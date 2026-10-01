@@ -25,6 +25,48 @@ The entry MFA is `Elixir.Hello:main/0`. The reference task must record the exact
 compile/run commands, tool versions, emitted BEAM modules, and operations actually
 required by `IO.puts/1`. Do not assume console output is a single BEAM instruction.
 
+## Instruction and operation inventory
+
+Task #41 records the compiled program's requirements here as a table. Include
+BEAM instructions, external MFA calls, BIFs, term representations, and host IO
+operations separately; an external call is not itself an instruction. Record the
+artifact, pinned toolchain, rebuild command, and inspection/run command alongside
+the table so another reviewer can reproduce the evidence.
+
+| Kind | Instruction or operation | Required semantics | Evidence | PBeam support and limits | Task / PR / test |
+| --- | --- | --- | --- | --- | --- |
+| Inventory pending | Not yet inspected | To be established by #41 | Exploratory ERTS output only; no compiled inventory yet | No runtime implementation | [#41](https://github.com/fahchen/pbeam/issues/41) |
+
+Replace the pending row with evidence-backed entries during #41. Distinguish
+statically present operations from operations observed during execution and
+dependencies whose necessity is still unverified. For instructions, identify
+operand forms and the relevant function/disassembly location. Do not infer a
+complete runtime dependency set from the entry module's disassembly alone.
+
+Each implementation PR updates the affected rows with supported semantics,
+remaining limits, and a runnable regression test. Mark support verified only
+after the implementing PR is merged and its acceptance checks pass. A passing
+fixture does not imply support for every operand form or general OTP behavior.
+
+## Implementation checklist
+
+Keep implementation todos as checkboxes in the linked GitHub task issues; this
+document records technical evidence and verified support. Each todo names one
+observable behavior and its acceptance check. Group related inventory rows into
+a focused task rather than creating one issue per opcode. Additional independent
+behaviors become sibling issues under the epic, with native dependencies.
+
+| Order | Task | Result required for review |
+| --- | --- | --- |
+| 1 | [#41: Reference and inventory](https://github.com/fahchen/pbeam/issues/41) | Compiled fixtures, exact ERTS output checks, inventory, and proposed output boundary |
+| 2 | [#4: Constant return](https://github.com/fahchen/pbeam/issues/4) | Real BEAM loading and execution, plus malformed-input checks |
+| 3 | [#5: Calls](https://github.com/fahchen/pbeam/issues/5) | Local/external calls, preserved arguments, and correct returns |
+| 4 | [#42: PBeam printing](https://github.com/fahchen/pbeam/issues/42) | Both greeting variants, stdout/stderr/exit checks, and visible failures |
+
+Update the inventory, issue checklists, dependencies, and PR decisions together
+when evidence changes the chosen solution. Implementation progress and readiness
+remain in GitHub; the table above describes delivery boundaries.
+
 ## Acceptance
 
 - On macOS arm64, PBeam running the compiled entry produces exactly `Hello, world!\n`
