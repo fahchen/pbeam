@@ -16,9 +16,10 @@ not an available installation or build instruction.
 - Isolate platform services behind System/Host boundaries.
 - Embed one application bundle in a Rust launcher.
 
-[Hello World](docs/hello-world-target.md) is the first executable target: a compiled
-Elixir program that prints one line and exits. [Terra Counter](docs/terra-target.md)
-follows as a broader macOS arm64 PTY scenario. Reference execution is pending. Full OTP
+[Hello World](docs/hello-world-target.md) is the first target: PBeam must execute the
+Elixir program, print exactly `Hello, world!\n`, and exit successfully. Compilation
+and an ERTS smoke run are preparation, not completion. PBeam execution is pending.
+[Terra Counter](docs/terra-target.md) follows as a broader macOS arm64 PTY scenario. Full OTP
 compatibility, hot code upgrades, JIT/AOT, and traditional NIF ABI compatibility
 are outside the initial scope. Each executable targets a particular platform;
 system libraries may still be required.

@@ -12,7 +12,7 @@ Run existing Erlang/Elixir `.beam` artifacts on a Rust runtime without ERTS, and
 
 The normal Erlang/Elixir compiler remains part of the build toolchain. PBeam consumes its output; it does not introduce a language frontend or compile Erlang/Elixir source directly to native code.
 
-The [Hello World contract](hello-world-target.md) is the first executable target: a compiled Elixir entry prints one line and exits. The pinned [Terra Counter contract](terra-target.md) follows as a broader application compatibility target: a real PTY interaction on macOS arm64, with a headless probe as an earlier check. Reference execution remains pending. Compatibility grows from the instructions, BIFs, OTP modules, and host operations each target actually needs. This is not an initial promise of complete BEAM or OTP compatibility.
+The [Hello World contract](hello-world-target.md) is the first target: PBeam executes the Elixir entry, prints exactly `Hello, world!\n`, and exits successfully. Compilation, artifact inspection, and ERTS execution are preparation and do not satisfy this target. The pinned [Terra Counter contract](terra-target.md) follows as a broader application compatibility target: a real PTY interaction on macOS arm64, with a headless probe as an earlier check. PBeam execution and the reproducible reference harness remain pending. Compatibility grows from the instructions, BIFs, OTP modules, and host operations each target actually needs. This is not an initial promise of complete BEAM or OTP compatibility.
 
 ## 2. Architecture decisions
 

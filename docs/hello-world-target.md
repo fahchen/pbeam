@@ -1,12 +1,17 @@
-# First executable target: Hello World
+# First target: PBeam prints Hello World
 
-Hello World is the first PBeam execution checkpoint. Terra Counter follows it as
-a broader application compatibility target. This contract is not a working example
-yet: the crate is empty, and reference/VM execution belong to subsequent task PRs.
+The first target is complete only when PBeam executes `Hello.main/0`, prints exactly
+`Hello, world!\n` to stdout, and exits with status zero. Compilation, BEAM inspection,
+and an ERTS reference run are preparation; none completes this target.
+
+Terra Counter follows as a broader application compatibility target. The PBeam
+crate is still empty. An exploratory ERTS run printed the greeting successfully,
+but PBeam execution has not been implemented or verified.
 
 ## Program
 
-Compile this ordinary Elixir module with the pinned mise toolchain:
+PBeam must execute this ordinary Elixir program. Use the pinned mise toolchain to
+compile it as test setup:
 
 ```elixir
 defmodule Hello do
@@ -22,7 +27,7 @@ required by `IO.puts/1`. Do not assume console output is a single BEAM instructi
 
 ## Acceptance
 
-- On macOS arm64, running the compiled entry produces exactly `Hello, world!\n`
+- On macOS arm64, PBeam running the compiled entry produces exactly `Hello, world!\n`
   on stdout, no application diagnostics on stderr, and exit status zero.
 - The process terminates without input, a PTY, network access, or credentials.
 - The same captured output and exit behavior hold on ERTS and PBeam.
@@ -39,8 +44,16 @@ delegate execution to ERTS or an external Elixir process.
 
 ## Delivery boundary
 
-First capture the ERTS baseline and disassemble its actual compiler output. Existing
-constant-return and call-chain tasks remain small interpreter building blocks.
+The deliverable is a runnable PBeam command plus a regression test that captures
+its stdout, stderr, and exit status. The exact runner command is established by
+the implementation PR; there is no working PBeam run command yet.
+
+[Reference task #41](https://github.com/fahchen/pbeam/issues/41) captures the ERTS
+baseline and disassembles its compiler output as preparation. Existing constant-return
+and call-chain tasks remain small interpreter building blocks. These tasks may be
+reviewed independently, but the Hello World target remains open until
+[execution task #42](https://github.com/fahchen/pbeam/issues/42) demonstrates printing
+through PBeam and its regression test passes.
 The Hello World execution task adds only the output path and any proven prerequisites
 still required by that baseline; split additional behaviors into reviewed task issues
 if needed. Preserve the language-visible call semantics and record any native/host
