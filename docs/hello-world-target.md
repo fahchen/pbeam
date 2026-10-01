@@ -5,8 +5,8 @@ The first target is complete only when PBeam executes `Hello.main/0`, prints exa
 and an ERTS reference run are preparation; none completes this target.
 
 Terra Counter follows as a broader application compatibility target. The PBeam
-crate is still empty. An exploratory ERTS run printed the greeting successfully,
-but PBeam execution has not been implemented or verified.
+crate is still empty. The compiled ERTS reference and both greeting variants are verified;
+PBeam execution has not been implemented or verified.
 
 ## Program
 
@@ -27,26 +27,72 @@ required by `IO.puts/1`. Do not assume console output is a single BEAM instructi
 
 ## Instruction and operation inventory
 
-Task #41 records the compiled program's requirements here as a table. Include
-BEAM instructions, external MFA calls, BIFs, term representations, and host IO
-operations separately; an external call is not itself an instruction. Record the
-artifact, pinned toolchain, rebuild command, and inspection/run command alongside
-the table so another reviewer can reproduce the evidence.
+The reference uses OTP 29.1.1 and Elixir 1.20.4-otp-29 on macOS arm64.
+From a clean checkout, install the pinned tools with `mise install`, then run:
+
+```sh
+mise run reference
+mise run inventory
+```
+
+`reference` compiles the fixture in Mix's test environment, covers both entry
+functions, and runs each compiled artifact in a fresh ERTS process. Tests compare
+stdout, stderr, and exit status exactly. Each child installs a five-second execution
+watchdog (exit 124); ExUnit's default 60-second test timeout bounds the surrounding
+test. `inventory` compiles in the dev environment and prints entry disassembly,
+exports, and imports using `:beam_disasm` and `:beam_lib`. These inspection APIs
+are tooling for the pinned OTP release, not a PBeam runtime dependency.
+
+Artifacts are `Elixir.Hello.beam` and `Elixir.HelloVariant.beam` under
+`fixtures/hello/_build/{test,dev}/lib/hello_reference/ebin/`. Generated BEAM and
+coverage files are ignored and rebuilt from the checked-in source. Mix also
+emits `hello_reference.app`; the fixture has no third-party dependencies.
+
+Observed results: four tests pass; each module has 100% application line coverage.
+Both subprocesses have empty stderr and exit zero. Stdout is `Hello, world!\n`
+and `Another greeting.\n`, respectively. Rust coverage remains N/A for the empty
+crate. In-process tests measure fixture coverage; subprocess tests independently
+verify the original compiled artifacts and process-level results.
 
 | Kind | Instruction or operation | Required semantics | Evidence | PBeam support and limits | Task / PR / test |
 | --- | --- | --- | --- | --- | --- |
-| Inventory pending | Not yet inspected | To be established by #41 | Exploratory ERTS output only; no compiled inventory yet | No runtime implementation | [#41](https://github.com/fahchen/pbeam/issues/41) |
+| Instruction | `move literal, x0` | Put the binary literal into argument register 0 | Static entry disassembly, both modules | Not implemented | #4, #42; `hello_test.exs` |
+| Instruction | `call_ext_only 1, Elixir.IO:puts/1` | External tail call with one argument; preserve caller return destination | Static final entry instruction, both modules | Not implemented | #5, #42; `hello_test.exs` |
+| Loader metadata | `label`, `line`, `func_info` | Resolve entry label 11; distinguish metadata from executable operations | Static `main/0` disassembly, source lines 2–3 | Not implemented | #4 |
+| Terms | Binary literals, atom `ok` | Load each distinct greeting; output call returns `:ok` | Disassembly plus both in-process assertions | Not implemented; no general chardata claim | #4, #42 |
+| External MFA | `Elixir.IO:puts/1` | Write supplied greeting plus newline to standard output | Static import; observed output and `:ok` result under ERTS | Proposed native boundary below; not implemented | #42; both process tests |
+| Host operation | stdout write | Exact bytes; output errors must remain visible | Successful output observed; failure behavior still belongs to #42 | Not implemented | #42 |
+| Static library dependency | `IO.puts/2`, `:io.put_chars/2` | Default-device mapping, chardata conversion, IO request handling | Installed Elixir `lib/elixir/lib/io.ex`, `puts` definition; not independently traced | Not required if proposed native boundary is accepted | #42 decision |
+| Compiler-generated functions | `__info__/1`, `module_info/0,1`, helper; `:erlang.get_module_info/1,2` imports | Introspection outside the entry path | Static exports/imports; no calls from the inspected `main/0` body | Out of this fixture's execution scope | #4 loader must not mistake imports for executed dependencies |
 
-Replace the pending row with evidence-backed entries during #41. Distinguish
-statically present operations from operations observed during execution and
-dependencies whose necessity is still unverified. For instructions, identify
-operand forms and the relevant function/disassembly location. Do not infer a
-complete runtime dependency set from the entry module's disassembly alone.
+Entry disassembly contains a literal move followed by the external tail call;
+there is no stdout opcode. Static inspection is not an opcode execution trace,
+and successful output does not establish the complete dynamic OTP dependency
+set. The table records the bounded entry path and observed behavior, not general
+OTP support.
 
-Each implementation PR updates the affected rows with supported semantics,
-remaining limits, and a runnable regression test. Mark support verified only
-after the implementing PR is merged and its acceptance checks pass. A passing
-fixture does not imply support for every operand form or general OTP behavior.
+### Proposed output boundary
+
+For #42, resolve the ordinary external MFA `Elixir.IO:puts/1` to a minimal Rust
+implementation accepting the fixture's valid UTF-8 binary, appending one newline,
+writing to stdout, and returning `:ok`. Validate the supported argument form and
+propagate write failures; do not recognize greeting contents or delegate to ERTS.
+Keep both literal variants as regression tests.
+
+Executing the full Elixir/OTP IO implementation would introduce device resolution,
+chardata conversion, and process-based IO behavior before this checkpoint. The
+narrow boundary preserves this fixture's source and observable behavior while
+explicitly leaving arbitrary chardata, custom devices, and general IO unsupported.
+This is a proposed decision for #42's review, not implemented compatibility.
+Reuse external-MFA resolution from #5; add only the one required native mapping
+in #42. The broader registration mechanism remains #12. If implementation evidence
+requires independent prerequisite behavior, create sibling issues before expanding
+task #42.
+
+Each implementation PR updates affected rows with supported semantics, remaining
+limits, and runnable regression tests. Mark support verified only after merge and
+passing acceptance checks. GitHub links below identify the tasks; PR #43 supplies
+the reference evidence and `fixtures/hello/test/hello_test.exs` contains its checks.
 
 ## Implementation checklist
 
@@ -103,7 +149,8 @@ implementation decision in its PR. Do not bypass the gate by changing the progra
 a PBeam-only print operation.
 
 Lint and 100% application line coverage remain required. Adding the Elixir fixture
-must also replace the current fail-closed Elixir guard with its real checks. Passing
+uses formatting, warnings-as-errors, and Mix tests with a 100% coverage threshold
+in the shared check command. Passing
 Hello World establishes this program's behavior, not general Elixir/OTP support.
 
 After this checkpoint, continue the planned runtime, native, and packaging slices.

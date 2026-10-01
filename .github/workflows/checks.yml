@@ -27,7 +27,7 @@ jobs:
           install: false
 
       - name: Install check tools
-        run: mise install rust rumdl taplo actionlint shellcheck github:taiki-e/cargo-llvm-cov
+        run: mise install erlang elixir rust rumdl taplo actionlint shellcheck github:taiki-e/cargo-llvm-cov
 
       - name: Install Rust check components
         run: mise exec -- rustup component add rustfmt clippy llvm-tools-preview --toolchain 1.99.0

@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -n "$(git ls-files --cached --others --exclude-standard -- '*.ex' '*.exs')" ]]; then
-  echo 'Add Elixir lint, tests, and 100% coverage gates before introducing Elixir source.' >&2
-  exit 1
-fi
+(cd fixtures/hello && mix test --cover --warnings-as-errors)
 
 # Only the exact empty bootstrap is exempt; any Rust source addition enables coverage.
 rust_sources=$(git ls-files --cached --others --exclude-standard -- '*.rs')

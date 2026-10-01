@@ -15,14 +15,25 @@ run = [
   "taplo fmt --check",
   "actionlint",
   "shellcheck scripts/*.sh",
+  "cd fixtures/hello && mix format --check-formatted && mix compile --warnings-as-errors",
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
 ]
 
 [tasks.test]
-description = "Run Rust tests and require 100% line coverage"
+description = "Run reference and Rust tests with 100% application line coverage"
 run = "bash scripts/test.sh"
 
 [tasks.check]
 description = "Run all required checks"
 depends = ["lint", "test"]
+
+[tasks.reference]
+description = "Verify compiled Hello World fixtures under ERTS"
+dir = "fixtures/hello"
+run = "mix test --cover --warnings-as-errors"
+
+[tasks.inventory]
+description = "Inspect compiled Hello World entry instructions and imports"
+dir = "fixtures/hello"
+run = '''mix run --no-start -e 'for module <- [Hello, HelloVariant] do path = :code.which(module); {:beam_file, _, exports, _, _, functions} = :beam_disasm.file(path); IO.inspect({module, path, exports}, limit: :infinity); IO.inspect(Enum.filter(functions, fn {:function, name, _, _, _} -> name == :main end), limit: :infinity); IO.inspect(:beam_lib.chunks(path, [:imports, :exports]), limit: :infinity) end' '''

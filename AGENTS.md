@@ -85,8 +85,9 @@ replace contradictory current instructions rather than appending a correction.
   are merge blockers. Require 100% application line coverage; never lower the
   threshold or exclude production code to pass it. An empty crate has no measurable
   coverage and must be reported as N/A, not as 100%.
-- The first Elixir source PR must add its formatting, warnings-as-errors, test,
-  and 100% coverage gates to the same check command before introducing behavior.
+- Elixir fixtures in `fixtures/hello` use formatting, warnings-as-errors, tests,
+  and 100% application coverage in the shared check command. Any additional Elixir
+  project must add equivalent gates before introducing behavior.
 - Never mutate runtime configuration keys shared with other tests. A uniquely
   test-scoped key may be set inside that test's `setup_all` with a one-line scoping
   comment. Shared keys belong in `config/test.exs` or the language equivalent.
