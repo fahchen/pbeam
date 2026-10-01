@@ -96,6 +96,8 @@ replace contradictory current instructions rather than appending a correction.
 
 ## Tools and collaboration
 
+- Set development tool versions in `mise.toml`; local and CI setup must use those
+  pins rather than duplicating version settings in commands or fixture projects.
 - Prefer `fd` and `rg`; use `ast-grep` for structural searches when appropriate.
 - Use fish for shell work and `gh` for GitHub operations. Prefer command help
   before external documentation. Use Context7 for library/API documentation and

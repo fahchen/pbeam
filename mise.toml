@@ -8,6 +8,10 @@ actionlint = "1.7.12"
 shellcheck = "0.11.0"
 "github:taiki-e/cargo-llvm-cov" = "0.9.1"
 
+[tasks.setup]
+description = "Install check components for the mise-pinned Rust toolchain"
+run = 'rustup component add rustfmt clippy llvm-tools-preview --toolchain "$(mise config get --file mise.toml tools.rust)"'
+
 [tasks.lint]
 description = "Check documentation, configuration, workflows, and Rust"
 run = [

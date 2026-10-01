@@ -36,7 +36,7 @@ for versions and verification limits. There is no PBeam build command yet.
 After installing the mise tools, install the Rust checking components and run:
 
 ```sh
-mise exec -- rustup component add rustfmt clippy llvm-tools-preview --toolchain 1.99.0
+mise run setup
 mise run check
 ```
 
