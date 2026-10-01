@@ -1,0 +1,207 @@
+# Portable BEAM runtime specification
+
+Status: architecture baseline reconstructed from the design conversation; implementation has not started.
+
+Source: [Branch · Portable BEAM实现原理](chatgpt-conversation://6abe6693-526c-83ee-8922-0af41462fb49).
+
+The source conversation names a generated `portable_beam_runtime_handoff.md`, but its contents were unavailable during transcription. This document captures the readable discussion, not a verbatim copy of that attachment. Requirements below express the proposed design. Acceptance checks make that design reviewable; they are not evidence of an existing implementation. Open questions remain explicit.
+
+## 1. Goal
+
+Run existing Erlang/Elixir `.beam` artifacts on a Rust runtime without ERTS, and package an application as a single native executable.
+
+The normal Erlang/Elixir compiler remains part of the build toolchain. PBeam consumes its output; it does not introduce a language frontend or compile Erlang/Elixir source directly to native code.
+
+Terra is the first application compatibility target. Compatibility grows from the instructions, BIFs, OTP modules, and host operations that this target actually needs. This is not an initial promise of complete BEAM or OTP compatibility.
+
+## 2. Architecture decisions
+
+| Area | Baseline |
+| --- | --- |
+| Execution | Interpreter first; decode BEAM instructions once into an internal instruction representation. |
+| Memory | Immediate terms where appropriate; `Arc<Value>` for shared, immutable compound values. |
+| Binary data | Separate binary/bitstring representation and operations from general compound values. |
+| Scheduling | One OS process, multiple scheduler threads, one scheduler per OS thread, work stealing. |
+| Native extensions | Rust functions registered by module/function/arity (MFA), linked into the executable. |
+| Platform access | System/Host boundary for platform services and asynchronous completion. |
+| Code loading | Bundle-defined code loaded at startup; shared code remains effectively immutable afterward. |
+| Packaging | One application bundle embedded in a Rust launcher with `include_bytes!`. |
+| First validation target | Terra. |
+
+Firefly is an architectural reference for separation of responsibilities, scheduler organization, and native integration. Its compiler pipeline is not part of this design, and the design does not require a Firefly dependency.
+
+## 3. Scope and exclusions
+
+The initial runtime must support the selected application slice end to end: loading its BEAM modules, interpreting required instructions, executing processes, calling required native functions, accessing required host services, and running from an embedded bundle.
+
+The initial scope excludes:
+
+- A compiler frontend, Core/Kernel/SSA pipeline, LLVM/MLIR, AOT, and JIT.
+- Arena allocation or a replacement process heap/GC implementation.
+- Hot code upgrades, dynamic module loading, code purge, and multiple versions of a module.
+- Traditional `erl_nif`/Rustler ABI compatibility and dynamically loaded native extension libraries.
+- Post-link bundle appending or platform-specific executable section manipulation.
+- Complete OTP compatibility as a prerequisite for the first application.
+
+Rust procedural macros for native bindings, broad automatic type conversion, a standalone `pbeam run app.pbeam` command, and alternate memory backends are future extensions. Do not build their scaffolding before a consumer needs them.
+
+## 4. Responsibility boundaries
+
+The discussion proposes the following logical boundaries. They do not require creating every crate before its first consumer exists.
+
+| Boundary | Responsibility |
+| --- | --- |
+| `pbeam-system` | Runtime-independent platform primitives. |
+| `pbeam-term` | Terms, values, atoms, and term semantics. |
+| `pbeam-binary` | Binary/sub-binary/bitstring storage, construction, and matching. |
+| `pbeam-beam` | BEAM file parsing and validation. |
+| `pbeam-bytecode` | Decoded instruction representation. |
+| `pbeam-runtime` | Processes, interpreter integration, mailboxes, exceptions, and BIFs. |
+| `pbeam-scheduler` | Runnable processes, reductions, scheduler threads, and work stealing. |
+| `pbeam-native` | Native registry, call context, arguments, results, and extension registration. |
+| `pbeam-host` | Terminal, files, network, timers, clocks, and randomness used by the application. |
+| Bootstrap/CRT | Embedded bundle, runtime initialization, native registration, and entry process startup. |
+
+Keep platform-specific calls behind System/Host rather than spreading them through terms, instructions, and BIFs. Keep bootstrap distinct from execution without introducing unused alternative runtime implementations.
+
+## 5. Loading and interpretation
+
+The loader reads the bundle, validates its metadata and modules, and decodes supported BEAM instructions into executable internal instructions. The code server resolves modules and functions from that startup-loaded set.
+
+Schedulers share code and modules through `Arc`. No scheduler mutates module code during execution.
+
+A process holds its registers, stack, mailbox, execution position, and reductions state. The interpreter executes the supported bytecode and preserves the required BEAM behavior for calls, returns, exceptions, and message handling.
+
+Unsupported bytecode, unresolved functions, and unsupported runtime operations must produce actionable failures rather than silently changing program behavior. The exact supported OTP/BEAM version and instruction/BIF inventory must be recorded before compatibility can be claimed.
+
+## 6. Terms and binary ownership
+
+The initial memory model uses shared immutable values backed by `Arc<Value>`, with immediate representations where appropriate. Processes may share immutable term storage; mutable execution state remains owned by the executing process.
+
+Binary handling has its own representation for binaries, sub-binaries, and bitstrings. Construction and matching must retain the distinctions between byte length, bit length, and slice offsets. A binary cannot be reduced to an undifferentiated general value wrapper.
+
+The design leaves room to change storage later, but v0 does not implement an arena, allocator framework, or configurable heap backend. Exact term layout and binary backing storage remain implementation decisions.
+
+## 7. Scheduling and asynchronous work
+
+Each scheduler runs on one OS thread. Processes initially run on their creating scheduler. Idle schedulers can steal runnable processes from other schedulers.
+
+Reductions bound a process's interpreter turn so other runnable processes can progress. A process must never execute concurrently on two schedulers. Waiting processes become runnable when a message, timeout, or host completion satisfies their wait.
+
+Host work that can block must not block a scheduler thread. The intended asynchronous flow is:
+
+1. A process requests a host or native operation.
+2. The runtime records its continuation and suspends that process.
+3. The host executes the operation asynchronously.
+4. Completion enters a scheduler inbox/completion queue.
+5. The scheduler makes the process runnable and resumes the call with its result.
+
+Tokio was an example executor in the discussion, not a finalized dependency requirement. Completion ownership, cancellation, process exit, and shutdown behavior must be defined when the first asynchronous operation is implemented. Late completion must not resume a dead process or resume the same call twice.
+
+## 8. Rust-native extensions
+
+### Elixir declaration
+
+The proposed interface uses ordinary Elixir function calls:
+
+```elixir
+defmodule MyApp.NativeHash do
+  use PBeam.Native
+
+  native :sha256, 1
+end
+```
+
+The declaration generates a callable stub and persists native MFA metadata in the BEAM module. The bundler reads that metadata to discover required native implementations. On ordinary ERTS, executing the stub raises `:pbeam_native_only` through `:erlang.nif_error/1`.
+
+These API names are proposed contracts, not currently available libraries.
+
+### Rust registration and dispatch
+
+A Rust extension exports a registration function. Registration maps an MFA such as `Elixir.MyApp.NativeHash:sha256/1` to a Rust implementation.
+
+For an external MFA call, the runtime checks the native registry first. A registered implementation executes through the native call context; otherwise the runtime resolves the BEAM function through the code server. Native integration does not require a separate `PBeam.Native.call/3` instruction or BIF.
+
+The initial native API needs a term argument interface, checked conversion for the types actually used, a context for constructing return terms, and a result/error contract. Incorrect arguments must become defined runtime errors rather than unchecked Rust indexing or conversion failures.
+
+All supported ways to invoke a declared native function must preserve the same dispatch behavior. The implementation must account for local calls, dynamic application, and function references if those paths occur in the supported application slice; the source's `call_ext` sketch alone does not settle them.
+
+### Build integration
+
+The proposed Mix configuration declares native crate paths:
+
+```elixir
+def project do
+  [
+    app: :my_app,
+    version: "0.1.0",
+    pbeam: [native: ["native/hash"]]
+  ]
+end
+```
+
+The builder generates a launcher crate with those Cargo dependencies and registration calls. Native implementations are linked into the application executable; startup does not locate or load extension `.so`, `.dylib`, or `.dll` files.
+
+Missing required implementations and conflicting native registrations must be diagnosed before application execution. The exact validation mechanism remains open.
+
+Automatic `FromTerm`/`IntoTerm` conversions and attribute macros may follow when manual bindings become repetitive. Async native functions use the suspension/completion model above; they must not call blocking `block_on` on scheduler threads.
+
+## 9. Bundle and executable build
+
+The proposed command is:
+
+```sh
+mix pbeam.build
+```
+
+It performs these steps:
+
+1. Compile the Elixir application with the existing toolchain.
+2. Collect application, dependency, and required OTP BEAM modules and application resources.
+3. Read native declaration metadata and configured native crate paths.
+4. Generate a manifest and one `app.pbeam` bundle.
+5. Generate a Rust launcher crate that embeds that bundle and registers native modules.
+6. Run a release Cargo build for the selected target.
+7. Produce the application executable, illustrated as `dist/my_app` in the discussion.
+
+The bundle contains identifying/version metadata, an entry MFA, compiler/OTP compatibility metadata, a module table, a resource table, and the module/resource payload. Compression was proposed, but its codec and necessity are not settled. The example `otp: 28` is illustrative, not a compatibility commitment.
+
+Use one embedded bundle rather than generating a separate `include_bytes!` declaration for every module. Bundle parsing is independent of executable embedding so an external-bundle runner can be added later without changing the application representation.
+
+At startup the launcher loads and validates the embedded bundle, initializes atom/code/native tables, registers linked native modules, starts the scheduler pool, and spawns the entry MFA. Required initialization must finish before application code runs.
+
+The delivered executable must not require installed `erl`, `elixir`, external BEAM files, or separately distributed native extension libraries. Build-time Erlang/Elixir and Rust toolchains are still required.
+
+## 10. Portability
+
+Single executable means one application artifact per target platform. It does not mean one binary runs on every OS/architecture, or that every target avoids system libraries.
+
+The discussion proposes macOS arm64/x86_64, Linux musl arm64/x86_64, and Windows MSVC arm64/x86_64 as a future target matrix. Initial supported targets remain to be selected and verified.
+
+macOS system frameworks/libraries remain normal dependencies. Linux musl builds aim to avoid a target-machine glibc dependency where all linked dependencies permit it. Native crates that require external C libraries must be evaluated against the single-artifact requirement. Rust-native libraries such as rustls and RustCrypto are preferred where they satisfy application needs; specific network/crypto libraries are not mandatory in advance.
+
+## 11. Acceptance checks
+
+These checks operationalize the design; expand them only as supported behavior grows.
+
+- Load and execute a compiled BEAM fixture through the interpreter; reject an unsupported format/instruction with a useful diagnostic.
+- Demonstrate process scheduling, reduction-based yielding, message wakeup, and work stealing with multiple schedulers. Verify exclusive process execution.
+- Exercise binary construction, sub-binary offsets, and non-byte-aligned matching wherever the selected application requires them.
+- Call the declared SHA-256 native example from Elixir and compare its result with a known digest. Verify bad arguments and missing registrations fail predictably.
+- For the first async operation, show that another process progresses while its caller waits, and that completion after caller exit is harmless.
+- Build an executable, move it away from the build output, and run it without an installed Erlang/Elixir runtime or accompanying application files. Verify required embedded resources remain accessible.
+- Run the pinned Terra scenario and compare its observable behavior with the same scenario on ERTS. Record required modules, instructions, BIFs, host services, and known gaps.
+
+Passing small fixtures does not establish Terra compatibility or complete OTP compatibility.
+
+## 12. Unresolved details before implementation claims
+
+- Terra repository, revision, entry point, dependencies, and exact first acceptance scenario.
+- Supported OTP/Elixir versions and BEAM opcode/BIF subset.
+- Application startup semantics, dependency initialization, entry arguments, exit status, and shutdown policy.
+- Required process semantics, including selective receive, timers, links, monitors, and exception behavior for the chosen slice.
+- Native registry conflict policy, validation timing, call-path coverage, errors, resource ownership, and async cancellation.
+- Bundle encoding/versioning, validation limits, resource lookup semantics, and whether compression is needed.
+- Initial OS/architecture target, scheduler count policy, and host executor.
+
+Resolve each detail when its first implementation slice requires it. Add only the foundations that slice consumes; do not interpret the logical architecture or future platform matrix as a request to scaffold unused components.
