@@ -23,6 +23,23 @@
   links in the task body. Keep discovery-driven tasks under their epic rather
   than adding another hierarchy level.
 
+## Labels
+
+- Give each issue exactly one structural label: `kind:milestone`, `kind:epic`,
+  or `kind:task`. PRs do not receive structural labels.
+- Use existing content labels on tasks and PRs: `documentation` for documentation
+  and planning, `enhancement` for new capabilities, and `bug` for defects. Apply
+  only labels that describe the actual scope; multiple content labels are allowed.
+- Use `status:needs-input` when a concrete unanswered question prevents progress;
+  name the missing input in the issue. Use `status:blocked` when an unresolved
+  prerequisite prevents work; retain native blocked-by links as the dependency record.
+- Status labels describe the issue itself, not every ancestor. Do not propagate
+  a child's blocked status to all epics and milestone trackers. Remove status
+  labels when resolved; absence of a status label is not proof a task is ready.
+- Use GitHub's issue/PR state and review status for open, closed, draft, and review
+  lifecycle. Do not add labels for individual milestones, epics, or speculative
+  priorities. Keep labels current when scope or blockers change.
+
 ## Implementation and review
 
 1. Read the task issue, its epic, milestone tracker, and blockers. Confirm that
