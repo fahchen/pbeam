@@ -1,7 +1,8 @@
 ## Task
 
 Closes #<task issue>
-Milestone:
+Epic: #<epic issue>
+Milestone: <link>
 Prerequisite PRs (must be merged):
 
 ## Behavior
@@ -29,4 +30,5 @@ For documentation-only changes, record the consistency checks performed.
 - [ ] This PR implements one task, with no unused foundations for later tasks.
 - [ ] Acceptance criteria and known limitations are documented.
 - [ ] The task issue contains acceptance evidence; milestone completion is not claimed prematurely.
+- [ ] This PR is linked from its epic; epic and milestone issue bullets reflect accepted work.
 - [ ] Dependent implementation will wait for review and merge.
