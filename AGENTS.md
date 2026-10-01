@@ -65,6 +65,11 @@ Close tasks only after merge and acceptance verification; close epics and
 milestone trackers only after their required children and checkpoints are accepted.
 Keep GitHub milestone state consistent with its tracking issue.
 
+Whenever direction or a solution changes, update the affected task bodies,
+acceptance criteria, dependencies, milestone/epic checklists, documentation, and
+PR description in the same turn. Check downstream tasks for stale assumptions;
+replace contradictory current instructions rather than appending a correction.
+
 ## Engineering constraints
 
 - Land minimal shared foundations: only the first consumer's required types,
