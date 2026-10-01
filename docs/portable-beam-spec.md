@@ -12,7 +12,7 @@ Run existing Erlang/Elixir `.beam` artifacts on a Rust runtime without ERTS, and
 
 The normal Erlang/Elixir compiler remains part of the build toolchain. PBeam consumes its output; it does not introduce a language frontend or compile Erlang/Elixir source directly to native code.
 
-The pinned [Terra Counter contract](terra-target.md) is the first application compatibility target: a real PTY interaction on macOS arm64, with a headless probe as an earlier check. Reference execution remains pending. Compatibility grows from the instructions, BIFs, OTP modules, and host operations that this target actually needs. This is not an initial promise of complete BEAM or OTP compatibility.
+The [Hello World contract](hello-world-target.md) is the first executable target: a compiled Elixir entry prints one line and exits. The pinned [Terra Counter contract](terra-target.md) follows as a broader application compatibility target: a real PTY interaction on macOS arm64, with a headless probe as an earlier check. Reference execution remains pending. Compatibility grows from the instructions, BIFs, OTP modules, and host operations each target actually needs. This is not an initial promise of complete BEAM or OTP compatibility.
 
 ## 2. Architecture decisions
 
@@ -26,7 +26,7 @@ The pinned [Terra Counter contract](terra-target.md) is the first application co
 | Platform access | System/Host boundary for platform services and asynchronous completion. |
 | Code loading | Bundle-defined code loaded at startup; shared code remains effectively immutable afterward. |
 | Packaging | One application bundle embedded in a Rust launcher with `include_bytes!`. |
-| First validation target | Terra. |
+| Validation order | Hello World, then Terra Counter. |
 
 Firefly is an architectural reference for separation of responsibilities, scheduler organization, and native integration. Its compiler pipeline is not part of this design, and the design does not require a Firefly dependency.
 
@@ -185,6 +185,7 @@ macOS system frameworks/libraries remain normal dependencies. Linux musl builds 
 These checks operationalize the design; expand them only as supported behavior grows.
 
 - Load and execute a compiled BEAM fixture through the interpreter; reject an unsupported format/instruction with a useful diagnostic.
+- Run the compiled Hello World entry without ERTS and match its reference stdout and exit behavior before Terra acceptance work.
 - Demonstrate process scheduling, reduction-based yielding, message wakeup, and work stealing with multiple schedulers. Verify exclusive process execution.
 - Exercise binary construction, sub-binary offsets, and non-byte-aligned matching wherever the selected application requires them.
 - Call the declared SHA-256 native example from Elixir and compare its result with a known digest. Verify bad arguments and missing registrations fail predictably.

@@ -1,6 +1,7 @@
 # First Terra compatibility target
 
-This contract defines the first application scenario for PBeam. Source inspection
+This contract defines the Terra application scenario after the
+[Hello World checkpoint](hello-world-target.md). Source inspection
 supports the expectations below; neither an ERTS reference run on these toolchains
 nor a PBeam execution has been verified. [Task #3](https://github.com/fahchen/pbeam/issues/3)
 owns the reproducible reference run and compatibility inventory.
@@ -97,7 +98,7 @@ provides an early deterministic probe: send `jj`, check state `2` and rendered
 The [Terra.Test helper](https://github.com/uminocelo/terra/blob/30dea5667d7e4ae5777aa3df77acb36c4aac6967/lib/terra/test.ex)
 disables terminal handling and defaults to no input reader. Passing that probe proves
 only the exercised application/process semantics. The real PTY interaction and
-restoration are required for the first application acceptance.
+restoration are required for Terra application acceptance.
 
 The eventual PBeam executable must run the same compiled Counter after being moved
 away from its build tree, without installed ERTS or loose application files. Compile
