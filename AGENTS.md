@@ -65,6 +65,11 @@ Close tasks only after merge and acceptance verification; close epics and
 milestone trackers only after their required children and checkpoints are accepted.
 Keep GitHub milestone state consistent with its tracking issue.
 
+Whenever direction or a solution changes, update the affected task bodies,
+acceptance criteria, dependencies, milestone/epic checklists, documentation, and
+PR description in the same turn. Check downstream tasks for stale assumptions;
+replace contradictory current instructions rather than appending a correction.
+
 ## Engineering constraints
 
 - Land minimal shared foundations: only the first consumer's required types,
@@ -76,6 +81,12 @@ Keep GitHub milestone state consistent with its tracking issue.
   cause and preserve existing supported behavior.
 - Verify changed behavior with focused, runnable checks. For documentation-only
   work, check consistency, links, and whitespace; do not scaffold a test framework.
+- `mise run check` must pass locally and in CI. Rust formatting and Clippy warnings
+  are merge blockers. Require 100% application line coverage; never lower the
+  threshold or exclude production code to pass it. An empty crate has no measurable
+  coverage and must be reported as N/A, not as 100%.
+- The first Elixir source PR must add its formatting, warnings-as-errors, test,
+  and 100% coverage gates to the same check command before introducing behavior.
 - Never mutate runtime configuration keys shared with other tests. A uniquely
   test-scoped key may be set inside that test's `setup_all` with a one-line scoping
   comment. Shared keys belong in `config/test.exs` or the language equivalent.

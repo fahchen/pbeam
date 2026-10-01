@@ -1,8 +1,8 @@
-## Task
+# Task
 
 Closes #<task issue>
 Epic: #<epic issue>
-Milestone: <link>
+Milestone: paste tracking issue link
 Prerequisite PRs (must be merged):
 
 ## Behavior

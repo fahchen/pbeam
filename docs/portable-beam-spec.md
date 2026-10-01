@@ -12,7 +12,7 @@ Run existing Erlang/Elixir `.beam` artifacts on a Rust runtime without ERTS, and
 
 The normal Erlang/Elixir compiler remains part of the build toolchain. PBeam consumes its output; it does not introduce a language frontend or compile Erlang/Elixir source directly to native code.
 
-Terra is the first application compatibility target. Compatibility grows from the instructions, BIFs, OTP modules, and host operations that this target actually needs. This is not an initial promise of complete BEAM or OTP compatibility.
+The [Hello World contract](hello-world-target.md) is the first target: PBeam executes the Elixir entry, prints exactly `Hello, world!\n`, and exits successfully. Compilation, artifact inspection, and ERTS execution are preparation and do not satisfy this target. The pinned [Terra Counter contract](terra-target.md) follows as a broader application compatibility target: a real PTY interaction on macOS arm64, with a headless probe as an earlier check. PBeam execution and the reproducible reference harness remain pending. Compatibility grows from the instructions, BIFs, OTP modules, and host operations each target actually needs. This is not an initial promise of complete BEAM or OTP compatibility.
 
 ## 2. Architecture decisions
 
@@ -26,7 +26,7 @@ Terra is the first application compatibility target. Compatibility grows from th
 | Platform access | System/Host boundary for platform services and asynchronous completion. |
 | Code loading | Bundle-defined code loaded at startup; shared code remains effectively immutable afterward. |
 | Packaging | One application bundle embedded in a Rust launcher with `include_bytes!`. |
-| First validation target | Terra. |
+| Validation order | Hello World, then Terra Counter. |
 
 Firefly is an architectural reference for separation of responsibilities, scheduler organization, and native integration. Its compiler pipeline is not part of this design, and the design does not require a Firefly dependency.
 
@@ -176,7 +176,7 @@ The delivered executable must not require installed `erl`, `elixir`, external BE
 
 Single executable means one application artifact per target platform. It does not mean one binary runs on every OS/architecture, or that every target avoids system libraries.
 
-The discussion proposes macOS arm64/x86_64, Linux musl arm64/x86_64, and Windows MSVC arm64/x86_64 as a future target matrix. Initial supported targets remain to be selected and verified.
+The discussion proposes macOS arm64/x86_64, Linux musl arm64/x86_64, and Windows MSVC arm64/x86_64 as a future target matrix. The first validation target is macOS arm64; runtime support remains unverified.
 
 macOS system frameworks/libraries remain normal dependencies. Linux musl builds aim to avoid a target-machine glibc dependency where all linked dependencies permit it. Native crates that require external C libraries must be evaluated against the single-artifact requirement. Rust-native libraries such as rustls and RustCrypto are preferred where they satisfy application needs; specific network/crypto libraries are not mandatory in advance.
 
@@ -185,6 +185,7 @@ macOS system frameworks/libraries remain normal dependencies. Linux musl builds 
 These checks operationalize the design; expand them only as supported behavior grows.
 
 - Load and execute a compiled BEAM fixture through the interpreter; reject an unsupported format/instruction with a useful diagnostic.
+- Run the compiled Hello World entry without ERTS and match its reference stdout and exit behavior before Terra acceptance work.
 - Demonstrate process scheduling, reduction-based yielding, message wakeup, and work stealing with multiple schedulers. Verify exclusive process execution.
 - Exercise binary construction, sub-binary offsets, and non-byte-aligned matching wherever the selected application requires them.
 - Call the declared SHA-256 native example from Elixir and compare its result with a known digest. Verify bad arguments and missing registrations fail predictably.
@@ -196,12 +197,12 @@ Passing small fixtures does not establish Terra compatibility or complete OTP co
 
 ## 12. Unresolved details before implementation claims
 
-- Terra repository, revision, entry point, dependencies, and exact first acceptance scenario.
-- Supported OTP/Elixir versions and BEAM opcode/BIF subset.
+- Reproducible ERTS results and dependency/operation inventory for the pinned [Terra scenario](terra-target.md).
+- BEAM opcode/BIF subset and runtime compatibility with the pinned mise toolchains; selecting versions is not a support claim.
 - Application startup semantics, dependency initialization, entry arguments, exit status, and shutdown policy.
 - Required process semantics, including selective receive, timers, links, monitors, and exception behavior for the chosen slice.
 - Native registry conflict policy, validation timing, call-path coverage, errors, resource ownership, and async cancellation.
 - Bundle encoding/versioning, validation limits, resource lookup semantics, and whether compression is needed.
-- Initial OS/architecture target, scheduler count policy, and host executor.
+- Scheduler count policy and host executor for the initial macOS arm64 target.
 
 Resolve each detail when its first implementation slice requires it. Add only the foundations that slice consumes; do not interpret the logical architecture or future platform matrix as a request to scaffold unused components.

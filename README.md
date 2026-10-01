@@ -3,8 +3,8 @@
 PBeam is a planned Rust runtime for executing existing Erlang/Elixir `.beam`
 artifacts without ERTS and packaging applications as single native executables.
 
-**Status: specification and delivery planning.** The interpreter, runtime, and
-build tooling are not implemented yet. `mix pbeam.build` is a proposed command,
+**Status: specification and an empty Rust library scaffold.** The interpreter, runtime,
+and application build tooling are not implemented yet. `mix pbeam.build` is a proposed command,
 not an available installation or build instruction.
 
 ## Design
@@ -16,14 +16,35 @@ not an available installation or build instruction.
 - Isolate platform services behind System/Host boundaries.
 - Embed one application bundle in a Rust launcher.
 
-Terra is the first intended compatibility target. Its exact project, revision,
-and acceptance scenario must be pinned before implementation. Full OTP
+[Hello World](docs/hello-world-target.md) is the first target: PBeam must execute the
+Elixir program, print exactly `Hello, world!\n`, and exit successfully. Compilation
+and an ERTS smoke run are preparation, not completion. PBeam execution is pending.
+[Terra Counter](docs/terra-target.md) follows as a broader macOS arm64 PTY scenario. Full OTP
 compatibility, hot code upgrades, JIT/AOT, and traditional NIF ABI compatibility
 are outside the initial scope. Each executable targets a particular platform;
 system libraries may still be required.
 
 See the [runtime specification](docs/portable-beam-spec.md) for architecture,
 acceptance criteria, and unresolved decisions.
+
+Development toolchains are pinned in [mise.toml](mise.toml). Use `mise install`
+to install them; see the [target contract](docs/terra-target.md#toolchain-baseline)
+for versions and verification limits. There is no PBeam build command yet.
+
+## Checks
+
+After installing the mise tools, install the Rust checking components and run:
+
+```sh
+mise exec -- rustup component add rustfmt clippy llvm-tools-preview --toolchain 1.99.0
+mise run check
+```
+
+The shared local/CI command checks Markdown, TOML formatting, GitHub Actions, shell scripts,
+Rust formatting, Clippy with warnings denied, tests, and 100% line coverage.
+The initial `pbeam-runtime` crate contains only a module comment: it has no
+implementation, tests, or measurable coverage. Coverage is N/A until code exists.
+The first Elixir source change must add equivalent checks before it can pass CI.
 
 ## Delivery
 
