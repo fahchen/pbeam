@@ -1,0 +1,3 @@
+[global]
+# Prose and source URLs may exceed a fixed line width.
+disable = ["MD013"]

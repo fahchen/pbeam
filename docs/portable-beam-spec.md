@@ -12,7 +12,7 @@ Run existing Erlang/Elixir `.beam` artifacts on a Rust runtime without ERTS, and
 
 The normal Erlang/Elixir compiler remains part of the build toolchain. PBeam consumes its output; it does not introduce a language frontend or compile Erlang/Elixir source directly to native code.
 
-Terra is the first application compatibility target. Compatibility grows from the instructions, BIFs, OTP modules, and host operations that this target actually needs. This is not an initial promise of complete BEAM or OTP compatibility.
+The pinned [Terra Counter contract](terra-target.md) is the first application compatibility target: a real PTY interaction on macOS arm64, with a headless probe as an earlier check. Reference execution remains pending. Compatibility grows from the instructions, BIFs, OTP modules, and host operations that this target actually needs. This is not an initial promise of complete BEAM or OTP compatibility.
 
 ## 2. Architecture decisions
 
@@ -176,7 +176,7 @@ The delivered executable must not require installed `erl`, `elixir`, external BE
 
 Single executable means one application artifact per target platform. It does not mean one binary runs on every OS/architecture, or that every target avoids system libraries.
 
-The discussion proposes macOS arm64/x86_64, Linux musl arm64/x86_64, and Windows MSVC arm64/x86_64 as a future target matrix. Initial supported targets remain to be selected and verified.
+The discussion proposes macOS arm64/x86_64, Linux musl arm64/x86_64, and Windows MSVC arm64/x86_64 as a future target matrix. The first validation target is macOS arm64; runtime support remains unverified.
 
 macOS system frameworks/libraries remain normal dependencies. Linux musl builds aim to avoid a target-machine glibc dependency where all linked dependencies permit it. Native crates that require external C libraries must be evaluated against the single-artifact requirement. Rust-native libraries such as rustls and RustCrypto are preferred where they satisfy application needs; specific network/crypto libraries are not mandatory in advance.
 
@@ -196,12 +196,12 @@ Passing small fixtures does not establish Terra compatibility or complete OTP co
 
 ## 12. Unresolved details before implementation claims
 
-- Terra repository, revision, entry point, dependencies, and exact first acceptance scenario.
-- Supported OTP/Elixir versions and BEAM opcode/BIF subset.
+- Reproducible ERTS results and dependency/operation inventory for the pinned [Terra scenario](terra-target.md).
+- BEAM opcode/BIF subset and runtime compatibility with the pinned mise toolchains; selecting versions is not a support claim.
 - Application startup semantics, dependency initialization, entry arguments, exit status, and shutdown policy.
 - Required process semantics, including selective receive, timers, links, monitors, and exception behavior for the chosen slice.
 - Native registry conflict policy, validation timing, call-path coverage, errors, resource ownership, and async cancellation.
 - Bundle encoding/versioning, validation limits, resource lookup semantics, and whether compression is needed.
-- Initial OS/architecture target, scheduler count policy, and host executor.
+- Scheduler count policy and host executor for the initial macOS arm64 target.
 
 Resolve each detail when its first implementation slice requires it. Add only the foundations that slice consumes; do not interpret the logical architecture or future platform matrix as a request to scaffold unused components.
