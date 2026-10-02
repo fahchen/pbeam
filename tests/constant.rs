@@ -210,6 +210,23 @@ fn rejects_code_labels_outside_declared_range() {
 }
 
 #[test]
+fn rejects_zero_code_label() {
+    let beam = edit_chunk(constant_fixture(), b"Code", |data| {
+        let label = data
+            .windows(2)
+            .position(|bytes| bytes == [1, 0x10])
+            .unwrap();
+        data[label + 1] = 0;
+    });
+    assert!(
+        BeamModule::load(&beam)
+            .unwrap_err()
+            .to_string()
+            .contains("outside declared range")
+    );
+}
+
+#[test]
 fn rejects_invalid_code_stream_and_operands() {
     assert!(
         BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| data

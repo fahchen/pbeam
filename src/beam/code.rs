@@ -85,7 +85,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
         .find(|&&label| label == 0 || label > number_of_labels)
     {
         return Err(error(format!(
-            "BEAM export label {label} exceeds declared label count {number_of_labels}"
+            "BEAM export label {label} is outside declared range 1..={number_of_labels}"
         )));
     }
     Ok(DecodedModule {
@@ -114,7 +114,7 @@ fn decode_code(data: &[u8], atoms: &[String]) -> Result<(Vec<Instruction>, u32),
                 let label = read_operand(data, &mut cursor, 0)? as u32;
                 if label == 0 || label > number_of_labels {
                     return Err(error(format!(
-                        "BEAM label {label} exceeds declared label count {number_of_labels}"
+                        "BEAM label {label} is outside declared range 1..={number_of_labels}"
                     )));
                 }
                 Instruction::Label(label)
