@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use super::{
     error::{BeamError, error},
+    module::BeamModule,
     term::Term,
 };
 
@@ -16,12 +17,6 @@ pub(super) enum Instruction {
     Move(Term, u32),
     Return,
     End,
-}
-
-pub(super) struct ParsedModule {
-    pub(super) name: String,
-    pub(super) exports: HashMap<(String, u32), u32>,
-    pub(super) instructions: Vec<Instruction>,
 }
 
 /// Parse the BEAM subset used by this runtime.
@@ -87,7 +82,7 @@ pub(super) struct ParsedModule {
 /// extension forms only. Bit fields are shown from high bit to low bit. Other
 /// chunk payloads and padding byte values are ignored. Execution supports
 /// `move` into register `x0` only.
-pub(super) fn parse(bytes: &[u8]) -> Result<ParsedModule, BeamError> {
+pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
     if bytes.len() < 12 || &bytes[..4] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
     }
@@ -137,7 +132,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<ParsedModule, BeamError> {
             "BEAM export label {label} is outside declared range 1..={number_of_labels}"
         )));
     }
-    Ok(ParsedModule {
+    Ok(BeamModule {
         name,
         exports,
         instructions,

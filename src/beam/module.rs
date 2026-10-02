@@ -8,19 +8,14 @@ use super::{
 
 #[derive(Debug)]
 pub struct BeamModule {
-    name: String,
-    exports: HashMap<(String, u32), u32>,
-    instructions: Vec<Instruction>,
+    pub(super) name: String,
+    pub(super) exports: HashMap<(String, u32), u32>,
+    pub(super) instructions: Vec<Instruction>,
 }
 
 impl BeamModule {
     pub fn load(bytes: &[u8]) -> Result<Self, BeamError> {
-        let parsed = code::parse(bytes)?;
-        Ok(Self {
-            name: parsed.name,
-            exports: parsed.exports,
-            instructions: parsed.instructions,
-        })
+        code::parse(bytes)
     }
 
     pub fn execute(&self, function: &str, arguments: &[Term]) -> Result<Term, BeamError> {
