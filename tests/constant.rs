@@ -197,6 +197,19 @@ fn rejects_invalid_exports_and_code_header() {
 }
 
 #[test]
+fn rejects_code_labels_outside_declared_range() {
+    let beam = edit_chunk(constant_fixture(), b"Code", |data| {
+        data[12..16].copy_from_slice(&0u32.to_be_bytes());
+    });
+    assert!(
+        BeamModule::load(&beam)
+            .unwrap_err()
+            .to_string()
+            .contains("label")
+    );
+}
+
+#[test]
 fn rejects_invalid_code_stream_and_operands() {
     assert!(
         BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| data
@@ -260,18 +273,16 @@ fn rejects_truncated_atom_and_zero_atom_index() {
 }
 
 #[test]
-fn reports_export_whose_code_label_is_missing() {
+fn rejects_export_labels_outside_declared_range() {
     let beam = edit_chunk(constant_fixture(), b"ExpT", |data| {
         for entry in data[4..].chunks_mut(12) {
             entry[8..12].copy_from_slice(&99u32.to_be_bytes());
         }
     });
-    let module = BeamModule::load(&beam).unwrap();
     assert!(
-        module
-            .execute("main", &[])
+        BeamModule::load(&beam)
             .unwrap_err()
             .to_string()
-            .contains("entry label 99 not found")
+            .contains("export label")
     );
 }

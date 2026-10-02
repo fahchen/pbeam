@@ -79,7 +79,15 @@ pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
         .first()
         .ok_or_else(|| error("empty BEAM atom table"))?
         .clone();
-    let instructions = decode_code(code, &atoms)?;
+    let (instructions, number_of_labels) = decode_code(code, &atoms)?;
+    if let Some(label) = exports
+        .values()
+        .find(|&&label| label == 0 || label > number_of_labels)
+    {
+        return Err(error(format!(
+            "BEAM export label {label} exceeds declared label count {number_of_labels}"
+        )));
+    }
     Ok(DecodedModule {
         name,
         exports,
@@ -87,10 +95,11 @@ pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
     })
 }
 
-fn decode_code(data: &[u8], atoms: &[String]) -> Result<Vec<Instruction>, BeamError> {
+fn decode_code(data: &[u8], atoms: &[String]) -> Result<(Vec<Instruction>, u32), BeamError> {
     if data.len() < 20 || read_u32(&data[..4])? != 16 || read_u32(&data[4..8])? != 0 {
         return Err(error("unsupported BEAM code header"));
     }
+    let number_of_labels = read_u32(&data[12..16])?;
     let function_count = read_u32(&data[16..20])? as usize;
     let mut cursor = 20;
     let mut instructions = Vec::new();
@@ -101,7 +110,15 @@ fn decode_code(data: &[u8], atoms: &[String]) -> Result<Vec<Instruction>, BeamEr
             .ok_or_else(|| error("truncated BEAM instruction stream"))?;
         cursor += 1;
         let instruction = match opcode {
-            1 => Instruction::Label(read_operand(data, &mut cursor, 0)? as u32),
+            1 => {
+                let label = read_operand(data, &mut cursor, 0)? as u32;
+                if label == 0 || label > number_of_labels {
+                    return Err(error(format!(
+                        "BEAM label {label} exceeds declared label count {number_of_labels}"
+                    )));
+                }
+                Instruction::Label(label)
+            }
             2 => {
                 functions += 1;
                 let module =
@@ -125,7 +142,7 @@ fn decode_code(data: &[u8], atoms: &[String]) -> Result<Vec<Instruction>, BeamEr
                     return Err(error("invalid BEAM code terminator or function count"));
                 }
                 instructions.push(Instruction::End);
-                return Ok(instructions);
+                return Ok((instructions, number_of_labels));
             }
             _ => return Err(error(format!("unsupported BEAM opcode {opcode}"))),
         };
