@@ -43,9 +43,10 @@ mise run check
 The shared local/CI command checks Markdown, TOML formatting, GitHub Actions, shell scripts,
 Rust formatting, Clippy with warnings denied, tests, and 100% line coverage.
 Elixir fixtures use formatting, warnings-as-errors, and Mix tests with 100% application
-line coverage. Run `mise run beam-fixture` to compile the minimal OTP assembly fixture,
-`mise run beam-inventory` to inspect its disassembly, `mise run reference` for the ERTS
-checks, and `mise run inventory` for the compiled Hello World entry instructions/imports.
+line coverage. The constant-return BEAM fixture is checked in at
+`fixtures/beam/constant.beam`. Run `mise run beam-inventory` to inspect its disassembly,
+`mise run reference` for the ERTS checks, and `mise run inventory` for the compiled Hello
+World entry instructions and imports.
 See the [evidence table](docs/hello-world-target.md).
 
 ## Delivery

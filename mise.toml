@@ -26,7 +26,6 @@ run = [
 
 [tasks.test]
 description = "Run reference and Rust tests with 100% application line coverage"
-depends = ["beam-fixture"]
 run = "bash scripts/test.sh"
 
 [tasks.check]
@@ -43,11 +42,6 @@ description = "Inspect compiled Hello World entry instructions and imports"
 dir = "fixtures/hello"
 run = '''mix run --no-start -e 'for module <- [Hello, HelloVariant] do path = :code.which(module); {:beam_file, _, exports, _, _, functions} = :beam_disasm.file(path); IO.inspect({module, path, exports}, limit: :infinity); IO.inspect(Enum.filter(functions, fn {:function, name, _, _, _} -> name == :main end), limit: :infinity); IO.inspect(:beam_lib.chunks(path, [:imports, :exports]), limit: :infinity) end' '''
 
-[tasks.beam-fixture]
-description = "Compile the constant-return BEAM fixture with the pinned OTP assembler"
-run = "mkdir -p target && erlc +from_asm -o target fixtures/beam/constant.S"
-
 [tasks.beam-inventory]
 description = "Disassemble the constant-return BEAM fixture"
-depends = ["beam-fixture"]
-run = '''erl -noshell -eval 'io:format("~p~n", [beam_disasm:file("target/constant.beam")]), halt().' '''
+run = '''erl -noshell -eval 'io:format("~p~n", [beam_disasm:file("fixtures/beam/constant.beam")]), halt().' '''

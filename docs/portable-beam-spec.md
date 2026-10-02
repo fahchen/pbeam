@@ -184,7 +184,7 @@ macOS system frameworks/libraries remain normal dependencies. Linux musl builds 
 
 These checks operationalize the design; expand them only as supported behavior grows.
 
-- [In review] Compile an OTP assembly fixture with the pinned toolchain; load its `AtU8`, `Code`, and `ExpT` chunks; execute exported atom and small-integer constants; reject malformed containers and unsupported instructions with diagnostics. This is a narrow fixture check, not general BEAM compatibility.
+- [In review] Load the checked-in BEAM fixture; read its `AtU8`, `Code`, and `ExpT` chunks; execute exported atom and small-integer constants; reject malformed containers and unsupported instructions with diagnostics. This is a narrow fixture check, not general BEAM compatibility.
 - Run the compiled Hello World entry without ERTS and match its reference stdout and exit behavior before Terra acceptance work.
 - Demonstrate process scheduling, reduction-based yielding, message wakeup, and work stealing with multiple schedulers. Verify exclusive process execution.
 - Exercise binary construction, sub-binary offsets, and non-byte-aligned matching wherever the selected application requires them.

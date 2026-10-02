@@ -12,16 +12,5 @@ if [[ "$rust_sources" == 'src/lib.rs' ]] &&
 else
   cargo llvm-cov --locked --workspace --all-features \
     --cobertura --output-path target/coverage.xml
-  python3 -c '
-import sys
-import xml.etree.ElementTree as ET
-
-coverage = ET.parse(sys.argv[1]).getroot()
-covered = int(coverage.attrib["lines-covered"])
-total = int(coverage.attrib["lines-valid"])
-print("Application line coverage: {}/{} ({:.2f}%)".format(
-    covered, total, float(coverage.attrib["line-rate"]) * 100
-))
-sys.exit(0 if total > 0 and covered == total else 1)
-' target/coverage.xml
+  mise exec -- elixir scripts/check_coverage.exs target/coverage.xml
 fi
