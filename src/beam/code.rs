@@ -30,15 +30,19 @@ pub(super) struct DecodedModule {
 ///
 /// ```text
 /// beam_file ::= "FOR1" container_size "BEAM" chunk*
+/// container_size ::= u32be
 /// chunk     ::= chunk_id chunk_size payload padding
 /// chunk_id  ::= byte[4]
+/// chunk_size ::= u32be
 /// payload   ::= byte[chunk_size]
 /// padding   ::= byte[(4 - chunk_size mod 4) mod 4]
+/// u32be     ::= byte[4]
 /// ```
 ///
 /// `container_size` counts bytes after its field, including `BEAM` and chunks.
 /// `chunk_size` counts payload bytes and excludes padding. The parser requires
-/// the `AtU8`, `ExpT`, and `Code` chunks.
+/// the `AtU8`, `ExpT`, and `Code` chunks. `u32be` is an unsigned big-endian
+/// integer. `byte[n]` means exactly `n` bytes.
 pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
     if bytes.len() < 12 || &bytes[..4] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
@@ -80,7 +84,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
         .first()
         .ok_or_else(|| error("empty BEAM atom table"))?
         .clone();
-    let (instructions, number_of_labels) = decode_code(code, &atoms)?;
+    let (instructions, number_of_labels) = parse_code(code, &atoms)?;
     if let Some(label) = exports
         .values()
         .find(|&&label| label == 0 || label > number_of_labels)
@@ -96,7 +100,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
     })
 }
 
-fn decode_code(data: &[u8], atoms: &[String]) -> Result<(Vec<Instruction>, u32), BeamError> {
+fn parse_code(data: &[u8], atoms: &[String]) -> Result<(Vec<Instruction>, u32), BeamError> {
     if data.len() < 20 || read_u32(&data[..4])? != 16 || read_u32(&data[4..8])? != 0 {
         return Err(error("unsupported BEAM code header"));
     }
@@ -297,7 +301,7 @@ fn read_u32(bytes: &[u8]) -> Result<u32, BeamError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        atom_at, decode_code, parse_atoms, parse_exports, read_integer, read_integer_after_first,
+        atom_at, parse_atoms, parse_code, parse_exports, read_integer, read_integer_after_first,
         read_operand, read_u32, read_value,
     };
 
@@ -310,10 +314,10 @@ mod tests {
         assert!(read_operand(&[], &mut 0, 0).is_err());
         assert!(read_value(&[0x03], &mut 0, &[]).is_err());
         assert!(read_value(&[0x12], &mut 0, &[]).is_err());
-        assert!(decode_code(&[], &[]).is_err());
-        assert!(decode_code(&[0; 20], &[]).is_err());
+        assert!(parse_code(&[], &[]).is_err());
+        assert!(parse_code(&[0; 20], &[]).is_err());
         assert!(
-            decode_code(
+            parse_code(
                 &[0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 &[]
             )
