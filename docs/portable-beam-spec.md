@@ -23,6 +23,7 @@ The [Hello World contract](hello-world-target.md) is the first target: PBeam exe
 | Binary data | Separate binary/bitstring representation and operations from general compound values. |
 | Scheduling | One OS process, multiple scheduler threads, one scheduler per OS thread, work stealing. |
 | Native extensions | Rust functions registered by module/function/arity (MFA), linked into the executable. |
+| OTP compatibility | Keep required OTP BEAM modules and replace their native/ERTS boundaries only where the selected application needs them. |
 | Platform access | System/Host boundary for platform services and asynchronous completion. |
 | Code loading | Bundle-defined code loaded at startup; shared code remains effectively immutable afterward. |
 | Packaging | One application bundle embedded in a Rust launcher with `include_bytes!`. |
@@ -42,6 +43,7 @@ The initial scope excludes:
 - Traditional `erl_nif`/Rustler ABI compatibility and dynamically loaded native extension libraries.
 - Post-link bundle appending or platform-specific executable section manipulation.
 - Complete OTP compatibility as a prerequisite for the first application.
+- Rewriting BEAM instructions to replace native dependencies, or replacing an entire OTP application by default.
 
 Rust procedural macros for native bindings, broad automatic type conversion, a standalone `pbeam run app.pbeam` command, and alternate memory backends are future extensions. Do not build their scaffolding before a consumer needs them.
 
@@ -100,6 +102,14 @@ Tokio was an example executor in the discussion, not a finalized dependency requ
 
 ## 8. Rust-native extensions
 
+### OTP and system dependencies
+
+For required OTP applications, first run their original `.beam` modules. Resolve ordinary calls through the code server; dispatch calls that reach an ERTS primitive or registered native leaf to the corresponding PBeam implementation. Do not patch bytecode or replace an OTP application merely because it uses a native dependency. This applies to `:httpc`, `:ssl`, and `:ssh` as a strategy, not as a claim that any of them runs on PBeam today.
+
+For example, an HTTPS call may traverse `:httpc` and OTP `:ssl` BEAM code before reaching crypto and socket operations. Preserve those BEAM layers where feasible; implement the required crypto/NIF and socket/ERTS boundaries in Rust. OTP `:ssh` likewise does not imply a dependency on a target machine's OpenSSH executable. A separately invoked external program is a distinct host dependency and needs its own explicit handling.
+
+If an OTP subsystem proves impractical to support at its native boundary, replacing the subsystem requires a separate, evidence-backed compatibility decision. No such replacement is part of the baseline.
+
 ### Elixir declaration
 
 The proposed interface uses ordinary Elixir function calls:
@@ -122,6 +132,8 @@ A Rust extension exports a registration function. Registration maps an MFA such 
 
 For an external MFA call, the runtime checks the native registry first. A registered implementation executes through the native call context; otherwise the runtime resolves the BEAM function through the code server. Native integration does not require a separate `PBeam.Native.call/3` instruction or BIF.
 
+For OTP compatibility, register the native leaf or ERTS operation being replaced. A BEAM wrapper such as `:crypto.hash/2` should continue to execute as BEAM code when its implementation calls a lower native function. Dispatch must also account for native entry paths that do not use `call_ext`; the required paths are determined from the selected OTP version and application slice.
+
 The initial native API needs a term argument interface, checked conversion for the types actually used, a context for constructing return terms, and a result/error contract. Incorrect arguments must become defined runtime errors rather than unchecked Rust indexing or conversion failures.
 
 All supported ways to invoke a declared native function must preserve the same dispatch behavior. The implementation must account for local calls, dynamic application, and function references if those paths occur in the supported application slice; the source's `call_ext` sketch alone does not settle them.
@@ -143,6 +155,8 @@ end
 The builder generates a launcher crate with those Cargo dependencies and registration calls. Native implementations are linked into the application executable; startup does not locate or load extension `.so`, `.dylib`, or `.dll` files.
 
 Missing required implementations and conflicting native registrations must be diagnosed before application execution. The exact validation mechanism remains open.
+
+Build-time inspection should inventory required OTP modules, imports, native declarations, and other observed native dependencies, then check them against bundled BEAM code and registered Rust implementations. An import alone does not prove that a function is native or that every dynamic call is reachable. Record such limits, and report a required third-party NIF with no replacement as unsupported rather than assuming its original native library can load.
 
 Automatic `FromTerm`/`IntoTerm` conversions and attribute macros may follow when manual bindings become repetitive. Async native functions use the suspension/completion model above; they must not call blocking `block_on` on scheduler threads.
 
@@ -189,6 +203,7 @@ These checks operationalize the design; expand them only as supported behavior g
 - Demonstrate process scheduling, reduction-based yielding, message wakeup, and work stealing with multiple schedulers. Verify exclusive process execution.
 - Exercise binary construction, sub-binary offsets, and non-byte-aligned matching wherever the selected application requires them.
 - Call the declared SHA-256 native example from Elixir and compare its result with a known digest. Verify bad arguments and missing registrations fail predictably.
+- For the first OTP module requiring a native dependency, verify that its original BEAM code runs through the runtime's native dispatch without bytecode rewriting; document the native operation and any dependency-scan blind spots.
 - For the first async operation, show that another process progresses while its caller waits, and that completion after caller exit is harmless.
 - Build an executable, move it away from the build output, and run it without an installed Erlang/Elixir runtime or accompanying application files. Verify required embedded resources remain accessible.
 - Run the pinned Terra scenario and compare its observable behavior with the same scenario on ERTS. Record required modules, instructions, BIFs, host services, and known gaps.
