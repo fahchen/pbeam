@@ -26,15 +26,19 @@ pub(super) struct DecodedModule {
 
 /// Parse the BEAM subset used by this runtime.
 ///
-/// File layout:
+/// Container grammar:
 ///
 /// ```text
-/// FOR1 | file_size:u32be | BEAM | chunk...
-/// chunk = id[4] | size:u32be | data[size] | padding[0..3]
+/// beam_file ::= "FOR1" container_size "BEAM" chunk*
+/// chunk     ::= chunk_id chunk_size payload padding
+/// chunk_id  ::= byte[4]
+/// payload   ::= byte[chunk_size]
+/// padding   ::= byte[(4 - chunk_size mod 4) mod 4]
 /// ```
 ///
-/// `file_size` counts bytes after its field. Chunk sizes exclude padding.
-/// This parser reads the `AtU8`, `ExpT`, and `Code` chunks.
+/// `container_size` counts bytes after its field, including `BEAM` and chunks.
+/// `chunk_size` counts payload bytes and excludes padding. The parser requires
+/// the `AtU8`, `ExpT`, and `Code` chunks.
 pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
     if bytes.len() < 12 || &bytes[..4] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
