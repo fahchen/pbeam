@@ -2,11 +2,7 @@
 
 ## Project Knowledge
 
-Before coding, load project knowledge into context:
-
-1. Read `docs/agents/knowledge.md` and `docs/agents/patterns.md` in full.
-2. Scan the titles in `docs/agents/improvements.md`.
-3. Scan only frontmatter in `docs/agents/postmortems/*.md`.
+Before implementation, read `docs/agents/knowledge.md`.
 
 ## Scope and source of truth
 
