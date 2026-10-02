@@ -57,6 +57,10 @@
 6. Record exact verification commands and results, including acceptance evidence
    and known gaps. Stop for review after opening the PR; do not auto-merge or
    proceed with dependent implementation.
+7. Keep every commit atomic and independently reviewable: make each one a cohesive
+   change with its relevant verification, and do not mix unrelated work. Do not
+   add functions, fields, or configuration without a current consumer, unless an
+   explicit architectural decision records the need, alternatives, and tradeoffs.
 
 Keep affected issues current as work progresses: scope, dependencies, blockers,
 decisions, PR links, verification, and remaining work. Add PR links to task issues
