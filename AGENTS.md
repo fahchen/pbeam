@@ -1,5 +1,13 @@
 # AGENTS.md
 
+## Project Knowledge
+
+Before coding, load project knowledge into context:
+
+1. Read `docs/agents/knowledge.md` and `docs/agents/patterns.md` in full.
+2. Scan the titles in `docs/agents/improvements.md`.
+3. Scan only frontmatter in `docs/agents/postmortems/*.md`.
+
 ## Scope and source of truth
 
 - Read `README.md` and `docs/portable-beam-spec.md` before changing runtime behavior.
@@ -41,9 +49,6 @@
   priorities. Keep labels current when scope or blockers change.
 
 ## Implementation and review
-
-Before implementation, read `docs/implementation-conventions.md`. It records
-review feedback and naming, scope, documentation, and verification rules.
 
 1. Read the task issue, its epic, milestone tracker, and blockers. Confirm that
    scope, acceptance criteria, and verification are concrete before implementation.
