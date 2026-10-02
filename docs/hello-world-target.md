@@ -5,8 +5,8 @@ The first target is complete only when PBeam executes `Hello.main/0`, prints exa
 and an ERTS reference run are preparation; none completes this target.
 
 Terra Counter follows as a broader application compatibility target. The compiled ERTS
-reference and both greeting variants are verified. The initial constant-return BEAM
-loader supports atom and integer constants. It does not execute the Hello World entry.
+reference and both greeting variants are verified. The initial runtime supports
+atom/integer constants and one bounded call chain. It does not execute the Hello World entry.
 
 ## Program
 
@@ -57,7 +57,8 @@ independently verify the original compiled artifacts and process-level results.
 | Kind | Instruction or operation | Required semantics | Evidence | PBeam support and limits | Task / PR / test |
 | --- | --- | --- | --- | --- | --- |
 | Instruction | `move literal, x0` | Put the binary literal into argument register 0 | Static entry disassembly, both modules | Only immediate atoms and integers through 2047; binary literals remain unsupported | #4; `constant.rs` |
-| Instruction | `call_ext_only 1, Elixir.IO:puts/1` | External tail call with one argument; preserve caller return destination | Static final entry instruction, both modules | Not implemented | #5, #42; `hello_test.exs` |
+| Instructions | `call`, `call_ext`, `call_ext_last`, `allocate`, `deallocate`, `move x/y` | Preserve arguments and return values across a local call and startup-loaded external calls | Compiled Erlang call fixture, compared with ERTS | Supports this bounded call fixture only; no scheduler, exceptions, or dynamic loading | #5; `calls.rs` |
+| Instruction | `call_ext_only 1, Elixir.IO:puts/1` | External tail call with one argument; preserve caller return destination | Static final entry instruction, both modules | The instruction is supported. `Elixir.IO:puts/1` has no implementation yet. | #5, #42; `hello_test.exs` |
 | Loader metadata | `label`, `line`, `func_info` | Resolve entry label 11; distinguish metadata from executable operations | Static `main/0` disassembly, source lines 2–3 | Supports `label`, `func_info`, `return`, `int_code_end`; no general entry metadata | #4 |
 | Terms | Binary literals, atom `ok` | Load each distinct greeting; output call returns `:ok` | Disassembly plus both in-process assertions | Atoms and non-negative integers through 2047 only; no binary literal or general term support | #4, #42 |
 | External MFA | `Elixir.IO:puts/1` | Write supplied greeting plus newline to standard output | Static import; observed output and `:ok` result under ERTS | Proposed native boundary below; not implemented | #42; both process tests |
@@ -95,6 +96,15 @@ passing acceptance checks. GitHub links below identify the tasks; PR #43 supplie
 the reference evidence and `fixtures/hello/test/hello_test.exs` contains its checks.
 
 ## Implementation checklist
+
+Rebuild the call fixture with the pinned Erlang compiler:
+
+```sh
+mise exec -- erlc +no_line_info -Werror -o fixtures/calls fixtures/calls/calls.erl fixtures/calls/external.erl
+```
+
+The checked-in BEAM files are the test inputs. The Rust call test also runs the
+same modules under ERTS and checks its output.
 
 Keep implementation todos as checkboxes in the linked GitHub task issues; this
 document records technical evidence and verified support. Each todo names one
