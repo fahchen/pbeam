@@ -15,11 +15,11 @@ pub struct BeamModule {
 
 impl BeamModule {
     pub fn load(bytes: &[u8]) -> Result<Self, BeamError> {
-        let decoded = code::decode(bytes)?;
+        let parsed = code::parse(bytes)?;
         Ok(Self {
-            name: decoded.name,
-            exports: decoded.exports,
-            instructions: decoded.instructions,
+            name: parsed.name,
+            exports: parsed.exports,
+            instructions: parsed.instructions,
         })
     }
 

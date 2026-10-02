@@ -24,7 +24,7 @@ pub(super) struct DecodedModule {
     pub(super) instructions: Vec<Instruction>,
 }
 
-pub(super) fn decode(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
+pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
     if bytes.len() < 12 || &bytes[..4] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
     }
