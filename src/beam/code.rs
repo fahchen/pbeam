@@ -43,8 +43,8 @@ pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
     if bytes.len() < 12 || &bytes[..4] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
     }
-    let declared = read_u32(&bytes[4..8])? as usize;
-    if declared != bytes.len() - 8 || &bytes[8..12] != b"BEAM" {
+    let container_size = read_u32(&bytes[4..8])? as usize;
+    if container_size != bytes.len() - 8 || &bytes[8..12] != b"BEAM" {
         return Err(error("invalid BEAM container size or identity"));
     }
 
@@ -56,12 +56,13 @@ pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
         }
         let header_end = cursor + 8;
         let id = &bytes[cursor..cursor + 4];
-        let length = read_u32(&bytes[cursor + 4..header_end])? as usize;
-        let padding = (4 - (length % 4)) % 4;
-        if length > bytes.len() - header_end || padding > bytes.len() - header_end - length {
+        let chunk_size = read_u32(&bytes[cursor + 4..header_end])? as usize;
+        let padding = (4 - (chunk_size % 4)) % 4;
+        if chunk_size > bytes.len() - header_end || padding > bytes.len() - header_end - chunk_size
+        {
             return Err(error("BEAM chunk exceeds container bounds"));
         }
-        let data_end = header_end + length;
+        let data_end = header_end + chunk_size;
         let padded_end = data_end + padding;
         if chunks
             .insert(id.to_vec(), &bytes[header_end..data_end])
