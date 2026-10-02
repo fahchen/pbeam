@@ -18,7 +18,7 @@ pub(super) enum Instruction {
     End,
 }
 
-pub(super) struct DecodedModule {
+pub(super) struct ParsedModule {
     pub(super) name: String,
     pub(super) exports: HashMap<(String, u32), u32>,
     pub(super) instructions: Vec<Instruction>,
@@ -37,13 +37,57 @@ pub(super) struct DecodedModule {
 /// payload   ::= byte[chunk_size]
 /// padding   ::= byte[(4 - chunk_size mod 4) mod 4]
 /// u32be     ::= byte[4]
+/// i32be     ::= byte[4]
+///
+/// atoms_chunk ::= "AtU8" chunk_size atom_table padding
+/// atom_table  ::= atom_count atom_entry[abs(atom_count)]
+/// atom_count  ::= i32be
+/// atom_entry  ::= atom_name_length utf8_name[atom_name_length]
+/// atom_name_length ::= compact(0)
+///
+/// exports_chunk ::= "ExpT" chunk_size export_table padding
+/// export_table  ::= export_count export[export_count]
+/// export_count  ::= u32be
+/// export        ::= atom_index:u32be arity:u32be label:u32be
+///
+/// code_chunk  ::= "Code" chunk_size code_header executable_instruction* int_code_end padding
+/// code_header ::= sub_size instruction_set opcode_max label_count function_count
+/// sub_size    ::= 16:u32be
+/// instruction_set ::= 0:u32be
+/// opcode_max ::= u32be
+/// label_count ::= u32be
+/// function_count ::= u32be
+/// executable_instruction ::= label | function_info | move | return
+/// label       ::= 1 compact(0)
+/// function_info ::= 2 compact(2) compact(2) compact(0)
+/// move        ::= 64 value compact(3)
+/// return      ::= 19
+/// int_code_end ::= 3
+/// value       ::= integer_value | atom_value
+/// integer_value ::= compact(1)
+/// atom_value  ::= compact(2)
+///
+/// compact(tag) ::= short(tag) | extended(tag)
+/// short(tag)   ::= value:4 0 tag:3
+/// extended(tag) ::= high:3 1 0 tag:3 low:8
 /// ```
 ///
 /// `container_size` counts bytes after its field, including `BEAM` and chunks.
 /// `chunk_size` counts payload bytes and excludes padding. The parser requires
 /// the `AtU8`, `ExpT`, and `Code` chunks. `u32be` is an unsigned big-endian
-/// integer. `byte[n]` means exactly `n` bytes.
-pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
+/// integer. `i32be` is a signed big-endian integer. `byte[n]` means exactly
+/// `n` bytes. `AtU8` stores a non-positive count; its absolute value gives the
+/// number of atoms. Atom names use UTF-8. The module name is the first atom.
+/// Atom indices are one-based. `ExpT` contains exactly the declared number of
+/// 12-byte entries. Export and code labels must be in `1..=label_count`.
+/// `function_count` must match the number of `function_info` instructions.
+/// `opcode_max` is not checked. The parser rejects duplicate chunk IDs. It
+/// supports only the listed instructions and compact operand forms. Compact
+/// tags occupy the low three bits. The parser accepts the short and one-byte
+/// extension forms only. Bit fields are shown from high bit to low bit. Other
+/// chunk payloads and padding byte values are ignored. Execution supports
+/// `move` into register `x0` only.
+pub(super) fn parse(bytes: &[u8]) -> Result<ParsedModule, BeamError> {
     if bytes.len() < 12 || &bytes[..4] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
     }
@@ -93,7 +137,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
             "BEAM export label {label} is outside declared range 1..={number_of_labels}"
         )));
     }
-    Ok(DecodedModule {
+    Ok(ParsedModule {
         name,
         exports,
         instructions,
