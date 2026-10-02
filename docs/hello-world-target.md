@@ -5,8 +5,8 @@ The first target is complete only when PBeam executes `Hello.main/0`, prints exa
 and an ERTS reference run are preparation; none completes this target.
 
 Terra Counter follows as a broader application compatibility target. The compiled ERTS
-reference and both greeting variants are verified. PBeam has an initial constant-return
-BEAM loader in review; it does not yet execute the Hello World entry.
+reference and both greeting variants are verified. The initial constant-return BEAM
+loader supports atom and integer constants. It does not execute the Hello World entry.
 
 ## Program
 
@@ -50,9 +50,9 @@ emits `hello_reference.app`; the fixture has no third-party dependencies.
 
 Observed results: four tests pass; each module has 100% application line coverage.
 Both subprocesses have empty stderr and exit zero. Stdout is `Hello, world!\n`
-and `Another greeting.\n`, respectively. Rust coverage remains N/A for the empty
-crate. In-process tests measure fixture coverage; subprocess tests independently
-verify the original compiled artifacts and process-level results.
+and `Another greeting.\n`, respectively. Rust application line coverage is
+385/385 (100%). In-process tests measure fixture coverage; subprocess tests
+independently verify the original compiled artifacts and process-level results.
 
 | Kind | Instruction or operation | Required semantics | Evidence | PBeam support and limits | Task / PR / test |
 | --- | --- | --- | --- | --- | --- |
