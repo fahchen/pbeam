@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Project Knowledge
+
+Before implementation, read `docs/agents/knowledge.md`.
+
 ## Scope and source of truth
 
 - Read `README.md` and `docs/portable-beam-spec.md` before changing runtime behavior.
@@ -57,6 +61,10 @@
 6. Record exact verification commands and results, including acceptance evidence
    and known gaps. Stop for review after opening the PR; do not auto-merge or
    proceed with dependent implementation.
+7. Keep every commit atomic and independently reviewable: make each one a cohesive
+   change with its relevant verification, and do not mix unrelated work. Do not
+   add functions, fields, or configuration without a current consumer, unless an
+   explicit architectural decision records the need, alternatives, and tradeoffs.
 
 Keep affected issues current as work progresses: scope, dependencies, blockers,
 decisions, PR links, verification, and remaining work. Add PR links to task issues
@@ -108,4 +116,6 @@ replace contradictory current instructions rather than appending a correction.
   lookups to subagents. Give editing agents explicit file ownership and preserve
   others' changes.
 - Keep communication concise and suited to an experienced systems engineer.
-  Write repository documentation and PR descriptions in normal prose.
+  Write all project documents, GitHub issue and PR text, and assistant messages
+  in ASD-STE100 Simplified Technical English. Use short sentences, one instruction
+  per sentence, approved words, and consistent terms.

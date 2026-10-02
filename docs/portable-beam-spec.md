@@ -1,6 +1,6 @@
 # Portable BEAM runtime specification
 
-Status: architecture baseline reconstructed from the design conversation; implementation has not started.
+Status: architecture baseline reconstructed from the design conversation; the initial constant-return BEAM slice is implemented.
 
 Source: [Branch · Portable BEAM实现原理](chatgpt-conversation://6abe6693-526c-83ee-8922-0af41462fb49).
 
@@ -198,7 +198,7 @@ macOS system frameworks/libraries remain normal dependencies. Linux musl builds 
 
 These checks operationalize the design; expand them only as supported behavior grows.
 
-- Load and execute a compiled BEAM fixture through the interpreter; reject an unsupported format/instruction with a useful diagnostic.
+- [Implemented] Load the checked-in BEAM fixture; read its `AtU8`, `Code`, and `ExpT` chunks; execute exported atom and small-integer constants; reject malformed containers and unsupported instructions with diagnostics. This is a narrow fixture check, not general BEAM compatibility.
 - Run the compiled Hello World entry without ERTS and match its reference stdout and exit behavior before Terra acceptance work.
 - Demonstrate process scheduling, reduction-based yielding, message wakeup, and work stealing with multiple schedulers. Verify exclusive process execution.
 - Exercise binary construction, sub-binary offsets, and non-byte-aligned matching wherever the selected application requires them.

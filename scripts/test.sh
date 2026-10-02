@@ -10,5 +10,7 @@ if [[ "$rust_sources" == 'src/lib.rs' ]] &&
   cargo test --locked --workspace --all-features
   echo 'Line coverage: N/A (empty bootstrap; no executable Rust code).'
 else
-  cargo llvm-cov --locked --workspace --all-features --fail-under-lines 100
+  cargo llvm-cov --locked --workspace --all-features \
+    --cobertura --output-path target/coverage.xml
+  mise exec -- elixir scripts/check_coverage.exs target/coverage.xml
 fi
