@@ -96,6 +96,11 @@ pub(super) enum Instruction {
     End,
 }
 
+/// A source or destination in the supported `move` instruction.
+///
+/// `Value` holds a supported immediate term. `X` uses compact register tag 3,
+/// and `Y` uses compact register tag 4. For example, `move x0, y0` is encoded
+/// as `[0x40, 0x03, 0x04]`.
 #[derive(Debug, Clone)]
 pub(super) enum Operand {
     Value(Term),
