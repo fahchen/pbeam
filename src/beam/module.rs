@@ -6,6 +6,8 @@ use super::{
     term::Term,
 };
 
+const X0_REGISTER: u32 = 0;
+
 #[derive(Debug)]
 pub struct BeamModule {
     pub(super) name: String,
@@ -39,7 +41,9 @@ impl BeamModule {
                 }
                 Instruction::Label(label) if active && label == entry => label_matches = true,
                 Instruction::Label(_) if active => {}
-                Instruction::Move(term, 0) if active && label_matches && value.is_none() => {
+                Instruction::Move(term, X0_REGISTER)
+                    if active && label_matches && value.is_none() =>
+                {
                     value = Some(term.clone());
                 }
                 Instruction::Return if active && label_matches => {
@@ -57,8 +61,8 @@ impl BeamModule {
     }
 }
 
-fn checked_arity(length: usize) -> Result<u32, BeamError> {
-    u32::try_from(length).map_err(|_| error("arity exceeds BEAM limit"))
+fn checked_arity(argument_count: usize) -> Result<u32, BeamError> {
+    u32::try_from(argument_count).map_err(|_| error("arity exceeds BEAM limit"))
 }
 
 #[cfg(test)]

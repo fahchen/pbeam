@@ -6,6 +6,34 @@ use super::{
     term::Term,
 };
 
+const WORD_SIZE: usize = 4;
+const CHUNK_ALIGNMENT: usize = WORD_SIZE;
+const CHUNK_HEADER_SIZE: usize = WORD_SIZE * 2;
+const CONTAINER_HEADER_SIZE: usize = WORD_SIZE * 3;
+const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
+const CODE_HEADER_SUB_SIZE: u32 = 16;
+const INSTRUCTION_SET_ERLANG: u32 = 0;
+const EXPORT_ENTRY_SIZE: usize = WORD_SIZE * 3;
+const COMPACT_TAG_MASK: u8 = 0b111;
+const COMPACT_EXTENDED_FLAG: u8 = 0b1000;
+const COMPACT_SIGN_FLAG: u8 = 0b1_0000;
+const COMPACT_HIGH_BITS_MASK: u8 = 0b1110_0000;
+const COMPACT_SHORT_VALUE_SHIFT: u8 = 4;
+const COMPACT_HIGH_VALUE_SHIFT: u8 = 3;
+const TAG_UNSIGNED: u8 = 0;
+const TAG_INTEGER: u8 = 1;
+const TAG_ATOM: u8 = 2;
+const TAG_REGISTER: u8 = 3;
+const OPCODE_LABEL: u8 = 1;
+const OPCODE_FUNCTION_INFO: u8 = 2;
+const OPCODE_INT_CODE_END: u8 = 3;
+const OPCODE_RETURN: u8 = 19;
+const OPCODE_MOVE: u8 = 64;
+const FIRST_ATOM_INDEX: usize = 1;
+const FIRST_LABEL_NUMBER: u32 = 1;
+const CODE_LABEL_COUNT_OFFSET: usize = WORD_SIZE * 3;
+const CODE_FUNCTION_COUNT_OFFSET: usize = WORD_SIZE * 4;
+
 #[derive(Debug, Clone)]
 pub(super) enum Instruction {
     Label(u32),
@@ -83,24 +111,26 @@ pub(super) enum Instruction {
 /// chunk payloads and padding byte values are ignored. Execution supports
 /// `move` into register `x0` only.
 pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
-    if bytes.len() < 12 || &bytes[..4] != b"FOR1" {
+    if bytes.len() < CONTAINER_HEADER_SIZE || &bytes[..WORD_SIZE] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
     }
-    let container_size = read_u32(&bytes[4..8])? as usize;
-    if container_size != bytes.len() - 8 || &bytes[8..12] != b"BEAM" {
+    let container_size = read_u32(&bytes[WORD_SIZE..WORD_SIZE * 2])? as usize;
+    if container_size != bytes.len() - WORD_SIZE * 2
+        || &bytes[WORD_SIZE * 2..CONTAINER_HEADER_SIZE] != b"BEAM"
+    {
         return Err(error("invalid BEAM container size or identity"));
     }
 
     let mut chunks = HashMap::new();
-    let mut cursor = 12;
+    let mut cursor = CONTAINER_HEADER_SIZE;
     while cursor < bytes.len() {
-        if bytes.len() - cursor < 8 {
+        if bytes.len() - cursor < CHUNK_HEADER_SIZE {
             return Err(error("truncated BEAM chunk header"));
         }
-        let header_end = cursor + 8;
-        let id = &bytes[cursor..cursor + 4];
-        let chunk_size = read_u32(&bytes[cursor + 4..header_end])? as usize;
-        let padding = (4 - (chunk_size % 4)) % 4;
+        let header_end = cursor + CHUNK_HEADER_SIZE;
+        let chunk_id = &bytes[cursor..cursor + WORD_SIZE];
+        let chunk_size = read_u32(&bytes[cursor + WORD_SIZE..header_end])? as usize;
+        let padding = (CHUNK_ALIGNMENT - (chunk_size % CHUNK_ALIGNMENT)) % CHUNK_ALIGNMENT;
         if chunk_size > bytes.len() - header_end || padding > bytes.len() - header_end - chunk_size
         {
             return Err(error("BEAM chunk exceeds container bounds"));
@@ -108,7 +138,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
         let data_end = header_end + chunk_size;
         let padded_end = data_end + padding;
         if chunks
-            .insert(id.to_vec(), &bytes[header_end..data_end])
+            .insert(chunk_id.to_vec(), &bytes[header_end..data_end])
             .is_some()
         {
             return Err(error("duplicate BEAM chunk"));
@@ -126,7 +156,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
     let (instructions, number_of_labels) = parse_code(code, &atoms)?;
     if let Some(label) = exports
         .values()
-        .find(|&&label| label == 0 || label > number_of_labels)
+        .find(|&&label| label < FIRST_LABEL_NUMBER || label > number_of_labels)
     {
         return Err(error(format!(
             "BEAM export label {label} is outside declared range 1..={number_of_labels}"
@@ -140,49 +170,55 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
 }
 
 fn parse_code(data: &[u8], atoms: &[String]) -> Result<(Vec<Instruction>, u32), BeamError> {
-    if data.len() < 20 || read_u32(&data[..4])? != 16 || read_u32(&data[4..8])? != 0 {
+    if data.len() < CODE_HEADER_SIZE
+        || read_u32(&data[..WORD_SIZE])? != CODE_HEADER_SUB_SIZE
+        || read_u32(&data[WORD_SIZE..WORD_SIZE * 2])? != INSTRUCTION_SET_ERLANG
+    {
         return Err(error("unsupported BEAM code header"));
     }
-    let number_of_labels = read_u32(&data[12..16])?;
-    let function_count = read_u32(&data[16..20])? as usize;
-    let mut cursor = 20;
+    let number_of_labels =
+        read_u32(&data[CODE_LABEL_COUNT_OFFSET..CODE_LABEL_COUNT_OFFSET + WORD_SIZE])?;
+    let declared_function_count =
+        read_u32(&data[CODE_FUNCTION_COUNT_OFFSET..CODE_HEADER_SIZE])? as usize;
+    let mut cursor = CODE_HEADER_SIZE;
     let mut instructions = Vec::new();
-    let mut functions = 0;
+    let mut function_info_count = 0;
     loop {
         let opcode = *data
             .get(cursor)
             .ok_or_else(|| error("truncated BEAM instruction stream"))?;
         cursor += 1;
         let instruction = match opcode {
-            1 => {
-                let label = read_operand(data, &mut cursor, 0)? as u32;
-                if label == 0 || label > number_of_labels {
+            OPCODE_LABEL => {
+                let label = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                if label < FIRST_LABEL_NUMBER || label > number_of_labels {
                     return Err(error(format!(
                         "BEAM label {label} is outside declared range 1..={number_of_labels}"
                     )));
                 }
                 Instruction::Label(label)
             }
-            2 => {
-                functions += 1;
+            OPCODE_FUNCTION_INFO => {
+                function_info_count += 1;
                 let module =
-                    atom_at(atoms, read_operand(data, &mut cursor, 2)? as usize)?.to_owned();
-                let name = atom_at(atoms, read_operand(data, &mut cursor, 2)? as usize)?.to_owned();
-                let arity = read_operand(data, &mut cursor, 0)? as u32;
+                    atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?.to_owned();
+                let name =
+                    atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?.to_owned();
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
                 Instruction::FunctionInfo {
                     module,
                     name,
                     arity,
                 }
             }
-            19 => Instruction::Return,
-            64 => {
+            OPCODE_RETURN => Instruction::Return,
+            OPCODE_MOVE => {
                 let value = read_value(data, &mut cursor, atoms)?;
-                let destination = read_operand(data, &mut cursor, 3)? as u32;
+                let destination = read_operand(data, &mut cursor, TAG_REGISTER)? as u32;
                 Instruction::Move(value, destination)
             }
-            3 => {
-                if cursor != data.len() || functions != function_count {
+            OPCODE_INT_CODE_END => {
+                if cursor != data.len() || function_info_count != declared_function_count {
                     return Err(error("invalid BEAM code terminator or function count"));
                 }
                 instructions.push(Instruction::End);
@@ -195,31 +231,31 @@ fn parse_code(data: &[u8], atoms: &[String]) -> Result<(Vec<Instruction>, u32), 
 }
 
 fn parse_atoms(data: &[u8]) -> Result<Vec<String>, BeamError> {
-    let count = read_u32(data)? as i32;
-    let count = usize::try_from(
-        count
+    let signed_atom_count = read_u32(data)? as i32;
+    let atom_count = usize::try_from(
+        signed_atom_count
             .checked_neg()
             .ok_or_else(|| error("unsupported atom table encoding"))?,
     )
     .map_err(|_| error("invalid atom count"))?;
-    if count > data.len() - 4 {
+    if atom_count > data.len() - WORD_SIZE {
         return Err(error("atom count exceeds chunk size"));
     }
-    let mut atoms = Vec::with_capacity(count);
-    let mut cursor = 4;
-    for _ in 0..count {
-        let length = read_operand(data, &mut cursor, 0)? as usize;
-        if length > data.len() - cursor {
+    let mut atoms = Vec::with_capacity(atom_count);
+    let mut cursor = WORD_SIZE;
+    for _ in 0..atom_count {
+        let atom_name_length = read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize;
+        if atom_name_length > data.len() - cursor {
             return Err(error("truncated atom name"));
         }
-        let end = cursor + length;
+        let atom_name_end = cursor + atom_name_length;
         let atom = std::str::from_utf8(
-            data.get(cursor..end)
+            data.get(cursor..atom_name_end)
                 .ok_or_else(|| error("truncated atom name"))?,
         )
         .map_err(|_| error("invalid UTF-8 atom name"))?;
         atoms.push(atom.to_owned());
-        cursor = end;
+        cursor = atom_name_end;
     }
     if cursor != data.len() {
         return Err(error("unexpected bytes after atom table"));
@@ -228,22 +264,23 @@ fn parse_atoms(data: &[u8]) -> Result<Vec<String>, BeamError> {
 }
 
 fn parse_exports(data: &[u8], atoms: &[String]) -> Result<HashMap<(String, u32), u32>, BeamError> {
-    let count = read_u32(data)? as usize;
-    let expected = 4usize
+    let export_count = read_u32(data)? as usize;
+    let expected_table_size = WORD_SIZE
         .checked_add(
-            count
-                .checked_mul(12)
+            export_count
+                .checked_mul(EXPORT_ENTRY_SIZE)
                 .ok_or_else(|| error("export count overflow"))?,
         )
         .ok_or_else(|| error("export table size overflow"))?;
-    if expected != data.len() {
+    if expected_table_size != data.len() {
         return Err(error("invalid export table size"));
     }
     let mut exports = HashMap::new();
-    for entry in data[4..].chunks(12) {
-        let name = atom_at(atoms, read_u32(&entry[..4])? as usize)?.to_owned();
-        let arity = read_u32(&entry[4..8])?;
-        let label = read_u32(&entry[8..])?;
+    for entry in data[WORD_SIZE..].chunks(EXPORT_ENTRY_SIZE) {
+        let atom_index = read_u32(&entry[..WORD_SIZE])? as usize;
+        let arity = read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])?;
+        let label = read_u32(&entry[WORD_SIZE * 2..])?;
+        let name = atom_at(atoms, atom_index)?.to_owned();
         if exports.insert((name, arity), label).is_some() {
             return Err(error("duplicate BEAM export"));
         }
@@ -252,89 +289,109 @@ fn parse_exports(data: &[u8], atoms: &[String]) -> Result<HashMap<(String, u32),
 }
 
 fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term, BeamError> {
-    let byte = *data
+    let first_byte = *data
         .get(*cursor)
         .ok_or_else(|| error("truncated BEAM operand"))?;
-    match byte & 7 {
-        1 => {
-            let value = read_integer(data, cursor, 1)?;
+    match first_byte & COMPACT_TAG_MASK {
+        TAG_INTEGER => {
+            let value = read_integer(data, cursor, TAG_INTEGER)?;
             Ok(Term::Integer(
                 i64::try_from(value).map_err(|_| error("integer constant exceeds i64"))?,
             ))
         }
-        2 => {
-            let index = read_operand(data, cursor, 2)? as usize;
+        TAG_ATOM => {
+            let index = read_operand(data, cursor, TAG_ATOM)? as usize;
             Ok(Term::Atom(atom_at(atoms, index)?.to_owned()))
         }
-        tag => Err(error(format!("unsupported constant operand tag {tag}"))),
+        unsupported_tag => Err(error(format!(
+            "unsupported constant operand tag {unsupported_tag}"
+        ))),
     }
 }
 
 fn atom_at(atoms: &[String], index: usize) -> Result<&str, BeamError> {
-    if index == 0 {
+    if index < FIRST_ATOM_INDEX {
         return Err(error("BEAM atom index zero is invalid"));
     }
     atoms
-        .get(index - 1)
+        .get(index - FIRST_ATOM_INDEX)
         .map(String::as_str)
         .ok_or_else(|| error(format!("BEAM atom index {index} out of range")))
 }
 
 fn required_chunk<'a>(
     chunks: &HashMap<Vec<u8>, &'a [u8]>,
-    id: &[u8; 4],
+    chunk_id: &[u8; WORD_SIZE],
 ) -> Result<&'a [u8], BeamError> {
-    chunks
-        .get(id.as_slice())
-        .copied()
-        .ok_or_else(|| error(format!("missing {} chunk", String::from_utf8_lossy(id))))
+    chunks.get(chunk_id.as_slice()).copied().ok_or_else(|| {
+        error(format!(
+            "missing {} chunk",
+            String::from_utf8_lossy(chunk_id)
+        ))
+    })
 }
 
-fn read_operand(data: &[u8], cursor: &mut usize, tag: u8) -> Result<u64, BeamError> {
+fn read_operand(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<u64, BeamError> {
     let first = *data
         .get(*cursor)
         .ok_or_else(|| error("truncated BEAM operand"))?;
     *cursor += 1;
-    if first & 7 != tag {
-        return Err(error(format!("unexpected BEAM operand tag {}", first & 7)));
+    if first & COMPACT_TAG_MASK != expected_tag {
+        return Err(error(format!(
+            "unexpected BEAM operand tag {}",
+            first & COMPACT_TAG_MASK
+        )));
     }
     read_integer_after_first(data, cursor, first)
 }
 
-fn read_integer(data: &[u8], cursor: &mut usize, tag: u8) -> Result<i128, BeamError> {
+fn read_integer(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<i128, BeamError> {
     let first = *data
         .get(*cursor)
         .ok_or_else(|| error("truncated BEAM operand"))?;
     *cursor += 1;
-    if first & 7 != tag {
-        return Err(error(format!("unexpected BEAM operand tag {}", first & 7)));
+    if first & COMPACT_TAG_MASK != expected_tag {
+        return Err(error(format!(
+            "unexpected BEAM operand tag {}",
+            first & COMPACT_TAG_MASK
+        )));
     }
     let value = read_integer_after_first(data, cursor, first)?;
     Ok(value as i128)
 }
 
-fn read_integer_after_first(data: &[u8], cursor: &mut usize, first: u8) -> Result<u64, BeamError> {
-    if first & 8 == 0 {
-        return Ok((first >> 4) as u64);
+fn read_integer_after_first(
+    data: &[u8],
+    cursor: &mut usize,
+    first_byte: u8,
+) -> Result<u64, BeamError> {
+    if first_byte & COMPACT_EXTENDED_FLAG == 0 {
+        return Ok((first_byte >> COMPACT_SHORT_VALUE_SHIFT) as u64);
     }
-    if first & 16 == 0 {
-        let low = *data
+    if first_byte & COMPACT_SIGN_FLAG == 0 {
+        let low_value_byte = *data
             .get(*cursor)
             .ok_or_else(|| error("truncated BEAM operand"))?;
         *cursor += 1;
-        return Ok((((first & 0xe0) as u64) << 3) | low as u64);
+        return Ok(
+            (((first_byte & COMPACT_HIGH_BITS_MASK) as u64) << COMPACT_HIGH_VALUE_SHIFT)
+                | low_value_byte as u64,
+        );
     }
     Err(error("extended BEAM operands are unsupported"))
 }
 
-fn read_u32(bytes: &[u8]) -> Result<u32, BeamError> {
-    let bytes = bytes.get(..4).ok_or_else(|| {
+fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
+    let field_bytes = field_bytes.get(..WORD_SIZE).ok_or_else(|| {
         error(format!(
             "truncated 32-bit BEAM field: got {} bytes",
-            bytes.len()
+            field_bytes.len()
         ))
     })?;
-    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    let field: [u8; WORD_SIZE] = field_bytes
+        .try_into()
+        .expect("four-byte BEAM field was checked above");
+    Ok(u32::from_be_bytes(field))
 }
 
 #[cfg(test)]
