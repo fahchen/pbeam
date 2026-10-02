@@ -24,6 +24,17 @@ pub(super) struct DecodedModule {
     pub(super) instructions: Vec<Instruction>,
 }
 
+/// Parse the BEAM subset used by this runtime.
+///
+/// File layout:
+///
+/// ```text
+/// FOR1 | file_size:u32be | BEAM | chunk...
+/// chunk = id[4] | size:u32be | data[size] | padding[0..3]
+/// ```
+///
+/// `file_size` counts bytes after its field. Chunk sizes exclude padding.
+/// This parser reads the `AtU8`, `ExpT`, and `Code` chunks.
 pub(super) fn parse(bytes: &[u8]) -> Result<DecodedModule, BeamError> {
     if bytes.len() < 12 || &bytes[..4] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
