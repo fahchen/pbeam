@@ -57,8 +57,8 @@ fn reports_missing_entry_and_input_failures() {
         vec!["Elixir.Hello", "main"],
     ] {
         let output = run_pbeam(&arguments);
-        assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("usage: pbeam"));
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: pbeam"));
     }
 
     let output = run_pbeam(&[
@@ -68,6 +68,18 @@ fn reports_missing_entry_and_input_failures() {
     ]);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read"));
+}
+
+#[test]
+fn prints_help_and_exits_successfully() {
+    let output = run_pbeam(&["--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Run a zero-argument function from BEAM files."));
+    assert!(stdout.contains("Usage: pbeam <ENTRY_MODULE> <ENTRY_FUNCTION> <BEAM_FILE>..."));
+    assert!(stdout.contains("-h, --help"));
+    assert!(output.stderr.is_empty());
 }
 
 #[test]

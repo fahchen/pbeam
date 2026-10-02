@@ -51,7 +51,7 @@ emits `hello_reference.app`; the fixture has no third-party dependencies.
 Observed results: four tests pass; each module has 100% application line coverage.
 Both subprocesses have empty stderr and exit zero. Stdout is `Hello, world!\n`
 and `Another greeting.\n`, respectively. Rust application line coverage is
-1097/1097 (100%). In-process tests measure fixture coverage; subprocess tests
+1083/1083 (100%). In-process tests measure fixture coverage; subprocess tests
 independently verify the original compiled artifacts and process-level results.
 
 | Kind | Instruction or operation | Required semantics | Evidence | PBeam support and limits | Task / PR / test |
@@ -99,6 +99,7 @@ cargo run --bin pbeam -- Elixir.Hello main fixtures/hello/_build/dev/lib/hello_r
 
 Pass another module name and BEAM file to run the second fixture. Pass more BEAM
 files after the entry name and function to load modules for external calls.
+Run `cargo run --bin pbeam -- --help` to print the command options.
 
 Each implementation PR updates affected rows with supported semantics, remaining
 limits, and runnable regression tests. Mark support verified only after merge and
