@@ -251,14 +251,14 @@ fn rejects_invalid_code_stream_and_operands() {
     assert!(
         BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| {
             let i = data.windows(2).position(|w| w == [64, 50]).unwrap();
-            data[i + 1] = 52;
+            data[i + 1] = 55;
         }))
         .is_err()
     );
     assert!(
         BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| {
             let i = data.windows(3).position(|w| w == [64, 50, 3]).unwrap();
-            data[i + 2] = 20;
+            data[i + 2] = 23;
         }))
         .is_err()
     );

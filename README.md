@@ -3,7 +3,7 @@
 PBeam is a planned Rust runtime for executing existing Erlang/Elixir `.beam`
 artifacts without ERTS and packaging applications as single native executables.
 
-**Status: verified Elixir reference fixtures and an initial Rust constant-return BEAM slice.**
+**Status: verified Elixir references and Rust constant-return/call-chain BEAM slices.**
 The broader interpreter, runtime, and application build tooling are not implemented yet.
 `mix pbeam.build` is a proposed command, not an available installation or build instruction.
 

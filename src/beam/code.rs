@@ -14,6 +14,7 @@ const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
 const INSTRUCTION_SET_ERLANG: u32 = 0;
 const EXPORT_ENTRY_SIZE: usize = WORD_SIZE * 3;
+const IMPORT_ENTRY_SIZE: usize = WORD_SIZE * 3;
 const COMPACT_TAG_MASK: u8 = 0b111;
 const COMPACT_EXTENDED_FLAG: u8 = 0b1000;
 const COMPACT_SIGN_FLAG: u8 = 0b1_0000;
@@ -24,10 +25,18 @@ const TAG_UNSIGNED: u8 = 0;
 const TAG_INTEGER: u8 = 1;
 const TAG_ATOM: u8 = 2;
 const TAG_REGISTER: u8 = 3;
+const TAG_Y_REGISTER: u8 = 4;
+const TAG_LABEL: u8 = 5;
 const OPCODE_LABEL: u8 = 1;
 const OPCODE_FUNCTION_INFO: u8 = 2;
 const OPCODE_INT_CODE_END: u8 = 3;
+const OPCODE_CALL: u8 = 4;
+const OPCODE_CALL_EXT: u8 = 7;
+const OPCODE_CALL_EXT_LAST: u8 = 8;
+const OPCODE_CALL_EXT_ONLY: u8 = 78;
+const OPCODE_ALLOCATE: u8 = 12;
 const OPCODE_RETURN: u8 = 19;
+const OPCODE_DEALLOCATE: u8 = 18;
 const OPCODE_MOVE: u8 = 64;
 const FIRST_ATOM_INDEX: usize = 1;
 const FIRST_LABEL_NUMBER: u32 = 1;
@@ -56,12 +65,25 @@ pub(super) enum Instruction {
         name: String,
         arity: u32,
     },
-    /// Moves an immediate atom or integer into a register.
-    ///
-    /// Encoding: opcode, value, and destination register. Example:
-    /// `[0x40, 0x32, 0x03]` moves atom index 3 into `x0`. Execution supports
-    /// `x0` only.
-    Move(Term, u32),
+    /// Moves a literal or register value into an X or Y register.
+    Move(Operand, Operand),
+    Call {
+        arity: u32,
+        label: u32,
+    },
+    CallExternal {
+        arity: u32,
+        module: String,
+        name: String,
+        tail: bool,
+        deallocate: u32,
+    },
+    Allocate {
+        stack_size: u32,
+    },
+    Deallocate {
+        stack_size: u32,
+    },
     /// Returns the value in `x0` from the active function.
     ///
     /// Encoding: `[0x13]`. Execution reports an error if the function has not
@@ -72,6 +94,18 @@ pub(super) enum Instruction {
     /// Encoding: `[0x03]`. The parser adds this internal sentinel after it
     /// reads the terminator. The executor stops at this sentinel.
     End,
+}
+
+/// A source or destination in the supported `move` instruction.
+///
+/// `Value` holds a supported immediate term. `X` uses compact register tag 3,
+/// and `Y` uses compact register tag 4. For example, `move x0, y0` is encoded
+/// as `[0x40, 0x03, 0x04]`.
+#[derive(Debug, Clone)]
+pub(super) enum Operand {
+    Value(Term),
+    X(u32),
+    Y(u32),
 }
 
 /// Parse the BEAM subset used by this runtime.
@@ -107,12 +141,25 @@ pub(super) enum Instruction {
 /// opcode_max ::= u32be
 /// label_count ::= u32be
 /// function_count ::= u32be
-/// executable_instruction ::= label | function_info | move | return
+/// executable_instruction ::= label | function_info | move | call | call_ext | allocate | deallocate | return
 /// label       ::= 1 compact(0)
 /// function_info ::= 2 compact(2) compact(2) compact(0)
-/// move        ::= 64 value compact(3)
+/// move        ::= 64 move_source (x_register | y_register)
+/// move_source ::= value | x_register | y_register
+/// x_register  ::= compact(3)
+/// y_register  ::= compact(4)
+/// call        ::= 4 compact(0) compact(5)
+/// call_ext    ::= 7 compact(0) compact(0)
+/// call_ext_last ::= 8 compact(0) compact(0) compact(0)
+/// call_ext_only ::= 78 compact(0) compact(0)
+/// allocate    ::= 12 compact(0) compact(0)
+/// deallocate  ::= 18 compact(0)
 /// return      ::= 19
 /// int_code_end ::= 3
+/// imports_chunk ::= "ImpT" chunk_size import_table padding
+/// import_table ::= import_count import[import_count]
+/// import_count ::= u32be
+/// import ::= module_atom_index:u32be function_atom_index:u32be arity:u32be
 /// value       ::= integer_value | atom_value
 /// integer_value ::= compact(1)
 /// atom_value  ::= compact(2)
@@ -124,7 +171,8 @@ pub(super) enum Instruction {
 ///
 /// `container_size` counts bytes after its field, including `BEAM` and chunks.
 /// `chunk_size` counts payload bytes and excludes padding. The parser requires
-/// the `AtU8`, `ExpT`, and `Code` chunks. `u32be` is an unsigned big-endian
+/// the `AtU8`, `ExpT`, and `Code` chunks. `ImpT` is required for external
+/// calls. `u32be` is an unsigned big-endian
 /// integer. `i32be` is a signed big-endian integer. `byte[n]` means exactly
 /// `n` bytes. `AtU8` stores a non-positive count; its absolute value gives the
 /// number of atoms. Atom names use UTF-8. The module name is the first atom.
@@ -135,8 +183,9 @@ pub(super) enum Instruction {
 /// supports only the listed instructions and compact operand forms. Compact
 /// tags occupy the low three bits. The parser accepts the short and one-byte
 /// extension forms only. Bit fields are shown from high bit to low bit. Other
-/// chunk payloads and padding byte values are ignored. Execution supports
-/// `move` into register `x0` only.
+/// chunk payloads and padding byte values are ignored. The `ImpT` chunk maps
+/// external call indexes to module/function/arity. The executor supports only
+/// the listed instructions.
 pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
     if bytes.len() < CONTAINER_HEADER_SIZE || &bytes[..WORD_SIZE] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
@@ -180,7 +229,12 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
         .first()
         .ok_or_else(|| error("empty BEAM atom table"))?
         .clone();
-    let (instructions, number_of_labels) = parse_code(code, &atoms)?;
+    let imports = chunks
+        .get(b"ImpT".as_slice())
+        .map(|data| parse_imports(data, &atoms))
+        .transpose()?
+        .unwrap_or_default();
+    let (instructions, number_of_labels) = parse_code(code, &atoms, &imports)?;
     if let Some(label) = exports
         .values()
         .find(|&&label| label < FIRST_LABEL_NUMBER || label > number_of_labels)
@@ -196,7 +250,11 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
     })
 }
 
-fn parse_code(data: &[u8], atoms: &[String]) -> Result<(Vec<Instruction>, u32), BeamError> {
+fn parse_code(
+    data: &[u8],
+    atoms: &[String],
+    imports: &[(String, String, u32)],
+) -> Result<(Vec<Instruction>, u32), BeamError> {
     if data.len() < CODE_HEADER_SIZE
         || read_u32(&data[..WORD_SIZE])? != CODE_HEADER_SUB_SIZE
         || read_u32(&data[WORD_SIZE..WORD_SIZE * 2])? != INSTRUCTION_SET_ERLANG
@@ -239,10 +297,46 @@ fn parse_code(data: &[u8], atoms: &[String]) -> Result<(Vec<Instruction>, u32), 
                 }
             }
             OPCODE_RETURN => Instruction::Return,
+            OPCODE_CALL => Instruction::Call {
+                arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+            },
+            OPCODE_CALL_EXT | OPCODE_CALL_EXT_LAST | OPCODE_CALL_EXT_ONLY => {
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let index = read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize;
+                let (module, name, imported_arity) = imports
+                    .get(index)
+                    .ok_or_else(|| error(format!("BEAM import index {index} out of range")))?;
+                if arity != *imported_arity {
+                    return Err(error(format!(
+                        "BEAM external call arity {arity} does not match import arity {imported_arity}"
+                    )));
+                }
+                let deallocate = if opcode == OPCODE_CALL_EXT_LAST {
+                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32
+                } else {
+                    0
+                };
+                Instruction::CallExternal {
+                    arity,
+                    module: module.clone(),
+                    name: name.clone(),
+                    tail: opcode != OPCODE_CALL_EXT,
+                    deallocate,
+                }
+            }
+            OPCODE_ALLOCATE => {
+                let stack_size = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                Instruction::Allocate { stack_size }
+            }
+            OPCODE_DEALLOCATE => Instruction::Deallocate {
+                stack_size: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+            },
             OPCODE_MOVE => {
-                let value = read_value(data, &mut cursor, atoms)?;
-                let destination = read_operand(data, &mut cursor, TAG_REGISTER)? as u32;
-                Instruction::Move(value, destination)
+                let source = read_move_operand(data, &mut cursor, atoms)?;
+                let destination = read_register(data, &mut cursor)?;
+                Instruction::Move(source, destination)
             }
             OPCODE_INT_CODE_END => {
                 if cursor != data.len() || function_info_count != declared_function_count {
@@ -313,6 +407,59 @@ fn parse_exports(data: &[u8], atoms: &[String]) -> Result<HashMap<(String, u32),
         }
     }
     Ok(exports)
+}
+
+fn parse_imports(data: &[u8], atoms: &[String]) -> Result<Vec<(String, String, u32)>, BeamError> {
+    let import_count = read_u32(data)? as usize;
+    let expected_size = WORD_SIZE
+        .checked_add(
+            import_count
+                .checked_mul(IMPORT_ENTRY_SIZE)
+                .ok_or_else(|| error("import count overflow"))?,
+        )
+        .ok_or_else(|| error("import table size overflow"))?;
+    if expected_size != data.len() {
+        return Err(error("invalid import table size"));
+    }
+    data[WORD_SIZE..]
+        .chunks(IMPORT_ENTRY_SIZE)
+        .map(|entry| {
+            Ok((
+                atom_at(atoms, read_u32(&entry[..WORD_SIZE])? as usize)?.to_owned(),
+                atom_at(atoms, read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])? as usize)?.to_owned(),
+                read_u32(&entry[WORD_SIZE * 2..])?,
+            ))
+        })
+        .collect()
+}
+
+fn read_register(data: &[u8], cursor: &mut usize) -> Result<Operand, BeamError> {
+    let first = *data
+        .get(*cursor)
+        .ok_or_else(|| error("truncated BEAM operand"))?;
+    let tag = first & COMPACT_TAG_MASK;
+    match tag {
+        TAG_REGISTER => Ok(Operand::X(read_operand(data, cursor, TAG_REGISTER)? as u32)),
+        TAG_Y_REGISTER => Ok(Operand::Y(
+            read_operand(data, cursor, TAG_Y_REGISTER)? as u32
+        )),
+        _ => Err(error(format!("unsupported BEAM register tag {tag}"))),
+    }
+}
+
+fn read_move_operand(
+    data: &[u8],
+    cursor: &mut usize,
+    atoms: &[String],
+) -> Result<Operand, BeamError> {
+    let first = *data
+        .get(*cursor)
+        .ok_or_else(|| error("truncated BEAM operand"))?;
+    match first & COMPACT_TAG_MASK {
+        TAG_INTEGER | TAG_ATOM => Ok(Operand::Value(read_value(data, cursor, atoms)?)),
+        TAG_REGISTER | TAG_Y_REGISTER => read_register(data, cursor),
+        tag => Err(error(format!("unsupported move operand tag {tag}"))),
+    }
 }
 
 fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term, BeamError> {
@@ -437,12 +584,13 @@ mod tests {
         assert!(read_operand(&[], &mut 0, 0).is_err());
         assert!(read_value(&[0x03], &mut 0, &[]).is_err());
         assert!(read_value(&[0x12], &mut 0, &[]).is_err());
-        assert!(parse_code(&[], &[]).is_err());
-        assert!(parse_code(&[0; 20], &[]).is_err());
+        assert!(parse_code(&[], &[], &[]).is_err());
+        assert!(parse_code(&[0; 20], &[], &[]).is_err());
         assert!(
             parse_code(
                 &[0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                &[]
+                &[],
+                &[],
             )
             .is_err()
         );

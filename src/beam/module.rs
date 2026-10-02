@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{
-    code::{self, Instruction},
+    code::{self, Instruction, Operand},
     error::{BeamError, error},
     term::Term,
 };
@@ -41,7 +41,7 @@ impl BeamModule {
                 }
                 Instruction::Label(label) if active && label == entry => label_matches = true,
                 Instruction::Label(_) if active => {}
-                Instruction::Move(term, X0_REGISTER)
+                Instruction::Move(Operand::Value(term), Operand::X(X0_REGISTER))
                     if active && label_matches && value.is_none() =>
                 {
                     value = Some(term.clone());
@@ -69,7 +69,7 @@ fn checked_arity(argument_count: usize) -> Result<u32, BeamError> {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{BeamModule, Instruction, Term, checked_arity};
+    use super::{BeamModule, Instruction, Operand, Term, checked_arity};
 
     #[test]
     fn reports_oversized_arity() {
@@ -122,7 +122,7 @@ mod tests {
             module(vec![
                 function.clone(),
                 Instruction::Label(2),
-                Instruction::Move(Term::Atom("ok".into()), 1)
+                Instruction::Move(Operand::Value(Term::Atom("ok".into())), Operand::X(1))
             ])
             .execute("main", &[])
             .unwrap_err()

@@ -1,4 +1,5 @@
 /target/
+/erl_crash.dump
 /fixtures/hello/_build/
 /fixtures/hello/cover/
 /fixtures/hello/tmp/
