@@ -1,6 +1,5 @@
 mod code;
 mod error;
-mod format;
 mod module;
 mod term;
 

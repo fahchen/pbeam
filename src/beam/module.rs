@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use super::{
     code::{self, Instruction},
     error::{BeamError, error},
-    format,
     term::Term,
 };
 
@@ -16,12 +15,11 @@ pub struct BeamModule {
 
 impl BeamModule {
     pub fn load(bytes: &[u8]) -> Result<Self, BeamError> {
-        let parsed = format::parse(bytes)?;
-        let instructions = code::decode(parsed.code, &parsed.atoms)?;
+        let decoded = code::decode(bytes)?;
         Ok(Self {
-            name: parsed.name,
-            exports: parsed.exports,
-            instructions,
+            name: decoded.name,
+            exports: decoded.exports,
+            instructions: decoded.instructions,
         })
     }
 
