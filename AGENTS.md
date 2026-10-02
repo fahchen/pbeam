@@ -42,6 +42,9 @@
 
 ## Implementation and review
 
+Before implementation, read `docs/implementation-conventions.md`. It records
+review feedback and naming, scope, documentation, and verification rules.
+
 1. Read the task issue, its epic, milestone tracker, and blockers. Confirm that
    scope, acceptance criteria, and verification are concrete before implementation.
 2. Implement only the next ready task. Prerequisite PRs must be reviewed and
