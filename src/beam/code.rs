@@ -35,15 +35,42 @@ const CODE_LABEL_COUNT_OFFSET: usize = WORD_SIZE * 3;
 const CODE_FUNCTION_COUNT_OFFSET: usize = WORD_SIZE * 4;
 
 #[derive(Debug, Clone)]
+/// An instruction that the parser can read from a BEAM `Code` chunk.
+///
+/// Byte examples use hexadecimal values. Compact operands use the short form
+/// in the Code chunk grammar. `End` represents the stream terminator; the
+/// executor does not run it.
 pub(super) enum Instruction {
+    /// Starts a code label. The label must be in `1..=label_count`.
+    ///
+    /// Encoding: opcode, then a compact unsigned label. Example: `[0x01, 0x10]`
+    /// encodes label 1.
     Label(u32),
+    /// Declares the module, function, and arity for the following function.
+    /// Atom indexes refer to the one-based `AtU8` table.
+    ///
+    /// Encoding: opcode, module atom, function atom, and arity. Example:
+    /// `[0x02, 0x12, 0x22, 0x00]` refers to atom indexes 1 and 2 with arity 0.
     FunctionInfo {
         module: String,
         name: String,
         arity: u32,
     },
+    /// Moves an immediate atom or integer into a register.
+    ///
+    /// Encoding: opcode, value, and destination register. Example:
+    /// `[0x40, 0x32, 0x03]` moves atom index 3 into `x0`. Execution supports
+    /// `x0` only.
     Move(Term, u32),
+    /// Returns the value in `x0` from the active function.
+    ///
+    /// Encoding: `[0x13]`. Execution reports an error if the function has not
+    /// set `x0`.
     Return,
+    /// Marks the end of the `Code` instruction stream.
+    ///
+    /// Encoding: `[0x03]`. The parser adds this internal sentinel after it
+    /// reads the terminator. The executor stops at this sentinel.
     End,
 }
 
