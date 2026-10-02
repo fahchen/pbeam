@@ -3,9 +3,9 @@
 PBeam is a planned Rust runtime for executing existing Erlang/Elixir `.beam`
 artifacts without ERTS and packaging applications as single native executables.
 
-**Status: verified Elixir reference fixtures and an empty Rust library scaffold.** The interpreter, runtime,
-and application build tooling are not implemented yet. `mix pbeam.build` is a proposed command,
-not an available installation or build instruction.
+**Status: verified Elixir reference fixtures and an initial Rust constant-return BEAM slice.**
+The broader interpreter, runtime, and application build tooling are not implemented yet.
+`mix pbeam.build` is a proposed command, not an available installation or build instruction.
 
 ## Design
 
@@ -42,11 +42,11 @@ mise run check
 
 The shared local/CI command checks Markdown, TOML formatting, GitHub Actions, shell scripts,
 Rust formatting, Clippy with warnings denied, tests, and 100% line coverage.
-The initial `pbeam-runtime` crate contains only a module comment: it has no
-implementation, tests, or measurable coverage. Coverage is N/A until code exists.
 Elixir fixtures use formatting, warnings-as-errors, and Mix tests with 100% application
-line coverage. Run `mise run reference` for the ERTS checks and `mise run inventory`
-for the compiled entry instructions/imports. See the [evidence table](docs/hello-world-target.md).
+line coverage. Run `mise run beam-fixture` to compile the minimal OTP assembly fixture,
+`mise run beam-inventory` to inspect its disassembly, `mise run reference` for the ERTS
+checks, and `mise run inventory` for the compiled Hello World entry instructions/imports.
+See the [evidence table](docs/hello-world-target.md).
 
 ## Delivery
 

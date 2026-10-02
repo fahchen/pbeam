@@ -4,9 +4,9 @@ The first target is complete only when PBeam executes `Hello.main/0`, prints exa
 `Hello, world!\n` to stdout, and exits with status zero. Compilation, BEAM inspection,
 and an ERTS reference run are preparation; none completes this target.
 
-Terra Counter follows as a broader application compatibility target. The PBeam
-crate is still empty. The compiled ERTS reference and both greeting variants are verified;
-PBeam execution has not been implemented or verified.
+Terra Counter follows as a broader application compatibility target. The compiled ERTS
+reference and both greeting variants are verified. PBeam has an initial constant-return
+BEAM loader in review; it does not yet execute the Hello World entry.
 
 ## Program
 
@@ -56,10 +56,10 @@ verify the original compiled artifacts and process-level results.
 
 | Kind | Instruction or operation | Required semantics | Evidence | PBeam support and limits | Task / PR / test |
 | --- | --- | --- | --- | --- | --- |
-| Instruction | `move literal, x0` | Put the binary literal into argument register 0 | Static entry disassembly, both modules | Not implemented | #4, #42; `hello_test.exs` |
+| Instruction | `move literal, x0` | Put the binary literal into argument register 0 | Static entry disassembly, both modules | Only immediate atoms and integers through 2047; binary literals remain unsupported | #4; `constant.rs` |
 | Instruction | `call_ext_only 1, Elixir.IO:puts/1` | External tail call with one argument; preserve caller return destination | Static final entry instruction, both modules | Not implemented | #5, #42; `hello_test.exs` |
-| Loader metadata | `label`, `line`, `func_info` | Resolve entry label 11; distinguish metadata from executable operations | Static `main/0` disassembly, source lines 2–3 | Not implemented | #4 |
-| Terms | Binary literals, atom `ok` | Load each distinct greeting; output call returns `:ok` | Disassembly plus both in-process assertions | Not implemented; no general chardata claim | #4, #42 |
+| Loader metadata | `label`, `line`, `func_info` | Resolve entry label 11; distinguish metadata from executable operations | Static `main/0` disassembly, source lines 2–3 | Supports `label`, `func_info`, `return`, `int_code_end`; no general entry metadata | #4 |
+| Terms | Binary literals, atom `ok` | Load each distinct greeting; output call returns `:ok` | Disassembly plus both in-process assertions | Atoms and non-negative integers through 2047 only; no binary literal or general term support | #4, #42 |
 | External MFA | `Elixir.IO:puts/1` | Write supplied greeting plus newline to standard output | Static import; observed output and `:ok` result under ERTS | Proposed native boundary below; not implemented | #42; both process tests |
 | Host operation | stdout write | Exact bytes; output errors must remain visible | Successful output observed; failure behavior still belongs to #42 | Not implemented | #42 |
 | Static library dependency | `IO.puts/2`, `:io.put_chars/2` | Default-device mapping, chardata conversion, IO request handling | Installed Elixir `lib/elixir/lib/io.ex`, `puts` definition; not independently traced | Not required if proposed native boundary is accepted | #42 decision |
