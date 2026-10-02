@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 
 use super::{
     BeamError,
@@ -32,6 +33,17 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
     ) -> Result<Term, BeamError> {
+        let mut output = std::io::stdout().lock();
+        self.execute_with_output(module, function, arguments, &mut output)
+    }
+
+    fn execute_with_output(
+        &self,
+        module: &str,
+        function: &str,
+        arguments: &[Term],
+        output: &mut dyn Write,
+    ) -> Result<Term, BeamError> {
         let loaded = self
             .modules
             .get(module)
@@ -42,7 +54,7 @@ impl BeamProgram {
             .exports
             .get(&(function.to_owned(), arity))
             .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))?;
-        self.execute_label(module, label, arguments)
+        self.execute_label(module, label, arguments, output)
     }
 
     fn execute_mfa(
@@ -51,7 +63,11 @@ impl BeamProgram {
         function: &str,
         arity: u32,
         arguments: &[Term],
+        output: &mut dyn Write,
     ) -> Result<Term, BeamError> {
+        if module == "Elixir.IO" && function == "puts" {
+            return execute_io_puts(arity, arguments, output);
+        }
         let loaded = self.modules.get(module).ok_or_else(|| {
             error(format!(
                 "unresolved external MFA {module}:{function}/{}",
@@ -66,7 +82,7 @@ impl BeamProgram {
                     "unresolved external MFA {module}:{function}/{arity}"
                 ))
             })?;
-        self.execute_label(module, label, arguments)
+        self.execute_label(module, label, arguments, output)
     }
 
     fn execute_label(
@@ -74,6 +90,7 @@ impl BeamProgram {
         module_name: &str,
         label: u32,
         arguments: &[Term],
+        output: &mut dyn Write,
     ) -> Result<Term, BeamError> {
         let module = self
             .modules
@@ -106,7 +123,7 @@ impl BeamProgram {
                 }
                 Instruction::Call { arity, label } => {
                     let arguments = call_arguments(&registers, *arity)?;
-                    let result = self.execute_label(module_name, *label, &arguments)?;
+                    let result = self.execute_label(module_name, *label, &arguments, output)?;
                     set_x0(result, &mut registers);
                 }
                 Instruction::CallExternal {
@@ -120,7 +137,7 @@ impl BeamProgram {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     let arguments = call_arguments(&registers, *arity)?;
-                    let result = self.execute_mfa(module, name, *arity, &arguments)?;
+                    let result = self.execute_mfa(module, name, *arity, &arguments, output)?;
                     if *tail {
                         return Ok(result);
                     }
@@ -133,6 +150,9 @@ impl BeamProgram {
                         .ok_or_else(|| error("return before setting x0"));
                 }
                 Instruction::End => break,
+                Instruction::Unsupported(opcode) => {
+                    return Err(error(format!("unsupported BEAM opcode {opcode}")));
+                }
                 Instruction::Label(_) | Instruction::FunctionInfo { .. } => {
                     return Err(error("unsupported entry instruction"));
                 }
@@ -143,6 +163,25 @@ impl BeamProgram {
             module_name, function.name
         )))
     }
+}
+
+fn execute_io_puts(
+    arity: u32,
+    arguments: &[Term],
+    output: &mut dyn Write,
+) -> Result<Term, BeamError> {
+    if arity != 1 {
+        return Err(error(format!("unsupported Elixir.IO:puts/{arity}")));
+    }
+    let [Term::Binary(contents)] = arguments else {
+        return Err(error("Elixir.IO:puts/1 requires a UTF-8 binary"));
+    };
+    std::str::from_utf8(contents).map_err(|_| error("Elixir.IO:puts/1 requires a UTF-8 binary"))?;
+    output
+        .write_all(contents)
+        .and_then(|()| output.write_all(b"\n"))
+        .map_err(|write_error| error(format!("stdout write failed: {write_error}")))?;
+    Ok(Term::Atom("ok".into()))
 }
 
 #[derive(Debug)]
@@ -213,6 +252,9 @@ fn read_operand(
 ) -> Result<Term, BeamError> {
     match operand {
         Operand::Value(value) => Ok(value.clone()),
+        Operand::UnsupportedLiteral(index) => {
+            Err(error(format!("unsupported BEAM literal index {index}")))
+        }
         Operand::X(index) => registers
             .get(*index as usize)
             .and_then(Clone::clone)
@@ -231,6 +273,9 @@ fn write_operand(
     stack: &mut [Option<Term>],
 ) -> Result<(), BeamError> {
     match operand {
+        Operand::UnsupportedLiteral(index) => {
+            return Err(error(format!("unsupported BEAM literal index {index}")));
+        }
         Operand::X(index) => {
             let index = *index as usize;
             registers.resize(registers.len().max(index + 1), None);
@@ -252,10 +297,14 @@ fn write_operand(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        io::{self, Write},
+    };
 
     use super::{
-        BeamProgram, call_arguments, function_at_label, read_operand, set_x0, write_operand,
+        BeamProgram, call_arguments, execute_io_puts, function_at_label, read_operand, set_x0,
+        write_operand,
     };
     use crate::beam::{
         code::{Instruction, Operand},
@@ -359,6 +408,13 @@ mod tests {
                 .contains("did not return")
         );
         assert!(
+            make_program(vec![Instruction::Unsupported(6)], 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported BEAM opcode 6")
+        );
+        assert!(
             make_program(vec![Instruction::Label(3)], 0)
                 .execute("fixture", "main", &[])
                 .is_err()
@@ -384,14 +440,14 @@ mod tests {
         };
         assert!(
             program
-                .execute_mfa("missing", "run", 0, &[])
+                .execute_mfa("missing", "run", 0, &[], &mut Vec::new())
                 .unwrap_err()
                 .to_string()
                 .contains("unresolved external MFA missing:run/0")
         );
         assert!(
             program
-                .execute_mfa("external", "missing", 0, &[])
+                .execute_mfa("external", "missing", 0, &[], &mut Vec::new())
                 .unwrap_err()
                 .to_string()
                 .contains("external:missing/0")
@@ -432,7 +488,17 @@ mod tests {
         );
         assert!(read_operand(&Operand::X(1), &registers, &[]).is_err());
         assert!(read_operand(&Operand::Y(0), &registers, &[]).is_err());
+        assert!(read_operand(&Operand::UnsupportedLiteral(0), &registers, &[]).is_err());
         assert!(call_arguments(&[], 1).is_err());
+        assert!(
+            write_operand(
+                &Operand::UnsupportedLiteral(0),
+                Term::Integer(1),
+                &mut registers,
+                &mut []
+            )
+            .is_err()
+        );
         assert!(write_operand(&Operand::Y(0), Term::Integer(1), &mut registers, &mut []).is_err());
         assert!(
             write_operand(
@@ -443,5 +509,34 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    struct FailingOutput;
+
+    impl Write for FailingOutput {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("closed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writes_only_supported_utf8_binary_output() {
+        let mut failing_output = FailingOutput;
+        assert!(failing_output.flush().is_ok());
+        let mut output = Vec::new();
+        assert_eq!(
+            execute_io_puts(1, &[Term::Binary(b"Hello".to_vec())], &mut output).unwrap(),
+            Term::Atom("ok".into())
+        );
+        assert_eq!(output, b"Hello\n");
+        assert!(execute_io_puts(2, &[Term::Binary(b"x".to_vec())], &mut output).is_err());
+        assert!(execute_io_puts(1, &[], &mut output).is_err());
+        assert!(execute_io_puts(1, &[Term::Atom("ok".into())], &mut output).is_err());
+        assert!(execute_io_puts(1, &[Term::Binary(vec![0xff])], &mut output).is_err());
+        assert!(execute_io_puts(1, &[Term::Binary(b"x".to_vec())], &mut failing_output).is_err());
     }
 }

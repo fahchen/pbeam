@@ -5,8 +5,8 @@ The first target is complete only when PBeam executes `Hello.main/0`, prints exa
 and an ERTS reference run are preparation; none completes this target.
 
 Terra Counter follows as a broader application compatibility target. The compiled ERTS
-reference and both greeting variants are verified. The initial runtime supports
-atom/integer constants and one bounded call chain. It does not execute the Hello World entry.
+reference and both greeting variants are verified. Task #42 adds a small PBeam command
+that runs these two entries. General Elixir IO and broad OTP support remain unsupported.
 
 ## Program
 
@@ -51,20 +51,20 @@ emits `hello_reference.app`; the fixture has no third-party dependencies.
 Observed results: four tests pass; each module has 100% application line coverage.
 Both subprocesses have empty stderr and exit zero. Stdout is `Hello, world!\n`
 and `Another greeting.\n`, respectively. Rust application line coverage is
-407/407 (100%). In-process tests measure fixture coverage; subprocess tests
+1097/1097 (100%). In-process tests measure fixture coverage; subprocess tests
 independently verify the original compiled artifacts and process-level results.
 
 | Kind | Instruction or operation | Required semantics | Evidence | PBeam support and limits | Task / PR / test |
 | --- | --- | --- | --- | --- | --- |
-| Instruction | `move literal, x0` | Put the binary literal into argument register 0 | Static entry disassembly, both modules | Only immediate atoms and integers through 2047; binary literals remain unsupported | #4; `constant.rs` |
+| Instruction | `move literal, x0` | Put the binary literal into argument register 0 | Static entry disassembly and both PBeam runs | Reads uncompressed OTP 29 literal tables and ETF binary values; other literal values remain unsupported | #42; `hello.rs` |
 | Instructions | `call`, `call_ext`, `call_ext_last`, `allocate`, `deallocate`, `move x/y` | Preserve arguments and return values across a local call and startup-loaded external calls | Compiled Erlang call fixture, compared with ERTS | Supports this bounded call fixture only; no scheduler, exceptions, or dynamic loading | #5; `calls.rs` |
-| Instruction | `call_ext_only 1, Elixir.IO:puts/1` | External tail call with one argument; preserve caller return destination | Static final entry instruction, both modules | The instruction is supported. `Elixir.IO:puts/1` has no implementation yet. | #5, #42; `hello_test.exs` |
-| Loader metadata | `label`, `line`, `func_info` | Resolve entry label 11; distinguish metadata from executable operations | Static `main/0` disassembly, source lines 2–3 | Supports `label`, `func_info`, `return`, `int_code_end`; no general entry metadata | #4 |
-| Terms | Binary literals, atom `ok` | Load each distinct greeting; output call returns `:ok` | Disassembly plus both in-process assertions | Atoms and non-negative integers through 2047 only; no binary literal or general term support | #4, #42 |
-| External MFA | `Elixir.IO:puts/1` | Write supplied greeting plus newline to standard output | Static import; observed output and `:ok` result under ERTS | Proposed native boundary below; not implemented | #42; both process tests |
-| Host operation | stdout write | Exact bytes; output errors must remain visible | Successful output observed; failure behavior still belongs to #42 | Not implemented | #42 |
-| Static library dependency | `IO.puts/2`, `:io.put_chars/2` | Default-device mapping, chardata conversion, IO request handling | Installed Elixir `lib/elixir/lib/io.ex`, `puts` definition; not independently traced | Not required if proposed native boundary is accepted | #42 decision |
-| Compiler-generated functions | `__info__/1`, `module_info/0,1`, helper; `:erlang.get_module_info/1,2` imports | Introspection outside the entry path | Static exports/imports; no calls from the inspected `main/0` body | Out of this fixture's execution scope | #4 loader must not mistake imports for executed dependencies |
+| Instruction | `call_ext_only 1, Elixir.IO:puts/1` | External tail call with one argument | Static entry instruction and both PBeam runs | Supports this `call_ext_only` form and the two required calls | #42; `hello.rs` |
+| Loader metadata | `label`, `line`, `func_info` | Resolve entry label 11 and skip line metadata | Static `main/0` disassembly and successful PBeam runs | Skips line metadata; generated `select_val`, `call_only`, and `jump` stay unsupported at execution | #42; `hello.rs` |
+| Terms | Binary literals, atom `ok` | Load each greeting and return `:ok` from the output call | Both PBeam runs and output unit tests | Supports referenced UTF-8 ETF binaries and the required atom; other referenced literal types fail | #42; `hello.rs` |
+| External MFA | `Elixir.IO:puts/1` | Write supplied greeting plus newline to standard output | ERTS reference and PBeam subprocess tests | Accepts one UTF-8 binary; rejects other arguments and arities | #42; `hello.rs` |
+| Host operation | stdout write | Write exact bytes and show write failures | PBeam output tests with a failing writer | Uses Rust `Write`; no device lookup or general IO requests | #42; `program.rs` tests |
+| Static library dependency | `IO.puts/2`, `:io.put_chars/2` | Device mapping, chardata conversion, IO request handling | Installed Elixir `lib/elixir/lib/io.ex`, `puts` definition; not independently traced | Not required for the two binary fixtures | #42 |
+| Compiler-generated functions | `__info__/1`, `module_info/0,1`, helper; `:erlang.get_module_info/1,2` imports | Load the whole module without running unused generated code | Static exports/imports and successful entry runs | Retains the observed `select_val`, `call_only`, `jump`, and unsupported literal forms; execution fails if reached | #42; `hello.rs` |
 
 Entry disassembly contains a literal move followed by the external tail call;
 there is no stdout opcode. Static inspection is not an opcode execution trace,
@@ -72,7 +72,7 @@ and successful output does not establish the complete dynamic OTP dependency
 set. The table records the bounded entry path and observed behavior, not general
 OTP support.
 
-### Proposed output boundary
+### Implemented output boundary
 
 For #42, resolve the ordinary external MFA `Elixir.IO:puts/1` to a minimal Rust
 implementation accepting the fixture's valid UTF-8 binary, appending one newline,
@@ -84,11 +84,21 @@ Executing the full Elixir/OTP IO implementation would introduce device resolutio
 chardata conversion, and process-based IO behavior before this checkpoint. The
 narrow boundary preserves this fixture's source and observable behavior while
 explicitly leaving arbitrary chardata, custom devices, and general IO unsupported.
-This is a proposed decision for #42's review, not implemented compatibility.
-Reuse external-MFA resolution from #5; add only the one required native mapping
-in #42. The broader registration mechanism remains #12. If implementation evidence
-requires independent prerequisite behavior, create sibling issues before expanding
-task #42.
+This supports the two compiled fixtures. It does not support arbitrary chardata,
+custom devices, or general IO. The implementation uses the existing external-MFA
+path from #5. It does not add the native registry in #12. Task #42 adds no other
+native mapping.
+
+Run the Elixir compile step from `fixtures/hello`, then run PBeam from the repository
+root:
+
+```sh
+mix compile --warnings-as-errors
+cargo run --bin pbeam -- Elixir.Hello main fixtures/hello/_build/dev/lib/hello_reference/ebin/Elixir.Hello.beam
+```
+
+Pass another module name and BEAM file to run the second fixture. Pass more BEAM
+files after the entry name and function to load modules for external calls.
 
 Each implementation PR updates affected rows with supported semantics, remaining
 limits, and runnable regression tests. Mark support verified only after merge and
@@ -143,8 +153,8 @@ delegate execution to ERTS or an external Elixir process.
 ## Delivery boundary
 
 The deliverable is a runnable PBeam command plus a regression test that captures
-its stdout, stderr, and exit status. The exact runner command is established by
-the implementation PR; there is no working PBeam run command yet.
+its stdout, stderr, and exit status. Task #42 implements the command and tests both
+compiled greeting modules. Its PR remains under review until merge.
 
 [Reference task #41](https://github.com/fahchen/pbeam/issues/41) captures the ERTS
 baseline and disassembles its compiler output as preparation. Existing constant-return

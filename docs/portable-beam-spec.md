@@ -1,6 +1,6 @@
 # Portable BEAM runtime specification
 
-Status: architecture baseline reconstructed from the design conversation; constant-return and bounded-call BEAM slices are implemented.
+Status: architecture baseline reconstructed from the design conversation; constant-return, bounded-call, and compiled Hello World slices are implemented. Task #42 is pending review.
 
 Source: [Branch · Portable BEAM实现原理](chatgpt-conversation://6abe6693-526c-83ee-8922-0af41462fb49).
 
@@ -199,7 +199,7 @@ macOS system frameworks/libraries remain normal dependencies. Linux musl builds 
 These checks operationalize the design; expand them only as supported behavior grows.
 
 - [Implemented] Load checked-in BEAM fixtures; read `AtU8`, `Code`, `ExpT`, and required `ImpT` data; execute exported constants and a bounded local/external call chain with a small integer; reject malformed containers and unsupported instructions with diagnostics. This is a narrow fixture check, not general BEAM compatibility.
-- Run the compiled Hello World entry without ERTS and match its reference stdout and exit behavior before Terra acceptance work.
+- [Implemented in task #42; pending review] Run both compiled Hello World entries without ERTS. Match their reference stdout, stderr, and exit status before Terra acceptance work.
 - Demonstrate process scheduling, reduction-based yielding, message wakeup, and work stealing with multiple schedulers. Verify exclusive process execution.
 - Exercise binary construction, sub-binary offsets, and non-byte-aligned matching wherever the selected application requires them.
 - Call the declared SHA-256 native example from Elixir and compare its result with a known digest. Verify bad arguments and missing registrations fail predictably.

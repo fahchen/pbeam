@@ -1,0 +1,114 @@
+use std::{
+    path::PathBuf,
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+use pbeam_runtime::BeamModule;
+
+#[test]
+fn loads_compiled_elixir_greetings() {
+    for beam_file in ["Elixir.Hello.beam", "Elixir.HelloVariant.beam"] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/hello/_build/test/lib/hello_reference/ebin")
+            .join(beam_file);
+        let bytes = std::fs::read(path).unwrap();
+
+        BeamModule::load(&bytes).unwrap();
+    }
+}
+
+#[test]
+fn runs_both_compiled_greetings_without_erts() {
+    for (module, file, expected) in [
+        ("Elixir.Hello", "Elixir.Hello.beam", "Hello, world!\n"),
+        (
+            "Elixir.HelloVariant",
+            "Elixir.HelloVariant.beam",
+            "Another greeting.\n",
+        ),
+    ] {
+        let output = run_pbeam(&[module, "main", beam_file(file).to_str().unwrap()]);
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, expected.as_bytes());
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn reports_missing_entry_and_input_failures() {
+    let hello = beam_file("Elixir.Hello.beam");
+    let output = run_pbeam(&["Elixir.Hello", "missing", hello.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("missing export Elixir.Hello:missing/0")
+    );
+
+    for arguments in [
+        Vec::new(),
+        vec!["Elixir.Hello"],
+        vec!["Elixir.Hello", "main"],
+    ] {
+        let output = run_pbeam(&arguments);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("usage: pbeam"));
+    }
+
+    let output = run_pbeam(&[
+        "Elixir.Hello",
+        "main",
+        "/pbeam-test-file-that-does-not-exist.beam",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read"));
+}
+
+#[test]
+fn reports_invalid_beam_files() {
+    let path = std::env::temp_dir().join(format!(
+        "pbeam-invalid-{}-{}.beam",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::write(&path, b"invalid BEAM").unwrap();
+    let output = run_pbeam(&["Elixir.Hello", "main", path.to_str().unwrap()]);
+    std::fs::remove_file(path).unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot load BEAM modules"));
+}
+
+fn beam_file(file: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/hello/_build/test/lib/hello_reference/ebin")
+        .join(file)
+}
+
+fn run_pbeam(arguments: &[&str]) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pbeam"))
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if started.elapsed() >= Duration::from_secs(5) {
+            child.kill().unwrap();
+            panic!("PBeam test process exceeded its five-second limit");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
+}
