@@ -112,4 +112,6 @@ replace contradictory current instructions rather than appending a correction.
   lookups to subagents. Give editing agents explicit file ownership and preserve
   others' changes.
 - Keep communication concise and suited to an experienced systems engineer.
-  Write repository documentation and PR descriptions in normal prose.
+  Write all project documents, GitHub issue and PR text, and assistant messages
+  in ASD-STE100 Simplified Technical English. Use short sentences, one instruction
+  per sentence, approved words, and consistent terms.
