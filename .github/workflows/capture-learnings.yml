@@ -68,3 +68,12 @@ jobs:
             --allow-tool='shell(wc:*)' \
             --deny-tool='shell(git push origin main)' \
             -p "PR: #${PR_NUMBER} $(cat .github/prompts/capture-learnings.prompt.md)"
+
+      - name: Report a failed capture
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh pr comment "$PR_NUMBER" \
+            --body "Capture of review learnings failed. See the workflow run: $RUN_URL"

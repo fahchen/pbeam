@@ -36,14 +36,11 @@ Pick the mode from the PR state (`gh pr view <N> --json state,headRefName`):
 - **Open PR** (local run during the implementation): show the proposals and
   wait for the user confirmation, as Step 7 of the skill says. Write the
   confirmed entries on the PR branch. Commit them with the `commit` skill
-  as a separate `docs:` commit. Do not comment on the PR; the commit is the
-  record.
+  as a separate `docs:` commit, and push. Then comment on the PR (see
+  `## 4. Comment on the PR`).
 - **Merged PR** (CI run): nobody can confirm. The review of a knowledge PR
   replaces the confirmation.
-  - No candidate passes: do not change files. Comment on the PR:
-    "No new review learnings.", then one line for each candidate with the
-    check that rejected it. If there were no candidates, say that the PR had
-    no human review comments or no recurring problem class.
+  - No candidate passes: do not change files.
   - At least one candidate passes, and no pruning is necessary: create
     branch `learnings/pr-<N>` from `main`. Write only the entries into
     `docs/agents/knowledge.md` (Step 8 of the skill). Commit with the subject
@@ -51,12 +48,23 @@ Pick the mode from the PR state (`gh pr view <N> --json state,headRefName`):
     rule and its source threads. Push the branch. Open a PR to `main` with
     the same title and the label `documentation`. For each rule, the PR body
     shows the full proposal (entry, Why, Good, Bad), the overlap analysis,
-    and links to the source review threads. After the new PR exists,
-    comment on the merged PR: "Captured review learnings in #<new PR>.",
-    then the heading of each captured rule.
-  - Pruning is necessary: do not write. Comment on the merged PR with the
-    candidate rules and the 5 prune candidates, and ask the owner to choose.
-  - Every merged-PR run ends with exactly one comment on the merged PR.
+    and links to the source review threads. Comment on the merged PR only
+    after the new PR exists.
+  - Pruning is necessary: do not write.
+
+## 4. Comment on the PR
+
+Every run ends with exactly one comment on the PR, in both modes, whatever
+the result:
+
+- Rules captured: "Captured review learnings in <commit SHA or #new PR>.",
+  then the heading of each captured rule.
+- No rule captured: "No new review learnings.", then one line for each
+  candidate with the check or user decision that rejected it. If there were
+  no candidates, say that the PR had no human review comments or no
+  recurring problem class.
+- Pruning needed: the candidate rules and the 5 prune candidates, with a
+  request to the owner to choose.
 
 ## Limits
 
