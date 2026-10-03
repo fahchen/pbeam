@@ -276,6 +276,11 @@ Then, as `AGENTS.md` requires:
 Wrap up with the final decision table, the reply URLs, deferred threads,
 parking lot items, and a note that reviewers resolve the threads.
 
+Then offer to capture review learnings for this PR: run
+`.github/prompts/capture-learnings.prompt.md` with `PR: #<N>`. On an open PR
+it proposes entries for `docs/agents/knowledge.md` and waits for the user
+confirmation. A CI workflow runs the same prompt after the PR merges.
+
 ## Tips
 
 - `line` is `null` for file-level or deleted-line comments. Show
@@ -301,4 +306,5 @@ parking lot items, and a note that reviewers resolve the threads.
 - `commit`: owns the commit step.
 - `draft-pr`: opens the PR.
 - `capture-learnings`: promotes a recurring review problem to
-  `docs/agents/knowledge.md`.
+  `docs/agents/knowledge.md`. `.github/prompts/capture-learnings.prompt.md`
+  runs it for the human comments of one PR.

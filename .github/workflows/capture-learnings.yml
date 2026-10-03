@@ -1,9 +1,8 @@
 name: Capture Learnings
 
-# After a PR merges into main, Copilot CLI runs the capture-learnings skill on
-# its review. The skill needs user confirmation before it writes. In CI, the
-# confirmation is the review of the knowledge PR that this workflow opens.
-# Every run ends with one comment on the merged PR.
+# After a PR merges into main, Copilot CLI runs
+# .github/prompts/capture-learnings.prompt.md for that PR. The same prompt
+# also runs locally on an open PR during its implementation.
 
 on:
   pull_request:
@@ -68,54 +67,4 @@ jobs:
             --allow-tool='shell(grep:*)' \
             --allow-tool='shell(wc:*)' \
             --deny-tool='shell(git push origin main)' \
-            -p "$(cat <<EOF
-          REPO: ${GITHUB_REPOSITORY}
-          MERGED PR: #${PR_NUMBER}
-
-          Run the capture-learnings skill in non-interactive mode for the merged
-          PR. Read .agents/skills/capture-learnings/SKILL.md, its references,
-          AGENTS.md, and docs/agents/knowledge.md first.
-
-          1. Collect the comments that humans left on the merged PR: review
-             threads, review bodies, and PR comments. Use gh api and the
-             GraphQL reviewThreads query. A comment is human only when its
-             author type is User. Skip authors of type Bot, logins that end in
-             [bot], and Copilot reviewers. Replies in a thread, the PR
-             description, and commit messages are context only; they show how
-             each comment was resolved.
-          2. Find candidate rules only in the human comments: a comment that
-             states a problem class, or a question or correction that changed
-             the code. Apply Steps 2 to 6 of the skill to each candidate:
-             abstraction, recurrence, Good and Bad examples, overlap, and
-             capacity.
-          3. If no candidate passes every check, do not change files. Comment
-             on the merged PR: "No new review learnings.", then one line for
-             each candidate with the check that rejected it. If there were no
-             candidates, say that the PR had no human review comments or no
-             recurring problem class.
-          4. If at least one candidate passes, and the capacity check needs no
-             pruning:
-             - Create branch learnings/pr-${PR_NUMBER} from main.
-             - Write only the entries into docs/agents/knowledge.md, as Step 8
-               of the skill says. Keep the Markdown style of the file: line
-               length 80 or less, one blank line around headings.
-             - Commit with the subject
-               "docs: capture review learnings from #${PR_NUMBER}" and a body
-               that names each rule and its source threads. Do not add
-               attribution trailers.
-             - Push the branch. Open a PR to main with the same title and the
-               label documentation. For each rule, the PR body shows the full
-               proposal from references/rule-format.md (entry, Why, Good, Bad),
-               the overlap analysis, and links to the source review threads.
-               The PR review is the user confirmation of the skill.
-             - Comment on the merged PR with a link to the new PR.
-          5. If the capacity check needs pruning, do not write. Comment on the
-             merged PR with the candidate rules and the 5 prune candidates, and
-             ask the owner to choose.
-
-          Every run ends with exactly one comment on the merged PR (step 3, 4,
-          or 5). Write all text in ASD-STE100 Simplified Technical English.
-          Never change files other than docs/agents/knowledge.md. Never push
-          to main.
-          EOF
-          )"
+            -p "PR: #${PR_NUMBER} $(cat .github/prompts/capture-learnings.prompt.md)"
