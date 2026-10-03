@@ -22,6 +22,7 @@ The [Hello World contract](hello-world-target.md) is the first target: PBeam exe
 | Memory | Immediate terms where appropriate; `Arc<Value>` for shared, immutable compound values. |
 | Binary data | Separate binary/bitstring representation and operations from general compound values. |
 | Scheduling | One OS process, multiple scheduler threads, one scheduler per OS thread, work stealing. |
+| ERTS alignment | Follow the ERTS implementation model and observable behavior for processes, scheduling, messages, and BIFs. Record each intentional departure and its reason in the task and PR. |
 | Native extensions | Rust functions registered by module/function/arity (MFA), linked into the executable. |
 | OTP compatibility | Keep required OTP BEAM modules and replace their native/ERTS boundaries only where the selected application needs them. |
 | Platform access | System/Host boundary for platform services and asynchronous completion. |
@@ -92,6 +93,8 @@ The design leaves room to change storage later, but v0 does not implement an are
 Each scheduler runs on one OS thread. Processes initially run on their creating scheduler. Idle schedulers can steal runnable processes from other schedulers.
 
 Reductions bound a process's interpreter turn so other runnable processes can progress. A process must never execute concurrently on two schedulers. Waiting processes become runnable when a message, timeout, or host completion satisfies their wait.
+
+Process ownership follows ERTS. The process table holds every live process, including the running process. Each scheduler records its running process in a `current_process` field, as the ERTS scheduler data does. The run queue holds only processes that wait for a turn. A scheduler removes a process from the run queue when the process starts to run. The scheduler adds the process to the queue again only when the process is preempted or a message wakes it. A per-process state, such as the ERTS `ACTIVE` and `IN_RUNQ` flags, prevents a second queue entry for one process. The current single-thread implementation takes the running process out of the process table; a refactor in PR #56 aligns it with this model.
 
 Host work that can block must not block a scheduler thread. The intended asynchronous flow is:
 
