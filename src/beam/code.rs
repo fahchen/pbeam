@@ -30,8 +30,12 @@ const TAG_LABEL: u8 = 5;
 const TAG_LITERAL: u8 = 7;
 const LIST_SUBTAG: i128 = 1;
 const ETF_VERSION: u8 = 131;
-const ETF_BINARY_EXT: u8 = 109;
+const ETF_SMALL_TUPLE_EXT: u8 = 104;
+const ETF_NIL_EXT: u8 = 106;
 const ETF_STRING_EXT: u8 = 107;
+const ETF_LIST_EXT: u8 = 108;
+const ETF_BINARY_EXT: u8 = 109;
+const ETF_SMALL_ATOM_UTF8_EXT: u8 = 119;
 const FIRST_ATOM_INDEX: usize = 1;
 const FIRST_LABEL_NUMBER: u32 = 1;
 
@@ -107,9 +111,14 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// nil_value ::= compact(2) ; atom index zero
 /// literals_chunk ::= "LitT" chunk_size 0:u32be literal_count literal_entry*
 /// literal_count ::= u32be
-/// literal_entry ::= term_size:u32be external_term[term_size]
-/// binary_term ::= 131 109 binary_size:u32be byte[binary_size]
-/// string_term ::= 131 107 string_size:u16be byte[string_size]
+/// literal_entry ::= term_size:u32be 131 external_term ; term_size bytes in total
+/// external_term ::= binary_term | string_term | nil_term | atom_term | tuple_term | list_term
+/// binary_term ::= 109 binary_size:u32be byte[binary_size]
+/// string_term ::= 107 string_size:u16be byte[string_size]
+/// nil_term    ::= 106
+/// atom_term   ::= 119 name_size:u8 utf8_byte[name_size]
+/// tuple_term  ::= 104 arity:u8 external_term[arity]
+/// list_term   ::= 108 length:u32be external_term[length] tail:external_term
 ///
 /// compact(tag) ::= short(tag) | extended(tag)
 /// short(tag)   ::= value:4 0 tag:3
@@ -128,7 +137,10 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// `function_count` must match the number of `function_info` instructions.
 /// `opcode_max` is not checked. The parser rejects duplicate chunk IDs. It
 /// supports only the listed instructions and compact operand forms. `LitT`
-/// supports uncompressed tables with ETF binary and string values when referenced. The
+/// supports uncompressed tables. A literal loads as a value only when every
+/// nested tag is listed; another tag, such as a map, integer, or improper list
+/// tail, makes the literal unsupported, and execution fails only if an
+/// instruction uses it. `[a|[b]]` and `[a,b]` give the same list. The
 /// parser retains generated instructions that it does not execute. Execution
 /// fails if it reaches one. Compact
 /// tags occupy the low three bits. The parser accepts the short and one-byte
@@ -359,46 +371,113 @@ fn parse_literals(data: &[u8]) -> Result<Vec<Option<Term>>, BeamError> {
     Ok(literals)
 }
 
-/// Read a supported ETF binary or string term, or return `None` for another type.
+/// Read one `LitT` entry. Return `None` when the term contains a tag that
+/// `literal_entry` does not list, at any depth.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let term = read_literal(&[131, 109, 0, 0, 0, 2, b'o', b'k'])?;
 /// assert_eq!(term, Some(Term::Binary(b"ok".to_vec())));
-/// let newline = read_literal(&[131, 107, 0, 1, b'\\n'])?;
-/// assert_eq!(newline, Some(Term::List(vec![Term::Integer(10)])));
+/// // [flush]
+/// let list = read_literal(&[131, 108, 0, 0, 0, 1, 119, 5, b'f', b'l', b'u', b's', b'h', 106])?;
+/// assert_eq!(list, Some(Term::List(vec![Term::Atom("flush".into())])));
 /// ```
 fn read_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
     if data.first() != Some(&ETF_VERSION) {
         return Ok(None);
     }
-    match data.get(1) {
-        Some(&ETF_BINARY_EXT) => {
-            let binary_size = read_u32(data.get(2..).unwrap_or_default())? as usize;
-            if binary_size != data.len() - WORD_SIZE - 2 {
-                return Err(error("invalid BEAM binary literal size"));
-            }
-            Ok(Some(Term::Binary(data[WORD_SIZE + 2..].to_vec())))
+    let mut cursor = 1;
+    let Some(term) = read_external_term(data, &mut cursor)? else {
+        return Ok(None);
+    };
+    if cursor != data.len() {
+        return Err(error("unexpected bytes after BEAM literal"));
+    }
+    Ok(Some(term))
+}
+
+/// Read one external term at the cursor and advance past it. Return `None`
+/// for a tag or list tail that `literal_entry` does not list.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// // {}
+/// assert_eq!(read_external_term(&[104, 0], &mut cursor)?, Some(Term::Tuple(vec![])));
+/// assert_eq!(cursor, 2);
+/// ```
+fn read_external_term(data: &[u8], cursor: &mut usize) -> Result<Option<Term>, BeamError> {
+    let term = match take(data, cursor, 1)?[0] {
+        ETF_BINARY_EXT => {
+            let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
+            Term::Binary(take(data, cursor, size)?.to_vec())
         }
-        Some(&ETF_STRING_EXT) => {
-            let size_bytes: [u8; 2] = data
-                .get(2..4)
-                .ok_or_else(|| error("truncated BEAM string literal"))?
-                .try_into()
-                .map_err(|_| error("truncated BEAM string literal"))?;
-            let size = u16::from_be_bytes(size_bytes) as usize;
-            if size != data.len().saturating_sub(4) {
-                return Err(error("invalid BEAM string literal size"));
-            }
-            let characters = data[4..]
+        ETF_STRING_EXT => {
+            let size_bytes = take(data, cursor, 2)?;
+            let size = u16::from_be_bytes([size_bytes[0], size_bytes[1]]) as usize;
+            let characters = take(data, cursor, size)?
                 .iter()
                 .map(|&byte| Term::Integer(i64::from(byte)))
                 .collect();
-            Ok(Some(Term::List(characters)))
+            Term::List(characters)
         }
-        _ => Ok(None),
-    }
+        ETF_NIL_EXT => Term::List(Vec::new()),
+        ETF_SMALL_ATOM_UTF8_EXT => {
+            let size = take(data, cursor, 1)?[0] as usize;
+            let name = std::str::from_utf8(take(data, cursor, size)?)
+                .map_err(|_| error("invalid UTF-8 in BEAM atom literal"))?;
+            Term::Atom(name.to_owned())
+        }
+        ETF_SMALL_TUPLE_EXT => {
+            let arity = take(data, cursor, 1)?[0];
+            let mut elements = Vec::new();
+            for _ in 0..arity {
+                let Some(element) = read_external_term(data, cursor)? else {
+                    return Ok(None);
+                };
+                elements.push(element);
+            }
+            Term::Tuple(elements)
+        }
+        ETF_LIST_EXT => {
+            let length = read_u32(take(data, cursor, WORD_SIZE)?)?;
+            let mut elements = Vec::new();
+            for _ in 0..length {
+                let Some(element) = read_external_term(data, cursor)? else {
+                    return Ok(None);
+                };
+                elements.push(element);
+            }
+            let Some(Term::List(tail)) = read_external_term(data, cursor)? else {
+                return Ok(None);
+            };
+            elements.extend(tail);
+            Term::List(elements)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(term))
+}
+
+/// Return the next `length` bytes at the cursor and advance past them.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 1;
+/// assert_eq!(take(&[1, 2, 3], &mut cursor, 2)?, &[2, 3]);
+/// assert!(take(&[1], &mut 0, 2).is_err());
+/// ```
+fn take<'a>(data: &'a [u8], cursor: &mut usize, length: usize) -> Result<&'a [u8], BeamError> {
+    let end = cursor
+        .checked_add(length)
+        .filter(|&end| end <= data.len())
+        .ok_or_else(|| error("truncated BEAM literal"))?;
+    let bytes = &data[*cursor..end];
+    *cursor = end;
+    Ok(bytes)
 }
 
 /// Read a supported integer or atom term and advance the cursor.
@@ -424,12 +503,10 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term,
         }
         TAG_ATOM => {
             let index = read_operand(data, cursor, TAG_ATOM)? as usize;
-            let atom = if index == 0 {
-                "nil"
-            } else {
-                atom_at(atoms, index)?
-            };
-            Ok(Term::Atom(atom.to_owned()))
+            if index == 0 {
+                return Ok(Term::List(Vec::new()));
+            }
+            Ok(Term::Atom(atom_at(atoms, index)?.to_owned()))
         }
         unsupported_tag => Err(error(format!(
             "unsupported constant operand tag {unsupported_tag}"
@@ -642,6 +719,36 @@ mod tests {
         );
         assert!(read_literal(&[131, 107]).is_err());
         assert!(read_literal(&[131, 107, 0, 2, b'x']).is_err());
+    }
+
+    #[test]
+    fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
+        let atom = |name: &str| Term::Atom(name.into());
+        // [a|[b]] gives the same list as [a,b].
+        assert_eq!(
+            read_literal(&[
+                131, 108, 0, 0, 0, 1, 119, 1, b'a', 108, 0, 0, 0, 1, 119, 1, b'b', 106
+            ])
+            .unwrap(),
+            Some(Term::List(vec![atom("a"), atom("b")]))
+        );
+        assert_eq!(
+            read_literal(&[131, 104, 2, 119, 2, b'o', b'k', 106]).unwrap(),
+            Some(Term::Tuple(vec![atom("ok"), Term::List(vec![])]))
+        );
+        // A small integer (97) inside a tuple or a list, and an improper tail.
+        assert_eq!(read_literal(&[131, 104, 1, 97, 1]).unwrap(), None);
+        assert_eq!(
+            read_literal(&[131, 108, 0, 0, 0, 1, 97, 1, 106]).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_literal(&[131, 108, 0, 0, 0, 1, 106, 119, 1, b't']).unwrap(),
+            None
+        );
+        assert!(read_literal(&[131, 119, 1, 0xff]).is_err());
+        assert!(read_literal(&[131, 106, 106]).is_err());
+        assert!(read_literal(&[131, 104]).is_err());
     }
 
     #[test]

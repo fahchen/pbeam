@@ -298,10 +298,8 @@ impl BeamProgram {
                     destination,
                 } => {
                     let head = read(process, head)?;
-                    let mut values = match read(process, tail)? {
-                        Term::List(values) => values,
-                        Term::Atom(atom) if atom == "nil" => Vec::new(),
-                        _ => return Err(error("unsupported BEAM list tail")),
+                    let Term::List(mut values) = read(process, tail)? else {
+                        return Err(error("unsupported BEAM list tail"));
                     };
                     values.insert(0, head);
                     write(process, destination, Term::List(values))?;
@@ -440,10 +438,8 @@ impl BeamProgram {
                 ])));
             }
             ("spawn_monitor" | "spawn_link", [Term::Atom(module), Term::Atom(function), list]) => {
-                let arguments = match list {
-                    Term::List(values) => values.clone(),
-                    Term::Atom(atom) if atom == "nil" => Vec::new(),
-                    _ => return Err(error("spawn arguments are not a proper list")),
+                let Term::List(arguments) = list.clone() else {
+                    return Err(error("spawn arguments are not a proper list"));
                 };
                 let arity = u32::try_from(arguments.len())
                     .map_err(|_| error("arity exceeds BEAM limit"))?;
@@ -983,7 +979,7 @@ mod tests {
             vec![
                 Instruction::PutList {
                     head: Operand::Value(Term::Integer(10)),
-                    tail: Operand::Value(Term::Atom("nil".into())),
+                    tail: Operand::Value(Term::List(Vec::new())),
                     destination: Operand::X(0),
                 },
                 Instruction::Return,
