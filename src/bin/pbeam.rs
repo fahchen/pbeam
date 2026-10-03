@@ -21,6 +21,15 @@ struct Cli {
     beam_files: Vec<PathBuf>,
 }
 
+/// Run the command line. Print an error to stderr and exit with status 1
+/// when loading or execution fails.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // $ pbeam Elixir.Hello main Elixir.Hello.beam Elixir.IO.beam
+/// // Hello, world!
+/// ```
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -31,6 +40,14 @@ fn main() -> ExitCode {
     }
 }
 
+/// Read the BEAM files, load them, and run the zero-argument entry function.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let arguments = Cli::parse_from(["pbeam", "hello", "main", "hello.beam"]);
+/// run(arguments)?;
+/// ```
 fn run(arguments: Cli) -> Result<(), String> {
     let mut modules = Vec::with_capacity(arguments.beam_files.len());
     for path in arguments.beam_files {

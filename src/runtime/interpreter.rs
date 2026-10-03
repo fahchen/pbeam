@@ -24,6 +24,14 @@ enum Outcome {
 }
 
 impl BeamProgram {
+    /// Load BEAM files into one program. Module names must be unique.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let program = BeamProgram::load(&[CALLS, EXTERNAL])?;
+    /// assert!(BeamProgram::load(&[CALLS, CALLS]).is_err());
+    /// ```
     pub fn load(modules: &[&[u8]]) -> Result<Self, BeamError> {
         let mut loaded = HashMap::new();
         for bytes in modules {
@@ -559,6 +567,15 @@ struct Function<'a> {
     start: usize,
 }
 
+/// Find the function whose entry label is `target`. The function starts
+/// after the label.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let function = function_at_label(&module, 2)?;
+/// assert_eq!((function.name, function.arity), ("main", 0));
+/// ```
 fn function_at_label(module: &BeamModule, target: u32) -> Result<Function<'_>, BeamError> {
     let mut function = None;
     for (index, instruction) in module.instructions.iter().enumerate() {
@@ -593,6 +610,16 @@ fn function_at_label(module: &BeamModule, target: u32) -> Result<Function<'_>, B
     )))
 }
 
+/// Copy the first `arity` X registers as call arguments. Each register
+/// must be set.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let registers = vec![Some(Term::Integer(1))];
+/// assert_eq!(call_arguments(&registers, 1)?, vec![Term::Integer(1)]);
+/// assert!(call_arguments(&registers, 2).is_err());
+/// ```
 fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, BeamError> {
     (0..arity)
         .map(|index| {
@@ -604,6 +631,15 @@ fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, B
         .collect()
 }
 
+/// Read a literal, an X register, or a Y register.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let registers = vec![Some(Term::Integer(7))];
+/// assert_eq!(read_operand(&Operand::X(0), &registers, &[])?, Term::Integer(7));
+/// assert!(read_operand(&Operand::Y(0), &registers, &[]).is_err());
+/// ```
 fn read_operand(
     operand: &Operand,
     registers: &[Option<Term>],
@@ -625,6 +661,16 @@ fn read_operand(
     }
 }
 
+/// Write a value to an X register or an allocated Y register. X registers
+/// grow as necessary. A literal destination is an error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut registers = vec![];
+/// write_operand(&Operand::X(1), Term::Integer(7), &mut registers, &mut [])?;
+/// assert_eq!(registers, vec![None, Some(Term::Integer(7))]);
+/// ```
 fn write_operand(
     operand: &Operand,
     value: Term,

@@ -16,10 +16,26 @@ pub struct BeamModule {
 }
 
 impl BeamModule {
+    /// Parse one BEAM file into a module.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let module = BeamModule::load(CONSTANT)?;
+    /// assert!(BeamModule::load(b"not beam").is_err());
+    /// ```
     pub fn load(bytes: &[u8]) -> Result<Self, BeamError> {
         code::parse(bytes)
     }
 
+    /// Run an exported function that returns a constant from `x0`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let module = BeamModule::load(CONSTANT)?;
+    /// assert_eq!(module.execute("number", &[])?, Term::Integer(7));
+    /// ```
     pub fn execute(&self, function: &str, arguments: &[Term]) -> Result<Term, BeamError> {
         let arity = checked_arity(arguments.len())?;
         let entry = self
@@ -61,6 +77,14 @@ impl BeamModule {
     }
 }
 
+/// Convert an argument count to a BEAM arity.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(checked_arity(2)?, 2);
+/// assert!(checked_arity(usize::MAX).is_err());
+/// ```
 fn checked_arity(argument_count: usize) -> Result<u32, BeamError> {
     u32::try_from(argument_count).map_err(|_| error("arity exceeds BEAM limit"))
 }
