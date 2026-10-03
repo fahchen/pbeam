@@ -22,7 +22,7 @@ The [Hello World contract](hello-world-target.md) is the first target: PBeam exe
 | Memory | Immediate terms where appropriate; `Arc<Value>` for shared, immutable compound values. |
 | Binary data | Separate binary/bitstring representation and operations from general compound values. |
 | Scheduling | One OS process, multiple scheduler threads, one scheduler per OS thread, work stealing. |
-| ERTS alignment | Follow the ERTS implementation model and observable behavior for processes, scheduling, messages, and BIFs. Record each intentional departure and its reason in the task and PR. |
+| ERTS alignment | Follow the ERTS implementation model and observable behavior for processes, scheduling, messages, and BIFs. Record each intentional departure and its reason in the task, the PR, and [ERTS differences](erts-differences.md). |
 | Native extensions | Rust functions registered by module/function/arity (MFA), linked into the executable. |
 | OTP compatibility | Keep required OTP BEAM modules and replace their native/ERTS boundaries only where the selected application needs them. |
 | Platform access | System/Host boundary for platform services and asynchronous completion. |
