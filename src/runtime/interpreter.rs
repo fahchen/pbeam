@@ -1,4 +1,7 @@
-use super::process::{Frame, ProcessState, Scheduler};
+use super::{
+    process::{Frame, ProcessState},
+    scheduler::Scheduler,
+};
 use crate::{
     beam::{
         BeamModule,
@@ -124,7 +127,7 @@ impl BeamProgram {
         Ok(Frame {
             module: module_name.to_owned(),
             function: function.name.to_owned(),
-            pc: function.start,
+            next_instruction: function.start,
             stack: Vec::new(),
         })
     }
@@ -157,13 +160,13 @@ impl BeamProgram {
         loop {
             let frame = current_frame(process);
             let module = self.module(&frame.module)?;
-            let Some(instruction) = module.instructions.get(frame.pc) else {
+            let Some(instruction) = module.instructions.get(frame.next_instruction) else {
                 return Err(error(format!(
                     "function {}:{} did not return",
                     frame.module, frame.function
                 )));
             };
-            frame.pc += 1;
+            frame.next_instruction += 1;
             match instruction {
                 Instruction::Move(source, destination) => {
                     let value = read(process, source)?;
@@ -229,10 +232,13 @@ impl BeamProgram {
                     name,
                     destination,
                 } => {
-                    if module != "erlang" || name != "self" {
+                    if module != "erlang" {
                         return Err(error(format!("unsupported BIF {module}:{name}/0")));
                     }
-                    write(process, destination, Term::Pid(process.id))?;
+                    // ponytail: no zero-arity BIF exits; map an exit to an error until one does.
+                    let value = self.bif(scheduler, process, name, Vec::new())?;
+                    let value = value.map_err(|reason| error(format!("BIF exited: {reason:?}")))?;
+                    write(process, destination, value)?;
                 }
                 Instruction::Jump(label) => jump(module, process, *label)?,
                 Instruction::Test {
@@ -428,6 +434,10 @@ impl BeamProgram {
     /// Run an `erlang` BIF that the observed process path calls. `Err` holds
     /// the exit reason when the BIF exits the process.
     ///
+    /// BIFs are native functions of the `erlang` module. The compiler emits
+    /// guard BIFs such as `self/0` as `bif` instructions and other BIFs as
+    /// `call_ext` instructions. Both forms come here.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -449,6 +459,7 @@ impl BeamProgram {
                 process.trap_exit = value == "true";
                 old
             }
+            ("self", []) => Term::Pid(process.id),
             ("make_ref", []) => Term::Reference(scheduler.make_ref()?),
             ("exit", [reason]) => return Ok(Err(reason.clone())),
             ("spawn_monitor" | "spawn_link", [Term::Atom(module), Term::Atom(function), list]) => {
@@ -486,7 +497,7 @@ impl BeamProgram {
 /// # Examples
 ///
 /// ```rust,ignore
-/// current_frame(&mut process).pc += 1;
+/// current_frame(&mut process).next_instruction += 1;
 /// ```
 fn current_frame(process: &mut ProcessState) -> &mut Frame {
     // ponytail: the run loop exits when the last frame returns, so a frame is always active.
@@ -523,7 +534,7 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
 /// jump(module, &mut process, 3)?;
 /// ```
 fn jump(module: &BeamModule, process: &mut ProcessState, label: u32) -> Result<(), BeamError> {
-    current_frame(process).pc = module
+    current_frame(process).next_instruction = module
         .instructions
         .iter()
         .position(|instruction| matches!(instruction, Instruction::Label(found) if *found == label))
@@ -887,7 +898,15 @@ mod tests {
                 name: "node".into(),
                 destination: Operand::X(0),
             }])
-            .contains("unsupported BIF erlang:node/0")
+            .contains("unresolved external MFA erlang:node/0")
+        );
+        assert!(
+            error(vec![Instruction::Bif0 {
+                module: "lists".into(),
+                name: "node".into(),
+                destination: Operand::X(0),
+            }])
+            .contains("unsupported BIF lists:node/0")
         );
     }
 

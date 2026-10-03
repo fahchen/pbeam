@@ -8,15 +8,23 @@ use crate::{
 /// One active function call: its module, code position, and Y registers.
 #[derive(Debug)]
 pub(super) struct Frame {
+    /// Name of the module that owns the code.
     pub(super) module: String,
+    /// Name of the function, for error messages.
     pub(super) function: String,
-    pub(super) pc: usize,
+    /// Index of the next instruction to run in the module code.
+    pub(super) next_instruction: usize,
+    /// Y registers. `allocate` sets the size and `deallocate` clears them.
     pub(super) stack: Vec<Option<Term>>,
 }
 
+/// One mailbox message.
 #[derive(Debug)]
 pub(super) struct Message {
+    /// Arrival order in the mailbox. It does not change when other messages
+    /// leave the mailbox.
     pub(super) sequence: u64,
+    /// The message term.
     pub(super) term: Term,
 }
 
@@ -24,7 +32,9 @@ pub(super) struct Message {
 /// receive cursor or receive marker stays valid after other messages leave.
 #[derive(Debug, Default)]
 pub(super) struct Mailbox {
+    /// Messages in arrival order.
     messages: VecDeque<Message>,
+    /// Sequence number for the next message.
     next_sequence: u64,
 }
 
@@ -87,19 +97,29 @@ impl Mailbox {
 /// The execution state and mailbox of one process.
 #[derive(Debug)]
 pub(super) struct ProcessState {
+    /// Identifier of this process.
     pub(super) id: ProcessId,
+    /// Call stack. The last frame is the active function.
     pub(super) frames: Vec<Frame>,
+    /// X registers. All frames of the process share them.
     pub(super) registers: Vec<Option<Term>>,
+    /// Messages that this process did not receive yet.
     pub(super) mailbox: Mailbox,
+    /// Sequence number where `loop_rec` starts its search.
     pub(super) receive_cursor: u64,
+    /// Sequence number of the message that `loop_rec` selected.
     pub(super) current_message: Option<u64>,
     /// Mailbox positions saved by `recv_marker_reserve`, keyed by marker or
     /// by the bound reference.
     pub(super) receive_markers: HashMap<Reference, u64>,
-    pub(super) waiting: bool,
+    /// True while the process waits in `wait` for a new message.
+    waiting: bool,
+    /// True when exit signals from linked processes become `EXIT` messages.
     pub(super) trap_exit: bool,
-    links: HashSet<ProcessId>,
-    monitored_by: Vec<(ProcessId, Reference)>,
+    /// Processes linked to this process.
+    pub(super) links: HashSet<ProcessId>,
+    /// Watchers that get a `DOWN` message when this process exits.
+    pub(super) monitored_by: Vec<(ProcessId, Reference)>,
 }
 
 impl ProcessState {
@@ -111,7 +131,7 @@ impl ProcessState {
     /// let process = ProcessState::new(ProcessId(0), frame, vec![]);
     /// assert!(!process.waiting);
     /// ```
-    fn new(id: ProcessId, frame: Frame, arguments: Vec<Term>) -> Self {
+    pub(super) fn new(id: ProcessId, frame: Frame, arguments: Vec<Term>) -> Self {
         Self {
             id,
             frames: vec![frame],
@@ -126,243 +146,79 @@ impl ProcessState {
             monitored_by: Vec::new(),
         }
     }
+
+    /// Mark the process as waiting for a new message.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.wait();
+    /// assert!(process.receive(Term::Atom("ping".into()))?);
+    /// ```
+    pub(super) fn wait(&mut self) {
+        self.waiting = true;
+    }
+
+    /// Add a message to the mailbox. Return true when the message wakes a
+    /// waiting process, so the scheduler must run it again.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!process.receive(Term::Atom("ping".into()))?);
+    /// ```
+    pub(super) fn receive(&mut self, term: Term) -> Result<bool, BeamError> {
+        self.mailbox.push(term)?;
+        Ok(std::mem::take(&mut self.waiting))
+    }
 }
 
-/// A cooperative scheduler on one OS thread. The running process is taken
-/// out of the process table until it waits or exits.
-#[derive(Debug, Default)]
-pub(super) struct Scheduler {
-    processes: HashMap<ProcessId, ProcessState>,
-    runnable: VecDeque<ProcessId>,
-    next_process_id: u64,
-    next_reference: u64,
-    root_result: Option<Result<Term, Term>>,
-}
+#[cfg(test)]
+pub(super) mod tests {
+    use super::{Frame, Mailbox, ProcessState};
+    use crate::term::{ProcessId, Term};
 
-impl Scheduler {
-    /// Create the root process. The root process gets `ProcessId(0)`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut scheduler = Scheduler::default();
-    /// scheduler.start(frame, vec![])?;
-    /// assert_eq!(scheduler.take_next().unwrap().id, ProcessId(0));
-    /// ```
-    pub(super) fn start(&mut self, frame: Frame, arguments: Vec<Term>) -> Result<(), BeamError> {
-        let id = self.next_pid()?;
-        self.insert(ProcessState::new(id, frame, arguments));
-        Ok(())
-    }
-
-    /// Store a process and add it to the ready queue.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// scheduler.insert(ProcessState::new(ProcessId(1), frame, vec![]));
-    /// ```
-    fn insert(&mut self, process: ProcessState) {
-        self.runnable.push_back(process.id);
-        self.processes.insert(process.id, process);
-    }
-
-    /// Take the next runnable process from the scheduler.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let process = scheduler.take_next();
-    /// assert_eq!(process.map(|process| process.id), Some(ProcessId(0)));
-    /// ```
-    pub(super) fn take_next(&mut self) -> Option<ProcessState> {
-        let id = self.runnable.pop_front()?;
-        self.processes.remove(&id)
-    }
-
-    /// Store a process that waits for a message. A delivery makes it runnable.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// scheduler.park(process);
-    /// ```
-    pub(super) fn park(&mut self, mut process: ProcessState) {
-        process.waiting = true;
-        self.processes.insert(process.id, process);
-    }
-
-    /// Create the next process identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(Scheduler::default().next_pid()?, ProcessId(0));
-    /// ```
-    fn next_pid(&mut self) -> Result<ProcessId, BeamError> {
-        let value = self.next_process_id;
-        self.next_process_id = value
-            .checked_add(1)
-            .ok_or_else(|| error("process identifier overflow"))?;
-        Ok(ProcessId(value))
-    }
-
-    /// Create a new unique reference.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(scheduler.make_ref()?, Reference(0));
-    /// ```
-    pub(super) fn make_ref(&mut self) -> Result<Reference, BeamError> {
-        let value = self.next_reference;
-        self.next_reference = value
-            .checked_add(1)
-            .ok_or_else(|| error("process reference overflow"))?;
-        Ok(Reference(value))
-    }
-
-    /// Return the root result. `None` means the root process did not exit.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(scheduler.into_root_result(), Some(Ok(Term::Atom("ok".into()))));
-    /// ```
-    pub(super) fn into_root_result(self) -> Option<Result<Term, Term>> {
-        self.root_result
-    }
-
-    /// Deliver a message to the current process or another live process.
-    /// A message to a process that does not exist is dropped, as in ERTS.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// scheduler.deliver(&mut current, target, Term::Atom("ping".into()))?;
-    /// ```
-    pub(super) fn deliver(
-        &mut self,
-        current: &mut ProcessState,
-        target: ProcessId,
-        term: Term,
-    ) -> Result<(), BeamError> {
-        if target == current.id {
-            return current.mailbox.push(term);
+    pub(in crate::runtime) fn frame() -> Frame {
+        Frame {
+            module: "fixture".into(),
+            function: "main".into(),
+            next_instruction: 0,
+            stack: Vec::new(),
         }
-        self.deliver_to(target, term)
     }
 
-    /// Deliver a message to a stored process and wake it when it waits.
-    /// A message to a process that does not exist is dropped.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// scheduler.deliver_to(ProcessId(1), Term::Atom("ping".into()))?;
-    /// ```
-    fn deliver_to(&mut self, target: ProcessId, term: Term) -> Result<(), BeamError> {
-        let Some(process) = self.processes.get_mut(&target) else {
-            return Ok(());
+    #[test]
+    fn keeps_message_sequences_after_removal() {
+        let mut mailbox = Mailbox::default();
+        mailbox.push(Term::Atom("first".into())).unwrap();
+        mailbox.push(Term::Atom("second".into())).unwrap();
+        mailbox.remove(0);
+
+        let message = mailbox.first_at_or_after(0).unwrap();
+        assert_eq!(
+            (message.sequence, &message.term),
+            (1, &Term::Atom("second".into()))
+        );
+        assert!(mailbox.first_at_or_after(2).is_none());
+        assert_eq!(mailbox.next_sequence(), 2);
+    }
+
+    #[test]
+    fn rejects_mailbox_sequence_overflow() {
+        let mut mailbox = Mailbox {
+            next_sequence: u64::MAX,
+            ..Mailbox::default()
         };
-        process.mailbox.push(term)?;
-        if process.waiting {
-            process.waiting = false;
-            self.runnable.push_back(target);
-        }
-        Ok(())
+        assert!(mailbox.push(Term::Integer(1)).is_err());
     }
 
-    /// Spawn a child process and optionally monitor or link it.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let (pid, monitor) = scheduler.spawn(&mut parent, frame, vec![], true, false)?;
-    /// assert!(monitor.is_some());
-    /// ```
-    pub(super) fn spawn(
-        &mut self,
-        parent: &mut ProcessState,
-        frame: Frame,
-        arguments: Vec<Term>,
-        monitor: bool,
-        link: bool,
-    ) -> Result<(ProcessId, Option<Reference>), BeamError> {
-        let mut child = ProcessState::new(self.next_pid()?, frame, arguments);
-        let reference = if monitor {
-            let reference = self.make_ref()?;
-            child.monitored_by.push((parent.id, reference));
-            Some(reference)
-        } else {
-            None
-        };
-        if link {
-            parent.links.insert(child.id);
-            child.links.insert(parent.id);
-        }
-        let id = child.id;
-        self.insert(child);
-        Ok((id, reference))
-    }
-
-    /// Record a process exit. Send `DOWN` to monitors and `EXIT` to linked
-    /// processes that trap exits.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// scheduler.finish(process, Term::Atom("normal".into()), Some(result))?;
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// An abnormal exit signal to a linked process that does not trap exits
-    /// is not supported.
-    pub(super) fn finish(
-        &mut self,
-        process: ProcessState,
-        reason: Term,
-        result: Option<Term>,
-    ) -> Result<(), BeamError> {
-        let normal = reason == Term::Atom("normal".into());
-        if process.id == ProcessId(0) {
-            self.root_result = Some(match result {
-                Some(result) if normal => Ok(result),
-                _ => Err(reason.clone()),
-            });
-        }
-        for (watcher, reference) in process.monitored_by {
-            let down = Term::Tuple(vec![
-                Term::Atom("DOWN".into()),
-                Term::Reference(reference),
-                Term::Atom("process".into()),
-                Term::Pid(process.id),
-                reason.clone(),
-            ]);
-            self.deliver_to(watcher, down)?;
-        }
-        for linked in process.links {
-            let trap_exit = self.processes.get_mut(&linked).map(|target| {
-                target.links.remove(&process.id);
-                target.trap_exit
-            });
-            if normal {
-                continue;
-            }
-            if trap_exit == Some(false) {
-                // ponytail: no exit-signal propagation yet; add it when a task needs linked kills.
-                return Err(error(format!(
-                    "unsupported exit signal {reason:?} to a process that does not trap exits"
-                )));
-            }
-            let exit = Term::Tuple(vec![
-                Term::Atom("EXIT".into()),
-                Term::Pid(process.id),
-                reason.clone(),
-            ]);
-            self.deliver_to(linked, exit)?;
-        }
-        Ok(())
+    #[test]
+    fn wakes_only_a_waiting_process() {
+        let mut process = ProcessState::new(ProcessId(0), frame(), vec![Term::Integer(1)]);
+        assert_eq!(process.registers, vec![Some(Term::Integer(1))]);
+        assert!(!process.receive(Term::Atom("early".into())).unwrap());
+        process.wait();
+        assert!(process.receive(Term::Atom("late".into())).unwrap());
+        assert!(!process.receive(Term::Atom("later".into())).unwrap());
     }
 }
