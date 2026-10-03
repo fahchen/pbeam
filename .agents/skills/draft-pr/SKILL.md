@@ -100,11 +100,12 @@ logs or diffs. Check that no scratch file (`docs/tmp/`,
 
 ### 3. Verify
 
-Run `mise run check`. Record the exact commands and results, including
-`Application line coverage`. Run the acceptance check of the task (for
-example, the ERTS comparison test). If a check fails, stop and report. Do
-not open the PR with a failing check unless the user accepts it as a
-recorded gap.
+Run `mise run check`, even for a documentation-only or skill-only change: it
+runs `rumdl check .`, which catches markdown lint failures that CI also
+runs. Record the exact commands and results, including `Application line
+coverage`. Run the acceptance check of the task (for example, the ERTS
+comparison test). If a check fails, stop and report. Do not open the PR
+with a failing check unless the user accepts it as a recorded gap.
 
 ### 4. Surface open questions
 
