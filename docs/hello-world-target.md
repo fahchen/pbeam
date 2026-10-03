@@ -53,7 +53,7 @@ emits `hello_reference.app`; the fixture has no third-party dependencies.
 Observed results: four tests pass; each module has 100% application line coverage.
 Both subprocesses have empty stderr and exit zero. Stdout is `Hello, world!\n`
 and `Another greeting.\n`, respectively. Rust application line coverage is
-1205/1205 (100%). In-process tests measure fixture coverage; subprocess tests
+1206/1206 (100%). In-process tests measure fixture coverage; subprocess tests
 independently verify the original compiled artifacts and process-level results.
 
 | Kind | Instruction or operation | Required semantics | Evidence | PBeam support and limits | Task / PR / test |

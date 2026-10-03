@@ -1,0 +1,616 @@
+//! Parse Code chunk instructions into the runtime instruction model.
+
+use super::super::error::{BeamError, error};
+use super::{
+    COMPACT_EXTENDED_FLAG, COMPACT_SHORT_VALUE_SHIFT, COMPACT_SIGN_FLAG, COMPACT_TAG_MASK,
+    FIRST_LABEL_NUMBER, LIST_SUBTAG, LITERAL_SUBTAG, TAG_ATOM, TAG_INTEGER, TAG_LABEL, TAG_LITERAL,
+    TAG_REGISTER, TAG_UNSIGNED, TAG_Y_REGISTER, WORD_SIZE, atom_at, read_integer, read_operand,
+    read_u32, read_value,
+};
+use crate::beam::term::Term;
+
+const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
+const CODE_HEADER_SUB_SIZE: u32 = 16;
+const INSTRUCTION_SET_ERLANG: u32 = 0;
+const CODE_LABEL_COUNT_OFFSET: usize = WORD_SIZE * 3;
+const CODE_FUNCTION_COUNT_OFFSET: usize = WORD_SIZE * 4;
+const OPCODE_LABEL: u8 = 1;
+const OPCODE_FUNCTION_INFO: u8 = 2;
+const OPCODE_INT_CODE_END: u8 = 3;
+const OPCODE_CALL: u8 = 4;
+const OPCODE_CALL_ONLY: u8 = 6;
+const OPCODE_CALL_EXT: u8 = 7;
+const OPCODE_CALL_EXT_LAST: u8 = 8;
+const OPCODE_CALL_EXT_ONLY: u8 = 78;
+const OPCODE_ALLOCATE: u8 = 12;
+const OPCODE_RETURN: u8 = 19;
+const OPCODE_DEALLOCATE: u8 = 18;
+const OPCODE_MOVE: u8 = 64;
+const OPCODE_SELECT_VAL: u8 = 59;
+const OPCODE_SELECT_TUPLE_ARITY: u8 = 60;
+const OPCODE_JUMP: u8 = 61;
+const OPCODE_LINE: u8 = 153;
+const OPCODE_CALL_LAST: u8 = 5;
+const OPCODE_BIF0: u8 = 9;
+const OPCODE_BIF1: u8 = 10;
+const OPCODE_BIF2: u8 = 11;
+const OPCODE_TEST_HEAP: u8 = 16;
+const OPCODE_PUT_MAP_EXACT: u8 = 155;
+const OPCODE_GET_MAP_ELEMENTS: u8 = 158;
+const OPCODE_GET_HD: u8 = 162;
+const OPCODE_PUT_TUPLE2: u8 = 164;
+const OPCODE_SWAP: u8 = 169;
+const OPCODE_INIT_YREGS: u8 = 172;
+const OPCODE_BS_CREATE_BIN: u8 = 177;
+const OPCODE_BS_INIT_WRITABLE: u8 = 133;
+const OPCODE_GET_LIST: u8 = 65;
+const OPCODE_GET_TUPLE_ELEMENT: u8 = 66;
+const OPCODE_PUT_LIST: u8 = 69;
+const OPCODE_BADMATCH: u8 = 72;
+const OPCODE_CASE_END: u8 = 74;
+const OPCODE_CALL_FUN: u8 = 75;
+const OPCODE_TRIM: u8 = 136;
+const OPCODE_GET_TL: u8 = 163;
+const OPCODE_TEST_IS_INTEGER: u8 = 45;
+const OPCODE_TEST_IS_FLOAT: u8 = 46;
+const OPCODE_TEST_IS_NUMBER: u8 = 47;
+const OPCODE_TEST_IS_ATOM: u8 = 48;
+const OPCODE_TEST_IS_PID: u8 = 49;
+const OPCODE_TEST_IS_NIL: u8 = 52;
+const OPCODE_TEST_IS_BINARY: u8 = 53;
+const OPCODE_TEST_IS_LIST: u8 = 55;
+const OPCODE_TEST_IS_NONEMPTY_LIST: u8 = 56;
+const OPCODE_TEST_IS_TUPLE: u8 = 57;
+const OPCODE_TEST_ARITY: u8 = 58;
+const OPCODE_TEST_IS_BOOLEAN: u8 = 114;
+const OPCODE_TEST_IS_BITSTR: u8 = 129;
+const OPCODE_TEST_TAGGED_TUPLE: u8 = 159;
+const OPCODE_TEST_IS_MAP: u8 = 156;
+const OPCODE_TEST_EQ: u8 = 41;
+const OPCODE_TEST_LT: u8 = 39;
+const OPCODE_TEST_NE: u8 = 42;
+const OPCODE_TEST_GE: u8 = 40;
+const OPCODE_TEST_EXACT_EQ: u8 = 43;
+const OPCODE_TEST_EXACT_NE: u8 = 44;
+const OPCODE_PUT_MAP_ASSOC: u8 = 154;
+const OPCODE_HAS_MAP_FIELDS: u8 = 157;
+const OPCODE_GET_RECORD_ELEMENTS: u8 = 188;
+const OPCODE_PUT_RECORD: u8 = 189;
+const OPCODE_MAKE_FUN3: u8 = 171;
+const OPCODE_BS_MATCH: u8 = 182;
+const OPCODE_UPDATE_RECORD: u8 = 181;
+#[derive(Debug, Clone)]
+/// An instruction that the parser can read from a BEAM `Code` chunk.
+///
+/// Byte examples use hexadecimal values. Compact operands use the short form
+/// in the Code chunk grammar. `End` represents the stream terminator; the
+/// executor does not run it.
+pub(in crate::beam) enum Instruction {
+    /// Starts a code label. The label must be in `1..=label_count`.
+    ///
+    /// Encoding: opcode, then a compact unsigned label. Example: `[0x01, 0x10]`
+    /// encodes label 1.
+    Label(u32),
+    /// Declares the module, function, and arity for the following function.
+    /// Atom indexes refer to the one-based `AtU8` table.
+    ///
+    /// Encoding: opcode, module atom, function atom, and arity. Example:
+    /// `[0x02, 0x12, 0x22, 0x00]` refers to atom indexes 1 and 2 with arity 0.
+    FunctionInfo {
+        module: String,
+        name: String,
+        arity: u32,
+    },
+    /// Moves a literal or register value into an X or Y register.
+    Move(Operand, Operand),
+    Call {
+        arity: u32,
+        label: u32,
+    },
+    CallExternal {
+        arity: u32,
+        module: String,
+        name: String,
+        tail: bool,
+        deallocate: u32,
+    },
+    /// An instruction that is parsed so the module can load, but cannot run.
+    Unsupported(u8),
+    Allocate {
+        stack_size: u32,
+    },
+    Deallocate {
+        stack_size: u32,
+    },
+    /// Returns the value in `x0` from the active function.
+    ///
+    /// Encoding: `[0x13]`. Execution reports an error if the function has not
+    /// set `x0`.
+    Return,
+    /// Marks the end of the `Code` instruction stream.
+    ///
+    /// Encoding: `[0x03]`. The parser adds this internal sentinel after it
+    /// reads the terminator. The executor stops at this sentinel.
+    End,
+}
+
+/// A source or destination in the supported `move` instruction.
+///
+/// `Value` holds a supported immediate term. `X` uses compact register tag 3,
+/// and `Y` uses compact register tag 4. For example, `move x0, y0` is encoded
+/// as `[0x40, 0x03, 0x04]`.
+#[derive(Debug, Clone)]
+pub(in crate::beam) enum Operand {
+    Value(Term),
+    UnsupportedLiteral(usize),
+    X(u32),
+    Y(u32),
+}
+
+pub(super) fn parse_code(
+    data: &[u8],
+    atoms: &[String],
+    imports: &[(String, String, u32)],
+    literals: &[Option<Term>],
+) -> Result<(Vec<Instruction>, u32), BeamError> {
+    if data.len() < CODE_HEADER_SIZE
+        || read_u32(&data[..WORD_SIZE])? != CODE_HEADER_SUB_SIZE
+        || read_u32(&data[WORD_SIZE..WORD_SIZE * 2])? != INSTRUCTION_SET_ERLANG
+    {
+        return Err(error("unsupported BEAM code header"));
+    }
+    let number_of_labels =
+        read_u32(&data[CODE_LABEL_COUNT_OFFSET..CODE_LABEL_COUNT_OFFSET + WORD_SIZE])?;
+    let declared_function_count =
+        read_u32(&data[CODE_FUNCTION_COUNT_OFFSET..CODE_HEADER_SIZE])? as usize;
+    let mut cursor = CODE_HEADER_SIZE;
+    let mut instructions = Vec::new();
+    let mut function_info_count = 0;
+    loop {
+        let opcode = *data
+            .get(cursor)
+            .ok_or_else(|| error("truncated BEAM instruction stream"))?;
+        cursor += 1;
+        let instruction = match opcode {
+            OPCODE_LABEL => {
+                let label = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                if label < FIRST_LABEL_NUMBER || label > number_of_labels {
+                    return Err(error(format!(
+                        "BEAM label {label} is outside declared range 1..={number_of_labels}"
+                    )));
+                }
+                Instruction::Label(label)
+            }
+            OPCODE_FUNCTION_INFO => {
+                function_info_count += 1;
+                let module =
+                    atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?.to_owned();
+                let name =
+                    atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?.to_owned();
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                Instruction::FunctionInfo {
+                    module,
+                    name,
+                    arity,
+                }
+            }
+            OPCODE_RETURN => Instruction::Return,
+            OPCODE_CALL => Instruction::Call {
+                arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+            },
+            OPCODE_CALL_ONLY => {
+                let _arity = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let _label = read_operand(data, &mut cursor, TAG_LABEL)?;
+                Instruction::Unsupported(opcode)
+            }
+            OPCODE_JUMP => {
+                let _label = read_operand(data, &mut cursor, TAG_LABEL)?;
+                Instruction::Unsupported(opcode)
+            }
+            OPCODE_SELECT_VAL | OPCODE_SELECT_TUPLE_ARITY => {
+                skip_select_val(data, &mut cursor)?;
+                Instruction::Unsupported(opcode)
+            }
+            OPCODE_LINE => {
+                let _line_index = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                continue;
+            }
+            OPCODE_CALL_EXT | OPCODE_CALL_EXT_LAST | OPCODE_CALL_EXT_ONLY => {
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let index = read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize;
+                let (module, name, imported_arity) = imports
+                    .get(index)
+                    .ok_or_else(|| error(format!("BEAM import index {index} out of range")))?;
+                if arity != *imported_arity {
+                    return Err(error(format!(
+                        "BEAM external call arity {arity} does not match import arity {imported_arity}"
+                    )));
+                }
+                let deallocate = if opcode == OPCODE_CALL_EXT_LAST {
+                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32
+                } else {
+                    0
+                };
+                Instruction::CallExternal {
+                    arity,
+                    module: module.clone(),
+                    name: name.clone(),
+                    tail: opcode != OPCODE_CALL_EXT,
+                    deallocate,
+                }
+            }
+            OPCODE_ALLOCATE => {
+                let stack_size = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                Instruction::Allocate { stack_size }
+            }
+            OPCODE_DEALLOCATE => Instruction::Deallocate {
+                stack_size: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+            },
+            OPCODE_MOVE => {
+                let source = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let destination = read_register(data, &mut cursor)?;
+                Instruction::Move(source, destination)
+            }
+            OPCODE_INT_CODE_END => {
+                if cursor != data.len() || function_info_count != declared_function_count {
+                    return Err(error("invalid BEAM code terminator or function count"));
+                }
+                instructions.push(Instruction::End);
+                return Ok((instructions, number_of_labels));
+            }
+            _ => {
+                skip_unsupported_instruction(opcode, data, &mut cursor)?;
+                Instruction::Unsupported(opcode)
+            }
+        };
+        instructions.push(instruction);
+    }
+}
+
+fn skip_unsupported_instruction(
+    opcode: u8,
+    data: &[u8],
+    cursor: &mut usize,
+) -> Result<(), BeamError> {
+    let operand_count = unsupported_opcode_operand_count(opcode)
+        .ok_or_else(|| error(format!("unsupported BEAM opcode {opcode}")))?;
+    skip_operands(data, cursor, operand_count)?;
+    if matches!(
+        opcode,
+        OPCODE_PUT_MAP_ASSOC
+            | OPCODE_PUT_MAP_EXACT
+            | OPCODE_HAS_MAP_FIELDS
+            | OPCODE_GET_MAP_ELEMENTS
+            | OPCODE_GET_RECORD_ELEMENTS
+            | OPCODE_PUT_RECORD
+            | OPCODE_PUT_TUPLE2
+            | OPCODE_MAKE_FUN3
+            | OPCODE_INIT_YREGS
+            | OPCODE_BS_CREATE_BIN
+            | OPCODE_BS_MATCH
+            | OPCODE_UPDATE_RECORD
+    ) {
+        skip_counted_operands(data, cursor)?;
+    }
+    Ok(())
+}
+
+fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
+    match opcode {
+        OPCODE_CALL_LAST | OPCODE_CALL_EXT_LAST => Some(3),
+        OPCODE_TEST_HEAP => Some(2),
+        OPCODE_BIF0 => Some(2),
+        OPCODE_BIF1 => Some(4),
+        OPCODE_BIF2 => Some(5),
+        OPCODE_TEST_LT | OPCODE_TEST_GE | OPCODE_TEST_EQ | OPCODE_TEST_NE
+        | OPCODE_TEST_EXACT_EQ | OPCODE_TEST_EXACT_NE | OPCODE_TEST_ARITY => Some(3),
+        OPCODE_TEST_TAGGED_TUPLE => Some(4),
+        OPCODE_TEST_IS_INTEGER
+        | OPCODE_TEST_IS_FLOAT
+        | OPCODE_TEST_IS_NUMBER
+        | OPCODE_TEST_IS_ATOM
+        | OPCODE_TEST_IS_PID
+        | OPCODE_TEST_IS_BINARY
+        | OPCODE_TEST_IS_NIL
+        | OPCODE_TEST_IS_LIST
+        | OPCODE_TEST_IS_NONEMPTY_LIST
+        | OPCODE_TEST_IS_TUPLE
+        | OPCODE_TEST_IS_MAP
+        | OPCODE_TEST_IS_BOOLEAN
+        | OPCODE_TEST_IS_BITSTR => Some(2),
+        OPCODE_GET_LIST | OPCODE_GET_TUPLE_ELEMENT | OPCODE_PUT_LIST => Some(3),
+        OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_CALL_FUN => Some(1),
+        OPCODE_TRIM => Some(2),
+        OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_MAP_EXACT => Some(5),
+        OPCODE_GET_MAP_ELEMENTS | OPCODE_HAS_MAP_FIELDS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
+        OPCODE_PUT_RECORD => Some(6),
+        OPCODE_GET_HD | OPCODE_GET_TL | OPCODE_SWAP => Some(2),
+        OPCODE_PUT_TUPLE2 => Some(2),
+        OPCODE_INIT_YREGS => Some(1),
+        OPCODE_MAKE_FUN3 => Some(3),
+        OPCODE_BS_CREATE_BIN => Some(6),
+        OPCODE_BS_INIT_WRITABLE => Some(0),
+        OPCODE_BS_MATCH => Some(3),
+        OPCODE_UPDATE_RECORD => Some(5),
+        _ => None,
+    }
+}
+
+fn skip_counted_operands(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
+    let operand_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+        .map_err(|_| error("BEAM instruction operand list is too large"))?;
+    if operand_count > data.len().saturating_sub(*cursor) {
+        return Err(error("BEAM instruction operand list exceeds code chunk"));
+    }
+    skip_operands(data, cursor, operand_count)
+}
+
+fn skip_operands(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), BeamError> {
+    if count > data.len().saturating_sub(*cursor) {
+        return Err(error("truncated BEAM instruction operands"));
+    }
+    for _ in 0..count {
+        skip_operand(data, cursor)?;
+    }
+    Ok(())
+}
+
+fn skip_operand(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
+    let first_byte = *data
+        .get(*cursor)
+        .ok_or_else(|| error("truncated BEAM operand"))?;
+    *cursor += 1;
+    let tag = first_byte & COMPACT_TAG_MASK;
+    if tag != TAG_LITERAL {
+        return skip_integer_payload(data, cursor, first_byte);
+    }
+    if first_byte & COMPACT_EXTENDED_FLAG != 0 {
+        return Err(error(format!(
+            "unsupported extended BEAM operand {first_byte:#04x}"
+        )));
+    }
+    match first_byte >> COMPACT_SHORT_VALUE_SHIFT {
+        0 => skip_bytes(data, cursor, 8),
+        1 => Ok(()),
+        2 | 4 => skip_operand(data, cursor),
+        3 => {
+            let count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+                .map_err(|_| error("BEAM allocation list is too large"))?;
+            let item_count = count
+                .checked_mul(2)
+                .ok_or_else(|| error("BEAM allocation list size overflow"))?;
+            skip_operands(data, cursor, item_count)
+        }
+        5 => skip_operands(data, cursor, 2),
+        tag => Err(error(format!(
+            "unsupported BEAM extended operand tag {tag}"
+        ))),
+    }
+}
+
+fn skip_integer_payload(data: &[u8], cursor: &mut usize, first_byte: u8) -> Result<(), BeamError> {
+    if first_byte & COMPACT_EXTENDED_FLAG == 0 {
+        return Ok(());
+    }
+    if first_byte & COMPACT_SIGN_FLAG == 0 {
+        return skip_bytes(data, cursor, 1);
+    }
+    let size_code = (first_byte >> 5) as usize;
+    let byte_count = if size_code == 7 {
+        usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+            .map_err(|_| error("BEAM integer operand is too large"))?
+            .checked_add(9)
+            .ok_or_else(|| error("BEAM integer operand size overflow"))?
+    } else {
+        size_code + 2
+    };
+    skip_bytes(data, cursor, byte_count)
+}
+
+fn skip_bytes(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), BeamError> {
+    let end = cursor
+        .checked_add(count)
+        .filter(|&end| end <= data.len())
+        .ok_or_else(|| error("truncated BEAM operand"))?;
+    *cursor = end;
+    Ok(())
+}
+
+fn skip_select_val(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
+    skip_operand(data, cursor)?;
+    let _failure_label = read_operand(data, cursor, TAG_LABEL)?;
+    if read_integer(data, cursor, TAG_LITERAL)? != LIST_SUBTAG {
+        return Err(error("unsupported BEAM selection list"));
+    }
+    let item_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+        .map_err(|_| error("BEAM selection list is too large"))?;
+    if item_count > data.len().saturating_sub(*cursor) {
+        return Err(error("BEAM selection list exceeds code chunk"));
+    }
+    if item_count % 2 != 0 {
+        return Err(error("BEAM selection list has an incomplete pair"));
+    }
+    for _ in 0..item_count / 2 {
+        skip_operand(data, cursor)?;
+        let _target_label = read_operand(data, cursor, TAG_LABEL)?;
+    }
+    Ok(())
+}
+
+fn read_register(data: &[u8], cursor: &mut usize) -> Result<Operand, BeamError> {
+    let first = *data
+        .get(*cursor)
+        .ok_or_else(|| error("truncated BEAM operand"))?;
+    let tag = first & COMPACT_TAG_MASK;
+    match tag {
+        TAG_REGISTER => Ok(Operand::X(read_operand(data, cursor, TAG_REGISTER)? as u32)),
+        TAG_Y_REGISTER => Ok(Operand::Y(
+            read_operand(data, cursor, TAG_Y_REGISTER)? as u32
+        )),
+        _ => Err(error(format!("unsupported BEAM register tag {tag}"))),
+    }
+}
+
+fn read_move_operand(
+    data: &[u8],
+    cursor: &mut usize,
+    atoms: &[String],
+    literals: &[Option<Term>],
+) -> Result<Operand, BeamError> {
+    let first = *data
+        .get(*cursor)
+        .ok_or_else(|| error("truncated BEAM operand"))?;
+    match first & COMPACT_TAG_MASK {
+        TAG_INTEGER | TAG_ATOM => Ok(Operand::Value(read_value(data, cursor, atoms)?)),
+        TAG_LITERAL => {
+            if read_integer(data, cursor, TAG_LITERAL)? != LITERAL_SUBTAG {
+                return Err(error("unsupported extended BEAM move operand"));
+            }
+            let literal_index = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+                .map_err(|_| error("BEAM literal index exceeds platform limit"))?;
+            match literals.get(literal_index) {
+                Some(Some(value)) => Ok(Operand::Value(value.clone())),
+                Some(None) => Ok(Operand::UnsupportedLiteral(literal_index)),
+                None => Err(error(format!(
+                    "BEAM literal index {literal_index} is out of range"
+                ))),
+            }
+        }
+        TAG_REGISTER | TAG_Y_REGISTER => read_register(data, cursor),
+        tag => Err(error(format!("unsupported move operand tag {tag}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
+    use super::{
+        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BIF1, OPCODE_BIF2, OPCODE_BS_CREATE_BIN,
+        OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_CALL_LAST, OPCODE_GET_LIST,
+        OPCODE_GET_RECORD_ELEMENTS, OPCODE_INIT_YREGS, OPCODE_MAKE_FUN3, OPCODE_PUT_MAP_ASSOC,
+        OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_SWAP, OPCODE_TEST_HEAP, OPCODE_TEST_IS_MAP,
+        OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRIM, OPCODE_UPDATE_RECORD, parse_code,
+        read_move_operand, skip_counted_operands, skip_integer_payload, skip_operand,
+        skip_select_val, skip_unsupported_instruction, unsupported_opcode_operand_count,
+    };
+    use crate::beam::{code::Operand, term::Term};
+
+    #[test]
+    fn rejects_invalid_operands_and_code_headers() {
+        let mut cursor = 0;
+        assert!(read_integer(&[0x12], &mut cursor, 1).is_err());
+        assert!(read_integer_after_first(&[], &mut 0, 0x19).is_err());
+        assert!(read_integer_after_first(&[], &mut 0, 0x09).is_err());
+        assert!(read_operand(&[], &mut 0, 0).is_err());
+        assert!(read_value(&[0x03], &mut 0, &[]).is_err());
+        assert!(read_value(&[0x12], &mut 0, &[]).is_err());
+        assert!(parse_code(&[], &[], &[], &[]).is_err());
+        assert!(parse_code(&[0; 20], &[], &[], &[]).is_err());
+        assert!(
+            parse_code(
+                &[0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                &[],
+                &[],
+                &[],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reads_only_supported_move_literals() {
+        let literals = vec![Some(Term::Binary(b"ok".to_vec())), None];
+        assert!(matches!(
+            read_move_operand(&[0x47, 0x00], &mut 0, &[], &literals).unwrap(),
+            Operand::Value(Term::Binary(value)) if value == b"ok"
+        ));
+        assert!(matches!(
+            read_move_operand(&[0x47, 0x10], &mut 0, &[], &literals).unwrap(),
+            Operand::UnsupportedLiteral(1)
+        ));
+        assert!(read_move_operand(&[0x47, 0x20], &mut 0, &[], &literals).is_err());
+        assert!(read_move_operand(&[0x27, 0x00], &mut 0, &[], &literals).is_err());
+        assert!(read_move_operand(&[0x06], &mut 0, &[], &literals).is_err());
+        assert_eq!(
+            read_value(&[0x02], &mut 0, &[]).unwrap(),
+            Term::Atom("nil".into())
+        );
+    }
+
+    #[test]
+    fn skips_only_the_known_generated_selection_form() {
+        assert!(skip_select_val(&[0x03, 0x15, 0x17, 0x20, 0x12, 0x15, 0x22, 0x25], &mut 0).is_ok());
+        assert!(skip_select_val(&[0], &mut 0).is_err());
+        assert!(skip_select_val(&[0x03], &mut 0).is_err());
+        assert!(skip_select_val(&[0x03, 0x15, 0x27, 0], &mut 0).is_err());
+        assert!(skip_select_val(&[0x03, 0x15, 0x17, 0x10, 0x00], &mut 0).is_err());
+        assert!(skip_select_val(&[0x03, 0x15, 0x17, 0x80], &mut 0).is_err());
+        assert!(skip_select_val(&[0x03, 0x15, 0x17, 0x20, 0x03, 0x15], &mut 0).is_ok());
+        assert!(skip_select_val(&[0x03, 0x15, 0x17, 0x10], &mut 0).is_err());
+        assert!(skip_select_val(&[0x03, 0x15, 0x17, 0x20, 0x12, 0], &mut 0).is_err());
+    }
+
+    #[test]
+    fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
+        for (opcode, count) in [
+            (OPCODE_CALL_LAST, 3),
+            (OPCODE_TEST_HEAP, 2),
+            (OPCODE_BIF0, 2),
+            (OPCODE_BIF1, 4),
+            (OPCODE_BIF2, 5),
+            (OPCODE_TEST_LT, 3),
+            (OPCODE_TEST_TAGGED_TUPLE, 4),
+            (OPCODE_TEST_IS_MAP, 2),
+            (OPCODE_GET_LIST, 3),
+            (OPCODE_BADMATCH, 1),
+            (OPCODE_TRIM, 2),
+            (OPCODE_PUT_MAP_ASSOC, 5),
+            (OPCODE_GET_RECORD_ELEMENTS, 3),
+            (OPCODE_PUT_RECORD, 6),
+            (OPCODE_SWAP, 2),
+            (OPCODE_PUT_TUPLE2, 2),
+            (OPCODE_INIT_YREGS, 1),
+            (OPCODE_MAKE_FUN3, 3),
+            (OPCODE_BS_CREATE_BIN, 6),
+            (OPCODE_BS_INIT_WRITABLE, 0),
+            (OPCODE_BS_MATCH, 3),
+            (OPCODE_UPDATE_RECORD, 5),
+        ] {
+            assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
+        }
+        assert_eq!(unsupported_opcode_operand_count(255), None);
+
+        let mut cursor = 0;
+        assert!(skip_unsupported_instruction(255, &[], &mut cursor).is_err());
+        assert!(skip_unsupported_instruction(OPCODE_BIF1, &[0], &mut cursor).is_err());
+        assert!(skip_counted_operands(&[0x10], &mut 0).is_err());
+        assert!(skip_counted_operands(&[0x20], &mut 0).is_err());
+    }
+
+    #[test]
+    fn skips_extended_operands_and_reports_invalid_or_truncated_forms() {
+        for (operand, expected_cursor) in [
+            (vec![0x07, 0, 0, 0, 0, 0, 0, 0, 0], 9),
+            (vec![0x17], 1),
+            (vec![0x27, 0x10], 2),
+            (vec![0x37, 0x10, 0x10, 0x10], 4),
+            (vec![0x47, 0x10], 2),
+        ] {
+            let mut cursor = 0;
+            skip_operand(&operand, &mut cursor).unwrap();
+            assert_eq!(cursor, expected_cursor);
+        }
+        assert!(skip_operand(&[0x07], &mut 0).is_err());
+        assert!(skip_operand(&[0x37, 0x10], &mut 0).is_err());
+        assert!(skip_operand(&[0x57], &mut 0).is_err());
+        assert!(skip_operand(&[0x87], &mut 0).is_err());
+        assert!(skip_operand(&[0x0f], &mut 0).is_err());
+
+        let mut cursor = 0;
+        assert!(skip_integer_payload(&[0], &mut cursor, 0xf8).is_err());
+        assert!(skip_integer_payload(&[0, 0], &mut 0, 0x19).is_ok());
+        assert!(read_integer_after_first(&[0], &mut 0, 0xf9).is_err());
+    }
+}
