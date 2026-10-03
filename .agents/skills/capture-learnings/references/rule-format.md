@@ -1,12 +1,10 @@
 # Rule Format and Judgement Aids
 
-Reference for `capture-learnings`. Use these aids to decide whether a
-candidate rule earns a slot in `docs/agents/knowledge.md`.
+Reference for `capture-learnings`. Use these aids to decide whether a candidate rule earns a slot in `docs/agents/knowledge.md`. Write every section here, and every proposal this reference produces, as unwrapped paragraphs and bullets; do not add manual line-breaks mid-sentence.
 
 ## Entry template
 
-Match the existing entries of `docs/agents/knowledge.md`. The heading names
-the problem class that review found. The body states the rule.
+Match the existing entries of `docs/agents/knowledge.md`. The heading names the problem class that review found. The body states the rule.
 
 ```markdown
 ## <Problem class, for example "Runtime models depart from ERTS">
@@ -26,9 +24,7 @@ Show representative input and output in Rust code fences.
 
 ## Proposal template
 
-Show this to the user in Step 7. Only the entry goes into the file. The
-`Why`, `Good`, and `Bad` parts prove that the rule is concrete; they stay in
-the conversation.
+Show this to the user in Step 7. Only the entry goes into the file. The `Why`, `Good`, and `Bad` parts prove that the rule is concrete; they stay in the conversation.
 
 ````markdown
 Entry:
@@ -61,8 +57,7 @@ Use `text` or `markdown` fences when the rule is not about Rust code.
 - Why: 1 sentence.
 - Good / Bad: 2 to 6 lines each, no commentary inside the block.
 
-If a rule needs more room, it does two things. Split it or drop the
-secondary point.
+If a rule needs more room, it does two things. Split it or drop the secondary point.
 
 ## Abstraction test
 
@@ -77,11 +72,9 @@ All must hold:
 
 Any one must hold:
 
-- It applies each time a developer writes a kind of code (parser,
-  instruction, BIF, process operation, test).
+- It applies each time a developer writes a kind of code (parser, instruction, BIF, process operation, test).
 - It applies each time a tool runs (`mise run check`, `erlc -S`, `gh`).
-- The mistake comes from a misunderstanding that can repeat (for example,
-  a Rust shortcut in place of ERTS behavior).
+- The mistake comes from a misunderstanding that can repeat (for example, a Rust shortcut in place of ERTS behavior).
 
 ## Why the `Bad` example is mandatory
 
