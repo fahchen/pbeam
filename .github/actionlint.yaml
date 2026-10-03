@@ -1,0 +1,6 @@
+paths:
+  .github/workflows/capture-learnings.yml:
+    ignore:
+      # GitHub added the copilot-requests scope for Copilot CLI with
+      # GITHUB_TOKEN. The pinned actionlint does not know it yet.
+      - 'unknown permission scope "copilot-requests"'

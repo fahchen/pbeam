@@ -1,0 +1,124 @@
+name: Capture Learnings
+
+# After a PR merges into main, Copilot CLI runs
+# .github/prompts/capture-learnings.prompt.md for that PR. Copilot generates
+# and commits the knowledge change and writes the result files. A separate
+# step pushes, opens the knowledge PR, and comments on the merged PR. The same
+# prompt also runs locally on an open PR during its implementation.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capture-learnings
+  cancel-in-progress: false
+
+jobs:
+  capture-learnings:
+    name: capture learnings
+    # Skip unmerged PRs, fork PRs (their token cannot write), and the
+    # knowledge PRs that this workflow opens.
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !startsWith(github.event.pull_request.head.ref, 'learnings/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      copilot-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      OUTPUT: /tmp/capture-learnings
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+
+      # Only comments from trusted human reviewers can become rules. Comments
+      # from bots or from people outside the repository are ignored, so their
+      # text never reaches Copilot as a rule source.
+      - name: Count trusted human comments
+        id: comments
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          trusted='select(.user.type == "User" and (.author_association | IN("OWNER", "MEMBER", "COLLABORATOR")))'
+          count=$(
+            {
+              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" --jq ".[] | $trusted | .id"
+              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --jq ".[] | select(.body != \"\") | $trusted | .id"
+              gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --jq ".[] | $trusted | .id"
+            } | wc -l | tr -d " "
+          )
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          if [ "$count" -eq 0 ]; then
+            gh pr comment "$PR_NUMBER" --body "No new review learnings. The PR has no comments from human reviewers."
+          fi
+
+      - name: Install Copilot CLI
+        if: steps.comments.outputs.count != '0'
+        run: npm install -g @github/copilot@1.0.91
+
+      - name: Configure git identity
+        if: steps.comments.outputs.count != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Generate learnings with Copilot
+        if: steps.comments.outputs.count != '0'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        # Copilot reads GitHub, edits and commits docs/agents/knowledge.md, and
+        # writes result files. The next step pushes, opens the PR, and comments.
+        run: |
+          mkdir -p "$OUTPUT"
+          copilot -s --no-ask-user --model sonnet \
+            --allow-tool='write' \
+            --allow-tool='shell(gh api:*)' \
+            --allow-tool='shell(gh pr view:*)' \
+            --allow-tool='shell(git switch:*)' \
+            --allow-tool='shell(git add:*)' \
+            --allow-tool='shell(git commit:*)' \
+            --allow-tool='shell(git status:*)' \
+            --allow-tool='shell(git diff:*)' \
+            --allow-tool='shell(grep:*)' \
+            --allow-tool='shell(wc:*)' \
+            -p "MODE: ci PR: #${PR_NUMBER} OUTPUT: ${OUTPUT} $(cat .github/prompts/capture-learnings.prompt.md)"
+
+      - name: Push, open the knowledge PR, and comment
+        if: steps.comments.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          comment="$OUTPUT/comment.md"
+          if [ -n "$(git log --oneline origin/main..HEAD)" ]; then
+            branch=$(git branch --show-current)
+            # A re-run replaces the branch of the earlier run and reuses its PR.
+            git push --force origin "$branch"
+            url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null \
+              || gh pr create --base main --head "$branch" \
+                --title "docs: capture review learnings from #$PR_NUMBER" \
+                --body-file "$OUTPUT/pr-body.md" --label documentation)
+            printf '\nKnowledge PR: %s\n' "$url" >> "$comment"
+          fi
+          cat "$comment" >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$PR_NUMBER" --body-file "$comment"
+
+      - name: Report a failed capture
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh pr comment "$PR_NUMBER" \
+            --body "Capture of review learnings failed. See the workflow run: $RUN_URL"
