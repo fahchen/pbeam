@@ -100,27 +100,40 @@ pub(crate) enum Instruction {
     ///
     /// Encoding: opcode, then a compact unsigned label. Example: `[0x01, 0x10]`
     /// encodes label 1.
+    ///
+    /// Erlang: every function and branch target has a label.
+    /// `a() -> ok.` compiles to `{label,1}` and `{label,2}`.
     Label(u32),
     /// Declares the module, function, and arity for the following function.
     /// Atom indexes refer to the one-based `AtU8` table.
     ///
     /// Encoding: opcode, module atom, function atom, and arity. Example:
     /// `[0x02, 0x12, 0x22, 0x00]` refers to atom indexes 1 and 2 with arity 0.
+    ///
+    /// Erlang: `a() -> ok.` in module `ex` compiles to
+    /// `{func_info,{atom,ex},{atom,a},0}`.
     FunctionInfo {
         module: String,
         name: String,
         arity: u32,
     },
     /// Moves a literal or register value into an X or Y register.
+    ///
+    /// Erlang: `a() -> ok.` compiles to `{move,{atom,ok},{x,0}}`.
     Move(Operand, Operand),
-    Call {
-        arity: u32,
-        label: u32,
-    },
-    CallOnly {
-        arity: u32,
-        label: u32,
-    },
+    /// Calls a local function and continues after it returns.
+    ///
+    /// Erlang: `b(X) -> c(X), ok.` compiles to `{call,1,{f,6}}`.
+    Call { arity: u32, label: u32 },
+    /// Tail-calls a local function.
+    ///
+    /// Erlang: `c(X) -> d(X).` compiles to `{call_only,1,{f,8}}`.
+    CallOnly { arity: u32, label: u32 },
+    /// Calls an imported function. `tail` marks `call_ext_last` and
+    /// `call_ext_only`; `deallocate` is the stack size to release first.
+    ///
+    /// Erlang: `d(X) -> lists:reverse(X).` compiles to
+    /// `{call_ext_only,1,{extfunc,lists,reverse,1}}`.
     CallExternal {
         arity: u32,
         module: String,
@@ -132,6 +145,8 @@ pub(crate) enum Instruction {
     ///
     /// Encoding: opcode, import index, destination register. Example:
     /// `[0x09, 0x00, 0x03]` calls import 0 and writes `x0`.
+    ///
+    /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`.
     Bif0 {
         module: String,
         name: String,
@@ -139,23 +154,40 @@ pub(crate) enum Instruction {
     },
     /// An instruction that is parsed so the module can load, but cannot run.
     Unsupported(u8),
-    Allocate {
-        stack_size: u32,
-    },
-    Deallocate {
-        stack_size: u32,
-    },
+    /// Allocates `stack_size` Y registers for the active function.
+    ///
+    /// Erlang: `b(X) -> c(X), ok.` compiles to `{allocate,0,1}`.
+    Allocate { stack_size: u32 },
+    /// Releases the Y registers of the active function.
+    ///
+    /// Erlang: `b(X) -> c(X), ok.` compiles to `{deallocate,0}`.
+    Deallocate { stack_size: u32 },
+    /// Continues execution after a label.
+    ///
+    /// Erlang: a receive clause jumps past the `after` body, for example
+    /// `{jump,{f,8}}` in `fixtures/process/process_probe.erl`.
     Jump(u32),
+    /// Jumps to `fail_label` when the value does not have the tested type.
+    ///
+    /// Erlang: `e(X) when is_atom(X) -> X; e(_) -> other.` compiles to
+    /// `{test,is_atom,{f,11},[{x,0}]}`.
     Test {
         kind: TestKind,
         fail_label: u32,
         value: Operand,
     },
+    /// Jumps to the label of the first matching choice, or to `fail_label`.
+    ///
+    /// Erlang: `f(1) -> one; f(2) -> two; f(_) -> many.` compiles to
+    /// `{select_val,{x,0},{f,16},{list,[{integer,1},{f,15},{integer,2},{f,14}]}}`.
     SelectValue {
         value: Operand,
         fail_label: u32,
         choices: Vec<(Term, u32)>,
     },
+    /// Builds a list cell from a head and a tail.
+    ///
+    /// Erlang: `[X]` compiles to `{put_list,{x,0},nil,{x,0}}`.
     PutList {
         head: Operand,
         tail: Operand,
@@ -166,6 +198,9 @@ pub(crate) enum Instruction {
     /// Encoding: opcode, destination register, extended list, element count,
     /// elements. Example: `[0xA4, 0x03, 0x17, 0x20, 0x12, 0x22]` writes a
     /// tuple of atoms 1 and 2 to `x0`.
+    ///
+    /// Erlang: `g(X) -> {X, X}.` compiles to
+    /// `{put_tuple2,{x,0},{list,[{x,0},{x,0}]}}`.
     PutTuple {
         elements: Vec<Operand>,
         destination: Operand,
@@ -174,6 +209,9 @@ pub(crate) enum Instruction {
     ///
     /// Encoding: opcode, tuple register, unsigned index, destination register.
     /// Example: `[0x42, 0x03, 0x10, 0x13]` copies element 1 of `x0` to `x1`.
+    ///
+    /// Erlang: `{Service, Monitor} = spawn_monitor(M, F, A)` reads `Monitor`
+    /// with `{get_tuple_element,{x,0},1,{y,2}}`.
     GetTupleElement {
         tuple: Operand,
         index: u32,
@@ -184,6 +222,9 @@ pub(crate) enum Instruction {
     /// Encoding: opcode, fail label, two operands. A typed register (extended
     /// subtag 5) reads as its register. Example: `[0x2B, 0x35, 0x13, 0x12]`
     /// compares `x1` with atom 1 and fails to label 3.
+    ///
+    /// Erlang: `receive {io_reply, Reference, ok} -> io_ok end` compiles to
+    /// `{test,is_eq_exact,{f,14},[{x,0},{atom,ok}]}`.
     TestExactEqual {
         fail_label: u32,
         left: Operand,
@@ -195,6 +236,9 @@ pub(crate) enum Instruction {
     /// Encoding: opcode, fail label, operand, unsigned arity, tag atom.
     /// Example: `[0x9F, 0x35, 0x03, 0x30, 0x12]` tests `x0` for a 3-tuple
     /// tagged with atom 1.
+    ///
+    /// Erlang: `receive {io_reply, Reference, ok} -> io_ok end` compiles to
+    /// `{test,is_tagged_tuple,{f,14},[{x,0},3,{atom,io_reply}]}`.
     TestTaggedTuple {
         fail_label: u32,
         value: Operand,
@@ -204,17 +248,23 @@ pub(crate) enum Instruction {
     /// Sends `x1` to the process in `x0`, then writes the message to `x0`.
     ///
     /// Encoding: `[0x14]`.
+    ///
+    /// Erlang: `Pid ! Message` compiles to `send`.
     Send,
     /// Removes the current message from the mailbox and resets the receive
     /// cursor.
     ///
     /// Encoding: `[0x15]`.
+    ///
+    /// Erlang: a matched `receive` clause compiles to `remove_message`.
     RemoveMessage,
     /// Writes the message at the receive cursor to a register, or jumps to
     /// `fail_label` when no message is left.
     ///
     /// Encoding: opcode, fail label, destination register. Example:
     /// `[0x17, 0x35, 0x03]` writes `x0` or fails to label 3.
+    ///
+    /// Erlang: `receive ... end` starts with `{loop_rec,{f,15},{x,0}}`.
     LoopReceive {
         fail_label: u32,
         destination: Operand,
@@ -223,41 +273,64 @@ pub(crate) enum Instruction {
     /// label.
     ///
     /// Encoding: opcode, label. Example: `[0x18, 0x35]` jumps to label 3.
+    ///
+    /// Erlang: a `receive` clause that does not match compiles to
+    /// `{loop_rec_end,{f,3}}`.
     LoopReceiveEnd(u32),
     /// Suspends the process until a message arrives, then continues at the
     /// label.
     ///
     /// Encoding: opcode, label. Example: `[0x19, 0x35]` continues at label 3.
+    ///
+    /// Erlang: `receive ... end` without `after` ends with `{wait,{f,3}}`.
     Wait(u32),
     /// Ends a receive after its timeout and resets the receive cursor.
     ///
     /// Encoding: `[0x16]`.
+    ///
+    /// Erlang: `receive ... after 0 -> no_exit end` compiles to `timeout`
+    /// before the `after` body.
     Timeout,
     /// Saves the current mailbox end and writes a new marker reference.
     ///
     /// Encoding: opcode, register. Example: `[0xAF, 0x14]` writes `y1`.
+    ///
+    /// Erlang: `Ref = make_ref(), Pid ! {request, Ref}, receive {Ref, R} -> R end`
+    /// compiles to `{recv_marker_reserve,{y,1}}` before `make_ref/0`.
     ReceiveMarkerReserve(Operand),
     /// Moves a saved marker position to the bound reference.
     ///
     /// Encoding: opcode, marker register, reference register. Example:
     /// `[0xAD, 0x14, 0x03]` binds marker `y1` to the reference in `x0`.
-    ReceiveMarkerBind {
-        marker: Operand,
-        reference: Operand,
-    },
+    ///
+    /// Erlang: the same pattern compiles to `{recv_marker_bind,{y,1},{x,0}}`
+    /// after `make_ref/0`.
+    ReceiveMarkerBind { marker: Operand, reference: Operand },
     /// Sets the receive cursor from the marker bound to a reference.
     ///
     /// Encoding: opcode, register. Example: `[0xB0, 0x14]` uses `y1`.
+    ///
+    /// Erlang: the same pattern compiles to `{recv_marker_use,{y,1}}` before
+    /// the `receive`.
     ReceiveMarkerUse(Operand),
     /// Removes the marker bound to a reference.
     ///
     /// Encoding: opcode, register. Example: `[0xAE, 0x14]` clears `y1`.
+    ///
+    /// Erlang: the same pattern compiles to `{recv_marker_clear,{y,1}}` when
+    /// the `receive` matches.
     ReceiveMarkerClear(Operand),
+    /// An instruction that has no runtime effect, such as `test_heap` or
+    /// `init_yregs`.
+    ///
+    /// Erlang: `g(X) -> {X, X}.` compiles to `{test_heap,3,1}` first.
     Noop,
     /// Returns the value in `x0` from the active function.
     ///
     /// Encoding: `[0x13]`. Execution reports an error if the function has not
     /// set `x0`.
+    ///
+    /// Erlang: `a() -> ok.` ends with `return`.
     Return,
     /// Marks the end of the `Code` instruction stream.
     ///
