@@ -53,7 +53,7 @@ emits `hello_reference.app`; the fixture has no third-party dependencies.
 Observed results: four tests pass; each module has 100% application line coverage.
 Both subprocesses have empty stderr and exit zero. Stdout is `Hello, world!\n`
 and `Another greeting.\n`, respectively. Rust application line coverage is
-1083/1083 (100%). In-process tests measure fixture coverage; subprocess tests
+1205/1205 (100%). In-process tests measure fixture coverage; subprocess tests
 independently verify the original compiled artifacts and process-level results.
 
 | Kind | Instruction or operation | Required semantics | Evidence | PBeam support and limits | Task / PR / test |
@@ -63,7 +63,7 @@ independently verify the original compiled artifacts and process-level results.
 | Instruction | `call_ext_only 1, Elixir.IO:puts/1` | External tail call with one argument | Static entry instruction; PBeam verification remains pending | Supports this `call_ext_only` form for this fixture | #42; `hello.rs` |
 | Loader metadata | `label`, `line`, `func_info` | Resolve entry label 11 and skip line metadata | Static `main/0` disassembly; PBeam verification remains pending | Skips line metadata; generated `select_val`, `call_only`, and `jump` stay unsupported at execution | #42; `hello.rs` |
 | Terms | Binary literals, atom `ok` | Load each greeting and return the `:io.put_chars/2` result | Static entry disassembly; PBeam verification remains pending | Supports referenced UTF-8 ETF binaries and required atoms only as verified by the task chain | #42; `hello.rs` |
-| Module loading | Complete `Elixir.IO.beam` code chunk | Read all code and retain unsupported instructions | Pinned Elixir 1.20.4 and OTP 29.1.1 module load | Decode forms used by this module; do not execute unsupported forms | #51 |
+| Module loading | Complete `Elixir.IO.beam` code chunk | Read all code and retain unsupported instructions | `loads_the_pinned_elixir_io_module` with Elixir 1.20.4 and OTP 29.1.1 | Decode forms used by this module; do not execute unsupported forms | #51; PR #47 |
 | External MFA | `Elixir.IO:puts/1` | Execute the compiled Elixir implementation | Pinned Elixir `Elixir.IO.beam` disassembly | No native mapping is accepted for this MFA | #48 |
 | External MFA | `Elixir.IO:puts/2` | Map `:stdio`, convert binary to chardata, append newline, call `:io.put_chars/2` | Compiled BEAM disassembly and Elixir `io.ex` source | Implement only the fixture's binary standard-output path | #48 |
 | Process and IO protocol | `:io.put_chars/2` | Send an IO request to the group leader and receive its matching reply | OTP 29 `io.beam` disassembly and `stdlib/src/io.erl` | Implement only the request, reply, monitor, and process behavior reached by this call | #49 |
@@ -92,8 +92,9 @@ standard-output path reached by these fixtures. General chardata, custom devices
 and unrelated process behavior remain out of scope.
 
 After the task chain is implemented, compile the Elixir fixture from
-`fixtures/hello`, then run PBeam from the repository root. The current PR #47 command
-uses the rejected direct IO shortcut and is not acceptance evidence:
+`fixtures/hello`, then run PBeam from the repository root. PR #47 removes the direct
+IO shortcut. The command still cannot complete the greeting because task #48 must
+add execution for the compiled `Elixir.IO` path:
 
 ```sh
 mix compile --warnings-as-errors
@@ -162,8 +163,9 @@ delegate execution to ERTS or an external Elixir process.
 
 The deliverable is a runnable PBeam command plus a regression test that captures
 its stdout, stderr, and exit status. Task #42 is the final command and acceptance
-task. PR #47 is draft for task #51. It contains a direct `Elixir.IO:puts/1`
-shortcut that must be removed before merge.
+task. PR #47 implements task #51 and is ready for review. It loads the pinned
+`Elixir.IO.beam` module and retains unsupported instructions. The `puts` path remains
+unsupported until task #48.
 
 [Reference task #41](https://github.com/fahchen/pbeam/issues/41) captures the ERTS
 baseline and disassembles its compiler output as preparation. Existing constant-return

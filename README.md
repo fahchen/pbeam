@@ -18,10 +18,9 @@ The wider interpreter, scheduler, and application build tooling are not implemen
 
 [Hello World](docs/hello-world-target.md) is the first target: PBeam executes the
 compiled Elixir entry, prints exactly `Hello, world!\n`, and exits successfully.
-The current task plan executes the compiled Elixir and OTP IO path through the
-group leader. Draft PR #47 is being reshaped to load the pinned `Elixir.IO.beam`
-module. Its direct `Elixir.IO:puts/1` shortcut must be removed. Compilation and
-an ERTS smoke run alone do not meet this target.
+The current task chain executes the compiled Elixir and OTP IO path through the
+group leader. PR #47 loads the pinned `Elixir.IO.beam` module. It does not execute
+the IO path yet. Compilation and an ERTS smoke run alone do not meet this target.
 [Terra Counter](docs/terra-target.md) follows as a broader macOS arm64 PTY scenario. Full OTP
 compatibility, hot code upgrades, JIT/AOT, and traditional NIF ABI compatibility
 are outside the initial scope. Each executable targets a particular platform;
