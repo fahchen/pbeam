@@ -1,8 +1,10 @@
 name: Capture Learnings
 
 # After a PR merges into main, Copilot CLI runs
-# .github/prompts/capture-learnings.prompt.md for that PR. The same prompt
-# also runs locally on an open PR during its implementation.
+# .github/prompts/capture-learnings.prompt.md for that PR. Copilot only
+# generates the knowledge change and the result files. A separate step
+# commits, opens the knowledge PR, and comments on the merged PR. The same
+# prompt also runs locally on an open PR during its implementation.
 
 on:
   pull_request:
@@ -31,6 +33,7 @@ jobs:
       copilot-requests: write
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
+      OUTPUT: /tmp/capture-learnings
     steps:
       - name: Check out main
         uses: actions/checkout@v7.0.1
@@ -46,28 +49,50 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Run capture-learnings
+      - name: Generate learnings with Copilot
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
+        # Copilot only reads GitHub, edits docs/agents/knowledge.md, and writes
+        # result files. The next step commits, opens the PR, and comments.
         run: |
+          mkdir -p "$OUTPUT"
           copilot -s --no-ask-user \
             --allow-tool='write' \
-            --allow-tool='shell(gh pr view:*)' \
-            --allow-tool='shell(gh pr create:*)' \
-            --allow-tool='shell(gh pr comment:*)' \
             --allow-tool='shell(gh api:*)' \
-            --allow-tool='shell(git switch:*)' \
-            --allow-tool='shell(git add:*)' \
-            --allow-tool='shell(git commit:*)' \
-            --allow-tool='shell(git push:*)' \
-            --allow-tool='shell(git log:*)' \
-            --allow-tool='shell(git diff:*)' \
-            --allow-tool='shell(git status:*)' \
+            --allow-tool='shell(gh pr view:*)' \
             --allow-tool='shell(grep:*)' \
             --allow-tool='shell(wc:*)' \
-            --deny-tool='shell(git push origin main)' \
-            -p "PR: #${PR_NUMBER} $(cat .github/prompts/capture-learnings.prompt.md)"
+            -p "MODE: ci PR: #${PR_NUMBER} OUTPUT: ${OUTPUT} $(cat .github/prompts/capture-learnings.prompt.md)"
+
+      - name: Commit, open the knowledge PR, and comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f "$OUTPUT/comment.md" ]; then
+            echo "Copilot did not write comment.md" >&2
+            exit 1
+          fi
+          if git diff --quiet -- docs/agents/knowledge.md; then
+            gh pr comment "$PR_NUMBER" --body-file "$OUTPUT/comment.md"
+            exit 0
+          fi
+          unexpected=$(git status --porcelain | grep -v ' docs/agents/knowledge.md$' || true)
+          if [ -n "$unexpected" ]; then
+            echo "Copilot changed other files:" >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+          branch="learnings/pr-$PR_NUMBER"
+          git switch -c "$branch"
+          git add docs/agents/knowledge.md
+          git commit -F "$OUTPUT/commit.md"
+          git push -u origin "$branch"
+          url=$(gh pr create --base main --head "$branch" \
+            --title "docs: capture review learnings from #$PR_NUMBER" \
+            --body-file "$OUTPUT/pr-body.md" --label documentation)
+          { cat "$OUTPUT/comment.md"; echo; echo "Knowledge PR: $url"; } > "$OUTPUT/final-comment.md"
+          gh pr comment "$PR_NUMBER" --body-file "$OUTPUT/final-comment.md"
 
       - name: Report a failed capture
         if: failure()

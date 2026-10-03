@@ -4,8 +4,16 @@ description: Capture recurring review problem classes from the human comments on
 
 # Capture review learnings from a PR
 
-The caller gives the PR number before this prompt, as `PR: #<N>`. Use the
-repository of the current checkout.
+The caller gives two values before this prompt:
+
+- `PR: #<N>`: the PR to analyse.
+- `OUTPUT: <dir>`: a directory outside the repository for the result files.
+  A local run without `OUTPUT` uses a new temporary directory.
+
+Use the repository of the current checkout. This prompt only reads GitHub,
+edits `docs/agents/knowledge.md`, and writes result files. It does not
+commit, push, open PRs, or comment. The caller does that with the result
+files (see `## 5. Publish the result`).
 
 Run the capture-learnings skill for that PR. Read
 `.agents/skills/capture-learnings/SKILL.md`, its references, `AGENTS.md`, and
@@ -29,48 +37,54 @@ problem class, or a question or correction that changed the code. Apply
 Steps 2 to 6 of the skill to each candidate: abstraction, recurrence, Good
 and Bad examples, overlap, and capacity.
 
-## 3. Act on the result
+## 3. Write the entries
 
-Pick the mode from the PR state (`gh pr view <N> --json state,headRefName`):
+- **Local run** (an agent session during the PR implementation): show the
+  proposals and wait for the user confirmation, as Step 7 of the skill says.
+  Write only the confirmed entries.
+- **CI run** (`MODE: ci` is given): nobody can confirm. Write every entry
+  that passes all checks. The review of the knowledge PR replaces the
+  confirmation.
 
-- **Open PR** (local run during the implementation): show the proposals and
-  wait for the user confirmation, as Step 7 of the skill says. Write the
-  confirmed entries on the PR branch. Commit them with the `commit` skill
-  as a separate `docs:` commit, and push. Then comment on the PR (see
-  `## 4. Comment on the PR`).
-- **Merged PR** (CI run): nobody can confirm. The review of a knowledge PR
-  replaces the confirmation.
-  - No candidate passes: do not change files.
-  - At least one candidate passes, and no pruning is necessary: create
-    branch `learnings/pr-<N>` from `main`. Write only the entries into
-    `docs/agents/knowledge.md` (Step 8 of the skill). Commit with the subject
-    `docs: capture review learnings from #<N>` and a body that names each
-    rule and its source threads. Push the branch. Open a PR to `main` with
-    the same title and the label `documentation`. For each rule, the PR body
-    shows the full proposal (entry, Why, Good, Bad), the overlap analysis,
-    and links to the source review threads. Comment on the merged PR only
-    after the new PR exists.
-  - Pruning is necessary: do not write.
+Write only the entries into `docs/agents/knowledge.md` (Step 8 of the
+skill). If the capacity check needs pruning, do not write.
 
-## 4. Comment on the PR
+## 4. Write the result files
 
-Every run ends with exactly one comment on the PR, in both modes, whatever
-the result:
+Write these files into `OUTPUT`:
 
-- Rules captured: "Captured review learnings in <commit SHA or #new PR>.",
-  then the heading of each captured rule.
-- No rule captured: "No new review learnings.", then one line for each
-  candidate with the check or user decision that rejected it. If there were
-  no candidates, say that the PR had no human review comments or no
-  recurring problem class.
-- Pruning needed: the candidate rules and the 5 prune candidates, with a
-  request to the owner to choose.
+- `comment.md` (always): the comment for the PR.
+  - Rules captured: "Captured review learnings from this PR.", then the
+    heading of each captured rule. The caller adds the link to the commit or
+    the knowledge PR.
+  - No rule captured: "No new review learnings.", then one line for each
+    candidate with the check or user decision that rejected it. If there were
+    no candidates, say that the PR had no human review comments or no
+    recurring problem class.
+  - Pruning needed: the candidate rules and the 5 prune candidates, with a
+    request to the owner to choose.
+- `pr-body.md` (only when rules are captured): the body of the knowledge PR.
+  For each rule: the full proposal (entry, Why, Good, Bad), the overlap
+  analysis, and links to the source review threads.
+- `commit.md` (only when rules are captured): the commit message. Subject
+  `docs: capture review learnings from #<N>`, a blank line, and a body that
+  names each rule and its source threads. No attribution trailers.
+
+## 5. Publish the result
+
+The caller publishes the result. Every run ends with exactly one comment on
+the PR.
+
+- **CI run:** the workflow commits on branch `learnings/pr-<N>`, pushes,
+  opens the knowledge PR with `pr-body.md`, and comments on the merged PR
+  with `comment.md` and the link to the knowledge PR.
+- **Local run:** after this prompt, commit the entries on the PR branch with
+  the `commit` skill (message from `commit.md`), push, and post `comment.md`
+  with the commit SHA as a PR comment.
 
 ## Limits
 
 - Change only `docs/agents/knowledge.md`.
-- Never push to `main`.
-- Do not add attribution trailers to commits.
 - Keep the Markdown style of the knowledge file: line length 80 or less, one
   blank line around headings.
 - Write all text in ASD-STE100 Simplified Technical English.
