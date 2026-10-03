@@ -1,10 +1,10 @@
 # Portable BEAM runtime specification
 
-Status: architecture baseline reconstructed from the design conversation; constant-return and bounded-call slices are implemented. PR #47 merged as `265f173` and loads the pinned Elixir IO module. The Hello World execution tasks run its compiled IO path through the OTP group leader. The output shortcut is removed, but the IO path is not implemented yet.
+Status: architecture baseline reconstructed from the design conversation; constant-return and bounded-call slices are implemented. PR #47 merged as `265f173` and loads the pinned Elixir IO module. PR #52 merged as `5f94923` and executes its compiled IO path through the unresolved `:io.put_chars/2` boundary. Tasks #49 and #50 remain before the Hello World command can write output.
 
 Source: [Branch · Portable BEAM实现原理](chatgpt-conversation://6abe6693-526c-83ee-8922-0af41462fb49).
 
-The source conversation names a generated `portable_beam_runtime_handoff.md`, but its contents were unavailable during transcription. This document captures the readable discussion, not a verbatim copy of that attachment. Requirements below express the proposed design. Acceptance checks make that design reviewable; they are not evidence of an existing implementation. Open questions remain explicit.
+The source conversation and supplied handoff are design input. This specification records the decisions accepted for this repository and the current issue scopes. Its requirements are not evidence of implementation unless an acceptance check says so. Open questions remain explicit.
 
 ## 1. Goal
 
@@ -224,7 +224,7 @@ macOS system frameworks/libraries remain normal dependencies. Linux musl builds 
 These checks operationalize the design; expand them only as supported behavior grows.
 
 - [Implemented] Load checked-in BEAM fixtures; read `AtU8`, `Code`, `ExpT`, and required `ImpT` data; execute exported constants and a bounded local/external call chain with a small integer; reject malformed containers and unsupported instructions with diagnostics. This is a narrow fixture check, not general BEAM compatibility.
-- [Planned; tasks #51, #48–#50 block #42] Load the pinned Elixir IO module. Run both compiled Hello World entries without ERTS through compiled Elixir IO and the OTP group-leader request/reply path. Match reference stdout, stderr, and exit status before Terra acceptance work. Do not intercept `Elixir.IO:puts/1` or `:io.put_chars/2` with direct host output.
+- [In progress; #51 and #48 merged; #49 and #50 block #42] Run both compiled Hello World entries without ERTS through compiled Elixir IO and the OTP group-leader request/reply path. PR #52 verifies the compiled Elixir path through `:io.put_chars/2`; it does not execute the OTP protocol or write host output. Match reference stdout, stderr, and exit status before Terra acceptance work. Do not intercept `Elixir.IO:puts/1` or `:io.put_chars/2` with direct host output.
 - Demonstrate process scheduling, reduction-based yielding, message wakeup, and work stealing with multiple schedulers. Verify exclusive process execution.
 - Exercise binary construction, sub-binary offsets, and non-byte-aligned matching wherever the selected application requires them.
 - Call the declared SHA-256 native example from Elixir and compare its result with a known digest. Verify bad arguments and missing registrations fail predictably.
