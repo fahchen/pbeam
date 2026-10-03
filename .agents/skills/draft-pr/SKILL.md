@@ -1,7 +1,7 @@
 ---
 name: draft-pr
-description: This skill should be used when the user asks to "create a PR", "open a PR", "create a draft PR", "make a PR", "/pr", "/draft-pr", or otherwise requests a GitHub pull request for the current branch in the pbeam repo. Uses the task issue title as the PR title, fills the repo PR template with task links, decisions, and exact verification, applies content labels, updates the task issue and epic, and stops for review.
-version: 0.1.0
+description: This skill should be used when the user asks to "create a PR", "open a PR", "create a draft PR", "make a PR", "/pr", "/draft-pr", or otherwise requests a GitHub pull request for the current branch in the pbeam repo. Uses the task issue title as the PR title, fills the repo PR template with task links, decisions, and exact verification, checks each Review boundary item and stops to ask if one fails, applies content labels, updates the task issue and epic, and stops for review.
+version: 0.3.0
 user-invocable: true
 allowed-tools:
   - Bash(git *)
@@ -100,11 +100,12 @@ logs or diffs. Check that no scratch file (`docs/tmp/`,
 
 ### 3. Verify
 
-Run `mise run check`. Record the exact commands and results, including
-`Application line coverage`. Run the acceptance check of the task (for
-example, the ERTS comparison test). If a check fails, stop and report. Do
-not open the PR with a failing check unless the user accepts it as a
-recorded gap.
+Run `mise run check`, even for a documentation-only or skill-only change: it
+runs `rumdl check .`, which catches markdown lint failures that CI also
+runs. Record the exact commands and results, including `Application line
+coverage`. Run the acceptance check of the task (for example, the ERTS
+comparison test). If a check fails, stop and report. Do not open the PR
+with a failing check unless the user accepts it as a recorded gap.
 
 ### 4. Surface open questions
 
@@ -125,10 +126,21 @@ Show them and ask for each: `fix now`, `record in PR`, or `ignore`.
 Follow the body rules in `references/conventions.md`. Write the body with the
 Write tool to a scratch file. Do not pass the body through a shell string.
 
-### 6. Final confirmation
+### 6. Check the Review boundary
 
-Print the title, body, labels, and milestone. Wait for an affirmative reply.
-Do not call `gh pr create` without it.
+Evaluate each `## Review boundary` item from the template against the
+actual diff and task:
+
+- This PR implements one task, with no unused foundations for later tasks.
+- Acceptance criteria and known limitations are documented.
+- Dependent implementation will wait for review and merge.
+
+If an item is false (for example, the diff adds a field or function no
+current task needs, or an acceptance criterion is unmet with no documented
+gap), stop and ask the user: report which item fails and why, and let them
+choose `fix now`, `record in PR` (as a known limitation in `##
+Verification`), or `confirm override`. Do not check a box that is false and
+do not silently proceed past a failing item.
 
 ### 7. Push and create
 

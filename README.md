@@ -75,6 +75,7 @@ rationale, tradeoffs, and verification. Prerequisite PRs must be reviewed and
 merged before dependent work begins. Issues and milestone checkpoints remain
 open until their acceptance evidence is reviewed.
 
-There are no file-based task plans or duplicate progress checklists. Follow
-[AGENTS.md](AGENTS.md) when contributing and use the
+There are no file-based task plans or duplicate progress checklists. Status
+tracking lives on the [project board](https://github.com/users/fahchen/projects/2).
+Follow [AGENTS.md](AGENTS.md) when contributing and use the
 [PR template](.github/pull_request_template.md) for review.

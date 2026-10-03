@@ -7,8 +7,9 @@ Before implementation, read `docs/agents/knowledge.md`.
 ## Scope and source of truth
 
 - Read `README.md` and `docs/portable-beam-spec.md` before changing runtime behavior.
-- Use GitHub Issues and their dependencies for planning and progress. Do not
-  create `tasks/plan.md`, `tasks/todo.md`, or another file-based task tracker.
+- Use GitHub Issues and their dependencies for planning and progress. Track
+  at-a-glance status on the [project board](https://github.com/users/fahchen/projects/2).
+  Do not create `tasks/plan.md`, `tasks/todo.md`, or another file-based task tracker.
 - Stay within the requested task. Resolve unknowns explicitly; do not invent
   Terra identity, compatibility guarantees, supported platforms, or working commands.
 
@@ -106,11 +107,14 @@ replace contradictory current instructions rather than appending a correction.
 - Understand the actual flow and all callers before fixing a bug. Fix the shared
   cause and preserve existing supported behavior.
 - Verify changed behavior with focused, runnable checks. For documentation-only
-  work, check consistency, links, and whitespace; do not scaffold a test framework.
-- `mise run check` must pass locally and in CI. Rust formatting and Clippy warnings
-  are merge blockers. Require 100% application line coverage; never lower the
-  threshold or exclude production code to pass it. An empty crate has no measurable
-  coverage and must be reported as N/A, not as 100%.
+  or skill-only work, run `mise run lint` (it includes `rumdl check .`); do not
+  scaffold a test framework.
+- Run `mise run check` before every commit and before opening a PR, including
+  documentation-only and skill-only changes. It must pass locally and in CI.
+  Rust formatting and Clippy warnings are merge blockers. Require 100%
+  application line coverage; never lower the threshold or exclude production
+  code to pass it. An empty crate has no measurable coverage and must be
+  reported as N/A, not as 100%.
 - Elixir fixtures in `fixtures/hello` use formatting, warnings-as-errors, tests,
   and 100% application coverage in the shared check command. Any additional Elixir
   project must add equivalent gates before introducing behavior.
