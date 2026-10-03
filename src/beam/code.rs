@@ -8,7 +8,7 @@ use super::{
 
 const WORD_SIZE: usize = 4;
 mod instruction;
-pub(super) use instruction::{Instruction, Operand};
+pub(super) use instruction::{Instruction, Operand, TestKind};
 
 const CHUNK_ALIGNMENT: usize = WORD_SIZE;
 const CHUNK_HEADER_SIZE: usize = WORD_SIZE * 2;
@@ -28,10 +28,10 @@ const TAG_REGISTER: u8 = 3;
 const TAG_Y_REGISTER: u8 = 4;
 const TAG_LABEL: u8 = 5;
 const TAG_LITERAL: u8 = 7;
-const LITERAL_SUBTAG: i128 = 4;
 const LIST_SUBTAG: i128 = 1;
 const ETF_VERSION: u8 = 131;
 const ETF_BINARY_EXT: u8 = 109;
+const ETF_STRING_EXT: u8 = 107;
 const FIRST_ATOM_INDEX: usize = 1;
 const FIRST_LABEL_NUMBER: u32 = 1;
 
@@ -68,7 +68,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// opcode_max ::= u32be
 /// label_count ::= u32be
 /// function_count ::= u32be
-/// executable_instruction ::= label | function_info | move | call | call_ext | allocate | deallocate | return | generated_instruction
+/// executable_instruction ::= label | function_info | move | call | call_only | call_ext | jump | select_val | test | put_list | allocate | deallocate | return | noop | generated_instruction
 /// label       ::= 1 compact(0)
 /// function_info ::= 2 compact(2) compact(2) compact(0)
 /// move        ::= 64 move_source (x_register | y_register)
@@ -78,6 +78,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// x_register  ::= compact(3)
 /// y_register  ::= compact(4)
 /// call        ::= 4 compact(0) compact(5)
+/// call_only   ::= 6 compact(0) compact(5)
 /// call_ext    ::= 7 compact(0) compact(0)
 /// call_ext_last ::= 8 compact(0) compact(0) compact(0)
 /// call_ext_only ::= 78 compact(0) compact(0)
@@ -85,12 +86,16 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// deallocate  ::= 18 compact(0)
 /// return      ::= 19
 /// line        ::= 153 compact(0)
-/// generated_instruction ::= 6 compact(0) compact(5) ; call_only
-/// generated_instruction ::= 61 compact(5) ; jump
-/// generated_instruction ::= 59 x_register compact(5) select_list
-/// select_list ::= compact(7) compact(0) select_item[select_count] ; first value is 1
-/// select_item ::= atom_value | label_value
-/// label_value ::= compact(5)
+/// jump       ::= 61 compact(5)
+/// select_val ::= 59 select_source compact(5) selection_list
+/// select_source ::= register | typed_register
+/// typed_register ::= compact(7, short=5) register compact(0)
+/// selection_list ::= compact(7, short=1) compact(0) selection_pair[select_count/2]
+/// selection_pair ::= atom_value compact(5)
+/// type_test ::= test_opcode compact(5) register
+/// test_opcode ::= 48 ; is_atom | 49 ; is_pid | 53 ; is_binary | 55 ; is_list
+/// put_list ::= 69 move_source move_source register
+/// noop ::= 16 test_heap_operands | 172 init_yregs_operands
 /// int_code_end ::= 3
 /// imports_chunk ::= "ImpT" chunk_size import_table padding
 /// import_table ::= import_count import[import_count]
@@ -104,6 +109,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// literal_count ::= u32be
 /// literal_entry ::= term_size:u32be external_term[term_size]
 /// binary_term ::= 131 109 binary_size:u32be byte[binary_size]
+/// string_term ::= 131 107 string_size:u16be byte[string_size]
 ///
 /// compact(tag) ::= short(tag) | extended(tag)
 /// short(tag)   ::= value:4 0 tag:3
@@ -122,7 +128,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// `function_count` must match the number of `function_info` instructions.
 /// `opcode_max` is not checked. The parser rejects duplicate chunk IDs. It
 /// supports only the listed instructions and compact operand forms. `LitT`
-/// supports uncompressed tables with ETF binary values when referenced. The
+/// supports uncompressed tables with ETF binary and string values when referenced. The
 /// parser retains generated instructions that it does not execute. Execution
 /// fails if it reaches one. Compact
 /// tags occupy the low three bits. The parser accepts the short and one-byte
@@ -344,7 +350,7 @@ fn parse_literals(data: &[u8]) -> Result<Vec<Option<Term>>, BeamError> {
             .checked_add(literal_size)
             .filter(|&end| end <= data.len())
             .ok_or_else(|| error("BEAM literal exceeds chunk size"))?;
-        literals.push(read_binary_literal(&data[cursor..literal_end])?);
+        literals.push(read_literal(&data[cursor..literal_end])?);
         cursor = literal_end;
     }
     if cursor != data.len() {
@@ -353,23 +359,46 @@ fn parse_literals(data: &[u8]) -> Result<Vec<Option<Term>>, BeamError> {
     Ok(literals)
 }
 
-/// Read an ETF binary term, or return `None` for another term type.
+/// Read a supported ETF binary or string term, or return `None` for another type.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let term = read_binary_literal(&[131, 109, 0, 0, 0, 2, b'o', b'k'])?;
+/// let term = read_literal(&[131, 109, 0, 0, 0, 2, b'o', b'k'])?;
 /// assert_eq!(term, Some(Term::Binary(b"ok".to_vec())));
+/// let newline = read_literal(&[131, 107, 0, 1, b'\\n'])?;
+/// assert_eq!(newline, Some(Term::List(vec![Term::Integer(10)])));
 /// ```
-fn read_binary_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
-    if data.get(..2) != Some(&[ETF_VERSION, ETF_BINARY_EXT]) {
+fn read_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
+    if data.first() != Some(&ETF_VERSION) {
         return Ok(None);
     }
-    let binary_size = read_u32(data.get(2..).unwrap_or_default())? as usize;
-    if binary_size != data.len() - WORD_SIZE - 2 {
-        return Err(error("invalid BEAM binary literal size"));
+    match data.get(1) {
+        Some(&ETF_BINARY_EXT) => {
+            let binary_size = read_u32(data.get(2..).unwrap_or_default())? as usize;
+            if binary_size != data.len() - WORD_SIZE - 2 {
+                return Err(error("invalid BEAM binary literal size"));
+            }
+            Ok(Some(Term::Binary(data[WORD_SIZE + 2..].to_vec())))
+        }
+        Some(&ETF_STRING_EXT) => {
+            let size_bytes: [u8; 2] = data
+                .get(2..4)
+                .ok_or_else(|| error("truncated BEAM string literal"))?
+                .try_into()
+                .map_err(|_| error("truncated BEAM string literal"))?;
+            let size = u16::from_be_bytes(size_bytes) as usize;
+            if size != data.len().saturating_sub(4) {
+                return Err(error("invalid BEAM string literal size"));
+            }
+            let characters = data[4..]
+                .iter()
+                .map(|&byte| Term::Integer(i64::from(byte)))
+                .collect();
+            Ok(Some(Term::List(characters)))
+        }
+        _ => Ok(None),
     }
-    Ok(Some(Term::Binary(data[WORD_SIZE + 2..].to_vec())))
 }
 
 /// Read a supported integer or atom term and advance the cursor.
@@ -566,9 +595,7 @@ fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        atom_at, parse_atoms, parse_exports, parse_literals, read_binary_literal, read_u32,
-    };
+    use super::{atom_at, parse_atoms, parse_exports, parse_literals, read_literal, read_u32};
     use crate::beam::term::Term;
 
     #[test]
@@ -607,8 +634,14 @@ mod tests {
             parse_literals(&[0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             Vec::<Option<Term>>::new()
         );
-        assert_eq!(read_binary_literal(&[1]).unwrap(), None);
-        assert!(read_binary_literal(&[131, 109]).is_err());
+        assert_eq!(read_literal(&[1]).unwrap(), None);
+        assert!(read_literal(&[131, 109]).is_err());
+        assert_eq!(
+            read_literal(&[131, 107, 0, 1, b'\n']).unwrap(),
+            Some(Term::List(vec![Term::Integer(10)]))
+        );
+        assert!(read_literal(&[131, 107]).is_err());
+        assert!(read_literal(&[131, 107, 0, 2, b'x']).is_err());
     }
 
     #[test]
