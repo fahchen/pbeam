@@ -82,7 +82,7 @@ jobs:
         # writes result files. The next step pushes, opens the PR, and comments.
         run: |
           mkdir -p "$OUTPUT"
-          copilot -s --no-ask-user --model sonnet \
+          copilot -s --no-ask-user --model gpt-5-mini \
             --allow-tool='write' \
             --allow-tool='shell(gh api:*)' \
             --allow-tool='shell(gh pr view:*)' \
