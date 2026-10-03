@@ -145,16 +145,15 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.deliver(target, Term::Atom("ping".into()))?;
+    /// scheduler.deliver(target, Term::Atom("ping".into()));
     /// ```
-    pub(super) fn deliver(&mut self, target: ProcessId, term: Term) -> Result<(), BeamError> {
+    pub(super) fn deliver(&mut self, target: ProcessId, term: Term) {
         let Some(process) = self.processes.get_mut(&target) else {
-            return Ok(());
+            return;
         };
-        if process.receive(term)? {
+        if process.receive(term) {
             self.runnable.push_back(target);
         }
-        Ok(())
     }
 
     /// Spawn a child process for the current process and optionally monitor
@@ -229,7 +228,7 @@ impl Scheduler {
                 Term::Pid(process.id),
                 reason.clone(),
             ]);
-            self.deliver(watcher, down)?;
+            self.deliver(watcher, down);
         }
         for linked in process.links {
             let trap_exit = self.processes.get_mut(&linked).map(|target| {
@@ -250,7 +249,7 @@ impl Scheduler {
                 Term::Pid(process.id),
                 reason.clone(),
             ]);
-            self.deliver(linked, exit)?;
+            self.deliver(linked, exit);
         }
         Ok(())
     }
@@ -289,9 +288,9 @@ mod tests {
         scheduler.park_current();
         assert_eq!(scheduler.schedule_next(), Some(ProcessId(1)));
         assert!(scheduler.runnable.is_empty());
-        scheduler.deliver(ProcessId(0), atom("ping")).unwrap();
-        scheduler.deliver(ProcessId(1), atom("self")).unwrap();
-        scheduler.deliver(ProcessId(9), atom("lost")).unwrap();
+        scheduler.deliver(ProcessId(0), atom("ping"));
+        scheduler.deliver(ProcessId(1), atom("self"));
+        scheduler.deliver(ProcessId(9), atom("lost"));
 
         assert_eq!(Vec::from(scheduler.runnable.clone()), vec![ProcessId(0)]);
         assert_eq!(first_message(&scheduler, 0, 0), atom("ping"));

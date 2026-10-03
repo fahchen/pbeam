@@ -335,7 +335,7 @@ impl BeamProgram {
                         return Err(error("unsupported BEAM send target"));
                     };
                     let message = read(process, &Operand::X(1))?;
-                    scheduler.deliver(target, message.clone())?;
+                    scheduler.deliver(target, message.clone());
                     write(scheduler.current_process_mut(), &Operand::X(0), message)?;
                 }
                 Instruction::LoopReceive {

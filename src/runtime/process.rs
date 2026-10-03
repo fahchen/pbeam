@@ -1,9 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::{
-    error::{BeamError, error},
-    term::{ProcessId, Reference, Term},
-};
+use crate::term::{ProcessId, Reference, Term};
 
 /// One active function call: its module, code position, and Y registers.
 #[derive(Debug)]
@@ -44,16 +41,15 @@ impl Mailbox {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// mailbox.push(Term::Atom("ready".into()))?;
+    /// mailbox.push(Term::Atom("ready".into()));
     /// assert_eq!(mailbox.next_sequence(), 1);
     /// ```
-    fn push(&mut self, term: Term) -> Result<(), BeamError> {
+    fn push(&mut self, term: Term) {
         let sequence = self.next_sequence;
-        self.next_sequence = sequence
-            .checked_add(1)
-            .ok_or_else(|| error("process mailbox sequence overflow"))?;
+        // ponytail: like ERTS, the mailbox has no message limit; a u64 lasts
+        // about 584 years at one message per nanosecond.
+        self.next_sequence += 1;
         self.messages.push_back(Message { sequence, term });
-        Ok(())
     }
 
     /// Return the first message at or after the receive cursor.
@@ -153,7 +149,7 @@ impl ProcessState {
     ///
     /// ```rust,ignore
     /// process.wait();
-    /// assert!(process.receive(Term::Atom("ping".into()))?);
+    /// assert!(process.receive(Term::Atom("ping".into())));
     /// ```
     pub(super) fn wait(&mut self) {
         self.waiting = true;
@@ -165,11 +161,11 @@ impl ProcessState {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(!process.receive(Term::Atom("ping".into()))?);
+    /// assert!(!process.receive(Term::Atom("ping".into())));
     /// ```
-    pub(super) fn receive(&mut self, term: Term) -> Result<bool, BeamError> {
-        self.mailbox.push(term)?;
-        Ok(std::mem::take(&mut self.waiting))
+    pub(super) fn receive(&mut self, term: Term) -> bool {
+        self.mailbox.push(term);
+        std::mem::take(&mut self.waiting)
     }
 }
 
@@ -190,8 +186,8 @@ pub(super) mod tests {
     #[test]
     fn keeps_message_sequences_after_removal() {
         let mut mailbox = Mailbox::default();
-        mailbox.push(Term::Atom("first".into())).unwrap();
-        mailbox.push(Term::Atom("second".into())).unwrap();
+        mailbox.push(Term::Atom("first".into()));
+        mailbox.push(Term::Atom("second".into()));
         mailbox.remove(0);
 
         let message = mailbox.first_at_or_after(0).unwrap();
@@ -204,21 +200,12 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn rejects_mailbox_sequence_overflow() {
-        let mut mailbox = Mailbox {
-            next_sequence: u64::MAX,
-            ..Mailbox::default()
-        };
-        assert!(mailbox.push(Term::Integer(1)).is_err());
-    }
-
-    #[test]
     fn wakes_only_a_waiting_process() {
         let mut process = ProcessState::new(ProcessId(0), frame(), vec![Term::Integer(1)]);
         assert_eq!(process.registers, vec![Some(Term::Integer(1))]);
-        assert!(!process.receive(Term::Atom("early".into())).unwrap());
+        assert!(!process.receive(Term::Atom("early".into())));
         process.wait();
-        assert!(process.receive(Term::Atom("late".into())).unwrap());
-        assert!(!process.receive(Term::Atom("later".into())).unwrap());
+        assert!(process.receive(Term::Atom("late".into())));
+        assert!(!process.receive(Term::Atom("later".into())));
     }
 }
