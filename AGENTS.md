@@ -2,7 +2,13 @@
 
 ## Project Knowledge
 
-Before implementation, read `docs/agents/knowledge.md`.
+Before coding, load project knowledge into context:
+
+1. **Read fully:** `docs/agents/knowledge.md` and `docs/agents/patterns.md` — these are compact and always relevant
+2. **Scan titles only:** `docs/agents/improvements.md` — read the `## YYYYMMDD: Title` headings. Read the full entry only when a title is relevant to your current task
+3. **Scan frontmatter only:** `docs/agents/postmortems/*.md` — read the YAML `description:` field and file path. Read the full postmortem only when relevant
+
+Write `docs/agents/knowledge.md` only through the `capture-learnings` skill. Use `/agent-docs:update-knowledge` only for `patterns.md`, `improvements.md`, and `postmortems/`.
 
 ## Scope and source of truth
 
