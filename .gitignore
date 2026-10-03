@@ -8,3 +8,4 @@
 /.agents/.handoff/
 /docs/tmp/
 /portable_beam_runtime_handoff.md
+/.claude/worktrees/
