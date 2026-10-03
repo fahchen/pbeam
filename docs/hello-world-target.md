@@ -66,8 +66,8 @@ independently verify the original compiled artifacts and process-level results.
 | Module loading | Complete `Elixir.IO.beam` code chunk | Read all code and retain unsupported instructions | `loads_the_pinned_elixir_io_module` with Elixir 1.20.4 and OTP 29.1.1 | Decode forms used by this module; do not execute unsupported forms | #51; PR #47 |
 | External MFA | `Elixir.IO:puts/1` | Execute the compiled Elixir implementation | Pinned Elixir `Elixir.IO.beam` disassembly | No native mapping is accepted for this MFA | #48 |
 | External MFA | `Elixir.IO:puts/2` | Map `:stdio`, convert binary to chardata, append newline, call `:io.put_chars/2` | Compiled BEAM disassembly and Elixir `io.ex` source | Implement only the fixture's binary standard-output path | #48 |
-| Process and IO protocol | `:io.put_chars/2` | Send an IO request to the group leader and receive its matching reply | OTP 29 `io.beam` disassembly and `stdlib/src/io.erl` | Implement only the request, reply, monitor, and process behavior reached by this call | #49 |
-| Host operation | Group-leader output | Handle the standard-output request, write bytes, and return `io_reply` | OTP 29 `io.erl` request protocol | Host stdout is a group-leader endpoint; it does not replace Elixir or `:io` BEAM functions | #50 |
+| Process and IO protocol | `:io.put_chars/2` through `group`, `user_drv`, and `prim_tty` | Interpret the pinned BEAM path through the `prim_tty:write_nif/2` boundary; support the required process and IO request/reply behavior | OTP 29.1.1 disassembly and source | Implement only the instructions, scheduling, process, mailbox, and monitor behavior reached by this path | #49 |
+| Native binding and host operation | `prim_tty:write_nif/2` | Dispatch this exact verified OTP MFA to a PBeam native binding; write supplied bytes to host stdout and return success or failure to the BEAM path | OTP 29.1.1 `prim_tty` NIF declaration, load path, and terminal path | First statically linked NIF binding; this does not establish support for other OTP NIFs or replace BEAM IO functions | #50 |
 | Compiler-generated functions | `__info__/1`, `module_info/0,1`, helper; `:erlang.get_module_info/1,2` imports | Load the whole module without running unused generated code | Static exports/imports; PBeam verification remains pending | Retains the observed `select_val`, `call_only`, `jump`, and unsupported literal forms; execution fails if reached | #42; `hello.rs` |
 
 Entry disassembly contains a literal move followed by the external tail call;
@@ -82,19 +82,24 @@ The compiled entry calls `Elixir.IO:puts/1`. The pinned Elixir BEAM code calls
 `Elixir.IO:puts/2`, builds chardata with a newline, and calls
 `:io:put_chars/2`. OTP maps `:stdio` to `:standard_io`, obtains the group leader,
 and sends an `io_request`. It waits for the matching `io_reply` and removes its
-monitor. The group leader writes to host stdout.
+monitor. The group leader forwards the request to `user_drv`. The pinned OTP
+29.1.1 terminal path reaches the `prim_tty:write_nif/2` NIF for host output.
+`call_ext*` means an imported call, not a call outside the BEAM VM. Interpret
+each available BEAM implementation, including the Elixir and OTP modules. Add
+only the runtime behavior and native host operation that the traced path needs.
 
-Tasks #51, #48, #49, and #50 implement this observed path in small steps. They must execute the
-compiled Elixir and OTP BEAM functions. They must not intercept
+Task #49 interprets the OTP BEAM path through `prim_tty:write_nif/2`. Task #50 registers
+that exact native MFA and implements its host operation. Tasks #51, #48, #49, and #50 implement this observed
+path in small steps. They must execute the compiled Elixir and OTP BEAM functions. They must not intercept
 `Elixir.IO:puts/1` or `:io:put_chars/2`, print the greeting directly, or alter
 the fixture to use a PBeam-only operation. The support limit is the binary
 standard-output path reached by these fixtures. General chardata, custom devices,
 and unrelated process behavior remain out of scope.
 
 After the task chain is implemented, compile the Elixir fixture from
-`fixtures/hello`, then run PBeam from the repository root. PR #47 removes the direct
-IO shortcut. The command still cannot complete the greeting because task #48 must
-add execution for the compiled `Elixir.IO` path:
+`fixtures/hello`, then run PBeam from the repository root. PR #47 removed the
+direct IO shortcut. The command cannot complete the greeting until tasks #48–#50
+execute the compiled Elixir and OTP path through the host boundary:
 
 ```sh
 mix compile --warnings-as-errors
@@ -134,8 +139,8 @@ behaviors become sibling issues under the epic, with native dependencies.
 | 3 | [#5: Calls](https://github.com/fahchen/pbeam/issues/5) | Local/external calls, preserved arguments, and correct returns |
 | 4 | [#51: Load Elixir IO](https://github.com/fahchen/pbeam/issues/51) | Load the pinned module and retain unsupported instructions |
 | 5 | [#48: Execute Elixir IO](https://github.com/fahchen/pbeam/issues/48) | Run compiled `Elixir.IO` code for the fixture's binary path |
-| 6 | [#49: Execute OTP IO protocol](https://github.com/fahchen/pbeam/issues/49) | Run the `:io` request/reply path through the group leader |
-| 7 | [#50: Write group-leader output](https://github.com/fahchen/pbeam/issues/50) | Write the standard-output request and return its reply |
+| 6 | [#49: Execute OTP IO protocol](https://github.com/fahchen/pbeam/issues/49) | Interpret `:io`, `group`, `user_drv`, and `prim_tty` BEAM code through `prim_tty:write_nif/2` |
+| 7 | [#50: Write standard IO through the group leader](https://github.com/fahchen/pbeam/issues/50) | Implement only the native host write at the verified NIF boundary |
 | 8 | [#42: PBeam printing](https://github.com/fahchen/pbeam/issues/42) | Both greeting variants, stdout/stderr/exit checks, and visible failures |
 
 Update the inventory, issue checklists, dependencies, and PR decisions together
@@ -163,7 +168,7 @@ delegate execution to ERTS or an external Elixir process.
 
 The deliverable is a runnable PBeam command plus a regression test that captures
 its stdout, stderr, and exit status. Task #42 is the final command and acceptance
-task. PR #47 implements task #51 and is ready for review. It loads the pinned
+task. PR #47 implements task #51 and merged as `265f173`. It loads the pinned
 `Elixir.IO.beam` module and retains unsupported instructions. The `puts` path remains
 unsupported until task #48.
 

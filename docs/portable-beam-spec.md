@@ -1,6 +1,6 @@
 # Portable BEAM runtime specification
 
-Status: architecture baseline reconstructed from the design conversation; constant-return and bounded-call slices are implemented. The Hello World execution tasks now load the pinned Elixir IO module, then run its compiled IO path through the OTP group leader. PR #47 is draft for the module-loading task; its direct output shortcut must be removed.
+Status: architecture baseline reconstructed from the design conversation; constant-return and bounded-call slices are implemented. PR #47 merged as `265f173` and loads the pinned Elixir IO module. The Hello World execution tasks run its compiled IO path through the OTP group leader. The output shortcut is removed, but the IO path is not implemented yet.
 
 Source: [Branch · Portable BEAM实现原理](chatgpt-conversation://6abe6693-526c-83ee-8922-0af41462fb49).
 
@@ -61,6 +61,7 @@ The discussion proposes the following logical boundaries. They do not require cr
 | `pbeam-runtime` | Processes, interpreter integration, mailboxes, exceptions, and BIFs. |
 | `pbeam-scheduler` | Runnable processes, reductions, scheduler threads, and work stealing. |
 | `pbeam-native` | Native registry, call context, arguments, results, and extension registration. |
+| `pbeam-native-otp` | Rust implementations for OTP NIFs required by the supported application slice. |
 | `pbeam-host` | Terminal, files, network, timers, clocks, and randomness used by the application. |
 | Bootstrap/CRT | Embedded bundle, runtime initialization, native registration, and entry process startup. |
 
@@ -69,6 +70,8 @@ Keep platform-specific calls behind System/Host rather than spreading them throu
 ## 5. Loading and interpretation
 
 The loader reads the bundle, validates its metadata and modules, and decodes supported BEAM instructions into executable internal instructions. The code server resolves modules and functions from that startup-loaded set.
+
+An external-call instruction such as `call_ext` identifies an imported MFA. It does not mean that the call leaves the BEAM VM. Resolve the target first. If the target has BEAM code, execute that code in the interpreter. Implement only the VM instructions, scheduler, process operations, BIFs, and native boundaries required by the executed path. Do not replace a BEAM function with a Rust shortcut.
 
 Schedulers share code and modules through `Arc`. No scheduler mutates module code during execution.
 
@@ -104,6 +107,8 @@ Tokio was an example executor in the discussion, not a finalized dependency requ
 
 ### OTP and system dependencies
 
+NIF compatibility means behavioral compatibility at each required native boundary. It does not mean copying OTP's native source, using its dynamic NIF ABI, or implementing every NIF in OTP. Support the NIF MFAs reached by the selected application and pinned OTP/host targets. Expand that set only when a supported application requires more behavior. Record the OTP release, target, observed arguments and results, errors, and side effects for each supported binding.
+
 For required OTP applications, first run their original `.beam` modules. Resolve ordinary calls through the code server; dispatch calls that reach an ERTS primitive or registered native leaf to the corresponding PBeam implementation. Do not patch bytecode or replace an OTP application merely because it uses a native dependency. This applies to `:httpc`, `:ssl`, and `:ssh` as a strategy, not as a claim that any of them runs on PBeam today.
 
 For example, an HTTPS call may traverse `:httpc` and OTP `:ssl` BEAM code before reaching crypto and socket operations. Preserve those BEAM layers where feasible; implement the required crypto/NIF and socket/ERTS boundaries in Rust. OTP `:ssh` likewise does not imply a dependency on a target machine's OpenSSH executable. A separately invoked external program is a distinct host dependency and needs its own explicit handling.
@@ -128,13 +133,33 @@ These API names are proposed contracts, not currently available libraries.
 
 ### Rust registration and dispatch
 
-A Rust extension exports a registration function. Registration maps an MFA such as `Elixir.MyApp.NativeHash:sha256/1` to a Rust implementation.
+A Rust extension exports a registration function. Registration maps an exact MFA such as `Elixir.MyApp.NativeHash:sha256/1` to a Rust implementation. The registry owns this mapping and rejects duplicate entries. A binding accepts BEAM terms and returns a BEAM term or a defined runtime exception. Host operations are available through a call context; platform details stay in `pbeam-host`.
 
-For an external MFA call, the runtime checks the native registry first. A registered implementation executes through the native call context; otherwise the runtime resolves the BEAM function through the code server. Native integration does not require a separate `PBeam.Native.call/3` instruction or BIF.
+Resolve an imported MFA through the code server. Execute its BEAM implementation when one is available. Dispatch to a registered native implementation only when the target is explicitly declared as native or is a verified VM/NIF boundary. Native integration does not require a separate `PBeam.Native.call/3` instruction or BIF.
+
+The bundler may use BEAM imports, `-nifs` declarations, `erlang:load_nif/2` calls, OTP source, and reference-runtime traces to find candidate native MFAs. These are evidence for an inventory, not proof that every imported or declared MFA is native or reachable. The build must compare required native MFAs with the linked registry. Missing required bindings must fail with the MFA and the supported OTP target. Dynamic call paths remain a documented coverage limit.
 
 For OTP compatibility, register the native leaf or ERTS operation being replaced. A BEAM wrapper such as `:crypto.hash/2` should continue to execute as BEAM code when its implementation calls a lower native function. Dispatch must also account for native entry paths that do not use `call_ext`; the required paths are determined from the selected OTP version and application slice.
 
 The initial native API needs a term argument interface, checked conversion for the types actually used, a context for constructing return terms, and a result/error contract. Incorrect arguments must become defined runtime errors rather than unchecked Rust indexing or conversion failures.
+
+Keep the crates and source paths grouped by responsibility. The target layout is:
+
+```text
+crates/
+  pbeam-native/
+    src/                 # MFA registry and native call contract
+  pbeam-native-otp/
+    src/                 # OTP bindings, grouped by OTP module
+      prim_tty.rs
+      ...
+  pbeam-host/
+    src/                 # OS services, grouped by capability
+      terminal.rs
+      ...
+```
+
+An OTP binding keeps the exact OTP MFA and its conversion/error mapping in `pbeam-native-otp`. It calls a capability in `pbeam-host` for OS effects. Do not create a crate or module for every MFA. Add each crate and directory when its first consumer needs it; this layout does not require scaffolding all OTP bindings in advance. Keep BIFs in `pbeam-runtime` and BEAM implementations in their original modules.
 
 All supported ways to invoke a declared native function must preserve the same dispatch behavior. The implementation must account for local calls, dynamic application, and function references if those paths occur in the supported application slice; the source's `call_ext` sketch alone does not settle them.
 
