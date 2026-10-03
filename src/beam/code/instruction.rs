@@ -43,6 +43,12 @@ const OPCODE_SWAP: u8 = 169;
 const OPCODE_INIT_YREGS: u8 = 172;
 const OPCODE_BS_CREATE_BIN: u8 = 177;
 const OPCODE_BS_INIT_WRITABLE: u8 = 133;
+const OPCODE_SEND: u8 = 20;
+const OPCODE_REMOVE_MESSAGE: u8 = 21;
+const OPCODE_TIMEOUT: u8 = 22;
+const OPCODE_LOOP_REC: u8 = 23;
+const OPCODE_LOOP_REC_END: u8 = 24;
+const OPCODE_WAIT: u8 = 25;
 const OPCODE_GET_LIST: u8 = 65;
 const OPCODE_GET_TUPLE_ELEMENT: u8 = 66;
 const OPCODE_PUT_LIST: u8 = 69;
@@ -79,6 +85,10 @@ const OPCODE_PUT_RECORD: u8 = 189;
 const OPCODE_MAKE_FUN3: u8 = 171;
 const OPCODE_BS_MATCH: u8 = 182;
 const OPCODE_UPDATE_RECORD: u8 = 181;
+const OPCODE_RECV_MARKER_BIND: u8 = 173;
+const OPCODE_RECV_MARKER_CLEAR: u8 = 174;
+const OPCODE_RECV_MARKER_RESERVE: u8 = 175;
+const OPCODE_RECV_MARKER_USE: u8 = 176;
 #[derive(Debug, Clone)]
 /// An instruction that the parser can read from a BEAM `Code` chunk.
 ///
@@ -118,6 +128,11 @@ pub(crate) enum Instruction {
         tail: bool,
         deallocate: u32,
     },
+    Bif0 {
+        module: String,
+        name: String,
+        destination: Operand,
+    },
     /// An instruction that is parsed so the module can load, but cannot run.
     Unsupported(u8),
     Allocate {
@@ -142,6 +157,42 @@ pub(crate) enum Instruction {
         tail: Operand,
         destination: Operand,
     },
+    PutTuple {
+        elements: Vec<Operand>,
+        destination: Operand,
+    },
+    GetTupleElement {
+        tuple: Operand,
+        index: u32,
+        destination: Operand,
+    },
+    TestExactEqual {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
+    TestTaggedTuple {
+        fail_label: u32,
+        value: Operand,
+        arity: u32,
+        tag: Term,
+    },
+    Send,
+    RemoveMessage,
+    LoopReceive {
+        fail_label: u32,
+        destination: Operand,
+    },
+    LoopReceiveEnd(u32),
+    Wait(u32),
+    Timeout,
+    ReceiveMarkerReserve(Operand),
+    ReceiveMarkerBind {
+        marker: Operand,
+        reference: Operand,
+    },
+    ReceiveMarkerUse(Operand),
+    ReceiveMarkerClear(Operand),
     Noop,
     /// Returns the value in `x0` from the active function.
     ///
@@ -275,6 +326,68 @@ pub(super) fn parse_code(
                 skip_select_val(data, &mut cursor)?;
                 Instruction::Unsupported(opcode)
             }
+            OPCODE_TEST_TAGGED_TUPLE => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let value = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let tag = read_value(data, &mut cursor, atoms)?;
+                Instruction::TestTaggedTuple {
+                    fail_label,
+                    value,
+                    arity,
+                    tag,
+                }
+            }
+            OPCODE_TEST_EXACT_EQ => Instruction::TestExactEqual {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_SEND => Instruction::Send,
+            OPCODE_REMOVE_MESSAGE => Instruction::RemoveMessage,
+            OPCODE_LOOP_REC => Instruction::LoopReceive {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                destination: read_register(data, &mut cursor)?,
+            },
+            OPCODE_LOOP_REC_END => {
+                Instruction::LoopReceiveEnd(read_operand(data, &mut cursor, TAG_LABEL)? as u32)
+            }
+            OPCODE_WAIT => Instruction::Wait(read_operand(data, &mut cursor, TAG_LABEL)? as u32),
+            OPCODE_TIMEOUT => Instruction::Timeout,
+            OPCODE_RECV_MARKER_RESERVE => {
+                Instruction::ReceiveMarkerReserve(read_register(data, &mut cursor)?)
+            }
+            OPCODE_RECV_MARKER_BIND => Instruction::ReceiveMarkerBind {
+                marker: read_register(data, &mut cursor)?,
+                reference: read_register(data, &mut cursor)?,
+            },
+            OPCODE_RECV_MARKER_USE => {
+                Instruction::ReceiveMarkerUse(read_register(data, &mut cursor)?)
+            }
+            OPCODE_RECV_MARKER_CLEAR => {
+                Instruction::ReceiveMarkerClear(read_register(data, &mut cursor)?)
+            }
+            OPCODE_GET_TUPLE_ELEMENT => Instruction::GetTupleElement {
+                tuple: read_register(data, &mut cursor)?,
+                index: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                destination: read_register(data, &mut cursor)?,
+            },
+            OPCODE_PUT_TUPLE2 => {
+                let destination = read_register(data, &mut cursor)?;
+                if read_integer(data, &mut cursor, TAG_LITERAL)? != LIST_SUBTAG {
+                    return Err(error("unsupported BEAM tuple element list"));
+                }
+                let item_count = usize::try_from(read_operand(data, &mut cursor, TAG_UNSIGNED)?)
+                    .map_err(|_| error("BEAM tuple has too many elements"))?;
+                let mut elements = Vec::with_capacity(item_count);
+                for _ in 0..item_count {
+                    elements.push(read_move_operand(data, &mut cursor, atoms, literals)?);
+                }
+                Instruction::PutTuple {
+                    elements,
+                    destination,
+                }
+            }
             OPCODE_TEST_IS_ATOM
             | OPCODE_TEST_IS_PID
             | OPCODE_TEST_IS_LIST
@@ -323,6 +436,17 @@ pub(super) fn parse_code(
                     name: name.clone(),
                     tail: opcode != OPCODE_CALL_EXT,
                     deallocate,
+                }
+            }
+            OPCODE_BIF0 => {
+                let index = read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize;
+                let (module, name, _arity) = imports
+                    .get(index)
+                    .ok_or_else(|| error(format!("BEAM BIF import index {index} out of range")))?;
+                Instruction::Bif0 {
+                    module: module.clone(),
+                    name: name.clone(),
+                    destination: read_register(data, &mut cursor)?,
                 }
             }
             OPCODE_ALLOCATE => {
@@ -766,6 +890,14 @@ mod tests {
         assert!(parse_code(&code(&[59, 3, 21, 39]), &[], &[], &[]).is_err());
         assert!(parse_code(&code(&[59, 3, 21, 23, 16]), &[], &[], &[]).is_err());
         assert!(parse_code(&code(&[59, 3, 21, 23, 32, 3]), &[], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_put_tuple2_without_an_element_list() {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([OPCODE_PUT_TUPLE2, 0x03, 0x27]);
+        assert!(parse_code(&code, &[], &[], &[]).is_err());
     }
 
     #[test]
