@@ -433,6 +433,12 @@ impl BeamProgram {
             ("self", []) => Term::Pid(scheduler.current_process_mut().id),
             ("make_ref", []) => Term::Reference(scheduler.make_ref()?),
             ("exit", [reason]) => return Ok(Err(reason.clone())),
+            ("nif_error", [reason]) => {
+                return Ok(Err(Term::Tuple(vec![
+                    reason.clone(),
+                    Term::List(Vec::new()),
+                ])));
+            }
             ("spawn_monitor" | "spawn_link", [Term::Atom(module), Term::Atom(function), list]) => {
                 let arguments = match list {
                     Term::List(values) => values.clone(),
@@ -776,6 +782,13 @@ mod tests {
                 erlang_call("exit", 1, false),
             ])
             .contains("root process exited with Atom(\"boom\")")
+        );
+        assert!(
+            error(vec![
+                Instruction::Move(atom("undef"), Operand::X(0)),
+                erlang_call("nif_error", 1, false),
+            ])
+            .contains("root process exited with Tuple([Atom(\"undef\"), List([])])")
         );
         let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
         body.extend(wait_forever());
