@@ -19,4 +19,7 @@ main() ->
     end,
     {Reply, Kept}.
 
-writer() -> exit(write_failed).
+writer() ->
+    receive
+        {io_request, _Caller, _Reference, _Request} -> exit(write_failed)
+    end.
