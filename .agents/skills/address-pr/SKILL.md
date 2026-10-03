@@ -19,9 +19,7 @@ allowed-tools:
 
 # Address PR
 
-Full lifecycle for GitHub review comments on a pbeam PR. Discuss and decide
-first, implement and push next, reply last. Reviewers see replies that point
-at pushed commits, not promises.
+Full lifecycle for GitHub review comments on a pbeam PR. Discuss and decide first, implement and push next, reply last. Reviewers see replies that point at pushed commits, not promises.
 
 ```text
 Phase 1  fetch unanswered threads
@@ -34,14 +32,9 @@ Phase 7  push
 Phase 8  reply, then update the PR description and issues
 ```
 
-**GitHub is the only record.** `AGENTS.md` forbids file-based task trackers.
-Do not write a tracking file. Keep the decision table in the conversation.
-After the session, the replies, commits, and PR description hold every
-decision. To resume, fetch the threads again: a thread is answered when its
-last comment is a reply from the PR author.
+**GitHub is the only record.** `AGENTS.md` forbids file-based task trackers. Do not write a tracking file. Keep the decision table in the conversation. After the session, the replies, commits, and PR description hold every decision. To resume, fetch the threads again: a thread is answered when its last comment is a reply from the PR author.
 
-**This skill never resolves threads.** The reviewer verifies the fix or the
-reason and resolves the thread.
+**This skill never resolves threads.** The reviewer verifies the fix or the reason and resolves the thread.
 
 ## Staying on the rails
 
@@ -49,23 +42,16 @@ After every user message, before you do anything else:
 
 1. **Name the phase and thread** (for example, "Phase 2, thread 3 of 7").
 2. **Classify the reply:**
-   - **Decision** (`fix`, `keep`, a plan, or an edit): record it in the
-     decision table and advance.
-   - **Clarifying question:** answer it briefly, ask the original question
-     again, and stay on the same thread.
-   - **Tangent:** acknowledge it in one line, add it to the parking lot, and
-     return to the current thread.
-   - **Scope expansion** (for example, "also resolve the threads", "also
-     refactor the module"): give the reason against it briefly, park real
-     follow-ups, and return.
-   - **Process change** (for example, "skip Phase 6"): accept it once only if
-     it is safe. Flag it if it breaks a hard rule.
+   - **Decision** (`fix`, `keep`, a plan, or an edit): record it in the decision table and advance.
+   - **Clarifying question:** answer it briefly, ask the original question again, and stay on the same thread.
+   - **Tangent:** acknowledge it in one line, add it to the parking lot, and return to the current thread.
+   - **Scope expansion** (for example, "also resolve the threads", "also refactor the module"): give the reason against it briefly, park real follow-ups, and return.
+   - **Process change** (for example, "skip Phase 6"): accept it once only if it is safe. Flag it if it breaks a hard rule.
 3. **Check the gate:**
    - Phase 1 to 2: 1 or more unanswered threads. With zero threads, stop.
    - Phase 2 to 3: every thread is `fix`, `keep`, or `deferred`.
    - Phase 3 to 4: no `discuss`, no contradictions, no unresolved overlaps.
-   - Phase 4 to 5: every `fix` has a real `file:line`, or all decisions are
-     `keep` (skip 4 and 5).
+   - Phase 4 to 5: every `fix` has a real `file:line`, or all decisions are `keep` (skip 4 and 5).
    - Phase 5 to 6: each `fix` has a commit SHA.
    - Phase 6 to 7: the user approved the batch (`yes`, `y`, `push`, `lgtm`).
    - Phase 7 to 8: `git push` succeeded, or there was nothing to push.
@@ -92,10 +78,7 @@ Status values:
 
 ### Parking lot
 
-Keep out-of-scope items in a parking lot list in the conversation. In the
-wrap-up, propose a GitHub issue for each item that needs work. Create an
-issue only when the user agrees, and follow the hierarchy rules in
-`AGENTS.md`.
+Keep out-of-scope items in a parking lot list in the conversation. In the wrap-up, propose a GitHub issue for each item that needs work. Create an issue only when the user agrees, and follow the hierarchy rules in `AGENTS.md`.
 
 ## Invocation
 
@@ -110,23 +93,16 @@ Combinations work: `/address-pr 56 @fahchen`.
 
 ## Hard rules
 
-1. **Never amend or force-push a pushed commit** unless the user explicitly
-   asks. Review changes are new atomic commits through the `commit` skill.
+1. **Never amend or force-push a pushed commit** unless the user explicitly asks. Review changes are new atomic commits through the `commit` skill.
 2. **Never resolve a thread.**
-3. **Reply after push, in one batch, after one approval.** `keep` replies
-   wait with `fix` replies.
-4. **Match the comment language.** Reply in the language of the comment.
-   Write English replies in ASD-STE100.
-5. **Read before you analyse.** Read the cited source at the cited line, and
-   the related code and tests. Do not judge from `diffHunk` alone.
-6. **Check ERTS alignment.** When a comment concerns runtime behavior or a
-   runtime model, compare it with the ERTS implementation and observable
-   behavior before you answer. Record any intentional departure in the PR.
-7. **Answer questions with evidence.** For BEAM questions, show the
-   `erlc -S` output, the ERTS source concept, or an ERTS run. Do not guess.
-8. **Stay in the task scope.** A change outside the PR task goes to the
-   parking lot.
+3. **Reply after push, in one batch, after one approval.** `keep` replies wait with `fix` replies.
+4. **Match the comment language.** Reply in the language of the comment. Write English replies in ASD-STE100.
+5. **Read before you analyse.** Read the cited source at the cited line, and the related code and tests. Do not judge from `diffHunk` alone.
+6. **Check ERTS alignment.** When a comment concerns runtime behavior or a runtime model, compare it with the ERTS implementation and observable behavior before you answer. Record any intentional departure in the PR.
+7. **Answer questions with evidence.** For BEAM questions, show the `erlc -S` output, the ERTS source concept, or an ERTS run. Do not guess.
+8. **Stay in the task scope.** A change outside the PR task goes to the parking lot.
 9. **No attribution trailers** in commits or replies.
+10. **No manual line-breaks.** Write each reply, decision note, and PR/issue update as one unwrapped paragraph or bullet per line.
 
 ## Phases
 
@@ -138,8 +114,7 @@ Combinations work: `/address-pr 56 @fahchen`.
 gh pr view [<N>] --json number,author,headRefName,baseRefName,url,body
 ```
 
-**1b. Fetch review threads with GraphQL.** Request `databaseId` for the REST
-reply endpoint:
+**1b. Fetch review threads with GraphQL.** Request `databaseId` for the REST reply endpoint:
 
 ```bash
 gh api graphql -f query='
@@ -160,77 +135,52 @@ query($owner:String!, $name:String!, $number:Int!) {
 }' -F owner=fahchen -F name=pbeam -F number=<N>
 ```
 
-Keep threads where `isResolved == false` and the last comment is not a reply
-from the PR author. Apply the author filter. Keep outdated threads and mark
-them "outdated". Also read top-level review bodies and PR comments
-(`gh pr view <N> --json reviews,comments`) and add any that ask for a change.
+Keep threads where `isResolved == false` and the last comment is not a reply from the PR author. Apply the author filter. Keep outdated threads and mark them "outdated". Also read top-level review bodies and PR comments (`gh pr view <N> --json reviews,comments`) and add any that ask for a change.
 
-**1c. Report** the thread count and show the decision table with all rows
-`open`.
+**1c. Report** the thread count and show the decision table with all rows `open`.
 
 ### Phase 2: Discuss one by one
 
 For each thread:
 
-1. Show the file, line, author, comment (verbatim), and the last 8 lines of
-   diff context.
+1. Show the file, line, author, comment (verbatim), and the last 8 lines of diff context.
 2. Read the cited code and related code.
-3. Give your analysis. For a question, answer it; the answer becomes the
-   draft reply. For a change request, assess it, then propose a fix plan or
-   give reasons against it. Name exact code items. Check the knowledge file
-   (`docs/agents/knowledge.md`) and the specification for a rule that
-   applies.
+3. Give your analysis. For a question, answer it; the answer becomes the draft reply. For a change request, assess it, then propose a fix plan or give reasons against it. Name exact code items. Check the knowledge file (`docs/agents/knowledge.md`) and the specification for a rule that applies.
 4. Wait for the user.
 5. Record `Status`, `Decision`, and the draft reply in the conversation.
 
-When several threads have obvious, independent answers, you can present them
-together, but each still needs a decision. Do not start Phase 3 before every
-thread has a decision. Do not post replies.
+When several threads have obvious, independent answers, you can present them together, but each still needs a decision. Do not start Phase 3 before every thread has a decision. Do not post replies.
 
 ### Phase 3: Reconcile
 
-Read the whole decision table. Find contradictions, open `discuss` entries,
-and fixes that change the same lines. Run Phase 2 again for the affected
-threads until none remain.
+Read the whole decision table. Find contradictions, open `discuss` entries, and fixes that change the same lines. Run Phase 2 again for the affected threads until none remain.
 
 ### Phase 4: Implement
 
 Skip if every decision is `keep`. Otherwise:
 
 - Read each file before you edit it.
-- Make the smallest change that satisfies the decision. Do not change
-  adjacent code.
-- Keep the project gates: Rustdoc with `# Examples` on every function, a doc
-  comment on every field, instruction encodings with byte and Erlang
-  examples, 100% application line coverage, no Clippy warnings.
-- Run focused checks (`cargo test <name>`,
-  `cargo clippy --all-targets -- -D warnings`).
-- When a decision changes the direction, update the affected documents in
-  the same round (`docs/portable-beam-spec.md`, `docs/agents/knowledge.md`
-  through `capture-learnings`, `AGENTS.md`).
-- If a fix needs scope expansion, set the thread to `discuss` and return to
-  Phase 2.
+- Make the smallest change that satisfies the decision. Do not change adjacent code.
+- Keep the project gates: Rustdoc with `# Examples` on every function, a doc comment on every field, instruction encodings with byte and Erlang examples, 100% application line coverage, no Clippy warnings.
+- Run focused checks (`cargo test <name>`, `cargo clippy --all-targets -- -D warnings`).
+- When a decision changes the direction, update the affected documents in the same round (`docs/portable-beam-spec.md`, `docs/agents/knowledge.md` through `capture-learnings`, `AGENTS.md`).
+- If a fix needs scope expansion, set the thread to `discuss` and return to Phase 2.
 
 Record the `file:line` for each fix.
 
 ### Phase 5: Commit
 
-Stage explicit paths only. Invoke the `commit` skill. Make one commit per
-logical change; several threads can share a commit when they are one
-change. Run `mise run check` before the last commit of the round. Record the
-short SHA for each `fix`.
+Stage explicit paths only. Invoke the `commit` skill. Make one commit per logical change; several threads can share a commit when they are one change. Run `mise run check` before the last commit of the round. Record the short SHA for each `fix`.
 
 ### Phase 6: Reply preview
 
-Rewrite each `fix` draft to cite the real commit and location, in past
-tense. Show all replies at once:
+Rewrite each `fix` draft to cite the real commit and location, in past tense. Show all replies at once:
 
 ```text
 Drafted replies for PR #<N>:
 
 1. `src/runtime/process.rs` #13 - @author [fix]
-   `pc` meant program counter. Commit abc1234 renames the field to
-   `next_instruction` and documents it.
+   `pc` meant program counter. Commit abc1234 renames the field to `next_instruction` and documents it.
 
 2. `src/runtime/process.rs` #28 - @author [keep]
    ERTS has no fixed limit on the number of messages in a mailbox. ...
@@ -267,24 +217,17 @@ gh api repos/fahchen/pbeam/pulls/<N>/comments/<first-comment-id>/replies \
 
 Then, as `AGENTS.md` requires:
 
-- Update the PR description when a decision, a verification result, or a
-  coverage number changed. Keep the template sections.
-- Update the task issue, epic, and affected downstream issues when the scope
-  or direction changed.
+- Update the PR description when a decision, a verification result, or a coverage number changed. Keep the template sections.
+- Update the task issue, epic, and affected downstream issues when the scope or direction changed.
 - Do not resolve threads.
 
-Wrap up with the final decision table, the reply URLs, deferred threads,
-parking lot items, and a note that reviewers resolve the threads.
+Wrap up with the final decision table, the reply URLs, deferred threads, parking lot items, and a note that reviewers resolve the threads.
 
-Then offer to capture review learnings for this PR: run
-`.github/prompts/capture-learnings.prompt.md` with `PR: #<N>`. On an open PR
-it proposes entries for `docs/agents/knowledge.md` and waits for the user
-confirmation. A CI workflow runs the same prompt after the PR merges.
+Then offer to capture review learnings for this PR: run `.github/prompts/capture-learnings.prompt.md` with `PR: #<N>`. On an open PR it proposes entries for `docs/agents/knowledge.md` and waits for the user confirmation. A CI workflow runs the same prompt after the PR merges.
 
 ## Tips
 
-- `line` is `null` for file-level or deleted-line comments. Show
-  `#- (file-level)` and read the area manually.
+- `line` is `null` for file-level or deleted-line comments. Show `#- (file-level)` and read the area manually.
 - Reply only to the first comment of a thread.
 - Quote long non-English comments verbatim.
 - More than 100 threads: paginate before filtering.
@@ -305,6 +248,4 @@ confirmation. A CI workflow runs the same prompt after the PR merges.
 
 - `commit`: owns the commit step.
 - `draft-pr`: opens the PR.
-- `capture-learnings`: promotes a recurring review problem to
-  `docs/agents/knowledge.md`. `.github/prompts/capture-learnings.prompt.md`
-  runs it for the human comments of one PR.
+- `capture-learnings`: promotes a recurring review problem to `docs/agents/knowledge.md`. `.github/prompts/capture-learnings.prompt.md` runs it for the human comments of one PR.

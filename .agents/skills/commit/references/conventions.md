@@ -1,14 +1,10 @@
 # PBeam Commit and PR Conventions
 
-Shared reference for the `commit` and `draft-pr` skills. Cross-check against
-`AGENTS.md` and `.github/pull_request_template.md` before drafting.
+Shared reference for the `commit` and `draft-pr` skills. Cross-check against `AGENTS.md` and `.github/pull_request_template.md` before drafting.
 
 ## Language
 
-Write commit messages, PR titles, PR bodies, and issue text in ASD-STE100
-Simplified Technical English. Use short sentences, one instruction per
-sentence, approved words, and the same term for the same concept. Keep code
-identifiers, commands, and error strings exact.
+Write commit messages, PR titles, PR bodies, and issue text in ASD-STE100 Simplified Technical English. Use short sentences, one instruction per sentence, approved words, and the same term for the same concept. Keep code identifiers, commands, and error strings exact. Write each paragraph or bullet as one unwrapped line; do not add manual line-breaks mid-sentence.
 
 ## Commit subject grammar
 
@@ -18,8 +14,7 @@ identifiers, commands, and error strings exact.
 
 - `type` is lowercase and comes from the table below.
 - Do not use a scope. The project history uses plain types.
-- The description starts lowercase, uses the imperative mood, and has no
-  trailing period. Code identifiers keep their casing.
+- The description starts lowercase, uses the imperative mood, and has no trailing period. Code identifiers keep their casing.
 - Do not use `!`. Record breaking or risky changes in the PR decisions.
 - Keep the subject at 72 characters or fewer.
 - Do not add issue numbers. The PR links the task issue.
@@ -70,35 +65,23 @@ The PR title is the task issue title:
 [mN-eN] <Task title>
 ```
 
-- Copy the task issue title exactly, for example
-  `[m2-e1] Add a cooperative process runtime for OTP IO`.
-- A PR without a task issue is an exception. Ask the user before you open
-  one. If the user confirms, use a commit-style title
-  (`docs: sync Hello World execution status`).
+- Copy the task issue title exactly, for example `[m2-e1] Add a cooperative process runtime for OTP IO`.
+- A PR without a task issue is an exception. Ask the user before you open one. If the user confirms, use a commit-style title (`docs: sync Hello World execution status`).
 
 ## PR labels
 
 - Do not apply structural labels (`kind:*`) to PRs.
-- Apply content labels that describe the actual scope: `enhancement` for new
-  capability, `documentation` for documentation and planning, `bug` for
-  defects. Multiple content labels are allowed.
+- Apply content labels that describe the actual scope: `enhancement` for new capability, `documentation` for documentation and planning, `bug` for defects. Multiple content labels are allowed.
 - Do not use status labels on PRs. GitHub review state tracks review.
 
 ## PR body rules
 
-Use `.github/pull_request_template.md` as the skeleton. Keep its sections and
-order: `# Task`, `## Behavior`, `## Implementation decisions`,
-`## Verification`, `## Review boundary`.
+Use `.github/pull_request_template.md` as the skeleton. Keep its sections and order: `# Task`, `## Behavior`, `## Implementation decisions`, `## Verification`, `## Review boundary`.
 
-- `# Task`: `Closes #<task>`, the epic issue, the milestone tracking issue,
-  and the prerequisite PRs with their merge commits.
+- `# Task`: `Closes #<task>`, the epic issue, the milestone tracking issue, and the prerequisite PRs with their merge commits.
 - `## Behavior`: the observable result and the scope of the slice.
-- `## Implementation decisions`: for each decision, the choice, the
-  alternatives and rationale, and the consequences. Explain departures from
-  the issue, the specification, or ERTS. State explicitly when no new
-  decisions were necessary.
-- `## Verification`: exact commands and results, acceptance evidence, and
-  known gaps.
+- `## Implementation decisions`: for each decision, the choice, the alternatives and rationale, and the consequences. Explain departures from the issue, the specification, or ERTS. State explicitly when no new decisions were necessary.
+- `## Verification`: exact commands and results, acceptance evidence, and known gaps.
 - `## Review boundary`: check only the items that are true.
 - Do not leave template placeholder text. Remove HTML comments.
-- Write each paragraph and each bullet as one line. GitHub wraps the text.
+- Write each paragraph and each bullet as one unwrapped line. Do not add manual line-breaks mid-sentence; GitHub soft-wraps the text for display.
