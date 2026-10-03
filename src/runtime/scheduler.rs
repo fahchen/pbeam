@@ -190,8 +190,36 @@ impl Scheduler {
         Ok((id, reference))
     }
 
-    /// Remove the current process after it exits. Send `DOWN` to monitors
-    /// and `EXIT` to linked processes that trap exits.
+    /// Link the current process with a live local process, as
+    /// `erlang:link/1` does. Return `true`, as ERTS does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.link(child)?, Term::Atom("true".into()));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A link to a process that does not exist is not supported.
+    pub(super) fn link(&mut self, target: ProcessId) -> Result<Term, BeamError> {
+        let current = self.current_process_mut().id;
+        let Some(process) = self.processes.get_mut(&target) else {
+            // ponytail: ERTS sends noproc for a dead target; add it when a fixture links to one.
+            return Err(error(format!(
+                "unsupported link to missing process {target:?}"
+            )));
+        };
+        process.links.insert(current);
+        self.current_process_mut().links.insert(target);
+        Ok(Term::Atom("true".into()))
+    }
+
+    /// Remove the current process after it exits. Send `EXIT` to linked
+    /// processes that trap exits, then `DOWN` to monitors. ERTS sends link
+    /// exit signals before monitor down signals (`erl_process.c`,
+    /// `ERTS_CONTINUE_EXIT_LINKS` runs before `ERTS_CONTINUE_EXIT_MONITORS`),
+    /// and a process that traps exits also receives a `normal` exit.
     ///
     /// # Examples
     ///
@@ -220,25 +248,16 @@ impl Scheduler {
                 _ => Err(reason.clone()),
             });
         }
-        for (watcher, reference) in process.monitored_by {
-            let down = Term::Tuple(vec![
-                Term::Atom("DOWN".into()),
-                Term::Reference(reference),
-                Term::Atom("process".into()),
-                Term::Pid(process.id),
-                reason.clone(),
-            ]);
-            self.deliver(watcher, down);
-        }
         for linked in process.links {
-            let trap_exit = self.processes.get_mut(&linked).map(|target| {
+            // A missing target counts as trapping; `deliver` then drops the message.
+            let trap_exit = self.processes.get_mut(&linked).is_none_or(|target| {
                 target.links.remove(&process.id);
                 target.trap_exit
             });
-            if normal {
-                continue;
-            }
-            if trap_exit == Some(false) {
+            if !trap_exit {
+                if normal {
+                    continue;
+                }
                 // ponytail: no exit-signal propagation yet; add it when a task needs linked kills.
                 return Err(error(format!(
                     "unsupported exit signal {reason:?} to a process that does not trap exits"
@@ -250,6 +269,16 @@ impl Scheduler {
                 reason.clone(),
             ]);
             self.deliver(linked, exit);
+        }
+        for (watcher, reference) in process.monitored_by {
+            let down = Term::Tuple(vec![
+                Term::Atom("DOWN".into()),
+                Term::Reference(reference),
+                Term::Atom("process".into()),
+                Term::Pid(process.id),
+                reason.clone(),
+            ]);
+            self.deliver(watcher, down);
         }
         Ok(())
     }
@@ -330,6 +359,31 @@ mod tests {
             .unwrap();
         assert!(scheduler.processes.is_empty());
         assert_eq!(scheduler.into_root_result(), Some(Ok(atom("ok"))));
+    }
+
+    #[test]
+    fn links_live_processes_and_ignores_normal_exit_without_trap_exit() {
+        let mut scheduler = Scheduler::default();
+        scheduler.start(frame(), vec![]).unwrap();
+        scheduler.schedule_next();
+        let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
+        assert_eq!(scheduler.link(child).unwrap(), atom("true"));
+        assert!(scheduler.link(ProcessId(99)).is_err());
+        scheduler.park_current();
+
+        scheduler.schedule_next();
+        assert!(
+            scheduler
+                .current_process_mut()
+                .links
+                .contains(&ProcessId(0))
+        );
+        scheduler.finish_current(atom("normal"), None).unwrap();
+
+        assert_eq!(scheduler.schedule_next(), None);
+        let root = &scheduler.processes[&ProcessId(0)];
+        assert!(root.links.is_empty());
+        assert!(root.mailbox.messages().is_empty());
     }
 
     #[test]

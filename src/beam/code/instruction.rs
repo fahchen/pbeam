@@ -190,6 +190,15 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `b(X) -> c(X), ok.` compiles to `{deallocate,0}`.
     Deallocate { stack_size: u32 },
+    /// Drops the first `count` Y registers of the active function and keeps
+    /// the next `remaining` registers, which become `y0` onwards.
+    ///
+    /// Encoding: opcode, count, remaining. Example: `[0x88, 0x10, 0x10]`
+    /// drops `y0` and keeps one register.
+    ///
+    /// Erlang: `order/0` in `fixtures/exit_signal/exit_signal_probe.erl`
+    /// compiles to `{trim,1,1}` before its last local call.
+    Trim { count: u32, remaining: u32 },
     /// Continues execution after a label.
     ///
     /// Erlang: a receive clause jumps past the `after` body, for example
@@ -620,6 +629,10 @@ pub(super) fn parse_code(
             OPCODE_DEALLOCATE => Instruction::Deallocate {
                 stack_size: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
             },
+            OPCODE_TRIM => Instruction::Trim {
+                count: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                remaining: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+            },
             OPCODE_MOVE => {
                 let source = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let destination = read_register(data, &mut cursor)?;
@@ -746,7 +759,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_IS_FUNCTION => Some(2),
         OPCODE_GET_LIST | OPCODE_GET_TUPLE_ELEMENT | OPCODE_PUT_LIST => Some(3),
         OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_CALL_FUN => Some(1),
-        OPCODE_TRIM => Some(2),
         OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_MAP_EXACT => Some(5),
         OPCODE_GET_MAP_ELEMENTS | OPCODE_HAS_MAP_FIELDS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),
@@ -1001,7 +1013,7 @@ mod tests {
         OPCODE_GET_RECORD_ELEMENTS, OPCODE_INIT_YREGS, OPCODE_MAKE_FUN3, OPCODE_PUT_MAP_ASSOC,
         OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_SWAP, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
         OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
-        OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRIM, OPCODE_UPDATE_RECORD, parse_code,
+        OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_UPDATE_RECORD, parse_code,
         read_move_operand, skip_counted_operands, skip_integer_payload, skip_operand,
         skip_select_val, skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
     };
@@ -1116,7 +1128,6 @@ mod tests {
             (OPCODE_TEST_IS_MAP, 2),
             (OPCODE_GET_LIST, 3),
             (OPCODE_BADMATCH, 1),
-            (OPCODE_TRIM, 2),
             (OPCODE_PUT_MAP_ASSOC, 5),
             (OPCODE_GET_RECORD_ELEMENTS, 3),
             (OPCODE_PUT_RECORD, 6),
