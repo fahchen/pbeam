@@ -147,6 +147,18 @@ pub(in crate::beam) enum Operand {
     Y(u32),
 }
 
+/// Decode the `Code` header and instruction stream.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut code = vec![0, 0, 0, 16]; // sub-size
+/// code.extend_from_slice(&[0; 16]); // instruction set, opcode max, labels, functions
+/// code.push(0x03); // end
+/// let (instructions, labels) = parse_code(&code, &[], &[], &[])?;
+/// assert_eq!(labels, 0);
+/// assert!(matches!(instructions.as_slice(), [Instruction::End]));
+/// ```
 pub(super) fn parse_code(
     data: &[u8],
     atoms: &[String],
@@ -269,6 +281,15 @@ pub(super) fn parse_code(
     }
 }
 
+/// Skip operands for a known instruction that the runtime cannot execute.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// skip_unsupported_instruction(OPCODE_BIF1, &[0, 0, 0, 0], &mut cursor)?;
+/// assert_eq!(cursor, 4);
+/// ```
 fn skip_unsupported_instruction(
     opcode: u8,
     data: &[u8],
@@ -297,6 +318,14 @@ fn skip_unsupported_instruction(
     Ok(())
 }
 
+/// Return the fixed operand count for a known unsupported opcode.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(unsupported_opcode_operand_count(OPCODE_BIF1), Some(4));
+/// assert_eq!(unsupported_opcode_operand_count(255), None);
+/// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
         OPCODE_CALL_LAST | OPCODE_CALL_EXT_LAST => Some(3),
@@ -338,6 +367,15 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     }
 }
 
+/// Read a compact operand count, then skip that many operands.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// skip_counted_operands(&[0x10, 0x20], &mut cursor)?;
+/// assert_eq!(cursor, 2);
+/// ```
 fn skip_counted_operands(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
     let operand_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
         .map_err(|_| error("BEAM instruction operand list is too large"))?;
@@ -347,6 +385,15 @@ fn skip_counted_operands(data: &[u8], cursor: &mut usize) -> Result<(), BeamErro
     skip_operands(data, cursor, operand_count)
 }
 
+/// Skip a fixed number of compact operands.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// skip_operands(&[0x10, 0x20], &mut cursor, 2)?;
+/// assert_eq!(cursor, 2);
+/// ```
 fn skip_operands(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), BeamError> {
     if count > data.len().saturating_sub(*cursor) {
         return Err(error("truncated BEAM instruction operands"));
@@ -357,6 +404,15 @@ fn skip_operands(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), Be
     Ok(())
 }
 
+/// Skip one compact operand, including a supported extended payload.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// skip_operand(&[0x07, 0, 0, 0, 0, 0, 0, 0, 0], &mut cursor)?;
+/// assert_eq!(cursor, 9);
+/// ```
 fn skip_operand(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
     let first_byte = *data
         .get(*cursor)
@@ -390,6 +446,15 @@ fn skip_operand(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
     }
 }
 
+/// Skip the extension bytes described by a compact integer's first byte.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// skip_integer_payload(&[0, 7], &mut cursor, 0x19)?;
+/// assert_eq!(cursor, 2);
+/// ```
 fn skip_integer_payload(data: &[u8], cursor: &mut usize, first_byte: u8) -> Result<(), BeamError> {
     if first_byte & COMPACT_EXTENDED_FLAG == 0 {
         return Ok(());
@@ -409,6 +474,15 @@ fn skip_integer_payload(data: &[u8], cursor: &mut usize, first_byte: u8) -> Resu
     skip_bytes(data, cursor, byte_count)
 }
 
+/// Advance the cursor by a byte count if the full range exists.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// skip_bytes(&[0, 0], &mut cursor, 2)?;
+/// assert_eq!(cursor, 2);
+/// ```
 fn skip_bytes(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), BeamError> {
     let end = cursor
         .checked_add(count)
@@ -418,6 +492,15 @@ fn skip_bytes(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), BeamE
     Ok(())
 }
 
+/// Skip a `select_val` or `select_tuple_arity` instruction's operands.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// skip_select_val(&[0x03, 0x15, 0x17, 0x20, 0x12, 0x15, 0x22, 0x25], &mut cursor)?;
+/// assert_eq!(cursor, 8);
+/// ```
 fn skip_select_val(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
     skip_operand(data, cursor)?;
     let _failure_label = read_operand(data, cursor, TAG_LABEL)?;
@@ -439,6 +522,15 @@ fn skip_select_val(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
     Ok(())
 }
 
+/// Read an X or Y register operand.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// assert!(matches!(read_register(&[0x03], &mut cursor)?, Operand::X(0)));
+/// assert_eq!(cursor, 1);
+/// ```
 fn read_register(data: &[u8], cursor: &mut usize) -> Result<Operand, BeamError> {
     let first = *data
         .get(*cursor)
@@ -453,6 +545,16 @@ fn read_register(data: &[u8], cursor: &mut usize) -> Result<Operand, BeamError> 
     }
 }
 
+/// Read one supported source operand for a `move` instruction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let literals = vec![Some(Term::Binary(b"ok".to_vec()))];
+/// let mut cursor = 0;
+/// let operand = read_move_operand(&[0x47, 0], &mut cursor, &[], &literals)?;
+/// assert!(matches!(operand, Operand::Value(Term::Binary(bytes)) if bytes == b"ok"));
+/// ```
 fn read_move_operand(
     data: &[u8],
     cursor: &mut usize,

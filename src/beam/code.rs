@@ -130,6 +130,12 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// chunk payloads and padding byte values are ignored. The `ImpT` chunk maps
 /// external call indexes to module/function/arity. The executor supports only
 /// the listed instructions.
+/// # Examples
+///
+/// ```rust,ignore
+/// let module = parse(&beam_bytes)?;
+/// assert_eq!(module.name, "Elixir.Hello");
+/// ```
 pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
     if bytes.len() < CONTAINER_HEADER_SIZE || &bytes[..WORD_SIZE] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
@@ -200,6 +206,14 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
     })
 }
 
+/// Read the atom names from an `AtU8` chunk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = parse_atoms(&[0xff, 0xff, 0xff, 0xff, 0x10, b'a'])?;
+/// assert_eq!(atoms, ["a"]);
+/// ```
 fn parse_atoms(data: &[u8]) -> Result<Vec<String>, BeamError> {
     let signed_atom_count = read_u32(data)? as i32;
     let atom_count = usize::try_from(
@@ -233,6 +247,16 @@ fn parse_atoms(data: &[u8]) -> Result<Vec<String>, BeamError> {
     Ok(atoms)
 }
 
+/// Read exported function names, arities, and labels from an `ExpT` chunk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = vec!["main".to_owned()];
+/// let table = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
+/// let exports = parse_exports(table, &atoms)?;
+/// assert_eq!(exports.get(&("main".to_owned(), 0)), Some(&1));
+/// ```
 fn parse_exports(data: &[u8], atoms: &[String]) -> Result<HashMap<(String, u32), u32>, BeamError> {
     let export_count = read_u32(data)? as usize;
     let expected_table_size = WORD_SIZE
@@ -258,6 +282,15 @@ fn parse_exports(data: &[u8], atoms: &[String]) -> Result<HashMap<(String, u32),
     Ok(exports)
 }
 
+/// Read external module, function, and arity entries from an `ImpT` chunk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = vec!["IO".to_owned(), "puts".to_owned()];
+/// let table = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1];
+/// assert_eq!(parse_imports(table, &atoms)?, [("IO".into(), "puts".into(), 1)]);
+/// ```
 fn parse_imports(data: &[u8], atoms: &[String]) -> Result<Vec<(String, String, u32)>, BeamError> {
     let import_count = read_u32(data)? as usize;
     let expected_size = WORD_SIZE
@@ -282,6 +315,14 @@ fn parse_imports(data: &[u8], atoms: &[String]) -> Result<Vec<(String, String, u
         .collect()
 }
 
+/// Read supported binary terms from an uncompressed `LitT` chunk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let literals = parse_literals(&[0; 8])?;
+/// assert!(literals.is_empty());
+/// ```
 fn parse_literals(data: &[u8]) -> Result<Vec<Option<Term>>, BeamError> {
     if data.len() < WORD_SIZE * 2 {
         return Err(error("truncated BEAM literal table header"));
@@ -312,6 +353,14 @@ fn parse_literals(data: &[u8]) -> Result<Vec<Option<Term>>, BeamError> {
     Ok(literals)
 }
 
+/// Read an ETF binary term, or return `None` for another term type.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let term = read_binary_literal(&[131, 109, 0, 0, 0, 2, b'o', b'k'])?;
+/// assert_eq!(term, Some(Term::Binary(b"ok".to_vec())));
+/// ```
 fn read_binary_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
     if data.get(..2) != Some(&[ETF_VERSION, ETF_BINARY_EXT]) {
         return Ok(None);
@@ -323,6 +372,16 @@ fn read_binary_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
     Ok(Some(Term::Binary(data[WORD_SIZE + 2..].to_vec())))
 }
 
+/// Read a supported integer or atom term and advance the cursor.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// let term = read_value(&[0x01], &mut cursor, &[])?;
+/// assert_eq!(term, Term::Integer(0));
+/// assert_eq!(cursor, 1);
+/// ```
 fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term, BeamError> {
     let first_byte = *data
         .get(*cursor)
@@ -349,6 +408,14 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term,
     }
 }
 
+/// Return the atom at a one-based BEAM atom index.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = vec!["hello".to_owned()];
+/// assert_eq!(atom_at(&atoms, 1)?, "hello");
+/// ```
 fn atom_at(atoms: &[String], index: usize) -> Result<&str, BeamError> {
     if index < FIRST_ATOM_INDEX {
         return Err(error("BEAM atom index zero is invalid"));
@@ -359,6 +426,15 @@ fn atom_at(atoms: &[String], index: usize) -> Result<&str, BeamError> {
         .ok_or_else(|| error(format!("BEAM atom index {index} out of range")))
 }
 
+/// Return a required chunk payload by its four-byte ID.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let payload = [0x03];
+/// let chunks = HashMap::from([(b"Code".to_vec(), &payload[..])]);
+/// assert_eq!(required_chunk(&chunks, b"Code")?, &payload);
+/// ```
 fn required_chunk<'a>(
     chunks: &HashMap<Vec<u8>, &'a [u8]>,
     chunk_id: &[u8; WORD_SIZE],
@@ -371,6 +447,15 @@ fn required_chunk<'a>(
     })
 }
 
+/// Read a compact unsigned operand with the expected tag.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// assert_eq!(read_operand(&[0x10], &mut cursor, TAG_UNSIGNED)?, 1);
+/// assert_eq!(cursor, 1);
+/// ```
 fn read_operand(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<u64, BeamError> {
     let first = *data
         .get(*cursor)
@@ -385,6 +470,15 @@ fn read_operand(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<u64
     read_integer_after_first(data, cursor, first)
 }
 
+/// Read a compact integer payload and advance the cursor.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// assert_eq!(read_integer(&[0x21], &mut cursor, TAG_INTEGER)?, 2);
+/// assert_eq!(cursor, 1);
+/// ```
 fn read_integer(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<i128, BeamError> {
     let first = *data
         .get(*cursor)
@@ -400,6 +494,15 @@ fn read_integer(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<i12
     Ok(value as i128)
 }
 
+/// Read the integer payload after its first compact-operand byte.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// assert_eq!(read_integer_after_first(&[0, 7], &mut cursor, 0x19)?, 7);
+/// assert_eq!(cursor, 2);
+/// ```
 fn read_integer_after_first(
     data: &[u8],
     cursor: &mut usize,
@@ -441,6 +544,13 @@ fn read_integer_after_first(
     Ok(value)
 }
 
+/// Read one unsigned, big-endian 32-bit field.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(read_u32(&[0, 0, 0, 2])?, 2);
+/// ```
 fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
     let field_bytes = field_bytes.get(..WORD_SIZE).ok_or_else(|| {
         error(format!(

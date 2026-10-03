@@ -18,3 +18,9 @@ separate modules, even when one operation uses them together.
 Keep the supported binary grammar and layout near the code that reads it. Name
 non-obvious format values in implementation code. Show supported forms with
 their limits and representative byte examples.
+
+## Function behavior lacks examples
+
+Document every function with Rustdoc comments and a `# Examples` section. Show
+representative input and output in Rust code fences. For parser functions, use
+concrete byte forms. State important observable errors and limits.
