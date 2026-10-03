@@ -74,10 +74,10 @@ impl BeamProgram {
             .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))?;
         let mut scheduler = Scheduler::default();
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
-        while let Some(mut process) = scheduler.take_next() {
-            match self.run(&mut scheduler, &mut process)? {
-                Outcome::Wait => scheduler.park(process),
-                Outcome::Exit { reason, result } => scheduler.finish(process, reason, result)?,
+        while scheduler.schedule_next().is_some() {
+            match self.run(&mut scheduler)? {
+                Outcome::Wait => scheduler.park_current(),
+                Outcome::Exit { reason, result } => scheduler.finish_current(reason, result)?,
             }
         }
         match scheduler.into_root_result() {
@@ -145,19 +145,16 @@ impl BeamProgram {
             .ok_or_else(|| error(format!("missing BEAM module {name}")))
     }
 
-    /// Run one process until it waits for a message or exits.
+    /// Run the current process until it waits for a message or exits.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(matches!(program.run(&mut scheduler, &mut process)?, Outcome::Wait));
+    /// assert!(matches!(program.run(&mut scheduler)?, Outcome::Wait));
     /// ```
-    fn run(
-        &self,
-        scheduler: &mut Scheduler,
-        process: &mut ProcessState,
-    ) -> Result<Outcome, BeamError> {
+    fn run(&self, scheduler: &mut Scheduler) -> Result<Outcome, BeamError> {
         loop {
+            let process = scheduler.current_process_mut();
             let frame = current_frame(process);
             let module = self.module(&frame.module)?;
             let Some(instruction) = module.instructions.get(frame.next_instruction) else {
@@ -205,7 +202,7 @@ impl BeamProgram {
                     }
                     let arguments = call_arguments(&process.registers, *arity)?;
                     if module == "erlang" {
-                        let value = match self.bif(scheduler, process, name, arguments)? {
+                        let value = match self.bif(scheduler, name, arguments)? {
                             Ok(value) => value,
                             Err(reason) => {
                                 return Ok(Outcome::Exit {
@@ -214,6 +211,7 @@ impl BeamProgram {
                                 });
                             }
                         };
+                        let process = scheduler.current_process_mut();
                         write(process, &Operand::X(0), value)?;
                         if *tail && let Some(outcome) = return_from_frame(process)? {
                             return Ok(outcome);
@@ -236,9 +234,9 @@ impl BeamProgram {
                         return Err(error(format!("unsupported BIF {module}:{name}/0")));
                     }
                     // ponytail: no zero-arity BIF exits; map an exit to an error until one does.
-                    let value = self.bif(scheduler, process, name, Vec::new())?;
+                    let value = self.bif(scheduler, name, Vec::new())?;
                     let value = value.map_err(|reason| error(format!("BIF exited: {reason:?}")))?;
-                    write(process, destination, value)?;
+                    write(scheduler.current_process_mut(), destination, value)?;
                 }
                 Instruction::Jump(label) => jump(module, process, *label)?,
                 Instruction::Test {
@@ -337,8 +335,8 @@ impl BeamProgram {
                         return Err(error("unsupported BEAM send target"));
                     };
                     let message = read(process, &Operand::X(1))?;
-                    scheduler.deliver(process, target, message.clone())?;
-                    write(process, &Operand::X(0), message)?;
+                    scheduler.deliver(target, message.clone())?;
+                    write(scheduler.current_process_mut(), &Operand::X(0), message)?;
                 }
                 Instruction::LoopReceive {
                     fail_label,
@@ -382,6 +380,7 @@ impl BeamProgram {
                 }
                 Instruction::ReceiveMarkerReserve(marker) => {
                     let reference = scheduler.make_ref()?;
+                    let process = scheduler.current_process_mut();
                     let position = process.mailbox.next_sequence();
                     process.receive_markers.insert(reference, position);
                     write(process, marker, Term::Reference(reference))?;
@@ -441,13 +440,12 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let value = program.bif(&mut scheduler, &mut process, "make_ref", vec![])?;
+    /// let value = program.bif(&mut scheduler, "make_ref", vec![])?;
     /// assert!(matches!(value, Ok(Term::Reference(_))));
     /// ```
     fn bif(
         &self,
         scheduler: &mut Scheduler,
-        process: &mut ProcessState,
         name: &str,
         arguments: Vec<Term>,
     ) -> Result<Result<Term, Term>, BeamError> {
@@ -455,11 +453,12 @@ impl BeamProgram {
             ("process_flag", [Term::Atom(flag), Term::Atom(value)])
                 if flag == "trap_exit" && (value == "true" || value == "false") =>
             {
+                let process = scheduler.current_process_mut();
                 let old = Term::Atom(process.trap_exit.to_string());
                 process.trap_exit = value == "true";
                 old
             }
-            ("self", []) => Term::Pid(process.id),
+            ("self", []) => Term::Pid(scheduler.current_process_mut().id),
             ("make_ref", []) => Term::Reference(scheduler.make_ref()?),
             ("exit", [reason]) => return Ok(Err(reason.clone())),
             ("spawn_monitor" | "spawn_link", [Term::Atom(module), Term::Atom(function), list]) => {
@@ -472,8 +471,7 @@ impl BeamProgram {
                     .map_err(|_| error("arity exceeds BEAM limit"))?;
                 let frame = self.mfa_frame(module, function, arity)?;
                 let monitor = name == "spawn_monitor";
-                let (pid, reference) =
-                    scheduler.spawn(process, frame, arguments, monitor, !monitor)?;
+                let (pid, reference) = scheduler.spawn(frame, arguments, monitor, !monitor)?;
                 match reference {
                     Some(reference) => {
                         Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)])

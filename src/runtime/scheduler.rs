@@ -6,14 +6,20 @@ use crate::{
     term::{ProcessId, Reference, Term},
 };
 
-/// A cooperative scheduler on one OS thread. The running process is taken
-/// out of the process table until it waits or exits.
+/// A cooperative scheduler on one OS thread. It follows the ERTS model: the
+/// process table holds every live process, `current_process` names the
+/// running process, and the run queue holds only processes that wait for a
+/// turn.
 #[derive(Debug, Default)]
 pub(super) struct Scheduler {
-    /// Processes that are not running now.
+    /// All live processes, including the current process.
     processes: HashMap<ProcessId, ProcessState>,
-    /// Processes that can run, in run order.
+    /// Processes that wait for a turn, in run order. The current process is
+    /// not in this queue, as in ERTS.
     runnable: VecDeque<ProcessId>,
+    /// The process that runs now, like `current_process` in the ERTS
+    /// scheduler data.
+    current_process: Option<ProcessId>,
     /// Number for the next process identifier.
     next_process_id: u64,
     /// Number for the next reference.
@@ -30,7 +36,7 @@ impl Scheduler {
     /// ```rust,ignore
     /// let mut scheduler = Scheduler::default();
     /// scheduler.start(frame, vec![])?;
-    /// assert_eq!(scheduler.take_next().unwrap().id, ProcessId(0));
+    /// assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
     /// ```
     pub(super) fn start(&mut self, frame: Frame, arguments: Vec<Term>) -> Result<(), BeamError> {
         let id = self.next_pid()?;
@@ -50,29 +56,45 @@ impl Scheduler {
         self.processes.insert(process.id, process);
     }
 
-    /// Take the next runnable process from the scheduler.
+    /// Take the next process from the run queue and make it the current
+    /// process.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let process = scheduler.take_next();
-    /// assert_eq!(process.map(|process| process.id), Some(ProcessId(0)));
+    /// assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
     /// ```
-    pub(super) fn take_next(&mut self) -> Option<ProcessState> {
-        let id = self.runnable.pop_front()?;
-        self.processes.remove(&id)
+    pub(super) fn schedule_next(&mut self) -> Option<ProcessId> {
+        self.current_process = self.runnable.pop_front();
+        self.current_process
     }
 
-    /// Store a process that waits for a message. A delivery makes it runnable.
+    /// Return the current process.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.park(process);
+    /// scheduler.schedule_next();
+    /// assert_eq!(scheduler.current_process_mut().id, ProcessId(0));
     /// ```
-    pub(super) fn park(&mut self, mut process: ProcessState) {
-        process.wait();
-        self.processes.insert(process.id, process);
+    pub(super) fn current_process_mut(&mut self) -> &mut ProcessState {
+        // ponytail: only the run loop calls this, after `schedule_next` returned a process.
+        self.current_process
+            .and_then(|id| self.processes.get_mut(&id))
+            .expect("the scheduler has a current process")
+    }
+
+    /// Stop the current process until a message arrives. A delivery adds it
+    /// to the run queue again.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.park_current();
+    /// ```
+    pub(super) fn park_current(&mut self) {
+        self.current_process_mut().wait();
+        self.current_process = None;
     }
 
     /// Create the next process identifier.
@@ -116,36 +138,16 @@ impl Scheduler {
         self.root_result
     }
 
-    /// Deliver a message to the current process or another live process.
-    /// A message to a process that does not exist is dropped, as in ERTS.
+    /// Deliver a message to a live process. Add the process to the run queue
+    /// when the message wakes it. A message to a process that does not exist
+    /// is dropped, as in ERTS.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.deliver(&mut current, target, Term::Atom("ping".into()))?;
+    /// scheduler.deliver(target, Term::Atom("ping".into()))?;
     /// ```
-    pub(super) fn deliver(
-        &mut self,
-        current: &mut ProcessState,
-        target: ProcessId,
-        term: Term,
-    ) -> Result<(), BeamError> {
-        if target == current.id {
-            current.receive(term)?;
-            return Ok(());
-        }
-        self.deliver_to(target, term)
-    }
-
-    /// Deliver a message to a stored process and wake it when it waits.
-    /// A message to a process that does not exist is dropped.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// scheduler.deliver_to(ProcessId(1), Term::Atom("ping".into()))?;
-    /// ```
-    fn deliver_to(&mut self, target: ProcessId, term: Term) -> Result<(), BeamError> {
+    pub(super) fn deliver(&mut self, target: ProcessId, term: Term) -> Result<(), BeamError> {
         let Some(process) = self.processes.get_mut(&target) else {
             return Ok(());
         };
@@ -155,58 +157,63 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Spawn a child process and optionally monitor or link it.
+    /// Spawn a child process for the current process and optionally monitor
+    /// or link it.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let (pid, monitor) = scheduler.spawn(&mut parent, frame, vec![], true, false)?;
+    /// let (pid, monitor) = scheduler.spawn(frame, vec![], true, false)?;
     /// assert!(monitor.is_some());
     /// ```
     pub(super) fn spawn(
         &mut self,
-        parent: &mut ProcessState,
         frame: Frame,
         arguments: Vec<Term>,
         monitor: bool,
         link: bool,
     ) -> Result<(ProcessId, Option<Reference>), BeamError> {
         let mut child = ProcessState::new(self.next_pid()?, frame, arguments);
+        let parent = self.current_process_mut().id;
         let reference = if monitor {
             let reference = self.make_ref()?;
-            child.monitored_by.push((parent.id, reference));
+            child.monitored_by.push((parent, reference));
             Some(reference)
         } else {
             None
         };
         if link {
-            parent.links.insert(child.id);
-            child.links.insert(parent.id);
+            self.current_process_mut().links.insert(child.id);
+            child.links.insert(parent);
         }
         let id = child.id;
         self.insert(child);
         Ok((id, reference))
     }
 
-    /// Record a process exit. Send `DOWN` to monitors and `EXIT` to linked
-    /// processes that trap exits.
+    /// Remove the current process after it exits. Send `DOWN` to monitors
+    /// and `EXIT` to linked processes that trap exits.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.finish(process, Term::Atom("normal".into()), Some(result))?;
+    /// scheduler.finish_current(Term::Atom("normal".into()), Some(result))?;
     /// ```
     ///
     /// # Errors
     ///
     /// An abnormal exit signal to a linked process that does not trap exits
     /// is not supported.
-    pub(super) fn finish(
+    pub(super) fn finish_current(
         &mut self,
-        process: ProcessState,
         reason: Term,
         result: Option<Term>,
     ) -> Result<(), BeamError> {
+        let process = self
+            .current_process
+            .take()
+            .and_then(|id| self.processes.remove(&id))
+            .expect("the scheduler has a current process");
         let normal = reason == Term::Atom("normal".into());
         if process.id == ProcessId(0) {
             self.root_result = Some(match result {
@@ -222,7 +229,7 @@ impl Scheduler {
                 Term::Pid(process.id),
                 reason.clone(),
             ]);
-            self.deliver_to(watcher, down)?;
+            self.deliver(watcher, down)?;
         }
         for linked in process.links {
             let trap_exit = self.processes.get_mut(&linked).map(|target| {
@@ -243,7 +250,7 @@ impl Scheduler {
                 Term::Pid(process.id),
                 reason.clone(),
             ]);
-            self.deliver_to(linked, exit)?;
+            self.deliver(linked, exit)?;
         }
         Ok(())
     }
@@ -261,73 +268,58 @@ mod tests {
         Term::Atom(name.into())
     }
 
+    fn first_message(scheduler: &Scheduler, id: u64, sequence: u64) -> Term {
+        scheduler.processes[&ProcessId(id)]
+            .mailbox
+            .first_at_or_after(sequence)
+            .unwrap()
+            .term
+            .clone()
+    }
+
     #[test]
-    fn runs_processes_in_order_and_wakes_a_parked_receiver() {
+    fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
         let mut scheduler = Scheduler::default();
         scheduler.start(frame(), vec![]).unwrap();
-        let mut root = scheduler.take_next().unwrap();
-        let (child, monitor) = scheduler
-            .spawn(&mut root, frame(), vec![], false, false)
-            .unwrap();
-        assert_eq!(
-            (root.id, child, monitor),
-            (ProcessId(0), ProcessId(1), None)
-        );
+        assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+        assert!(scheduler.processes.contains_key(&ProcessId(0)));
+        let (child, monitor) = scheduler.spawn(frame(), vec![], false, false).unwrap();
+        assert_eq!((child, monitor), (ProcessId(1), None));
 
-        scheduler.park(root);
-        let mut child = scheduler.take_next().unwrap();
-        assert!(scheduler.take_next().is_none());
-        scheduler
-            .deliver(&mut child, ProcessId(0), atom("ping"))
-            .unwrap();
-        scheduler
-            .deliver(&mut child, ProcessId(1), atom("self"))
-            .unwrap();
-        scheduler
-            .deliver(&mut child, ProcessId(9), atom("lost"))
-            .unwrap();
+        scheduler.park_current();
+        assert_eq!(scheduler.schedule_next(), Some(ProcessId(1)));
+        assert!(scheduler.runnable.is_empty());
+        scheduler.deliver(ProcessId(0), atom("ping")).unwrap();
+        scheduler.deliver(ProcessId(1), atom("self")).unwrap();
+        scheduler.deliver(ProcessId(9), atom("lost")).unwrap();
 
-        let root = scheduler.take_next().unwrap();
-        assert_eq!(
-            root.mailbox.first_at_or_after(0).unwrap().term,
-            atom("ping")
-        );
-        assert_eq!(
-            child.mailbox.first_at_or_after(0).unwrap().term,
-            atom("self")
-        );
+        assert_eq!(Vec::from(scheduler.runnable.clone()), vec![ProcessId(0)]);
+        assert_eq!(first_message(&scheduler, 0, 0), atom("ping"));
+        assert_eq!(first_message(&scheduler, 1, 0), atom("self"));
     }
 
     #[test]
     fn sends_down_and_exit_messages_and_records_the_root_result() {
         let mut scheduler = Scheduler::default();
         scheduler.start(frame(), vec![]).unwrap();
-        let mut root = scheduler.take_next().unwrap();
-        root.trap_exit = true;
-        let (monitored, monitor) = scheduler
-            .spawn(&mut root, frame(), vec![], true, false)
-            .unwrap();
-        let (linked, _) = scheduler
-            .spawn(&mut root, frame(), vec![], false, true)
-            .unwrap();
-        scheduler.park(root);
+        scheduler.schedule_next();
+        scheduler.current_process_mut().trap_exit = true;
+        let (monitored, monitor) = scheduler.spawn(frame(), vec![], true, false).unwrap();
+        let (linked, _) = scheduler.spawn(frame(), vec![], false, true).unwrap();
+        scheduler.park_current();
 
-        let process = scheduler.take_next().unwrap();
-        scheduler.finish(process, atom("normal"), None).unwrap();
-        let process = scheduler.take_next().unwrap();
-        scheduler.finish(process, atom("boom"), None).unwrap();
+        scheduler.schedule_next();
+        scheduler.finish_current(atom("normal"), None).unwrap();
+        scheduler.schedule_next();
+        scheduler.finish_current(atom("boom"), None).unwrap();
 
-        let root = scheduler.take_next().unwrap();
-        assert!(root.links.is_empty());
-        let messages = [0, 1].map(|sequence| {
-            root.mailbox
-                .first_at_or_after(sequence)
-                .unwrap()
-                .term
-                .clone()
-        });
+        assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+        assert!(scheduler.current_process_mut().links.is_empty());
         assert_eq!(
-            messages,
+            [
+                first_message(&scheduler, 0, 0),
+                first_message(&scheduler, 0, 1)
+            ],
             [
                 Term::Tuple(vec![
                     atom("DOWN"),
@@ -340,8 +332,9 @@ mod tests {
             ]
         );
         scheduler
-            .finish(root, atom("normal"), Some(atom("ok")))
+            .finish_current(atom("normal"), Some(atom("ok")))
             .unwrap();
+        assert!(scheduler.processes.is_empty());
         assert_eq!(scheduler.into_root_result(), Some(Ok(atom("ok"))));
     }
 
@@ -349,19 +342,17 @@ mod tests {
     fn rejects_unsupported_exit_signals_and_counter_overflow() {
         let mut scheduler = Scheduler::default();
         scheduler.start(frame(), vec![]).unwrap();
-        let mut root = scheduler.take_next().unwrap();
-        scheduler
-            .spawn(&mut root, frame(), vec![], false, true)
-            .unwrap();
-        let child = scheduler.take_next().unwrap();
-        scheduler.park(root);
-        assert!(scheduler.finish(child, atom("boom"), None).is_err());
+        scheduler.schedule_next();
+        scheduler.spawn(frame(), vec![], false, true).unwrap();
+        scheduler.park_current();
+        scheduler.schedule_next();
+        assert!(scheduler.finish_current(atom("boom"), None).is_err());
 
         let mut scheduler = Scheduler::default();
         scheduler.start(frame(), vec![]).unwrap();
-        let root = scheduler.take_next().unwrap();
+        scheduler.schedule_next();
         scheduler
-            .finish(root, atom("boom"), Some(atom("ok")))
+            .finish_current(atom("boom"), Some(atom("ok")))
             .unwrap();
         assert_eq!(scheduler.into_root_result(), Some(Err(atom("boom"))));
 
