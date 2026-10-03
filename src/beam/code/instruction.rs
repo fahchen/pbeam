@@ -1,13 +1,13 @@
 //! Parse Code chunk instructions into the runtime instruction model.
 
-use super::super::error::{BeamError, error};
 use super::{
     COMPACT_EXTENDED_FLAG, COMPACT_SHORT_VALUE_SHIFT, COMPACT_SIGN_FLAG, COMPACT_TAG_MASK,
     FIRST_LABEL_NUMBER, LIST_SUBTAG, TAG_ATOM, TAG_INTEGER, TAG_LABEL, TAG_LITERAL, TAG_REGISTER,
     TAG_UNSIGNED, TAG_Y_REGISTER, WORD_SIZE, atom_at, read_integer, read_operand, read_u32,
     read_value,
 };
-use crate::beam::term::Term;
+use crate::error::{BeamError, error};
+use crate::term::Term;
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
@@ -85,7 +85,7 @@ const OPCODE_UPDATE_RECORD: u8 = 181;
 /// Byte examples use hexadecimal values. Compact operands use the short form
 /// in the Code chunk grammar. `End` represents the stream terminator; the
 /// executor does not run it.
-pub(in crate::beam) enum Instruction {
+pub(crate) enum Instruction {
     /// Starts a code label. The label must be in `1..=label_count`.
     ///
     /// Encoding: opcode, then a compact unsigned label. Example: `[0x01, 0x10]`
@@ -156,7 +156,7 @@ pub(in crate::beam) enum Instruction {
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::beam) enum TestKind {
+pub(crate) enum TestKind {
     Atom,
     Pid,
     List,
@@ -169,7 +169,7 @@ pub(in crate::beam) enum TestKind {
 /// and `Y` uses compact register tag 4. For example, `move x0, y0` is encoded
 /// as `[0x40, 0x03, 0x04]`.
 #[derive(Debug, Clone)]
-pub(in crate::beam) enum Operand {
+pub(crate) enum Operand {
     Value(Term),
     UnsupportedLiteral(usize),
     X(u32),
@@ -700,7 +700,7 @@ mod tests {
         read_move_operand, skip_counted_operands, skip_integer_payload, skip_operand,
         skip_select_val, skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
     };
-    use crate::beam::{code::Operand, term::Term};
+    use crate::{beam::code::Operand, term::Term};
 
     #[test]
     fn rejects_invalid_operands_and_code_headers() {

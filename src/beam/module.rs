@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use super::{
-    code::{self, Instruction, Operand},
+use super::code::{self, Instruction, Operand};
+use crate::{
     error::{BeamError, error},
     term::Term,
 };
@@ -10,9 +10,9 @@ const X0_REGISTER: u32 = 0;
 
 #[derive(Debug)]
 pub struct BeamModule {
-    pub(super) name: String,
-    pub(super) exports: HashMap<(String, u32), u32>,
-    pub(super) instructions: Vec<Instruction>,
+    pub(crate) name: String,
+    pub(crate) exports: HashMap<(String, u32), u32>,
+    pub(crate) instructions: Vec<Instruction>,
 }
 
 impl BeamModule {

@@ -1,3 +1,9 @@
 mod beam;
+mod error;
+mod runtime;
+mod term;
 
-pub use beam::{BeamError, BeamModule, BeamProgram, Term};
+pub use beam::BeamModule;
+pub use error::BeamError;
+pub use runtime::BeamProgram;
+pub use term::Term;

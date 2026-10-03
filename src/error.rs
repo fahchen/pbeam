@@ -11,7 +11,7 @@ impl fmt::Display for BeamError {
 
 impl std::error::Error for BeamError {}
 
-pub(super) fn error(message: impl Into<String>) -> BeamError {
+pub(crate) fn error(message: impl Into<String>) -> BeamError {
     BeamError(message.into())
 }
 

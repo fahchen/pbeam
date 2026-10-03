@@ -1,8 +1,9 @@
-use super::{
-    BeamError,
-    code::{Instruction, Operand, TestKind},
-    error::error,
-    module::BeamModule,
+use crate::{
+    beam::{
+        BeamModule,
+        code::{Instruction, Operand, TestKind},
+    },
+    error::{BeamError, error},
     term::Term,
 };
 use std::collections::HashMap;
@@ -340,10 +341,9 @@ mod tests {
     use super::{
         BeamProgram, call_arguments, function_at_label, read_operand, set_x0, write_operand,
     };
-    use crate::beam::{
-        code::{Instruction, Operand},
-        module::BeamModule,
-        term::Term,
+    use crate::{
+        BeamModule, Term,
+        beam::code::{Instruction, Operand},
     };
 
     fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
