@@ -24,3 +24,11 @@ their limits and representative byte examples.
 Document every function with Rustdoc comments and a `# Examples` section. Show
 representative input and output in Rust code fences. For parser functions, use
 concrete byte forms. State important observable errors and limits.
+
+## Runtime models copy a similar BIF instead of ERTS
+
+Before you model a BIF or instruction, run it on the pinned ERTS and record the observable result: return value, exit reason shape, and messages sent. Do not copy the behavior of a similar BIF. Record each departure from the ERTS result in the PR and in a test.
+
+## Tests pass without the behavior they claim
+
+A test must fail when its claimed behavior breaks. Drive behavior through compiled BEAM fixtures, and make each test double perform the step under test. Assert exact values from a pinned ERTS run, not only types.
