@@ -1,9 +1,9 @@
 name: Capture Learnings
 
 # After a PR merges into main, Copilot CLI runs
-# .github/prompts/capture-learnings.prompt.md for that PR. Copilot only
-# generates the knowledge change and the result files. A separate step
-# commits, opens the knowledge PR, and comments on the merged PR. The same
+# .github/prompts/capture-learnings.prompt.md for that PR. Copilot generates
+# and commits the knowledge change and writes the result files. A separate
+# step pushes, opens the knowledge PR, and comments on the merged PR. The same
 # prompt also runs locally on an open PR during its implementation.
 
 on:
@@ -53,19 +53,24 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
-        # Copilot only reads GitHub, edits docs/agents/knowledge.md, and writes
-        # result files. The next step commits, opens the PR, and comments.
+        # Copilot reads GitHub, edits and commits docs/agents/knowledge.md, and
+        # writes result files. The next step pushes, opens the PR, and comments.
         run: |
           mkdir -p "$OUTPUT"
           copilot -s --no-ask-user \
             --allow-tool='write' \
             --allow-tool='shell(gh api:*)' \
             --allow-tool='shell(gh pr view:*)' \
+            --allow-tool='shell(git switch:*)' \
+            --allow-tool='shell(git add:*)' \
+            --allow-tool='shell(git commit:*)' \
+            --allow-tool='shell(git status:*)' \
+            --allow-tool='shell(git diff:*)' \
             --allow-tool='shell(grep:*)' \
             --allow-tool='shell(wc:*)' \
             -p "MODE: ci PR: #${PR_NUMBER} OUTPUT: ${OUTPUT} $(cat .github/prompts/capture-learnings.prompt.md)"
 
-      - name: Commit, open the knowledge PR, and comment
+      - name: Push, open the knowledge PR, and comment
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -73,20 +78,21 @@ jobs:
             echo "Copilot did not write comment.md" >&2
             exit 1
           fi
-          if git diff --quiet -- docs/agents/knowledge.md; then
+          branch="learnings/pr-$PR_NUMBER"
+          if [ "$(git branch --show-current)" != "$branch" ]; then
+            if ! git diff --quiet; then
+              echo "Copilot changed files without a commit" >&2
+              exit 1
+            fi
             gh pr comment "$PR_NUMBER" --body-file "$OUTPUT/comment.md"
             exit 0
           fi
-          unexpected=$(git status --porcelain | grep -v ' docs/agents/knowledge.md$' || true)
-          if [ -n "$unexpected" ]; then
-            echo "Copilot changed other files:" >&2
+          unexpected=$(git diff --name-only origin/main...HEAD | grep -vx 'docs/agents/knowledge.md' || true)
+          if [ -n "$unexpected" ] || ! git diff --quiet; then
+            echo "Copilot changed files other than docs/agents/knowledge.md:" >&2
             echo "$unexpected" >&2
             exit 1
           fi
-          branch="learnings/pr-$PR_NUMBER"
-          git switch -c "$branch"
-          git add docs/agents/knowledge.md
-          git commit -F "$OUTPUT/commit.md"
           git push -u origin "$branch"
           url=$(gh pr create --base main --head "$branch" \
             --title "docs: capture review learnings from #$PR_NUMBER" \
