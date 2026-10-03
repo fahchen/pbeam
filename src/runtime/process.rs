@@ -155,6 +155,13 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Store a process and add it to the ready queue.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.insert(ProcessState::new(ProcessId(1), frame, vec![]));
+    /// ```
     fn insert(&mut self, process: ProcessState) {
         self.runnable.push_back(process.id);
         self.processes.insert(process.id, process);
@@ -185,6 +192,13 @@ impl Scheduler {
         self.processes.insert(process.id, process);
     }
 
+    /// Create the next process identifier.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Scheduler::default().next_pid()?, ProcessId(0));
+    /// ```
     fn next_pid(&mut self) -> Result<ProcessId, BeamError> {
         let value = self.next_process_id;
         self.next_process_id = value
@@ -239,6 +253,14 @@ impl Scheduler {
         self.deliver_to(target, term)
     }
 
+    /// Deliver a message to a stored process and wake it when it waits.
+    /// A message to a process that does not exist is dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.deliver_to(ProcessId(1), Term::Atom("ping".into()))?;
+    /// ```
     fn deliver_to(&mut self, target: ProcessId, term: Term) -> Result<(), BeamError> {
         let Some(process) = self.processes.get_mut(&target) else {
             return Ok(());

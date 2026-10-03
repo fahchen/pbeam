@@ -128,6 +128,10 @@ pub(crate) enum Instruction {
         tail: bool,
         deallocate: u32,
     },
+    /// Calls a zero-arity BIF and writes its value to a register.
+    ///
+    /// Encoding: opcode, import index, destination register. Example:
+    /// `[0x09, 0x00, 0x03]` calls import 0 and writes `x0`.
     Bif0 {
         module: String,
         name: String,
@@ -157,41 +161,97 @@ pub(crate) enum Instruction {
         tail: Operand,
         destination: Operand,
     },
+    /// Builds a tuple from the listed operands.
+    ///
+    /// Encoding: opcode, destination register, extended list, element count,
+    /// elements. Example: `[0xA4, 0x03, 0x17, 0x20, 0x12, 0x22]` writes a
+    /// tuple of atoms 1 and 2 to `x0`.
     PutTuple {
         elements: Vec<Operand>,
         destination: Operand,
     },
+    /// Copies the zero-based tuple element at `index` to a register.
+    ///
+    /// Encoding: opcode, tuple register, unsigned index, destination register.
+    /// Example: `[0x42, 0x03, 0x10, 0x13]` copies element 1 of `x0` to `x1`.
     GetTupleElement {
         tuple: Operand,
         index: u32,
         destination: Operand,
     },
+    /// Jumps to `fail_label` when the operands are not exactly equal.
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `[0x2B, 0x35, 0x13, 0x12]`
+    /// compares `x1` with atom 1 and fails to label 3.
     TestExactEqual {
         fail_label: u32,
         left: Operand,
         right: Operand,
     },
+    /// Jumps to `fail_label` unless the value is a tuple with `arity`
+    /// elements and the first element is `tag`.
+    ///
+    /// Encoding: opcode, fail label, operand, unsigned arity, tag atom.
+    /// Example: `[0x9F, 0x35, 0x03, 0x30, 0x12]` tests `x0` for a 3-tuple
+    /// tagged with atom 1.
     TestTaggedTuple {
         fail_label: u32,
         value: Operand,
         arity: u32,
         tag: Term,
     },
+    /// Sends `x1` to the process in `x0`, then writes the message to `x0`.
+    ///
+    /// Encoding: `[0x14]`.
     Send,
+    /// Removes the current message from the mailbox and resets the receive
+    /// cursor.
+    ///
+    /// Encoding: `[0x15]`.
     RemoveMessage,
+    /// Writes the message at the receive cursor to a register, or jumps to
+    /// `fail_label` when no message is left.
+    ///
+    /// Encoding: opcode, fail label, destination register. Example:
+    /// `[0x17, 0x35, 0x03]` writes `x0` or fails to label 3.
     LoopReceive {
         fail_label: u32,
         destination: Operand,
     },
+    /// Moves the receive cursor past the current message and jumps to the
+    /// label.
+    ///
+    /// Encoding: opcode, label. Example: `[0x18, 0x35]` jumps to label 3.
     LoopReceiveEnd(u32),
+    /// Suspends the process until a message arrives, then continues at the
+    /// label.
+    ///
+    /// Encoding: opcode, label. Example: `[0x19, 0x35]` continues at label 3.
     Wait(u32),
+    /// Ends a receive after its timeout and resets the receive cursor.
+    ///
+    /// Encoding: `[0x16]`.
     Timeout,
+    /// Saves the current mailbox end and writes a new marker reference.
+    ///
+    /// Encoding: opcode, register. Example: `[0xAF, 0x14]` writes `y1`.
     ReceiveMarkerReserve(Operand),
+    /// Moves a saved marker position to the bound reference.
+    ///
+    /// Encoding: opcode, marker register, reference register. Example:
+    /// `[0xAD, 0x14, 0x03]` binds marker `y1` to the reference in `x0`.
     ReceiveMarkerBind {
         marker: Operand,
         reference: Operand,
     },
+    /// Sets the receive cursor from the marker bound to a reference.
+    ///
+    /// Encoding: opcode, register. Example: `[0xB0, 0x14]` uses `y1`.
     ReceiveMarkerUse(Operand),
+    /// Removes the marker bound to a reference.
+    ///
+    /// Encoding: opcode, register. Example: `[0xAE, 0x14]` clears `y1`.
     ReceiveMarkerClear(Operand),
     Noop,
     /// Returns the value in `x0` from the active function.

@@ -121,6 +121,13 @@ impl BeamProgram {
         })
     }
 
+    /// Return a loaded module by name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(program.module("fixture")?.name, "fixture");
+    /// ```
     fn module(&self, name: &str) -> Result<&BeamModule, BeamError> {
         self.modules
             .get(name)
@@ -466,6 +473,13 @@ impl BeamProgram {
     }
 }
 
+/// Return the active frame of a running process.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// current_frame(&mut process).pc += 1;
+/// ```
 fn current_frame(process: &mut ProcessState) -> &mut Frame {
     // ponytail: the run loop exits when the last frame returns, so a frame is always active.
     process
@@ -510,11 +524,25 @@ fn jump(module: &BeamModule, process: &mut ProcessState, label: u32) -> Result<(
     Ok(())
 }
 
+/// Read an operand from the process registers or the active frame.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(read(&process, &Operand::Value(Term::Integer(1)))?, Term::Integer(1));
+/// ```
 fn read(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
     let stack = process.frames.last().map_or(&[][..], |frame| &frame.stack);
     read_operand(operand, &process.registers, stack)
 }
 
+/// Write a value to an X register or a Y register of the active frame.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write(&mut process, &Operand::X(0), Term::Integer(1))?;
+/// ```
 fn write(process: &mut ProcessState, operand: &Operand, value: Term) -> Result<(), BeamError> {
     let stack = &mut process
         .frames
