@@ -6,4 +6,4 @@ mod term;
 pub use beam::BeamModule;
 pub use error::BeamError;
 pub use runtime::BeamProgram;
-pub use term::Term;
+pub use term::{ProcessId, Reference, Term};

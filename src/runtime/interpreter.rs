@@ -148,7 +148,7 @@ impl BeamProgram {
                     let value = read_operand(value, &registers, &stack)?;
                     let passed = match kind {
                         TestKind::Atom => matches!(value, Term::Atom(_)),
-                        TestKind::Pid => false,
+                        TestKind::Pid => matches!(value, Term::Pid(_)),
                         TestKind::List => matches!(value, Term::List(_)),
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                     };
@@ -408,6 +408,46 @@ mod tests {
         assert_eq!(
             program.execute("fixture", "main", &[]).unwrap(),
             Term::Integer(7)
+        );
+    }
+
+    #[test]
+    fn recognizes_runtime_process_identifiers_as_pids() {
+        use crate::ProcessId;
+
+        let mut program = make_program(
+            vec![
+                Instruction::Test {
+                    kind: crate::beam::code::TestKind::Pid,
+                    fail_label: 3,
+                    value: Operand::X(0),
+                },
+                Instruction::Move(Operand::Value(Term::Atom("pid".into())), Operand::X(0)),
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::Move(Operand::Value(Term::Atom("other".into())), Operand::X(0)),
+                Instruction::Return,
+            ],
+            1,
+        );
+        program
+            .modules
+            .get_mut("fixture")
+            .unwrap()
+            .exports
+            .insert(("main".into(), 1), 2);
+
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[Term::Pid(ProcessId(1))])
+                .unwrap(),
+            Term::Atom("pid".into())
+        );
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[Term::Integer(1)])
+                .unwrap(),
+            Term::Atom("other".into())
         );
     }
 
