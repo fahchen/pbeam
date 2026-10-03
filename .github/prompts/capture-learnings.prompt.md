@@ -51,8 +51,9 @@ Pick the mode from the PR state (`gh pr view <N> --json state,headRefName`):
     rule and its source threads. Push the branch. Open a PR to `main` with
     the same title and the label `documentation`. For each rule, the PR body
     shows the full proposal (entry, Why, Good, Bad), the overlap analysis,
-    and links to the source review threads. Then comment on the merged PR
-    with a link to the new PR.
+    and links to the source review threads. After the new PR exists,
+    comment on the merged PR: "Captured review learnings in #<new PR>.",
+    then the heading of each captured rule.
   - Pruning is necessary: do not write. Comment on the merged PR with the
     candidate rules and the 5 prune candidates, and ask the owner to choose.
   - Every merged-PR run ends with exactly one comment on the merged PR.
