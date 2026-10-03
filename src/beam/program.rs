@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::io::Write;
-
 use super::{
     BeamError,
     code::{Instruction, Operand},
@@ -8,6 +5,7 @@ use super::{
     module::BeamModule,
     term::Term,
 };
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct BeamProgram {
@@ -33,17 +31,6 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
     ) -> Result<Term, BeamError> {
-        let mut output = std::io::stdout().lock();
-        self.execute_with_output(module, function, arguments, &mut output)
-    }
-
-    fn execute_with_output(
-        &self,
-        module: &str,
-        function: &str,
-        arguments: &[Term],
-        output: &mut dyn Write,
-    ) -> Result<Term, BeamError> {
         let loaded = self
             .modules
             .get(module)
@@ -54,7 +41,7 @@ impl BeamProgram {
             .exports
             .get(&(function.to_owned(), arity))
             .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))?;
-        self.execute_label(module, label, arguments, output)
+        self.execute_label(module, label, arguments)
     }
 
     fn execute_mfa(
@@ -63,11 +50,7 @@ impl BeamProgram {
         function: &str,
         arity: u32,
         arguments: &[Term],
-        output: &mut dyn Write,
     ) -> Result<Term, BeamError> {
-        if module == "Elixir.IO" && function == "puts" {
-            return execute_io_puts(arity, arguments, output);
-        }
         let loaded = self.modules.get(module).ok_or_else(|| {
             error(format!(
                 "unresolved external MFA {module}:{function}/{}",
@@ -82,7 +65,7 @@ impl BeamProgram {
                     "unresolved external MFA {module}:{function}/{arity}"
                 ))
             })?;
-        self.execute_label(module, label, arguments, output)
+        self.execute_label(module, label, arguments)
     }
 
     fn execute_label(
@@ -90,7 +73,6 @@ impl BeamProgram {
         module_name: &str,
         label: u32,
         arguments: &[Term],
-        output: &mut dyn Write,
     ) -> Result<Term, BeamError> {
         let module = self
             .modules
@@ -123,7 +105,7 @@ impl BeamProgram {
                 }
                 Instruction::Call { arity, label } => {
                     let arguments = call_arguments(&registers, *arity)?;
-                    let result = self.execute_label(module_name, *label, &arguments, output)?;
+                    let result = self.execute_label(module_name, *label, &arguments)?;
                     set_x0(result, &mut registers);
                 }
                 Instruction::CallExternal {
@@ -137,7 +119,7 @@ impl BeamProgram {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     let arguments = call_arguments(&registers, *arity)?;
-                    let result = self.execute_mfa(module, name, *arity, &arguments, output)?;
+                    let result = self.execute_mfa(module, name, *arity, &arguments)?;
                     if *tail {
                         return Ok(result);
                     }
@@ -163,25 +145,6 @@ impl BeamProgram {
             module_name, function.name
         )))
     }
-}
-
-fn execute_io_puts(
-    arity: u32,
-    arguments: &[Term],
-    output: &mut dyn Write,
-) -> Result<Term, BeamError> {
-    if arity != 1 {
-        return Err(error(format!("unsupported Elixir.IO:puts/{arity}")));
-    }
-    let [Term::Binary(contents)] = arguments else {
-        return Err(error("Elixir.IO:puts/1 requires a UTF-8 binary"));
-    };
-    std::str::from_utf8(contents).map_err(|_| error("Elixir.IO:puts/1 requires a UTF-8 binary"))?;
-    output
-        .write_all(contents)
-        .and_then(|()| output.write_all(b"\n"))
-        .map_err(|write_error| error(format!("stdout write failed: {write_error}")))?;
-    Ok(Term::Atom("ok".into()))
 }
 
 #[derive(Debug)]
@@ -297,14 +260,10 @@ fn write_operand(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap,
-        io::{self, Write},
-    };
+    use std::collections::HashMap;
 
     use super::{
-        BeamProgram, call_arguments, execute_io_puts, function_at_label, read_operand, set_x0,
-        write_operand,
+        BeamProgram, call_arguments, function_at_label, read_operand, set_x0, write_operand,
     };
     use crate::beam::{
         code::{Instruction, Operand},
@@ -358,6 +317,22 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("arity does not match")
+        );
+    }
+
+    #[test]
+    fn executes_a_loaded_function_and_returns_x0() {
+        let program = make_program(
+            vec![
+                Instruction::Move(Operand::Value(Term::Integer(7)), Operand::X(0)),
+                Instruction::Return,
+            ],
+            0,
+        );
+
+        assert_eq!(
+            program.execute("fixture", "main", &[]).unwrap(),
+            Term::Integer(7)
         );
     }
 
@@ -440,14 +415,14 @@ mod tests {
         };
         assert!(
             program
-                .execute_mfa("missing", "run", 0, &[], &mut Vec::new())
+                .execute_mfa("missing", "run", 0, &[])
                 .unwrap_err()
                 .to_string()
                 .contains("unresolved external MFA missing:run/0")
         );
         assert!(
             program
-                .execute_mfa("external", "missing", 0, &[], &mut Vec::new())
+                .execute_mfa("external", "missing", 0, &[])
                 .unwrap_err()
                 .to_string()
                 .contains("external:missing/0")
@@ -509,34 +484,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    struct FailingOutput;
-
-    impl Write for FailingOutput {
-        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("closed"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn writes_only_supported_utf8_binary_output() {
-        let mut failing_output = FailingOutput;
-        assert!(failing_output.flush().is_ok());
-        let mut output = Vec::new();
-        assert_eq!(
-            execute_io_puts(1, &[Term::Binary(b"Hello".to_vec())], &mut output).unwrap(),
-            Term::Atom("ok".into())
-        );
-        assert_eq!(output, b"Hello\n");
-        assert!(execute_io_puts(2, &[Term::Binary(b"x".to_vec())], &mut output).is_err());
-        assert!(execute_io_puts(1, &[], &mut output).is_err());
-        assert!(execute_io_puts(1, &[Term::Atom("ok".into())], &mut output).is_err());
-        assert!(execute_io_puts(1, &[Term::Binary(vec![0xff])], &mut output).is_err());
-        assert!(execute_io_puts(1, &[Term::Binary(b"x".to_vec())], &mut failing_output).is_err());
     }
 }

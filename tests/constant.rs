@@ -265,7 +265,7 @@ fn rejects_invalid_code_stream_and_operands() {
     assert!(
         BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| {
             let i = data.windows(3).position(|w| w == [64, 0x69, 0xe8]).unwrap();
-            data[i + 1] = 0x19;
+            data[i + 1] = 0x07;
         }))
         .is_err()
     );

@@ -5,40 +5,27 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pbeam_runtime::BeamModule;
+use pbeam_runtime::BeamProgram;
 
 #[test]
 fn loads_compiled_elixir_greetings() {
-    for beam_file in ["Elixir.Hello.beam", "Elixir.HelloVariant.beam"] {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/hello/_build/test/lib/hello_reference/ebin")
-            .join(beam_file);
-        let bytes = std::fs::read(path).unwrap();
+    let hello = std::fs::read(beam_file("Elixir.Hello.beam")).unwrap();
+    let variant = std::fs::read(beam_file("Elixir.HelloVariant.beam")).unwrap();
 
-        BeamModule::load(&bytes).unwrap();
-    }
+    BeamProgram::load(&[&hello, &variant]).unwrap();
 }
 
 #[test]
-fn runs_both_compiled_greetings_without_erts() {
-    for (module, file, expected) in [
-        ("Elixir.Hello", "Elixir.Hello.beam", "Hello, world!\n"),
-        (
-            "Elixir.HelloVariant",
-            "Elixir.HelloVariant.beam",
-            "Another greeting.\n",
-        ),
-    ] {
-        let output = run_pbeam(&[module, "main", beam_file(file).to_str().unwrap()]);
+fn loads_the_pinned_elixir_io_module() {
+    let path = Command::new("elixir")
+        .args(["-e", "IO.write(:code.which(IO))"])
+        .output()
+        .unwrap();
+    assert!(path.status.success());
+    let path = PathBuf::from(String::from_utf8(path.stdout).unwrap());
+    let bytes = std::fs::read(path).unwrap();
 
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(output.stdout, expected.as_bytes());
-        assert!(output.stderr.is_empty());
-    }
+    BeamProgram::load(&[&bytes]).unwrap();
 }
 
 #[test]

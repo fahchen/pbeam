@@ -44,6 +44,6 @@ fn run(arguments: Cli) -> Result<(), String> {
         .map_err(|load_error| format!("cannot load BEAM modules: {load_error}"))?;
     program
         .execute(&arguments.entry_module, &arguments.entry_function, &[])
-        .map_err(|execution_error| execution_error.to_string())?;
-    Ok(())
+        .map(|_| ())
+        .map_err(|execution_error| execution_error.to_string())
 }
