@@ -23,12 +23,39 @@ const OPCODE_CALL_EXT: u8 = 7;
 const OPCODE_CALL_EXT_LAST: u8 = 8;
 const OPCODE_CALL_EXT_ONLY: u8 = 78;
 const OPCODE_ALLOCATE: u8 = 12;
+const OPCODE_ALLOCATE_HEAP: u8 = 13;
+const OPCODE_TRY: u8 = 104;
+const OPCODE_TRY_END: u8 = 105;
+const OPCODE_TRY_CASE: u8 = 106;
+const OPCODE_RAISE: u8 = 108;
+const OPCODE_IF_END: u8 = 73;
+const OPCODE_BUILD_STACKTRACE: u8 = 160;
+const OPCODE_IS_FUNCTION: u8 = 77;
+const OPCODE_APPLY: u8 = 112;
+const OPCODE_APPLY_LAST: u8 = 113;
+const OPCODE_IS_FUNCTION2: u8 = 115;
+const OPCODE_CALL_FUN2: u8 = 178;
+const OPCODE_NIF_START: u8 = 179;
+const OPCODE_BADRECORD: u8 = 180;
 const OPCODE_RETURN: u8 = 19;
 const OPCODE_DEALLOCATE: u8 = 18;
 const OPCODE_MOVE: u8 = 64;
 const OPCODE_SELECT_VAL: u8 = 59;
 const OPCODE_SELECT_TUPLE_ARITY: u8 = 60;
 const OPCODE_JUMP: u8 = 61;
+const OPCODE_CATCH: u8 = 62;
+const OPCODE_CATCH_END: u8 = 63;
+const OPCODE_BS_GET_BINARY2: u8 = 119;
+const OPCODE_BS_SKIP_BITS2: u8 = 120;
+const OPCODE_GC_BIF1: u8 = 124;
+const OPCODE_GC_BIF2: u8 = 125;
+const OPCODE_BS_GET_TAIL: u8 = 165;
+const OPCODE_BS_START_MATCH3: u8 = 166;
+const OPCODE_BS_GET_POSITION: u8 = 167;
+const OPCODE_BS_SET_POSITION: u8 = 168;
+const OPCODE_BS_START_MATCH4: u8 = 170;
+const OPCODE_BS_GET_UTF8: u8 = 138;
+const OPCODE_BS_SKIP_UTF8: u8 = 139;
 const OPCODE_LINE: u8 = 153;
 const OPCODE_CALL_LAST: u8 = 5;
 const OPCODE_BIF0: u8 = 9;
@@ -49,6 +76,7 @@ const OPCODE_TIMEOUT: u8 = 22;
 const OPCODE_LOOP_REC: u8 = 23;
 const OPCODE_LOOP_REC_END: u8 = 24;
 const OPCODE_WAIT: u8 = 25;
+const OPCODE_WAIT_TIMEOUT: u8 = 26;
 const OPCODE_GET_LIST: u8 = 65;
 const OPCODE_GET_TUPLE_ELEMENT: u8 = 66;
 const OPCODE_PUT_LIST: u8 = 69;
@@ -677,7 +705,24 @@ fn skip_unsupported_instruction(
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
-        OPCODE_CALL_LAST | OPCODE_CALL_EXT_LAST => Some(3),
+        OPCODE_CALL_LAST | OPCODE_CALL_EXT_LAST | OPCODE_ALLOCATE_HEAP => Some(3),
+        OPCODE_TRY | OPCODE_RAISE => Some(2),
+        OPCODE_CALL_FUN2 | OPCODE_IS_FUNCTION2 => Some(3),
+        OPCODE_APPLY_LAST => Some(2),
+        OPCODE_APPLY => Some(1),
+        OPCODE_WAIT_TIMEOUT | OPCODE_CATCH => Some(2),
+        OPCODE_CATCH_END => Some(1),
+        OPCODE_BS_GET_BINARY2 => Some(7),
+        OPCODE_BS_SKIP_BITS2 => Some(5),
+        OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
+        OPCODE_BS_GET_TAIL | OPCODE_BS_GET_POSITION => Some(3),
+        OPCODE_BS_GET_UTF8 => Some(5),
+        OPCODE_BS_SKIP_UTF8 => Some(4),
+        OPCODE_BS_SET_POSITION => Some(2),
+        OPCODE_GC_BIF1 => Some(5),
+        OPCODE_GC_BIF2 => Some(6),
+        OPCODE_TRY_END | OPCODE_TRY_CASE | OPCODE_BADRECORD => Some(1),
+        OPCODE_NIF_START | OPCODE_IF_END | OPCODE_BUILD_STACKTRACE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
         OPCODE_BIF1 => Some(4),
@@ -697,7 +742,8 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_TEST_IS_TUPLE
         | OPCODE_TEST_IS_MAP
         | OPCODE_TEST_IS_BOOLEAN
-        | OPCODE_TEST_IS_BITSTR => Some(2),
+        | OPCODE_TEST_IS_BITSTR
+        | OPCODE_IS_FUNCTION => Some(2),
         OPCODE_GET_LIST | OPCODE_GET_TUPLE_ELEMENT | OPCODE_PUT_LIST => Some(3),
         OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_CALL_FUN => Some(1),
         OPCODE_TRIM => Some(2),
