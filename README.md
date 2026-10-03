@@ -3,8 +3,8 @@
 PBeam is a planned Rust runtime for executing existing Erlang/Elixir `.beam`
 artifacts without ERTS and packaging applications as single native executables.
 
-**Status: verified Elixir references and Rust constant-return/call-chain BEAM slices.**
-The broader interpreter, runtime, and application build tooling are not implemented yet.
+**Status: verified Elixir references and Rust constant-return and bounded call-chain slices.**
+The wider interpreter, scheduler, and application build tooling are not implemented yet.
 `mix pbeam.build` is a proposed command, not an available installation or build instruction.
 
 ## Design
@@ -16,9 +16,11 @@ The broader interpreter, runtime, and application build tooling are not implemen
 - Isolate platform services behind System/Host boundaries.
 - Embed one application bundle in a Rust launcher.
 
-[Hello World](docs/hello-world-target.md) is the first target: PBeam must execute the
-Elixir program, print exactly `Hello, world!\n`, and exit successfully. Compilation
-and an ERTS smoke run are preparation, not completion. PBeam execution is pending.
+[Hello World](docs/hello-world-target.md) is the first target: PBeam executes the
+compiled Elixir entry, prints exactly `Hello, world!\n`, and exits successfully.
+The current task chain executes the compiled Elixir and OTP IO path through the
+group leader. PR #47 loads the pinned `Elixir.IO.beam` module. It does not execute
+the IO path yet. Compilation and an ERTS smoke run alone do not meet this target.
 [Terra Counter](docs/terra-target.md) follows as a broader macOS arm64 PTY scenario. Full OTP
 compatibility, hot code upgrades, JIT/AOT, and traditional NIF ABI compatibility
 are outside the initial scope. Each executable targets a particular platform;

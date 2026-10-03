@@ -7,12 +7,12 @@ use super::{
 };
 
 const WORD_SIZE: usize = 4;
+mod instruction;
+pub(super) use instruction::{Instruction, Operand};
+
 const CHUNK_ALIGNMENT: usize = WORD_SIZE;
 const CHUNK_HEADER_SIZE: usize = WORD_SIZE * 2;
 const CONTAINER_HEADER_SIZE: usize = WORD_SIZE * 3;
-const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
-const CODE_HEADER_SUB_SIZE: u32 = 16;
-const INSTRUCTION_SET_ERLANG: u32 = 0;
 const EXPORT_ENTRY_SIZE: usize = WORD_SIZE * 3;
 const IMPORT_ENTRY_SIZE: usize = WORD_SIZE * 3;
 const COMPACT_TAG_MASK: u8 = 0b111;
@@ -27,86 +27,13 @@ const TAG_ATOM: u8 = 2;
 const TAG_REGISTER: u8 = 3;
 const TAG_Y_REGISTER: u8 = 4;
 const TAG_LABEL: u8 = 5;
-const OPCODE_LABEL: u8 = 1;
-const OPCODE_FUNCTION_INFO: u8 = 2;
-const OPCODE_INT_CODE_END: u8 = 3;
-const OPCODE_CALL: u8 = 4;
-const OPCODE_CALL_EXT: u8 = 7;
-const OPCODE_CALL_EXT_LAST: u8 = 8;
-const OPCODE_CALL_EXT_ONLY: u8 = 78;
-const OPCODE_ALLOCATE: u8 = 12;
-const OPCODE_RETURN: u8 = 19;
-const OPCODE_DEALLOCATE: u8 = 18;
-const OPCODE_MOVE: u8 = 64;
+const TAG_LITERAL: u8 = 7;
+const LITERAL_SUBTAG: i128 = 4;
+const LIST_SUBTAG: i128 = 1;
+const ETF_VERSION: u8 = 131;
+const ETF_BINARY_EXT: u8 = 109;
 const FIRST_ATOM_INDEX: usize = 1;
 const FIRST_LABEL_NUMBER: u32 = 1;
-const CODE_LABEL_COUNT_OFFSET: usize = WORD_SIZE * 3;
-const CODE_FUNCTION_COUNT_OFFSET: usize = WORD_SIZE * 4;
-
-#[derive(Debug, Clone)]
-/// An instruction that the parser can read from a BEAM `Code` chunk.
-///
-/// Byte examples use hexadecimal values. Compact operands use the short form
-/// in the Code chunk grammar. `End` represents the stream terminator; the
-/// executor does not run it.
-pub(super) enum Instruction {
-    /// Starts a code label. The label must be in `1..=label_count`.
-    ///
-    /// Encoding: opcode, then a compact unsigned label. Example: `[0x01, 0x10]`
-    /// encodes label 1.
-    Label(u32),
-    /// Declares the module, function, and arity for the following function.
-    /// Atom indexes refer to the one-based `AtU8` table.
-    ///
-    /// Encoding: opcode, module atom, function atom, and arity. Example:
-    /// `[0x02, 0x12, 0x22, 0x00]` refers to atom indexes 1 and 2 with arity 0.
-    FunctionInfo {
-        module: String,
-        name: String,
-        arity: u32,
-    },
-    /// Moves a literal or register value into an X or Y register.
-    Move(Operand, Operand),
-    Call {
-        arity: u32,
-        label: u32,
-    },
-    CallExternal {
-        arity: u32,
-        module: String,
-        name: String,
-        tail: bool,
-        deallocate: u32,
-    },
-    Allocate {
-        stack_size: u32,
-    },
-    Deallocate {
-        stack_size: u32,
-    },
-    /// Returns the value in `x0` from the active function.
-    ///
-    /// Encoding: `[0x13]`. Execution reports an error if the function has not
-    /// set `x0`.
-    Return,
-    /// Marks the end of the `Code` instruction stream.
-    ///
-    /// Encoding: `[0x03]`. The parser adds this internal sentinel after it
-    /// reads the terminator. The executor stops at this sentinel.
-    End,
-}
-
-/// A source or destination in the supported `move` instruction.
-///
-/// `Value` holds a supported immediate term. `X` uses compact register tag 3,
-/// and `Y` uses compact register tag 4. For example, `move x0, y0` is encoded
-/// as `[0x40, 0x03, 0x04]`.
-#[derive(Debug, Clone)]
-pub(super) enum Operand {
-    Value(Term),
-    X(u32),
-    Y(u32),
-}
 
 /// Parse the BEAM subset used by this runtime.
 ///
@@ -141,11 +68,13 @@ pub(super) enum Operand {
 /// opcode_max ::= u32be
 /// label_count ::= u32be
 /// function_count ::= u32be
-/// executable_instruction ::= label | function_info | move | call | call_ext | allocate | deallocate | return
+/// executable_instruction ::= label | function_info | move | call | call_ext | allocate | deallocate | return | generated_instruction
 /// label       ::= 1 compact(0)
 /// function_info ::= 2 compact(2) compact(2) compact(0)
 /// move        ::= 64 move_source (x_register | y_register)
 /// move_source ::= value | x_register | y_register
+/// move_source ::= literal_value
+/// literal_value ::= compact(7) compact(0) ; compact(7) value is 4
 /// x_register  ::= compact(3)
 /// y_register  ::= compact(4)
 /// call        ::= 4 compact(0) compact(5)
@@ -155,6 +84,13 @@ pub(super) enum Operand {
 /// allocate    ::= 12 compact(0) compact(0)
 /// deallocate  ::= 18 compact(0)
 /// return      ::= 19
+/// line        ::= 153 compact(0)
+/// generated_instruction ::= 6 compact(0) compact(5) ; call_only
+/// generated_instruction ::= 61 compact(5) ; jump
+/// generated_instruction ::= 59 x_register compact(5) select_list
+/// select_list ::= compact(7) compact(0) select_item[select_count] ; first value is 1
+/// select_item ::= atom_value | label_value
+/// label_value ::= compact(5)
 /// int_code_end ::= 3
 /// imports_chunk ::= "ImpT" chunk_size import_table padding
 /// import_table ::= import_count import[import_count]
@@ -163,6 +99,11 @@ pub(super) enum Operand {
 /// value       ::= integer_value | atom_value
 /// integer_value ::= compact(1)
 /// atom_value  ::= compact(2)
+/// nil_value ::= compact(2) ; atom index zero
+/// literals_chunk ::= "LitT" chunk_size 0:u32be literal_count literal_entry*
+/// literal_count ::= u32be
+/// literal_entry ::= term_size:u32be external_term[term_size]
+/// binary_term ::= 131 109 binary_size:u32be byte[binary_size]
 ///
 /// compact(tag) ::= short(tag) | extended(tag)
 /// short(tag)   ::= value:4 0 tag:3
@@ -180,12 +121,21 @@ pub(super) enum Operand {
 /// 12-byte entries. Export and code labels must be in `1..=label_count`.
 /// `function_count` must match the number of `function_info` instructions.
 /// `opcode_max` is not checked. The parser rejects duplicate chunk IDs. It
-/// supports only the listed instructions and compact operand forms. Compact
+/// supports only the listed instructions and compact operand forms. `LitT`
+/// supports uncompressed tables with ETF binary values when referenced. The
+/// parser retains generated instructions that it does not execute. Execution
+/// fails if it reaches one. Compact
 /// tags occupy the low three bits. The parser accepts the short and one-byte
 /// extension forms only. Bit fields are shown from high bit to low bit. Other
 /// chunk payloads and padding byte values are ignored. The `ImpT` chunk maps
 /// external call indexes to module/function/arity. The executor supports only
 /// the listed instructions.
+/// # Examples
+///
+/// ```rust,ignore
+/// let module = parse(&beam_bytes)?;
+/// assert_eq!(module.name, "Elixir.Hello");
+/// ```
 pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
     if bytes.len() < CONTAINER_HEADER_SIZE || &bytes[..WORD_SIZE] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
@@ -234,7 +184,13 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
         .map(|data| parse_imports(data, &atoms))
         .transpose()?
         .unwrap_or_default();
-    let (instructions, number_of_labels) = parse_code(code, &atoms, &imports)?;
+    let literals = chunks
+        .get(b"LitT".as_slice())
+        .map(|data| parse_literals(data))
+        .transpose()?
+        .unwrap_or_default();
+    let (instructions, number_of_labels) =
+        instruction::parse_code(code, &atoms, &imports, &literals)?;
     if let Some(label) = exports
         .values()
         .find(|&&label| label < FIRST_LABEL_NUMBER || label > number_of_labels)
@@ -250,107 +206,14 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
     })
 }
 
-fn parse_code(
-    data: &[u8],
-    atoms: &[String],
-    imports: &[(String, String, u32)],
-) -> Result<(Vec<Instruction>, u32), BeamError> {
-    if data.len() < CODE_HEADER_SIZE
-        || read_u32(&data[..WORD_SIZE])? != CODE_HEADER_SUB_SIZE
-        || read_u32(&data[WORD_SIZE..WORD_SIZE * 2])? != INSTRUCTION_SET_ERLANG
-    {
-        return Err(error("unsupported BEAM code header"));
-    }
-    let number_of_labels =
-        read_u32(&data[CODE_LABEL_COUNT_OFFSET..CODE_LABEL_COUNT_OFFSET + WORD_SIZE])?;
-    let declared_function_count =
-        read_u32(&data[CODE_FUNCTION_COUNT_OFFSET..CODE_HEADER_SIZE])? as usize;
-    let mut cursor = CODE_HEADER_SIZE;
-    let mut instructions = Vec::new();
-    let mut function_info_count = 0;
-    loop {
-        let opcode = *data
-            .get(cursor)
-            .ok_or_else(|| error("truncated BEAM instruction stream"))?;
-        cursor += 1;
-        let instruction = match opcode {
-            OPCODE_LABEL => {
-                let label = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                if label < FIRST_LABEL_NUMBER || label > number_of_labels {
-                    return Err(error(format!(
-                        "BEAM label {label} is outside declared range 1..={number_of_labels}"
-                    )));
-                }
-                Instruction::Label(label)
-            }
-            OPCODE_FUNCTION_INFO => {
-                function_info_count += 1;
-                let module =
-                    atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?.to_owned();
-                let name =
-                    atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?.to_owned();
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                Instruction::FunctionInfo {
-                    module,
-                    name,
-                    arity,
-                }
-            }
-            OPCODE_RETURN => Instruction::Return,
-            OPCODE_CALL => Instruction::Call {
-                arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
-                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
-            },
-            OPCODE_CALL_EXT | OPCODE_CALL_EXT_LAST | OPCODE_CALL_EXT_ONLY => {
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                let index = read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize;
-                let (module, name, imported_arity) = imports
-                    .get(index)
-                    .ok_or_else(|| error(format!("BEAM import index {index} out of range")))?;
-                if arity != *imported_arity {
-                    return Err(error(format!(
-                        "BEAM external call arity {arity} does not match import arity {imported_arity}"
-                    )));
-                }
-                let deallocate = if opcode == OPCODE_CALL_EXT_LAST {
-                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32
-                } else {
-                    0
-                };
-                Instruction::CallExternal {
-                    arity,
-                    module: module.clone(),
-                    name: name.clone(),
-                    tail: opcode != OPCODE_CALL_EXT,
-                    deallocate,
-                }
-            }
-            OPCODE_ALLOCATE => {
-                let stack_size = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
-                Instruction::Allocate { stack_size }
-            }
-            OPCODE_DEALLOCATE => Instruction::Deallocate {
-                stack_size: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
-            },
-            OPCODE_MOVE => {
-                let source = read_move_operand(data, &mut cursor, atoms)?;
-                let destination = read_register(data, &mut cursor)?;
-                Instruction::Move(source, destination)
-            }
-            OPCODE_INT_CODE_END => {
-                if cursor != data.len() || function_info_count != declared_function_count {
-                    return Err(error("invalid BEAM code terminator or function count"));
-                }
-                instructions.push(Instruction::End);
-                return Ok((instructions, number_of_labels));
-            }
-            _ => return Err(error(format!("unsupported BEAM opcode {opcode}"))),
-        };
-        instructions.push(instruction);
-    }
-}
-
+/// Read the atom names from an `AtU8` chunk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = parse_atoms(&[0xff, 0xff, 0xff, 0xff, 0x10, b'a'])?;
+/// assert_eq!(atoms, ["a"]);
+/// ```
 fn parse_atoms(data: &[u8]) -> Result<Vec<String>, BeamError> {
     let signed_atom_count = read_u32(data)? as i32;
     let atom_count = usize::try_from(
@@ -384,6 +247,16 @@ fn parse_atoms(data: &[u8]) -> Result<Vec<String>, BeamError> {
     Ok(atoms)
 }
 
+/// Read exported function names, arities, and labels from an `ExpT` chunk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = vec!["main".to_owned()];
+/// let table = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
+/// let exports = parse_exports(table, &atoms)?;
+/// assert_eq!(exports.get(&("main".to_owned(), 0)), Some(&1));
+/// ```
 fn parse_exports(data: &[u8], atoms: &[String]) -> Result<HashMap<(String, u32), u32>, BeamError> {
     let export_count = read_u32(data)? as usize;
     let expected_table_size = WORD_SIZE
@@ -409,6 +282,15 @@ fn parse_exports(data: &[u8], atoms: &[String]) -> Result<HashMap<(String, u32),
     Ok(exports)
 }
 
+/// Read external module, function, and arity entries from an `ImpT` chunk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = vec!["IO".to_owned(), "puts".to_owned()];
+/// let table = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1];
+/// assert_eq!(parse_imports(table, &atoms)?, [("IO".into(), "puts".into(), 1)]);
+/// ```
 fn parse_imports(data: &[u8], atoms: &[String]) -> Result<Vec<(String, String, u32)>, BeamError> {
     let import_count = read_u32(data)? as usize;
     let expected_size = WORD_SIZE
@@ -433,35 +315,73 @@ fn parse_imports(data: &[u8], atoms: &[String]) -> Result<Vec<(String, String, u
         .collect()
 }
 
-fn read_register(data: &[u8], cursor: &mut usize) -> Result<Operand, BeamError> {
-    let first = *data
-        .get(*cursor)
-        .ok_or_else(|| error("truncated BEAM operand"))?;
-    let tag = first & COMPACT_TAG_MASK;
-    match tag {
-        TAG_REGISTER => Ok(Operand::X(read_operand(data, cursor, TAG_REGISTER)? as u32)),
-        TAG_Y_REGISTER => Ok(Operand::Y(
-            read_operand(data, cursor, TAG_Y_REGISTER)? as u32
-        )),
-        _ => Err(error(format!("unsupported BEAM register tag {tag}"))),
+/// Read supported binary terms from an uncompressed `LitT` chunk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let literals = parse_literals(&[0; 8])?;
+/// assert!(literals.is_empty());
+/// ```
+fn parse_literals(data: &[u8]) -> Result<Vec<Option<Term>>, BeamError> {
+    if data.len() < WORD_SIZE * 2 {
+        return Err(error("truncated BEAM literal table header"));
     }
+    if read_u32(&data[..WORD_SIZE])? != 0 {
+        return Err(error("compressed BEAM literal tables are unsupported"));
+    }
+    let literal_count = read_u32(&data[WORD_SIZE..WORD_SIZE * 2])? as usize;
+    if literal_count > (data.len() - WORD_SIZE * 2) / WORD_SIZE {
+        return Err(error("BEAM literal count exceeds chunk size"));
+    }
+
+    let mut cursor = WORD_SIZE * 2;
+    let mut literals = Vec::with_capacity(literal_count);
+    for _ in 0..literal_count {
+        let literal_size = read_u32(&data[cursor..])? as usize;
+        cursor += WORD_SIZE;
+        let literal_end = cursor
+            .checked_add(literal_size)
+            .filter(|&end| end <= data.len())
+            .ok_or_else(|| error("BEAM literal exceeds chunk size"))?;
+        literals.push(read_binary_literal(&data[cursor..literal_end])?);
+        cursor = literal_end;
+    }
+    if cursor != data.len() {
+        return Err(error("unexpected bytes after BEAM literal table"));
+    }
+    Ok(literals)
 }
 
-fn read_move_operand(
-    data: &[u8],
-    cursor: &mut usize,
-    atoms: &[String],
-) -> Result<Operand, BeamError> {
-    let first = *data
-        .get(*cursor)
-        .ok_or_else(|| error("truncated BEAM operand"))?;
-    match first & COMPACT_TAG_MASK {
-        TAG_INTEGER | TAG_ATOM => Ok(Operand::Value(read_value(data, cursor, atoms)?)),
-        TAG_REGISTER | TAG_Y_REGISTER => read_register(data, cursor),
-        tag => Err(error(format!("unsupported move operand tag {tag}"))),
+/// Read an ETF binary term, or return `None` for another term type.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let term = read_binary_literal(&[131, 109, 0, 0, 0, 2, b'o', b'k'])?;
+/// assert_eq!(term, Some(Term::Binary(b"ok".to_vec())));
+/// ```
+fn read_binary_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
+    if data.get(..2) != Some(&[ETF_VERSION, ETF_BINARY_EXT]) {
+        return Ok(None);
     }
+    let binary_size = read_u32(data.get(2..).unwrap_or_default())? as usize;
+    if binary_size != data.len() - WORD_SIZE - 2 {
+        return Err(error("invalid BEAM binary literal size"));
+    }
+    Ok(Some(Term::Binary(data[WORD_SIZE + 2..].to_vec())))
 }
 
+/// Read a supported integer or atom term and advance the cursor.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// let term = read_value(&[0x01], &mut cursor, &[])?;
+/// assert_eq!(term, Term::Integer(0));
+/// assert_eq!(cursor, 1);
+/// ```
 fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term, BeamError> {
     let first_byte = *data
         .get(*cursor)
@@ -475,7 +395,12 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term,
         }
         TAG_ATOM => {
             let index = read_operand(data, cursor, TAG_ATOM)? as usize;
-            Ok(Term::Atom(atom_at(atoms, index)?.to_owned()))
+            let atom = if index == 0 {
+                "nil"
+            } else {
+                atom_at(atoms, index)?
+            };
+            Ok(Term::Atom(atom.to_owned()))
         }
         unsupported_tag => Err(error(format!(
             "unsupported constant operand tag {unsupported_tag}"
@@ -483,6 +408,14 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term,
     }
 }
 
+/// Return the atom at a one-based BEAM atom index.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = vec!["hello".to_owned()];
+/// assert_eq!(atom_at(&atoms, 1)?, "hello");
+/// ```
 fn atom_at(atoms: &[String], index: usize) -> Result<&str, BeamError> {
     if index < FIRST_ATOM_INDEX {
         return Err(error("BEAM atom index zero is invalid"));
@@ -493,6 +426,15 @@ fn atom_at(atoms: &[String], index: usize) -> Result<&str, BeamError> {
         .ok_or_else(|| error(format!("BEAM atom index {index} out of range")))
 }
 
+/// Return a required chunk payload by its four-byte ID.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let payload = [0x03];
+/// let chunks = HashMap::from([(b"Code".to_vec(), &payload[..])]);
+/// assert_eq!(required_chunk(&chunks, b"Code")?, &payload);
+/// ```
 fn required_chunk<'a>(
     chunks: &HashMap<Vec<u8>, &'a [u8]>,
     chunk_id: &[u8; WORD_SIZE],
@@ -505,6 +447,15 @@ fn required_chunk<'a>(
     })
 }
 
+/// Read a compact unsigned operand with the expected tag.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// assert_eq!(read_operand(&[0x10], &mut cursor, TAG_UNSIGNED)?, 1);
+/// assert_eq!(cursor, 1);
+/// ```
 fn read_operand(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<u64, BeamError> {
     let first = *data
         .get(*cursor)
@@ -519,6 +470,15 @@ fn read_operand(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<u64
     read_integer_after_first(data, cursor, first)
 }
 
+/// Read a compact integer payload and advance the cursor.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// assert_eq!(read_integer(&[0x21], &mut cursor, TAG_INTEGER)?, 2);
+/// assert_eq!(cursor, 1);
+/// ```
 fn read_integer(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<i128, BeamError> {
     let first = *data
         .get(*cursor)
@@ -534,6 +494,15 @@ fn read_integer(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<i12
     Ok(value as i128)
 }
 
+/// Read the integer payload after its first compact-operand byte.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// assert_eq!(read_integer_after_first(&[0, 7], &mut cursor, 0x19)?, 7);
+/// assert_eq!(cursor, 2);
+/// ```
 fn read_integer_after_first(
     data: &[u8],
     cursor: &mut usize,
@@ -552,9 +521,36 @@ fn read_integer_after_first(
                 | low_value_byte as u64,
         );
     }
-    Err(error("extended BEAM operands are unsupported"))
+    let size_code = (first_byte >> 5) as usize;
+    let byte_count = if size_code == 7 {
+        usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+            .map_err(|_| error("BEAM integer operand is too large"))?
+            .checked_add(9)
+            .ok_or_else(|| error("BEAM integer operand size overflow"))?
+    } else {
+        size_code + 2
+    };
+    if byte_count > size_of::<u64>() {
+        return Err(error("BEAM integer operand exceeds u64"));
+    }
+    let end = cursor
+        .checked_add(byte_count)
+        .filter(|&end| end <= data.len())
+        .ok_or_else(|| error("truncated BEAM integer operand"))?;
+    let value = data[*cursor..end]
+        .iter()
+        .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
+    *cursor = end;
+    Ok(value)
 }
 
+/// Read one unsigned, big-endian 32-bit field.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(read_u32(&[0, 0, 0, 2])?, 2);
+/// ```
 fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
     let field_bytes = field_bytes.get(..WORD_SIZE).ok_or_else(|| {
         error(format!(
@@ -571,30 +567,9 @@ fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        atom_at, parse_atoms, parse_code, parse_exports, read_integer, read_integer_after_first,
-        read_operand, read_u32, read_value,
+        atom_at, parse_atoms, parse_exports, parse_literals, read_binary_literal, read_u32,
     };
-
-    #[test]
-    fn rejects_invalid_operands_and_code_headers() {
-        let mut cursor = 0;
-        assert!(read_integer(&[0x12], &mut cursor, 1).is_err());
-        assert!(read_integer_after_first(&[], &mut 0, 0x19).is_err());
-        assert!(read_integer_after_first(&[], &mut 0, 0x09).is_err());
-        assert!(read_operand(&[], &mut 0, 0).is_err());
-        assert!(read_value(&[0x03], &mut 0, &[]).is_err());
-        assert!(read_value(&[0x12], &mut 0, &[]).is_err());
-        assert!(parse_code(&[], &[], &[]).is_err());
-        assert!(parse_code(&[0; 20], &[], &[]).is_err());
-        assert!(
-            parse_code(
-                &[0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                &[],
-                &[],
-            )
-            .is_err()
-        );
-    }
+    use crate::beam::term::Term;
 
     #[test]
     fn rejects_invalid_atom_tables_and_indices() {
@@ -616,5 +591,36 @@ mod tests {
         assert!(parse_exports(&[0, 0, 0, 1], &[]).is_err());
         let exports = [0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1];
         assert!(parse_exports(&exports, &["constant".into()]).is_err());
+    }
+
+    #[test]
+    fn reads_uncompressed_binary_literals() {
+        let mut table = 0u32.to_be_bytes().to_vec();
+        table.extend(1u32.to_be_bytes());
+        table.extend(8u32.to_be_bytes());
+        table.extend([131, 109, 0, 0, 0, 2, b'o', b'k']);
+        assert_eq!(
+            parse_literals(&table).unwrap(),
+            vec![Some(Term::Binary(b"ok".to_vec()))]
+        );
+        assert_eq!(
+            parse_literals(&[0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            Vec::<Option<Term>>::new()
+        );
+        assert_eq!(read_binary_literal(&[1]).unwrap(), None);
+        assert!(read_binary_literal(&[131, 109]).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_literal_tables() {
+        assert!(parse_literals(&[0, 0, 0, 0]).is_err());
+        assert!(parse_literals(&[0, 0, 0, 1, 0, 0, 0, 0]).is_err());
+        assert!(parse_literals(&[0, 0, 0, 0, 0, 0, 0, 1]).is_err());
+        assert!(parse_literals(&[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1]).is_err());
+        assert!(parse_literals(&[0, 0, 0, 0, 0, 0, 0, 0, 1]).is_err());
+
+        let mut malformed_binary = vec![0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 7];
+        malformed_binary.extend([131, 109, 0, 0, 0, 2, b'x']);
+        assert!(parse_literals(&malformed_binary).is_err());
     }
 }

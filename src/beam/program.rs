@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use super::{
     BeamError,
     code::{Instruction, Operand},
@@ -7,6 +5,7 @@ use super::{
     module::BeamModule,
     term::Term,
 };
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct BeamProgram {
@@ -133,6 +132,9 @@ impl BeamProgram {
                         .ok_or_else(|| error("return before setting x0"));
                 }
                 Instruction::End => break,
+                Instruction::Unsupported(opcode) => {
+                    return Err(error(format!("unsupported BEAM opcode {opcode}")));
+                }
                 Instruction::Label(_) | Instruction::FunctionInfo { .. } => {
                     return Err(error("unsupported entry instruction"));
                 }
@@ -213,6 +215,9 @@ fn read_operand(
 ) -> Result<Term, BeamError> {
     match operand {
         Operand::Value(value) => Ok(value.clone()),
+        Operand::UnsupportedLiteral(index) => {
+            Err(error(format!("unsupported BEAM literal index {index}")))
+        }
         Operand::X(index) => registers
             .get(*index as usize)
             .and_then(Clone::clone)
@@ -231,6 +236,9 @@ fn write_operand(
     stack: &mut [Option<Term>],
 ) -> Result<(), BeamError> {
     match operand {
+        Operand::UnsupportedLiteral(index) => {
+            return Err(error(format!("unsupported BEAM literal index {index}")));
+        }
         Operand::X(index) => {
             let index = *index as usize;
             registers.resize(registers.len().max(index + 1), None);
@@ -313,6 +321,22 @@ mod tests {
     }
 
     #[test]
+    fn executes_a_loaded_function_and_returns_x0() {
+        let program = make_program(
+            vec![
+                Instruction::Move(Operand::Value(Term::Integer(7)), Operand::X(0)),
+                Instruction::Return,
+            ],
+            0,
+        );
+
+        assert_eq!(
+            program.execute("fixture", "main", &[]).unwrap(),
+            Term::Integer(7)
+        );
+    }
+
+    #[test]
     fn rejects_call_stack_and_return_errors() {
         assert!(
             make_program(
@@ -357,6 +381,13 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("did not return")
+        );
+        assert!(
+            make_program(vec![Instruction::Unsupported(6)], 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported BEAM opcode 6")
         );
         assert!(
             make_program(vec![Instruction::Label(3)], 0)
@@ -432,7 +463,17 @@ mod tests {
         );
         assert!(read_operand(&Operand::X(1), &registers, &[]).is_err());
         assert!(read_operand(&Operand::Y(0), &registers, &[]).is_err());
+        assert!(read_operand(&Operand::UnsupportedLiteral(0), &registers, &[]).is_err());
         assert!(call_arguments(&[], 1).is_err());
+        assert!(
+            write_operand(
+                &Operand::UnsupportedLiteral(0),
+                Term::Integer(1),
+                &mut registers,
+                &mut []
+            )
+            .is_err()
+        );
         assert!(write_operand(&Operand::Y(0), Term::Integer(1), &mut registers, &mut []).is_err());
         assert!(
             write_operand(
