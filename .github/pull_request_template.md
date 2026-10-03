@@ -1,3 +1,5 @@
+<!-- Write prose as flowing paragraphs. Do not add manual line breaks inside a paragraph. -->
+
 # Task
 
 Closes #<task issue>

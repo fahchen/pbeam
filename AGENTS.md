@@ -44,6 +44,24 @@ Before implementation, read `docs/agents/knowledge.md`.
   lifecycle. Do not add labels for individual milestones, epics, or speculative
   priorities. Keep labels current when scope or blockers change.
 
+## Project board
+
+- Track at-a-glance status on the [project board](https://github.com/users/fahchen/projects/2),
+  not a new file-based tracker.
+- The board's `Status` field tracks the work lifecycle: `Todo` (not started),
+  `Designing` (drafting a proposed solution/approach), `Pending Review`
+  (proposal awaiting confirmation before coding starts), `In Progress`
+  (coding), `In Review` (PR open, awaiting review/approval), `Done`
+  (merged/closed). `status:blocked` stays a label, not a `Status` value.
+- Set `Status` the moment it changes, not in a later batch:
+  - `Designing` when you start drafting a proposed solution.
+  - `Pending Review` when the proposal is ready and you stop for confirmation.
+  - `In Progress` the moment confirmation arrives and coding starts.
+  - `In Review` the moment the PR opens.
+  - `Done` the moment the PR merges and acceptance is verified.
+  Every PR, merge, and status-label change that touches an issue updates that
+  issue's board `Status` in the same turn.
+
 ## Implementation and review
 
 1. Read the task issue, its epic, milestone tracker, and blockers. Confirm that
