@@ -1,7 +1,7 @@
 ---
 name: draft-pr
 description: This skill should be used when the user asks to "create a PR", "open a PR", "create a draft PR", "make a PR", "/pr", "/draft-pr", or otherwise requests a GitHub pull request for the current branch in the pbeam repo. Uses the task issue title as the PR title, fills the repo PR template with task links, decisions, and exact verification, applies content labels, updates the task issue and epic, and stops for review.
-version: 0.1.0
+version: 0.2.0
 user-invocable: true
 allowed-tools:
   - Bash(git *)
@@ -125,12 +125,7 @@ Show them and ask for each: `fix now`, `record in PR`, or `ignore`.
 Follow the body rules in `references/conventions.md`. Write the body with the
 Write tool to a scratch file. Do not pass the body through a shell string.
 
-### 6. Final confirmation
-
-Print the title, body, labels, and milestone. Wait for an affirmative reply.
-Do not call `gh pr create` without it.
-
-### 7. Push and create
+### 6. Push and create
 
 ```bash
 git rev-parse --verify "origin/$(git branch --show-current)" >/dev/null 2>&1 \
@@ -145,7 +140,7 @@ gh pr create \
 
 Add `--draft` only when the user asked for a draft.
 
-### 8. Update the issues
+### 7. Update the issues
 
 - Comment on the task issue: the PR link, the acceptance evidence, and that
   the task stays open until merge.
