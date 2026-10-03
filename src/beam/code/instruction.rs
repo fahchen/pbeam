@@ -1,13 +1,13 @@
 //! Parse Code chunk instructions into the runtime instruction model.
 
-use super::super::error::{BeamError, error};
 use super::{
     COMPACT_EXTENDED_FLAG, COMPACT_SHORT_VALUE_SHIFT, COMPACT_SIGN_FLAG, COMPACT_TAG_MASK,
     FIRST_LABEL_NUMBER, LIST_SUBTAG, TAG_ATOM, TAG_INTEGER, TAG_LABEL, TAG_LITERAL, TAG_REGISTER,
     TAG_UNSIGNED, TAG_Y_REGISTER, WORD_SIZE, atom_at, read_integer, read_operand, read_u32,
     read_value,
 };
-use crate::beam::term::Term;
+use crate::error::{BeamError, error};
+use crate::term::Term;
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
@@ -43,6 +43,12 @@ const OPCODE_SWAP: u8 = 169;
 const OPCODE_INIT_YREGS: u8 = 172;
 const OPCODE_BS_CREATE_BIN: u8 = 177;
 const OPCODE_BS_INIT_WRITABLE: u8 = 133;
+const OPCODE_SEND: u8 = 20;
+const OPCODE_REMOVE_MESSAGE: u8 = 21;
+const OPCODE_TIMEOUT: u8 = 22;
+const OPCODE_LOOP_REC: u8 = 23;
+const OPCODE_LOOP_REC_END: u8 = 24;
+const OPCODE_WAIT: u8 = 25;
 const OPCODE_GET_LIST: u8 = 65;
 const OPCODE_GET_TUPLE_ELEMENT: u8 = 66;
 const OPCODE_PUT_LIST: u8 = 69;
@@ -79,38 +85,55 @@ const OPCODE_PUT_RECORD: u8 = 189;
 const OPCODE_MAKE_FUN3: u8 = 171;
 const OPCODE_BS_MATCH: u8 = 182;
 const OPCODE_UPDATE_RECORD: u8 = 181;
+const OPCODE_RECV_MARKER_BIND: u8 = 173;
+const OPCODE_RECV_MARKER_CLEAR: u8 = 174;
+const OPCODE_RECV_MARKER_RESERVE: u8 = 175;
+const OPCODE_RECV_MARKER_USE: u8 = 176;
 #[derive(Debug, Clone)]
 /// An instruction that the parser can read from a BEAM `Code` chunk.
 ///
 /// Byte examples use hexadecimal values. Compact operands use the short form
 /// in the Code chunk grammar. `End` represents the stream terminator; the
 /// executor does not run it.
-pub(in crate::beam) enum Instruction {
+pub(crate) enum Instruction {
     /// Starts a code label. The label must be in `1..=label_count`.
     ///
     /// Encoding: opcode, then a compact unsigned label. Example: `[0x01, 0x10]`
     /// encodes label 1.
+    ///
+    /// Erlang: every function and branch target has a label.
+    /// `a() -> ok.` compiles to `{label,1}` and `{label,2}`.
     Label(u32),
     /// Declares the module, function, and arity for the following function.
     /// Atom indexes refer to the one-based `AtU8` table.
     ///
     /// Encoding: opcode, module atom, function atom, and arity. Example:
     /// `[0x02, 0x12, 0x22, 0x00]` refers to atom indexes 1 and 2 with arity 0.
+    ///
+    /// Erlang: `a() -> ok.` in module `ex` compiles to
+    /// `{func_info,{atom,ex},{atom,a},0}`.
     FunctionInfo {
         module: String,
         name: String,
         arity: u32,
     },
     /// Moves a literal or register value into an X or Y register.
+    ///
+    /// Erlang: `a() -> ok.` compiles to `{move,{atom,ok},{x,0}}`.
     Move(Operand, Operand),
-    Call {
-        arity: u32,
-        label: u32,
-    },
-    CallOnly {
-        arity: u32,
-        label: u32,
-    },
+    /// Calls a local function and continues after it returns.
+    ///
+    /// Erlang: `b(X) -> c(X), ok.` compiles to `{call,1,{f,6}}`.
+    Call { arity: u32, label: u32 },
+    /// Tail-calls a local function.
+    ///
+    /// Erlang: `c(X) -> d(X).` compiles to `{call_only,1,{f,8}}`.
+    CallOnly { arity: u32, label: u32 },
+    /// Calls an imported function. `tail` marks `call_ext_last` and
+    /// `call_ext_only`; `deallocate` is the stack size to release first.
+    ///
+    /// Erlang: `d(X) -> lists:reverse(X).` compiles to
+    /// `{call_ext_only,1,{extfunc,lists,reverse,1}}`.
     CallExternal {
         arity: u32,
         module: String,
@@ -118,35 +141,198 @@ pub(in crate::beam) enum Instruction {
         tail: bool,
         deallocate: u32,
     },
+    /// Calls a zero-arity BIF and writes its value to a register.
+    ///
+    /// Encoding: opcode, import index, destination register. Example:
+    /// `[0x09, 0x00, 0x03]` calls import 0 and writes `x0`.
+    ///
+    /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`.
+    Bif0 {
+        module: String,
+        name: String,
+        destination: Operand,
+    },
     /// An instruction that is parsed so the module can load, but cannot run.
     Unsupported(u8),
-    Allocate {
-        stack_size: u32,
-    },
-    Deallocate {
-        stack_size: u32,
-    },
+    /// Allocates `stack_size` Y registers for the active function.
+    ///
+    /// Erlang: `b(X) -> c(X), ok.` compiles to `{allocate,0,1}`.
+    Allocate { stack_size: u32 },
+    /// Releases the Y registers of the active function.
+    ///
+    /// Erlang: `b(X) -> c(X), ok.` compiles to `{deallocate,0}`.
+    Deallocate { stack_size: u32 },
+    /// Continues execution after a label.
+    ///
+    /// Erlang: a receive clause jumps past the `after` body, for example
+    /// `{jump,{f,8}}` in `fixtures/process/process_probe.erl`.
     Jump(u32),
+    /// Jumps to `fail_label` when the value does not have the tested type.
+    ///
+    /// Erlang: `e(X) when is_atom(X) -> X; e(_) -> other.` compiles to
+    /// `{test,is_atom,{f,11},[{x,0}]}`.
     Test {
         kind: TestKind,
         fail_label: u32,
         value: Operand,
     },
+    /// Jumps to the label of the first matching choice, or to `fail_label`.
+    ///
+    /// Erlang: `f(1) -> one; f(2) -> two; f(_) -> many.` compiles to
+    /// `{select_val,{x,0},{f,16},{list,[{integer,1},{f,15},{integer,2},{f,14}]}}`.
     SelectValue {
         value: Operand,
         fail_label: u32,
         choices: Vec<(Term, u32)>,
     },
+    /// Builds a list cell from a head and a tail.
+    ///
+    /// Erlang: `[X]` compiles to `{put_list,{x,0},nil,{x,0}}`.
     PutList {
         head: Operand,
         tail: Operand,
         destination: Operand,
     },
+    /// Builds a tuple from the listed operands.
+    ///
+    /// Encoding: opcode, destination register, extended list, element count,
+    /// elements. Example: `[0xA4, 0x03, 0x17, 0x20, 0x12, 0x22]` writes a
+    /// tuple of atoms 1 and 2 to `x0`.
+    ///
+    /// Erlang: `g(X) -> {X, X}.` compiles to
+    /// `{put_tuple2,{x,0},{list,[{x,0},{x,0}]}}`.
+    PutTuple {
+        elements: Vec<Operand>,
+        destination: Operand,
+    },
+    /// Copies the zero-based tuple element at `index` to a register.
+    ///
+    /// Encoding: opcode, tuple register, unsigned index, destination register.
+    /// Example: `[0x42, 0x03, 0x10, 0x13]` copies element 1 of `x0` to `x1`.
+    ///
+    /// Erlang: `{Service, Monitor} = spawn_monitor(M, F, A)` reads `Monitor`
+    /// with `{get_tuple_element,{x,0},1,{y,2}}`.
+    GetTupleElement {
+        tuple: Operand,
+        index: u32,
+        destination: Operand,
+    },
+    /// Jumps to `fail_label` when the operands are not exactly equal.
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `[0x2B, 0x35, 0x13, 0x12]`
+    /// compares `x1` with atom 1 and fails to label 3.
+    ///
+    /// Erlang: `receive {io_reply, Reference, ok} -> io_ok end` compiles to
+    /// `{test,is_eq_exact,{f,14},[{x,0},{atom,ok}]}`.
+    TestExactEqual {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
+    /// Jumps to `fail_label` unless the value is a tuple with `arity`
+    /// elements and the first element is `tag`.
+    ///
+    /// Encoding: opcode, fail label, operand, unsigned arity, tag atom.
+    /// Example: `[0x9F, 0x35, 0x03, 0x30, 0x12]` tests `x0` for a 3-tuple
+    /// tagged with atom 1.
+    ///
+    /// Erlang: `receive {io_reply, Reference, ok} -> io_ok end` compiles to
+    /// `{test,is_tagged_tuple,{f,14},[{x,0},3,{atom,io_reply}]}`.
+    TestTaggedTuple {
+        fail_label: u32,
+        value: Operand,
+        arity: u32,
+        tag: Term,
+    },
+    /// Sends `x1` to the process in `x0`, then writes the message to `x0`.
+    ///
+    /// Encoding: `[0x14]`.
+    ///
+    /// Erlang: `Pid ! Message` compiles to `send`.
+    Send,
+    /// Removes the current message from the mailbox and moves the save
+    /// pointer to the first message.
+    ///
+    /// Encoding: `[0x15]`.
+    ///
+    /// Erlang: a matched `receive` clause compiles to `remove_message`.
+    RemoveMessage,
+    /// Writes the message at the save pointer to a register, or jumps to
+    /// `fail_label` when no message is left.
+    ///
+    /// Encoding: opcode, fail label, destination register. Example:
+    /// `[0x17, 0x35, 0x03]` writes `x0` or fails to label 3.
+    ///
+    /// Erlang: `receive ... end` starts with `{loop_rec,{f,15},{x,0}}`.
+    LoopReceive {
+        fail_label: u32,
+        destination: Operand,
+    },
+    /// Moves the save pointer past the current message and jumps to the
+    /// label.
+    ///
+    /// Encoding: opcode, label. Example: `[0x18, 0x35]` jumps to label 3.
+    ///
+    /// Erlang: a `receive` clause that does not match compiles to
+    /// `{loop_rec_end,{f,3}}`.
+    LoopReceiveEnd(u32),
+    /// Suspends the process until a message arrives, then continues at the
+    /// label.
+    ///
+    /// Encoding: opcode, label. Example: `[0x19, 0x35]` continues at label 3.
+    ///
+    /// Erlang: `receive ... end` without `after` ends with `{wait,{f,3}}`.
+    Wait(u32),
+    /// Ends a receive after its timeout and moves the save pointer to the
+    /// first message.
+    ///
+    /// Encoding: `[0x16]`.
+    ///
+    /// Erlang: `receive ... after 0 -> no_exit end` compiles to `timeout`
+    /// before the `after` body.
+    Timeout,
+    /// Inserts a receive marker at the end of the mailbox and writes its
+    /// identifier, or `undefined` when the mailbox is empty.
+    ///
+    /// Encoding: opcode, register. Example: `[0xAF, 0x14]` writes `y1`.
+    ///
+    /// Erlang: `Ref = make_ref(), Pid ! {request, Ref}, receive {Ref, R} -> R end`
+    /// compiles to `{recv_marker_reserve,{y,1}}` before `make_ref/0`.
+    ReceiveMarkerReserve(Operand),
+    /// Binds a reserved receive marker to a reference.
+    ///
+    /// Encoding: opcode, marker register, reference register. Example:
+    /// `[0xAD, 0x14, 0x03]` binds marker `y1` to the reference in `x0`.
+    ///
+    /// Erlang: the same pattern compiles to `{recv_marker_bind,{y,1},{x,0}}`
+    /// after `make_ref/0`.
+    ReceiveMarkerBind { marker: Operand, reference: Operand },
+    /// Moves the save pointer past the receive marker bound to a reference.
+    ///
+    /// Encoding: opcode, register. Example: `[0xB0, 0x14]` uses `y1`.
+    ///
+    /// Erlang: the same pattern compiles to `{recv_marker_use,{y,1}}` before
+    /// the `receive`.
+    ReceiveMarkerUse(Operand),
+    /// Clears the receive marker bound to a reference.
+    ///
+    /// Encoding: opcode, register. Example: `[0xAE, 0x14]` clears `y1`.
+    ///
+    /// Erlang: the same pattern compiles to `{recv_marker_clear,{y,1}}` when
+    /// the `receive` matches.
+    ReceiveMarkerClear(Operand),
+    /// An instruction that has no runtime effect, such as `test_heap` or
+    /// `init_yregs`.
+    ///
+    /// Erlang: `g(X) -> {X, X}.` compiles to `{test_heap,3,1}` first.
     Noop,
     /// Returns the value in `x0` from the active function.
     ///
     /// Encoding: `[0x13]`. Execution reports an error if the function has not
     /// set `x0`.
+    ///
+    /// Erlang: `a() -> ok.` ends with `return`.
     Return,
     /// Marks the end of the `Code` instruction stream.
     ///
@@ -156,7 +342,7 @@ pub(in crate::beam) enum Instruction {
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::beam) enum TestKind {
+pub(crate) enum TestKind {
     Atom,
     Pid,
     List,
@@ -169,7 +355,7 @@ pub(in crate::beam) enum TestKind {
 /// and `Y` uses compact register tag 4. For example, `move x0, y0` is encoded
 /// as `[0x40, 0x03, 0x04]`.
 #[derive(Debug, Clone)]
-pub(in crate::beam) enum Operand {
+pub(crate) enum Operand {
     Value(Term),
     UnsupportedLiteral(usize),
     X(u32),
@@ -275,6 +461,68 @@ pub(super) fn parse_code(
                 skip_select_val(data, &mut cursor)?;
                 Instruction::Unsupported(opcode)
             }
+            OPCODE_TEST_TAGGED_TUPLE => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let value = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let tag = read_value(data, &mut cursor, atoms)?;
+                Instruction::TestTaggedTuple {
+                    fail_label,
+                    value,
+                    arity,
+                    tag,
+                }
+            }
+            OPCODE_TEST_EXACT_EQ => Instruction::TestExactEqual {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_SEND => Instruction::Send,
+            OPCODE_REMOVE_MESSAGE => Instruction::RemoveMessage,
+            OPCODE_LOOP_REC => Instruction::LoopReceive {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                destination: read_register(data, &mut cursor)?,
+            },
+            OPCODE_LOOP_REC_END => {
+                Instruction::LoopReceiveEnd(read_operand(data, &mut cursor, TAG_LABEL)? as u32)
+            }
+            OPCODE_WAIT => Instruction::Wait(read_operand(data, &mut cursor, TAG_LABEL)? as u32),
+            OPCODE_TIMEOUT => Instruction::Timeout,
+            OPCODE_RECV_MARKER_RESERVE => {
+                Instruction::ReceiveMarkerReserve(read_register(data, &mut cursor)?)
+            }
+            OPCODE_RECV_MARKER_BIND => Instruction::ReceiveMarkerBind {
+                marker: read_register(data, &mut cursor)?,
+                reference: read_register(data, &mut cursor)?,
+            },
+            OPCODE_RECV_MARKER_USE => {
+                Instruction::ReceiveMarkerUse(read_register(data, &mut cursor)?)
+            }
+            OPCODE_RECV_MARKER_CLEAR => {
+                Instruction::ReceiveMarkerClear(read_register(data, &mut cursor)?)
+            }
+            OPCODE_GET_TUPLE_ELEMENT => Instruction::GetTupleElement {
+                tuple: read_register(data, &mut cursor)?,
+                index: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                destination: read_register(data, &mut cursor)?,
+            },
+            OPCODE_PUT_TUPLE2 => {
+                let destination = read_register(data, &mut cursor)?;
+                if read_integer(data, &mut cursor, TAG_LITERAL)? != LIST_SUBTAG {
+                    return Err(error("unsupported BEAM tuple element list"));
+                }
+                let item_count = usize::try_from(read_operand(data, &mut cursor, TAG_UNSIGNED)?)
+                    .map_err(|_| error("BEAM tuple has too many elements"))?;
+                let mut elements = Vec::with_capacity(item_count);
+                for _ in 0..item_count {
+                    elements.push(read_move_operand(data, &mut cursor, atoms, literals)?);
+                }
+                Instruction::PutTuple {
+                    elements,
+                    destination,
+                }
+            }
             OPCODE_TEST_IS_ATOM
             | OPCODE_TEST_IS_PID
             | OPCODE_TEST_IS_LIST
@@ -323,6 +571,17 @@ pub(super) fn parse_code(
                     name: name.clone(),
                     tail: opcode != OPCODE_CALL_EXT,
                     deallocate,
+                }
+            }
+            OPCODE_BIF0 => {
+                let index = read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize;
+                let (module, name, _arity) = imports
+                    .get(index)
+                    .ok_or_else(|| error(format!("BEAM BIF import index {index} out of range")))?;
+                Instruction::Bif0 {
+                    module: module.clone(),
+                    name: name.clone(),
+                    destination: read_register(data, &mut cursor)?,
                 }
             }
             OPCODE_ALLOCATE => {
@@ -700,7 +959,7 @@ mod tests {
         read_move_operand, skip_counted_operands, skip_integer_payload, skip_operand,
         skip_select_val, skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
     };
-    use crate::beam::{code::Operand, term::Term};
+    use crate::{beam::code::Operand, term::Term};
 
     #[test]
     fn rejects_invalid_operands_and_code_headers() {
@@ -766,6 +1025,14 @@ mod tests {
         assert!(parse_code(&code(&[59, 3, 21, 39]), &[], &[], &[]).is_err());
         assert!(parse_code(&code(&[59, 3, 21, 23, 16]), &[], &[], &[]).is_err());
         assert!(parse_code(&code(&[59, 3, 21, 23, 32, 3]), &[], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_put_tuple2_without_an_element_list() {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([OPCODE_PUT_TUPLE2, 0x03, 0x27]);
+        assert!(parse_code(&code, &[], &[], &[]).is_err());
     }
 
     #[test]

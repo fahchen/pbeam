@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
-use super::{
+use super::module::BeamModule;
+use crate::{
     error::{BeamError, error},
-    module::BeamModule,
     term::Term,
 };
 
 const WORD_SIZE: usize = 4;
 mod instruction;
-pub(super) use instruction::{Instruction, Operand, TestKind};
+pub(crate) use instruction::{Instruction, Operand, TestKind};
 
 const CHUNK_ALIGNMENT: usize = WORD_SIZE;
 const CHUNK_HEADER_SIZE: usize = WORD_SIZE * 2;
@@ -596,7 +596,7 @@ fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
 #[cfg(test)]
 mod tests {
     use super::{atom_at, parse_atoms, parse_exports, parse_literals, read_literal, read_u32};
-    use crate::beam::term::Term;
+    use crate::term::Term;
 
     #[test]
     fn rejects_invalid_atom_tables_and_indices() {
