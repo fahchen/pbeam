@@ -341,34 +341,27 @@ impl BeamProgram {
                 Instruction::LoopReceive {
                     fail_label,
                     destination,
-                } => {
-                    let message = process
-                        .mailbox
-                        .first_at_or_after(process.receive_cursor)
-                        .map(|message| (message.sequence, message.term.clone()));
-                    match message {
-                        Some((sequence, term)) => {
-                            process.current_message = Some(sequence);
-                            write(process, destination, term)?;
-                        }
-                        None => jump(module, process, *fail_label)?,
+                } => match process.mailbox.get(process.receive_cursor).cloned() {
+                    Some(term) => {
+                        process.current_message = Some(process.receive_cursor);
+                        write(process, destination, term)?;
                     }
-                }
+                    None => jump(module, process, *fail_label)?,
+                },
                 Instruction::LoopReceiveEnd(label) => {
-                    let sequence = process
+                    let index = process
                         .current_message
                         .take()
                         .ok_or_else(|| error("loop_rec_end without a current message"))?;
-                    process.receive_cursor = sequence + 1;
+                    process.receive_cursor = index + 1;
                     jump(module, process, *label)?;
                 }
                 Instruction::RemoveMessage => {
-                    let sequence = process
+                    let index = process
                         .current_message
                         .take()
                         .ok_or_else(|| error("remove_message without a current message"))?;
-                    process.mailbox.remove(sequence);
-                    process.receive_cursor = 0;
+                    process.remove_message(index);
                 }
                 Instruction::Wait(label) => {
                     jump(module, process, *label)?;
@@ -381,7 +374,7 @@ impl BeamProgram {
                 Instruction::ReceiveMarkerReserve(marker) => {
                     let reference = scheduler.make_ref()?;
                     let process = scheduler.current_process_mut();
-                    let position = process.mailbox.next_sequence();
+                    let position = process.mailbox.len();
                     process.receive_markers.insert(reference, position);
                     write(process, marker, Term::Reference(reference))?;
                 }

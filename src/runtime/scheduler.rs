@@ -267,13 +267,8 @@ mod tests {
         Term::Atom(name.into())
     }
 
-    fn first_message(scheduler: &Scheduler, id: u64, sequence: u64) -> Term {
-        scheduler.processes[&ProcessId(id)]
-            .mailbox
-            .first_at_or_after(sequence)
-            .unwrap()
-            .term
-            .clone()
+    fn first_message(scheduler: &Scheduler, id: u64, index: usize) -> Term {
+        scheduler.processes[&ProcessId(id)].mailbox[index].clone()
     }
 
     #[test]

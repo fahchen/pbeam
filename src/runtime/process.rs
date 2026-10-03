@@ -15,81 +15,6 @@ pub(super) struct Frame {
     pub(super) stack: Vec<Option<Term>>,
 }
 
-/// One mailbox message.
-#[derive(Debug)]
-pub(super) struct Message {
-    /// Arrival order in the mailbox. It does not change when other messages
-    /// leave the mailbox.
-    pub(super) sequence: u64,
-    /// The message term.
-    pub(super) term: Term,
-}
-
-/// A process mailbox. Each message keeps a stable sequence number, so a
-/// receive cursor or receive marker stays valid after other messages leave.
-#[derive(Debug, Default)]
-pub(super) struct Mailbox {
-    /// Messages in arrival order.
-    messages: VecDeque<Message>,
-    /// Sequence number for the next message.
-    next_sequence: u64,
-}
-
-impl Mailbox {
-    /// Add a term to the end of the mailbox.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// mailbox.push(Term::Atom("ready".into()));
-    /// assert_eq!(mailbox.next_sequence(), 1);
-    /// ```
-    fn push(&mut self, term: Term) {
-        let sequence = self.next_sequence;
-        // ponytail: like ERTS, the mailbox has no message limit; a u64 lasts
-        // about 584 years at one message per nanosecond.
-        self.next_sequence += 1;
-        self.messages.push_back(Message { sequence, term });
-    }
-
-    /// Return the first message at or after the receive cursor.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(mailbox.first_at_or_after(0).map(|message| &message.term), Some(&term));
-    /// ```
-    pub(super) fn first_at_or_after(&self, cursor: u64) -> Option<&Message> {
-        // ponytail: linear scan; add an index only if large mailboxes matter.
-        self.messages
-            .iter()
-            .find(|message| message.sequence >= cursor)
-    }
-
-    /// Remove a message by its sequence number.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// mailbox.remove(0);
-    /// assert!(mailbox.first_at_or_after(0).is_none());
-    /// ```
-    pub(super) fn remove(&mut self, sequence: u64) {
-        self.messages.retain(|message| message.sequence != sequence);
-    }
-
-    /// Return the sequence number that the next message will get.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(Mailbox::default().next_sequence(), 0);
-    /// ```
-    pub(super) fn next_sequence(&self) -> u64 {
-        self.next_sequence
-    }
-}
-
 /// The execution state and mailbox of one process.
 #[derive(Debug)]
 pub(super) struct ProcessState {
@@ -99,15 +24,15 @@ pub(super) struct ProcessState {
     pub(super) frames: Vec<Frame>,
     /// X registers. All frames of the process share them.
     pub(super) registers: Vec<Option<Term>>,
-    /// Messages that this process did not receive yet.
-    pub(super) mailbox: Mailbox,
-    /// Sequence number where `loop_rec` starts its search.
-    pub(super) receive_cursor: u64,
-    /// Sequence number of the message that `loop_rec` selected.
-    pub(super) current_message: Option<u64>,
-    /// Mailbox positions saved by `recv_marker_reserve`, keyed by marker or
-    /// by the bound reference.
-    pub(super) receive_markers: HashMap<Reference, u64>,
+    /// Messages that this process did not receive yet, in arrival order.
+    pub(super) mailbox: VecDeque<Term>,
+    /// Mailbox index of the next message that `loop_rec` examines.
+    pub(super) receive_cursor: usize,
+    /// Mailbox index of the message that `loop_rec` selected.
+    pub(super) current_message: Option<usize>,
+    /// Mailbox indexes saved by `recv_marker_reserve`, keyed by marker or by
+    /// the bound reference.
+    pub(super) receive_markers: HashMap<Reference, usize>,
     /// True while the process waits in `wait` for a new message.
     waiting: bool,
     /// True when exit signals from linked processes become `EXIT` messages.
@@ -132,7 +57,7 @@ impl ProcessState {
             id,
             frames: vec![frame],
             registers: arguments.into_iter().map(Some).collect(),
-            mailbox: Mailbox::default(),
+            mailbox: VecDeque::new(),
             receive_cursor: 0,
             current_message: None,
             receive_markers: HashMap::new(),
@@ -164,15 +89,35 @@ impl ProcessState {
     /// assert!(!process.receive(Term::Atom("ping".into())));
     /// ```
     pub(super) fn receive(&mut self, term: Term) -> bool {
-        self.mailbox.push(term);
+        self.mailbox.push_back(term);
         std::mem::take(&mut self.waiting)
+    }
+
+    /// Remove the message at a mailbox index and reset the receive cursor,
+    /// as ERTS does in `remove_message`. Receive markers after the removed
+    /// message move back by one, so they keep their message.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.remove_message(0);
+    /// assert_eq!(process.receive_cursor, 0);
+    /// ```
+    pub(super) fn remove_message(&mut self, index: usize) {
+        self.mailbox.remove(index);
+        self.receive_cursor = 0;
+        for position in self.receive_markers.values_mut() {
+            if *position > index {
+                *position -= 1;
+            }
+        }
     }
 }
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::{Frame, Mailbox, ProcessState};
-    use crate::term::{ProcessId, Term};
+    use super::{Frame, ProcessState};
+    use crate::term::{ProcessId, Reference, Term};
 
     pub(in crate::runtime) fn frame() -> Frame {
         Frame {
@@ -184,19 +129,23 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn keeps_message_sequences_after_removal() {
-        let mut mailbox = Mailbox::default();
-        mailbox.push(Term::Atom("first".into()));
-        mailbox.push(Term::Atom("second".into()));
-        mailbox.remove(0);
+    fn moves_receive_markers_after_a_removed_message() {
+        let mut process = ProcessState::new(ProcessId(0), frame(), vec![]);
+        for name in ["first", "second", "third"] {
+            process.receive(Term::Atom(name.into()));
+        }
+        process.receive_cursor = 2;
+        process.receive_markers.insert(Reference(1), 0);
+        process.receive_markers.insert(Reference(2), 2);
+        process.remove_message(1);
 
-        let message = mailbox.first_at_or_after(0).unwrap();
         assert_eq!(
-            (message.sequence, &message.term),
-            (1, &Term::Atom("second".into()))
+            Vec::from(process.mailbox.clone()),
+            vec![Term::Atom("first".into()), Term::Atom("third".into())]
         );
-        assert!(mailbox.first_at_or_after(2).is_none());
-        assert_eq!(mailbox.next_sequence(), 2);
+        assert_eq!(process.receive_cursor, 0);
+        assert_eq!(process.receive_markers[&Reference(1)], 0);
+        assert_eq!(process.receive_markers[&Reference(2)], 1);
     }
 
     #[test]
