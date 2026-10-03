@@ -44,7 +44,7 @@ Before any board write, ask the user to confirm the task selection and
 that board Status should move to `Designing` now. Only on explicit
 confirmation, run:
 
-```
+```bash
 gh project item-list 2 --owner fahchen --format json --jq \
   '.items[] | select(.content.number == <ISSUE_NUMBER>) | .id'
 gh project item-edit --id <ITEM_ID> --project-id PVT_kwHOAA0Ofs4BlkkX \
