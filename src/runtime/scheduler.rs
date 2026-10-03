@@ -268,7 +268,7 @@ mod tests {
     }
 
     fn first_message(scheduler: &Scheduler, id: u64, index: usize) -> Term {
-        scheduler.processes[&ProcessId(id)].mailbox[index].clone()
+        scheduler.processes[&ProcessId(id)].mailbox.messages()[index].clone()
     }
 
     #[test]

@@ -341,62 +341,41 @@ impl BeamProgram {
                 Instruction::LoopReceive {
                     fail_label,
                     destination,
-                } => match process.mailbox.get(process.receive_cursor).cloned() {
-                    Some(term) => {
-                        process.current_message = Some(process.receive_cursor);
-                        write(process, destination, term)?;
-                    }
+                } => match process.mailbox.current().cloned() {
+                    Some(term) => write(process, destination, term)?,
                     None => jump(module, process, *fail_label)?,
                 },
                 Instruction::LoopReceiveEnd(label) => {
-                    let index = process
-                        .current_message
-                        .take()
-                        .ok_or_else(|| error("loop_rec_end without a current message"))?;
-                    process.receive_cursor = index + 1;
+                    if !process.mailbox.save_next() {
+                        return Err(error("loop_rec_end without a current message"));
+                    }
                     jump(module, process, *label)?;
                 }
                 Instruction::RemoveMessage => {
-                    let index = process
-                        .current_message
-                        .take()
-                        .ok_or_else(|| error("remove_message without a current message"))?;
-                    process.remove_message(index);
+                    if !process.mailbox.remove_current() {
+                        return Err(error("remove_message without a current message"));
+                    }
                 }
                 Instruction::Wait(label) => {
                     jump(module, process, *label)?;
                     return Ok(Outcome::Wait);
                 }
-                Instruction::Timeout => {
-                    process.current_message = None;
-                    process.receive_cursor = 0;
-                }
+                Instruction::Timeout => process.mailbox.set_save_first(),
                 Instruction::ReceiveMarkerReserve(marker) => {
-                    let reference = scheduler.make_ref()?;
-                    let process = scheduler.current_process_mut();
-                    let position = process.mailbox.len();
-                    process.receive_markers.insert(reference, position);
-                    write(process, marker, Term::Reference(reference))?;
+                    let id = process.mailbox.reserve_marker();
+                    write(process, marker, id)?;
                 }
                 Instruction::ReceiveMarkerBind { marker, reference } => {
-                    if let (Term::Reference(marker), Term::Reference(reference)) =
-                        (read(process, marker)?, read(process, reference)?)
-                        && let Some(position) = process.receive_markers.remove(&marker)
-                    {
-                        process.receive_markers.insert(reference, position);
-                    }
+                    let (marker, reference) = (read(process, marker)?, read(process, reference)?);
+                    process.mailbox.bind_marker(&marker, &reference);
                 }
                 Instruction::ReceiveMarkerUse(reference) => {
-                    if let Term::Reference(reference) = read(process, reference)?
-                        && let Some(position) = process.receive_markers.get(&reference)
-                    {
-                        process.receive_cursor = *position;
-                    }
+                    let reference = read(process, reference)?;
+                    process.mailbox.use_marker(&reference);
                 }
                 Instruction::ReceiveMarkerClear(reference) => {
-                    if let Term::Reference(reference) = read(process, reference)? {
-                        process.receive_markers.remove(&reference);
-                    }
+                    let reference = read(process, reference)?;
+                    process.mailbox.clear_marker(&reference);
                 }
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::Return => {
@@ -874,6 +853,8 @@ mod tests {
             index,
             destination: Operand::X(0),
         };
+        assert!(error(vec![Instruction::LoopReceiveEnd(1)]).contains("loop_rec_end"));
+        assert!(error(vec![Instruction::RemoveMessage]).contains("remove_message"));
         assert!(error(vec![element(Term::Integer(1), 0)]).contains("not a tuple"));
         assert!(error(vec![element(Term::Tuple(vec![]), 0)]).contains("no element 0"));
         assert!(

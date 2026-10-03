@@ -251,14 +251,14 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `Pid ! Message` compiles to `send`.
     Send,
-    /// Removes the current message from the mailbox and resets the receive
-    /// cursor.
+    /// Removes the current message from the mailbox and moves the save
+    /// pointer to the first message.
     ///
     /// Encoding: `[0x15]`.
     ///
     /// Erlang: a matched `receive` clause compiles to `remove_message`.
     RemoveMessage,
-    /// Writes the message at the receive cursor to a register, or jumps to
+    /// Writes the message at the save pointer to a register, or jumps to
     /// `fail_label` when no message is left.
     ///
     /// Encoding: opcode, fail label, destination register. Example:
@@ -269,7 +269,7 @@ pub(crate) enum Instruction {
         fail_label: u32,
         destination: Operand,
     },
-    /// Moves the receive cursor past the current message and jumps to the
+    /// Moves the save pointer past the current message and jumps to the
     /// label.
     ///
     /// Encoding: opcode, label. Example: `[0x18, 0x35]` jumps to label 3.
@@ -284,21 +284,23 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `receive ... end` without `after` ends with `{wait,{f,3}}`.
     Wait(u32),
-    /// Ends a receive after its timeout and resets the receive cursor.
+    /// Ends a receive after its timeout and moves the save pointer to the
+    /// first message.
     ///
     /// Encoding: `[0x16]`.
     ///
     /// Erlang: `receive ... after 0 -> no_exit end` compiles to `timeout`
     /// before the `after` body.
     Timeout,
-    /// Saves the current mailbox end and writes a new marker reference.
+    /// Inserts a receive marker at the end of the mailbox and writes its
+    /// identifier, or `undefined` when the mailbox is empty.
     ///
     /// Encoding: opcode, register. Example: `[0xAF, 0x14]` writes `y1`.
     ///
     /// Erlang: `Ref = make_ref(), Pid ! {request, Ref}, receive {Ref, R} -> R end`
     /// compiles to `{recv_marker_reserve,{y,1}}` before `make_ref/0`.
     ReceiveMarkerReserve(Operand),
-    /// Moves a saved marker position to the bound reference.
+    /// Binds a reserved receive marker to a reference.
     ///
     /// Encoding: opcode, marker register, reference register. Example:
     /// `[0xAD, 0x14, 0x03]` binds marker `y1` to the reference in `x0`.
@@ -306,14 +308,14 @@ pub(crate) enum Instruction {
     /// Erlang: the same pattern compiles to `{recv_marker_bind,{y,1},{x,0}}`
     /// after `make_ref/0`.
     ReceiveMarkerBind { marker: Operand, reference: Operand },
-    /// Sets the receive cursor from the marker bound to a reference.
+    /// Moves the save pointer past the receive marker bound to a reference.
     ///
     /// Encoding: opcode, register. Example: `[0xB0, 0x14]` uses `y1`.
     ///
     /// Erlang: the same pattern compiles to `{recv_marker_use,{y,1}}` before
     /// the `receive`.
     ReceiveMarkerUse(Operand),
-    /// Removes the marker bound to a reference.
+    /// Clears the receive marker bound to a reference.
     ///
     /// Encoding: opcode, register. Example: `[0xAE, 0x14]` clears `y1`.
     ///
