@@ -3,3 +3,8 @@
 /fixtures/hello/_build/
 /fixtures/hello/cover/
 /fixtures/hello/tmp/
+
+# Agent scratch files. Skills under .agents/skills/ stay tracked.
+/.agents/.handoff/
+/docs/tmp/
+/portable_beam_runtime_handoff.md
