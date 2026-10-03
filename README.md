@@ -54,8 +54,9 @@ See the [evidence table](docs/hello-world-target.md).
 
 ## Delivery
 
-Work is managed in [GitHub Issues](https://github.com/fahchen/pbeam/issues)
-and [milestones](https://github.com/fahchen/pbeam/milestones):
+Work is managed in [GitHub Issues](https://github.com/fahchen/pbeam/issues),
+[milestones](https://github.com/fahchen/pbeam/milestones), and the
+[project board](https://github.com/users/fahchen/projects/2):
 
 **Milestone tracking issue → epic issue → task issue.**
 
