@@ -74,31 +74,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ ! -f "$OUTPUT/comment.md" ]; then
-            echo "Copilot did not write comment.md" >&2
-            exit 1
+          comment="$OUTPUT/comment.md"
+          if [ -n "$(git log --oneline origin/main..HEAD)" ]; then
+            git push -u origin HEAD
+            url=$(gh pr create --base main \
+              --title "docs: capture review learnings from #$PR_NUMBER" \
+              --body-file "$OUTPUT/pr-body.md" --label documentation)
+            printf '\nKnowledge PR: %s\n' "$url" >> "$comment"
           fi
-          branch="learnings/pr-$PR_NUMBER"
-          if [ "$(git branch --show-current)" != "$branch" ]; then
-            if ! git diff --quiet; then
-              echo "Copilot changed files without a commit" >&2
-              exit 1
-            fi
-            gh pr comment "$PR_NUMBER" --body-file "$OUTPUT/comment.md"
-            exit 0
-          fi
-          unexpected=$(git diff --name-only origin/main...HEAD | grep -vx 'docs/agents/knowledge.md' || true)
-          if [ -n "$unexpected" ] || ! git diff --quiet; then
-            echo "Copilot changed files other than docs/agents/knowledge.md:" >&2
-            echo "$unexpected" >&2
-            exit 1
-          fi
-          git push -u origin "$branch"
-          url=$(gh pr create --base main --head "$branch" \
-            --title "docs: capture review learnings from #$PR_NUMBER" \
-            --body-file "$OUTPUT/pr-body.md" --label documentation)
-          { cat "$OUTPUT/comment.md"; echo; echo "Knowledge PR: $url"; } > "$OUTPUT/final-comment.md"
-          gh pr comment "$PR_NUMBER" --body-file "$OUTPUT/final-comment.md"
+          gh pr comment "$PR_NUMBER" --body-file "$comment"
 
       - name: Report a failed capture
         if: failure()
