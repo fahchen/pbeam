@@ -3,9 +3,9 @@
 use super::super::error::{BeamError, error};
 use super::{
     COMPACT_EXTENDED_FLAG, COMPACT_SHORT_VALUE_SHIFT, COMPACT_SIGN_FLAG, COMPACT_TAG_MASK,
-    FIRST_LABEL_NUMBER, LIST_SUBTAG, LITERAL_SUBTAG, TAG_ATOM, TAG_INTEGER, TAG_LABEL, TAG_LITERAL,
-    TAG_REGISTER, TAG_UNSIGNED, TAG_Y_REGISTER, WORD_SIZE, atom_at, read_integer, read_operand,
-    read_u32, read_value,
+    FIRST_LABEL_NUMBER, LIST_SUBTAG, TAG_ATOM, TAG_INTEGER, TAG_LABEL, TAG_LITERAL, TAG_REGISTER,
+    TAG_UNSIGNED, TAG_Y_REGISTER, WORD_SIZE, atom_at, read_integer, read_operand, read_u32,
+    read_value,
 };
 use crate::beam::term::Term;
 
@@ -107,6 +107,10 @@ pub(in crate::beam) enum Instruction {
         arity: u32,
         label: u32,
     },
+    CallOnly {
+        arity: u32,
+        label: u32,
+    },
     CallExternal {
         arity: u32,
         module: String,
@@ -122,6 +126,23 @@ pub(in crate::beam) enum Instruction {
     Deallocate {
         stack_size: u32,
     },
+    Jump(u32),
+    Test {
+        kind: TestKind,
+        fail_label: u32,
+        value: Operand,
+    },
+    SelectValue {
+        value: Operand,
+        fail_label: u32,
+        choices: Vec<(Term, u32)>,
+    },
+    PutList {
+        head: Operand,
+        tail: Operand,
+        destination: Operand,
+    },
+    Noop,
     /// Returns the value in `x0` from the active function.
     ///
     /// Encoding: `[0x13]`. Execution reports an error if the function has not
@@ -132,6 +153,14 @@ pub(in crate::beam) enum Instruction {
     /// Encoding: `[0x03]`. The parser adds this internal sentinel after it
     /// reads the terminator. The executor stops at this sentinel.
     End,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::beam) enum TestKind {
+    Atom,
+    Pid,
+    List,
+    Binary,
 }
 
 /// A source or destination in the supported `move` instruction.
@@ -211,19 +240,63 @@ pub(super) fn parse_code(
                 arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
                 label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
             },
-            OPCODE_CALL_ONLY => {
-                let _arity = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
-                let _label = read_operand(data, &mut cursor, TAG_LABEL)?;
-                Instruction::Unsupported(opcode)
+            OPCODE_CALL_ONLY => Instruction::CallOnly {
+                arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+            },
+            OPCODE_JUMP => Instruction::Jump(read_operand(data, &mut cursor, TAG_LABEL)? as u32),
+            OPCODE_SELECT_VAL => {
+                let value = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                if read_integer(data, &mut cursor, TAG_LITERAL)? != LIST_SUBTAG {
+                    return Err(error("unsupported BEAM selection list"));
+                }
+                let item_count = usize::try_from(read_operand(data, &mut cursor, TAG_UNSIGNED)?)
+                    .map_err(|_| error("BEAM selection list is too large"))?;
+                if item_count % 2 != 0 {
+                    return Err(error("BEAM selection list has an incomplete pair"));
+                }
+                let mut choices = Vec::with_capacity(item_count / 2);
+                for _ in 0..item_count / 2 {
+                    let choice = read_move_operand(data, &mut cursor, atoms, literals)?;
+                    let Operand::Value(choice) = choice else {
+                        return Err(error("unsupported BEAM selection value"));
+                    };
+                    let target = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                    choices.push((choice, target));
+                }
+                Instruction::SelectValue {
+                    value,
+                    fail_label,
+                    choices,
+                }
             }
-            OPCODE_JUMP => {
-                let _label = read_operand(data, &mut cursor, TAG_LABEL)?;
-                Instruction::Unsupported(opcode)
-            }
-            OPCODE_SELECT_VAL | OPCODE_SELECT_TUPLE_ARITY => {
+            OPCODE_SELECT_TUPLE_ARITY => {
                 skip_select_val(data, &mut cursor)?;
                 Instruction::Unsupported(opcode)
             }
+            OPCODE_TEST_IS_ATOM
+            | OPCODE_TEST_IS_PID
+            | OPCODE_TEST_IS_LIST
+            | OPCODE_TEST_IS_BINARY => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let value = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let kind = test_kind(opcode)?;
+                Instruction::Test {
+                    kind,
+                    fail_label,
+                    value,
+                }
+            }
+            OPCODE_TEST_HEAP | OPCODE_INIT_YREGS => {
+                skip_unsupported_instruction(opcode, data, &mut cursor)?;
+                Instruction::Noop
+            }
+            OPCODE_PUT_LIST => Instruction::PutList {
+                head: read_move_operand(data, &mut cursor, atoms, literals)?,
+                tail: read_move_operand(data, &mut cursor, atoms, literals)?,
+                destination: read_register(data, &mut cursor)?,
+            },
             OPCODE_LINE => {
                 let _line_index = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
                 continue;
@@ -278,6 +351,23 @@ pub(super) fn parse_code(
             }
         };
         instructions.push(instruction);
+    }
+}
+
+/// Return the type checked by a BEAM type-test opcode.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(test_kind(OPCODE_TEST_IS_BINARY)?, TestKind::Binary);
+/// ```
+fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
+    match opcode {
+        OPCODE_TEST_IS_ATOM => Ok(TestKind::Atom),
+        OPCODE_TEST_IS_PID => Ok(TestKind::Pid),
+        OPCODE_TEST_IS_LIST => Ok(TestKind::List),
+        OPCODE_TEST_IS_BINARY => Ok(TestKind::Binary),
+        _ => Err(error(format!("unsupported BEAM type-test opcode {opcode}"))),
     }
 }
 
@@ -567,16 +657,28 @@ fn read_move_operand(
     match first & COMPACT_TAG_MASK {
         TAG_INTEGER | TAG_ATOM => Ok(Operand::Value(read_value(data, cursor, atoms)?)),
         TAG_LITERAL => {
-            if read_integer(data, cursor, TAG_LITERAL)? != LITERAL_SUBTAG {
-                return Err(error("unsupported extended BEAM move operand"));
-            }
-            let literal_index = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
-                .map_err(|_| error("BEAM literal index exceeds platform limit"))?;
-            match literals.get(literal_index) {
-                Some(Some(value)) => Ok(Operand::Value(value.clone())),
-                Some(None) => Ok(Operand::UnsupportedLiteral(literal_index)),
-                None => Err(error(format!(
-                    "BEAM literal index {literal_index} is out of range"
+            let subtag = read_integer(data, cursor, TAG_LITERAL)?;
+            match subtag {
+                1 => Ok(Operand::Value(Term::Atom("nil".into()))),
+                2 => read_move_operand(data, cursor, atoms, literals),
+                4 => {
+                    let literal_index = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+                        .map_err(|_| error("BEAM literal index exceeds platform limit"))?;
+                    match literals.get(literal_index) {
+                        Some(Some(value)) => Ok(Operand::Value(value.clone())),
+                        Some(None) => Ok(Operand::UnsupportedLiteral(literal_index)),
+                        None => Err(error(format!(
+                            "BEAM literal index {literal_index} is out of range"
+                        ))),
+                    }
+                }
+                5 => {
+                    let register = read_move_operand(data, cursor, atoms, literals)?;
+                    skip_operand(data, cursor)?;
+                    Ok(register)
+                }
+                _ => Err(error(format!(
+                    "unsupported extended BEAM move operand {subtag}"
                 ))),
             }
         }
@@ -592,10 +694,11 @@ mod tests {
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BIF1, OPCODE_BIF2, OPCODE_BS_CREATE_BIN,
         OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_CALL_LAST, OPCODE_GET_LIST,
         OPCODE_GET_RECORD_ELEMENTS, OPCODE_INIT_YREGS, OPCODE_MAKE_FUN3, OPCODE_PUT_MAP_ASSOC,
-        OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_SWAP, OPCODE_TEST_HEAP, OPCODE_TEST_IS_MAP,
+        OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_SWAP, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
+        OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
         OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRIM, OPCODE_UPDATE_RECORD, parse_code,
         read_move_operand, skip_counted_operands, skip_integer_payload, skip_operand,
-        skip_select_val, skip_unsupported_instruction, unsupported_opcode_operand_count,
+        skip_select_val, skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
     };
     use crate::beam::{code::Operand, term::Term};
 
@@ -628,9 +731,19 @@ mod tests {
             read_move_operand(&[0x47, 0x00], &mut 0, &[], &literals).unwrap(),
             Operand::Value(Term::Binary(value)) if value == b"ok"
         ));
+        let mut cursor = 0;
+        assert!(matches!(
+            read_move_operand(&[0x57, 0x03, 0x50], &mut cursor, &[], &literals).unwrap(),
+            Operand::X(0)
+        ));
+        assert_eq!(cursor, 3);
         assert!(matches!(
             read_move_operand(&[0x47, 0x10], &mut 0, &[], &literals).unwrap(),
             Operand::UnsupportedLiteral(1)
+        ));
+        assert!(matches!(
+            read_move_operand(&[0x17, 0x10], &mut 0, &[], &literals).unwrap(),
+            Operand::Value(Term::Atom(atom)) if atom == "nil"
         ));
         assert!(read_move_operand(&[0x47, 0x20], &mut 0, &[], &literals).is_err());
         assert!(read_move_operand(&[0x27, 0x00], &mut 0, &[], &literals).is_err());
@@ -639,6 +752,29 @@ mod tests {
             read_value(&[0x02], &mut 0, &[]).unwrap(),
             Term::Atom("nil".into())
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_select_val_forms() {
+        let code = |instructions: &[u8]| {
+            let mut code = vec![0, 0, 0, 16];
+            code.extend([0; 16]);
+            code.extend_from_slice(instructions);
+            code
+        };
+
+        assert!(parse_code(&code(&[59, 3, 21, 39]), &[], &[], &[]).is_err());
+        assert!(parse_code(&code(&[59, 3, 21, 23, 16]), &[], &[], &[]).is_err());
+        assert!(parse_code(&code(&[59, 3, 21, 23, 32, 3]), &[], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn maps_supported_type_tests_and_rejects_unknown_opcodes() {
+        assert!(test_kind(OPCODE_TEST_IS_ATOM).is_ok());
+        assert!(test_kind(OPCODE_TEST_IS_PID).is_ok());
+        assert!(test_kind(OPCODE_TEST_IS_LIST).is_ok());
+        assert!(test_kind(OPCODE_TEST_IS_BINARY).is_ok());
+        assert!(test_kind(255).is_err());
     }
 
     #[test]

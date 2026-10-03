@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pbeam_runtime::BeamProgram;
+use pbeam_runtime::{BeamProgram, Term};
 
 #[test]
 fn loads_compiled_elixir_greetings() {
@@ -17,15 +17,65 @@ fn loads_compiled_elixir_greetings() {
 
 #[test]
 fn loads_the_pinned_elixir_io_module() {
-    let path = Command::new("elixir")
-        .args(["-e", "IO.write(:code.which(IO))"])
-        .output()
-        .unwrap();
-    assert!(path.status.success());
-    let path = PathBuf::from(String::from_utf8(path.stdout).unwrap());
-    let bytes = std::fs::read(path).unwrap();
+    let bytes = elixir_io_beam();
 
     BeamProgram::load(&[&bytes]).unwrap();
+}
+
+#[test]
+fn executes_compiled_elixir_puts_to_the_otp_io_boundary() {
+    let hello = std::fs::read(beam_file("Elixir.Hello.beam")).unwrap();
+    let io = elixir_io_beam();
+    let program = BeamProgram::load(&[&hello, &io]).unwrap();
+
+    let error = program.execute("Elixir.Hello", "main", &[]).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("unresolved external MFA io:put_chars/2"),
+        "expected execution to reach OTP IO, got {error}"
+    );
+}
+
+#[test]
+fn rejects_an_unsupported_io_device_with_a_function_clause_error() {
+    let io = elixir_io_beam();
+    let program = BeamProgram::load(&[&io]).unwrap();
+
+    let error = program
+        .execute(
+            "Elixir.IO",
+            "puts",
+            &[Term::Integer(7), Term::Binary(b"message".to_vec())],
+        )
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("function clause Elixir.IO:puts/2")
+    );
+}
+
+#[test]
+fn reports_the_unavailable_string_conversion_for_non_binary_data() {
+    let io = elixir_io_beam();
+    let program = BeamProgram::load(&[&io]).unwrap();
+
+    let error = program
+        .execute(
+            "Elixir.IO",
+            "puts",
+            &[Term::Atom("stdio".into()), Term::Integer(7)],
+        )
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("unresolved external MFA Elixir.String.Chars:to_string/1")
+    );
 }
 
 #[test]
@@ -88,6 +138,15 @@ fn beam_file(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/hello/_build/test/lib/hello_reference/ebin")
         .join(file)
+}
+
+fn elixir_io_beam() -> Vec<u8> {
+    let path = Command::new("elixir")
+        .args(["-e", "IO.write(:code.which(IO))"])
+        .output()
+        .unwrap();
+    assert!(path.status.success());
+    std::fs::read(PathBuf::from(String::from_utf8(path.stdout).unwrap())).unwrap()
 }
 
 fn run_pbeam(arguments: &[&str]) -> Output {

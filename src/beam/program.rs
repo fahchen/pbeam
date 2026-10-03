@@ -1,6 +1,6 @@
 use super::{
     BeamError,
-    code::{Instruction, Operand},
+    code::{Instruction, Operand, TestKind},
     error::error,
     module::BeamModule,
     term::Term,
@@ -108,6 +108,10 @@ impl BeamProgram {
                     let result = self.execute_label(module_name, *label, &arguments)?;
                     set_x0(result, &mut registers);
                 }
+                Instruction::CallOnly { arity, label } => {
+                    let arguments = call_arguments(&registers, *arity)?;
+                    return self.execute_label(module_name, *label, &arguments);
+                }
                 Instruction::CallExternal {
                     arity,
                     module,
@@ -125,6 +129,74 @@ impl BeamProgram {
                     }
                     set_x0(result, &mut registers);
                 }
+                Instruction::Jump(label) => {
+                    pc = module
+                        .instructions
+                        .iter()
+                        .position(|instruction| {
+                            matches!(instruction, Instruction::Label(found) if found == label)
+                        })
+                        .map(|index| index + 1)
+                        .ok_or_else(|| error(format!("missing BEAM label {label}")))?;
+                }
+                Instruction::Test {
+                    kind,
+                    fail_label,
+                    value,
+                } => {
+                    let value = read_operand(value, &registers, &stack)?;
+                    let passed = match kind {
+                        TestKind::Atom => matches!(value, Term::Atom(_)),
+                        TestKind::Pid => false,
+                        TestKind::List => matches!(value, Term::List(_)),
+                        TestKind::Binary => matches!(value, Term::Binary(_)),
+                    };
+                    if !passed {
+                        pc = module
+                            .instructions
+                            .iter()
+                            .position(|instruction| {
+                                matches!(instruction, Instruction::Label(found) if found == fail_label)
+                            })
+                            .map(|index| index + 1)
+                            .ok_or_else(|| error(format!("missing BEAM label {fail_label}")))?;
+                    }
+                }
+                Instruction::SelectValue {
+                    value,
+                    fail_label,
+                    choices,
+                } => {
+                    let value = read_operand(value, &registers, &stack)?;
+                    let target = choices
+                        .iter()
+                        .find(|(choice, _)| choice == &value)
+                        .map_or(*fail_label, |(_, label)| *label);
+                    pc = module
+                        .instructions
+                        .iter()
+                        .position(|instruction| {
+                            matches!(instruction, Instruction::Label(found) if *found == target)
+                        })
+                        .map(|index| index + 1)
+                        .ok_or_else(|| error(format!("missing BEAM label {target}")))?;
+                }
+                Instruction::PutList {
+                    head,
+                    tail,
+                    destination,
+                } => {
+                    let head = read_operand(head, &registers, &stack)?;
+                    let tail = read_operand(tail, &registers, &stack)?;
+                    let mut values = match tail {
+                        Term::List(values) => values,
+                        Term::Atom(atom) if atom == "nil" => Vec::new(),
+                        _ => return Err(error("unsupported BEAM list tail")),
+                    };
+                    values.insert(0, head);
+                    write_operand(destination, Term::List(values), &mut registers, &mut stack)?;
+                }
+                Instruction::Noop => {}
                 Instruction::Return => {
                     return registers
                         .first()
@@ -135,9 +207,12 @@ impl BeamProgram {
                 Instruction::Unsupported(opcode) => {
                     return Err(error(format!("unsupported BEAM opcode {opcode}")));
                 }
-                Instruction::Label(_) | Instruction::FunctionInfo { .. } => {
-                    return Err(error("unsupported entry instruction"));
-                }
+                Instruction::Label(_) => {}
+                Instruction::FunctionInfo {
+                    module,
+                    name,
+                    arity,
+                } => return Err(error(format!("function clause {module}:{name}/{arity}"))),
             }
         }
         Err(error(format!(
@@ -260,7 +335,7 @@ fn write_operand(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, path::PathBuf, process::Command};
 
     use super::{
         BeamProgram, call_arguments, function_at_label, read_operand, set_x0, write_operand,
@@ -333,6 +408,93 @@ mod tests {
         assert_eq!(
             program.execute("fixture", "main", &[]).unwrap(),
             Term::Integer(7)
+        );
+    }
+
+    #[test]
+    fn builds_a_list_from_nil_and_rejects_an_unsupported_tail() {
+        let list = make_program(
+            vec![
+                Instruction::PutList {
+                    head: Operand::Value(Term::Integer(10)),
+                    tail: Operand::Value(Term::Atom("nil".into())),
+                    destination: Operand::X(0),
+                },
+                Instruction::Return,
+            ],
+            0,
+        );
+        assert_eq!(
+            list.execute("fixture", "main", &[]).unwrap(),
+            Term::List(vec![Term::Integer(10)])
+        );
+
+        let invalid_tail = make_program(
+            vec![
+                Instruction::PutList {
+                    head: Operand::Value(Term::Integer(10)),
+                    tail: Operand::Value(Term::Integer(0)),
+                    destination: Operand::X(0),
+                },
+                Instruction::Return,
+            ],
+            0,
+        );
+        assert!(invalid_tail.execute("fixture", "main", &[]).is_err());
+    }
+
+    #[test]
+    fn executes_compiled_io_puts_and_passes_chardata_to_beam_io() {
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/hello/_build/test/lib/hello_reference/ebin");
+        let hello = std::fs::read(fixture_dir.join("Elixir.Hello.beam")).unwrap();
+        let variant = std::fs::read(fixture_dir.join("Elixir.HelloVariant.beam")).unwrap();
+        let io_path = Command::new("elixir")
+            .args(["-e", "IO.write(:code.which(IO))"])
+            .output()
+            .unwrap();
+        assert!(io_path.status.success());
+        let io = std::fs::read(String::from_utf8(io_path.stdout).unwrap()).unwrap();
+        let mut modules = HashMap::from([
+            ("Elixir.Hello".into(), BeamModule::load(&hello).unwrap()),
+            (
+                "Elixir.HelloVariant".into(),
+                BeamModule::load(&variant).unwrap(),
+            ),
+            ("Elixir.IO".into(), BeamModule::load(&io).unwrap()),
+        ]);
+        modules.insert(
+            "io".into(),
+            BeamModule {
+                name: "io".into(),
+                exports: HashMap::from([(("put_chars".into(), 2), 1)]),
+                instructions: vec![
+                    Instruction::FunctionInfo {
+                        module: "io".into(),
+                        name: "put_chars".into(),
+                        arity: 2,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Move(Operand::X(1), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            },
+        );
+        let program = BeamProgram { modules };
+
+        assert_eq!(
+            program.execute("Elixir.Hello", "main", &[]).unwrap(),
+            Term::List(vec![
+                Term::Binary(b"Hello, world!".to_vec()),
+                Term::Integer(10),
+            ])
+        );
+        assert_eq!(
+            program.execute("Elixir.HelloVariant", "main", &[]).unwrap(),
+            Term::List(vec![
+                Term::Binary(b"Another greeting.".to_vec()),
+                Term::Integer(10),
+            ])
         );
     }
 
