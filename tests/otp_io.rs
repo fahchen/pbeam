@@ -50,13 +50,25 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
 
     // `prim_tty:ansi_regexp/0` resolves inside the loaded `prim_tty` module
     // and returns its literal binary without reaching any unresolved call.
-    assert!(matches!(
+    // The expected bytes come from a pinned OTP 29.1.1 run of
+    // `prim_tty:ansi_regexp/0`.
+    assert_eq!(
         program
             .execute("otp_io_calls", "prim_tty_call", &[])
             .unwrap(),
-        Term::Binary(_)
-    ));
+        Term::Binary(ANSI_REGEXP.to_vec())
+    );
 }
+
+const ANSI_REGEXP: &[u8] = &[
+    94, 91, 27, 194, 155, 93, 91, 91, 92, 93, 40, 41, 35, 59, 63, 93, 42, 40, 63, 58, 40, 63, 58,
+    40, 63, 58, 40, 63, 58, 59, 91, 45, 97, 45, 122, 65, 45, 90, 92, 100, 92, 47, 35, 38, 46, 58,
+    61, 63, 37, 64, 126, 95, 93, 43, 41, 42, 124, 91, 97, 45, 122, 65, 45, 90, 92, 100, 93, 43, 40,
+    63, 58, 59, 91, 45, 97, 45, 122, 65, 45, 90, 92, 100, 92, 47, 35, 38, 46, 58, 61, 63, 37, 64,
+    126, 95, 93, 42, 41, 42, 41, 63, 7, 41, 124, 40, 63, 58, 40, 63, 58, 92, 100, 123, 49, 44, 52,
+    125, 40, 63, 58, 59, 92, 100, 123, 48, 44, 52, 125, 41, 42, 41, 63, 91, 92, 100, 65, 45, 80,
+    82, 45, 84, 90, 99, 102, 45, 110, 113, 45, 117, 121, 61, 62, 60, 126, 93, 41, 41,
+];
 
 /// Read the pinned OTP 29.1.1 BEAM file for a kernel or stdlib module from
 /// the mise-managed Erlang installation that this repository pins.
