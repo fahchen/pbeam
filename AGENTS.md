@@ -18,6 +18,12 @@ Before implementation, read `docs/agents/knowledge.md`.
 - Maintain milestone tracking issue → epic issue → task issue using native
   sub-issue relationships. Implementation PRs link tasks; they are not another
   hierarchy level.
+- When a task's scope bundles independent mechanisms behind one acceptance
+  gate, split it into sub-issues under that task using native sub-issue
+  relationships. Keep each sub-issue titled `[mN-eN] Title` like a normal
+  task, deliver one focused PR per sub-issue, and record native blocked-by
+  links between sub-issues to express build order. Close the parent task
+  when its sub-issues are accepted and its own acceptance criteria hold.
 - Every GitHub milestone has a dedicated tracking issue titled `[mN] Title`.
 - Epic and task titles use `[mN-eN] Title`. Do not add task-number suffixes;
   GitHub issue numbers identify tasks.
