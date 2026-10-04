@@ -244,56 +244,58 @@ pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
 }
 
 /// Run `erlang:'++'/2`: append `right` to the proper list `left`. With an
-/// empty `left`, return `right` itself, which can be any term, as ERTS does.
-/// A non-empty `left` with a `right` that is not a list gives a runtime
-/// error, because PBeam has no improper lists. ERTS returns the improper
-/// list `[1 | x]` for `[1] ++ x`.
+/// empty `left`, return `right` itself, which can be any term, as ERTS
+/// `append` (`erl_bif_lists.c`) does. A `left` that is not a list raises
+/// `badarg`. A non-empty `left` with a `right` that is not a list gives a
+/// runtime error, because PBeam has no improper lists. ERTS returns the
+/// improper list `[1 | x]` for `[1] ++ x`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let x = Term::static_atom("ok");
-/// assert!(matches!(append(&[], &x)?, BifResult::Value(term) if term == x));
-/// let list = append(&[Term::Integer(1)], &Term::List(vec![Term::Integer(2)]))?;
+/// assert!(matches!(append(&Term::List(vec![]), &x)?, BifResult::Value(term) if term == x));
+/// let list = append(&Term::List(vec![Term::Integer(1)]), &Term::List(vec![Term::Integer(2)]))?;
 /// assert!(matches!(list, BifResult::Value(Term::List(elements)) if elements.len() == 2));
-/// assert!(append(&[Term::Integer(1)], &x).is_err());
+/// assert!(matches!(append(&x, &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// assert!(append(&Term::List(vec![Term::Integer(1)]), &x).is_err());
 /// ```
-pub(super) fn append(left: &[Term], right: &Term) -> Result<BifResult, BeamError> {
+pub(super) fn append(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
     match (left, right) {
-        ([], right) => Ok(Value(right.clone())),
-        (left, Term::List(right)) => Ok(Value(Term::List(
+        (Term::List(left), right) if left.is_empty() => Ok(Value(right.clone())),
+        (Term::List(left), Term::List(right)) => Ok(Value(Term::List(
             left.iter().chain(right).cloned().collect(),
         ))),
         // ponytail: an improper list result needs an improper list term; see "BIF arguments" in docs/erts-differences.md.
-        _ => Err(error(format!(
+        (Term::List(_), right) => Err(error(format!(
             "unsupported erlang:++/2 tail {right:?}: not a list"
         ))),
+        _ => Ok(BifResult::badarg()),
     }
 }
 
 /// Run `erlang:element/2`: return the element at the 1-based `index` of a
-/// tuple. An `index` outside the tuple gives a runtime error.
+/// tuple. An `index` that is not an integer or is outside the tuple, and a
+/// `tuple` that is not a tuple, raise `badarg`, as in ERTS `element_2`
+/// (`bif.c`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let tuple = [Term::static_atom("ok"), Term::Integer(1)];
-/// assert!(matches!(element(2, &tuple)?, BifResult::Value(Term::Integer(1))));
-/// assert!(element(0, &tuple).is_err());
-/// assert!(element(3, &tuple).is_err());
+/// let tuple = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
+/// assert!(matches!(element(&Term::Integer(2), &tuple), BifResult::Value(Term::Integer(1))));
+/// assert!(matches!(element(&Term::Integer(3), &tuple), BifResult::Raise { .. }));
+/// assert!(matches!(element(&Term::Integer(1), &Term::List(vec![])), BifResult::Raise { .. }));
 /// ```
-pub(super) fn element(index: i64, elements: &[Term]) -> Result<BifResult, BeamError> {
-    // ponytail: ERTS raises badarg; see "BIF arguments" in docs/erts-differences.md.
-    let element = usize::try_from(index)
+pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
+    let (Term::Integer(index), Term::Tuple(elements)) = (index, tuple) else {
+        return BifResult::badarg();
+    };
+    usize::try_from(*index)
         .ok()
         .and_then(|index| index.checked_sub(1))
         .and_then(|index| elements.get(index))
-        .ok_or_else(|| {
-            error(format!(
-                "unsupported erlang:element/2 index {index}: outside the tuple"
-            ))
-        })?;
-    Ok(Value(element.clone()))
+        .map_or_else(BifResult::badarg, |element| Value(element.clone()))
 }
 
 /// Run `erlang:process_info/2` for the calling process and the item
@@ -329,22 +331,31 @@ pub(super) fn process_info(
 /// Run `erlang:function_exported/3`: return `true` when a loaded module
 /// exports the function or the function is a BIF, as ERTS
 /// `function_exported_3` (`bif.c`) does with `erts_find_function` and
-/// `erts_is_builtin`. ERTS reads the arity into a C `int`, so only its low
-/// 32 bits count, and a negative arity finds no function.
+/// `erts_is_builtin`. A `module` or `name` that is not an atom, and an
+/// `arity` that is not a small integer, raise `badarg`. ERTS reads the
+/// small-integer arity into a C `int`, so only its low 32 bits count, and a
+/// negative arity finds no function.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(function_exported(&program, "erlang", "self", 0), BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(function_exported(&program, "erlang", "apply", 3), BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(function_exported(&program, "lists", "nomatch", 2), BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// let erlang = Term::static_atom("erlang");
+/// let exported = function_exported(&program, &erlang, &Term::static_atom("self"), &Term::Integer(0));
+/// assert!(matches!(exported, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// let exported = function_exported(&program, &erlang, &Term::static_atom("self"), &Term::Integer(1 << 59));
+/// assert!(matches!(exported, BifResult::Raise { .. }));
 /// ```
 pub(super) fn function_exported(
     program: &BeamProgram,
-    module: &str,
-    name: &str,
-    arity: i64,
+    module: &Term,
+    name: &Term,
+    arity: &Term,
 ) -> BifResult {
+    let (Term::Atom(module), Term::Atom(name), Some(arity)) = (module, name, arity.small_integer())
+    else {
+        return BifResult::badarg();
+    };
+    let (module, name) = (module.name(), name.name());
     let exported = u32::try_from(arity as i32).is_ok_and(|arity| {
         program
             .modules

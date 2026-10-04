@@ -308,8 +308,18 @@ impl BeamProgram {
                     tail,
                     deallocate,
                 } => {
-                    let module = apply_atom(process, *arity)?;
-                    let name = apply_atom(process, arity.saturating_add(1))?;
+                    let module = read(process, &Operand::X(*arity))?;
+                    let name = read(process, &Operand::X(arity.saturating_add(1)))?;
+                    // ERTS `fixed_apply` (`beam_common.c`) raises `badarg`
+                    // when the module or the function name is not an atom.
+                    let (Term::Atom(module), Term::Atom(name)) = (&module, &name) else {
+                        if let Some(outcome) =
+                            raise(process, ExceptionClass::Error, Term::static_atom("badarg"))
+                        {
+                            return Ok(outcome);
+                        }
+                        continue;
+                    };
                     if let Some(outcome) = self.call_external(
                         scheduler,
                         module.name(),
@@ -714,24 +724,6 @@ impl BeamProgram {
     }
 }
 
-/// Read the module or the function name of an `apply` instruction from
-/// `x(index)`. The value must be an atom.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// process.registers = vec![Some(Term::static_atom("erlang"))];
-/// assert_eq!(apply_atom(&process, 0)?.name(), "erlang");
-/// assert!(apply_atom(&process, 1).is_err());
-/// ```
-fn apply_atom(process: &ProcessState, index: u32) -> Result<Atom, BeamError> {
-    match read(process, &Operand::X(index))? {
-        Term::Atom(ref atom) => Ok(atom.clone()),
-        // ponytail: ERTS raises `badarg`; see "Instruction calls" in docs/erts-differences.md.
-        value => Err(error(format!("apply target {value:?} is not an atom"))),
-    }
-}
-
 /// The spawn options that this runtime supports, as the flags of ERTS
 /// `ErlSpawnOpts`.
 #[derive(Default)]
@@ -1115,6 +1107,10 @@ mod tests {
         beam::code::{self, Instruction, Operand, TestKind},
         term::{AtomTable, test_atom},
     };
+
+    /// The runtime error of a root process that exits with an uncaught
+    /// `error:badarg`. PBeam gives the stack trace `[]`.
+    const BADARG_EXIT: &str = "root process exited with Tuple([Atom(\"badarg\"), List([])])";
 
     fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
         let mut instructions = vec![
@@ -2628,7 +2624,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_apply_of_an_instruction_call_a_non_atom_or_a_stack_mismatch() {
+    fn rejects_an_apply_of_an_instruction_call_or_a_stack_mismatch_and_raises_badarg() {
         let error = |body| run_with_apply_targets(body).unwrap_err().to_string();
         // ERTS runs `erlang:apply(fixture, id, [x, y, z])` through `{apply,3}`
         // and gives `{x,y,z}`. PBeam keeps the instruction-call guard.
@@ -2636,15 +2632,15 @@ mod tests {
             error(apply_body(3, atom("erlang"), atom("apply"))),
             "unsupported instruction call erlang:apply/3"
         );
-        // ERTS raises `badarg` for `M:F()` with `1` and `f`, or with `m` and
-        // `1`.
+        // ERTS 29.1.1 raises `badarg` for `M:F()` with `1` and `f`, or with
+        // `m` and `1`.
         assert_eq!(
             error(apply_body(0, Operand::Value(Term::Integer(1)), atom("f"))),
-            "apply target Integer(1) is not an atom"
+            BADARG_EXIT
         );
         assert_eq!(
             error(apply_body(0, atom("m"), Operand::Value(Term::Integer(1)))),
-            "apply target Integer(1) is not an atom"
+            BADARG_EXIT
         );
         // `apply_last` releases the Y registers of the frame, so the count
         // must match the allocated stack, as for `call_last`.
@@ -2793,19 +2789,19 @@ mod tests {
             integers(&[1, 2, 3])
         );
         // ERTS 29.1.1: [1] ++ x is the improper list [1|x], and a ++ []
-        // raises badarg.
+        // and a ++ x raise badarg.
         assert_eq!(
             append(integers(&[1]), test_atom("x"))
                 .unwrap_err()
                 .to_string(),
             "unsupported erlang:++/2 tail Atom(\"x\"): not a list"
         );
-        assert_eq!(
-            append(test_atom("a"), Term::List(Vec::new()))
-                .unwrap_err()
-                .to_string(),
-            "unresolved external MFA erlang:++/2"
-        );
+        for right in [Term::List(Vec::new()), test_atom("x")] {
+            assert_eq!(
+                append(test_atom("a"), right).unwrap_err().to_string(),
+                BADARG_EXIT
+            );
+        }
     }
 
     #[test]
@@ -2813,6 +2809,11 @@ mod tests {
         let tuple = |elements: Vec<Term>| Term::Tuple(elements);
         let keyfind = |key: Term, position: Term, list: Vec<Term>| {
             call_ext_with("lists", "keyfind", vec![key, position, Term::List(list)])
+        };
+        let badarg = |key: Term, position: Term, list: Term| {
+            call_ext_with("lists", "keyfind", vec![key, position, list])
+                .unwrap_err()
+                .to_string()
         };
         let (a, b) = (test_atom("a"), test_atom("b"));
         // ERTS 29.1.1: lists:keyfind(b, 1, [{a,1},{b,2},{b,3}]) is {b,2}.
@@ -2850,32 +2851,31 @@ mod tests {
             .unwrap(),
             tuple(vec![Term::Integer(1), a.clone()])
         );
-        // ERTS 29.1.1 raises badarg for the positions 0, -1, and x, and for
-        // the list a.
+        // ERTS 29.1.1: lists:keyfind(a, (1 bsl 59) - 1, [{a}]) is false: the
+        // position is a small integer.
         assert_eq!(
-            keyfind(a.clone(), Term::Integer(0), Vec::new())
-                .unwrap_err()
-                .to_string(),
-            "unsupported lists:keyfind/3 position 0: below 1"
+            keyfind(
+                a.clone(),
+                Term::Integer((1 << 59) - 1),
+                vec![tuple(vec![a.clone()])]
+            )
+            .unwrap(),
+            Term::static_atom("false")
         );
-        assert_eq!(
-            keyfind(a.clone(), Term::Integer(-1), vec![tuple(vec![a.clone()])])
-                .unwrap_err()
-                .to_string(),
-            "unsupported lists:keyfind/3 position -1: below 1"
-        );
-        assert_eq!(
-            keyfind(a.clone(), test_atom("x"), Vec::new())
-                .unwrap_err()
-                .to_string(),
-            "unresolved external MFA lists:keyfind/3"
-        );
-        assert_eq!(
-            call_ext_with("lists", "keyfind", vec![a.clone(), Term::Integer(1), a])
-                .unwrap_err()
-                .to_string(),
-            "unresolved external MFA lists:keyfind/3"
-        );
+        // ERTS 29.1.1 raises badarg for the positions 0, -1, x, and the
+        // bignum 1 bsl 59, and for the lists a and {a}.
+        let one = Term::List(vec![tuple(vec![a.clone()])]);
+        for position in [
+            Term::Integer(0),
+            Term::Integer(-1),
+            test_atom("x"),
+            Term::Integer(1 << 59),
+        ] {
+            assert_eq!(badarg(a.clone(), position, one.clone()), BADARG_EXIT);
+        }
+        for list in [a.clone(), tuple(vec![a.clone()])] {
+            assert_eq!(badarg(a.clone(), Term::Integer(1), list), BADARG_EXIT);
+        }
     }
 
     fn element_bif(index: i64, tuple: Operand, destination: Operand) -> Instruction {
@@ -2913,20 +2913,15 @@ mod tests {
         // ERTS 29.1.1: element(1, {a}) is a.
         assert_eq!(element(Term::Integer(1), one.clone()).unwrap(), a);
         // ERTS 29.1.1 raises badarg for element(0, {a}), element(2, {a}),
-        // element(a, {a}), and element(1, [a]).
-        for index in [0, 2] {
-            assert_eq!(
-                element(Term::Integer(index), one.clone())
-                    .unwrap_err()
-                    .to_string(),
-                format!("unsupported erlang:element/2 index {index}: outside the tuple")
-            );
-        }
-        for (index, tuple) in [(a.clone(), one), (Term::Integer(1), Term::List(vec![a]))] {
-            assert_eq!(
-                element(index, tuple).unwrap_err().to_string(),
-                "unresolved external MFA erlang:element/2"
-            );
+        // element(-1, {a}), element(a, {a}), and element(1, [a]).
+        for (index, tuple) in [
+            (Term::Integer(0), one.clone()),
+            (Term::Integer(2), one.clone()),
+            (Term::Integer(-1), one.clone()),
+            (a.clone(), one),
+            (Term::Integer(1), Term::List(vec![a])),
+        ] {
+            assert_eq!(element(index, tuple).unwrap_err().to_string(), BADARG_EXIT);
         }
     }
 
@@ -3035,16 +3030,35 @@ mod tests {
                 "{module}:{name}/{arity}"
             );
         }
-        // ERTS 29.1.1 raises badarg for a module that is not an atom.
-        assert_eq!(
+        // ERTS 29.1.1: an arity in the small-integer range counts with its
+        // low 32 bits, so -(1 bsl 59) finds erlang:self/0, and
+        // (1 bsl 59) - 1 finds no function.
+        let arity = |module: &str, name: &str, arity: i64| {
             call_ext_with(
                 "erlang",
                 "function_exported",
-                vec![Term::Integer(1), test_atom("map"), Term::Integer(2)]
+                vec![test_atom(module), test_atom(name), Term::Integer(arity)],
             )
-            .unwrap_err()
-            .to_string(),
-            "unresolved external MFA erlang:function_exported/3"
-        );
+        };
+        assert_eq!(arity("erlang", "self", -(1 << 59)).unwrap(), yes);
+        assert_eq!(arity("erlang", "self", (1 << 59) - 1).unwrap(), no);
+        // ERTS 29.1.1 raises badarg for a module or a name that is not an
+        // atom, and for an arity that is not a small integer: x, the bignum
+        // 1 bsl 59, and the bignum -(1 bsl 59) - 1.
+        let (erlang, self_name) = (test_atom("erlang"), test_atom("self"));
+        for arguments in [
+            vec![Term::Integer(1), self_name.clone(), Term::Integer(0)],
+            vec![erlang.clone(), Term::Integer(1), Term::Integer(0)],
+            vec![erlang.clone(), self_name.clone(), test_atom("x")],
+            vec![erlang.clone(), self_name.clone(), Term::Integer(1 << 59)],
+            vec![erlang, self_name, Term::Integer(-(1 << 59) - 1)],
+        ] {
+            assert_eq!(
+                call_ext_with("erlang", "function_exported", arguments)
+                    .unwrap_err()
+                    .to_string(),
+                BADARG_EXIT
+            );
+        }
     }
 }

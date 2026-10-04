@@ -38,6 +38,21 @@ pub(super) enum BifResult {
 }
 
 impl BifResult {
+    /// Return the `error:badarg` exception, which ERTS raises with
+    /// `BIF_ERROR(p, BADARG)` for a BIF argument that is not valid.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(BifResult::badarg(), BifResult::Raise { class: ExceptionClass::Error, .. }));
+    /// ```
+    pub(super) fn badarg() -> BifResult {
+        BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("badarg"),
+        }
+    }
+
     /// Return the value of a BIF called through a `bif` instruction with
     /// fail label 0. An exception or a trap from such a BIF is not supported.
     ///

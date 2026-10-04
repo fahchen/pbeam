@@ -8,31 +8,29 @@ use super::*;
 /// tuples, and tuples with fewer than `position` elements, do not match, as
 /// in ERTS `keyfind` (`erl_bif_lists.c`). ERTS compares numbers with `==`;
 /// PBeam has only integers, so exact equality gives the same result. A
-/// `position` below 1 gives a runtime error.
+/// `position` that is not a small integer or is below 1, and a `list` that
+/// is not a list, raise `badarg`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let entry = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
-/// let found = keyfind(&Term::static_atom("ok"), 1, &[entry.clone()])?;
+/// let found = keyfind(&Term::static_atom("ok"), &Term::Integer(1), &Term::List(vec![entry.clone()]));
 /// assert!(matches!(found, BifResult::Value(term) if term == entry));
-/// assert!(matches!(keyfind(&Term::Integer(1), 1, &[])?, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
-/// assert!(keyfind(&Term::Integer(1), 0, &[]).is_err());
+/// let missing = keyfind(&Term::Integer(1), &Term::Integer(1), &Term::List(vec![]));
+/// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(keyfind(&Term::Integer(1), &Term::Integer(0), &Term::List(vec![])), BifResult::Raise { .. }));
 /// ```
-pub(super) fn keyfind(key: &Term, position: i64, list: &[Term]) -> Result<BifResult, BeamError> {
-    // ponytail: ERTS raises badarg; see "BIF arguments" in docs/erts-differences.md.
-    let Some(index) = usize::try_from(position)
-        .ok()
-        .and_then(|position| position.checked_sub(1))
-    else {
-        return Err(error(format!(
-            "unsupported lists:keyfind/3 position {position}: below 1"
-        )));
+pub(super) fn keyfind(key: &Term, position: &Term, list: &Term) -> BifResult {
+    let index = position
+        .small_integer()
+        .and_then(|position| usize::try_from(position).ok())
+        .and_then(|position| position.checked_sub(1));
+    let (Some(index), Term::List(list)) = (index, list) else {
+        return BifResult::badarg();
     };
     let found = list.iter().find(
         |element| matches!(element, Term::Tuple(elements) if elements.get(index) == Some(key)),
     );
-    Ok(Value(
-        found.cloned().unwrap_or_else(|| Term::static_atom("false")),
-    ))
+    Value(found.cloned().unwrap_or_else(|| Term::static_atom("false")))
 }
