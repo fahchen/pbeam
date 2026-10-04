@@ -1794,9 +1794,15 @@ mod tests {
                 .to_string(),
             "unsupported chardata Integer(1): not a binary or a list"
         );
+        // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], utf8)
+        // is <<"Hello\n">>.
         assert_eq!(
-            convert(chardata(), "utf8").unwrap_err().to_string(),
-            "unsupported unicode:characters_to_binary/2 encoding Atom(\"utf8\")"
+            convert(chardata(), "utf8").unwrap(),
+            Term::Binary(b"Hello\n".to_vec())
+        );
+        assert_eq!(
+            convert(chardata(), "latin1").unwrap_err().to_string(),
+            "unsupported unicode:characters_to_binary/2 encoding Atom(\"latin1\")"
         );
     }
 
@@ -2967,6 +2973,29 @@ mod tests {
         for list in [a.clone(), tuple(vec![a.clone()])] {
             assert_eq!(badarg(a.clone(), Term::Integer(1), list), BADARG_EXIT);
         }
+    }
+
+    #[test]
+    fn finds_list_members_as_pinned_erts() {
+        let member =
+            |element: Term, list: Term| call_ext_with("lists", "member", vec![element, list]);
+        // ERTS 29.1.1: lists:member(a, []) is false, and lists:member(1, [1])
+        // is true.
+        assert_eq!(
+            member(test_atom("a"), Term::List(Vec::new())).unwrap(),
+            Term::static_atom("false")
+        );
+        assert_eq!(
+            member(Term::Integer(1), Term::List(vec![Term::Integer(1)])).unwrap(),
+            Term::static_atom("true")
+        );
+        // ERTS 29.1.1: lists:member(a, x) raises badarg.
+        assert_eq!(
+            member(test_atom("a"), test_atom("x"))
+                .unwrap_err()
+                .to_string(),
+            BADARG_EXIT
+        );
     }
 
     fn element_bif(index: i64, tuple: Operand, destination: Operand) -> Instruction {

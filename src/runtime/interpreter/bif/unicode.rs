@@ -4,7 +4,8 @@ use super::BifResult::Value;
 use super::*;
 
 /// Run `unicode:characters_to_binary/2`: convert `chardata` to one UTF-8
-/// binary. Only the `unicode` encoding is supported.
+/// binary. Only the `unicode` and `utf8` encodings are supported. As in ERTS
+/// (`erl_unicode.c`), they give the same result.
 ///
 /// # Examples
 ///
@@ -19,10 +20,10 @@ pub(super) fn characters_to_binary(
     encoding: &Term,
 ) -> Result<BifResult, BeamError> {
     match encoding {
-        Term::Atom(encoding) if encoding.name() == "unicode" => {
+        Term::Atom(encoding) if matches!(encoding.name(), "unicode" | "utf8") => {
             Ok(Value(Term::Binary(characters_to_utf8(chardata)?)))
         }
-        // ponytail: ERTS also converts `utf8`, `latin1`, and other encodings; see "Chardata conversion" in docs/erts-differences.md.
+        // ponytail: ERTS also converts `latin1` and other encodings; see "Chardata conversion" in docs/erts-differences.md.
         _ => Err(error(format!(
             "unsupported unicode:characters_to_binary/2 encoding {encoding:?}"
         ))),

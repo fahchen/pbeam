@@ -489,7 +489,7 @@ bifs! {
     lists:keyfind/3 => |_, [key, position, list]| Ok(lists::keyfind(key, position, list)),
     lists:keymember/3 => unsupported,
     lists:keysearch/3 => unsupported,
-    lists:member/2 => unsupported,
+    lists:member/2 => |_, [element, list]| Ok(match list { Term::List(elements) => Value(Term::static_atom(if elements.contains(element) { "true" } else { "false" })), _ => BifResult::badarg() }),
     lists:reverse/2 => unsupported,
     maps:find/2 => unsupported,
     maps:from_keys/2 => unsupported,
