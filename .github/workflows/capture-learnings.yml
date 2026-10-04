@@ -178,6 +178,21 @@ jobs:
             if (captured && !read('pr-body.md')) {
               return core.setFailed('knowledge.md exists, but pr-body.md is missing.')
             }
+            if (captured) {
+              // The prompt allows 2 new rules for one PR, and no change to
+              // the text of an entry that the run does not add.
+              const headings = text => (text.match(/^## .*$/gm) ?? [])
+              const before = headings(fs.readFileSync('docs/agents/knowledge.md', 'utf8'))
+              const after = headings(read('knowledge.md'))
+              const added = after.filter(h => !before.includes(h))
+              const removed = before.filter(h => !after.includes(h))
+              if (removed.length) {
+                return core.setFailed(`knowledge.md drops the rules: ${removed.join(', ')}`)
+              }
+              if (added.length > 2) {
+                return core.setFailed(`knowledge.md adds ${added.length} rules, and the limit for one PR is 2.`)
+              }
+            }
             core.setOutput('captured', String(captured))
 
       - name: Commit and push the knowledge branch

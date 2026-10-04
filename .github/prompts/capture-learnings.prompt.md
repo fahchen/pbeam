@@ -50,6 +50,20 @@ class, or a question or correction that changed the code. Apply
 Steps 2 to 6 of the skill to each candidate: abstraction, recurrence, Good
 and Bad examples, overlap, and capacity.
 
+Two checks reject most candidates. Apply them before the others.
+
+- **One defect is not a rule.** A comment that reports a single mistake in
+  this PR belongs in the PR, not in the knowledge file. Keep the candidate
+  only when the same mistake can occur again in a different file, for a
+  different task, by a different author.
+- **One cause is one rule.** Group the comments by cause first. Write one
+  entry for each cause, and name the most general form of that cause. Two
+  entries that a reader would apply in the same situation are one entry.
+
+A normal PR gives 0 or 1 rules. Two rules need two separate causes. Do not
+write more than 2 rules for one PR. When more candidates pass, keep the two
+that apply most widely, and name the others in `comment.md` as rejected.
+
 ## 3. Write the entries
 
 - **Local run** (an agent session during the PR implementation): show the
@@ -61,6 +75,11 @@ and Bad examples, overlap, and capacity.
 
 Apply Step 8 of the skill to place the entries. If the capacity check needs
 pruning, write no entry.
+
+Change nothing that an entry does not need. Keep every existing heading,
+sentence, and line break as it is. Do not reflow, rewrap, reorder, or
+reword a paragraph that your entries do not add. The difference of the
+knowledge file must show only the new entries.
 
 - **Local run:** edit `docs/agents/knowledge.md` in place, then commit on the
   PR branch with the `commit` skill. Use the subject
