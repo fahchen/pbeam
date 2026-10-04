@@ -65,3 +65,12 @@ flag "--pa <dir>" help="Add this directory to the code path, for example fixture
 arg "<expr>" help="Erlang expressions, as for erl -eval"
 '''
 run = 'escript scripts/erts_eval.escript "${usage_pa:-}" "$usage_expr"'
+
+[tasks.disasm]
+description = "Disassemble selected functions of a module or BEAM file with beam_disasm, without line instructions"
+quiet = true
+usage = '''
+arg "<module>" help="A module on the pinned OTP code path, such as erlang or io, or a .beam file"
+arg "[function]..." help="Functions as name/arity; with none, all functions" var=#true
+'''
+run = 'eval "set -- ${usage_function:-}"; escript scripts/disasm.escript "$usage_module" "$@"'
