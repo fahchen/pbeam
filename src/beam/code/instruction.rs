@@ -1002,6 +1002,10 @@ fn read_selection_pair_count(data: &[u8], cursor: &mut usize) -> Result<usize, B
     }
     let item_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
         .map_err(|_| error("BEAM selection list is too large"))?;
+    // Each item takes at least one byte, so a larger count is malformed.
+    if item_count > data.len().saturating_sub(*cursor) {
+        return Err(error("BEAM selection list exceeds code chunk"));
+    }
     if item_count % 2 != 0 {
         return Err(error("BEAM selection list has an incomplete pair"));
     }
@@ -1093,8 +1097,8 @@ mod tests {
         OPCODE_PUT_TUPLE2, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
         OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_LT,
         OPCODE_TEST_TAGGED_TUPLE, OPCODE_UPDATE_RECORD, parse_code, read_move_operand,
-        skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
-        test_kind, unsupported_opcode_operand_count,
+        read_selection_pair_count, skip_counted_operands, skip_integer_payload, skip_operand,
+        skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
     };
     use crate::{beam::code::Operand, term::Term};
 
@@ -1161,7 +1165,22 @@ mod tests {
 
         assert!(parse_code(&code(&[59, 3, 21, 39]), &[], &[], &[]).is_err());
         assert!(parse_code(&code(&[59, 3, 21, 23, 16]), &[], &[], &[]).is_err());
-        assert!(parse_code(&code(&[59, 3, 21, 23, 32, 3]), &[], &[], &[]).is_err());
+        // A register as a selection value, with two items present.
+        assert!(
+            parse_code(&code(&[59, 3, 21, 23, 32, 3, 21]), &[], &[], &[])
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported BEAM selection value")
+        );
+        // A count larger than the remaining bytes fails before any allocation.
+        for opcode in [59, 60] {
+            assert!(
+                parse_code(&code(&[opcode, 3, 21, 23, 32, 3]), &[], &[], &[])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("exceeds code chunk")
+            );
+        }
     }
 
     #[test]
@@ -1182,7 +1201,24 @@ mod tests {
     }
 
     #[test]
-    fn skips_only_the_known_generated_selection_form() {}
+    fn reads_selection_list_headers_and_rejects_malformed_forms() {
+        let mut cursor = 0;
+        let list = [0x17, 0x40, 0x10, 0x15, 0x20, 0x25];
+        assert_eq!(read_selection_pair_count(&list, &mut cursor).unwrap(), 2);
+        assert_eq!(cursor, 2);
+        assert_eq!(read_selection_pair_count(&[0x17, 0x00], &mut 0).unwrap(), 0);
+        assert!(read_selection_pair_count(&[], &mut 0).is_err());
+        assert!(read_selection_pair_count(&[0x17], &mut 0).is_err());
+        assert!(read_selection_pair_count(&[0x27, 0x00], &mut 0).is_err());
+        assert!(read_selection_pair_count(&[0x17, 0x10, 0x00], &mut 0).is_err());
+        // Eight items with no bytes left: rejected before any allocation.
+        assert!(
+            read_selection_pair_count(&[0x17, 0x80], &mut 0)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds code chunk")
+        );
+    }
 
     #[test]
     fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
