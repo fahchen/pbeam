@@ -495,20 +495,14 @@ impl BeamProgram {
                     fail_label,
                     left,
                     right,
-                } => match (read(process, left)?, read(process, right)?) {
-                    (Term::Integer(left), Term::Integer(right)) => {
-                        if left < right {
-                            jump(module, process, *fail_label)?;
-                        }
+                } => {
+                    if read(process, left)?
+                        .compare(&read(process, right)?)?
+                        .is_lt()
+                    {
+                        jump(module, process, *fail_label)?;
                     }
-                    // ponytail: ERTS compares any two terms in term order
-                    // (`CMP_GE_ACTION`); PBeam has no term order yet.
-                    (left, right) => {
-                        return Err(error(format!(
-                            "unsupported BEAM is_ge operands {left:?} and {right:?}"
-                        )));
-                    }
-                },
+                }
                 Instruction::TestTaggedTuple {
                     fail_label,
                     value,
@@ -3058,24 +3052,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_is_ge_operands_that_are_not_integers() {
-        // ERTS compares any two terms in term order: a >= 1 is true. PBeam
-        // has no term order yet; this is a row in `docs/erts-differences.md`.
+    fn rejects_is_ge_on_two_different_references() {
+        // ERTS orders two references by the scheduler thread that made each
+        // one; this is the "Term order" row in `docs/erts-differences.md`.
+        let reference = |number| Operand::Value(Term::Reference(crate::Reference(number)));
         let body = vec![
             Instruction::TestGreaterEqual {
                 fail_label: 3,
-                left: atom("a"),
-                right: Operand::Value(Term::Integer(1)),
+                left: reference(1),
+                right: reference(2),
             },
             Instruction::Label(3),
             Instruction::Return,
         ];
-        assert!(
+        assert_eq!(
             make_program(body, 0)
                 .execute("fixture", "main", &[])
                 .unwrap_err()
-                .to_string()
-                .starts_with("unsupported BEAM is_ge operands")
+                .to_string(),
+            "unsupported term order of two references Reference(Reference(1)) and \
+             Reference(Reference(2))"
         );
     }
 

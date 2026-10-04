@@ -510,8 +510,8 @@ pub(crate) enum Instruction {
         right: Operand,
     },
     /// Jumps to `fail_label` when the left operand is less than the right
-    /// operand (`is_ge`, opcode 40). PBeam compares two integers only; any
-    /// other operand pair gives a runtime error.
+    /// operand (`is_ge`, opcode 40) in the ERTS term order. Two different
+    /// references give a runtime error.
     ///
     /// Encoding: opcode, fail label, two operands. A typed register (extended
     /// subtag 5) reads as its register. Example: `[0x28, 0x0D, 0x16, 0x57,
