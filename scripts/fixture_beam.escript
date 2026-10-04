@@ -3,12 +3,19 @@
 %% Usage: escript scripts/fixture_beam.escript [--write] [fixtures/<dir>/<name>.erl]...
 
 main(["--write" | Sources]) ->
-    run(write, Sources);
+    run(write, sources(Sources));
 main(Sources) ->
-    run(verify, Sources).
+    run(verify, sources(Sources)).
 
-run(Mode, []) ->
-    run(Mode, filelib:wildcard("fixtures/*/*.erl"));
+%% With no source, use all fixtures under the current directory, which is the repository root when mise runs the task.
+sources([]) ->
+    case filelib:wildcard("fixtures/*/*.erl") of
+        [] -> fail("no fixtures/*/*.erl under ~ts~n", [element(2, file:get_cwd())]);
+        Sources -> Sources
+    end;
+sources(Sources) ->
+    Sources.
+
 run(Mode, Sources) ->
     Results = [{Source, fixture(Mode, Source)} || Source <- Sources],
     Same = length([same || {_, same} <- Results]),
@@ -74,3 +81,7 @@ report(write, _Source, Beam, {Status, Binary}) ->
 
 status(new) -> "new";
 status({differs, Ids}) -> ["differs ", lists:join(",", Ids)].
+
+fail(Format, Args) ->
+    io:format(standard_error, Format, Args),
+    halt(1).
