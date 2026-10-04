@@ -100,7 +100,7 @@ fn uses_a_flatmap_up_to_32_keys_and_a_hashmap_above_like_erts() {
 #[test]
 fn takes_the_badmap_path_when_add_gets_a_non_map() {
     // `add/1` tests is_map and then calls erlang:error({badmap, M}), which
-    // PBeam does not resolve until exceptions arrive in #73.
+    // PBeam does not resolve yet: `erlang:error/1` is not implemented.
     let program = BeamProgram::load(&[MAP_PROBE]).unwrap();
     assert!(
         program

@@ -461,7 +461,7 @@ impl BeamProgram {
                 } => {
                     let mut map = read(process, map)?;
                     let Term::Map(entries) = &mut map else {
-                        // ponytail: ERTS raises error {badmap, Map}; exceptions arrive in #73.
+                        // ponytail: ERTS raises error {badmap, Map}; this raise is not implemented yet.
                         return Err(error("unsupported BEAM put_map_assoc source: not a map"));
                     };
                     // PBeam inserts the pairs one by one. ERTS merges a flatmap source and builds a
@@ -734,7 +734,7 @@ impl BeamProgram {
             ("maps", "keys", [Term::Map(map)]) => {
                 Term::List(map.erts_iter()?.map(|(key, _)| key.clone()).collect())
             }
-            // ponytail: ERTS raises error {badmap, Map}; exceptions arrive in #73.
+            // ponytail: ERTS raises error {badmap, Map}; this raise is not implemented yet.
             ("maps", "keys", [_]) => {
                 return Err(error("unsupported maps:keys/1 argument: not a map"));
             }
