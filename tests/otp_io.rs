@@ -24,13 +24,17 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
     );
 
     // `group:whereis_shell/0` resolves inside the loaded `group` module,
-    // calls `erlang:group_leader/0`, and reaches the `node/1` guard BIF
-    // (`bif1`, opcode 10), which PBeam does not run yet.
+    // calls `erlang:group_leader/0`, runs `node/1` (`bif1`) and `node/0`
+    // (`bif0`), and finds that the group leader is on the local node. It
+    // then calls `user_drv:whereis_group/0`, which reaches the unimplemented
+    // process registry lookup.
     let error = program
         .execute("otp_io_calls", "group_call", &[])
         .unwrap_err();
     assert!(
-        error.to_string().contains("unsupported BEAM opcode 10"),
+        error
+            .to_string()
+            .contains("unresolved external MFA erlang:whereis/1"),
         "expected resolution into group, got {error}"
     );
 

@@ -1,6 +1,7 @@
 -module(io_client_probe).
--export([main/0, server/2, gone/0]).
+-export([main/0, list/0, server/2, gone/0]).
 main() -> run(<<"Hello, world!\n">>).
+list() -> run([<<"Hello, world!">>, 10]).
 run(Chars) ->
     Old = group_leader(),
     Server = spawn(?MODULE, server, [self(), Old]),

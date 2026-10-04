@@ -1,6 +1,7 @@
 use super::{
     process::{Frame, ProcessState, StackSlot},
     scheduler::Scheduler,
+    unicode::characters_to_utf8,
 };
 use crate::{
     beam::{
@@ -11,6 +12,11 @@ use crate::{
     term::{Atom, AtomTable, Term},
 };
 use std::collections::HashMap;
+
+mod bif;
+mod rust_stand_ins;
+
+use bif::{BifResult, is_bif};
 
 #[derive(Debug)]
 pub struct BeamProgram {
@@ -52,53 +58,6 @@ impl ExceptionClass {
         match self {
             ExceptionClass::Error => "error",
             ExceptionClass::Exit => "exit",
-        }
-    }
-}
-
-/// What a BIF call does to the calling process.
-#[derive(Debug)]
-enum BifResult {
-    /// The BIF returns this value.
-    Value(Term),
-    /// The BIF raises an exception in the calling process.
-    Raise {
-        /// Class of the exception.
-        class: ExceptionClass,
-        /// Reason of the exception, without a stack trace.
-        reason: Term,
-    },
-    /// The BIF continues in BEAM code, as `BIF_TRAP` does in ERTS: the call
-    /// becomes a call to this exported function, and its return value is the
-    /// value of the BIF call.
-    Trap {
-        /// Module of the trap target, for example `erts_internal`.
-        module: &'static str,
-        /// Exported function of the trap target.
-        function: &'static str,
-        /// Arguments for the trap target, in `x0` onwards.
-        arguments: Vec<Term>,
-    },
-}
-
-impl BifResult {
-    /// Return the value of a guard BIF called through `bif0`. An exception
-    /// or a trap from a zero-arity BIF is not supported.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(BifResult::Value(Term::Integer(1)).into_bif0_value("self")?, Term::Integer(1));
-    /// let raise = BifResult::Raise { class: ExceptionClass::Exit, reason: Term::static_atom("badarg") };
-    /// assert!(raise.into_bif0_value("self").is_err());
-    /// ```
-    fn into_bif0_value(self, name: &str) -> Result<Term, BeamError> {
-        match self {
-            BifResult::Value(value) => Ok(value),
-            // ponytail: no zero-arity BIF raises or traps; add it when one does.
-            other => Err(error(format!(
-                "unsupported erlang:{name}/0 result {other:?}"
-            ))),
         }
     }
 }
@@ -343,30 +302,39 @@ impl BeamProgram {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     let arguments = call_arguments(&process.registers, *arity)?;
-                    if is_bif(module, name, *arity) {
-                        let (target, arguments) =
-                            match self.bif(scheduler, module, name, arguments)? {
-                                BifResult::Value(value) => {
-                                    let process = scheduler.current_process_mut();
-                                    write(process, &Operand::X(0), value)?;
-                                    if *tail && let Some(outcome) = return_from_frame(process)? {
-                                        return Ok(outcome);
-                                    }
-                                    continue;
+                    // A temporary Rust stand-in for an `erlang.beam` function
+                    // comes first; #87 removes it. Then a BIF, then module code.
+                    let result =
+                        match rust_stand_ins::run(self, scheduler, module, name, &arguments) {
+                            Some(value) => Some(BifResult::Value(value?)),
+                            None if is_bif(module, name, *arity) => {
+                                Some(self.bif(scheduler, module, name, arguments)?)
+                            }
+                            None => None,
+                        };
+                    if let Some(result) = result {
+                        let (target, arguments) = match result {
+                            BifResult::Value(value) => {
+                                let process = scheduler.current_process_mut();
+                                write(process, &Operand::X(0), value)?;
+                                if *tail && let Some(outcome) = return_from_frame(process)? {
+                                    return Ok(outcome);
                                 }
-                                BifResult::Raise { class, reason } => {
-                                    let process = scheduler.current_process_mut();
-                                    if let Some(outcome) = raise(process, class, reason) {
-                                        return Ok(outcome);
-                                    }
-                                    continue;
+                                continue;
+                            }
+                            BifResult::Raise { class, reason } => {
+                                let process = scheduler.current_process_mut();
+                                if let Some(outcome) = raise(process, class, reason) {
+                                    return Ok(outcome);
                                 }
-                                BifResult::Trap {
-                                    module,
-                                    function,
-                                    arguments,
-                                } => ((module, function), arguments),
-                            };
+                                continue;
+                            }
+                            BifResult::Trap {
+                                module,
+                                function,
+                                arguments,
+                            } => ((module, function), arguments),
+                        };
                         let process = scheduler.current_process_mut();
                         let arity = u32::try_from(arguments.len())
                             .map_err(|_| error("arity exceeds BEAM limit"))?;
@@ -381,6 +349,7 @@ impl BeamProgram {
                         }
                         continue;
                     }
+                    let process = scheduler.current_process_mut();
                     let frame = self.mfa_frame(module, name, *arity)?;
                     if *tail {
                         *current_frame(process) = frame;
@@ -388,17 +357,24 @@ impl BeamProgram {
                         process.frames.push(frame);
                     }
                 }
-                Instruction::Bif0 {
+                Instruction::Bif {
                     module,
                     name,
+                    arguments,
                     destination,
                 } => {
-                    if module != "erlang" {
-                        return Err(error(format!("unsupported BIF {module}:{name}/0")));
+                    if !is_bif(module, name, arguments.len() as u32) {
+                        return Err(error(format!(
+                            "unsupported BIF {module}:{name}/{}",
+                            arguments.len()
+                        )));
                     }
-                    let value = self
-                        .bif(scheduler, module, name, Vec::new())?
-                        .into_bif0_value(name)?;
+                    let values = arguments
+                        .iter()
+                        .map(|argument| read(process, argument))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let result = self.bif(scheduler, module, name, values)?;
+                    let value = result.into_bif_value(module, name, arguments.len())?;
                     write(scheduler.current_process_mut(), destination, value)?;
                 }
                 Instruction::Jump(label) => jump(module, process, *label)?,
@@ -651,145 +627,48 @@ impl BeamProgram {
             }
         }
     }
-
-    /// Run a BIF that the observed process path calls. The result
-    /// is a value, an exception, or a trap into BEAM code.
-    ///
-    /// BIFs are native functions listed in the ERTS `bif.tab`, mostly in the
-    /// `erlang` module. The compiler emits guard BIFs such as `self/0` as
-    /// `bif` instructions and other BIFs as `call_ext` instructions. Both
-    /// forms come here.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let value = program.bif(&mut scheduler, "erlang", "make_ref", vec![])?;
-    /// assert!(matches!(value, BifResult::Value(Term::Reference(_))));
-    /// ```
-    fn bif(
-        &self,
-        scheduler: &mut Scheduler,
-        module: &str,
-        name: &str,
-        arguments: Vec<Term>,
-    ) -> Result<BifResult, BeamError> {
-        let value = match (module, name, arguments.as_slice()) {
-            ("erlang", "process_flag", [Term::Atom(flag), Term::Atom(value)])
-                if flag.name() == "trap_exit"
-                    && (value.name() == "true" || value.name() == "false") =>
-            {
-                let process = scheduler.current_process_mut();
-                let old = Term::static_atom(&process.trap_exit.to_string());
-                process.trap_exit = value.name() == "true";
-                old
-            }
-            ("erlang", "self", []) => Term::Pid(scheduler.current_process_mut().id),
-            ("erlang", "make_ref", []) => Term::Reference(scheduler.make_ref()?),
-            ("erlang", "link", [Term::Pid(target)]) => scheduler.link(*target)?,
-            ("erlang", "group_leader", []) => {
-                Term::Pid(scheduler.current_process_mut().group_leader)
-            }
-            ("erlang", "group_leader", [Term::Pid(leader), Term::Pid(target)]) => {
-                scheduler.set_group_leader(*target, *leader)?;
-                Term::static_atom("true")
-            }
-            ("erlang", "monitor", [Term::Atom(kind), Term::Pid(target)])
-                if kind.name() == "process" =>
-            {
-                Term::Reference(scheduler.monitor(*target)?)
-            }
-            ("erlang", "demonitor", [Term::Reference(reference), Term::List(options)]) => {
-                let flush = match options.as_slice() {
-                    [] => false,
-                    [Term::Atom(option)] if option.name() == "flush" => true,
-                    _ => return Err(error(format!("unsupported demonitor options {options:?}"))),
-                };
-                // ERTS `demonitor_2` (bif.c) flushes only when no active
-                // monitor was removed: the DOWN message can then be queued.
-                let removed = scheduler.demonitor(*reference);
-                if removed || !flush {
-                    Term::static_atom("true")
-                } else {
-                    let arguments = vec![
-                        Term::Reference(*reference),
-                        Term::static_atom("false"),
-                        Term::static_atom("true"),
-                    ];
-                    let module = "erts_internal";
-                    let function = "flush_monitor_messages";
-                    return Ok(BifResult::Trap {
-                        module,
-                        function,
-                        arguments,
-                    });
-                }
-            }
-            ("erlang", "exit", [reason]) => {
-                return Ok(BifResult::Raise {
-                    class: ExceptionClass::Exit,
-                    reason: reason.clone(),
-                });
-            }
-            ("erlang", "nif_error", [reason]) => {
-                return Ok(BifResult::Raise {
-                    class: ExceptionClass::Error,
-                    reason: reason.clone(),
-                });
-            }
-            (
-                "erlang",
-                "spawn" | "spawn_monitor" | "spawn_link",
-                [Term::Atom(spawn_module), Term::Atom(function), list],
-            ) => {
-                let Term::List(arguments) = list else {
-                    return Err(error("spawn arguments are not a proper list"));
-                };
-                let arguments = arguments.clone();
-                let arity = u32::try_from(arguments.len())
-                    .map_err(|_| error("arity exceeds BEAM limit"))?;
-                let frame = self.mfa_frame(spawn_module.name(), function.name(), arity)?;
-                let monitor = name == "spawn_monitor";
-                let link = name == "spawn_link";
-                let (pid, reference) = scheduler.spawn(frame, arguments, monitor, link)?;
-                match reference {
-                    Some(reference) => {
-                        Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)])
-                    }
-                    None => Term::Pid(pid),
-                }
-            }
-            ("maps", "keys", [Term::Map(map)]) => {
-                Term::List(map.iter().map(|(key, _)| key.clone()).collect())
-            }
-            // ponytail: ERTS raises error {badmap, Map}; see "Exception raise sites" in docs/erts-differences.md.
-            ("maps", "keys", [_]) => {
-                return Err(error("unsupported maps:keys/1 argument: not a map"));
-            }
-            _ => {
-                return Err(error(format!(
-                    "unresolved external MFA {module}:{name}/{}",
-                    arguments.len()
-                )));
-            }
-        };
-        Ok(BifResult::Value(value))
-    }
 }
 
-/// Return whether an external call goes to a BIF. A `bif.tab` entry, such as
-/// `maps:keys/1`, runs before the module code, as in ERTS. Every `erlang`
-/// call goes to the BIF table, which reports an unresolved MFA.
+/// The spawn options that this runtime supports, as the flags of ERTS
+/// `ErlSpawnOpts`.
+#[derive(Default)]
+struct SpawnOptions {
+    /// Link the new process to the caller (`SPO_LINK`).
+    link: bool,
+    /// Monitor the new process and return `{Pid, Reference}` (`SPO_MONITOR`).
+    monitor: bool,
+}
+
+/// Start a process that runs `module:function` with the elements of
+/// `arguments`, as ERTS `erl_create_process` does. Return the pid, or
+/// `{Pid, Reference}` when `options.monitor` is set.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(is_bif("erlang", "self", 0));
-/// assert!(is_bif("maps", "keys", 1));
-/// assert!(!is_bif("maps", "keys", 2));
-/// assert!(!is_bif("io", "put_chars", 2));
+/// let result = create_process(&program, &mut scheduler, &module, &function, &Term::List(vec![]), SpawnOptions::default())?;
+/// assert!(matches!(result, Term::Pid(_)));
+/// assert!(create_process(&program, &mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default()).is_err());
 /// ```
-fn is_bif(module: &str, name: &str, arity: u32) -> bool {
-    module == "erlang" || (module, name, arity) == ("maps", "keys", 1)
+fn create_process(
+    program: &BeamProgram,
+    scheduler: &mut Scheduler,
+    module: &Atom,
+    function: &Atom,
+    arguments: &Term,
+    options: SpawnOptions,
+) -> Result<Term, BeamError> {
+    let Term::List(arguments) = arguments else {
+        return Err(error("spawn arguments are not a proper list"));
+    };
+    let arguments = arguments.clone();
+    let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
+    let frame = program.mfa_frame(module.name(), function.name(), arity)?;
+    let (pid, reference) = scheduler.spawn(frame, arguments, options.monitor, options.link)?;
+    Ok(match reference {
+        Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
+        None => Term::Pid(pid),
+    })
 }
 
 /// Return the active frame of a running process.
@@ -1104,6 +983,7 @@ fn write_operand(
 mod tests {
     use std::{collections::HashMap, path::PathBuf, process::Command};
 
+    use super::bif::BIFS;
     use super::{
         BeamProgram, BifResult, ExceptionClass, call_arguments, function_at_label, read_operand,
         write_operand,
@@ -1218,7 +1098,7 @@ mod tests {
         body.push(Instruction::Return);
         assert!(matches!(run_with_child(body), Ok(Term::Pid(_))));
         assert!(error(spawn_link_child(Term::Integer(1))).contains("not a proper list"));
-        assert!(error(vec![erlang_call("node", 0, false)]).contains("erlang:node/0"));
+        assert!(error(vec![erlang_call("is_alive", 0, false)]).contains("erlang:is_alive/0"));
     }
 
     #[test]
@@ -1296,17 +1176,19 @@ mod tests {
             .contains("send target")
         );
         assert!(
-            error(vec![Instruction::Bif0 {
+            error(vec![Instruction::Bif {
                 module: "erlang".into(),
-                name: "node".into(),
+                name: "is_alive".into(),
+                arguments: Vec::new(),
                 destination: Operand::X(0),
             }])
-            .contains("unresolved external MFA erlang:node/0")
+            .contains("unresolved external MFA erlang:is_alive/0")
         );
         assert!(
-            error(vec![Instruction::Bif0 {
+            error(vec![Instruction::Bif {
                 module: "lists".into(),
                 name: "node".into(),
+                arguments: Vec::new(),
                 destination: Operand::X(0),
             }])
             .contains("unsupported BIF lists:node/0")
@@ -1512,6 +1394,133 @@ mod tests {
         assert_eq!(
             keys(atom("ok")).unwrap_err().to_string(),
             "unsupported maps:keys/1 argument: not a map"
+        );
+    }
+
+    #[test]
+    fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
+        let mut program = make_program(
+            vec![
+                Instruction::Move(
+                    Operand::Value(Term::Map(Map::from_pairs(Vec::new()).unwrap())),
+                    Operand::X(0),
+                ),
+                Instruction::CallExternal {
+                    arity: 1,
+                    module: "maps".into(),
+                    name: "keys".into(),
+                    tail: true,
+                    deallocate: 0,
+                },
+            ],
+            0,
+        );
+        program.modules.insert(
+            "maps".into(),
+            BeamModule {
+                name: "maps".into(),
+                exports: HashMap::from([(("keys".into(), 1), 1)]),
+                instructions: vec![
+                    Instruction::FunctionInfo {
+                        module: "maps".into(),
+                        name: "keys".into(),
+                        arity: 1,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Move(atom("module_code"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            },
+        );
+        // The BIF returns the keys of the empty map. The module code would
+        // return `module_code`.
+        assert_eq!(
+            program.execute("fixture", "main", &[]).unwrap(),
+            Term::List(Vec::new())
+        );
+    }
+
+    #[test]
+    fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
+        let mut program = make_program(
+            vec![
+                Instruction::Move(atom("a"), Operand::X(0)),
+                Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(1)),
+                Instruction::Move(Operand::Value(Term::List(Vec::new())), Operand::X(2)),
+                Instruction::CallExternal {
+                    arity: 3,
+                    module: "lists".into(),
+                    name: "keyfind".into(),
+                    tail: true,
+                    deallocate: 0,
+                },
+            ],
+            0,
+        );
+        program.modules.insert(
+            "lists".into(),
+            BeamModule {
+                name: "lists".into(),
+                exports: HashMap::from([(("keyfind".into(), 3), 1)]),
+                instructions: vec![
+                    Instruction::FunctionInfo {
+                        module: "lists".into(),
+                        name: "keyfind".into(),
+                        arity: 3,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Move(atom("stub"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            },
+        );
+        // `lists:keyfind/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
+        // BIF, so the BEAM stub body of the loaded `lists` module must not run.
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            "unresolved external MFA lists:keyfind/3"
+        );
+        // `is_bif` finds an entry with a binary search.
+        // Strictly increasing: sorted for a binary search, with no duplicate entry.
+        assert!(BIFS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn converts_unicode_chardata_and_rejects_other_encodings() {
+        let convert = |chardata: Term, encoding: &str| {
+            make_program(
+                vec![
+                    Instruction::Move(Operand::Value(chardata), Operand::X(0)),
+                    Instruction::Move(Operand::Value(Term::static_atom(encoding)), Operand::X(1)),
+                    Instruction::CallExternal {
+                        arity: 2,
+                        module: "unicode".into(),
+                        name: "characters_to_binary".into(),
+                        tail: true,
+                        deallocate: 0,
+                    },
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        let chardata = || Term::List(vec![Term::Binary(b"Hello".to_vec()), Term::Integer(10)]);
+        assert_eq!(
+            convert(chardata(), "unicode").unwrap(),
+            Term::Binary(b"Hello\n".to_vec())
+        );
+        assert_eq!(
+            convert(Term::Integer(1), "unicode")
+                .unwrap_err()
+                .to_string(),
+            "unsupported chardata Integer(1): not a binary or a list"
+        );
+        assert_eq!(
+            convert(chardata(), "utf8").unwrap_err().to_string(),
+            "unsupported unicode:characters_to_binary/2 encoding Atom(\"utf8\")"
         );
     }
 
@@ -1904,22 +1913,60 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_exception_from_a_zero_arity_bif() {
+    fn rejects_an_exception_from_a_bif_instruction() {
         assert_eq!(
             BifResult::Value(Term::Integer(1))
-                .into_bif0_value("self")
+                .into_bif_value("erlang", "self", 0)
                 .unwrap(),
             Term::Integer(1)
         );
         assert!(
             BifResult::Raise {
-                class: ExceptionClass::Exit,
-                reason: test_atom("boom"),
+                class: ExceptionClass::Error,
+                reason: test_atom("badarg"),
             }
-            .into_bif0_value("self")
+            .into_bif_value("erlang", "node", 1)
             .unwrap_err()
             .to_string()
-            .contains("unsupported erlang:self/0 result")
+            .contains("unsupported erlang:node/1 result")
+        );
+    }
+
+    #[test]
+    fn returns_the_local_node_for_node_0_and_a_pid() {
+        let node = |arguments: Vec<Operand>| {
+            make_program(
+                vec![
+                    Instruction::Bif {
+                        module: "erlang".into(),
+                        name: "self".into(),
+                        arguments: Vec::new(),
+                        destination: Operand::X(1),
+                    },
+                    Instruction::Bif {
+                        module: "erlang".into(),
+                        name: "node".into(),
+                        arguments,
+                        destination: Operand::X(0),
+                    },
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        // ERTS 29.1.1 without distribution: node() and node(self()) are nonode@nohost.
+        assert_eq!(
+            node(Vec::new()).unwrap(),
+            Term::static_atom("nonode@nohost")
+        );
+        assert_eq!(
+            node(vec![Operand::X(1)]).unwrap(),
+            Term::static_atom("nonode@nohost")
+        );
+        assert_eq!(
+            node(vec![atom("foo")]).unwrap_err().to_string(),
+            "unsupported erlang:node/1 argument Atom(\"foo\"): not a pid"
         );
     }
 
@@ -1966,9 +2013,10 @@ mod tests {
         // is still active, so ERTS returns true without flushing.
         let program = make_program(
             vec![
-                Instruction::Bif0 {
+                Instruction::Bif {
                     module: "erlang".into(),
                     name: "self".into(),
+                    arguments: Vec::new(),
                     destination: Operand::X(1),
                 },
                 Instruction::Move(atom("process"), Operand::X(0)),
