@@ -2,7 +2,6 @@
 
 use super::BifResult::{Trap, Value};
 use super::*;
-use crate::term::Reference;
 
 /// Return the node of a pid or of the calling process.
 ///
@@ -57,44 +56,69 @@ pub(super) fn trap_exit(
     Ok(Value(old))
 }
 
-/// Run `erlang:demonitor(Reference, Options)` with the options `[]` or
-/// `[flush]`. Other options give a runtime error.
+/// Run `erlang:demonitor(Reference, Options)` as ERTS `demonitor_2`
+/// (bif.c) does. `Options` is a list of `flush` and `info` in any order,
+/// with repeats. An options term that is not such a list raises `badarg`,
+/// then a `Reference` that is not a reference raises `badarg`. The checks
+/// come before the monitor is removed, so a call that raises leaves the
+/// monitor active.
 ///
-/// ERTS `demonitor_2` (bif.c) flushes only when no active monitor was
-/// removed: the DOWN message can then be queued. The flush traps into
-/// `erts_internal:flush_monitor_messages/3`.
+/// The result is `true`. With `info`, it is `false` when no active monitor
+/// was removed. With `flush` and no active monitor removed, the DOWN
+/// message can be queued, so the BIF traps into
+/// `erts_internal:flush_monitor_messages(Reference, false, Result)`. ERTS
+/// gives `Multi = true` only for a time-offset monitor, which PBeam does
+/// not support.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = demonitor(&mut context, reference, &[])?;
+/// let result = demonitor(&mut context, &Term::Reference(reference), &Term::List(vec![]));
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let result = demonitor(&mut context, gone, &[Term::static_atom("flush")])?;
+/// let info = Term::List(vec![Term::static_atom("info")]);
+/// let result = demonitor(&mut context, &Term::Reference(reference), &info);
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// let flush = Term::List(vec![Term::static_atom("flush")]);
+/// let result = demonitor(&mut context, &Term::Reference(gone), &flush);
 /// assert!(matches!(result, BifResult::Trap { function: "flush_monitor_messages", .. }));
+/// let result = demonitor(&mut context, &Term::Integer(1), &Term::List(vec![]));
+/// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 pub(super) fn demonitor(
     context: &mut BifContext<'_>,
-    reference: Reference,
-    options: &[Term],
-) -> Result<BifResult, BeamError> {
-    let flush = match options {
-        [] => false,
-        [Term::Atom(option)] if option.name() == "flush" => true,
-        _ => return Err(error(format!("unsupported demonitor options {options:?}"))),
+    reference: &Term,
+    options: &Term,
+) -> BifResult {
+    let Term::List(options) = options else {
+        return BifResult::badarg();
     };
-    let removed = context.scheduler.demonitor(reference);
-    if removed || !flush {
-        return Ok(Value(Term::static_atom("true")));
+    let (mut flush, mut info) = (false, false);
+    for option in options {
+        match option {
+            Term::Atom(atom) if atom.name() == "flush" => flush = true,
+            Term::Atom(atom) if atom.name() == "info" => info = true,
+            _ => return BifResult::badarg(),
+        }
     }
-    Ok(Trap {
+    let Term::Reference(reference) = reference else {
+        return BifResult::badarg();
+    };
+    if context.scheduler.demonitor(*reference) {
+        return Value(Term::static_atom("true"));
+    }
+    let result = Term::static_atom(if info { "false" } else { "true" });
+    if !flush {
+        return Value(result);
+    }
+    Trap {
         module: "erts_internal",
         function: "flush_monitor_messages",
         arguments: vec![
-            Term::Reference(reference),
+            Term::Reference(*reference),
             Term::static_atom("false"),
-            Term::static_atom("true"),
+            result,
         ],
-    })
+    }
 }
 
 /// Run `erlang:spawn/3`: start a process that runs `module:function` with the

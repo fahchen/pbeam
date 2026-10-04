@@ -2278,7 +2278,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_tuple_arity_and_rejects_call_last_stack_size_and_demonitor_options() {
+    fn selects_tuple_arity_and_rejects_call_last_stack_size() {
         let select = |value: Term| {
             make_program(
                 vec![
@@ -2323,17 +2323,6 @@ mod tests {
                 },
             ])
             .contains("tail-call stack size")
-        );
-        assert!(
-            error(vec![
-                erlang_call("make_ref", 0, false),
-                Instruction::Move(
-                    Operand::Value(Term::List(vec![test_atom("info")])),
-                    Operand::X(1),
-                ),
-                erlang_call("demonitor", 2, false),
-            ])
-            .contains("unsupported demonitor options")
         );
     }
 
