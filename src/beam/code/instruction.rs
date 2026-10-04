@@ -976,7 +976,7 @@ fn read_move_operand(
         TAG_LITERAL => {
             let subtag = read_integer(data, cursor, TAG_LITERAL)?;
             match subtag {
-                1 => Ok(Operand::Value(Term::Atom("nil".into()))),
+                1 => Ok(Operand::Value(Term::List(Vec::new()))),
                 2 => read_move_operand(data, cursor, atoms, literals),
                 4 => {
                     let literal_index = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
@@ -1045,7 +1045,7 @@ mod tests {
     fn reads_only_supported_move_literals() {
         let literals = vec![Some(Term::Binary(b"ok".to_vec())), None];
         assert!(matches!(
-            read_move_operand(&[0x47, 0x00], &mut 0, &[], &literals).unwrap(),
+            &read_move_operand(&[0x47, 0x00], &mut 0, &[], &literals).unwrap(),
             Operand::Value(Term::Binary(value)) if value == b"ok"
         ));
         let mut cursor = 0;
@@ -1059,15 +1059,15 @@ mod tests {
             Operand::UnsupportedLiteral(1)
         ));
         assert!(matches!(
-            read_move_operand(&[0x17, 0x10], &mut 0, &[], &literals).unwrap(),
-            Operand::Value(Term::Atom(atom)) if atom == "nil"
+            &read_move_operand(&[0x17, 0x10], &mut 0, &[], &literals).unwrap(),
+            Operand::Value(Term::List(values)) if values.is_empty()
         ));
         assert!(read_move_operand(&[0x47, 0x20], &mut 0, &[], &literals).is_err());
         assert!(read_move_operand(&[0x27, 0x00], &mut 0, &[], &literals).is_err());
         assert!(read_move_operand(&[0x06], &mut 0, &[], &literals).is_err());
         assert_eq!(
             read_value(&[0x02], &mut 0, &[]).unwrap(),
-            Term::Atom("nil".into())
+            Term::List(Vec::new())
         );
     }
 
