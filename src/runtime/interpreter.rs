@@ -301,7 +301,7 @@ impl BeamProgram {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     if INSTRUCTION_CALLS.contains(&(module.as_str(), name.as_str(), *arity)) {
-                        // ponytail: ERTS runs these calls as instructions; see "Apply and yield calls" in docs/erts-differences.md.
+                        // ponytail: ERTS runs these calls as instructions; see "Instruction calls" in docs/erts-differences.md.
                         return Err(error(format!(
                             "unsupported instruction call {module}:{name}/{arity}"
                         )));
@@ -1107,6 +1107,10 @@ mod tests {
             error(vec![erlang_call("apply", 3, false)])
                 .contains("unsupported instruction call erlang:apply/3")
         );
+        assert!(
+            error(vec![erlang_call("hibernate", 0, false)])
+                .contains("unsupported instruction call erlang:hibernate/0")
+        );
     }
 
     #[test]
@@ -1561,8 +1565,10 @@ mod tests {
             .collect();
         builtin.sort_unstable();
         builtin.dedup();
+        // `erts_is_builtin` (`beam_common.c`) marks apply/2, apply/3, and
+        // yield/0 as builtin, but not hibernate/0.
         for mfa in INSTRUCTION_CALLS {
-            assert!(builtin.contains(&mfa));
+            assert_eq!(builtin.contains(&mfa), mfa.1 != "hibernate");
         }
         builtin.retain(|mfa| !INSTRUCTION_CALLS.contains(mfa));
         assert_eq!(BIFS, builtin.as_slice());
