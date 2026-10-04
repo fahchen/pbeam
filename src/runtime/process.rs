@@ -13,7 +13,19 @@ pub(super) struct Frame {
     /// Index of the next instruction to run in the module code.
     pub(super) next_instruction: usize,
     /// Y registers. `allocate` sets the size and `deallocate` clears them.
-    pub(super) stack: Vec<Option<Term>>,
+    pub(super) stack: Vec<StackSlot>,
+}
+
+/// One Y register of a frame.
+#[derive(Debug)]
+pub(super) enum StackSlot {
+    /// Allocated, but no instruction wrote it yet.
+    Empty,
+    /// A term that a BEAM instruction wrote.
+    Term(Term),
+    /// A catch tag that `try` or `catch` wrote: the index of the first
+    /// instruction after the handler label in the module of the frame.
+    Catch(usize),
 }
 
 /// The execution state and mailbox of one process.

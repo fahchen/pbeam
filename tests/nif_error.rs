@@ -30,7 +30,7 @@ fn raises_undef_for_a_local_function_that_calls_nif_error() {
     );
 
     // PBeam exits with the same reason but an empty stack trace. This is the
-    // "NIF stub exit" row in `docs/erts-differences.md`.
+    // "Exception stack trace" row in `docs/erts-differences.md`.
     let program = BeamProgram::load(&[NIF_ERROR_PROBE]).unwrap();
     let error = program.execute("nif_error_probe", "main", &[]).unwrap_err();
     assert!(
