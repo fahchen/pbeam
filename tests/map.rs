@@ -4,10 +4,16 @@ use pbeam_runtime::{BeamProgram, Map, Term};
 
 const MAP_PROBE: &[u8] = include_bytes!("../fixtures/map/map_probe.beam");
 const MAP_ORDER_PROBE: &[u8] = include_bytes!("../fixtures/map/map_order_probe.beam");
+const ATOM_MAP_PROBE: &[u8] = include_bytes!("../fixtures/map/atom_map_probe.beam");
 
 /// Return the atom term of a name that the program holds.
 fn atom(program: &BeamProgram, name: &str) -> Term {
     Term::Atom(program.atom(name).unwrap())
+}
+
+/// Return the list of the atoms in a comma-separated list of names.
+fn atoms(program: &BeamProgram, names: &str) -> Term {
+    Term::List(names.split(',').map(|name| atom(program, name)).collect())
 }
 
 fn map(program: &BeamProgram, pairs: &[(&str, Term)]) -> Term {
@@ -120,4 +126,79 @@ fn takes_the_badmap_path_when_add_gets_a_non_map() {
             .to_string()
             .contains("unresolved external MFA erlang:error/1")
     );
+}
+
+#[test]
+fn orders_and_hashes_atom_keys_by_the_erts_atom_index() {
+    let program = BeamProgram::load(&[ATOM_MAP_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let atoms = |names: &str| atoms(&program, names);
+    assert_eq!(
+        program.execute("atom_map_probe", "main", &[]).unwrap(),
+        Term::Tuple(vec![
+            atom("pbeam_zeta"),
+            // A hashmap of 40 static atoms: index order through the ERTS atom hash.
+            atoms(
+                "internal_error,utf16,total_active_tasks,error_handler,first,pending_driver,\
+                 sigusr2,off_heap,complete,linked_in_driver,is_function,false,get_seq_token,\
+                 yield,start_timer,all,start,dflag_unicode_io,more,bag,fun_info_mfa,\
+                 http_response,get_definition,nodedown_reason,registered,link,port_call,add,\
+                 dt_put_tag,reset,decentralized_counters,seq_trace,attributes,dotall,proc_sig,\
+                 match_spec_compile,schedulers_online,dirty,memory_internal,call_error_handler"
+            ),
+            // A flatmap: true (1) and abs_path (26) are static; pbeam_zeta comes before
+            // pbeam_alpha in AtU8.
+            atoms("true,abs_path,pbeam_zeta,pbeam_alpha"),
+            atom("pbeam_lit_b"),
+            map(
+                &program,
+                &[
+                    ("pbeam_lit_a", Term::Integer(1)),
+                    ("pbeam_lit_b", Term::Integer(2))
+                ]
+            ),
+            // LitT creates pbeam_lit_b first, because it is the first tuple element.
+            atoms("pbeam_lit_b,pbeam_lit_a"),
+        ])
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [atom_map_probe:main()])"),
+        b"{pbeam_zeta,[internal_error,utf16,total_active_tasks,error_handler,first,\
+          pending_driver,sigusr2,off_heap,complete,linked_in_driver,is_function,false,\
+          get_seq_token,yield,start_timer,all,start,dflag_unicode_io,more,bag,fun_info_mfa,\
+          http_response,get_definition,nodedown_reason,registered,link,port_call,add,\
+          dt_put_tag,reset,decentralized_counters,seq_trace,attributes,dotall,proc_sig,\
+          match_spec_compile,schedulers_online,dirty,memory_internal,call_error_handler],\
+          [true,abs_path,pbeam_zeta,pbeam_alpha],pbeam_lit_b,\
+          #{pbeam_lit_b => 2,pbeam_lit_a => 1},[pbeam_lit_b,pbeam_lit_a]}\n"
+    );
+}
+
+#[test]
+fn orders_a_hashmap_of_all_static_atoms_like_erts() {
+    let program = BeamProgram::load(&[ATOM_MAP_PROBE]).unwrap();
+    let result = program
+        .execute("atom_map_probe", "static_keys", &[])
+        .unwrap();
+    let Term::List(keys) = &result else {
+        panic!("maps:keys/1 returns a list");
+    };
+    let names: Vec<&str> = keys
+        .iter()
+        .map(|key| match key {
+            Term::Atom(atom) => atom.name(),
+            other => panic!("static key {other:?} is not an atom"),
+        })
+        .collect();
+    assert_eq!(names.len(), 1150);
+    let expected = erl_reference(
+        "io:format(\"~s~n\", \
+         [lists:join(\",\", [atom_to_list(K) || K <- atom_map_probe:static_keys()])])",
+    );
+    // The ERTS 29.1.1 order starts with these keys in every run.
+    assert!(expected.starts_with(
+        b"exact_reductions,bin_is_7bit,pending_process,native,erl_debugger,internal_error,"
+    ));
+    assert_eq!(format!("{}\n", names.join(",")).into_bytes(), expected);
 }
