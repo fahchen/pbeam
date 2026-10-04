@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::module::BeamModule;
 use crate::{
     error::{BeamError, error},
-    term::Term,
+    term::{Map, Term},
 };
 
 const WORD_SIZE: usize = 4;
@@ -30,11 +30,13 @@ const TAG_LABEL: u8 = 5;
 const TAG_LITERAL: u8 = 7;
 const LIST_SUBTAG: i128 = 1;
 const ETF_VERSION: u8 = 131;
+const ETF_SMALL_INTEGER_EXT: u8 = 97;
 const ETF_SMALL_TUPLE_EXT: u8 = 104;
 const ETF_NIL_EXT: u8 = 106;
 const ETF_STRING_EXT: u8 = 107;
 const ETF_LIST_EXT: u8 = 108;
 const ETF_BINARY_EXT: u8 = 109;
+const ETF_MAP_EXT: u8 = 116;
 const ETF_SMALL_ATOM_UTF8_EXT: u8 = 119;
 const FIRST_ATOM_INDEX: usize = 1;
 const FIRST_LABEL_NUMBER: u32 = 1;
@@ -97,7 +99,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// selection_list ::= compact(7, short=1) compact(0) selection_pair[select_count/2]
 /// selection_pair ::= atom_value compact(5)
 /// type_test ::= test_opcode compact(5) register
-/// test_opcode ::= 48 ; is_atom | 49 ; is_pid | 50 ; is_reference | 53 ; is_binary | 55 ; is_list | 57 ; is_tuple
+/// test_opcode ::= 48 ; is_atom | 49 ; is_pid | 50 ; is_reference | 53 ; is_binary | 55 ; is_list | 57 ; is_tuple | 156 ; is_map
 /// put_list ::= 69 move_source move_source register
 /// noop ::= 16 test_heap_operands | 172 init_yregs_operands
 /// int_code_end ::= 3
@@ -106,23 +108,27 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// import_count ::= u32be
 /// import ::= module_atom_index:u32be function_atom_index:u32be arity:u32be
 /// value       ::= integer_value | atom_value
-/// integer_value ::= compact(1)
+/// integer_value ::= compact(1) ; a large(1) payload is two's complement
 /// atom_value  ::= compact(2)
 /// nil_value ::= compact(2) ; atom index zero
 /// literals_chunk ::= "LitT" chunk_size 0:u32be literal_count literal_entry*
 /// literal_count ::= u32be
 /// literal_entry ::= term_size:u32be 131 external_term ; term_size bytes in total
 /// external_term ::= binary_term | string_term | nil_term | atom_term | tuple_term | list_term
+///                 | map_term | small_integer_term
+/// small_integer_term ::= 97 value:u8
 /// binary_term ::= 109 binary_size:u32be byte[binary_size]
 /// string_term ::= 107 string_size:u16be byte[string_size]
 /// nil_term    ::= 106
 /// atom_term   ::= 119 name_size:u8 utf8_byte[name_size]
 /// tuple_term  ::= 104 arity:u8 external_term[arity]
 /// list_term   ::= 108 length:u32be external_term[length] tail:external_term
+/// map_term    ::= 116 pair_count:u32be (key:external_term value:external_term)[pair_count]
 ///
-/// compact(tag) ::= short(tag) | extended(tag)
+/// compact(tag) ::= short(tag) | extended(tag) | large(tag)
 /// short(tag)   ::= value:4 0 tag:3
 /// extended(tag) ::= high:3 1 0 tag:3 low:8
+/// large(tag)   ::= size_code:3 1 1 tag:3 byte[size_code + 2] ; size_code in 0..=6
 /// ```
 ///
 /// `container_size` counts bytes after its field, including `BEAM` and chunks.
@@ -138,13 +144,22 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// `opcode_max` is not checked. The parser rejects duplicate chunk IDs. It
 /// supports only the listed instructions and compact operand forms. `LitT`
 /// supports uncompressed tables. A literal loads as a value only when every
-/// nested tag is listed; another tag, such as a map, integer, or improper list
-/// tail, makes the literal unsupported, and execution fails only if an
-/// instruction uses it. `[a|[b]]` and `[a,b]` give the same list. The
+/// nested tag is listed; another tag, such as an integer outside `0..=255`
+/// (`INTEGER_EXT`, 98, as `-1` is `[98, 255, 255, 255, 255]`), an improper
+/// list tail, or a map key that `Map` does not support yet, makes the literal
+/// unsupported, and execution fails only if an instruction uses it.
+/// `[a|[b]]` and `[a,b]` give the same list. `[97, 1]` is the integer 1. A
+/// map literal is a flatmap up to 32 pairs and a hashmap above 32 pairs, in
+/// any input order, as in ERTS. A map literal with a duplicate key is an
+/// error, as ERTS rejects it with `badarg`. The
 /// parser retains generated instructions that it does not execute. Execution
 /// fails if it reaches one. Compact
-/// tags occupy the low three bits. The parser accepts the short and one-byte
-/// extension forms only. Bit fields are shown from high bit to low bit. Other
+/// tags occupy the low three bits. A `large` payload is big-endian. ERTS
+/// sign-extends the payload of `large(1)` only, so `{integer,-1}` is
+/// `[0x19, 0xFF, 0xFF]` and `{integer,-101714049538469044}` is `[0xD9]`
+/// followed by its eight two's-complement bytes. The `short` and `extended`
+/// forms are never negative. A payload of more than 8 bytes (a bignum) is an
+/// error. Bit fields are shown from high bit to low bit. Other
 /// chunk payloads and padding byte values are ignored. The `ImpT` chunk maps
 /// external call indexes to module/function/arity. The executor supports only
 /// the listed instructions.
@@ -397,7 +412,8 @@ fn read_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
     Ok(Some(term))
 }
 
-/// A list or tuple that `read_external_term` has started but not finished.
+/// A list, tuple, or map that `read_external_term` has started but not
+/// finished.
 enum PartialTerm {
     /// A tuple that still needs `remaining` elements.
     Tuple { remaining: u8, elements: Vec<Term> },
@@ -405,12 +421,20 @@ enum PartialTerm {
     List { remaining: u32, elements: Vec<Term> },
     /// A list whose elements are read and whose tail is next.
     ListTail { elements: Vec<Term> },
+    /// A map that still needs `remaining` pairs. `key` holds the key of the
+    /// pair whose value is next.
+    Map {
+        remaining: u32,
+        pairs: Vec<(Term, Term)>,
+        key: Option<Term>,
+    },
 }
 
 /// Read one external term at the cursor and advance past it. Return `None`
-/// for a tag or list tail that `literal_entry` does not list. Nested lists
-/// and tuples use a work stack, so nesting has no fixed depth limit, as in
-/// the ERTS decoder.
+/// for a tag or list tail that `literal_entry` does not list, or for a map
+/// key that `Map` does not support yet.
+/// Nested lists, tuples, and maps use a work stack, so nesting has no fixed
+/// depth limit, as in the ERTS decoder.
 ///
 /// # Examples
 ///
@@ -420,6 +444,11 @@ enum PartialTerm {
 /// assert_eq!(read_external_term(&[104, 0], &mut cursor)?, Some(Term::Tuple(vec![])));
 /// assert_eq!(cursor, 2);
 /// ```
+///
+/// # Errors
+///
+/// A truncated term, an atom that is not UTF-8, or a map with a duplicate
+/// key is an error.
 fn read_external_term(data: &[u8], cursor: &mut usize) -> Result<Option<Term>, BeamError> {
     let mut partial = Vec::new();
     loop {
@@ -438,6 +467,7 @@ fn read_external_term(data: &[u8], cursor: &mut usize) -> Result<Option<Term>, B
                 Term::List(characters)
             }
             ETF_NIL_EXT => Term::List(Vec::new()),
+            ETF_SMALL_INTEGER_EXT => Term::Integer(i64::from(take(data, cursor, 1)?[0])),
             ETF_SMALL_ATOM_UTF8_EXT => {
                 let size = take(data, cursor, 1)?[0] as usize;
                 let name = std::str::from_utf8(take(data, cursor, size)?)
@@ -466,6 +496,17 @@ fn read_external_term(data: &[u8], cursor: &mut usize) -> Result<Option<Term>, B
                 });
                 continue;
             }
+            ETF_MAP_EXT => match read_u32(take(data, cursor, WORD_SIZE)?)? {
+                0 => Term::Map(Map::new()),
+                remaining => {
+                    partial.push(PartialTerm::Map {
+                        remaining,
+                        pairs: Vec::new(),
+                        key: None,
+                    });
+                    continue;
+                }
+            },
             _ => return Ok(None),
         };
         // Give the finished term to the innermost partial term, and finish
@@ -509,6 +550,38 @@ fn read_external_term(data: &[u8], cursor: &mut usize) -> Result<Option<Term>, B
                     term = Term::List(elements);
                     continue;
                 }
+                Some(PartialTerm::Map {
+                    remaining,
+                    pairs,
+                    key: None,
+                }) => partial.push(PartialTerm::Map {
+                    remaining,
+                    pairs,
+                    key: Some(term),
+                }),
+                Some(PartialTerm::Map {
+                    remaining,
+                    mut pairs,
+                    key: Some(key),
+                }) => {
+                    pairs.push((key, term));
+                    if remaining == 1 {
+                        let count = pairs.len();
+                        let Ok(map) = Map::from_pairs(pairs) else {
+                            return Ok(None);
+                        };
+                        if map.len() < count {
+                            return Err(error("duplicate key in BEAM map literal"));
+                        }
+                        term = Term::Map(map);
+                        continue;
+                    }
+                    partial.push(PartialTerm::Map {
+                        remaining: remaining - 1,
+                        pairs,
+                        key: None,
+                    });
+                }
             }
             break;
         }
@@ -550,10 +623,8 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term,
         .ok_or_else(|| error("truncated BEAM operand"))?;
     match first_byte & COMPACT_TAG_MASK {
         TAG_INTEGER => {
-            let value = read_integer(data, cursor, TAG_INTEGER)?;
-            Ok(Term::Integer(
-                i64::try_from(value).map_err(|_| error("integer constant exceeds i64"))?,
-            ))
+            let payload = read_operand(data, cursor, TAG_INTEGER)?;
+            Ok(Term::Integer(sign_extend(first_byte, payload)))
         }
         TAG_ATOM => {
             let index = read_operand(data, cursor, TAG_ATOM)? as usize;
@@ -566,6 +637,33 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term,
             "unsupported constant operand tag {unsupported_tag}"
         ))),
     }
+}
+
+/// Return the signed value of a `TAG_INTEGER` payload, as ERTS
+/// `beamreader_read_tagged` does. The short and two-byte forms hold a value
+/// in `0..2048`. The extended form holds 2 to 8 big-endian bytes in two's
+/// complement, so ERTS sign-extends them from the highest payload bit.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {integer,-1} is [0x19, 0xFF, 0xFF]: two payload bytes.
+/// assert_eq!(sign_extend(0x19, 0xFFFF), -1);
+/// // {integer,65535} is [0x39, 0x00, 0xFF, 0xFF]: three payload bytes.
+/// assert_eq!(sign_extend(0x39, 0xFFFF), 65535);
+/// // {integer,2047} is [0xE9, 0xFF]: the two-byte form has no sign.
+/// assert_eq!(sign_extend(0xE9, 0x7FF), 2047);
+/// ```
+fn sign_extend(first_byte: u8, payload: u64) -> i64 {
+    let extended = COMPACT_EXTENDED_FLAG | COMPACT_SIGN_FLAG;
+    if first_byte & extended != extended {
+        return payload as i64;
+    }
+    // A payload of 9 or more bytes fails in `read_integer_after_first`, so the
+    // size code here is 0..=6 and the payload has 2..=8 bytes.
+    let payload_bits = u32::from(first_byte >> 5) * 8 + 16;
+    let shift = u64::BITS - payload_bits;
+    ((payload << shift) as i64) >> shift
 }
 
 /// Return the atom at a one-based BEAM atom index.
@@ -727,7 +825,7 @@ fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
 #[cfg(test)]
 mod tests {
     use super::{atom_at, parse_atoms, parse_exports, parse_literals, read_literal, read_u32};
-    use crate::term::Term;
+    use crate::term::{Map, Term};
 
     #[test]
     fn rejects_invalid_atom_tables_and_indices() {
@@ -790,10 +888,10 @@ mod tests {
             read_literal(&[131, 104, 2, 119, 2, b'o', b'k', 106]).unwrap(),
             Some(Term::Tuple(vec![atom("ok"), Term::List(vec![])]))
         );
-        // A small integer (97) inside a tuple or a list, and an improper tail.
-        assert_eq!(read_literal(&[131, 104, 1, 97, 1]).unwrap(), None);
+        // INTEGER_EXT (98) 256 inside a tuple or a list, and an improper tail.
+        assert_eq!(read_literal(&[131, 104, 1, 98, 0, 0, 1, 0]).unwrap(), None);
         assert_eq!(
-            read_literal(&[131, 108, 0, 0, 0, 1, 97, 1, 106]).unwrap(),
+            read_literal(&[131, 108, 0, 0, 0, 1, 98, 0, 0, 1, 0, 106]).unwrap(),
             None
         );
         assert_eq!(
@@ -812,6 +910,55 @@ mod tests {
             read_literal(&[131, 108, 0, 0, 0, 0, 106]).unwrap(),
             Some(Term::List(vec![]))
         );
+
+        // #{b => [], a => {}} keeps its pairs in flatmap key order; #{} is empty.
+        let map = read_literal(&[
+            131, 116, 0, 0, 0, 2, 119, 1, b'b', 106, 119, 1, b'a', 104, 0,
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            format!("{map:?}"),
+            "Map([(Atom(\"a\"), Tuple([])), (Atom(\"b\"), List([]))])"
+        );
+        assert_eq!(
+            read_literal(&[131, 116, 0, 0, 0, 0]).unwrap(),
+            Some(Term::Map(Map::from_pairs(vec![]).unwrap()))
+        );
+        // A map key that `Map` does not support yet makes the literal unsupported.
+        assert_eq!(
+            read_literal(&[131, 116, 0, 0, 0, 1, 106, 106]).unwrap(),
+            None
+        );
+        // ERTS rejects a MAP_EXT with a duplicate key: #{1 => [], 1 => []}.
+        assert_eq!(
+            read_literal(&[131, 116, 0, 0, 0, 2, 97, 1, 106, 97, 1, 106])
+                .unwrap_err()
+                .to_string(),
+            "duplicate key in BEAM map literal"
+        );
+
+        // SMALL_INTEGER_EXT: 1 and 255.
+        assert_eq!(read_literal(&[131, 97, 1]).unwrap(), Some(Term::Integer(1)));
+        assert_eq!(
+            read_literal(&[131, 97, 255]).unwrap(),
+            Some(Term::Integer(255))
+        );
+
+        // erlc writes #{1 => v, ..., 33 => v} as 131,116,0,0,0,33,97,1,119,1,118,...;
+        // 33 keys give a hashmap in the ERTS order, from either input order.
+        let literal = |keys: &mut dyn Iterator<Item = u8>| {
+            let mut bytes = vec![131, 116, 0, 0, 0, 33];
+            for key in keys {
+                bytes.extend([97, key, 119, 1, b'v']);
+            }
+            read_literal(&bytes).unwrap().unwrap()
+        };
+        let forward = literal(&mut (1..=33));
+        assert_eq!(forward, literal(&mut (1..=33).rev()));
+        assert!(format!("{forward:?}").starts_with(
+            "Map([(Integer(18), Atom(\"v\")), (Integer(4), Atom(\"v\")), (Integer(12), "
+        ));
 
         // ERTS decodes a term nested 1000000 levels deep; so does PBeam.
         let mut deep = vec![131];

@@ -235,13 +235,6 @@ pub(crate) enum Instruction {
         fail_label: u32,
         value: Operand,
     },
-    /// Exchanges the values of two registers.
-    ///
-    /// Encoding: opcode, register, register. Example: `[0xa9, 0x03, 0x23]`
-    /// swaps `x0` and `x2`.
-    ///
-    /// Erlang: `io:put_chars/2` compiles to `{swap,{x,0},{x,2}}`.
-    Swap(Operand, Operand),
     /// Jumps to `fail_label` unless the value is a tuple with `arity`
     /// elements.
     ///
@@ -278,6 +271,51 @@ pub(crate) enum Instruction {
         fail_label: u32,
         choices: Vec<(Term, u32)>,
     },
+    /// Copies the value of each key in a map to its destination register, or
+    /// jumps to `fail_label` when a key is missing. `pairs` holds each key
+    /// and its destination.
+    ///
+    /// Encoding: opcode, fail label, map operand, extended list, item count,
+    /// then key and destination operands in turn. Example:
+    /// `[0x9E, 0x35, 0x03, 0x17, 0x20, 0x12, 0x13]` copies the value of atom 1
+    /// in the map in `x0` to `x1`, or fails to label 3.
+    ///
+    /// Erlang: `output(#{output := raw}) -> raw.` compiles to
+    /// `{get_map_elements,{f,9},{x,0},{list,[{atom,output},{x,0}]}}`, and
+    /// `get40(#{40 := V}) -> V;` compiles to
+    /// `{get_map_elements,{f,17},{tr,{x,0},{t_map,any,any}},{list,[{integer,40},{x,0}]}}`.
+    GetMapElements {
+        fail_label: u32,
+        map: Operand,
+        pairs: Vec<(Operand, Operand)>,
+    },
+    /// Writes a copy of a map with each key set to its value. `pairs` holds
+    /// each key and value. The fail label and live-register count are not
+    /// kept: the compiler emits fail label 0, and PBeam needs no live count.
+    /// The pairs go into the copy one by one, as in ERTS, so the copy is a
+    /// flatmap up to 32 keys and a hashmap above 32 keys.
+    ///
+    /// Encoding: opcode, fail label, map operand, destination register, live
+    /// count, extended list, item count, then key and value operands in turn.
+    /// Example: `[0x9A, 0x05, 0x03, 0x03, 0x10, 0x17, 0x20, 0x12, 0x22]` sets
+    /// atom 1 to atom 2 in the map in `x0` and writes the result to `x0`.
+    ///
+    /// Erlang: `add(M) -> M#{output => raw}.` compiles to
+    /// `{put_map_assoc,{f,0},{x,0},{x,0},1,{list,[{atom,output},{atom,raw}]}}`.
+    PutMapAssoc {
+        map: Operand,
+        destination: Operand,
+        pairs: Vec<(Operand, Operand)>,
+    },
+    /// Exchanges the values of two registers.
+    ///
+    /// Encoding: opcode, two registers. Example: `[0xA9, 0x03, 0x13]` swaps
+    /// `x0` and `x1`.
+    ///
+    /// Erlang: `main/0` in `fixtures/map/map_probe.erl` compiles to
+    /// `{swap,{y,3},{x,0}}` before its last external call, and
+    /// `io:put_chars/2` compiles to `{swap,{x,0},{x,2}}`.
+    Swap(Operand, Operand),
     /// Builds a list cell from a head and a tail.
     ///
     /// Erlang: `[X]` compiles to `{put_list,{x,0},nil,{x,0}}`.
@@ -447,6 +485,7 @@ pub(crate) enum TestKind {
     Tuple,
     List,
     Binary,
+    Map,
 }
 
 /// A source or destination in the supported `move` instruction.
@@ -571,10 +610,6 @@ pub(super) fn parse_code(
                 value: read_move_operand(data, &mut cursor, atoms, literals)?,
                 arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
             },
-            OPCODE_SWAP => Instruction::Swap(
-                read_register(data, &mut cursor)?,
-                read_register(data, &mut cursor)?,
-            ),
             OPCODE_CALL_LAST => Instruction::CallLast {
                 arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
                 label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
@@ -642,12 +677,33 @@ pub(super) fn parse_code(
                     destination,
                 }
             }
+            OPCODE_GET_MAP_ELEMENTS => Instruction::GetMapElements {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                map: read_move_operand(data, &mut cursor, atoms, literals)?,
+                pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_PUT_MAP_ASSOC => {
+                let _fail_label = read_operand(data, &mut cursor, TAG_LABEL)?;
+                let map = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let destination = read_register(data, &mut cursor)?;
+                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                Instruction::PutMapAssoc {
+                    map,
+                    destination,
+                    pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
+                }
+            }
+            OPCODE_SWAP => Instruction::Swap(
+                read_register(data, &mut cursor)?,
+                read_register(data, &mut cursor)?,
+            ),
             OPCODE_TEST_IS_ATOM
             | OPCODE_TEST_IS_PID
             | OPCODE_TEST_IS_REFERENCE
             | OPCODE_TEST_IS_TUPLE
             | OPCODE_TEST_IS_LIST
-            | OPCODE_TEST_IS_BINARY => {
+            | OPCODE_TEST_IS_BINARY
+            | OPCODE_TEST_IS_MAP => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let kind = test_kind(opcode)?;
@@ -756,8 +812,42 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
         OPCODE_TEST_IS_TUPLE => Ok(TestKind::Tuple),
         OPCODE_TEST_IS_LIST => Ok(TestKind::List),
         OPCODE_TEST_IS_BINARY => Ok(TestKind::Binary),
+        OPCODE_TEST_IS_MAP => Ok(TestKind::Map),
         _ => Err(error(format!("unsupported BEAM type-test opcode {opcode}"))),
     }
+}
+
+/// Read an extended operand list of pairs, such as the key and value list
+/// of `put_map_assoc`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {list,[{atom,1},{x,1}]}
+/// let pairs = read_operand_pairs(&[0x17, 0x20, 0x12, 0x13], &mut 0, &atoms, &[])?;
+/// assert_eq!(pairs.len(), 1);
+/// ```
+fn read_operand_pairs(
+    data: &[u8],
+    cursor: &mut usize,
+    atoms: &[String],
+    literals: &[Option<Term>],
+) -> Result<Vec<(Operand, Operand)>, BeamError> {
+    if read_integer(data, cursor, TAG_LITERAL)? != LIST_SUBTAG {
+        return Err(error("unsupported BEAM operand list"));
+    }
+    let item_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+        .map_err(|_| error("BEAM operand list is too large"))?;
+    if item_count % 2 != 0 {
+        return Err(error("BEAM operand list has an incomplete pair"));
+    }
+    let mut pairs = Vec::with_capacity(item_count / 2);
+    for _ in 0..item_count / 2 {
+        let first = read_move_operand(data, cursor, atoms, literals)?;
+        let second = read_move_operand(data, cursor, atoms, literals)?;
+        pairs.push((first, second));
+    }
+    Ok(pairs)
 }
 
 /// Skip operands for a known instruction that the runtime cannot execute.
@@ -1097,10 +1187,23 @@ mod tests {
         OPCODE_PUT_TUPLE2, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
         OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_LT,
         OPCODE_TEST_TAGGED_TUPLE, OPCODE_UPDATE_RECORD, parse_code, read_move_operand,
-        read_selection_pair_count, skip_counted_operands, skip_integer_payload, skip_operand,
-        skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
+        read_operand_pairs, read_selection_pair_count, skip_counted_operands, skip_integer_payload,
+        skip_operand, skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
     };
     use crate::{beam::code::Operand, term::Term};
+
+    #[test]
+    fn reads_operand_pairs_and_rejects_other_lists() {
+        let atoms = vec!["output".to_owned()];
+        // {list,[{atom,output},{x,1}]}
+        let pairs = read_operand_pairs(&[0x17, 0x20, 0x12, 0x13], &mut 0, &atoms, &[]).unwrap();
+        assert!(matches!(
+            pairs.as_slice(),
+            [(Operand::Value(Term::Atom(key)), Operand::X(1))] if key == "output"
+        ));
+        assert!(read_operand_pairs(&[0x27, 0x20], &mut 0, &atoms, &[]).is_err());
+        assert!(read_operand_pairs(&[0x17, 0x10, 0x12], &mut 0, &atoms, &[]).is_err());
+    }
 
     #[test]
     fn rejects_invalid_operands_and_code_headers() {
@@ -1122,6 +1225,23 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn sign_extends_large_integer_operands_as_erts() {
+        let integer = |bytes: &[u8]| read_value(bytes, &mut 0, &[]).unwrap();
+        // erlc 29.1.1 writes {integer,-1} as [0x19, 0xFF, 0xFF].
+        assert_eq!(integer(&[0x19, 0xFF, 0xFF]), Term::Integer(-1));
+        // {integer,-101714049538469044}: size code 6 gives eight bytes.
+        assert_eq!(
+            integer(&[0xD9, 0xFE, 0x96, 0xA3, 0x9C, 0x60, 0x97, 0xD3, 0x4C]),
+            Term::Integer(-101714049538469044)
+        );
+        // A leading zero byte keeps a large payload positive.
+        assert_eq!(integer(&[0x39, 0x00, 0xFF, 0xFF]), Term::Integer(65535));
+        // The short and extended forms are never negative.
+        assert_eq!(integer(&[0xF1]), Term::Integer(15));
+        assert_eq!(integer(&[0xE9, 0xFF]), Term::Integer(2047));
     }
 
     #[test]
