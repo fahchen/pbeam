@@ -184,15 +184,32 @@ pub(crate) enum Instruction {
         tail: bool,
         deallocate: u32,
     },
-    /// Calls a zero-arity BIF and writes its value to a register.
+    /// Calls a BIF through `bif0` (opcode 9) or `bif1` (opcode 10) and writes
+    /// its value to a register. `bif0` has no fail label. A `bif1` with fail
+    /// label 0 maps here; a `bif1` with another fail label decodes to
+    /// `Unsupported(10)` after its operands are read.
     ///
-    /// Encoding: opcode, import index, destination register. Example:
-    /// `[0x09, 0x00, 0x03]` calls import 0 and writes `x0`.
+    /// Encoding: `bif0` has opcode, import index, destination register;
+    /// `bif1` has opcode, fail label, import index, argument, destination
+    /// register. An argument can be a typed register (extended subtag 5).
+    /// Example: `io:io_request/2` in the pinned `io.beam` has
+    /// `[0x0A, 0x05, 0xE0, 0x57, 0x03, 0x40, 0x23]`, which calls import 14
+    /// (`erlang:node/1`) with `x0` typed as a pid and writes `x2`, and
+    /// `[0x09, 0xF0, 0x53]`, which calls import 15 (`erlang:node/0`) and
+    /// writes `x5`.
     ///
-    /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`.
-    Bif0 {
+    /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`, and
+    /// `node(Pid) =:= node()` in `io:io_request/2` compiles to
+    /// `{bif,node,{f,0},[{tr,{x,0},pid}],{x,2}}` and
+    /// `{bif,node,nofail,[],{x,5}}`.
+    Bif {
+        /// Module of the BIF, for example `erlang`.
         module: String,
+        /// Name of the BIF, for example `node`.
         name: String,
+        /// Argument operands, in `x0` order of the BIF.
+        arguments: Vec<Operand>,
+        /// Register for the BIF value.
         destination: Operand,
     },
     /// An instruction that is parsed so the module can load, but cannot run.
@@ -822,14 +839,35 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_BIF0 => {
-                let index = read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize;
-                let (module, name, _arity) = imports
-                    .get(index)
-                    .ok_or_else(|| error(format!("BEAM BIF import index {index} out of range")))?;
-                Instruction::Bif0 {
-                    module: module.clone(),
-                    name: name.clone(),
+                let (module, name) = bif_import(
+                    imports,
+                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
+                )?;
+                Instruction::Bif {
+                    module,
+                    name,
+                    arguments: Vec::new(),
                     destination: read_register(data, &mut cursor)?,
+                }
+            }
+            OPCODE_BIF1 => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)?;
+                let (module, name) = bif_import(
+                    imports,
+                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
+                )?;
+                let argument = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let destination = read_register(data, &mut cursor)?;
+                // ponytail: a non-zero fail label jumps on a BIF failure; a later task adds it.
+                if fail_label != 0 {
+                    Instruction::Unsupported(opcode)
+                } else {
+                    Instruction::Bif {
+                        module,
+                        name,
+                        arguments: vec![argument],
+                        destination,
+                    }
                 }
             }
             OPCODE_ALLOCATE | OPCODE_ALLOCATE_HEAP => {
@@ -866,6 +904,25 @@ pub(super) fn parse_code(
         };
         instructions.push(instruction);
     }
+}
+
+/// Return the module and name of the import that a `bif` instruction calls.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let imports = vec![("erlang".to_owned(), "node".to_owned(), 0)];
+/// assert_eq!(bif_import(&imports, 0)?, ("erlang".to_owned(), "node".to_owned()));
+/// assert!(bif_import(&imports, 1).is_err());
+/// ```
+fn bif_import(
+    imports: &[(String, String, u32)],
+    index: usize,
+) -> Result<(String, String), BeamError> {
+    let (module, name, _arity) = imports
+        .get(index)
+        .ok_or_else(|| error(format!("BEAM BIF import index {index} out of range")))?;
+    Ok((module.clone(), name.clone()))
 }
 
 /// Return the type checked by a BEAM type-test opcode.
@@ -927,8 +984,8 @@ fn read_operand_pairs(
 ///
 /// ```rust,ignore
 /// let mut cursor = 0;
-/// skip_unsupported_instruction(OPCODE_BIF1, &[0, 0, 0, 0], &mut cursor)?;
-/// assert_eq!(cursor, 4);
+/// skip_unsupported_instruction(OPCODE_BIF2, &[0, 0, 0, 0, 0], &mut cursor)?;
+/// assert_eq!(cursor, 5);
 /// ```
 fn skip_unsupported_instruction(
     opcode: u8,
@@ -963,7 +1020,7 @@ fn skip_unsupported_instruction(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(unsupported_opcode_operand_count(OPCODE_BIF1), Some(4));
+/// assert_eq!(unsupported_opcode_operand_count(OPCODE_BIF2), Some(5));
 /// assert_eq!(unsupported_opcode_operand_count(255), None);
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
@@ -986,7 +1043,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_NIF_START | OPCODE_IF_END | OPCODE_BUILD_STACKTRACE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_BIF1 => Some(4),
         OPCODE_BIF2 => Some(5),
         OPCODE_TEST_LT | OPCODE_TEST_GE | OPCODE_TEST_EQ | OPCODE_TEST_NE
         | OPCODE_TEST_EXACT_EQ | OPCODE_TEST_EXACT_NE => Some(3),
@@ -1251,14 +1307,14 @@ fn read_move_operand(
 mod tests {
     use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
     use super::{
-        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BIF1, OPCODE_BIF2, OPCODE_BS_CREATE_BIN,
-        OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GET_LIST, OPCODE_GET_RECORD_ELEMENTS,
-        OPCODE_INIT_YREGS, OPCODE_MAKE_FUN3, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD,
-        OPCODE_PUT_TUPLE2, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
-        OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_LT,
-        OPCODE_TEST_TAGGED_TUPLE, OPCODE_UPDATE_RECORD, parse_code, read_move_operand,
-        read_operand_pairs, read_selection_pair_count, skip_counted_operands, skip_integer_payload,
-        skip_operand, skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
+        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BIF2, OPCODE_BS_CREATE_BIN, OPCODE_BS_INIT_WRITABLE,
+        OPCODE_BS_MATCH, OPCODE_GET_LIST, OPCODE_GET_RECORD_ELEMENTS, OPCODE_INIT_YREGS,
+        OPCODE_MAKE_FUN3, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
+        OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
+        OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE,
+        OPCODE_UPDATE_RECORD, parse_code, read_move_operand, read_operand_pairs,
+        read_selection_pair_count, skip_counted_operands, skip_integer_payload, skip_operand,
+        skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
     };
     use crate::{
         beam::code::{Instruction, Operand},
@@ -1430,6 +1486,66 @@ mod tests {
     }
 
     #[test]
+    fn decodes_bif0_and_bif1_with_fail_label_0_into_one_bif_instruction() {
+        let code = |instructions: &[u8]| {
+            let mut code = vec![0, 0, 0, 16];
+            code.extend([0; 16]);
+            code.extend_from_slice(instructions);
+            code.push(0x03);
+            code
+        };
+        let imports = vec![
+            ("erlang".to_owned(), "node".to_owned(), 1),
+            ("erlang".to_owned(), "node".to_owned(), 0),
+        ];
+        // The bytes of `io:io_request/2` in the pinned `io.beam`, with the
+        // import indexes 14 and 15 changed to 0 and 1.
+        let (instructions, _) = parse_code(
+            &code(&[
+                0x0A, 0x05, 0x00, 0x57, 0x03, 0x40, 0x23, // bif1 f0 node/1 {tr,x0,pid} x2
+                0x09, 0x10, 0x53, // bif0 node/0 x5
+                0x0A, 0x35, 0x00, 0x03, 0x13, // bif1 f3 node/1 x0 x1
+            ]),
+            &[],
+            &imports,
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::Bif {
+                    module: node1_module,
+                    name: node1,
+                    arguments: node1_arguments,
+                    destination: Operand::X(2),
+                },
+                Instruction::Bif {
+                    module: node0_module,
+                    name: node0,
+                    arguments: node0_arguments,
+                    destination: Operand::X(5),
+                },
+                Instruction::Unsupported(10),
+                Instruction::End,
+            ] if node1_module == "erlang"
+                && node1 == "node"
+                && matches!(node1_arguments.as_slice(), [Operand::X(0)])
+                && node0_module == "erlang"
+                && node0 == "node"
+                && node0_arguments.is_empty()
+        ));
+        for bif in [&[0x09, 0x20, 0x03][..], &[0x0A, 0x05, 0x20, 0x03, 0x03]] {
+            assert!(
+                parse_code(&code(bif), &[], &imports, &[])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("BEAM BIF import index 2 out of range")
+            );
+        }
+    }
+
+    #[test]
     fn rejects_a_put_tuple2_without_an_element_list() {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
@@ -1471,7 +1587,6 @@ mod tests {
         for (opcode, count) in [
             (OPCODE_TEST_HEAP, 2),
             (OPCODE_BIF0, 2),
-            (OPCODE_BIF1, 4),
             (OPCODE_BIF2, 5),
             (OPCODE_TEST_LT, 3),
             (OPCODE_TEST_TAGGED_TUPLE, 4),
@@ -1495,7 +1610,7 @@ mod tests {
 
         let mut cursor = 0;
         assert!(skip_unsupported_instruction(255, &[], &mut cursor).is_err());
-        assert!(skip_unsupported_instruction(OPCODE_BIF1, &[0], &mut cursor).is_err());
+        assert!(skip_unsupported_instruction(OPCODE_BIF2, &[0], &mut cursor).is_err());
         assert!(skip_counted_operands(&[0x10], &mut 0).is_err());
         assert!(skip_counted_operands(&[0x20], &mut 0).is_err());
     }

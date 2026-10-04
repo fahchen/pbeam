@@ -82,22 +82,23 @@ enum BifResult {
 }
 
 impl BifResult {
-    /// Return the value of a guard BIF called through `bif0`. An exception
-    /// or a trap from a zero-arity BIF is not supported.
+    /// Return the value of a BIF called through a `bif` instruction with
+    /// fail label 0. An exception or a trap from such a BIF is not supported.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(BifResult::Value(Term::Integer(1)).into_bif0_value("self")?, Term::Integer(1));
+    /// let value = BifResult::Value(Term::Integer(1)).into_bif_value("erlang", "self", 0)?;
+    /// assert_eq!(value, Term::Integer(1));
     /// let raise = BifResult::Raise { class: ExceptionClass::Exit, reason: Term::static_atom("badarg") };
-    /// assert!(raise.into_bif0_value("self").is_err());
+    /// assert!(raise.into_bif_value("erlang", "node", 1).is_err());
     /// ```
-    fn into_bif0_value(self, name: &str) -> Result<Term, BeamError> {
+    fn into_bif_value(self, module: &str, name: &str, arity: usize) -> Result<Term, BeamError> {
         match self {
             BifResult::Value(value) => Ok(value),
-            // ponytail: no zero-arity BIF raises or traps; add it when one does.
+            // ponytail: no BIF that a `bif` instruction reaches raises or traps; add it when one does.
             other => Err(error(format!(
-                "unsupported erlang:{name}/0 result {other:?}"
+                "unsupported {module}:{name}/{arity} result {other:?}"
             ))),
         }
     }
@@ -388,17 +389,24 @@ impl BeamProgram {
                         process.frames.push(frame);
                     }
                 }
-                Instruction::Bif0 {
+                Instruction::Bif {
                     module,
                     name,
+                    arguments,
                     destination,
                 } => {
                     if module != "erlang" {
-                        return Err(error(format!("unsupported BIF {module}:{name}/0")));
+                        return Err(error(format!(
+                            "unsupported BIF {module}:{name}/{}",
+                            arguments.len()
+                        )));
                     }
-                    let value = self
-                        .bif(scheduler, module, name, Vec::new())?
-                        .into_bif0_value(name)?;
+                    let values = arguments
+                        .iter()
+                        .map(|argument| read(process, argument))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let result = self.bif(scheduler, module, name, values)?;
+                    let value = result.into_bif_value(module, name, arguments.len())?;
                     write(scheduler.current_process_mut(), destination, value)?;
                 }
                 Instruction::Jump(label) => jump(module, process, *label)?,
@@ -684,6 +692,14 @@ impl BeamProgram {
                 old
             }
             ("erlang", "self", []) => Term::Pid(scheduler.current_process_mut().id),
+            // PBeam is a local node that is not distributed, so every pid is
+            // local and its node is `nonode@nohost`, as on ERTS (`dist.c`).
+            ("erlang", "node", [] | [Term::Pid(_)]) => Term::static_atom("nonode@nohost"),
+            ("erlang", "node", [argument]) => {
+                return Err(error(format!(
+                    "unsupported erlang:node/1 argument {argument:?}: not a pid"
+                )));
+            }
             ("erlang", "make_ref", []) => Term::Reference(scheduler.make_ref()?),
             ("erlang", "link", [Term::Pid(target)]) => scheduler.link(*target)?,
             ("erlang", "group_leader", []) => {
@@ -1218,7 +1234,7 @@ mod tests {
         body.push(Instruction::Return);
         assert!(matches!(run_with_child(body), Ok(Term::Pid(_))));
         assert!(error(spawn_link_child(Term::Integer(1))).contains("not a proper list"));
-        assert!(error(vec![erlang_call("node", 0, false)]).contains("erlang:node/0"));
+        assert!(error(vec![erlang_call("is_alive", 0, false)]).contains("erlang:is_alive/0"));
     }
 
     #[test]
@@ -1296,17 +1312,19 @@ mod tests {
             .contains("send target")
         );
         assert!(
-            error(vec![Instruction::Bif0 {
+            error(vec![Instruction::Bif {
                 module: "erlang".into(),
-                name: "node".into(),
+                name: "is_alive".into(),
+                arguments: Vec::new(),
                 destination: Operand::X(0),
             }])
-            .contains("unresolved external MFA erlang:node/0")
+            .contains("unresolved external MFA erlang:is_alive/0")
         );
         assert!(
-            error(vec![Instruction::Bif0 {
+            error(vec![Instruction::Bif {
                 module: "lists".into(),
                 name: "node".into(),
+                arguments: Vec::new(),
                 destination: Operand::X(0),
             }])
             .contains("unsupported BIF lists:node/0")
@@ -1904,22 +1922,60 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_exception_from_a_zero_arity_bif() {
+    fn rejects_an_exception_from_a_bif_instruction() {
         assert_eq!(
             BifResult::Value(Term::Integer(1))
-                .into_bif0_value("self")
+                .into_bif_value("erlang", "self", 0)
                 .unwrap(),
             Term::Integer(1)
         );
         assert!(
             BifResult::Raise {
-                class: ExceptionClass::Exit,
-                reason: test_atom("boom"),
+                class: ExceptionClass::Error,
+                reason: test_atom("badarg"),
             }
-            .into_bif0_value("self")
+            .into_bif_value("erlang", "node", 1)
             .unwrap_err()
             .to_string()
-            .contains("unsupported erlang:self/0 result")
+            .contains("unsupported erlang:node/1 result")
+        );
+    }
+
+    #[test]
+    fn returns_the_local_node_for_node_0_and_a_pid() {
+        let node = |arguments: Vec<Operand>| {
+            make_program(
+                vec![
+                    Instruction::Bif {
+                        module: "erlang".into(),
+                        name: "self".into(),
+                        arguments: Vec::new(),
+                        destination: Operand::X(1),
+                    },
+                    Instruction::Bif {
+                        module: "erlang".into(),
+                        name: "node".into(),
+                        arguments,
+                        destination: Operand::X(0),
+                    },
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        // ERTS 29.1.1 without distribution: node() and node(self()) are nonode@nohost.
+        assert_eq!(
+            node(Vec::new()).unwrap(),
+            Term::static_atom("nonode@nohost")
+        );
+        assert_eq!(
+            node(vec![Operand::X(1)]).unwrap(),
+            Term::static_atom("nonode@nohost")
+        );
+        assert_eq!(
+            node(vec![atom("foo")]).unwrap_err().to_string(),
+            "unsupported erlang:node/1 argument Atom(\"foo\"): not a pid"
         );
     }
 
@@ -1966,9 +2022,10 @@ mod tests {
         // is still active, so ERTS returns true without flushing.
         let program = make_program(
             vec![
-                Instruction::Bif0 {
+                Instruction::Bif {
                     module: "erlang".into(),
                     name: "self".into(),
+                    arguments: Vec::new(),
                     destination: Operand::X(1),
                 },
                 Instruction::Move(atom("process"), Operand::X(0)),
