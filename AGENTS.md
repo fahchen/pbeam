@@ -75,6 +75,8 @@ Whenever direction or a solution changes, update the affected task bodies, accep
 ## Tools and collaboration
 
 - Set development tool versions in `mise.toml`; local and CI setup must use those pins rather than duplicating version settings in commands or fixture projects.
+- Use these compact `mise` tasks in development loops. They print results and failures, not full logs. `mise run check` stays the merge gate.
+  - `mise run check-brief` runs `mise run check`. It prints `check: pass` and the `Application line coverage` line, or the failed step and the uncovered lines. The full log is in `target/check.log`.
 - Prefer `fd` and `rg`; use `ast-grep` for structural searches when appropriate.
 - Use fish for shell work and `gh` for GitHub operations. Prefer command help before external documentation. Use Context7 for library/API documentation and setup/code-generation guidance when available.
 - Follow the directory's JavaScript lockfile: `bun.lock` means bun; `pnpm-lock.yaml` means pnpm.
