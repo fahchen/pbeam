@@ -1,6 +1,8 @@
 #!/usr/bin/env escript
 %% Evaluate Erlang expressions as `erl -eval` does and print the value or the exception.
 %% Usage: escript scripts/erts_eval.escript <code path or ""> <expressions>
+%% An exit signal to this process, such as from exit(self(), kill), is not an exception: the runtime stops and writes erl_crash.dump, as with `erl -eval`
+%% (OTP-29.1.1 erts/preloaded/src/init.erl:1552-1566 runs erl_eval:exprs/2 in the boot process).
 
 main([CodePath, Expr]) ->
     add_path(CodePath),

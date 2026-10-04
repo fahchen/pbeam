@@ -75,12 +75,12 @@ Whenever direction or a solution changes, update the affected task bodies, accep
 ## Tools and collaboration
 
 - Set development tool versions in `mise.toml`; local and CI setup must use those pins rather than duplicating version settings in commands or fixture projects.
-- Use these compact `mise` tasks in development loops. They print results and failures, not full logs. `mise run check` stays the merge gate.
-  - `mise run check-brief` runs `mise run check`. It prints `check: pass` and the `Application line coverage` line, or the failed step and the uncovered lines. The full log is in `target/check.log`.
-  - `mise run test-focus <cargo test arguments>` runs `cargo test`, for example `--test group` or a test name filter. It prints the result lines and failures, or `no test ran`.
-  - `mise run erts-eval [--pa <dir>] '<expressions>'` evaluates Erlang expressions with `erl_eval` on the pinned OTP, as `erl -eval` does. It prints the value, or `exception <class>: <reason>` without a stack trace, and writes no crash dump. To see the behavior of compiled BEAM instructions, compile a probe module and call it with `--pa`.
-  - `mise run disasm <module or file.beam> [name/arity]...` prints the `beam_disasm` instructions of the selected functions, or of all functions, one instruction on each line and without `{line,_}` instructions. A preloaded module, such as `erlang`, resolves to its BEAM file in the erts `ebin` directory.
-  - `mise run fixture-beam [--write] [fixtures/<dir>/<name>.erl]...` compiles the Erlang fixtures, or all `fixtures/*/*.erl`, with the options that each committed BEAM file records. It compares all chunks except `CInf` and `Dbgi`, which hold the source path and the build directory. It prints only the fixtures that differ, are new, or do not compile, and `N of M fixtures same`. `--write` writes only the BEAM files that differ or are new.
+- Use these compact `mise` tasks in development loops. They print results and failures, not full logs. `mise run check` stays the merge gate. `mise run <task> --help` shows the arguments.
+  - `mise run check-brief`: run `mise run check`. Print the result and the coverage line, or the failure. The full log is in `target/check.log`.
+  - `mise run test-focus [cargo test arguments] [-- <harness arguments>]`: run selected Rust tests, for example `--test order -- --nocapture`.
+  - `mise run erts-eval [--pa <dir>] '<expressions>'`: evaluate on the pinned OTP as `erl -eval` does. Print the value or `exception <class>: <reason>`. An exit signal to the evaluating process stops the runtime, as with `erl -eval`.
+  - `mise run disasm <module | file.beam> [name/arity]...`: print the `beam_disasm` instructions without `{line,_}`.
+  - `mise run fixture-beam [--write] [fixtures/<dir>/<name>.erl]...`: compile the Erlang fixtures and compare them with the committed `.beam` files, except `CInf` and `Dbgi`.
 - Prefer `fd` and `rg`; use `ast-grep` for structural searches when appropriate.
 - Use fish for shell work and `gh` for GitHub operations. Prefer command help before external documentation. Use Context7 for library/API documentation and setup/code-generation guidance when available.
 - Follow the directory's JavaScript lockfile: `bun.lock` means bun; `pnpm-lock.yaml` means pnpm.
