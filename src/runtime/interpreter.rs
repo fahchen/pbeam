@@ -257,10 +257,59 @@ impl BeamProgram {
                         TestKind::Pid => matches!(value, Term::Pid(_)),
                         TestKind::List => matches!(value, Term::List(_)),
                         TestKind::Binary => matches!(value, Term::Binary(_)),
+                        TestKind::Map => matches!(value, Term::Map(_)),
                     };
                     if !passed {
                         jump(module, process, *fail_label)?;
                     }
+                }
+                Instruction::GetMapElements {
+                    fail_label,
+                    map,
+                    pairs,
+                } => {
+                    let map = read(process, map)?;
+                    let Term::Map(entries) = &map else {
+                        return Err(error("BEAM get_map_elements source is not a map"));
+                    };
+                    let mut found = Vec::with_capacity(pairs.len());
+                    for (key, destination) in pairs {
+                        let key = read(process, key)?;
+                        let Some((_, value)) =
+                            entries.iter().find(|(existing, _)| existing == &key)
+                        else {
+                            break;
+                        };
+                        found.push((destination, value.clone()));
+                    }
+                    if found.len() < pairs.len() {
+                        jump(module, process, *fail_label)?;
+                    } else {
+                        for (destination, value) in found {
+                            write(process, destination, value)?;
+                        }
+                    }
+                }
+                Instruction::PutMapAssoc {
+                    map,
+                    destination,
+                    pairs,
+                } => {
+                    let mut map = read(process, map)?;
+                    let Term::Map(entries) = &mut map else {
+                        // ponytail: ERTS raises error {badmap, Map}; exceptions arrive in #73.
+                        return Err(error("unsupported BEAM put_map_assoc source: not a map"));
+                    };
+                    for (key, value) in pairs {
+                        put_map_entry(entries, read(process, key)?, read(process, value)?)?;
+                    }
+                    write(process, destination, map)?;
+                }
+                Instruction::Swap(left, right) => {
+                    let left_value = read(process, left)?;
+                    let right_value = read(process, right)?;
+                    write(process, left, right_value)?;
+                    write(process, right, left_value)?;
                 }
                 Instruction::TestExactEqual {
                     fail_label,
@@ -474,6 +523,39 @@ impl BeamProgram {
         };
         Ok(Ok(value))
     }
+}
+
+/// Set a key to a value in map entries that are sorted by atom key. Replace
+/// the value when the key exists, as `put_map_assoc` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut entries = vec![(Term::Atom("b".into()), Term::Integer(1))];
+/// put_map_entry(&mut entries, Term::Atom("a".into()), Term::Integer(2))?;
+/// assert_eq!(entries[0].0, Term::Atom("a".into()));
+/// ```
+///
+/// # Errors
+///
+/// A key that is not an atom is not supported yet.
+fn put_map_entry(entries: &mut Vec<(Term, Term)>, key: Term, value: Term) -> Result<(), BeamError> {
+    let Term::Atom(name) = &key else {
+        // ponytail: atom keys only; add ERTS term order when a fixture uses another key type.
+        return Err(error(format!("unsupported map key {key:?}")));
+    };
+    // A stored key that is not an atom sorts first, so the search stays total.
+    let position = entries.binary_search_by(|(existing, _)| {
+        let Term::Atom(existing) = existing else {
+            return std::cmp::Ordering::Less;
+        };
+        existing.as_str().cmp(name)
+    });
+    match position {
+        Ok(index) => entries[index].1 = value,
+        Err(index) => entries.insert(index, (key, value)),
+    }
+    Ok(())
 }
 
 /// Return the active frame of a running process.
@@ -699,7 +781,9 @@ fn write_operand(
 mod tests {
     use std::{collections::HashMap, path::PathBuf, process::Command};
 
-    use super::{BeamProgram, call_arguments, function_at_label, read_operand, write_operand};
+    use super::{
+        BeamProgram, call_arguments, function_at_label, put_map_entry, read_operand, write_operand,
+    };
     use crate::{
         BeamModule, Term,
         beam::code::{Instruction, Operand},
@@ -982,6 +1066,94 @@ mod tests {
                 .execute("fixture", "main", &[Term::Integer(1)])
                 .unwrap(),
             Term::Atom("other".into())
+        );
+    }
+
+    #[test]
+    fn keeps_map_entries_sorted_by_atom_key() {
+        let atom = |name: &str| Term::Atom(name.into());
+        let mut entries = vec![(Term::Integer(0), atom("first")), (atom("m"), atom("m"))];
+        put_map_entry(&mut entries, atom("z"), atom("z")).unwrap();
+        put_map_entry(&mut entries, atom("a"), atom("a")).unwrap();
+        let keys: Vec<_> = entries.iter().map(|(key, _)| key.clone()).collect();
+        assert_eq!(keys, [Term::Integer(0), atom("a"), atom("m"), atom("z")]);
+    }
+
+    #[test]
+    fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
+        let map = |pairs: Vec<(&str, i64)>| {
+            Operand::Value(Term::Map(
+                pairs
+                    .into_iter()
+                    .map(|(key, value)| (Term::Atom(key.into()), Term::Integer(value)))
+                    .collect(),
+            ))
+        };
+        let run = |body: Vec<Instruction>| make_program(body, 0).execute("fixture", "main", &[]);
+        // Replace an existing key, then read it back.
+        assert_eq!(
+            run(vec![
+                Instruction::PutMapAssoc {
+                    map: map(vec![("a", 1), ("b", 2)]),
+                    destination: Operand::X(0),
+                    pairs: vec![(atom("b"), Operand::Value(Term::Integer(3)))],
+                },
+                Instruction::GetMapElements {
+                    fail_label: 3,
+                    map: Operand::X(0),
+                    pairs: vec![(atom("b"), Operand::X(0))],
+                },
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::Move(atom("missing"), Operand::X(0)),
+                Instruction::Return,
+            ])
+            .unwrap(),
+            Term::Integer(3)
+        );
+        // A missing key jumps to the fail label.
+        assert_eq!(
+            run(vec![
+                Instruction::GetMapElements {
+                    fail_label: 3,
+                    map: map(vec![("a", 1)]),
+                    pairs: vec![(atom("a"), Operand::X(1)), (atom("b"), Operand::X(0))],
+                },
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::Move(atom("missing"), Operand::X(0)),
+                Instruction::Return,
+            ])
+            .unwrap(),
+            Term::Atom("missing".into())
+        );
+        let error = |body| run(body).unwrap_err().to_string();
+        assert!(
+            error(vec![Instruction::GetMapElements {
+                fail_label: 3,
+                map: atom("a"),
+                pairs: vec![],
+            }])
+            .contains("get_map_elements source is not a map")
+        );
+        assert!(
+            error(vec![Instruction::PutMapAssoc {
+                map: atom("a"),
+                destination: Operand::X(0),
+                pairs: vec![],
+            }])
+            .contains("put_map_assoc source: not a map")
+        );
+        assert!(
+            error(vec![Instruction::PutMapAssoc {
+                map: map(vec![]),
+                destination: Operand::X(0),
+                pairs: vec![(
+                    Operand::Value(Term::Integer(1)),
+                    Operand::Value(Term::Integer(1))
+                )],
+            }])
+            .contains("unsupported map key Integer(1)")
         );
     }
 

@@ -1,8 +1,8 @@
 use std::fmt;
 
-/// A BEAM term. Lists and tuples can nest to any depth, as in ERTS, so
-/// `Drop`, `Clone`, `PartialEq`, and `Debug` use explicit work stacks and do
-/// not recurse on the Rust stack.
+/// A BEAM term. Lists, tuples, and maps can nest to any depth, as in ERTS,
+/// so `Drop`, `Clone`, `PartialEq`, and `Debug` use explicit work stacks and
+/// do not recurse on the Rust stack.
 pub enum Term {
     Atom(String),
     Binary(Vec<u8>),
@@ -11,38 +11,58 @@ pub enum Term {
     List(Vec<Term>),
     /// A BEAM tuple.
     Tuple(Vec<Term>),
+    /// A BEAM map as key-value pairs. The runtime keeps the pairs sorted by
+    /// atom key, so two maps with the same pairs are equal.
+    Map(Vec<(Term, Term)>),
     /// A process identifier owned by this runtime.
     Pid(ProcessId),
     /// A reference owned by this runtime.
     Reference(Reference),
 }
 
-/// The kind of a term that contains elements.
+/// The kind of a term that contains other terms.
 #[derive(Clone, Copy)]
 enum Kind {
     List,
     Tuple,
+    Map,
 }
 
+/// The nested terms of a list, tuple, or map, in order. A map gives each
+/// key and then its value.
+type Nested<'a> = Box<dyn Iterator<Item = &'a Term> + 'a>;
+
 impl Kind {
-    /// Build a term of this kind from its elements.
+    /// Build a term of this kind from its nested terms. For a map, the
+    /// terms are keys and values in turn.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(Kind::Tuple.build(vec![]), Term::Tuple(vec![]));
+    /// let map = Kind::Map.build(vec![Term::Atom("a".into()), Term::Integer(1)]);
+    /// assert_eq!(map, Term::Map(vec![(Term::Atom("a".into()), Term::Integer(1))]));
     /// ```
-    fn build(self, elements: Vec<Term>) -> Term {
+    fn build(self, terms: Vec<Term>) -> Term {
         match self {
-            Kind::List => Term::List(elements),
-            Kind::Tuple => Term::Tuple(elements),
+            Kind::List => Term::List(terms),
+            Kind::Tuple => Term::Tuple(terms),
+            Kind::Map => {
+                let mut pairs = Vec::with_capacity(terms.len() / 2);
+                let mut terms = terms.into_iter();
+                while let (Some(key), Some(value)) = (terms.next(), terms.next()) {
+                    pairs.push((key, value));
+                }
+                Term::Map(pairs)
+            }
         }
     }
 }
 
 impl Term {
-    /// Copy a term that has no elements. For a list or tuple, return its
-    /// elements and kind instead, so the caller copies them.
+    /// Copy a term that has no nested terms. For a list, tuple, or map,
+    /// return its nested terms, kind, and count instead, so the caller
+    /// copies them.
     ///
     /// # Examples
     ///
@@ -50,10 +70,15 @@ impl Term {
     /// assert_eq!(Term::Integer(1).shallow_clone().ok(), Some(Term::Integer(1)));
     /// assert!(Term::List(vec![]).shallow_clone().is_err());
     /// ```
-    fn shallow_clone(&self) -> Result<Term, (&[Term], Kind)> {
+    fn shallow_clone(&self) -> Result<Term, (Nested<'_>, Kind, usize)> {
         match self {
-            Term::List(elements) => Err((elements, Kind::List)),
-            Term::Tuple(elements) => Err((elements, Kind::Tuple)),
+            Term::List(elements) => Err((Box::new(elements.iter()), Kind::List, elements.len())),
+            Term::Tuple(elements) => Err((Box::new(elements.iter()), Kind::Tuple, elements.len())),
+            Term::Map(pairs) => Err((
+                Box::new(pairs.iter().flat_map(|(key, value)| [key, value])),
+                Kind::Map,
+                pairs.len() * 2,
+            )),
             Term::Atom(name) => Ok(Term::Atom(name.clone())),
             Term::Binary(bytes) => Ok(Term::Binary(bytes.clone())),
             Term::Integer(value) => Ok(Term::Integer(*value)),
@@ -61,11 +86,34 @@ impl Term {
             Term::Reference(reference) => Ok(Term::Reference(*reference)),
         }
     }
+
+    /// Move the nested terms of a list, tuple, or map onto a work stack and
+    /// leave the term empty.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut pending = Vec::new();
+    /// Term::Tuple(vec![Term::Integer(1)]).take_nested(&mut pending);
+    /// assert_eq!(pending, vec![Term::Integer(1)]);
+    /// ```
+    fn take_nested(&mut self, pending: &mut Vec<Term>) {
+        match self {
+            Term::List(elements) | Term::Tuple(elements) => pending.append(elements),
+            Term::Map(pairs) => {
+                for (key, value) in std::mem::take(pairs) {
+                    pending.push(key);
+                    pending.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Drop for Term {
-    /// Move nested elements onto a work stack, so dropping a deep term does
-    /// not recurse.
+    /// Move nested terms onto a work stack, so dropping a deep term does not
+    /// recurse.
     ///
     /// # Examples
     ///
@@ -74,20 +122,17 @@ impl Drop for Term {
     /// drop(deep);
     /// ```
     fn drop(&mut self) {
-        let (Term::List(elements) | Term::Tuple(elements)) = self else {
-            return;
-        };
-        let mut pending = std::mem::take(elements);
+        let mut pending = Vec::new();
+        self.take_nested(&mut pending);
         while let Some(mut term) = pending.pop() {
-            if let Term::List(elements) | Term::Tuple(elements) = &mut term {
-                pending.append(elements);
-            }
+            term.take_nested(&mut pending);
         }
     }
 }
 
 impl Clone for Term {
-    /// Copy a term with a work stack of partly copied lists and tuples.
+    /// Copy a term with a work stack of partly copied lists, tuples, and
+    /// maps.
     ///
     /// # Examples
     ///
@@ -96,18 +141,18 @@ impl Clone for Term {
     /// assert_eq!(term.clone(), term);
     /// ```
     fn clone(&self) -> Self {
-        let (elements, kind) = match self.shallow_clone() {
+        let (nested, kind, count) = match self.shallow_clone() {
             Ok(term) => return term,
             Err(container) => container,
         };
-        let mut stack = vec![(elements.iter(), kind, Vec::with_capacity(elements.len()))];
+        let mut stack = vec![(nested, kind, Vec::with_capacity(count))];
         loop {
             let (source, _, copied) = stack.last_mut().expect("the clone stack is not empty");
-            if let Some(element) = source.next() {
-                match element.shallow_clone() {
+            if let Some(term) = source.next() {
+                match term.shallow_clone() {
                     Ok(term) => copied.push(term),
-                    Err((elements, kind)) => {
-                        stack.push((elements.iter(), kind, Vec::with_capacity(elements.len())));
+                    Err((nested, kind, count)) => {
+                        stack.push((nested, kind, Vec::with_capacity(count)));
                     }
                 }
                 continue;
@@ -123,7 +168,8 @@ impl Clone for Term {
 }
 
 impl PartialEq for Term {
-    /// Compare two terms pair by pair with a work stack.
+    /// Compare two terms pair by pair with a work stack. Two maps are equal
+    /// when their sorted pairs are equal.
     ///
     /// # Examples
     ///
@@ -137,6 +183,14 @@ impl PartialEq for Term {
             let equal = match pair {
                 (Term::List(left), Term::List(right)) | (Term::Tuple(left), Term::Tuple(right)) => {
                     pairs.extend(left.iter().zip(right));
+                    left.len() == right.len()
+                }
+                (Term::Map(left), Term::Map(right)) => {
+                    for ((left_key, left_value), (right_key, right_value)) in left.iter().zip(right)
+                    {
+                        pairs.push((left_key, right_key));
+                        pairs.push((left_value, right_value));
+                    }
                     left.len() == right.len()
                 }
                 (Term::Atom(left), Term::Atom(right)) => left == right,
@@ -158,7 +212,8 @@ impl Eq for Term {}
 
 impl fmt::Debug for Term {
     /// Write the same text as a derived `Debug`, for example
-    /// `Tuple([Atom("undef"), List([])])`, with a work stack.
+    /// `Tuple([Atom("undef"), List([])])` or `Map([(Atom("a"), Integer(1))])`,
+    /// with a work stack.
     ///
     /// # Examples
     ///
@@ -200,6 +255,20 @@ impl fmt::Debug for Term {
                         }
                     }
                 }
+                Term::Map(pairs) => {
+                    formatter.write_str("Map([")?;
+                    items.push(Item::Text("])"));
+                    for (index, (key, value)) in pairs.iter().enumerate().rev() {
+                        items.push(Item::Text(")"));
+                        items.push(Item::Term(value));
+                        items.push(Item::Text(", "));
+                        items.push(Item::Term(key));
+                        items.push(Item::Text("("));
+                        if index > 0 {
+                            items.push(Item::Text(", "));
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -218,13 +287,15 @@ pub struct Reference(pub(crate) u64);
 mod tests {
     use super::{ProcessId, Reference, Term};
 
+    fn atom(name: &str) -> Term {
+        Term::Atom(name.into())
+    }
+
     fn deep(levels: usize) -> Term {
-        (0..levels).fold(Term::List(vec![]), |inner, level| {
-            if level % 2 == 0 {
-                Term::Tuple(vec![inner])
-            } else {
-                Term::List(vec![Term::Integer(1), inner])
-            }
+        (0..levels).fold(Term::List(vec![]), |inner, level| match level % 3 {
+            0 => Term::Tuple(vec![inner]),
+            1 => Term::List(vec![Term::Integer(1), inner]),
+            _ => Term::Map(vec![(atom("k"), inner)]),
         })
     }
 
@@ -234,7 +305,7 @@ mod tests {
         let copy = term.clone();
         assert_eq!(term, copy);
         assert_ne!(term, deep(999_999));
-        assert!(format!("{copy:?}").starts_with("List([Integer(1), Tuple([List([Integer(1), "));
+        assert!(format!("{copy:?}").starts_with("Tuple([Map([(Atom(\"k\"), List([Integer(1), "));
         drop(term);
         drop(copy);
     }
@@ -242,7 +313,7 @@ mod tests {
     #[test]
     fn matches_the_derived_debug_text_and_compares_every_variant() {
         let leaves = [
-            Term::Atom("ok".into()),
+            atom("ok"),
             Term::Binary(vec![1, 2]),
             Term::Integer(-3),
             Term::Pid(ProcessId(4)),
@@ -264,5 +335,29 @@ mod tests {
             Term::Tuple(vec![Term::Atom("a".into())]),
             Term::Tuple(vec![Term::Atom("b".into())])
         );
+    }
+
+    #[test]
+    fn formats_and_compares_maps_by_their_pairs() {
+        let map = Term::Map(vec![
+            (atom("a"), Term::Integer(1)),
+            (atom("b"), Term::List(vec![])),
+        ]);
+        assert_eq!(
+            format!("{map:?}"),
+            "Map([(Atom(\"a\"), Integer(1)), (Atom(\"b\"), List([]))])"
+        );
+        assert_eq!(format!("{:?}", Term::Map(vec![])), "Map([])");
+        assert_eq!(map.clone(), map);
+        assert_ne!(map, Term::Map(vec![(atom("a"), Term::Integer(1))]));
+        assert_ne!(
+            Term::Map(vec![(atom("a"), Term::Integer(1))]),
+            Term::Map(vec![(atom("a"), Term::Integer(2))])
+        );
+        assert_ne!(
+            Term::Map(vec![(atom("a"), Term::Integer(1))]),
+            Term::Map(vec![(atom("b"), Term::Integer(1))])
+        );
+        assert_ne!(Term::Map(vec![]), Term::List(vec![]));
     }
 }

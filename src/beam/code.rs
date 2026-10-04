@@ -35,6 +35,7 @@ const ETF_NIL_EXT: u8 = 106;
 const ETF_STRING_EXT: u8 = 107;
 const ETF_LIST_EXT: u8 = 108;
 const ETF_BINARY_EXT: u8 = 109;
+const ETF_MAP_EXT: u8 = 116;
 const ETF_SMALL_ATOM_UTF8_EXT: u8 = 119;
 const FIRST_ATOM_INDEX: usize = 1;
 const FIRST_LABEL_NUMBER: u32 = 1;
@@ -113,12 +114,14 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// literal_count ::= u32be
 /// literal_entry ::= term_size:u32be 131 external_term ; term_size bytes in total
 /// external_term ::= binary_term | string_term | nil_term | atom_term | tuple_term | list_term
+///                 | map_term
 /// binary_term ::= 109 binary_size:u32be byte[binary_size]
 /// string_term ::= 107 string_size:u16be byte[string_size]
 /// nil_term    ::= 106
 /// atom_term   ::= 119 name_size:u8 utf8_byte[name_size]
 /// tuple_term  ::= 104 arity:u8 external_term[arity]
 /// list_term   ::= 108 length:u32be external_term[length] tail:external_term
+/// map_term    ::= 116 pair_count:u32be (key:atom_term value:external_term)[pair_count]
 ///
 /// compact(tag) ::= short(tag) | extended(tag)
 /// short(tag)   ::= value:4 0 tag:3
@@ -138,9 +141,10 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// `opcode_max` is not checked. The parser rejects duplicate chunk IDs. It
 /// supports only the listed instructions and compact operand forms. `LitT`
 /// supports uncompressed tables. A literal loads as a value only when every
-/// nested tag is listed; another tag, such as a map, integer, or improper list
-/// tail, makes the literal unsupported, and execution fails only if an
-/// instruction uses it. `[a|[b]]` and `[a,b]` give the same list. The
+/// nested tag is listed; another tag, such as an integer, an improper list
+/// tail, or a map key that is not an atom, makes the literal unsupported, and
+/// execution fails only if an instruction uses it. `[a|[b]]` and `[a,b]` give
+/// the same list. A map literal keeps its pairs sorted by atom key. The
 /// parser retains generated instructions that it does not execute. Execution
 /// fails if it reaches one. Compact
 /// tags occupy the low three bits. The parser accepts the short and one-byte
@@ -397,7 +401,8 @@ fn read_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
     Ok(Some(term))
 }
 
-/// A list or tuple that `read_external_term` has started but not finished.
+/// A list, tuple, or map that `read_external_term` has started but not
+/// finished.
 enum PartialTerm {
     /// A tuple that still needs `remaining` elements.
     Tuple { remaining: u8, elements: Vec<Term> },
@@ -405,12 +410,19 @@ enum PartialTerm {
     List { remaining: u32, elements: Vec<Term> },
     /// A list whose elements are read and whose tail is next.
     ListTail { elements: Vec<Term> },
+    /// A map that still needs `remaining` pairs. `key` holds the atom key of
+    /// the pair whose value is next.
+    Map {
+        remaining: u32,
+        pairs: Vec<(String, Term)>,
+        key: Option<String>,
+    },
 }
 
 /// Read one external term at the cursor and advance past it. Return `None`
-/// for a tag or list tail that `literal_entry` does not list. Nested lists
-/// and tuples use a work stack, so nesting has no fixed depth limit, as in
-/// the ERTS decoder.
+/// for a tag, list tail, or map key that `literal_entry` does not list.
+/// Nested lists, tuples, and maps use a work stack, so nesting has no fixed
+/// depth limit, as in the ERTS decoder.
 ///
 /// # Examples
 ///
@@ -466,6 +478,17 @@ fn read_external_term(data: &[u8], cursor: &mut usize) -> Result<Option<Term>, B
                 });
                 continue;
             }
+            ETF_MAP_EXT => match read_u32(take(data, cursor, WORD_SIZE)?)? {
+                0 => Term::Map(Vec::new()),
+                remaining => {
+                    partial.push(PartialTerm::Map {
+                        remaining,
+                        pairs: Vec::new(),
+                        key: None,
+                    });
+                    continue;
+                }
+            },
             _ => return Ok(None),
         };
         // Give the finished term to the innermost partial term, and finish
@@ -508,6 +531,43 @@ fn read_external_term(data: &[u8], cursor: &mut usize) -> Result<Option<Term>, B
                     elements.append(tail);
                     term = Term::List(elements);
                     continue;
+                }
+                Some(PartialTerm::Map {
+                    remaining,
+                    pairs,
+                    key: None,
+                }) => {
+                    let Term::Atom(key) = &mut term else {
+                        return Ok(None);
+                    };
+                    let key = Some(std::mem::take(key));
+                    partial.push(PartialTerm::Map {
+                        remaining,
+                        pairs,
+                        key,
+                    });
+                }
+                Some(PartialTerm::Map {
+                    remaining,
+                    mut pairs,
+                    key: Some(key),
+                }) => {
+                    pairs.push((key, term));
+                    if remaining == 1 {
+                        pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
+                        term = Term::Map(
+                            pairs
+                                .into_iter()
+                                .map(|(key, value)| (Term::Atom(key), value))
+                                .collect(),
+                        );
+                        continue;
+                    }
+                    partial.push(PartialTerm::Map {
+                        remaining: remaining - 1,
+                        pairs,
+                        key: None,
+                    });
                 }
             }
             break;
@@ -811,6 +871,27 @@ mod tests {
         assert_eq!(
             read_literal(&[131, 108, 0, 0, 0, 0, 106]).unwrap(),
             Some(Term::List(vec![]))
+        );
+
+        // #{b => [], a => {}} keeps its pairs sorted by atom key; #{} is empty.
+        assert_eq!(
+            read_literal(&[
+                131, 116, 0, 0, 0, 2, 119, 1, b'b', 106, 119, 1, b'a', 104, 0
+            ])
+            .unwrap(),
+            Some(Term::Map(vec![
+                (atom("a"), Term::Tuple(vec![])),
+                (atom("b"), Term::List(vec![])),
+            ]))
+        );
+        assert_eq!(
+            read_literal(&[131, 116, 0, 0, 0, 0]).unwrap(),
+            Some(Term::Map(vec![]))
+        );
+        // A map key that is not an atom makes the literal unsupported.
+        assert_eq!(
+            read_literal(&[131, 116, 0, 0, 0, 1, 106, 106]).unwrap(),
+            None
         );
 
         // ERTS decodes a term nested 1000000 levels deep; so does PBeam.
