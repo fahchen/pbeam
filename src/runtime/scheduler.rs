@@ -288,7 +288,7 @@ impl Scheduler {
         leader: ProcessId,
     ) -> Result<(), BeamError> {
         let Some(process) = self.processes.get_mut(&target) else {
-            // ponytail: ERTS raises error badarg; this raise is not implemented yet.
+            // ponytail: ERTS raises error badarg; see "Exception raise sites" in docs/erts-differences.md.
             return Err(error(format!(
                 "unsupported group_leader/2 target {target:?}"
             )));
