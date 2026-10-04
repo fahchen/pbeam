@@ -228,8 +228,8 @@ pub(crate) enum Instruction {
     /// current_stacktrace))`, compiles to
     /// `{bif,element,{f,0},[{integer,2},{x,0}],{x,0}}`. The guard
     /// `when tuple_size(X) >= 2` in `fixtures/group/group_probe.erl`
-    /// compiles to `{bif,tuple_size,{f,5},[{x,0}],{x,1}}`, which is
-    /// `[0x0A, 0x55, 0x10, 0x03, 0x13]` with import 1.
+    /// compiles to `{bif,tuple_size,{f,22},[{x,0}],{x,1}}`, which is
+    /// `[0x0A, 0x0D, 0x16, 0x80, 0x03, 0x13]` with import 8.
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
@@ -514,12 +514,13 @@ pub(crate) enum Instruction {
     /// other operand pair gives a runtime error.
     ///
     /// Encoding: opcode, fail label, two operands. A typed register (extended
-    /// subtag 5) reads as its register. Example: `[0x28, 0x55, 0x57, 0x13,
-    /// 0x10, 0x21]` fails to label 5 when `x1` is less than the integer 2.
+    /// subtag 5) reads as its register. Example: `[0x28, 0x0D, 0x16, 0x57,
+    /// 0x13, 0x20, 0x21]` fails to label 22 when `x1` is less than the
+    /// integer 2.
     ///
     /// Erlang: the guard `when tuple_size(X) >= 2` in
     /// `fixtures/group/group_probe.erl` compiles to
-    /// `{test,is_ge,{f,5},[{tr,{x,1},{t_integer,{0,16777215}}},{integer,2}]}`.
+    /// `{test,is_ge,{f,22},[{tr,{x,1},{t_integer,{0,16777215}}},{integer,2}]}`.
     TestGreaterEqual {
         fail_label: u32,
         left: Operand,
@@ -1791,14 +1792,14 @@ mod tests {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         // Bytes of `group_probe:kind/1` in `fixtures/group/group_probe.beam`:
-        // {test,is_ge,{f,5},[{tr,{x,1},{t_integer,{0,16777215}}},{integer,2}]}
-        code.extend([0x28, 0x55, 0x57, 0x13, 0x10, 0x21, 0x03]);
+        // {test,is_ge,{f,22},[{tr,{x,1},{t_integer,{0,16777215}}},{integer,2}]}
+        code.extend([0x28, 0x0D, 0x16, 0x57, 0x13, 0x20, 0x21, 0x03]);
         let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
                 Instruction::TestGreaterEqual {
-                    fail_label: 5,
+                    fail_label: 22,
                     left: Operand::X(1),
                     right: Operand::Value(Term::Integer(2)),
                 },
