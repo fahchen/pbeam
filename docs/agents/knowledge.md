@@ -1,8 +1,7 @@
 # Review Conventions
 
 Read this file before implementation. Record only problem classes that recur
-in review. Keep individual comments and one-time decisions in their task or
-PR.
+in review. Keep individual comments and one-time decisions in their task or PR.
 
 ## Domain concepts and code names drift apart
 
@@ -28,37 +27,16 @@ concrete byte forms. State important observable errors and limits.
 
 ## Runtime models depart from ERTS
 
-Before you model a BIF, instruction, or term operation, run it on the pinned
-ERTS and record the observable result: return value, exit reason shape, messages
-sent, and limits. Follow that result strictly: do not copy a similar BIF, and
-do not add a limit or shortcut that ERTS does not have; change the PBeam design
-instead. Record only scope that is not implemented yet as an ERTS difference,
-never a workaround.
+Before you model a BIF, instruction, or term operation, run it on the pinned ERTS and record the observable result: return value, exit reason shape, messages sent, and limits. Follow that result strictly: do not copy a similar BIF, and do not add a limit or shortcut that ERTS does not have; change the PBeam design instead. Record only scope that is not implemented yet as an ERTS difference, never a workaround.
 
 ## Tests pass without the behavior they claim
 
-A test must fail when its claimed behavior breaks. Drive behavior through
-compiled BEAM fixtures, and make each test double perform the step under test.
-Assert exact values from a pinned ERTS run, not only types.
+A test must fail when its claimed behavior breaks. Drive behavior through compiled BEAM fixtures, and make each test double perform the step under test. Assert exact values from a pinned ERTS run, not only types.
 
 ## Untrusted automation has excessive access
 
-Run automation that processes untrusted text with least-privilege credentials
-and an isolated writable workspace. Do not expose persistent credentials or
-allow untrusted input to write outside its intended output directory.
+Run automation that processes untrusted text with least-privilege credentials and an isolated writable workspace. Do not expose persistent credentials or let untrusted input write outside its output directory.
 
 ## External identifiers lack trusted-origin validation
 
-Validate the trusted origin of an external identifier before extracting a
-local repository, resource, or record number from it. Do not use data from an
-unvalidated identifier for a local action or error report.
-
-## Mode-specific contracts conflict
-
-State behavior for each execution mode in the contract that governs it. Keep
-restrictions for one mode separate from permitted actions in another mode.
-
-## Related artifacts are not cross-validated
-
-Validate all generated artifacts as one result before publishing them. Reject
-missing, contradictory, or success-shaped partial results.
+Validate the trusted origin of an external identifier before you take a local number or name from it. Do not use data from an unvalidated identifier for a local action or an error report.
