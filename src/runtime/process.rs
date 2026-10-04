@@ -23,6 +23,9 @@ pub(super) enum StackSlot {
     Empty,
     /// A term that a BEAM instruction wrote.
     Term(Term),
+    /// A catch tag that `try` or `catch` wrote: the index of the first
+    /// instruction after the handler label in the module of the frame.
+    Catch(usize),
 }
 
 /// The execution state and mailbox of one process.

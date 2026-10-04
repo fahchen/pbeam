@@ -26,13 +26,44 @@ enum Outcome {
     Exit { reason: Term, result: Option<Term> },
 }
 
+/// The class of an exception. The `throw` class is not implemented yet.
+#[derive(Debug, Clone, Copy)]
+enum ExceptionClass {
+    /// Class `error`, as `erlang:nif_error/1` raises.
+    Error,
+    /// Class `exit`, as `erlang:exit/1` raises.
+    Exit,
+}
+
+impl ExceptionClass {
+    /// Return the atom name of the class, as `try_case` puts it in `x0`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ExceptionClass::Error.name(), "error");
+    /// assert_eq!(ExceptionClass::Exit.name(), "exit");
+    /// ```
+    fn name(self) -> &'static str {
+        match self {
+            ExceptionClass::Error => "error",
+            ExceptionClass::Exit => "exit",
+        }
+    }
+}
+
 /// What a BIF call does to the calling process.
 #[derive(Debug)]
 enum BifResult {
     /// The BIF returns this value.
     Value(Term),
-    /// The BIF exits the process with this reason.
-    Exit(Term),
+    /// The BIF raises an exception in the calling process.
+    Raise {
+        /// Class of the exception.
+        class: ExceptionClass,
+        /// Reason of the exception, without a stack trace.
+        reason: Term,
+    },
     /// The BIF continues in BEAM code, as `BIF_TRAP` does in ERTS: the call
     /// becomes a call to this exported function, and its return value is the
     /// value of the BIF call.
@@ -47,19 +78,20 @@ enum BifResult {
 }
 
 impl BifResult {
-    /// Return the value of a guard BIF called through `bif0`. An exit or a
-    /// trap from a zero-arity BIF is not supported.
+    /// Return the value of a guard BIF called through `bif0`. An exception
+    /// or a trap from a zero-arity BIF is not supported.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(BifResult::Value(Term::Integer(1)).into_bif0_value("self")?, Term::Integer(1));
-    /// assert!(BifResult::Exit(Term::Atom("boom".into())).into_bif0_value("self").is_err());
+    /// let raise = BifResult::Raise { class: ExceptionClass::Exit, reason: Term::Atom("boom".into()) };
+    /// assert!(raise.into_bif0_value("self").is_err());
     /// ```
     fn into_bif0_value(self, name: &str) -> Result<Term, BeamError> {
         match self {
             BifResult::Value(value) => Ok(value),
-            // ponytail: no zero-arity BIF exits or traps; add it when one does.
+            // ponytail: no zero-arity BIF raises or traps; add it when one does.
             other => Err(error(format!(
                 "unsupported erlang:{name}/0 result {other:?}"
             ))),
@@ -298,11 +330,12 @@ impl BeamProgram {
                                     }
                                     continue;
                                 }
-                                BifResult::Exit(reason) => {
-                                    return Ok(Outcome::Exit {
-                                        reason,
-                                        result: None,
-                                    });
+                                BifResult::Raise { class, reason } => {
+                                    let process = scheduler.current_process_mut();
+                                    if let Some(outcome) = raise(process, class, reason) {
+                                        return Ok(outcome);
+                                    }
+                                    continue;
                                 }
                                 BifResult::Trap {
                                     module,
@@ -345,6 +378,39 @@ impl BeamProgram {
                     write(scheduler.current_process_mut(), destination, value)?;
                 }
                 Instruction::Jump(label) => jump(module, process, *label)?,
+                Instruction::Catch { register, label } => {
+                    // ERTS also counts `c_p->catches` here. PBeam finds a live
+                    // tag with a frame scan in `raise` and needs no counter.
+                    let handler = label_index(module, *label)?;
+                    let slot = current_frame(process)
+                        .stack
+                        .get_mut(*register as usize)
+                        .ok_or_else(|| {
+                            error(format!("register y{register} is outside allocated range"))
+                        })?;
+                    *slot = StackSlot::Catch(handler);
+                }
+                Instruction::TryEnd { register } => try_end(process, *register)?,
+                Instruction::TryCase { register } => {
+                    try_end(process, *register)?;
+                    let class = read(process, &Operand::X(3))?;
+                    write(process, &Operand::X(0), class)?;
+                }
+                Instruction::CatchEnd { register } => {
+                    try_end(process, *register)?;
+                    // An unset x0 is the ERTS non-value: an exception reached
+                    // the handler. A normal return always sets x0.
+                    if matches!(process.registers.first(), Some(None)) {
+                        if read(process, &Operand::X(3))? == Term::Atom("error".into()) {
+                            let reason = read(process, &Operand::X(1))?;
+                            let stack = read(process, &Operand::X(2))?;
+                            write(process, &Operand::X(1), Term::Tuple(vec![reason, stack]))?;
+                        }
+                        let reason = read(process, &Operand::X(1))?;
+                        let caught = Term::Tuple(vec![Term::Atom("EXIT".into()), reason]);
+                        write(process, &Operand::X(0), caught)?;
+                    }
+                }
                 Instruction::Test {
                     kind,
                     fail_label,
@@ -563,7 +629,7 @@ impl BeamProgram {
     }
 
     /// Run a BIF that the observed process path calls. The result
-    /// is a value, an exit reason, or a trap into BEAM code.
+    /// is a value, an exception, or a trap into BEAM code.
     ///
     /// BIFs are native functions listed in the ERTS `bif.tab`, mostly in the
     /// `erlang` module. The compiler emits guard BIFs such as `self/0` as
@@ -631,12 +697,17 @@ impl BeamProgram {
                     });
                 }
             }
-            ("erlang", "exit", [reason]) => return Ok(BifResult::Exit(reason.clone())),
+            ("erlang", "exit", [reason]) => {
+                return Ok(BifResult::Raise {
+                    class: ExceptionClass::Exit,
+                    reason: reason.clone(),
+                });
+            }
             ("erlang", "nif_error", [reason]) => {
-                return Ok(BifResult::Exit(Term::Tuple(vec![
-                    reason.clone(),
-                    Term::List(Vec::new()),
-                ])));
+                return Ok(BifResult::Raise {
+                    class: ExceptionClass::Error,
+                    reason: reason.clone(),
+                });
             }
             (
                 "erlang",
@@ -728,6 +799,76 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
     }))
 }
 
+/// Raise an exception in the process, as ERTS `handle_error` does: continue
+/// at the nearest live catch tag, or return the exit outcome when no frame
+/// holds one.
+///
+/// The scan starts at the newest frame and, in one frame, at the lowest Y
+/// index, as ERTS `next_catch` scans up from the stack top. The frames above
+/// the tag are dropped, and the tag becomes `[]`. The handler gets the
+/// non-value in `x0`, the reason in `x1`, the stack trace `[]` in `x2`, and
+/// the class atom in `x3`. An uncaught `error` exits the process with
+/// `{Reason, []}`, and an uncaught `exit` exits it with `Reason`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let outcome = raise(&mut process, ExceptionClass::Exit, Term::Atom("bye".into()));
+/// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
+/// ```
+fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Option<Outcome> {
+    let tag = process
+        .frames
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(depth, frame)| {
+            frame
+                .stack
+                .iter()
+                .enumerate()
+                .find_map(|(slot, value)| match value {
+                    StackSlot::Catch(handler) => Some((depth, slot, *handler)),
+                    _ => None,
+                })
+        });
+    let Some((depth, slot, handler)) = tag else {
+        let reason = match class {
+            ExceptionClass::Error => Term::Tuple(vec![reason, Term::List(Vec::new())]),
+            ExceptionClass::Exit => reason,
+        };
+        return Some(Outcome::Exit {
+            reason,
+            result: None,
+        });
+    };
+    process.frames.truncate(depth + 1);
+    let frame = current_frame(process);
+    frame.stack[slot] = StackSlot::Term(Term::List(Vec::new()));
+    frame.next_instruction = handler;
+    process
+        .registers
+        .resize(process.registers.len().max(4), None);
+    process.registers[0] = None;
+    process.registers[1] = Some(reason);
+    process.registers[2] = Some(Term::List(Vec::new()));
+    process.registers[3] = Some(Term::Atom(class.name().into()));
+    None
+}
+
+/// Clear the catch tag in a Y register of the active frame. The register
+/// becomes `[]`, as ERTS `make_blank` writes NIL.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// try_end(&mut process, 0)?;
+/// assert_eq!(read(&process, &Operand::Y(0))?, Term::List(Vec::new()));
+/// ```
+fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
+    write(process, &Operand::Y(register), Term::List(Vec::new()))
+}
+
 /// Continue execution after a label in the active module.
 ///
 /// # Examples
@@ -736,13 +877,26 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
 /// jump(module, &mut process, 3)?;
 /// ```
 fn jump(module: &BeamModule, process: &mut ProcessState, label: u32) -> Result<(), BeamError> {
-    current_frame(process).next_instruction = module
+    current_frame(process).next_instruction = label_index(module, label)?;
+    Ok(())
+}
+
+/// Return the index of the first instruction after a label in a module.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [FunctionInfo, Label(1), Label(2), Return]
+/// assert_eq!(label_index(&module, 2)?, 3);
+/// assert!(label_index(&module, 9).is_err());
+/// ```
+fn label_index(module: &BeamModule, label: u32) -> Result<usize, BeamError> {
+    module
         .instructions
         .iter()
         .position(|instruction| matches!(instruction, Instruction::Label(found) if *found == label))
         .map(|index| index + 1)
-        .ok_or_else(|| error(format!("missing BEAM label {label}")))?;
-    Ok(())
+        .ok_or_else(|| error(format!("missing BEAM label {label}")))
 }
 
 /// Read an operand from the process registers or the active frame.
@@ -869,7 +1023,13 @@ fn read_operand(
             .ok_or_else(|| error(format!("register x{index} is unset"))),
         Operand::Y(index) => match stack.get(*index as usize) {
             Some(StackSlot::Term(value)) => Ok(value.clone()),
-            _ => Err(error(format!("stack register y{index} is unset"))),
+            // The BEAM validator never lets an instruction read a catch tag.
+            Some(StackSlot::Catch(_)) => {
+                Err(error(format!("stack register y{index} holds a catch tag")))
+            }
+            Some(StackSlot::Empty) | None => {
+                Err(error(format!("stack register y{index} is unset")))
+            }
         },
     }
 }
@@ -918,7 +1078,8 @@ mod tests {
     use std::{collections::HashMap, path::PathBuf, process::Command};
 
     use super::{
-        BeamProgram, BifResult, call_arguments, function_at_label, read_operand, write_operand,
+        BeamProgram, BifResult, ExceptionClass, call_arguments, function_at_label, read_operand,
+        write_operand,
     };
     use crate::{
         BeamModule, Map, Term,
@@ -1638,7 +1799,82 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_exit_or_trap_from_a_zero_arity_bif() {
+    fn finds_a_live_catch_tag_after_other_slots_and_skips_a_cleared_tag() {
+        let run = |body| make_program(body, 0).execute("fixture", "main", &[]);
+        let nif_error = [
+            Instruction::Move(atom("undef"), Operand::X(0)),
+            erlang_call("nif_error", 1, false),
+        ];
+        // y0 is empty, so the scan must look past it to the tag in y1.
+        let mut body = vec![
+            Instruction::Allocate { stack_size: 2 },
+            Instruction::Catch {
+                register: 1,
+                label: 3,
+            },
+        ];
+        body.extend(nif_error.clone());
+        body.extend([
+            Instruction::Label(3),
+            Instruction::CatchEnd { register: 1 },
+            Instruction::Return,
+        ]);
+        assert_eq!(
+            run(body).unwrap(),
+            Term::Tuple(vec![
+                Term::Atom("EXIT".into()),
+                Term::Tuple(vec![Term::Atom("undef".into()), Term::List(Vec::new())]),
+            ])
+        );
+        // `try_end` writes `[]` over the tag, so the exception is not caught.
+        let mut body = vec![
+            Instruction::Allocate { stack_size: 1 },
+            Instruction::Catch {
+                register: 0,
+                label: 3,
+            },
+            Instruction::TryEnd { register: 0 },
+        ];
+        body.extend(nif_error);
+        body.extend([Instruction::Label(3), Instruction::Return]);
+        assert!(
+            run(body)
+                .unwrap_err()
+                .to_string()
+                .contains("root process exited with Tuple([Atom(\"undef\"), List([])])")
+        );
+    }
+
+    #[test]
+    fn rejects_a_catch_tag_operand_and_an_unallocated_catch_register() {
+        let error = |body| {
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            error(vec![
+                Instruction::Allocate { stack_size: 1 },
+                Instruction::Catch {
+                    register: 0,
+                    label: 2,
+                },
+                Instruction::Move(Operand::Y(0), Operand::X(0)),
+            ])
+            .contains("stack register y0 holds a catch tag")
+        );
+        assert!(
+            error(vec![Instruction::Catch {
+                register: 0,
+                label: 2,
+            }])
+            .contains("register y0 is outside allocated range")
+        );
+    }
+
+    #[test]
+    fn rejects_an_exception_from_a_zero_arity_bif() {
         assert_eq!(
             BifResult::Value(Term::Integer(1))
                 .into_bif0_value("self")
@@ -1646,11 +1882,14 @@ mod tests {
             Term::Integer(1)
         );
         assert!(
-            BifResult::Exit(Term::Atom("boom".into()))
-                .into_bif0_value("self")
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported erlang:self/0 result")
+            BifResult::Raise {
+                class: ExceptionClass::Exit,
+                reason: Term::Atom("boom".into()),
+            }
+            .into_bif0_value("self")
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported erlang:self/0 result")
         );
     }
 
