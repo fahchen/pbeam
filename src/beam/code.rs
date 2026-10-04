@@ -39,6 +39,9 @@ const ETF_BINARY_EXT: u8 = 109;
 const ETF_MAP_EXT: u8 = 116;
 const ETF_SMALL_ATOM_UTF8_EXT: u8 = 119;
 const FIRST_ATOM_INDEX: usize = 1;
+/// The largest number of characters in an atom name (`MAX_ATOM_CHARACTERS`
+/// in `atom.h`).
+const MAX_ATOM_CHARACTERS: usize = 255;
 const FIRST_LABEL_NUMBER: u32 = 1;
 
 /// Parse the BEAM subset used by this runtime.
@@ -279,11 +282,10 @@ fn parse_atoms(data: &[u8], atom_table: &mut AtomTable) -> Result<Vec<Atom>, Bea
             return Err(error("truncated atom name"));
         }
         let atom_name_end = cursor + atom_name_length;
-        let atom = std::str::from_utf8(
+        let atom = atom_chunk_name(
             data.get(cursor..atom_name_end)
                 .ok_or_else(|| error("truncated atom name"))?,
-        )
-        .map_err(|_| error("invalid UTF-8 atom name"))?;
+        )?;
         atoms.push(atom_table.put(atom)?);
         cursor = atom_name_end;
     }
@@ -291,6 +293,37 @@ fn parse_atoms(data: &[u8], atom_table: &mut AtomTable) -> Result<Vec<Atom>, Bea
         return Err(error("unexpected bytes after atom table"));
     }
     Ok(atoms)
+}
+
+/// Return the atom name of an `AtU8` entry. As `parse_atom_chunk` calls
+/// `erts_atom_put` with `trunc` set, a name longer than 255 characters
+/// becomes its first 255 characters, and ERTS does not check the bytes after
+/// them. Thus two long names with the same first 255 characters are one atom.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(atom_chunk_name(b"ok")?, "ok");
+/// let long = [b"a".repeat(255), vec![b'b', 0xff]].concat();
+/// assert_eq!(atom_chunk_name(&long)?, "a".repeat(255));
+/// assert!(atom_chunk_name(&[b'a', 0xff]).is_err());
+/// ```
+///
+/// # Errors
+///
+/// A name that is not valid UTF-8 in its first 255 characters is the error
+/// `invalid UTF-8 atom name`.
+fn atom_chunk_name(bytes: &[u8]) -> Result<&str, BeamError> {
+    let valid = std::str::from_utf8(bytes).unwrap_or_else(|invalid| {
+        std::str::from_utf8(&bytes[..invalid.valid_up_to()]).expect("a valid UTF-8 prefix")
+    });
+    match valid.char_indices().nth(MAX_ATOM_CHARACTERS) {
+        Some((end, _)) => Ok(&valid[..end]),
+        None if valid.len() == bytes.len() || valid.chars().count() == MAX_ATOM_CHARACTERS => {
+            Ok(valid)
+        }
+        None => Err(error("invalid UTF-8 atom name")),
+    }
 }
 
 /// Read exported function names, arities, and labels from an `ExpT` chunk.
@@ -853,7 +886,10 @@ fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{atom_at, parse_atoms, parse_exports, parse_literals, read_literal, read_u32};
+    use super::{
+        atom_at, atom_chunk_name, parse_atoms, parse_exports, parse_literals, read_literal,
+        read_u32,
+    };
     use crate::term::{AtomTable, Map, Term};
 
     /// Return the atom term of a name that exists in a table.
@@ -900,6 +936,43 @@ mod tests {
         assert_eq!(table.get("zeta"), Some(atoms[0].clone()));
         // A second module gets the same index for an existing atom.
         assert_eq!(parse_atoms(&chunk, &mut table).unwrap(), atoms);
+    }
+
+    #[test]
+    fn truncates_a_long_atu8_name_to_255_characters_like_erts() {
+        // OTP 29.1.1 loads 255 `a` and `b`, or 255 `a` and 0xff, as the atom of
+        // 255 `a`. It rejects 254 `a` and 0xff as a corrupt atom table.
+        let a255 = "a".repeat(255);
+        assert_eq!(atom_chunk_name(a255.as_bytes()).unwrap(), a255);
+        assert_eq!(
+            atom_chunk_name(format!("{a255}b").as_bytes()).unwrap(),
+            a255
+        );
+        assert_eq!(
+            atom_chunk_name(&[a255.as_bytes(), &[0xff]].concat()).unwrap(),
+            a255
+        );
+        assert!(atom_chunk_name(&[&a255.as_bytes()[1..], &[0xff]].concat()).is_err());
+        // ERTS counts characters, not bytes: 255 `é` and `x` is 255 `é`.
+        let e255 = "é".repeat(255);
+        assert_eq!(
+            atom_chunk_name(format!("{e255}x").as_bytes()).unwrap(),
+            e255
+        );
+
+        // AtU8 with 255 `a` and `b`, then 255 `a` and `d`: one atom.
+        let mut table = AtomTable::new();
+        let mut chunk = (-2i32).to_be_bytes().to_vec();
+        for last in *b"bd" {
+            chunk.extend([0x28, 0]);
+            chunk.extend(a255.as_bytes());
+            chunk.push(last);
+        }
+        let atoms = parse_atoms(&chunk, &mut table).unwrap();
+        assert_eq!(atoms[0].name(), a255);
+        assert_eq!(atoms[0].index(), 1150);
+        assert_eq!(atoms[1], atoms[0]);
+        assert_eq!(table.get(&a255), Some(atoms[0].clone()));
     }
 
     #[test]
