@@ -511,6 +511,23 @@ pub(crate) enum Instruction {
         left: Operand,
         right: Operand,
     },
+    /// Jumps to `fail_label` when the operands are exactly equal
+    /// (`is_ne_exact`, opcode 44).
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `user_drv:server/3` in the
+    /// pinned `user_drv.beam` has `[0x2C, 0x0D, 0x9D, 0x03, 0x33]`, which
+    /// fails to label 157 when `x0` equals `x3`.
+    ///
+    /// Erlang: the guard `element(1,Req) =:= User orelse element(1,Req) =:=
+    /// Curr` of `user_drv:server/3` (user_drv.erl:542) compiles to
+    /// `{test,is_ne_exact,{f,157},[{x,0},{x,3}]}`. When the first test is
+    /// true, the jump skips the `orelse` test.
+    TestExactNotEqual {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
     /// Jumps to `fail_label` when the left operand is less than the right
     /// operand (`is_ge`, opcode 40) in the ERTS term order. Two different
     /// references give a runtime error.
@@ -817,6 +834,11 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_TEST_EXACT_EQ => Instruction::TestExactEqual {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_TEST_EXACT_NE => Instruction::TestExactNotEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -1224,8 +1246,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_LT | OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ
-        | OPCODE_TEST_EXACT_NE => Some(3),
+        OPCODE_TEST_LT | OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
         OPCODE_TEST_IS_INTEGER
         | OPCODE_TEST_IS_FLOAT
@@ -1788,6 +1809,27 @@ mod tests {
                     call_arguments.as_slice(),
                     [Operand::Value(Term::Integer(2)), Operand::X(0)]
                 )
+        ));
+    }
+
+    #[test]
+    fn decodes_is_ne_exact_with_its_fail_label() {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        // Bytes of `user_drv:server/3` in the pinned `user_drv.beam`:
+        // {test,is_ne_exact,{f,157},[{x,0},{x,3}]}
+        code.extend([0x2C, 0x0D, 0x9D, 0x03, 0x33, 0x03]);
+        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::TestExactNotEqual {
+                    fail_label: 157,
+                    left: Operand::X(0),
+                    right: Operand::X(3),
+                },
+                Instruction::End,
+            ]
         ));
     }
 

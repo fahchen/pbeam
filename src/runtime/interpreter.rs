@@ -491,6 +491,15 @@ impl BeamProgram {
                         jump(module, process, *fail_label)?;
                     }
                 }
+                Instruction::TestExactNotEqual {
+                    fail_label,
+                    left,
+                    right,
+                } => {
+                    if read(process, left)? == read(process, right)? {
+                        jump(module, process, *fail_label)?;
+                    }
+                }
                 Instruction::TestGreaterEqual {
                     fail_label,
                     left,
