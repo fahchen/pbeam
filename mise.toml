@@ -74,3 +74,12 @@ arg "<module>" help="A module on the pinned OTP code path, such as erlang or io,
 arg "[function]..." help="Functions as name/arity; with none, all functions" var=#true
 '''
 run = 'eval "set -- ${usage_function:-}"; escript scripts/disasm.escript "$usage_module" "$@"'
+
+[tasks.fixture-beam]
+description = "Compile Erlang fixtures and compare each result with the committed BEAM file, except the CInf and Dbgi chunks"
+quiet = true
+usage = '''
+flag "--write" help="Write the BEAM files that differ or are new"
+arg "[source]..." help="Fixture sources, such as fixtures/order/order_probe.erl; with none, all fixtures/*/*.erl" var=#true
+'''
+run = 'eval "set -- ${usage_source:-}"; escript scripts/fixture_beam.escript ${usage_write:+--write} "$@"'
