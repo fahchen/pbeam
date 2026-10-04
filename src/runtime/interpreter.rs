@@ -1488,6 +1488,56 @@ mod tests {
         assert!(BIFS.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
+    /// The BIF table holds the BIFs of the pinned ERTS. `erlang:is_builtin/3`
+    /// returns `true` for each table entry and for no other exported function
+    /// of the OTP 29.1.1 installation, except `erlang:apply/2`,
+    /// `erlang:apply/3`, and `erlang:yield/0`. `erts_is_builtin`
+    /// (`beam_common.c`) marks these three, but they are not `bif.tab` entries:
+    /// the loader turns a call to them into the `i_apply_fun`, `i_apply`, and
+    /// `i_yield` instructions (`ops.tab`).
+    #[test]
+    fn bif_table_equals_erts_is_builtin() {
+        let output = Command::new("erl")
+            .args([
+                "-noshell",
+                "-eval",
+                concat!(
+                    "[io:format(\"~ts\\t~ts\\t~b~n\", [M, F, A]) ",
+                    "|| P <- filelib:wildcard(filename:join([code:root_dir(), \"lib\", \"*\", \"ebin\", \"*.beam\"])), ",
+                    "{ok, {M, [{exports, E}]}} <- [beam_lib:chunks(P, [exports])], ",
+                    "{F, A} <- E, erlang:is_builtin(M, F, A)], halt()."
+                ),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut builtin: Vec<(&str, &str, u32)> = stdout
+            .lines()
+            .map(|line| {
+                let mut field = line.split('\t');
+                (
+                    field.next().unwrap(),
+                    field.next().unwrap(),
+                    field.next().unwrap().parse().unwrap(),
+                )
+            })
+            .collect();
+        builtin.sort_unstable();
+        builtin.dedup();
+        let instructions = [
+            ("erlang", "apply", 2),
+            ("erlang", "apply", 3),
+            ("erlang", "yield", 0),
+        ];
+        for mfa in instructions {
+            assert!(builtin.contains(&mfa));
+        }
+        builtin.retain(|mfa| !instructions.contains(mfa));
+        assert_eq!(BIFS, builtin.as_slice());
+    }
+
     #[test]
     fn converts_unicode_chardata_and_rejects_other_encodings() {
         let convert = |chardata: Term, encoding: &str| {

@@ -78,7 +78,8 @@ struct BifContext<'a> {
 /// either mistake does not compile. A function that ERTS runs as BEAM code is
 /// not a BIF and is not in this table. A pattern can have a guard:
 /// `|context, [arguments]| where guard => body`. A body returns
-/// `Result<BifResult, BeamError>`.
+/// `Result<BifResult, BeamError>`. A name that is not a Rust identifier, such
+/// as the operator `+`, is a string literal: `erlang:"+"/2`.
 ///
 /// The macro expands into `BIFS`, the entries as
 /// `(module, name, arity)`, and `dispatch`, one `match` with an arm for each
@@ -94,11 +95,15 @@ struct BifContext<'a> {
 ///
 /// ```rust,ignore
 /// bifs! {
+///     erlang:"+"/2 => unsupported,
 ///     erlang:self/0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().id))),
 ///     lists:keyfind/3 => unsupported,
 ///     maps:keys/1 => |_, [map]| maps::keys(map),
 /// }
-/// assert_eq!(BIFS, &[("erlang", "self", 0), ("lists", "keyfind", 3), ("maps", "keys", 1)]);
+/// assert_eq!(
+///     BIFS,
+///     &[("erlang", "+", 2), ("erlang", "self", 0), ("lists", "keyfind", 3), ("maps", "keys", 1)]
+/// );
 /// ```
 macro_rules! bifs {
     (@form unsupported) => {};
@@ -106,9 +111,11 @@ macro_rules! bifs {
     (@form $($tokens:tt)*) => {
         compile_error!("a bifs! entry needs `unsupported` or one `|context, [arguments]| body`, not both");
     };
+    (@name $name:literal) => { $name };
+    (@name $name:ident) => { stringify!($name) };
     (
         $(
-            $module:ident : $name:ident / $arity:literal => $($unsupported:ident)?
+            $module:ident : $name:tt / $arity:literal => $($unsupported:ident)?
             $( |$context:pat_param, $arguments:pat_param| $(where $guard:expr =>)? $body:expr )?
         ),* $(,)?
     ) => {
@@ -125,7 +132,7 @@ macro_rules! bifs {
         /// assert!(BIFS.binary_search(&("lists", "keyfind", 3)).is_ok());
         /// ```
         pub(in crate::runtime::interpreter) const BIFS: &[(&str, &str, u32)] = &[
-            $( (stringify!($module), stringify!($name), $arity), )*
+            $( (stringify!($module), bifs!(@name $name), $arity), )*
         ];
 
         /// Run the table pattern that matches a call, or report an
@@ -145,7 +152,7 @@ macro_rules! bifs {
         ) -> Result<BifResult, BeamError> {
             match (module, name, arguments.len(), arguments) {
                 $($(
-                    (stringify!($module), stringify!($name), $arity, $arguments) $(if $guard)? => {
+                    (stringify!($module), bifs!(@name $name), $arity, $arguments) $(if $guard)? => {
                         (|$context: &mut BifContext<'_>| $body)(context)
                     }
                 )?)*
