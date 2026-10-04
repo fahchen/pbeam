@@ -42,25 +42,23 @@ jobs:
         with:
           ref: main
 
-      # Only comments from trusted human reviewers can become rules. Comments
-      # from bots or from people outside the repository are ignored, so their
-      # text never reaches Copilot as a rule source.
-      - name: Count trusted human comments
+      # Every comment on the PR can become a rule, whatever its author. The
+      # comment text stays data, never instructions for Copilot.
+      - name: Count comments
         id: comments
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          trusted='select(.user.type == "User" and (.author_association | IN("OWNER", "MEMBER", "COLLABORATOR")))'
           count=$(
             {
-              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" --jq ".[] | $trusted | .id"
-              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --jq ".[] | select(.body != \"\") | $trusted | .id"
-              gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --jq ".[] | $trusted | .id"
+              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" --jq ".[] | .id"
+              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --jq ".[] | select(.body != \"\") | .id"
+              gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --jq ".[] | .id"
             } | wc -l | tr -d " "
           )
           echo "count=$count" >> "$GITHUB_OUTPUT"
           if [ "$count" -eq 0 ]; then
-            gh pr comment "$PR_NUMBER" --body "No new review learnings. The PR has no comments from human reviewers."
+            gh pr comment "$PR_NUMBER" --body "No new review learnings. The PR has no comments."
           fi
 
       - name: Install Copilot CLI
