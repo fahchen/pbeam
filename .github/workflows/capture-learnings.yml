@@ -78,19 +78,23 @@ jobs:
           echo "PR_NUMBER=$number" >> "$GITHUB_ENV"
 
       # Every comment on the PR can become a rule, whatever its author. The
-      # comment text stays data, never instructions for Copilot.
-      - name: Count comments
+      # workflow collects the comments itself and gives Copilot a data file,
+      # so no comment text can reach Copilot as a GitHub API instruction.
+      - name: Collect the comments
         id: comments
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          count=$(
-            {
-              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" --jq ".[] | .id"
-              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --jq ".[] | select(.body != \"\") | .id"
-              gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --jq ".[] | .id"
-            } | wc -l | tr -d " "
-          )
+          mkdir -p "$OUTPUT"
+          {
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+              --jq '.[] | {kind: "review thread", author: .user.login, path: .path, line: .line, url: .html_url, body: .body}'
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+              --jq '.[] | select(.body != "") | {kind: "review body", author: .user.login, url: .html_url, body: .body}'
+            gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --jq '.[] | {kind: "PR comment", author: .user.login, url: .html_url, body: .body}'
+          } | jq -s '.' > "$OUTPUT/comments.json"
+          count=$(jq 'length' "$OUTPUT/comments.json")
           echo "count=$count" >> "$GITHUB_OUTPUT"
           if [ "$count" -eq 0 ]; then
             gh pr comment "$PR_NUMBER" --body "No new review learnings. The PR has no comments."
@@ -106,36 +110,49 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      # Copilot reads the comment data file and writes result files only. It
+      # gets no GitHub token, no git, and no gh, so a prompt injection in a
+      # comment cannot reach the repository, the token, or another PR. The
+      # next steps commit, push, open the PR, and comment.
       - name: Generate learnings with Copilot
         if: steps.comments.outputs.count != '0'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GH_TOKEN: ${{ github.token }}
-        # Copilot reads GitHub, edits and commits docs/agents/knowledge.md, and
-        # writes result files. The next step pushes, opens the PR, and comments.
         run: |
-          mkdir -p "$OUTPUT"
           copilot -s --no-ask-user --model gpt-5.6-luna \
             --allow-tool='write' \
-            --allow-tool='shell(gh api:*)' \
-            --allow-tool='shell(gh pr view:*)' \
-            --allow-tool='shell(git switch:*)' \
-            --allow-tool='shell(git add:*)' \
-            --allow-tool='shell(git commit:*)' \
-            --allow-tool='shell(git status:*)' \
-            --allow-tool='shell(git diff:*)' \
             --allow-tool='shell(grep:*)' \
             --allow-tool='shell(wc:*)' \
             -p "MODE: ci PR: #${PR_NUMBER} OUTPUT: ${OUTPUT} $(cat .github/prompts/capture-learnings.prompt.md)"
 
-      - name: Push, open the knowledge PR, and comment
+      # Copilot cannot commit, so the workflow does. A run that claims a
+      # capture without writing knowledge.md is a failure, not an empty run.
+      - name: Commit, push, open the knowledge PR, and comment
         if: steps.comments.outputs.count != '0'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           comment="$OUTPUT/comment.md"
-          if [ -n "$(git log --oneline origin/main..HEAD)" ]; then
-            branch=$(git branch --show-current)
+          if [ ! -s "$comment" ]; then
+            echo "Copilot wrote no comment.md." >&2
+            exit 1
+          fi
+          captured=""
+          if [ -s "$OUTPUT/knowledge.md" ]; then
+            captured=yes
+          fi
+          if grep -q "^Captured review learnings" "$comment" && [ -z "$captured" ]; then
+            echo "comment.md claims a capture, but knowledge.md is missing." >&2
+            exit 1
+          fi
+          if [ -n "$captured" ]; then
+            if [ ! -s "$OUTPUT/pr-body.md" ]; then
+              echo "knowledge.md exists, but pr-body.md is missing." >&2
+              exit 1
+            fi
+            branch="learnings/pr-$PR_NUMBER"
+            git switch -c "$branch"
+            cp "$OUTPUT/knowledge.md" docs/agents/knowledge.md
+            git commit -m "docs: capture review learnings from #$PR_NUMBER" \
+              -- docs/agents/knowledge.md
             # A re-run replaces the branch of the earlier run and reuses its PR.
             git push --force origin "$branch"
             url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null \
