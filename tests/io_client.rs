@@ -2,6 +2,10 @@ use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
 
+mod common;
+
+use common::pinned_beam;
+
 const IO_CLIENT_PROBE: &[u8] = include_bytes!("../fixtures/io_client/io_client_probe.beam");
 
 #[test]
@@ -22,8 +26,8 @@ fn converts_chardata_in_the_io_request_to_one_binary() {
 /// `erts_internal` modules, and in the pinned ERTS 29.1.1. Both runs must
 /// give the probe term below.
 fn assert_probe_matches_erts(function: &str) {
-    let io = pinned_otp_beam("io");
-    let erts_internal = pinned_erts_beam("erts_internal");
+    let io = pinned_beam("io");
+    let erts_internal = pinned_beam("erts_internal");
     let program = BeamProgram::load(&[&io, &erts_internal, IO_CLIENT_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
@@ -60,36 +64,4 @@ fn assert_probe_matches_erts(function: &str) {
         String::from_utf8(reference.stdout).unwrap(),
         "{ok,{{put_chars,unicode,<<\"Hello, world!\\n\">>},same},\n    noise_ok,none,\n    {true,no_down}}\n"
     );
-}
-
-/// Read the pinned OTP 29.1.1 BEAM file for a kernel or stdlib module from
-/// the mise-managed Erlang installation that this repository pins.
-fn pinned_otp_beam(module: &str) -> Vec<u8> {
-    let path = Command::new("erl")
-        .args([
-            "-noshell",
-            "-eval",
-            &format!("io:format(\"~s\", [code:which({module})]), halt()."),
-        ])
-        .output()
-        .unwrap();
-    assert!(path.status.success());
-    std::fs::read(String::from_utf8(path.stdout).unwrap()).unwrap()
-}
-
-/// Read a pinned OTP 29.1.1 preloaded ERTS module, such as `erts_internal`,
-/// from the `erts` application of the mise-managed Erlang installation.
-/// `code:which/1` returns `preloaded` for these modules, so the path comes
-/// from `code:lib_dir(erts)`.
-fn pinned_erts_beam(module: &str) -> Vec<u8> {
-    let path = Command::new("erl")
-        .args([
-            "-noshell",
-            "-eval",
-            &format!("io:format(\"~s/ebin/{module}.beam\", [code:lib_dir(erts)]), halt()."),
-        ])
-        .output()
-        .unwrap();
-    assert!(path.status.success());
-    std::fs::read(String::from_utf8(path.stdout).unwrap()).unwrap()
 }
