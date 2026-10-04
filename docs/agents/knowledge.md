@@ -25,9 +25,9 @@ Document every function with Rustdoc comments and a `# Examples` section. Show
 representative input and output in Rust code fences. For parser functions, use
 concrete byte forms. State important observable errors and limits.
 
-## Runtime models copy a similar BIF instead of ERTS
+## Runtime models depart from ERTS
 
-Before you model a BIF or instruction, run it on the pinned ERTS and record the observable result: return value, exit reason shape, and messages sent. Do not copy the behavior of a similar BIF. Record each departure from the ERTS result in the PR and in a test.
+Before you model a BIF, instruction, or term operation, run it on the pinned ERTS and record the observable result: return value, exit reason shape, messages sent, and limits. Follow that result strictly: do not copy a similar BIF, and do not add a limit or shortcut that ERTS does not have; change the PBeam design instead. Record only scope that is not implemented yet as an ERTS difference, never a workaround.
 
 ## Tests pass without the behavior they claim
 
