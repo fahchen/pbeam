@@ -4,13 +4,10 @@ use pbeam_runtime::{BeamProgram, Term};
 
 const LITERAL_PROBE: &[u8] = include_bytes!("../fixtures/literal/literal_probe.beam");
 
-fn atom(name: &str) -> Term {
-    Term::Atom(name.into())
-}
-
 #[test]
 fn decodes_tuple_and_list_literals_and_builds_lists_on_the_empty_list() {
     let program = BeamProgram::load(&[LITERAL_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("literal_probe", "main", &[]).unwrap(),
         Term::Tuple(vec![

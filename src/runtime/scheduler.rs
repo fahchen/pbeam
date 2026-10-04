@@ -132,7 +132,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.into_root_result(), Some(Ok(Term::Atom("ok".into()))));
+    /// assert_eq!(scheduler.into_root_result(), Some(Ok(Term::static_atom("ok"))));
     /// ```
     pub(super) fn into_root_result(self) -> Option<Result<Term, Term>> {
         self.root_result
@@ -145,7 +145,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.deliver(target, Term::Atom("ping".into()));
+    /// scheduler.deliver(target, Term::static_atom("ok"));
     /// ```
     pub(super) fn deliver(&mut self, target: ProcessId, term: Term) {
         let Some(process) = self.processes.get_mut(&target) else {
@@ -197,7 +197,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.link(child)?, Term::Atom("true".into()));
+    /// assert_eq!(scheduler.link(child)?, Term::static_atom("true"));
     /// ```
     ///
     /// # Errors
@@ -213,7 +213,7 @@ impl Scheduler {
         };
         process.links.insert(current);
         self.current_process_mut().links.insert(target);
-        Ok(Term::Atom("true".into()))
+        Ok(Term::static_atom("true"))
     }
 
     /// Monitor a local process for the current process, as
@@ -233,11 +233,11 @@ impl Scheduler {
             None => self.deliver(
                 current,
                 Term::Tuple(vec![
-                    Term::Atom("DOWN".into()),
+                    Term::static_atom("DOWN"),
                     Term::Reference(reference),
-                    Term::Atom("process".into()),
+                    Term::static_atom("process"),
                     Term::Pid(target),
-                    Term::Atom("noproc".into()),
+                    Term::static_atom("noproc"),
                 ]),
             ),
         }
@@ -306,7 +306,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.finish_current(Term::Atom("normal".into()), Some(result))?;
+    /// scheduler.finish_current(Term::static_atom("normal"), Some(result))?;
     /// ```
     ///
     /// # Errors
@@ -323,7 +323,7 @@ impl Scheduler {
             .take()
             .and_then(|id| self.processes.remove(&id))
             .expect("the scheduler has a current process");
-        let normal = reason == Term::Atom("normal".into());
+        let normal = reason == Term::static_atom("normal");
         if process.id == ProcessId(0) {
             self.root_result = Some(match result {
                 Some(result) if normal => Ok(result),
@@ -346,7 +346,7 @@ impl Scheduler {
                 )));
             }
             let exit = Term::Tuple(vec![
-                Term::Atom("EXIT".into()),
+                Term::static_atom("EXIT"),
                 Term::Pid(process.id),
                 reason.clone(),
             ]);
@@ -354,9 +354,9 @@ impl Scheduler {
         }
         for (watcher, reference) in process.monitored_by {
             let down = Term::Tuple(vec![
-                Term::Atom("DOWN".into()),
+                Term::static_atom("DOWN"),
                 Term::Reference(reference),
-                Term::Atom("process".into()),
+                Term::static_atom("process"),
                 Term::Pid(process.id),
                 reason.clone(),
             ]);
@@ -369,13 +369,14 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::Scheduler;
+    use crate::term::test_atom;
     use crate::{
         runtime::process::tests::frame,
         term::{ProcessId, Term},
     };
 
     fn atom(name: &str) -> Term {
-        Term::Atom(name.into())
+        test_atom(name)
     }
 
     fn first_message(scheduler: &Scheduler, id: u64, index: usize) -> Term {

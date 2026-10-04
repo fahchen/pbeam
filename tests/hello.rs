@@ -67,7 +67,7 @@ fn reports_the_unavailable_string_conversion_for_non_binary_data() {
         .execute(
             "Elixir.IO",
             "puts",
-            &[Term::Atom("stdio".into()), Term::Integer(7)],
+            &[Term::Atom(program.atom("stdio").unwrap()), Term::Integer(7)],
         )
         .unwrap_err();
 

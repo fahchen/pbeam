@@ -89,8 +89,8 @@ impl Mailbox {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// mailbox.push(Term::Atom("ready".into()));
-    /// assert_eq!(mailbox.current(), Some(&Term::Atom("ready".into())));
+    /// mailbox.push(Term::static_atom("ok"));
+    /// assert_eq!(mailbox.current(), Some(&Term::static_atom("ok")));
     /// ```
     pub(super) fn push(&mut self, term: Term) {
         self.append(Some(term));
@@ -166,11 +166,11 @@ impl Mailbox {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(mailbox.reserve_marker(), Term::Atom("undefined".into()));
+    /// assert_eq!(mailbox.reserve_marker(), Term::static_atom("undefined"));
     /// ```
     pub(super) fn reserve_marker(&mut self) -> Term {
         if self.first.is_none() {
-            return Term::Atom("undefined".into());
+            return Term::static_atom("undefined");
         }
         if self.markers.len() == MARKER_SLOTS {
             let index = self
@@ -390,6 +390,7 @@ impl Mailbox {
 #[cfg(test)]
 mod tests {
     use super::{MARKER_SLOTS, Mailbox};
+    use crate::term::test_atom;
     use crate::term::{Reference, Term};
 
     fn int(value: i64) -> Term {
@@ -423,7 +424,7 @@ mod tests {
     #[test]
     fn starts_a_receive_after_a_bound_marker() {
         let mut mailbox = Mailbox::default();
-        assert_eq!(mailbox.reserve_marker(), Term::Atom("undefined".into()));
+        assert_eq!(mailbox.reserve_marker(), test_atom("undefined"));
         mailbox.push(int(1));
         let marker = mailbox.reserve_marker();
         assert_eq!(marker, int(-(1 << 59)));
@@ -455,7 +456,7 @@ mod tests {
         let marker = mailbox.reserve_marker();
         mailbox.push(int(2));
         assert_eq!(mailbox.current(), Some(&int(2)));
-        mailbox.bind_marker(&marker, &Term::Atom("none".into()));
+        mailbox.bind_marker(&marker, &test_atom("none"));
         assert!(mailbox.markers[0].id.is_none());
 
         // A marker at the front of the queue leaves when a receive ends.

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::module::BeamModule;
 use crate::{
     error::{BeamError, error},
-    term::{Map, Term},
+    term::{Atom, AtomTable, Map, Term},
 };
 
 const WORD_SIZE: usize = 4;
@@ -39,6 +39,9 @@ const ETF_BINARY_EXT: u8 = 109;
 const ETF_MAP_EXT: u8 = 116;
 const ETF_SMALL_ATOM_UTF8_EXT: u8 = 119;
 const FIRST_ATOM_INDEX: usize = 1;
+/// The largest number of characters in an atom name (`MAX_ATOM_CHARACTERS`
+/// in `atom.h`).
+const MAX_ATOM_CHARACTERS: usize = 255;
 const FIRST_LABEL_NUMBER: u32 = 1;
 
 /// Parse the BEAM subset used by this runtime.
@@ -138,7 +141,9 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// integer. `i32be` is a signed big-endian integer. `byte[n]` means exactly
 /// `n` bytes. `AtU8` stores a non-positive count; its absolute value gives the
 /// number of atoms. Atom names use UTF-8. The module name is the first atom.
-/// Atom indices are one-based. `ExpT` contains exactly the declared number of
+/// Atom indices are one-based. The parser puts each `AtU8` atom, in chunk
+/// order, into the atom table of the program, and then each `LitT` atom, in
+/// byte order, as the ERTS loader does. `ExpT` contains exactly the declared number of
 /// 12-byte entries. Export and code labels must be in `1..=label_count`.
 /// `function_count` must match the number of `function_info` instructions.
 /// `opcode_max` is not checked. The parser rejects duplicate chunk IDs. It
@@ -166,10 +171,17 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// # Examples
 ///
 /// ```rust,ignore
-/// let module = parse(&beam_bytes)?;
+/// let mut atoms = AtomTable::new();
+/// let module = parse(&beam_bytes, &mut atoms)?;
 /// assert_eq!(module.name, "Elixir.Hello");
+/// assert!(atoms.get("Elixir.Hello").is_some());
 /// ```
-pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
+///
+/// # Errors
+///
+/// A malformed or unsupported module is an error. A new atom when the atom
+/// table is full is an error, as in ERTS.
+pub(crate) fn parse(bytes: &[u8], atom_table: &mut AtomTable) -> Result<BeamModule, BeamError> {
     if bytes.len() < CONTAINER_HEADER_SIZE || &bytes[..WORD_SIZE] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
     }
@@ -205,13 +217,14 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
         cursor = padded_end;
     }
 
-    let atoms = parse_atoms(required_chunk(&chunks, b"AtU8")?)?;
+    let atoms = parse_atoms(required_chunk(&chunks, b"AtU8")?, atom_table)?;
     let exports = parse_exports(required_chunk(&chunks, b"ExpT")?, &atoms)?;
     let code = required_chunk(&chunks, b"Code")?;
     let name = atoms
         .first()
         .ok_or_else(|| error("empty BEAM atom table"))?
-        .clone();
+        .name()
+        .to_owned();
     let imports = chunks
         .get(b"ImpT".as_slice())
         .map(|data| parse_imports(data, &atoms))
@@ -219,7 +232,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
         .unwrap_or_default();
     let literals = chunks
         .get(b"LitT".as_slice())
-        .map(|data| parse_literals(data))
+        .map(|data| parse_literals(data, atom_table))
         .transpose()?
         .unwrap_or_default();
     let (instructions, number_of_labels) =
@@ -239,15 +252,18 @@ pub(super) fn parse(bytes: &[u8]) -> Result<BeamModule, BeamError> {
     })
 }
 
-/// Read the atom names from an `AtU8` chunk.
+/// Read the atoms of an `AtU8` chunk and put each one, in chunk order, into
+/// the atom table (`parse_atom_chunk` in ERTS).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let atoms = parse_atoms(&[0xff, 0xff, 0xff, 0xff, 0x10, b'a'])?;
-/// assert_eq!(atoms, ["a"]);
+/// let mut table = AtomTable::new();
+/// let atoms = parse_atoms(&[0xff, 0xff, 0xff, 0xff, 0x10, b'a'], &mut table)?;
+/// assert_eq!(atoms[0].name(), "a");
+/// assert_eq!(table.get("a"), Some(atoms[0].clone()));
 /// ```
-fn parse_atoms(data: &[u8]) -> Result<Vec<String>, BeamError> {
+fn parse_atoms(data: &[u8], atom_table: &mut AtomTable) -> Result<Vec<Atom>, BeamError> {
     let signed_atom_count = read_u32(data)? as i32;
     let atom_count = usize::try_from(
         signed_atom_count
@@ -266,12 +282,11 @@ fn parse_atoms(data: &[u8]) -> Result<Vec<String>, BeamError> {
             return Err(error("truncated atom name"));
         }
         let atom_name_end = cursor + atom_name_length;
-        let atom = std::str::from_utf8(
+        let atom = atom_chunk_name(
             data.get(cursor..atom_name_end)
                 .ok_or_else(|| error("truncated atom name"))?,
-        )
-        .map_err(|_| error("invalid UTF-8 atom name"))?;
-        atoms.push(atom.to_owned());
+        )?;
+        atoms.push(atom_table.put(atom)?);
         cursor = atom_name_end;
     }
     if cursor != data.len() {
@@ -280,17 +295,48 @@ fn parse_atoms(data: &[u8]) -> Result<Vec<String>, BeamError> {
     Ok(atoms)
 }
 
+/// Return the atom name of an `AtU8` entry. As `parse_atom_chunk` calls
+/// `erts_atom_put` with `trunc` set, a name longer than 255 characters
+/// becomes its first 255 characters, and ERTS does not check the bytes after
+/// them. Thus two long names with the same first 255 characters are one atom.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(atom_chunk_name(b"ok")?, "ok");
+/// let long = [b"a".repeat(255), vec![b'b', 0xff]].concat();
+/// assert_eq!(atom_chunk_name(&long)?, "a".repeat(255));
+/// assert!(atom_chunk_name(&[b'a', 0xff]).is_err());
+/// ```
+///
+/// # Errors
+///
+/// A name that is not valid UTF-8 in its first 255 characters is the error
+/// `invalid UTF-8 atom name`.
+fn atom_chunk_name(bytes: &[u8]) -> Result<&str, BeamError> {
+    let valid = std::str::from_utf8(bytes).unwrap_or_else(|invalid| {
+        std::str::from_utf8(&bytes[..invalid.valid_up_to()]).expect("a valid UTF-8 prefix")
+    });
+    match valid.char_indices().nth(MAX_ATOM_CHARACTERS) {
+        Some((end, _)) => Ok(&valid[..end]),
+        None if valid.len() == bytes.len() || valid.chars().count() == MAX_ATOM_CHARACTERS => {
+            Ok(valid)
+        }
+        None => Err(error("invalid UTF-8 atom name")),
+    }
+}
+
 /// Read exported function names, arities, and labels from an `ExpT` chunk.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let atoms = vec!["main".to_owned()];
+/// let atoms = vec![AtomTable::new().put("main")?];
 /// let table = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
 /// let exports = parse_exports(table, &atoms)?;
 /// assert_eq!(exports.get(&("main".to_owned(), 0)), Some(&1));
 /// ```
-fn parse_exports(data: &[u8], atoms: &[String]) -> Result<HashMap<(String, u32), u32>, BeamError> {
+fn parse_exports(data: &[u8], atoms: &[Atom]) -> Result<HashMap<(String, u32), u32>, BeamError> {
     let export_count = read_u32(data)? as usize;
     let expected_table_size = WORD_SIZE
         .checked_add(
@@ -307,7 +353,7 @@ fn parse_exports(data: &[u8], atoms: &[String]) -> Result<HashMap<(String, u32),
         let atom_index = read_u32(&entry[..WORD_SIZE])? as usize;
         let arity = read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])?;
         let label = read_u32(&entry[WORD_SIZE * 2..])?;
-        let name = atom_at(atoms, atom_index)?.to_owned();
+        let name = atom_at(atoms, atom_index)?.name().to_owned();
         if exports.insert((name, arity), label).is_some() {
             return Err(error("duplicate BEAM export"));
         }
@@ -320,11 +366,12 @@ fn parse_exports(data: &[u8], atoms: &[String]) -> Result<HashMap<(String, u32),
 /// # Examples
 ///
 /// ```rust,ignore
-/// let atoms = vec!["IO".to_owned(), "puts".to_owned()];
-/// let table = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1];
-/// assert_eq!(parse_imports(table, &atoms)?, [("IO".into(), "puts".into(), 1)]);
+/// let mut table = AtomTable::new();
+/// let atoms = vec![table.put("IO")?, table.put("puts")?];
+/// let entries = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1];
+/// assert_eq!(parse_imports(entries, &atoms)?, [("IO".into(), "puts".into(), 1)]);
 /// ```
-fn parse_imports(data: &[u8], atoms: &[String]) -> Result<Vec<(String, String, u32)>, BeamError> {
+fn parse_imports(data: &[u8], atoms: &[Atom]) -> Result<Vec<(String, String, u32)>, BeamError> {
     let import_count = read_u32(data)? as usize;
     let expected_size = WORD_SIZE
         .checked_add(
@@ -340,23 +387,29 @@ fn parse_imports(data: &[u8], atoms: &[String]) -> Result<Vec<(String, String, u
         .chunks(IMPORT_ENTRY_SIZE)
         .map(|entry| {
             Ok((
-                atom_at(atoms, read_u32(&entry[..WORD_SIZE])? as usize)?.to_owned(),
-                atom_at(atoms, read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])? as usize)?.to_owned(),
+                atom_at(atoms, read_u32(&entry[..WORD_SIZE])? as usize)?
+                    .name()
+                    .to_owned(),
+                atom_at(atoms, read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])? as usize)?
+                    .name()
+                    .to_owned(),
                 read_u32(&entry[WORD_SIZE * 2..])?,
             ))
         })
         .collect()
 }
 
-/// Read supported binary terms from an uncompressed `LitT` chunk.
+/// Read supported terms from an uncompressed `LitT` chunk. Put the atoms of
+/// each literal, in byte order, into the atom table, as `erts_decode_ext`
+/// does.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let literals = parse_literals(&[0; 8])?;
+/// let literals = parse_literals(&[0; 8], &mut AtomTable::new())?;
 /// assert!(literals.is_empty());
 /// ```
-fn parse_literals(data: &[u8]) -> Result<Vec<Option<Term>>, BeamError> {
+fn parse_literals(data: &[u8], atom_table: &mut AtomTable) -> Result<Vec<Option<Term>>, BeamError> {
     if data.len() < WORD_SIZE * 2 {
         return Err(error("truncated BEAM literal table header"));
     }
@@ -377,7 +430,7 @@ fn parse_literals(data: &[u8]) -> Result<Vec<Option<Term>>, BeamError> {
             .checked_add(literal_size)
             .filter(|&end| end <= data.len())
             .ok_or_else(|| error("BEAM literal exceeds chunk size"))?;
-        literals.push(read_literal(&data[cursor..literal_end])?);
+        literals.push(read_literal(&data[cursor..literal_end], atom_table)?);
         cursor = literal_end;
     }
     if cursor != data.len() {
@@ -387,23 +440,26 @@ fn parse_literals(data: &[u8]) -> Result<Vec<Option<Term>>, BeamError> {
 }
 
 /// Read one `LitT` entry. Return `None` when the term contains a tag that
-/// `literal_entry` does not list, at any depth.
+/// `literal_entry` does not list, at any depth. The atoms before that tag
+/// are in the atom table.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let term = read_literal(&[131, 109, 0, 0, 0, 2, b'o', b'k'])?;
+/// let mut atoms = AtomTable::new();
+/// let term = read_literal(&[131, 109, 0, 0, 0, 2, b'o', b'k'], &mut atoms)?;
 /// assert_eq!(term, Some(Term::Binary(b"ok".to_vec())));
 /// // [flush]
-/// let list = read_literal(&[131, 108, 0, 0, 0, 1, 119, 5, b'f', b'l', b'u', b's', b'h', 106])?;
-/// assert_eq!(list, Some(Term::List(vec![Term::Atom("flush".into())])));
+/// let bytes = [131, 108, 0, 0, 0, 1, 119, 5, b'f', b'l', b'u', b's', b'h', 106];
+/// let list = read_literal(&bytes, &mut atoms)?;
+/// assert_eq!(list, Some(Term::List(vec![Term::static_atom("flush")])));
 /// ```
-fn read_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
+fn read_literal(data: &[u8], atom_table: &mut AtomTable) -> Result<Option<Term>, BeamError> {
     if data.first() != Some(&ETF_VERSION) {
         return Ok(None);
     }
     let mut cursor = 1;
-    let Some(term) = read_external_term(data, &mut cursor)? else {
+    let Some(term) = read_external_term(data, &mut cursor, atom_table)? else {
         return Ok(None);
     };
     if cursor != data.len() {
@@ -430,9 +486,10 @@ enum PartialTerm {
     },
 }
 
-/// Read one external term at the cursor and advance past it. Return `None`
-/// for a tag or list tail that `literal_entry` does not list, or for a map
-/// key that `Map` does not support yet.
+/// Read one external term at the cursor and advance past it. Put each atom
+/// into the atom table when it is read. Return `None` for a tag or list tail
+/// that `literal_entry` does not list, or for a map key that `Map` does not
+/// support yet.
 /// Nested lists, tuples, and maps use a work stack, so nesting has no fixed
 /// depth limit, as in the ERTS decoder.
 ///
@@ -440,16 +497,22 @@ enum PartialTerm {
 ///
 /// ```rust,ignore
 /// let mut cursor = 0;
+/// let mut atoms = AtomTable::new();
 /// // {}
-/// assert_eq!(read_external_term(&[104, 0], &mut cursor)?, Some(Term::Tuple(vec![])));
+/// let term = read_external_term(&[104, 0], &mut cursor, &mut atoms)?;
+/// assert_eq!(term, Some(Term::Tuple(vec![])));
 /// assert_eq!(cursor, 2);
 /// ```
 ///
 /// # Errors
 ///
-/// A truncated term, an atom that is not UTF-8, or a map with a duplicate
-/// key is an error.
-fn read_external_term(data: &[u8], cursor: &mut usize) -> Result<Option<Term>, BeamError> {
+/// A truncated term, an atom that is not UTF-8, a new atom when the atom
+/// table is full, or a map with a duplicate key is an error.
+fn read_external_term(
+    data: &[u8],
+    cursor: &mut usize,
+    atom_table: &mut AtomTable,
+) -> Result<Option<Term>, BeamError> {
     let mut partial = Vec::new();
     loop {
         let mut term = match take(data, cursor, 1)?[0] {
@@ -472,7 +535,7 @@ fn read_external_term(data: &[u8], cursor: &mut usize) -> Result<Option<Term>, B
                 let size = take(data, cursor, 1)?[0] as usize;
                 let name = std::str::from_utf8(take(data, cursor, size)?)
                     .map_err(|_| error("invalid UTF-8 in BEAM atom literal"))?;
-                Term::Atom(name.to_owned())
+                Term::Atom(atom_table.put(name)?)
             }
             ETF_SMALL_TUPLE_EXT => match take(data, cursor, 1)?[0] {
                 0 => Term::Tuple(Vec::new()),
@@ -617,7 +680,7 @@ fn take<'a>(data: &'a [u8], cursor: &mut usize, length: usize) -> Result<&'a [u8
 /// assert_eq!(term, Term::Integer(0));
 /// assert_eq!(cursor, 1);
 /// ```
-fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term, BeamError> {
+fn read_value(data: &[u8], cursor: &mut usize, atoms: &[Atom]) -> Result<Term, BeamError> {
     let first_byte = *data
         .get(*cursor)
         .ok_or_else(|| error("truncated BEAM operand"))?;
@@ -631,7 +694,7 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term,
             if index == 0 {
                 return Ok(Term::List(Vec::new()));
             }
-            Ok(Term::Atom(atom_at(atoms, index)?.to_owned()))
+            Ok(Term::Atom(atom_at(atoms, index)?.clone()))
         }
         unsupported_tag => Err(error(format!(
             "unsupported constant operand tag {unsupported_tag}"
@@ -671,16 +734,15 @@ fn sign_extend(first_byte: u8, payload: u64) -> i64 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let atoms = vec!["hello".to_owned()];
-/// assert_eq!(atom_at(&atoms, 1)?, "hello");
+/// let atoms = vec![AtomTable::new().put("hello")?];
+/// assert_eq!(atom_at(&atoms, 1)?.name(), "hello");
 /// ```
-fn atom_at(atoms: &[String], index: usize) -> Result<&str, BeamError> {
+fn atom_at(atoms: &[Atom], index: usize) -> Result<&Atom, BeamError> {
     if index < FIRST_ATOM_INDEX {
         return Err(error("BEAM atom index zero is invalid"));
     }
     atoms
         .get(index - FIRST_ATOM_INDEX)
-        .map(String::as_str)
         .ok_or_else(|| error(format!("BEAM atom index {index} out of range")))
 }
 
@@ -824,95 +886,203 @@ fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{atom_at, parse_atoms, parse_exports, parse_literals, read_literal, read_u32};
-    use crate::term::{Map, Term};
+    use super::{
+        atom_at, atom_chunk_name, parse_atoms, parse_exports, parse_literals, read_literal,
+        read_u32,
+    };
+    use crate::term::{AtomTable, Map, Term};
+
+    /// Return the atom term of a name that exists in a table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(atom(&AtomTable::new(), "ok"), Term::static_atom("ok"));
+    /// ```
+    fn atom(table: &AtomTable, name: &str) -> Term {
+        Term::Atom(table.get(name).unwrap())
+    }
 
     #[test]
     fn rejects_invalid_atom_tables_and_indices() {
+        let mut table = AtomTable::new();
         assert!(read_u32(&[0, 1]).is_err());
-        assert!(parse_atoms(&[]).is_err());
-        assert!(parse_atoms(&(-1i32).to_be_bytes()).is_err());
+        assert!(parse_atoms(&[], &mut table).is_err());
+        assert!(parse_atoms(&(-1i32).to_be_bytes(), &mut table).is_err());
         assert!(atom_at(&[], 0).is_err());
 
         let mut malformed_atoms = (-2i32).to_be_bytes().to_vec();
         malformed_atoms.extend([0x30, b'a', b'b', b'c', 0xa0]);
-        assert!(parse_atoms(&malformed_atoms).is_err());
-        assert!(parse_atoms(&[0xff, 0xff, 0xff, 0xff, 0x10, 0xff]).is_err());
-        assert!(parse_atoms(&0i32.to_be_bytes()).unwrap().is_empty());
+        assert!(parse_atoms(&malformed_atoms, &mut table).is_err());
+        assert!(parse_atoms(&[0xff, 0xff, 0xff, 0xff, 0x10, 0xff], &mut table).is_err());
+        assert!(
+            parse_atoms(&0i32.to_be_bytes(), &mut table)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn puts_atu8_atoms_into_the_table_in_chunk_order() {
+        let mut table = AtomTable::new();
+        // AtU8 with zeta, ok, and alpha: ok keeps its static index 506.
+        let mut chunk = (-3i32).to_be_bytes().to_vec();
+        chunk.extend([0x40, b'z', b'e', b't', b'a', 0x20, b'o', b'k']);
+        chunk.extend([0x50, b'a', b'l', b'p', b'h', b'a']);
+        let atoms = parse_atoms(&chunk, &mut table).unwrap();
+        let indices: Vec<_> = atoms.iter().map(|atom| atom.index()).collect();
+        assert_eq!(indices, [1150, 506, 1151]);
+        assert_eq!(atoms[2].name(), "alpha");
+        assert_eq!(table.get("zeta"), Some(atoms[0].clone()));
+        // A second module gets the same index for an existing atom.
+        assert_eq!(parse_atoms(&chunk, &mut table).unwrap(), atoms);
+    }
+
+    #[test]
+    fn truncates_a_long_atu8_name_to_255_characters_like_erts() {
+        // OTP 29.1.1 loads 255 `a` and `b`, or 255 `a` and 0xff, as the atom of
+        // 255 `a`. It rejects 254 `a` and 0xff as a corrupt atom table.
+        let a255 = "a".repeat(255);
+        assert_eq!(atom_chunk_name(a255.as_bytes()).unwrap(), a255);
+        assert_eq!(
+            atom_chunk_name(format!("{a255}b").as_bytes()).unwrap(),
+            a255
+        );
+        assert_eq!(
+            atom_chunk_name(&[a255.as_bytes(), &[0xff]].concat()).unwrap(),
+            a255
+        );
+        assert!(atom_chunk_name(&[&a255.as_bytes()[1..], &[0xff]].concat()).is_err());
+        // ERTS counts characters, not bytes: 255 `é` and `x` is 255 `é`.
+        let e255 = "é".repeat(255);
+        assert_eq!(
+            atom_chunk_name(format!("{e255}x").as_bytes()).unwrap(),
+            e255
+        );
+
+        // AtU8 with 255 `a` and `b`, then 255 `a` and `d`: one atom.
+        let mut table = AtomTable::new();
+        let mut chunk = (-2i32).to_be_bytes().to_vec();
+        for last in *b"bd" {
+            chunk.extend([0x28, 0]);
+            chunk.extend(a255.as_bytes());
+            chunk.push(last);
+        }
+        let atoms = parse_atoms(&chunk, &mut table).unwrap();
+        assert_eq!(atoms[0].name(), a255);
+        assert_eq!(atoms[0].index(), 1150);
+        assert_eq!(atoms[1], atoms[0]);
+        assert_eq!(table.get(&a255), Some(atoms[0].clone()));
     }
 
     #[test]
     fn rejects_invalid_export_tables_and_indices() {
+        let atoms = [AtomTable::new().put("constant").unwrap()];
         assert!(parse_exports(&[], &[]).is_err());
         assert!(parse_exports(&[0, 0, 0, 1], &[]).is_err());
         let exports = [0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1];
-        assert!(parse_exports(&exports, &["constant".into()]).is_err());
+        assert!(parse_exports(&exports, &atoms).is_err());
     }
 
     #[test]
     fn reads_uncompressed_binary_literals() {
+        let mut atoms = AtomTable::new();
         let mut table = 0u32.to_be_bytes().to_vec();
         table.extend(1u32.to_be_bytes());
         table.extend(8u32.to_be_bytes());
         table.extend([131, 109, 0, 0, 0, 2, b'o', b'k']);
         assert_eq!(
-            parse_literals(&table).unwrap(),
+            parse_literals(&table, &mut atoms).unwrap(),
             vec![Some(Term::Binary(b"ok".to_vec()))]
         );
         assert_eq!(
-            parse_literals(&[0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            parse_literals(&[0, 0, 0, 0, 0, 0, 0, 0], &mut atoms).unwrap(),
             Vec::<Option<Term>>::new()
         );
-        assert_eq!(read_literal(&[1]).unwrap(), None);
-        assert!(read_literal(&[131, 109]).is_err());
+        assert_eq!(read_literal(&[1], &mut atoms).unwrap(), None);
+        assert!(read_literal(&[131, 109], &mut atoms).is_err());
         assert_eq!(
-            read_literal(&[131, 107, 0, 1, b'\n']).unwrap(),
+            read_literal(&[131, 107, 0, 1, b'\n'], &mut atoms).unwrap(),
             Some(Term::List(vec![Term::Integer(10)]))
         );
-        assert!(read_literal(&[131, 107]).is_err());
-        assert!(read_literal(&[131, 107, 0, 2, b'x']).is_err());
+        assert!(read_literal(&[131, 107], &mut atoms).is_err());
+        assert!(read_literal(&[131, 107, 0, 2, b'x'], &mut atoms).is_err());
+    }
+
+    #[test]
+    fn puts_literal_atoms_into_the_table_in_byte_order() {
+        let mut atoms = AtomTable::new();
+        // {pbeam_lit_b, #{pbeam_lit_a => 1, pbeam_lit_b => 2}}: ERTS 29.1.1 creates pbeam_lit_b
+        // first, so maps:keys/1 of the map is [pbeam_lit_b,pbeam_lit_a].
+        let mut bytes = vec![131, 104, 2, 119, 11];
+        bytes.extend(b"pbeam_lit_b");
+        bytes.extend([116, 0, 0, 0, 2, 119, 11]);
+        bytes.extend(b"pbeam_lit_a");
+        bytes.extend([97, 1, 119, 11]);
+        bytes.extend(b"pbeam_lit_b");
+        bytes.extend([97, 2]);
+        let literal = read_literal(&bytes, &mut atoms).unwrap().unwrap();
+        assert_eq!(atoms.get("pbeam_lit_b").unwrap().index(), 1150);
+        assert_eq!(atoms.get("pbeam_lit_a").unwrap().index(), 1151);
+        let (lit_a, lit_b) = (atom(&atoms, "pbeam_lit_a"), atom(&atoms, "pbeam_lit_b"));
+        let pairs = vec![(lit_a, Term::Integer(1)), (lit_b.clone(), Term::Integer(2))];
+        let map = Term::Map(Map::from_pairs(pairs).unwrap());
+        assert_eq!(literal, Term::Tuple(vec![lit_b, map]));
+        assert_eq!(
+            format!("{literal:?}"),
+            "Tuple([Atom(\"pbeam_lit_b\"), Map([(Atom(\"pbeam_lit_b\"), Integer(2)), \
+             (Atom(\"pbeam_lit_a\"), Integer(1))])])"
+        );
+        // [pbeam_x, 256, pbeam_y]: the atoms after the unsupported INTEGER_EXT are not created.
+        let mut unsupported = vec![131, 108, 0, 0, 0, 3, 119, 7];
+        unsupported.extend(b"pbeam_x");
+        unsupported.extend([98, 0, 0, 1, 0, 119, 7]);
+        unsupported.extend(b"pbeam_y");
+        unsupported.push(106);
+        assert_eq!(read_literal(&unsupported, &mut atoms).unwrap(), None);
+        assert_eq!(atoms.get("pbeam_x").unwrap().index(), 1152);
+        assert_eq!(atoms.get("pbeam_y"), None);
     }
 
     #[test]
     fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
-        let atom = |name: &str| Term::Atom(name.into());
+        let mut atoms = AtomTable::new();
+        let mut read = |bytes: &[u8]| read_literal(bytes, &mut atoms);
         // [a|[b]] gives the same list as [a,b].
+        let improper = read(&[
+            131, 108, 0, 0, 0, 1, 119, 1, b'a', 108, 0, 0, 0, 1, 119, 1, b'b', 106,
+        ])
+        .unwrap();
         assert_eq!(
-            read_literal(&[
-                131, 108, 0, 0, 0, 1, 119, 1, b'a', 108, 0, 0, 0, 1, 119, 1, b'b', 106
-            ])
-            .unwrap(),
-            Some(Term::List(vec![atom("a"), atom("b")]))
-        );
-        assert_eq!(
-            read_literal(&[131, 104, 2, 119, 2, b'o', b'k', 106]).unwrap(),
-            Some(Term::Tuple(vec![atom("ok"), Term::List(vec![])]))
+            read(&[131, 104, 2, 119, 2, b'o', b'k', 106]).unwrap(),
+            Some(Term::Tuple(vec![
+                Term::static_atom("ok"),
+                Term::List(vec![])
+            ]))
         );
         // INTEGER_EXT (98) 256 inside a tuple or a list, and an improper tail.
-        assert_eq!(read_literal(&[131, 104, 1, 98, 0, 0, 1, 0]).unwrap(), None);
+        assert_eq!(read(&[131, 104, 1, 98, 0, 0, 1, 0]).unwrap(), None);
         assert_eq!(
-            read_literal(&[131, 108, 0, 0, 0, 1, 98, 0, 0, 1, 0, 106]).unwrap(),
+            read(&[131, 108, 0, 0, 0, 1, 98, 0, 0, 1, 0, 106]).unwrap(),
             None
         );
         assert_eq!(
-            read_literal(&[131, 108, 0, 0, 0, 1, 106, 119, 1, b't']).unwrap(),
+            read(&[131, 108, 0, 0, 0, 1, 106, 119, 1, b't']).unwrap(),
             None
         );
-        assert!(read_literal(&[131, 119, 1, 0xff]).is_err());
-        assert!(read_literal(&[131, 106, 106]).is_err());
-        assert!(read_literal(&[131, 104]).is_err());
+        assert!(read(&[131, 119, 1, 0xff]).is_err());
+        assert!(read(&[131, 106, 106]).is_err());
+        assert!(read(&[131, 104]).is_err());
         // [a, b] with length 2, and a zero-length LIST_EXT whose tail is [].
+        let proper = read(&[131, 108, 0, 0, 0, 2, 119, 1, b'a', 119, 1, b'b', 106]).unwrap();
         assert_eq!(
-            read_literal(&[131, 108, 0, 0, 0, 2, 119, 1, b'a', 119, 1, b'b', 106]).unwrap(),
-            Some(Term::List(vec![atom("a"), atom("b")]))
-        );
-        assert_eq!(
-            read_literal(&[131, 108, 0, 0, 0, 0, 106]).unwrap(),
+            read(&[131, 108, 0, 0, 0, 0, 106]).unwrap(),
             Some(Term::List(vec![]))
         );
 
-        // #{b => [], a => {}} keeps its pairs in flatmap key order; #{} is empty.
-        let map = read_literal(&[
+        // #{b => [], a => {}} keeps its pairs in flatmap key order. The first literal made a
+        // before b, so a has the lower atom index.
+        let map = read(&[
             131, 116, 0, 0, 0, 2, 119, 1, b'b', 106, 119, 1, b'a', 104, 0,
         ])
         .unwrap()
@@ -922,37 +1092,31 @@ mod tests {
             "Map([(Atom(\"a\"), Tuple([])), (Atom(\"b\"), List([]))])"
         );
         assert_eq!(
-            read_literal(&[131, 116, 0, 0, 0, 0]).unwrap(),
+            read(&[131, 116, 0, 0, 0, 0]).unwrap(),
             Some(Term::Map(Map::from_pairs(vec![]).unwrap()))
         );
         // A map key that `Map` does not support yet makes the literal unsupported.
-        assert_eq!(
-            read_literal(&[131, 116, 0, 0, 0, 1, 106, 106]).unwrap(),
-            None
-        );
+        assert_eq!(read(&[131, 116, 0, 0, 0, 1, 106, 106]).unwrap(), None);
         // ERTS rejects a MAP_EXT with a duplicate key: #{1 => [], 1 => []}.
         assert_eq!(
-            read_literal(&[131, 116, 0, 0, 0, 2, 97, 1, 106, 97, 1, 106])
+            read(&[131, 116, 0, 0, 0, 2, 97, 1, 106, 97, 1, 106])
                 .unwrap_err()
                 .to_string(),
             "duplicate key in BEAM map literal"
         );
 
         // SMALL_INTEGER_EXT: 1 and 255.
-        assert_eq!(read_literal(&[131, 97, 1]).unwrap(), Some(Term::Integer(1)));
-        assert_eq!(
-            read_literal(&[131, 97, 255]).unwrap(),
-            Some(Term::Integer(255))
-        );
+        assert_eq!(read(&[131, 97, 1]).unwrap(), Some(Term::Integer(1)));
+        assert_eq!(read(&[131, 97, 255]).unwrap(), Some(Term::Integer(255)));
 
         // erlc writes #{1 => v, ..., 33 => v} as 131,116,0,0,0,33,97,1,119,1,118,...;
         // 33 keys give a hashmap in the ERTS order, from either input order.
-        let literal = |keys: &mut dyn Iterator<Item = u8>| {
+        let mut literal = |keys: &mut dyn Iterator<Item = u8>| {
             let mut bytes = vec![131, 116, 0, 0, 0, 33];
             for key in keys {
                 bytes.extend([97, key, 119, 1, b'v']);
             }
-            read_literal(&bytes).unwrap().unwrap()
+            read(&bytes).unwrap().unwrap()
         };
         let forward = literal(&mut (1..=33));
         assert_eq!(forward, literal(&mut (1..=33).rev()));
@@ -966,20 +1130,26 @@ mod tests {
             deep.extend([104, 1]);
         }
         deep.push(106);
-        let term = read_literal(&deep).unwrap().unwrap();
+        let term = read(&deep).unwrap().unwrap();
         assert!(format!("{term:?}").starts_with("Tuple([Tuple(["));
+
+        let list = Some(Term::List(vec![atom(&atoms, "a"), atom(&atoms, "b")]));
+        assert_eq!(improper, list);
+        assert_eq!(proper, list);
     }
 
     #[test]
     fn rejects_invalid_literal_tables() {
-        assert!(parse_literals(&[0, 0, 0, 0]).is_err());
-        assert!(parse_literals(&[0, 0, 0, 1, 0, 0, 0, 0]).is_err());
-        assert!(parse_literals(&[0, 0, 0, 0, 0, 0, 0, 1]).is_err());
-        assert!(parse_literals(&[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1]).is_err());
-        assert!(parse_literals(&[0, 0, 0, 0, 0, 0, 0, 0, 1]).is_err());
+        let mut atoms = AtomTable::new();
+        let mut parse = |bytes: &[u8]| parse_literals(bytes, &mut atoms);
+        assert!(parse(&[0, 0, 0, 0]).is_err());
+        assert!(parse(&[0, 0, 0, 1, 0, 0, 0, 0]).is_err());
+        assert!(parse(&[0, 0, 0, 0, 0, 0, 0, 1]).is_err());
+        assert!(parse(&[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1]).is_err());
+        assert!(parse(&[0, 0, 0, 0, 0, 0, 0, 0, 1]).is_err());
 
         let mut malformed_binary = vec![0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 7];
         malformed_binary.extend([131, 109, 0, 0, 0, 2, b'x']);
-        assert!(parse_literals(&malformed_binary).is_err());
+        assert!(parse(&malformed_binary).is_err());
     }
 }

@@ -10,12 +10,11 @@ fn runs_a_compiled_process_probe_with_reference_matching_and_cleanup() {
 
     assert_eq!(
         program.execute("process_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
-            Term::Atom("io_ok".into()),
-            Term::Atom("down_ok".into()),
-            Term::Atom("exit_ok".into()),
-            Term::Atom("noise_ok".into()),
-        ])
+        Term::Tuple(
+            ["io_ok", "down_ok", "exit_ok", "noise_ok"]
+                .map(|name| Term::Atom(program.atom(name).unwrap()))
+                .to_vec()
+        )
     );
 
     let reference = Command::new("erl")

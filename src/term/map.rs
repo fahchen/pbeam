@@ -9,18 +9,15 @@
 //! Supported keys:
 //!
 //! - flatmap: any integer and any atom;
-//! - hashmap: an integer in the ERTS small-integer range only.
+//! - hashmap: any atom, and an integer in the ERTS small-integer range.
 //!
-//! ERTS orders atom keys in a flatmap and hashes atom keys in a hashmap by
-//! the index of the atom in the atom table. PBeam has no atom table, so a
-//! hashmap does not accept atom keys, and [`Map::erts_iter`] rejects a map
-//! with two or more atom keys. A flatmap stores atom keys in name order, but
-//! no BEAM operation can see that internal order. Other key types need the
-//! ERTS term order and hash for bignums and compound terms, which PBeam does
-//! not have yet.
+//! As in ERTS, a flatmap orders atom keys by their atom index, and a hashmap
+//! hashes an atom key by its atom word `(index << 6) | 0xB`. Thus the pair
+//! order of a map is the ERTS order, which BEAM code sees through operations
+//! such as `maps:keys/1`. Other key types need the ERTS term order and hash
+//! for bignums and compound terms, which PBeam does not have yet.
 
 use super::Term;
-use crate::error::{BeamError, error};
 
 /// The largest number of keys in a flatmap (`MAP_SMALL_MAP_LIMIT` in a
 /// release build of ERTS). A map with more keys is a hashmap.
@@ -39,6 +36,10 @@ const SMALL_INTEGER_TAG: u64 = 0xF;
 const SMALL_INTEGER_MIN: i64 = -(1 << 59);
 /// The largest ERTS small integer on a 64-bit system: 2^59 - 1.
 const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
+/// The width of the tag of an ERTS atom word (`_TAG_IMMED2_SIZE`).
+const ATOM_TAG_BITS: u32 = 6;
+/// The tag bits of an ERTS atom word (`_TAG_IMMED2_ATOM`).
+const ATOM_TAG: u64 = 0xB;
 
 /// A BEAM map: a flatmap up to 32 keys and a HAMT above 32 keys, as in
 /// ERTS. The layout is private, so every map is in its canonical form.
@@ -84,11 +85,11 @@ enum Child {
 /// integer before every atom, as the ERTS term order puts numbers before
 /// atoms.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum FlatKey<'a> {
+enum FlatKey {
     /// An integer key, ordered by value.
     Integer(i64),
-    /// An atom key, ordered by name bytes. ERTS uses the atom index here.
-    Atom(&'a [u8]),
+    /// An atom key, ordered by atom index, as `erts_cmp_flatmap_keys` does.
+    Atom(u32),
 }
 
 impl Map {
@@ -113,17 +114,18 @@ impl Map {
     ///
     /// ```rust,ignore
     /// let map = Map::from_pairs(vec![
-    ///     (Term::Atom("b".into()), Term::Integer(1)),
+    ///     (Term::static_atom("ok"), Term::Integer(1)),
     ///     (Term::Integer(2), Term::Integer(2)),
     /// ])?;
     /// let keys: Vec<_> = map.iter().map(|(key, _)| key.clone()).collect();
-    /// assert_eq!(keys, [Term::Integer(2), Term::Atom("b".into())]);
+    /// assert_eq!(keys, [Term::Integer(2), Term::static_atom("ok")]);
     /// ```
     ///
     /// # Errors
     ///
     /// Return the first key that the map form does not support yet, for
-    /// example a tuple key, or an atom key in a map of more than 32 keys.
+    /// example a tuple key, or an integer outside the small-integer range in
+    /// a map of more than 32 keys.
     pub fn from_pairs(pairs: Vec<(Term, Term)>) -> Result<Self, Term> {
         let mut map = Map::new();
         for (key, value) in pairs {
@@ -237,13 +239,9 @@ impl Map {
         Ok(())
     }
 
-    /// Iterate over the pairs in storage order: flatmap key order for a
-    /// flatmap, and depth-first ascending slot order for a hashmap. This
-    /// order matches ERTS only when the map has fewer than two atom keys,
-    /// because a flatmap keeps atom keys in name order. Use it only where
-    /// BEAM code cannot see the order, such as `Clone`, `PartialEq`, and
-    /// `Debug`. An operation that gives the order to BEAM code uses
-    /// [`Map::erts_iter`].
+    /// Iterate over the pairs in the ERTS order: flatmap key order for a
+    /// flatmap, and depth-first ascending slot order for a hashmap. BEAM code
+    /// sees this order through operations such as `maps:keys/1`.
     ///
     /// # Examples
     ///
@@ -272,30 +270,6 @@ impl Map {
                     }
                 }
             }))
-    }
-
-    /// Iterate over the pairs in the ERTS order, which BEAM code sees
-    /// through operations such as `maps:keys/1`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let nil = || Term::List(vec![]);
-    /// let map = Map::from_pairs(vec![(Term::Atom("a".into()), nil()), (Term::Integer(1), nil())])?;
-    /// let keys: Vec<_> = map.erts_iter()?.map(|(key, _)| key.clone()).collect();
-    /// assert_eq!(keys, [Term::Integer(1), Term::Atom("a".into())]);
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// A map with two or more atom keys is an error. ERTS orders atom keys
-    /// by atom-table index, and PBeam has no atom table yet.
-    pub(crate) fn erts_iter(&self) -> Result<impl Iterator<Item = (&Term, &Term)>, BeamError> {
-        let mut atoms = self.iter().filter(|(key, _)| matches!(key, Term::Atom(_)));
-        if atoms.nth(1).is_some() {
-            return Err(error("unsupported map order for two or more atom keys"));
-        }
-        Ok(self.iter())
     }
 
     /// Move every key and value onto a work stack. `Term` uses this to drop
@@ -458,13 +432,15 @@ impl Node {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(flat_key(&Term::Integer(1)) < flat_key(&Term::Atom("a".into())));
+/// assert!(flat_key(&Term::Integer(1)) < flat_key(&Term::static_atom("false")));
+/// // true (index 1) comes before abs_path (index 26).
+/// assert!(flat_key(&Term::static_atom("true")) < flat_key(&Term::static_atom("abs_path")));
 /// assert!(flat_key(&Term::Tuple(vec![])).is_none());
 /// ```
-fn flat_key(key: &Term) -> Option<FlatKey<'_>> {
+fn flat_key(key: &Term) -> Option<FlatKey> {
     match key {
         Term::Integer(value) => Some(FlatKey::Integer(*value)),
-        Term::Atom(name) => Some(FlatKey::Atom(name.as_bytes())),
+        Term::Atom(atom) => Some(FlatKey::Atom(atom.index())),
         _ => None,
     }
 }
@@ -484,12 +460,15 @@ fn slot(hash: u64, level: u32) -> u32 {
 
 /// Return the ERTS map hash (`erts_map_hash`) of a key, or `None` for a key
 /// that a hashmap does not support yet. A small integer hashes as its raw
-/// ERTS word `(value << 4) | 0xF`.
+/// ERTS word `(value << 4) | 0xF`. An atom hashes as its raw ERTS word
+/// `(index << 6) | 0xB`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// assert_eq!(map_hash(&Term::Integer(1)), Some(7938660269479274665));
+/// // true has index 1, so its word is 0x4B.
+/// assert_eq!(map_hash(&Term::static_atom("true")), Some(14558535449716669319));
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
 /// ```
 fn map_hash(key: &Term) -> Option<u64> {
@@ -497,6 +476,7 @@ fn map_hash(key: &Term) -> Option<u64> {
         Term::Integer(value) if (SMALL_INTEGER_MIN..=SMALL_INTEGER_MAX).contains(value) => Some(
             mix64(((*value as u64) << SMALL_INTEGER_TAG_BITS) | SMALL_INTEGER_TAG),
         ),
+        Term::Atom(atom) => Some(mix64((u64::from(atom.index()) << ATOM_TAG_BITS) | ATOM_TAG)),
         _ => None,
     }
 }
@@ -520,12 +500,12 @@ fn mix64(mut hash: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{Child, Map, Node, map_hash, mix64};
-    use crate::term::Term;
+    use crate::term::{AtomTable, Term, test_atom as atom};
 
     fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
         Map::from_pairs(
             keys.into_iter()
-                .map(|key| (Term::Integer(key), Term::Atom("v".into())))
+                .map(|key| (Term::Integer(key), atom("v")))
                 .collect(),
         )
         .unwrap()
@@ -548,13 +528,29 @@ mod tests {
         assert!(map_hash(&Term::Integer(-(1 << 59))).is_some());
         assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
         assert_eq!(map_hash(&Term::Integer(-(1 << 59) - 1)), None);
-        assert_eq!(map_hash(&Term::Atom("a".into())), None);
+    }
+
+    #[test]
+    fn hashes_atoms_by_their_index_as_erts() {
+        // true has index 1: its ERTS word is (1 << 6) | 0xB = 0x4B.
+        assert_eq!(mix64(0x4B), 14558535449716669319);
+        assert_eq!(
+            map_hash(&Term::static_atom("true")),
+            Some(14558535449716669319)
+        );
+        // abs_path has index 26.
+        assert_eq!(
+            map_hash(&Term::static_atom("abs_path")),
+            Some(mix64((26 << 6) | 0xB))
+        );
     }
 
     #[test]
     fn keeps_flatmap_keys_in_order_and_replaces_values() {
-        let atom = |name: &str| Term::Atom(name.into());
-        // #{a => V, 2 => V, 1 => V} has keys [1,2,a] in ERTS 29.1.1.
+        // A fresh table for this test makes z before a, so z has the lower
+        // atom index. A table shared with other tests could make a first.
+        let mut table = AtomTable::new();
+        let mut atom = |name: &str| Term::Atom(table.put(name).unwrap());
         let mut map = Map::from_pairs(vec![
             (atom("z"), atom("z")),
             (atom("a"), atom("old")),
@@ -568,8 +564,24 @@ mod tests {
             [
                 Term::Integer(i64::MIN),
                 Term::Integer(2),
-                atom("a"),
-                atom("z")
+                atom("z"),
+                atom("a")
+            ]
+        );
+        // ERTS 29.1.1: maps:keys(#{true => V, abs_path => V, 1 => V}) is [1,true,abs_path],
+        // because true has index 1 and abs_path has index 26.
+        let static_atoms = Map::from_pairs(vec![
+            (Term::static_atom("abs_path"), atom("v")),
+            (Term::static_atom("true"), atom("v")),
+            (Term::Integer(1), atom("v")),
+        ])
+        .unwrap();
+        assert_eq!(
+            keys(&static_atoms),
+            [
+                Term::Integer(1),
+                Term::static_atom("true"),
+                Term::static_atom("abs_path")
             ]
         );
         assert_eq!(map.get(&atom("a")), Some(&atom("a")));
@@ -593,8 +605,7 @@ mod tests {
         // Replacing a value in a full flatmap keeps the flatmap.
         map.insert(Term::Integer(32), Term::Integer(0)).unwrap();
         assert_eq!(keys(&map), list(&(1..=32).collect::<Vec<_>>()));
-        map.insert(Term::Integer(33), Term::Atom("v".into()))
-            .unwrap();
+        map.insert(Term::Integer(33), atom("v")).unwrap();
         assert_eq!(map.len(), 33);
         // ERTS 29.1.1: maps:keys of 1..33.
         assert_eq!(
@@ -609,7 +620,7 @@ mod tests {
         assert_eq!(map.get(&Term::Integer(33)), Some(&Term::Integer(1)));
         assert_eq!(map.len(), 33);
         assert_eq!(map.get(&Term::Integer(34)), None);
-        assert_eq!(map.get(&Term::Atom("a".into())), None);
+        assert_eq!(map.get(&atom("a")), None);
 
         // ERTS 29.1.1: maps:keys of 1..64, where every root slot is used.
         let full = integers((1..=64).rev());
@@ -679,43 +690,33 @@ mod tests {
     }
 
     #[test]
-    fn rejects_keys_that_the_hashmap_does_not_support_yet() {
-        let atom = Term::Atom("a".into());
-        // The 33rd key turns the flatmap into a hashmap, which has no atom keys yet.
+    fn puts_atom_keys_in_a_hashmap_and_rejects_large_integers() {
+        let a = atom("a");
+        // The 33rd key turns a flatmap with an atom key into a hashmap.
         let mut map = integers(1..=31);
-        map.insert(atom.clone(), atom.clone()).unwrap();
+        map.insert(a.clone(), a.clone()).unwrap();
+        map.insert(Term::Integer(33), a.clone()).unwrap();
+        assert_eq!(map.len(), 33);
+        assert_eq!(map.get(&a), Some(&a));
+        assert_eq!(map.get(&atom("b")), None);
+        // An atom key goes into a hashmap.
+        let mut map = integers(1..=33);
+        map.insert(a.clone(), Term::Integer(1)).unwrap();
+        map.insert(a.clone(), Term::Integer(2)).unwrap();
+        assert_eq!(map.len(), 34);
+        assert_eq!(map.get(&a), Some(&Term::Integer(2)));
+        // A hashmap has no hash for an integer outside the small-integer range yet.
         assert_eq!(
-            map.insert(Term::Integer(33), atom.clone()),
-            Err(atom.clone())
-        );
-        assert_eq!(map.len(), 32);
-        let mut map = integers(1..=32);
-        assert_eq!(map.insert(atom.clone(), atom.clone()), Err(atom.clone()));
-        assert_eq!(
-            map.insert(Term::Integer(1 << 59), atom.clone()),
+            map.insert(Term::Integer(1 << 59), a.clone()),
             Err(Term::Integer(1 << 59))
         );
-        let mut map = integers(1..=33);
-        assert_eq!(map.insert(atom.clone(), atom.clone()), Err(atom));
-        assert_eq!(map.len(), 33);
-    }
-
-    #[test]
-    fn gives_the_erts_order_only_for_fewer_than_two_atom_keys() {
-        let atom = |name: &str| Term::Atom(name.into());
-        let map = |keys: Vec<Term>| {
-            Map::from_pairs(keys.into_iter().map(|key| (key, atom("v"))).collect()).unwrap()
-        };
-        // ERTS 29.1.1: maps:keys(#{a => V, 2 => V, 1 => V}) is [1,2,a].
-        let one_atom = map(vec![atom("a"), Term::Integer(2), Term::Integer(1)]);
-        let keys: Vec<_> = one_atom.erts_iter().unwrap().map(|(key, _)| key).collect();
-        assert_eq!(keys, [&Term::Integer(1), &Term::Integer(2), &atom("a")]);
-        // ERTS 29.1.1 gives [1,b,a] for #{a => v, 1 => v, b => v}: atom-index order.
-        let two_atoms = map(vec![atom("a"), Term::Integer(1), atom("b")]);
+        let mut map = integers(1..=31);
+        map.insert(Term::Integer(1 << 59), a.clone()).unwrap();
         assert_eq!(
-            two_atoms.erts_iter().err().unwrap().to_string(),
-            "unsupported map order for two or more atom keys"
+            map.insert(Term::Integer(33), a),
+            Err(Term::Integer(1 << 59))
         );
+        assert_eq!(map.len(), 32);
     }
 
     #[test]
@@ -728,7 +729,7 @@ mod tests {
         assert_eq!(pending.len(), 80);
         let mut pending = Vec::new();
         integers([2, 1]).drain_into(&mut pending);
-        let v = Term::Atom("v".into());
+        let v = atom("v");
         assert_eq!(pending, [Term::Integer(1), v.clone(), Term::Integer(2), v]);
     }
 

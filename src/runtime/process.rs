@@ -82,7 +82,7 @@ impl ProcessState {
     ///
     /// ```rust,ignore
     /// process.wait();
-    /// assert!(process.receive(Term::Atom("ping".into())));
+    /// assert!(process.receive(Term::static_atom("ok")));
     /// ```
     pub(super) fn wait(&mut self) {
         self.waiting = true;
@@ -94,7 +94,7 @@ impl ProcessState {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(!process.receive(Term::Atom("ping".into())));
+    /// assert!(!process.receive(Term::static_atom("ok")));
     /// ```
     pub(super) fn receive(&mut self, term: Term) -> bool {
         self.mailbox.push(term);
@@ -105,6 +105,7 @@ impl ProcessState {
 #[cfg(test)]
 pub(super) mod tests {
     use super::{Frame, ProcessState};
+    use crate::term::test_atom;
     use crate::term::{ProcessId, Term};
 
     pub(in crate::runtime) fn frame() -> Frame {
@@ -120,9 +121,9 @@ pub(super) mod tests {
     fn wakes_only_a_waiting_process() {
         let mut process = ProcessState::new(ProcessId(0), frame(), vec![Term::Integer(1)]);
         assert_eq!(process.registers, vec![Some(Term::Integer(1))]);
-        assert!(!process.receive(Term::Atom("early".into())));
+        assert!(!process.receive(test_atom("early")));
         process.wait();
-        assert!(process.receive(Term::Atom("late".into())));
-        assert!(!process.receive(Term::Atom("later".into())));
+        assert!(process.receive(test_atom("late")));
+        assert!(!process.receive(test_atom("later")));
     }
 }

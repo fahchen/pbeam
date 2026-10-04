@@ -4,8 +4,8 @@ use pbeam_runtime::{BeamProgram, Term};
 
 const EXCEPTION_PROBE: &[u8] = include_bytes!("../fixtures/exception/exception_probe.beam");
 
-fn atom(name: &str) -> Term {
-    Term::Atom(name.into())
+fn atom(program: &BeamProgram, name: &str) -> Term {
+    Term::Atom(program.atom(name).unwrap())
 }
 
 fn pair(first: Term, second: Term) -> Term {
@@ -33,6 +33,7 @@ fn erl_reference(expression: &str) -> Vec<u8> {
 #[test]
 fn catches_error_and_exit_exceptions_with_try_and_catch() {
     let program = BeamProgram::load(&[EXCEPTION_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
     assert_eq!(
         program.execute("exception_probe", "main", &[]).unwrap(),
         Term::Tuple(vec![
@@ -71,6 +72,7 @@ fn adds_the_stack_trace_to_a_caught_error() {
     // PBeam records no stack frames, so the stack trace is empty. This is
     // the "Exception stack trace" row in `docs/erts-differences.md`.
     let program = BeamProgram::load(&[EXCEPTION_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
     assert_eq!(
         program
             .execute("exception_probe", "catch_stub", &[])
