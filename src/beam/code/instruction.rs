@@ -197,6 +197,62 @@ pub(crate) enum Instruction {
     },
     /// An instruction that is parsed so the module can load, but cannot run.
     Unsupported(u8),
+    /// Writes a catch tag to a Y register. While the tag is live, an
+    /// exception continues after `label`. `try` (opcode 104) and `catch`
+    /// (opcode 62) both map here, because the ERTS loader rewrites
+    /// `try Y F` to `catch Y F` (`ops.tab`).
+    ///
+    /// Encoding: opcode, Y register, label. Example: `[0x68, 0x04, 0x75]` is
+    /// `try y0 f7`, `[0x68, 0x04, 0x0D, 0x11]` is `try y0 f17`, and
+    /// `[0x3E, 0x04, 0xA5]` is `catch y0 f10`.
+    ///
+    /// Erlang: `catch_value() -> catch ?MODULE:id(ok).` in
+    /// `fixtures/exception/exception_probe.erl` compiles to
+    /// `{'catch',{y,0},{f,13}}`, and `try_value/1` compiles to
+    /// `{'try',{y,0},{f,10}}`.
+    Catch {
+        /// Index of the Y register that holds the tag.
+        register: u32,
+        /// Label of the handler code.
+        label: u32,
+    },
+    /// Clears the catch tag of a `try` when its body returns without an
+    /// exception. The Y register becomes `[]`, as ERTS `make_blank` does.
+    ///
+    /// Encoding: opcode, Y register. Example: `[0x69, 0x04]` is `try_end y0`.
+    ///
+    /// Erlang: `try_value/1` in `fixtures/exception/exception_probe.erl`
+    /// compiles to `{try_end,{y,0}}` after the `try` body.
+    TryEnd {
+        /// Index of the Y register that holds the tag.
+        register: u32,
+    },
+    /// Starts the handler of a `try`: clears the catch tag, then copies the
+    /// exception class from `x3` to `x0`. `x1` holds the reason and `x2` the
+    /// stack trace.
+    ///
+    /// Encoding: opcode, Y register. Example: `[0x6A, 0x04]` is
+    /// `try_case y0`.
+    ///
+    /// Erlang: `try_stub() -> try stub() catch error:R -> {error, R} end.`
+    /// compiles to `{try_case,{y,0}}` at the handler label.
+    TryCase {
+        /// Index of the Y register that holds the tag.
+        register: u32,
+    },
+    /// Ends a `catch` expression: clears the catch tag. After an exception,
+    /// `x0` becomes `{'EXIT', {Reason, Stack}}` for class `error` and
+    /// `{'EXIT', Reason}` for class `exit`.
+    ///
+    /// Encoding: opcode, Y register. Example: `[0x3F, 0x04]` is
+    /// `catch_end y0`.
+    ///
+    /// Erlang: `catch_exit() -> catch exit(bye).` compiles to
+    /// `{catch_end,{y,0}}` at the handler label.
+    CatchEnd {
+        /// Index of the Y register that holds the tag.
+        register: u32,
+    },
     /// Allocates `stack_size` Y registers for the active function.
     /// `allocate_heap` (opcode 13) also maps here: PBeam terms do not use a
     /// process heap, so its heap need has no effect.
@@ -634,6 +690,19 @@ pub(super) fn parse_code(
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
+            OPCODE_TRY | OPCODE_CATCH => Instruction::Catch {
+                register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
+                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+            },
+            OPCODE_TRY_END => Instruction::TryEnd {
+                register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
+            },
+            OPCODE_TRY_CASE => Instruction::TryCase {
+                register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
+            },
+            OPCODE_CATCH_END => Instruction::CatchEnd {
+                register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
+            },
             OPCODE_SEND => Instruction::Send,
             OPCODE_REMOVE_MESSAGE => Instruction::RemoveMessage,
             OPCODE_LOOP_REC => Instruction::LoopReceive {
@@ -899,12 +968,11 @@ fn skip_unsupported_instruction(
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
-        OPCODE_TRY | OPCODE_RAISE => Some(2),
+        OPCODE_RAISE => Some(2),
         OPCODE_CALL_FUN2 | OPCODE_IS_FUNCTION2 => Some(3),
         OPCODE_APPLY_LAST => Some(2),
         OPCODE_APPLY => Some(1),
-        OPCODE_WAIT_TIMEOUT | OPCODE_CATCH => Some(2),
-        OPCODE_CATCH_END => Some(1),
+        OPCODE_WAIT_TIMEOUT => Some(2),
         OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
         OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
@@ -914,7 +982,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_SET_POSITION => Some(2),
         OPCODE_GC_BIF1 => Some(5),
         OPCODE_GC_BIF2 => Some(6),
-        OPCODE_TRY_END | OPCODE_TRY_CASE | OPCODE_BADRECORD => Some(1),
+        OPCODE_BADRECORD => Some(1),
         OPCODE_NIF_START | OPCODE_IF_END | OPCODE_BUILD_STACKTRACE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
@@ -1193,7 +1261,7 @@ mod tests {
         skip_operand, skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
     };
     use crate::{
-        beam::code::Operand,
+        beam::code::{Instruction, Operand},
         term::{Atom, Term},
     };
 
@@ -1306,6 +1374,59 @@ mod tests {
                     .contains("exceeds code chunk")
             );
         }
+    }
+
+    #[test]
+    fn decodes_try_and_catch_instructions_with_a_y_register() {
+        let code = |instructions: &[u8]| {
+            let mut code = vec![0, 0, 0, 16];
+            code.extend([0; 16]);
+            code.extend_from_slice(instructions);
+            code.push(0x03);
+            code
+        };
+        let (instructions, _) = parse_code(
+            &code(&[
+                0x68, 0x04, 0x75, // try y0 f7
+                0x68, 0x14, 0x0D, 0x11, // try y1 f17
+                0x3E, 0x04, 0xA5, // catch y0 f10
+                0x69, 0x04, // try_end y0
+                0x6A, 0x04, // try_case y0
+                0x3F, 0x04, // catch_end y0
+            ]),
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::Catch {
+                    register: 0,
+                    label: 7
+                },
+                Instruction::Catch {
+                    register: 1,
+                    label: 17
+                },
+                Instruction::Catch {
+                    register: 0,
+                    label: 10
+                },
+                Instruction::TryEnd { register: 0 },
+                Instruction::TryCase { register: 0 },
+                Instruction::CatchEnd { register: 0 },
+                Instruction::End,
+            ]
+        ));
+        // An X register cannot hold a catch tag.
+        assert!(
+            parse_code(&code(&[0x68, 0x03, 0x75]), &[], &[], &[])
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected BEAM operand tag 3")
+        );
     }
 
     #[test]
