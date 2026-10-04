@@ -206,9 +206,8 @@ pub(crate) enum Instruction {
     },
     /// Calls a BIF through `bif0` (opcode 9), `bif1` (opcode 10), or `bif2`
     /// (opcode 11) and writes its value to a register. `bif0` has no fail
-    /// label. A `bif1` or `bif2` with fail label 0 maps here; one with another
-    /// fail label decodes to `Unsupported(10)` or `Unsupported(11)` after its
-    /// operands are read.
+    /// label and decodes with `fail_label` 0. With fail label 0, a BIF failure
+    /// raises its exception; with another fail label, it jumps to the label.
     ///
     /// Encoding: `bif0` has opcode, import index, destination register;
     /// `bif1` and `bif2` have opcode, fail label, import index, one or two
@@ -227,8 +226,13 @@ pub(crate) enum Instruction {
     /// `{bif,node,nofail,[],{x,5}}`. The `STACKTRACE()` macro of
     /// `gen_statem`, `element(2, erlang:process_info(self(),
     /// current_stacktrace))`, compiles to
-    /// `{bif,element,{f,0},[{integer,2},{x,0}],{x,0}}`.
+    /// `{bif,element,{f,0},[{integer,2},{x,0}],{x,0}}`. The guard
+    /// `when tuple_size(X) >= 2` in `fixtures/group/group_probe.erl`
+    /// compiles to `{bif,tuple_size,{f,5},[{x,0}],{x,1}}`, which is
+    /// `[0x0A, 0x55, 0x10, 0x03, 0x13]` with import 1.
     Bif {
+        /// Label to jump to when the BIF fails, or 0 to raise the exception.
+        fail_label: u32,
         /// Module of the BIF, for example `erlang`.
         module: String,
         /// Name of the BIF, for example `node`.
@@ -501,6 +505,22 @@ pub(crate) enum Instruction {
     /// Erlang: `receive {io_reply, Reference, ok} -> io_ok end` compiles to
     /// `{test,is_eq_exact,{f,14},[{x,0},{atom,ok}]}`.
     TestExactEqual {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
+    /// Jumps to `fail_label` when the left operand is less than the right
+    /// operand (`is_ge`, opcode 40). PBeam compares two integers only; any
+    /// other operand pair gives a runtime error.
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `[0x28, 0x55, 0x57, 0x13,
+    /// 0x10, 0x21]` fails to label 5 when `x1` is less than the integer 2.
+    ///
+    /// Erlang: the guard `when tuple_size(X) >= 2` in
+    /// `fixtures/group/group_probe.erl` compiles to
+    /// `{test,is_ge,{f,5},[{tr,{x,1},{t_integer,{0,16777215}}},{integer,2}]}`.
+    TestGreaterEqual {
         fail_label: u32,
         left: Operand,
         right: Operand,
@@ -798,6 +818,11 @@ pub(super) fn parse_code(
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
+            OPCODE_TEST_GE => Instruction::TestGreaterEqual {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
             OPCODE_TRY | OPCODE_CATCH => Instruction::Catch {
                 register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
                 label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
@@ -972,6 +997,7 @@ pub(super) fn parse_code(
                     read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
                 )?;
                 Instruction::Bif {
+                    fail_label: 0,
                     module,
                     name,
                     arguments: Vec::new(),
@@ -979,7 +1005,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_BIF1 | OPCODE_BIF2 => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)?;
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let (module, name) = bif_import(
                     imports,
                     read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
@@ -988,17 +1014,12 @@ pub(super) fn parse_code(
                 let arguments = (0..argument_count)
                     .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
                     .collect::<Result<Vec<_>, _>>()?;
-                let destination = read_register(data, &mut cursor)?;
-                // ponytail: a non-zero fail label jumps on a BIF failure; a later task adds it.
-                if fail_label != 0 {
-                    Instruction::Unsupported(opcode)
-                } else {
-                    Instruction::Bif {
-                        module,
-                        name,
-                        arguments,
-                        destination,
-                    }
+                Instruction::Bif {
+                    fail_label,
+                    module,
+                    name,
+                    arguments,
+                    destination: read_register(data, &mut cursor)?,
                 }
             }
             OPCODE_ALLOCATE | OPCODE_ALLOCATE_HEAP => {
@@ -1199,8 +1220,8 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_LT | OPCODE_TEST_GE | OPCODE_TEST_EQ | OPCODE_TEST_NE
-        | OPCODE_TEST_EXACT_EQ | OPCODE_TEST_EXACT_NE => Some(3),
+        OPCODE_TEST_LT | OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ
+        | OPCODE_TEST_EXACT_NE => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
         OPCODE_TEST_IS_INTEGER
         | OPCODE_TEST_IS_FLOAT
@@ -1645,7 +1666,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_bif0_and_bif1_with_fail_label_0_into_one_bif_instruction() {
+    fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
         let code = |instructions: &[u8]| {
             let mut code = vec![0, 0, 0, 16];
             code.extend([0; 16]);
@@ -1674,18 +1695,26 @@ mod tests {
             instructions.as_slice(),
             [
                 Instruction::Bif {
+                    fail_label: 0,
                     module: node1_module,
                     name: node1,
                     arguments: node1_arguments,
                     destination: Operand::X(2),
                 },
                 Instruction::Bif {
+                    fail_label: 0,
                     module: node0_module,
                     name: node0,
                     arguments: node0_arguments,
                     destination: Operand::X(5),
                 },
-                Instruction::Unsupported(10),
+                Instruction::Bif {
+                    fail_label: 3,
+                    module: guard_module,
+                    name: guard,
+                    arguments: guard_arguments,
+                    destination: Operand::X(1),
+                },
                 Instruction::End,
             ] if node1_module == "erlang"
                 && node1 == "node"
@@ -1693,6 +1722,9 @@ mod tests {
                 && node0_module == "erlang"
                 && node0 == "node"
                 && node0_arguments.is_empty()
+                && guard_module == "erlang"
+                && guard == "node"
+                && matches!(guard_arguments.as_slice(), [Operand::X(0)])
         ));
         for bif in [&[0x09, 0x20, 0x03][..], &[0x0A, 0x05, 0x20, 0x03, 0x03]] {
             assert!(
@@ -1705,7 +1737,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_bif2_with_fail_label_0_into_a_bif_instruction() {
+    fn decodes_bif2_into_a_bif_instruction_with_its_fail_label() {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         // Bytes of the pinned OTP 29.1.1 `gen_statem.beam` and `gen.beam`,
@@ -1725,12 +1757,19 @@ mod tests {
             instructions.as_slice(),
             [
                 Instruction::Bif {
+                    fail_label: 0,
                     module,
                     name,
                     arguments,
                     destination: Operand::X(0),
                 },
-                Instruction::Unsupported(11),
+                Instruction::Bif {
+                    fail_label: 46,
+                    module: call_module,
+                    name: call_name,
+                    arguments: call_arguments,
+                    destination: Operand::X(4),
+                },
                 Instruction::End,
             ] if module == "erlang"
                 && name == "element"
@@ -1738,6 +1777,33 @@ mod tests {
                     arguments.as_slice(),
                     [Operand::Value(Term::Integer(2)), Operand::X(0)]
                 )
+                && call_module == "erlang"
+                && call_name == "element"
+                && matches!(
+                    call_arguments.as_slice(),
+                    [Operand::Value(Term::Integer(2)), Operand::X(0)]
+                )
+        ));
+    }
+
+    #[test]
+    fn decodes_is_ge_with_a_typed_register() {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        // Bytes of `group_probe:kind/1` in `fixtures/group/group_probe.beam`:
+        // {test,is_ge,{f,5},[{tr,{x,1},{t_integer,{0,16777215}}},{integer,2}]}
+        code.extend([0x28, 0x55, 0x57, 0x13, 0x10, 0x21, 0x03]);
+        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::TestGreaterEqual {
+                    fail_label: 5,
+                    left: Operand::X(1),
+                    right: Operand::Value(Term::Integer(2)),
+                },
+                Instruction::End,
+            ]
         ));
     }
 

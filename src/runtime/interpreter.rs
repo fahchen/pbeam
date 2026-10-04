@@ -332,14 +332,15 @@ impl BeamProgram {
                     }
                 }
                 Instruction::Bif {
-                    module,
+                    fail_label,
+                    module: bif_module,
                     name,
                     arguments,
                     destination,
                 } => {
-                    if !is_bif(module, name, arguments.len() as u32) {
+                    if !is_bif(bif_module, name, arguments.len() as u32) {
                         return Err(error(format!(
-                            "unsupported BIF {module}:{name}/{}",
+                            "unsupported BIF {bif_module}:{name}/{}",
                             arguments.len()
                         )));
                     }
@@ -349,11 +350,16 @@ impl BeamProgram {
                         .collect::<Result<Vec<_>, _>>()?;
                     // A `bif` instruction with fail label 0 raises the
                     // exception of the BIF, as `handle_error` does in ERTS
-                    // (`bif_instrs.tab`).
-                    let result = self.bif(scheduler, module, name, values)?;
+                    // (`bif_instrs.tab`). Another fail label jumps to the
+                    // label and raises nothing (`$FAIL($Fail)` in
+                    // `i_bif.call`).
+                    let result = self.bif(scheduler, bif_module, name, values)?;
                     let process = scheduler.current_process_mut();
                     match result {
                         BifResult::Value(value) => write(process, destination, value)?,
+                        BifResult::Raise { .. } if *fail_label != 0 => {
+                            jump(module, process, *fail_label)?
+                        }
                         BifResult::Raise { class, reason } => {
                             if let Some(outcome) = raise(process, class, reason) {
                                 return Ok(outcome);
@@ -363,7 +369,7 @@ impl BeamProgram {
                         // BIF that does not trap.
                         trap => {
                             return Err(error(format!(
-                                "unsupported {module}:{name}/{} result {trap:?}",
+                                "unsupported {bif_module}:{name}/{} result {trap:?}",
                                 arguments.len()
                             )));
                         }
@@ -485,6 +491,24 @@ impl BeamProgram {
                         jump(module, process, *fail_label)?;
                     }
                 }
+                Instruction::TestGreaterEqual {
+                    fail_label,
+                    left,
+                    right,
+                } => match (read(process, left)?, read(process, right)?) {
+                    (Term::Integer(left), Term::Integer(right)) => {
+                        if left < right {
+                            jump(module, process, *fail_label)?;
+                        }
+                    }
+                    // ponytail: ERTS compares any two terms in term order
+                    // (`CMP_GE_ACTION`); PBeam has no term order yet.
+                    (left, right) => {
+                        return Err(error(format!(
+                            "unsupported BEAM is_ge operands {left:?} and {right:?}"
+                        )));
+                    }
+                },
                 Instruction::TestTaggedTuple {
                     fail_label,
                     value,
@@ -1380,6 +1404,7 @@ mod tests {
         );
         assert!(
             error(vec![Instruction::Bif {
+                fail_label: 0,
                 module: "erlang".into(),
                 name: "date".into(),
                 arguments: Vec::new(),
@@ -1389,6 +1414,7 @@ mod tests {
         );
         assert!(
             error(vec![Instruction::Bif {
+                fail_label: 0,
                 module: "lists".into(),
                 name: "node".into(),
                 arguments: Vec::new(),
@@ -2432,6 +2458,7 @@ mod tests {
         let body = vec![
             erlang_call("make_ref", 0, false),
             Instruction::Bif {
+                fail_label: 0,
                 module: "erlang".into(),
                 name: "demonitor".into(),
                 arguments: vec![
@@ -2457,12 +2484,14 @@ mod tests {
             make_program(
                 vec![
                     Instruction::Bif {
+                        fail_label: 0,
                         module: "erlang".into(),
                         name: "self".into(),
                         arguments: Vec::new(),
                         destination: Operand::X(1),
                     },
                     Instruction::Bif {
+                        fail_label: 0,
                         module: "erlang".into(),
                         name: "node".into(),
                         arguments,
@@ -2533,6 +2562,7 @@ mod tests {
         let program = make_program(
             vec![
                 Instruction::Bif {
+                    fail_label: 0,
                     module: "erlang".into(),
                     name: "self".into(),
                     arguments: Vec::new(),
@@ -2746,6 +2776,7 @@ mod tests {
 
     fn get_bif(key: &str, destination: Operand) -> Instruction {
         Instruction::Bif {
+            fail_label: 0,
             module: "erlang".into(),
             name: "get".into(),
             arguments: vec![atom(key)],
@@ -2940,6 +2971,7 @@ mod tests {
 
     fn element_bif(index: i64, tuple: Operand, destination: Operand) -> Instruction {
         Instruction::Bif {
+            fail_label: 0,
             module: "erlang".into(),
             name: "element".into(),
             arguments: vec![Operand::Value(Term::Integer(index)), tuple],
@@ -2986,11 +3018,45 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_tuple_size_as_pinned_erts() {
+        let tuple_size = |term: Term| call_ext_with("erlang", "tuple_size", vec![term]);
+        // ERTS 29.1.1: tuple_size({}) is 0, and tuple_size(a) raises badarg.
+        assert_eq!(tuple_size(Term::Tuple(vec![])).unwrap(), Term::Integer(0));
+        assert_eq!(
+            tuple_size(test_atom("a")).unwrap_err().to_string(),
+            BADARG_EXIT
+        );
+    }
+
+    #[test]
+    fn rejects_is_ge_operands_that_are_not_integers() {
+        // ERTS compares any two terms in term order: a >= 1 is true. PBeam
+        // has no term order yet; this is a row in `docs/erts-differences.md`.
+        let body = vec![
+            Instruction::TestGreaterEqual {
+                fail_label: 3,
+                left: atom("a"),
+                right: Operand::Value(Term::Integer(1)),
+            },
+            Instruction::Label(3),
+            Instruction::Return,
+        ];
+        assert!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+                .starts_with("unsupported BEAM is_ge operands")
+        );
+    }
+
+    #[test]
     fn reads_an_empty_current_stacktrace_of_the_calling_process() {
         // `STACKTRACE()` in the pinned `gen_statem` is
         // `element(2, erlang:process_info(self(), current_stacktrace))`.
         let body = vec![
             Instruction::Bif {
+                fail_label: 0,
                 module: "erlang".into(),
                 name: "self".into(),
                 arguments: Vec::new(),
@@ -3038,6 +3104,7 @@ mod tests {
         }
         let body = vec![
             Instruction::Bif {
+                fail_label: 0,
                 module: "erlang".into(),
                 name: "self".into(),
                 arguments: Vec::new(),

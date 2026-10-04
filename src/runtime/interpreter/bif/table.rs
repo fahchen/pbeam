@@ -325,7 +325,7 @@ bifs! {
     erlang:trace_delivered/1 => unsupported,
     erlang:trace_info/2 => unsupported,
     erlang:trunc/1 => unsupported,
-    erlang:tuple_size/1 => unsupported,
+    erlang:tuple_size/1 => |_, [term]| Ok(match term { Term::Tuple(elements) => Value(Term::Integer(elements.len() as i64)), _ => BifResult::badarg() }),
     erlang:tuple_to_list/1 => unsupported,
     erlang:unalias/1 => unsupported,
     erlang:unique_integer/0 => unsupported,
