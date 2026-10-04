@@ -77,8 +77,10 @@ fn registers_a_process_name_as_pinned_erts() {
 fn executes_the_pinned_group_server_for_one_put_chars_request() {
     // `main/0` makes a group process the group leader and sends one
     // `put_chars` request through `io:put_chars/2`. The pinned `group` runs
-    // in the `gen_statem` loop and forwards the request to the fixture driver
-    // as `put_chars_sync` with the `utf8` encoding. `lists`, `unicode`,
+    // in the `gen_statem` loop. It converts the chardata with
+    // `unicode:characters_to_binary(Chars, utf8)` and sends
+    // `{put_chars_sync, unicode, Binary, From}` to the fixture driver
+    // (`group.erl` lines 619-621). `lists`, `unicode`,
     // `proc_lib`, and `logger` are not loaded: each `lists` and `unicode`
     // call on the path is a BIF, and nothing calls `proc_lib` or `logger`.
     // The group process waits in `receive` after `main/0` returns, and PBeam
