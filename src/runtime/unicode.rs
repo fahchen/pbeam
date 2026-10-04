@@ -11,7 +11,10 @@ use crate::{
 /// Unicode code point. The bytes of each run of adjacent binaries, in list
 /// order, must be one valid UTF-8 sequence, so a code point can start in
 /// one binary and end in the next one, as in ERTS. An integer between two
-/// binaries ends a run.
+/// binaries ends a run. The UTF-8 encoding of an integer is a complete
+/// sequence that does not start with a continuation byte, so the output is
+/// valid UTF-8 exactly when each run is valid. Thus one check of the output
+/// after the walk checks each run.
 ///
 /// The walk uses an explicit work stack, as ERTS does with an `ESTACK`, so
 /// nested lists of any depth do not use the Rust stack.
@@ -44,8 +47,6 @@ pub(super) fn characters_to_utf8(chardata: &Term) -> Result<Vec<u8>, BeamError> 
         )));
     }
     let mut bytes = Vec::new();
-    // The start of the current run of adjacent binaries in `bytes`.
-    let mut run_start = 0;
     let mut pending = vec![std::slice::from_ref(chardata).iter()];
     while let Some(elements) = pending.last_mut() {
         let Some(element) = elements.next() else {
@@ -56,7 +57,6 @@ pub(super) fn characters_to_utf8(chardata: &Term) -> Result<Vec<u8>, BeamError> 
             Term::Binary(binary) => bytes.extend_from_slice(binary),
             Term::List(nested) => pending.push(nested.iter()),
             Term::Integer(code_point) => {
-                check_utf8_run(&bytes[run_start..])?;
                 let character = u32::try_from(*code_point)
                     .ok()
                     .and_then(char::from_u32)
@@ -66,7 +66,6 @@ pub(super) fn characters_to_utf8(chardata: &Term) -> Result<Vec<u8>, BeamError> 
                         ))
                     })?;
                 bytes.extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes());
-                run_start = bytes.len();
             }
             other => {
                 return Err(error(format!(
@@ -75,27 +74,14 @@ pub(super) fn characters_to_utf8(chardata: &Term) -> Result<Vec<u8>, BeamError> 
             }
         }
     }
-    check_utf8_run(&bytes[run_start..])?;
-    Ok(bytes)
-}
-
-/// Check that the bytes of a run of adjacent binaries are one valid UTF-8
-/// sequence. Rust and ERTS both reject overlong forms, surrogates, code
-/// points above `0x10FFFF`, and an incomplete sequence.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(check_utf8_run("é".as_bytes()).is_ok());
-/// assert!(check_utf8_run(&[195]).is_err());
-/// assert!(check_utf8_run(&[0xED, 0xA0, 0x80]).is_err());
-/// ```
-fn check_utf8_run(bytes: &[u8]) -> Result<(), BeamError> {
-    std::str::from_utf8(bytes).map(|_| ()).map_err(|_| {
+    // Rust and ERTS both reject overlong forms, surrogates, code points
+    // above `0x10FFFF`, and an incomplete sequence.
+    std::str::from_utf8(&bytes).map_err(|reason| {
         error(format!(
-            "unsupported chardata: binary bytes {bytes:?} are not valid UTF-8"
+            "unsupported chardata: binaries are not valid UTF-8: {reason}"
         ))
-    })
+    })?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -175,20 +161,20 @@ mod tests {
         // {incomplete, <<>>, <<195>>} for an incomplete sequence at the end.
         assert_eq!(
             error(binary(&[255])),
-            "unsupported chardata: binary bytes [255] are not valid UTF-8"
+            "unsupported chardata: binaries are not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 0"
         );
         assert_eq!(
             error(Term::List(vec![binary(&[192, 128])])),
-            "unsupported chardata: binary bytes [192, 128] are not valid UTF-8"
+            "unsupported chardata: binaries are not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 0"
         );
         assert_eq!(
             error(Term::List(vec![binary(&[195])])),
-            "unsupported chardata: binary bytes [195] are not valid UTF-8"
+            "unsupported chardata: binaries are not valid UTF-8: incomplete utf-8 byte sequence from index 0"
         );
         // An integer ends a run: ERTS returns {error, <<>>, [<<195>>, [97]]}.
         assert_eq!(
             error(Term::List(vec![binary(&[195]), Term::Integer(97)])),
-            "unsupported chardata: binary bytes [195] are not valid UTF-8"
+            "unsupported chardata: binaries are not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 0"
         );
         // ERTS 29.1.1 raises badarg for these terms.
         assert_eq!(
