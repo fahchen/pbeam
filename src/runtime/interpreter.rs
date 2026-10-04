@@ -3083,13 +3083,14 @@ mod tests {
                 .unwrap(),
             Term::Tuple(vec![stacktrace, Term::List(Vec::new())])
         );
-        // ERTS 29.1.1: process_info(self(), registered_name) is [], the
-        // current_stacktrace of another process is its frames, and
-        // process_info(a, current_stacktrace) raises badarg.
+        // ERTS 29.1.1: the current_stacktrace of another process is its
+        // frames, and process_info(a, current_stacktrace) and
+        // process_info(self(), bogus_item) raise badarg.
         let other = Term::Pid(crate::ProcessId(99));
         for (process, item) in [
             (other, test_atom("current_stacktrace")),
             (test_atom("a"), test_atom("current_stacktrace")),
+            (Term::Pid(crate::ProcessId(0)), test_atom("bogus_item")),
         ] {
             assert_eq!(
                 call_ext_with(
@@ -3102,24 +3103,37 @@ mod tests {
                 format!("unsupported erlang:process_info/2 arguments {process:?}, {item:?}")
             );
         }
-        let body = vec![
-            Instruction::Bif {
-                fail_label: 0,
-                module: "erlang".into(),
-                name: "self".into(),
-                arguments: Vec::new(),
-                destination: Operand::X(0),
-            },
-            Instruction::Move(atom("registered_name"), Operand::X(1)),
-            erlang_call("process_info", 2, true),
-        ];
-        assert!(
-            make_program(body, 0)
-                .execute("fixture", "main", &[])
-                .unwrap_err()
-                .to_string()
-                .ends_with(", Atom(\"registered_name\")")
+        // ERTS 29.1.1: process_info(self(), registered_name) is [] for a
+        // process without a name.
+        assert_eq!(
+            call_ext_with(
+                "erlang",
+                "process_info",
+                vec![Term::Pid(crate::ProcessId(0)), test_atom("registered_name")]
+            )
+            .unwrap(),
+            Term::List(Vec::new())
         );
+    }
+
+    #[test]
+    fn registers_a_name_or_raises_badarg_as_pinned_erts() {
+        let register = |name: Term, id: Term| call_ext_with("erlang", "register", vec![name, id]);
+        let root = Term::Pid(crate::ProcessId(0));
+        // ERTS 29.1.1: register(a, self()) is true.
+        assert_eq!(
+            register(test_atom("a"), root.clone()).unwrap(),
+            test_atom("true")
+        );
+        // ERTS 29.1.1 raises badarg for register(1, self()), register(a, x),
+        // and register(a, Pid) with a process that is not alive.
+        for (name, id) in [
+            (Term::Integer(1), root),
+            (test_atom("a"), test_atom("x")),
+            (test_atom("a"), Term::Pid(crate::ProcessId(99))),
+        ] {
+            assert_eq!(register(name, id).unwrap_err().to_string(), BADARG_EXIT);
+        }
     }
 
     #[test]

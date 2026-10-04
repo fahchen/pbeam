@@ -32,3 +32,39 @@ fn takes_the_fail_labels_of_guard_bifs_and_is_ge_as_pinned_erts() {
     assert!(reference.stderr.is_empty());
     assert_eq!(reference.stdout, b"[output,other,other]\n");
 }
+
+#[test]
+fn registers_a_process_name_as_pinned_erts() {
+    // `registry/0` registers `undefined`, a first name, a second name for the
+    // same process, and a name that another process holds, then reads the
+    // `registered_name` of the caller.
+    let program = BeamProgram::load(&[GROUP_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("group_probe", "registry", &[]).unwrap(),
+        Term::Tuple(vec![
+            atom("badarg"),
+            atom("true"),
+            atom("badarg"),
+            atom("badarg"),
+            Term::Tuple(vec![atom("registered_name"), atom("pbeam_probe_reg")]),
+        ])
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/group",
+            "-eval",
+            "io:format(\"~p~n\", [group_probe:registry()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        reference.stdout,
+        b"{badarg,true,badarg,badarg,{registered_name,pbeam_probe_reg}}\n"
+    );
+}

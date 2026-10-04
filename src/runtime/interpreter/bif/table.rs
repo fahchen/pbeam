@@ -280,7 +280,7 @@ bifs! {
     erlang:read_timer/1 => unsupported,
     erlang:read_timer/2 => unsupported,
     erlang:ref_to_list/1 => unsupported,
-    erlang:register/2 => unsupported,
+    erlang:register/2 => |cx, [name, id]| Ok(if cx.scheduler.register(name, id) { Value(Term::static_atom("true")) } else { BifResult::badarg() }),
     erlang:registered/0 => unsupported,
     erlang:rem/2 => unsupported,
     erlang:resume_process/1 => unsupported,

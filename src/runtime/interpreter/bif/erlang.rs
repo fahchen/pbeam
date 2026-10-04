@@ -299,8 +299,11 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
 }
 
 /// Run `erlang:process_info/2` for the calling process and the item
-/// `current_stacktrace`. Return `{current_stacktrace, []}`, because PBeam
-/// records no stack frames. Any other process or item gives a runtime error.
+/// `current_stacktrace` or `registered_name`. Return
+/// `{current_stacktrace, []}`, because PBeam records no stack frames. Return
+/// `{registered_name, Name}`, or `[]` when the process has no name, as ERTS
+/// `process_info_aux` (`erl_bif_info.c`) does. Any other process or item
+/// gives a runtime error.
 ///
 /// # Examples
 ///
@@ -309,23 +312,39 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
 /// let item = Term::static_atom("current_stacktrace");
 /// let info = process_info(&mut context, &process, &item)?;
 /// assert!(matches!(info, BifResult::Value(Term::Tuple(elements)) if elements[1] == Term::List(vec![])));
-/// assert!(process_info(&mut context, &process, &Term::static_atom("registered_name")).is_err());
+/// let name = process_info(&mut context, &process, &Term::static_atom("registered_name"))?;
+/// assert!(matches!(name, BifResult::Value(Term::List(elements)) if elements.is_empty()));
+/// assert!(process_info(&mut context, &process, &Term::static_atom("status")).is_err());
 /// ```
 pub(super) fn process_info(
     context: &mut BifContext<'_>,
     process: &Term,
     item: &Term,
 ) -> Result<BifResult, BeamError> {
-    let current = Term::Pid(context.scheduler.current_process_mut().id);
-    let stacktrace = Term::static_atom("current_stacktrace");
+    let current = context.scheduler.current_process_mut();
+    let info = match (process, item) {
+        (Term::Pid(id), Term::Atom(name)) if *id == current.id => {
+            match (name.name(), &current.registered_name) {
+                // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
+                ("current_stacktrace", _) => {
+                    Some(Term::Tuple(vec![item.clone(), Term::List(Vec::new())]))
+                }
+                ("registered_name", Some(registered)) => Some(Term::Tuple(vec![
+                    item.clone(),
+                    Term::Atom(registered.clone()),
+                ])),
+                ("registered_name", None) => Some(Term::List(Vec::new())),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
     // ponytail: other processes and items need process lookup and more state; see "BIF arguments" in docs/erts-differences.md.
-    if *process != current || *item != stacktrace {
-        return Err(error(format!(
+    info.map(Value).ok_or_else(|| {
+        error(format!(
             "unsupported erlang:process_info/2 arguments {process:?}, {item:?}"
-        )));
-    }
-    // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
-    Ok(Value(Term::Tuple(vec![stacktrace, Term::List(Vec::new())])))
+        ))
+    })
 }
 
 /// Run `erlang:function_exported/3`: return `true` when a loaded module
