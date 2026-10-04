@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::process::{Frame, ProcessState};
+use super::{
+    persistent_term::PersistentTerms,
+    process::{Frame, ProcessState},
+};
 use crate::{
     error::{BeamError, error},
     term::{ProcessId, Reference, Term},
@@ -31,6 +34,8 @@ pub(super) struct Scheduler {
     /// process of a name is its `registered_name` field; no caller looks up
     /// a process by name yet.
     names: HashSet<String>,
+    /// Persistent terms of the node. All processes of the run share them.
+    pub(super) persistent_terms: PersistentTerms,
 }
 
 impl Scheduler {
