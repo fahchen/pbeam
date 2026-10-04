@@ -14,9 +14,8 @@ use crate::{
 use std::collections::HashMap;
 
 mod bif;
-mod rust_stand_ins;
 
-use bif::{BifResult, is_bif};
+use bif::{BifResult, INSTRUCTION_CALLS, is_bif};
 
 #[derive(Debug)]
 pub struct BeamProgram {
@@ -301,18 +300,16 @@ impl BeamProgram {
                     if *tail && *deallocate as usize != current_frame(process).stack.len() {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
-                    let arguments = call_arguments(&process.registers, *arity)?;
-                    // A temporary Rust stand-in for an `erlang.beam` function
-                    // comes first; #87 removes it. Then a BIF, then module code.
-                    let result =
-                        match rust_stand_ins::run(self, scheduler, module, name, &arguments) {
-                            Some(value) => Some(BifResult::Value(value?)),
-                            None if is_bif(module, name, *arity) => {
-                                Some(self.bif(scheduler, module, name, arguments)?)
-                            }
-                            None => None,
-                        };
-                    if let Some(result) = result {
+                    if INSTRUCTION_CALLS.contains(&(module.as_str(), name.as_str(), *arity)) {
+                        // ponytail: ERTS runs these calls as instructions; see "Apply and yield calls" in docs/erts-differences.md.
+                        return Err(error(format!(
+                            "unsupported instruction call {module}:{name}/{arity}"
+                        )));
+                    }
+                    // A BIF runs before the module code, as in ERTS.
+                    if is_bif(module, name, *arity) {
+                        let arguments = call_arguments(&process.registers, *arity)?;
+                        let result = self.bif(scheduler, module, name, arguments)?;
                         let (target, arguments) = match result {
                             BifResult::Value(value) => {
                                 let process = scheduler.current_process_mut();
@@ -983,7 +980,7 @@ fn write_operand(
 mod tests {
     use std::{collections::HashMap, path::PathBuf, process::Command};
 
-    use super::bif::BIFS;
+    use super::bif::{BIFS, INSTRUCTION_CALLS};
     use super::{
         BeamProgram, BifResult, ExceptionClass, call_arguments, function_at_label, read_operand,
         write_operand,
@@ -1098,7 +1095,45 @@ mod tests {
         body.push(Instruction::Return);
         assert!(matches!(run_with_child(body), Ok(Term::Pid(_))));
         assert!(error(spawn_link_child(Term::Integer(1))).contains("not a proper list"));
-        assert!(error(vec![erlang_call("is_alive", 0, false)]).contains("erlang:is_alive/0"));
+        // `erlang:is_alive/0` is not a BIF: it runs the code of the `erlang`
+        // module, which this program does not load.
+        assert!(
+            error(vec![erlang_call("is_alive", 0, false)])
+                .contains("unresolved external MFA erlang:is_alive/0")
+        );
+        // The ERTS loader turns these calls into instructions. Their bodies in
+        // `erlang.beam` call themselves, so they must not run.
+        assert!(
+            error(vec![erlang_call("apply", 3, false)])
+                .contains("unsupported instruction call erlang:apply/3")
+        );
+    }
+
+    #[test]
+    fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
+        let spawn_opt = |options: Vec<Term>| {
+            let mut body = spawn_link_child(Term::List(vec![test_atom("normal")]));
+            body.pop();
+            body.push(Instruction::Move(
+                Operand::Value(Term::List(options)),
+                Operand::X(3),
+            ));
+            body.push(erlang_call("spawn_opt", 4, false));
+            body.push(Instruction::Return);
+            run_with_child(body)
+        };
+        assert!(matches!(
+            spawn_opt(vec![test_atom("link"), test_atom("monitor")]),
+            Ok(Term::Tuple(ref elements))
+                if matches!(elements.as_slice(), [Term::Pid(_), Term::Reference(_)])
+        ));
+        assert!(matches!(spawn_opt(vec![]), Ok(Term::Pid(_))));
+        assert!(
+            spawn_opt(vec![test_atom("priority")])
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported spawn option Atom(\"priority\")")
+        );
     }
 
     #[test]
@@ -1178,11 +1213,11 @@ mod tests {
         assert!(
             error(vec![Instruction::Bif {
                 module: "erlang".into(),
-                name: "is_alive".into(),
+                name: "date".into(),
                 arguments: Vec::new(),
                 destination: Operand::X(0),
             }])
-            .contains("unresolved external MFA erlang:is_alive/0")
+            .contains("unresolved external MFA erlang:date/0")
         );
         assert!(
             error(vec![Instruction::Bif {
@@ -1526,15 +1561,10 @@ mod tests {
             .collect();
         builtin.sort_unstable();
         builtin.dedup();
-        let instructions = [
-            ("erlang", "apply", 2),
-            ("erlang", "apply", 3),
-            ("erlang", "yield", 0),
-        ];
-        for mfa in instructions {
+        for mfa in INSTRUCTION_CALLS {
             assert!(builtin.contains(&mfa));
         }
-        builtin.retain(|mfa| !instructions.contains(mfa));
+        builtin.retain(|mfa| !INSTRUCTION_CALLS.contains(mfa));
         assert_eq!(BIFS, builtin.as_slice());
     }
 

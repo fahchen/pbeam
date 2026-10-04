@@ -1,12 +1,13 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `erlang`, `maps`, and `unicode` modules hold the BIF bodies that do
-//! not fit on one table line.
+//! The `erlang`, `erts_internal`, `maps`, and `unicode` modules hold the BIF
+//! bodies that do not fit on one table line.
 
 use super::*;
 
 mod erlang;
+mod erts_internal;
 mod maps;
 mod unicode;
 
@@ -199,9 +200,10 @@ impl BeamProgram {
     }
 }
 
-/// Return whether an external call or a `bif` instruction goes to a BIF. An
-/// entry of `BIFS` runs before the module code, as in ERTS. Every `erlang`
-/// call goes to the BIF dispatch, which reports an unresolved MFA.
+/// Return whether an external call or a `bif` instruction goes to a BIF: the
+/// MFA is an entry of `BIFS`, the `bif.tab` entries, so it runs before the
+/// module code, as in ERTS. Any other MFA, also in `erlang`, runs the BEAM
+/// code of its module.
 ///
 /// # Examples
 ///
@@ -209,9 +211,29 @@ impl BeamProgram {
 /// assert!(is_bif("erlang", "self", 0));
 /// assert!(is_bif("maps", "keys", 1));
 /// assert!(is_bif("lists", "keyfind", 3));
+/// assert!(!is_bif("erlang", "spawn_monitor", 3));
 /// assert!(!is_bif("maps", "keys", 2));
 /// assert!(!is_bif("io", "put_chars", 2));
 /// ```
 pub(super) fn is_bif(module: &str, name: &str, arity: u32) -> bool {
-    module == "erlang" || BIFS.binary_search(&(module, name, arity)).is_ok()
+    BIFS.binary_search(&(module, name, arity)).is_ok()
 }
+
+/// The `erlang` functions that ERTS runs as instructions, not as BIFs or BEAM
+/// code. The loader turns a call to `apply/2` into `i_apply_fun`, a call to
+/// `apply/3` into `i_apply`, and a call to `yield/0` into `i_yield`
+/// (`ops.tab`). `erts_is_builtin` (`beam_common.c`) marks them as builtin,
+/// but they are not `bif.tab` entries. Their bodies in `erlang.beam` only call
+/// the function again, for example `apply(F, A) -> erlang:apply(F, A).`
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(INSTRUCTION_CALLS.contains(&("erlang", "apply", 3)));
+/// assert!(!INSTRUCTION_CALLS.contains(&("erlang", "spawn_monitor", 3)));
+/// ```
+pub(super) const INSTRUCTION_CALLS: [(&str, &str, u32); 3] = [
+    ("erlang", "apply", 2),
+    ("erlang", "apply", 3),
+    ("erlang", "yield", 0),
+];

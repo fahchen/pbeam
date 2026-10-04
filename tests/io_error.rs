@@ -2,11 +2,17 @@ use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
 
+mod common;
+
+use common::pinned_beam;
+
 const IO_ERROR_PROBE: &[u8] = include_bytes!("../fixtures/io_error/io_error_probe.beam");
 
 #[test]
 fn surfaces_a_writer_process_exit_as_an_io_protocol_error() {
-    let program = BeamProgram::load(&[IO_ERROR_PROBE]).unwrap();
+    // `erlang:spawn_monitor/3` runs from the pinned `erlang.beam`.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, IO_ERROR_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
 
     assert_eq!(

@@ -1,5 +1,5 @@
 -module(io_client_probe).
--export([main/0, list/0, server/2, gone/0]).
+-export([main/0, list/0, server/2, gone/0, group_leader_badarg/0]).
 main() -> run(<<"Hello, world!\n">>).
 list() -> run([<<"Hello, world!">>, 10]).
 run(Chars) ->
@@ -28,5 +28,9 @@ flush() ->
     Ref3 = monitor(process, Pid),
     Demon = demonitor(Ref3, [flush]),
     {Demon, receive {'DOWN', Ref3, _, _, _} -> down after 0 -> no_down end}.
+group_leader_badarg() ->
+    {Pid, Ref} = spawn_monitor(?MODULE, gone, []),
+    receive {'DOWN', Ref, process, Pid, normal} -> ok end,
+    {erts_internal:group_leader(self(), Pid), erts_internal:group_leader(not_a_pid, self())}.
 same(X, X) -> same;
 same(_, _) -> different.
