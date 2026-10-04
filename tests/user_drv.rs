@@ -160,10 +160,11 @@ fn builds_the_state_of_a_real_disabled_user_drv_in_pinned_erts() {
     // same pids and reference. Only the tty handle and `ansi_regexp` come
     // from the real state. `prim_tty:init/1` sets `have_termcap` from
     // `setupterm/0` and `unicode` from the locale, so `TERM` is set to a
-    // terminal that every terminfo database has. The locale of the
-    // environment must be UTF-8.
+    // terminal that every terminfo database has, and `LC_ALL` to a UTF-8
+    // locale that macOS and glibc both have.
     let reference = Command::new("erl")
         .env("TERM", "dumb")
+        .env("LC_ALL", "C.UTF-8")
         .args([
             "-noshell",
             "-nouser",
