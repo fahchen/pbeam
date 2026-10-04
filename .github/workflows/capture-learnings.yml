@@ -1,10 +1,11 @@
 name: Capture Learnings
 
 # After a PR merges into main, Copilot CLI runs
-# .github/prompts/capture-learnings.prompt.md for that PR. Copilot generates
-# and commits the knowledge change and writes the result files. A separate
-# step pushes, opens the knowledge PR, and comments on the merged PR. The same
-# prompt also runs locally on an open PR during its implementation.
+# .github/prompts/capture-learnings.prompt.md for that PR. The workflow gives
+# Copilot the comments as a data file and takes the result files back.
+# Copilot holds no token and touches no branch. Later steps commit the
+# knowledge file, open the knowledge PR, and comment on the merged PR. The
+# same prompt also runs locally on an open PR during its implementation.
 
 on:
   pull_request:
@@ -28,7 +29,7 @@ jobs:
     name: capture learnings
     # Skip unmerged PRs, fork PRs (their token cannot write), and the
     # knowledge PRs that this workflow opens. A manual run names its own PR,
-    # so it skips these checks.
+    # so the step that reads the number applies the fork check instead.
     if: >-
       github.event_name == 'workflow_dispatch' || (
       github.event.pull_request.merged == true &&
@@ -51,54 +52,57 @@ jobs:
         with:
           ref: main
 
-      # gh pr view accepts a number, a URL, and a branch name, but it reads
-      # the number out of a URL of any repository. Reject a foreign URL.
+      # A manual run gives a PR number or a PR URL. Reduce it to the number
+      # that every later step and the prompt use.
       - name: Read the PR number
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          case "$PR_INPUT" in
-            http*)
-              prefix="${{ github.server_url }}/$GITHUB_REPOSITORY/pull/"
-              case "$PR_INPUT" in
-                "$prefix"*) ;;
-                *) echo "The PR URL is not a PR of $GITHUB_REPOSITORY." >&2; exit 1 ;;
-              esac
-              ;;
-          esac
-          number=$(gh pr view "$PR_INPUT" --json number --jq .number)
-          # The pull_request trigger rejects a fork PR, because the job holds a
-          # write token. A manual run gets the same restriction.
-          head=$(gh pr view "$number" --json headRepositoryOwner,headRepository \
-            --jq '.headRepositoryOwner.login + "/" + .headRepository.name')
-          if [ "$head" != "$GITHUB_REPOSITORY" ]; then
-            echo "PR #$number comes from the fork $head." >&2
-            exit 1
-          fi
-          echo "PR_NUMBER=$number" >> "$GITHUB_ENV"
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const {owner, repo} = context.repo
+            const input = process.env.PR_INPUT.trim()
+            // A URL of another repository holds a number that is valid here,
+            // so match the repository of the URL and not only the number.
+            const url = input.match(/^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
+            if (url && `${url[1]}/${url[2]}` !== `${owner}/${repo}`) {
+              core.setFailed(`The PR URL is not a PR of ${owner}/${repo}.`)
+              return
+            }
+            const number = Number(url ? url[3] : input.replace(/^#/, ''))
+            if (!Number.isInteger(number) || number <= 0) {
+              core.setFailed(`"${input}" is not a PR number or a PR URL.`)
+              return
+            }
+            const {data: pr} = await github.rest.pulls.get({owner, repo, pull_number: number})
+            // The pull_request trigger skips a fork PR, because the job holds
+            // a write token. A manual run gets the same restriction.
+            if (pr.head.repo?.full_name !== `${owner}/${repo}`) {
+              core.setFailed(`PR #${number} comes from the fork ${pr.head.repo?.full_name}.`)
+              return
+            }
+            core.exportVariable('PR_NUMBER', number)
 
       # Every comment on the PR can become a rule, whatever its author. The
       # workflow collects the comments itself and gives Copilot a data file,
       # so no comment text can reach Copilot as a GitHub API instruction.
       - name: Collect the comments
         id: comments
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p "$OUTPUT"
-          {
-            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
-              --jq '.[] | {kind: "review thread", author: .user.login, path: .path, line: .line, url: .html_url, body: .body}'
-            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
-              --jq '.[] | select(.body != "") | {kind: "review body", author: .user.login, url: .html_url, body: .body}'
-            gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              --jq '.[] | {kind: "PR comment", author: .user.login, url: .html_url, body: .body}'
-          } | jq -s '.' > "$OUTPUT/comments.json"
-          count=$(jq 'length' "$OUTPUT/comments.json")
-          echo "count=$count" >> "$GITHUB_OUTPUT"
-          if [ "$count" -eq 0 ]; then
-            gh pr comment "$PR_NUMBER" --body "No new review learnings. The PR has no comments."
-          fi
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const {owner, repo} = context.repo
+            const pull_number = Number(process.env.PR_NUMBER)
+            const get = (route, map) => github.paginate(route, {owner, repo, pull_number, issue_number: pull_number, per_page: 100}).then(rows => rows.map(map))
+            const comments = [
+              ...await get(github.rest.pulls.listReviewComments, c => ({kind: 'review thread', author: c.user.login, path: c.path, line: c.line, url: c.html_url, body: c.body})),
+              ...await get(github.rest.pulls.listReviews, r => ({kind: 'review body', author: r.user.login, url: r.html_url, body: r.body})),
+              ...await get(github.rest.issues.listComments, c => ({kind: 'PR comment', author: c.user.login, url: c.html_url, body: c.body})),
+            ].filter(c => c.body)
+            await require('node:fs/promises').mkdir(process.env.OUTPUT, {recursive: true})
+            await require('node:fs/promises').writeFile(`${process.env.OUTPUT}/comments.json`, JSON.stringify(comments, null, 2))
+            core.setOutput('count', comments.length)
+            if (comments.length === 0) {
+              await github.rest.issues.createComment({owner, repo, issue_number: pull_number, body: 'No new review learnings. The PR has no comments.'})
+            }
 
       - name: Install Copilot CLI
         if: steps.comments.outputs.count != '0'
@@ -125,51 +129,79 @@ jobs:
 
       # Copilot cannot commit, so the workflow does. A run that claims a
       # capture without writing knowledge.md is a failure, not an empty run.
-      - name: Commit, push, open the knowledge PR, and comment
+      - name: Check the result files
+        id: result
         if: steps.comments.outputs.count != '0'
-        env:
-          GH_TOKEN: ${{ github.token }}
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const fs = require('node:fs')
+            const read = name => {
+              const path = `${process.env.OUTPUT}/${name}`
+              return fs.existsSync(path) ? fs.readFileSync(path, 'utf8').trim() : ''
+            }
+            const comment = read('comment.md')
+            if (!comment) return core.setFailed('Copilot wrote no comment.md.')
+            const captured = Boolean(read('knowledge.md'))
+            if (comment.startsWith('Captured review learnings') && !captured) {
+              return core.setFailed('comment.md claims a capture, but knowledge.md is missing.')
+            }
+            if (captured && !read('pr-body.md')) {
+              return core.setFailed('knowledge.md exists, but pr-body.md is missing.')
+            }
+            core.setOutput('captured', String(captured))
+
+      - name: Commit and push the knowledge branch
+        if: steps.result.outputs.captured == 'true'
         run: |
-          comment="$OUTPUT/comment.md"
-          if [ ! -s "$comment" ]; then
-            echo "Copilot wrote no comment.md." >&2
-            exit 1
-          fi
-          captured=""
-          if [ -s "$OUTPUT/knowledge.md" ]; then
-            captured=yes
-          fi
-          if grep -q "^Captured review learnings" "$comment" && [ -z "$captured" ]; then
-            echo "comment.md claims a capture, but knowledge.md is missing." >&2
-            exit 1
-          fi
-          if [ -n "$captured" ]; then
-            if [ ! -s "$OUTPUT/pr-body.md" ]; then
-              echo "knowledge.md exists, but pr-body.md is missing." >&2
-              exit 1
-            fi
-            branch="learnings/pr-$PR_NUMBER"
-            git switch -c "$branch"
-            cp "$OUTPUT/knowledge.md" docs/agents/knowledge.md
-            git commit -m "docs: capture review learnings from #$PR_NUMBER" \
-              -- docs/agents/knowledge.md
-            # A re-run replaces the branch of the earlier run and reuses its PR.
-            git push --force origin "$branch"
-            url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null \
-              || gh pr create --base main --head "$branch" \
-                --title "docs: capture review learnings from #$PR_NUMBER" \
-                --body-file "$OUTPUT/pr-body.md" --label documentation)
-            printf '\nKnowledge PR: %s\n' "$url" >> "$comment"
-          fi
-          cat "$comment" >> "$GITHUB_STEP_SUMMARY"
-          gh pr comment "$PR_NUMBER" --body-file "$comment"
+          branch="learnings/pr-$PR_NUMBER"
+          git switch -c "$branch"
+          cp "$OUTPUT/knowledge.md" docs/agents/knowledge.md
+          git commit -m "docs: capture review learnings from #$PR_NUMBER" \
+            -- docs/agents/knowledge.md
+          # A re-run replaces the branch of the earlier run and reuses its PR.
+          git push --force origin "$branch"
+
+      - name: Open the knowledge PR and comment
+        if: steps.comments.outputs.count != '0'
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const fs = require('node:fs')
+            const {owner, repo} = context.repo
+            const issue_number = Number(process.env.PR_NUMBER)
+            const title = `docs: capture review learnings from #${issue_number}`
+            let body = fs.readFileSync(`${process.env.OUTPUT}/comment.md`, 'utf8')
+            if (process.env.CAPTURED === 'true') {
+              const head = `learnings/pr-${issue_number}`
+              // A re-run reuses the PR that the earlier run opened.
+              const {data: open} = await github.rest.pulls.list({owner, repo, head: `${owner}:${head}`, state: 'open'})
+              const pr = open[0] ?? (await github.rest.pulls.create({
+                owner, repo, base: 'main', head, title,
+                body: fs.readFileSync(`${process.env.OUTPUT}/pr-body.md`, 'utf8'),
+              })).data
+              if (!open[0]) {
+                await github.rest.issues.addLabels({owner, repo, issue_number: pr.number, labels: ['documentation']})
+              }
+              body += `\nKnowledge PR: ${pr.html_url}\n`
+            }
+            await core.summary.addRaw(body).write()
+            await github.rest.issues.createComment({owner, repo, issue_number, body})
+        env:
+          CAPTURED: ${{ steps.result.outputs.captured }}
 
       - name: Report a failed capture
         if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          # PR_NUMBER is empty when the step that reads it is the one that failed.
-          gh pr comment "${PR_NUMBER:-$PR_INPUT}" \
-            --body "Capture of review learnings failed. See the workflow run: $RUN_URL"
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            // PR_NUMBER is empty when the step that reads it is the one that
+            // failed. The raw input is a number or a URL that ends with one.
+            const input = process.env.PR_NUMBER || process.env.PR_INPUT
+            const issue_number = Number(input.trim().replace(/^#/, '').match(/\d+$/)?.[0])
+            if (!issue_number) return
+            const url = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${context.runId}`
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number,
+              body: `Capture of review learnings failed. See the workflow run: ${url}`,
+            })
