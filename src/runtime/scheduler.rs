@@ -174,6 +174,7 @@ impl Scheduler {
     ) -> Result<(ProcessId, Option<Reference>), BeamError> {
         let mut child = ProcessState::new(self.next_pid()?, frame, arguments);
         let parent = self.current_process_mut().id;
+        child.group_leader = self.current_process_mut().group_leader;
         let reference = if monitor {
             let reference = self.make_ref()?;
             child.monitored_by.push((parent, reference));
@@ -213,6 +214,87 @@ impl Scheduler {
         process.links.insert(current);
         self.current_process_mut().links.insert(target);
         Ok(Term::Atom("true".into()))
+    }
+
+    /// Monitor a local process for the current process, as
+    /// `erlang:monitor(process, Pid)` does. A process that does not exist
+    /// gets an immediate `{'DOWN', Ref, process, Pid, noproc}`, as in ERTS.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let reference = scheduler.monitor(child)?;
+    /// ```
+    pub(super) fn monitor(&mut self, target: ProcessId) -> Result<Reference, BeamError> {
+        let reference = self.make_ref()?;
+        let current = self.current_process_mut().id;
+        match self.processes.get_mut(&target) {
+            Some(process) => process.monitored_by.push((current, reference)),
+            None => self.deliver(
+                current,
+                Term::Tuple(vec![
+                    Term::Atom("DOWN".into()),
+                    Term::Reference(reference),
+                    Term::Atom("process".into()),
+                    Term::Pid(target),
+                    Term::Atom("noproc".into()),
+                ]),
+            ),
+        }
+        Ok(reference)
+    }
+
+    /// Remove a monitor that the current process holds, as the ERTS
+    /// `demonitor` function does. Return true when an active monitor was
+    /// removed, and false when it already fired or never existed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let reference = scheduler.monitor(child)?;
+    /// assert!(scheduler.demonitor(reference));
+    /// assert!(!scheduler.demonitor(reference));
+    /// ```
+    pub(super) fn demonitor(&mut self, reference: Reference) -> bool {
+        let current = self.current_process_mut().id;
+        for process in self.processes.values_mut() {
+            if let Some(index) = process
+                .monitored_by
+                .iter()
+                .position(|&entry| entry == (current, reference))
+            {
+                process.monitored_by.remove(index);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Set the group leader of a live local process, as
+    /// `erlang:group_leader/2` does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.set_group_leader(child, leader)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A target that does not exist is not supported; ERTS raises `badarg`.
+    pub(super) fn set_group_leader(
+        &mut self,
+        target: ProcessId,
+        leader: ProcessId,
+    ) -> Result<(), BeamError> {
+        let Some(process) = self.processes.get_mut(&target) else {
+            // ponytail: ERTS raises badarg; add it with the exception model (#73).
+            return Err(error(format!(
+                "unsupported group_leader/2 target {target:?}"
+            )));
+        };
+        process.group_leader = leader;
+        Ok(())
     }
 
     /// Remove the current process after it exits. Send `EXIT` to linked
@@ -411,5 +493,23 @@ mod tests {
         };
         assert!(scheduler.start(frame(), vec![]).is_err());
         assert!(scheduler.make_ref().is_err());
+    }
+
+    #[test]
+    fn removes_active_monitors_and_sets_group_leaders() {
+        let mut scheduler = Scheduler::default();
+        scheduler.start(frame(), vec![]).unwrap();
+        scheduler.schedule_next();
+        let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
+        assert_eq!(scheduler.processes[&child].group_leader, ProcessId(0));
+        scheduler.set_group_leader(child, child).unwrap();
+        assert_eq!(scheduler.processes[&child].group_leader, child);
+        assert!(scheduler.set_group_leader(ProcessId(99), child).is_err());
+
+        let reference = scheduler.monitor(child).unwrap();
+        assert_eq!(scheduler.processes[&child].monitored_by.len(), 1);
+        assert!(scheduler.demonitor(reference));
+        assert!(scheduler.processes[&child].monitored_by.is_empty());
+        assert!(!scheduler.demonitor(reference));
     }
 }

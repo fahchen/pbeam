@@ -13,26 +13,24 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
     let program = BeamProgram::load(&[&io, &group, &user_drv, &prim_tty, OTP_IO_CALLS]).unwrap();
 
     // `otp_io_calls:io_call/0` calls `io:columns/0`, which resolves inside
-    // the loaded `io` module and reaches the unimplemented group-leader
-    // lookup. The error proves the call crossed into `io`'s own code.
+    // the loaded `io` module. The first process is its own group leader, so
+    // the request returns `{error, calling_self}`, and `io:columns/1` then
+    // reaches its `is_integer` test (opcode 45), which PBeam does not run
+    // yet. The error proves the call ran `io`'s own code.
     let error = program.execute("otp_io_calls", "io_call", &[]).unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("unresolved external MFA erlang:group_leader/0"),
+        error.to_string().contains("unsupported BEAM opcode 45"),
         "expected resolution into io, got {error}"
     );
 
-    // `group:whereis_shell/0` resolves inside the loaded `group` module and
-    // reaches the same group-leader boundary as `io`, which `group` also
-    // calls directly.
+    // `group:whereis_shell/0` resolves inside the loaded `group` module,
+    // calls `erlang:group_leader/0`, and reaches the `node/1` guard BIF
+    // (`bif1`, opcode 10), which PBeam does not run yet.
     let error = program
         .execute("otp_io_calls", "group_call", &[])
         .unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("unresolved external MFA erlang:group_leader/0"),
+        error.to_string().contains("unsupported BEAM opcode 10"),
         "expected resolution into group, got {error}"
     );
 

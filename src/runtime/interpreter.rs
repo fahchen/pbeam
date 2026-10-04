@@ -26,6 +26,47 @@ enum Outcome {
     Exit { reason: Term, result: Option<Term> },
 }
 
+/// What a BIF call does to the calling process.
+#[derive(Debug)]
+enum BifResult {
+    /// The BIF returns this value.
+    Value(Term),
+    /// The BIF exits the process with this reason.
+    Exit(Term),
+    /// The BIF continues in BEAM code, as `BIF_TRAP` does in ERTS: the call
+    /// becomes a call to this exported function, and its return value is the
+    /// value of the BIF call.
+    Trap {
+        /// Module of the trap target, for example `erts_internal`.
+        module: &'static str,
+        /// Exported function of the trap target.
+        function: &'static str,
+        /// Arguments for the trap target, in `x0` onwards.
+        arguments: Vec<Term>,
+    },
+}
+
+impl BifResult {
+    /// Return the value of a guard BIF called through `bif0`. An exit or a
+    /// trap from a zero-arity BIF is not supported.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(BifResult::Value(Term::Integer(1)).into_bif0_value("self")?, Term::Integer(1));
+    /// assert!(BifResult::Exit(Term::Atom("boom".into())).into_bif0_value("self").is_err());
+    /// ```
+    fn into_bif0_value(self, name: &str) -> Result<Term, BeamError> {
+        match self {
+            BifResult::Value(value) => Ok(value),
+            // ponytail: no zero-arity BIF exits or traps; add it when one does.
+            other => Err(error(format!(
+                "unsupported erlang:{name}/0 result {other:?}"
+            ))),
+        }
+    }
+}
+
 impl BeamProgram {
     /// Load BEAM files into one program. Module names must be unique.
     ///
@@ -197,6 +238,44 @@ impl BeamProgram {
                     call_arguments(&process.registers, *arity)?;
                     *current_frame(process) = self.frame(&module.name, *label, *arity)?;
                 }
+                Instruction::CallLast {
+                    arity,
+                    label,
+                    deallocate,
+                } => {
+                    if *deallocate as usize != current_frame(process).stack.len() {
+                        return Err(error("invalid BEAM tail-call stack size"));
+                    }
+                    call_arguments(&process.registers, *arity)?;
+                    *current_frame(process) = self.frame(&module.name, *label, *arity)?;
+                }
+                Instruction::TestArity {
+                    fail_label,
+                    value,
+                    arity,
+                } => {
+                    let passed = matches!(
+                        &read(process, value)?,
+                        Term::Tuple(elements) if elements.len() == *arity as usize
+                    );
+                    if !passed {
+                        jump(module, process, *fail_label)?;
+                    }
+                }
+                Instruction::SelectTupleArity {
+                    value,
+                    fail_label,
+                    choices,
+                } => {
+                    let target = match &read(process, value)? {
+                        Term::Tuple(elements) => choices
+                            .iter()
+                            .find(|(arity, _)| *arity as usize == elements.len())
+                            .map_or(*fail_label, |(_, label)| *label),
+                        _ => *fail_label,
+                    };
+                    jump(module, process, target)?;
+                }
                 Instruction::CallExternal {
                     arity,
                     module,
@@ -209,19 +288,39 @@ impl BeamProgram {
                     }
                     let arguments = call_arguments(&process.registers, *arity)?;
                     if is_bif(module, name, *arity) {
-                        let value = match self.bif(scheduler, module, name, arguments)? {
-                            Ok(value) => value,
-                            Err(reason) => {
-                                return Ok(Outcome::Exit {
-                                    reason,
-                                    result: None,
-                                });
-                            }
-                        };
+                        let (target, arguments) =
+                            match self.bif(scheduler, module, name, arguments)? {
+                                BifResult::Value(value) => {
+                                    let process = scheduler.current_process_mut();
+                                    write(process, &Operand::X(0), value)?;
+                                    if *tail && let Some(outcome) = return_from_frame(process)? {
+                                        return Ok(outcome);
+                                    }
+                                    continue;
+                                }
+                                BifResult::Exit(reason) => {
+                                    return Ok(Outcome::Exit {
+                                        reason,
+                                        result: None,
+                                    });
+                                }
+                                BifResult::Trap {
+                                    module,
+                                    function,
+                                    arguments,
+                                } => ((module, function), arguments),
+                            };
                         let process = scheduler.current_process_mut();
-                        write(process, &Operand::X(0), value)?;
-                        if *tail && let Some(outcome) = return_from_frame(process)? {
-                            return Ok(outcome);
+                        let arity = u32::try_from(arguments.len())
+                            .map_err(|_| error("arity exceeds BEAM limit"))?;
+                        for (index, argument) in (0..).zip(arguments) {
+                            write(process, &Operand::X(index), argument)?;
+                        }
+                        let frame = self.mfa_frame(target.0, target.1, arity)?;
+                        if *tail {
+                            *current_frame(process) = frame;
+                        } else {
+                            process.frames.push(frame);
                         }
                         continue;
                     }
@@ -240,9 +339,9 @@ impl BeamProgram {
                     if module != "erlang" {
                         return Err(error(format!("unsupported BIF {module}:{name}/0")));
                     }
-                    // ponytail: no zero-arity BIF exits; map an exit to an error until one does.
-                    let value = self.bif(scheduler, module, name, Vec::new())?;
-                    let value = value.map_err(|reason| error(format!("BIF exited: {reason:?}")))?;
+                    let value = self
+                        .bif(scheduler, module, name, Vec::new())?
+                        .into_bif0_value(name)?;
                     write(scheduler.current_process_mut(), destination, value)?;
                 }
                 Instruction::Jump(label) => jump(module, process, *label)?,
@@ -255,6 +354,8 @@ impl BeamProgram {
                     let passed = match kind {
                         TestKind::Atom => matches!(value, Term::Atom(_)),
                         TestKind::Pid => matches!(value, Term::Pid(_)),
+                        TestKind::Reference => matches!(value, Term::Reference(_)),
+                        TestKind::Tuple => matches!(value, Term::Tuple(_)),
                         TestKind::List => matches!(value, Term::List(_)),
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
@@ -461,8 +562,8 @@ impl BeamProgram {
         }
     }
 
-    /// Run a BIF that the observed process path calls. `Err` holds the exit
-    /// reason when the BIF exits the process.
+    /// Run a BIF that the observed process path calls. The result
+    /// is a value, an exit reason, or a trap into BEAM code.
     ///
     /// BIFs are native functions listed in the ERTS `bif.tab`, mostly in the
     /// `erlang` module. The compiler emits guard BIFs such as `self/0` as
@@ -473,7 +574,7 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// let value = program.bif(&mut scheduler, "erlang", "make_ref", vec![])?;
-    /// assert!(matches!(value, Ok(Term::Reference(_))));
+    /// assert!(matches!(value, BifResult::Value(Term::Reference(_))));
     /// ```
     fn bif(
         &self,
@@ -481,7 +582,7 @@ impl BeamProgram {
         module: &str,
         name: &str,
         arguments: Vec<Term>,
-    ) -> Result<Result<Term, Term>, BeamError> {
+    ) -> Result<BifResult, BeamError> {
         let value = match (module, name, arguments.as_slice()) {
             ("erlang", "process_flag", [Term::Atom(flag), Term::Atom(value)])
                 if flag == "trap_exit" && (value == "true" || value == "false") =>
@@ -494,16 +595,52 @@ impl BeamProgram {
             ("erlang", "self", []) => Term::Pid(scheduler.current_process_mut().id),
             ("erlang", "make_ref", []) => Term::Reference(scheduler.make_ref()?),
             ("erlang", "link", [Term::Pid(target)]) => scheduler.link(*target)?,
-            ("erlang", "exit", [reason]) => return Ok(Err(reason.clone())),
+            ("erlang", "group_leader", []) => {
+                Term::Pid(scheduler.current_process_mut().group_leader)
+            }
+            ("erlang", "group_leader", [Term::Pid(leader), Term::Pid(target)]) => {
+                scheduler.set_group_leader(*target, *leader)?;
+                Term::Atom("true".into())
+            }
+            ("erlang", "monitor", [Term::Atom(kind), Term::Pid(target)]) if kind == "process" => {
+                Term::Reference(scheduler.monitor(*target)?)
+            }
+            ("erlang", "demonitor", [Term::Reference(reference), Term::List(options)]) => {
+                let flush = match options.as_slice() {
+                    [] => false,
+                    [Term::Atom(option)] if option == "flush" => true,
+                    _ => return Err(error(format!("unsupported demonitor options {options:?}"))),
+                };
+                // ERTS `demonitor_2` (bif.c) flushes only when no active
+                // monitor was removed: the DOWN message can then be queued.
+                let removed = scheduler.demonitor(*reference);
+                if removed || !flush {
+                    Term::Atom("true".into())
+                } else {
+                    let arguments = vec![
+                        Term::Reference(*reference),
+                        Term::Atom("false".into()),
+                        Term::Atom("true".into()),
+                    ];
+                    let module = "erts_internal";
+                    let function = "flush_monitor_messages";
+                    return Ok(BifResult::Trap {
+                        module,
+                        function,
+                        arguments,
+                    });
+                }
+            }
+            ("erlang", "exit", [reason]) => return Ok(BifResult::Exit(reason.clone())),
             ("erlang", "nif_error", [reason]) => {
-                return Ok(Err(Term::Tuple(vec![
+                return Ok(BifResult::Exit(Term::Tuple(vec![
                     reason.clone(),
                     Term::List(Vec::new()),
                 ])));
             }
             (
                 "erlang",
-                "spawn_monitor" | "spawn_link",
+                "spawn" | "spawn_monitor" | "spawn_link",
                 [Term::Atom(spawn_module), Term::Atom(function), list],
             ) => {
                 let Term::List(arguments) = list else {
@@ -514,7 +651,8 @@ impl BeamProgram {
                     .map_err(|_| error("arity exceeds BEAM limit"))?;
                 let frame = self.mfa_frame(spawn_module, function, arity)?;
                 let monitor = name == "spawn_monitor";
-                let (pid, reference) = scheduler.spawn(frame, arguments, monitor, !monitor)?;
+                let link = name == "spawn_link";
+                let (pid, reference) = scheduler.spawn(frame, arguments, monitor, link)?;
                 match reference {
                     Some(reference) => {
                         Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)])
@@ -536,7 +674,7 @@ impl BeamProgram {
                 )));
             }
         };
-        Ok(Ok(value))
+        Ok(BifResult::Value(value))
     }
 }
 
@@ -779,7 +917,9 @@ fn write_operand(
 mod tests {
     use std::{collections::HashMap, path::PathBuf, process::Command};
 
-    use super::{BeamProgram, call_arguments, function_at_label, read_operand, write_operand};
+    use super::{
+        BeamProgram, BifResult, call_arguments, function_at_label, read_operand, write_operand,
+    };
     use crate::{
         BeamModule, Map, Term,
         beam::code::{Instruction, Operand},
@@ -1434,6 +1574,147 @@ mod tests {
                 &mut []
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn selects_tuple_arity_and_rejects_call_last_stack_size_and_demonitor_options() {
+        let select = |value: Term| {
+            make_program(
+                vec![
+                    Instruction::Move(Operand::Value(value), Operand::X(0)),
+                    Instruction::SelectTupleArity {
+                        value: Operand::X(0),
+                        fail_label: 4,
+                        choices: vec![(1, 3)],
+                    },
+                    Instruction::Label(3),
+                    Instruction::Move(atom("one"), Operand::X(0)),
+                    Instruction::Return,
+                    Instruction::Label(4),
+                    Instruction::Move(atom("other"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+            .unwrap()
+        };
+        assert_eq!(
+            select(Term::Tuple(vec![Term::Integer(1)])),
+            Term::Atom("one".into())
+        );
+        assert_eq!(select(Term::Tuple(vec![])), Term::Atom("other".into()));
+        assert_eq!(select(Term::Atom("a".into())), Term::Atom("other".into()));
+
+        let error = |body| {
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            error(vec![
+                Instruction::Allocate { stack_size: 1 },
+                Instruction::CallLast {
+                    arity: 0,
+                    label: 2,
+                    deallocate: 0,
+                },
+            ])
+            .contains("tail-call stack size")
+        );
+        assert!(
+            error(vec![
+                erlang_call("make_ref", 0, false),
+                Instruction::Move(
+                    Operand::Value(Term::List(vec![Term::Atom("info".into())])),
+                    Operand::X(1),
+                ),
+                erlang_call("demonitor", 2, false),
+            ])
+            .contains("unsupported demonitor options")
+        );
+    }
+
+    #[test]
+    fn rejects_an_exit_or_trap_from_a_zero_arity_bif() {
+        assert_eq!(
+            BifResult::Value(Term::Integer(1))
+                .into_bif0_value("self")
+                .unwrap(),
+            Term::Integer(1)
+        );
+        assert!(
+            BifResult::Exit(Term::Atom("boom".into()))
+                .into_bif0_value("self")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported erlang:self/0 result")
+        );
+    }
+
+    #[test]
+    fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
+        let mut program = make_program(
+            vec![
+                erlang_call("make_ref", 0, false),
+                Instruction::Move(
+                    Operand::Value(Term::List(vec![Term::Atom("flush".into())])),
+                    Operand::X(1),
+                ),
+                erlang_call("demonitor", 2, true),
+            ],
+            0,
+        );
+        program.modules.insert(
+            "erts_internal".into(),
+            BeamModule {
+                name: "erts_internal".into(),
+                exports: HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
+                instructions: vec![
+                    Instruction::FunctionInfo {
+                        module: "erts_internal".into(),
+                        name: "flush_monitor_messages".into(),
+                        arity: 3,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Label(2),
+                    Instruction::Move(Operand::X(2), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            },
+        );
+        assert_eq!(
+            program.execute("fixture", "main", &[]).unwrap(),
+            Term::Atom("true".into())
+        );
+    }
+
+    #[test]
+    fn removes_an_active_monitor_without_a_trap() {
+        // monitor(process, self()), then demonitor(Ref, [flush]): the monitor
+        // is still active, so ERTS returns true without flushing.
+        let program = make_program(
+            vec![
+                Instruction::Bif0 {
+                    module: "erlang".into(),
+                    name: "self".into(),
+                    destination: Operand::X(1),
+                },
+                Instruction::Move(atom("process"), Operand::X(0)),
+                erlang_call("monitor", 2, false),
+                Instruction::Move(
+                    Operand::Value(Term::List(vec![Term::Atom("flush".into())])),
+                    Operand::X(1),
+                ),
+                erlang_call("demonitor", 2, true),
+            ],
+            0,
+        );
+        assert_eq!(
+            program.execute("fixture", "main", &[]).unwrap(),
+            Term::Atom("true".into())
         );
     }
 }

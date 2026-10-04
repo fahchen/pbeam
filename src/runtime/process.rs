@@ -35,6 +35,10 @@ pub(super) struct ProcessState {
     pub(super) links: HashSet<ProcessId>,
     /// Watchers that get a `DOWN` message when this process exits.
     pub(super) monitored_by: Vec<(ProcessId, Reference)>,
+    /// Group leader that receives the IO requests of this process. A new
+    /// process starts as its own group leader, as `init` does in ERTS; a
+    /// spawned process gets the group leader of its parent.
+    pub(super) group_leader: ProcessId,
 }
 
 impl ProcessState {
@@ -56,6 +60,7 @@ impl ProcessState {
             trap_exit: false,
             links: HashSet::new(),
             monitored_by: Vec::new(),
+            group_leader: id,
         }
     }
 

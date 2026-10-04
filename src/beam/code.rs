@@ -99,7 +99,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// selection_list ::= compact(7, short=1) compact(0) selection_pair[select_count/2]
 /// selection_pair ::= atom_value compact(5)
 /// type_test ::= test_opcode compact(5) register
-/// test_opcode ::= 48 ; is_atom | 49 ; is_pid | 53 ; is_binary | 55 ; is_list | 156 ; is_map
+/// test_opcode ::= 48 ; is_atom | 49 ; is_pid | 50 ; is_reference | 53 ; is_binary | 55 ; is_list | 57 ; is_tuple | 156 ; is_map
 /// put_list ::= 69 move_source move_source register
 /// noop ::= 16 test_heap_operands | 172 init_yregs_operands
 /// int_code_end ::= 3
