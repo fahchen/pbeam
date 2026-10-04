@@ -1115,17 +1115,45 @@ mod tests {
 
     #[test]
     fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
-        let spawn_opt = |options: Vec<Term>| {
-            let mut body = spawn_link_child(Term::List(vec![test_atom("normal")]));
+        let spawn_opt_body = |reason: Term, options: Vec<Term>| {
+            let mut body = spawn_link_child(Term::List(vec![reason]));
             body.pop();
             body.push(Instruction::Move(
                 Operand::Value(Term::List(options)),
                 Operand::X(3),
             ));
             body.push(erlang_call("spawn_opt", 4, false));
+            body
+        };
+        let spawn_opt = |options: Vec<Term>| {
+            let mut body = spawn_opt_body(test_atom("normal"), options);
             body.push(Instruction::Return);
             run_with_child(body)
         };
+        // A link sends the abnormal exit of the child to the parent as an
+        // exit signal, and a monitor sends it as a `'DOWN'` message.
+        let wait_for_abnormal_child = |options: Vec<Term>| {
+            let mut body = spawn_opt_body(Term::Integer(1), options);
+            body.extend(wait_forever());
+            run_with_child(body)
+        };
+        assert!(
+            wait_for_abnormal_child(vec![test_atom("link")])
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported exit signal")
+        );
+        assert!(matches!(
+            wait_for_abnormal_child(vec![test_atom("monitor")]),
+            Ok(Term::Tuple(ref elements))
+                if elements.first() == Some(&test_atom("DOWN"))
+        ));
+        assert!(
+            wait_for_abnormal_child(vec![])
+                .unwrap_err()
+                .to_string()
+                .contains("waits for a message that cannot arrive")
+        );
         assert!(matches!(
             spawn_opt(vec![test_atom("link"), test_atom("monitor")]),
             Ok(Term::Tuple(ref elements))
