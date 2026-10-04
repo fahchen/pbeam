@@ -397,8 +397,20 @@ fn read_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
     Ok(Some(term))
 }
 
+/// A list or tuple that `read_external_term` has started but not finished.
+enum PartialTerm {
+    /// A tuple that still needs `remaining` elements.
+    Tuple { remaining: u8, elements: Vec<Term> },
+    /// A list that still needs `remaining` elements before its tail.
+    List { remaining: u32, elements: Vec<Term> },
+    /// A list whose elements are read and whose tail is next.
+    ListTail { elements: Vec<Term> },
+}
+
 /// Read one external term at the cursor and advance past it. Return `None`
-/// for a tag or list tail that `literal_entry` does not list.
+/// for a tag or list tail that `literal_entry` does not list. Nested lists
+/// and tuples use a work stack, so nesting has no fixed depth limit, as in
+/// the ERTS decoder.
 ///
 /// # Examples
 ///
@@ -409,56 +421,98 @@ fn read_literal(data: &[u8]) -> Result<Option<Term>, BeamError> {
 /// assert_eq!(cursor, 2);
 /// ```
 fn read_external_term(data: &[u8], cursor: &mut usize) -> Result<Option<Term>, BeamError> {
-    let term = match take(data, cursor, 1)?[0] {
-        ETF_BINARY_EXT => {
-            let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
-            Term::Binary(take(data, cursor, size)?.to_vec())
-        }
-        ETF_STRING_EXT => {
-            let size_bytes = take(data, cursor, 2)?;
-            let size = u16::from_be_bytes([size_bytes[0], size_bytes[1]]) as usize;
-            let characters = take(data, cursor, size)?
-                .iter()
-                .map(|&byte| Term::Integer(i64::from(byte)))
-                .collect();
-            Term::List(characters)
-        }
-        ETF_NIL_EXT => Term::List(Vec::new()),
-        ETF_SMALL_ATOM_UTF8_EXT => {
-            let size = take(data, cursor, 1)?[0] as usize;
-            let name = std::str::from_utf8(take(data, cursor, size)?)
-                .map_err(|_| error("invalid UTF-8 in BEAM atom literal"))?;
-            Term::Atom(name.to_owned())
-        }
-        ETF_SMALL_TUPLE_EXT => {
-            let arity = take(data, cursor, 1)?[0];
-            let mut elements = Vec::new();
-            for _ in 0..arity {
-                let Some(element) = read_external_term(data, cursor)? else {
-                    return Ok(None);
-                };
-                elements.push(element);
+    let mut partial = Vec::new();
+    loop {
+        let mut term = match take(data, cursor, 1)?[0] {
+            ETF_BINARY_EXT => {
+                let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
+                Term::Binary(take(data, cursor, size)?.to_vec())
             }
-            Term::Tuple(elements)
-        }
-        ETF_LIST_EXT => {
-            let length = read_u32(take(data, cursor, WORD_SIZE)?)?;
-            let mut elements = Vec::new();
-            for _ in 0..length {
-                let Some(element) = read_external_term(data, cursor)? else {
-                    return Ok(None);
-                };
-                elements.push(element);
+            ETF_STRING_EXT => {
+                let size_bytes = take(data, cursor, 2)?;
+                let size = u16::from_be_bytes([size_bytes[0], size_bytes[1]]) as usize;
+                let characters = take(data, cursor, size)?
+                    .iter()
+                    .map(|&byte| Term::Integer(i64::from(byte)))
+                    .collect();
+                Term::List(characters)
             }
-            let Some(Term::List(tail)) = read_external_term(data, cursor)? else {
-                return Ok(None);
-            };
-            elements.extend(tail);
-            Term::List(elements)
+            ETF_NIL_EXT => Term::List(Vec::new()),
+            ETF_SMALL_ATOM_UTF8_EXT => {
+                let size = take(data, cursor, 1)?[0] as usize;
+                let name = std::str::from_utf8(take(data, cursor, size)?)
+                    .map_err(|_| error("invalid UTF-8 in BEAM atom literal"))?;
+                Term::Atom(name.to_owned())
+            }
+            ETF_SMALL_TUPLE_EXT => match take(data, cursor, 1)?[0] {
+                0 => Term::Tuple(Vec::new()),
+                remaining => {
+                    let elements = Vec::new();
+                    partial.push(PartialTerm::Tuple {
+                        remaining,
+                        elements,
+                    });
+                    continue;
+                }
+            },
+            ETF_LIST_EXT => {
+                let elements = Vec::new();
+                partial.push(match read_u32(take(data, cursor, WORD_SIZE)?)? {
+                    0 => PartialTerm::ListTail { elements },
+                    remaining => PartialTerm::List {
+                        remaining,
+                        elements,
+                    },
+                });
+                continue;
+            }
+            _ => return Ok(None),
+        };
+        // Give the finished term to the innermost partial term, and finish
+        // each partial term that it completes.
+        loop {
+            match partial.pop() {
+                None => return Ok(Some(term)),
+                Some(PartialTerm::Tuple {
+                    remaining,
+                    mut elements,
+                }) => {
+                    elements.push(term);
+                    if remaining == 1 {
+                        term = Term::Tuple(elements);
+                        continue;
+                    }
+                    let remaining = remaining - 1;
+                    partial.push(PartialTerm::Tuple {
+                        remaining,
+                        elements,
+                    });
+                }
+                Some(PartialTerm::List {
+                    remaining,
+                    mut elements,
+                }) => {
+                    elements.push(term);
+                    partial.push(match remaining {
+                        1 => PartialTerm::ListTail { elements },
+                        _ => PartialTerm::List {
+                            remaining: remaining - 1,
+                            elements,
+                        },
+                    });
+                }
+                Some(PartialTerm::ListTail { mut elements }) => {
+                    let Term::List(tail) = &mut term else {
+                        return Ok(None);
+                    };
+                    elements.append(tail);
+                    term = Term::List(elements);
+                    continue;
+                }
+            }
+            break;
         }
-        _ => return Ok(None),
-    };
-    Ok(Some(term))
+    }
 }
 
 /// Return the next `length` bytes at the cursor and advance past them.
@@ -749,6 +803,24 @@ mod tests {
         assert!(read_literal(&[131, 119, 1, 0xff]).is_err());
         assert!(read_literal(&[131, 106, 106]).is_err());
         assert!(read_literal(&[131, 104]).is_err());
+        // [a, b] with length 2, and a zero-length LIST_EXT whose tail is [].
+        assert_eq!(
+            read_literal(&[131, 108, 0, 0, 0, 2, 119, 1, b'a', 119, 1, b'b', 106]).unwrap(),
+            Some(Term::List(vec![atom("a"), atom("b")]))
+        );
+        assert_eq!(
+            read_literal(&[131, 108, 0, 0, 0, 0, 106]).unwrap(),
+            Some(Term::List(vec![]))
+        );
+
+        // ERTS decodes a term nested 1000000 levels deep; so does PBeam.
+        let mut deep = vec![131];
+        for _ in 0..1_000_000 {
+            deep.extend([104, 1]);
+        }
+        deep.push(106);
+        let term = read_literal(&deep).unwrap().unwrap();
+        assert!(format!("{term:?}").starts_with("Tuple([Tuple(["));
     }
 
     #[test]

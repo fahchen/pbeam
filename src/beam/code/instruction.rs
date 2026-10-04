@@ -1033,7 +1033,7 @@ mod tests {
     fn reads_only_supported_move_literals() {
         let literals = vec![Some(Term::Binary(b"ok".to_vec())), None];
         assert!(matches!(
-            read_move_operand(&[0x47, 0x00], &mut 0, &[], &literals).unwrap(),
+            &read_move_operand(&[0x47, 0x00], &mut 0, &[], &literals).unwrap(),
             Operand::Value(Term::Binary(value)) if value == b"ok"
         ));
         let mut cursor = 0;
@@ -1047,7 +1047,7 @@ mod tests {
             Operand::UnsupportedLiteral(1)
         ));
         assert!(matches!(
-            read_move_operand(&[0x17, 0x10], &mut 0, &[], &literals).unwrap(),
+            &read_move_operand(&[0x17, 0x10], &mut 0, &[], &literals).unwrap(),
             Operand::Value(Term::List(values)) if values.is_empty()
         ));
         assert!(read_move_operand(&[0x47, 0x20], &mut 0, &[], &literals).is_err());

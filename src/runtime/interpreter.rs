@@ -271,7 +271,7 @@ impl BeamProgram {
                     tag,
                 } => {
                     let passed = matches!(
-                        read(process, value)?,
+                        &read(process, value)?,
                         Term::Tuple(fields)
                             if fields.len() == *arity as usize
                                 && fields.first() == Some(tag)
@@ -298,9 +298,11 @@ impl BeamProgram {
                     destination,
                 } => {
                     let head = read(process, head)?;
-                    let Term::List(mut values) = read(process, tail)? else {
+                    let mut tail = read(process, tail)?;
+                    let Term::List(values) = &mut tail else {
                         return Err(error("unsupported BEAM list tail"));
                     };
+                    let mut values = std::mem::take(values);
                     values.insert(0, head);
                     write(process, destination, Term::List(values))?;
                 }
@@ -319,7 +321,8 @@ impl BeamProgram {
                     index,
                     destination,
                 } => {
-                    let Term::Tuple(mut fields) = read(process, tuple)? else {
+                    let mut tuple = read(process, tuple)?;
+                    let Term::Tuple(fields) = &mut tuple else {
                         return Err(error("BEAM tuple element source is not a tuple"));
                     };
                     let index = *index as usize;
@@ -438,9 +441,10 @@ impl BeamProgram {
                 ])));
             }
             ("spawn_monitor" | "spawn_link", [Term::Atom(module), Term::Atom(function), list]) => {
-                let Term::List(arguments) = list.clone() else {
+                let Term::List(arguments) = list else {
                     return Err(error("spawn arguments are not a proper list"));
                 };
+                let arguments = arguments.clone();
                 let arity = u32::try_from(arguments.len())
                     .map_err(|_| error("arity exceeds BEAM limit"))?;
                 let frame = self.mfa_frame(module, function, arity)?;
