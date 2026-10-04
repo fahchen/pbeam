@@ -88,7 +88,7 @@ bifs! {
     erlang:"=<"/2 => unsupported,
     erlang:"=="/2 => unsupported,
     erlang:">"/2 => unsupported,
-    erlang:">="/2 => unsupported,
+    erlang:">="/2 => |_, [left, right]| Ok(Value(Term::static_atom(if left.compare(right)?.is_ge() { "true" } else { "false" }))),
     erlang:abs/1 => unsupported,
     erlang:adler32/1 => unsupported,
     erlang:adler32/2 => unsupported,

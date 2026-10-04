@@ -8,13 +8,24 @@ const ORDER_PROBE: &[u8] = include_bytes!("../fixtures/order/order_probe.beam");
 /// left term is greater than or equal to the right term, else `lt`.
 const RESULTS: &str = "lt,ge,lt,ge,ge,lt,ge,ge,ge,lt,ge,ge,ge,lt,lt,ge,ge,ge,lt,lt,lt,lt,ge,lt,ge,lt,ge,ge,lt,ge,ge,ge,lt,ge,ge,ge,ge";
 
+/// The `erlang:'>='/2` result of each pair: `true` for each `ge` of
+/// [`RESULTS`], else `false`.
+fn bif_results() -> String {
+    RESULTS
+        .split(',')
+        .map(|result| if result == "ge" { "true" } else { "false" })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[test]
-fn compares_terms_in_is_ge_as_pinned_erts() {
-    // `main/0` runs the guard `A >= B` (`is_ge`) on pairs of each term type:
-    // integers, atoms by name, references, pids by creation, tuples, flatmaps
-    // and hashmaps, lists, and binaries. `pbeam_order_z` has a lower atom
-    // index than `pbeam_order_a`, as `maps:keys/1` shows, but it is greater
-    // in the term order.
+fn compares_terms_in_is_ge_and_erlang_ge_as_pinned_erts() {
+    // `main/0` runs the guard `A >= B` (`is_ge`) and the BIF
+    // `erlang:'>='/2` on pairs of each term type: integers, atoms by name,
+    // references, pids by creation, tuples, flatmaps and hashmaps, lists,
+    // and binaries. `pbeam_order_z` has a lower atom index than
+    // `pbeam_order_a`, as `maps:keys/1` shows, but it is greater in the term
+    // order.
     let program = BeamProgram::load(&[ORDER_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
@@ -22,6 +33,7 @@ fn compares_terms_in_is_ge_as_pinned_erts() {
         Term::Tuple(vec![
             Term::List(vec![atom("pbeam_order_z"), atom("pbeam_order_a")]),
             Term::List(RESULTS.split(',').map(atom).collect()),
+            Term::List(bif_results().split(',').map(atom).collect()),
         ])
     );
 
@@ -39,6 +51,9 @@ fn compares_terms_in_is_ge_as_pinned_erts() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
-        format!("{{[pbeam_order_z,pbeam_order_a],[{RESULTS}]}}\n")
+        format!(
+            "{{[pbeam_order_z,pbeam_order_a],[{RESULTS}],[{}]}}\n",
+            bif_results()
+        )
     );
 }

@@ -1,11 +1,12 @@
 -module(order_probe).
--export([first/0, main/0, ge/2]).
+-export([first/0, main/0, ge/2, bif/2]).
 
 %% `pbeam_order_z` gets a lower atom index than `pbeam_order_a`, so the
 %% flatmap key order and the term order of the two atoms differ.
 first() -> pbeam_order_z.
 
-%% Each pair runs the guard `A >= B`, which compiles to `is_ge`.
+%% Each pair runs the guard `A >= B`, which compiles to `is_ge`, and the
+%% body `A >= B`, which compiles to a call of the BIF `erlang:'>='/2`.
 main() ->
     Ref = make_ref(),
     Self = self(),
@@ -26,7 +27,9 @@ main() ->
         {<<>>, [a]}, {<<1, 2>>, <<1, 3>>}, {<<1, 2>>, <<1>>}, {<<2>>, <<1, 9>>},
         {{a, [1, #{a => <<1>>}]}, {a, [1, #{a => <<1>>}]}}, {Ref, Ref}
     ],
-    {maps:keys(Order), [?MODULE:ge(A, B) || {A, B} <- Pairs]}.
+    {maps:keys(Order), [?MODULE:ge(A, B) || {A, B} <- Pairs], [?MODULE:bif(A, B) || {A, B} <- Pairs]}.
 
 ge(A, B) when A >= B -> ge;
 ge(_, _) -> lt.
+
+bif(A, B) -> A >= B.
