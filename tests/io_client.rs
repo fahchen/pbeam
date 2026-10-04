@@ -2,6 +2,10 @@ use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
 
+mod common;
+
+use common::pinned_beam;
+
 const IO_CLIENT_PROBE: &[u8] = include_bytes!("../fixtures/io_client/io_client_probe.beam");
 
 #[test]
@@ -18,13 +22,47 @@ fn converts_chardata_in_the_io_request_to_one_binary() {
     assert_probe_matches_erts("list");
 }
 
-/// Run an `io_client_probe` function in PBeam with the pinned `io` and
-/// `erts_internal` modules, and in the pinned ERTS 29.1.1. Both runs must
-/// give the probe term below.
+/// `erts_internal:group_leader/2` returns the atom `badarg`, and raises no
+/// exception, for a target process that exited and for a leader that is not
+/// a pid (`bif.c`). `erlang:group_leader/2` in `erlang.beam` then raises
+/// `badarg` itself.
+#[test]
+fn returns_badarg_from_erts_internal_group_leader_for_a_dead_target_or_a_non_pid_leader() {
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, IO_CLIENT_PROBE]).unwrap();
+    let badarg = Term::Atom(program.atom("badarg").unwrap());
+    assert_eq!(
+        program
+            .execute("io_client_probe", "group_leader_badarg", &[])
+            .unwrap(),
+        Term::Tuple(vec![badarg.clone(), badarg])
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/io_client",
+            "-eval",
+            "io:format(\"~p~n\", [io_client_probe:group_leader_badarg()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stdout, b"{badarg,badarg}\n");
+}
+
+/// Run an `io_client_probe` function in PBeam with the pinned `erlang`,
+/// `io`, and `erts_internal` modules, and in the pinned ERTS 29.1.1. Both
+/// runs must give the probe term below. `erlang:group_leader/2` and
+/// `erlang:spawn_monitor/3` run from `erlang.beam`, which ERTS preloads
+/// first.
 fn assert_probe_matches_erts(function: &str) {
-    let io = pinned_otp_beam("io");
-    let erts_internal = pinned_erts_beam("erts_internal");
-    let program = BeamProgram::load(&[&io, &erts_internal, IO_CLIENT_PROBE]).unwrap();
+    let erlang = pinned_beam("erlang");
+    let io = pinned_beam("io");
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erlang, &io, &erts_internal, IO_CLIENT_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("io_client_probe", function, &[]).unwrap(),
@@ -60,36 +98,4 @@ fn assert_probe_matches_erts(function: &str) {
         String::from_utf8(reference.stdout).unwrap(),
         "{ok,{{put_chars,unicode,<<\"Hello, world!\\n\">>},same},\n    noise_ok,none,\n    {true,no_down}}\n"
     );
-}
-
-/// Read the pinned OTP 29.1.1 BEAM file for a kernel or stdlib module from
-/// the mise-managed Erlang installation that this repository pins.
-fn pinned_otp_beam(module: &str) -> Vec<u8> {
-    let path = Command::new("erl")
-        .args([
-            "-noshell",
-            "-eval",
-            &format!("io:format(\"~s\", [code:which({module})]), halt()."),
-        ])
-        .output()
-        .unwrap();
-    assert!(path.status.success());
-    std::fs::read(String::from_utf8(path.stdout).unwrap()).unwrap()
-}
-
-/// Read a pinned OTP 29.1.1 preloaded ERTS module, such as `erts_internal`,
-/// from the `erts` application of the mise-managed Erlang installation.
-/// `code:which/1` returns `preloaded` for these modules, so the path comes
-/// from `code:lib_dir(erts)`.
-fn pinned_erts_beam(module: &str) -> Vec<u8> {
-    let path = Command::new("erl")
-        .args([
-            "-noshell",
-            "-eval",
-            &format!("io:format(\"~s/ebin/{module}.beam\", [code:lib_dir(erts)]), halt()."),
-        ])
-        .output()
-        .unwrap();
-    assert!(path.status.success());
-    std::fs::read(String::from_utf8(path.stdout).unwrap()).unwrap()
 }

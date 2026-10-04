@@ -271,30 +271,21 @@ impl Scheduler {
     }
 
     /// Set the group leader of a live local process, as
-    /// `erlang:group_leader/2` does.
+    /// `erts_set_group_leader` does for `erts_internal:group_leader/2`.
+    /// Return `false` when the target does not exist.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.set_group_leader(child, leader)?;
+    /// assert!(scheduler.set_group_leader(child, leader));
+    /// assert!(!scheduler.set_group_leader(ProcessId(99), leader));
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// A target that does not exist is not supported; ERTS raises `badarg`.
-    pub(super) fn set_group_leader(
-        &mut self,
-        target: ProcessId,
-        leader: ProcessId,
-    ) -> Result<(), BeamError> {
+    pub(super) fn set_group_leader(&mut self, target: ProcessId, leader: ProcessId) -> bool {
         let Some(process) = self.processes.get_mut(&target) else {
-            // ponytail: ERTS raises error badarg; see "Exception raise sites" in docs/erts-differences.md.
-            return Err(error(format!(
-                "unsupported group_leader/2 target {target:?}"
-            )));
+            return false;
         };
         process.group_leader = leader;
-        Ok(())
+        true
     }
 
     /// Remove the current process after it exits. Send `EXIT` to linked
@@ -503,9 +494,9 @@ mod tests {
         scheduler.schedule_next();
         let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
         assert_eq!(scheduler.processes[&child].group_leader, ProcessId(0));
-        scheduler.set_group_leader(child, child).unwrap();
+        assert!(scheduler.set_group_leader(child, child));
         assert_eq!(scheduler.processes[&child].group_leader, child);
-        assert!(scheduler.set_group_leader(ProcessId(99), child).is_err());
+        assert!(!scheduler.set_group_leader(ProcessId(99), child));
 
         let reference = scheduler.monitor(child).unwrap();
         assert_eq!(scheduler.processes[&child].monitored_by.len(), 1);

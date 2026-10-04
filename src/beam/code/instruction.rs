@@ -27,6 +27,7 @@ const OPCODE_ALLOCATE_HEAP: u8 = 13;
 const OPCODE_TRY: u8 = 104;
 const OPCODE_TRY_END: u8 = 105;
 const OPCODE_TRY_CASE: u8 = 106;
+const OPCODE_TRY_CASE_END: u8 = 107;
 const OPCODE_RAISE: u8 = 108;
 const OPCODE_IF_END: u8 = 73;
 const OPCODE_BUILD_STACKTRACE: u8 = 160;
@@ -91,6 +92,7 @@ const OPCODE_TEST_IS_NUMBER: u8 = 47;
 const OPCODE_TEST_IS_ATOM: u8 = 48;
 const OPCODE_TEST_IS_PID: u8 = 49;
 const OPCODE_TEST_IS_REFERENCE: u8 = 50;
+const OPCODE_TEST_IS_PORT: u8 = 51;
 const OPCODE_TEST_IS_NIL: u8 = 52;
 const OPCODE_TEST_IS_BINARY: u8 = 53;
 const OPCODE_TEST_IS_LIST: u8 = 55;
@@ -1061,7 +1063,10 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_TEST_IS_BITSTR
         | OPCODE_IS_FUNCTION => Some(2),
         OPCODE_GET_LIST | OPCODE_GET_TUPLE_ELEMENT | OPCODE_PUT_LIST => Some(3),
-        OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_CALL_FUN => Some(1),
+        // `is_port Fail Src` is in `erlang:is_port/1` and `erlang:open_port/2`.
+        OPCODE_TEST_IS_PORT => Some(2),
+        // `try_case_end Src` is in `erlang:processes_next/1`.
+        OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_CALL_FUN | OPCODE_TRY_CASE_END => Some(1),
         OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_MAP_EXACT => Some(5),
         OPCODE_GET_MAP_ELEMENTS | OPCODE_HAS_MAP_FIELDS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),
@@ -1311,10 +1316,11 @@ mod tests {
         OPCODE_BS_MATCH, OPCODE_GET_LIST, OPCODE_GET_RECORD_ELEMENTS, OPCODE_INIT_YREGS,
         OPCODE_MAKE_FUN3, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
         OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
-        OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE,
-        OPCODE_UPDATE_RECORD, parse_code, read_move_operand, read_operand_pairs,
-        read_selection_pair_count, skip_counted_operands, skip_integer_payload, skip_operand,
-        skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
+        OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_LT,
+        OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, OPCODE_UPDATE_RECORD, parse_code,
+        read_move_operand, read_operand_pairs, read_selection_pair_count, skip_counted_operands,
+        skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
+        unsupported_opcode_operand_count,
     };
     use crate::{
         beam::code::{Instruction, Operand},
@@ -1593,6 +1599,8 @@ mod tests {
             (OPCODE_TEST_IS_MAP, 2),
             (OPCODE_GET_LIST, 3),
             (OPCODE_BADMATCH, 1),
+            (OPCODE_TEST_IS_PORT, 2),
+            (OPCODE_TRY_CASE_END, 1),
             (OPCODE_PUT_MAP_ASSOC, 5),
             (OPCODE_GET_RECORD_ELEMENTS, 3),
             (OPCODE_PUT_RECORD, 6),

@@ -152,3 +152,44 @@ pub(super) fn spawn_link(
     )
     .map(Value)
 }
+
+/// Run `erlang:spawn_opt/4`, which `erlang:spawn_monitor/3` in `erlang.beam`
+/// calls with the options `[monitor]`: start a process with the spawn
+/// options in `options`, as ERTS `spawn_opt_4` (`bif.c`) does. The option
+/// `link` links the new process and `monitor` monitors it. With `monitor`
+/// the result is `{Pid, Reference}`, else `Pid`. Any other option gives a
+/// runtime error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &[monitor])?;
+/// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
+/// assert!(spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &[priority]).is_err());
+/// ```
+pub(super) fn spawn_opt(
+    context: &mut BifContext<'_>,
+    module: &Atom,
+    function: &Atom,
+    arguments: &Term,
+    options: &[Term],
+) -> Result<BifResult, BeamError> {
+    let mut spawn_options = SpawnOptions::default();
+    for option in options {
+        match option {
+            Term::Atom(option) if option.name() == "link" => spawn_options.link = true,
+            Term::Atom(option) if option.name() == "monitor" => spawn_options.monitor = true,
+            // ponytail: ERTS accepts more options; see "Spawn options" in docs/erts-differences.md.
+            _ => return Err(error(format!("unsupported spawn option {option:?}"))),
+        }
+    }
+    create_process(
+        context.program,
+        context.scheduler,
+        module,
+        function,
+        arguments,
+        spawn_options,
+    )
+    .map(Value)
+}

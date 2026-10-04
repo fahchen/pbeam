@@ -2,11 +2,17 @@ use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
 
+mod common;
+
+use common::pinned_beam;
+
 const PROCESS_PROBE: &[u8] = include_bytes!("../fixtures/process/process_probe.beam");
 
 #[test]
 fn runs_a_compiled_process_probe_with_reference_matching_and_cleanup() {
-    let program = BeamProgram::load(&[PROCESS_PROBE]).unwrap();
+    // `erlang:spawn_monitor/3` runs from the pinned `erlang.beam`.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PROCESS_PROBE]).unwrap();
 
     assert_eq!(
         program.execute("process_probe", "main", &[]).unwrap(),

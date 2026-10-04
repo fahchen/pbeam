@@ -1,12 +1,13 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `erlang`, `maps`, and `unicode` modules hold the BIF bodies that do
-//! not fit on one table line.
+//! The `erlang`, `erts_internal`, `maps`, and `unicode` modules hold the BIF
+//! bodies that do not fit on one table line.
 
 use super::*;
 
 mod erlang;
+mod erts_internal;
 mod maps;
 mod unicode;
 
@@ -78,7 +79,8 @@ struct BifContext<'a> {
 /// either mistake does not compile. A function that ERTS runs as BEAM code is
 /// not a BIF and is not in this table. A pattern can have a guard:
 /// `|context, [arguments]| where guard => body`. A body returns
-/// `Result<BifResult, BeamError>`.
+/// `Result<BifResult, BeamError>`. A name that is not a Rust identifier, such
+/// as the operator `+`, is a string literal: `erlang:"+"/2`.
 ///
 /// The macro expands into `BIFS`, the entries as
 /// `(module, name, arity)`, and `dispatch`, one `match` with an arm for each
@@ -94,11 +96,15 @@ struct BifContext<'a> {
 ///
 /// ```rust,ignore
 /// bifs! {
+///     erlang:"+"/2 => unsupported,
 ///     erlang:self/0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().id))),
 ///     lists:keyfind/3 => unsupported,
 ///     maps:keys/1 => |_, [map]| maps::keys(map),
 /// }
-/// assert_eq!(BIFS, &[("erlang", "self", 0), ("lists", "keyfind", 3), ("maps", "keys", 1)]);
+/// assert_eq!(
+///     BIFS,
+///     &[("erlang", "+", 2), ("erlang", "self", 0), ("lists", "keyfind", 3), ("maps", "keys", 1)]
+/// );
 /// ```
 macro_rules! bifs {
     (@form unsupported) => {};
@@ -106,9 +112,11 @@ macro_rules! bifs {
     (@form $($tokens:tt)*) => {
         compile_error!("a bifs! entry needs `unsupported` or one `|context, [arguments]| body`, not both");
     };
+    (@name $name:literal) => { $name };
+    (@name $name:ident) => { stringify!($name) };
     (
         $(
-            $module:ident : $name:ident / $arity:literal => $($unsupported:ident)?
+            $module:ident : $name:tt / $arity:literal => $($unsupported:ident)?
             $( |$context:pat_param, $arguments:pat_param| $(where $guard:expr =>)? $body:expr )?
         ),* $(,)?
     ) => {
@@ -125,7 +133,7 @@ macro_rules! bifs {
         /// assert!(BIFS.binary_search(&("lists", "keyfind", 3)).is_ok());
         /// ```
         pub(in crate::runtime::interpreter) const BIFS: &[(&str, &str, u32)] = &[
-            $( (stringify!($module), stringify!($name), $arity), )*
+            $( (stringify!($module), bifs!(@name $name), $arity), )*
         ];
 
         /// Run the table pattern that matches a call, or report an
@@ -145,7 +153,7 @@ macro_rules! bifs {
         ) -> Result<BifResult, BeamError> {
             match (module, name, arguments.len(), arguments) {
                 $($(
-                    (stringify!($module), stringify!($name), $arity, $arguments) $(if $guard)? => {
+                    (stringify!($module), bifs!(@name $name), $arity, $arguments) $(if $guard)? => {
                         (|$context: &mut BifContext<'_>| $body)(context)
                     }
                 )?)*
@@ -192,9 +200,10 @@ impl BeamProgram {
     }
 }
 
-/// Return whether an external call or a `bif` instruction goes to a BIF. An
-/// entry of `BIFS` runs before the module code, as in ERTS. Every `erlang`
-/// call goes to the BIF dispatch, which reports an unresolved MFA.
+/// Return whether an external call or a `bif` instruction goes to a BIF: the
+/// MFA is an entry of `BIFS`, the `bif.tab` entries, so it runs before the
+/// module code, as in ERTS. Any other MFA, also in `erlang`, runs the BEAM
+/// code of its module.
 ///
 /// # Examples
 ///
@@ -202,9 +211,32 @@ impl BeamProgram {
 /// assert!(is_bif("erlang", "self", 0));
 /// assert!(is_bif("maps", "keys", 1));
 /// assert!(is_bif("lists", "keyfind", 3));
+/// assert!(!is_bif("erlang", "spawn_monitor", 3));
 /// assert!(!is_bif("maps", "keys", 2));
 /// assert!(!is_bif("io", "put_chars", 2));
 /// ```
 pub(super) fn is_bif(module: &str, name: &str, arity: u32) -> bool {
-    module == "erlang" || BIFS.binary_search(&(module, name, arity)).is_ok()
+    BIFS.binary_search(&(module, name, arity)).is_ok()
 }
+
+/// The `erlang` functions that ERTS runs as instructions, not as BIFs or BEAM
+/// code. The loader turns a call to `apply/2` into `i_apply_fun`, a call to
+/// `apply/3` into `i_apply`, a call to `yield/0` into `i_yield`, and a call
+/// to `hibernate/0` into `i_hibernate` (the `call_ext u$func:` transforms in
+/// `ops.tab` whose function is not a `bif.tab` entry). Their bodies in
+/// `erlang.beam` only call the function again, for example
+/// `apply(F, A) -> erlang:apply(F, A).`
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(INSTRUCTION_CALLS.contains(&("erlang", "apply", 3)));
+/// assert!(INSTRUCTION_CALLS.contains(&("erlang", "hibernate", 0)));
+/// assert!(!INSTRUCTION_CALLS.contains(&("erlang", "spawn_monitor", 3)));
+/// ```
+pub(super) const INSTRUCTION_CALLS: [(&str, &str, u32); 4] = [
+    ("erlang", "apply", 2),
+    ("erlang", "apply", 3),
+    ("erlang", "hibernate", 0),
+    ("erlang", "yield", 0),
+];

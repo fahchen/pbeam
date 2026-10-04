@@ -1,15 +1,17 @@
-use std::process::Command;
-
 use pbeam_runtime::{BeamProgram, Term};
+
+mod common;
+
+use common::pinned_beam;
 
 const OTP_IO_CALLS: &[u8] = include_bytes!("../fixtures/otp_io/otp_io_calls.beam");
 
 #[test]
 fn resolves_calls_into_each_pinned_otp_io_module() {
-    let io = pinned_otp_beam("io");
-    let group = pinned_otp_beam("group");
-    let user_drv = pinned_otp_beam("user_drv");
-    let prim_tty = pinned_otp_beam("prim_tty");
+    let io = pinned_beam("io");
+    let group = pinned_beam("group");
+    let user_drv = pinned_beam("user_drv");
+    let prim_tty = pinned_beam("prim_tty");
     let program = BeamProgram::load(&[&io, &group, &user_drv, &prim_tty, OTP_IO_CALLS]).unwrap();
 
     // `otp_io_calls:io_call/0` calls `io:columns/0`, which resolves inside
@@ -71,18 +73,3 @@ const ANSI_REGEXP: &[u8] = &[
     125, 40, 63, 58, 59, 92, 100, 123, 48, 44, 52, 125, 41, 42, 41, 63, 91, 92, 100, 65, 45, 80,
     82, 45, 84, 90, 99, 102, 45, 110, 113, 45, 117, 121, 61, 62, 60, 126, 93, 41, 41,
 ];
-
-/// Read the pinned OTP 29.1.1 BEAM file for a kernel or stdlib module from
-/// the mise-managed Erlang installation that this repository pins.
-fn pinned_otp_beam(module: &str) -> Vec<u8> {
-    let path = Command::new("erl")
-        .args([
-            "-noshell",
-            "-eval",
-            &format!("io:format(\"~s\", [code:which({module})]), halt()."),
-        ])
-        .output()
-        .unwrap();
-    assert!(path.status.success());
-    std::fs::read(String::from_utf8(path.stdout).unwrap()).unwrap()
-}
