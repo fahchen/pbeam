@@ -10,6 +10,11 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: The PR to analyse. Give its number or its URL.
+        required: true
 
 permissions:
   contents: read
@@ -22,11 +27,13 @@ jobs:
   capture-learnings:
     name: capture learnings
     # Skip unmerged PRs, fork PRs (their token cannot write), and the
-    # knowledge PRs that this workflow opens.
+    # knowledge PRs that this workflow opens. A manual run names its own PR,
+    # so it skips these checks.
     if: >-
+      github.event_name == 'workflow_dispatch' || (
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      !startsWith(github.event.pull_request.head.ref, 'learnings/')
+      !startsWith(github.event.pull_request.head.ref, 'learnings/') )
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -34,13 +41,22 @@ jobs:
       pull-requests: write
       copilot-requests: write
     env:
-      PR_NUMBER: ${{ github.event.pull_request.number }}
+      # A manual run gives a PR number or a PR URL. The next step reduces it
+      # to the number that every later step and the prompt use.
+      PR_INPUT: ${{ inputs.pr || github.event.pull_request.number }}
       OUTPUT: /tmp/capture-learnings
     steps:
       - name: Check out main
         uses: actions/checkout@v7.0.1
         with:
           ref: main
+
+      - name: Read the PR number
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          number=$(gh pr view "$PR_INPUT" --json number --jq .number)
+          echo "PR_NUMBER=$number" >> "$GITHUB_ENV"
 
       # Every comment on the PR can become a rule, whatever its author. The
       # comment text stays data, never instructions for Copilot.
@@ -118,5 +134,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          gh pr comment "$PR_NUMBER" \
+          # PR_NUMBER is empty when the step that reads it is the one that failed.
+          gh pr comment "${PR_NUMBER:-$PR_INPUT}" \
             --body "Capture of review learnings failed. See the workflow run: $RUN_URL"
