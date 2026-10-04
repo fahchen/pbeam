@@ -208,8 +208,7 @@ impl BeamProgram {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     let arguments = call_arguments(&process.registers, *arity)?;
-                    // A bif.tab entry, such as maps:keys/1, runs before the module code, as in ERTS.
-                    if module == "erlang" || (module == "maps" && name == "keys") {
+                    if is_bif(module, name, *arity) {
                         let value = match self.bif(scheduler, module, name, arguments)? {
                             Ok(value) => value,
                             Err(reason) => {
@@ -539,6 +538,22 @@ impl BeamProgram {
         };
         Ok(Ok(value))
     }
+}
+
+/// Return whether an external call goes to a BIF. A `bif.tab` entry, such as
+/// `maps:keys/1`, runs before the module code, as in ERTS. Every `erlang`
+/// call goes to the BIF table, which reports an unresolved MFA.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_bif("erlang", "self", 0));
+/// assert!(is_bif("maps", "keys", 1));
+/// assert!(!is_bif("maps", "keys", 2));
+/// assert!(!is_bif("io", "put_chars", 2));
+/// ```
+fn is_bif(module: &str, name: &str, arity: u32) -> bool {
+    module == "erlang" || (module, name, arity) == ("maps", "keys", 1)
 }
 
 /// Return the active frame of a running process.
