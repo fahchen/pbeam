@@ -31,6 +31,7 @@ const OPCODE_TRY_CASE_END: u8 = 107;
 const OPCODE_RAISE: u8 = 108;
 const OPCODE_IF_END: u8 = 73;
 const OPCODE_BUILD_STACKTRACE: u8 = 160;
+const OPCODE_RAW_RAISE: u8 = 161;
 const OPCODE_IS_FUNCTION: u8 = 77;
 const OPCODE_APPLY: u8 = 112;
 const OPCODE_APPLY_LAST: u8 = 113;
@@ -411,6 +412,51 @@ pub(crate) enum Instruction {
         elements: Vec<Operand>,
         destination: Operand,
     },
+    /// Writes a copy of a tuple with each 1-based position set to its value.
+    /// All values are read before the destination is written. The `copy`,
+    /// `reuse`, and `inplace` hints and the tuple size are not kept: with
+    /// immutable terms, each hint gives the same result.
+    ///
+    /// Encoding: opcode, hint atom, unsigned size, source, destination
+    /// register, extended list, item count, then unsigned position and value
+    /// operands in turn. Example: `gen_statem:enter/8` in the pinned
+    /// `gen_statem.beam` has `[0xB5, 0x0A, 0x31, 0x70, 0x57, 0x94, 0x10, 0x33,
+    /// 0x17, 0x20, 0x50, 0x57, 0x24, 0x30]`, which sets position 5 of the
+    /// 7-tuple in `y9` to the value of `y2` and writes `x3`.
+    ///
+    /// Erlang: `rec(R, X) -> R#r{b = X, c = R#r.a}.` compiles to
+    /// `{update_record,{atom,copy},4,{tr,{x,0},...},{x,0},{list,[3,{x,1},4,{x,2}]}}`.
+    UpdateRecord {
+        source: Operand,
+        destination: Operand,
+        /// Each 1-based position and its value operand.
+        updates: Vec<(u32, Operand)>,
+    },
+    /// Copies the head and the tail of a nonempty list to two registers.
+    ///
+    /// Encoding: opcode, source, head register, tail register. Example:
+    /// `gen_statem:replies/1` in the pinned `gen_statem.beam` has
+    /// `[0x41, 0x03, 0x13, 0x23]`, which writes the head of `x0` to `x1` and
+    /// its tail to `x2`.
+    ///
+    /// Erlang: `lst([H | T]) -> {H, T}.` compiles to
+    /// `{get_list,{x,0},{x,1},{x,0}}`.
+    GetList {
+        source: Operand,
+        head: Operand,
+        tail: Operand,
+    },
+    /// Copies the head of a nonempty list to a register.
+    ///
+    /// Encoding: opcode, source, destination register. Example:
+    /// `gen_statem:system_code_change/4` in the pinned `gen_statem.beam` has
+    /// `[0xA2, 0x53, 0x73]`, which writes the head of `x5` to `x7`.
+    ///
+    /// Erlang: `hd1([H | _]) -> H.` compiles to `{get_hd,{x,0},{x,0}}`.
+    GetHead {
+        source: Operand,
+        destination: Operand,
+    },
     /// Copies the zero-based tuple element at `index` to a register.
     ///
     /// Encoding: opcode, tuple register, unsigned index, destination register.
@@ -490,6 +536,17 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `receive ... end` without `after` ends with `{wait,{f,3}}`.
     Wait(u32),
+    /// Suspends the process until a message arrives or the timeout in
+    /// `source` expires. A message continues at `label`; an expired timeout
+    /// continues at the next instruction.
+    ///
+    /// Encoding: opcode, label, timeout operand. Example: `gen_statem:loop/3`
+    /// in the pinned `gen_statem.beam` has `[0x1A, 0x0D, 0xCC, 0x04]`, which
+    /// waits with the timeout in `y0` and continues at label 204.
+    ///
+    /// Erlang: `wait(T) -> receive M -> M after T -> timeout end.` compiles to
+    /// `{wait_timeout,{f,16},{y,0}}`.
+    WaitTimeout { label: u32, source: Operand },
     /// Ends a receive after its timeout and moves the save pointer to the
     /// first message.
     ///
@@ -559,6 +616,15 @@ pub(crate) enum TestKind {
     /// tests the request result with `{test,is_tuple,{f,10},[{x,0}]}`.
     Tuple,
     List,
+    /// `is_nil`, opcode 52. Example: `[0x34, 0x0D, 0x73, 0x03]` in
+    /// `gen_statem:replies/1` fails to label 115 unless `x0` is `[]`.
+    /// Erlang: `nil([]) -> nil;` compiles to `{test,is_nil,{f,13},[{x,0}]}`.
+    Nil,
+    /// `is_nonempty_list`, opcode 56. Example: `[0x38, 0x0D, 0x75, 0x03]` in
+    /// `gen_statem:replies/1` fails to label 117 unless `x0` is a list with a
+    /// head. Erlang: `hd1([H | _]) -> H.` compiles to
+    /// `{test,is_nonempty_list,{f,8},[{x,0}]}`.
+    NonEmptyList,
     Binary,
     Map,
 }
@@ -732,6 +798,10 @@ pub(super) fn parse_code(
                 Instruction::LoopReceiveEnd(read_operand(data, &mut cursor, TAG_LABEL)? as u32)
             }
             OPCODE_WAIT => Instruction::Wait(read_operand(data, &mut cursor, TAG_LABEL)? as u32),
+            OPCODE_WAIT_TIMEOUT => Instruction::WaitTimeout {
+                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                source: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
             OPCODE_TIMEOUT => Instruction::Timeout,
             OPCODE_RECV_MARKER_RESERVE => {
                 Instruction::ReceiveMarkerReserve(read_register(data, &mut cursor)?)
@@ -749,6 +819,24 @@ pub(super) fn parse_code(
             OPCODE_GET_TUPLE_ELEMENT => Instruction::GetTupleElement {
                 tuple: read_register(data, &mut cursor)?,
                 index: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                destination: read_register(data, &mut cursor)?,
+            },
+            OPCODE_UPDATE_RECORD => {
+                let _hint = read_operand(data, &mut cursor, TAG_ATOM)?;
+                let _size = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                Instruction::UpdateRecord {
+                    source: read_move_operand(data, &mut cursor, atoms, literals)?,
+                    destination: read_register(data, &mut cursor)?,
+                    updates: read_record_updates(data, &mut cursor, atoms, literals)?,
+                }
+            }
+            OPCODE_GET_LIST => Instruction::GetList {
+                source: read_move_operand(data, &mut cursor, atoms, literals)?,
+                head: read_register(data, &mut cursor)?,
+                tail: read_register(data, &mut cursor)?,
+            },
+            OPCODE_GET_HD => Instruction::GetHead {
+                source: read_move_operand(data, &mut cursor, atoms, literals)?,
                 destination: read_register(data, &mut cursor)?,
             },
             OPCODE_PUT_TUPLE2 => {
@@ -792,6 +880,8 @@ pub(super) fn parse_code(
             | OPCODE_TEST_IS_REFERENCE
             | OPCODE_TEST_IS_TUPLE
             | OPCODE_TEST_IS_LIST
+            | OPCODE_TEST_IS_NIL
+            | OPCODE_TEST_IS_NONEMPTY_LIST
             | OPCODE_TEST_IS_BINARY
             | OPCODE_TEST_IS_MAP => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
@@ -941,6 +1031,8 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
         OPCODE_TEST_IS_REFERENCE => Ok(TestKind::Reference),
         OPCODE_TEST_IS_TUPLE => Ok(TestKind::Tuple),
         OPCODE_TEST_IS_LIST => Ok(TestKind::List),
+        OPCODE_TEST_IS_NIL => Ok(TestKind::Nil),
+        OPCODE_TEST_IS_NONEMPTY_LIST => Ok(TestKind::NonEmptyList),
         OPCODE_TEST_IS_BINARY => Ok(TestKind::Binary),
         OPCODE_TEST_IS_MAP => Ok(TestKind::Map),
         _ => Err(error(format!("unsupported BEAM type-test opcode {opcode}"))),
@@ -980,6 +1072,42 @@ fn read_operand_pairs(
     Ok(pairs)
 }
 
+/// Read the extended list of `update_record`: an unsigned 1-based position
+/// and a value operand for each update.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {list,[5,{tr,{y,2},3}]} from `gen_statem:enter/8`
+/// let updates = read_record_updates(&[0x17, 0x20, 0x50, 0x57, 0x24, 0x30], &mut 0, &[], &[])?;
+/// assert!(matches!(updates.as_slice(), [(5, Operand::Y(2))]));
+/// ```
+fn read_record_updates(
+    data: &[u8],
+    cursor: &mut usize,
+    atoms: &[Atom],
+    literals: &[Option<Term>],
+) -> Result<Vec<(u32, Operand)>, BeamError> {
+    if read_integer(data, cursor, TAG_LITERAL)? != LIST_SUBTAG {
+        return Err(error("unsupported BEAM record update list"));
+    }
+    let item_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+        .map_err(|_| error("BEAM record update list is too large"))?;
+    // Each item takes at least one byte, so a larger count is malformed.
+    if item_count > data.len().saturating_sub(*cursor) {
+        return Err(error("BEAM record update list exceeds code chunk"));
+    }
+    if item_count % 2 != 0 {
+        return Err(error("BEAM record update list has an incomplete pair"));
+    }
+    let mut updates = Vec::with_capacity(item_count / 2);
+    for _ in 0..item_count / 2 {
+        let position = read_operand(data, cursor, TAG_UNSIGNED)? as u32;
+        updates.push((position, read_move_operand(data, cursor, atoms, literals)?));
+    }
+    Ok(updates)
+}
+
 /// Skip operands for a known instruction that the runtime cannot execute.
 ///
 /// # Examples
@@ -1010,7 +1138,6 @@ fn skip_unsupported_instruction(
             | OPCODE_INIT_YREGS
             | OPCODE_BS_CREATE_BIN
             | OPCODE_BS_MATCH
-            | OPCODE_UPDATE_RECORD
     ) {
         skip_counted_operands(data, cursor)?;
     }
@@ -1031,7 +1158,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_CALL_FUN2 | OPCODE_IS_FUNCTION2 => Some(3),
         OPCODE_APPLY_LAST => Some(2),
         OPCODE_APPLY => Some(1),
-        OPCODE_WAIT_TIMEOUT => Some(2),
         OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
         OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
@@ -1043,6 +1169,8 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_GC_BIF2 => Some(6),
         OPCODE_BADRECORD => Some(1),
         OPCODE_NIF_START | OPCODE_IF_END | OPCODE_BUILD_STACKTRACE => Some(0),
+        // `raw_raise` is in `gen_statem:call/3`.
+        OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
         OPCODE_BIF2 => Some(5),
@@ -1055,14 +1183,11 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_TEST_IS_ATOM
         | OPCODE_TEST_IS_PID
         | OPCODE_TEST_IS_BINARY
-        | OPCODE_TEST_IS_NIL
         | OPCODE_TEST_IS_LIST
-        | OPCODE_TEST_IS_NONEMPTY_LIST
         | OPCODE_TEST_IS_MAP
         | OPCODE_TEST_IS_BOOLEAN
         | OPCODE_TEST_IS_BITSTR
         | OPCODE_IS_FUNCTION => Some(2),
-        OPCODE_GET_LIST | OPCODE_GET_TUPLE_ELEMENT | OPCODE_PUT_LIST => Some(3),
         // `is_port Fail Src` is in `erlang:is_port/1` and `erlang:open_port/2`.
         OPCODE_TEST_IS_PORT => Some(2),
         // `try_case_end Src` is in `erlang:processes_next/1`.
@@ -1070,14 +1195,13 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_MAP_EXACT => Some(5),
         OPCODE_GET_MAP_ELEMENTS | OPCODE_HAS_MAP_FIELDS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),
-        OPCODE_GET_HD | OPCODE_GET_TL => Some(2),
+        OPCODE_GET_TL => Some(2),
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
         OPCODE_MAKE_FUN3 => Some(3),
         OPCODE_BS_CREATE_BIN => Some(6),
         OPCODE_BS_INIT_WRITABLE => Some(0),
         OPCODE_BS_MATCH => Some(3),
-        OPCODE_UPDATE_RECORD => Some(5),
         _ => None,
     }
 }
@@ -1313,17 +1437,17 @@ mod tests {
     use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
     use super::{
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BIF2, OPCODE_BS_CREATE_BIN, OPCODE_BS_INIT_WRITABLE,
-        OPCODE_BS_MATCH, OPCODE_GET_LIST, OPCODE_GET_RECORD_ELEMENTS, OPCODE_INIT_YREGS,
+        OPCODE_BS_MATCH, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS,
         OPCODE_MAKE_FUN3, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
-        OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
-        OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_LT,
-        OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, OPCODE_UPDATE_RECORD, parse_code,
-        read_move_operand, read_operand_pairs, read_selection_pair_count, skip_counted_operands,
-        skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
-        unsupported_opcode_operand_count,
+        OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
+        OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
+        OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
+        read_move_operand, read_operand_pairs, read_record_updates, read_selection_pair_count,
+        skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
+        test_kind, unsupported_opcode_operand_count,
     };
     use crate::{
-        beam::code::{Instruction, Operand},
+        beam::code::{Instruction, Operand, TestKind},
         term::{Atom, Term},
     };
 
@@ -1552,6 +1676,86 @@ mod tests {
     }
 
     #[test]
+    fn decodes_the_list_record_and_receive_wait_instructions_of_pinned_gen_statem() {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        // Bytes of the pinned OTP 29.1.1 `gen_statem.beam`.
+        code.extend([
+            0x38, 0x0D, 0x75, 0x03, // replies/1: {test,is_nonempty_list,{f,117},[{x,0}]}
+            0x41, 0x03, 0x13, 0x23, // replies/1: {get_list,{x,0},{x,1},{x,2}}
+            0x34, 0x0D, 0x73, 0x03, // replies/1: {test,is_nil,{f,115},[{x,0}]}
+            0xA2, 0x53, 0x73, // system_code_change/4: {get_hd,{x,5},{x,7}}
+            // enter/8: {update_record,{atom,copy},7,{tr,{y,9},_},{x,3},{list,[5,{tr,{y,2},_}]}}
+            0xB5, 0x0A, 0x31, 0x70, 0x57, 0x94, 0x10, 0x33, 0x17, 0x20, 0x50, 0x57, 0x24, 0x30,
+            // loop_t0q/5: {update_record,{atom,inplace},6,{tr,{x,2},_},{x,2},{list,[4,{x,3},5,nil]}}
+            0xB5, 0x0A, 0x9F, 0x60, 0x57, 0x23, 0x10, 0x23, 0x17, 0x40, 0x40, 0x33, 0x50, 0x02,
+            0x1A, 0x0D, 0xCC, 0x04, // loop/3: {wait_timeout,{f,204},{y,0}}
+            0xA1, // call/3: raw_raise
+            0x03,
+        ]);
+        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::Test {
+                    kind: TestKind::NonEmptyList,
+                    fail_label: 117,
+                    value: Operand::X(0),
+                },
+                Instruction::GetList {
+                    source: Operand::X(0),
+                    head: Operand::X(1),
+                    tail: Operand::X(2),
+                },
+                Instruction::Test {
+                    kind: TestKind::Nil,
+                    fail_label: 115,
+                    value: Operand::X(0),
+                },
+                Instruction::GetHead {
+                    source: Operand::X(5),
+                    destination: Operand::X(7),
+                },
+                Instruction::UpdateRecord {
+                    source: Operand::Y(9),
+                    destination: Operand::X(3),
+                    updates: copy,
+                },
+                Instruction::UpdateRecord {
+                    source: Operand::X(2),
+                    destination: Operand::X(2),
+                    updates: inplace,
+                },
+                Instruction::WaitTimeout {
+                    label: 204,
+                    source: Operand::Y(0),
+                },
+                Instruction::Unsupported(OPCODE_RAW_RAISE),
+                Instruction::End,
+            ] if matches!(copy.as_slice(), [(5, Operand::Y(2))])
+                && matches!(
+                    inplace.as_slice(),
+                    [(4, Operand::X(3)), (5, Operand::Value(Term::List(nil)))] if nil.is_empty()
+                )
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_record_update_lists() {
+        let error = |bytes: &[u8]| {
+            read_record_updates(bytes, &mut 0, &[], &[])
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(error(&[0x27, 0x20]).contains("unsupported BEAM record update list"));
+        assert!(error(&[0x17, 0x10, 0x50]).contains("incomplete pair"));
+        // Eight items with no bytes left: rejected before any allocation.
+        assert!(error(&[0x17, 0x80]).contains("exceeds code chunk"));
+        // A position must be an unsigned operand.
+        assert!(error(&[0x17, 0x20, 0x03, 0x03]).contains("unexpected BEAM operand tag 3"));
+    }
+
+    #[test]
     fn rejects_a_put_tuple2_without_an_element_list() {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
@@ -1597,7 +1801,7 @@ mod tests {
             (OPCODE_TEST_LT, 3),
             (OPCODE_TEST_TAGGED_TUPLE, 4),
             (OPCODE_TEST_IS_MAP, 2),
-            (OPCODE_GET_LIST, 3),
+            (OPCODE_GET_TL, 2),
             (OPCODE_BADMATCH, 1),
             (OPCODE_TEST_IS_PORT, 2),
             (OPCODE_TRY_CASE_END, 1),
@@ -1610,7 +1814,7 @@ mod tests {
             (OPCODE_BS_CREATE_BIN, 6),
             (OPCODE_BS_INIT_WRITABLE, 0),
             (OPCODE_BS_MATCH, 3),
-            (OPCODE_UPDATE_RECORD, 5),
+            (OPCODE_RAW_RAISE, 0),
         ] {
             assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
         }

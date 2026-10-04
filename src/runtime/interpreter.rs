@@ -420,6 +420,10 @@ impl BeamProgram {
                         TestKind::Reference => matches!(value, Term::Reference(_)),
                         TestKind::Tuple => matches!(value, Term::Tuple(_)),
                         TestKind::List => matches!(value, Term::List(_)),
+                        TestKind::Nil => matches!(&value, Term::List(values) if values.is_empty()),
+                        TestKind::NonEmptyList => {
+                            matches!(&value, Term::List(values) if !values.is_empty())
+                        }
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
                     };
@@ -553,6 +557,42 @@ impl BeamProgram {
                     }
                     write(process, destination, fields.swap_remove(index))?;
                 }
+                Instruction::UpdateRecord {
+                    source,
+                    destination,
+                    updates,
+                } => {
+                    let mut record = read(process, source)?;
+                    let Term::Tuple(fields) = &mut record else {
+                        return Err(error("BEAM update_record source is not a tuple"));
+                    };
+                    // ERTS reads each value before it writes the destination, which can be a value register.
+                    for (position, value) in updates {
+                        let value = read(process, value)?;
+                        let field = (*position as usize)
+                            .checked_sub(1)
+                            .and_then(|index| fields.get_mut(index))
+                            .ok_or_else(|| {
+                                error(format!("BEAM update_record has no position {position}"))
+                            })?;
+                        *field = value;
+                    }
+                    write(process, destination, record)?;
+                }
+                Instruction::GetList { source, head, tail } => {
+                    let mut values = nonempty_list(read(process, source)?)?;
+                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+                    let first = values.remove(0);
+                    write(process, head, first)?;
+                    write(process, tail, Term::List(values))?;
+                }
+                Instruction::GetHead {
+                    source,
+                    destination,
+                } => {
+                    let mut values = nonempty_list(read(process, source)?)?;
+                    write(process, destination, values.swap_remove(0))?;
+                }
                 Instruction::Send => {
                     let Term::Pid(target) = read(process, &Operand::X(0))? else {
                         return Err(error("unsupported BEAM send target"));
@@ -580,6 +620,15 @@ impl BeamProgram {
                     }
                 }
                 Instruction::Wait(label) => {
+                    jump(module, process, *label)?;
+                    return Ok(Outcome::Wait);
+                }
+                Instruction::WaitTimeout { label, source } => {
+                    let timeout = read(process, source)?;
+                    if timeout != Term::static_atom("infinity") {
+                        // ponytail: PBeam has no timers; see "Receive timeout" in docs/erts-differences.md.
+                        return Err(error(format!("unsupported receive timeout {timeout:?}")));
+                    }
                     jump(module, process, *label)?;
                     return Ok(Outcome::Wait);
                 }
@@ -770,6 +819,25 @@ fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Opt
 /// ```
 fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
     write(process, &Operand::Y(register), Term::List(Vec::new()))
+}
+
+/// Return the elements of a nonempty list, which `get_list` and `get_hd`
+/// read. The BEAM validator makes sure that the source is a nonempty list.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
+/// assert_eq!(nonempty_list(list)?, vec![Term::Integer(1), Term::Integer(2)]);
+/// assert!(nonempty_list(Term::List(vec![])).is_err());
+/// ```
+fn nonempty_list(mut list: Term) -> Result<Vec<Term>, BeamError> {
+    match &mut list {
+        Term::List(values) if !values.is_empty() => Ok(std::mem::take(values)),
+        _ => Err(error(format!(
+            "BEAM list source {list:?} is not a nonempty list"
+        ))),
+    }
 }
 
 /// Continue execution after a label in the active module.
@@ -987,7 +1055,7 @@ mod tests {
     };
     use crate::{
         BeamModule, Map, Term,
-        beam::code::{self, Instruction, Operand},
+        beam::code::{self, Instruction, Operand, TestKind},
         term::{AtomTable, test_atom},
     };
 
@@ -1668,6 +1736,230 @@ mod tests {
             0,
         );
         assert!(invalid_tail.execute("fixture", "main", &[]).is_err());
+    }
+
+    /// The values come from a pinned OTP 29.1.1 run of `lst/1`, `hd1/1`, and
+    /// `nil/1` in a module compiled with `erlc +no_line_info`:
+    /// `lst([H | T]) -> {H, T}.`, `hd1([H | _]) -> H.`, and
+    /// `nil([]) -> nil; nil([_ | _]) -> nonempty; nil(_) -> other.`
+    #[test]
+    fn reads_and_tests_lists_as_pinned_erts() {
+        let list = |names: &[&str]| Term::List(names.iter().map(|name| test_atom(name)).collect());
+        let run = |argument: Term, body: Vec<Instruction>| {
+            let mut instructions = vec![Instruction::Move(Operand::Value(argument), Operand::X(0))];
+            instructions.extend(body);
+            make_program(instructions, 0).execute("fixture", "main", &[])
+        };
+        // lst/1 compiles to {get_list,{x,0},{x,1},{x,0}}, then put_tuple2.
+        let get_list = |argument: Term| {
+            run(
+                argument,
+                vec![
+                    Instruction::GetList {
+                        source: Operand::X(0),
+                        head: Operand::X(1),
+                        tail: Operand::X(0),
+                    },
+                    Instruction::PutTuple {
+                        elements: vec![Operand::X(1), Operand::X(0)],
+                        destination: Operand::X(0),
+                    },
+                    Instruction::Return,
+                ],
+            )
+        };
+        // ERTS: lst([a,b,c]) is {a,[b,c]}, and lst([a]) is {a,[]}.
+        assert_eq!(
+            get_list(list(&["a", "b", "c"])).unwrap(),
+            Term::Tuple(vec![test_atom("a"), list(&["b", "c"])])
+        );
+        assert_eq!(
+            get_list(list(&["a"])).unwrap(),
+            Term::Tuple(vec![test_atom("a"), list(&[])])
+        );
+        // ERTS: hd1([x,y]) is x.
+        let get_head = |argument: Term| {
+            run(
+                argument,
+                vec![
+                    Instruction::GetHead {
+                        source: Operand::X(0),
+                        destination: Operand::X(0),
+                    },
+                    Instruction::Return,
+                ],
+            )
+        };
+        assert_eq!(get_head(list(&["x", "y"])).unwrap(), test_atom("x"));
+        // ERTS: nil([]) is nil, nil([a]) is nonempty, and nil(a) is other.
+        let classify = |argument: Term| {
+            run(
+                argument,
+                vec![
+                    Instruction::Test {
+                        kind: TestKind::Nil,
+                        fail_label: 3,
+                        value: Operand::X(0),
+                    },
+                    Instruction::Move(atom("nil"), Operand::X(0)),
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Test {
+                        kind: TestKind::NonEmptyList,
+                        fail_label: 4,
+                        value: Operand::X(0),
+                    },
+                    Instruction::Move(atom("nonempty"), Operand::X(0)),
+                    Instruction::Return,
+                    Instruction::Label(4),
+                    Instruction::Move(atom("other"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            )
+            .unwrap()
+        };
+        assert_eq!(classify(list(&[])), test_atom("nil"));
+        assert_eq!(classify(list(&["a"])), test_atom("nonempty"));
+        assert_eq!(classify(test_atom("a")), test_atom("other"));
+        // The BEAM validator makes sure that the source is a nonempty list.
+        assert_eq!(
+            get_list(list(&[])).unwrap_err().to_string(),
+            "BEAM list source List([]) is not a nonempty list"
+        );
+        assert_eq!(
+            get_head(test_atom("a")).unwrap_err().to_string(),
+            "BEAM list source Atom(\"a\") is not a nonempty list"
+        );
+    }
+
+    /// The value comes from a pinned OTP 29.1.1 run of `rec/2` with
+    /// `-record(r, {a, b, c})`: `rec(#r{a = 1, b = 2, c = 3}, 9)` is
+    /// `{r,1,9,1}`. `rec(R, X) -> R#r{b = X, c = R#r.a}.` compiles to
+    /// `{get_tuple_element,{x,0},1,{x,2}}` and
+    /// `{update_record,{atom,copy},4,{tr,{x,0},_},{x,0},{list,[3,{x,1},4,{x,2}]}}`.
+    #[test]
+    fn updates_record_positions_as_pinned_erts() {
+        let record = || {
+            Operand::Value(Term::Tuple(vec![
+                test_atom("r"),
+                Term::Integer(1),
+                Term::Integer(2),
+                Term::Integer(3),
+            ]))
+        };
+        let run = |destination: Operand, updates: Vec<(u32, Operand)>| {
+            make_program(
+                vec![
+                    Instruction::Move(record(), Operand::X(0)),
+                    Instruction::Move(Operand::Value(Term::Integer(9)), Operand::X(1)),
+                    Instruction::GetTupleElement {
+                        tuple: Operand::X(0),
+                        index: 1,
+                        destination: Operand::X(2),
+                    },
+                    Instruction::UpdateRecord {
+                        source: Operand::X(0),
+                        destination: destination.clone(),
+                        updates,
+                    },
+                    Instruction::Move(destination, Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        assert_eq!(
+            run(Operand::X(0), vec![(3, Operand::X(1)), (4, Operand::X(2))]).unwrap(),
+            Term::Tuple(vec![
+                test_atom("r"),
+                Term::Integer(1),
+                Term::Integer(9),
+                Term::Integer(1),
+            ])
+        );
+        // The destination x1 is also a value register. The update uses the
+        // value of x1 before the write, as the ERTS `SCRATCH_X_REG` rewrite does.
+        assert_eq!(
+            run(Operand::X(1), vec![(2, Operand::X(2)), (3, Operand::X(1))]).unwrap(),
+            Term::Tuple(vec![
+                test_atom("r"),
+                Term::Integer(1),
+                Term::Integer(9),
+                Term::Integer(3),
+            ])
+        );
+        for position in [0, 5] {
+            assert_eq!(
+                run(Operand::X(0), vec![(position, Operand::X(1))])
+                    .unwrap_err()
+                    .to_string(),
+                format!("BEAM update_record has no position {position}")
+            );
+        }
+        assert_eq!(
+            make_program(
+                vec![Instruction::UpdateRecord {
+                    source: atom("r"),
+                    destination: Operand::X(0),
+                    updates: Vec::new(),
+                }],
+                0,
+            )
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+            "BEAM update_record source is not a tuple"
+        );
+    }
+
+    /// A `wait_timeout` with `infinity` waits as `wait` does: the `DOWN`
+    /// message of a monitored child continues the receive at its label.
+    #[test]
+    fn waits_for_a_message_with_an_infinity_timeout_and_rejects_other_timeouts() {
+        let wait = |timeout: Term| {
+            let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
+            body.pop();
+            body.extend([
+                Instruction::Move(
+                    Operand::Value(Term::List(vec![test_atom("monitor")])),
+                    Operand::X(3),
+                ),
+                erlang_call("spawn_opt", 4, false),
+                Instruction::Label(5),
+                Instruction::LoopReceive {
+                    fail_label: 6,
+                    destination: Operand::X(0),
+                },
+                Instruction::Return,
+                Instruction::Label(6),
+                Instruction::WaitTimeout {
+                    label: 5,
+                    source: Operand::Value(timeout),
+                },
+                Instruction::Timeout,
+                Instruction::Move(atom("timeout"), Operand::X(0)),
+                Instruction::Return,
+            ]);
+            run_with_child(body)
+        };
+        assert!(matches!(
+            wait(test_atom("infinity")),
+            Ok(Term::Tuple(ref fields))
+                if fields[0] == test_atom("DOWN")
+                    && fields[2] == test_atom("process")
+                    && fields[4] == Term::Integer(1)
+        ));
+        // ERTS 29.1.1: `receive M -> M after T -> timeout end` with T = 0
+        // returns timeout at once. PBeam has no timers yet.
+        assert_eq!(
+            wait(Term::Integer(0)).unwrap_err().to_string(),
+            "unsupported receive timeout Integer(0)"
+        );
+        assert_eq!(
+            wait(Term::Integer(100)).unwrap_err().to_string(),
+            "unsupported receive timeout Integer(100)"
+        );
     }
 
     #[test]
