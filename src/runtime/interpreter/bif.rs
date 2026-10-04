@@ -52,32 +52,6 @@ impl BifResult {
             reason: Term::static_atom("badarg"),
         }
     }
-
-    /// Return the value of a BIF called through a `bif` instruction with
-    /// fail label 0. An exception or a trap from such a BIF is not supported.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let value = BifResult::Value(Term::Integer(1)).into_bif_value("erlang", "self", 0)?;
-    /// assert_eq!(value, Term::Integer(1));
-    /// let raise = BifResult::Raise { class: ExceptionClass::Exit, reason: Term::static_atom("badarg") };
-    /// assert!(raise.into_bif_value("erlang", "node", 1).is_err());
-    /// ```
-    pub(super) fn into_bif_value(
-        self,
-        module: &str,
-        name: &str,
-        arity: usize,
-    ) -> Result<Term, BeamError> {
-        match self {
-            BifResult::Value(value) => Ok(value),
-            // ponytail: no BIF that a `bif` instruction reaches raises or traps; add it when one does.
-            other => Err(error(format!(
-                "unsupported {module}:{name}/{arity} result {other:?}"
-            ))),
-        }
-    }
 }
 
 /// The state that a BIF body can use.

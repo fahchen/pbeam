@@ -347,9 +347,27 @@ impl BeamProgram {
                         .iter()
                         .map(|argument| read(process, argument))
                         .collect::<Result<Vec<_>, _>>()?;
+                    // A `bif` instruction with fail label 0 raises the
+                    // exception of the BIF, as `handle_error` does in ERTS
+                    // (`bif_instrs.tab`).
                     let result = self.bif(scheduler, module, name, values)?;
-                    let value = result.into_bif_value(module, name, arguments.len())?;
-                    write(scheduler.current_process_mut(), destination, value)?;
+                    let process = scheduler.current_process_mut();
+                    match result {
+                        BifResult::Value(value) => write(process, destination, value)?,
+                        BifResult::Raise { class, reason } => {
+                            if let Some(outcome) = raise(process, class, reason) {
+                                return Ok(outcome);
+                            }
+                        }
+                        // The compiler emits a `bif` instruction only for a
+                        // BIF that does not trap.
+                        trap => {
+                            return Err(error(format!(
+                                "unsupported {module}:{name}/{} result {trap:?}",
+                                arguments.len()
+                            )));
+                        }
+                    }
                 }
                 Instruction::Jump(label) => jump(module, process, *label)?,
                 Instruction::Catch { register, label } => {
@@ -1098,10 +1116,7 @@ mod tests {
     use std::{collections::HashMap, path::PathBuf, process::Command};
 
     use super::bif::{BIFS, INSTRUCTION_CALLS};
-    use super::{
-        BeamProgram, BifResult, ExceptionClass, call_arguments, function_at_label, read_operand,
-        write_operand,
-    };
+    use super::{BeamProgram, call_arguments, function_at_label, read_operand, write_operand};
     use crate::{
         BeamModule, Map, Term,
         beam::code::{self, Instruction, Operand, TestKind},
@@ -2372,22 +2387,67 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_exception_from_a_bif_instruction() {
+    fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
+        let element = |index: i64| {
+            make_program(
+                vec![
+                    Instruction::Allocate { stack_size: 1 },
+                    Instruction::Catch {
+                        register: 0,
+                        label: 3,
+                    },
+                    element_bif(index, Operand::Value(Term::Tuple(vec![])), Operand::X(0)),
+                    Instruction::Label(3),
+                    Instruction::CatchEnd { register: 0 },
+                    Instruction::Deallocate { stack_size: 1 },
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        // ERTS 29.1.1: catch element(1, {}) is {'EXIT', {badarg, Stack}}.
+        // PBeam gives the stack trace [].
         assert_eq!(
-            BifResult::Value(Term::Integer(1))
-                .into_bif_value("erlang", "self", 0)
-                .unwrap(),
-            Term::Integer(1)
+            element(1).unwrap(),
+            Term::Tuple(vec![
+                test_atom("EXIT"),
+                Term::Tuple(vec![test_atom("badarg"), Term::List(Vec::new())]),
+            ])
         );
+        // Without a catch, the exception exits the process.
+        let body = vec![
+            element_bif(1, Operand::Value(Term::Tuple(vec![])), Operand::X(0)),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            BADARG_EXIT
+        );
+        // demonitor(Ref, [flush]) of a reference with no monitor traps. No
+        // compiler emits it as a `bif` instruction.
+        let body = vec![
+            erlang_call("make_ref", 0, false),
+            Instruction::Bif {
+                module: "erlang".into(),
+                name: "demonitor".into(),
+                arguments: vec![
+                    Operand::X(0),
+                    Operand::Value(Term::List(vec![test_atom("flush")])),
+                ],
+                destination: Operand::X(0),
+            },
+            Instruction::Return,
+        ];
         assert!(
-            BifResult::Raise {
-                class: ExceptionClass::Error,
-                reason: test_atom("badarg"),
-            }
-            .into_bif_value("erlang", "node", 1)
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported erlang:node/1 result")
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+                .starts_with("unsupported erlang:demonitor/2 result Trap")
         );
     }
 
