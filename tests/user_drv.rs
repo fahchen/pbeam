@@ -73,6 +73,35 @@ fn runs_iolist_to_iovec_of_terms_that_are_not_lists_as_pinned_erts() {
 }
 
 #[test]
+fn runs_is_ne_exact_in_an_orelse_guard_as_pinned_erts() {
+    // `ne/3` has the `orelse` guard shape of `user_drv:server/3`:
+    // `{test,is_ne_exact,{f,24},[{x,0},{x,1}]}` jumps to the `match` body
+    // when A =:= B, and otherwise continues to `is_eq_exact` on A and C.
+    // `{a, a, b}` returns `match` only through the fail jump, and
+    // `{a, b, c}` returns `no_match` only when equal operands do not jump.
+    let program = BeamProgram::load(&[USER_DRV_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("user_drv_probe", "ne", &[]).unwrap(),
+        Term::List(vec![atom("match"), atom("match"), atom("no_match")])
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/user_drv",
+            "-eval",
+            "io:format(\"~p~n\", [user_drv_probe:ne()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stdout, b"[match,match,no_match]\n");
+}
+
+#[test]
 fn executes_the_pinned_user_drv_server_for_one_put_chars_sync_request() {
     // `main/0` starts a driver with `gen_statem:enter_loop/4` and the state of
     // a disabled-mode `user_drv`, and sends one `put_chars_sync` request from

@@ -1,5 +1,5 @@
 -module(user_drv_probe).
--export([main/0, iovec/0, start_driver/3, state/3, writer/2]).
+-export([main/0, iovec/0, ne/0, ne/3, start_driver/3, state/3, writer/2]).
 
 main() ->
     WriterRef = make_ref(),
@@ -33,3 +33,10 @@ writer(Probe, WriterRef) ->
 
 iovec() ->
     [try erlang:iolist_to_iovec(X) catch error:R -> R end || X <- [<<>>, [], foo]].
+
+ne() ->
+    [?MODULE:ne(A, B, C) || {A, B, C} <- [{a, a, b}, {a, b, a}, {a, b, c}]].
+
+%% The guard compiles to is_ne_exact on A and B, as user_drv:server/3 does.
+ne(A, B, C) when A =:= B orelse A =:= C -> match;
+ne(_, _, _) -> no_match.
