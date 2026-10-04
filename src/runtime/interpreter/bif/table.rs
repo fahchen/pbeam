@@ -4,12 +4,13 @@
 //! bytes of the module and the name, then by arity. On the pinned ERTS,
 //! `erlang:is_builtin/3` returns `true` for each entry, and a unit test
 //! checks that the table holds no other builtin function. An operator name
-//! is a string literal, for example `erlang:"+"/2`. ERTS binds each import of a BIF to the BIF and replaces
-//! the body of each exported BIF stub with a call to the BIF (`emu_load.c`),
-//! so a stub body such as `erlang:nif_error(undef)` never runs for an
-//! external call. An entry gives one argument pattern with its body, or
-//! `unsupported` when PBeam does not implement it. A call that no pattern
-//! matches gives an unresolved MFA error.
+//! is a string literal, for example `erlang:"+"/2`. ERTS binds each import
+//! of a BIF to the BIF and replaces the body of each exported BIF stub with
+//! a call to the BIF (`emu_load.c`), so a stub body such as
+//! `erlang:nif_error(undef)` never runs for an external call. An entry gives
+//! one argument pattern with its body, or `unsupported` when PBeam does not
+//! implement it. A call that no pattern matches gives an unresolved MFA
+//! error.
 
 use super::BifResult::{Raise, Value};
 use super::*;
