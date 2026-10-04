@@ -181,6 +181,13 @@ impl BeamProgram {
                     }
                     stack.clear();
                 }
+                Instruction::Trim { count, remaining } => {
+                    let stack = &mut current_frame(process).stack;
+                    if stack.len() != *count as usize + *remaining as usize {
+                        return Err(error("invalid BEAM stack size"));
+                    }
+                    stack.drain(..*count as usize);
+                }
                 Instruction::Call { arity, label } => {
                     call_arguments(&process.registers, *arity)?;
                     let frame = self.frame(&module.name, *label, *arity)?;
@@ -432,6 +439,7 @@ impl BeamProgram {
             }
             ("self", []) => Term::Pid(scheduler.current_process_mut().id),
             ("make_ref", []) => Term::Reference(scheduler.make_ref()?),
+            ("link", [Term::Pid(target)]) => scheduler.link(*target)?,
             ("exit", [reason]) => return Ok(Err(reason.clone())),
             ("nif_error", [reason]) => {
                 return Ok(Err(Term::Tuple(vec![
@@ -1076,6 +1084,22 @@ mod tests {
             )
             .execute("fixture", "main", &[])
             .is_err()
+        );
+        assert!(
+            make_program(
+                vec![
+                    Instruction::Allocate { stack_size: 1 },
+                    Instruction::Trim {
+                        count: 1,
+                        remaining: 1
+                    }
+                ],
+                0
+            )
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string()
+            .contains("invalid BEAM stack size")
         );
         assert!(
             make_program(
