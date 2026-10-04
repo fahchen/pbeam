@@ -7,8 +7,9 @@ use crate::term::Term;
 /// hash table for the node and finds a key with the `EQ` exact equality
 /// (`lookup` in `erl_bif_persistent.c`). `Term` has no hash, so this store
 /// uses a linear search with the exact equality of `Term`. The ERTS hash
-/// order is visible only through `persistent_term:get/0` and `info/0`, which
-/// PBeam does not implement.
+/// order is visible only through `persistent_term:get/0`, which returns the
+/// `[{Key, Value}]` list in table order. PBeam does not implement it.
+/// `persistent_term:info/0` returns only `#{count := Count, memory := Memory}`.
 #[derive(Debug, Default)]
 pub(super) struct PersistentTerms(Vec<(Term, Term)>);
 
