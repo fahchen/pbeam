@@ -117,24 +117,26 @@ pub(super) fn demonitor(
 
 /// Run `erlang:spawn/3`, `erlang:spawn_link/3`, or `erlang:spawn_monitor/3`:
 /// start a process that runs `module:function` with the elements of
-/// `arguments`. Return the pid, or `{Pid, Reference}` with `monitor`.
+/// `arguments`. `name` is the BIF name: `spawn_link` also links the new
+/// process, and `spawn_monitor` also monitors it and returns `{Pid, Reference}`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let arguments = Term::List(vec![]);
-/// let result = spawn(&mut context, &module, &function, &arguments, false, true)?;
+/// let result = spawn(&mut context, "spawn_link", &module, &function, &arguments)?;
 /// assert!(matches!(result, BifResult::Value(Term::Pid(_))));
-/// assert!(spawn(&mut context, &module, &function, &Term::Integer(1), false, false).is_err());
+/// assert!(spawn(&mut context, "spawn", &module, &function, &Term::Integer(1)).is_err());
 /// ```
 pub(super) fn spawn(
     context: &mut BifContext<'_>,
+    name: &str,
     module: &Atom,
     function: &Atom,
     arguments: &Term,
-    monitor: bool,
-    link: bool,
 ) -> Result<BifResult, BeamError> {
+    let monitor = name == "spawn_monitor";
+    let link = name == "spawn_link";
     let Term::List(arguments) = arguments else {
         return Err(error("spawn arguments are not a proper list"));
     };

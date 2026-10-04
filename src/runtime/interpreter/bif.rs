@@ -76,7 +76,8 @@ struct BifContext<'a> {
 /// The `bif_tab` section holds the `bif.tab` entries. The `erlang_beam`
 /// section holds the `erlang` functions that PBeam runs as BIFs but ERTS
 /// runs as BEAM code. Each entry is `module:name/arity`, then `unsupported`
-/// or one `|context, [arguments]| body` pattern. A `bif_tab` pattern can have
+/// or one `|context, [arguments]| body` pattern, never both and never neither:
+/// either mistake does not compile. A `bif_tab` pattern can have
 /// a guard: `|context, [arguments]| where guard => body`. A body returns
 /// `Result<BifResult, BeamError>`.
 ///
@@ -100,16 +101,21 @@ struct BifContext<'a> {
 ///         maps:keys/1 => |_, [map]| maps::keys(map),
 ///     }
 ///     erlang_beam {
-///         erlang:spawn_monitor/3 => |cx, [Term::Atom(m), Term::Atom(f), a]| erlang::spawn(cx, m, f, a, true, false),
+///         erlang:spawn_monitor/3 => |cx, [Term::Atom(m), Term::Atom(f), a]| erlang::spawn(cx, "spawn_monitor", m, f, a),
 ///     }
 /// }
 /// assert_eq!(BIFS, &[("erlang", "self", 0), ("lists", "keyfind", 3), ("maps", "keys", 1)]);
 /// ```
 macro_rules! bifs {
+    (@form unsupported) => {};
+    (@form | $context:pat_param |) => {};
+    (@form $($tokens:tt)*) => {
+        compile_error!("a bifs! entry needs `unsupported` or one `|context, [arguments]| body`, not both");
+    };
     (
         bif_tab {
             $(
-                $module:ident : $name:ident / $arity:literal => $(unsupported)?
+                $module:ident : $name:ident / $arity:literal => $($unsupported:ident)?
                 $( |$context:pat_param, $arguments:pat_param| $(where $guard:expr =>)? $body:expr )?
             ),* $(,)?
         }
@@ -120,6 +126,10 @@ macro_rules! bifs {
             ),* $(,)?
         }
     ) => {
+        const _: () = {
+            $( bifs!(@form $($unsupported)? $(| $context |)?); )*
+        };
+
         /// The `bif.tab` entries of the table, as `(module, name, arity)`,
         /// sorted for a binary search.
         ///

@@ -82,8 +82,8 @@ bifs! {
         erlang:node/1 => |_, [term]| erlang::node(term),
         erlang:process_flag/2 => |cx, [Term::Atom(flag), Term::Atom(value)]| where flag.name() == "trap_exit" && matches!(value.name(), "true" | "false") => erlang::trap_exit(cx, value),
         erlang:self/0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().id))),
-        erlang:spawn/3 => |cx, [Term::Atom(module), Term::Atom(function), arguments]| erlang::spawn(cx, module, function, arguments, false, false),
-        erlang:spawn_link/3 => |cx, [Term::Atom(module), Term::Atom(function), arguments]| erlang::spawn(cx, module, function, arguments, false, true),
+        erlang:spawn/3 => |cx, [Term::Atom(module), Term::Atom(function), arguments]| erlang::spawn(cx, "spawn", module, function, arguments),
+        erlang:spawn_link/3 => |cx, [Term::Atom(module), Term::Atom(function), arguments]| erlang::spawn(cx, "spawn_link", module, function, arguments),
         error_logger:warning_map/0 => unsupported,
         erts_debug:breakpoint/2 => unsupported,
         erts_debug:copy_shared/2 => unsupported,
@@ -323,6 +323,6 @@ bifs! {
     // in `BIFS`. #87 removes them.
     erlang_beam {
         erlang:group_leader/2 => |cx, [Term::Pid(leader), Term::Pid(target)]| erlang::set_group_leader(cx, *target, *leader),
-        erlang:spawn_monitor/3 => |cx, [Term::Atom(module), Term::Atom(function), arguments]| erlang::spawn(cx, module, function, arguments, true, false),
+        erlang:spawn_monitor/3 => |cx, [Term::Atom(module), Term::Atom(function), arguments]| erlang::spawn(cx, "spawn_monitor", module, function, arguments),
     }
 }

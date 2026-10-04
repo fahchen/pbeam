@@ -1431,7 +1431,8 @@ mod tests {
             "unresolved external MFA lists:keyfind/3"
         );
         // `is_bif` finds an entry with a binary search.
-        assert!(BIFS.is_sorted());
+        // Strictly increasing: sorted for a binary search, with no duplicate entry.
+        assert!(BIFS.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
