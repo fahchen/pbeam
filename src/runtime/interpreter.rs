@@ -197,6 +197,37 @@ impl BeamProgram {
                     call_arguments(&process.registers, *arity)?;
                     *current_frame(process) = self.frame(&module.name, *label, *arity)?;
                 }
+                Instruction::CallLast {
+                    arity,
+                    label,
+                    deallocate,
+                } => {
+                    if *deallocate as usize != current_frame(process).stack.len() {
+                        return Err(error("invalid BEAM tail-call stack size"));
+                    }
+                    call_arguments(&process.registers, *arity)?;
+                    *current_frame(process) = self.frame(&module.name, *label, *arity)?;
+                }
+                Instruction::Swap(first, second) => {
+                    let first_value = read(process, first)?;
+                    let second_value = read(process, second)?;
+                    write(process, first, second_value)?;
+                    write(process, second, first_value)?;
+                }
+                Instruction::SelectTupleArity {
+                    value,
+                    fail_label,
+                    choices,
+                } => {
+                    let target = match &read(process, value)? {
+                        Term::Tuple(elements) => choices
+                            .iter()
+                            .find(|(arity, _)| *arity as usize == elements.len())
+                            .map_or(*fail_label, |(_, label)| *label),
+                        _ => *fail_label,
+                    };
+                    jump(module, process, target)?;
+                }
                 Instruction::CallExternal {
                     arity,
                     module,
@@ -255,6 +286,8 @@ impl BeamProgram {
                     let passed = match kind {
                         TestKind::Atom => matches!(value, Term::Atom(_)),
                         TestKind::Pid => matches!(value, Term::Pid(_)),
+                        TestKind::Reference => matches!(value, Term::Reference(_)),
+                        TestKind::Tuple => matches!(value, Term::Tuple(_)),
                         TestKind::List => matches!(value, Term::List(_)),
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                     };
@@ -441,6 +474,23 @@ impl BeamProgram {
             ("self", []) => Term::Pid(scheduler.current_process_mut().id),
             ("make_ref", []) => Term::Reference(scheduler.make_ref()?),
             ("link", [Term::Pid(target)]) => scheduler.link(*target)?,
+            ("group_leader", []) => Term::Pid(scheduler.current_process_mut().group_leader),
+            ("group_leader", [Term::Pid(leader), Term::Pid(target)]) => {
+                scheduler.set_group_leader(*target, *leader)?;
+                Term::Atom("true".into())
+            }
+            ("monitor", [Term::Atom(kind), Term::Pid(target)]) if kind == "process" => {
+                Term::Reference(scheduler.monitor(*target)?)
+            }
+            ("demonitor", [Term::Reference(reference), Term::List(options)]) => {
+                let flush = match options.as_slice() {
+                    [] => false,
+                    [Term::Atom(option)] if option == "flush" => true,
+                    _ => return Err(error(format!("unsupported demonitor options {options:?}"))),
+                };
+                scheduler.demonitor(*reference, flush);
+                Term::Atom("true".into())
+            }
             ("exit", [reason]) => return Ok(Err(reason.clone())),
             ("nif_error", [reason]) => {
                 return Ok(Err(Term::Tuple(vec![
@@ -448,7 +498,10 @@ impl BeamProgram {
                     Term::List(Vec::new()),
                 ])));
             }
-            ("spawn_monitor" | "spawn_link", [Term::Atom(module), Term::Atom(function), list]) => {
+            (
+                "spawn" | "spawn_monitor" | "spawn_link",
+                [Term::Atom(module), Term::Atom(function), list],
+            ) => {
                 let Term::List(arguments) = list else {
                     return Err(error("spawn arguments are not a proper list"));
                 };
@@ -457,7 +510,8 @@ impl BeamProgram {
                     .map_err(|_| error("arity exceeds BEAM limit"))?;
                 let frame = self.mfa_frame(module, function, arity)?;
                 let monitor = name == "spawn_monitor";
-                let (pid, reference) = scheduler.spawn(frame, arguments, monitor, !monitor)?;
+                let link = name == "spawn_link";
+                let (pid, reference) = scheduler.spawn(frame, arguments, monitor, link)?;
                 match reference {
                     Some(reference) => {
                         Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)])
@@ -1234,6 +1288,66 @@ mod tests {
                 &mut []
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn selects_tuple_arity_and_rejects_call_last_stack_size_and_demonitor_options() {
+        let select = |value: Term| {
+            make_program(
+                vec![
+                    Instruction::Move(Operand::Value(value), Operand::X(0)),
+                    Instruction::SelectTupleArity {
+                        value: Operand::X(0),
+                        fail_label: 4,
+                        choices: vec![(1, 3)],
+                    },
+                    Instruction::Label(3),
+                    Instruction::Move(atom("one"), Operand::X(0)),
+                    Instruction::Return,
+                    Instruction::Label(4),
+                    Instruction::Move(atom("other"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+            .unwrap()
+        };
+        assert_eq!(
+            select(Term::Tuple(vec![Term::Integer(1)])),
+            Term::Atom("one".into())
+        );
+        assert_eq!(select(Term::Tuple(vec![])), Term::Atom("other".into()));
+        assert_eq!(select(Term::Atom("a".into())), Term::Atom("other".into()));
+
+        let error = |body| {
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            error(vec![
+                Instruction::Allocate { stack_size: 1 },
+                Instruction::CallLast {
+                    arity: 0,
+                    label: 2,
+                    deallocate: 0,
+                },
+            ])
+            .contains("tail-call stack size")
+        );
+        assert!(
+            error(vec![
+                erlang_call("make_ref", 0, false),
+                Instruction::Move(
+                    Operand::Value(Term::List(vec![Term::Atom("info".into())])),
+                    Operand::X(1),
+                ),
+                erlang_call("demonitor", 2, false),
+            ])
+            .contains("unsupported demonitor options")
         );
     }
 }
