@@ -3,9 +3,10 @@ name: Capture Learnings
 # After a PR merges into main, Copilot CLI runs
 # .github/prompts/capture-learnings.prompt.md for that PR. The workflow gives
 # Copilot the comments as a data file and takes the result files back.
-# Copilot holds no token and touches no branch. Later steps commit the
-# knowledge file, open the knowledge PR, and comment on the merged PR. The
-# same prompt also runs locally on an open PR during its implementation.
+# Copilot holds only the token that authenticates its own model requests,
+# and touches no branch. Later steps commit the knowledge file, open the
+# knowledge PR, and comment on the merged PR. The same prompt also runs
+# locally on an open PR during its implementation.
 
 on:
   pull_request:
@@ -104,6 +105,12 @@ jobs:
               await github.rest.issues.createComment({owner, repo, issue_number: pull_number, body: 'No new review learnings. The PR has no comments.'})
             }
 
+      - name: Set up Node.js
+        if: steps.comments.outputs.count != '0'
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+
       - name: Install Copilot CLI
         if: steps.comments.outputs.count != '0'
         run: npm install -g @github/copilot@1.0.91
@@ -115,16 +122,24 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       # Copilot reads the comment data file and writes result files only. It
-      # gets no GitHub token, no git, and no gh, so a prompt injection in a
-      # comment cannot reach the repository, the token, or another PR. The
-      # next steps commit, push, open the PR, and comment.
+      # gets no git and no gh, so a prompt injection in a comment cannot reach
+      # the repository or another PR. COPILOT_GITHUB_TOKEN authenticates the
+      # model requests, and the name keeps GH_TOKEN out of the shell, so an
+      # injected gh command finds no credential. The next steps commit, push,
+      # open the PR, and comment.
       - name: Generate learnings with Copilot
         if: steps.comments.outputs.count != '0'
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
         run: |
           copilot -s --no-ask-user --model gpt-5.6-luna \
             --allow-tool='write' \
             --allow-tool='shell(grep:*)' \
             --allow-tool='shell(wc:*)' \
+            --deny-tool='shell(gh:*)' \
+            --deny-tool='shell(git:*)' \
+            --deny-tool='shell(curl:*)' \
+            --secret-env-vars='COPILOT_GITHUB_TOKEN' \
             -p "MODE: ci PR: #${PR_NUMBER} OUTPUT: ${OUTPUT} $(cat .github/prompts/capture-learnings.prompt.md)"
 
       # Copilot cannot commit, so the workflow does. A run that claims a
