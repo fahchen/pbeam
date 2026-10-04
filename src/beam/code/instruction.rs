@@ -232,7 +232,9 @@ pub(crate) enum Instruction {
     /// in the map in `x0` to `x1`, or fails to label 3.
     ///
     /// Erlang: `output(#{output := raw}) -> raw.` compiles to
-    /// `{get_map_elements,{f,9},{x,0},{list,[{atom,output},{x,0}]}}`.
+    /// `{get_map_elements,{f,9},{x,0},{list,[{atom,output},{x,0}]}}`, and
+    /// `get40(#{40 := V}) -> V;` compiles to
+    /// `{get_map_elements,{f,17},{tr,{x,0},{t_map,any,any}},{list,[{integer,40},{x,0}]}}`.
     GetMapElements {
         fail_label: u32,
         map: Operand,
@@ -241,6 +243,8 @@ pub(crate) enum Instruction {
     /// Writes a copy of a map with each key set to its value. `pairs` holds
     /// each key and value. The fail label and live-register count are not
     /// kept: the compiler emits fail label 0, and PBeam needs no live count.
+    /// The pairs go into the copy one by one, as in ERTS, so the copy is a
+    /// flatmap up to 32 keys and a hashmap above 32 keys.
     ///
     /// Encoding: opcode, fail label, map operand, destination register, live
     /// count, extended list, item count, then key and value operands in turn.

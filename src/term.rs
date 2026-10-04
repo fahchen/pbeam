@@ -1,3 +1,7 @@
+mod map;
+
+pub use map::Map;
+
 use std::fmt;
 
 /// A BEAM term. Lists, tuples, and maps can nest to any depth, as in ERTS,
@@ -11,9 +15,12 @@ pub enum Term {
     List(Vec<Term>),
     /// A BEAM tuple.
     Tuple(Vec<Term>),
-    /// A BEAM map as key-value pairs. The runtime keeps the pairs sorted by
-    /// atom key, so two maps with the same pairs are equal.
-    Map(Vec<(Term, Term)>),
+    /// A BEAM map: a flatmap up to 32 keys and a hashmap above 32 keys, as
+    /// in ERTS. `Map` keeps each map in its canonical form, so two maps with
+    /// the same pairs are equal. A key is an integer or an atom; a hashmap
+    /// accepts only small integers. BEAM code cannot see the order of two or
+    /// more atom keys yet, because PBeam has no atom table.
+    Map(Map),
     /// A process identifier owned by this runtime.
     Pid(ProcessId),
     /// A reference owned by this runtime.
@@ -41,7 +48,8 @@ impl Kind {
     /// ```rust,ignore
     /// assert_eq!(Kind::Tuple.build(vec![]), Term::Tuple(vec![]));
     /// let map = Kind::Map.build(vec![Term::Atom("a".into()), Term::Integer(1)]);
-    /// assert_eq!(map, Term::Map(vec![(Term::Atom("a".into()), Term::Integer(1))]));
+    /// let pairs = vec![(Term::Atom("a".into()), Term::Integer(1))];
+    /// assert_eq!(map, Term::Map(Map::from_pairs(pairs)?));
     /// ```
     fn build(self, terms: Vec<Term>) -> Term {
         match self {
@@ -53,7 +61,8 @@ impl Kind {
                 while let (Some(key), Some(value)) = (terms.next(), terms.next()) {
                     pairs.push((key, value));
                 }
-                Term::Map(pairs)
+                // A hashmap copy hashes each key again; `Map` has no other way to build a map.
+                Term::Map(Map::from_pairs(pairs).expect("a copied map holds only supported keys"))
             }
         }
     }
@@ -74,10 +83,10 @@ impl Term {
         match self {
             Term::List(elements) => Err((Box::new(elements.iter()), Kind::List, elements.len())),
             Term::Tuple(elements) => Err((Box::new(elements.iter()), Kind::Tuple, elements.len())),
-            Term::Map(pairs) => Err((
-                Box::new(pairs.iter().flat_map(|(key, value)| [key, value])),
+            Term::Map(map) => Err((
+                Box::new(map.iter().flat_map(|(key, value)| [key, value])),
                 Kind::Map,
-                pairs.len() * 2,
+                map.len() * 2,
             )),
             Term::Atom(name) => Ok(Term::Atom(name.clone())),
             Term::Binary(bytes) => Ok(Term::Binary(bytes.clone())),
@@ -100,12 +109,7 @@ impl Term {
     fn take_nested(&mut self, pending: &mut Vec<Term>) {
         match self {
             Term::List(elements) | Term::Tuple(elements) => pending.append(elements),
-            Term::Map(pairs) => {
-                for (key, value) in std::mem::take(pairs) {
-                    pending.push(key);
-                    pending.push(value);
-                }
-            }
+            Term::Map(map) => std::mem::replace(map, Map::new()).drain_into(pending),
             _ => {}
         }
     }
@@ -169,7 +173,8 @@ impl Clone for Term {
 
 impl PartialEq for Term {
     /// Compare two terms pair by pair with a work stack. Two maps are equal
-    /// when their sorted pairs are equal.
+    /// when their pairs in canonical order are equal, as the structural ERTS
+    /// comparison of two flatmaps or two hashmaps is.
     ///
     /// # Examples
     ///
@@ -186,7 +191,8 @@ impl PartialEq for Term {
                     left.len() == right.len()
                 }
                 (Term::Map(left), Term::Map(right)) => {
-                    for ((left_key, left_value), (right_key, right_value)) in left.iter().zip(right)
+                    for ((left_key, left_value), (right_key, right_value)) in
+                        left.iter().zip(right.iter())
                     {
                         pairs.push((left_key, right_key));
                         pairs.push((left_value, right_value));
@@ -255,10 +261,11 @@ impl fmt::Debug for Term {
                         }
                     }
                 }
-                Term::Map(pairs) => {
+                Term::Map(map) => {
                     formatter.write_str("Map([")?;
                     items.push(Item::Text("])"));
-                    for (index, (key, value)) in pairs.iter().enumerate().rev() {
+                    let pairs: Vec<_> = map.iter().collect();
+                    for (index, (key, value)) in pairs.into_iter().enumerate().rev() {
                         items.push(Item::Text(")"));
                         items.push(Item::Term(value));
                         items.push(Item::Text(", "));
@@ -285,17 +292,21 @@ pub struct Reference(pub(crate) u64);
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcessId, Reference, Term};
+    use super::{Map, ProcessId, Reference, Term};
 
     fn atom(name: &str) -> Term {
         Term::Atom(name.into())
+    }
+
+    fn map(pairs: Vec<(Term, Term)>) -> Term {
+        Term::Map(Map::from_pairs(pairs).unwrap())
     }
 
     fn deep(levels: usize) -> Term {
         (0..levels).fold(Term::List(vec![]), |inner, level| match level % 3 {
             0 => Term::Tuple(vec![inner]),
             1 => Term::List(vec![Term::Integer(1), inner]),
-            _ => Term::Map(vec![(atom("k"), inner)]),
+            _ => map(vec![(atom("k"), inner)]),
         })
     }
 
@@ -339,25 +350,41 @@ mod tests {
 
     #[test]
     fn formats_and_compares_maps_by_their_pairs() {
-        let map = Term::Map(vec![
-            (atom("a"), Term::Integer(1)),
-            (atom("b"), Term::List(vec![])),
-        ]);
+        let pairs = || {
+            vec![
+                (atom("a"), Term::Integer(1)),
+                (atom("b"), Term::List(vec![])),
+            ]
+        };
+        let sorted = map(pairs());
         assert_eq!(
-            format!("{map:?}"),
+            format!("{sorted:?}"),
             "Map([(Atom(\"a\"), Integer(1)), (Atom(\"b\"), List([]))])"
         );
-        assert_eq!(format!("{:?}", Term::Map(vec![])), "Map([])");
-        assert_eq!(map.clone(), map);
-        assert_ne!(map, Term::Map(vec![(atom("a"), Term::Integer(1))]));
+        assert_eq!(format!("{:?}", map(vec![])), "Map([])");
+        assert_eq!(sorted.clone(), sorted);
+        assert_ne!(sorted, map(vec![(atom("a"), Term::Integer(1))]));
         assert_ne!(
-            Term::Map(vec![(atom("a"), Term::Integer(1))]),
-            Term::Map(vec![(atom("a"), Term::Integer(2))])
+            map(vec![(atom("a"), Term::Integer(1))]),
+            map(vec![(atom("a"), Term::Integer(2))])
         );
         assert_ne!(
-            Term::Map(vec![(atom("a"), Term::Integer(1))]),
-            Term::Map(vec![(atom("b"), Term::Integer(1))])
+            map(vec![(atom("a"), Term::Integer(1))]),
+            map(vec![(atom("b"), Term::Integer(1))])
         );
-        assert_ne!(Term::Map(vec![]), Term::List(vec![]));
+        assert_ne!(map(vec![]), Term::List(vec![]));
+        // Pairs in any order give the same map and the same text.
+        let reversed = map(pairs().into_iter().rev().collect());
+        assert_eq!(reversed, sorted);
+        assert_eq!(format!("{reversed:?}"), format!("{sorted:?}"));
+        // A hashmap copy is equal to its source and has the same text.
+        let hash = |keys: &mut dyn Iterator<Item = i64>| {
+            map(keys.map(|key| (Term::Integer(key), atom("v"))).collect())
+        };
+        let forty = hash(&mut (1..=40));
+        assert_eq!(forty.clone(), hash(&mut (1..=40).rev()));
+        assert_eq!(format!("{:?}", forty.clone()), format!("{forty:?}"));
+        assert!(format!("{forty:?}").starts_with("Map([(Integer(18), Atom(\"v\")), (Integer(4), "));
+        assert_ne!(forty, hash(&mut (2..=41)));
     }
 }
