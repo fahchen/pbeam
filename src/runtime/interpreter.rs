@@ -2877,4 +2877,174 @@ mod tests {
             "unresolved external MFA lists:keyfind/3"
         );
     }
+
+    fn element_bif(index: i64, tuple: Operand, destination: Operand) -> Instruction {
+        Instruction::Bif {
+            module: "erlang".into(),
+            name: "element".into(),
+            arguments: vec![Operand::Value(Term::Integer(index)), tuple],
+            destination,
+        }
+    }
+
+    #[test]
+    fn reads_tuple_elements_as_pinned_erts() {
+        let (a, b, c) = (test_atom("a"), test_atom("b"), test_atom("c"));
+        // The pinned `gen_statem` runs `element/2` through
+        // `{bif,element,{f,0},[{integer,2},{x,0}],{x,0}}`.
+        // ERTS 29.1.1: element(2, {a,b,c}) is b.
+        let body = vec![
+            Instruction::Move(
+                Operand::Value(Term::Tuple(vec![a.clone(), b.clone(), c])),
+                Operand::X(0),
+            ),
+            element_bif(2, Operand::X(0), Operand::X(0)),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap(),
+            b
+        );
+        let element =
+            |index: Term, tuple: Term| call_ext_with("erlang", "element", vec![index, tuple]);
+        let one = Term::Tuple(vec![a.clone()]);
+        // ERTS 29.1.1: element(1, {a}) is a.
+        assert_eq!(element(Term::Integer(1), one.clone()).unwrap(), a);
+        // ERTS 29.1.1 raises badarg for element(0, {a}), element(2, {a}),
+        // element(a, {a}), and element(1, [a]).
+        for index in [0, 2] {
+            assert_eq!(
+                element(Term::Integer(index), one.clone())
+                    .unwrap_err()
+                    .to_string(),
+                format!("unsupported erlang:element/2 index {index}: outside the tuple")
+            );
+        }
+        for (index, tuple) in [(a.clone(), one), (Term::Integer(1), Term::List(vec![a]))] {
+            assert_eq!(
+                element(index, tuple).unwrap_err().to_string(),
+                "unresolved external MFA erlang:element/2"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_an_empty_current_stacktrace_of_the_calling_process() {
+        // `STACKTRACE()` in the pinned `gen_statem` is
+        // `element(2, erlang:process_info(self(), current_stacktrace))`.
+        let body = vec![
+            Instruction::Bif {
+                module: "erlang".into(),
+                name: "self".into(),
+                arguments: Vec::new(),
+                destination: Operand::X(0),
+            },
+            Instruction::Move(atom("current_stacktrace"), Operand::X(1)),
+            erlang_call("process_info", 2, false),
+            Instruction::Move(Operand::X(0), Operand::X(1)),
+            element_bif(2, Operand::X(0), Operand::X(0)),
+            Instruction::PutTuple {
+                elements: vec![Operand::X(1), Operand::X(0)],
+                destination: Operand::X(0),
+            },
+            Instruction::Return,
+        ];
+        // ERTS 29.1.1 gives the frames of the caller; PBeam records none.
+        let stacktrace = Term::Tuple(vec![
+            test_atom("current_stacktrace"),
+            Term::List(Vec::new()),
+        ]);
+        assert_eq!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap(),
+            Term::Tuple(vec![stacktrace, Term::List(Vec::new())])
+        );
+        // ERTS 29.1.1: process_info(self(), registered_name) is [], the
+        // current_stacktrace of another process is its frames, and
+        // process_info(a, current_stacktrace) raises badarg.
+        let other = Term::Pid(crate::ProcessId(99));
+        for (process, item) in [
+            (other, test_atom("current_stacktrace")),
+            (test_atom("a"), test_atom("current_stacktrace")),
+        ] {
+            assert_eq!(
+                call_ext_with(
+                    "erlang",
+                    "process_info",
+                    vec![process.clone(), item.clone()]
+                )
+                .unwrap_err()
+                .to_string(),
+                format!("unsupported erlang:process_info/2 arguments {process:?}, {item:?}")
+            );
+        }
+        let body = vec![
+            Instruction::Bif {
+                module: "erlang".into(),
+                name: "self".into(),
+                arguments: Vec::new(),
+                destination: Operand::X(0),
+            },
+            Instruction::Move(atom("registered_name"), Operand::X(1)),
+            erlang_call("process_info", 2, true),
+        ];
+        assert!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+                .ends_with(", Atom(\"registered_name\")")
+        );
+    }
+
+    #[test]
+    fn finds_exported_functions_as_pinned_erts() {
+        let exported = |module: &str, name: &str, arity: i64| {
+            call_ext_with(
+                "erlang",
+                "function_exported",
+                vec![test_atom(module), test_atom(name), Term::Integer(arity)],
+            )
+        };
+        let (yes, no) = (test_atom("true"), test_atom("false"));
+        // ERTS 29.1.1: function_exported/3 is true for a loaded export
+        // (lists:map/2), a BIF (erlang:self/0), and erlang:apply/2,
+        // erlang:apply/3, and erlang:yield/0. It is false for a missing
+        // function (lists:nomatch/2), a module that is not loaded, and the
+        // arity -1. Only the low 32 bits of the arity count:
+        // function_exported(erlang, self, 1 bsl 32) is true.
+        for (module, name, arity, value) in [
+            ("fixture", "main", 0, &yes),
+            ("erlang", "self", 0, &yes),
+            ("erlang", "apply", 2, &yes),
+            ("erlang", "apply", 3, &yes),
+            ("erlang", "yield", 0, &yes),
+            ("erlang", "self", 1 << 32, &yes),
+            ("fixture", "main", (1 << 32) + 1, &no),
+            ("fixture", "nomatch", 0, &no),
+            ("nomod", "f", 0, &no),
+            ("erlang", "self", -1, &no),
+            ("erlang", "yield", 1, &no),
+        ] {
+            assert_eq!(
+                &exported(module, name, arity).unwrap(),
+                value,
+                "{module}:{name}/{arity}"
+            );
+        }
+        // ERTS 29.1.1 raises badarg for a module that is not an atom.
+        assert_eq!(
+            call_ext_with(
+                "erlang",
+                "function_exported",
+                vec![Term::Integer(1), test_atom("map"), Term::Integer(2)]
+            )
+            .unwrap_err()
+            .to_string(),
+            "unresolved external MFA erlang:function_exported/3"
+        );
+    }
 }

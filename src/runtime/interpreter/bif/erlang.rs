@@ -264,9 +264,99 @@ pub(super) fn append(left: &[Term], right: &Term) -> Result<BifResult, BeamError
         (left, Term::List(right)) => Ok(Value(Term::List(
             left.iter().chain(right).cloned().collect(),
         ))),
-        // ponytail: an improper list result needs an improper list term; see "List BIF arguments" in docs/erts-differences.md.
+        // ponytail: an improper list result needs an improper list term; see "BIF arguments" in docs/erts-differences.md.
         _ => Err(error(format!(
             "unsupported erlang:++/2 tail {right:?}: not a list"
         ))),
     }
+}
+
+/// Run `erlang:element/2`: return the element at the 1-based `index` of a
+/// tuple. An `index` outside the tuple gives a runtime error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let tuple = [Term::static_atom("ok"), Term::Integer(1)];
+/// assert!(matches!(element(2, &tuple)?, BifResult::Value(Term::Integer(1))));
+/// assert!(element(0, &tuple).is_err());
+/// assert!(element(3, &tuple).is_err());
+/// ```
+pub(super) fn element(index: i64, elements: &[Term]) -> Result<BifResult, BeamError> {
+    // ponytail: ERTS raises badarg; see "BIF arguments" in docs/erts-differences.md.
+    let element = usize::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| elements.get(index))
+        .ok_or_else(|| {
+            error(format!(
+                "unsupported erlang:element/2 index {index}: outside the tuple"
+            ))
+        })?;
+    Ok(Value(element.clone()))
+}
+
+/// Run `erlang:process_info/2` for the calling process and the item
+/// `current_stacktrace`. Return `{current_stacktrace, []}`, because PBeam
+/// records no stack frames. Any other process or item gives a runtime error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let process = Term::Pid(context.scheduler.current_process_mut().id);
+/// let item = Term::static_atom("current_stacktrace");
+/// let info = process_info(&mut context, &process, &item)?;
+/// assert!(matches!(info, BifResult::Value(Term::Tuple(elements)) if elements[1] == Term::List(vec![])));
+/// assert!(process_info(&mut context, &process, &Term::static_atom("registered_name")).is_err());
+/// ```
+pub(super) fn process_info(
+    context: &mut BifContext<'_>,
+    process: &Term,
+    item: &Term,
+) -> Result<BifResult, BeamError> {
+    let current = Term::Pid(context.scheduler.current_process_mut().id);
+    let stacktrace = Term::static_atom("current_stacktrace");
+    // ponytail: other processes and items need process lookup and more state; see "BIF arguments" in docs/erts-differences.md.
+    if *process != current || *item != stacktrace {
+        return Err(error(format!(
+            "unsupported erlang:process_info/2 arguments {process:?}, {item:?}"
+        )));
+    }
+    // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
+    Ok(Value(Term::Tuple(vec![stacktrace, Term::List(Vec::new())])))
+}
+
+/// Run `erlang:function_exported/3`: return `true` when a loaded module
+/// exports the function or the function is a BIF, as ERTS
+/// `function_exported_3` (`bif.c`) does with `erts_find_function` and
+/// `erts_is_builtin`. ERTS reads the arity into a C `int`, so only its low
+/// 32 bits count, and a negative arity finds no function.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(function_exported(&program, "erlang", "self", 0), BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(function_exported(&program, "erlang", "apply", 3), BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(function_exported(&program, "lists", "nomatch", 2), BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// ```
+pub(super) fn function_exported(
+    program: &BeamProgram,
+    module: &str,
+    name: &str,
+    arity: i64,
+) -> BifResult {
+    let exported = u32::try_from(arity as i32).is_ok_and(|arity| {
+        program
+            .modules
+            .get(module)
+            .is_some_and(|loaded| loaded.exports.contains_key(&(name.to_owned(), arity)))
+            || is_bif(module, name, arity)
+            // `erts_is_builtin` (`beam_common.c`) also counts these
+            // instruction calls, which are not `bif.tab` entries.
+            || matches!(
+                (module, name, arity),
+                ("erlang", "apply", 2 | 3) | ("erlang", "yield", 0)
+            )
+    });
+    Value(Term::static_atom(if exported { "true" } else { "false" }))
 }

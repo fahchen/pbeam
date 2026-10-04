@@ -20,7 +20,7 @@ use super::*;
 /// assert!(keyfind(&Term::Integer(1), 0, &[]).is_err());
 /// ```
 pub(super) fn keyfind(key: &Term, position: i64, list: &[Term]) -> Result<BifResult, BeamError> {
-    // ponytail: ERTS raises badarg; see "List BIF arguments" in docs/erts-differences.md.
+    // ponytail: ERTS raises badarg; see "BIF arguments" in docs/erts-differences.md.
     let Some(index) = usize::try_from(position)
         .ok()
         .and_then(|position| position.checked_sub(1))
