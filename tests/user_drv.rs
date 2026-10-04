@@ -79,7 +79,8 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
     // (`IOL2V_COPY_THRESHOLD`, 4096 bits) into one merged binary, and keeps
     // each larger binary as its own element. An empty merged binary is not
     // in the result. An element that is not iodata raises `badarg`, also
-    // after valid elements. The list nested 100000 deep gives `[<<1>>]`.
+    // after valid elements. The list nested 100000 deep gives `[<<1>>]`. A
+    // bare binary that is not empty gives `[Bin]` at every size.
     let program = BeamProgram::load(&[USER_DRV_PROBE]).unwrap();
     let badarg = Term::Atom(program.atom("badarg").unwrap());
     let ones = |size| Term::Binary(vec![255; size]);
@@ -122,6 +123,8 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
         badarg.clone(),
         badarg.clone(),
         badarg,
+        Term::List(vec![ones(64)]),
+        Term::List(vec![ones(513)]),
     ]);
     assert_eq!(
         program

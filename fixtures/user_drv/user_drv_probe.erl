@@ -43,7 +43,7 @@ iolists(B64, B512, B513, Huge, Deep, Above, Below) ->
               [[[1, [2, [3, <<4>>]], 5]], 6], [B64], [1, B64], [B512], [1, B512], [B512, B512],
               [B513], [1, B513], [1, B513, 2], [B513, B513], [B513, 1, 2, B513, <<>>],
               [<<>>, B513], [[B513]], [Huge], [1, Huge, <<"ab">>], Deep,
-              [Above], [Below], [a], [1, a], [1, [2, Above]], [B513, foo]],
+              [Above], [Below], [a], [1, a], [1, [2, Above]], [B513, foo], B64, B513],
     [try erlang:iolist_to_iovec(X) catch error:R -> R end || X <- Inputs].
 
 ne() ->
