@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use pbeam_runtime::{BeamModule, Term};
+use pbeam_runtime::{Atom, BeamModule, Term};
 
 fn constant_fixture() -> &'static [u8] {
     static BEAM: OnceLock<Vec<u8>> = OnceLock::new();
@@ -14,7 +14,7 @@ fn executes_exported_atom_and_small_integer_constants() {
     let module = BeamModule::load(constant_fixture()).unwrap();
     assert_eq!(
         module.execute("main", &[]).unwrap(),
-        Term::Atom("ok".into())
+        Term::Atom(Atom::from_static("ok").unwrap())
     );
     assert_eq!(module.execute("number", &[]).unwrap(), Term::Integer(7));
     assert_eq!(module.execute("larger", &[]).unwrap(), Term::Integer(1000));

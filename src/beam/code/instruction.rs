@@ -7,7 +7,7 @@ use super::{
     read_value,
 };
 use crate::error::{BeamError, error};
-use crate::term::Term;
+use crate::term::{Atom, Term};
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
@@ -515,7 +515,7 @@ pub(crate) enum Operand {
 /// ```
 pub(super) fn parse_code(
     data: &[u8],
-    atoms: &[String],
+    atoms: &[Atom],
     imports: &[(String, String, u32)],
     literals: &[Option<Term>],
 ) -> Result<(Vec<Instruction>, u32), BeamError> {
@@ -549,10 +549,12 @@ pub(super) fn parse_code(
             }
             OPCODE_FUNCTION_INFO => {
                 function_info_count += 1;
-                let module =
-                    atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?.to_owned();
-                let name =
-                    atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?.to_owned();
+                let module = atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?
+                    .name()
+                    .to_owned();
+                let name = atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?
+                    .name()
+                    .to_owned();
                 let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
                 Instruction::FunctionInfo {
                     module,
@@ -830,7 +832,7 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
 fn read_operand_pairs(
     data: &[u8],
     cursor: &mut usize,
-    atoms: &[String],
+    atoms: &[Atom],
     literals: &[Option<Term>],
 ) -> Result<Vec<(Operand, Operand)>, BeamError> {
     if read_integer(data, cursor, TAG_LITERAL)? != LIST_SUBTAG {
@@ -1138,7 +1140,7 @@ fn read_register(data: &[u8], cursor: &mut usize) -> Result<Operand, BeamError> 
 fn read_move_operand(
     data: &[u8],
     cursor: &mut usize,
-    atoms: &[String],
+    atoms: &[Atom],
     literals: &[Option<Term>],
 ) -> Result<Operand, BeamError> {
     let first = *data
@@ -1190,16 +1192,19 @@ mod tests {
         read_operand_pairs, read_selection_pair_count, skip_counted_operands, skip_integer_payload,
         skip_operand, skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
     };
-    use crate::{beam::code::Operand, term::Term};
+    use crate::{
+        beam::code::Operand,
+        term::{Atom, Term},
+    };
 
     #[test]
     fn reads_operand_pairs_and_rejects_other_lists() {
-        let atoms = vec!["output".to_owned()];
+        let atoms = vec![Atom::from_static("output").unwrap()];
         // {list,[{atom,output},{x,1}]}
         let pairs = read_operand_pairs(&[0x17, 0x20, 0x12, 0x13], &mut 0, &atoms, &[]).unwrap();
         assert!(matches!(
             pairs.as_slice(),
-            [(Operand::Value(Term::Atom(key)), Operand::X(1))] if key == "output"
+            [(Operand::Value(Term::Atom(key)), Operand::X(1))] if key.name() == "output"
         ));
         assert!(read_operand_pairs(&[0x27, 0x20], &mut 0, &atoms, &[]).is_err());
         assert!(read_operand_pairs(&[0x17, 0x10, 0x12], &mut 0, &atoms, &[]).is_err());

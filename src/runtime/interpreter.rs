@@ -5,16 +5,20 @@ use super::{
 use crate::{
     beam::{
         BeamModule,
-        code::{Instruction, Operand, TestKind},
+        code::{self, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::Term,
+    term::{Atom, AtomTable, Term},
 };
 use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct BeamProgram {
+    /// The loaded modules by name.
     modules: HashMap<String, BeamModule>,
+    /// The atom table of the program. ERTS has one atom table for each
+    /// emulator, so each program has its own table.
+    atoms: AtomTable,
 }
 
 /// Why a process stopped running on the scheduler.
@@ -54,7 +58,7 @@ impl BifResult {
     ///
     /// ```rust,ignore
     /// assert_eq!(BifResult::Value(Term::Integer(1)).into_bif0_value("self")?, Term::Integer(1));
-    /// assert!(BifResult::Exit(Term::Atom("boom".into())).into_bif0_value("self").is_err());
+    /// assert!(BifResult::Exit(Term::static_atom("badarg")).into_bif0_value("self").is_err());
     /// ```
     fn into_bif0_value(self, name: &str) -> Result<Term, BeamError> {
         match self {
@@ -68,7 +72,9 @@ impl BifResult {
 }
 
 impl BeamProgram {
-    /// Load BEAM files into one program. Module names must be unique.
+    /// Load BEAM files into one program. Module names must be unique. The
+    /// atom table starts with the 1150 static atoms. Each module, in the
+    /// given order, puts its `AtU8` atoms and then its `LitT` atoms into it.
     ///
     /// # Examples
     ///
@@ -77,15 +83,33 @@ impl BeamProgram {
     /// assert!(BeamProgram::load(&[CALLS, CALLS]).is_err());
     /// ```
     pub fn load(modules: &[&[u8]]) -> Result<Self, BeamError> {
+        let mut atoms = AtomTable::new();
         let mut loaded = HashMap::new();
         for bytes in modules {
-            let module = BeamModule::load(bytes)?;
+            let module = code::parse(bytes, &mut atoms)?;
             let name = module.name.clone();
             if loaded.insert(name.clone(), module).is_some() {
                 return Err(error(format!("duplicate BEAM module {name}")));
             }
         }
-        Ok(Self { modules: loaded })
+        Ok(Self {
+            modules: loaded,
+            atoms,
+        })
+    }
+
+    /// Return the atom of a name when the atom table of the program holds
+    /// it. Use it to build terms that compare with the terms of the program.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let program = BeamProgram::load(&[ATOM_MAP_PROBE])?;
+    /// assert!(program.atom("pbeam_zeta").is_some());
+    /// assert_eq!(program.atom("pbeam_unknown"), None);
+    /// ```
+    pub fn atom(&self, name: &str) -> Option<Atom> {
+        self.atoms.get(name)
     }
 
     /// Run an exported function as the root process. Processes that it
@@ -585,11 +609,12 @@ impl BeamProgram {
     ) -> Result<BifResult, BeamError> {
         let value = match (module, name, arguments.as_slice()) {
             ("erlang", "process_flag", [Term::Atom(flag), Term::Atom(value)])
-                if flag == "trap_exit" && (value == "true" || value == "false") =>
+                if flag.name() == "trap_exit"
+                    && (value.name() == "true" || value.name() == "false") =>
             {
                 let process = scheduler.current_process_mut();
-                let old = Term::Atom(process.trap_exit.to_string());
-                process.trap_exit = value == "true";
+                let old = Term::static_atom(&process.trap_exit.to_string());
+                process.trap_exit = value.name() == "true";
                 old
             }
             ("erlang", "self", []) => Term::Pid(scheduler.current_process_mut().id),
@@ -600,27 +625,29 @@ impl BeamProgram {
             }
             ("erlang", "group_leader", [Term::Pid(leader), Term::Pid(target)]) => {
                 scheduler.set_group_leader(*target, *leader)?;
-                Term::Atom("true".into())
+                Term::static_atom("true")
             }
-            ("erlang", "monitor", [Term::Atom(kind), Term::Pid(target)]) if kind == "process" => {
+            ("erlang", "monitor", [Term::Atom(kind), Term::Pid(target)])
+                if kind.name() == "process" =>
+            {
                 Term::Reference(scheduler.monitor(*target)?)
             }
             ("erlang", "demonitor", [Term::Reference(reference), Term::List(options)]) => {
                 let flush = match options.as_slice() {
                     [] => false,
-                    [Term::Atom(option)] if option == "flush" => true,
+                    [Term::Atom(option)] if option.name() == "flush" => true,
                     _ => return Err(error(format!("unsupported demonitor options {options:?}"))),
                 };
                 // ERTS `demonitor_2` (bif.c) flushes only when no active
                 // monitor was removed: the DOWN message can then be queued.
                 let removed = scheduler.demonitor(*reference);
                 if removed || !flush {
-                    Term::Atom("true".into())
+                    Term::static_atom("true")
                 } else {
                     let arguments = vec![
                         Term::Reference(*reference),
-                        Term::Atom("false".into()),
-                        Term::Atom("true".into()),
+                        Term::static_atom("false"),
+                        Term::static_atom("true"),
                     ];
                     let module = "erts_internal";
                     let function = "flush_monitor_messages";
@@ -649,7 +676,7 @@ impl BeamProgram {
                 let arguments = arguments.clone();
                 let arity = u32::try_from(arguments.len())
                     .map_err(|_| error("arity exceeds BEAM limit"))?;
-                let frame = self.mfa_frame(spawn_module, function, arity)?;
+                let frame = self.mfa_frame(spawn_module.name(), function.name(), arity)?;
                 let monitor = name == "spawn_monitor";
                 let link = name == "spawn_link";
                 let (pid, reference) = scheduler.spawn(frame, arguments, monitor, link)?;
@@ -661,7 +688,7 @@ impl BeamProgram {
                 }
             }
             ("maps", "keys", [Term::Map(map)]) => {
-                Term::List(map.erts_iter()?.map(|(key, _)| key.clone()).collect())
+                Term::List(map.iter().map(|(key, _)| key.clone()).collect())
             }
             // ponytail: ERTS raises error {badmap, Map}; exceptions arrive in #73.
             ("maps", "keys", [_]) => {
@@ -723,7 +750,7 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
         return Ok(None);
     }
     Ok(Some(Outcome::Exit {
-        reason: Term::Atom("normal".into()),
+        reason: Term::static_atom("normal"),
         result: Some(result),
     }))
 }
@@ -922,7 +949,8 @@ mod tests {
     };
     use crate::{
         BeamModule, Map, Term,
-        beam::code::{Instruction, Operand},
+        beam::code::{self, Instruction, Operand},
+        term::{AtomTable, test_atom},
     };
 
     fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
@@ -945,6 +973,7 @@ mod tests {
                     instructions,
                 },
             )]),
+            atoms: AtomTable::new(),
         }
     }
 
@@ -959,7 +988,7 @@ mod tests {
     }
 
     fn atom(name: &str) -> Operand {
-        Operand::Value(Term::Atom(name.into()))
+        Operand::Value(test_atom(name))
     }
 
     /// Run `main/0` with a `child/1` function that calls `erlang:exit/1`.
@@ -1021,7 +1050,7 @@ mod tests {
         let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
         body.extend(wait_forever());
         assert!(error(body).contains("unsupported exit signal"));
-        let mut body = spawn_link_child(Term::List(vec![Term::Atom("normal".into())]));
+        let mut body = spawn_link_child(Term::List(vec![test_atom("normal")]));
         body.extend(wait_forever());
         assert!(error(body).contains("waits for a message that cannot arrive"));
         let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
@@ -1048,7 +1077,7 @@ mod tests {
                 Instruction::Return,
             ])
             .unwrap(),
-            Term::Atom("lost".into())
+            test_atom("lost")
         );
     }
 
@@ -1064,7 +1093,7 @@ mod tests {
                     fail_label: 3,
                     value: Operand::X(0),
                     arity: 2,
-                    tag: Term::Atom("a".into()),
+                    tag: test_atom("a"),
                 },
                 Instruction::Label(3),
                 Instruction::TestExactEqual {
@@ -1082,7 +1111,7 @@ mod tests {
                 Instruction::Return,
             ])
             .unwrap(),
-            Term::Tuple(vec![Term::Atom("a".into())])
+            Term::Tuple(vec![test_atom("a")])
         );
     }
 
@@ -1176,10 +1205,10 @@ mod tests {
                     fail_label: 3,
                     value: Operand::X(0),
                 },
-                Instruction::Move(Operand::Value(Term::Atom("pid".into())), Operand::X(0)),
+                Instruction::Move(Operand::Value(test_atom("pid")), Operand::X(0)),
                 Instruction::Return,
                 Instruction::Label(3),
-                Instruction::Move(Operand::Value(Term::Atom("other".into())), Operand::X(0)),
+                Instruction::Move(Operand::Value(test_atom("other")), Operand::X(0)),
                 Instruction::Return,
             ],
             1,
@@ -1195,13 +1224,13 @@ mod tests {
             program
                 .execute("fixture", "main", &[Term::Pid(ProcessId(1))])
                 .unwrap(),
-            Term::Atom("pid".into())
+            test_atom("pid")
         );
         assert_eq!(
             program
                 .execute("fixture", "main", &[Term::Integer(1)])
                 .unwrap(),
-            Term::Atom("other".into())
+            test_atom("other")
         );
     }
 
@@ -1210,7 +1239,7 @@ mod tests {
         let map = |pairs: Vec<(&str, i64)>| {
             let pairs = pairs
                 .into_iter()
-                .map(|(key, value)| (Term::Atom(key.into()), Term::Integer(value)))
+                .map(|(key, value)| (test_atom(key), Term::Integer(value)))
                 .collect();
             Operand::Value(Term::Map(Map::from_pairs(pairs).unwrap()))
         };
@@ -1250,7 +1279,7 @@ mod tests {
                 Instruction::Return,
             ])
             .unwrap(),
-            Term::Atom("missing".into())
+            test_atom("missing")
         );
         let error = |body| run(body).unwrap_err().to_string();
         assert!(
@@ -1307,20 +1336,20 @@ mod tests {
                 .collect();
             Term::Map(Map::from_pairs(pairs).unwrap())
         };
-        let atom = |name: &str| Term::Atom(name.into());
+        let atom = Term::static_atom;
         // ERTS 29.1.1: maps:keys(#{a => V, 2 => V, 1 => V}) is [1,2,a].
+        let a = test_atom("a");
         assert_eq!(
-            keys(map(vec![atom("a"), Term::Integer(2), Term::Integer(1)])).unwrap(),
-            Term::List(vec![Term::Integer(1), Term::Integer(2), atom("a")])
+            keys(map(vec![a.clone(), Term::Integer(2), Term::Integer(1)])).unwrap(),
+            Term::List(vec![Term::Integer(1), Term::Integer(2), a])
+        );
+        // ERTS 29.1.1: maps:keys(#{true => V, abs_path => V, 1 => V}) is [1,true,abs_path].
+        assert_eq!(
+            keys(map(vec![atom("abs_path"), atom("true"), Term::Integer(1)])).unwrap(),
+            Term::List(vec![Term::Integer(1), atom("true"), atom("abs_path")])
         );
         assert_eq!(
-            keys(map(vec![atom("a"), atom("b")]))
-                .unwrap_err()
-                .to_string(),
-            "unsupported map order for two or more atom keys"
-        );
-        assert_eq!(
-            keys(atom("x")).unwrap_err().to_string(),
+            keys(atom("ok")).unwrap_err().to_string(),
             "unsupported maps:keys/1 argument: not a map"
         );
     }
@@ -1369,13 +1398,13 @@ mod tests {
             .unwrap();
         assert!(io_path.status.success());
         let io = std::fs::read(String::from_utf8(io_path.stdout).unwrap()).unwrap();
+        // One atom table for the three modules, as `BeamProgram::load` makes it.
+        let mut atoms = AtomTable::new();
+        let mut load = |bytes: &[u8]| code::parse(bytes, &mut atoms).unwrap();
         let mut modules = HashMap::from([
-            ("Elixir.Hello".into(), BeamModule::load(&hello).unwrap()),
-            (
-                "Elixir.HelloVariant".into(),
-                BeamModule::load(&variant).unwrap(),
-            ),
-            ("Elixir.IO".into(), BeamModule::load(&io).unwrap()),
+            ("Elixir.Hello".into(), load(&hello)),
+            ("Elixir.HelloVariant".into(), load(&variant)),
+            ("Elixir.IO".into(), load(&io)),
         ]);
         modules.insert(
             "io".into(),
@@ -1394,7 +1423,7 @@ mod tests {
                 ],
             },
         );
-        let program = BeamProgram { modules };
+        let program = BeamProgram { modules, atoms };
 
         assert_eq!(
             program.execute("Elixir.Hello", "main", &[]).unwrap(),
@@ -1504,6 +1533,7 @@ mod tests {
         };
         let program = BeamProgram {
             modules: HashMap::from([("external".into(), module)]),
+            atoms: AtomTable::new(),
         };
         assert!(
             program
@@ -1602,10 +1632,10 @@ mod tests {
         };
         assert_eq!(
             select(Term::Tuple(vec![Term::Integer(1)])),
-            Term::Atom("one".into())
+            test_atom("one")
         );
-        assert_eq!(select(Term::Tuple(vec![])), Term::Atom("other".into()));
-        assert_eq!(select(Term::Atom("a".into())), Term::Atom("other".into()));
+        assert_eq!(select(Term::Tuple(vec![])), test_atom("other"));
+        assert_eq!(select(test_atom("a")), test_atom("other"));
 
         let error = |body| {
             make_program(body, 0)
@@ -1628,7 +1658,7 @@ mod tests {
             error(vec![
                 erlang_call("make_ref", 0, false),
                 Instruction::Move(
-                    Operand::Value(Term::List(vec![Term::Atom("info".into())])),
+                    Operand::Value(Term::List(vec![test_atom("info")])),
                     Operand::X(1),
                 ),
                 erlang_call("demonitor", 2, false),
@@ -1646,7 +1676,7 @@ mod tests {
             Term::Integer(1)
         );
         assert!(
-            BifResult::Exit(Term::Atom("boom".into()))
+            BifResult::Exit(test_atom("boom"))
                 .into_bif0_value("self")
                 .unwrap_err()
                 .to_string()
@@ -1660,7 +1690,7 @@ mod tests {
             vec![
                 erlang_call("make_ref", 0, false),
                 Instruction::Move(
-                    Operand::Value(Term::List(vec![Term::Atom("flush".into())])),
+                    Operand::Value(Term::List(vec![test_atom("flush")])),
                     Operand::X(1),
                 ),
                 erlang_call("demonitor", 2, true),
@@ -1687,7 +1717,7 @@ mod tests {
         );
         assert_eq!(
             program.execute("fixture", "main", &[]).unwrap(),
-            Term::Atom("true".into())
+            test_atom("true")
         );
     }
 
@@ -1705,7 +1735,7 @@ mod tests {
                 Instruction::Move(atom("process"), Operand::X(0)),
                 erlang_call("monitor", 2, false),
                 Instruction::Move(
-                    Operand::Value(Term::List(vec![Term::Atom("flush".into())])),
+                    Operand::Value(Term::List(vec![test_atom("flush")])),
                     Operand::X(1),
                 ),
                 erlang_call("demonitor", 2, true),
@@ -1714,7 +1744,7 @@ mod tests {
         );
         assert_eq!(
             program.execute("fixture", "main", &[]).unwrap(),
-            Term::Atom("true".into())
+            test_atom("true")
         );
     }
 }

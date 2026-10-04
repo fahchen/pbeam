@@ -1,5 +1,10 @@
+mod atom;
 mod map;
 
+pub use atom::Atom;
+pub(crate) use atom::AtomTable;
+#[cfg(test)]
+pub(crate) use atom::test_atom;
 pub use map::Map;
 
 use std::fmt;
@@ -8,7 +13,8 @@ use std::fmt;
 /// so `Drop`, `Clone`, `PartialEq`, and `Debug` use explicit work stacks and
 /// do not recurse on the Rust stack.
 pub enum Term {
-    Atom(String),
+    /// An atom: its index in the atom table of the program, and its name.
+    Atom(Atom),
     Binary(Vec<u8>),
     Integer(i64),
     /// A proper list of BEAM terms.
@@ -18,8 +24,8 @@ pub enum Term {
     /// A BEAM map: a flatmap up to 32 keys and a hashmap above 32 keys, as
     /// in ERTS. `Map` keeps each map in its canonical form, so two maps with
     /// the same pairs are equal. A key is an integer or an atom; a hashmap
-    /// accepts only small integers. BEAM code cannot see the order of two or
-    /// more atom keys yet, because PBeam has no atom table.
+    /// accepts atoms and small integers. Atom keys are ordered and hashed by
+    /// their atom index, as in ERTS.
     Map(Map),
     /// A process identifier owned by this runtime.
     Pid(ProcessId),
@@ -47,8 +53,8 @@ impl Kind {
     ///
     /// ```rust,ignore
     /// assert_eq!(Kind::Tuple.build(vec![]), Term::Tuple(vec![]));
-    /// let map = Kind::Map.build(vec![Term::Atom("a".into()), Term::Integer(1)]);
-    /// let pairs = vec![(Term::Atom("a".into()), Term::Integer(1))];
+    /// let map = Kind::Map.build(vec![Term::static_atom("ok"), Term::Integer(1)]);
+    /// let pairs = vec![(Term::static_atom("ok"), Term::Integer(1))];
     /// assert_eq!(map, Term::Map(Map::from_pairs(pairs)?));
     /// ```
     fn build(self, terms: Vec<Term>) -> Term {
@@ -69,6 +75,22 @@ impl Kind {
 }
 
 impl Term {
+    /// Return the term of a static atom, such as `true` or `normal`. A
+    /// static atom has the same index in every atom table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Term::static_atom("ok"), Term::Atom(Atom::from_static("ok").unwrap()));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panic when the name is not a static atom. Callers pass a fixed name.
+    pub(crate) fn static_atom(name: &str) -> Term {
+        Term::Atom(Atom::from_static(name).expect("the name is a static atom"))
+    }
+
     /// Copy a term that has no nested terms. For a list, tuple, or map,
     /// return its nested terms, kind, and count instead, so the caller
     /// copies them.
@@ -88,7 +110,7 @@ impl Term {
                 Kind::Map,
                 map.len() * 2,
             )),
-            Term::Atom(name) => Ok(Term::Atom(name.clone())),
+            Term::Atom(atom) => Ok(Term::Atom(atom.clone())),
             Term::Binary(bytes) => Ok(Term::Binary(bytes.clone())),
             Term::Integer(value) => Ok(Term::Integer(*value)),
             Term::Pid(pid) => Ok(Term::Pid(*pid)),
@@ -224,7 +246,7 @@ impl fmt::Debug for Term {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let term = Term::Tuple(vec![Term::Atom("undef".into()), Term::List(vec![])]);
+    /// let term = Term::Tuple(vec![Term::static_atom("undef"), Term::List(vec![])]);
     /// assert_eq!(format!("{term:?}"), "Tuple([Atom(\"undef\"), List([])])");
     /// ```
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -242,7 +264,7 @@ impl fmt::Debug for Term {
                 Item::Term(term) => term,
             };
             match term {
-                Term::Atom(name) => write!(formatter, "Atom({name:?})")?,
+                Term::Atom(atom) => write!(formatter, "Atom({:?})", atom.name())?,
                 Term::Binary(bytes) => write!(formatter, "Binary({bytes:?})")?,
                 Term::Integer(value) => write!(formatter, "Integer({value:?})")?,
                 Term::Pid(pid) => write!(formatter, "Pid({pid:?})")?,
@@ -292,11 +314,7 @@ pub struct Reference(pub(crate) u64);
 
 #[cfg(test)]
 mod tests {
-    use super::{Map, ProcessId, Reference, Term};
-
-    fn atom(name: &str) -> Term {
-        Term::Atom(name.into())
-    }
+    use super::{Map, ProcessId, Reference, Term, test_atom as atom};
 
     fn map(pairs: Vec<(Term, Term)>) -> Term {
         Term::Map(Map::from_pairs(pairs).unwrap())
@@ -342,10 +360,7 @@ mod tests {
         }
         assert_ne!(Term::List(vec![]), Term::Tuple(vec![]));
         assert_ne!(Term::List(vec![]), Term::List(vec![Term::Integer(1)]));
-        assert_ne!(
-            Term::Tuple(vec![Term::Atom("a".into())]),
-            Term::Tuple(vec![Term::Atom("b".into())])
-        );
+        assert_ne!(Term::Tuple(vec![atom("a")]), Term::Tuple(vec![atom("b")]));
     }
 
     #[test]

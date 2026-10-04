@@ -4,15 +4,12 @@ use pbeam_runtime::{BeamProgram, Term};
 
 const IO_CLIENT_PROBE: &[u8] = include_bytes!("../fixtures/io_client/io_client_probe.beam");
 
-fn atom(name: &str) -> Term {
-    Term::Atom(name.into())
-}
-
 #[test]
 fn sends_an_io_request_to_a_probe_group_leader_and_flushes_monitors() {
     let io = pinned_otp_beam("io");
     let erts_internal = pinned_erts_beam("erts_internal");
     let program = BeamProgram::load(&[&io, &erts_internal, IO_CLIENT_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("io_client_probe", "main", &[]).unwrap(),
         Term::Tuple(vec![

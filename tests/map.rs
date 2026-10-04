@@ -5,14 +5,15 @@ use pbeam_runtime::{BeamProgram, Map, Term};
 const MAP_PROBE: &[u8] = include_bytes!("../fixtures/map/map_probe.beam");
 const MAP_ORDER_PROBE: &[u8] = include_bytes!("../fixtures/map/map_order_probe.beam");
 
-fn atom(name: &str) -> Term {
-    Term::Atom(name.into())
+/// Return the atom term of a name that the program holds.
+fn atom(program: &BeamProgram, name: &str) -> Term {
+    Term::Atom(program.atom(name).unwrap())
 }
 
-fn map(pairs: &[(&str, &str)]) -> Term {
+fn map(program: &BeamProgram, pairs: &[(&str, Term)]) -> Term {
     let pairs = pairs
         .iter()
-        .map(|(key, value)| (atom(key), atom(value)))
+        .map(|(key, value)| (atom(program, key), value.clone()))
         .collect();
     Term::Map(Map::from_pairs(pairs).unwrap())
 }
@@ -21,15 +22,16 @@ fn integers(keys: &[i64]) -> Term {
     Term::List(keys.iter().map(|key| Term::Integer(*key)).collect())
 }
 
-/// Run `main/0` of a map fixture under the pinned ERTS and return its stdout.
-fn erl_reference(module: &str, format: &str) -> Vec<u8> {
+/// Run an expression under the pinned ERTS with the map fixtures in the code
+/// path, and return its stdout.
+fn erl_reference(expression: &str) -> Vec<u8> {
     let reference = Command::new("erl")
         .args([
             "-noshell",
             "-pa",
             "fixtures/map",
             "-eval",
-            &format!("io:format(\"{format}~n\", [{module}:main()]), halt()."),
+            &format!("{expression}, halt()."),
         ])
         .output()
         .unwrap();
@@ -41,11 +43,19 @@ fn erl_reference(module: &str, format: &str) -> Vec<u8> {
 #[test]
 fn builds_matches_and_compares_maps_like_erts() {
     let program = BeamProgram::load(&[MAP_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
     assert_eq!(
         program.execute("map_probe", "main", &[]).unwrap(),
         Term::Tuple(vec![
             atom("raw"),
-            map(&[("input", "cooked"), ("ofd", "stdout"), ("output", "raw")]),
+            map(
+                &program,
+                &[
+                    ("input", atom("cooked")),
+                    ("ofd", atom("stdout")),
+                    ("output", atom("raw"))
+                ]
+            ),
             atom("other"),
             atom("other"),
             atom("same"),
@@ -53,7 +63,7 @@ fn builds_matches_and_compares_maps_like_erts() {
     );
 
     assert_eq!(
-        erl_reference("map_probe", "~p"),
+        erl_reference("io:format(\"~p~n\", [map_probe:main()])"),
         b"{raw,#{input => cooked,output => raw,ofd => stdout},other,other,same}\n"
     );
 }
@@ -69,6 +79,7 @@ fn uses_a_flatmap_up_to_32_keys_and_a_hashmap_above_like_erts() {
         11, 17, 24, 37, 40, 14, 33, 3, 16, 30, 21, 5, 27, 26, 22, 39,
     ];
     let program = BeamProgram::load(&[MAP_ORDER_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
     assert_eq!(
         program.execute("map_order_probe", "main", &[]).unwrap(),
         Term::Tuple(vec![
@@ -87,7 +98,7 @@ fn uses_a_flatmap_up_to_32_keys_and_a_hashmap_above_like_erts() {
     );
 
     assert_eq!(
-        erl_reference("map_order_probe", "~w"),
+        erl_reference("io:format(\"~w~n\", [map_order_probe:main()])"),
         b"{[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32],\
           [18,4,12,19,29,13,2,7,31,8,10,23,9,15,32,1,25,28,20,6,11,17,24,14,33,3,16,30,21,5,27,26,22],\
           [18,4,12,19,29,13,2,7,31,8,10,23,9,15,32,1,25,28,20,6,11,17,24,14,33,3,16,30,21,5,27,26,22],\

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::code::{self, Instruction, Operand};
 use crate::{
     error::{BeamError, error},
-    term::Term,
+    term::{AtomTable, Term},
 };
 
 const X0_REGISTER: u32 = 0;
@@ -16,7 +16,7 @@ pub struct BeamModule {
 }
 
 impl BeamModule {
-    /// Parse one BEAM file into a module.
+    /// Parse one BEAM file into a module, with a new atom table.
     ///
     /// # Examples
     ///
@@ -25,7 +25,7 @@ impl BeamModule {
     /// assert!(BeamModule::load(b"not beam").is_err());
     /// ```
     pub fn load(bytes: &[u8]) -> Result<Self, BeamError> {
-        code::parse(bytes)
+        code::parse(bytes, &mut AtomTable::new())
     }
 
     /// Run an exported function that returns a constant from `x0`.
@@ -146,7 +146,7 @@ mod tests {
             module(vec![
                 function.clone(),
                 Instruction::Label(2),
-                Instruction::Move(Operand::Value(Term::Atom("ok".into())), Operand::X(1))
+                Instruction::Move(Operand::Value(Term::static_atom("ok")), Operand::X(1))
             ])
             .execute("main", &[])
             .unwrap_err()
