@@ -207,7 +207,7 @@ pub(crate) enum Instruction {
         module: String,
         /// Name of the BIF, for example `node`.
         name: String,
-        /// Argument operands, in `x0` order of the BIF.
+        /// Argument operands of the BIF, in argument order.
         arguments: Vec<Operand>,
         /// Register for the BIF value.
         destination: Operand,
