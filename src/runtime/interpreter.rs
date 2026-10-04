@@ -1,5 +1,5 @@
 use super::{
-    process::{Frame, ProcessState},
+    process::{Frame, ProcessState, StackSlot},
     scheduler::Scheduler,
 };
 use crate::{
@@ -213,7 +213,7 @@ impl BeamProgram {
                 Instruction::Allocate { stack_size } => {
                     current_frame(process)
                         .stack
-                        .resize(*stack_size as usize, None);
+                        .resize_with(*stack_size as usize, || StackSlot::Empty);
                 }
                 Instruction::Deallocate { stack_size } => {
                     let stack = &mut current_frame(process).stack;
@@ -856,7 +856,7 @@ fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, B
 fn read_operand(
     operand: &Operand,
     registers: &[Option<Term>],
-    stack: &[Option<Term>],
+    stack: &[StackSlot],
 ) -> Result<Term, BeamError> {
     match operand {
         Operand::Value(value) => Ok(value.clone()),
@@ -867,10 +867,10 @@ fn read_operand(
             .get(*index as usize)
             .and_then(Clone::clone)
             .ok_or_else(|| error(format!("register x{index} is unset"))),
-        Operand::Y(index) => stack
-            .get(*index as usize)
-            .and_then(Clone::clone)
-            .ok_or_else(|| error(format!("stack register y{index} is unset"))),
+        Operand::Y(index) => match stack.get(*index as usize) {
+            Some(StackSlot::Term(value)) => Ok(value.clone()),
+            _ => Err(error(format!("stack register y{index} is unset"))),
+        },
     }
 }
 
@@ -888,7 +888,7 @@ fn write_operand(
     operand: &Operand,
     value: Term,
     registers: &mut Vec<Option<Term>>,
-    stack: &mut [Option<Term>],
+    stack: &mut [StackSlot],
 ) -> Result<(), BeamError> {
     match operand {
         Operand::UnsupportedLiteral(index) => {
@@ -906,7 +906,7 @@ fn write_operand(
                     "register y{index} is outside allocated range"
                 )));
             }
-            stack[index] = Some(value);
+            stack[index] = StackSlot::Term(value);
         }
         Operand::Value(_) => return Err(error("invalid BEAM move destination")),
     }
