@@ -14,6 +14,7 @@ use crate::{
 use std::collections::HashMap;
 
 mod bif;
+mod erlang_beam;
 
 use bif::{BifResult, is_bif};
 
@@ -301,30 +302,38 @@ impl BeamProgram {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     let arguments = call_arguments(&process.registers, *arity)?;
-                    if is_bif(module, name, *arity) {
-                        let (target, arguments) =
-                            match self.bif(scheduler, module, name, arguments)? {
-                                BifResult::Value(value) => {
-                                    let process = scheduler.current_process_mut();
-                                    write(process, &Operand::X(0), value)?;
-                                    if *tail && let Some(outcome) = return_from_frame(process)? {
-                                        return Ok(outcome);
-                                    }
-                                    continue;
+                    // An `erlang.beam` function that PBeam still runs in Rust
+                    // comes first; #87 removes it. Then a BIF, then module code.
+                    let result = match erlang_beam::run(self, scheduler, module, name, &arguments) {
+                        Some(value) => Some(BifResult::Value(value?)),
+                        None if is_bif(module, name, *arity) => {
+                            Some(self.bif(scheduler, module, name, arguments)?)
+                        }
+                        None => None,
+                    };
+                    if let Some(result) = result {
+                        let (target, arguments) = match result {
+                            BifResult::Value(value) => {
+                                let process = scheduler.current_process_mut();
+                                write(process, &Operand::X(0), value)?;
+                                if *tail && let Some(outcome) = return_from_frame(process)? {
+                                    return Ok(outcome);
                                 }
-                                BifResult::Raise { class, reason } => {
-                                    let process = scheduler.current_process_mut();
-                                    if let Some(outcome) = raise(process, class, reason) {
-                                        return Ok(outcome);
-                                    }
-                                    continue;
+                                continue;
+                            }
+                            BifResult::Raise { class, reason } => {
+                                let process = scheduler.current_process_mut();
+                                if let Some(outcome) = raise(process, class, reason) {
+                                    return Ok(outcome);
                                 }
-                                BifResult::Trap {
-                                    module,
-                                    function,
-                                    arguments,
-                                } => ((module, function), arguments),
-                            };
+                                continue;
+                            }
+                            BifResult::Trap {
+                                module,
+                                function,
+                                arguments,
+                            } => ((module, function), arguments),
+                        };
                         let process = scheduler.current_process_mut();
                         let arity = u32::try_from(arguments.len())
                             .map_err(|_| error("arity exceeds BEAM limit"))?;
@@ -339,6 +348,7 @@ impl BeamProgram {
                         }
                         continue;
                     }
+                    let process = scheduler.current_process_mut();
                     let frame = self.mfa_frame(module, name, *arity)?;
                     if *tail {
                         *current_frame(process) = frame;
@@ -616,6 +626,48 @@ impl BeamProgram {
             }
         }
     }
+}
+
+/// The spawn options that this runtime supports, as the flags of ERTS
+/// `ErlSpawnOpts`.
+#[derive(Default)]
+struct SpawnOptions {
+    /// Link the new process to the caller (`SPO_LINK`).
+    link: bool,
+    /// Monitor the new process and return `{Pid, Reference}` (`SPO_MONITOR`).
+    monitor: bool,
+}
+
+/// Start a process that runs `module:function` with the elements of
+/// `arguments`, as ERTS `erl_create_process` does. Return the pid, or
+/// `{Pid, Reference}` when `options.monitor` is set.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = create_process(&program, &mut scheduler, &module, &function, &Term::List(vec![]), SpawnOptions::default())?;
+/// assert!(matches!(result, Term::Pid(_)));
+/// assert!(create_process(&program, &mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default()).is_err());
+/// ```
+fn create_process(
+    program: &BeamProgram,
+    scheduler: &mut Scheduler,
+    module: &Atom,
+    function: &Atom,
+    arguments: &Term,
+    options: SpawnOptions,
+) -> Result<Term, BeamError> {
+    let Term::List(arguments) = arguments else {
+        return Err(error("spawn arguments are not a proper list"));
+    };
+    let arguments = arguments.clone();
+    let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
+    let frame = program.mfa_frame(module.name(), function.name(), arity)?;
+    let (pid, reference) = scheduler.spawn(frame, arguments, options.monitor, options.link)?;
+    Ok(match reference {
+        Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
+        None => Term::Pid(pid),
+    })
 }
 
 /// Return the active frame of a running process.

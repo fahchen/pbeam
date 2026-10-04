@@ -73,15 +73,14 @@ struct BifContext<'a> {
 
 /// Build the BIF list and the BIF dispatch from one table.
 ///
-/// The `bif_tab` section holds the `bif.tab` entries. The `erlang_beam`
-/// section holds the `erlang` functions that PBeam runs as BIFs but ERTS
-/// runs as BEAM code. Each entry is `module:name/arity`, then `unsupported`
+/// Each entry is a `bif.tab` entry: `module:name/arity`, then `unsupported`
 /// or one `|context, [arguments]| body` pattern, never both and never neither:
-/// either mistake does not compile. A `bif_tab` pattern can have
-/// a guard: `|context, [arguments]| where guard => body`. A body returns
+/// either mistake does not compile. A function that ERTS runs as BEAM code is
+/// not a BIF and is not in this table. A pattern can have a guard:
+/// `|context, [arguments]| where guard => body`. A body returns
 /// `Result<BifResult, BeamError>`.
 ///
-/// The macro expands into `BIFS`, the `bif_tab` entries as
+/// The macro expands into `BIFS`, the entries as
 /// `(module, name, arity)`, and `dispatch`, one `match` with an arm for each
 /// pattern in table order. A call that no arm matches gives an unresolved MFA
 /// error.
@@ -95,14 +94,9 @@ struct BifContext<'a> {
 ///
 /// ```rust,ignore
 /// bifs! {
-///     bif_tab {
-///         erlang:self/0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().id))),
-///         lists:keyfind/3 => unsupported,
-///         maps:keys/1 => |_, [map]| maps::keys(map),
-///     }
-///     erlang_beam {
-///         erlang:spawn_monitor/3 => |cx, [Term::Atom(m), Term::Atom(f), a]| erlang::spawn(cx, "spawn_monitor", m, f, a),
-///     }
+///     erlang:self/0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().id))),
+///     lists:keyfind/3 => unsupported,
+///     maps:keys/1 => |_, [map]| maps::keys(map),
 /// }
 /// assert_eq!(BIFS, &[("erlang", "self", 0), ("lists", "keyfind", 3), ("maps", "keys", 1)]);
 /// ```
@@ -113,18 +107,10 @@ macro_rules! bifs {
         compile_error!("a bifs! entry needs `unsupported` or one `|context, [arguments]| body`, not both");
     };
     (
-        bif_tab {
-            $(
-                $module:ident : $name:ident / $arity:literal => $($unsupported:ident)?
-                $( |$context:pat_param, $arguments:pat_param| $(where $guard:expr =>)? $body:expr )?
-            ),* $(,)?
-        }
-        erlang_beam {
-            $(
-                $beam_module:ident : $beam_name:ident / $beam_arity:literal =>
-                |$beam_context:pat_param, $beam_arguments:pat_param| $beam_body:expr
-            ),* $(,)?
-        }
+        $(
+            $module:ident : $name:ident / $arity:literal => $($unsupported:ident)?
+            $( |$context:pat_param, $arguments:pat_param| $(where $guard:expr =>)? $body:expr )?
+        ),* $(,)?
     ) => {
         const _: () = {
             $( bifs!(@form $($unsupported)? $(| $context |)?); )*
@@ -163,11 +149,6 @@ macro_rules! bifs {
                         (|$context: &mut BifContext<'_>| $body)(context)
                     }
                 )?)*
-                $(
-                    (stringify!($beam_module), stringify!($beam_name), $beam_arity, $beam_arguments) => {
-                        (|$beam_context: &mut BifContext<'_>| $beam_body)(context)
-                    }
-                )*
                 _ => Err(error(format!(
                     "unresolved external MFA {module}:{name}/{}",
                     arguments.len()

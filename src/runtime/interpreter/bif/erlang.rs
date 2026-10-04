@@ -2,7 +2,7 @@
 
 use super::BifResult::{Trap, Value};
 use super::*;
-use crate::term::{ProcessId, Reference};
+use crate::term::Reference;
 
 /// Return the node of a pid or of the calling process.
 ///
@@ -57,24 +57,6 @@ pub(super) fn trap_exit(
     Ok(Value(old))
 }
 
-/// Run `erlang:group_leader(Leader, Target)`: make `leader` the group leader
-/// of `target` and return `true`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let result = set_group_leader(&mut context, target, leader)?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// ```
-pub(super) fn set_group_leader(
-    context: &mut BifContext<'_>,
-    target: ProcessId,
-    leader: ProcessId,
-) -> Result<BifResult, BeamError> {
-    context.scheduler.set_group_leader(target, leader)?;
-    Ok(Value(Term::static_atom("true")))
-}
-
 /// Run `erlang:demonitor(Reference, Options)` with the options `[]` or
 /// `[flush]`. Other options give a runtime error.
 ///
@@ -115,39 +97,58 @@ pub(super) fn demonitor(
     })
 }
 
-/// Run `erlang:spawn/3`, `erlang:spawn_link/3`, or `erlang:spawn_monitor/3`:
-/// start a process that runs `module:function` with the elements of
-/// `arguments`. `name` is the BIF name: `spawn_link` also links the new
-/// process, and `spawn_monitor` also monitors it and returns `{Pid, Reference}`.
+/// Run `erlang:spawn/3`: start a process that runs `module:function` with the
+/// elements of `arguments`, as ERTS `spawn_3` does with default spawn options.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let arguments = Term::List(vec![]);
-/// let result = spawn(&mut context, "spawn_link", &module, &function, &arguments)?;
+/// let result = spawn(&mut context, &module, &function, &Term::List(vec![]))?;
 /// assert!(matches!(result, BifResult::Value(Term::Pid(_))));
-/// assert!(spawn(&mut context, "spawn", &module, &function, &Term::Integer(1)).is_err());
 /// ```
 pub(super) fn spawn(
     context: &mut BifContext<'_>,
-    name: &str,
     module: &Atom,
     function: &Atom,
     arguments: &Term,
 ) -> Result<BifResult, BeamError> {
-    let monitor = name == "spawn_monitor";
-    let link = name == "spawn_link";
-    let Term::List(arguments) = arguments else {
-        return Err(error("spawn arguments are not a proper list"));
+    create_process(
+        context.program,
+        context.scheduler,
+        module,
+        function,
+        arguments,
+        SpawnOptions::default(),
+    )
+    .map(Value)
+}
+
+/// Run `erlang:spawn_link/3`: start a linked process, as ERTS `spawn_link_3`
+/// does by adding `SPO_LINK` to the default spawn options.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = spawn_link(&mut context, &module, &function, &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Value(Term::Pid(_))));
+/// ```
+pub(super) fn spawn_link(
+    context: &mut BifContext<'_>,
+    module: &Atom,
+    function: &Atom,
+    arguments: &Term,
+) -> Result<BifResult, BeamError> {
+    let options = SpawnOptions {
+        link: true,
+        ..SpawnOptions::default()
     };
-    let arguments = arguments.clone();
-    let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-    let frame = context
-        .program
-        .mfa_frame(module.name(), function.name(), arity)?;
-    let (pid, reference) = context.scheduler.spawn(frame, arguments, monitor, link)?;
-    Ok(Value(match reference {
-        Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
-        None => Term::Pid(pid),
-    }))
+    create_process(
+        context.program,
+        context.scheduler,
+        module,
+        function,
+        arguments,
+        options,
+    )
+    .map(Value)
 }
