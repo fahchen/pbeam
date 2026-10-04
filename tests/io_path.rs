@@ -22,6 +22,16 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
     // linked driver exits (group.erl:522-525). `io:o_request/2` raises
     // `error:badarg` (io.erl:203-207, 785).
     // The noise message stays in the mailbox of the caller.
+    //
+    // `io:conv_reason/1` gives `badarg` for most writer exit reasons, so the
+    // caller result alone does not show where the writer failed. `main/0`
+    // also monitors the writer and returns its exit reason. `write_nif/2`
+    // starts with `nif_start`, a no-op, and then calls
+    // `erlang:nif_error(undef)`, so PBeam gives `{undef, []}`. On ERTS the
+    // real NIF raises `badarg` for the fake TTY reference, and the reason is
+    // `{badarg, [{prim_tty, write_nif, [Ref, Chars], []}, ...]}`. PBeam has no
+    // `prim_tty` NIF binding until #50, so the ERTS check compares only the
+    // class and the first stack frame.
     let modules = [
         "erlang",
         "erts_internal",
@@ -48,6 +58,7 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
             atom("noise_ok"),
             atom("normal"),
             atom("normal"),
+            Term::Tuple(vec![atom("undef"), Term::List(vec![])]),
         ])
     );
 
@@ -57,7 +68,9 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
             "-pa",
             "fixtures/io_path",
             "-eval",
-            "io:format(\"~p~n\", [io_path_probe:main()]), halt().",
+            "{R, K, D, G, W} = io_path_probe:main(), \
+             F = case W of {C, [{M, N, _, _} | _]} -> {C, M, N}; _ -> W end, \
+             io:format(\"~p~n\", [{R, K, D, G, F}]), halt().",
         ])
         .output()
         .unwrap();
@@ -65,47 +78,7 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         without_writer_report(&String::from_utf8(reference.stdout).unwrap()),
-        "{{error,badarg},noise_ok,normal,normal}\n"
-    );
-}
-
-#[test]
-fn runs_the_nif_error_fallback_of_the_pinned_prim_tty_writer() {
-    // `writer/0` sends one write request to a monitored
-    // `prim_tty:writer_loop/2` and returns the `DOWN` reason. `write_nif/2`
-    // starts with `nif_start`, a no-op, and then calls
-    // `erlang:nif_error(undef)`, so PBeam gives `{undef, []}`. On ERTS the
-    // real NIF raises `badarg` for the fake TTY reference, and the reason is
-    // `{badarg, [{prim_tty, write_nif, [Ref, Chars], []}, ...]}`. PBeam has no
-    // `prim_tty` NIF binding until #50, so the ERTS check compares only the
-    // first element.
-    let modules = ["erlang", "prim_tty"].map(pinned_beam);
-    let mut beams = vec![IO_PATH_PROBE];
-    beams.extend(modules.iter().map(Vec::as_slice));
-    let program = BeamProgram::load(&beams).unwrap();
-    assert_eq!(
-        program.execute("io_path_probe", "writer", &[]).unwrap(),
-        Term::Tuple(vec![
-            Term::Atom(program.atom("undef").unwrap()),
-            Term::List(vec![]),
-        ])
-    );
-
-    let reference = Command::new("erl")
-        .args([
-            "-noshell",
-            "-pa",
-            "fixtures/io_path",
-            "-eval",
-            "io:format(\"~p~n\", [element(1, io_path_probe:writer())]), halt().",
-        ])
-        .output()
-        .unwrap();
-    assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
-    assert_eq!(
-        without_writer_report(&String::from_utf8(reference.stdout).unwrap()),
-        "badarg\n"
+        "{{error,badarg},noise_ok,normal,normal,{badarg,prim_tty,write_nif}}\n"
     );
 }
 
@@ -118,7 +91,7 @@ fn runs_the_nif_error_fallback_of_the_pinned_prim_tty_writer() {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let stdout = "badarg\n=ERROR REPORT==== ...\nError in process <0.89.0> \
+/// let stdout = "ok\n=ERROR REPORT==== ...\nError in process <0.89.0> \
 ///     with exit value:\n{badarg,[{prim_tty,write_nif,...},\n \
 ///     {prim_tty,writer_loop,2,[{file,\"prim_tty.erl\"},{line,560}]}]}\n\n";
 /// assert_eq!(without_writer_report(stdout), "badarg\n");
