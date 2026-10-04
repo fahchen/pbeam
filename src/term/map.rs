@@ -32,10 +32,6 @@ const SLOT_MASK: u64 = 0xF;
 const SMALL_INTEGER_TAG_BITS: u32 = 4;
 /// The tag bits of an ERTS small integer word (`_TAG_IMMED1_SMALL`).
 const SMALL_INTEGER_TAG: u64 = 0xF;
-/// The smallest ERTS small integer on a 64-bit system: -(2^59).
-const SMALL_INTEGER_MIN: i64 = -(1 << 59);
-/// The largest ERTS small integer on a 64-bit system: 2^59 - 1.
-const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
 /// The width of the tag of an ERTS atom word (`_TAG_IMMED2_SIZE`).
 const ATOM_TAG_BITS: u32 = 6;
 /// The tag bits of an ERTS atom word (`_TAG_IMMED2_ATOM`).
@@ -473,11 +469,10 @@ fn slot(hash: u64, level: u32) -> u32 {
 /// ```
 fn map_hash(key: &Term) -> Option<u64> {
     match key {
-        Term::Integer(value) if (SMALL_INTEGER_MIN..=SMALL_INTEGER_MAX).contains(value) => Some(
-            mix64(((*value as u64) << SMALL_INTEGER_TAG_BITS) | SMALL_INTEGER_TAG),
-        ),
         Term::Atom(atom) => Some(mix64((u64::from(atom.index()) << ATOM_TAG_BITS) | ATOM_TAG)),
-        _ => None,
+        _ => key
+            .small_integer()
+            .map(|value| mix64(((value as u64) << SMALL_INTEGER_TAG_BITS) | SMALL_INTEGER_TAG)),
     }
 }
 

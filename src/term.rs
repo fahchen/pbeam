@@ -9,6 +9,11 @@ pub use map::Map;
 
 use std::fmt;
 
+/// The smallest ERTS small integer on a 64-bit system: -(2^59).
+const SMALL_INTEGER_MIN: i64 = -(1 << 59);
+/// The largest ERTS small integer on a 64-bit system: 2^59 - 1.
+const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
+
 /// A BEAM term. Lists, tuples, and maps can nest to any depth, as in ERTS,
 /// so `Drop`, `Clone`, `PartialEq`, and `Debug` use explicit work stacks and
 /// do not recurse on the Rust stack.
@@ -89,6 +94,27 @@ impl Term {
     /// Panic when the name is not a static atom. Callers pass a fixed name.
     pub(crate) fn static_atom(name: &str) -> Term {
         Term::Atom(Atom::from_static(name).expect("the name is a static atom"))
+    }
+
+    /// Return the value of an integer in the ERTS small-integer range,
+    /// -(2^59) to 2^59 - 1, as the ERTS checks `is_small` and `signed_val`
+    /// do. Return `None` for any other term. ERTS stores a larger integer as
+    /// a bignum, which is not a small integer.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Term::Integer(-1).small_integer(), Some(-1));
+    /// assert_eq!(Term::Integer(1 << 59).small_integer(), None);
+    /// assert_eq!(Term::static_atom("ok").small_integer(), None);
+    /// ```
+    pub(crate) fn small_integer(&self) -> Option<i64> {
+        match self {
+            Term::Integer(value) if (SMALL_INTEGER_MIN..=SMALL_INTEGER_MAX).contains(value) => {
+                Some(*value)
+            }
+            _ => None,
+        }
     }
 
     /// Copy a term that has no nested terms. For a list, tuple, or map,

@@ -297,61 +297,38 @@ impl BeamProgram {
                     tail,
                     deallocate,
                 } => {
-                    if *tail && *deallocate as usize != current_frame(process).stack.len() {
-                        return Err(error("invalid BEAM tail-call stack size"));
+                    if let Some(outcome) =
+                        self.call_external(scheduler, module, name, *arity, *tail, *deallocate)?
+                    {
+                        return Ok(outcome);
                     }
-                    if INSTRUCTION_CALLS.contains(&(module.as_str(), name.as_str(), *arity)) {
-                        // ponytail: ERTS runs these calls as instructions; see "Instruction calls" in docs/erts-differences.md.
-                        return Err(error(format!(
-                            "unsupported instruction call {module}:{name}/{arity}"
-                        )));
-                    }
-                    // A BIF runs before the module code, as in ERTS.
-                    if is_bif(module, name, *arity) {
-                        let arguments = call_arguments(&process.registers, *arity)?;
-                        let result = self.bif(scheduler, module, name, arguments)?;
-                        let (target, arguments) = match result {
-                            BifResult::Value(value) => {
-                                let process = scheduler.current_process_mut();
-                                write(process, &Operand::X(0), value)?;
-                                if *tail && let Some(outcome) = return_from_frame(process)? {
-                                    return Ok(outcome);
-                                }
-                                continue;
-                            }
-                            BifResult::Raise { class, reason } => {
-                                let process = scheduler.current_process_mut();
-                                if let Some(outcome) = raise(process, class, reason) {
-                                    return Ok(outcome);
-                                }
-                                continue;
-                            }
-                            BifResult::Trap {
-                                module,
-                                function,
-                                arguments,
-                            } => ((module, function), arguments),
-                        };
-                        let process = scheduler.current_process_mut();
-                        let arity = u32::try_from(arguments.len())
-                            .map_err(|_| error("arity exceeds BEAM limit"))?;
-                        for (index, argument) in (0..).zip(arguments) {
-                            write(process, &Operand::X(index), argument)?;
-                        }
-                        let frame = self.mfa_frame(target.0, target.1, arity)?;
-                        if *tail {
-                            *current_frame(process) = frame;
-                        } else {
-                            process.frames.push(frame);
+                }
+                Instruction::Apply {
+                    arity,
+                    tail,
+                    deallocate,
+                } => {
+                    let module = read(process, &Operand::X(*arity))?;
+                    let name = read(process, &Operand::X(arity.saturating_add(1)))?;
+                    // ERTS `fixed_apply` (`beam_common.c`) raises `badarg`
+                    // when the module or the function name is not an atom.
+                    let (Term::Atom(module), Term::Atom(name)) = (&module, &name) else {
+                        if let Some(outcome) =
+                            raise(process, ExceptionClass::Error, Term::static_atom("badarg"))
+                        {
+                            return Ok(outcome);
                         }
                         continue;
-                    }
-                    let process = scheduler.current_process_mut();
-                    let frame = self.mfa_frame(module, name, *arity)?;
-                    if *tail {
-                        *current_frame(process) = frame;
-                    } else {
-                        process.frames.push(frame);
+                    };
+                    if let Some(outcome) = self.call_external(
+                        scheduler,
+                        module.name(),
+                        name.name(),
+                        *arity,
+                        *tail,
+                        *deallocate,
+                    )? {
+                        return Ok(outcome);
                     }
                 }
                 Instruction::Bif {
@@ -370,9 +347,27 @@ impl BeamProgram {
                         .iter()
                         .map(|argument| read(process, argument))
                         .collect::<Result<Vec<_>, _>>()?;
+                    // A `bif` instruction with fail label 0 raises the
+                    // exception of the BIF, as `handle_error` does in ERTS
+                    // (`bif_instrs.tab`).
                     let result = self.bif(scheduler, module, name, values)?;
-                    let value = result.into_bif_value(module, name, arguments.len())?;
-                    write(scheduler.current_process_mut(), destination, value)?;
+                    let process = scheduler.current_process_mut();
+                    match result {
+                        BifResult::Value(value) => write(process, destination, value)?,
+                        BifResult::Raise { class, reason } => {
+                            if let Some(outcome) = raise(process, class, reason) {
+                                return Ok(outcome);
+                            }
+                        }
+                        // The compiler emits a `bif` instruction only for a
+                        // BIF that does not trap.
+                        trap => {
+                            return Err(error(format!(
+                                "unsupported {module}:{name}/{} result {trap:?}",
+                                arguments.len()
+                            )));
+                        }
+                    }
                 }
                 Instruction::Jump(label) => jump(module, process, *label)?,
                 Instruction::Catch { register, label } => {
@@ -420,6 +415,10 @@ impl BeamProgram {
                         TestKind::Reference => matches!(value, Term::Reference(_)),
                         TestKind::Tuple => matches!(value, Term::Tuple(_)),
                         TestKind::List => matches!(value, Term::List(_)),
+                        TestKind::Nil => matches!(&value, Term::List(values) if values.is_empty()),
+                        TestKind::NonEmptyList => {
+                            matches!(&value, Term::List(values) if !values.is_empty())
+                        }
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
                     };
@@ -553,6 +552,42 @@ impl BeamProgram {
                     }
                     write(process, destination, fields.swap_remove(index))?;
                 }
+                Instruction::UpdateRecord {
+                    source,
+                    destination,
+                    updates,
+                } => {
+                    let mut record = read(process, source)?;
+                    let Term::Tuple(fields) = &mut record else {
+                        return Err(error("BEAM update_record source is not a tuple"));
+                    };
+                    // ERTS reads each value before it writes the destination, which can be a value register.
+                    for (position, value) in updates {
+                        let value = read(process, value)?;
+                        let field = (*position as usize)
+                            .checked_sub(1)
+                            .and_then(|index| fields.get_mut(index))
+                            .ok_or_else(|| {
+                                error(format!("BEAM update_record has no position {position}"))
+                            })?;
+                        *field = value;
+                    }
+                    write(process, destination, record)?;
+                }
+                Instruction::GetList { source, head, tail } => {
+                    let mut values = nonempty_list(read(process, source)?)?;
+                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+                    let first = values.remove(0);
+                    write(process, head, first)?;
+                    write(process, tail, Term::List(values))?;
+                }
+                Instruction::GetHead {
+                    source,
+                    destination,
+                } => {
+                    let mut values = nonempty_list(read(process, source)?)?;
+                    write(process, destination, values.swap_remove(0))?;
+                }
                 Instruction::Send => {
                     let Term::Pid(target) = read(process, &Operand::X(0))? else {
                         return Err(error("unsupported BEAM send target"));
@@ -580,6 +615,15 @@ impl BeamProgram {
                     }
                 }
                 Instruction::Wait(label) => {
+                    jump(module, process, *label)?;
+                    return Ok(Outcome::Wait);
+                }
+                Instruction::WaitTimeout { label, source } => {
+                    let timeout = read(process, source)?;
+                    if timeout != Term::static_atom("infinity") {
+                        // ponytail: PBeam has no timers; see "Receive timeout" in docs/erts-differences.md.
+                        return Err(error(format!("unsupported receive timeout {timeout:?}")));
+                    }
                     jump(module, process, *label)?;
                     return Ok(Outcome::Wait);
                 }
@@ -623,6 +667,78 @@ impl BeamProgram {
                 } => return Err(error(format!("function clause {module}:{name}/{arity}"))),
             }
         }
+    }
+
+    /// Call `module:name/arity` with the arguments in the X registers, as
+    /// `call_ext` and `apply` do. A tail call first checks that the frame
+    /// has `deallocate` Y registers, then replaces the frame. A BIF runs
+    /// before the module code, as in ERTS. Return the outcome when the
+    /// process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // `erlang:exit/1` in a tail call with no catch tag exits the process.
+    /// let outcome = program.call_external(&mut scheduler, "erlang", "exit", 1, true, 0)?;
+    /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
+    /// // `erlang:apply/3` runs as an instruction in ERTS.
+    /// assert!(program.call_external(&mut scheduler, "erlang", "apply", 3, false, 0).is_err());
+    /// ```
+    fn call_external(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        name: &str,
+        arity: u32,
+        tail: bool,
+        deallocate: u32,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        if tail && deallocate as usize != current_frame(process).stack.len() {
+            return Err(error("invalid BEAM tail-call stack size"));
+        }
+        if INSTRUCTION_CALLS.contains(&(module, name, arity)) {
+            // ponytail: ERTS runs these calls as instructions; see "Instruction calls" in docs/erts-differences.md.
+            return Err(error(format!(
+                "unsupported instruction call {module}:{name}/{arity}"
+            )));
+        }
+        let (frame, process) = if is_bif(module, name, arity) {
+            let arguments = call_arguments(&process.registers, arity)?;
+            let result = self.bif(scheduler, module, name, arguments)?;
+            let process = scheduler.current_process_mut();
+            match result {
+                BifResult::Value(value) => {
+                    write(process, &Operand::X(0), value)?;
+                    return if tail {
+                        return_from_frame(process)
+                    } else {
+                        Ok(None)
+                    };
+                }
+                BifResult::Raise { class, reason } => return Ok(raise(process, class, reason)),
+                BifResult::Trap {
+                    module,
+                    function,
+                    arguments,
+                } => {
+                    let arity = u32::try_from(arguments.len())
+                        .map_err(|_| error("arity exceeds BEAM limit"))?;
+                    for (index, argument) in (0..).zip(arguments) {
+                        write(process, &Operand::X(index), argument)?;
+                    }
+                    (self.mfa_frame(module, function, arity)?, process)
+                }
+            }
+        } else {
+            (self.mfa_frame(module, name, arity)?, process)
+        };
+        if tail {
+            *current_frame(process) = frame;
+        } else {
+            process.frames.push(frame);
+        }
+        Ok(None)
     }
 }
 
@@ -770,6 +886,25 @@ fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Opt
 /// ```
 fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
     write(process, &Operand::Y(register), Term::List(Vec::new()))
+}
+
+/// Return the elements of a nonempty list, which `get_list` and `get_hd`
+/// read. The BEAM validator makes sure that the source is a nonempty list.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
+/// assert_eq!(nonempty_list(list)?, vec![Term::Integer(1), Term::Integer(2)]);
+/// assert!(nonempty_list(Term::List(vec![])).is_err());
+/// ```
+fn nonempty_list(mut list: Term) -> Result<Vec<Term>, BeamError> {
+    match &mut list {
+        Term::List(values) if !values.is_empty() => Ok(std::mem::take(values)),
+        _ => Err(error(format!(
+            "BEAM list source {list:?} is not a nonempty list"
+        ))),
+    }
 }
 
 /// Continue execution after a label in the active module.
@@ -981,15 +1116,16 @@ mod tests {
     use std::{collections::HashMap, path::PathBuf, process::Command};
 
     use super::bif::{BIFS, INSTRUCTION_CALLS};
-    use super::{
-        BeamProgram, BifResult, ExceptionClass, call_arguments, function_at_label, read_operand,
-        write_operand,
-    };
+    use super::{BeamProgram, call_arguments, function_at_label, read_operand, write_operand};
     use crate::{
         BeamModule, Map, Term,
-        beam::code::{self, Instruction, Operand},
+        beam::code::{self, Instruction, Operand, TestKind},
         term::{AtomTable, test_atom},
     };
+
+    /// The runtime error of a root process that exits with an uncaught
+    /// `error:badarg`. PBeam gives the stack trace `[]`.
+    const BADARG_EXIT: &str = "root process exited with Tuple([Atom(\"badarg\"), List([])])";
 
     fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
         let mut instructions = vec![
@@ -1517,7 +1653,7 @@ mod tests {
                 Instruction::CallExternal {
                     arity: 3,
                     module: "lists".into(),
-                    name: "keyfind".into(),
+                    name: "keymember".into(),
                     tail: true,
                     deallocate: 0,
                 },
@@ -1528,11 +1664,11 @@ mod tests {
             "lists".into(),
             BeamModule {
                 name: "lists".into(),
-                exports: HashMap::from([(("keyfind".into(), 3), 1)]),
+                exports: HashMap::from([(("keymember".into(), 3), 1)]),
                 instructions: vec![
                     Instruction::FunctionInfo {
                         module: "lists".into(),
-                        name: "keyfind".into(),
+                        name: "keymember".into(),
                         arity: 3,
                     },
                     Instruction::Label(1),
@@ -1541,14 +1677,14 @@ mod tests {
                 ],
             },
         );
-        // `lists:keyfind/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
+        // `lists:keymember/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
         // BIF, so the BEAM stub body of the loaded `lists` module must not run.
         assert_eq!(
             program
                 .execute("fixture", "main", &[])
                 .unwrap_err()
                 .to_string(),
-            "unresolved external MFA lists:keyfind/3"
+            "unresolved external MFA lists:keymember/3"
         );
         // `is_bif` finds an entry with a binary search.
         // Strictly increasing: sorted for a binary search, with no duplicate entry.
@@ -1668,6 +1804,230 @@ mod tests {
             0,
         );
         assert!(invalid_tail.execute("fixture", "main", &[]).is_err());
+    }
+
+    /// The values come from a pinned OTP 29.1.1 run of `lst/1`, `hd1/1`, and
+    /// `nil/1` in a module compiled with `erlc +no_line_info`:
+    /// `lst([H | T]) -> {H, T}.`, `hd1([H | _]) -> H.`, and
+    /// `nil([]) -> nil; nil([_ | _]) -> nonempty; nil(_) -> other.`
+    #[test]
+    fn reads_and_tests_lists_as_pinned_erts() {
+        let list = |names: &[&str]| Term::List(names.iter().map(|name| test_atom(name)).collect());
+        let run = |argument: Term, body: Vec<Instruction>| {
+            let mut instructions = vec![Instruction::Move(Operand::Value(argument), Operand::X(0))];
+            instructions.extend(body);
+            make_program(instructions, 0).execute("fixture", "main", &[])
+        };
+        // lst/1 compiles to {get_list,{x,0},{x,1},{x,0}}, then put_tuple2.
+        let get_list = |argument: Term| {
+            run(
+                argument,
+                vec![
+                    Instruction::GetList {
+                        source: Operand::X(0),
+                        head: Operand::X(1),
+                        tail: Operand::X(0),
+                    },
+                    Instruction::PutTuple {
+                        elements: vec![Operand::X(1), Operand::X(0)],
+                        destination: Operand::X(0),
+                    },
+                    Instruction::Return,
+                ],
+            )
+        };
+        // ERTS: lst([a,b,c]) is {a,[b,c]}, and lst([a]) is {a,[]}.
+        assert_eq!(
+            get_list(list(&["a", "b", "c"])).unwrap(),
+            Term::Tuple(vec![test_atom("a"), list(&["b", "c"])])
+        );
+        assert_eq!(
+            get_list(list(&["a"])).unwrap(),
+            Term::Tuple(vec![test_atom("a"), list(&[])])
+        );
+        // ERTS: hd1([x,y]) is x.
+        let get_head = |argument: Term| {
+            run(
+                argument,
+                vec![
+                    Instruction::GetHead {
+                        source: Operand::X(0),
+                        destination: Operand::X(0),
+                    },
+                    Instruction::Return,
+                ],
+            )
+        };
+        assert_eq!(get_head(list(&["x", "y"])).unwrap(), test_atom("x"));
+        // ERTS: nil([]) is nil, nil([a]) is nonempty, and nil(a) is other.
+        let classify = |argument: Term| {
+            run(
+                argument,
+                vec![
+                    Instruction::Test {
+                        kind: TestKind::Nil,
+                        fail_label: 3,
+                        value: Operand::X(0),
+                    },
+                    Instruction::Move(atom("nil"), Operand::X(0)),
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Test {
+                        kind: TestKind::NonEmptyList,
+                        fail_label: 4,
+                        value: Operand::X(0),
+                    },
+                    Instruction::Move(atom("nonempty"), Operand::X(0)),
+                    Instruction::Return,
+                    Instruction::Label(4),
+                    Instruction::Move(atom("other"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            )
+            .unwrap()
+        };
+        assert_eq!(classify(list(&[])), test_atom("nil"));
+        assert_eq!(classify(list(&["a"])), test_atom("nonempty"));
+        assert_eq!(classify(test_atom("a")), test_atom("other"));
+        // The BEAM validator makes sure that the source is a nonempty list.
+        assert_eq!(
+            get_list(list(&[])).unwrap_err().to_string(),
+            "BEAM list source List([]) is not a nonempty list"
+        );
+        assert_eq!(
+            get_head(test_atom("a")).unwrap_err().to_string(),
+            "BEAM list source Atom(\"a\") is not a nonempty list"
+        );
+    }
+
+    /// The value comes from a pinned OTP 29.1.1 run of `rec/2` with
+    /// `-record(r, {a, b, c})`: `rec(#r{a = 1, b = 2, c = 3}, 9)` is
+    /// `{r,1,9,1}`. `rec(R, X) -> R#r{b = X, c = R#r.a}.` compiles to
+    /// `{get_tuple_element,{x,0},1,{x,2}}` and
+    /// `{update_record,{atom,copy},4,{tr,{x,0},_},{x,0},{list,[3,{x,1},4,{x,2}]}}`.
+    #[test]
+    fn updates_record_positions_as_pinned_erts() {
+        let record = || {
+            Operand::Value(Term::Tuple(vec![
+                test_atom("r"),
+                Term::Integer(1),
+                Term::Integer(2),
+                Term::Integer(3),
+            ]))
+        };
+        let run = |destination: Operand, updates: Vec<(u32, Operand)>| {
+            make_program(
+                vec![
+                    Instruction::Move(record(), Operand::X(0)),
+                    Instruction::Move(Operand::Value(Term::Integer(9)), Operand::X(1)),
+                    Instruction::GetTupleElement {
+                        tuple: Operand::X(0),
+                        index: 1,
+                        destination: Operand::X(2),
+                    },
+                    Instruction::UpdateRecord {
+                        source: Operand::X(0),
+                        destination: destination.clone(),
+                        updates,
+                    },
+                    Instruction::Move(destination, Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        assert_eq!(
+            run(Operand::X(0), vec![(3, Operand::X(1)), (4, Operand::X(2))]).unwrap(),
+            Term::Tuple(vec![
+                test_atom("r"),
+                Term::Integer(1),
+                Term::Integer(9),
+                Term::Integer(1),
+            ])
+        );
+        // The destination x1 is also a value register. The update uses the
+        // value of x1 before the write, as the ERTS `SCRATCH_X_REG` rewrite does.
+        assert_eq!(
+            run(Operand::X(1), vec![(2, Operand::X(2)), (3, Operand::X(1))]).unwrap(),
+            Term::Tuple(vec![
+                test_atom("r"),
+                Term::Integer(1),
+                Term::Integer(9),
+                Term::Integer(3),
+            ])
+        );
+        for position in [0, 5] {
+            assert_eq!(
+                run(Operand::X(0), vec![(position, Operand::X(1))])
+                    .unwrap_err()
+                    .to_string(),
+                format!("BEAM update_record has no position {position}")
+            );
+        }
+        assert_eq!(
+            make_program(
+                vec![Instruction::UpdateRecord {
+                    source: atom("r"),
+                    destination: Operand::X(0),
+                    updates: Vec::new(),
+                }],
+                0,
+            )
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+            "BEAM update_record source is not a tuple"
+        );
+    }
+
+    /// A `wait_timeout` with `infinity` waits as `wait` does: the `DOWN`
+    /// message of a monitored child continues the receive at its label.
+    #[test]
+    fn waits_for_a_message_with_an_infinity_timeout_and_rejects_other_timeouts() {
+        let wait = |timeout: Term| {
+            let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
+            body.pop();
+            body.extend([
+                Instruction::Move(
+                    Operand::Value(Term::List(vec![test_atom("monitor")])),
+                    Operand::X(3),
+                ),
+                erlang_call("spawn_opt", 4, false),
+                Instruction::Label(5),
+                Instruction::LoopReceive {
+                    fail_label: 6,
+                    destination: Operand::X(0),
+                },
+                Instruction::Return,
+                Instruction::Label(6),
+                Instruction::WaitTimeout {
+                    label: 5,
+                    source: Operand::Value(timeout),
+                },
+                Instruction::Timeout,
+                Instruction::Move(atom("timeout"), Operand::X(0)),
+                Instruction::Return,
+            ]);
+            run_with_child(body)
+        };
+        assert!(matches!(
+            wait(test_atom("infinity")),
+            Ok(Term::Tuple(ref fields))
+                if fields[0] == test_atom("DOWN")
+                    && fields[2] == test_atom("process")
+                    && fields[4] == Term::Integer(1)
+        ));
+        // ERTS 29.1.1: `receive M -> M after T -> timeout end` with T = 0
+        // returns timeout at once. PBeam has no timers yet.
+        assert_eq!(
+            wait(Term::Integer(0)).unwrap_err().to_string(),
+            "unsupported receive timeout Integer(0)"
+        );
+        assert_eq!(
+            wait(Term::Integer(100)).unwrap_err().to_string(),
+            "unsupported receive timeout Integer(100)"
+        );
     }
 
     #[test]
@@ -2027,22 +2387,67 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_exception_from_a_bif_instruction() {
+    fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
+        let element = |index: i64| {
+            make_program(
+                vec![
+                    Instruction::Allocate { stack_size: 1 },
+                    Instruction::Catch {
+                        register: 0,
+                        label: 3,
+                    },
+                    element_bif(index, Operand::Value(Term::Tuple(vec![])), Operand::X(0)),
+                    Instruction::Label(3),
+                    Instruction::CatchEnd { register: 0 },
+                    Instruction::Deallocate { stack_size: 1 },
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        // ERTS 29.1.1: catch element(1, {}) is {'EXIT', {badarg, Stack}}.
+        // PBeam gives the stack trace [].
         assert_eq!(
-            BifResult::Value(Term::Integer(1))
-                .into_bif_value("erlang", "self", 0)
-                .unwrap(),
-            Term::Integer(1)
+            element(1).unwrap(),
+            Term::Tuple(vec![
+                test_atom("EXIT"),
+                Term::Tuple(vec![test_atom("badarg"), Term::List(Vec::new())]),
+            ])
         );
+        // Without a catch, the exception exits the process.
+        let body = vec![
+            element_bif(1, Operand::Value(Term::Tuple(vec![])), Operand::X(0)),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            BADARG_EXIT
+        );
+        // demonitor(Ref, [flush]) of a reference with no monitor traps. No
+        // compiler emits it as a `bif` instruction.
+        let body = vec![
+            erlang_call("make_ref", 0, false),
+            Instruction::Bif {
+                module: "erlang".into(),
+                name: "demonitor".into(),
+                arguments: vec![
+                    Operand::X(0),
+                    Operand::Value(Term::List(vec![test_atom("flush")])),
+                ],
+                destination: Operand::X(0),
+            },
+            Instruction::Return,
+        ];
         assert!(
-            BifResult::Raise {
-                class: ExceptionClass::Error,
-                reason: test_atom("badarg"),
-            }
-            .into_bif_value("erlang", "node", 1)
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported erlang:node/1 result")
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+                .starts_with("unsupported erlang:demonitor/2 result Trap")
         );
     }
 
@@ -2147,5 +2552,573 @@ mod tests {
             program.execute("fixture", "main", &[]).unwrap(),
             test_atom("true")
         );
+    }
+
+    /// Run `main/0` with the functions `zero/0`, `id/3`, and `last/2` of
+    /// the probe that gives the ERTS values of the `apply` tests:
+    /// `zero() -> zero.`, `id(A, B, C) -> {A, B, C}.`, and
+    /// `last(M, F) -> M:F(bye).`, which compiles to `{apply_last,1,0}`.
+    fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
+        let mut program = make_program(body, 0);
+        let module = program.modules.get_mut("fixture").unwrap();
+        module.exports.extend([
+            (("zero".into(), 0), 11),
+            (("id".into(), 3), 12),
+            (("last".into(), 2), 13),
+        ]);
+        let function = |name: &str, arity, label| {
+            [
+                Instruction::FunctionInfo {
+                    module: "fixture".into(),
+                    name: name.into(),
+                    arity,
+                },
+                Instruction::Label(label),
+            ]
+        };
+        module.instructions.extend(function("zero", 0, 11));
+        module.instructions.extend([
+            Instruction::Move(atom("zero"), Operand::X(0)),
+            Instruction::Return,
+        ]);
+        module.instructions.extend(function("id", 3, 12));
+        module.instructions.extend([
+            Instruction::PutTuple {
+                elements: vec![Operand::X(0), Operand::X(1), Operand::X(2)],
+                destination: Operand::X(0),
+            },
+            Instruction::Return,
+        ]);
+        module.instructions.extend(function("last", 2, 13));
+        module.instructions.extend([
+            Instruction::Allocate { stack_size: 0 },
+            Instruction::Move(Operand::X(1), Operand::X(2)),
+            Instruction::Move(Operand::X(0), Operand::X(1)),
+            Instruction::Move(atom("bye"), Operand::X(0)),
+            Instruction::Apply {
+                arity: 1,
+                tail: true,
+                deallocate: 0,
+            },
+        ]);
+        program.execute("fixture", "main", &[])
+    }
+
+    /// Return the body that moves the module and the function name of an
+    /// `apply` with `arity` arguments to `x(arity)` and `x(arity + 1)`, then
+    /// runs the `apply`.
+    fn apply_body(arity: u32, module: Operand, function: Operand) -> Vec<Instruction> {
+        vec![
+            Instruction::Move(module, Operand::X(arity)),
+            Instruction::Move(function, Operand::X(arity + 1)),
+            Instruction::Apply {
+                arity,
+                tail: false,
+                deallocate: 0,
+            },
+            Instruction::Return,
+        ]
+    }
+
+    #[test]
+    fn applies_module_functions_and_bifs_as_pinned_erts() {
+        // OTP 29.1.1: `M:F()` compiles to `{apply,0}`, and it gives `zero`
+        // with `fixture` and `zero`.
+        assert_eq!(
+            run_with_apply_targets(apply_body(0, atom("fixture"), atom("zero"))).unwrap(),
+            test_atom("zero")
+        );
+        // `M:F()` with `erlang` and `self` gives a pid: the BIF runs.
+        assert!(matches!(
+            run_with_apply_targets(apply_body(0, atom("erlang"), atom("self"))),
+            Ok(Term::Pid(_))
+        ));
+        // In a tail position, `M:F()` compiles to `{apply_last,0,0}`. The BIF
+        // value returns from the last frame, so the root process exits.
+        assert!(matches!(
+            run_with_apply_targets(vec![
+                Instruction::Move(atom("erlang"), Operand::X(0)),
+                Instruction::Move(atom("self"), Operand::X(1)),
+                Instruction::Apply {
+                    arity: 0,
+                    tail: true,
+                    deallocate: 0,
+                },
+            ]),
+            Ok(Term::Pid(_))
+        ));
+        // `M:F(A, b, c)` compiles to `{apply,3}`, and it gives `{a,b,c}`
+        // with `fixture`, `id`, and `a`.
+        let mut body = vec![
+            Instruction::Move(atom("a"), Operand::X(0)),
+            Instruction::Move(atom("b"), Operand::X(1)),
+            Instruction::Move(atom("c"), Operand::X(2)),
+        ];
+        body.extend(apply_body(3, atom("fixture"), atom("id")));
+        assert_eq!(
+            run_with_apply_targets(body).unwrap(),
+            Term::Tuple(vec![test_atom("a"), test_atom("b"), test_atom("c")])
+        );
+        // `catch last(erlang, exit)` gives `{'EXIT',bye}`: `apply_last` runs
+        // the `erlang:exit/1` BIF, and the exception reaches the catch.
+        assert_eq!(
+            run_with_apply_targets(vec![
+                Instruction::Allocate { stack_size: 1 },
+                Instruction::Catch {
+                    register: 0,
+                    label: 3,
+                },
+                Instruction::Move(atom("erlang"), Operand::X(0)),
+                Instruction::Move(atom("exit"), Operand::X(1)),
+                Instruction::Call {
+                    arity: 2,
+                    label: 13
+                },
+                Instruction::Label(3),
+                Instruction::CatchEnd { register: 0 },
+                Instruction::Return,
+            ])
+            .unwrap(),
+            Term::Tuple(vec![test_atom("EXIT"), test_atom("bye")])
+        );
+    }
+
+    #[test]
+    fn rejects_an_apply_of_an_instruction_call_or_a_stack_mismatch_and_raises_badarg() {
+        let error = |body| run_with_apply_targets(body).unwrap_err().to_string();
+        // ERTS runs `erlang:apply(fixture, id, [x, y, z])` through `{apply,3}`
+        // and gives `{x,y,z}`. PBeam keeps the instruction-call guard.
+        assert_eq!(
+            error(apply_body(3, atom("erlang"), atom("apply"))),
+            "unsupported instruction call erlang:apply/3"
+        );
+        // ERTS 29.1.1 raises `badarg` for `M:F()` with `1` and `f`, or with
+        // `m` and `1`.
+        assert_eq!(
+            error(apply_body(0, Operand::Value(Term::Integer(1)), atom("f"))),
+            BADARG_EXIT
+        );
+        assert_eq!(
+            error(apply_body(0, atom("m"), Operand::Value(Term::Integer(1)))),
+            BADARG_EXIT
+        );
+        // `apply_last` releases the Y registers of the frame, so the count
+        // must match the allocated stack, as for `call_last`.
+        assert_eq!(
+            error(vec![
+                Instruction::Allocate { stack_size: 1 },
+                Instruction::Move(atom("fixture"), Operand::X(0)),
+                Instruction::Move(atom("zero"), Operand::X(1)),
+                Instruction::Apply {
+                    arity: 0,
+                    tail: true,
+                    deallocate: 0,
+                },
+            ]),
+            "invalid BEAM tail-call stack size"
+        );
+    }
+
+    /// Run `main/0` as a tail `call_ext` of `module:name` with `arguments`
+    /// in `x0` onwards.
+    fn call_ext_with(
+        module: &str,
+        name: &str,
+        arguments: Vec<Term>,
+    ) -> Result<Term, crate::BeamError> {
+        let arity = arguments.len() as u32;
+        let mut body: Vec<Instruction> = arguments
+            .into_iter()
+            .zip(0..)
+            .map(|(argument, register)| {
+                Instruction::Move(Operand::Value(argument), Operand::X(register))
+            })
+            .collect();
+        body.push(Instruction::CallExternal {
+            arity,
+            module: module.into(),
+            name: name.into(),
+            tail: true,
+            deallocate: 0,
+        });
+        make_program(body, 0).execute("fixture", "main", &[])
+    }
+
+    fn get_bif(key: &str, destination: Operand) -> Instruction {
+        Instruction::Bif {
+            module: "erlang".into(),
+            name: "get".into(),
+            arguments: vec![atom(key)],
+            destination,
+        }
+    }
+
+    #[test]
+    fn puts_and_gets_process_dictionary_values_as_pinned_erts() {
+        let put = |value: i64| {
+            [
+                Instruction::Move(atom("k"), Operand::X(0)),
+                Instruction::Move(Operand::Value(Term::Integer(value)), Operand::X(1)),
+                erlang_call("put", 2, false),
+            ]
+        };
+        let mut body = vec![Instruction::Allocate { stack_size: 3 }];
+        body.extend(put(1));
+        body.push(Instruction::Move(Operand::X(0), Operand::Y(0)));
+        body.extend(put(2));
+        body.push(Instruction::Move(Operand::X(0), Operand::Y(1)));
+        // `gen:get_parent/0` reads `get('$ancestors')` with
+        // `{bif,get,{f,0},[{atom,'$ancestors'}],{x,0}}`.
+        body.push(get_bif("k", Operand::Y(2)));
+        body.push(get_bif("other", Operand::X(0)));
+        body.extend([
+            Instruction::PutTuple {
+                elements: vec![Operand::Y(0), Operand::Y(1), Operand::Y(2), Operand::X(0)],
+                destination: Operand::X(0),
+            },
+            Instruction::Deallocate { stack_size: 3 },
+            Instruction::Return,
+        ]);
+        // ERTS 29.1.1: [put(k, 1), put(k, 2), get(k), get(other)] is
+        // [undefined,1,2,undefined].
+        let undefined = Term::static_atom("undefined");
+        assert_eq!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap(),
+            Term::Tuple(vec![
+                undefined.clone(),
+                Term::Integer(1),
+                Term::Integer(2),
+                undefined
+            ])
+        );
+    }
+
+    #[test]
+    fn starts_a_spawned_process_with_an_empty_dictionary() {
+        let mut body = vec![
+            Instruction::Move(atom("k"), Operand::X(0)),
+            Instruction::Move(atom("parent"), Operand::X(1)),
+            erlang_call("put", 2, false),
+            Instruction::Move(atom("fixture"), Operand::X(0)),
+            Instruction::Move(atom("fresh"), Operand::X(1)),
+            Instruction::Move(Operand::Value(Term::List(Vec::new())), Operand::X(2)),
+            Instruction::Move(
+                Operand::Value(Term::List(vec![test_atom("monitor")])),
+                Operand::X(3),
+            ),
+            erlang_call("spawn_opt", 4, false),
+        ];
+        body.extend(wait_forever());
+        let mut program = make_program(body, 0);
+        let module = program.modules.get_mut("fixture").unwrap();
+        module.exports.insert(("fresh".into(), 0), 11);
+        module.instructions.extend([
+            Instruction::FunctionInfo {
+                module: "fixture".into(),
+                name: "fresh".into(),
+                arity: 0,
+            },
+            Instruction::Label(11),
+            get_bif("k", Operand::X(0)),
+            erlang_call("exit", 1, true),
+        ]);
+        // ERTS 29.1.1: after put(k, parent), a spawned process gets
+        // undefined for get(k).
+        assert!(matches!(
+            program.execute("fixture", "main", &[]),
+            Ok(Term::Tuple(ref elements))
+                if elements.first() == Some(&test_atom("DOWN"))
+                    && elements.last() == Some(&Term::static_atom("undefined"))
+        ));
+    }
+
+    #[test]
+    fn appends_lists_as_pinned_erts() {
+        let integers =
+            |values: &[i64]| Term::List(values.iter().copied().map(Term::Integer).collect());
+        let append = |left: Term, right: Term| call_ext_with("erlang", "++", vec![left, right]);
+        // ERTS 29.1.1: [] ++ x is x, and [1,2] ++ [3] is [1,2,3].
+        assert_eq!(
+            append(Term::List(Vec::new()), test_atom("x")).unwrap(),
+            test_atom("x")
+        );
+        assert_eq!(
+            append(integers(&[1, 2]), integers(&[3])).unwrap(),
+            integers(&[1, 2, 3])
+        );
+        // ERTS 29.1.1: [1] ++ x is the improper list [1|x], and a ++ []
+        // and a ++ x raise badarg.
+        assert_eq!(
+            append(integers(&[1]), test_atom("x"))
+                .unwrap_err()
+                .to_string(),
+            "unsupported erlang:++/2 tail Atom(\"x\"): not a list"
+        );
+        for right in [Term::List(Vec::new()), test_atom("x")] {
+            assert_eq!(
+                append(test_atom("a"), right).unwrap_err().to_string(),
+                BADARG_EXIT
+            );
+        }
+    }
+
+    #[test]
+    fn finds_key_tuples_as_pinned_erts() {
+        let tuple = |elements: Vec<Term>| Term::Tuple(elements);
+        let keyfind = |key: Term, position: Term, list: Vec<Term>| {
+            call_ext_with("lists", "keyfind", vec![key, position, Term::List(list)])
+        };
+        let badarg = |key: Term, position: Term, list: Term| {
+            call_ext_with("lists", "keyfind", vec![key, position, list])
+                .unwrap_err()
+                .to_string()
+        };
+        let (a, b) = (test_atom("a"), test_atom("b"));
+        // ERTS 29.1.1: lists:keyfind(b, 1, [{a,1},{b,2},{b,3}]) is {b,2}.
+        assert_eq!(
+            keyfind(
+                b.clone(),
+                Term::Integer(1),
+                vec![
+                    tuple(vec![a.clone(), Term::Integer(1)]),
+                    tuple(vec![b.clone(), Term::Integer(2)]),
+                    tuple(vec![b.clone(), Term::Integer(3)]),
+                ]
+            )
+            .unwrap(),
+            tuple(vec![b, Term::Integer(2)])
+        );
+        // ERTS 29.1.1: lists:keyfind(x, 1, []) is false.
+        assert_eq!(
+            keyfind(test_atom("x"), Term::Integer(1), Vec::new()).unwrap(),
+            Term::static_atom("false")
+        );
+        // ERTS 29.1.1: lists:keyfind(a, 2, [{1,a}, x, {a}, {2,a}]) is {1,a}:
+        // a term that is not a tuple and a tuple that is too short do not match.
+        assert_eq!(
+            keyfind(
+                a.clone(),
+                Term::Integer(2),
+                vec![
+                    tuple(vec![Term::Integer(1), a.clone()]),
+                    test_atom("x"),
+                    tuple(vec![a.clone()]),
+                    tuple(vec![Term::Integer(2), a.clone()]),
+                ]
+            )
+            .unwrap(),
+            tuple(vec![Term::Integer(1), a.clone()])
+        );
+        // ERTS 29.1.1: lists:keyfind(a, (1 bsl 59) - 1, [{a}]) is false: the
+        // position is a small integer.
+        assert_eq!(
+            keyfind(
+                a.clone(),
+                Term::Integer((1 << 59) - 1),
+                vec![tuple(vec![a.clone()])]
+            )
+            .unwrap(),
+            Term::static_atom("false")
+        );
+        // ERTS 29.1.1 raises badarg for the positions 0, -1, x, and the
+        // bignum 1 bsl 59, and for the lists a and {a}.
+        let one = Term::List(vec![tuple(vec![a.clone()])]);
+        for position in [
+            Term::Integer(0),
+            Term::Integer(-1),
+            test_atom("x"),
+            Term::Integer(1 << 59),
+        ] {
+            assert_eq!(badarg(a.clone(), position, one.clone()), BADARG_EXIT);
+        }
+        for list in [a.clone(), tuple(vec![a.clone()])] {
+            assert_eq!(badarg(a.clone(), Term::Integer(1), list), BADARG_EXIT);
+        }
+    }
+
+    fn element_bif(index: i64, tuple: Operand, destination: Operand) -> Instruction {
+        Instruction::Bif {
+            module: "erlang".into(),
+            name: "element".into(),
+            arguments: vec![Operand::Value(Term::Integer(index)), tuple],
+            destination,
+        }
+    }
+
+    #[test]
+    fn reads_tuple_elements_as_pinned_erts() {
+        let (a, b, c) = (test_atom("a"), test_atom("b"), test_atom("c"));
+        // The pinned `gen_statem` runs `element/2` through
+        // `{bif,element,{f,0},[{integer,2},{x,0}],{x,0}}`.
+        // ERTS 29.1.1: element(2, {a,b,c}) is b.
+        let body = vec![
+            Instruction::Move(
+                Operand::Value(Term::Tuple(vec![a.clone(), b.clone(), c])),
+                Operand::X(0),
+            ),
+            element_bif(2, Operand::X(0), Operand::X(0)),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap(),
+            b
+        );
+        let element =
+            |index: Term, tuple: Term| call_ext_with("erlang", "element", vec![index, tuple]);
+        let one = Term::Tuple(vec![a.clone()]);
+        // ERTS 29.1.1: element(1, {a}) is a.
+        assert_eq!(element(Term::Integer(1), one.clone()).unwrap(), a);
+        // ERTS 29.1.1 raises badarg for element(0, {a}), element(2, {a}),
+        // element(-1, {a}), element(a, {a}), and element(1, [a]).
+        for (index, tuple) in [
+            (Term::Integer(0), one.clone()),
+            (Term::Integer(2), one.clone()),
+            (Term::Integer(-1), one.clone()),
+            (a.clone(), one),
+            (Term::Integer(1), Term::List(vec![a])),
+        ] {
+            assert_eq!(element(index, tuple).unwrap_err().to_string(), BADARG_EXIT);
+        }
+    }
+
+    #[test]
+    fn reads_an_empty_current_stacktrace_of_the_calling_process() {
+        // `STACKTRACE()` in the pinned `gen_statem` is
+        // `element(2, erlang:process_info(self(), current_stacktrace))`.
+        let body = vec![
+            Instruction::Bif {
+                module: "erlang".into(),
+                name: "self".into(),
+                arguments: Vec::new(),
+                destination: Operand::X(0),
+            },
+            Instruction::Move(atom("current_stacktrace"), Operand::X(1)),
+            erlang_call("process_info", 2, false),
+            Instruction::Move(Operand::X(0), Operand::X(1)),
+            element_bif(2, Operand::X(0), Operand::X(0)),
+            Instruction::PutTuple {
+                elements: vec![Operand::X(1), Operand::X(0)],
+                destination: Operand::X(0),
+            },
+            Instruction::Return,
+        ];
+        // ERTS 29.1.1 gives the frames of the caller; PBeam records none.
+        let stacktrace = Term::Tuple(vec![
+            test_atom("current_stacktrace"),
+            Term::List(Vec::new()),
+        ]);
+        assert_eq!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap(),
+            Term::Tuple(vec![stacktrace, Term::List(Vec::new())])
+        );
+        // ERTS 29.1.1: process_info(self(), registered_name) is [], the
+        // current_stacktrace of another process is its frames, and
+        // process_info(a, current_stacktrace) raises badarg.
+        let other = Term::Pid(crate::ProcessId(99));
+        for (process, item) in [
+            (other, test_atom("current_stacktrace")),
+            (test_atom("a"), test_atom("current_stacktrace")),
+        ] {
+            assert_eq!(
+                call_ext_with(
+                    "erlang",
+                    "process_info",
+                    vec![process.clone(), item.clone()]
+                )
+                .unwrap_err()
+                .to_string(),
+                format!("unsupported erlang:process_info/2 arguments {process:?}, {item:?}")
+            );
+        }
+        let body = vec![
+            Instruction::Bif {
+                module: "erlang".into(),
+                name: "self".into(),
+                arguments: Vec::new(),
+                destination: Operand::X(0),
+            },
+            Instruction::Move(atom("registered_name"), Operand::X(1)),
+            erlang_call("process_info", 2, true),
+        ];
+        assert!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+                .ends_with(", Atom(\"registered_name\")")
+        );
+    }
+
+    #[test]
+    fn finds_exported_functions_as_pinned_erts() {
+        let exported = |module: &str, name: &str, arity: i64| {
+            call_ext_with(
+                "erlang",
+                "function_exported",
+                vec![test_atom(module), test_atom(name), Term::Integer(arity)],
+            )
+        };
+        let (yes, no) = (test_atom("true"), test_atom("false"));
+        // ERTS 29.1.1: function_exported/3 is true for a loaded export
+        // (lists:map/2), a BIF (erlang:self/0), and erlang:apply/2,
+        // erlang:apply/3, and erlang:yield/0. It is false for a missing
+        // function (lists:nomatch/2), a module that is not loaded, and the
+        // arity -1. Only the low 32 bits of the arity count:
+        // function_exported(erlang, self, 1 bsl 32) is true.
+        for (module, name, arity, value) in [
+            ("fixture", "main", 0, &yes),
+            ("erlang", "self", 0, &yes),
+            ("erlang", "apply", 2, &yes),
+            ("erlang", "apply", 3, &yes),
+            ("erlang", "yield", 0, &yes),
+            ("erlang", "self", 1 << 32, &yes),
+            ("fixture", "main", (1 << 32) + 1, &no),
+            ("fixture", "nomatch", 0, &no),
+            ("nomod", "f", 0, &no),
+            ("erlang", "self", -1, &no),
+            ("erlang", "yield", 1, &no),
+        ] {
+            assert_eq!(
+                &exported(module, name, arity).unwrap(),
+                value,
+                "{module}:{name}/{arity}"
+            );
+        }
+        // ERTS 29.1.1: an arity in the small-integer range counts with its
+        // low 32 bits, so -(1 bsl 59) finds erlang:self/0, and
+        // (1 bsl 59) - 1 finds no function.
+        let arity = |module: &str, name: &str, arity: i64| {
+            call_ext_with(
+                "erlang",
+                "function_exported",
+                vec![test_atom(module), test_atom(name), Term::Integer(arity)],
+            )
+        };
+        assert_eq!(arity("erlang", "self", -(1 << 59)).unwrap(), yes);
+        assert_eq!(arity("erlang", "self", (1 << 59) - 1).unwrap(), no);
+        // ERTS 29.1.1 raises badarg for a module or a name that is not an
+        // atom, and for an arity that is not a small integer: x, the bignum
+        // 1 bsl 59, and the bignum -(1 bsl 59) - 1.
+        let (erlang, self_name) = (test_atom("erlang"), test_atom("self"));
+        for arguments in [
+            vec![Term::Integer(1), self_name.clone(), Term::Integer(0)],
+            vec![erlang.clone(), Term::Integer(1), Term::Integer(0)],
+            vec![erlang.clone(), self_name.clone(), test_atom("x")],
+            vec![erlang.clone(), self_name.clone(), Term::Integer(1 << 59)],
+            vec![erlang, self_name, Term::Integer(-(1 << 59) - 1)],
+        ] {
+            assert_eq!(
+                call_ext_with("erlang", "function_exported", arguments)
+                    .unwrap_err()
+                    .to_string(),
+                BADARG_EXIT
+            );
+        }
     }
 }
