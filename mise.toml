@@ -50,3 +50,9 @@ run = '''erl -noshell -eval 'io:format("~p~n", [beam_disasm:file("fixtures/beam/
 description = "Run all required checks and print only the result; the full log goes to target/check.log"
 quiet = true
 run = "bash scripts/check_brief.sh"
+
+[tasks.test-focus]
+description = "Run selected Rust tests and print only the results and failures"
+quiet = true
+usage = 'arg "[args]..." help="Arguments for cargo test, such as --test group or a test name filter" var=#true'
+run = 'eval "set -- ${usage_args:-}"; bash scripts/test_focus.sh "$@"'
