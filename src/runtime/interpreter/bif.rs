@@ -1,13 +1,14 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `erlang`, `erts_internal`, `maps`, and `unicode` modules hold the BIF
-//! bodies that do not fit on one table line.
+//! The `erlang`, `erts_internal`, `lists`, `maps`, and `unicode` modules hold
+//! the BIF bodies that do not fit on one table line.
 
 use super::*;
 
 mod erlang;
 mod erts_internal;
+mod lists;
 mod maps;
 mod unicode;
 

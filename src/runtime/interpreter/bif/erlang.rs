@@ -193,3 +193,80 @@ pub(super) fn spawn_opt(
     )
     .map(Value)
 }
+
+/// Run `erlang:put/2`: set the value of `key` in the process dictionary of
+/// the calling process. Return the old value, or `undefined` for a new key,
+/// as ERTS `pd_hash_put` (`erl_process_dict.c`) does. Keys compare with
+/// exact equality.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let key = Term::static_atom("ok");
+/// assert!(matches!(put(&mut context, &key, &Term::Integer(1)), BifResult::Value(Term::Atom(atom)) if atom.name() == "undefined"));
+/// assert!(matches!(put(&mut context, &key, &Term::Integer(2)), BifResult::Value(Term::Integer(1))));
+/// ```
+pub(super) fn put(context: &mut BifContext<'_>, key: &Term, value: &Term) -> BifResult {
+    let dictionary = &mut context.scheduler.current_process_mut().dictionary;
+    let old = match dictionary.iter_mut().find(|(other, _)| other == key) {
+        Some((_, old)) => std::mem::replace(old, value.clone()),
+        None => {
+            dictionary.push((key.clone(), value.clone()));
+            Term::static_atom("undefined")
+        }
+    };
+    Value(old)
+}
+
+/// Run `erlang:get/1`: return the value of `key` in the process dictionary
+/// of the calling process, or `undefined` when the key has no value. Keys
+/// compare with exact equality.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let key = Term::static_atom("ok");
+/// assert!(matches!(get(&mut context, &key), BifResult::Value(Term::Atom(atom)) if atom.name() == "undefined"));
+/// put(&mut context, &key, &Term::Integer(1));
+/// assert!(matches!(get(&mut context, &key), BifResult::Value(Term::Integer(1))));
+/// ```
+pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
+    let dictionary = &context.scheduler.current_process_mut().dictionary;
+    Value(
+        dictionary
+            .iter()
+            .find(|(other, _)| other == key)
+            .map_or_else(
+                || Term::static_atom("undefined"),
+                |(_, value)| value.clone(),
+            ),
+    )
+}
+
+/// Run `erlang:'++'/2`: append `right` to the proper list `left`. With an
+/// empty `left`, return `right` itself, which can be any term, as ERTS does.
+/// A non-empty `left` with a `right` that is not a list gives a runtime
+/// error, because PBeam has no improper lists. ERTS returns the improper
+/// list `[1 | x]` for `[1] ++ x`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let x = Term::static_atom("ok");
+/// assert!(matches!(append(&[], &x)?, BifResult::Value(term) if term == x));
+/// let list = append(&[Term::Integer(1)], &Term::List(vec![Term::Integer(2)]))?;
+/// assert!(matches!(list, BifResult::Value(Term::List(elements)) if elements.len() == 2));
+/// assert!(append(&[Term::Integer(1)], &x).is_err());
+/// ```
+pub(super) fn append(left: &[Term], right: &Term) -> Result<BifResult, BeamError> {
+    match (left, right) {
+        ([], right) => Ok(Value(right.clone())),
+        (left, Term::List(right)) => Ok(Value(Term::List(
+            left.iter().chain(right).cloned().collect(),
+        ))),
+        // ponytail: an improper list result needs an improper list term; see "List BIF arguments" in docs/erts-differences.md.
+        _ => Err(error(format!(
+            "unsupported erlang:++/2 tail {right:?}: not a list"
+        ))),
+    }
+}

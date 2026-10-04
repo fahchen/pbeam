@@ -1642,7 +1642,7 @@ mod tests {
                 Instruction::CallExternal {
                     arity: 3,
                     module: "lists".into(),
-                    name: "keyfind".into(),
+                    name: "keymember".into(),
                     tail: true,
                     deallocate: 0,
                 },
@@ -1653,11 +1653,11 @@ mod tests {
             "lists".into(),
             BeamModule {
                 name: "lists".into(),
-                exports: HashMap::from([(("keyfind".into(), 3), 1)]),
+                exports: HashMap::from([(("keymember".into(), 3), 1)]),
                 instructions: vec![
                     Instruction::FunctionInfo {
                         module: "lists".into(),
-                        name: "keyfind".into(),
+                        name: "keymember".into(),
                         arity: 3,
                     },
                     Instruction::Label(1),
@@ -1666,14 +1666,14 @@ mod tests {
                 ],
             },
         );
-        // `lists:keyfind/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
+        // `lists:keymember/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
         // BIF, so the BEAM stub body of the loaded `lists` module must not run.
         assert_eq!(
             program
                 .execute("fixture", "main", &[])
                 .unwrap_err()
                 .to_string(),
-            "unresolved external MFA lists:keyfind/3"
+            "unresolved external MFA lists:keymember/3"
         );
         // `is_bif` finds an entry with a binary search.
         // Strictly increasing: sorted for a binary search, with no duplicate entry.
@@ -2660,6 +2660,221 @@ mod tests {
                 },
             ]),
             "invalid BEAM tail-call stack size"
+        );
+    }
+
+    /// Run `main/0` as a tail `call_ext` of `module:name` with `arguments`
+    /// in `x0` onwards.
+    fn call_ext_with(
+        module: &str,
+        name: &str,
+        arguments: Vec<Term>,
+    ) -> Result<Term, crate::BeamError> {
+        let arity = arguments.len() as u32;
+        let mut body: Vec<Instruction> = arguments
+            .into_iter()
+            .zip(0..)
+            .map(|(argument, register)| {
+                Instruction::Move(Operand::Value(argument), Operand::X(register))
+            })
+            .collect();
+        body.push(Instruction::CallExternal {
+            arity,
+            module: module.into(),
+            name: name.into(),
+            tail: true,
+            deallocate: 0,
+        });
+        make_program(body, 0).execute("fixture", "main", &[])
+    }
+
+    fn get_bif(key: &str, destination: Operand) -> Instruction {
+        Instruction::Bif {
+            module: "erlang".into(),
+            name: "get".into(),
+            arguments: vec![atom(key)],
+            destination,
+        }
+    }
+
+    #[test]
+    fn puts_and_gets_process_dictionary_values_as_pinned_erts() {
+        let put = |value: i64| {
+            [
+                Instruction::Move(atom("k"), Operand::X(0)),
+                Instruction::Move(Operand::Value(Term::Integer(value)), Operand::X(1)),
+                erlang_call("put", 2, false),
+            ]
+        };
+        let mut body = vec![Instruction::Allocate { stack_size: 3 }];
+        body.extend(put(1));
+        body.push(Instruction::Move(Operand::X(0), Operand::Y(0)));
+        body.extend(put(2));
+        body.push(Instruction::Move(Operand::X(0), Operand::Y(1)));
+        // `gen:get_parent/0` reads `get('$ancestors')` with
+        // `{bif,get,{f,0},[{atom,'$ancestors'}],{x,0}}`.
+        body.push(get_bif("k", Operand::Y(2)));
+        body.push(get_bif("other", Operand::X(0)));
+        body.extend([
+            Instruction::PutTuple {
+                elements: vec![Operand::Y(0), Operand::Y(1), Operand::Y(2), Operand::X(0)],
+                destination: Operand::X(0),
+            },
+            Instruction::Deallocate { stack_size: 3 },
+            Instruction::Return,
+        ]);
+        // ERTS 29.1.1: [put(k, 1), put(k, 2), get(k), get(other)] is
+        // [undefined,1,2,undefined].
+        let undefined = Term::static_atom("undefined");
+        assert_eq!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap(),
+            Term::Tuple(vec![
+                undefined.clone(),
+                Term::Integer(1),
+                Term::Integer(2),
+                undefined
+            ])
+        );
+    }
+
+    #[test]
+    fn starts_a_spawned_process_with_an_empty_dictionary() {
+        let mut body = vec![
+            Instruction::Move(atom("k"), Operand::X(0)),
+            Instruction::Move(atom("parent"), Operand::X(1)),
+            erlang_call("put", 2, false),
+            Instruction::Move(atom("fixture"), Operand::X(0)),
+            Instruction::Move(atom("fresh"), Operand::X(1)),
+            Instruction::Move(Operand::Value(Term::List(Vec::new())), Operand::X(2)),
+            Instruction::Move(
+                Operand::Value(Term::List(vec![test_atom("monitor")])),
+                Operand::X(3),
+            ),
+            erlang_call("spawn_opt", 4, false),
+        ];
+        body.extend(wait_forever());
+        let mut program = make_program(body, 0);
+        let module = program.modules.get_mut("fixture").unwrap();
+        module.exports.insert(("fresh".into(), 0), 11);
+        module.instructions.extend([
+            Instruction::FunctionInfo {
+                module: "fixture".into(),
+                name: "fresh".into(),
+                arity: 0,
+            },
+            Instruction::Label(11),
+            get_bif("k", Operand::X(0)),
+            erlang_call("exit", 1, true),
+        ]);
+        // ERTS 29.1.1: after put(k, parent), a spawned process gets
+        // undefined for get(k).
+        assert!(matches!(
+            program.execute("fixture", "main", &[]),
+            Ok(Term::Tuple(ref elements))
+                if elements.first() == Some(&test_atom("DOWN"))
+                    && elements.last() == Some(&Term::static_atom("undefined"))
+        ));
+    }
+
+    #[test]
+    fn appends_lists_as_pinned_erts() {
+        let integers =
+            |values: &[i64]| Term::List(values.iter().copied().map(Term::Integer).collect());
+        let append = |left: Term, right: Term| call_ext_with("erlang", "++", vec![left, right]);
+        // ERTS 29.1.1: [] ++ x is x, and [1,2] ++ [3] is [1,2,3].
+        assert_eq!(
+            append(Term::List(Vec::new()), test_atom("x")).unwrap(),
+            test_atom("x")
+        );
+        assert_eq!(
+            append(integers(&[1, 2]), integers(&[3])).unwrap(),
+            integers(&[1, 2, 3])
+        );
+        // ERTS 29.1.1: [1] ++ x is the improper list [1|x], and a ++ []
+        // raises badarg.
+        assert_eq!(
+            append(integers(&[1]), test_atom("x"))
+                .unwrap_err()
+                .to_string(),
+            "unsupported erlang:++/2 tail Atom(\"x\"): not a list"
+        );
+        assert_eq!(
+            append(test_atom("a"), Term::List(Vec::new()))
+                .unwrap_err()
+                .to_string(),
+            "unresolved external MFA erlang:++/2"
+        );
+    }
+
+    #[test]
+    fn finds_key_tuples_as_pinned_erts() {
+        let tuple = |elements: Vec<Term>| Term::Tuple(elements);
+        let keyfind = |key: Term, position: Term, list: Vec<Term>| {
+            call_ext_with("lists", "keyfind", vec![key, position, Term::List(list)])
+        };
+        let (a, b) = (test_atom("a"), test_atom("b"));
+        // ERTS 29.1.1: lists:keyfind(b, 1, [{a,1},{b,2},{b,3}]) is {b,2}.
+        assert_eq!(
+            keyfind(
+                b.clone(),
+                Term::Integer(1),
+                vec![
+                    tuple(vec![a.clone(), Term::Integer(1)]),
+                    tuple(vec![b.clone(), Term::Integer(2)]),
+                    tuple(vec![b.clone(), Term::Integer(3)]),
+                ]
+            )
+            .unwrap(),
+            tuple(vec![b, Term::Integer(2)])
+        );
+        // ERTS 29.1.1: lists:keyfind(x, 1, []) is false.
+        assert_eq!(
+            keyfind(test_atom("x"), Term::Integer(1), Vec::new()).unwrap(),
+            Term::static_atom("false")
+        );
+        // ERTS 29.1.1: lists:keyfind(a, 2, [{1,a}, x, {a}, {2,a}]) is {1,a}:
+        // a term that is not a tuple and a tuple that is too short do not match.
+        assert_eq!(
+            keyfind(
+                a.clone(),
+                Term::Integer(2),
+                vec![
+                    tuple(vec![Term::Integer(1), a.clone()]),
+                    test_atom("x"),
+                    tuple(vec![a.clone()]),
+                    tuple(vec![Term::Integer(2), a.clone()]),
+                ]
+            )
+            .unwrap(),
+            tuple(vec![Term::Integer(1), a.clone()])
+        );
+        // ERTS 29.1.1 raises badarg for the positions 0, -1, and x, and for
+        // the list a.
+        assert_eq!(
+            keyfind(a.clone(), Term::Integer(0), Vec::new())
+                .unwrap_err()
+                .to_string(),
+            "unsupported lists:keyfind/3 position 0: below 1"
+        );
+        assert_eq!(
+            keyfind(a.clone(), Term::Integer(-1), vec![tuple(vec![a.clone()])])
+                .unwrap_err()
+                .to_string(),
+            "unsupported lists:keyfind/3 position -1: below 1"
+        );
+        assert_eq!(
+            keyfind(a.clone(), test_atom("x"), Vec::new())
+                .unwrap_err()
+                .to_string(),
+            "unresolved external MFA lists:keyfind/3"
+        );
+        assert_eq!(
+            call_ext_with("lists", "keyfind", vec![a.clone(), Term::Integer(1), a])
+                .unwrap_err()
+                .to_string(),
+            "unresolved external MFA lists:keyfind/3"
         );
     }
 }

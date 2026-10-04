@@ -51,6 +51,9 @@ pub(super) struct ProcessState {
     /// process starts as its own group leader, as `init` does in ERTS; a
     /// spawned process gets the group leader of its parent.
     pub(super) group_leader: ProcessId,
+    /// Process dictionary of `put/2` and `get/1`, as key and value pairs in
+    /// insertion order. Keys compare with exact equality (`=:=`).
+    pub(super) dictionary: Vec<(Term, Term)>,
 }
 
 impl ProcessState {
@@ -73,6 +76,7 @@ impl ProcessState {
             links: HashSet::new(),
             monitored_by: Vec::new(),
             group_leader: id,
+            dictionary: Vec::new(),
         }
     }
 
