@@ -159,6 +159,10 @@ fn orders_and_hashes_atom_keys_by_the_erts_atom_index() {
             ),
             // LitT creates pbeam_lit_b first, because it is the first tuple element.
             atoms("pbeam_lit_b,pbeam_lit_a"),
+            atom("pbeam_z_code"),
+            // ERTS puts the AtU8 atoms before the LitT atoms: pbeam_z_code is in AtU8
+            // and pbeam_a_lit is only in LitT, so index order is the reverse of name order.
+            atoms("pbeam_z_code,pbeam_a_lit"),
         ])
     );
 
@@ -171,7 +175,8 @@ fn orders_and_hashes_atom_keys_by_the_erts_atom_index() {
           dt_put_tag,reset,decentralized_counters,seq_trace,attributes,dotall,proc_sig,\
           match_spec_compile,schedulers_online,dirty,memory_internal,call_error_handler],\
           [true,abs_path,pbeam_zeta,pbeam_alpha],pbeam_lit_b,\
-          #{pbeam_lit_b => 2,pbeam_lit_a => 1},[pbeam_lit_b,pbeam_lit_a]}\n"
+          #{pbeam_lit_b => 2,pbeam_lit_a => 1},[pbeam_lit_b,pbeam_lit_a],pbeam_z_code,\
+          [pbeam_z_code,pbeam_a_lit]}\n"
     );
 }
 

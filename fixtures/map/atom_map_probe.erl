@@ -1,9 +1,9 @@
 -module(atom_map_probe).
--export([main/0, zeta/0, static40/1, mixed/1, literal/0, static_keys/0, static_all/0]).
+-export([main/0, zeta/0, static40/1, mixed/1, literal/0, z_code/0, mixed_chunks/0, static_keys/0, static_all/0]).
 
 main() ->
     {Tag, Literal} = ?MODULE:literal(),
-    {?MODULE:zeta(), maps:keys(?MODULE:static40(v)), maps:keys(?MODULE:mixed(v)), Tag, Literal, maps:keys(Literal)}.
+    {?MODULE:zeta(), maps:keys(?MODULE:static40(v)), maps:keys(?MODULE:mixed(v)), Tag, Literal, maps:keys(Literal), ?MODULE:z_code(), maps:keys(?MODULE:mixed_chunks())}.
 
 zeta() -> pbeam_zeta.
 
@@ -15,6 +15,11 @@ mixed(V) ->
 
 literal() ->
     {pbeam_lit_b, #{pbeam_lit_a => 1, pbeam_lit_b => 2}}.
+
+z_code() -> pbeam_z_code.
+
+mixed_chunks() ->
+    #{pbeam_a_lit => 1, pbeam_z_code => 2}.
 
 static_keys() ->
     maps:keys(?MODULE:static_all()).
