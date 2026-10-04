@@ -739,7 +739,7 @@ pub(super) fn parse_code(
             OPCODE_SELECT_VAL => {
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
-                let pair_count = read_selection_pair_count(data, &mut cursor)?;
+                let pair_count = read_pair_count(data, &mut cursor)?;
                 let mut choices = Vec::with_capacity(pair_count);
                 for _ in 0..pair_count {
                     let choice = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -758,7 +758,7 @@ pub(super) fn parse_code(
             OPCODE_SELECT_TUPLE_ARITY => {
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
-                let pair_count = read_selection_pair_count(data, &mut cursor)?;
+                let pair_count = read_pair_count(data, &mut cursor)?;
                 let mut choices = Vec::with_capacity(pair_count);
                 for _ in 0..pair_count {
                     let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
@@ -1127,20 +1127,9 @@ fn read_record_updates(
     atoms: &[Atom],
     literals: &[Option<Term>],
 ) -> Result<Vec<(u32, Operand)>, BeamError> {
-    if read_integer(data, cursor, TAG_LITERAL)? != LIST_SUBTAG {
-        return Err(error("unsupported BEAM record update list"));
-    }
-    let item_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
-        .map_err(|_| error("BEAM record update list is too large"))?;
-    // Each item takes at least one byte, so a larger count is malformed.
-    if item_count > data.len().saturating_sub(*cursor) {
-        return Err(error("BEAM record update list exceeds code chunk"));
-    }
-    if item_count % 2 != 0 {
-        return Err(error("BEAM record update list has an incomplete pair"));
-    }
-    let mut updates = Vec::with_capacity(item_count / 2);
-    for _ in 0..item_count / 2 {
+    let pair_count = read_pair_count(data, cursor)?;
+    let mut updates = Vec::with_capacity(pair_count);
+    for _ in 0..pair_count {
         let position = read_operand(data, cursor, TAG_UNSIGNED)? as u32;
         updates.push((position, read_move_operand(data, cursor, atoms, literals)?));
     }
@@ -1367,28 +1356,32 @@ fn skip_bytes(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), BeamE
     Ok(())
 }
 
-/// Read the extended list header of `select_val` or `select_tuple_arity`
-/// and return the number of `value, label` pairs.
+/// Read the extended list header of `select_val`, `select_tuple_arity`, or
+/// `update_record` and return the number of pairs in the list.
+///
+/// The header is the literal tag with `LIST_SUBTAG`, then an unsigned item
+/// count. A count that is odd, or larger than the bytes left in the chunk,
+/// is malformed.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let mut cursor = 0;
 /// // {list,[...]} with four items: two pairs.
-/// assert_eq!(read_selection_pair_count(&[0x17, 0x40], &mut cursor)?, 2);
+/// assert_eq!(read_pair_count(&[0x17, 0x40], &mut cursor)?, 2);
 /// ```
-fn read_selection_pair_count(data: &[u8], cursor: &mut usize) -> Result<usize, BeamError> {
+fn read_pair_count(data: &[u8], cursor: &mut usize) -> Result<usize, BeamError> {
     if read_integer(data, cursor, TAG_LITERAL)? != LIST_SUBTAG {
-        return Err(error("unsupported BEAM selection list"));
+        return Err(error("unsupported BEAM pair list"));
     }
     let item_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
-        .map_err(|_| error("BEAM selection list is too large"))?;
+        .map_err(|_| error("BEAM pair list is too large"))?;
     // Each item takes at least one byte, so a larger count is malformed.
     if item_count > data.len().saturating_sub(*cursor) {
-        return Err(error("BEAM selection list exceeds code chunk"));
+        return Err(error("BEAM pair list exceeds code chunk"));
     }
     if item_count % 2 != 0 {
-        return Err(error("BEAM selection list has an incomplete pair"));
+        return Err(error("BEAM pair list has an incomplete pair"));
     }
     Ok(item_count / 2)
 }
@@ -1478,9 +1471,9 @@ mod tests {
         OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
         OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
         OPCODE_TEST_IS_PORT, OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END,
-        parse_code, read_move_operand, read_operand_pairs, read_record_updates,
-        read_selection_pair_count, skip_counted_operands, skip_integer_payload, skip_operand,
-        skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
+        parse_code, read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
+        skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
+        test_kind, unsupported_opcode_operand_count,
     };
     use crate::{
         beam::code::{Instruction, Operand, TestKind},
@@ -1858,10 +1851,8 @@ mod tests {
                 .unwrap_err()
                 .to_string()
         };
-        assert!(error(&[0x27, 0x20]).contains("unsupported BEAM record update list"));
+        // The shared header reader rejects a list that is not a pair list.
         assert!(error(&[0x17, 0x10, 0x50]).contains("incomplete pair"));
-        // Eight items with no bytes left: rejected before any allocation.
-        assert!(error(&[0x17, 0x80]).contains("exceeds code chunk"));
         // A position must be an unsigned operand.
         assert!(error(&[0x17, 0x20, 0x03, 0x03]).contains("unexpected BEAM operand tag 3"));
     }
@@ -1884,19 +1875,19 @@ mod tests {
     }
 
     #[test]
-    fn reads_selection_list_headers_and_rejects_malformed_forms() {
+    fn reads_pair_list_headers_and_rejects_malformed_forms() {
         let mut cursor = 0;
         let list = [0x17, 0x40, 0x10, 0x15, 0x20, 0x25];
-        assert_eq!(read_selection_pair_count(&list, &mut cursor).unwrap(), 2);
+        assert_eq!(read_pair_count(&list, &mut cursor).unwrap(), 2);
         assert_eq!(cursor, 2);
-        assert_eq!(read_selection_pair_count(&[0x17, 0x00], &mut 0).unwrap(), 0);
-        assert!(read_selection_pair_count(&[], &mut 0).is_err());
-        assert!(read_selection_pair_count(&[0x17], &mut 0).is_err());
-        assert!(read_selection_pair_count(&[0x27, 0x00], &mut 0).is_err());
-        assert!(read_selection_pair_count(&[0x17, 0x10, 0x00], &mut 0).is_err());
+        assert_eq!(read_pair_count(&[0x17, 0x00], &mut 0).unwrap(), 0);
+        assert!(read_pair_count(&[], &mut 0).is_err());
+        assert!(read_pair_count(&[0x17], &mut 0).is_err());
+        assert!(read_pair_count(&[0x27, 0x00], &mut 0).is_err());
+        assert!(read_pair_count(&[0x17, 0x10, 0x00], &mut 0).is_err());
         // Eight items with no bytes left: rejected before any allocation.
         assert!(
-            read_selection_pair_count(&[0x17, 0x80], &mut 0)
+            read_pair_count(&[0x17, 0x80], &mut 0)
                 .unwrap_err()
                 .to_string()
                 .contains("exceeds code chunk")
