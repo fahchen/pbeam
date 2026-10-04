@@ -1,7 +1,8 @@
-//! `erlang` functions that ERTS 29.1.1 runs as BEAM code from `erlang.beam`
-//! and PBeam still runs in Rust. They are not BIFs: `erlang:is_builtin/3`
-//! returns `false` for them, so they are not in the BIF table. #87 removes
-//! this module and runs the functions from the pinned `erlang.beam`.
+//! Temporary Rust stand-ins for `erlang` functions that ERTS 29.1.1 runs as
+//! BEAM code from `erlang.beam`. They are not BIFs: `erlang:is_builtin/3`
+//! returns `false` for them, so they are not in the BIF table. PBeam does not
+//! load `erlang.beam` yet. #87 removes this module and runs the functions from
+//! the pinned `erlang.beam`.
 
 use super::*;
 

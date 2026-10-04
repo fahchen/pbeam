@@ -14,7 +14,7 @@ use crate::{
 use std::collections::HashMap;
 
 mod bif;
-mod erlang_beam;
+mod rust_stand_ins;
 
 use bif::{BifResult, is_bif};
 
@@ -302,15 +302,16 @@ impl BeamProgram {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     let arguments = call_arguments(&process.registers, *arity)?;
-                    // An `erlang.beam` function that PBeam still runs in Rust
+                    // A temporary Rust stand-in for an `erlang.beam` function
                     // comes first; #87 removes it. Then a BIF, then module code.
-                    let result = match erlang_beam::run(self, scheduler, module, name, &arguments) {
-                        Some(value) => Some(BifResult::Value(value?)),
-                        None if is_bif(module, name, *arity) => {
-                            Some(self.bif(scheduler, module, name, arguments)?)
-                        }
-                        None => None,
-                    };
+                    let result =
+                        match rust_stand_ins::run(self, scheduler, module, name, &arguments) {
+                            Some(value) => Some(BifResult::Value(value?)),
+                            None if is_bif(module, name, *arity) => {
+                                Some(self.bif(scheduler, module, name, arguments)?)
+                            }
+                            None => None,
+                        };
                     if let Some(result) = result {
                         let (target, arguments) = match result {
                             BifResult::Value(value) => {
