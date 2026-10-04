@@ -51,10 +51,21 @@ jobs:
         with:
           ref: main
 
+      # gh pr view accepts a number, a URL, and a branch name, but it reads
+      # the number out of a URL of any repository. Reject a foreign URL.
       - name: Read the PR number
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          case "$PR_INPUT" in
+            http*)
+              prefix="${{ github.server_url }}/$GITHUB_REPOSITORY/pull/"
+              case "$PR_INPUT" in
+                "$prefix"*) ;;
+                *) echo "The PR URL is not a PR of $GITHUB_REPOSITORY." >&2; exit 1 ;;
+              esac
+              ;;
+          esac
           number=$(gh pr view "$PR_INPUT" --json number --jq .number)
           echo "PR_NUMBER=$number" >> "$GITHUB_ENV"
 
