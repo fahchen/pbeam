@@ -22,13 +22,20 @@ parse_function(Function) ->
     case string:split(Function, "/", trailing) of
         [Name, Arity] when Name =/= "" ->
             try list_to_integer(Arity) of
-                N when N >= 0 -> {list_to_atom(Name), N};
+                N when N >= 0 -> {function_name(Name), N};
                 _ -> fail_function(Function)
             catch
                 error:badarg -> fail_function(Function)
             end;
         _ ->
             fail_function(Function)
+    end.
+
+%% Accept the quoted form that the output prints, such as '+', and take any other text as the atom name.
+function_name(Name) ->
+    case erl_scan:string(Name) of
+        {ok, [{atom, _, Atom}], _} -> Atom;
+        _ -> list_to_atom(Name)
     end.
 
 fail_function(Function) ->
