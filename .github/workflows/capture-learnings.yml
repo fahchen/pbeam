@@ -52,6 +52,9 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           ref: main
+          # The default writes the token into .git/config, where the grep tool
+          # of Copilot can read it. The push step sets its own credential.
+          persist-credentials: false
 
       # A manual run gives a PR number or a PR URL. Reduce it to the number
       # that every later step and the prompt use.
@@ -61,14 +64,19 @@ jobs:
           script: |
             const {owner, repo} = context.repo
             const input = process.env.PR_INPUT.trim()
-            // A URL of another repository holds a number that is valid here,
-            // so match the repository of the URL and not only the number.
-            const url = input.match(/^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
-            if (url && `${url[1]}/${url[2]}` !== `${owner}/${repo}`) {
-              core.setFailed(`The PR URL is not a PR of ${owner}/${repo}.`)
-              return
+            // A URL of another host or another repository holds a number that
+            // is valid here, so compare the whole prefix and not the number.
+            let number
+            if (/^[a-z][a-z0-9+.-]*:/i.test(input)) {
+              const prefix = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/pull/`
+              if (!input.startsWith(prefix)) {
+                core.setFailed(`The PR URL is not a PR of ${process.env.GITHUB_SERVER_URL}/${owner}/${repo}.`)
+                return
+              }
+              number = Number(input.slice(prefix.length).split(/[/?#]/)[0])
+            } else {
+              number = Number(input.replace(/^#/, ''))
             }
-            const number = Number(url ? url[3] : input.replace(/^#/, ''))
             if (!Number.isInteger(number) || number <= 0) {
               core.setFailed(`"${input}" is not a PR number or a PR URL.`)
               return
@@ -133,7 +141,7 @@ jobs:
           COPILOT_GITHUB_TOKEN: ${{ github.token }}
         run: |
           copilot -s --no-ask-user --model gpt-5.6-luna \
-            --allow-tool='write' \
+            --allow-tool="write($OUTPUT)" \
             --allow-tool='shell(grep:*)' \
             --allow-tool='shell(wc:*)' \
             --deny-tool='shell(gh:*)' \
@@ -157,23 +165,54 @@ jobs:
             }
             const comment = read('comment.md')
             if (!comment) return core.setFailed('Copilot wrote no comment.md.')
-            const captured = Boolean(read('knowledge.md'))
-            if (comment.startsWith('Captured review learnings') && !captured) {
-              return core.setFailed('comment.md claims a capture, but knowledge.md is missing.')
+            const claims = comment.startsWith('Captured review learnings')
+            // The prompt may write either file, or both.
+            const files = ['knowledge.md', 'improvements.md'].filter(name => read(name))
+            const captured = files.length > 0
+            // The comment and the artifacts must agree in both directions. A
+            // claim without a file hides a failure, and a file without a
+            // claim publishes entries that the comment does not report.
+            if (claims !== captured) {
+              return core.setFailed(claims
+                ? 'comment.md claims a capture, but no knowledge.md and no improvements.md exist.'
+                : `${files.join(' and ')} exists, but comment.md reports no capture.`)
             }
             if (captured && !read('pr-body.md')) {
-              return core.setFailed('knowledge.md exists, but pr-body.md is missing.')
+              return core.setFailed(`${files.join(' and ')} exists, but pr-body.md is missing.`)
+            }
+            // The prompt allows 2 new rules in knowledge.md for one PR, and
+            // no change to the text of an entry that the run does not add.
+            const headings = text => (text.match(/^## .*$/gm) ?? [])
+            for (const name of files) {
+              const before = headings(fs.readFileSync(`docs/agents/${name}`, 'utf8'))
+              const added = headings(read(name)).filter(h => !before.includes(h))
+              const removed = before.filter(h => !headings(read(name)).includes(h))
+              if (removed.length) {
+                return core.setFailed(`${name} drops the entries: ${removed.join(', ')}`)
+              }
+              if (name === 'knowledge.md' && added.length > 2) {
+                return core.setFailed(`knowledge.md adds ${added.length} rules, and the limit for one PR is 2.`)
+              }
             }
             core.setOutput('captured', String(captured))
+            core.setOutput('files', files.join(' '))
 
       - name: Commit and push the knowledge branch
         if: steps.result.outputs.captured == 'true'
+        env:
+          # The checkout keeps no credential, so the push carries its own.
+          GITHUB_TOKEN: ${{ github.token }}
+          FILES: ${{ steps.result.outputs.files }}
         run: |
+          git remote set-url origin \
+            "https://x-access-token:$GITHUB_TOKEN@${GITHUB_SERVER_URL#https://}/$GITHUB_REPOSITORY.git"
           branch="learnings/pr-$PR_NUMBER"
           git switch -c "$branch"
-          cp "$OUTPUT/knowledge.md" docs/agents/knowledge.md
-          git commit -m "docs: capture review learnings from #$PR_NUMBER" \
-            -- docs/agents/knowledge.md
+          for name in $FILES; do
+            cp "$OUTPUT/$name" "docs/agents/$name"
+            git add "docs/agents/$name"
+          done
+          git commit -m "docs: capture review learnings from #$PR_NUMBER"
           # A re-run replaces the branch of the earlier run and reuses its PR.
           git push --force origin "$branch"
 
@@ -210,11 +249,14 @@ jobs:
         uses: actions/github-script@v9.0.0
         with:
           script: |
-            // PR_NUMBER is empty when the step that reads it is the one that
-            // failed. The raw input is a number or a URL that ends with one.
-            const input = process.env.PR_NUMBER || process.env.PR_INPUT
-            const issue_number = Number(input.trim().replace(/^#/, '').match(/\d+$/)?.[0])
-            if (!issue_number) return
+            // Only the validated number is safe. An unvalidated input can
+            // name a PR of another repository, so a number taken from it
+            // would send this report to an unrelated PR of this repository.
+            const issue_number = Number(process.env.PR_NUMBER)
+            if (!issue_number) {
+              core.warning('The PR number is not known, so no comment was posted.')
+              return
+            }
             const url = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${context.runId}`
             await github.rest.issues.createComment({
               ...context.repo, issue_number,

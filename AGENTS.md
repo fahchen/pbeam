@@ -8,7 +8,7 @@ Before coding, load project knowledge into context:
 2. **Scan titles only:** `docs/agents/improvements.md` — read the `## YYYYMMDD: Title` headings. Read the full entry only when a title is relevant to your current task
 3. **Scan frontmatter only:** `docs/agents/postmortems/*.md` — read the YAML `description:` field and file path. Read the full postmortem only when relevant
 
-Write `docs/agents/knowledge.md` only through the `capture-learnings` skill. Use `/agent-docs:update-knowledge` only for `patterns.md`, `improvements.md`, and `postmortems/`.
+Write `docs/agents/knowledge.md` and `docs/agents/improvements.md` only through the `capture-learnings` skill. The skill sends a problem class that recurs to `knowledge.md`, and a single wrong turn with a lesson to `improvements.md`. Use `/agent-docs:update-knowledge` only for `patterns.md` and `postmortems/`.
 
 ## Scope and source of truth
 
