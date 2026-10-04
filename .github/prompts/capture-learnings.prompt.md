@@ -10,10 +10,15 @@ The caller gives two values before this prompt:
 - `OUTPUT: <dir>`: a directory outside the repository for the result files.
   A local run without `OUTPUT` uses a new temporary directory.
 
-Use the repository of the current checkout. This prompt writes result files
-into `OUTPUT` and changes nothing else. It does not edit the repository,
-commit, push, open PRs, or comment. The caller does all of that with the
-result files (see `## 5. Publish the result`).
+Use the repository of the current checkout. The two modes have different
+limits.
+
+- **CI run** (`MODE: ci` is given): write files into `OUTPUT` and change
+  nothing else. Do not edit the repository, commit, push, open PRs, or
+  comment. The caller does all of that with the result files (see
+  `## 5. Publish the result`).
+- **Local run:** edit `docs/agents/knowledge.md` and commit it on the PR
+  branch. Do not push, open PRs, or comment.
 
 Run the capture-learnings skill for that PR. Read
 `.agents/skills/capture-learnings/SKILL.md`, its references, `AGENTS.md`, and
@@ -103,7 +108,7 @@ the PR.
 ## Limits
 
 - Local run: change only `docs/agents/knowledge.md`. CI run: write only files
-  in `OUTPUT`.
+  in `OUTPUT`, and change no file in the repository.
 - Keep the Markdown style of the knowledge file: line length 80 or less, one
   blank line around headings.
 - Write all text in ASD-STE100 Simplified Technical English.
