@@ -1152,6 +1152,23 @@ mod tests {
     }
 
     #[test]
+    fn sign_extends_large_integer_operands_as_erts() {
+        let integer = |bytes: &[u8]| read_value(bytes, &mut 0, &[]).unwrap();
+        // erlc 29.1.1 writes {integer,-1} as [0x19, 0xFF, 0xFF].
+        assert_eq!(integer(&[0x19, 0xFF, 0xFF]), Term::Integer(-1));
+        // {integer,-101714049538469044}: size code 6 gives eight bytes.
+        assert_eq!(
+            integer(&[0xD9, 0xFE, 0x96, 0xA3, 0x9C, 0x60, 0x97, 0xD3, 0x4C]),
+            Term::Integer(-101714049538469044)
+        );
+        // A leading zero byte keeps a large payload positive.
+        assert_eq!(integer(&[0x39, 0x00, 0xFF, 0xFF]), Term::Integer(65535));
+        // The short and extended forms are never negative.
+        assert_eq!(integer(&[0xF1]), Term::Integer(15));
+        assert_eq!(integer(&[0xE9, 0xFF]), Term::Integer(2047));
+    }
+
+    #[test]
     fn reads_only_supported_move_literals() {
         let literals = vec![Some(Term::Binary(b"ok".to_vec())), None];
         assert!(matches!(

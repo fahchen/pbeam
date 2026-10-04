@@ -107,7 +107,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// import_count ::= u32be
 /// import ::= module_atom_index:u32be function_atom_index:u32be arity:u32be
 /// value       ::= integer_value | atom_value
-/// integer_value ::= compact(1)
+/// integer_value ::= compact(1) ; a large(1) payload is two's complement
 /// atom_value  ::= compact(2)
 /// nil_value ::= compact(2) ; atom index zero
 /// literals_chunk ::= "LitT" chunk_size 0:u32be literal_count literal_entry*
@@ -123,9 +123,10 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// list_term   ::= 108 length:u32be external_term[length] tail:external_term
 /// map_term    ::= 116 pair_count:u32be (key:atom_term value:external_term)[pair_count]
 ///
-/// compact(tag) ::= short(tag) | extended(tag)
+/// compact(tag) ::= short(tag) | extended(tag) | large(tag)
 /// short(tag)   ::= value:4 0 tag:3
 /// extended(tag) ::= high:3 1 0 tag:3 low:8
+/// large(tag)   ::= size_code:3 1 1 tag:3 byte[size_code + 2] ; size_code in 0..=6
 /// ```
 ///
 /// `container_size` counts bytes after its field, including `BEAM` and chunks.
@@ -147,8 +148,12 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// the same list. A map literal keeps its pairs sorted by atom key. The
 /// parser retains generated instructions that it does not execute. Execution
 /// fails if it reaches one. Compact
-/// tags occupy the low three bits. The parser accepts the short and one-byte
-/// extension forms only. Bit fields are shown from high bit to low bit. Other
+/// tags occupy the low three bits. A `large` payload is big-endian. ERTS
+/// sign-extends the payload of `large(1)` only, so `{integer,-1}` is
+/// `[0x19, 0xFF, 0xFF]` and `{integer,-101714049538469044}` is `[0xD9]`
+/// followed by its eight two's-complement bytes. The `short` and `extended`
+/// forms are never negative. A payload of more than 8 bytes (a bignum) is an
+/// error. Bit fields are shown from high bit to low bit. Other
 /// chunk payloads and padding byte values are ignored. The `ImpT` chunk maps
 /// external call indexes to module/function/arity. The executor supports only
 /// the listed instructions.
@@ -610,10 +615,8 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term,
         .ok_or_else(|| error("truncated BEAM operand"))?;
     match first_byte & COMPACT_TAG_MASK {
         TAG_INTEGER => {
-            let value = read_integer(data, cursor, TAG_INTEGER)?;
-            Ok(Term::Integer(
-                i64::try_from(value).map_err(|_| error("integer constant exceeds i64"))?,
-            ))
+            let payload = read_operand(data, cursor, TAG_INTEGER)?;
+            Ok(Term::Integer(sign_extend(first_byte, payload)))
         }
         TAG_ATOM => {
             let index = read_operand(data, cursor, TAG_ATOM)? as usize;
@@ -626,6 +629,33 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[String]) -> Result<Term,
             "unsupported constant operand tag {unsupported_tag}"
         ))),
     }
+}
+
+/// Return the signed value of a `TAG_INTEGER` payload, as ERTS
+/// `beamreader_read_tagged` does. The short and two-byte forms hold a value
+/// in `0..2048`. The extended form holds 2 to 8 big-endian bytes in two's
+/// complement, so ERTS sign-extends them from the highest payload bit.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {integer,-1} is [0x19, 0xFF, 0xFF]: two payload bytes.
+/// assert_eq!(sign_extend(0x19, 0xFFFF), -1);
+/// // {integer,65535} is [0x39, 0x00, 0xFF, 0xFF]: three payload bytes.
+/// assert_eq!(sign_extend(0x39, 0xFFFF), 65535);
+/// // {integer,2047} is [0xE9, 0xFF]: the two-byte form has no sign.
+/// assert_eq!(sign_extend(0xE9, 0x7FF), 2047);
+/// ```
+fn sign_extend(first_byte: u8, payload: u64) -> i64 {
+    let extended = COMPACT_EXTENDED_FLAG | COMPACT_SIGN_FLAG;
+    if first_byte & extended != extended {
+        return payload as i64;
+    }
+    // A payload of 9 or more bytes fails in `read_integer_after_first`, so the
+    // size code here is 0..=6 and the payload has 2..=8 bytes.
+    let payload_bits = u32::from(first_byte >> 5) * 8 + 16;
+    let shift = u64::BITS - payload_bits;
+    ((payload << shift) as i64) >> shift
 }
 
 /// Return the atom at a one-based BEAM atom index.
