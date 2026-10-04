@@ -67,6 +67,14 @@ jobs:
               ;;
           esac
           number=$(gh pr view "$PR_INPUT" --json number --jq .number)
+          # The pull_request trigger rejects a fork PR, because the job holds a
+          # write token. A manual run gets the same restriction.
+          head=$(gh pr view "$number" --json headRepositoryOwner,headRepository \
+            --jq '.headRepositoryOwner.login + "/" + .headRepository.name')
+          if [ "$head" != "$GITHUB_REPOSITORY" ]; then
+            echo "PR #$number comes from the fork $head." >&2
+            exit 1
+          fi
           echo "PR_NUMBER=$number" >> "$GITHUB_ENV"
 
       # Every comment on the PR can become a rule, whatever its author. The
