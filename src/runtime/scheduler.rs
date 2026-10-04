@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::process::{Frame, ProcessState};
 use crate::{
@@ -26,6 +26,11 @@ pub(super) struct Scheduler {
     next_reference: u64,
     /// Return value or exit reason of the root process after it exits.
     root_result: Option<Result<Term, Term>>,
+    /// Registered names, as the keys of the ERTS `process_reg` table. An
+    /// atom name is unique in one atom table, so its text identifies it. The
+    /// process of a name is its `registered_name` field; no caller looks up
+    /// a process by name yet.
+    names: HashSet<String>,
 }
 
 impl Scheduler {
@@ -288,11 +293,44 @@ impl Scheduler {
         true
     }
 
-    /// Remove the current process after it exits. Send `EXIT` to linked
-    /// processes that trap exits, then `DOWN` to monitors. ERTS sends link
-    /// exit signals before monitor down signals (`erl_process.c`,
-    /// `ERTS_CONTINUE_EXIT_LINKS` runs before `ERTS_CONTINUE_EXIT_MONITORS`),
-    /// and a process that traps exits also receives a `normal` exit.
+    /// Give the name `name` to the live process `id`, as `erlang:register/2`
+    /// does. Return `false` and change nothing when ERTS
+    /// `erts_register_name` (`register.c`) fails: `name` is not an atom or
+    /// is `undefined`, `id` is not a pid, the process is not alive, the
+    /// process has a name, or another process has the name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
+    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// ```
+    pub(super) fn register(&mut self, name: &Term, id: &Term) -> bool {
+        let (Term::Atom(name), Term::Pid(id)) = (name, id) else {
+            return false;
+        };
+        match self.processes.get_mut(id) {
+            Some(process)
+                if name.name() != "undefined"
+                    && process.registered_name.is_none()
+                    && !self.names.contains(name.name()) =>
+            {
+                process.registered_name = Some(name.clone());
+                self.names.insert(name.name().to_owned());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Remove the current process after it exits. Free its registered name
+    /// first, then send `EXIT` to linked processes that trap exits, then
+    /// `DOWN` to monitors. ERTS (`erl_process.c`) unregisters the name in
+    /// `ERTS_CONTINUE_EXIT_FREE`, before `ERTS_CONTINUE_EXIT_LINKS` and
+    /// `ERTS_CONTINUE_EXIT_MONITORS`, and sends link exit signals before
+    /// monitor down signals. A process that traps exits also receives a
+    /// `normal` exit.
     ///
     /// # Examples
     ///
@@ -314,6 +352,9 @@ impl Scheduler {
             .take()
             .and_then(|id| self.processes.remove(&id))
             .expect("the scheduler has a current process");
+        if let Some(name) = &process.registered_name {
+            self.names.remove(name.name());
+        }
         let normal = reason == Term::static_atom("normal");
         if process.id == ProcessId(0) {
             self.root_result = Some(match result {
@@ -503,5 +544,32 @@ mod tests {
         assert!(scheduler.demonitor(reference));
         assert!(scheduler.processes[&child].monitored_by.is_empty());
         assert!(!scheduler.demonitor(reference));
+    }
+
+    #[test]
+    fn frees_the_name_of_a_process_when_it_exits() {
+        // ERTS 29.1.1: after a named process exits, register(Name, self())
+        // in another process is true.
+        let mut scheduler = Scheduler::default();
+        scheduler.start(frame(), vec![]).unwrap();
+        scheduler.schedule_next();
+        let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
+        let name = atom("pbeam_probe_reg");
+        assert!(scheduler.register(&name, &Term::Pid(child)));
+        assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
+        scheduler.park_current();
+
+        scheduler.schedule_next();
+        scheduler.finish_current(atom("normal"), None).unwrap();
+        assert!(scheduler.names.is_empty());
+        assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+        assert!(scheduler.names.contains("pbeam_probe_reg"));
+        assert_eq!(
+            scheduler.processes[&ProcessId(0)]
+                .registered_name
+                .clone()
+                .map(Term::Atom),
+            Some(name)
+        );
     }
 }

@@ -1,5 +1,6 @@
 mod atom;
 mod map;
+mod order;
 
 pub use atom::Atom;
 pub(crate) use atom::AtomTable;

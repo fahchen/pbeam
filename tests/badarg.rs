@@ -8,14 +8,15 @@ const BADARG_PROBE: &[u8] = include_bytes!("../fixtures/badarg/badarg_probe.beam
 fn raises_badarg_that_catch_and_try_catch_as_pinned_erts() {
     // Each `catch` of the probe gets `{'EXIT', {badarg, Stack}}` with a list
     // as `Stack`. The probe runs `element/2` through a `bif` instruction
-    // with fail label 0, and the other BIFs through `call_ext`. PBeam gives
-    // the stack trace `[]`; this is the "Exception stack trace" row in
-    // `docs/erts-differences.md`.
+    // with fail label 0, and the other BIFs through `call_ext`.
+    // `process_info/2` raises badarg for a first argument that is not a pid
+    // and for an item that is not valid. PBeam gives the stack trace `[]`;
+    // this is the "Exception stack trace" row in `docs/erts-differences.md`.
     let program = BeamProgram::load(&[BADARG_PROBE]).unwrap();
     let badarg = Term::Atom(program.atom("badarg").unwrap());
     let error = Term::Atom(program.atom("error").unwrap());
     let caught = Term::Tuple(vec![error, badarg.clone()]);
-    let mut expected = vec![badarg; 9];
+    let mut expected = vec![badarg; 11];
     expected.extend([caught.clone(), caught]);
     assert_eq!(
         program.execute("badarg_probe", "main", &[]).unwrap(),
@@ -36,6 +37,6 @@ fn raises_badarg_that_catch_and_try_catch_as_pinned_erts() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         reference.stdout,
-        b"{badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,{error,badarg},{error,badarg}}\n"
+        b"{badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,{error,badarg},{error,badarg}}\n"
     );
 }

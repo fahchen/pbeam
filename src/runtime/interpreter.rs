@@ -332,14 +332,15 @@ impl BeamProgram {
                     }
                 }
                 Instruction::Bif {
-                    module,
+                    fail_label,
+                    module: bif_module,
                     name,
                     arguments,
                     destination,
                 } => {
-                    if !is_bif(module, name, arguments.len() as u32) {
+                    if !is_bif(bif_module, name, arguments.len() as u32) {
                         return Err(error(format!(
-                            "unsupported BIF {module}:{name}/{}",
+                            "unsupported BIF {bif_module}:{name}/{}",
                             arguments.len()
                         )));
                     }
@@ -349,11 +350,16 @@ impl BeamProgram {
                         .collect::<Result<Vec<_>, _>>()?;
                     // A `bif` instruction with fail label 0 raises the
                     // exception of the BIF, as `handle_error` does in ERTS
-                    // (`bif_instrs.tab`).
-                    let result = self.bif(scheduler, module, name, values)?;
+                    // (`bif_instrs.tab`). Another fail label jumps to the
+                    // label and raises nothing (`$FAIL($Fail)` in
+                    // `i_bif.call`).
+                    let result = self.bif(scheduler, bif_module, name, values)?;
                     let process = scheduler.current_process_mut();
                     match result {
                         BifResult::Value(value) => write(process, destination, value)?,
+                        BifResult::Raise { .. } if *fail_label != 0 => {
+                            jump(module, process, *fail_label)?
+                        }
                         BifResult::Raise { class, reason } => {
                             if let Some(outcome) = raise(process, class, reason) {
                                 return Ok(outcome);
@@ -363,7 +369,7 @@ impl BeamProgram {
                         // BIF that does not trap.
                         trap => {
                             return Err(error(format!(
-                                "unsupported {module}:{name}/{} result {trap:?}",
+                                "unsupported {bif_module}:{name}/{} result {trap:?}",
                                 arguments.len()
                             )));
                         }
@@ -482,6 +488,18 @@ impl BeamProgram {
                     right,
                 } => {
                     if read(process, left)? != read(process, right)? {
+                        jump(module, process, *fail_label)?;
+                    }
+                }
+                Instruction::TestGreaterEqual {
+                    fail_label,
+                    left,
+                    right,
+                } => {
+                    if read(process, left)?
+                        .compare(&read(process, right)?)?
+                        .is_lt()
+                    {
                         jump(module, process, *fail_label)?;
                     }
                 }
@@ -1380,6 +1398,7 @@ mod tests {
         );
         assert!(
             error(vec![Instruction::Bif {
+                fail_label: 0,
                 module: "erlang".into(),
                 name: "date".into(),
                 arguments: Vec::new(),
@@ -1389,6 +1408,7 @@ mod tests {
         );
         assert!(
             error(vec![Instruction::Bif {
+                fail_label: 0,
                 module: "lists".into(),
                 name: "node".into(),
                 arguments: Vec::new(),
@@ -1768,9 +1788,15 @@ mod tests {
                 .to_string(),
             "unsupported chardata Integer(1): not a binary or a list"
         );
+        // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], utf8)
+        // is <<"Hello\n">>.
         assert_eq!(
-            convert(chardata(), "utf8").unwrap_err().to_string(),
-            "unsupported unicode:characters_to_binary/2 encoding Atom(\"utf8\")"
+            convert(chardata(), "utf8").unwrap(),
+            Term::Binary(b"Hello\n".to_vec())
+        );
+        assert_eq!(
+            convert(chardata(), "latin1").unwrap_err().to_string(),
+            "unsupported unicode:characters_to_binary/2 encoding Atom(\"latin1\")"
         );
     }
 
@@ -2432,6 +2458,7 @@ mod tests {
         let body = vec![
             erlang_call("make_ref", 0, false),
             Instruction::Bif {
+                fail_label: 0,
                 module: "erlang".into(),
                 name: "demonitor".into(),
                 arguments: vec![
@@ -2457,12 +2484,14 @@ mod tests {
             make_program(
                 vec![
                     Instruction::Bif {
+                        fail_label: 0,
                         module: "erlang".into(),
                         name: "self".into(),
                         arguments: Vec::new(),
                         destination: Operand::X(1),
                     },
                     Instruction::Bif {
+                        fail_label: 0,
                         module: "erlang".into(),
                         name: "node".into(),
                         arguments,
@@ -2533,6 +2562,7 @@ mod tests {
         let program = make_program(
             vec![
                 Instruction::Bif {
+                    fail_label: 0,
                     module: "erlang".into(),
                     name: "self".into(),
                     arguments: Vec::new(),
@@ -2746,6 +2776,7 @@ mod tests {
 
     fn get_bif(key: &str, destination: Operand) -> Instruction {
         Instruction::Bif {
+            fail_label: 0,
             module: "erlang".into(),
             name: "get".into(),
             arguments: vec![atom(key)],
@@ -2938,8 +2969,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn finds_list_members_as_pinned_erts() {
+        let member =
+            |element: Term, list: Term| call_ext_with("lists", "member", vec![element, list]);
+        // ERTS 29.1.1: lists:member(a, []) is false, and lists:member(1, [1])
+        // is true.
+        assert_eq!(
+            member(test_atom("a"), Term::List(Vec::new())).unwrap(),
+            Term::static_atom("false")
+        );
+        assert_eq!(
+            member(Term::Integer(1), Term::List(vec![Term::Integer(1)])).unwrap(),
+            Term::static_atom("true")
+        );
+        // ERTS 29.1.1: lists:member(a, x) raises badarg.
+        assert_eq!(
+            member(test_atom("a"), test_atom("x"))
+                .unwrap_err()
+                .to_string(),
+            BADARG_EXIT
+        );
+    }
+
     fn element_bif(index: i64, tuple: Operand, destination: Operand) -> Instruction {
         Instruction::Bif {
+            fail_label: 0,
             module: "erlang".into(),
             name: "element".into(),
             arguments: vec![Operand::Value(Term::Integer(index)), tuple],
@@ -2986,11 +3041,47 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_tuple_size_as_pinned_erts() {
+        let tuple_size = |term: Term| call_ext_with("erlang", "tuple_size", vec![term]);
+        // ERTS 29.1.1: tuple_size({}) is 0, and tuple_size(a) raises badarg.
+        assert_eq!(tuple_size(Term::Tuple(vec![])).unwrap(), Term::Integer(0));
+        assert_eq!(
+            tuple_size(test_atom("a")).unwrap_err().to_string(),
+            BADARG_EXIT
+        );
+    }
+
+    #[test]
+    fn rejects_is_ge_on_two_different_references() {
+        // ERTS orders two references by the scheduler thread that made each
+        // one; this is the "Term order" row in `docs/erts-differences.md`.
+        let reference = |number| Operand::Value(Term::Reference(crate::Reference(number)));
+        let body = vec![
+            Instruction::TestGreaterEqual {
+                fail_label: 3,
+                left: reference(1),
+                right: reference(2),
+            },
+            Instruction::Label(3),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            make_program(body, 0)
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            "unsupported term order of two references Reference(Reference(1)) and \
+             Reference(Reference(2))"
+        );
+    }
+
+    #[test]
     fn reads_an_empty_current_stacktrace_of_the_calling_process() {
         // `STACKTRACE()` in the pinned `gen_statem` is
         // `element(2, erlang:process_info(self(), current_stacktrace))`.
         let body = vec![
             Instruction::Bif {
+                fail_label: 0,
                 module: "erlang".into(),
                 name: "self".into(),
                 arguments: Vec::new(),
@@ -3017,42 +3108,88 @@ mod tests {
                 .unwrap(),
             Term::Tuple(vec![stacktrace, Term::List(Vec::new())])
         );
-        // ERTS 29.1.1: process_info(self(), registered_name) is [], the
-        // current_stacktrace of another process is its frames, and
-        // process_info(a, current_stacktrace) raises badarg.
-        let other = Term::Pid(crate::ProcessId(99));
+        let process_info = |process: Term, item: Term| {
+            call_ext_with("erlang", "process_info", vec![process, item])
+        };
+        let root = || Term::Pid(crate::ProcessId(0));
+        let dictionary = || Term::Tuple(vec![test_atom("dictionary"), test_atom("k")]);
+        // ERTS 29.1.1 checks the item before the process. It raises badarg for
+        // process_info(a, current_stacktrace), process_info(a, bogus_item),
+        // process_info(self(), bogus_item), process_info(self(), 5),
+        // process_info(self(), [registered_name, bogus]), and
+        // process_info(self(), {bogus, k}).
         for (process, item) in [
-            (other, test_atom("current_stacktrace")),
             (test_atom("a"), test_atom("current_stacktrace")),
+            (test_atom("a"), test_atom("bogus_item")),
+            (Term::Pid(crate::ProcessId(99)), test_atom("bogus_item")),
+            (root(), test_atom("bogus_item")),
+            (root(), Term::Integer(5)),
+            (
+                root(),
+                Term::List(vec![test_atom("registered_name"), test_atom("bogus")]),
+            ),
+            (
+                root(),
+                Term::Tuple(vec![test_atom("bogus"), test_atom("k")]),
+            ),
         ] {
             assert_eq!(
-                call_ext_with(
-                    "erlang",
-                    "process_info",
-                    vec![process.clone(), item.clone()]
-                )
-                .unwrap_err()
-                .to_string(),
+                process_info(process, item).unwrap_err().to_string(),
+                BADARG_EXIT
+            );
+        }
+        // ERTS 29.1.1: the current_stacktrace of another process is its
+        // frames, a process that is not alive gives undefined,
+        // process_info(self(), {dictionary, k}) is {{dictionary, k}, undefined},
+        // and process_info(self(), [registered_name]) is
+        // [{registered_name, []}]. PBeam does not implement them yet.
+        for (process, item) in [
+            (
+                Term::Pid(crate::ProcessId(99)),
+                test_atom("current_stacktrace"),
+            ),
+            (root(), dictionary()),
+            (root(), Term::List(vec![test_atom("registered_name")])),
+            (root(), test_atom("status")),
+        ] {
+            assert_eq!(
+                process_info(process.clone(), item.clone())
+                    .unwrap_err()
+                    .to_string(),
                 format!("unsupported erlang:process_info/2 arguments {process:?}, {item:?}")
             );
         }
-        let body = vec![
-            Instruction::Bif {
-                module: "erlang".into(),
-                name: "self".into(),
-                arguments: Vec::new(),
-                destination: Operand::X(0),
-            },
-            Instruction::Move(atom("registered_name"), Operand::X(1)),
-            erlang_call("process_info", 2, true),
-        ];
-        assert!(
-            make_program(body, 0)
-                .execute("fixture", "main", &[])
-                .unwrap_err()
-                .to_string()
-                .ends_with(", Atom(\"registered_name\")")
+        // ERTS 29.1.1: process_info(self(), registered_name) is [] for a
+        // process without a name.
+        assert_eq!(
+            call_ext_with(
+                "erlang",
+                "process_info",
+                vec![Term::Pid(crate::ProcessId(0)), test_atom("registered_name")]
+            )
+            .unwrap(),
+            Term::List(Vec::new())
         );
+    }
+
+    #[test]
+    fn registers_a_name_or_raises_badarg_as_pinned_erts() {
+        let register = |name: Term, id: Term| call_ext_with("erlang", "register", vec![name, id]);
+        let root = Term::Pid(crate::ProcessId(0));
+        // ERTS 29.1.1: register(a, self()) is true.
+        assert_eq!(
+            register(test_atom("a"), root.clone()).unwrap(),
+            test_atom("true")
+        );
+        // ERTS 29.1.1 raises badarg for register(1, self()), register(a, x),
+        // and register(a, Pid) with a process that is not alive.
+        for (name, id) in [
+            (Term::Integer(1), root),
+            (test_atom("a"), test_atom("x")),
+            (test_atom("a"), Term::Pid(crate::ProcessId(99))),
+        ] {
+            assert_eq!(register(name, id).unwrap_err().to_string(), BADARG_EXIT);
+        }
     }
 
     #[test]

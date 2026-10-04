@@ -12,6 +12,8 @@ main() ->
      reason(catch apply_name()),
      reason(catch element(?MODULE:id(0), {a})),
      reason(catch element(1, ?MODULE:id([a]))),
+     reason(catch process_info(?MODULE:id(foo), registered_name)),
+     reason(catch process_info(self(), ?MODULE:id(bogus_item))),
      try lists:keyfind(a, ?MODULE:id(x), []) catch error:R1 -> {error, R1} end,
      try element(?MODULE:id(2), {a}) catch error:R2 -> {error, R2} end}.
 

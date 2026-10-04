@@ -298,9 +298,80 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
         .map_or_else(BifResult::badarg, |element| Value(element.clone()))
 }
 
-/// Run `erlang:process_info/2` for the calling process and the item
-/// `current_stacktrace`. Return `{current_stacktrace, []}`, because PBeam
-/// records no stack frames. Any other process or item gives a runtime error.
+/// The item atoms that `erlang:process_info/2` accepts (`pi_arg2ix` in
+/// `erl_bif_info.c`). The tuple `{dictionary, Key}` is also an item.
+const PROCESS_INFO_ITEMS: [&str; 40] = [
+    "registered_name",
+    "current_function",
+    "initial_call",
+    "status",
+    "messages",
+    "message_queue_len",
+    "links",
+    "monitors",
+    "monitored_by",
+    "dictionary",
+    "trap_exit",
+    "error_handler",
+    "heap_size",
+    "stack_size",
+    "memory",
+    "garbage_collection",
+    "group_leader",
+    "reductions",
+    "priority",
+    "trace",
+    "binary",
+    "sequential_trace_token",
+    "catchlevel",
+    "backtrace",
+    "last_calls",
+    "total_heap_size",
+    "suspending",
+    "min_heap_size",
+    "min_bin_vheap_size",
+    "max_heap_size",
+    "current_location",
+    "current_stacktrace",
+    "message_queue_data",
+    "garbage_collection_info",
+    "magic_ref",
+    "fullsweep_after",
+    "parent",
+    "async_dist",
+    "label",
+    "priority_messages",
+];
+
+/// Return whether a term is one `erlang:process_info/2` item: an atom of
+/// `PROCESS_INFO_ITEMS` or a tuple `{dictionary, Key}`, as `pi_arg2ix`
+/// (`erl_bif_info.c`) accepts.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_process_info_item(&Term::static_atom("registered_name")));
+/// let lookup = Term::Tuple(vec![Term::static_atom("dictionary"), Term::Integer(1)]);
+/// assert!(is_process_info_item(&lookup));
+/// assert!(!is_process_info_item(&Term::static_atom("ok")));
+/// ```
+fn is_process_info_item(item: &Term) -> bool {
+    match item {
+        Term::Atom(name) => PROCESS_INFO_ITEMS.contains(&name.name()),
+        Term::Tuple(elements) => {
+            matches!(elements.as_slice(), [Term::Atom(key), _] if key.name() == "dictionary")
+        }
+        _ => false,
+    }
+}
+
+/// Run `erlang:process_info/2`. As `process_info_bif` (`erl_bif_info.c`)
+/// does, first raise `badarg` when `item` is not an item or a proper list of
+/// items, then raise `badarg` when `process` is not a pid. For the calling
+/// process, return `{current_stacktrace, []}`, because PBeam records no
+/// stack frames. Return `{registered_name, Name}`, or `[]` when the process
+/// has no name, as `process_info_aux` does. Another process, also one that
+/// is not alive, and any other item give a runtime error.
 ///
 /// # Examples
 ///
@@ -309,23 +380,48 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
 /// let item = Term::static_atom("current_stacktrace");
 /// let info = process_info(&mut context, &process, &item)?;
 /// assert!(matches!(info, BifResult::Value(Term::Tuple(elements)) if elements[1] == Term::List(vec![])));
-/// assert!(process_info(&mut context, &process, &Term::static_atom("registered_name")).is_err());
+/// let name = process_info(&mut context, &process, &Term::static_atom("registered_name"))?;
+/// assert!(matches!(name, BifResult::Value(Term::List(elements)) if elements.is_empty()));
+/// let bogus = process_info(&mut context, &process, &Term::static_atom("bogus_item"))?;
+/// assert!(matches!(bogus, BifResult::Raise { .. }));
+/// assert!(process_info(&mut context, &process, &Term::static_atom("status")).is_err());
 /// ```
 pub(super) fn process_info(
     context: &mut BifContext<'_>,
     process: &Term,
     item: &Term,
 ) -> Result<BifResult, BeamError> {
-    let current = Term::Pid(context.scheduler.current_process_mut().id);
-    let stacktrace = Term::static_atom("current_stacktrace");
-    // ponytail: other processes and items need process lookup and more state; see "BIF arguments" in docs/erts-differences.md.
-    if *process != current || *item != stacktrace {
-        return Err(error(format!(
-            "unsupported erlang:process_info/2 arguments {process:?}, {item:?}"
-        )));
+    let valid = match item {
+        Term::List(items) => items.iter().all(is_process_info_item),
+        item => is_process_info_item(item),
+    };
+    if !valid || !matches!(process, Term::Pid(_)) {
+        return Ok(BifResult::badarg());
     }
-    // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
-    Ok(Value(Term::Tuple(vec![stacktrace, Term::List(Vec::new())])))
+    let current = context.scheduler.current_process_mut();
+    let info = match (process, item) {
+        (Term::Pid(id), Term::Atom(name)) if *id == current.id => {
+            match (name.name(), &current.registered_name) {
+                // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
+                ("current_stacktrace", _) => {
+                    Some(Term::Tuple(vec![item.clone(), Term::List(Vec::new())]))
+                }
+                ("registered_name", Some(registered)) => Some(Term::Tuple(vec![
+                    item.clone(),
+                    Term::Atom(registered.clone()),
+                ])),
+                ("registered_name", None) => Some(Term::List(Vec::new())),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    // ponytail: other processes and items need process lookup and more state; see "BIF arguments" in docs/erts-differences.md.
+    info.map(Value).ok_or_else(|| {
+        error(format!(
+            "unsupported erlang:process_info/2 arguments {process:?}, {item:?}"
+        ))
+    })
 }
 
 /// Run `erlang:function_exported/3`: return `true` when a loaded module

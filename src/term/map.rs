@@ -14,8 +14,8 @@
 //! As in ERTS, a flatmap orders atom keys by their atom index, and a hashmap
 //! hashes an atom key by its atom word `(index << 6) | 0xB`. Thus the pair
 //! order of a map is the ERTS order, which BEAM code sees through operations
-//! such as `maps:keys/1`. Other key types need the ERTS term order and hash
-//! for bignums and compound terms, which PBeam does not have yet.
+//! such as `maps:keys/1`. Other key types need the ERTS flatmap key order
+//! and hash for bignums and compound terms, which PBeam does not have yet.
 
 use super::Term;
 

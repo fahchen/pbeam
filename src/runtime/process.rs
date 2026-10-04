@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use super::mailbox::Mailbox;
-use crate::term::{ProcessId, Reference, Term};
+use crate::term::{Atom, ProcessId, Reference, Term};
 
 /// One active function call: its module, code position, and Y registers.
 #[derive(Debug)]
@@ -54,6 +54,9 @@ pub(super) struct ProcessState {
     /// Process dictionary of `put/2` and `get/1`, as key and value pairs in
     /// insertion order. Keys compare with exact equality (`=:=`).
     pub(super) dictionary: Vec<(Term, Term)>,
+    /// Name that `erlang:register/2` gave this process, as
+    /// `common.u.alive.reg` in ERTS.
+    pub(super) registered_name: Option<Atom>,
 }
 
 impl ProcessState {
@@ -77,6 +80,7 @@ impl ProcessState {
             monitored_by: Vec::new(),
             group_leader: id,
             dictionary: Vec::new(),
+            registered_name: None,
         }
     }
 
