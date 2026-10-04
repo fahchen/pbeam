@@ -1,0 +1,752 @@
+//! The layout of a BEAM map, as in ERTS OTP 29.1.1 (`erl_map.h`, `erl_map.c`).
+//!
+//! A map with at most 32 keys is a flatmap: its pairs are sorted by the
+//! flatmap key order. A map with more than 32 keys is a hashmap: a hash
+//! array mapped trie (HAMT) indexed by the ERTS map hash of each key. The
+//! layout depends only on the set of keys, so two equal maps have the same
+//! pairs in the same order.
+//!
+//! Supported keys:
+//!
+//! - flatmap: any integer and any atom;
+//! - hashmap: an integer in the ERTS small-integer range only.
+//!
+//! ERTS orders atom keys in a flatmap and hashes atom keys in a hashmap by
+//! the index of the atom in the atom table. PBeam has no atom table, so a
+//! hashmap does not accept atom keys, and [`Map::erts_iter`] rejects a map
+//! with two or more atom keys. A flatmap stores atom keys in name order, but
+//! no BEAM operation can see that internal order. Other key types need the
+//! ERTS term order and hash for bignums and compound terms, which PBeam does
+//! not have yet.
+
+use super::Term;
+use crate::error::{BeamError, error};
+
+/// The largest number of keys in a flatmap (`MAP_SMALL_MAP_LIMIT` in a
+/// release build of ERTS). A map with more keys is a hashmap.
+const SMALL_MAP_LIMIT: usize = 32;
+/// The number of hash bits that select a slot at one HAMT level.
+const SLOT_BITS: u32 = 4;
+/// The number of HAMT levels that a 64-bit hash fills (`HAMT_MAX_LEVEL`).
+const HAMT_MAX_LEVEL: u32 = u64::BITS / SLOT_BITS;
+/// The mask of the hash bits that select a slot.
+const SLOT_MASK: u64 = 0xF;
+/// The width of the tag of an ERTS small integer word (`_TAG_IMMED1_SIZE`).
+const SMALL_INTEGER_TAG_BITS: u32 = 4;
+/// The tag bits of an ERTS small integer word (`_TAG_IMMED1_SMALL`).
+const SMALL_INTEGER_TAG: u64 = 0xF;
+/// The smallest ERTS small integer on a 64-bit system: -(2^59).
+const SMALL_INTEGER_MIN: i64 = -(1 << 59);
+/// The largest ERTS small integer on a 64-bit system: 2^59 - 1.
+const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
+
+/// A BEAM map: a flatmap up to 32 keys and a HAMT above 32 keys, as in
+/// ERTS. The layout is private, so every map is in its canonical form.
+pub struct Map {
+    /// The flatmap or hashmap form of the map.
+    repr: Repr,
+}
+
+/// The two forms of a map. The number of keys selects the form.
+enum Repr {
+    /// At most 32 pairs, sorted by the flatmap key order.
+    Flat(Vec<(Term, Term)>),
+    /// A HAMT, only for 33 or more keys.
+    Hash(Hamt),
+}
+
+/// A hash array mapped trie of map pairs.
+struct Hamt {
+    /// The node at level 0.
+    root: Node,
+    /// The number of keys in the trie.
+    size: usize,
+}
+
+/// A HAMT node. Bit `i` of `bitmap` is set when slot `i` holds a child.
+/// `children` holds one child per set bit, in ascending slot order.
+struct Node {
+    /// The occupied slots.
+    bitmap: u16,
+    /// The child of each occupied slot, in ascending slot order.
+    children: Vec<Child>,
+}
+
+/// The child in one slot of a HAMT node.
+enum Child {
+    /// A key and its value.
+    Leaf(Term, Term),
+    /// A node one level down.
+    Node(Node),
+}
+
+/// The flatmap sort key of a supported key. The derived order puts every
+/// integer before every atom, as the ERTS term order puts numbers before
+/// atoms.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FlatKey<'a> {
+    /// An integer key, ordered by value.
+    Integer(i64),
+    /// An atom key, ordered by name bytes. ERTS uses the atom index here.
+    Atom(&'a [u8]),
+}
+
+impl Map {
+    /// Return an empty flatmap.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Map::new().len(), 0);
+    /// ```
+    pub(crate) fn new() -> Self {
+        Map {
+            repr: Repr::Flat(Vec::new()),
+        }
+    }
+
+    /// Build a map from pairs in any order. Insert the pairs one by one;
+    /// when a key occurs again, the last value wins, as `maps:from_list/1`
+    /// does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::from_pairs(vec![
+    ///     (Term::Atom("b".into()), Term::Integer(1)),
+    ///     (Term::Integer(2), Term::Integer(2)),
+    /// ])?;
+    /// let keys: Vec<_> = map.iter().map(|(key, _)| key.clone()).collect();
+    /// assert_eq!(keys, [Term::Integer(2), Term::Atom("b".into())]);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return the first key that the map form does not support yet, for
+    /// example a tuple key, or an atom key in a map of more than 32 keys.
+    pub fn from_pairs(pairs: Vec<(Term, Term)>) -> Result<Self, Term> {
+        let mut map = Map::new();
+        for (key, value) in pairs {
+            map.insert(key, value)?;
+        }
+        Ok(map)
+    }
+
+    /// Return the number of keys.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// assert_eq!(map.len(), 1);
+    /// ```
+    pub(crate) fn len(&self) -> usize {
+        match &self.repr {
+            Repr::Flat(pairs) => pairs.len(),
+            Repr::Hash(hamt) => hamt.size,
+        }
+    }
+
+    /// Return the value of a key, or `None` when the map does not hold the
+    /// key. A flatmap compares each key with `==`, as ERTS does. A hashmap
+    /// follows the slots of the key hash.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(2)));
+    /// assert_eq!(map.get(&Term::Tuple(vec![])), None);
+    /// ```
+    pub(crate) fn get(&self, key: &Term) -> Option<&Term> {
+        let hamt = match &self.repr {
+            Repr::Flat(pairs) => {
+                return pairs
+                    .iter()
+                    .find(|(existing, _)| existing == key)
+                    .map(|(_, value)| value);
+            }
+            Repr::Hash(hamt) => hamt,
+        };
+        // A key with no hash is not equal to any stored key.
+        let hash = map_hash(key)?;
+        let mut node = &hamt.root;
+        let mut level = 0;
+        loop {
+            let child = node.child(slot(hash, level))?;
+            match child {
+                Child::Leaf(existing, value) => return (existing == key).then_some(value),
+                Child::Node(inner) => node = inner,
+            }
+            level += 1;
+        }
+    }
+
+    /// Set a key to a value. Replace the value when the key exists. A
+    /// flatmap that gets its 33rd key becomes a hashmap, as in ERTS.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::new();
+    /// map.insert(Term::Integer(1), Term::Integer(2))?;
+    /// map.insert(Term::Integer(1), Term::Integer(3))?;
+    /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(3)));
+    /// assert!(map.insert(Term::Tuple(vec![]), Term::Integer(1)).is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return the first key that the map form does not support yet. The map
+    /// does not change.
+    pub(crate) fn insert(&mut self, key: Term, value: Term) -> Result<(), Term> {
+        let pairs = match &mut self.repr {
+            Repr::Flat(pairs) => pairs,
+            Repr::Hash(hamt) => {
+                let Some(hash) = map_hash(&key) else {
+                    return Err(key);
+                };
+                hamt.insert(hash, key, value);
+                return Ok(());
+            }
+        };
+        let Some(order) = flat_key(&key) else {
+            return Err(key);
+        };
+        match pairs.binary_search_by(|(existing, _)| flat_key(existing).cmp(&Some(order))) {
+            Ok(index) => pairs[index].1 = value,
+            Err(index) if pairs.len() < SMALL_MAP_LIMIT => pairs.insert(index, (key, value)),
+            Err(_) => {
+                let hashes = pairs
+                    .iter()
+                    .map(|(existing, _)| existing)
+                    .chain([&key])
+                    .map(|candidate| map_hash(candidate).ok_or_else(|| candidate.clone()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut hamt = Hamt {
+                    root: Node::empty(),
+                    size: 0,
+                };
+                let pairs = std::mem::take(pairs).into_iter().chain([(key, value)]);
+                for (hash, (key, value)) in hashes.into_iter().zip(pairs) {
+                    hamt.insert(hash, key, value);
+                }
+                self.repr = Repr::Hash(hamt);
+            }
+        }
+        Ok(())
+    }
+
+    /// Iterate over the pairs in storage order: flatmap key order for a
+    /// flatmap, and depth-first ascending slot order for a hashmap. This
+    /// order matches ERTS only when the map has fewer than two atom keys,
+    /// because a flatmap keeps atom keys in name order. Use it only where
+    /// BEAM code cannot see the order, such as `Clone`, `PartialEq`, and
+    /// `Debug`. An operation that gives the order to BEAM code uses
+    /// [`Map::erts_iter`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let nil = || Term::List(vec![]);
+    /// let map = Map::from_pairs(vec![(Term::Integer(2), nil()), (Term::Integer(1), nil())])?;
+    /// let keys: Vec<_> = map.iter().map(|(key, _)| key.clone()).collect();
+    /// assert_eq!(keys, [Term::Integer(1), Term::Integer(2)]);
+    /// ```
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Term, &Term)> {
+        let (pairs, mut nodes) = match &self.repr {
+            Repr::Flat(pairs) => (pairs.iter(), Vec::new()),
+            Repr::Hash(hamt) => (Default::default(), vec![hamt.root.children.iter()]),
+        };
+        pairs
+            .map(|(key, value)| (key, value))
+            .chain(std::iter::from_fn(move || {
+                loop {
+                    let Some(child) = nodes.last_mut()?.next() else {
+                        nodes.pop();
+                        continue;
+                    };
+                    match child {
+                        Child::Leaf(key, value) => return Some((key, value)),
+                        Child::Node(node) => nodes.push(node.children.iter()),
+                    }
+                }
+            }))
+    }
+
+    /// Iterate over the pairs in the ERTS order, which BEAM code sees
+    /// through operations such as `maps:keys/1`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let nil = || Term::List(vec![]);
+    /// let map = Map::from_pairs(vec![(Term::Atom("a".into()), nil()), (Term::Integer(1), nil())])?;
+    /// let keys: Vec<_> = map.erts_iter()?.map(|(key, _)| key.clone()).collect();
+    /// assert_eq!(keys, [Term::Integer(1), Term::Atom("a".into())]);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A map with two or more atom keys is an error. ERTS orders atom keys
+    /// by atom-table index, and PBeam has no atom table yet.
+    pub(crate) fn erts_iter(&self) -> Result<impl Iterator<Item = (&Term, &Term)>, BeamError> {
+        let mut atoms = self.iter().filter(|(key, _)| matches!(key, Term::Atom(_)));
+        if atoms.nth(1).is_some() {
+            return Err(error("unsupported map order for two or more atom keys"));
+        }
+        Ok(self.iter())
+    }
+
+    /// Move every key and value onto a work stack. `Term` uses this to drop
+    /// a deep map without recursion.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut pending = Vec::new();
+    /// Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?.drain_into(&mut pending);
+    /// assert_eq!(pending, [Term::Integer(1), Term::Integer(2)]);
+    /// ```
+    pub(crate) fn drain_into(self, pending: &mut Vec<Term>) {
+        let root = match self.repr {
+            Repr::Flat(pairs) => {
+                pending.extend(pairs.into_iter().flat_map(|(key, value)| [key, value]));
+                return;
+            }
+            Repr::Hash(hamt) => hamt.root.children,
+        };
+        let mut nodes = vec![root];
+        while let Some(children) = nodes.pop() {
+            for child in children {
+                match child {
+                    Child::Leaf(key, value) => pending.extend([key, value]),
+                    Child::Node(node) => nodes.push(node.children),
+                }
+            }
+        }
+    }
+}
+
+impl Hamt {
+    /// Set a key with a hash to a value, as ERTS `insert_down` does. A new
+    /// key goes into the first free slot on its hash path. When that slot
+    /// holds another key, add nodes until the two hashes select different
+    /// slots.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut hamt = Hamt { root: Node::empty(), size: 0 };
+    /// hamt.insert(map_hash(&Term::Integer(1)).unwrap(), Term::Integer(1), Term::Integer(2));
+    /// assert_eq!(hamt.size, 1);
+    /// ```
+    fn insert(&mut self, hash: u64, key: Term, value: Term) {
+        let mut node = &mut self.root;
+        let mut level = 0;
+        loop {
+            let slot = slot(hash, level);
+            let bit = 1 << slot;
+            let index = (node.bitmap & (bit - 1)).count_ones() as usize;
+            if node.bitmap & bit == 0 {
+                node.bitmap |= bit;
+                node.children.insert(index, Child::Leaf(key, value));
+                self.size += 1;
+                return;
+            }
+            let child = &mut node.children[index];
+            match child {
+                Child::Node(inner) => node = inner,
+                Child::Leaf(existing, existing_value) => {
+                    if *existing == key {
+                        *existing_value = value;
+                        return;
+                    }
+                    // mix64 is a bijection, so two different keys have two different hashes.
+                    let existing_hash = map_hash(existing).expect("a stored key has a hash");
+                    let existing = (
+                        existing_hash,
+                        std::mem::replace(existing, Term::List(Vec::new())),
+                        std::mem::replace(existing_value, Term::List(Vec::new())),
+                    );
+                    *child = Child::Node(Node::split(level + 1, existing, (hash, key, value)));
+                    self.size += 1;
+                    return;
+                }
+            }
+            level += 1;
+        }
+    }
+}
+
+impl Node {
+    /// Return a node with no children.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Node::empty().bitmap, 0);
+    /// ```
+    fn empty() -> Self {
+        Node {
+            bitmap: 0,
+            children: Vec::new(),
+        }
+    }
+
+    /// Return the child in a slot, or `None` when the slot is free.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Node::empty().child(3).is_none());
+    /// ```
+    fn child(&self, slot: u32) -> Option<&Child> {
+        let bit = 1 << slot;
+        if self.bitmap & bit == 0 {
+            return None;
+        }
+        Some(&self.children[(self.bitmap & (bit - 1)).count_ones() as usize])
+    }
+
+    /// Build the node at `level` for two leaves whose hashes select the
+    /// same slots above `level`. Add one node with one child for each level
+    /// where the two hashes still select the same slot, then put the two
+    /// leaves in slot order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // The hashes 0x01 and 0x11 differ first at level 1.
+    /// let node = Node::split(0, (0x01, one, one_value), (0x11, two, two_value));
+    /// assert_eq!(node.bitmap, 1 << 1);
+    /// ```
+    fn split(level: u32, first: (u64, Term, Term), second: (u64, Term, Term)) -> Node {
+        let mut depth = level;
+        while slot(first.0, depth) == slot(second.0, depth) {
+            depth += 1;
+            // ERTS keeps two keys with equal hashes in a collision node at HAMT_MAX_LEVEL.
+            // Supported keys have different hashes, because mix64 is a bijection.
+            debug_assert!(
+                depth < HAMT_MAX_LEVEL,
+                "equal map hashes need an ERTS collision node"
+            );
+        }
+        let (first_slot, second_slot) = (slot(first.0, depth), slot(second.0, depth));
+        let path = first.0;
+        let (low, high) = if first_slot < second_slot {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let mut node = Node {
+            bitmap: (1 << first_slot) | (1 << second_slot),
+            children: vec![Child::Leaf(low.1, low.2), Child::Leaf(high.1, high.2)],
+        };
+        for depth in (level..depth).rev() {
+            node = Node {
+                bitmap: 1 << slot(path, depth),
+                children: vec![Child::Node(node)],
+            };
+        }
+        node
+    }
+}
+
+/// Return the flatmap sort key of a supported flatmap key.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(flat_key(&Term::Integer(1)) < flat_key(&Term::Atom("a".into())));
+/// assert!(flat_key(&Term::Tuple(vec![])).is_none());
+/// ```
+fn flat_key(key: &Term) -> Option<FlatKey<'_>> {
+    match key {
+        Term::Integer(value) => Some(FlatKey::Integer(*value)),
+        Term::Atom(name) => Some(FlatKey::Atom(name.as_bytes())),
+        _ => None,
+    }
+}
+
+/// Return the slot that a hash selects at a HAMT level. Level 0 uses the
+/// lowest four bits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(slot(0x21, 0), 1);
+/// assert_eq!(slot(0x21, 1), 2);
+/// ```
+fn slot(hash: u64, level: u32) -> u32 {
+    ((hash >> (SLOT_BITS * level)) & SLOT_MASK) as u32
+}
+
+/// Return the ERTS map hash (`erts_map_hash`) of a key, or `None` for a key
+/// that a hashmap does not support yet. A small integer hashes as its raw
+/// ERTS word `(value << 4) | 0xF`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(map_hash(&Term::Integer(1)), Some(7938660269479274665));
+/// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
+/// ```
+fn map_hash(key: &Term) -> Option<u64> {
+    match key {
+        Term::Integer(value) if (SMALL_INTEGER_MIN..=SMALL_INTEGER_MAX).contains(value) => Some(
+            mix64(((*value as u64) << SMALL_INTEGER_TAG_BITS) | SMALL_INTEGER_TAG),
+        ),
+        _ => None,
+    }
+}
+
+/// Mix a 64-bit word, as ERTS `ihash_mix64` does (the MurmurHash3 fmix64
+/// finalizer). The function is a bijection on `u64`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(mix64(0x1F), 7938660269479274665);
+/// ```
+fn mix64(mut hash: u64) -> u64 {
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    hash ^ (hash >> 33)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Child, Map, Node, map_hash, mix64};
+    use crate::term::Term;
+
+    fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
+        Map::from_pairs(
+            keys.into_iter()
+                .map(|key| (Term::Integer(key), Term::Atom("v".into())))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn keys(map: &Map) -> Vec<Term> {
+        map.iter().map(|(key, _)| key.clone()).collect()
+    }
+
+    fn list(keys: &[i64]) -> Vec<Term> {
+        keys.iter().map(|key| Term::Integer(*key)).collect()
+    }
+
+    #[test]
+    fn hashes_small_integers_as_erts() {
+        assert_eq!(map_hash(&Term::Integer(1)), Some(7938660269479274665));
+        assert_eq!(map_hash(&Term::Integer(-1)), Some(7256831767414464289));
+        assert_eq!(mix64(0x1F), 7938660269479274665);
+        assert!(map_hash(&Term::Integer((1 << 59) - 1)).is_some());
+        assert!(map_hash(&Term::Integer(-(1 << 59))).is_some());
+        assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
+        assert_eq!(map_hash(&Term::Integer(-(1 << 59) - 1)), None);
+        assert_eq!(map_hash(&Term::Atom("a".into())), None);
+    }
+
+    #[test]
+    fn keeps_flatmap_keys_in_order_and_replaces_values() {
+        let atom = |name: &str| Term::Atom(name.into());
+        // #{a => V, 2 => V, 1 => V} has keys [1,2,a] in ERTS 29.1.1.
+        let mut map = Map::from_pairs(vec![
+            (atom("z"), atom("z")),
+            (atom("a"), atom("old")),
+            (Term::Integer(2), atom("v")),
+            (Term::Integer(i64::MIN), atom("v")),
+            (atom("a"), atom("a")),
+        ])
+        .unwrap();
+        assert_eq!(
+            keys(&map),
+            [
+                Term::Integer(i64::MIN),
+                Term::Integer(2),
+                atom("a"),
+                atom("z")
+            ]
+        );
+        assert_eq!(map.get(&atom("a")), Some(&atom("a")));
+        assert_eq!(map.get(&atom("b")), None);
+        assert_eq!(map.get(&Term::Tuple(vec![])), None);
+        map.insert(atom("z"), atom("new")).unwrap();
+        assert_eq!(map.get(&atom("z")), Some(&atom("new")));
+        assert_eq!(map.len(), 4);
+        // A key type that the flatmap does not support leaves the map unchanged.
+        assert_eq!(
+            map.insert(Term::Tuple(vec![]), atom("v")),
+            Err(Term::Tuple(vec![]))
+        );
+        assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn becomes_a_hashmap_with_the_erts_order_above_32_keys() {
+        let mut map = integers(1..=32);
+        assert_eq!(keys(&map), list(&(1..=32).collect::<Vec<_>>()));
+        // Replacing a value in a full flatmap keeps the flatmap.
+        map.insert(Term::Integer(32), Term::Integer(0)).unwrap();
+        assert_eq!(keys(&map), list(&(1..=32).collect::<Vec<_>>()));
+        map.insert(Term::Integer(33), Term::Atom("v".into()))
+            .unwrap();
+        assert_eq!(map.len(), 33);
+        // ERTS 29.1.1: maps:keys of 1..33.
+        assert_eq!(
+            keys(&map),
+            list(&[
+                18, 4, 12, 19, 29, 13, 2, 7, 31, 8, 10, 23, 9, 15, 32, 1, 25, 28, 20, 6, 11, 17,
+                24, 14, 33, 3, 16, 30, 21, 5, 27, 26, 22
+            ])
+        );
+        assert_eq!(map.get(&Term::Integer(32)), Some(&Term::Integer(0)));
+        map.insert(Term::Integer(33), Term::Integer(1)).unwrap();
+        assert_eq!(map.get(&Term::Integer(33)), Some(&Term::Integer(1)));
+        assert_eq!(map.len(), 33);
+        assert_eq!(map.get(&Term::Integer(34)), None);
+        assert_eq!(map.get(&Term::Atom("a".into())), None);
+
+        // ERTS 29.1.1: maps:keys of 1..64, where every root slot is used.
+        let full = integers((1..=64).rev());
+        assert_eq!(
+            keys(&full),
+            list(&[
+                54, 18, 4, 34, 46, 52, 12, 19, 41, 29, 13, 42, 55, 2, 7, 38, 56, 61, 31, 8, 44, 10,
+                23, 9, 49, 64, 15, 35, 36, 32, 58, 1, 25, 28, 60, 20, 6, 43, 57, 11, 48, 17, 24,
+                37, 40, 14, 33, 53, 3, 16, 30, 62, 21, 5, 27, 47, 63, 26, 51, 22, 50, 45, 59, 39
+            ])
+        );
+        assert!((1..=64).all(|key| full.get(&Term::Integer(key)).is_some()));
+
+        // The first three keys have hashes with the same low 60 bits, and so do the next two.
+        // Each group splits only at level 15. ERTS 29.1.1: maps:keys of this map.
+        let deep = [
+            413866500823436792,
+            -101714049538469044,
+            -74925715755171563,
+            329898321527737274,
+            446694106686689078,
+        ];
+        assert_eq!(
+            map_hash(&Term::Integer(deep[0])),
+            Some(0x6600_a35a_0999_50d8)
+        );
+        assert_eq!(
+            map_hash(&Term::Integer(deep[1])),
+            Some(0x7600_a35a_0999_50d8)
+        );
+        assert_eq!(
+            map_hash(&Term::Integer(deep[2])),
+            Some(0xf600_a35a_0999_50d8)
+        );
+        assert_eq!(
+            map_hash(&Term::Integer(deep[3])),
+            Some(0x3b04_04f2_b094_90b8)
+        );
+        assert_eq!(
+            map_hash(&Term::Integer(deep[4])),
+            Some(0x7b04_04f2_b094_90b8)
+        );
+        let deep60 = integers(deep.into_iter().chain(100..=129));
+        assert_eq!(
+            keys(&deep60),
+            list(&[
+                128, 123, 110, 114, 100, 113, 104, 105, 115, 127, 116, 111, 101, 112, 125, 103,
+                118, 109, 106, 117, deep[3], deep[4], deep[0], deep[1], deep[2], 126, 107, 108,
+                119, 122, 129, 124, 121, 102, 120
+            ])
+        );
+        assert!(
+            deep.iter()
+                .all(|key| deep60.get(&Term::Integer(*key)).is_some())
+        );
+
+        // ERTS 29.1.1: the small-integer limits in a hashmap.
+        let (min, max) = (-(1i64 << 59), (1i64 << 59) - 1);
+        let edges = integers([-1, min, max].into_iter().chain(1..=30));
+        assert_eq!(
+            keys(&edges),
+            list(&[
+                18, 4, -1, 12, 19, 29, 13, 2, 7, min, 8, 10, 23, 9, 15, 1, 25, 28, 20, 6, max, 11,
+                17, 24, 14, 3, 16, 30, 21, 5, 27, 26, 22
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_keys_that_the_hashmap_does_not_support_yet() {
+        let atom = Term::Atom("a".into());
+        // The 33rd key turns the flatmap into a hashmap, which has no atom keys yet.
+        let mut map = integers(1..=31);
+        map.insert(atom.clone(), atom.clone()).unwrap();
+        assert_eq!(
+            map.insert(Term::Integer(33), atom.clone()),
+            Err(atom.clone())
+        );
+        assert_eq!(map.len(), 32);
+        let mut map = integers(1..=32);
+        assert_eq!(map.insert(atom.clone(), atom.clone()), Err(atom.clone()));
+        assert_eq!(
+            map.insert(Term::Integer(1 << 59), atom.clone()),
+            Err(Term::Integer(1 << 59))
+        );
+        let mut map = integers(1..=33);
+        assert_eq!(map.insert(atom.clone(), atom.clone()), Err(atom));
+        assert_eq!(map.len(), 33);
+    }
+
+    #[test]
+    fn gives_the_erts_order_only_for_fewer_than_two_atom_keys() {
+        let atom = |name: &str| Term::Atom(name.into());
+        let map = |keys: Vec<Term>| {
+            Map::from_pairs(keys.into_iter().map(|key| (key, atom("v"))).collect()).unwrap()
+        };
+        // ERTS 29.1.1: maps:keys(#{a => V, 2 => V, 1 => V}) is [1,2,a].
+        let one_atom = map(vec![atom("a"), Term::Integer(2), Term::Integer(1)]);
+        let keys: Vec<_> = one_atom.erts_iter().unwrap().map(|(key, _)| key).collect();
+        assert_eq!(keys, [&Term::Integer(1), &Term::Integer(2), &atom("a")]);
+        // ERTS 29.1.1 gives [1,b,a] for #{a => v, 1 => v, b => v}: atom-index order.
+        let two_atoms = map(vec![atom("a"), Term::Integer(1), atom("b")]);
+        assert_eq!(
+            two_atoms.erts_iter().err().unwrap().to_string(),
+            "unsupported map order for two or more atom keys"
+        );
+    }
+
+    #[test]
+    fn builds_the_same_map_from_pairs_in_any_order() {
+        let forward = integers(1..=40);
+        let backward = integers((1..=40).rev());
+        assert_eq!(keys(&forward), keys(&backward));
+        let mut pending = Vec::new();
+        forward.drain_into(&mut pending);
+        assert_eq!(pending.len(), 80);
+        let mut pending = Vec::new();
+        integers([2, 1]).drain_into(&mut pending);
+        let v = Term::Atom("v".into());
+        assert_eq!(pending, [Term::Integer(1), v.clone(), Term::Integer(2), v]);
+    }
+
+    #[test]
+    fn splits_a_leaf_into_nodes_until_the_hashes_differ() {
+        let leaf = |key: i64| (key as u64, Term::Integer(key), Term::Integer(key));
+        // 0x101 and 0x201 select the same slot at levels 0 and 1, and slots 1 and 2 at level 2.
+        let node = Node::split(0, leaf(0x201), leaf(0x101));
+        assert_eq!(node.bitmap, 1 << 1);
+        assert!(matches!(
+            &node.children[..],
+            [Child::Node(Node { bitmap: 1, children })] if matches!(
+                &children[..],
+                [Child::Node(Node { bitmap: 0b110, children })] if matches!(
+                    &children[..],
+                    [Child::Leaf(Term::Integer(0x101), _), Child::Leaf(Term::Integer(0x201), _)]
+                )
+            )
+        ));
+    }
+}

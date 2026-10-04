@@ -208,8 +208,8 @@ impl BeamProgram {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     let arguments = call_arguments(&process.registers, *arity)?;
-                    if module == "erlang" {
-                        let value = match self.bif(scheduler, name, arguments)? {
+                    if is_bif(module, name, *arity) {
+                        let value = match self.bif(scheduler, module, name, arguments)? {
                             Ok(value) => value,
                             Err(reason) => {
                                 return Ok(Outcome::Exit {
@@ -241,7 +241,7 @@ impl BeamProgram {
                         return Err(error(format!("unsupported BIF {module}:{name}/0")));
                     }
                     // ponytail: no zero-arity BIF exits; map an exit to an error until one does.
-                    let value = self.bif(scheduler, name, Vec::new())?;
+                    let value = self.bif(scheduler, module, name, Vec::new())?;
                     let value = value.map_err(|reason| error(format!("BIF exited: {reason:?}")))?;
                     write(scheduler.current_process_mut(), destination, value)?;
                 }
@@ -257,10 +257,61 @@ impl BeamProgram {
                         TestKind::Pid => matches!(value, Term::Pid(_)),
                         TestKind::List => matches!(value, Term::List(_)),
                         TestKind::Binary => matches!(value, Term::Binary(_)),
+                        TestKind::Map => matches!(value, Term::Map(_)),
                     };
                     if !passed {
                         jump(module, process, *fail_label)?;
                     }
+                }
+                Instruction::GetMapElements {
+                    fail_label,
+                    map,
+                    pairs,
+                } => {
+                    let map = read(process, map)?;
+                    let Term::Map(map) = &map else {
+                        return Err(error("BEAM get_map_elements source is not a map"));
+                    };
+                    let mut found = Vec::with_capacity(pairs.len());
+                    for (key, destination) in pairs {
+                        let Some(value) = map.get(&read(process, key)?) else {
+                            break;
+                        };
+                        found.push((destination, value.clone()));
+                    }
+                    if found.len() < pairs.len() {
+                        jump(module, process, *fail_label)?;
+                    } else {
+                        for (destination, value) in found {
+                            write(process, destination, value)?;
+                        }
+                    }
+                }
+                Instruction::PutMapAssoc {
+                    map,
+                    destination,
+                    pairs,
+                } => {
+                    let mut map = read(process, map)?;
+                    let Term::Map(entries) = &mut map else {
+                        // ponytail: ERTS raises error {badmap, Map}; exceptions arrive in #73.
+                        return Err(error("unsupported BEAM put_map_assoc source: not a map"));
+                    };
+                    // PBeam inserts the pairs one by one. ERTS merges a flatmap source and builds a
+                    // hashmap in one step above 32 keys. The result is the same, because the flatmap
+                    // order and the HAMT shape depend only on the set of keys.
+                    for (key, value) in pairs {
+                        entries
+                            .insert(read(process, key)?, read(process, value)?)
+                            .map_err(|key| error(format!("unsupported map key {key:?}")))?;
+                    }
+                    write(process, destination, map)?;
+                }
+                Instruction::Swap(left, right) => {
+                    let left_value = read(process, left)?;
+                    let right_value = read(process, right)?;
+                    write(process, left, right_value)?;
+                    write(process, right, left_value)?;
                 }
                 Instruction::TestExactEqual {
                     fail_label,
@@ -410,27 +461,29 @@ impl BeamProgram {
         }
     }
 
-    /// Run an `erlang` BIF that the observed process path calls. `Err` holds
-    /// the exit reason when the BIF exits the process.
+    /// Run a BIF that the observed process path calls. `Err` holds the exit
+    /// reason when the BIF exits the process.
     ///
-    /// BIFs are native functions of the `erlang` module. The compiler emits
-    /// guard BIFs such as `self/0` as `bif` instructions and other BIFs as
-    /// `call_ext` instructions. Both forms come here.
+    /// BIFs are native functions listed in the ERTS `bif.tab`, mostly in the
+    /// `erlang` module. The compiler emits guard BIFs such as `self/0` as
+    /// `bif` instructions and other BIFs as `call_ext` instructions. Both
+    /// forms come here.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let value = program.bif(&mut scheduler, "make_ref", vec![])?;
+    /// let value = program.bif(&mut scheduler, "erlang", "make_ref", vec![])?;
     /// assert!(matches!(value, Ok(Term::Reference(_))));
     /// ```
     fn bif(
         &self,
         scheduler: &mut Scheduler,
+        module: &str,
         name: &str,
         arguments: Vec<Term>,
     ) -> Result<Result<Term, Term>, BeamError> {
-        let value = match (name, arguments.as_slice()) {
-            ("process_flag", [Term::Atom(flag), Term::Atom(value)])
+        let value = match (module, name, arguments.as_slice()) {
+            ("erlang", "process_flag", [Term::Atom(flag), Term::Atom(value)])
                 if flag == "trap_exit" && (value == "true" || value == "false") =>
             {
                 let process = scheduler.current_process_mut();
@@ -438,24 +491,28 @@ impl BeamProgram {
                 process.trap_exit = value == "true";
                 old
             }
-            ("self", []) => Term::Pid(scheduler.current_process_mut().id),
-            ("make_ref", []) => Term::Reference(scheduler.make_ref()?),
-            ("link", [Term::Pid(target)]) => scheduler.link(*target)?,
-            ("exit", [reason]) => return Ok(Err(reason.clone())),
-            ("nif_error", [reason]) => {
+            ("erlang", "self", []) => Term::Pid(scheduler.current_process_mut().id),
+            ("erlang", "make_ref", []) => Term::Reference(scheduler.make_ref()?),
+            ("erlang", "link", [Term::Pid(target)]) => scheduler.link(*target)?,
+            ("erlang", "exit", [reason]) => return Ok(Err(reason.clone())),
+            ("erlang", "nif_error", [reason]) => {
                 return Ok(Err(Term::Tuple(vec![
                     reason.clone(),
                     Term::List(Vec::new()),
                 ])));
             }
-            ("spawn_monitor" | "spawn_link", [Term::Atom(module), Term::Atom(function), list]) => {
+            (
+                "erlang",
+                "spawn_monitor" | "spawn_link",
+                [Term::Atom(spawn_module), Term::Atom(function), list],
+            ) => {
                 let Term::List(arguments) = list else {
                     return Err(error("spawn arguments are not a proper list"));
                 };
                 let arguments = arguments.clone();
                 let arity = u32::try_from(arguments.len())
                     .map_err(|_| error("arity exceeds BEAM limit"))?;
-                let frame = self.mfa_frame(module, function, arity)?;
+                let frame = self.mfa_frame(spawn_module, function, arity)?;
                 let monitor = name == "spawn_monitor";
                 let (pid, reference) = scheduler.spawn(frame, arguments, monitor, !monitor)?;
                 match reference {
@@ -465,15 +522,38 @@ impl BeamProgram {
                     None => Term::Pid(pid),
                 }
             }
+            ("maps", "keys", [Term::Map(map)]) => {
+                Term::List(map.erts_iter()?.map(|(key, _)| key.clone()).collect())
+            }
+            // ponytail: ERTS raises error {badmap, Map}; exceptions arrive in #73.
+            ("maps", "keys", [_]) => {
+                return Err(error("unsupported maps:keys/1 argument: not a map"));
+            }
             _ => {
                 return Err(error(format!(
-                    "unresolved external MFA erlang:{name}/{}",
+                    "unresolved external MFA {module}:{name}/{}",
                     arguments.len()
                 )));
             }
         };
         Ok(Ok(value))
     }
+}
+
+/// Return whether an external call goes to a BIF. A `bif.tab` entry, such as
+/// `maps:keys/1`, runs before the module code, as in ERTS. Every `erlang`
+/// call goes to the BIF table, which reports an unresolved MFA.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_bif("erlang", "self", 0));
+/// assert!(is_bif("maps", "keys", 1));
+/// assert!(!is_bif("maps", "keys", 2));
+/// assert!(!is_bif("io", "put_chars", 2));
+/// ```
+fn is_bif(module: &str, name: &str, arity: u32) -> bool {
+    module == "erlang" || (module, name, arity) == ("maps", "keys", 1)
 }
 
 /// Return the active frame of a running process.
@@ -701,7 +781,7 @@ mod tests {
 
     use super::{BeamProgram, call_arguments, function_at_label, read_operand, write_operand};
     use crate::{
-        BeamModule, Term,
+        BeamModule, Map, Term,
         beam::code::{Instruction, Operand},
     };
 
@@ -982,6 +1062,126 @@ mod tests {
                 .execute("fixture", "main", &[Term::Integer(1)])
                 .unwrap(),
             Term::Atom("other".into())
+        );
+    }
+
+    #[test]
+    fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
+        let map = |pairs: Vec<(&str, i64)>| {
+            let pairs = pairs
+                .into_iter()
+                .map(|(key, value)| (Term::Atom(key.into()), Term::Integer(value)))
+                .collect();
+            Operand::Value(Term::Map(Map::from_pairs(pairs).unwrap()))
+        };
+        let run = |body: Vec<Instruction>| make_program(body, 0).execute("fixture", "main", &[]);
+        // Replace an existing key, then read it back.
+        assert_eq!(
+            run(vec![
+                Instruction::PutMapAssoc {
+                    map: map(vec![("a", 1), ("b", 2)]),
+                    destination: Operand::X(0),
+                    pairs: vec![(atom("b"), Operand::Value(Term::Integer(3)))],
+                },
+                Instruction::GetMapElements {
+                    fail_label: 3,
+                    map: Operand::X(0),
+                    pairs: vec![(atom("b"), Operand::X(0))],
+                },
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::Move(atom("missing"), Operand::X(0)),
+                Instruction::Return,
+            ])
+            .unwrap(),
+            Term::Integer(3)
+        );
+        // A missing key jumps to the fail label.
+        assert_eq!(
+            run(vec![
+                Instruction::GetMapElements {
+                    fail_label: 3,
+                    map: map(vec![("a", 1)]),
+                    pairs: vec![(atom("a"), Operand::X(1)), (atom("b"), Operand::X(0))],
+                },
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::Move(atom("missing"), Operand::X(0)),
+                Instruction::Return,
+            ])
+            .unwrap(),
+            Term::Atom("missing".into())
+        );
+        let error = |body| run(body).unwrap_err().to_string();
+        assert!(
+            error(vec![Instruction::GetMapElements {
+                fail_label: 3,
+                map: atom("a"),
+                pairs: vec![],
+            }])
+            .contains("get_map_elements source is not a map")
+        );
+        assert!(
+            error(vec![Instruction::PutMapAssoc {
+                map: atom("a"),
+                destination: Operand::X(0),
+                pairs: vec![],
+            }])
+            .contains("put_map_assoc source: not a map")
+        );
+        assert!(
+            error(vec![Instruction::PutMapAssoc {
+                map: map(vec![]),
+                destination: Operand::X(0),
+                pairs: vec![(
+                    Operand::Value(Term::Tuple(vec![])),
+                    Operand::Value(Term::Integer(1))
+                )],
+            }])
+            .contains("unsupported map key Tuple([])")
+        );
+    }
+
+    #[test]
+    fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
+        let keys = |argument: Term| {
+            make_program(
+                vec![
+                    Instruction::Move(Operand::Value(argument), Operand::X(0)),
+                    Instruction::CallExternal {
+                        arity: 1,
+                        module: "maps".into(),
+                        name: "keys".into(),
+                        tail: true,
+                        deallocate: 0,
+                    },
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        let map = |keys: Vec<Term>| {
+            let pairs = keys
+                .into_iter()
+                .map(|key| (key, Term::Integer(0)))
+                .collect();
+            Term::Map(Map::from_pairs(pairs).unwrap())
+        };
+        let atom = |name: &str| Term::Atom(name.into());
+        // ERTS 29.1.1: maps:keys(#{a => V, 2 => V, 1 => V}) is [1,2,a].
+        assert_eq!(
+            keys(map(vec![atom("a"), Term::Integer(2), Term::Integer(1)])).unwrap(),
+            Term::List(vec![Term::Integer(1), Term::Integer(2), atom("a")])
+        );
+        assert_eq!(
+            keys(map(vec![atom("a"), atom("b")]))
+                .unwrap_err()
+                .to_string(),
+            "unsupported map order for two or more atom keys"
+        );
+        assert_eq!(
+            keys(atom("x")).unwrap_err().to_string(),
+            "unsupported maps:keys/1 argument: not a map"
         );
     }
 
