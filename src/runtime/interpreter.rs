@@ -3108,23 +3108,54 @@ mod tests {
                 .unwrap(),
             Term::Tuple(vec![stacktrace, Term::List(Vec::new())])
         );
-        // ERTS 29.1.1: the current_stacktrace of another process is its
-        // frames, and process_info(a, current_stacktrace) and
-        // process_info(self(), bogus_item) raise badarg.
-        let other = Term::Pid(crate::ProcessId(99));
+        let process_info = |process: Term, item: Term| {
+            call_ext_with("erlang", "process_info", vec![process, item])
+        };
+        let root = || Term::Pid(crate::ProcessId(0));
+        let dictionary = || Term::Tuple(vec![test_atom("dictionary"), test_atom("k")]);
+        // ERTS 29.1.1 checks the item before the process. It raises badarg for
+        // process_info(a, current_stacktrace), process_info(a, bogus_item),
+        // process_info(self(), bogus_item), process_info(self(), 5),
+        // process_info(self(), [registered_name, bogus]), and
+        // process_info(self(), {bogus, k}).
         for (process, item) in [
-            (other, test_atom("current_stacktrace")),
             (test_atom("a"), test_atom("current_stacktrace")),
-            (Term::Pid(crate::ProcessId(0)), test_atom("bogus_item")),
+            (test_atom("a"), test_atom("bogus_item")),
+            (Term::Pid(crate::ProcessId(99)), test_atom("bogus_item")),
+            (root(), test_atom("bogus_item")),
+            (root(), Term::Integer(5)),
+            (
+                root(),
+                Term::List(vec![test_atom("registered_name"), test_atom("bogus")]),
+            ),
+            (
+                root(),
+                Term::Tuple(vec![test_atom("bogus"), test_atom("k")]),
+            ),
         ] {
             assert_eq!(
-                call_ext_with(
-                    "erlang",
-                    "process_info",
-                    vec![process.clone(), item.clone()]
-                )
-                .unwrap_err()
-                .to_string(),
+                process_info(process, item).unwrap_err().to_string(),
+                BADARG_EXIT
+            );
+        }
+        // ERTS 29.1.1: the current_stacktrace of another process is its
+        // frames, a process that is not alive gives undefined,
+        // process_info(self(), {dictionary, k}) is {{dictionary, k}, undefined},
+        // and process_info(self(), [registered_name]) is
+        // [{registered_name, []}]. PBeam does not implement them yet.
+        for (process, item) in [
+            (
+                Term::Pid(crate::ProcessId(99)),
+                test_atom("current_stacktrace"),
+            ),
+            (root(), dictionary()),
+            (root(), Term::List(vec![test_atom("registered_name")])),
+            (root(), test_atom("status")),
+        ] {
+            assert_eq!(
+                process_info(process.clone(), item.clone())
+                    .unwrap_err()
+                    .to_string(),
                 format!("unsupported erlang:process_info/2 arguments {process:?}, {item:?}")
             );
         }
