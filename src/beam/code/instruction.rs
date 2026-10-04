@@ -187,6 +187,23 @@ pub(crate) enum Instruction {
         tail: bool,
         deallocate: u32,
     },
+    /// Calls the function whose module is in `x(arity)` and whose name is in
+    /// `x(arity + 1)`, with the arguments in `x0` to `x(arity - 1)`. `apply`
+    /// (opcode 112) continues after the call. `apply_last` (opcode 113) sets
+    /// `tail` and releases `deallocate` Y registers first.
+    ///
+    /// Encoding: `apply` has opcode and arity; `apply_last` has opcode, arity,
+    /// and deallocate. Example: the pinned `gen_statem.beam` has
+    /// `[0x70, 0x00]` (`apply 0`) in `get_callback_mode/2` and
+    /// `[0x71, 0x10, 0xB0]` (`apply_last 1 11`) in `terminate/7`.
+    ///
+    /// Erlang: `a3(M, F, A) -> {M:F(A, b, c)}.` compiles to `{apply,3}`, and
+    /// `last(M, F) -> M:F(bye).` compiles to `{apply_last,1,0}`.
+    Apply {
+        arity: u32,
+        tail: bool,
+        deallocate: u32,
+    },
     /// Calls a BIF through `bif0` (opcode 9) or `bif1` (opcode 10) and writes
     /// its value to a register. `bif0` has no fail label. A `bif1` with fail
     /// label 0 maps here; a `bif1` with another fail label decodes to
@@ -930,6 +947,19 @@ pub(super) fn parse_code(
                     deallocate,
                 }
             }
+            OPCODE_APPLY | OPCODE_APPLY_LAST => {
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let deallocate = if opcode == OPCODE_APPLY_LAST {
+                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32
+                } else {
+                    0
+                };
+                Instruction::Apply {
+                    arity,
+                    tail: opcode == OPCODE_APPLY_LAST,
+                    deallocate,
+                }
+            }
             OPCODE_BIF0 => {
                 let (module, name) = bif_import(
                     imports,
@@ -1156,8 +1186,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
         OPCODE_RAISE => Some(2),
         OPCODE_CALL_FUN2 | OPCODE_IS_FUNCTION2 => Some(3),
-        OPCODE_APPLY_LAST => Some(2),
-        OPCODE_APPLY => Some(1),
         OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
         OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
@@ -1738,6 +1766,44 @@ mod tests {
                     [(4, Operand::X(3)), (5, Operand::Value(Term::List(nil)))] if nil.is_empty()
                 )
         ));
+    }
+
+    #[test]
+    fn decodes_the_apply_instructions_of_pinned_gen_statem() {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        // Bytes of the pinned OTP 29.1.1 `gen_statem.beam`.
+        code.extend([
+            0x70, 0x00, // get_callback_mode/2: {apply,0}
+            0x70, 0x30, // terminate/7: {apply,3}
+            0x71, 0x10, 0xB0, // terminate/7: {apply_last,1,11}
+            0x03,
+        ]);
+        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::Apply {
+                    arity: 0,
+                    tail: false,
+                    deallocate: 0,
+                },
+                Instruction::Apply {
+                    arity: 3,
+                    tail: false,
+                    deallocate: 0,
+                },
+                Instruction::Apply {
+                    arity: 1,
+                    tail: true,
+                    deallocate: 11,
+                },
+                Instruction::End,
+            ]
+        ));
+        // `apply_last` without its deallocate operand is truncated.
+        code.truncate(code.len() - 2);
+        assert!(parse_code(&code, &[], &[], &[]).is_err());
     }
 
     #[test]

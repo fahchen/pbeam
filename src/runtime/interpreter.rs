@@ -297,61 +297,28 @@ impl BeamProgram {
                     tail,
                     deallocate,
                 } => {
-                    if *tail && *deallocate as usize != current_frame(process).stack.len() {
-                        return Err(error("invalid BEAM tail-call stack size"));
+                    if let Some(outcome) =
+                        self.call_external(scheduler, module, name, *arity, *tail, *deallocate)?
+                    {
+                        return Ok(outcome);
                     }
-                    if INSTRUCTION_CALLS.contains(&(module.as_str(), name.as_str(), *arity)) {
-                        // ponytail: ERTS runs these calls as instructions; see "Instruction calls" in docs/erts-differences.md.
-                        return Err(error(format!(
-                            "unsupported instruction call {module}:{name}/{arity}"
-                        )));
-                    }
-                    // A BIF runs before the module code, as in ERTS.
-                    if is_bif(module, name, *arity) {
-                        let arguments = call_arguments(&process.registers, *arity)?;
-                        let result = self.bif(scheduler, module, name, arguments)?;
-                        let (target, arguments) = match result {
-                            BifResult::Value(value) => {
-                                let process = scheduler.current_process_mut();
-                                write(process, &Operand::X(0), value)?;
-                                if *tail && let Some(outcome) = return_from_frame(process)? {
-                                    return Ok(outcome);
-                                }
-                                continue;
-                            }
-                            BifResult::Raise { class, reason } => {
-                                let process = scheduler.current_process_mut();
-                                if let Some(outcome) = raise(process, class, reason) {
-                                    return Ok(outcome);
-                                }
-                                continue;
-                            }
-                            BifResult::Trap {
-                                module,
-                                function,
-                                arguments,
-                            } => ((module, function), arguments),
-                        };
-                        let process = scheduler.current_process_mut();
-                        let arity = u32::try_from(arguments.len())
-                            .map_err(|_| error("arity exceeds BEAM limit"))?;
-                        for (index, argument) in (0..).zip(arguments) {
-                            write(process, &Operand::X(index), argument)?;
-                        }
-                        let frame = self.mfa_frame(target.0, target.1, arity)?;
-                        if *tail {
-                            *current_frame(process) = frame;
-                        } else {
-                            process.frames.push(frame);
-                        }
-                        continue;
-                    }
-                    let process = scheduler.current_process_mut();
-                    let frame = self.mfa_frame(module, name, *arity)?;
-                    if *tail {
-                        *current_frame(process) = frame;
-                    } else {
-                        process.frames.push(frame);
+                }
+                Instruction::Apply {
+                    arity,
+                    tail,
+                    deallocate,
+                } => {
+                    let module = apply_atom(process, *arity)?;
+                    let name = apply_atom(process, arity.saturating_add(1))?;
+                    if let Some(outcome) = self.call_external(
+                        scheduler,
+                        module.name(),
+                        name.name(),
+                        *arity,
+                        *tail,
+                        *deallocate,
+                    )? {
+                        return Ok(outcome);
                     }
                 }
                 Instruction::Bif {
@@ -672,6 +639,96 @@ impl BeamProgram {
                 } => return Err(error(format!("function clause {module}:{name}/{arity}"))),
             }
         }
+    }
+
+    /// Call `module:name/arity` with the arguments in the X registers, as
+    /// `call_ext` and `apply` do. A tail call first checks that the frame
+    /// has `deallocate` Y registers, then replaces the frame. A BIF runs
+    /// before the module code, as in ERTS. Return the outcome when the
+    /// process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // `erlang:exit/1` in a tail call with no catch tag exits the process.
+    /// let outcome = program.call_external(&mut scheduler, "erlang", "exit", 1, true, 0)?;
+    /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
+    /// // `erlang:apply/3` runs as an instruction in ERTS.
+    /// assert!(program.call_external(&mut scheduler, "erlang", "apply", 3, false, 0).is_err());
+    /// ```
+    fn call_external(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        name: &str,
+        arity: u32,
+        tail: bool,
+        deallocate: u32,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        if tail && deallocate as usize != current_frame(process).stack.len() {
+            return Err(error("invalid BEAM tail-call stack size"));
+        }
+        if INSTRUCTION_CALLS.contains(&(module, name, arity)) {
+            // ponytail: ERTS runs these calls as instructions; see "Instruction calls" in docs/erts-differences.md.
+            return Err(error(format!(
+                "unsupported instruction call {module}:{name}/{arity}"
+            )));
+        }
+        let (frame, process) = if is_bif(module, name, arity) {
+            let arguments = call_arguments(&process.registers, arity)?;
+            let result = self.bif(scheduler, module, name, arguments)?;
+            let process = scheduler.current_process_mut();
+            match result {
+                BifResult::Value(value) => {
+                    write(process, &Operand::X(0), value)?;
+                    return if tail {
+                        return_from_frame(process)
+                    } else {
+                        Ok(None)
+                    };
+                }
+                BifResult::Raise { class, reason } => return Ok(raise(process, class, reason)),
+                BifResult::Trap {
+                    module,
+                    function,
+                    arguments,
+                } => {
+                    let arity = u32::try_from(arguments.len())
+                        .map_err(|_| error("arity exceeds BEAM limit"))?;
+                    for (index, argument) in (0..).zip(arguments) {
+                        write(process, &Operand::X(index), argument)?;
+                    }
+                    (self.mfa_frame(module, function, arity)?, process)
+                }
+            }
+        } else {
+            (self.mfa_frame(module, name, arity)?, process)
+        };
+        if tail {
+            *current_frame(process) = frame;
+        } else {
+            process.frames.push(frame);
+        }
+        Ok(None)
+    }
+}
+
+/// Read the module or the function name of an `apply` instruction from
+/// `x(index)`. The value must be an atom.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.registers = vec![Some(Term::static_atom("erlang"))];
+/// assert_eq!(apply_atom(&process, 0)?.name(), "erlang");
+/// assert!(apply_atom(&process, 1).is_err());
+/// ```
+fn apply_atom(process: &ProcessState, index: u32) -> Result<Atom, BeamError> {
+    match read(process, &Operand::X(index))? {
+        Term::Atom(ref atom) => Ok(atom.clone()),
+        // ponytail: ERTS raises `badarg`; see "Instruction calls" in docs/erts-differences.md.
+        value => Err(error(format!("apply target {value:?} is not an atom"))),
     }
 }
 
@@ -2438,6 +2495,171 @@ mod tests {
         assert_eq!(
             program.execute("fixture", "main", &[]).unwrap(),
             test_atom("true")
+        );
+    }
+
+    /// Run `main/0` with the functions `zero/0`, `id/3`, and `last/2` of
+    /// the probe that gives the ERTS values of the `apply` tests:
+    /// `zero() -> zero.`, `id(A, B, C) -> {A, B, C}.`, and
+    /// `last(M, F) -> M:F(bye).`, which compiles to `{apply_last,1,0}`.
+    fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
+        let mut program = make_program(body, 0);
+        let module = program.modules.get_mut("fixture").unwrap();
+        module.exports.extend([
+            (("zero".into(), 0), 11),
+            (("id".into(), 3), 12),
+            (("last".into(), 2), 13),
+        ]);
+        let function = |name: &str, arity, label| {
+            [
+                Instruction::FunctionInfo {
+                    module: "fixture".into(),
+                    name: name.into(),
+                    arity,
+                },
+                Instruction::Label(label),
+            ]
+        };
+        module.instructions.extend(function("zero", 0, 11));
+        module.instructions.extend([
+            Instruction::Move(atom("zero"), Operand::X(0)),
+            Instruction::Return,
+        ]);
+        module.instructions.extend(function("id", 3, 12));
+        module.instructions.extend([
+            Instruction::PutTuple {
+                elements: vec![Operand::X(0), Operand::X(1), Operand::X(2)],
+                destination: Operand::X(0),
+            },
+            Instruction::Return,
+        ]);
+        module.instructions.extend(function("last", 2, 13));
+        module.instructions.extend([
+            Instruction::Allocate { stack_size: 0 },
+            Instruction::Move(Operand::X(1), Operand::X(2)),
+            Instruction::Move(Operand::X(0), Operand::X(1)),
+            Instruction::Move(atom("bye"), Operand::X(0)),
+            Instruction::Apply {
+                arity: 1,
+                tail: true,
+                deallocate: 0,
+            },
+        ]);
+        program.execute("fixture", "main", &[])
+    }
+
+    /// Return the body that moves the module and the function name of an
+    /// `apply` with `arity` arguments to `x(arity)` and `x(arity + 1)`, then
+    /// runs the `apply`.
+    fn apply_body(arity: u32, module: Operand, function: Operand) -> Vec<Instruction> {
+        vec![
+            Instruction::Move(module, Operand::X(arity)),
+            Instruction::Move(function, Operand::X(arity + 1)),
+            Instruction::Apply {
+                arity,
+                tail: false,
+                deallocate: 0,
+            },
+            Instruction::Return,
+        ]
+    }
+
+    #[test]
+    fn applies_module_functions_and_bifs_as_pinned_erts() {
+        // OTP 29.1.1: `M:F()` compiles to `{apply,0}`, and it gives `zero`
+        // with `fixture` and `zero`.
+        assert_eq!(
+            run_with_apply_targets(apply_body(0, atom("fixture"), atom("zero"))).unwrap(),
+            test_atom("zero")
+        );
+        // `M:F()` with `erlang` and `self` gives a pid: the BIF runs.
+        assert!(matches!(
+            run_with_apply_targets(apply_body(0, atom("erlang"), atom("self"))),
+            Ok(Term::Pid(_))
+        ));
+        // In a tail position, `M:F()` compiles to `{apply_last,0,0}`. The BIF
+        // value returns from the last frame, so the root process exits.
+        assert!(matches!(
+            run_with_apply_targets(vec![
+                Instruction::Move(atom("erlang"), Operand::X(0)),
+                Instruction::Move(atom("self"), Operand::X(1)),
+                Instruction::Apply {
+                    arity: 0,
+                    tail: true,
+                    deallocate: 0,
+                },
+            ]),
+            Ok(Term::Pid(_))
+        ));
+        // `M:F(A, b, c)` compiles to `{apply,3}`, and it gives `{a,b,c}`
+        // with `fixture`, `id`, and `a`.
+        let mut body = vec![
+            Instruction::Move(atom("a"), Operand::X(0)),
+            Instruction::Move(atom("b"), Operand::X(1)),
+            Instruction::Move(atom("c"), Operand::X(2)),
+        ];
+        body.extend(apply_body(3, atom("fixture"), atom("id")));
+        assert_eq!(
+            run_with_apply_targets(body).unwrap(),
+            Term::Tuple(vec![test_atom("a"), test_atom("b"), test_atom("c")])
+        );
+        // `catch last(erlang, exit)` gives `{'EXIT',bye}`: `apply_last` runs
+        // the `erlang:exit/1` BIF, and the exception reaches the catch.
+        assert_eq!(
+            run_with_apply_targets(vec![
+                Instruction::Allocate { stack_size: 1 },
+                Instruction::Catch {
+                    register: 0,
+                    label: 3,
+                },
+                Instruction::Move(atom("erlang"), Operand::X(0)),
+                Instruction::Move(atom("exit"), Operand::X(1)),
+                Instruction::Call {
+                    arity: 2,
+                    label: 13
+                },
+                Instruction::Label(3),
+                Instruction::CatchEnd { register: 0 },
+                Instruction::Return,
+            ])
+            .unwrap(),
+            Term::Tuple(vec![test_atom("EXIT"), test_atom("bye")])
+        );
+    }
+
+    #[test]
+    fn rejects_an_apply_of_an_instruction_call_a_non_atom_or_a_stack_mismatch() {
+        let error = |body| run_with_apply_targets(body).unwrap_err().to_string();
+        // ERTS runs `erlang:apply(fixture, id, [x, y, z])` through `{apply,3}`
+        // and gives `{x,y,z}`. PBeam keeps the instruction-call guard.
+        assert_eq!(
+            error(apply_body(3, atom("erlang"), atom("apply"))),
+            "unsupported instruction call erlang:apply/3"
+        );
+        // ERTS raises `badarg` for `M:F()` with `1` and `f`, or with `m` and
+        // `1`.
+        assert_eq!(
+            error(apply_body(0, Operand::Value(Term::Integer(1)), atom("f"))),
+            "apply target Integer(1) is not an atom"
+        );
+        assert_eq!(
+            error(apply_body(0, atom("m"), Operand::Value(Term::Integer(1)))),
+            "apply target Integer(1) is not an atom"
+        );
+        // `apply_last` releases the Y registers of the frame, so the count
+        // must match the allocated stack, as for `call_last`.
+        assert_eq!(
+            error(vec![
+                Instruction::Allocate { stack_size: 1 },
+                Instruction::Move(atom("fixture"), Operand::X(0)),
+                Instruction::Move(atom("zero"), Operand::X(1)),
+                Instruction::Apply {
+                    arity: 0,
+                    tail: true,
+                    deallocate: 0,
+                },
+            ]),
+            "invalid BEAM tail-call stack size"
         );
     }
 }
