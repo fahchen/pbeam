@@ -242,6 +242,20 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `io:put_chars/2` compiles to `{swap,{x,0},{x,2}}`.
     Swap(Operand, Operand),
+    /// Jumps to `fail_label` unless the value is a tuple with `arity`
+    /// elements.
+    ///
+    /// Encoding: opcode, fail label, value, arity. Example:
+    /// `[0x3a, 0x95, 0x03, 0x50]` fails to label 9 unless `x0` is a 5-tuple.
+    ///
+    /// Erlang: the `receive {_, Ref, _, _, _}` in
+    /// `erts_internal:flush_monitor_messages/3` compiles to
+    /// `{test,test_arity,{f,109},[{x,0},5]}`.
+    TestArity {
+        fail_label: u32,
+        value: Operand,
+        arity: u32,
+    },
     /// Jumps to the label for the arity of a tuple, or to `fail_label`.
     ///
     /// Encoding: opcode, value, fail label, extended list of
@@ -552,6 +566,11 @@ pub(super) fn parse_code(
                     choices,
                 }
             }
+            OPCODE_TEST_ARITY => Instruction::TestArity {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+                arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+            },
             OPCODE_SWAP => Instruction::Swap(
                 read_register(data, &mut cursor)?,
                 read_register(data, &mut cursor)?,
@@ -810,7 +829,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BIF1 => Some(4),
         OPCODE_BIF2 => Some(5),
         OPCODE_TEST_LT | OPCODE_TEST_GE | OPCODE_TEST_EQ | OPCODE_TEST_NE
-        | OPCODE_TEST_EXACT_EQ | OPCODE_TEST_EXACT_NE | OPCODE_TEST_ARITY => Some(3),
+        | OPCODE_TEST_EXACT_EQ | OPCODE_TEST_EXACT_NE => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
         OPCODE_TEST_IS_INTEGER
         | OPCODE_TEST_IS_FLOAT

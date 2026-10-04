@@ -244,31 +244,30 @@ impl Scheduler {
         Ok(reference)
     }
 
-    /// Remove a monitor that the current process holds, as
-    /// `erlang:demonitor/2` does. With `flush`, also remove the first
-    /// `{_, Reference, _, _, _}` message, as the ERTS trap target
-    /// `erts_internal:flush_monitor_messages/3` does with `receive ... after 0`.
-    /// A monitor that already fired, or never existed, is not an error.
+    /// Remove a monitor that the current process holds, as the ERTS
+    /// `demonitor` function does. Return true when an active monitor was
+    /// removed, and false when it already fired or never existed.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.demonitor(reference, true);
+    /// let reference = scheduler.monitor(child)?;
+    /// assert!(scheduler.demonitor(reference));
+    /// assert!(!scheduler.demonitor(reference));
     /// ```
-    pub(super) fn demonitor(&mut self, reference: Reference, flush: bool) {
+    pub(super) fn demonitor(&mut self, reference: Reference) -> bool {
         let current = self.current_process_mut().id;
         for process in self.processes.values_mut() {
-            process
+            if let Some(index) = process
                 .monitored_by
-                .retain(|&(watcher, held)| (watcher, held) != (current, reference));
+                .iter()
+                .position(|&entry| entry == (current, reference))
+            {
+                process.monitored_by.remove(index);
+                return true;
+            }
         }
-        if !flush {
-            return;
-        }
-        let down = Term::Reference(reference);
-        self.current_process_mut()
-            .mailbox
-            .remove_first(|message| matches!(message, Term::Tuple(fields) if fields.len() == 5 && fields[1] == down));
+        false
     }
 
     /// Set the group leader of a live local process, as
@@ -497,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn removes_monitors_flushes_their_down_message_and_sets_group_leaders() {
+    fn removes_active_monitors_and_sets_group_leaders() {
         let mut scheduler = Scheduler::default();
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
@@ -509,29 +508,8 @@ mod tests {
 
         let reference = scheduler.monitor(child).unwrap();
         assert_eq!(scheduler.processes[&child].monitored_by.len(), 1);
-        let other = Term::Tuple(vec![atom("a"); 5]);
-        let down = Term::Tuple(vec![
-            atom("DOWN"),
-            Term::Reference(reference),
-            atom("process"),
-            Term::Pid(child),
-            atom("normal"),
-        ]);
-        scheduler.deliver(ProcessId(0), other.clone());
-        scheduler.deliver(ProcessId(0), down);
-        scheduler.demonitor(reference, true);
+        assert!(scheduler.demonitor(reference));
         assert!(scheduler.processes[&child].monitored_by.is_empty());
-        assert_eq!(
-            scheduler.processes[&ProcessId(0)].mailbox.messages(),
-            vec![other.clone()]
-        );
-
-        let reference = scheduler.monitor(child).unwrap();
-        scheduler.demonitor(reference, false);
-        assert!(scheduler.processes[&child].monitored_by.is_empty());
-        assert_eq!(
-            scheduler.processes[&ProcessId(0)].mailbox.messages(),
-            vec![other]
-        );
+        assert!(!scheduler.demonitor(reference));
     }
 }

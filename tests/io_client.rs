@@ -11,7 +11,8 @@ fn atom(name: &str) -> Term {
 #[test]
 fn sends_an_io_request_to_a_probe_group_leader_and_flushes_monitors() {
     let io = pinned_otp_beam("io");
-    let program = BeamProgram::load(&[&io, IO_CLIENT_PROBE]).unwrap();
+    let erts_internal = pinned_erts_beam("erts_internal");
+    let program = BeamProgram::load(&[&io, &erts_internal, IO_CLIENT_PROBE]).unwrap();
     assert_eq!(
         program.execute("io_client_probe", "main", &[]).unwrap(),
         Term::Tuple(vec![
@@ -56,6 +57,23 @@ fn pinned_otp_beam(module: &str) -> Vec<u8> {
             "-noshell",
             "-eval",
             &format!("io:format(\"~s\", [code:which({module})]), halt()."),
+        ])
+        .output()
+        .unwrap();
+    assert!(path.status.success());
+    std::fs::read(String::from_utf8(path.stdout).unwrap()).unwrap()
+}
+
+/// Read a pinned OTP 29.1.1 preloaded ERTS module, such as `erts_internal`,
+/// from the `erts` application of the mise-managed Erlang installation.
+/// `code:which/1` returns `preloaded` for these modules, so the path comes
+/// from `code:lib_dir(erts)`.
+fn pinned_erts_beam(module: &str) -> Vec<u8> {
+    let path = Command::new("erl")
+        .args([
+            "-noshell",
+            "-eval",
+            &format!("io:format(\"~s/ebin/{module}.beam\", [code:lib_dir(erts)]), halt()."),
         ])
         .output()
         .unwrap();

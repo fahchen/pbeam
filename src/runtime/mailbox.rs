@@ -146,33 +146,6 @@ impl Mailbox {
         true
     }
 
-    /// Remove the first message, from the head of the queue, that matches
-    /// `matches`, then move the save pointer to the first message. This is
-    /// the result of a `receive Pattern -> ... after 0 -> ... end` that
-    /// starts a new receive. Return false when no message matches.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// mailbox.push(Term::Integer(1));
-    /// mailbox.push(Term::Integer(2));
-    /// assert!(mailbox.remove_first(|message| message == &Term::Integer(2)));
-    /// assert_eq!(mailbox.messages(), vec![Term::Integer(1)]);
-    /// ```
-    pub(super) fn remove_first(&mut self, matches: impl Fn(&Term) -> bool) -> bool {
-        let mut next = self.first;
-        while let Some(node) = next {
-            if self.nodes[node].message.as_ref().is_some_and(&matches) {
-                self.unlink(node);
-                self.set_save_first();
-                return true;
-            }
-            next = self.nodes[node].next;
-        }
-        self.set_save_first();
-        false
-    }
-
     /// Move the save pointer to the first message and remove the receive
     /// markers at the front of the queue, as ERTS does when a receive ends.
     ///
@@ -530,16 +503,5 @@ mod tests {
         }
         assert!(mailbox.markers.is_empty());
         assert_eq!(mailbox.messages(), vec![int(0), int(1)]);
-    }
-
-    #[test]
-    fn removes_the_first_matching_message_from_the_head() {
-        let mut mailbox = mailbox(&[1, 2, 2]);
-        assert!(mailbox.save_next());
-        assert!(mailbox.remove_first(|message| message == &int(2)));
-        assert_eq!(mailbox.messages(), vec![int(1), int(2)]);
-        assert_eq!(mailbox.current(), Some(&int(1)));
-        assert!(!mailbox.remove_first(|message| message == &int(9)));
-        assert_eq!(mailbox.messages(), vec![int(1), int(2)]);
     }
 }
