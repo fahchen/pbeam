@@ -43,11 +43,15 @@ fn catches_error_and_exit_exceptions_with_try_and_catch() {
             pair(atom("EXIT"), atom("bye")),
             pair(atom("exit"), atom("bye")),
             atom("true"),
+            pair(atom("inner"), atom("a")),
+            pair(atom("inner"), atom("b")),
+            pair(atom("EXIT"), atom("b")),
+            pair(atom("outer_caught"), atom("inner")),
         ])
     );
     assert_eq!(
-        erl_reference("io:format(\"~p~n\", [exception_probe:main()])"),
-        b"{{value,ok},ok,{exit,undef},{error,undef},{'EXIT',bye},{exit,bye},true}\n"
+        erl_reference("io:format(\"~w~n\", [exception_probe:main()])"),
+        b"{{value,ok},ok,{exit,undef},{error,undef},{'EXIT',bye},{exit,bye},true,{inner,a},{inner,b},{'EXIT',b},{outer_caught,inner}}\n"
     );
 }
 
