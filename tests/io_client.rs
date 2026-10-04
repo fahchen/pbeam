@@ -6,12 +6,28 @@ const IO_CLIENT_PROBE: &[u8] = include_bytes!("../fixtures/io_client/io_client_p
 
 #[test]
 fn sends_an_io_request_to_a_probe_group_leader_and_flushes_monitors() {
+    assert_probe_matches_erts("main");
+}
+
+/// Elixir `IO.puts/2` passes the chardata `[<<"Hello, world!">>, 10]` to
+/// `io:put_chars/2`. `io:io_request/2` converts it to one binary with the
+/// BIF `unicode:characters_to_binary/2`, so the probe server gets the same
+/// request as for `main/0`.
+#[test]
+fn converts_chardata_in_the_io_request_to_one_binary() {
+    assert_probe_matches_erts("list");
+}
+
+/// Run an `io_client_probe` function in PBeam with the pinned `io` and
+/// `erts_internal` modules, and in the pinned ERTS 29.1.1. Both runs must
+/// give the probe term below.
+fn assert_probe_matches_erts(function: &str) {
     let io = pinned_otp_beam("io");
     let erts_internal = pinned_erts_beam("erts_internal");
     let program = BeamProgram::load(&[&io, &erts_internal, IO_CLIENT_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("io_client_probe", "main", &[]).unwrap(),
+        program.execute("io_client_probe", function, &[]).unwrap(),
         Term::Tuple(vec![
             atom("ok"),
             Term::Tuple(vec![
@@ -34,7 +50,7 @@ fn sends_an_io_request_to_a_probe_group_leader_and_flushes_monitors() {
             "-pa",
             "fixtures/io_client",
             "-eval",
-            "io:format(\"~p~n\", [io_client_probe:main()]), halt().",
+            &format!("io:format(\"~p~n\", [io_client_probe:{function}()]), halt()."),
         ])
         .output()
         .unwrap();

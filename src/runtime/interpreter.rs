@@ -1,6 +1,7 @@
 use super::{
     process::{Frame, ProcessState, StackSlot},
     scheduler::Scheduler,
+    unicode::characters_to_utf8,
 };
 use crate::{
     beam::{
@@ -781,6 +782,17 @@ impl BeamProgram {
             ("maps", "keys", [_]) => {
                 return Err(error("unsupported maps:keys/1 argument: not a map"));
             }
+            ("unicode", "characters_to_binary", [chardata, Term::Atom(encoding)])
+                if encoding.name() == "unicode" =>
+            {
+                Term::Binary(characters_to_utf8(chardata)?)
+            }
+            // ponytail: ERTS also converts `utf8`, `latin1`, and other encodings; see "Chardata conversion" in docs/erts-differences.md.
+            ("unicode", "characters_to_binary", [_, encoding]) => {
+                return Err(error(format!(
+                    "unsupported unicode:characters_to_binary/2 encoding {encoding:?}"
+                )));
+            }
             _ => {
                 return Err(error(format!(
                     "unresolved external MFA {module}:{name}/{}",
@@ -796,7 +808,7 @@ impl BeamProgram {
 /// `erlang:is_builtin/3` returns `true` for each entry on the pinned ERTS
 /// 29.1.1. ERTS binds each import of a BIF to the BIF when it loads a
 /// module, so the BIF runs even when a loaded module exports the same MFA.
-const BIFS: &[(&str, &str, u32)] = &[("maps", "keys", 1)];
+const BIFS: &[(&str, &str, u32)] = &[("maps", "keys", 1), ("unicode", "characters_to_binary", 2)];
 
 /// Return whether an external call or a `bif` instruction goes to a BIF. An
 /// entry of `BIFS` runs before the module code, as in ERTS. Every `erlang`
@@ -1579,6 +1591,42 @@ mod tests {
         assert_eq!(
             program.execute("fixture", "main", &[]).unwrap(),
             Term::List(Vec::new())
+        );
+    }
+
+    #[test]
+    fn converts_unicode_chardata_and_rejects_other_encodings() {
+        let convert = |chardata: Term, encoding: &str| {
+            make_program(
+                vec![
+                    Instruction::Move(Operand::Value(chardata), Operand::X(0)),
+                    Instruction::Move(Operand::Value(Term::static_atom(encoding)), Operand::X(1)),
+                    Instruction::CallExternal {
+                        arity: 2,
+                        module: "unicode".into(),
+                        name: "characters_to_binary".into(),
+                        tail: true,
+                        deallocate: 0,
+                    },
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        let chardata = || Term::List(vec![Term::Binary(b"Hello".to_vec()), Term::Integer(10)]);
+        assert_eq!(
+            convert(chardata(), "unicode").unwrap(),
+            Term::Binary(b"Hello\n".to_vec())
+        );
+        assert_eq!(
+            convert(Term::Integer(1), "unicode")
+                .unwrap_err()
+                .to_string(),
+            "unsupported chardata Integer(1): not a binary or a list"
+        );
+        assert_eq!(
+            convert(chardata(), "utf8").unwrap_err().to_string(),
+            "unsupported unicode:characters_to_binary/2 encoding Atom(\"utf8\")"
         );
     }
 
