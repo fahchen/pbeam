@@ -1,5 +1,5 @@
 -module(user_drv_probe).
--export([main/0, iovec/0, ne/0, ne/3, start_driver/3, state/3, writer/2]).
+-export([main/0, iovec/0, iolists/7, ne/0, ne/3, start_driver/3, state/3, writer/2]).
 
 main() ->
     WriterRef = make_ref(),
@@ -33,6 +33,18 @@ writer(Probe, WriterRef) ->
 
 iovec() ->
     [try erlang:iolist_to_iovec(X) catch error:R -> R end || X <- [<<>>, [], foo]].
+
+%% ERTS copies bytes and each binary of at most 512 bytes into one merged
+%% binary, and keeps each larger binary as its own element (erl_iolist.c).
+%% The caller gives the binaries, the deep list, and 256 and -1, as PBeam
+%% has no bs_create_bin, no gc_bif2, and no INTEGER_EXT literals yet.
+iolists(B64, B512, B513, Huge, Deep, Above, Below) ->
+    Inputs = [[[]], [<<>>], [1, 2], [<<"a">>, [<<"b">>, 3]], [[[[1]]]], [[], <<>>, [[]]],
+              [[[1, [2, [3, <<4>>]], 5]], 6], [B64], [1, B64], [B512], [1, B512], [B512, B512],
+              [B513], [1, B513], [1, B513, 2], [B513, B513], [B513, 1, 2, B513, <<>>],
+              [<<>>, B513], [[B513]], [Huge], [1, Huge, <<"ab">>], Deep,
+              [Above], [Below], [a], [1, a], [1, [2, Above]], [B513, foo]],
+    [try erlang:iolist_to_iovec(X) catch error:R -> R end || X <- Inputs].
 
 ne() ->
     [?MODULE:ne(A, B, C) || {A, B, C} <- [{a, a, b}, {a, b, a}, {a, b, c}]].

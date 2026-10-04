@@ -298,32 +298,92 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
         .map_or_else(BifResult::badarg, |element| Value(element.clone()))
 }
 
-/// Run `erlang:iolist_to_iovec/1` for a term that is not a list that is not
-/// empty, as ERTS `iolist_to_iovec_1` (`erl_iolist.c`) does: return `[]` for
-/// `[]` and `<<>>`, and `[Bin]` for a binary `Bin` that is not empty. Each
-/// other term that is not a list raises `badarg`. A list that is not empty
-/// gives a runtime error.
+/// The largest binary, in bytes, that `erlang:iolist_to_iovec/1` copies into
+/// the merged binary of its result. ERTS `IOL2V_COPY_THRESHOLD`
+/// (`erl_iolist.c`) is `ERL_ONHEAP_BITS_LIMIT * 8` bits, and
+/// `ERL_ONHEAP_BITS_LIMIT` (`erl_bits.h`) is `64 * 8` bits, so the limit is
+/// 4096 bits, or 512 bytes. A larger binary is an element of the result.
+const IOVEC_COPY_LIMIT: usize = 512;
+
+/// Run `erlang:iolist_to_iovec/1` as ERTS `iolist_to_iovec_1` and
+/// `iolist_to_iovec_engine` (`erl_iolist.c`) do. Return `[]` for `[]` and
+/// `<<>>`, and `[Bin]` for a binary `Bin` that is not empty. For a list, walk
+/// the nested lists in order. Copy each byte and each binary of at most
+/// [`IOVEC_COPY_LIMIT`] bytes into one merged binary. Each larger binary
+/// closes the current merged binary, if it is not empty, and is an element of
+/// the result itself. An empty merged binary is not in the result. An integer
+/// outside `0..=255` or another term that is not iodata raises `badarg`.
+///
+/// ERTS also copies a sub-binary at a bit offset that is not a multiple of 8,
+/// whatever its size. PBeam binaries always start at a byte, so only the size
+/// selects the rule.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let hello = Term::Binary(b"Hello".to_vec());
-/// assert!(matches!(iolist_to_iovec(&hello)?, BifResult::Value(Term::List(iovec)) if iovec == [hello]));
-/// assert!(matches!(iolist_to_iovec(&Term::Binary(Vec::new()))?, BifResult::Value(Term::List(iovec)) if iovec.is_empty()));
-/// assert!(matches!(iolist_to_iovec(&Term::static_atom("foo"))?, BifResult::Raise { .. }));
-/// assert!(iolist_to_iovec(&Term::List(vec![Term::Integer(1)])).is_err());
+/// assert!(matches!(iolist_to_iovec(&hello), BifResult::Value(Term::List(iovec)) if iovec == [hello]));
+/// assert!(matches!(iolist_to_iovec(&Term::Binary(Vec::new())), BifResult::Value(Term::List(iovec)) if iovec.is_empty()));
+/// // [1, [<<2>>]] gives [<<1,2>>].
+/// let list = Term::List(vec![Term::Integer(1), Term::List(vec![Term::Binary(vec![2])])]);
+/// assert!(matches!(iolist_to_iovec(&list), BifResult::Value(Term::List(iovec)) if iovec == [Term::Binary(vec![1, 2])]));
+/// // [1, <<0:513/unit:8>>] gives [<<1>>, <<0:513/unit:8>>].
+/// let large = Term::Binary(vec![0; 513]);
+/// let list = Term::List(vec![Term::Integer(1), large.clone()]);
+/// assert!(matches!(iolist_to_iovec(&list), BifResult::Value(Term::List(iovec)) if iovec == [Term::Binary(vec![1]), large]));
+/// assert!(matches!(iolist_to_iovec(&Term::List(vec![Term::Integer(256)])), BifResult::Raise { .. }));
+/// assert!(matches!(iolist_to_iovec(&Term::static_atom("foo")), BifResult::Raise { .. }));
 /// ```
-pub(super) fn iolist_to_iovec(term: &Term) -> Result<BifResult, BeamError> {
+pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
     match term {
-        Term::List(elements) if elements.is_empty() => Ok(Value(Term::List(Vec::new()))),
-        Term::Binary(bytes) if bytes.is_empty() => Ok(Value(Term::List(Vec::new()))),
-        Term::Binary(_) => Ok(Value(Term::List(vec![term.clone()]))),
-        // ponytail: a list needs the iolist engine (`iolist_to_iovec_engine`); see "BIF arguments" in docs/erts-differences.md.
-        Term::List(_) => Err(error(format!(
-            "unsupported erlang:iolist_to_iovec/1 argument {term:?}: a list that is not empty"
-        ))),
-        _ => Ok(BifResult::badarg()),
+        Term::Binary(bytes) if bytes.is_empty() => Value(Term::List(Vec::new())),
+        Term::Binary(_) => Value(Term::List(vec![term.clone()])),
+        Term::List(elements) => {
+            iolist_iovec(elements).map_or_else(BifResult::badarg, |iovec| Value(Term::List(iovec)))
+        }
+        _ => BifResult::badarg(),
     }
+}
+
+/// Convert the elements of an iolist to the iovec of
+/// `erlang:iolist_to_iovec/1`, or return `None` when an element is not
+/// iodata. Use a stack of list iterators, as the ERTS engine does, so that a
+/// deep nested list does not use the Rust call stack.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let iolist = [Term::List(vec![]), Term::Binary(vec![]), Term::Integer(7)];
+/// assert_eq!(iolist_iovec(&iolist), Some(vec![Term::Binary(vec![7])]));
+/// assert_eq!(iolist_iovec(&[Term::Integer(-1)]), None);
+/// ```
+fn iolist_iovec(elements: &[Term]) -> Option<Vec<Term>> {
+    let mut iovec = Vec::new();
+    let mut merged = Vec::new();
+    let mut lists = vec![elements.iter()];
+    while let Some(list) = lists.last_mut() {
+        match list.next() {
+            None => {
+                lists.pop();
+            }
+            Some(Term::List(inner)) => lists.push(inner.iter()),
+            Some(Term::Integer(byte)) => merged.push(u8::try_from(*byte).ok()?),
+            Some(Term::Binary(bytes)) if bytes.len() <= IOVEC_COPY_LIMIT => {
+                merged.extend_from_slice(bytes);
+            }
+            Some(binary @ Term::Binary(_)) => {
+                if !merged.is_empty() {
+                    iovec.push(Term::Binary(std::mem::take(&mut merged)));
+                }
+                iovec.push(binary.clone());
+            }
+            Some(_) => return None,
+        }
+    }
+    if !merged.is_empty() {
+        iovec.push(Term::Binary(merged));
+    }
+    Some(iovec)
 }
 
 /// The item atoms that `erlang:process_info/2` accepts (`pi_arg2ix` in

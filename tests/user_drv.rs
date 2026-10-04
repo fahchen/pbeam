@@ -73,6 +73,113 @@ fn runs_iolist_to_iovec_of_terms_that_are_not_lists_as_pinned_erts() {
 }
 
 #[test]
+fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
+    // `iolist_to_iovec_engine` (`erl_iolist.c`) walks nested lists in order.
+    // It copies bytes and each binary of at most 512 bytes
+    // (`IOL2V_COPY_THRESHOLD`, 4096 bits) into one merged binary, and keeps
+    // each larger binary as its own element. An empty merged binary is not
+    // in the result. An element that is not iodata raises `badarg`, also
+    // after valid elements. The list nested 100000 deep gives `[<<1>>]`.
+    let program = BeamProgram::load(&[USER_DRV_PROBE]).unwrap();
+    let badarg = Term::Atom(program.atom("badarg").unwrap());
+    let ones = |size| Term::Binary(vec![255; size]);
+    let bytes = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let merged = |head: &[u8], size| {
+        let mut bytes = head.to_vec();
+        bytes.resize(head.len() + size, 255);
+        Term::Binary(bytes)
+    };
+    let huge = Term::Binary(vec![0; 100_000]);
+    let deep = (0..100_000).fold(Term::List(vec![Term::Integer(1)]), |list, _| {
+        Term::List(vec![list])
+    });
+    let expected = Term::List(vec![
+        Term::List(vec![]),
+        Term::List(vec![]),
+        Term::List(vec![bytes(&[1, 2])]),
+        Term::List(vec![bytes(b"ab\x03")]),
+        Term::List(vec![bytes(&[1])]),
+        Term::List(vec![]),
+        Term::List(vec![bytes(&[1, 2, 3, 4, 5, 6])]),
+        Term::List(vec![ones(64)]),
+        Term::List(vec![merged(&[1], 64)]),
+        Term::List(vec![ones(512)]),
+        Term::List(vec![merged(&[1], 512)]),
+        Term::List(vec![ones(1024)]),
+        Term::List(vec![ones(513)]),
+        Term::List(vec![bytes(&[1]), ones(513)]),
+        Term::List(vec![bytes(&[1]), ones(513), bytes(&[2])]),
+        Term::List(vec![ones(513), ones(513)]),
+        Term::List(vec![ones(513), bytes(&[1, 2]), ones(513)]),
+        Term::List(vec![ones(513)]),
+        Term::List(vec![ones(513)]),
+        Term::List(vec![huge.clone()]),
+        Term::List(vec![bytes(&[1]), huge.clone(), bytes(b"ab")]),
+        Term::List(vec![bytes(&[1])]),
+        badarg.clone(),
+        badarg.clone(),
+        badarg.clone(),
+        badarg.clone(),
+        badarg.clone(),
+        badarg,
+    ]);
+    assert_eq!(
+        program
+            .execute(
+                "user_drv_probe",
+                "iolists",
+                &[
+                    ones(64),
+                    ones(512),
+                    ones(513),
+                    huge,
+                    deep,
+                    Term::Integer(256),
+                    Term::Integer(-1),
+                ],
+            )
+            .unwrap(),
+        expected
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/user_drv",
+            "-eval",
+            "io:format(\"~w~n\", [user_drv_probe:iolists(<<-1:512>>, <<-1:4096>>, <<-1:4104>>, <<0:800000>>, lists:foldl(fun(_, L) -> [L] end, [1], lists:seq(1, 100000)), 256, -1)]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{}\n", erl_w(&expected))
+    );
+}
+
+/// Format a list of binaries, lists, and atoms as `io:format("~w", ...)` does
+/// on ERTS, for example `[[<<1,2>>],badarg]`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let term = Term::List(vec![Term::Binary(vec![1, 2])]);
+/// assert_eq!(erl_w(&term), "[<<1,2>>]");
+/// ```
+fn erl_w(term: &Term) -> String {
+    let join = |items: Vec<String>| items.join(",");
+    match term {
+        Term::Binary(bytes) => format!("<<{}>>", join(bytes.iter().map(u8::to_string).collect())),
+        Term::List(items) => format!("[{}]", join(items.iter().map(erl_w).collect())),
+        Term::Atom(atom) => atom.name().to_owned(),
+        other => panic!("no ~w format for {other:?}"),
+    }
+}
+
+#[test]
 fn runs_is_ne_exact_in_an_orelse_guard_as_pinned_erts() {
     // `ne/3` has the `orelse` guard shape of `user_drv:server/3`:
     // `{test,is_ne_exact,{f,24},[{x,0},{x,1}]}` jumps to the `match` body
