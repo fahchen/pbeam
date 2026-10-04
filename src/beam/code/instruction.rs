@@ -58,6 +58,8 @@ const OPCODE_BS_SET_POSITION: u8 = 168;
 const OPCODE_BS_START_MATCH4: u8 = 170;
 const OPCODE_BS_GET_UTF8: u8 = 138;
 const OPCODE_BS_SKIP_UTF8: u8 = 139;
+const OPCODE_BS_GET_UTF16: u8 = 140;
+const OPCODE_BS_GET_UTF32: u8 = 142;
 const OPCODE_LINE: u8 = 153;
 const OPCODE_CALL_LAST: u8 = 5;
 const OPCODE_BIF0: u8 = 9;
@@ -1210,7 +1212,8 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_SKIP_BITS2 => Some(5),
         OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
         OPCODE_BS_GET_TAIL | OPCODE_BS_GET_POSITION => Some(3),
-        OPCODE_BS_GET_UTF8 => Some(5),
+        // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
+        OPCODE_BS_GET_UTF8 | OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
         OPCODE_BS_SKIP_UTF8 => Some(4),
         OPCODE_BS_SET_POSITION => Some(2),
         OPCODE_GC_BIF1 => Some(5),
@@ -1487,15 +1490,16 @@ fn read_move_operand(
 mod tests {
     use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
     use super::{
-        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_INIT_WRITABLE,
-        OPCODE_BS_MATCH, OPCODE_GC_BIF2, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL,
-        OPCODE_INIT_YREGS, OPCODE_MAKE_FUN3, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD,
-        OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
-        OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
-        OPCODE_TEST_IS_PORT, OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END,
-        parse_code, read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
-        skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
-        test_kind, unsupported_opcode_operand_count,
+        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_UTF16,
+        OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GC_BIF2,
+        OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS, OPCODE_MAKE_FUN3,
+        OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE,
+        OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
+        OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_LT,
+        OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code, read_move_operand,
+        read_operand_pairs, read_pair_count, read_record_updates, skip_counted_operands,
+        skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
+        unsupported_opcode_operand_count,
     };
     use crate::{
         beam::code::{Instruction, Operand, TestKind},
@@ -1984,6 +1988,8 @@ mod tests {
             (OPCODE_BS_INIT_WRITABLE, 0),
             (OPCODE_BS_MATCH, 3),
             (OPCODE_RAW_RAISE, 0),
+            (OPCODE_BS_GET_UTF16, 5),
+            (OPCODE_BS_GET_UTF32, 5),
         ] {
             assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
         }
