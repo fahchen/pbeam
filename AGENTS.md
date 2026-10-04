@@ -62,6 +62,7 @@ Whenever direction or a solution changes, update the affected task bodies, accep
 
 ## Engineering constraints
 
+- Align runtime behavior with the pinned ERTS, which is the OTP version in `mise.toml`. Before you add or change an instruction, BIF, or term operation, read its pinned OTP source and run it on the pinned ERTS. Match the observable result exactly: return value, exception class and reason, messages sent, and side effects. Run the pinned OTP module code; do not replace it with a Rust shortcut. Do not add a limit or fast path that ERTS does not have. Cite the OTP source file and line for each such decision in the PR. A part that is not implemented yet fails with a clear runtime error, and `docs/erts-differences.md` records it; never ship different behavior as a workaround.
 - Land minimal shared foundations: only the first consumer's required types, fields, functions, and configuration. Each later task adds what it needs.
 - Reuse existing code, standard libraries, and installed dependencies before adding abstractions or dependencies. Logical boundaries in the specification do not require pre-created crates.
 - Understand the actual flow and all callers before fixing a bug. Fix the shared cause and preserve existing supported behavior.
