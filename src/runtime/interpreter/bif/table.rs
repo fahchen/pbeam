@@ -192,7 +192,7 @@ bifs! {
     erlang:integer_to_list/2 => unsupported,
     erlang:iolist_size/1 => unsupported,
     erlang:iolist_to_binary/1 => unsupported,
-    erlang:iolist_to_iovec/1 => unsupported,
+    erlang:iolist_to_iovec/1 => |_, [term]| erlang::iolist_to_iovec(term),
     erlang:is_atom/1 => unsupported,
     erlang:is_binary/1 => unsupported,
     erlang:is_bitstring/1 => unsupported,

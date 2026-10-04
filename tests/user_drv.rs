@@ -6,6 +6,8 @@ mod common;
 
 use common::pinned_beam;
 
+const USER_DRV_PROBE: &[u8] = include_bytes!("../fixtures/user_drv/user_drv_probe.beam");
+
 #[test]
 fn runs_the_pinned_unicode_characters_to_binary_as_pinned_erts() {
     // The pinned `unicode` module has `bs_get_utf16` and `bs_get_utf32`.
@@ -39,4 +41,33 @@ fn runs_the_pinned_unicode_characters_to_binary_as_pinned_erts() {
     assert!(reference.status.success());
     assert!(reference.stderr.is_empty());
     assert_eq!(reference.stdout, b"<<\"Hello\\n\">>\n");
+}
+
+#[test]
+fn runs_iolist_to_iovec_of_terms_that_are_not_lists_as_pinned_erts() {
+    // `iolist_to_iovec/1` returns `[]` for `<<>>` and `[]`, and raises
+    // `badarg` for `foo`, as `iolist_to_iovec_1` (`erl_iolist.c`) does.
+    let program = BeamProgram::load(&[USER_DRV_PROBE]).unwrap();
+    assert_eq!(
+        program.execute("user_drv_probe", "iovec", &[]).unwrap(),
+        Term::List(vec![
+            Term::List(vec![]),
+            Term::List(vec![]),
+            Term::Atom(program.atom("badarg").unwrap()),
+        ])
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/user_drv",
+            "-eval",
+            "io:format(\"~p~n\", [user_drv_probe:iovec()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stdout, b"[[],[],badarg]\n");
 }

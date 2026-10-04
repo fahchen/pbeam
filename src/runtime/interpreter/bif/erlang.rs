@@ -298,6 +298,34 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
         .map_or_else(BifResult::badarg, |element| Value(element.clone()))
 }
 
+/// Run `erlang:iolist_to_iovec/1` for a term that is not a list that is not
+/// empty, as ERTS `iolist_to_iovec_1` (`erl_iolist.c`) does: return `[]` for
+/// `[]` and `<<>>`, and `[Bin]` for a binary `Bin` that is not empty. Each
+/// other term that is not a list raises `badarg`. A list that is not empty
+/// gives a runtime error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let hello = Term::Binary(b"Hello".to_vec());
+/// assert!(matches!(iolist_to_iovec(&hello)?, BifResult::Value(Term::List(iovec)) if iovec == [hello]));
+/// assert!(matches!(iolist_to_iovec(&Term::Binary(Vec::new()))?, BifResult::Value(Term::List(iovec)) if iovec.is_empty()));
+/// assert!(matches!(iolist_to_iovec(&Term::static_atom("foo"))?, BifResult::Raise { .. }));
+/// assert!(iolist_to_iovec(&Term::List(vec![Term::Integer(1)])).is_err());
+/// ```
+pub(super) fn iolist_to_iovec(term: &Term) -> Result<BifResult, BeamError> {
+    match term {
+        Term::List(elements) if elements.is_empty() => Ok(Value(Term::List(Vec::new()))),
+        Term::Binary(bytes) if bytes.is_empty() => Ok(Value(Term::List(Vec::new()))),
+        Term::Binary(_) => Ok(Value(Term::List(vec![term.clone()]))),
+        // ponytail: a list needs the iolist engine (`iolist_to_iovec_engine`); see "BIF arguments" in docs/erts-differences.md.
+        Term::List(_) => Err(error(format!(
+            "unsupported erlang:iolist_to_iovec/1 argument {term:?}: a list that is not empty"
+        ))),
+        _ => Ok(BifResult::badarg()),
+    }
+}
+
 /// The item atoms that `erlang:process_info/2` accepts (`pi_arg2ix` in
 /// `erl_bif_info.c`). The tuple `{dictionary, Key}` is also an item.
 const PROCESS_INFO_ITEMS: [&str; 40] = [

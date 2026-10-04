@@ -2338,6 +2338,31 @@ mod tests {
     }
 
     #[test]
+    fn returns_the_iovec_of_a_binary_and_rejects_a_list_that_is_not_empty() {
+        // On pinned ERTS, `erlang:iolist_to_iovec(<<"Hello">>)` returns
+        // `[<<"Hello">>]`, and `[1, 2]` returns `[<<1,2>>]` through the iolist
+        // engine, which PBeam does not have.
+        let run = |argument| {
+            make_program(
+                vec![
+                    Instruction::Move(Operand::Value(argument), Operand::X(0)),
+                    erlang_call("iolist_to_iovec", 1, true),
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        let hello = Term::Binary(b"Hello".to_vec());
+        assert_eq!(run(hello.clone()).unwrap(), Term::List(vec![hello]));
+        assert!(
+            run(Term::List(vec![Term::Integer(1), Term::Integer(2)]))
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported erlang:iolist_to_iovec/1 argument")
+        );
+    }
+
+    #[test]
     fn finds_a_live_catch_tag_after_other_slots_and_skips_a_cleared_tag() {
         let run = |body| make_program(body, 0).execute("fixture", "main", &[]);
         let nif_error = [
