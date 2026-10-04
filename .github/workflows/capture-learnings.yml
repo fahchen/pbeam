@@ -166,48 +166,53 @@ jobs:
             const comment = read('comment.md')
             if (!comment) return core.setFailed('Copilot wrote no comment.md.')
             const claims = comment.startsWith('Captured review learnings')
-            const captured = Boolean(read('knowledge.md'))
+            // The prompt may write either file, or both.
+            const files = ['knowledge.md', 'improvements.md'].filter(name => read(name))
+            const captured = files.length > 0
             // The comment and the artifacts must agree in both directions. A
             // claim without a file hides a failure, and a file without a
-            // claim publishes rules that the comment does not report.
+            // claim publishes entries that the comment does not report.
             if (claims !== captured) {
               return core.setFailed(claims
-                ? 'comment.md claims a capture, but knowledge.md is missing.'
-                : 'knowledge.md exists, but comment.md reports no capture.')
+                ? 'comment.md claims a capture, but no knowledge.md and no improvements.md exist.'
+                : `${files.join(' and ')} exists, but comment.md reports no capture.`)
             }
             if (captured && !read('pr-body.md')) {
-              return core.setFailed('knowledge.md exists, but pr-body.md is missing.')
+              return core.setFailed(`${files.join(' and ')} exists, but pr-body.md is missing.`)
             }
-            if (captured) {
-              // The prompt allows 2 new rules for one PR, and no change to
-              // the text of an entry that the run does not add.
-              const headings = text => (text.match(/^## .*$/gm) ?? [])
-              const before = headings(fs.readFileSync('docs/agents/knowledge.md', 'utf8'))
-              const after = headings(read('knowledge.md'))
-              const added = after.filter(h => !before.includes(h))
-              const removed = before.filter(h => !after.includes(h))
+            // The prompt allows 2 new rules in knowledge.md for one PR, and
+            // no change to the text of an entry that the run does not add.
+            const headings = text => (text.match(/^## .*$/gm) ?? [])
+            for (const name of files) {
+              const before = headings(fs.readFileSync(`docs/agents/${name}`, 'utf8'))
+              const added = headings(read(name)).filter(h => !before.includes(h))
+              const removed = before.filter(h => !headings(read(name)).includes(h))
               if (removed.length) {
-                return core.setFailed(`knowledge.md drops the rules: ${removed.join(', ')}`)
+                return core.setFailed(`${name} drops the entries: ${removed.join(', ')}`)
               }
-              if (added.length > 2) {
+              if (name === 'knowledge.md' && added.length > 2) {
                 return core.setFailed(`knowledge.md adds ${added.length} rules, and the limit for one PR is 2.`)
               }
             }
             core.setOutput('captured', String(captured))
+            core.setOutput('files', files.join(' '))
 
       - name: Commit and push the knowledge branch
         if: steps.result.outputs.captured == 'true'
         env:
           # The checkout keeps no credential, so the push carries its own.
           GITHUB_TOKEN: ${{ github.token }}
+          FILES: ${{ steps.result.outputs.files }}
         run: |
           git remote set-url origin \
             "https://x-access-token:$GITHUB_TOKEN@${GITHUB_SERVER_URL#https://}/$GITHUB_REPOSITORY.git"
           branch="learnings/pr-$PR_NUMBER"
           git switch -c "$branch"
-          cp "$OUTPUT/knowledge.md" docs/agents/knowledge.md
-          git commit -m "docs: capture review learnings from #$PR_NUMBER" \
-            -- docs/agents/knowledge.md
+          for name in $FILES; do
+            cp "$OUTPUT/$name" "docs/agents/$name"
+            git add "docs/agents/$name"
+          done
+          git commit -m "docs: capture review learnings from #$PR_NUMBER"
           # A re-run replaces the branch of the earlier run and reuses its PR.
           git push --force origin "$branch"
 

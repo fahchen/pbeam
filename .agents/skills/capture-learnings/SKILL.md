@@ -1,6 +1,6 @@
 ---
 name: capture-learnings
-description: This skill should be used when the user asks to "capture learnings", "update knowledge", "save this rule", "/capture-learnings", or otherwise wants to persist a generalisable review convention discovered during a session into docs/agents/knowledge.md. Enforces abstraction, recurrence, good/bad examples, overlap detection, a capacity ceiling, and explicit user confirmation before any write.
+description: This skill should be used when the user asks to "capture learnings", "update knowledge", "save this rule", "/capture-learnings", or otherwise wants to persist a review lesson discovered during a session. Sends a problem class that recurs to docs/agents/knowledge.md, and a single wrong turn with a lesson to docs/agents/improvements.md. Enforces abstraction, recurrence, good/bad examples, overlap detection, a capacity ceiling, and explicit user confirmation before any write.
 version: 0.1.0
 user-invocable: true
 allowed-tools:
@@ -14,19 +14,26 @@ allowed-tools:
 
 # Capture Learnings
 
-Persist a generalisable rule into [docs/agents/knowledge.md](../../../docs/agents/knowledge.md). That file records only problem classes that recur in review. Context budget is tight: only durable, abstract, recurring rules earn a slot.
+Persist a review lesson into the file that fits it.
+
+- [docs/agents/knowledge.md](../../../docs/agents/knowledge.md) records only problem classes that recur in review. The whole file loads into every agent context, so the budget is tight: only durable, abstract, recurring rules earn a slot.
+- [docs/agents/improvements.md](../../../docs/agents/improvements.md) records a single wrong turn with a lesson. Only the titles load into context, so a specific entry costs little. A candidate that fails the abstraction check or the recurrence check goes here instead of being dropped.
+
+Do not write `patterns.md` or `postmortems/`. The `/agent-docs:update-knowledge` command owns those files.
 
 Trigger phrases: "capture learnings", "save this rule", "update knowledge", "/capture-learnings".
 
 ## Hard rules
 
 1. **No file:line pointers.** The knowledge file stores rules, not pointers into the codebase.
-2. **No one-off bug notes.** A fix for one bug belongs in `git` and in its task issue or PR.
+2. **No one-off bug notes in `knowledge.md`.** A fix for one bug goes to `improvements.md` when the next agent gains from the lesson, and to `git` and its task issue or PR when it does not.
 3. **Good and Bad examples are mandatory in the proposal.** They prove that the rule is concrete. A rule without a `Bad` example is not abstract enough. Reject it and tell the user. The written entry follows the existing style of the file (see `references/rule-format.md`).
 4. **Always confirm before writing.** Print the proposed entry, target position, and overlap analysis. Wait for an explicit `yes`.
-5. **Capacity ceiling is 40 rules.** At or above the ceiling, prune before adding. The user picks what to drop.
+5. **Capacity ceiling is 40 rules.** At or above the ceiling, prune before adding. The user picks what to drop. The ceiling counts `knowledge.md` rules only.
 6. **ASD-STE100.** Write the entry in Simplified Technical English: short sentences, one instruction per sentence, consistent terms.
 7. **No manual line-breaks.** Write the entry's rule and every proposal line as one unwrapped sentence or bullet per line.
+8. **An `improvements.md` entry uses the entry format of that file.** Give it the heading `## YYYYMMDD: Title`, and the `Problem`, `Root Cause`, `Fix`, `Guardrail`, and `Reference` lines. Name the lesson in the title, not the incident. Put a new entry directly below the comment block that holds the format, so the newest lesson is first.
+9. **Change nothing that an entry does not need.** Keep every existing heading, sentence, and line break. Do not reflow, rewrap, reorder, or reword a paragraph that the entry does not add.
 
 ## Workflow (execute in order)
 
@@ -48,7 +55,9 @@ Can the rule be stated without a specific file, function, PR, issue, or commit?
 
 On failure, tell the user:
 
-> "Candidate rule is too specific. It describes only [file/function]. Skipping. Restate it if a general rule exists."
+> "Candidate rule is too specific. It describes only [file/function]. Propose it for `improvements.md` instead, or restate it if a general rule exists."
+
+Then take the candidate to Step 7 as an `improvements.md` entry.
 
 ### Step 3: Recurrence check
 
@@ -57,7 +66,9 @@ Will the situation recur in different code?
 - Pass: "Compare new runtime behavior with ERTS before you choose a model."
 - Fail: "Pin OTP to 29.1.1." (one-time event; it belongs in `mise.toml`)
 
-On failure: "Candidate rule is one-off. Skipping."
+On failure: "Candidate rule is one-off. Propose it for `improvements.md` instead."
+
+Then take the candidate to Step 7 as an `improvements.md` entry. A one-off defect with no lesson for the next agent is dropped, not written.
 
 ### Step 4: Examples check
 
