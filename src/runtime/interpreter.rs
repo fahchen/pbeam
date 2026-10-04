@@ -395,7 +395,7 @@ impl BeamProgram {
                     arguments,
                     destination,
                 } => {
-                    if module != "erlang" {
+                    if !is_bif(module, name, arguments.len() as u32) {
                         return Err(error(format!(
                             "unsupported BIF {module}:{name}/{}",
                             arguments.len()
@@ -792,9 +792,15 @@ impl BeamProgram {
     }
 }
 
-/// Return whether an external call goes to a BIF. A `bif.tab` entry, such as
-/// `maps:keys/1`, runs before the module code, as in ERTS. Every `erlang`
-/// call goes to the BIF table, which reports an unresolved MFA.
+/// The BIFs in modules other than `erlang`, as `(module, name, arity)`.
+/// `erlang:is_builtin/3` returns `true` for each entry on the pinned ERTS
+/// 29.1.1. ERTS binds each import of a BIF to the BIF when it loads a
+/// module, so the BIF runs even when a loaded module exports the same MFA.
+const BIFS: &[(&str, &str, u32)] = &[("maps", "keys", 1)];
+
+/// Return whether an external call or a `bif` instruction goes to a BIF. An
+/// entry of `BIFS` runs before the module code, as in ERTS. Every `erlang`
+/// call goes to the BIF dispatch, which reports an unresolved MFA.
 ///
 /// # Examples
 ///
@@ -805,7 +811,7 @@ impl BeamProgram {
 /// assert!(!is_bif("io", "put_chars", 2));
 /// ```
 fn is_bif(module: &str, name: &str, arity: u32) -> bool {
-    module == "erlang" || (module, name, arity) == ("maps", "keys", 1)
+    module == "erlang" || BIFS.contains(&(module, name, arity))
 }
 
 /// Return the active frame of a running process.
@@ -1530,6 +1536,49 @@ mod tests {
         assert_eq!(
             keys(atom("ok")).unwrap_err().to_string(),
             "unsupported maps:keys/1 argument: not a map"
+        );
+    }
+
+    #[test]
+    fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
+        let mut program = make_program(
+            vec![
+                Instruction::Move(
+                    Operand::Value(Term::Map(Map::from_pairs(Vec::new()).unwrap())),
+                    Operand::X(0),
+                ),
+                Instruction::CallExternal {
+                    arity: 1,
+                    module: "maps".into(),
+                    name: "keys".into(),
+                    tail: true,
+                    deallocate: 0,
+                },
+            ],
+            0,
+        );
+        program.modules.insert(
+            "maps".into(),
+            BeamModule {
+                name: "maps".into(),
+                exports: HashMap::from([(("keys".into(), 1), 1)]),
+                instructions: vec![
+                    Instruction::FunctionInfo {
+                        module: "maps".into(),
+                        name: "keys".into(),
+                        arity: 1,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Move(atom("module_code"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            },
+        );
+        // The BIF returns the keys of the empty map. The module code would
+        // return `module_code`.
+        assert_eq!(
+            program.execute("fixture", "main", &[]).unwrap(),
+            Term::List(Vec::new())
         );
     }
 
