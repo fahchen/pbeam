@@ -78,6 +78,7 @@ Whenever direction or a solution changes, update the affected task bodies, accep
 - Use these compact `mise` tasks in development loops. They print results and failures, not full logs. `mise run check` stays the merge gate.
   - `mise run check-brief` runs `mise run check`. It prints `check: pass` and the `Application line coverage` line, or the failed step and the uncovered lines. The full log is in `target/check.log`.
   - `mise run test-focus <cargo test arguments>` runs `cargo test`, for example `--test group` or a test name filter. It prints the result lines and failures, or `no test ran`.
+  - `mise run erts-eval [--pa <dir>] '<expressions>'` evaluates Erlang expressions with `erl_eval` on the pinned OTP, as `erl -eval` does. It prints the value, or `exception <class>: <reason>` without a stack trace, and writes no crash dump. To see the behavior of compiled BEAM instructions, compile a probe module and call it with `--pa`.
 - Prefer `fd` and `rg`; use `ast-grep` for structural searches when appropriate.
 - Use fish for shell work and `gh` for GitHub operations. Prefer command help before external documentation. Use Context7 for library/API documentation and setup/code-generation guidance when available.
 - Follow the directory's JavaScript lockfile: `bun.lock` means bun; `pnpm-lock.yaml` means pnpm.

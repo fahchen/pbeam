@@ -56,3 +56,12 @@ description = "Run selected Rust tests and print only the results and failures"
 quiet = true
 usage = 'arg "[args]..." help="Arguments for cargo test, such as --test group or a test name filter" var=#true'
 run = 'eval "set -- ${usage_args:-}"; bash scripts/test_focus.sh "$@"'
+
+[tasks.erts-eval]
+description = "Evaluate Erlang expressions on the pinned OTP and print the value or the exception"
+quiet = true
+usage = '''
+flag "--pa <dir>" help="Add this directory to the code path, for example fixtures/order"
+arg "<expr>" help="Erlang expressions, as for erl -eval"
+'''
+run = 'escript scripts/erts_eval.escript "${usage_pa:-}" "$usage_expr"'
