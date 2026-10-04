@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::process::{Frame, ProcessState};
 use crate::{
@@ -26,10 +26,11 @@ pub(super) struct Scheduler {
     next_reference: u64,
     /// Return value or exit reason of the root process after it exits.
     root_result: Option<Result<Term, Term>>,
-    /// The process of each registered name, as the ERTS `process_reg`
-    /// table. An atom name is unique in one atom table, so its text is the
-    /// key.
-    names: HashMap<String, ProcessId>,
+    /// Registered names, as the keys of the ERTS `process_reg` table. An
+    /// atom name is unique in one atom table, so its text identifies it. The
+    /// process of a name is its `registered_name` field; no caller looks up
+    /// a process by name yet.
+    names: HashSet<String>,
 }
 
 impl Scheduler {
@@ -313,10 +314,10 @@ impl Scheduler {
             Some(process)
                 if name.name() != "undefined"
                     && process.registered_name.is_none()
-                    && !self.names.contains_key(name.name()) =>
+                    && !self.names.contains(name.name()) =>
             {
                 process.registered_name = Some(name.clone());
-                self.names.insert(name.name().to_owned(), *id);
+                self.names.insert(name.name().to_owned());
                 true
             }
             _ => false,
@@ -562,6 +563,13 @@ mod tests {
         scheduler.finish_current(atom("normal"), None).unwrap();
         assert!(scheduler.names.is_empty());
         assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
-        assert_eq!(scheduler.names["pbeam_probe_reg"], ProcessId(0));
+        assert!(scheduler.names.contains("pbeam_probe_reg"));
+        assert_eq!(
+            scheduler.processes[&ProcessId(0)]
+                .registered_name
+                .clone()
+                .map(Term::Atom),
+            Some(name)
+        );
     }
 }
