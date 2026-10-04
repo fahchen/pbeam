@@ -170,7 +170,9 @@ thread_local! {
 
 /// Return the atom term of a name for a unit test. A static name gets its
 /// static index. A new name gets the next index in the table of the test
-/// thread, so a test that makes `a` before `b` orders `a` before `b`.
+/// thread. libtest reuses a thread for many tests, so another test can make
+/// the same name first: use this only where atom order does not matter, and
+/// use a fresh `AtomTable` in a test that checks atom order.
 ///
 /// # Examples
 ///

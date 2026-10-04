@@ -500,7 +500,7 @@ fn mix64(mut hash: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{Child, Map, Node, map_hash, mix64};
-    use crate::term::{Term, test_atom as atom};
+    use crate::term::{AtomTable, Term, test_atom as atom};
 
     fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
         Map::from_pairs(
@@ -547,7 +547,10 @@ mod tests {
 
     #[test]
     fn keeps_flatmap_keys_in_order_and_replaces_values() {
-        // The test table makes z before a, so z has the lower atom index.
+        // A fresh table for this test makes z before a, so z has the lower
+        // atom index. A table shared with other tests could make a first.
+        let mut table = AtomTable::new();
+        let mut atom = |name: &str| Term::Atom(table.put(name).unwrap());
         let mut map = Map::from_pairs(vec![
             (atom("z"), atom("z")),
             (atom("a"), atom("old")),

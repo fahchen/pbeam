@@ -314,7 +314,7 @@ pub struct Reference(pub(crate) u64);
 
 #[cfg(test)]
 mod tests {
-    use super::{Map, ProcessId, Reference, Term, test_atom as atom};
+    use super::{AtomTable, Map, ProcessId, Reference, Term, test_atom as atom};
 
     fn map(pairs: Vec<(Term, Term)>) -> Term {
         Term::Map(Map::from_pairs(pairs).unwrap())
@@ -365,6 +365,16 @@ mod tests {
 
     #[test]
     fn formats_and_compares_maps_by_their_pairs() {
+        // A fresh table for this test makes a before b, so the Debug text
+        // lists a first. A table shared with other tests could make b first.
+        let mut table = AtomTable::new();
+        let a = Term::Atom(table.put("a").unwrap());
+        let b = Term::Atom(table.put("b").unwrap());
+        let atom = |name: &str| match name {
+            "a" => a.clone(),
+            "b" => b.clone(),
+            _ => crate::term::test_atom(name),
+        };
         let pairs = || {
             vec![
                 (atom("a"), Term::Integer(1)),
