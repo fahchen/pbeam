@@ -16,7 +16,7 @@ use std::collections::HashMap;
 mod bif;
 mod native;
 
-use bif::{BifResult, INSTRUCTION_CALLS, is_bif};
+use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function};
 
 #[derive(Debug)]
 pub struct BeamProgram {
@@ -277,6 +277,22 @@ impl BeamProgram {
                         jump(module, process, *fail_label)?;
                     }
                 }
+                Instruction::TestFunctionArity {
+                    fail_label,
+                    value,
+                    arity,
+                } => {
+                    let result = is_function(&read(process, value)?, &read(process, arity)?);
+                    // The `badarg` of the check fails the test and raises
+                    // nothing.
+                    let passed = matches!(
+                        result,
+                        BifResult::Value(value) if value == Term::static_atom("true")
+                    );
+                    if !passed {
+                        jump(module, process, *fail_label)?;
+                    }
+                }
                 Instruction::SelectTupleArity {
                     value,
                     fail_label,
@@ -446,6 +462,7 @@ impl BeamProgram {
                         }
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
+                        TestKind::Function => matches!(value, Term::Fun(_)),
                     };
                     if !passed {
                         jump(module, process, *fail_label)?;
@@ -1342,7 +1359,7 @@ mod tests {
     use crate::{
         BeamModule, Map, Term,
         beam::code::{self, Instruction, Operand, TestKind},
-        term::{AtomTable, test_atom},
+        term::{Atom, AtomTable, Lambda, test_atom},
     };
 
     /// The runtime error of a root process that exits with an uncaught
@@ -1424,6 +1441,46 @@ mod tests {
             Instruction::Label(6),
             Instruction::Wait(5),
         ]
+    }
+
+    #[test]
+    fn tests_a_fun_with_a_register_arity_as_erl_is_function() {
+        // The OTP 29.1.1 compiler emits `bif is_function` for an arity that
+        // is not a literal, but the loader accepts `is_function2` with a
+        // register arity (`jit/arm/ops.tab:605`). The JIT then calls
+        // `erl_is_function` and passes only on `true`
+        // (`jit/arm/instr_common.cpp:1266-1283`), so a `badarg` arity fails
+        // the test and raises nothing.
+        let run = |arity| {
+            let lambda = Lambda::new(Atom::from_static("erlang").unwrap(), 0, 0, 2, 1);
+            make_program(
+                vec![
+                    Instruction::MakeFun {
+                        lambda,
+                        free: Vec::new(),
+                        destination: Operand::X(0),
+                    },
+                    Instruction::Move(Operand::Value(arity), Operand::X(1)),
+                    Instruction::TestFunctionArity {
+                        fail_label: 3,
+                        value: Operand::X(0),
+                        arity: Operand::X(1),
+                    },
+                    Instruction::Move(atom("pass"), Operand::X(0)),
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Move(atom("fail"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+            .unwrap()
+        };
+        assert_eq!(run(Term::Integer(1)), test_atom("pass"));
+        for arity in [Term::Integer(0), Term::Integer(-1), test_atom("a")] {
+            assert_eq!(run(arity), test_atom("fail"));
+        }
     }
 
     #[test]

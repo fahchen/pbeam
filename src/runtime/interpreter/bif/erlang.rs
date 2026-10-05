@@ -298,6 +298,32 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
         .map_or_else(BifResult::badarg, |element| Value(element.clone()))
 }
 
+/// Run `erlang:is_function/2`: return `true` when `term` is a fun of
+/// `arity` arguments, as ERTS `erl_is_function` (`erl_bif_op.c:237-267`)
+/// does. An `arity` that is negative or not an integer raises `badarg`. A
+/// non-negative arity that no fun has gives `false`. The `is_function2`
+/// instruction runs the same check and passes only when it returns `true`
+/// (`jit/arm/instr_common.cpp:1266-1283`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // fun(X) -> {Tag, X} end
+/// assert!(matches!(is_function(&pair, &Term::Integer(1)), BifResult::Value(value) if value == Term::static_atom("true")));
+/// assert!(matches!(is_function(&pair, &Term::Integer(0)), BifResult::Value(value) if value == Term::static_atom("false")));
+/// assert!(matches!(is_function(&Term::static_atom("notfun"), &Term::Integer(-1)), BifResult::Raise { .. }));
+/// ```
+pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) -> BifResult {
+    let Term::Integer(arity) = *arity else {
+        return BifResult::badarg();
+    };
+    if arity < 0 {
+        return BifResult::badarg();
+    }
+    let matches = matches!(term, Term::Fun(fun) if i64::from(fun.lambda().arity()) == arity);
+    Value(Term::static_atom(if matches { "true" } else { "false" }))
+}
+
 /// The largest binary, in bytes, that `erlang:iolist_to_iovec/1` copies into
 /// the merged binary of its result. ERTS `IOL2V_COPY_THRESHOLD`
 /// (`erl_iolist.c`) is `ERL_ONHEAP_BITS_LIMIT * 8` bits, and

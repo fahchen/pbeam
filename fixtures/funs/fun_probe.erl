@@ -1,5 +1,5 @@
 -module(fun_probe).
--export([mfas/0, locals/0, id/1]).
+-export([mfas/0, locals/0, tests/0, id/1]).
 
 %% erlang:apply/3 and the apply instruction, as proc_lib:init_p_do_apply/3
 %% runs them. apply/3 takes at most 1023 arguments.
@@ -38,6 +38,22 @@ locals() ->
      try (id(notfun))() catch error:R1 -> R1 end,
      try (id({fun_probe, id}))(x) catch error:R2 -> R2 end].
 
+%% The is_function and is_function2 tests, lists:foreach/2, and the BIFs
+%% is_function/1,2.
+tests() ->
+    Pair = make_pair(a),
+    Self = self(),
+    ok = lists:foreach(fun(X) -> Self ! {item, X} end, [a, b]),
+    Items = [receive {item, a} -> a end, receive {item, b} -> b end],
+    [Items,
+     kind(Pair), kind(fun() -> ok end), kind(notfun),
+     is_function(id(Pair)), is_function(id(notfun)),
+     is_function(id(Pair), id(1)), is_function(id(Pair), id(0)),
+     is_function(id(notfun), id(1)),
+     arity_guard(Pair, id(1)), arity_guard(Pair, id(-1)), arity_guard(Pair, id(a)),
+     try is_function(id(Pair), id(-1)) catch error:R1 -> R1 end,
+     try is_function(id(notfun), id(a)) catch error:R2 -> R2 end].
+
 %% A list of 1022 atoms x, built without arithmetic.
 list1022() ->
     L1 = id([x]), L2 = L1 ++ L1, L4 = L2 ++ L2, L8 = L4 ++ L4, L16 = L8 ++ L8,
@@ -50,4 +66,9 @@ tail_call(F) -> F(tail).
 tail_apply(M, F, A) -> apply(M, F, A).
 eq(X, X) -> same;
 eq(_, _) -> different.
+kind(F) when is_function(F, 1) -> one;
+kind(F) when is_function(F) -> any;
+kind(_) -> none.
+arity_guard(F, N) when is_function(F, N) -> true;
+arity_guard(_, _) -> false.
 id(X) -> X.

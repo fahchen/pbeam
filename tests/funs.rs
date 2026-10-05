@@ -2,6 +2,10 @@ use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
 
+mod common;
+
+use common::pinned_beam;
+
 const FUN_PROBE: &[u8] = include_bytes!("../fixtures/funs/fun_probe.beam");
 
 /// Run `fun_probe:Function()` on the pinned ERTS and return its `~w` output.
@@ -83,5 +87,35 @@ fn makes_and_calls_local_funs_as_pinned_erts() {
         reference("locals"),
         b"[{tag,one},const,{tag,tail},same,different,same,true,false,\
           {badarity,same,[1,2]},{badfun,notfun},{badfun,{fun_probe,id}}]\n"
+    );
+}
+
+#[test]
+fn tests_funs_with_is_function_as_pinned_erts() {
+    // `fun_probe:tests/0` runs the pinned `lists:foreach/2`, which tests its
+    // fun with `is_function2` (`lists.erl:2637-2641`), as
+    // `standard_error:setopts/1` does. `kind/1` has the `is_function` and
+    // `is_function2` tests, and the other items call the BIFs
+    // `is_function/1` and `is_function/2` (`erl_bif_op.c:223-267`). A
+    // negative arity or an arity that is not an integer raises `badarg`, and
+    // the guard of `arity_guard/2` makes that `badarg` fail the clause.
+    let lists = pinned_beam("lists");
+    let program = BeamProgram::load(&[&lists, FUN_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let mut expected = vec![Term::List(vec![atom("a"), atom("b")])];
+    expected.extend(
+        [
+            "one", "any", "none", "true", "false", "true", "false", "false", "true", "false",
+            "false", "badarg", "badarg",
+        ]
+        .map(atom),
+    );
+    assert_eq!(
+        program.execute("fun_probe", "tests", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("tests"),
+        b"[[a,b],one,any,none,true,false,true,false,false,true,false,false,badarg,badarg]\n"
     );
 }

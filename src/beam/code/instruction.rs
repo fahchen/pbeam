@@ -32,10 +32,10 @@ const OPCODE_RAISE: u8 = 108;
 const OPCODE_IF_END: u8 = 73;
 const OPCODE_BUILD_STACKTRACE: u8 = 160;
 const OPCODE_RAW_RAISE: u8 = 161;
-const OPCODE_IS_FUNCTION: u8 = 77;
+const OPCODE_TEST_IS_FUNCTION: u8 = 77;
 const OPCODE_APPLY: u8 = 112;
 const OPCODE_APPLY_LAST: u8 = 113;
-const OPCODE_IS_FUNCTION2: u8 = 115;
+const OPCODE_TEST_IS_FUNCTION2: u8 = 115;
 const OPCODE_CALL_FUN2: u8 = 178;
 const OPCODE_NIF_START: u8 = 179;
 const OPCODE_BADRECORD: u8 = 180;
@@ -373,6 +373,25 @@ pub(crate) enum Instruction {
         kind: TestKind,
         fail_label: u32,
         value: Operand,
+    },
+    /// Jumps to `fail_label` unless the value is a fun of `arity` arguments
+    /// (`is_function2`, opcode 115). The arity is a literal or a register
+    /// (`is_function2 f s s` in `jit/arm/ops.tab:605`). The test passes only
+    /// when `erl_is_function` (`erl_bif_op.c:237-267`) returns `true`, as
+    /// the JIT does for a register arity (`jit/arm/instr_common.cpp:1266-1283`),
+    /// so an arity that is negative or not an integer fails the test.
+    ///
+    /// Encoding: opcode, fail label, value, arity. Example:
+    /// `fun_probe:kind/1` in `fixtures/funs/fun_probe.beam` has
+    /// `[0x73, 0x0D, 0x3A, 0x57, 0x03, 0x30, 0x11]`, which fails to label 58
+    /// unless the typed register `x0` holds a fun of one argument.
+    ///
+    /// Erlang: `kind(F) when is_function(F, 1) -> one;` compiles to
+    /// `{test,is_function2,{f,58},[{tr,{x,0},...},{integer,1}]}`.
+    TestFunctionArity {
+        fail_label: u32,
+        value: Operand,
+        arity: Operand,
     },
     /// Jumps to `fail_label` unless the value is a tuple with `arity`
     /// elements.
@@ -736,6 +755,11 @@ pub(crate) enum TestKind {
     NonEmptyList,
     Binary,
     Map,
+    /// `is_function`, opcode 77. Example: `[0x4D, 0x0D, 0x3B, 0x57, 0x03,
+    /// 0x30]` in `fun_probe:kind/1` fails to label 59 unless the typed
+    /// register `x0` holds a fun. Erlang: `kind(F) when is_function(F) ->
+    /// any;` compiles to `{test,is_function,{f,59},[{tr,{x,0},...}]}`.
+    Function,
 }
 
 /// A source or destination in the supported `move` instruction.
@@ -1057,7 +1081,8 @@ pub(super) fn parse_code(
             | OPCODE_TEST_IS_NIL
             | OPCODE_TEST_IS_NONEMPTY_LIST
             | OPCODE_TEST_IS_BINARY
-            | OPCODE_TEST_IS_MAP => {
+            | OPCODE_TEST_IS_MAP
+            | OPCODE_TEST_IS_FUNCTION => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let kind = test_kind(opcode)?;
@@ -1067,6 +1092,11 @@ pub(super) fn parse_code(
                     value,
                 }
             }
+            OPCODE_TEST_IS_FUNCTION2 => Instruction::TestFunctionArity {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+                arity: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
             OPCODE_NIF_START => {
                 let (name, arity) = function
                     .clone()
@@ -1227,6 +1257,7 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
         OPCODE_TEST_IS_NONEMPTY_LIST => Ok(TestKind::NonEmptyList),
         OPCODE_TEST_IS_BINARY => Ok(TestKind::Binary),
         OPCODE_TEST_IS_MAP => Ok(TestKind::Map),
+        OPCODE_TEST_IS_FUNCTION => Ok(TestKind::Function),
         _ => Err(error(format!("unsupported BEAM type-test opcode {opcode}"))),
     }
 }
@@ -1335,7 +1366,6 @@ fn skip_unsupported_instruction(
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
         OPCODE_RAISE => Some(2),
-        OPCODE_IS_FUNCTION2 => Some(3),
         OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
         OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
@@ -1363,8 +1393,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_TEST_IS_LIST
         | OPCODE_TEST_IS_MAP
         | OPCODE_TEST_IS_BOOLEAN
-        | OPCODE_TEST_IS_BITSTR
-        | OPCODE_IS_FUNCTION => Some(2),
+        | OPCODE_TEST_IS_BITSTR => Some(2),
         // `is_port Fail Src` is in `erlang:is_port/1` and `erlang:open_port/2`.
         OPCODE_TEST_IS_PORT => Some(2),
         // `try_case_end Src` is in `erlang:processes_next/1`.
@@ -2184,6 +2213,42 @@ mod tests {
             "BEAM call_fun2 function is not a register"
         );
         assert!(error(&[0xB2, 0x01, 0x00, 0x03]).contains("unexpected BEAM operand tag 1"));
+    }
+
+    #[test]
+    fn decodes_the_is_function_tests_of_the_fun_probe_fixture() {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        // Bytes of `fun_probe:kind/1` in `fixtures/funs/fun_probe.beam`, then
+        // an `is_function2` with the arity in `x1`.
+        code.extend([
+            0x73, 0x0D, 0x3A, 0x57, 0x03, 0x30, 0x11, // is_function2 f58 {tr,x0,_} 1
+            0x4D, 0x0D, 0x3B, 0x57, 0x03, 0x30, // is_function f59 {tr,x0,_}
+            0x73, 0x0D, 0x3A, 0x03, 0x13, // is_function2 f58 x0 x1
+            0x03,
+        ]);
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::TestFunctionArity {
+                    fail_label: 58,
+                    value: Operand::X(0),
+                    arity: Operand::Value(Term::Integer(1)),
+                },
+                Instruction::Test {
+                    kind: TestKind::Function,
+                    fail_label: 59,
+                    value: Operand::X(0),
+                },
+                Instruction::TestFunctionArity {
+                    fail_label: 58,
+                    value: Operand::X(0),
+                    arity: Operand::X(1),
+                },
+                Instruction::End,
+            ]
+        ));
     }
 
     #[test]
