@@ -239,7 +239,7 @@ fn orders_and_hashes_list_keys_like_erts() {
     let list = Term::List;
     let int = Term::Integer;
     // A flatmap: the atom a first, then [], then lists in the term order. The atom a in
-    // [a] compares by name, so [a] comes after the strings "a" and "b".
+    // [a] compares by name, so [a] comes after the strings "a" and "b" and after [300].
     let flat = |big: Option<Term>| {
         let mut keys = vec![
             atom("a"),
@@ -247,6 +247,7 @@ fn orders_and_hashes_list_keys_like_erts() {
             list(vec![int(1), integers(&[2])]),
             string("a"),
             string("b"),
+            integers(&[300]),
         ];
         keys.extend(big);
         keys.push(list(vec![atom("a")]));
@@ -292,26 +293,30 @@ fn orders_and_hashes_list_keys_like_erts() {
     assert_eq!(
         program.execute("map_key_probe", "list_keys", &[]).unwrap(),
         list(vec![
-            flat(Some(integers(&[300, 1]))),
-            int(7),
-            int(3),
-            int(6),
             flat(None),
+            int(3),
             list(hash),
             int(31),
+            int(3),
+            int(7),
             int(33),
+            int(31),
+            flat(Some(integers(&[300, 1]))),
+            int(9),
             int(34),
+            int(35),
         ])
     );
 
     assert_eq!(
         erl_reference("io:format(\"~w~n\", [map_key_probe:list_keys()])"),
-        b"[[a,[],[1,[2]],[97],[98],[300,1],[a]],7,3,6,[a,[],[1,[2]],[97],[98],[a]],\
+        b"[[a,[],[1,[2]],[97],[98],[300],[a]],3,\
           [[27,91,65],[107,49,54],[[1],true],[107,50,51],[107,49,55],[107,49,51],[107,50,55],\
           [107,48,56],[107,51,48],[107,50,49],[107,50,48],[107,49,48],[107,48,49],[107,48,53],\
           [107,48,51],[107,49,56],[107,48,55],default,[107,50,57],[107,50,56],[107,50,50],\
           [107,49,49],[107,48,50],[107,50,54],[300,1],[107,49,52],[107,50,53],[107,49,50],\
-          [107,49,57],[107,48,57],[107,49,53],[107,48,52],[107,48,54],[107,50,52]],31,33,34]\n"
+          [107,49,57],[107,48,57],[107,49,53],[107,48,52],[107,48,54],[107,50,52]],31,\
+          3,7,33,31,[a,[],[1,[2]],[97],[98],[300],[300,1],[a]],9,34,35]\n"
     );
 }
 
