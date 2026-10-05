@@ -14,7 +14,7 @@ mod maps;
 mod re;
 mod unicode;
 
-pub(super) use erlang::is_function;
+pub(super) use erlang::{is_function, send};
 
 /// What a BIF call does to the calling process.
 #[derive(Debug)]
