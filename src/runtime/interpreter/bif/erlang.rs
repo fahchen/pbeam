@@ -64,6 +64,8 @@ pub(super) fn trap_exit(
 /// reference gives `true` and sends nothing: PBeam has no process alias, so
 /// `erts_get_pid_of_ref` gives `undefined` (`erl_bif_unique.h:279-286`), and
 /// `send_gen_exit_signal` drops the signal (`erl_proc_sig_queue.c:1650-1655`).
+/// The reference of a NIF resource also gives `true`: in ERTS it is a magic
+/// reference, and `is_internal_ref` is true for it (`erl_term.h:1064-1065`).
 /// Each other term raises `error:badarg` (`bif.c:1864-1866`). PBeam cannot
 /// represent a port or a remote pid.
 ///
