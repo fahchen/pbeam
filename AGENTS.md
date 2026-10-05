@@ -81,6 +81,8 @@ Whenever direction or a solution changes, update the affected task bodies, accep
   - `mise run erts-eval [--pa <dir>] '<expressions>'`: evaluate on the pinned OTP as `erl -eval` does. Print the value or `exception <class>: <reason>`. The evaluating process traps exits, as with `erl -eval`. Exit signals arrive as `{'EXIT', From, Reason}` messages. Only `exit(self(), kill)` stops the runtime.
   - `mise run disasm <module | file.beam> [name/arity]...`: print the `beam_disasm` instructions without `{line,_}`.
   - `mise run fixture-beam [--write] [fixtures/<dir>/<name>.erl]...`: compile the Erlang fixtures and compare them with the committed `.beam` files, except `CInf` and `Dbgi`.
+  - `mise run otp-src <path> <start> <end>`: print numbered lines of an OTP source file at the pinned `erlang` tag, from the git repository in `$PBEAM_OTP_SRC` (default `~/.cache/pbeam/otp`).
+  - `mise run issue <number> [section]...`: print the title, state, labels, milestone, the text before the first section, and each `#` or `##` section whose heading starts with a given name. With no name, print the headings. The output omits blank lines and other sections, so never use it as the body of `gh issue edit`.
 - Prefer `fd` and `rg`; use `ast-grep` for structural searches when appropriate.
 - Use fish for shell work and `gh` for GitHub operations. Prefer command help before external documentation. Use Context7 for library/API documentation and setup/code-generation guidance when available.
 - Follow the directory's JavaScript lockfile: `bun.lock` means bun; `pnpm-lock.yaml` means pnpm.
