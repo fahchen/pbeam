@@ -130,8 +130,7 @@ impl BeamProgram {
             .exports
             .get(&(function.to_owned(), arity))
             .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))?;
-        let mut scheduler = Scheduler::default();
-        scheduler.atoms = self.atoms.clone();
+        let mut scheduler = Scheduler::new(self.atoms.clone());
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
         while scheduler.schedule_next().is_some() {
             match self.run(&mut scheduler)? {
@@ -1709,7 +1708,7 @@ mod tests {
         let program =
             BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
         let label = program.modules["fun_probe"].exports[&("tail_wait".to_owned(), 1)];
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(program.atoms.clone());
         let frame = program.frame("fun_probe", label, 1).unwrap();
         scheduler.start(frame, vec![Term::Integer(1)]).unwrap();
         scheduler.schedule_next().unwrap();

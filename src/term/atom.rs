@@ -91,19 +91,6 @@ pub(crate) struct AtomTable {
     indices: HashMap<String, u32>,
 }
 
-impl Default for AtomTable {
-    /// Return a table with only the static atoms, as `AtomTable::new` does.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(AtomTable::default().get("ok"), Atom::from_static("ok"));
-    /// ```
-    fn default() -> Self {
-        AtomTable::new()
-    }
-}
-
 impl AtomTable {
     /// Return a table with the 1150 static atoms at indices 0 to 1149, as
     /// `init_atom_table` makes it.

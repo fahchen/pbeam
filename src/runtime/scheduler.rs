@@ -13,7 +13,7 @@ use crate::{
 /// process table holds every live process, `current_process` names the
 /// running process, and the run queue holds only processes that wait for a
 /// turn.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct Scheduler {
     /// All live processes, including the current process.
     processes: HashMap<ProcessId, ProcessState>,
@@ -43,12 +43,36 @@ pub(super) struct Scheduler {
 }
 
 impl Scheduler {
+    /// Return a scheduler with no processes and the atom table of the run.
+    /// The table is a copy of the table of the loaded program, so each atom
+    /// of the program code keeps its index.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let scheduler = Scheduler::new(program.atoms.clone());
+    /// assert_eq!(scheduler.atoms.get("ok"), Atom::from_static("ok"));
+    /// ```
+    pub(super) fn new(atoms: AtomTable) -> Self {
+        Scheduler {
+            processes: HashMap::new(),
+            runnable: VecDeque::new(),
+            current_process: None,
+            next_process_id: 0,
+            next_reference: 0,
+            root_result: None,
+            names: HashMap::new(),
+            persistent_terms: PersistentTerms::default(),
+            atoms,
+        }
+    }
+
     /// Create the root process. The root process gets `ProcessId(0)`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut scheduler = Scheduler::default();
+    /// let mut scheduler = Scheduler::new(AtomTable::new());
     /// scheduler.start(frame, vec![])?;
     /// assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
     /// ```
@@ -131,7 +155,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Scheduler::default().next_pid()?, ProcessId(0));
+    /// assert_eq!(Scheduler::new(AtomTable::new()).next_pid()?, ProcessId(0));
     /// ```
     fn next_pid(&mut self) -> Result<ProcessId, BeamError> {
         let value = self.next_process_id;
@@ -445,7 +469,7 @@ mod tests {
     use crate::term::test_atom;
     use crate::{
         runtime::process::tests::frame,
-        term::{ProcessId, Term},
+        term::{AtomTable, ProcessId, Term},
     };
 
     fn atom(name: &str) -> Term {
@@ -458,7 +482,7 @@ mod tests {
 
     #[test]
     fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
         assert!(scheduler.processes.contains_key(&ProcessId(0)));
@@ -479,7 +503,7 @@ mod tests {
 
     #[test]
     fn sends_down_and_exit_messages_and_records_the_root_result() {
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         scheduler.current_process_mut().trap_exit = true;
@@ -519,7 +543,7 @@ mod tests {
 
     #[test]
     fn links_live_processes_and_ignores_normal_exit_without_trap_exit() {
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
@@ -544,7 +568,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_exit_signals_and_counter_overflow() {
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         scheduler.spawn(frame(), vec![], false, true).unwrap();
@@ -552,7 +576,7 @@ mod tests {
         scheduler.schedule_next();
         assert!(scheduler.finish_current(atom("boom"), None).is_err());
 
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         scheduler
@@ -563,7 +587,7 @@ mod tests {
         let mut scheduler = Scheduler {
             next_process_id: u64::MAX,
             next_reference: u64::MAX,
-            ..Scheduler::default()
+            ..Scheduler::new(AtomTable::new())
         };
         assert!(scheduler.start(frame(), vec![]).is_err());
         assert!(scheduler.make_ref().is_err());
@@ -571,7 +595,7 @@ mod tests {
 
     #[test]
     fn removes_active_monitors_and_sets_group_leaders() {
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
@@ -591,7 +615,7 @@ mod tests {
     fn frees_the_name_of_a_process_when_it_exits() {
         // ERTS 29.1.1: after a named process exits, register(Name, self())
         // in another process is true.
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
