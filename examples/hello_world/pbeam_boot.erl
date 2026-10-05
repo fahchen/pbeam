@@ -62,8 +62,11 @@ get_argument1(Arg, [_ | Args]) -> get_argument1(Arg, Args);
 get_argument1(_, []) -> [].
 
 %% Do the kernel part of kernel:start/2. Run logger:internal_init_logger/0
-%% (kernel.erl:37). Start the kernel_sup children StdError, SigSrv, User,
-%% and LoggerSup in the order of kernel.erl:124-168 and 224-225. Then run
+%% (kernel.erl:37). Do not run os:internal_init_cmd_shell/0 (kernel.erl:38):
+%% it needs file:read_file_info/2, and only os:cmd/1,2 reads the shell that
+%% it puts in a persistent term (os.erl:602, 630-669). Start the kernel_sup
+%% children StdError, SigSrv, User, and LoggerSup in the order of
+%% kernel.erl:124-168 and 224-225. Then run
 %% erl_signal_handler:start/0 and logger:add_handlers(kernel)
 %% (kernel.erl:41-42). Trap exits, as a supervisor does
 %% (supervisor.erl:950), and stay alive as the link parent of the servers.
