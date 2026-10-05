@@ -40,6 +40,11 @@ pub(super) enum BifResult {
         /// Arguments for the trap target, in `x0` onwards.
         arguments: Vec<Term>,
     },
+    /// The calling process exits with this reason, and no catch tag sees
+    /// it, as `ERTS_BIF_EXITED` does. `erlang:exit/2` to the caller traps to
+    /// the C function `erts_internal:await_exit/0`, which ends the process
+    /// before the BIF returns (`bif.c:1699-1716`).
+    Exited(Term),
 }
 
 impl BifResult {
