@@ -91,7 +91,7 @@ only the runtime behavior and native host operation that the traced path needs.
 
 Task #49 interprets the OTP BEAM path through `prim_tty:write_nif/2`. Task #50 registers that exact native MFA and runs its binding at function entry. Task #79 starts the OTP IO servers, adds the TTY resource, and implements the host write of the binding. Tasks #51, #48, #49, #50, and #79 implement this observed path in small steps. They must execute the compiled Elixir and OTP BEAM functions. They must not intercept `Elixir.IO:puts/1` or `:io:put_chars/2`, print the greeting directly, or alter the fixture to use a PBeam-only operation. The support limit is the binary standard-output path reached by these fixtures. General chardata, custom devices, and unrelated process behavior remain out of scope.
 
-After the task chain is implemented, compile the Elixir fixture from `fixtures/hello`, then run PBeam from the repository root. PR #47 removed the direct IO shortcut. PR #52 executes compiled Elixir IO through the OTP call boundary. The command cannot complete the greeting until tasks #49, #50, and #79 execute the OTP path through the host boundary and task #42 verifies the command:
+After the task chain is implemented, compile the Elixir fixture from `fixtures/hello`, then run PBeam from the repository root. PR #47 removed the direct IO shortcut. PR #52 executes compiled Elixir IO through the OTP call boundary. The command cannot complete the greeting until tasks #50 and #79 execute the OTP path through the host boundary and task #42 verifies the command:
 
 ```sh
 mix compile --warnings-as-errors
@@ -163,7 +163,7 @@ The deliverable is a runnable PBeam command plus a regression test that captures
 its stdout, stderr, and exit status. Task #42 is the final command and acceptance
 task. PR #47 implements task #51 and merged as `265f173`. It loads the pinned
 `Elixir.IO.beam` module. PR #52 implements task #48 and executes compiled `puts/1`
-and `puts/2` through the `:io.put_chars/2` boundary. The OTP protocol remains for task #49. The native binding of `prim_tty:write_nif/2` remains for task #50. The TTY resource and the host write remain for task #79.
+and `puts/2` through the `:io.put_chars/2` boundary. Task #50 runs the native binding of `prim_tty:write_nif/2`. The start of the OTP IO servers, the TTY resource, and the host write remain for task #79.
 
 [Reference task #41](https://github.com/fahchen/pbeam/issues/41) captures the ERTS
 baseline and disassembles its compiler output as preparation. Existing constant-return
