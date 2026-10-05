@@ -1,6 +1,6 @@
 -module(undef_probe).
 -compile(nowarn_deprecated_catch).
--export([calls/0, down/1, id/1, last/1, only/1, apply_last/3, apply3_last/3]).
+-export([calls/0, down/3, id/1, last/1, only/1, apply_last/3, apply3_last/3]).
 
 %% Call functions that undef_target and undef_handler do not export, through
 %% each call instruction. A try returns the class, the reason, and the first
@@ -28,8 +28,8 @@ calls() ->
 
 %% Return the DOWN reason of a process that starts at a function that the
 %% module does not export.
-down(Module) ->
-    {Pid, Ref} = spawn_monitor(Module, missing, [p]),
+down(Module, Function, Arguments) ->
+    {Pid, Ref} = spawn_monitor(Module, Function, Arguments),
     receive {'DOWN', Ref, process, Pid, Reason} -> Reason end.
 
 id(X) -> X.
