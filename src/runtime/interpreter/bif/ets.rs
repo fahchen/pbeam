@@ -36,9 +36,12 @@ const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
 ///    (`erl_db.c:2821-2831`).
 ///
 /// Then the final type `bag`, `duplicate_bag`, or `ordered_set`, and a heir
-/// that is a live process, also the caller, give a runtime error: ERTS makes
-/// such a table, and PBeam cannot model it yet. A heir that is not alive
-/// acts as `none`, as `set_heir` (`erl_db.c:5319-5337`) does. The table keeps
+/// that is a live process other than the caller, give a runtime error: ERTS
+/// makes such a table, and PBeam cannot model it yet. A heir that is not
+/// alive acts as `none`, as `set_heir` (`erl_db.c:5319-5337`) does. A heir
+/// that is the caller also acts as `none`: at the owner exit, ERTS gives the
+/// table to no process when the heir is the owner (`erl_db.c:5076-5078`),
+/// and no BIF that PBeam has reads the heir. The table keeps
 /// the last access mode, `protected` changes nothing (`erl_db.c:2705-2706`),
 /// and the key position keeps only the low 32 bits, as the C `int`
 /// `tb->common.keypos` (`erl_db_util.h:346`).
@@ -58,7 +61,7 @@ const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
 /// # Errors
 ///
 /// Return a runtime error for a table type other than `set`, and for a heir
-/// that is a live process.
+/// that is a live process other than the caller.
 pub(super) fn new(
     context: &mut BifContext<'_>,
     name: &Term,
@@ -121,14 +124,15 @@ pub(super) fn new(
             "unsupported ets:new/2 table type {table_type}"
         )));
     }
+    let owner = context.scheduler.current_process_mut().id;
     if let Some(heir) = heir
+        && heir != owner
         && context.scheduler.process(heir).is_some()
     {
         // ponytail: no table transfer to a heir; see "ETS tables" in docs/erts-differences.md.
         return Err(error(format!("unsupported ets:new/2 heir {heir:?}")));
     }
     let table = context.scheduler.make_ref()?;
-    let owner = context.scheduler.current_process_mut().id;
     let name = named.then_some(name);
     context.scheduler.ets.create(
         table,

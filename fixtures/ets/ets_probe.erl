@@ -17,6 +17,8 @@ new() ->
                          {decentralized_counters, false}, compressed,
                          {heir, none}]),
      kind(ets:new(ets_probe, [{heir, dead()}, {heir, dead(), data}])),
+     kind(ets:new(ets_probe, [{heir, self()}])),
+     kind(ets:new(ets_probe, [{heir, self(), data}])),
      [catch_error(fun() -> ets:new(Name, Options) end)
       || {Name, Options} <-
              [{1, []}, {ets_probe, foo}, {ets_probe, [bogus]}, {ets_probe, [1]},
@@ -34,12 +36,17 @@ new() ->
               {ets_probe_named, [bag, named_table]}]]].
 
 %% An exit of the owner deletes its tables and frees their names before
-%% the DOWN message (erl_process.c:14360-14368, erl_db.c:5031-5093).
+%% the DOWN message (erl_process.c:14360-14368, erl_db.c:5031-5093). A
+%% heir that is the owner gets no table (erl_db.c:5076-5078).
 owner_exit() ->
     Owner = start([named_table]),
+    Heir = start(heir),
     [catch_error(fun() -> ets:new(ets_probe_owned, [named_table]) end),
      stop(Owner),
-     ets:new(ets_probe_owned, [named_table])].
+     ets:new(ets_probe_owned, [named_table]),
+     catch_error(fun() -> ets:new(ets_probe_heir, [named_table]) end),
+     stop(Heir),
+     ets:new(ets_probe_heir, [named_table])].
 
 %% ets:insert/2 on a set table (erl_db.c:2341-2381, erl_db.c:1812-1827).
 insert() ->
@@ -118,8 +125,8 @@ unsupported(Case) ->
         set_after_bag -> ets:new(ets_probe, [bag, set]);
         duplicate_bag -> ets:new(ets_probe, [duplicate_bag]);
         ordered_set -> ets:new(ets_probe, [ordered_set]);
-        heir -> ets:new(ets_probe, [{heir, self()}]);
-        heir_data -> ets:new(ets_probe, [{heir, self(), data}]);
+        heir -> ets:new(ets_probe, [{heir, element(1, start([]))}]);
+        heir_data -> ets:new(ets_probe, [{heir, element(1, start([])), data}]);
         keypos -> ets:insert(ets:new(ets_probe, [{keypos, id(1 bsl 32)}]), {a});
         index ->
             T = ets:new(ets_probe, []),
@@ -136,6 +143,8 @@ start(Options) ->
 
 own(Parent, ac_tab) ->
     own(Parent, ac_tab, [set, public, named_table, {read_concurrency, true}]);
+own(Parent, heir) ->
+    own(Parent, ets_probe_heir, [named_table, {heir, self(), data}]);
 own(Parent, Options) ->
     Name = case lists:member(named_table, Options) of
                true -> ets_probe_owned;

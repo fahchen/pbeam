@@ -30,7 +30,8 @@ fn reference(function: &str) -> Vec<u8> {
 fn makes_tables_and_raises_badarg_as_pinned_erts() {
     // `ets_probe:new/0` makes an unnamed table, a named table, and a table
     // with each option that ERTS accepts (erl_db.c:2597-2710). A heir that
-    // is not alive acts as `none` (erl_db.c:5319-5337). Each case of the
+    // is not alive acts as `none` (erl_db.c:5319-5337). A heir that is the
+    // caller makes a table, with and without data. Each case of the
     // last list raises `badarg`: a name that is not an atom, options that
     // are not a list, an option that is not valid, `ordered_set` with an
     // explicit lock count (erl_db.c:2717-2758), and a name in use
@@ -47,12 +48,14 @@ fn makes_tables_and_raises_badarg_as_pinned_erts() {
             atom("reference"),
             atom("ets_probe"),
             atom("reference"),
+            atom("reference"),
+            atom("reference"),
             Term::List(vec![badarg(); 19]),
         ])
     );
     assert_eq!(
         reference("new"),
-        b"[reference,ets_probe_named,{error,badarg},reference,ets_probe,reference,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]]\n"
+        b"[reference,ets_probe_named,{error,badarg},reference,ets_probe,reference,reference,reference,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]]\n"
     );
 }
 
@@ -61,7 +64,9 @@ fn deletes_the_tables_of_an_owner_before_its_down_message_as_pinned_erts() {
     // `ets_probe:owner_exit/0` cannot make a table with the name of a table
     // that another process owns. After the `DOWN` message of the owner, the
     // name is free, because ERTS deletes the tables of an exiting process
-    // before its monitors fire (erl_process.c:14360-14368).
+    // before its monitors fire (erl_process.c:14360-14368). A table whose
+    // heir is its owner goes to no process at the exit (erl_db.c:5076-5078),
+    // so its name is free too.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
@@ -70,11 +75,14 @@ fn deletes_the_tables_of_an_owner_before_its_down_message_as_pinned_erts() {
             Term::Tuple(vec![atom("error"), atom("badarg")]),
             atom("stopped"),
             atom("ets_probe_owned"),
+            Term::Tuple(vec![atom("error"), atom("badarg")]),
+            atom("stopped"),
+            atom("ets_probe_heir"),
         ])
     );
     assert_eq!(
         reference("owner_exit"),
-        b"[{error,badarg},stopped,ets_probe_owned]\n"
+        b"[{error,badarg},stopped,ets_probe_owned,{error,badarg},stopped,ets_probe_heir]\n"
     );
 }
 
@@ -221,8 +229,9 @@ fn reads_the_application_environment_from_ac_tab_as_pinned_erts() {
 #[test]
 fn rejects_tables_that_pbeam_cannot_model() {
     // ERTS 29.1.1 makes each of these tables: the types bag, bag,
-    // duplicate_bag, and ordered_set, and two set tables whose heir is the
-    // caller. PBeam supports only set tables without a live heir. ERTS
+    // duplicate_bag, and ordered_set, and two set tables whose heir is a
+    // live process other than the caller. PBeam supports only set tables
+    // without such a heir. ERTS
     // aborts the emulator for an insert with the key position 0 (status
     // 134, `Invalid tag in make_internal_hash`) and crashes for a found key
     // and an index that becomes 0 (status 139). This is the "ETS tables"
@@ -233,8 +242,8 @@ fn rejects_tables_that_pbeam_cannot_model() {
         ("set_after_bag", "new/2 table type bag"),
         ("duplicate_bag", "new/2 table type duplicate_bag"),
         ("ordered_set", "new/2 table type ordered_set"),
-        ("heir", "new/2 heir ProcessId(0)"),
-        ("heir_data", "new/2 heir ProcessId(0)"),
+        ("heir", "new/2 heir ProcessId("),
+        ("heir_data", "new/2 heir ProcessId("),
         ("keypos", "insert/2 in a table with key position 0"),
         ("index", "lookup_element/4 index 4294967296 with position 0"),
     ] {
