@@ -63,6 +63,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer needs another spawn option.
 - **Source:** review of #152.
 
+### Parse BIF option lists with one shared function
+
+- Each BIF that takes an option list has its own parser: `timer_options` for `erlang:cancel_timer/2` (PR #172), `parse_options` for `re:compile/2`, and the `spawn_opt/4` options. Extract one function that takes the option term and a schema of the accepted options, and returns the parsed values or `badarg` for an option list that is not valid. Each BIF then gives only its schema.
+- **Trigger:** the next BIF that takes an option list, or a change to an existing option parser.
+- **Source:** owner review of PR #172 (#150).
+
 ### Delete one key of a hashmap in place
 
 - `maps:remove/2` (#129) rebuilds the map, which is O(n). ERTS changes one HAMT path.
