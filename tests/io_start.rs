@@ -78,6 +78,31 @@ fn takes_the_tail_and_the_length_of_lists_as_pinned_erts() {
 }
 
 #[test]
+fn negates_booleans_as_pinned_erts() {
+    // `io_start_probe:nots/0` runs `bif` `erlang:not/1` with fail label 0, as
+    // `group:init/1` (group.erl:149, 153) does, and through the `apply`
+    // instruction. A term that is not a boolean raises `badarg`
+    // (`erl_bif_op.c:84-91`; the JIT `bif_not`, `jit/arm/ops.tab:779-780`,
+    // `instr_guard_bifs.cpp:1172-1203`). The pinned erlc compiles the guard
+    // `(not X) =:= Y` to `bif` `erlang:not/1` with a fail label: `badarg`
+    // jumps to the fail label, and the next clause runs.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let expected = [
+        "false", "true", "badarg", "badarg", "false", "badarg", "same", "other", "other",
+    ]
+    .map(atom);
+    assert_eq!(
+        program.execute("io_start_probe", "nots", &[]).unwrap(),
+        Term::List(expected.to_vec())
+    );
+    assert_eq!(
+        reference("nots"),
+        b"[false,true,badarg,badarg,false,badarg,same,other,other]\n"
+    );
+}
+
+#[test]
 fn reads_and_updates_maps_as_pinned_erts() {
     // `io_start_probe:maps/0` runs `bif` `erlang:map_get/2` with fail label
     // 0, as `prim_tty:init/1` (prim_tty.erl:220) and `user_drv:init/1`

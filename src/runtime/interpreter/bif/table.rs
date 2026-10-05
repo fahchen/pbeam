@@ -258,7 +258,7 @@ bifs! {
     erlang:nodes/0 => unsupported,
     erlang:nodes/1 => unsupported,
     erlang:nodes/2 => unsupported,
-    erlang:not/1 => unsupported,
+    erlang:not/1 => |_, [term]| Ok(match term { Term::Atom(atom) if atom.name() == "true" => Value(Term::static_atom("false")), Term::Atom(atom) if atom.name() == "false" => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     erlang:now/0 => unsupported,
     erlang:or/2 => unsupported,
     erlang:phash/2 => unsupported,

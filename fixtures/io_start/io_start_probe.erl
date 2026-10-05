@@ -1,6 +1,6 @@
 -module(io_start_probe).
 -export([lists/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
-         system_other/0, format/0]).
+         system_other/0, format/0, nots/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
 %% runs it, and in a guard. `get_tl`, as proc_lib:trans_init/3
@@ -135,5 +135,22 @@ system_other() ->
 %% with the empty slogan of `-noshell` (user_drv.erl:271-273).
 format() ->
     io_lib:bformat(id("~ts"), [id("")]).
+
+%% `erlang:not/1` as the `bif` instruction with fail label 0, as
+%% group:init/1 (group.erl:149, 153) runs it, through the `apply`
+%% instruction, and in a guard, where the `bif` instruction has a fail
+%% label. A term that is not a boolean raises badarg (erl_bif_op.c:84-91);
+%% in a guard it jumps to the fail label.
+nots() ->
+    [not id(true), not id(false),
+     try not id(foo) catch error:R1 -> R1 end,
+     try not id(1) catch error:R2 -> R2 end,
+     apply(erlang, id('not'), [id(true)]),
+     try apply(erlang, id('not'), [id([])]) catch error:R3 -> R3 end,
+     not_guard(id(true), id(false)), not_guard(id(true), id(true)),
+     not_guard(id(foo), id(true))].
+
+not_guard(X, Y) when (not X) =:= Y -> same;
+not_guard(_, _) -> other.
 
 id(X) -> X.
