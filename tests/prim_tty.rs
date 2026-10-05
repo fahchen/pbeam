@@ -796,6 +796,12 @@ fn run_with_outputs(
         .stderr(stderr)
         .status()
         .unwrap();
+    // Keep the files of a failed run for diagnosis.
+    assert!(
+        status.success(),
+        "{command:?} exited with {status}; its files are in {}",
+        directory.display()
+    );
     let outputs = Outputs {
         result: fs::read(&result).ok(),
         modes: terminals.map(|terminal| terminal.map(|(_, slave)| mode(&slave))),
@@ -804,7 +810,6 @@ fn run_with_outputs(
         }),
     };
     fs::remove_dir_all(&directory).unwrap();
-    assert!(status.success(), "{command:?} exited with {status}");
     outputs
 }
 
