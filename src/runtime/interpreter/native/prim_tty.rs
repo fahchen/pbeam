@@ -52,7 +52,7 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 2,
         run: |scheduler, arguments| {
             write_nif(
-                scheduler.state.borrow_mut::<Ttys>(),
+                scheduler.resources.borrow_mut::<Ttys>(),
                 &arguments[0],
                 &arguments[1],
             )
@@ -161,7 +161,7 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
         None => (TtyState::Unavailable, terminal::EMPTY_MODE),
     };
     let reference = scheduler.make_ref()?;
-    scheduler.state.borrow_mut::<Ttys>().insert(
+    scheduler.resources.borrow_mut::<Ttys>().insert(
         reference,
         TtyResource {
             ofd,
@@ -196,7 +196,7 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
 /// The atom `enotsup` in a full atom table gives the error of
 /// `AtomTable::put`.
 fn tty_window_size(scheduler: &mut Scheduler, tty: &Term) -> Result<BifResult, BeamError> {
-    let Some(tty) = tty_resource(scheduler.state.borrow_mut::<Ttys>(), tty) else {
+    let Some(tty) = tty_resource(scheduler.resources.borrow_mut::<Ttys>(), tty) else {
         return Ok(BifResult::badarg());
     };
     let result = match terminal::window_size(tty.ofd) {
@@ -248,7 +248,7 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
     let Term::Reference(reference) = tty else {
         return Ok(BifResult::badarg());
     };
-    let ttys = scheduler.state.borrow_mut::<Ttys>();
+    let ttys = scheduler.resources.borrow_mut::<Ttys>();
     let Some(tty) = ttys.get_mut(*reference) else {
         return Ok(BifResult::badarg());
     };
@@ -452,7 +452,7 @@ mod tests {
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let reference = scheduler.make_ref().unwrap();
-        scheduler.state.borrow_mut::<Ttys>().insert(
+        scheduler.resources.borrow_mut::<Ttys>().insert(
             reference,
             TtyResource {
                 ofd: -1,
@@ -470,7 +470,7 @@ mod tests {
             format!("{result:?}"),
             r#"Value(Tuple([Atom("error"), Tuple([Atom("tcsetattr"), Atom("ebadf")])]))"#
         );
-        let tty = scheduler.state.borrow_mut::<Ttys>().get(reference).unwrap();
+        let tty = scheduler.resources.borrow_mut::<Ttys>().get(reference).unwrap();
         assert_eq!((&tty.state, tty.owner), (&TtyState::Enabled, None));
     }
 }

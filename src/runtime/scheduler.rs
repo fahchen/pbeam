@@ -5,7 +5,7 @@ use super::{
     persistent_term::PersistentTerms,
     process::{Frame, ProcessState},
     regex_code::RegexCodes,
-    state::State,
+    resources::Resources,
     tty::Ttys,
 };
 use crate::{
@@ -45,7 +45,7 @@ pub(super) struct Scheduler {
     /// Typed values of the node, one value of each type, such as the
     /// compiled regular expressions in `RegexCodes` and the TTY resources
     /// in `Ttys`. All processes of the run share them.
-    pub(super) state: State,
+    pub(super) resources: Resources,
     /// The atom table of the run, as `erts_atom_table` for one emulator. A
     /// run starts with a copy of the program table, and a BIF such as
     /// `erlang:list_to_atom/1` adds its new atoms here.
@@ -64,9 +64,9 @@ impl Scheduler {
     /// assert_eq!(scheduler.atoms.get("ok"), Atom::from_static("ok"));
     /// ```
     pub(super) fn new(atoms: AtomTable) -> Self {
-        let mut state = State::default();
-        state.put(RegexCodes::default());
-        state.put(Ttys::default());
+        let mut resources = Resources::default();
+        resources.put(RegexCodes::default());
+        resources.put(Ttys::default());
         Scheduler {
             processes: HashMap::new(),
             runnable: VecDeque::new(),
@@ -77,7 +77,7 @@ impl Scheduler {
             names: HashMap::new(),
             persistent_terms: PersistentTerms::default(),
             ets: EtsTables::default(),
-            state,
+            resources,
             atoms,
         }
     }
@@ -474,7 +474,7 @@ impl Scheduler {
         }
         // ERTS runs the NIF resource monitors of the process in the monitor
         // stage too (`ERTS_CONTINUE_EXIT_LT_MONITORS`).
-        self.state.borrow_mut::<Ttys>().process_down(process.id);
+        self.resources.borrow_mut::<Ttys>().process_down(process.id);
         for (watcher, reference) in process.monitored_by {
             let down = Term::Tuple(vec![
                 Term::static_atom("DOWN"),
