@@ -648,10 +648,12 @@ pub(crate) enum Instruction {
     /// Erlang: the same pattern compiles to `{recv_marker_clear,{y,1}}` when
     /// the `receive` matches.
     ReceiveMarkerClear(Operand),
-    /// An instruction that has no runtime effect, such as `test_heap` or
-    /// `init_yregs`.
+    /// An instruction that has no runtime effect, such as `test_heap`,
+    /// `init_yregs`, or `nif_start`.
     ///
-    /// Erlang: `g(X) -> {X, X}.` compiles to `{test_heap,3,1}` first.
+    /// Erlang: `g(X) -> {X, X}.` compiles to `{test_heap,3,1}` first. A
+    /// function in `-nifs([f/0]).` starts with `nif_start`. ERTS only marks
+    /// that function at load time, so `erlang:load_nif/2` can replace it.
     Noop,
     /// Returns the value in `x0` from the active function.
     ///
@@ -966,7 +968,7 @@ pub(super) fn parse_code(
                     value,
                 }
             }
-            OPCODE_TEST_HEAP | OPCODE_INIT_YREGS => {
+            OPCODE_TEST_HEAP | OPCODE_INIT_YREGS | OPCODE_NIF_START => {
                 skip_unsupported_instruction(opcode, data, &mut cursor)?;
                 Instruction::Noop
             }

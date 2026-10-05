@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::BeamProgram;
+use pbeam_runtime::{BeamProgram, Term};
 
 const NIF_ERROR_PROBE: &[u8] = include_bytes!("../fixtures/nif_error/nif_error_probe.beam");
 
@@ -38,5 +38,31 @@ fn raises_undef_for_a_local_function_that_calls_nif_error() {
             .to_string()
             .contains("root process exited with Tuple([Atom(\"undef\"), List([])])"),
         "expected an undef exit reason with an empty stack trace, got {error}"
+    );
+}
+
+#[test]
+fn runs_nif_start_as_a_no_op_before_the_nif_error_fallback() {
+    // The function `nif_stub/0` is in `-nifs`, so its first instruction is
+    // `nif_start`. No NIF library is loaded, so ERTS runs the Erlang body.
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/nif_error",
+            "-eval",
+            "io:format(\"~p~n\", [nif_error_probe:nif()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stdout, b"{error,undef}\n");
+
+    let program = BeamProgram::load(&[NIF_ERROR_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("nif_error_probe", "nif", &[]).unwrap(),
+        Term::Tuple(vec![atom("error"), atom("undef")])
     );
 }
