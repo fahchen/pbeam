@@ -13,8 +13,11 @@ use std::{
 
 use pbeam_runtime::{BeamProgram, Term};
 
+#[path = "common/boot.rs"]
+mod boot;
 mod common;
 
+use boot::BOOT_MODULES;
 use common::{pinned_beam, pinned_beam_path};
 
 const PRIM_TTY_PROBE: &[u8] = include_bytes!("../fixtures/prim_tty/prim_tty_probe.beam");
@@ -717,8 +720,8 @@ fn writes_hello_world_from_the_pbeam_binary_through_a_prim_tty_writer() {
     // `"Hello, world!\n"` to the stdout writer with `prim_tty:write/3`, which
     // calls `write_nif/2` and replies `ok` (prim_tty.erl:541-566,
     // prim_tty_nif.c:354-427). It then writes that reply and a newline to
-    // stderr. The `pbeam` binary runs `pbeam_main/0`, which first makes
-    // `ac_tab`. With stdout closed, ERTS opens `/dev/null` as fd 1
+    // stderr. The `pbeam` binary boots the standard IO servers first, as
+    // `erl -noshell` does, and the boot makes `ac_tab`. With stdout closed, ERTS opens `/dev/null` as fd 1
     // (sys.c:392-399) and ignores `SIGPIPE` (sys_drivers.c:175). The Rust
     // runtime of the `pbeam` binary does the same before `main` (Rust
     // 1.99.0 library/std/src/sys/pal/unix/mod.rs:22-36, 51-139, 141-185), so
@@ -728,11 +731,11 @@ fn writes_hello_world_from_the_pbeam_binary_through_a_prim_tty_writer() {
     // so it exits before `exit/2` returns (bif.c:1759-1772). The probe writes
     // the `DOWN` reason of its monitor and the `EXIT` reason of its link to
     // stderr.
-    let beams: Vec<_> = INIT_MODULES.map(pinned_beam_path).into();
+    let beams = BOOT_MODULES.map(pinned_beam_path);
     let pbeam = || {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
         command
-            .args(["host_write_probe", "pbeam_main", HOST_WRITE_PROBE])
+            .args(["host_write_probe", "main", HOST_WRITE_PROBE])
             .args(&beams);
         command
     };

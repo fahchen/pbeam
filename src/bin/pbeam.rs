@@ -7,7 +7,7 @@ use pbeam_runtime::BeamProgram;
 #[command(
     name = "pbeam",
     version,
-    about = "Run a zero-argument function from BEAM files."
+    about = "Boot the OTP standard IO servers, then run a zero-argument function from BEAM files."
 )]
 struct Cli {
     /// Module name, such as `Elixir.Hello`.
@@ -16,7 +16,8 @@ struct Cli {
     /// Function name to run.
     #[arg(value_name = "ENTRY_FUNCTION")]
     entry_function: String,
-    /// BEAM files to load.
+    /// BEAM files to load. Include the pinned OTP modules that the boot of
+    /// the standard IO servers calls.
     #[arg(value_name = "BEAM_FILE", required = true, num_args = 1..)]
     beam_files: Vec<PathBuf>,
 }
@@ -27,7 +28,7 @@ struct Cli {
 /// # Examples
 ///
 /// ```rust,ignore
-/// // $ pbeam Elixir.Hello main Elixir.Hello.beam Elixir.IO.beam
+/// // $ pbeam boot_probe main boot_probe.beam erlang.beam user_sup.beam ...
 /// // Hello, world!
 /// ```
 fn main() -> ExitCode {
@@ -40,7 +41,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Read the BEAM files, load them, and run the zero-argument entry function.
+/// Read the BEAM files, load them with the boot module, boot the OTP
+/// standard IO servers, and run the zero-argument entry function.
 ///
 /// # Examples
 ///
@@ -57,10 +59,10 @@ fn run(arguments: Cli) -> Result<(), String> {
         modules.push(bytes);
     }
     let module_slices = modules.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    let program = BeamProgram::load(&module_slices)
+    let program = BeamProgram::load_with_boot(&module_slices)
         .map_err(|load_error| format!("cannot load BEAM modules: {load_error}"))?;
     program
-        .execute(&arguments.entry_module, &arguments.entry_function, &[])
+        .execute_after_boot(&arguments.entry_module, &arguments.entry_function)
         .map(|_| ())
         .map_err(|execution_error| execution_error.to_string())
 }

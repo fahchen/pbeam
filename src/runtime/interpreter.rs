@@ -14,6 +14,7 @@ use crate::{
 use std::collections::HashMap;
 
 mod bif;
+mod boot;
 mod native;
 
 use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function, send};
@@ -120,16 +121,9 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
     ) -> Result<Term, BeamError> {
-        let loaded = self
-            .modules
-            .get(module)
-            .ok_or_else(|| error(format!("missing BEAM module {module}")))?;
         let arity =
             u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-        let label = *loaded
-            .exports
-            .get(&(function.to_owned(), arity))
-            .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))?;
+        let label = self.entry_label(module, function, arity)?;
         let mut scheduler = Scheduler::new(self.atoms.clone());
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
         while scheduler.schedule_next().is_some() {
@@ -143,6 +137,33 @@ impl BeamProgram {
             Some(Err(reason)) => Err(error(format!("root process exited with {reason:?}"))),
             None => Err(error("root process waits for a message that cannot arrive")),
         }
+    }
+
+    /// Return the entry label of an exported function that a run starts
+    /// from.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let label = program.entry_label("process_probe", "main", 0)?;
+    /// assert!(program.entry_label("process_probe", "missing", 0).is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A module that is not loaded is the error `missing BEAM module M`. A
+    /// function that the module does not export is the error
+    /// `missing export M:F/A`.
+    fn entry_label(&self, module: &str, function: &str, arity: u32) -> Result<u32, BeamError> {
+        let loaded = self
+            .modules
+            .get(module)
+            .ok_or_else(|| error(format!("missing BEAM module {module}")))?;
+        loaded
+            .exports
+            .get(&(function.to_owned(), arity))
+            .copied()
+            .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))
     }
 
     /// Create the frame for an exported function.

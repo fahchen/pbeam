@@ -1,5 +1,5 @@
 -module(host_write_probe).
--export([main/0, pbeam_main/0, own/1, init/3]).
+-export([main/0, init/3]).
 
 %% Write "Hello, world!\n" to stdout through a prim_tty writer, then write
 %% the result of that write and a newline to stderr through a second writer.
@@ -8,18 +8,6 @@ main() ->
     Err = init(host_write_probe_err, #{input => disabled, output => raw, ofd => stderr}),
     Result = write(Out, "Hello, world!\n"),
     write(Err, Result ++ "\n").
-
-%% PBeam has no application_controller, so pbeam_main/0 first makes ac_tab
-%% with the options of application_controller.erl:544-545.
-pbeam_main() ->
-    Parent = self(),
-    spawn(?MODULE, own, [Parent]),
-    receive ac_tab -> main() end.
-
-own(Parent) ->
-    ac_tab = ets:new(ac_tab, [set, public, named_table, {read_concurrency, true}]),
-    Parent ! ac_tab,
-    receive stop -> ok end.
 
 init(Name, Options) ->
     Pid = spawn(?MODULE, init, [self(), Name, Options]),
