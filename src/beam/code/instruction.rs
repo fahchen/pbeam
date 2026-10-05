@@ -915,6 +915,12 @@ pub(crate) enum TestKind {
     /// `{test,is_integer,{f,11},[{x,0}]}`, as the guard of
     /// `io_lib_format:field_value/2` (io_lib_format.erl:271) does.
     Integer,
+    /// `is_float`, opcode 46. Example: `[0x2E, 0x55, 0x03]` in
+    /// `float_test_probe:kind/1` fails to label 5 unless `x0` is a float.
+    /// Erlang: `kind(Term) when is_float(Term) -> float;` compiles to
+    /// `{test,is_float,{f,5},[{x,0}]}`, as `lists:thing_to_list/1`
+    /// (lists.erl:1283-1286) does. PBeam has no float term.
+    Float,
     /// `is_boolean`, opcode 114. Example: `[0x72, 0xC5, 0x03]` in
     /// `compare_probe:kind/1` fails to label 12 unless `x0` is the atom
     /// `true` or `false`. Erlang: `kind(X) when is_boolean(X) -> boolean;`
@@ -1319,6 +1325,7 @@ pub(super) fn parse_code(
             | OPCODE_TEST_IS_MAP
             | OPCODE_TEST_IS_FUNCTION
             | OPCODE_TEST_IS_INTEGER
+            | OPCODE_TEST_IS_FLOAT
             | OPCODE_TEST_IS_BOOLEAN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -1524,6 +1531,7 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
         OPCODE_TEST_IS_MAP => Ok(TestKind::Map),
         OPCODE_TEST_IS_FUNCTION => Ok(TestKind::Function),
         OPCODE_TEST_IS_INTEGER => Ok(TestKind::Integer),
+        OPCODE_TEST_IS_FLOAT => Ok(TestKind::Float),
         OPCODE_TEST_IS_BOOLEAN => Ok(TestKind::Boolean),
         _ => Err(error(format!("unsupported BEAM type-test opcode {opcode}"))),
     }
@@ -1653,8 +1661,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BIF0 => Some(2),
         OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
-        OPCODE_TEST_IS_FLOAT
-        | OPCODE_TEST_IS_NUMBER
+        OPCODE_TEST_IS_NUMBER
         | OPCODE_TEST_IS_ATOM
         | OPCODE_TEST_IS_PID
         | OPCODE_TEST_IS_BINARY
@@ -2413,6 +2420,34 @@ mod tests {
                 Instruction::Test {
                     kind: TestKind::Boolean,
                     fail_label: 12,
+                    value: Operand::X(0),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_is_float_test_of_the_float_test_probe_fixture() {
+        const FLOAT_TEST_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/float_test/float_test_probe.beam");
+        let is_float = [0x2E, 0x55, 0x03]; // kind/1: is_float f5 x0
+        assert!(
+            FLOAT_TEST_PROBE
+                .windows(is_float.len())
+                .any(|window| window == is_float),
+            "{is_float:02X?} is not in float_test_probe.beam"
+        );
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&is_float[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::Test {
+                    kind: TestKind::Float,
+                    fail_label: 5,
                     value: Operand::X(0),
                 },
                 Instruction::End,
