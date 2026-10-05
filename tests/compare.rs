@@ -56,3 +56,44 @@ fn compares_terms_exactly_as_pinned_erts() {
           true,false,true,false,false,true,false,true]]\n"
     );
 }
+
+#[test]
+fn runs_the_is_lt_is_integer_and_is_boolean_tests_as_pinned_erts() {
+    // `compare_probe:guards/0` runs `is_lt` after a `gc_bif2` guard, as
+    // `io_lib_format:build_limited_bin/5` does, on the atom `none` and 0, as
+    // `io_lib_format:field_width/3` does, and on two registers in the ERTS
+    // term order. It runs `is_integer` and `is_boolean`, as
+    // `io_lib_format:field_value/2` and `standard_error:check_valid_opts/1`
+    // do. 2^59 is an ERTS bignum and passes `is_integer`.
+    let program = BeamProgram::load(&[COMPARE_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let atoms = |names: &[&str]| Term::List(names.iter().map(|&name| atom(name)).collect());
+    let pair = |tag, value| Term::Tuple(vec![atom(tag), Term::Integer(value)]);
+    let expected = Term::List(vec![
+        Term::List(vec![
+            pair("pos", 2),
+            pair("nonpos", 0),
+            atom("other"),
+            atom("other"),
+        ]),
+        atoms(&[
+            "integer", "integer", "integer", "boolean", "boolean", "other", "other", "other",
+            "other", "other", "other",
+        ]),
+        atoms(&["right", "left", "right", "right"]),
+        atoms(&[
+            "lt", "nlt", "nlt", "lt", "lt", "nlt", "lt", "nlt", "lt", "nlt", "lt", "nlt", "lt",
+            "lt", "lt", "nlt",
+        ]),
+    ]);
+    assert_eq!(
+        program.execute("compare_probe", "guards", &[]).unwrap(),
+        expected
+    );
+    assert_eq!(
+        reference("guards"),
+        b"[[{pos,2},{nonpos,0},other,other],[integer,integer,integer,boolean,boolean,\
+          other,other,other,other,other,other],[right,left,right,right],[lt,nlt,nlt,lt,lt,\
+          nlt,lt,nlt,lt,nlt,lt,nlt,lt,lt,lt,nlt]]\n"
+    );
+}

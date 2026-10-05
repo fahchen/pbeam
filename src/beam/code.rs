@@ -106,7 +106,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// selection_list ::= compact(7, short=1) compact(0) selection_pair[select_count/2]
 /// selection_pair ::= atom_value compact(5)
 /// type_test ::= test_opcode compact(5) register
-/// test_opcode ::= 48 ; is_atom | 49 ; is_pid | 50 ; is_reference | 53 ; is_binary | 55 ; is_list | 57 ; is_tuple | 77 ; is_function | 156 ; is_map
+/// test_opcode ::= 45 ; is_integer | 48 ; is_atom | 49 ; is_pid | 50 ; is_reference | 53 ; is_binary | 55 ; is_list | 57 ; is_tuple | 77 ; is_function | 114 ; is_boolean | 156 ; is_map
 /// is_function2 ::= 115 compact(5) move_source move_source ; the arity is a literal or a register
 /// put_list ::= 69 move_source move_source register
 /// make_fun3 ::= 171 lambda_number:compact(0) register environment

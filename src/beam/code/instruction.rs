@@ -606,6 +606,24 @@ pub(crate) enum Instruction {
         left: Operand,
         right: Operand,
     },
+    /// Jumps to `fail_label` unless the left operand is less than the right
+    /// operand (`is_lt`, opcode 39) in the ERTS term order. Two different
+    /// references give a runtime error.
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `compare_probe:width/1` in
+    /// `fixtures/compare/compare_probe.beam` has `[0x27, 0xF5, 0x03, 0x01]`,
+    /// which fails to label 15 unless `x0` is less than the integer 0.
+    ///
+    /// Erlang: `width(F) when F < 0 -> left;` compiles to
+    /// `{test,is_lt,{f,15},[{x,0},{integer,0}]}`, as the guard of
+    /// `io_lib_format:field_width/3` (io_lib_format.erl:259) does, which
+    /// compares the atom `none` with 0.
+    TestLess {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
     /// Jumps to `fail_label` when the left operand is less than the right
     /// operand (`is_ge`, opcode 40) in the ERTS term order. Two different
     /// references give a runtime error.
@@ -785,6 +803,18 @@ pub(crate) enum TestKind {
     /// register `x0` holds a fun. Erlang: `kind(F) when is_function(F) ->
     /// any;` compiles to `{test,is_function,{f,101},[{tr,{x,0},...}]}`.
     Function,
+    /// `is_integer`, opcode 45. Example: `[0x2D, 0xB5, 0x03]` in
+    /// `compare_probe:kind/1` fails to label 11 unless `x0` is an integer.
+    /// Erlang: `kind(X) when is_integer(X) -> integer;` compiles to
+    /// `{test,is_integer,{f,11},[{x,0}]}`, as the guard of
+    /// `io_lib_format:field_value/2` (io_lib_format.erl:271) does.
+    Integer,
+    /// `is_boolean`, opcode 114. Example: `[0x72, 0xC5, 0x03]` in
+    /// `compare_probe:kind/1` fails to label 12 unless `x0` is the atom
+    /// `true` or `false`. Erlang: `kind(X) when is_boolean(X) -> boolean;`
+    /// compiles to `{test,is_boolean,{f,12},[{x,0}]}`, as the guard of
+    /// `standard_error:check_valid_opts/1` (standard_error.erl:236) does.
+    Boolean,
 }
 
 /// A source or destination in the supported `move` instruction.
@@ -962,6 +992,11 @@ pub(super) fn parse_code(
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
+            OPCODE_TEST_LT => Instruction::TestLess {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
             OPCODE_TEST_GE => Instruction::TestGreaterEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -1135,7 +1170,9 @@ pub(super) fn parse_code(
             | OPCODE_TEST_IS_NONEMPTY_LIST
             | OPCODE_TEST_IS_BINARY
             | OPCODE_TEST_IS_MAP
-            | OPCODE_TEST_IS_FUNCTION => {
+            | OPCODE_TEST_IS_FUNCTION
+            | OPCODE_TEST_IS_INTEGER
+            | OPCODE_TEST_IS_BOOLEAN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let kind = test_kind(opcode)?;
@@ -1316,6 +1353,8 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
         OPCODE_TEST_IS_BINARY => Ok(TestKind::Binary),
         OPCODE_TEST_IS_MAP => Ok(TestKind::Map),
         OPCODE_TEST_IS_FUNCTION => Ok(TestKind::Function),
+        OPCODE_TEST_IS_INTEGER => Ok(TestKind::Integer),
+        OPCODE_TEST_IS_BOOLEAN => Ok(TestKind::Boolean),
         _ => Err(error(format!("unsupported BEAM type-test opcode {opcode}"))),
     }
 }
@@ -1439,17 +1478,15 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_LT | OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
+        OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
-        OPCODE_TEST_IS_INTEGER
-        | OPCODE_TEST_IS_FLOAT
+        OPCODE_TEST_IS_FLOAT
         | OPCODE_TEST_IS_NUMBER
         | OPCODE_TEST_IS_ATOM
         | OPCODE_TEST_IS_PID
         | OPCODE_TEST_IS_BINARY
         | OPCODE_TEST_IS_LIST
         | OPCODE_TEST_IS_MAP
-        | OPCODE_TEST_IS_BOOLEAN
         | OPCODE_TEST_IS_BITSTR => Some(2),
         // `is_port Fail Src` is in `erlang:is_port/1` and `erlang:open_port/2`.
         OPCODE_TEST_IS_PORT => Some(2),
@@ -1721,12 +1758,12 @@ mod tests {
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_UTF16,
         OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GC_BIF1,
         OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC,
-        OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP,
+        OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_EQ, OPCODE_TEST_HEAP,
         OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
-        OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE,
-        OPCODE_TRY_CASE_END, parse_code, read_move_operand, read_operand_pairs, read_pair_count,
-        read_record_updates, skip_counted_operands, skip_integer_payload, skip_operand,
-        skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
+        OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END,
+        parse_code, read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
+        skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
+        test_kind, unsupported_opcode_operand_count,
     };
     use crate::{
         beam::code::{Instruction, Operand, TestKind},
@@ -2096,6 +2133,53 @@ mod tests {
                     fail_label: 22,
                     left: Operand::X(1),
                     right: Operand::Value(Term::Integer(2)),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_is_lt_is_integer_and_is_boolean_tests_of_the_compare_probe_fixture() {
+        const COMPARE_PROBE: &[u8] = include_bytes!("../../../fixtures/compare/compare_probe.beam");
+        let next = [0x27, 0x75, 0x01, 0x57, 0x13, 0x10]; // next/1: is_lt f7 0 {tr,x1,1}
+        let width = [0x27, 0xF5, 0x03, 0x01]; // width/1: is_lt f15 x0 0
+        let is_integer = [0x2D, 0xB5, 0x03]; // kind/1: is_integer f11 x0
+        let is_boolean = [0x72, 0xC5, 0x03]; // kind/1: is_boolean f12 x0
+        for bytes in [&next[..], &width, &is_integer, &is_boolean] {
+            assert!(
+                COMPARE_PROBE
+                    .windows(bytes.len())
+                    .any(|window| window == bytes),
+                "{bytes:02X?} is not in compare_probe.beam"
+            );
+        }
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&next[..], &width, &is_integer, &is_boolean, &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::TestLess {
+                    fail_label: 7,
+                    left: Operand::Value(Term::Integer(0)),
+                    right: Operand::X(1),
+                },
+                Instruction::TestLess {
+                    fail_label: 15,
+                    left: Operand::X(0),
+                    right: Operand::Value(Term::Integer(0)),
+                },
+                Instruction::Test {
+                    kind: TestKind::Integer,
+                    fail_label: 11,
+                    value: Operand::X(0),
+                },
+                Instruction::Test {
+                    kind: TestKind::Boolean,
+                    fail_label: 12,
+                    value: Operand::X(0),
                 },
                 Instruction::End,
             ]
@@ -2502,7 +2586,7 @@ mod tests {
             (OPCODE_TEST_HEAP, 2),
             (OPCODE_BIF0, 2),
             (OPCODE_GC_BIF1, 5),
-            (OPCODE_TEST_LT, 3),
+            (OPCODE_TEST_EQ, 3),
             (OPCODE_TEST_TAGGED_TUPLE, 4),
             (OPCODE_TEST_IS_MAP, 2),
             (OPCODE_GET_TL, 2),

@@ -1,5 +1,5 @@
 //! The ERTS term order, as `erts_cmp_compound` (`utils.c`, OTP 29.1.1)
-//! gives it to `is_ge` with arithmetic comparison (`exact = 0`).
+//! gives it to `is_lt` and `is_ge` with arithmetic comparison (`exact = 0`).
 //!
 //! Terms of different types compare by type, as the `*_DEF` values in
 //! `erl_term.h` order them:

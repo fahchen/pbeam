@@ -478,6 +478,10 @@ impl BeamProgram {
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
                         TestKind::Function => matches!(value, Term::Fun(_)),
+                        TestKind::Integer => matches!(value, Term::Integer(_)),
+                        TestKind::Boolean => {
+                            matches!(&value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
+                        }
                     };
                     if !passed {
                         jump(module, process, *fail_label)?;
@@ -548,6 +552,18 @@ impl BeamProgram {
                     right,
                 } => {
                     if read(process, left)? == read(process, right)? {
+                        jump(module, process, *fail_label)?;
+                    }
+                }
+                Instruction::TestLess {
+                    fail_label,
+                    left,
+                    right,
+                } => {
+                    if !read(process, left)?
+                        .compare(&read(process, right)?)?
+                        .is_lt()
+                    {
                         jump(module, process, *fail_label)?;
                     }
                 }
@@ -3576,27 +3592,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_is_ge_on_two_different_references() {
+    fn rejects_is_ge_and_is_lt_on_two_different_references() {
         // ERTS orders two references by the scheduler thread that made each
         // one; this is the "Term order" row in `docs/erts-differences.md`.
         let reference = |number| Operand::Value(Term::Reference(crate::Reference(number)));
-        let body = vec![
-            Instruction::TestGreaterEqual {
-                fail_label: 3,
-                left: reference(1),
-                right: reference(2),
-            },
-            Instruction::Label(3),
-            Instruction::Return,
-        ];
-        assert_eq!(
-            make_program(body, 0)
-                .execute("fixture", "main", &[])
-                .unwrap_err()
-                .to_string(),
-            "unsupported term order of two references Reference(Reference(1)) and \
-             Reference(Reference(2))"
-        );
+        let is_ge = Instruction::TestGreaterEqual {
+            fail_label: 3,
+            left: reference(1),
+            right: reference(2),
+        };
+        let is_lt = Instruction::TestLess {
+            fail_label: 3,
+            left: reference(1),
+            right: reference(2),
+        };
+        for test in [is_ge, is_lt] {
+            let body = vec![test, Instruction::Label(3), Instruction::Return];
+            assert_eq!(
+                make_program(body, 0)
+                    .execute("fixture", "main", &[])
+                    .unwrap_err()
+                    .to_string(),
+                "unsupported term order of two references Reference(Reference(1)) and \
+                 Reference(Reference(2))"
+            );
+        }
     }
 
     #[test]
