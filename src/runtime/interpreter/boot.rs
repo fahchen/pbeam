@@ -45,7 +45,8 @@ impl BeamProgram {
     /// starts the OTP standard IO servers, sets the registered `user`
     /// process as its group leader, and calls the zero-arity entry
     /// function. Return the result of the entry function. The run ends when
-    /// no process can run, so the servers do not keep it alive.
+    /// no process can run and no timer is active, so the servers that wait
+    /// for a message do not keep it alive.
     ///
     /// # Examples
     ///
