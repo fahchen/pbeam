@@ -14,6 +14,7 @@ use crate::{
 use std::collections::HashMap;
 
 mod bif;
+mod native;
 
 use bif::{BifResult, INSTRUCTION_CALLS, is_bif};
 
@@ -671,6 +672,19 @@ impl BeamProgram {
                     let reference = read(process, reference)?;
                     process.mailbox.clear_marker(&reference);
                 }
+                Instruction::NifStart { name, arity } => {
+                    // ERTS `erlang:load_nif/2` writes the NIF call over this
+                    // instruction, so each entry to the function runs the
+                    // NIF and returns its result to the caller
+                    // (`beam/erl_nif.c:4922-4928`, `5050-5098`). A function
+                    // without a binding runs its BEAM stub body.
+                    let arguments = call_arguments(&process.registers, *arity)?;
+                    if let Some(result) = native::call(&module.name, name, &arguments)
+                        && let Some(outcome) = self.finish_bif(process, result, true)?
+                    {
+                        return Ok(outcome);
+                    }
+                }
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::Return => {
                     if let Some(outcome) = return_from_frame(process)? {
@@ -730,42 +744,80 @@ impl BeamProgram {
                 "unsupported instruction call {module}:{name}/{arity}"
             )));
         }
-        let (frame, process) = if is_bif(module, name, arity) {
+        if is_bif(module, name, arity) {
             let arguments = call_arguments(&process.registers, arity)?;
             let result = self.bif(scheduler, module, name, arguments)?;
-            let process = scheduler.current_process_mut();
-            match result {
-                BifResult::Value(value) => {
-                    write(process, &Operand::X(0), value)?;
-                    return if tail {
-                        return_from_frame(process)
-                    } else {
-                        Ok(None)
-                    };
-                }
-                BifResult::Raise { class, reason } => return Ok(raise(process, class, reason)),
-                BifResult::Trap {
-                    module,
-                    function,
-                    arguments,
-                } => {
-                    let arity = u32::try_from(arguments.len())
-                        .map_err(|_| error("arity exceeds BEAM limit"))?;
-                    for (index, argument) in (0..).zip(arguments) {
-                        write(process, &Operand::X(index), argument)?;
-                    }
-                    (self.mfa_frame(module, function, arity)?, process)
+            return self.finish_bif(scheduler.current_process_mut(), result, tail);
+        }
+        enter_frame(process, self.mfa_frame(module, name, arity)?, tail);
+        Ok(None)
+    }
+
+    /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
+    /// does for BIFs and NIFs (`emu/bif_instrs.tab:604-636`; JIT
+    /// `emit_bif_nif_epilogue` in `jit/arm/instr_bif.cpp:631-719`). A value
+    /// goes to x0, and a tail call then returns from the frame. An exception
+    /// goes to the error handler. A trap writes its arguments to the X
+    /// registers and enters the target function. Return the outcome when the
+    /// process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // A value in a body call stays in the frame.
+    /// let outcome = program.finish_bif(process, BifResult::Value(Term::static_atom("ok")), false)?;
+    /// assert!(outcome.is_none());
+    /// // `exit(normal)` with no catch tag exits the process.
+    /// let raise = BifResult::Raise { class: ExceptionClass::Exit, reason: Term::static_atom("normal") };
+    /// assert!(matches!(program.finish_bif(process, raise, true)?, Some(Outcome::Exit { .. })));
+    /// ```
+    fn finish_bif(
+        &self,
+        process: &mut ProcessState,
+        result: BifResult,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        match result {
+            BifResult::Value(value) => {
+                write(process, &Operand::X(0), value)?;
+                if tail {
+                    return_from_frame(process)
+                } else {
+                    Ok(None)
                 }
             }
-        } else {
-            (self.mfa_frame(module, name, arity)?, process)
-        };
-        if tail {
-            *current_frame(process) = frame;
-        } else {
-            process.frames.push(frame);
+            BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
+            BifResult::Trap {
+                module,
+                function,
+                arguments,
+            } => {
+                let arity = u32::try_from(arguments.len())
+                    .map_err(|_| error("arity exceeds BEAM limit"))?;
+                for (index, argument) in (0..).zip(arguments) {
+                    write(process, &Operand::X(index), argument)?;
+                }
+                enter_frame(process, self.mfa_frame(module, function, arity)?, tail);
+                Ok(None)
+            }
         }
-        Ok(None)
+    }
+}
+
+/// Enter `frame`: a tail call replaces the active frame, and a body call
+/// pushes it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// enter_frame(&mut process, program.mfa_frame("external", "effect", 1)?, false);
+/// assert_eq!(process.frames.len(), 2);
+/// ```
+fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
+    if tail {
+        *current_frame(process) = frame;
+    } else {
+        process.frames.push(frame);
     }
 }
 

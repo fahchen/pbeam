@@ -25,13 +25,14 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
     //
     // `io:conv_reason/1` gives `badarg` for most writer exit reasons, so the
     // caller result alone does not show where the writer failed. `main/0`
-    // also monitors the writer and returns its exit reason. `write_nif/2`
-    // starts with `nif_start`, a no-op, and then calls
-    // `erlang:nif_error(undef)`, so PBeam gives `{undef, []}`. On ERTS the
-    // real NIF raises `badarg` for the fake TTY reference, and the reason is
-    // `{badarg, [{prim_tty, write_nif, [Ref, Chars], []}, ...]}`. PBeam has no
-    // `prim_tty` NIF binding until #50, so the ERTS check compares only the
-    // class and the first stack frame.
+    // also monitors the writer and returns its exit reason. The `nif_start`
+    // instruction of `write_nif/2` runs the PBeam binding. The binding raises
+    // `badarg` for the plain reference, as the ERTS NIF does for a term that
+    // is not a TTY resource (prim_tty_nif.c:363-364), so PBeam gives
+    // `{badarg, []}`. On ERTS the reason is
+    // `{badarg, [{prim_tty, write_nif, [Ref, Chars], []}, ...]}`. PBeam gives
+    // the stack trace `[]`, so the ERTS check compares only the class and the
+    // first stack frame.
     let modules = [
         "erlang",
         "erts_internal",
@@ -58,7 +59,7 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
             atom("noise_ok"),
             atom("normal"),
             atom("normal"),
-            Term::Tuple(vec![atom("undef"), Term::List(vec![])]),
+            Term::Tuple(vec![atom("badarg"), Term::List(vec![])]),
         ])
     );
 

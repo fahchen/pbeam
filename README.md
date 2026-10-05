@@ -20,8 +20,7 @@ The OTP IO protocol, host output path, and application build tooling are not imp
 compiled Elixir entry, prints exactly `Hello, world!\n`, and exits successfully.
 The current task chain targets the compiled Elixir and OTP IO path through the
 group leader. PR #47 loads the pinned `Elixir.IO.beam` module. PR #52 executes the compiled Elixir path
-through the `:io.put_chars/2` boundary. Tasks #49 and #50 complete the OTP and host
-paths. Compilation and an ERTS smoke run alone do not meet this target.
+through the `:io.put_chars/2` boundary. Task #49 adds the cooperative process runtime. Task #55 executes the pinned OTP `io`, `group`, `user_drv`, and `prim_tty` BEAM path. Task #50 runs `prim_tty:write_nif/2` as a native binding. Task #79 starts the OTP IO servers and adds the TTY resource and the host write. Compilation and an ERTS smoke run alone do not meet this target.
 [Terra Counter](docs/terra-target.md) follows as a broader macOS arm64 PTY scenario. Full OTP
 compatibility, hot code upgrades, JIT/AOT, and traditional NIF ABI compatibility
 are outside the initial scope. Each executable targets a particular platform;
