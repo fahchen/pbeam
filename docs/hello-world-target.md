@@ -98,9 +98,15 @@ mix compile --warnings-as-errors
 cargo run --bin pbeam -- Elixir.Hello main fixtures/hello/_build/dev/lib/hello_reference/ebin/Elixir.Hello.beam
 ```
 
-Pass another module name and BEAM file to run the second fixture. Pass more BEAM
-files after the entry name and function to load modules for external calls.
-Run `cargo run --bin pbeam -- --help` to print the command options.
+Pass another module name and BEAM file to run the second fixture. Pass more BEAM files after the entry name and function to load modules for external calls. Run `cargo run --bin pbeam -- --help` to print the command options.
+
+The `pbeam` command first boots the OTP standard IO servers with the embedded module `pbeam_boot` (#139), and then runs the entry with the registered `user` process as its group leader. The boot calls 28 pinned OTP modules: `erlang`, `prim_tty`, `proc_lib`, `application`, `application_controller`, `lists`, `os`, `unicode`, `gen_event`, `gen`, `prim_tty_sighandler`, `erl_signal_handler`, `standard_error`, `supervisor_bridge`, `user_sup`, `user_drv`, `group`, `gen_statem`, `io`, `io_lib`, `io_lib_format`, `proplists`, `queue`, `gen_server`, `logger`, `logger_config`, `edlin`, and `edlin_key`. Pass their BEAM files after the entry BEAM files. Without one of them, the command stops with `unresolved external MFA` of that module and status 1. Run the command in a locale whose codeset is UTF-8, such as `LC_ALL=C.UTF-8`. In another locale, the command stops with `unsupported BEAM opcode 166` (see "Boot" in [ERTS Differences](erts-differences.md)). From the repository root, these commands run the boot fixture, which prints `Hello, world!\n` and exits with status zero:
+
+```sh
+boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key"
+boot_beams=$(mise exec -- erl -noshell -eval '[io:format("~ts~n", [case code:which(list_to_atom(M)) of preloaded -> filename:join([code:lib_dir(erts), "ebin", M ++ ".beam"]); Path -> Path end]) || M <- init:get_plain_arguments()], halt().' -extra $boot_modules)
+LC_ALL=C.UTF-8 cargo run --bin pbeam -- boot_probe main fixtures/boot/boot_probe.beam $boot_beams
+```
 
 Each implementation PR updates affected rows with supported semantics, remaining
 limits, and runnable regression tests. Mark support verified only after merge and
