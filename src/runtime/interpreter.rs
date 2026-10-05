@@ -1219,8 +1219,9 @@ struct SpawnOptions {
 
 /// Start a process that runs `module:function` with the elements of
 /// `arguments`, as ERTS `erl_create_process` does. Return the pid, or
-/// `{Pid, Reference}` when `options.monitor` is set. `arguments` that are
-/// not a proper list raise `badarg` (`erl_process.c:12490-12492`).
+/// `{Pid, Reference}` when `options.monitor` is set. A `module` or
+/// `function` that is not an atom, and `arguments` that are not a proper
+/// list, raise `badarg` (`erl_process.c:12490-12492`).
 ///
 /// # Examples
 ///
@@ -1229,16 +1230,20 @@ struct SpawnOptions {
 /// assert!(matches!(result, BifResult::Value(Term::Pid(_))));
 /// let result = create_process(&program, &mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default())?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
+/// let result = create_process(&program, &mut scheduler, &Term::Integer(1), &function, &Term::List(vec![]), SpawnOptions::default())?;
+/// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 fn create_process(
     program: &BeamProgram,
     scheduler: &mut Scheduler,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
     options: SpawnOptions,
 ) -> Result<BifResult, BeamError> {
-    let Term::List(arguments) = arguments else {
+    let (Term::Atom(module), Term::Atom(function), Term::List(arguments)) =
+        (module, function, arguments)
+    else {
         return Ok(BifResult::badarg());
     };
     let arguments = arguments.clone();

@@ -4,7 +4,7 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
 use crate::runtime::timer::{Receiver, Timer, Timers};
-use crate::term::{Fun, Reference};
+use crate::term::Fun;
 
 /// Return the node of a pid or of the calling process.
 ///
@@ -104,7 +104,8 @@ pub(super) fn exit(
 /// Run `erlang:demonitor(Reference, Options)` as ERTS `demonitor_2`
 /// (`bif.c:613-654`) does. The options are a proper list of `flush` and
 /// `info`; each other element, and a tail that is not `[]`, raise `badarg`
-/// before the monitor is removed. The result is `true`, or `false` with
+/// before the monitor is removed. After the options, a `Reference` that is
+/// not a reference raises `badarg`. The result is `true`, or `false` with
 /// `info` when no active monitor was removed.
 ///
 /// With `flush`, ERTS flushes only when no active monitor was removed: the
@@ -115,17 +116,18 @@ pub(super) fn exit(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = demonitor(&mut context, reference, &Term::List(vec![]));
+/// let result = demonitor(&mut context, &reference, &Term::List(vec![]));
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let result = demonitor(&mut context, gone, &Term::List(vec![Term::static_atom("info")]));
+/// let result = demonitor(&mut context, &gone, &Term::List(vec![Term::static_atom("info")]));
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
-/// let result = demonitor(&mut context, gone, &Term::List(vec![Term::static_atom("flush")]));
+/// let result = demonitor(&mut context, &gone, &Term::List(vec![Term::static_atom("flush")]));
 /// assert!(matches!(result, BifResult::Trap { function: "flush_monitor_messages", .. }));
-/// assert!(matches!(demonitor(&mut context, gone, &Term::static_atom("x")), BifResult::Raise { .. }));
+/// assert!(matches!(demonitor(&mut context, &gone, &Term::static_atom("x")), BifResult::Raise { .. }));
+/// assert!(matches!(demonitor(&mut context, &Term::static_atom("x"), &Term::List(vec![])), BifResult::Raise { .. }));
 /// ```
 pub(super) fn demonitor(
     context: &mut BifContext<'_>,
-    reference: Reference,
+    reference: &Term,
     options: &Term,
 ) -> BifResult {
     let Term::List(options) = options else {
@@ -139,6 +141,9 @@ pub(super) fn demonitor(
             _ => return BifResult::badarg(),
         }
     }
+    let Term::Reference(reference) = *reference else {
+        return BifResult::badarg();
+    };
     let removed = context.scheduler.demonitor(reference);
     let result = Term::static_atom(if removed || !info { "true" } else { "false" });
     if removed || !flush {
@@ -157,7 +162,8 @@ pub(super) fn demonitor(
 
 /// Run `erlang:spawn/3`: start a process that runs `module:function` with the
 /// elements of `arguments`, as ERTS `spawn_3` does with default spawn options.
-/// `arguments` that are not a proper list raise `badarg`.
+/// A `module` or `function` that is not an atom, and `arguments` that are not
+/// a proper list, raise `badarg`.
 ///
 /// # Examples
 ///
@@ -167,8 +173,8 @@ pub(super) fn demonitor(
 /// ```
 pub(super) fn spawn(
     context: &mut BifContext<'_>,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
 ) -> Result<BifResult, BeamError> {
     create_process(
@@ -192,8 +198,8 @@ pub(super) fn spawn(
 /// ```
 pub(super) fn spawn_link(
     context: &mut BifContext<'_>,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
 ) -> Result<BifResult, BeamError> {
     let options = SpawnOptions {
@@ -217,7 +223,8 @@ pub(super) fn spawn_link(
 /// the result is `{Pid, Reference}`, else `Pid`. `options` that are not a
 /// proper list raise `badarg`, as `erts_parse_spawn_opts`
 /// (`erl_process.c:12222-12434`) does. Any other option gives a runtime
-/// error.
+/// error. After the options, a `module` or `function` that is not an atom
+/// raises `badarg`, as in `spawn/3`.
 ///
 /// # Examples
 ///
@@ -229,8 +236,8 @@ pub(super) fn spawn_link(
 /// ```
 pub(super) fn spawn_opt(
     context: &mut BifContext<'_>,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {

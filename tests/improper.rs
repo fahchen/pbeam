@@ -157,7 +157,9 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
     // (`utils.c:2862-2905`). The spawn BIFs, `demonitor/2`, and the other
     // BIFs raise `badarg` for an improper list (`erl_process.c:12490-12492`,
     // `bif.c:613-654`), and `demonitor/2` with `[info]` gives `false` when
-    // it removes no monitor.
+    // it removes no monitor. `demonitor/2` also raises `badarg` for a term
+    // that is not a reference, after the option walk, and the spawn BIFs for
+    // a module or function that is not an atom.
     let program = BeamProgram::load(&[IMPROPER_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let int = Term::Integer;
@@ -191,7 +193,7 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
             .into_iter()
             .chain(std::iter::repeat_with(badarg).take(10))
             .chain([atom("false"), atom("true")])
-            .chain(std::iter::repeat_with(badarg).take(4))
+            .chain(std::iter::repeat_with(badarg).take(10))
             .collect()
         )
     );
@@ -202,7 +204,8 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
          {error,system_limit},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
          {error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
          {error,badarg},false,true,{error,badarg},{error,badarg},{error,badarg},\
-         {error,badarg}]\n"
+         {error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+         {error,badarg},{error,badarg}]\n"
     );
 }
 

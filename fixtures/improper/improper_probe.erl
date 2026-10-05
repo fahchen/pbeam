@@ -57,7 +57,11 @@ list_bifs() ->
      t(fun() -> process_info(self(), ?MODULE:id([registered_name|x])) end),
      t(fun() -> erlang:cancel_timer(make_ref(), ?MODULE:id([{async, false}|x])) end),
      t(fun() -> ets:new(t, ?MODULE:id([set|x])) end),
-     t(fun() -> ets:insert(ets:new(t, []), ?MODULE:id([{a}|x])) end)].
+     t(fun() -> ets:insert(ets:new(t, []), ?MODULE:id([{a}|x])) end),
+     t(fun() -> erlang:demonitor(X, ?MODULE:id([flush|x])) end), t(fun() -> erlang:demonitor(X, ?MODULE:id([])) end),
+     t(fun() -> spawn(?MODULE:id(1), id, [1]) end), t(fun() -> spawn_link(?MODULE, ?MODULE:id(1), [1]) end),
+     t(fun() -> spawn_opt(?MODULE:id(1), id, [1], ?MODULE:id([link|x])) end),
+     t(fun() -> spawn_opt(?MODULE:id(1), id, [1], ?MODULE:id([])) end)].
 
 %% The iodata and chardata BIFs with improper lists.
 iodata() ->
