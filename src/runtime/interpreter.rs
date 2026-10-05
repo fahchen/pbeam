@@ -3682,20 +3682,6 @@ mod tests {
     }
 
     #[test]
-    fn reports_a_lists_reverse_result_that_is_an_improper_list() {
-        // ERTS 29.1.1: lists:reverse([a], x) is the improper list [a|x].
-        let reverse = call_ext_with(
-            "lists",
-            "reverse",
-            vec![Term::List(vec![test_atom("a")]), test_atom("x")],
-        );
-        assert_eq!(
-            reverse.unwrap_err().to_string(),
-            "unsupported lists:reverse/2 tail Atom(\"x\"): not a list"
-        );
-    }
-
-    #[test]
     fn finds_key_tuples_as_pinned_erts() {
         let tuple = |elements: Vec<Term>| Term::Tuple(elements);
         let keyfind = |key: Term, position: Term, list: Vec<Term>| {

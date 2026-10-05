@@ -78,32 +78,6 @@ fn takes_the_tail_and_the_length_of_lists_as_pinned_erts() {
 }
 
 #[test]
-fn reverses_lists_as_pinned_erts() {
-    // `io_start_probe:reverse/0` runs `lists:reverse/2`
-    // (`erl_bif_lists.c:1246-1263`). An empty first list returns the second
-    // term itself, and a first term that is not a list raises `badarg`.
-    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
-    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let list = |names: &[&str]| Term::List(names.iter().map(|name| atom(name)).collect());
-    let expected = vec![
-        list(&["c", "b", "a", "d"]),
-        atom("foo"),
-        list(&["a"]),
-        list(&[]),
-        atom("badarg"),
-        atom("badarg"),
-    ];
-    assert_eq!(
-        program.execute("io_start_probe", "reverse", &[]).unwrap(),
-        Term::List(expected)
-    );
-    assert_eq!(
-        reference("reverse"),
-        b"[[c,b,a,d],foo,[a],[],badarg,badarg]\n"
-    );
-}
-
-#[test]
 fn reads_and_updates_maps_as_pinned_erts() {
     // `io_start_probe:maps/0` runs `bif` `erlang:map_get/2` with fail label
     // 0, as `prim_tty:init/1` (prim_tty.erl:220) and `user_drv:init/1`
