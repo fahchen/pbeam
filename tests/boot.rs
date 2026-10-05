@@ -70,8 +70,10 @@ fn boots_the_standard_io_servers_before_the_entry_of_the_pbeam_binary() {
 
 #[test]
 fn stops_the_boot_at_the_first_missing_otp_module() {
-    // Without the pinned OTP modules, the kernel process of the boot calls
-    // `standard_error:start_link/0` first, and the run stops there.
+    // Without the pinned OTP modules, the boot process calls
+    // `logger_server:start_link/0` first, as start_clean.boot starts the
+    // kernel process `logger` first after `heart` (init.erl:1348-1350), and
+    // the run stops there.
     let output = Command::new(env!("CARGO_BIN_EXE_pbeam"))
         .args([
             "pbeam_boot",
@@ -94,9 +96,45 @@ fn stops_the_boot_at_the_first_missing_otp_module() {
         ),
         (
             &b""[..],
-            &b"pbeam: unresolved external MFA standard_error:start_link/0\n"[..],
+            &b"pbeam: unresolved external MFA logger_server:start_link/0\n"[..],
             Some(1)
         )
+    );
+}
+
+#[test]
+fn keeps_the_kernel_spec_of_the_pinned_start_clean_boot() {
+    // `pbeam_boot:start/2` gives `kernel_app/0` to
+    // `application_controller:start/1`, as start_clean.boot gives its kernel
+    // application spec (init.erl:1348-1350). The pinned ERTS parses the
+    // boot module source and compares the body of `kernel_app/0` with the
+    // spec in its start_clean.boot.
+    let output = Command::new("erl")
+        .args([
+            "-noshell",
+            "-eval",
+            "{ok, Boot} = file:read_file(filename:join([code:root_dir(), \"bin\", \"start_clean.boot\"])), \
+             {script, _, Commands} = binary_to_term(Boot), \
+             [Spec] = [App || {kernelProcess, application_controller, {_, _, [App]}} <- Commands], \
+             [Source] = init:get_plain_arguments(), \
+             {ok, Forms} = epp:parse_file(Source, []), \
+             [[{clause, _, [], [], [Expr]}]] = [Clauses || {function, _, kernel_app, 0, Clauses} <- Forms], \
+             io:format(\"~p~n\", [erl_parse:normalise(Expr) =:= Spec]), \
+             halt().",
+            "-extra",
+            BOOT_SOURCE,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        (
+            output.stdout.as_slice(),
+            output.stderr.as_slice(),
+            output.status.code()
+        ),
+        (&b"true\n"[..], &b""[..], Some(0))
     );
 }
 
