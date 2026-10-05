@@ -81,3 +81,97 @@ fn runs_receive_timeouts_as_pinned_erts() {
         b"[[timeout,early,timeout,other,late,none],[timeout,{error,timeout_value},{error,timeout_value},{error,timeout_value},{error,timeout_value},{error,timeout_value},{error,timeout_value},{error,timeout_value}],[ok,ok,other,none]]\n"
     );
 }
+
+#[test]
+fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, TIMER_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let badargs = |count| {
+        Term::List(vec![
+            Term::Tuple(vec![atom("error"), atom("badarg")]);
+            count
+        ])
+    };
+    let run = |function| program.execute("timer_probe", function, &[]).unwrap();
+
+    // The timer of 30 ms sends `{timeout, R2, b}` before the timer of 60 ms
+    // sends `{timeout, R1, a}`. `start_timer_3` raises `badarg` for a time
+    // that is not a non-negative integer and `setup_bif_timer` for a
+    // receiver that is not a pid or an atom (`erl_hl_timer.c:2605-2620`,
+    // `1814-1815`).
+    assert_eq!(
+        run("start_timer"),
+        Term::List(vec![atom("true"), atom("true"), atom("none"), badargs(7)])
+    );
+
+    // `cancel_timer/2` gives the time left, `false`, or `ok`, and sends
+    // `{cancel_timer, Ref, Result}` with `async` (`erl_hl_timer.c:2078-2147`).
+    // The canceled timers send no message. Each option that is not
+    // `{async, Bool}` or `{info, Bool}` and each term that is not a reference
+    // raise `badarg` (`erl_hl_timer.c:2237-2398`).
+    assert_eq!(
+        run("cancel_timer"),
+        Term::List(vec![
+            atom("true"),
+            atom("false"),
+            atom("ok"),
+            atom("ok"),
+            atom("ok"),
+            atom("true"),
+            atom("ok"),
+            atom("false"),
+            atom("ok"),
+            atom("false"),
+            atom("false"),
+            atom("none"),
+            badargs(11),
+        ])
+    );
+
+    // A pid that is not alive gets no timer, and an exit cancels the timers
+    // to its pid (`erl_hl_timer.c:1832-1858`, `erl_process.c:14300-14303`).
+    // A name timer finds the process with the name when it expires, and a
+    // name that no process has drops the message (`erl_hl_timer.c:1165-1171`).
+    assert_eq!(
+        run("receiver_exit"),
+        Term::List(vec![
+            atom("false"),
+            atom("false"),
+            atom("named"),
+            atom("none")
+        ])
+    );
+
+    // Timers with the same end expire in start order (`time.c:647-668`).
+    let order = [1, 2, 3, 4, 40, 50, 60].map(Term::Integer).to_vec();
+    assert_eq!(
+        run("order"),
+        Term::List(vec![Term::List(order), atom("recv"), atom("bif")])
+    );
+
+    // An end after `ERTS_MONOTONIC_END` and a 64-bit overflow raise `badarg`
+    // (`erl_hl_timer.c:2549-2552`).
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    assert_eq!(
+        run("timer_limits"),
+        Term::List(vec![atom("ok"), atom("ok"), badarg.clone(), badarg])
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/timer",
+            "-eval",
+            "io:format(\"~w~n\", [[timer_probe:F() || F <- [start_timer, cancel_timer, receiver_exit, order, timer_limits]]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        reference.stdout,
+        b"[[true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,false,ok,ok,ok,true,ok,false,ok,false,false,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[false,false,named,none],[[1,2,3,4,40,50,60],recv,bif],[ok,ok,{error,badarg},{error,badarg}]]\n"
+    );
+}

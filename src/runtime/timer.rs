@@ -4,11 +4,11 @@
 //! start. A timer end is a clock tick of 1 ms.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     time::{Duration, Instant},
 };
 
-use crate::term::ProcessId;
+use crate::term::{Atom, ProcessId, Reference, Term};
 
 /// The internal monotonic time at the run start, `ERTS_MONOTONIC_BEGIN`: one
 /// second in the native time unit of 1000000000 per second
@@ -34,6 +34,29 @@ pub(super) type TimerKey = (i64, u64);
 pub(super) enum Timer {
     /// The receive timer of a process, which `wait_timeout` starts.
     Receive(ProcessId),
+    /// A BIF timer, which `erlang:start_timer/3` starts. It sends `message`
+    /// to `receiver` when it expires (`bif_timer_timeout`,
+    /// `erl_hl_timer.c:1146-1203`).
+    Bif {
+        /// The timer reference that the BIF returns.
+        reference: Reference,
+        /// The process that gets the message.
+        receiver: Receiver,
+        /// The message, `{timeout, Reference, Msg}`, which
+        /// `setup_bif_timer` makes at the start (`erl_hl_timer.c:1825`).
+        message: Term,
+    },
+}
+
+/// The receiver of a BIF timer message.
+#[derive(Debug, PartialEq)]
+pub(super) enum Receiver {
+    /// A pid. The exit of the process cancels the timer
+    /// (`erl_process.c:14300-14303`).
+    Process(ProcessId),
+    /// A registered name. The timer finds the process with the name when it
+    /// expires (`ERTS_TMR_ROFLG_REG_NAME`, `erl_hl_timer.c:1165-1170`).
+    Name(Atom),
 }
 
 /// All active timers of the run, in expiry order. An ERTS timer wheel slot
@@ -47,6 +70,9 @@ pub(super) struct Timers {
     start: Instant,
     /// Active timers by key.
     queue: BTreeMap<TimerKey, Timer>,
+    /// The key of each active BIF timer by its reference, as the ERTS
+    /// `btm_tree` of the timer service (`erl_hl_timer.c:312`).
+    bif_timers: HashMap<Reference, TimerKey>,
     /// Start number of the next timer.
     next: u64,
 }
@@ -64,6 +90,7 @@ impl Timers {
         Self {
             start: Instant::now(),
             queue: BTreeMap::new(),
+            bif_timers: HashMap::new(),
             next: 0,
         }
     }
@@ -110,6 +137,22 @@ impl Timers {
             .filter(|&end| end <= MONOTONIC_END_TICKS)
     }
 
+    /// Return the milliseconds from the time `now` to the end tick `end`, as
+    /// `get_time_left` (`erl_hl_timer.c:681-689`) does: `now` becomes the
+    /// tick `(now - 1) div 1000000 + 1`, and an end at or before that tick
+    /// gives 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Timers::time_left(1_000_000_000, 1100), 100);
+    /// assert_eq!(Timers::time_left(1_000_000_001, 1100), 99);
+    /// assert_eq!(Timers::time_left(1_200_000_000, 1100), 0);
+    /// ```
+    pub(super) fn time_left(now: i64, end: i64) -> i64 {
+        (end - ((now - 1) / UNITS_PER_TICK + 1)).max(0)
+    }
+
     /// Add a timer that expires at the end tick `end`. Return its key.
     ///
     /// # Examples
@@ -121,6 +164,9 @@ impl Timers {
     pub(super) fn start(&mut self, end: i64, timer: Timer) -> TimerKey {
         let key = (end, self.next);
         self.next += 1;
+        if let Timer::Bif { reference, .. } = &timer {
+            self.bif_timers.insert(*reference, key);
+        }
         self.queue.insert(key, timer);
         key
     }
@@ -136,7 +182,68 @@ impl Timers {
     /// assert_eq!(timers.wait_time(1_000_000_000), None);
     /// ```
     pub(super) fn cancel(&mut self, key: TimerKey) {
-        self.queue.remove(&key);
+        self.remove(key);
+    }
+
+    /// Remove the BIF timer with the reference `reference`. Return its end
+    /// tick, or `None` when no BIF timer with the reference is active, as
+    /// `access_btm` (`erl_hl_timer.c:1922-1971`) finds no active timer.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// timers.start(1100, Timer::Bif { reference, receiver, message });
+    /// assert_eq!(timers.cancel_bif(reference), Some(1100));
+    /// assert_eq!(timers.cancel_bif(reference), None);
+    /// ```
+    pub(super) fn cancel_bif(&mut self, reference: Reference) -> Option<i64> {
+        let key = *self.bif_timers.get(&reference)?;
+        self.remove(key);
+        Some(key.0)
+    }
+
+    /// Remove each BIF timer whose receiver is the pid `id`, as
+    /// `erts_cancel_bif_timers` does when the process exits
+    /// (`erl_process.c:14300-14303`). A BIF timer to a registered name
+    /// stays.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// timers.start(1100, Timer::Bif { reference, receiver: Receiver::Process(id), message });
+    /// timers.cancel_process(id);
+    /// assert_eq!(timers.cancel_bif(reference), None);
+    /// ```
+    pub(super) fn cancel_process(&mut self, id: ProcessId) {
+        let bif_timers = &mut self.bif_timers;
+        self.queue.retain(|_, timer| match timer {
+            Timer::Bif {
+                reference,
+                receiver: Receiver::Process(receiver),
+                ..
+            } if *receiver == id => {
+                bif_timers.remove(reference);
+                false
+            }
+            _ => true,
+        });
+    }
+
+    /// Remove and return the timer with the key `key`. Keep the BIF timer
+    /// index in sync.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let key = timers.start(1100, Timer::Receive(ProcessId(0)));
+    /// assert_eq!(timers.remove(key), Some(Timer::Receive(ProcessId(0))));
+    /// ```
+    fn remove(&mut self, key: TimerKey) -> Option<Timer> {
+        let timer = self.queue.remove(&key)?;
+        if let Timer::Bif { reference, .. } = &timer {
+            self.bif_timers.remove(reference);
+        }
+        Some(timer)
     }
 
     /// Remove and return the first timer when it is due at the time `now`:
@@ -152,11 +259,11 @@ impl Timers {
     /// assert_eq!(timers.pop_due(1_100_000_000), Some(Timer::Receive(ProcessId(0))));
     /// ```
     pub(super) fn pop_due(&mut self, now: i64) -> Option<Timer> {
-        let (&(end, _), _) = self.queue.first_key_value()?;
-        if end > now / UNITS_PER_TICK {
+        let (&key, _) = self.queue.first_key_value()?;
+        if key.0 > now / UNITS_PER_TICK {
             return None;
         }
-        self.queue.pop_first().map(|(_, timer)| timer)
+        self.remove(key)
     }
 
     /// Return the time from `now` until the first timer is due, or `None`
@@ -181,8 +288,16 @@ impl Timers {
 mod tests {
     use std::time::Duration;
 
-    use super::{MONOTONIC_END_TICKS, Timer, Timers};
-    use crate::term::ProcessId;
+    use super::{MONOTONIC_END_TICKS, Receiver, Timer, Timers};
+    use crate::term::{AtomTable, ProcessId, Reference, test_atom};
+
+    fn bif(reference: u64, receiver: Receiver) -> Timer {
+        Timer::Bif {
+            reference: Reference(reference),
+            receiver,
+            message: test_atom("x"),
+        }
+    }
 
     #[test]
     fn gives_the_end_tick_of_a_relative_timeout_as_parse_timeout_pos() {
@@ -238,6 +353,60 @@ mod tests {
             Some(Timer::Receive(ProcessId(0)))
         );
         assert_eq!(timers.wait_time(1_200_000_000), None);
+    }
+
+    #[test]
+    fn keeps_the_bif_timer_index_in_sync_with_the_queue() {
+        let mut timers = Timers::new();
+        timers.start(1100, bif(0, Receiver::Process(ProcessId(0))));
+        timers.start(1100, bif(1, Receiver::Process(ProcessId(0))));
+        let canceled = timers.start(1200, bif(2, Receiver::Process(ProcessId(0))));
+        timers.cancel(canceled);
+        assert_eq!(timers.cancel_bif(Reference(2)), None);
+        assert_eq!(timers.cancel_bif(Reference(1)), Some(1100));
+        assert_eq!(timers.cancel_bif(Reference(1)), None);
+        assert_eq!(
+            timers.pop_due(1_100_000_000),
+            Some(bif(0, Receiver::Process(ProcessId(0))))
+        );
+        assert_eq!(timers.cancel_bif(Reference(0)), None);
+        assert!(timers.bif_timers.is_empty());
+        assert_eq!(timers.wait_time(1_000_000_000), None);
+    }
+
+    #[test]
+    fn cancels_the_bif_timers_of_an_exiting_pid_and_keeps_name_timers() {
+        // `erts_cancel_bif_timers` (`erl_process.c:14300-14303`) cancels only
+        // the timers in the `bif_timers` tree of the process.
+        let mut timers = Timers::new();
+        let name = AtomTable::new().put("name").unwrap();
+        timers.start(1100, bif(0, Receiver::Process(ProcessId(0))));
+        timers.start(1100, bif(1, Receiver::Name(name.clone())));
+        timers.start(1100, bif(2, Receiver::Process(ProcessId(1))));
+        timers.start(1100, Timer::Receive(ProcessId(0)));
+        timers.cancel_process(ProcessId(0));
+        assert_eq!(timers.cancel_bif(Reference(0)), None);
+        assert_eq!(
+            timers.pop_due(1_100_000_000),
+            Some(bif(1, Receiver::Name(name)))
+        );
+        assert_eq!(
+            timers.pop_due(1_100_000_000),
+            Some(bif(2, Receiver::Process(ProcessId(1))))
+        );
+        assert_eq!(
+            timers.pop_due(1_100_000_000),
+            Some(Timer::Receive(ProcessId(0)))
+        );
+    }
+
+    #[test]
+    fn gives_the_time_left_as_get_time_left() {
+        assert_eq!(Timers::time_left(1_000_000_000, 1100), 100);
+        assert_eq!(Timers::time_left(1_000_000_001, 1100), 99);
+        assert_eq!(Timers::time_left(1_099_000_000, 1100), 1);
+        assert_eq!(Timers::time_left(1_099_000_001, 1100), 0);
+        assert_eq!(Timers::time_left(1_200_000_000, 1100), 0);
     }
 
     #[test]

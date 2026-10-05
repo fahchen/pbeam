@@ -3,6 +3,7 @@
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
+use crate::runtime::timer::{Receiver, Timer, Timers};
 use crate::term::{Fun, Reference};
 
 /// Return the node of a pid or of the calling process.
@@ -885,4 +886,164 @@ pub(super) fn function_exported(
             )
     });
     Value(Term::static_atom(if exported { "true" } else { "false" }))
+}
+
+/// Run `erlang:start_timer(Time, Dest, Msg)`, as ERTS `start_timer_3` and
+/// `setup_bif_timer` (`erl_hl_timer.c:2605-2620`, `1804-1871`) do:
+///
+/// - `Time` goes through the relative branch of `parse_timeout_pos`
+///   ([`Timers::timeout_position`]). A term that is not an integer, a
+///   negative integer, an end after `ERTS_MONOTONIC_END`, and a 64-bit
+///   overflow raise `badarg`.
+/// - Then a `Dest` that is not a pid or an atom raises `badarg`.
+/// - Then the BIF makes a new reference and returns it. A pid that is not
+///   alive gets no timer (`erl_hl_timer.c:1832-1858`).
+///
+/// When the timer expires, `Dest` gets `{timeout, Reference, Msg}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = start_timer(&mut context, &Term::Integer(100), &Term::Pid(pid), &msg)?;
+/// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
+/// let result = start_timer(&mut context, &Term::Integer(-1), &Term::Pid(pid), &msg)?;
+/// assert!(matches!(result, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A reference counter overflow gives a runtime error.
+pub(super) fn start_timer(
+    context: &mut BifContext<'_>,
+    time: &Term,
+    receiver: &Term,
+    message: &Term,
+) -> Result<BifResult, BeamError> {
+    let scheduler = &mut *context.scheduler;
+    let end = match *time {
+        Term::Integer(msec) => Timers::timeout_position(scheduler.timers.now(), msec),
+        _ => None,
+    };
+    let Some(end) = end else {
+        return Ok(BifResult::badarg());
+    };
+    let receiver = match receiver {
+        Term::Pid(id) => Receiver::Process(*id),
+        Term::Atom(name) => Receiver::Name(name.clone()),
+        _ => return Ok(BifResult::badarg()),
+    };
+    let reference = scheduler.make_ref()?;
+    if !matches!(receiver, Receiver::Process(id) if scheduler.process(id).is_none()) {
+        let message = Term::Tuple(vec![
+            Term::static_atom("timeout"),
+            Term::Reference(reference),
+            message.clone(),
+        ]);
+        scheduler.timers.start(
+            end,
+            Timer::Bif {
+                reference,
+                receiver,
+                message,
+            },
+        );
+    }
+    Ok(Value(Term::Reference(reference)))
+}
+
+/// Run `erlang:cancel_timer(TimerRef, Options)`, as ERTS `cancel_timer_2`
+/// (`erl_hl_timer.c:2649-2659`) does:
+///
+/// - `parse_bif_timer_options` (`erl_hl_timer.c:2352-2398`) reads a list of
+///   `{async, Bool}` and `{info, Bool}`, and the last value of an option
+///   wins. The defaults are `async` false and `info` true. Each other
+///   element, also `{abs, Bool}`, raises `badarg`.
+/// - Then a `TimerRef` that is not a reference raises `badarg`
+///   (`access_bif_timer`, `erl_hl_timer.c:2237-2340`).
+/// - Then `access_btm` (`erl_hl_timer.c:1922-1971`) cancels the active
+///   timer and gives the milliseconds left (`get_time_left`), or `false`
+///   when no timer is active.
+/// - `access_sched_local_btm` (`erl_hl_timer.c:2078-2147`) gives the
+///   result: `info` false gives `ok`. Else `async` false gives the
+///   milliseconds left or `false` (`return_info`, `erl_hl_timer.c:1975-1989`),
+///   and `async` true sends `{cancel_timer, TimerRef, Result}` to the caller
+///   and gives `ok` (`send_async_info`, `erl_hl_timer.c:1992-2034`).
+///
+/// Each reference that PBeam can represent is a reference of the local
+/// scheduler, so the `no_timer_result` path (`erl_hl_timer.c:2209-2234`)
+/// never runs.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = cancel_timer(&mut context, &Term::Reference(reference), &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Value(Term::Integer(100))));
+/// let result = cancel_timer(&mut context, &Term::Reference(reference), &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// ```
+pub(super) fn cancel_timer(
+    context: &mut BifContext<'_>,
+    reference: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let (Some((asynchronous, info)), Term::Reference(reference)) =
+        (timer_options(options), reference)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    let scheduler = &mut *context.scheduler;
+    let result = match scheduler.timers.cancel_bif(*reference) {
+        Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
+        None => Term::static_atom("false"),
+    };
+    if !info {
+        return Ok(Value(Term::static_atom("ok")));
+    }
+    if !asynchronous {
+        return Ok(Value(result));
+    }
+    let caller = scheduler.current_process_mut().id;
+    let message = Term::Tuple(vec![
+        Term::static_atom("cancel_timer"),
+        Term::Reference(*reference),
+        result,
+    ]);
+    scheduler.deliver(caller, message);
+    Ok(Value(Term::static_atom("ok")))
+}
+
+/// Read the options of `erlang:cancel_timer/2` as `parse_bif_timer_options`
+/// (`erl_hl_timer.c:2352-2398`) does without the `abs` option. Return
+/// `(async, info)`, or `None` for an option list that is not valid.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(timer_options(&Term::List(vec![])), Some((false, true)));
+/// assert_eq!(timer_options(&Term::static_atom("foo")), None);
+/// ```
+fn timer_options(options: &Term) -> Option<(bool, bool)> {
+    let Term::List(options) = options else {
+        return None;
+    };
+    let (mut asynchronous, mut info) = (false, true);
+    for option in options {
+        let Term::Tuple(fields) = option else {
+            return None;
+        };
+        let [Term::Atom(name), Term::Atom(value)] = fields.as_slice() else {
+            return None;
+        };
+        let value = match value.name() {
+            "true" => true,
+            "false" => false,
+            _ => return None,
+        };
+        match name.name() {
+            "async" => asynchronous = value,
+            "info" => info = value,
+            _ => return None,
+        }
+    }
+    Some((asynchronous, info))
 }

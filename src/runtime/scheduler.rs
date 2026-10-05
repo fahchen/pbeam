@@ -5,7 +5,7 @@ use super::{
     persistent_term::PersistentTerms,
     process::{Frame, ProcessState, ReceiveTimer},
     resource::Resources,
-    timer::{Timer, Timers},
+    timer::{Receiver, Timer, Timers},
 };
 use crate::{
     error::{BeamError, error},
@@ -142,7 +142,10 @@ impl Scheduler {
     /// Expire each timer that is due at the time `now`, in end order. A
     /// process whose receive timer expires goes to the end of the run queue
     /// when it waits, and a process in the run queue stays there
-    /// (`proc_timeout_common`, `erl_hl_timer.c:692-706`).
+    /// (`proc_timeout_common`, `erl_hl_timer.c:692-706`). A BIF timer sends
+    /// its message to its pid, or to the process that has its name now, and
+    /// a name that no process has drops the message (`bif_timer_timeout`,
+    /// `erl_hl_timer.c:1146-1203`).
     ///
     /// # Examples
     ///
@@ -151,13 +154,27 @@ impl Scheduler {
     /// ```
     pub(super) fn expire_timers(&mut self, now: i64) {
         while let Some(timer) = self.timers.pop_due(now) {
-            let Timer::Receive(id) = timer;
-            if self
-                .processes
-                .get_mut(&id)
-                .is_some_and(ProcessState::time_out)
-            {
-                self.runnable.push_back(id);
+            match timer {
+                Timer::Receive(id) => {
+                    if self
+                        .processes
+                        .get_mut(&id)
+                        .is_some_and(ProcessState::time_out)
+                    {
+                        self.runnable.push_back(id);
+                    }
+                }
+                Timer::Bif {
+                    receiver, message, ..
+                } => {
+                    let target = match receiver {
+                        Receiver::Process(id) => Some(id),
+                        Receiver::Name(name) => self.whereis(name.name()),
+                    };
+                    if let Some(target) = target {
+                        self.deliver(target, message);
+                    }
+                }
             }
         }
     }
@@ -580,9 +597,10 @@ impl Scheduler {
     }
 
     /// Remove the process `id` after it exits, and take it out of the run
-    /// queue. Stop its receive timer. Delete its ETS tables first, then free its registered name,
-    /// then send `EXIT` to linked processes that trap exits, then run its TTY
-    /// resource monitors and send `DOWN` to monitors. ERTS (`erl_process.c`)
+    /// queue. Stop its receive timer and the BIF timers to its pid. Delete
+    /// its ETS tables first, then free its registered name, then send `EXIT`
+    /// to linked processes that trap exits, then run its TTY resource
+    /// monitors and send `DOWN` to monitors. ERTS (`erl_process.c`)
     /// deletes the tables in `ERTS_CONTINUE_EXIT_USING_DB`
     /// (`erl_process.c:14360-14368`), unregisters the name in
     /// `ERTS_CONTINUE_EXIT_FREE`, before `ERTS_CONTINUE_EXIT_LINKS` and
@@ -612,10 +630,12 @@ impl Scheduler {
             .remove(&id)
             .expect("the exiting process is alive");
         self.runnable.retain(|&runnable| runnable != id);
-        // ERTS cancels the receive timer first (`erl_process.c:14207-14210`).
+        // ERTS cancels the receive timer first (`erl_process.c:14207-14210`),
+        // then the BIF timers to the pid (`erl_process.c:14300-14303`).
         if let ReceiveTimer::Set { key, .. } = process.receive_timer {
             self.timers.cancel(key);
         }
+        self.timers.cancel_process(id);
         self.ets.delete_owned(process.id);
         if let Some(name) = &process.registered_name {
             self.names.remove(name.name());
