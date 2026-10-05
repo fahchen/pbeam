@@ -1,7 +1,6 @@
 use std::{
-    process::{Command, Output, Stdio},
-    thread,
-    time::{Duration, Instant},
+    process::{Command, Output},
+    time::Duration,
 };
 
 #[path = "common/boot.rs"]
@@ -11,16 +10,18 @@ mod boot;
     reason = "this test crate gives BEAM paths, not bytes, to the binary"
 )]
 mod common;
+#[path = "common/run.rs"]
+mod run;
 
 use boot::{BOOT_BEAM, BOOT_MODULES};
 use common::pinned_beam_path;
+use run::run_with_time_limit;
 
 const RUN_END_PROBE: &str = "fixtures/run_end/run_end_probe.beam";
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
 
-/// Run a command with stdin `/dev/null`, `TERM=dumb`, and `LC_ALL=C.UTF-8`,
-/// and return its output. Kill it and panic when it does not end in
-/// `RUN_TIME_LIMIT`.
+/// Run a command with `TERM=dumb` and `LC_ALL=C.UTF-8`, and return its
+/// output. Kill it and panic when it does not end in `RUN_TIME_LIMIT`.
 ///
 /// # Examples
 ///
@@ -29,28 +30,10 @@ const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
 /// assert_eq!(output.status.code(), Some(0));
 /// ```
 fn run_to_end(command: &mut Command) -> Output {
-    let mut child = command
-        .env("TERM", "dumb")
-        .env("LC_ALL", "C.UTF-8")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let start = Instant::now();
-    while child.try_wait().unwrap().is_none() {
-        if start.elapsed() >= RUN_TIME_LIMIT {
-            child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
-            panic!(
-                "the run did not end in {} s: {command:?}, stdout: {:?}",
-                RUN_TIME_LIMIT.as_secs(),
-                String::from_utf8_lossy(&output.stdout)
-            );
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    child.wait_with_output().unwrap()
+    run_with_time_limit(
+        command.env("TERM", "dumb").env("LC_ALL", "C.UTF-8"),
+        RUN_TIME_LIMIT,
+    )
 }
 
 #[test]
