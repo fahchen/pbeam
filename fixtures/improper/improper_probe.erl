@@ -1,5 +1,5 @@
 -module(improper_probe).
--export([literals/0, instructions/0, cons/2, id/1, ge/2, lt/2]).
+-export([literals/0, instructions/0, list_bifs/0, cons/2, id/1, ge/2, lt/2]).
 
 %% Literal improper lists: exact equality, the term order, and map keys.
 literals() ->
@@ -32,6 +32,40 @@ split([[A | B] | C]) -> {A, B, C}.
 kind(L) when is_list(L), L =/= [] -> nonempty;
 kind([]) -> nil;
 kind(_) -> other.
+
+%% The list BIFs with improper lists.
+list_bifs() ->
+    X = ?MODULE:id(x), One = ?MODULE:id([1]), Imp = ?MODULE:id([1|x]),
+    Long = dup(300, 97) ++ X,
+    [t(fun() -> One ++ X end), t(fun() -> One ++ ?MODULE:id([2|x]) end), t(fun() -> Imp ++ [2] end),
+     t(fun() -> ?MODULE:id([]) ++ X end),
+     t(fun() -> tl(Imp) end), t(fun() -> tl(?MODULE:id([1,2|x])) end), t(fun() -> length(Imp) end),
+     t(fun() -> lists:reverse(?MODULE:id([a]), X) end), t(fun() -> lists:reverse(?MODULE:id([a,b]), ?MODULE:id([c|x])) end),
+     t(fun() -> lists:reverse(Imp, []) end), t(fun() -> lists:reverse(?MODULE:id([]), Imp) end),
+     t(fun() -> lists:member(1, Imp) end), t(fun() -> lists:member(2, Imp) end),
+     t(fun() -> lists:keyfind(a, 1, ?MODULE:id([{a}|x])) end), t(fun() -> lists:keyfind(b, 1, ?MODULE:id([{a}|x])) end),
+     t(fun() -> lists:keymember(a, 1, ?MODULE:id([{a}|x])) end), t(fun() -> lists:keymember(b, 1, ?MODULE:id([{a}|x])) end),
+     t(fun() -> list_to_atom(Long) end), t(fun() -> list_to_atom(?MODULE:id([97|x])) end),
+     t(fun() -> apply(?MODULE, id, Imp) end), t(fun() -> apply(fun ?MODULE:id/1, Imp) end),
+     t(fun() -> spawn(?MODULE, id, Imp) end), t(fun() -> spawn(?MODULE, id, X) end), t(fun() -> spawn_link(?MODULE, id, Imp) end),
+     t(fun() -> spawn_opt(?MODULE, id, [1], ?MODULE:id([link|x])) end),
+     t(fun() -> erlang:demonitor(make_ref(), ?MODULE:id([flush|x])) end),
+     t(fun() -> erlang:demonitor(make_ref(), X) end),
+     t(fun() -> erlang:demonitor(make_ref(), ?MODULE:id([bogus])) end),
+     t(fun() -> erlang:demonitor(make_ref(), ?MODULE:id([info])) end),
+     t(fun() -> erlang:demonitor(erlang:monitor(process, spawn(?MODULE, id, [1])), ?MODULE:id([info])) end),
+     t(fun() -> process_info(self(), ?MODULE:id([registered_name|x])) end),
+     t(fun() -> erlang:cancel_timer(make_ref(), ?MODULE:id([{async, false}|x])) end),
+     t(fun() -> ets:new(t, ?MODULE:id([set|x])) end),
+     t(fun() -> ets:insert(ets:new(t, []), ?MODULE:id([{a}|x])) end)].
+
+%% Run a fun and return its result, or `{Class, Reason}` of its exception.
+t(Fun) -> try Fun() catch Class:Reason -> {Class, Reason} end.
+
+%% Return a list of N copies of E. A list that the compiler cannot fold
+%% makes `Long` a run-time term.
+dup(0, _) -> [];
+dup(N, E) -> [E | dup(N - 1, E)].
 
 %% Return a list cell with a head and a tail. The tail of `gen:do_call/4`
 %% is a reference, so `put_list` gets a register tail.

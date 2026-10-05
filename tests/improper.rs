@@ -144,3 +144,64 @@ fn builds_and_matches_improper_lists_as_pinned_erts() {
         "[reply,[1|x],[0,1|x],[[1|2]|3],0,[1|x],x,{1,2,3},nonempty,nil,other,[[0,1|x]],true]\n"
     );
 }
+
+#[test]
+fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
+    // `list_bifs/0` runs the list BIFs with improper lists. `'++'/2`,
+    // `tl/1`, and `lists:reverse/2` return improper lists
+    // (`erl_bif_lists.c:262-338`, 1195-1263; `bif.c:2931-2938`).
+    // `lists:member/2`, `lists:keyfind/3`, and `lists:keymember/3` return a
+    // match before the improper tail, else raise `badarg`
+    // (`erl_bif_lists.c:1108-1141`, 1302-1381). `list_to_atom/1` raises
+    // `system_limit` for 300 characters before it reads the tail
+    // (`utils.c:2862-2905`). The spawn BIFs, `demonitor/2`, and the other
+    // BIFs raise `badarg` for an improper list (`erl_process.c:12490-12492`,
+    // `bif.c:613-654`), and `demonitor/2` with `[info]` gives `false` when
+    // it removes no monitor.
+    let program = BeamProgram::load(&[IMPROPER_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let int = Term::Integer;
+    let error = |reason: &str| Term::Tuple(vec![atom("error"), atom(reason)]);
+    let badarg = || error("badarg");
+    let x = || atom("x");
+    let imp = || improper(vec![int(1)], x());
+    assert_eq!(
+        program.execute("improper_probe", "list_bifs", &[]).unwrap(),
+        Term::List(
+            [
+                imp(),
+                improper(integers(&[1, 2]), x()),
+                badarg(),
+                x(),
+                x(),
+                improper(vec![int(2)], x()),
+                badarg(),
+                improper(vec![atom("a")], x()),
+                improper(vec![atom("b"), atom("a"), atom("c")], x()),
+                badarg(),
+                imp(),
+                atom("true"),
+                badarg(),
+                Term::Tuple(vec![atom("a")]),
+                badarg(),
+                atom("true"),
+                badarg(),
+                error("system_limit"),
+            ]
+            .into_iter()
+            .chain(std::iter::repeat_with(badarg).take(10))
+            .chain([atom("false"), atom("true")])
+            .chain(std::iter::repeat_with(badarg).take(4))
+            .collect()
+        )
+    );
+    assert_eq!(
+        erl_reference("list_bifs"),
+        "[[1|x],[1,2|x],{error,badarg},x,x,[2|x],{error,badarg},[a|x],[b,a,c|x],\
+         {error,badarg},[1|x],true,{error,badarg},{a},{error,badarg},true,{error,badarg},\
+         {error,system_limit},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+         {error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+         {error,badarg},false,true,{error,badarg},{error,badarg},{error,badarg},\
+         {error,badarg}]\n"
+    );
+}

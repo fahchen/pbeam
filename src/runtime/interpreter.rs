@@ -1219,14 +1219,16 @@ struct SpawnOptions {
 
 /// Start a process that runs `module:function` with the elements of
 /// `arguments`, as ERTS `erl_create_process` does. Return the pid, or
-/// `{Pid, Reference}` when `options.monitor` is set.
+/// `{Pid, Reference}` when `options.monitor` is set. `arguments` that are
+/// not a proper list raise `badarg` (`erl_process.c:12490-12492`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let result = create_process(&program, &mut scheduler, &module, &function, &Term::List(vec![]), SpawnOptions::default())?;
-/// assert!(matches!(result, Term::Pid(_)));
-/// assert!(create_process(&program, &mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default()).is_err());
+/// assert!(matches!(result, BifResult::Value(Term::Pid(_))));
+/// let result = create_process(&program, &mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default())?;
+/// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 fn create_process(
     program: &BeamProgram,
@@ -1235,18 +1237,18 @@ fn create_process(
     function: &Atom,
     arguments: &Term,
     options: SpawnOptions,
-) -> Result<Term, BeamError> {
+) -> Result<BifResult, BeamError> {
     let Term::List(arguments) = arguments else {
-        return Err(error("spawn arguments are not a proper list"));
+        return Ok(BifResult::badarg());
     };
     let arguments = arguments.clone();
     let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
     let frame = program.mfa_frame(module.name(), function.name(), arity)?;
     let (pid, reference) = scheduler.spawn(frame, arguments, options.monitor, options.link)?;
-    Ok(match reference {
+    Ok(BifResult::Value(match reference {
         Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),
-    })
+    }))
 }
 
 /// Return the active frame of a running process.
@@ -1957,7 +1959,8 @@ mod tests {
         let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
         body.push(Instruction::Return);
         assert!(matches!(run_with_child(body), Ok(Term::Pid(_))));
-        assert!(error(spawn_link_child(Term::Integer(1))).contains("not a proper list"));
+        // ERTS 29.1.1: spawn_link(M, F, 1) raises badarg.
+        assert_eq!(error(spawn_link_child(Term::Integer(1))), BADARG_EXIT);
         // `erlang:is_alive/0` is not a BIF: it runs the code of the `erlang`
         // module, which this program does not load.
         assert!(
@@ -3198,16 +3201,17 @@ mod tests {
             ])
             .contains("tail-call stack size")
         );
-        assert!(
+        // ERTS 29.1.1: erlang:demonitor(make_ref(), [bogus]) raises badarg.
+        assert_eq!(
             error(vec![
                 erlang_call("make_ref", 0, false),
                 Instruction::Move(
-                    Operand::Value(Term::List(vec![test_atom("info")])),
+                    Operand::Value(Term::List(vec![test_atom("bogus")])),
                     Operand::X(1),
                 ),
                 erlang_call("demonitor", 2, false),
-            ])
-            .contains("unsupported demonitor options")
+            ]),
+            BADARG_EXIT
         );
     }
 
@@ -3874,10 +3878,8 @@ mod tests {
         // ERTS 29.1.1: [1] ++ x is the improper list [1|x], and a ++ []
         // and a ++ x raise badarg.
         assert_eq!(
-            append(integers(&[1]), test_atom("x"))
-                .unwrap_err()
-                .to_string(),
-            "unsupported erlang:++/2 tail Atom(\"x\"): not a list"
+            append(integers(&[1]), test_atom("x")).unwrap(),
+            Term::ImproperList(vec![Term::Integer(1)], Box::new(test_atom("x")))
         );
         for right in [Term::List(Vec::new()), test_atom("x")] {
             assert_eq!(
@@ -3888,7 +3890,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_a_lists_reverse_result_that_is_an_improper_list() {
+    fn reverses_a_list_onto_a_tail_that_is_not_a_list() {
         // ERTS 29.1.1: lists:reverse([a], x) is the improper list [a|x].
         let reverse = call_ext_with(
             "lists",
@@ -3896,8 +3898,8 @@ mod tests {
             vec![Term::List(vec![test_atom("a")]), test_atom("x")],
         );
         assert_eq!(
-            reverse.unwrap_err().to_string(),
-            "unsupported lists:reverse/2 tail Atom(\"x\"): not a list"
+            reverse.unwrap(),
+            Term::ImproperList(vec![test_atom("a")], Box::new(test_atom("x")))
         );
     }
 

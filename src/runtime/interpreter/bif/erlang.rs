@@ -101,48 +101,63 @@ pub(super) fn exit(
     }
 }
 
-/// Run `erlang:demonitor(Reference, Options)` with the options `[]` or
-/// `[flush]`. Other options give a runtime error.
+/// Run `erlang:demonitor(Reference, Options)` as ERTS `demonitor_2`
+/// (`bif.c:613-654`) does. The options are a proper list of `flush` and
+/// `info`; each other element, and a tail that is not `[]`, raise `badarg`
+/// before the monitor is removed. The result is `true`, or `false` with
+/// `info` when no active monitor was removed.
 ///
-/// ERTS `demonitor_2` (bif.c) flushes only when no active monitor was
-/// removed: the DOWN message can then be queued. The flush traps into
-/// `erts_internal:flush_monitor_messages/3`.
+/// With `flush`, ERTS flushes only when no active monitor was removed: the
+/// DOWN message can then be queued. The flush traps into
+/// `erts_internal:flush_monitor_messages/3`, which returns its third
+/// argument, the result.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = demonitor(&mut context, reference, &[])?;
+/// let result = demonitor(&mut context, reference, &Term::List(vec![]));
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let result = demonitor(&mut context, gone, &[Term::static_atom("flush")])?;
+/// let result = demonitor(&mut context, gone, &Term::List(vec![Term::static_atom("info")]));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// let result = demonitor(&mut context, gone, &Term::List(vec![Term::static_atom("flush")]));
 /// assert!(matches!(result, BifResult::Trap { function: "flush_monitor_messages", .. }));
+/// assert!(matches!(demonitor(&mut context, gone, &Term::static_atom("x")), BifResult::Raise { .. }));
 /// ```
 pub(super) fn demonitor(
     context: &mut BifContext<'_>,
     reference: Reference,
-    options: &[Term],
-) -> Result<BifResult, BeamError> {
-    let flush = match options {
-        [] => false,
-        [Term::Atom(option)] if option.name() == "flush" => true,
-        _ => return Err(error(format!("unsupported demonitor options {options:?}"))),
+    options: &Term,
+) -> BifResult {
+    let Term::List(options) = options else {
+        return BifResult::badarg();
     };
-    let removed = context.scheduler.demonitor(reference);
-    if removed || !flush {
-        return Ok(Value(Term::static_atom("true")));
+    let (mut flush, mut info) = (false, false);
+    for option in options {
+        match option {
+            Term::Atom(option) if option.name() == "flush" => flush = true,
+            Term::Atom(option) if option.name() == "info" => info = true,
+            _ => return BifResult::badarg(),
+        }
     }
-    Ok(Trap {
+    let removed = context.scheduler.demonitor(reference);
+    let result = Term::static_atom(if removed || !info { "true" } else { "false" });
+    if removed || !flush {
+        return Value(result);
+    }
+    Trap {
         module: "erts_internal",
         function: "flush_monitor_messages",
         arguments: vec![
             Term::Reference(reference),
             Term::static_atom("false"),
-            Term::static_atom("true"),
+            result,
         ],
-    })
+    }
 }
 
 /// Run `erlang:spawn/3`: start a process that runs `module:function` with the
 /// elements of `arguments`, as ERTS `spawn_3` does with default spawn options.
+/// `arguments` that are not a proper list raise `badarg`.
 ///
 /// # Examples
 ///
@@ -164,7 +179,6 @@ pub(super) fn spawn(
         arguments,
         SpawnOptions::default(),
     )
-    .map(Value)
 }
 
 /// Run `erlang:spawn_link/3`: start a linked process, as ERTS `spawn_link_3`
@@ -194,30 +208,35 @@ pub(super) fn spawn_link(
         arguments,
         options,
     )
-    .map(Value)
 }
 
 /// Run `erlang:spawn_opt/4`, which `erlang:spawn_monitor/3` in `erlang.beam`
 /// calls with the options `[monitor]`: start a process with the spawn
 /// options in `options`, as ERTS `spawn_opt_4` (`bif.c`) does. The option
 /// `link` links the new process and `monitor` monitors it. With `monitor`
-/// the result is `{Pid, Reference}`, else `Pid`. Any other option gives a
-/// runtime error.
+/// the result is `{Pid, Reference}`, else `Pid`. `options` that are not a
+/// proper list raise `badarg`, as `erts_parse_spawn_opts`
+/// (`erl_process.c:12222-12434`) does. Any other option gives a runtime
+/// error.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &[monitor])?;
+/// let result = spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &Term::List(vec![monitor]))?;
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
-/// assert!(spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &[priority]).is_err());
+/// assert!(matches!(spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &link_x)?, BifResult::Raise { .. }));
+/// assert!(spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &Term::List(vec![priority])).is_err());
 /// ```
 pub(super) fn spawn_opt(
     context: &mut BifContext<'_>,
     module: &Atom,
     function: &Atom,
     arguments: &Term,
-    options: &[Term],
+    options: &Term,
 ) -> Result<BifResult, BeamError> {
+    let Term::List(options) = options else {
+        return Ok(BifResult::badarg());
+    };
     let mut spawn_options = SpawnOptions::default();
     for option in options {
         match option {
@@ -235,7 +254,6 @@ pub(super) fn spawn_opt(
         arguments,
         spawn_options,
     )
-    .map(Value)
 }
 
 /// Run `erlang:put/2`: set the value of `key` in the process dictionary of
@@ -287,34 +305,24 @@ pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
     )
 }
 
-/// Run `erlang:'++'/2`: append `right` to the proper list `left`. With an
-/// empty `left`, return `right` itself, which can be any term, as ERTS
-/// `append` (`erl_bif_lists.c`) does. A `left` that is not a list raises
-/// `badarg`. A non-empty `left` with a `right` that is not a list gives a
-/// runtime error, because PBeam has no improper lists. ERTS returns the
-/// improper list `[1 | x]` for `[1] ++ x`.
+/// Run `erlang:'++'/2`: append `right` to the proper list `left`, as ERTS
+/// `append` (`erl_bif_lists.c:262-338`) does. `right` can be any term, so
+/// `[1] ++ x` gives the improper list `[1|x]`, and an empty `left` gives
+/// `right` itself. A `left` that is not a proper list raises `badarg`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let x = Term::static_atom("ok");
-/// assert!(matches!(append(&Term::List(vec![]), &x)?, BifResult::Value(term) if term == x));
-/// let list = append(&Term::List(vec![Term::Integer(1)]), &Term::List(vec![Term::Integer(2)]))?;
-/// assert!(matches!(list, BifResult::Value(Term::List(elements)) if elements.len() == 2));
-/// assert!(matches!(append(&x, &Term::List(vec![]))?, BifResult::Raise { .. }));
-/// assert!(append(&Term::List(vec![Term::Integer(1)]), &x).is_err());
+/// let x = Term::static_atom("x");
+/// assert!(matches!(append(&Term::List(vec![]), &x), BifResult::Value(term) if term == x));
+/// let list = append(&Term::List(vec![Term::Integer(1)]), &x);
+/// assert!(matches!(list, BifResult::Value(Term::ImproperList(elements, _)) if elements.len() == 1));
+/// assert!(matches!(append(&x, &Term::List(vec![])), BifResult::Raise { .. }));
 /// ```
-pub(super) fn append(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
-    match (left, right) {
-        (Term::List(left), right) if left.is_empty() => Ok(Value(right.clone())),
-        (Term::List(left), Term::List(right)) => Ok(Value(Term::List(
-            left.iter().chain(right).cloned().collect(),
-        ))),
-        // ponytail: an improper list result needs an improper list term; see "BIF arguments" in docs/erts-differences.md.
-        (Term::List(_), right) => Err(error(format!(
-            "unsupported erlang:++/2 tail {right:?}: not a list"
-        ))),
-        _ => Ok(BifResult::badarg()),
+pub(super) fn append(left: &Term, right: &Term) -> BifResult {
+    match left {
+        Term::List(left) => Value(Term::list_with_tail(left.clone(), right.clone())),
+        _ => BifResult::badarg(),
     }
 }
 
@@ -351,9 +359,11 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
 /// ERTS `list_to_atom_1` (`bif.c:3217-3236`) does with
 /// `erts_unicode_list_to_buf` (`utils.c:2862-2942`). ERTS counts each
 /// element before it checks it, so a 256th element raises `system_limit`,
-/// also when it is not a character. An element that is not an integer in
-/// `0..=0x10FFFF` outside `0xD800..=0xDFFF`, and a term that is not a list,
-/// raise `badarg`.
+/// also when it is not a character. ERTS checks the tail after the 255th
+/// element, so an improper list of 300 characters raises `system_limit`.
+/// An element that is not an integer in `0..=0x10FFFF` outside
+/// `0xD800..=0xDFFF`, a tail that is not `[]`, and a term that is not a
+/// list, raise `badarg`.
 ///
 /// # Examples
 ///
@@ -365,6 +375,8 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
 /// assert!(matches!(list_to_atom(&mut atoms, &surrogate)?, BifResult::Raise { .. }));
 /// let long = Term::List(vec![Term::Integer(97); 256]);
 /// assert!(matches!(list_to_atom(&mut atoms, &long)?, BifResult::Raise { .. }));
+/// let improper = Term::ImproperList(vec![Term::Integer(97)], Box::new(Term::static_atom("x")));
+/// assert!(matches!(list_to_atom(&mut atoms, &improper)?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -372,8 +384,10 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
 /// A new atom in a full atom table gives the error of `AtomTable::put`,
 /// where ERTS stops the emulator.
 pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResult, BeamError> {
-    let Term::List(elements) = term else {
-        return Ok(BifResult::badarg());
+    let (elements, proper) = match term {
+        Term::List(elements) => (elements, true),
+        Term::ImproperList(elements, _) => (elements, false),
+        _ => return Ok(BifResult::badarg()),
     };
     let mut name = String::new();
     for (count, element) in elements.iter().enumerate() {
@@ -391,6 +405,9 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
             return Ok(BifResult::badarg());
         };
         name.push(character);
+    }
+    if !proper {
+        return Ok(BifResult::badarg());
     }
     Ok(Value(Term::Atom(atoms.put(&name)?)))
 }
