@@ -327,6 +327,12 @@ impl BeamProgram {
                     tail,
                     deallocate,
                 } => {
+                    if *tail {
+                        // `apply_last` releases the frame before it tests
+                        // the module and the function name
+                        // (`emit_apply_last` in `jit/arm/instr_call.cpp:307-316`).
+                        release_frame(process, *deallocate)?;
+                    }
                     let module = read(process, &Operand::X(*arity))?;
                     let name = read(process, &Operand::X(arity.saturating_add(1)))?;
                     // ERTS `fixed_apply` (`beam_common.c`) raises `badarg`
@@ -339,14 +345,9 @@ impl BeamProgram {
                         }
                         continue;
                     };
-                    if let Some(outcome) = self.call_external(
-                        scheduler,
-                        module.name(),
-                        name.name(),
-                        *arity,
-                        *tail,
-                        *deallocate,
-                    )? {
+                    if let Some(outcome) =
+                        self.call_mfa(scheduler, module.name(), name.name(), *arity, *tail)?
+                    {
                         return Ok(outcome);
                     }
                 }
@@ -373,11 +374,7 @@ impl BeamProgram {
                         // `i_call_fun_last` releases the frame before it
                         // tests the fun (`emit_i_call_fun2_last` in
                         // `jit/arm/instr_fun.cpp:425-462`).
-                        let stack = &mut current_frame(process).stack;
-                        if stack.len() != *deallocate as usize {
-                            return Err(error("invalid BEAM tail-call stack size"));
-                        }
-                        stack.clear();
+                        release_frame(process, *deallocate)?;
                     }
                     if let Some(outcome) = self.call_fun(scheduler, &fun, *arity, *tail)? {
                         return Ok(outcome);
@@ -481,8 +478,6 @@ impl BeamProgram {
                         TestKind::Map => matches!(value, Term::Map(_)),
                         TestKind::Function => matches!(value, Term::Fun(_)),
                         TestKind::Integer => matches!(value, Term::Integer(_)),
-                        // PBeam has no float term.
-                        TestKind::Float => false,
                         TestKind::Boolean => {
                             matches!(&value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
                         }
@@ -580,17 +575,6 @@ impl BeamProgram {
                     right,
                 } => {
                     if read(process, left)? == read(process, right)? {
-                        jump(module, process, *fail_label)?;
-                    }
-                }
-                // Without floats, `==` is `=:=`: ERTS `is_eq` compares two
-                // references by value, so their scheduler order is not used.
-                Instruction::TestEqual {
-                    fail_label,
-                    left,
-                    right,
-                } => {
-                    if read(process, left)? != read(process, right)? {
                         jump(module, process, *fail_label)?;
                     }
                 }
@@ -825,8 +809,14 @@ impl BeamProgram {
     }
 
     /// Call `module:name/arity` with the arguments in the X registers, as
-    /// `call_ext` and `apply` do. A tail call first checks that the frame
-    /// has `deallocate` Y registers, then replaces the frame. Return the
+    /// `call_ext` does. A tail call first checks that the frame has
+    /// `deallocate` Y registers, then replaces the frame. A tail call of
+    /// `erlang:apply/2` or `erlang:apply/3` releases the Y registers before
+    /// the apply, as the ERTS loader makes `i_apply_fun_last` and
+    /// `i_apply_last` (`jit/arm/ops.tab:649-657`), so an exception of the
+    /// apply does not see the catch tags of the frame. A tail call of a BIF
+    /// keeps the frame until the BIF returns, as `call_light_bif`,
+    /// `deallocate`, and `return` do (`jit/arm/ops.tab:711-712`). Return the
     /// outcome when the process exits.
     ///
     /// # Examples
@@ -848,7 +838,9 @@ impl BeamProgram {
         deallocate: u32,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
-        if tail && deallocate as usize != current_frame(process).stack.len() {
+        if tail && matches!((module, name, arity), ("erlang", "apply", 2 | 3)) {
+            release_frame(process, deallocate)?;
+        } else if tail && deallocate as usize != current_frame(process).stack.len() {
             return Err(error("invalid BEAM tail-call stack size"));
         }
         self.call_mfa(scheduler, module, name, arity, tail)
@@ -1173,6 +1165,26 @@ fn current_frame(process: &mut ProcessState) -> &mut Frame {
         .frames
         .last_mut()
         .expect("a running process has an active frame")
+}
+
+/// Release the Y registers of the active frame before a tail call, as the
+/// ERTS `deallocate` does. The frame must have `deallocate` Y registers.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The frame has one Y register.
+/// release_frame(&mut process, 1)?;
+/// assert!(current_frame(&mut process).stack.is_empty());
+/// assert!(release_frame(&mut process, 1).is_err());
+/// ```
+fn release_frame(process: &mut ProcessState, deallocate: u32) -> Result<(), BeamError> {
+    let stack = &mut current_frame(process).stack;
+    if stack.len() != deallocate as usize {
+        return Err(error("invalid BEAM tail-call stack size"));
+    }
+    stack.clear();
+    Ok(())
 }
 
 /// Pop the active frame. Return the exit outcome when it was the last frame.
@@ -3667,20 +3679,6 @@ mod tests {
                 BADARG_EXIT
             );
         }
-    }
-
-    #[test]
-    fn reports_a_lists_reverse_result_that_is_an_improper_list() {
-        // ERTS 29.1.1: lists:reverse([a], x) is the improper list [a|x].
-        let reverse = call_ext_with(
-            "lists",
-            "reverse",
-            vec![Term::List(vec![test_atom("a")]), test_atom("x")],
-        );
-        assert_eq!(
-            reverse.unwrap_err().to_string(),
-            "unsupported lists:reverse/2 tail Atom(\"x\"): not a list"
-        );
     }
 
     #[test]

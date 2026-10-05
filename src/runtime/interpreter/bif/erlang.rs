@@ -420,32 +420,6 @@ pub(super) fn arith(
     Ok(Value(Term::Integer(result)))
 }
 
-/// Run `erlang:'-'/1`: the checked `i64` negation of an integer, as ERTS
-/// `erts_unary_minus` (`erl_arith.c:510-535`) does for a small integer. A
-/// term that is not a number raises `badarith`. PBeam has no float term, so
-/// each number is an integer. The negation of `i64::MIN` gives a runtime
-/// error, where ERTS makes a bignum.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(matches!(negate(&Term::Integer(5))?, BifResult::Value(Term::Integer(-5))));
-/// assert!(matches!(negate(&Term::static_atom("a"))?, BifResult::Raise { .. }));
-/// assert!(negate(&Term::Integer(i64::MIN)).is_err());
-/// ```
-pub(super) fn negate(value: &Term) -> Result<BifResult, BeamError> {
-    let Term::Integer(value) = value else {
-        return Ok(BifResult::badarith());
-    };
-    // ponytail: -(i64::MIN) needs a bignum term; see "Integer range" in docs/erts-differences.md.
-    let result = value.checked_neg().ok_or_else(|| {
-        error(format!(
-            "unsupported erlang:-/1 result of {value}: needs a bignum"
-        ))
-    })?;
-    Ok(Value(Term::Integer(result)))
-}
-
 /// Run `erlang:element/2`: return the element at the 1-based `index` of a
 /// tuple. An `index` that is not an integer or is outside the tuple, and a
 /// `tuple` that is not a tuple, raise `badarg`, as in ERTS `element_2`

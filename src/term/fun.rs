@@ -25,7 +25,7 @@ use super::{Atom, Term};
 /// let lambda = Lambda::new(module, 0, 31_263_486, 127, 1);
 /// assert_eq!(lambda.arity(), 1);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct Lambda {
     /// The module that defines the lambda.
     module: Atom,
@@ -113,6 +113,28 @@ impl Lambda {
             .then(self.old_unique.cmp(&other.old_unique))
     }
 }
+
+impl PartialEq for Lambda {
+    /// Compare two fun entries by the fields that identify an ERTS fun
+    /// entry: the module, the index, the old unique value, and the arity
+    /// (`fun_cmp` in `erl_fun.c:79-85`). The entry label is only the
+    /// address of the code, so two entries with other labels can be equal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Lambda::new(atom.clone(), 0, 1, 53, 1), Lambda::new(atom.clone(), 0, 1, 61, 1));
+    /// assert_ne!(Lambda::new(atom.clone(), 0, 1, 53, 1), Lambda::new(atom, 0, 1, 53, 2));
+    /// ```
+    fn eq(&self, other: &Self) -> bool {
+        self.module == other.module
+            && self.index == other.index
+            && self.old_unique == other.old_unique
+            && self.arity == other.arity
+    }
+}
+
+impl Eq for Lambda {}
 
 /// The entry that a fun points to: the fun entry of a lambda for a local
 /// fun, or the module, function, and arity for an external fun, as the
