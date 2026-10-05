@@ -1,4 +1,10 @@
-use std::process::Command;
+use std::{
+    env, fs,
+    os::fd::{FromRawFd, OwnedFd},
+    path::Path,
+    process::{Command, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use pbeam_runtime::{BeamProgram, Term};
 
@@ -7,6 +13,61 @@ mod common;
 use common::pinned_beam;
 
 const PRIM_TTY_PROBE: &[u8] = include_bytes!("../fixtures/prim_tty/prim_tty_probe.beam");
+
+/// The stand-in `prim_tty` with the NIF stubs of the pinned module. It is in
+/// a subdirectory, so `-pa fixtures/prim_tty` does not load it at boot.
+const STAND_IN: &str = "fixtures/prim_tty/nif/prim_tty.beam";
+const TTY_NIF_PROBE: &str = "fixtures/prim_tty/tty_nif_probe.beam";
+
+/// The environment variables that give the `isolated_run` child its entry
+/// `module:function`, its BEAM files, and the file for its result. The ERTS
+/// reference writes its result to the same file variable.
+const ENTRY: &str = "PBEAM_TTY_ENTRY";
+const BEAMS: &str = "PBEAM_TTY_BEAMS";
+const RESULT: &str = "PBEAM_TTY_RESULT";
+
+/// One standard stream of a child process.
+#[derive(Clone, Copy)]
+enum Stream {
+    /// `/dev/null`.
+    Null,
+    /// A new empty regular file.
+    File,
+    /// The slave of a new pseudo-terminal with this window size.
+    Terminal { columns: u16, rows: u16 },
+}
+
+/// Layout F: stdin `/dev/null`, stdout and stderr files.
+const FILES: [Stream; 3] = [Stream::Null, Stream::File, Stream::File];
+/// Layout P1: stdin `/dev/null`, stdout a 100 by 30 pseudo-terminal, and
+/// stderr an 80 by 0 pseudo-terminal.
+const OUTPUT_TERMINALS: [Stream; 3] = [
+    Stream::Null,
+    Stream::Terminal {
+        columns: 100,
+        rows: 30,
+    },
+    Stream::Terminal {
+        columns: 80,
+        rows: 0,
+    },
+];
+/// Layout P2: stdin 120 by 40, stdout 100 by 30, and stderr 0 by 0, all
+/// pseudo-terminals.
+const TERMINALS: [Stream; 3] = [
+    Stream::Terminal {
+        columns: 120,
+        rows: 40,
+    },
+    Stream::Terminal {
+        columns: 100,
+        rows: 30,
+    },
+    Stream::Terminal {
+        columns: 0,
+        rows: 0,
+    },
+];
 
 #[test]
 fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
@@ -55,4 +116,197 @@ fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
         program.execute("prim_tty_probe", "main", &[]).unwrap(),
         Term::List(vec![badarg.clone(), badarg.clone(), badarg])
     );
+}
+
+#[test]
+fn classifies_the_standard_fds_with_isatty() {
+    // `tty_nif_probe:isatty/0` calls `prim_tty:isatty/1` with `stdin`,
+    // `stdout`, `stderr`, `foo`, `1`, and a reference. The atoms give fds 0,
+    // 1, and 2 (prim_tty_nif.c:228-239): a terminal gives `true`, and
+    // `ENOTTY` from a file or `/dev/null` gives `false`. Each other term
+    // raises `badarg` (prim_tty_nif.c:284).
+    for (layout, erts, pbeam) in [
+        (
+            FILES,
+            "[false,false,false,badarg,badarg,badarg]\n",
+            r#"Ok(List([Atom("false"), Atom("false"), Atom("false"), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#,
+        ),
+        (
+            OUTPUT_TERMINALS,
+            "[false,true,true,badarg,badarg,badarg]\n",
+            r#"Ok(List([Atom("false"), Atom("true"), Atom("true"), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#,
+        ),
+        (
+            TERMINALS,
+            "[true,true,true,badarg,badarg,badarg]\n",
+            r#"Ok(List([Atom("true"), Atom("true"), Atom("true"), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#,
+        ),
+    ] {
+        assert_eq!(run_erts_nif_probe(layout, "isatty"), erts.as_bytes());
+        assert_eq!(
+            run_isolated(layout, "tty_nif_probe:isatty", &[TTY_NIF_PROBE, STAND_IN]),
+            pbeam.as_bytes()
+        );
+    }
+}
+
+/// Run `tty_nif_probe:Function()` on the pinned ERTS with the stand-in
+/// `prim_tty` and the standard streams of `layout`, and return the `~w`
+/// text of its result. The probe writes with `file:write_file/2`, because
+/// the boot IO servers call the stand-in after `code:load_abs/1`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(run_erts_nif_probe(FILES, "isatty"), b"[false,false,false,badarg,badarg,badarg]\n");
+/// ```
+fn run_erts_nif_probe(layout: [Stream; 3], function: &str) -> Vec<u8> {
+    let mut command = Command::new("erl");
+    command.args([
+        "-noshell",
+        "-nostick",
+        "-pa",
+        "fixtures/prim_tty",
+        "-eval",
+        &format!(
+            "{{module, prim_tty}} = code:load_abs(\"fixtures/prim_tty/nif/prim_tty\"), \
+             ok = prim_tty:load(\"prim_tty\"), \
+             ok = file:write_file(os:getenv(\"{RESULT}\"), \
+             io_lib:format(\"~w~n\", [tty_nif_probe:{function}()])), halt()."
+        ),
+    ]);
+    run_in_layout(&mut command, layout)
+}
+
+/// Run `entry` (`module:function`) of the BEAM files at `beams` in PBeam, in
+/// a child copy of this test binary with the standard streams of `layout`,
+/// and return the `Debug` text of the result. A child process is necessary,
+/// because the `prim_tty` NIF results depend on fds 0, 1, and 2. The child
+/// inherits `LLVM_PROFILE_FILE`, so `cargo llvm-cov` measures it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = run_isolated(FILES, "tty_nif_probe:isatty", &[TTY_NIF_PROBE, STAND_IN]);
+/// assert!(result.starts_with(b"Ok(List(["));
+/// ```
+fn run_isolated(layout: [Stream; 3], entry: &str, beams: &[&str]) -> Vec<u8> {
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args(["--exact", "isolated_run", "--include-ignored", "--quiet"])
+        .env(ENTRY, entry)
+        .env(BEAMS, env::join_paths(beams).unwrap());
+    run_in_layout(&mut command, layout)
+}
+
+/// The child side of `run_isolated`: load the BEAM files, run the entry, and
+/// write the `Debug` text of the result to the result file.
+#[test]
+#[ignore = "run_isolated runs it in a child process with fixed standard streams"]
+fn isolated_run() {
+    let beams: Vec<Vec<u8>> = env::split_paths(&env::var_os(BEAMS).unwrap())
+        .map(|path| fs::read(path).unwrap())
+        .collect();
+    let beams: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
+    let program = BeamProgram::load(&beams).unwrap();
+    let entry = env::var(ENTRY).unwrap();
+    let (module, function) = entry.split_once(':').unwrap();
+    let result = program.execute(module, function, &[]);
+    fs::write(env::var_os(RESULT).unwrap(), format!("{result:?}")).unwrap();
+}
+
+/// Run `command` with `TERM=dumb`, `LC_ALL=C.UTF-8`, and the standard
+/// streams of `layout`, and return the bytes that it writes to the file in
+/// the `PBEAM_TTY_RESULT` variable. Each pseudo-terminal master stays open
+/// until the command exits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = run_in_layout(Command::new("erl").args(["-noshell", "-eval", "..."]), FILES);
+/// ```
+fn run_in_layout(command: &mut Command, layout: [Stream; 3]) -> Vec<u8> {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let directory = env::temp_dir().join(format!(
+        "pbeam-prim-tty-{}-{}",
+        std::process::id(),
+        RUNS.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&directory).unwrap();
+    let mut masters = Vec::new();
+    let [stdin, stdout, stderr] = std::array::from_fn(|fd| {
+        open_stream(layout[fd], &directory.join(format!("fd{fd}")), &mut masters)
+    });
+    let result = directory.join("result");
+    let status = command
+        .env("TERM", "dumb")
+        .env("LC_ALL", "C.UTF-8")
+        .env(RESULT, &result)
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .status()
+        .unwrap();
+    drop(masters);
+    let output = fs::read(&result);
+    fs::remove_dir_all(&directory).unwrap();
+    assert!(status.success(), "{command:?} exited with {status}");
+    output.unwrap()
+}
+
+/// Open one standard stream for a child. A file stream creates `path`. A
+/// terminal stream adds the master of its pseudo-terminal to `masters`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let stdout = open_stream(Stream::Terminal { columns: 100, rows: 30 }, &path, &mut masters);
+/// assert_eq!(masters.len(), 1);
+/// ```
+fn open_stream(stream: Stream, path: &Path, masters: &mut Vec<OwnedFd>) -> Stdio {
+    match stream {
+        Stream::Null => Stdio::null(),
+        Stream::File => fs::File::create(path).unwrap().into(),
+        Stream::Terminal { columns, rows } => {
+            let (master, slave) = open_terminal(columns, rows);
+            masters.push(master);
+            slave.into()
+        }
+    }
+}
+
+/// Open a pseudo-terminal with the window size `columns` by `rows`, and
+/// return its master and slave. Both are close-on-exec, so a child of a
+/// parallel test does not keep them open.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (master, slave) = open_terminal(100, 30);
+/// ```
+fn open_terminal(columns: u16, rows: u16) -> (OwnedFd, OwnedFd) {
+    let size = libc::winsize {
+        ws_row: rows,
+        ws_col: columns,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: `openpty` writes two new fds to `master` and `slave`, reads
+    // the window size from `size`, and accepts a null name and mode.
+    // `fcntl` changes only the fd flags. Each `OwnedFd` takes one new fd.
+    unsafe {
+        let result = libc::openpty(
+            &raw mut master,
+            &raw mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw const size as *mut libc::winsize,
+        );
+        assert_eq!(result, 0, "openpty failed");
+        for fd in [master, slave] {
+            assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
+        }
+        (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave))
+    }
 }

@@ -13,20 +13,32 @@ use super::*;
 mod prim_tty;
 
 /// Run the native binding of `module:name/arity`, with the arity of
-/// `arguments`. Return `None` when PBeam has no binding for the MFA; the
-/// function then runs its BEAM stub body.
+/// `arguments`, for the current process of `scheduler`. Return `None` when
+/// PBeam has no binding for the MFA; the function then runs its BEAM stub
+/// body.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let tty = Term::static_atom("stdout");
-/// let iovec = Term::List(Vec::new());
-/// assert!(matches!(call("prim_tty", "write_nif", &[tty, iovec]), Some(BifResult::Raise { .. })));
-/// assert!(call("nif_error_probe", "nif_stub", &[]).is_none());
+/// let stdout = Term::Atom(scheduler.atoms.put("stdout")?);
+/// // `false` when stdout is a file.
+/// assert!(matches!(call(&mut scheduler, "prim_tty", "isatty", &[stdout]), Some(Ok(BifResult::Value(_)))));
+/// assert!(call(&mut scheduler, "nif_error_probe", "nif_stub", &[]).is_none());
 /// ```
-pub(super) fn call(module: &str, name: &str, arguments: &[Term]) -> Option<BifResult> {
+///
+/// # Errors
+///
+/// A binding gives a runtime error for a part that PBeam does not implement
+/// yet, or when a new result atom does not fit in the atom table.
+pub(super) fn call(
+    scheduler: &mut Scheduler,
+    module: &str,
+    name: &str,
+    arguments: &[Term],
+) -> Option<Result<BifResult, BeamError>> {
     match (module, name, arguments) {
-        ("prim_tty", "write_nif", [tty, iovec]) => Some(prim_tty::write_nif(tty, iovec)),
+        ("prim_tty", "isatty", [tty]) => Some(prim_tty::isatty(&mut scheduler.atoms, tty)),
+        ("prim_tty", "write_nif", [tty, iovec]) => Some(Ok(prim_tty::write_nif(tty, iovec))),
         _ => None,
     }
 }
