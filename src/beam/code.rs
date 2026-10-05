@@ -627,7 +627,8 @@ enum PartialTerm {
 /// # Errors
 ///
 /// A truncated term, an atom that is not UTF-8, a new atom when the atom
-/// table is full, or a map with a duplicate key is an error.
+/// table is full, a map with a duplicate key, or an external fun with an
+/// arity outside `0..=255` is an error.
 fn read_external_term(
     data: &[u8],
     cursor: &mut usize,
@@ -652,7 +653,11 @@ fn read_external_term(
             ETF_NIL_EXT => Term::List(Vec::new()),
             ETF_EXPORT_EXT => {
                 // `dec_term` (`external.c:5006-5041`) reads two atoms and a
-                // non-negative integer, else the decode fails.
+                // non-negative integer, else the decode fails. The arity can
+                // be `INTEGER_EXT`, as `[98, 0, 0, 0, 1]` loads as arity 1.
+                // A fun has at most 255 arguments. ERTS has no defined result
+                // above 255: arity 256 makes a fun of arity 0, and arity 257
+                // stops the VM.
                 let mut part = || read_external_term(data, cursor, atom_table);
                 let (Some(module), Some(function), Some(arity)) = (part()?, part()?, part()?)
                 else {
@@ -663,11 +668,13 @@ fn read_external_term(
                 else {
                     return Err(error("invalid BEAM external fun literal"));
                 };
-                // A `SMALL_INTEGER_EXT` arity is in `0..=255`.
+                let Ok(arity) = u8::try_from(arity) else {
+                    return Err(error("invalid BEAM external fun literal"));
+                };
                 Term::Fun(Fun::external(
                     module.clone(),
                     function.clone(),
-                    arity as u32,
+                    u32::from(arity),
                 ))
             }
             ETF_SMALL_INTEGER_EXT => Term::Integer(i64::from(take(data, cursor, 1)?[0])),
@@ -1372,9 +1379,27 @@ mod tests {
                 "invalid BEAM external fun literal"
             );
         }
+        // ERTS 29.1.1 loads an INTEGER_EXT arity in `0..=255`, as
+        // `[98, 0, 0, 0, 1]` and `[98, 0, 0, 0, 255]`. It rejects -1 as a
+        // corrupt literal table, and it has no defined result above 255.
+        let export = |arity: &[u8]| [&[131, 113, 119, 1, b'm', 119, 1, b'f'][..], arity].concat();
+        let integer_one = read(&export(&[98, 0, 0, 0, 1])).unwrap();
+        let integer_max = read(&export(&[98, 0, 0, 0, 255])).unwrap();
+        for arity in [&[98, 255, 255, 255, 255][..], &[98, 0, 0, 1, 0]] {
+            assert_eq!(
+                read(&export(arity)).unwrap_err().to_string(),
+                "invalid BEAM external fun literal"
+            );
+        }
         let atom = |name| atoms.get(name).unwrap();
         let fun = Fun::external(atom("lists"), atom("reverse"), 1);
         assert_eq!(reverse, Some(Term::Fun(fun)));
+        for (fun, arity) in [(integer_one, 1), (integer_max, 255)] {
+            assert_eq!(
+                fun,
+                Some(Term::Fun(Fun::external(atom("m"), atom("f"), arity)))
+            );
+        }
     }
 
     #[test]

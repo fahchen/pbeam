@@ -91,21 +91,26 @@ only the runtime behavior and native host operation that the traced path needs.
 
 Task #49 adds the cooperative process runtime for this path. Task #55 interprets the OTP BEAM path through `prim_tty:write_nif/2`. Task #50 registers that exact native MFA and runs its binding at function entry. Task #79 starts the OTP IO servers, adds the TTY resource, and implements the host write of the binding. Tasks #51, #48, #49, #55, #50, and #79 implement this observed path in small steps. They must execute the compiled Elixir and OTP BEAM functions. They must not intercept `Elixir.IO:puts/1` or `:io:put_chars/2`, print the greeting directly, or alter the fixture to use a PBeam-only operation. The support limit is the binary standard-output path reached by these fixtures. General chardata, custom devices, and unrelated process behavior remain out of scope.
 
-After the task chain is implemented, compile the Elixir fixture from `fixtures/hello`, then run PBeam from the repository root. PR #47 removed the direct IO shortcut. PR #52 executes compiled Elixir IO through the OTP call boundary. The command cannot complete the greeting until tasks #55, #50, and #79 execute the OTP path through the host boundary and task #42 verifies the command:
+After the task chain is implemented, compile the Elixir fixture from `fixtures/hello`, then run PBeam from the repository root. PR #47 removed the direct IO shortcut. PR #52 executes compiled Elixir IO through the OTP call boundary. Tasks #55, #50, and #79 execute the OTP path through the host boundary. Task #42 adds the regression test of the command.
+
+The `pbeam` command loads the given BEAM files and runs one function as the root process. It does not start the OTP standard IO servers. The boot module `pbeam_boot` in [`examples/hello_world`](../examples/hello_world/README.md) starts them (#139). `pbeam_boot:start(Module, Function)` then runs the entry with the registered `user` process as its group leader. The boot calls 28 pinned OTP modules: `erlang`, `prim_tty`, `proc_lib`, `application`, `application_controller`, `lists`, `os`, `unicode`, `gen_event`, `gen`, `prim_tty_sighandler`, `erl_signal_handler`, `standard_error`, `supervisor_bridge`, `user_sup`, `user_drv`, `group`, `gen_statem`, `io`, `io_lib`, `io_lib_format`, `proplists`, `queue`, `gen_server`, `logger`, `logger_config`, `edlin`, and `edlin_key`. Pass their BEAM files and `examples/hello_world/pbeam_boot.beam` after `--`. Without one of them, the command stops with `unresolved external MFA` of that module and status 1. Run the command in a locale whose codeset is UTF-8, such as `LC_ALL=C.UTF-8`. In another locale, the command stops with `unsupported BEAM opcode 166` (see "Boot" in [ERTS Differences](erts-differences.md)).
+
+From the repository root, these commands compile the Elixir fixture and run `pbeam_boot:start('Elixir.Hello', main)` with `Elixir.IO.beam` of the pinned Elixir and the boot modules. The run prints `Hello, world!\n` and exits with status zero:
 
 ```sh
-mix compile --warnings-as-errors
-cargo run --bin pbeam -- Elixir.Hello main fixtures/hello/_build/dev/lib/hello_reference/ebin/Elixir.Hello.beam
-```
-
-Pass another module name and BEAM file to run the second fixture. Pass more BEAM files after the entry name and function to load modules for external calls. Run `cargo run --bin pbeam -- --help` to print the command options.
-
-The `pbeam` command first boots the OTP standard IO servers with the embedded module `pbeam_boot` (#139), and then runs the entry with the registered `user` process as its group leader. The boot calls 28 pinned OTP modules: `erlang`, `prim_tty`, `proc_lib`, `application`, `application_controller`, `lists`, `os`, `unicode`, `gen_event`, `gen`, `prim_tty_sighandler`, `erl_signal_handler`, `standard_error`, `supervisor_bridge`, `user_sup`, `user_drv`, `group`, `gen_statem`, `io`, `io_lib`, `io_lib_format`, `proplists`, `queue`, `gen_server`, `logger`, `logger_config`, `edlin`, and `edlin_key`. Pass their BEAM files after the entry BEAM files. Without one of them, the command stops with `unresolved external MFA` of that module and status 1. Run the command in a locale whose codeset is UTF-8, such as `LC_ALL=C.UTF-8`. In another locale, the command stops with `unsupported BEAM opcode 166` (see "Boot" in [ERTS Differences](erts-differences.md)). From the repository root, these commands run the boot fixture, which prints `Hello, world!\n` and exits with status zero:
-
-```sh
+(cd fixtures/hello && mise exec -- mix compile --warnings-as-errors)
 boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key"
 boot_beams=$(mise exec -- erl -noshell -eval '[io:format("~ts~n", [case code:which(list_to_atom(M)) of preloaded -> filename:join([code:lib_dir(erts), "ebin", M ++ ".beam"]); Path -> Path end]) || M <- init:get_plain_arguments()], halt().' -extra $boot_modules)
-LC_ALL=C.UTF-8 cargo run --bin pbeam -- boot_probe main fixtures/boot/boot_probe.beam $boot_beams
+elixir_io=$(mise exec -- elixir -e 'IO.puts(:code.which(IO))')
+LC_ALL=C.UTF-8 cargo run --bin pbeam -- pbeam_boot start Elixir.Hello main -- fixtures/hello/_build/dev/lib/hello_reference/ebin/Elixir.Hello.beam $elixir_io $boot_beams examples/hello_world/pbeam_boot.beam
+```
+
+Pass another module name and BEAM file to run the second fixture. Pass more BEAM files after `--` to load modules for external calls. Run `cargo run --bin pbeam -- --help` to print the command options.
+
+With `boot_beams` from the commands above, this command runs the boot fixture. It also prints `Hello, world!\n` and exits with status zero:
+
+```sh
+LC_ALL=C.UTF-8 cargo run --bin pbeam -- pbeam_boot start boot_probe main -- fixtures/boot/boot_probe.beam $boot_beams examples/hello_world/pbeam_boot.beam
 ```
 
 Each implementation PR updates affected rows with supported semantics, remaining

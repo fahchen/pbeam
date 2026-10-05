@@ -1,22 +1,21 @@
-//! NIF resources of the node: native objects that a term refers to through
-//! a reference, as ERTS magic binaries and their magic references
-//! (`erl_binary.h`). All processes of a run share one store.
+//! The TTY resources of the node, as the `TTYResource` objects of
+//! `prim_tty_nif.c` and their magic references (`erl_binary.h`), with the
+//! process monitors of these resources. The scheduler keeps them in its
+//! `Resources`, and all processes of a run share them.
 
 use std::collections::HashMap;
 
-use super::{host::terminal, pcre2::Code};
+use super::host::terminal;
 use crate::term::{ProcessId, Reference};
 
-/// The resources of the node. ERTS frees a magic binary when no term refers
-/// to it. PBeam keeps each resource until the end of the run.
+/// The TTY resources of the node and their process monitors. ERTS frees a
+/// TTY resource and its monitors when no term refers to it. PBeam keeps
+/// each TTY resource until the end of the run.
 #[derive(Debug, Default)]
-pub(super) struct Resources {
-    /// The compiled code of each `re_pattern` by its reference, as the
-    /// magic binaries of `build_compile_result` (`erl_bif_re.c:600-608`).
-    regex_codes: HashMap<Reference, Code>,
+pub(super) struct Ttys {
     /// Each TTY resource by its reference, as the `TTYResource` objects of
     /// `tty_create_nif` (`prim_tty_nif.c:988-1072`).
-    ttys: HashMap<Reference, TtyResource>,
+    resources: HashMap<Reference, TtyResource>,
     /// The process monitors of the TTY resources, as the pid and the TTY
     /// reference of each `tty_init/2` or `tty_select/2` that monitors its
     /// caller (`prim_tty_nif.c:1162-1165`, `1229-1230`), in the order of
@@ -25,7 +24,7 @@ pub(super) struct Resources {
     /// (`erl_proc_sig_queue.c:6555`), and the exit of the process runs the
     /// list in order (`ERTS_CONTINUE_EXIT_LT_MONITORS`,
     /// `erl_process.c:14575-14582`).
-    tty_monitors: Vec<(ProcessId, Reference)>,
+    monitors: Vec<(ProcessId, Reference)>,
 }
 
 /// One terminal of `prim_tty:tty_create/1`, as the ERTS `TTYResource`
@@ -59,29 +58,17 @@ pub(super) enum TtyState {
     Enabled,
 }
 
-impl Resources {
-    /// Keep the compiled code `code` under the reference `reference`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut resources = Resources::default();
-    /// resources.insert_regex_code(Reference(0), pcre2::compile(b"a", 0, None, None)?);
-    /// ```
-    pub(super) fn insert_regex_code(&mut self, reference: Reference, code: Code) {
-        self.regex_codes.insert(reference, code);
-    }
-
+impl Ttys {
     /// Keep the TTY resource `tty` under the reference `reference`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut resources = Resources::default();
-    /// resources.insert_tty(Reference(0), tty);
+    /// let mut ttys = Ttys::default();
+    /// ttys.insert(Reference(0), tty);
     /// ```
-    pub(super) fn insert_tty(&mut self, reference: Reference, tty: TtyResource) {
-        self.ttys.insert(reference, tty);
+    pub(super) fn insert(&mut self, reference: Reference, tty: TtyResource) {
+        self.resources.insert(reference, tty);
     }
 
     /// Return the TTY resource of `reference`, as `enif_get_resource` with
@@ -91,24 +78,24 @@ impl Resources {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// resources.insert_tty(Reference(0), tty);
-    /// assert_eq!(resources.tty(Reference(0)).map(|tty| tty.ofd), Some(1));
-    /// assert!(resources.tty(Reference(1)).is_none());
+    /// ttys.insert(Reference(0), tty);
+    /// assert_eq!(ttys.get(Reference(0)).map(|tty| tty.ofd), Some(1));
+    /// assert!(ttys.get(Reference(1)).is_none());
     /// ```
-    pub(super) fn tty(&self, reference: Reference) -> Option<&TtyResource> {
-        self.ttys.get(&reference)
+    pub(super) fn get(&self, reference: Reference) -> Option<&TtyResource> {
+        self.resources.get(&reference)
     }
 
-    /// Return the TTY resource of `reference` for a change, as
-    /// `Resources::tty` does.
+    /// Return the TTY resource of `reference` for a change, as `Ttys::get`
+    /// does.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// resources.tty_mut(Reference(0)).unwrap().owner = Some(ProcessId(0));
+    /// ttys.get_mut(Reference(0)).unwrap().owner = Some(ProcessId(0));
     /// ```
-    pub(super) fn tty_mut(&mut self, reference: Reference) -> Option<&mut TtyResource> {
-        self.ttys.get_mut(&reference)
+    pub(super) fn get_mut(&mut self, reference: Reference) -> Option<&mut TtyResource> {
+        self.resources.get_mut(&reference)
     }
 
     /// Add a monitor of the process `pid` for the TTY resource `reference`,
@@ -118,10 +105,10 @@ impl Resources {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// resources.monitor_tty(ProcessId(0), Reference(0));
+    /// ttys.monitor(ProcessId(0), Reference(0));
     /// ```
-    pub(super) fn monitor_tty(&mut self, pid: ProcessId, reference: Reference) {
-        self.tty_monitors.push((pid, reference));
+    pub(super) fn monitor(&mut self, pid: ProcessId, reference: Reference) {
+        self.monitors.push((pid, reference));
     }
 
     /// Run the TTY monitors of the process `pid` after it exits, in the
@@ -133,17 +120,17 @@ impl Resources {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// resources.monitor_tty(ProcessId(1), Reference(0));
+    /// ttys.monitor(ProcessId(1), Reference(0));
     /// // fd 0 gets the first mode of the TTY resource `Reference(0)`.
-    /// resources.process_down(ProcessId(1));
+    /// ttys.process_down(ProcessId(1));
     /// ```
     pub(super) fn process_down(&mut self, pid: ProcessId) {
-        let (down, kept) = std::mem::take(&mut self.tty_monitors)
+        let (down, kept) = std::mem::take(&mut self.monitors)
             .into_iter()
             .partition(|&(monitor, _)| monitor == pid);
-        self.tty_monitors = kept;
+        self.monitors = kept;
         for (_, reference) in down {
-            let tty = &self.ttys[&reference];
+            let tty = &self.resources[&reference];
             if tty.owner == Some(pid) {
                 // ERTS ignores the result (prim_tty_nif.c:1239).
                 let _ = terminal::set_mode(libc::STDIN_FILENO, &tty.first_mode);
