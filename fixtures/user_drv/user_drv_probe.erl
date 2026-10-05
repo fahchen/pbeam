@@ -36,8 +36,8 @@ iovec() ->
 
 %% ERTS copies bytes and each binary of at most 512 bytes into one merged
 %% binary, and keeps each larger binary as its own element (erl_iolist.c).
-%% The caller gives the binaries, the deep list, and 256 and -1, as PBeam
-%% has no bs_create_bin, no gc_bif2, and no INTEGER_EXT literals yet.
+%% The caller gives the binaries and the deep list, as PBeam has no
+%% bs_create_bin and no gc_bif2. The caller also gives 256 and -1.
 iolists(B64, B512, B513, Huge, Deep, Above, Below) ->
     Inputs = [[[]], [<<>>], [1, 2], [<<"a">>, [<<"b">>, 3]], [[[[1]]]], [[], <<>>, [[]]],
               [[[1, [2, [3, <<4>>]], 5]], 6], [B64], [1, B64], [B512], [1, B512], [B512, B512],
