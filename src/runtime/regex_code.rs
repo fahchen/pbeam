@@ -1,6 +1,6 @@
 //! The compiled regular expressions of the node, as the ERTS magic binaries
 //! of `re:compile/2` and their magic references (`erl_binary.h`). The
-//! scheduler keeps them in its `State`, and all processes of a run share
+//! scheduler keeps them in its `Resources`, and all processes of a run share
 //! them.
 
 use std::collections::HashMap;
