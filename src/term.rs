@@ -1,5 +1,6 @@
 mod atom;
 mod fun;
+mod hash;
 mod map;
 mod order;
 
@@ -9,12 +10,10 @@ pub(crate) use atom::test_atom;
 pub(crate) use atom::{AtomTable, MAX_ATOM_CHARACTERS};
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target};
+pub(crate) use hash::internal_hash;
 pub use map::Map;
 
-use std::{
-    fmt,
-    hash::{Hash, Hasher},
-};
+use std::fmt;
 
 /// The smallest ERTS small integer on a 64-bit system: -(2^59).
 const SMALL_INTEGER_MIN: i64 = -(1 << 59);
@@ -22,8 +21,8 @@ const SMALL_INTEGER_MIN: i64 = -(1 << 59);
 const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
 
 /// A BEAM term. Lists, tuples, maps, and funs can nest to any depth, as in
-/// ERTS, so `Drop`, `Clone`, `PartialEq`, `Hash`, and `Debug` use explicit
-/// work stacks and do not recurse on the Rust stack.
+/// ERTS, so `Drop`, `Clone`, `PartialEq`, and `Debug` use explicit work
+/// stacks and do not recurse on the Rust stack.
 pub enum Term {
     /// An atom: its index in the atom table of the program, and its name.
     Atom(Atom),
@@ -293,52 +292,6 @@ impl PartialEq for Term {
 
 impl Eq for Term {}
 
-impl Hash for Term {
-    /// Hash a term with a work stack, consistent with `PartialEq`: two equal
-    /// terms give the same hash. Each term adds its variant, and a list,
-    /// tuple, map, or fun adds its length before its nested terms. An atom
-    /// adds only its atom index, because equal atoms have the same index. A
-    /// map adds its pairs in canonical order, as `PartialEq` compares them.
-    /// A fun adds its entry without the code label, as `PartialEq` compares
-    /// it, and then its free variables.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use std::hash::{BuildHasher, RandomState};
-    ///
-    /// let state = RandomState::new();
-    /// let key = Term::Tuple(vec![Term::static_atom("logger_config"), Term::static_atom("default")]);
-    /// assert_eq!(state.hash_one(&key), state.hash_one(&key.clone()));
-    /// ```
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let mut pending = vec![self];
-        while let Some(term) = pending.pop() {
-            std::mem::discriminant(term).hash(state);
-            match term {
-                Term::Atom(atom) => atom.index().hash(state),
-                Term::Binary(bytes) => bytes.hash(state),
-                Term::Integer(value) => value.hash(state),
-                Term::Pid(pid) => pid.hash(state),
-                Term::Reference(reference) => reference.hash(state),
-                Term::List(elements) | Term::Tuple(elements) => {
-                    elements.len().hash(state);
-                    pending.extend(elements);
-                }
-                Term::Map(map) => {
-                    map.len().hash(state);
-                    pending.extend(map.iter().flat_map(|(key, value)| [key, value]));
-                }
-                Term::Fun(fun) => {
-                    fun.target.hash(state);
-                    fun.free.len().hash(state);
-                    pending.extend(&fun.free);
-                }
-            }
-        }
-    }
-}
-
 impl fmt::Debug for Term {
     /// Write the same text as a derived `Debug`, for example
     /// `Tuple([Atom("undef"), List([])])` or `Map([(Atom("a"), Integer(1))])`,
@@ -418,8 +371,6 @@ pub struct Reference(pub(crate) u64);
 
 #[cfg(test)]
 mod tests {
-    use std::hash::{BuildHasher, RandomState};
-
     use super::{AtomTable, Fun, Lambda, Map, ProcessId, Reference, Term, test_atom as atom};
 
     fn map(pairs: Vec<(Term, Term)>) -> Term {
@@ -501,59 +452,6 @@ mod tests {
     }
 
     #[test]
-    fn hashes_funs_as_their_equality_compares_them() {
-        let state = RandomState::new();
-        let hash = |term: &Term| state.hash_one(term);
-        let module = || super::Atom::from_static("lists").unwrap();
-        let entry = |label, old_unique, arity, free| {
-            Term::Fun(Fun::new(
-                Lambda::new(module(), 0, old_unique, label, arity),
-                free,
-            ))
-        };
-        let external = |function, arity| {
-            Term::Fun(Fun::external(
-                module(),
-                super::Atom::from_static(function).unwrap(),
-                arity,
-            ))
-        };
-        // Equal funs give the same hash.
-        let tagged = fun(0, vec![atom("a"), Term::List(vec![Term::Integer(1)])]);
-        assert_eq!(hash(&tagged), hash(&tagged.clone()));
-        assert_eq!(hash(&external("get", 1)), hash(&external("get", 1)));
-        // The code label is not part of the identity of a fun entry, so funs
-        // with other labels and an equal identity give the same hash.
-        assert_eq!(entry(53, 7, 1, vec![]), entry(61, 7, 1, vec![]));
-        assert_eq!(
-            hash(&entry(53, 7, 1, vec![atom("a")])),
-            hash(&entry(61, 7, 1, vec![atom("a")]))
-        );
-        // Funs that are not equal give different hashes. A 64-bit collision
-        // among these terms is very improbable, so a hash that ignores a field
-        // of the identity fails here.
-        let funs = [
-            fun(0, vec![]),
-            fun(1, vec![]),
-            entry(53, 8, 1, vec![]),
-            entry(53, 7, 2, vec![]),
-            fun(0, vec![atom("a")]),
-            fun(0, vec![atom("b")]),
-            fun(0, vec![atom("a"), atom("b")]),
-            external("get", 1),
-            external("get", 2),
-            external("put", 1),
-            Term::Tuple(vec![]),
-        ];
-        for (index, term) in funs.iter().enumerate() {
-            for other in &funs[index + 1..] {
-                assert_ne!(term, other);
-                assert_ne!(hash(term), hash(other));
-            }
-        }
-    }
-
-    #[test]
     fn matches_the_derived_debug_text_and_compares_every_variant() {
         let leaves = [
             atom("ok"),
@@ -625,46 +523,5 @@ mod tests {
         assert_eq!(format!("{:?}", forty.clone()), format!("{forty:?}"));
         assert!(format!("{forty:?}").starts_with("Map([(Integer(18), Atom(\"v\")), (Integer(4), "));
         assert_ne!(forty, hash(&mut (2..=41)));
-    }
-
-    #[test]
-    fn hashes_equal_terms_equally_and_different_terms_differently() {
-        let state = RandomState::new();
-        let hash = |term: &Term| state.hash_one(term);
-        let forty = |keys: &mut dyn Iterator<Item = i64>| {
-            map(keys.map(|key| (Term::Integer(key), atom("v"))).collect())
-        };
-        let terms = [
-            atom("ok"),
-            Term::Binary(vec![1, 2]),
-            Term::Integer(-3),
-            Term::Pid(ProcessId(4)),
-            Term::Reference(Reference(5)),
-            Term::List(vec![]),
-            Term::Tuple(vec![]),
-            Term::Tuple(vec![atom("logger_config"), atom("default")]),
-            Term::List(vec![Term::Integer(1), Term::List(vec![Term::Integer(2)])]),
-            Term::List(vec![Term::List(vec![Term::Integer(1)]), Term::Integer(2)]),
-            map(vec![(atom("a"), Term::Integer(1))]),
-            map(vec![(atom("a"), Term::Integer(2))]),
-            forty(&mut (1..=40)),
-            deep(1_000),
-        ];
-        // Different terms can share a hash, but a 64-bit collision among
-        // these terms is very improbable. A constant hash fails here.
-        for (index, term) in terms.iter().enumerate() {
-            assert_eq!(hash(term), hash(&term.clone()));
-            for other in &terms[index + 1..] {
-                assert_ne!(term, other);
-                assert_ne!(hash(term), hash(other));
-            }
-        }
-        // Equal maps built in another pair order give the same hash.
-        assert_eq!(
-            hash(&forty(&mut (1..=40))),
-            hash(&forty(&mut (1..=40).rev()))
-        );
-        // A deep term hashes without recursion.
-        assert_eq!(hash(&deep(1_000_000)), hash(&deep(1_000_000)));
     }
 }
