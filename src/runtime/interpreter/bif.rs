@@ -54,6 +54,22 @@ impl BifResult {
             reason: Term::static_atom("badarg"),
         }
     }
+
+    /// Return the `error:badarith` exception, which ERTS raises with
+    /// `BADARITH` for an arithmetic operand that is not a number
+    /// (`erl_arith.c`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(BifResult::badarith(), BifResult::Raise { class: ExceptionClass::Error, .. }));
+    /// ```
+    pub(super) fn badarith() -> BifResult {
+        BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("badarith"),
+        }
+    }
 }
 
 /// The state that a BIF body can use.

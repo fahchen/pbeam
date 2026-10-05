@@ -206,21 +206,30 @@ pub(crate) enum Instruction {
         tail: bool,
         deallocate: u32,
     },
-    /// Calls a BIF through `bif0` (opcode 9), `bif1` (opcode 10), or `bif2`
-    /// (opcode 11) and writes its value to a register. `bif0` has no fail
-    /// label and decodes with `fail_label` 0. With fail label 0, a BIF failure
-    /// raises its exception; with another fail label, it jumps to the label.
+    /// Calls a BIF through `bif0` (opcode 9), `bif1` (opcode 10), `bif2`
+    /// (opcode 11), or `gc_bif2` (opcode 125) and writes its value to a
+    /// register. `bif0` has no fail label and decodes with `fail_label` 0.
+    /// With fail label 0, a BIF failure raises its exception; with another
+    /// fail label, it jumps to the label.
     ///
     /// Encoding: `bif0` has opcode, import index, destination register;
     /// `bif1` and `bif2` have opcode, fail label, import index, one or two
-    /// arguments, destination register. An argument can be a typed register
-    /// (extended subtag 5). Example: `io:io_request/2` in the pinned `io.beam`
-    /// has `[0x0A, 0x05, 0xE0, 0x57, 0x03, 0x40, 0x23]`, which calls import 14
+    /// arguments, destination register. `gc_bif2` has opcode, fail label,
+    /// live register count, import index, two arguments, destination
+    /// register. The live count tells the ERTS garbage collector which X
+    /// registers hold terms; PBeam has no process heap and does not keep it.
+    /// An argument can be a typed register (extended subtag 5). Example:
+    /// `io:io_request/2` in the pinned `io.beam` has
+    /// `[0x0A, 0x05, 0xE0, 0x57, 0x03, 0x40, 0x23]`, which calls import 14
     /// (`erlang:node/1`) with `x0` typed as a pid and writes `x2`, and
     /// `[0x09, 0xF0, 0x53]`, which calls import 15 (`erlang:node/0`) and
     /// writes `x5`. The pinned `gen_statem.beam` has
     /// `[0x0B, 0x05, 0x08, 0x21, 0x21, 0x03, 0x03]`, which calls import 33
     /// (`erlang:element/2`) with the integer 2 and `x0` and writes `x0`.
+    /// `arith_probe:up/1` in `fixtures/arith/arith_probe.beam` has
+    /// `[0x7D, 0x0D, 0x18, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03]`, which
+    /// calls import 0 (`erlang:'+'/2`) with fail label 24, live count 1,
+    /// `x0` typed, and the integer 1, and writes `x0`.
     ///
     /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`, and
     /// `node(Pid) =:= node()` in `io:io_request/2` compiles to
@@ -231,7 +240,11 @@ pub(crate) enum Instruction {
     /// `{bif,element,{f,0},[{integer,2},{x,0}],{x,0}}`. The guard
     /// `when tuple_size(X) >= 2` in `fixtures/group/group_probe.erl`
     /// compiles to `{bif,tuple_size,{f,22},[{x,0}],{x,1}}`, which is
-    /// `[0x0A, 0x0D, 0x16, 0x80, 0x03, 0x13]` with import 8.
+    /// `[0x0A, 0x0D, 0x16, 0x80, 0x03, 0x13]` with import 8. The guard
+    /// `when X + 1 >= 1` of `arith_probe:up/1` compiles to
+    /// `{gc_bif,'+',{f,24},1,[{tr,{x,0},...},{integer,1}],{x,0}}`, and
+    /// `id(-9223372036854775808) - id(1)` in `minus_overflow/0` compiles to
+    /// `{gc_bif,'-',{f,0},1,[{tr,{y,0},...},{tr,{x,0},...}],{x,0}}`.
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
@@ -1206,8 +1219,13 @@ pub(super) fn parse_code(
                     destination: read_register(data, &mut cursor)?,
                 }
             }
-            OPCODE_BIF1 | OPCODE_BIF2 => {
+            OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF2 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                if opcode == OPCODE_GC_BIF2 {
+                    // PBeam has no process heap, so the live register count
+                    // for the garbage collection of `gc_bif2` is not kept.
+                    let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                }
                 let (module, name) = bif_import(
                     imports,
                     read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
@@ -1366,8 +1384,8 @@ fn read_record_updates(
 ///
 /// ```rust,ignore
 /// let mut cursor = 0;
-/// skip_unsupported_instruction(OPCODE_GC_BIF2, &[0, 0, 0, 0, 0, 0], &mut cursor)?;
-/// assert_eq!(cursor, 6);
+/// skip_unsupported_instruction(OPCODE_GC_BIF1, &[0, 0, 0, 0, 0], &mut cursor)?;
+/// assert_eq!(cursor, 5);
 /// ```
 fn skip_unsupported_instruction(
     opcode: u8,
@@ -1400,7 +1418,7 @@ fn skip_unsupported_instruction(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(unsupported_opcode_operand_count(OPCODE_GC_BIF2), Some(6));
+/// assert_eq!(unsupported_opcode_operand_count(OPCODE_GC_BIF1), Some(5));
 /// assert_eq!(unsupported_opcode_operand_count(255), None);
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
@@ -1415,7 +1433,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_SKIP_UTF8 => Some(4),
         OPCODE_BS_SET_POSITION => Some(2),
         OPCODE_GC_BIF1 => Some(5),
-        OPCODE_GC_BIF2 => Some(6),
         OPCODE_BADRECORD => Some(1),
         OPCODE_IF_END | OPCODE_BUILD_STACKTRACE => Some(0),
         // `raw_raise` is in `gen_statem:call/3`.
@@ -1702,7 +1719,7 @@ mod tests {
     use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
     use super::{
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_UTF16,
-        OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GC_BIF2,
+        OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GC_BIF1,
         OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC,
         OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP,
         OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
@@ -2188,6 +2205,64 @@ mod tests {
         assert!(parse_code(&code, &[], &[], &[], &[]).is_err());
     }
 
+    #[test]
+    fn decodes_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction() {
+        const ARITH_PROBE: &[u8] = include_bytes!("../../../fixtures/arith/arith_probe.beam");
+        // up/1: gc_bif2 f24 live 1 '+'/2 {tr,x0,1} 1 x0
+        let up = [0x7D, 0x0D, 0x18, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03];
+        // minus_overflow/0: gc_bif2 f0 live 1 '-'/2 {tr,y0,1} {tr,x0,1} x0
+        let minus = [
+            0x7D, 0x05, 0x10, 0x10, 0x57, 0x04, 0x10, 0x57, 0x03, 0x10, 0x03,
+        ];
+        for bytes in [&up[..], &minus] {
+            assert!(
+                ARITH_PROBE
+                    .windows(bytes.len())
+                    .any(|window| window == bytes),
+                "{bytes:02X?} is not in arith_probe.beam"
+            );
+        }
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&up[..], &minus, &[0x03]].concat());
+        let imports = vec![
+            ("erlang".to_owned(), "+".to_owned(), 2),
+            ("erlang".to_owned(), "-".to_owned(), 2),
+        ];
+        let (instructions, _) = parse_code(&code, &[], &imports, &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::Bif {
+                    fail_label: 24,
+                    module: plus_module,
+                    name: plus,
+                    arguments: plus_arguments,
+                    destination: Operand::X(0),
+                },
+                Instruction::Bif {
+                    fail_label: 0,
+                    module: minus_module,
+                    name: minus,
+                    arguments: minus_arguments,
+                    destination: Operand::X(0),
+                },
+                Instruction::End,
+            ] if plus_module == "erlang"
+                && plus == "+"
+                && matches!(
+                    plus_arguments.as_slice(),
+                    [Operand::X(0), Operand::Value(Term::Integer(1))]
+                )
+                && minus_module == "erlang"
+                && minus == "-"
+                && matches!(minus_arguments.as_slice(), [Operand::Y(0), Operand::X(0)])
+        ));
+        // Without its destination and the end, the instruction is truncated.
+        code.truncate(code.len() - 2);
+        assert!(parse_code(&code, &[], &imports, &[], &[]).is_err());
+    }
+
     /// Assert that `bytes` occur in `fixtures/funs/fun_probe.beam`, so a test
     /// that takes its bytes from the fixture fails when the fixture changes.
     ///
@@ -2426,7 +2501,7 @@ mod tests {
         for (opcode, count) in [
             (OPCODE_TEST_HEAP, 2),
             (OPCODE_BIF0, 2),
-            (OPCODE_GC_BIF2, 6),
+            (OPCODE_GC_BIF1, 5),
             (OPCODE_TEST_LT, 3),
             (OPCODE_TEST_TAGGED_TUPLE, 4),
             (OPCODE_TEST_IS_MAP, 2),
@@ -2452,7 +2527,7 @@ mod tests {
 
         let mut cursor = 0;
         assert!(skip_unsupported_instruction(255, &[], &mut cursor).is_err());
-        assert!(skip_unsupported_instruction(OPCODE_GC_BIF2, &[0], &mut cursor).is_err());
+        assert!(skip_unsupported_instruction(OPCODE_GC_BIF1, &[0], &mut cursor).is_err());
         assert!(skip_counted_operands(&[0x10], &mut 0).is_err());
         assert!(skip_counted_operands(&[0x20], &mut 0).is_err());
     }

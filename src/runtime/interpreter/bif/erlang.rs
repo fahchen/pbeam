@@ -274,6 +274,40 @@ pub(super) fn append(left: &Term, right: &Term) -> Result<BifResult, BeamError> 
     }
 }
 
+/// Run `erlang:'+'/2` or `erlang:'-'/2` with `operation`, the checked `i64`
+/// sum or difference, as ERTS `erts_mixed_plus` and `erts_mixed_minus`
+/// (`erl_arith.c:370-389`, `erl_arith.c:585-602`) do for two integers. An
+/// operand that is not a number raises `badarith`. PBeam has no float term,
+/// so each number is an integer. A result outside the `i64` range gives a
+/// runtime error, where ERTS makes a bignum.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let sum = arith("+", &Term::Integer(1), &Term::Integer(2), i64::checked_add)?;
+/// assert!(matches!(sum, BifResult::Value(Term::Integer(3))));
+/// let atom = Term::static_atom("a");
+/// assert!(matches!(arith("-", &atom, &Term::Integer(1), i64::checked_sub)?, BifResult::Raise { .. }));
+/// assert!(arith("+", &Term::Integer(i64::MAX), &Term::Integer(1), i64::checked_add).is_err());
+/// ```
+pub(super) fn arith(
+    name: &str,
+    left: &Term,
+    right: &Term,
+    operation: fn(i64, i64) -> Option<i64>,
+) -> Result<BifResult, BeamError> {
+    let (Term::Integer(left), Term::Integer(right)) = (left, right) else {
+        return Ok(BifResult::badarith());
+    };
+    // ponytail: a result outside i64 needs a bignum term; see "Integer range" in docs/erts-differences.md.
+    let result = operation(*left, *right).ok_or_else(|| {
+        error(format!(
+            "unsupported erlang:{name}/2 result of {left} and {right}: needs a bignum"
+        ))
+    })?;
+    Ok(Value(Term::Integer(result)))
+}
+
 /// Run `erlang:element/2`: return the element at the 1-based `index` of a
 /// tuple. An `index` that is not an integer or is outside the tuple, and a
 /// `tuple` that is not a tuple, raise `badarg`, as in ERTS `element_2`
