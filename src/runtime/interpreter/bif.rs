@@ -236,23 +236,24 @@ pub(super) fn is_bif(module: &str, name: &str, arity: u32) -> bool {
 }
 
 /// The `erlang` functions that ERTS runs as instructions, not as BIFs or BEAM
-/// code. The loader turns a call to `apply/2` into `i_apply_fun`, a call to
-/// `apply/3` into `i_apply`, a call to `yield/0` into `i_yield`, and a call
-/// to `hibernate/0` into `i_hibernate` (the `call_ext u$func:` transforms in
-/// `ops.tab` whose function is not a `bif.tab` entry). Their bodies in
+/// code, and that `erts_is_builtin` marks as builtin. The loader turns a
+/// call to `apply/2` into `i_apply_fun`, a call to `apply/3` into `i_apply`,
+/// and a call to `yield/0` into `i_yield` (the `call_ext u$func:` transforms
+/// in `ops.tab` whose function is not a `bif.tab` entry). Their bodies in
 /// `erlang.beam` only call the function again, for example
-/// `apply(F, A) -> erlang:apply(F, A).`
+/// `apply(F, A) -> erlang:apply(F, A).` The PBeam loader turns a call to
+/// `hibernate/0` into `Instruction::Hibernate`, so an apply of it runs its
+/// body in `erlang.beam`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// assert!(INSTRUCTION_CALLS.contains(&("erlang", "apply", 3)));
-/// assert!(INSTRUCTION_CALLS.contains(&("erlang", "hibernate", 0)));
-/// assert!(!INSTRUCTION_CALLS.contains(&("erlang", "spawn_monitor", 3)));
+/// assert!(INSTRUCTION_CALLS.contains(&("erlang", "yield", 0)));
+/// assert!(!INSTRUCTION_CALLS.contains(&("erlang", "hibernate", 0)));
 /// ```
-pub(super) const INSTRUCTION_CALLS: [(&str, &str, u32); 4] = [
+pub(super) const INSTRUCTION_CALLS: [(&str, &str, u32); 3] = [
     ("erlang", "apply", 2),
     ("erlang", "apply", 3),
-    ("erlang", "hibernate", 0),
     ("erlang", "yield", 0),
 ];
