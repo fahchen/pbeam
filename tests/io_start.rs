@@ -245,6 +245,57 @@ fn limits_atom_names_to_255_characters_as_pinned_erts() {
 }
 
 #[test]
+fn returns_the_host_os_type_as_pinned_erts() {
+    // `io_start_probe:system/0` runs `os:type/0` (os.erl:383-384) from the
+    // pinned `os.beam`, as `prim_tty:init_term/1` (prim_tty.erl:284) does,
+    // and `erlang:system_info(os_type)` directly. ERTS returns `{unix,
+    // Flavor}` (`erl_bif_info.c:3026-3027`), where `Flavor` is the lowercase
+    // `uname` system name (`sys/unix/sys.c:835-865`). The test takes the
+    // flavor from the PBeam result, so it holds on each Unix host, and the
+    // ERTS reference checks it.
+    let os = pinned_beam("os");
+    let program = BeamProgram::load(&[IO_START_PROBE, &os]).unwrap();
+    let result = program.execute("io_start_probe", "system", &[]).unwrap();
+    let Term::List(results) = &result else {
+        panic!("io_start_probe:system/0 must return a list");
+    };
+    let [os_type, system_info] = results.as_slice() else {
+        panic!("io_start_probe:system/0 must return two terms");
+    };
+    assert_eq!(os_type, system_info);
+    let Term::Tuple(elements) = os_type else {
+        panic!("os:type/0 must return a tuple");
+    };
+    let [Term::Atom(family), Term::Atom(flavor)] = elements.as_slice() else {
+        panic!("os:type/0 must return a tuple of two atoms");
+    };
+    assert_eq!(family.name(), "unix");
+    let flavor = flavor.name();
+    assert_eq!(
+        reference("system"),
+        format!("[{{unix,{flavor}}},{{unix,{flavor}}}]\n").into_bytes()
+    );
+}
+
+#[test]
+fn rejects_other_system_info_items() {
+    // `io_start_probe:system_other/0` runs `erlang:system_info(otp_release)`.
+    // ERTS returns the release as a string; PBeam supports only `os_type`
+    // and returns a runtime error.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let error = program
+        .execute("io_start_probe", "system_other", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unsupported erlang:system_info/1 argument"),
+        "{error}"
+    );
+    assert!(error.contains("otp_release"), "{error}");
+    assert_eq!(reference("system_other"), b"[50,57]\n");
+}
+
+#[test]
 fn formats_the_empty_noshell_slogan_as_pinned_erts() {
     // `user_drv:init_shell/2` (user_drv.erl:374) runs
     // `io_lib:bformat("~ts", [""])` with the empty slogan of `-noshell`

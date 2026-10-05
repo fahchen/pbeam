@@ -2,6 +2,7 @@
 
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
+use crate::runtime::host;
 use crate::term::{Fun, Reference};
 
 /// Return the node of a pid or of the calling process.
@@ -349,6 +350,40 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
         name.push(character);
     }
     Ok(Value(Term::Atom(atoms.put(&name)?)))
+}
+
+/// Run `erlang:system_info/1`. The item `os_type` returns `{unix, Flavor}`,
+/// as ERTS `system_info_1` (`erl_bif_info.c:3026-3027`) does with `os_type`
+/// `"unix"` (`sys/unix/sys.c:835`) and the OS flavor of the host. ERTS makes
+/// both atoms at emulator start (`os_info_init` in
+/// `erl_bif_info.c:6418-6440`); PBeam puts them into the atom table of the
+/// run at this call.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut atoms = AtomTable::new();
+/// let os_type = system_info(&mut atoms, &Term::static_atom("os_type"))?;
+/// // macOS: {unix, darwin}.
+/// assert!(matches!(os_type, BifResult::Value(Term::Tuple(_))));
+/// assert!(system_info(&mut atoms, &Term::static_atom("otp_release")).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Each other item gives a runtime error, also an item that ERTS rejects
+/// with `badarg`. A new atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResult, BeamError> {
+    match item {
+        Term::Atom(atom) if atom.name() == "os_type" => Ok(Value(Term::Tuple(vec![
+            Term::Atom(atoms.put("unix")?),
+            Term::Atom(atoms.put(&host::os_flavor())?),
+        ]))),
+        _ => Err(error(format!(
+            "unsupported erlang:system_info/1 argument {item:?}"
+        ))),
+    }
 }
 
 /// Run `erlang:'+'/2` or `erlang:'-'/2` with `operation`, the checked `i64`

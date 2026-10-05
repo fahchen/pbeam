@@ -307,7 +307,7 @@ bifs! {
     erlang:statistics/1 => unsupported,
     erlang:subtract/2 => unsupported,
     erlang:system_flag/2 => unsupported,
-    erlang:system_info/1 => unsupported,
+    erlang:system_info/1 => |cx, [item]| erlang::system_info(&mut cx.scheduler.atoms, item),
     erlang:system_profile/0 => unsupported,
     erlang:system_profile/2 => unsupported,
     erlang:system_time/0 => unsupported,

@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+libc = "0.2"
