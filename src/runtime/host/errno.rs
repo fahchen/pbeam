@@ -4,34 +4,36 @@
 use std::ffi::c_int;
 
 /// The cases of the ERTS `errno_name` switch (`erl_errno_str.c:986-1105`),
-/// in its order. Some names have the same value on a host: `EWOULDBLOCK` is
-/// `EAGAIN` on macOS and Linux, and `EOPNOTSUPP` is `ENOTSUP` on Linux.
-/// ERTS compiles only the first case of such a pair, so the first match
-/// gives its name.
-const COLLISIONS: [(c_int, &str); 23] = [
-    (libc::EAGAIN, "EAGAIN"),
-    (libc::EALREADY, "EALREADY"),
-    (libc::EBUSY, "EBUSY"),
-    (libc::ECONNREFUSED, "ECONNREFUSED"),
-    (libc::EDEADLK, "EDEADLK"),
-    (libc::EEXIST, "EEXIST"),
-    (libc::EIDRM, "EIDRM"),
-    (libc::EINPROGRESS, "EINPROGRESS"),
-    (libc::ELOOP, "ELOOP"),
-    (libc::ENAMETOOLONG, "ENAMETOOLONG"),
-    (libc::ENOBUFS, "ENOBUFS"),
-    (libc::ENOSTR, "ENOSTR"),
-    (libc::ENODATA, "ENODATA"),
-    (libc::ENOENT, "ENOENT"),
-    (libc::ENOLCK, "ENOLCK"),
-    (libc::ENOSR, "ENOSR"),
-    (libc::ENOTEMPTY, "ENOTEMPTY"),
-    (libc::ENOTTY, "ENOTTY"),
-    (libc::ENOTSUP, "ENOTSUP"),
-    (libc::EOPNOTSUPP, "EOPNOTSUPP"),
-    (libc::ETIME, "ETIME"),
-    (libc::ETIMEDOUT, "ETIMEDOUT"),
-    (libc::EWOULDBLOCK, "EWOULDBLOCK"),
+/// in its order, each with the names of its `#if` guard. Some names have
+/// the same value on a host: `EWOULDBLOCK` is `EAGAIN` on macOS and Linux,
+/// and `EOPNOTSUPP` is `ENOTSUP` on Linux. ERTS does not compile a case
+/// when one of its guard names has the same value, so the other name of
+/// the pair gives the name. The guard does not always drop the later case:
+/// for `ENOSTR` and `ENOTTY`, ERTS drops `ENOSTR`.
+const COLLISIONS: [(c_int, &str, &[c_int]); 23] = [
+    (libc::EAGAIN, "EAGAIN", &[]),
+    (libc::EALREADY, "EALREADY", &[libc::EBUSY]),
+    (libc::EBUSY, "EBUSY", &[]),
+    (libc::ECONNREFUSED, "ECONNREFUSED", &[]),
+    (libc::EDEADLK, "EDEADLK", &[libc::EWOULDBLOCK]),
+    (libc::EEXIST, "EEXIST", &[]),
+    (libc::EIDRM, "EIDRM", &[libc::EINPROGRESS]),
+    (libc::EINPROGRESS, "EINPROGRESS", &[]),
+    (libc::ELOOP, "ELOOP", &[libc::ENOENT]),
+    (libc::ENAMETOOLONG, "ENAMETOOLONG", &[]),
+    (libc::ENOBUFS, "ENOBUFS", &[libc::ENOSR]),
+    (libc::ENOSTR, "ENOSTR", &[libc::ENOTTY]),
+    (libc::ENODATA, "ENODATA", &[libc::ECONNREFUSED]),
+    (libc::ENOENT, "ENOENT", &[]),
+    (libc::ENOLCK, "ENOLCK", &[]),
+    (libc::ENOSR, "ENOSR", &[libc::ENAMETOOLONG]),
+    (libc::ENOTEMPTY, "ENOTEMPTY", &[libc::EEXIST]),
+    (libc::ENOTTY, "ENOTTY", &[]),
+    (libc::ENOTSUP, "ENOTSUP", &[]),
+    (libc::EOPNOTSUPP, "EOPNOTSUPP", &[libc::ENOTSUP]),
+    (libc::ETIME, "ETIME", &[libc::ELOOP]),
+    (libc::ETIMEDOUT, "ETIMEDOUT", &[libc::ENOSTR, libc::EAGAIN]),
+    (libc::EWOULDBLOCK, "EWOULDBLOCK", &[libc::EAGAIN]),
 ];
 
 /// The cases of the ERTS `errno_name_fallback` switch
@@ -144,13 +146,27 @@ pub(crate) fn errno_id(errno: c_int) -> String {
     // ERTS writes `errno_0` for 0 and does not look up a name.
     let name = match errno {
         0 => None,
-        _ => COLLISIONS
-            .iter()
-            .find(|(value, _)| *value == errno)
-            .map(|(_, name)| *name)
-            .or_else(|| host_name(errno)),
+        _ => case_name(&COLLISIONS, errno).or_else(|| host_name(errno)),
     };
     name.map_or_else(|| format!("errno_{errno}"), str::to_ascii_lowercase)
+}
+
+/// Return the name of `errno` from `cases`, a table in the form of
+/// `COLLISIONS`, as the `errno_name` switch does. A case is not in the
+/// switch when one of its guard names has its value. `None` is the
+/// `default` branch.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(case_name(&[(5, "ENOSTR", &[5]), (5, "ENOTTY", &[])], 5), Some("ENOTTY"));
+/// assert_eq!(case_name(&COLLISIONS, libc::EPERM), None);
+/// ```
+fn case_name(cases: &[(c_int, &'static str, &[c_int])], errno: c_int) -> Option<&'static str> {
+    cases
+        .iter()
+        .find(|(value, _, guards)| *value == errno && !guards.contains(value))
+        .map(|(_, name, _)| *name)
 }
 
 /// Return the glibc name of `errno` from `strerrorname_np`, or `None` for a
@@ -213,5 +229,17 @@ mod tests {
         ] {
             assert_eq!(errno_id(errno), name, "errno {errno}");
         }
+    }
+
+    #[test]
+    fn drops_a_guarded_case_whose_guard_name_has_its_value() {
+        // On a host where `ENOTTY` has the value of `ENOSTR`, ERTS does not
+        // compile the earlier `ENOSTR` case, so the name is `ENOTTY`
+        // (erl_errno_str.c:1042-1046). Without a collision, `ENOSTR` stays.
+        let collision: [(c_int, &str, &[c_int]); 2] = [(5, "ENOSTR", &[5]), (5, "ENOTTY", &[])];
+        assert_eq!(case_name(&collision, 5), Some("ENOTTY"));
+        let distinct: [(c_int, &str, &[c_int]); 2] = [(5, "ENOSTR", &[6]), (6, "ENOTTY", &[])];
+        assert_eq!(case_name(&distinct, 5), Some("ENOSTR"));
+        assert_eq!(case_name(&distinct, 7), None);
     }
 }
