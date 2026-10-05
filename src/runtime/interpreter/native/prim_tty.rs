@@ -19,9 +19,9 @@ pub(super) const BINDINGS: &[Binding] = &[Binding {
 /// (`prim_tty_nif.c:354-427`) first gets the TTY resource from `TTY` and
 /// raises `badarg` when `TTY` is not a TTY resource (`prim_tty_nif.c:363-364`).
 /// Only then does it read `IOVec` and write it. Only `prim_tty:tty_create/1`
-/// makes a TTY resource, and the PBeam resource store holds only compiled
-/// regular expressions. Thus no PBeam term is a TTY resource: the binding
-/// raises `error:badarg` for each argument, and it writes nothing.
+/// makes a TTY resource, and PBeam keeps no TTY resource in the node state.
+/// Thus no PBeam term is a TTY resource: the binding raises `error:badarg`
+/// for each argument, and it writes nothing.
 ///
 /// # Examples
 ///
