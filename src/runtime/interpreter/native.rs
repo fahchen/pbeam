@@ -29,7 +29,7 @@ mod prim_tty;
 /// const WRITE_NIF: Binding = Binding {
 ///     name: "write_nif",
 ///     arity: 2,
-///     run: |arguments| write_nif(&arguments[0], &arguments[1]),
+///     run: |scheduler, arguments| write_nif(&scheduler.resources, &arguments[0], &arguments[1]),
 /// };
 /// ```
 struct Binding {
