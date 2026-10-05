@@ -370,9 +370,7 @@ fn sets_the_terminal_mode_with_tty_init() {
         br#"Ok(List([Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("ok"), Atom("ok"), Atom("ok"), Atom("ok")]))"#
     );
     // The stdout terminal has its first mode again, and the stderr terminal
-    // has the raw mode. On macOS the kernel adds `PENDIN` to the stdout
-    // mode when `ICANON` comes back, so the modes are compared with the
-    // ERTS run.
+    // has the raw mode.
     assert_same_modes(&erts_modes, &pbeam_modes);
     let [_, Some(stdout), Some(stderr)] = pbeam_modes else {
         panic!("stdout and stderr are terminals");
@@ -1005,13 +1003,32 @@ const CANONICAL_ECHO: libc::tcflag_t = libc::ICANON | libc::ECHO;
 /// has no `PartialEq`, so the test compares its `Debug` text, which shows
 /// each field.
 ///
+/// The comparison ignores the `PENDIN` flag of `c_lflag`. It is a status
+/// flag of the terminal driver, not a part of the mode that `tty_init/2`
+/// saves and sets. The macOS kernel sets it when `ICANON` comes back, and
+/// clears it when a reader or a poll of the terminal processes the pending
+/// input. After `tty_select/2`, the ERTS poll thread watches fd 0, so the
+/// final `PENDIN` of fd 0 in ERTS depends on the thread timing (measured:
+/// unset in 2 of 30 ERTS runs under CPU load, set in each PBeam run).
+///
 /// # Examples
 ///
 /// ```rust,ignore
 /// assert_same_modes(&erts_modes, &pbeam_modes);
 /// ```
 fn assert_same_modes(erts: &[Option<libc::termios>; 3], pbeam: &[Option<libc::termios>; 3]) {
-    assert_eq!(format!("{erts:?}"), format!("{pbeam:?}"));
+    let without_pendin = |modes: &[Option<libc::termios>; 3]| {
+        modes.map(|mode| {
+            mode.map(|mut mode| {
+                mode.c_lflag &= !libc::PENDIN;
+                mode
+            })
+        })
+    };
+    assert_eq!(
+        format!("{:?}", without_pendin(erts)),
+        format!("{:?}", without_pendin(pbeam))
+    );
 }
 
 /// Assert that `mode` has the raw changes of `tty_init/2`
@@ -1033,9 +1050,7 @@ fn assert_raw(mode: &libc::termios) {
 /// `prim_tty` and the standard streams of `layout`, and return the `~w`
 /// text of its result. The probe writes with `file:write_file/2`, because
 /// the boot IO servers call the stand-in after `code:load_abs/1`. With
-/// `-noinput`, no boot IO server reads fd 0, as in PBeam. A read of a
-/// macOS terminal clears the `PENDIN` flag (measured) that the kernel sets when
-/// `ICANON` comes back, so a reader changes the final mode of fd 0.
+/// `-noinput`, no boot IO server reads fd 0, as in PBeam.
 ///
 /// # Examples
 ///
