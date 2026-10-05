@@ -53,7 +53,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Model the ERTS timer wheels
 
-- PBeam keeps one timer list ordered by end time. ERTS uses soon and later wheels and a high-level timer tree, so a timer of 16384 ms or more that moves into a soon slot expires after the timers with the same end that are already in the slot (pinned probe gives `[b,a]`).
+- After #150 (PR #172), PBeam keeps one timer list ordered by end time. ERTS uses soon and later wheels and a high-level timer tree, so a timer of 16384 ms or more that moves into a soon slot expires after the timers with the same end that are already in the slot (pinned probe gives `[b,a]`).
 - **Trigger:** a measured path depends on the order of timers with the same end.
 - **Source:** review of #150.
 
@@ -78,19 +78,19 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### `erlang:error/2` and the `throw` class
 
-- `erlang:error/2` is still `unsupported`; `re:ucompile/2` (`re.erl:1742-1751`) stops at it. `erlang:throw/1` and `erlang:raise(throw, R, Stack)` give runtime errors.
+- After #155 (PR #177), `erlang:error/2` is still `unsupported`; `re:ucompile/2` (`re.erl:1742-1751`) stops at it. `erlang:throw/1` and `erlang:raise(throw, R, Stack)` give runtime errors.
 - **Trigger:** a measured path raises through them.
 - **Source:** review of #155.
 
 ### Keep the frames that `erlang:raise/3` receives
 
-- `erlang:raise/3` checks its stack trace argument but gives the exception `[]`. ERTS keeps the frames (at most `backtrace_depth`) with the location `[]`. The "Exception stack trace" row records this.
+- After #155 (PR #177), `erlang:raise/3` checks its stack trace argument but gives the exception `[]`. ERTS keeps the frames (at most `backtrace_depth`) with the location `[]`. The "Exception stack trace" row of PR #177 records this.
 - **Trigger:** the stack-trace work, or a consumer that reads raised frames.
 - **Source:** review of #155.
 
 ### Value checks of `process_flag/2` and `system_flag/2`
 
-- `max_heap_size` (`erl_gc.c:3824-3872`, needs the process minimum heap size), `{monitor_nodes, Options}` (`dist.c:6732-6799`), a `scheduler` value above the scheduler count, and the `system_flag/2` sub-checks of `internal_cpu_topology`, `erts_alloc`, `sequential_tracer`, `schedulers_online`, and `dirty_cpu_schedulers_online` give the runtime error where ERTS raises `badarg`. The "System flags" row records them.
+- After #155 (PR #177), `max_heap_size` (`erl_gc.c:3824-3872`, needs the process minimum heap size), `{monitor_nodes, Options}` (`dist.c:6732-6799`), a `scheduler` value above the scheduler count, and the `system_flag/2` sub-checks of `internal_cpu_topology`, `erts_alloc`, `sequential_tracer`, `schedulers_online`, and `dirty_cpu_schedulers_online` give the runtime error where ERTS raises `badarg`. The "System flags" row of PR #177 records them.
 - **Trigger:** a consumer sets one of these flags.
 - **Source:** review of #155.
 
