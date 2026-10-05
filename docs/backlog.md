@@ -25,9 +25,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path loads such a literal.
 - **Source:** review of PR #160 (#138).
 
-### Run `erlang:'-'/1`, `is_eq`, and `is_float` (was #128)
+### Run `erlang:'-'/1` and `is_eq` (was #128)
 
-- The measured M2 start path does not run them (pinned ERTS call trace and line counters). #110 removed them.
+- The measured M2 start path does not run them (pinned ERTS call trace and line counters). #110 removed them. The `is_float` test of the same task now has a consumer on the logger start and is task #167.
 - **Trigger:** a measured consumer, for example a `~e`, `~f`, or `~g` format, or `lists:usort/1` with three elements.
 - **Source:** review of PR #121 (#110).
 
