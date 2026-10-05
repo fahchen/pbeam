@@ -14,7 +14,6 @@ use crate::{
 use std::collections::HashMap;
 
 mod bif;
-mod boot;
 mod native;
 
 use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function, send};
