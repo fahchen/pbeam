@@ -1,7 +1,7 @@
 //! The TTY resources of the node, as the `TTYResource` objects of
 //! `prim_tty_nif.c` and their magic references (`erl_binary.h`), with the
 //! process monitors of these resources. The scheduler keeps them in its
-//! `State`, and all processes of a run share them.
+//! `Resources`, and all processes of a run share them.
 
 use std::collections::HashMap;
 
