@@ -7,16 +7,22 @@ mod common;
 use common::pinned_beam;
 
 const FUN_PROBE: &[u8] = include_bytes!("../fixtures/funs/fun_probe.beam");
+const TAIL_CATCH: &[u8] = include_bytes!("../fixtures/funs/tail_catch.beam");
 
 /// Run `fun_probe:Function()` on the pinned ERTS and return its `~w` output.
 fn reference(function: &str) -> Vec<u8> {
+    reference_of("fun_probe", function)
+}
+
+/// Run `Module:Function()` on the pinned ERTS and return its `~w` output.
+fn reference_of(module: &str, function: &str) -> Vec<u8> {
     let reference = Command::new("erl")
         .args([
             "-noshell",
             "-pa",
             "fixtures/funs",
             "-eval",
-            &format!("io:format(\"~w~n\", [fun_probe:{function}()]), halt()."),
+            &format!("io:format(\"~w~n\", [{module}:{function}()]), halt()."),
         ])
         .output()
         .unwrap();
@@ -221,5 +227,36 @@ fn makes_and_calls_external_funs_as_pinned_erts() {
         reference("externals"),
         b"[v,w,same,same,different,true,false,true,one,{badarity,same,[1,2]},\
           badarg,badarg,badarg,badarg,badarg,same,lit,same]\n"
+    );
+}
+
+#[test]
+fn releases_the_frame_before_a_tail_apply_as_pinned_erts() {
+    // `tail_catch:run/0` calls each inner function from a `try` in
+    // `outer/2`. Each inner function makes a tail call while its own `try`
+    // tag is live, which only hand-made BEAM code can do
+    // (`fixtures/funs/tail_catch.asm`). ERTS releases the frame before
+    // `i_apply_fun_last`, `i_apply_last`, and `apply_last`
+    // (`jit/arm/ops.tab:649-657`, `jit/arm/instr_call.cpp:307-316`), so the
+    // `badfun` and `badarg` of the apply reach the `try` of `outer/2`. A BIF
+    // tail call is `call_light_bif`, `deallocate`, and `return`
+    // (`jit/arm/ops.tab:711-712`), so the `badarg` of `erlang:whereis/1`
+    // reaches the `try` of the inner function.
+    let program = BeamProgram::load(&[TAIL_CATCH]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |first: &str, second| Term::Tuple(vec![atom(first), second]);
+    let expected = vec![
+        pair("outer", pair("badfun", atom("notfun"))),
+        pair("outer", atom("badarg")),
+        pair("outer", atom("badarg")),
+        pair("inner", atom("badarg")),
+    ];
+    assert_eq!(
+        program.execute("tail_catch", "run", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference_of("tail_catch", "run"),
+        b"[{outer,{badfun,notfun}},{outer,badarg},{outer,badarg},{inner,badarg}]\n"
     );
 }

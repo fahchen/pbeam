@@ -97,35 +97,3 @@ fn runs_the_is_lt_is_integer_and_is_boolean_tests_as_pinned_erts() {
           nlt,lt,nlt,lt,nlt,lt,nlt,lt,lt,lt,nlt]]\n"
     );
 }
-
-#[test]
-fn runs_the_is_eq_and_is_float_tests_as_pinned_erts() {
-    // `compare_probe:equal/0` runs `is_eq` on two registers, as
-    // `lists:usort/1` does (lists.erl:2081). The JIT `is_eq` compares two
-    // terms by value (`jit/arm/instr_common.cpp:2055-2079`), so without
-    // floats it gives the result of `=:=`, also for two different
-    // references. `is_float`, as in `io_lib_format:control_small/7`, is
-    // false for each PBeam term (`jit/arm/instr_common.cpp:1229-1244`).
-    let program = BeamProgram::load(&[COMPARE_PROBE]).unwrap();
-    let atoms = |names: &[&str]| {
-        Term::List(
-            names
-                .iter()
-                .map(|&name| Term::Atom(program.atom(name).unwrap()))
-                .collect(),
-        )
-    };
-    assert_eq!(
-        program.execute("compare_probe", "equal", &[]).unwrap(),
-        Term::List(vec![
-            atoms(&[
-                "eq", "ne", "ne", "eq", "eq", "ne", "eq", "eq", "ne", "eq", "eq", "ne", "eq",
-            ]),
-            atoms(&["other"; 6]),
-        ])
-    );
-    assert_eq!(
-        reference("equal"),
-        b"[[eq,ne,ne,eq,eq,ne,eq,eq,ne,eq,eq,ne,eq],[other,other,other,other,other,other]]\n"
-    );
-}

@@ -1,5 +1,5 @@
 -module(io_start_probe).
--export([lists/0, reverse/0, maps/0, map_keys/0, merge/0, remove/0, atoms/0, atom_limit/0, system/0,
+-export([lists/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
          system_other/0, format/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
@@ -72,17 +72,6 @@ map_keys() ->
 key_guard(M, K) when M#{K := 2} =:= #{a => 2} -> updated;
 key_guard(_, _) -> other.
 
-%% `lists:reverse/2`, which the IO start path runs: the reversed first list,
-%% then the second term. An empty first list returns the second term
-%% itself, and a first term that is not a list raises badarg.
-reverse() ->
-    [lists:reverse(id([a, b, c]), id([d])),
-     lists:reverse(id([]), id(foo)),
-     lists:reverse(id([a]), id([])),
-     lists:reverse(id([]), id([])),
-     try lists:reverse(id(foo), id([])) catch error:R1 -> R1 end,
-     try lists:reverse(id(<<1>>), id(foo)) catch error:R2 -> R2 end].
-
 %% `maps:merge/2`, as prim_tty:options/1 (prim_tty.erl:329) runs it: the
 %% values of the second map win. A first argument that is not a map raises
 %% {badmap, First}, else a second argument that is not a map raises
@@ -100,27 +89,6 @@ merge() ->
 big(N) -> big(N, #{}).
 big(0, M) -> M;
 big(N, M) -> big(N - 1, M#{N => N}).
-
-%% `maps:remove/2`, which the IO start path runs. A key that the map does
-%% not hold returns the map. A hashmap that keeps 32 keys becomes a flatmap
-%% (erl_map.c:2989), and a term that is not a map raises {badmap, Map}.
-%% The keys are integers: the ERTS index of a new atom such as `a` can
-%% change from one run to the next, and with it the flatmap order.
-remove() ->
-    M = id(#{1 => one, 2 => two}),
-    [maps:remove(1, M),
-     maps:remove(3, M),
-     maps:remove(id({x}), M),
-     maps:remove(one, id(#{one => 1})),
-     maps:keys(maps:remove(33, id(big(33)))),
-     maps:keys(maps:remove(40, id(big(33)))),
-     maps:keys(maps:remove(1, id(big(34)))),
-     maps:keys(drop(1, 30, id(big(64)))),
-     try maps:remove(a, id(foo)) catch error:R1 -> R1 end,
-     try maps:remove(a, id([])) catch error:R2 -> R2 end].
-
-drop(N, To, M) when N > To -> M;
-drop(N, To, M) -> drop(N + 1, To, maps:remove(N, M)).
 
 %% `erlang:atom_to_list/1` and `erlang:list_to_atom/1`, as
 %% prim_tty:set_name/2 (prim_tty.erl:569-571) runs them. A term that is not

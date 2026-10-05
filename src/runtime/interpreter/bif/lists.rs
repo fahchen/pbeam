@@ -34,36 +34,3 @@ pub(super) fn keyfind(key: &Term, position: &Term, list: &Term) -> BifResult {
     );
     Value(found.cloned().unwrap_or_else(|| Term::static_atom("false")))
 }
-
-/// Run `lists:reverse/2`: return the elements of `list` in reverse order,
-/// followed by `tail`, as ERTS `lists_reverse_2` (`erl_bif_lists.c:1246-1263`)
-/// does. An empty `list` returns `tail` itself, which can be any term. A
-/// `list` that is not a list raises `badarg`. A non-empty `list` with a
-/// `tail` that is not a list gives a runtime error, because PBeam has no
-/// improper lists. ERTS returns the improper list `[a | x]` for
-/// `lists:reverse([a], x)`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let x = Term::static_atom("x");
-/// assert!(matches!(reverse(&Term::List(vec![]), &x)?, BifResult::Value(term) if term == x));
-/// let list = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
-/// let reversed = reverse(&list, &Term::List(vec![Term::Integer(3)]))?;
-/// assert!(matches!(reversed, BifResult::Value(Term::List(elements)) if elements == [2, 1, 3].map(Term::Integer)));
-/// assert!(matches!(reverse(&x, &Term::List(vec![]))?, BifResult::Raise { .. }));
-/// assert!(reverse(&list, &x).is_err());
-/// ```
-pub(super) fn reverse(list: &Term, tail: &Term) -> Result<BifResult, BeamError> {
-    match (list, tail) {
-        (Term::List(list), tail) if list.is_empty() => Ok(Value(tail.clone())),
-        (Term::List(list), Term::List(tail)) => Ok(Value(Term::List(
-            list.iter().rev().chain(tail).cloned().collect(),
-        ))),
-        // ponytail: an improper list result needs an improper list term; see "BIF arguments" in docs/erts-differences.md.
-        (Term::List(_), tail) => Err(error(format!(
-            "unsupported lists:reverse/2 tail {tail:?}: not a list"
-        ))),
-        _ => Ok(BifResult::badarg()),
-    }
-}
