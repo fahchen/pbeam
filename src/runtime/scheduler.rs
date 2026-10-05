@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use super::{
     persistent_term::PersistentTerms,
@@ -29,11 +29,11 @@ pub(super) struct Scheduler {
     next_reference: u64,
     /// Return value or exit reason of the root process after it exits.
     root_result: Option<Result<Term, Term>>,
-    /// Registered names, as the keys of the ERTS `process_reg` table. An
-    /// atom name is unique in one atom table, so its text identifies it. The
-    /// process of a name is its `registered_name` field; no caller looks up
-    /// a process by name yet.
-    names: HashSet<String>,
+    /// Registered names and their processes, as the ERTS `process_reg`
+    /// table. An atom name is unique in one atom table, so its text
+    /// identifies it. The process also keeps its name in its
+    /// `registered_name` field.
+    names: HashMap<String, ProcessId>,
     /// Persistent terms of the node. All processes of the run share them.
     pub(super) persistent_terms: PersistentTerms,
 }
@@ -92,6 +92,21 @@ impl Scheduler {
         self.current_process
             .and_then(|id| self.processes.get_mut(&id))
             .expect("the scheduler has a current process")
+    }
+
+    /// Return the live process `id`, also the current process. Return `None`
+    /// when no live process has the pid, as `erts_try_lock_sig_free_proc`
+    /// (`erl_bif_info.c:1384-1386`) finds no process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.schedule_next();
+    /// assert_eq!(scheduler.process(ProcessId(0)).map(|process| process.id), Some(ProcessId(0)));
+    /// assert!(scheduler.process(ProcessId(99)).is_none());
+    /// ```
+    pub(super) fn process(&self, id: ProcessId) -> Option<&ProcessState> {
+        self.processes.get(&id)
     }
 
     /// Stop the current process until a message arrives. A delivery adds it
@@ -319,14 +334,31 @@ impl Scheduler {
             Some(process)
                 if name.name() != "undefined"
                     && process.registered_name.is_none()
-                    && !self.names.contains(name.name()) =>
+                    && !self.names.contains_key(name.name()) =>
             {
                 process.registered_name = Some(name.clone());
-                self.names.insert(name.name().to_owned());
+                self.names.insert(name.name().to_owned(), *id);
                 true
             }
             _ => false,
         }
+    }
+
+    /// Return the process that has the registered name `name`, as ERTS
+    /// `erts_whereis_name_to_id` (`register.c:276-300`) finds it in the
+    /// `process_reg` table. Return `None` when no live process has the name.
+    /// PBeam has no ports, so a name never gives a port.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
+    /// assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
+    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
+    /// ```
+    pub(super) fn whereis(&self, name: &str) -> Option<ProcessId> {
+        self.names.get(name).copied()
     }
 
     /// Remove the current process after it exits. Free its registered name
@@ -560,15 +592,17 @@ mod tests {
         scheduler.schedule_next();
         let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
         let name = atom("pbeam_probe_reg");
+        assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
         assert!(scheduler.register(&name, &Term::Pid(child)));
         assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
+        assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(child));
         scheduler.park_current();
 
         scheduler.schedule_next();
         scheduler.finish_current(atom("normal"), None).unwrap();
-        assert!(scheduler.names.is_empty());
+        assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
         assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
-        assert!(scheduler.names.contains("pbeam_probe_reg"));
+        assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
         assert_eq!(
             scheduler.processes[&ProcessId(0)]
                 .registered_name

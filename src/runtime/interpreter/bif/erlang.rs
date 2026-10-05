@@ -455,11 +455,14 @@ fn is_process_info_item(item: &Term) -> bool {
 
 /// Run `erlang:process_info/2`. As `process_info_bif` (`erl_bif_info.c`)
 /// does, first raise `badarg` when `item` is not an item or a proper list of
-/// items, then raise `badarg` when `process` is not a pid. For the calling
-/// process, return `{current_stacktrace, []}`, because PBeam records no
-/// stack frames. Return `{registered_name, Name}`, or `[]` when the process
-/// has no name, as `process_info_aux` does. Another process, also one that
-/// is not alive, and any other item give a runtime error.
+/// items, then raise `badarg` when `process` is not a pid. Return
+/// `undefined` for each valid item when the process is not alive
+/// (`erl_bif_info.c:1384-1386`). For a live process, return
+/// `{registered_name, Name}`, or `[]` when the process has no name, as
+/// `process_info_aux` does. For the calling process, return
+/// `{current_stacktrace, []}`, because PBeam records no stack frames. The
+/// `current_stacktrace` of another process, a list of items, and any other
+/// item give a runtime error.
 ///
 /// # Examples
 ///
@@ -470,6 +473,8 @@ fn is_process_info_item(item: &Term) -> bool {
 /// assert!(matches!(info, BifResult::Value(Term::Tuple(elements)) if elements[1] == Term::List(vec![])));
 /// let name = process_info(&mut context, &process, &Term::static_atom("registered_name"))?;
 /// assert!(matches!(name, BifResult::Value(Term::List(elements)) if elements.is_empty()));
+/// let dead = process_info(&mut context, &Term::Pid(ProcessId(99)), &item)?;
+/// assert!(matches!(dead, BifResult::Value(Term::Atom(atom)) if atom.name() == "undefined"));
 /// let bogus = process_info(&mut context, &process, &Term::static_atom("bogus_item"))?;
 /// assert!(matches!(bogus, BifResult::Raise { .. }));
 /// assert!(process_info(&mut context, &process, &Term::static_atom("status")).is_err());
@@ -483,28 +488,29 @@ pub(super) fn process_info(
         Term::List(items) => items.iter().all(is_process_info_item),
         item => is_process_info_item(item),
     };
-    if !valid || !matches!(process, Term::Pid(_)) {
+    let (true, Term::Pid(id)) = (valid, process) else {
         return Ok(BifResult::badarg());
-    }
-    let current = context.scheduler.current_process_mut();
-    let info = match (process, item) {
-        (Term::Pid(id), Term::Atom(name)) if *id == current.id => {
-            match (name.name(), &current.registered_name) {
-                // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
-                ("current_stacktrace", _) => {
-                    Some(Term::Tuple(vec![item.clone(), Term::List(Vec::new())]))
-                }
-                ("registered_name", Some(registered)) => Some(Term::Tuple(vec![
-                    item.clone(),
-                    Term::Atom(registered.clone()),
-                ])),
-                ("registered_name", None) => Some(Term::List(Vec::new())),
-                _ => None,
+    };
+    let current = context.scheduler.current_process_mut().id;
+    let Some(target) = context.scheduler.process(*id) else {
+        return Ok(Value(Term::static_atom("undefined")));
+    };
+    let info = match item {
+        Term::Atom(name) => match (name.name(), &target.registered_name) {
+            // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
+            ("current_stacktrace", _) if *id == current => {
+                Some(Term::Tuple(vec![item.clone(), Term::List(Vec::new())]))
             }
-        }
+            ("registered_name", Some(registered)) => Some(Term::Tuple(vec![
+                item.clone(),
+                Term::Atom(registered.clone()),
+            ])),
+            ("registered_name", None) => Some(Term::List(Vec::new())),
+            _ => None,
+        },
         _ => None,
     };
-    // ponytail: other processes and items need process lookup and more state; see "BIF arguments" in docs/erts-differences.md.
+    // ponytail: lists of items, other items, and the frames of another process need more state; see "BIF arguments" in docs/erts-differences.md.
     info.map(Value).ok_or_else(|| {
         error(format!(
             "unsupported erlang:process_info/2 arguments {process:?}, {item:?}"

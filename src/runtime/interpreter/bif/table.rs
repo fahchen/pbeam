@@ -335,7 +335,7 @@ bifs! {
     erlang:universaltime_to_posixtime/1 => unsupported,
     erlang:unlink/1 => unsupported,
     erlang:unregister/1 => unsupported,
-    erlang:whereis/1 => unsupported,
+    erlang:whereis/1 => |cx, [name]| Ok(match name { Term::Atom(name) => Value(cx.scheduler.whereis(name.name()).map_or(Term::static_atom("undefined"), Term::Pid)), _ => BifResult::badarg() }),
     erlang:xor/2 => unsupported,
     error_logger:warning_map/0 => unsupported,
     erts_debug:breakpoint/2 => unsupported,
