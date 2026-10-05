@@ -3,6 +3,8 @@
 
 use std::{ffi::c_int, io::IoSlice};
 
+use super::errno::errno;
+
 /// Write all bytes of `buffers` to `fd` with `writev`, as `tty_write_nif`
 /// (`prim_tty_nif.c:376-423`) writes one group of an iovec. The function
 /// calls `writev` again while it fails with `EINTR` or `EAGAIN`. After a
@@ -32,10 +34,7 @@ pub(crate) fn write_all(fd: c_int, mut buffers: &mut [IoSlice<'_>]) -> Result<()
         // same way (prim_tty_nif.c:376-380).
         let written = unsafe { libc::writev(fd, buffers.as_ptr().cast(), count) };
         let Ok(written) = usize::try_from(written) else {
-            match std::io::Error::last_os_error()
-                .raw_os_error()
-                .unwrap_or_default()
-            {
+            match errno() {
                 libc::EINTR | libc::EAGAIN => continue,
                 errno => return Err(errno),
             }
