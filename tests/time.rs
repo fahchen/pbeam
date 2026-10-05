@@ -1,8 +1,11 @@
+#[path = "common/boot.rs"]
+mod boot;
 mod common;
 
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 
-use common::pinned_beam;
+use boot::BOOT_MODULES;
+use common::{pinned_beam, pinned_beam_path};
 use pbeam_runtime::{BeamProgram, Term};
 
 const TIME_PROBE: &[u8] = include_bytes!("../fixtures/time/time_probe.beam");
@@ -182,4 +185,102 @@ fn gives_the_date_of_a_posix_time_as_pinned_erts() {
 {{292277026596,12,4},{15,30,7}},{{-292277022657,1,26},{8,29,52}},\
 {error,badarg},{error,badarg},{error,badarg}]\n"
     );
+}
+
+#[test]
+fn raises_badarg_for_a_date_that_is_not_valid_as_pinned_erts() {
+    // `erlang:universaltime_to_localtime/1` raises `badarg` for a term that
+    // is not `{{Y,M,D},{H,Mi,S}}` with small integers (`time_to_parts`,
+    // `bif.c:3902-3931`) and for a value out of range (`univ_to_local`,
+    // `erl_time_sup.c:1808-1818`).
+    let program = program();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("time_probe", "local_badarg", &[]).unwrap(),
+        Term::List(vec![Term::Tuple(vec![atom("error"), atom("badarg")]); 23])
+    );
+    assert_eq!(
+        reference("local_badarg"),
+        format!("[{}]\n", ["{error,badarg}"; 23].join(",")).into_bytes()
+    );
+}
+
+/// Run `time_probe:Function()` with the time zone `tz` in `erl -noshell`
+/// and in the `pbeam` binary, as child processes. Only each child gets
+/// `TZ`, so the environment of the test process does not change.
+fn run_with_time_zone(function: &str, tz: &str) -> [(&'static str, Output); 2] {
+    let beams = BOOT_MODULES.map(pinned_beam_path);
+    let mut erts = Command::new("erl");
+    erts.args([
+        "-noshell",
+        "-pa",
+        "fixtures/time",
+        "-eval",
+        &format!("time_probe:{function}(), halt()."),
+    ]);
+    let mut pbeam = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    pbeam
+        .args(["time_probe", function, "fixtures/time/time_probe.beam"])
+        .args(&beams);
+    [("ERTS", erts), ("PBeam", pbeam)].map(|(name, mut command)| {
+        let output = command
+            .env("TZ", tz)
+            .env("TERM", "dumb")
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        (name, output)
+    })
+}
+
+/// Assert that a child of [`run_with_time_zone`] printed `stdout`, wrote no
+/// error output, and exited with status 0.
+fn assert_printed(name: &str, output: &Output, stdout: &[u8]) {
+    assert_eq!(
+        (
+            output.stdout.as_slice(),
+            output.stderr.as_slice(),
+            output.status.code()
+        ),
+        (stdout, &b""[..], Some(0)),
+        "{name}"
+    );
+}
+
+#[test]
+fn gives_the_local_time_of_the_host_time_zone_as_pinned_erts() {
+    // `erlang:universaltime_to_localtime/1` calls `tzset` and `localtime_r`
+    // (`sys/unix/erl_unix_sys.h:331-343`), so it reads `TZ`. The POSIX rule
+    // does not depend on the tzdata of the host. `local_check/0` prints
+    // `ok` when the 11 dates, which include both changes of daylight saving
+    // time in 2026, give the pinned ERTS results of this rule. UTC gives
+    // other results.
+    for (tz, stdout) in [
+        ("EST5EDT,M3.2.0,M11.1.0", &b"ok\n"[..]),
+        ("UTC", &b"mismatch\n"[..]),
+    ] {
+        for (name, output) in run_with_time_zone("local_check", tz) {
+            assert_printed(&format!("{name} {tz}"), &output, stdout);
+        }
+    }
+}
+
+#[test]
+fn adds_the_leap_seconds_of_the_time_zone_as_the_host_erts() {
+    // `fixtures/time/leap_utc` is UTC with the leap seconds of the tz
+    // database (`fixtures/time/leap_utc.zone`). ERTS on macOS calls
+    // `posix2time` before `localtime_r` (`HAVE_POSIX2TIME`,
+    // `erl_time_sup.c:1822-1837`), so the leap seconds cancel and the local
+    // time is the UTC time. A glibc host has no `posix2time`, so the local
+    // time is 27 leap seconds earlier.
+    let tz = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/time/leap_utc");
+    let stdout: &[u8] = if cfg!(target_os = "macos") {
+        b"posix2time\n"
+    } else {
+        b"localtime_r\n"
+    };
+    for (name, output) in run_with_time_zone("leap_check", tz) {
+        assert_printed(name, &output, stdout);
+    }
 }

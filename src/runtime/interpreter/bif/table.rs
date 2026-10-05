@@ -332,7 +332,7 @@ bifs! {
     erlang:unique_integer/0 => unsupported,
     erlang:unique_integer/1 => unsupported,
     erlang:universaltime/0 => unsupported,
-    erlang:universaltime_to_localtime/1 => unsupported,
+    erlang:universaltime_to_localtime/1 => |_, [date]| Ok(erlang::universaltime_to_localtime(date)),
     erlang:universaltime_to_posixtime/1 => unsupported,
     erlang:unlink/1 => unsupported,
     erlang:unregister/1 => unsupported,

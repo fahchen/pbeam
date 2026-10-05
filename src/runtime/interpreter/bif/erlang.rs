@@ -697,11 +697,47 @@ pub(super) fn posixtime_to_universaltime(time: &Term) -> BifResult {
     let Term::Integer(time) = time else {
         return BifResult::badarg();
     };
-    let (year, month, day, hour, minute, second) = time::seconds_to_univ(*time);
-    Value(Term::Tuple(vec![
+    Value(date_time(time::seconds_to_univ(*time)))
+}
+
+/// Run `erlang:universaltime_to_localtime/1`: return the local date and time
+/// of a UTC date and time `{{Year, Month, Day}, {Hour, Minute, Second}}` in
+/// the host time zone, as ERTS `universaltime_to_localtime_1`
+/// (`bif.c:3975-3995`) does. A term that [`time::time_to_parts`] does not
+/// read, a value that [`time::univ_to_clock`] does not accept, and a
+/// failed `localtime_r` ([`host::clock::local_time`]) raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let triple = |a, b, c| Term::Tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+/// // TZ=EST5EDT,M3.2.0,M11.1.0: {{2026,1,15},{7,0,0}}
+/// let date = Term::Tuple(vec![triple(2026, 1, 15), triple(12, 0, 0)]);
+/// assert!(matches!(universaltime_to_localtime(&date), BifResult::Value(_)));
+/// let date = Term::Tuple(vec![triple(1901, 12, 31), triple(23, 59, 59)]);
+/// assert!(matches!(universaltime_to_localtime(&date), BifResult::Raise { .. }));
+/// ```
+pub(super) fn universaltime_to_localtime(date: &Term) -> BifResult {
+    time::time_to_parts(date)
+        .and_then(time::univ_to_clock)
+        .and_then(host::clock::local_time)
+        .map_or_else(BifResult::badarg, |local| Value(date_time(local)))
+}
+
+/// Return the term `{{Year, Month, Day}, {Hour, Minute, Second}}` of a date
+/// and time.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {{1970,1,2},{0,0,0}}
+/// let term = date_time((1970, 1, 2, 0, 0, 0));
+/// ```
+fn date_time((year, month, day, hour, minute, second): time::DateTime) -> Term {
+    Term::Tuple(vec![
         Term::Tuple([year, month, day].map(Term::Integer).into()),
         Term::Tuple([hour, minute, second].map(Term::Integer).into()),
-    ]))
+    ])
 }
 
 /// Run `erlang:element/2`: return the element at the 1-based `index` of a

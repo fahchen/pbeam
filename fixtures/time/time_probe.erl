@@ -1,9 +1,19 @@
 -module(time_probe).
--export([monotonic/0, system/0, units/0, convert/0, perf_counter/0, posix/0]).
+-export([monotonic/0, system/0, units/0, convert/0, perf_counter/0, posix/0,
+         local_badarg/0, local/0, local_check/0, leap_check/0]).
 
 %% The Erlang monotonic time at the emulator start in `native`
 %% (`erlang:system_info(start_time)` on the pinned ERTS).
 -define(START, -576460752000000000).
+
+%% The results of local/0 on the pinned ERTS with
+%% `TZ=EST5EDT,M3.2.0,M11.1.0`: UTC-5, and UTC-4 from the second Sunday in
+%% March 02:00 to the first Sunday in November 02:00.
+-define(LOCAL,
+        [{{2026,1,15},{7,0,0}}, {{2026,7,15},{8,0,0}}, {{1969,12,31},{19,0,0}},
+         {{2000,2,29},{18,59,59}}, {{2024,2,28},{19,0,0}}, {{1901,12,31},{19,0,0}},
+         {{2147483646,12,31},{18,59,59}}, {{2026,3,8},{1,59,59}},
+         {{2026,3,8},{3,0,0}}, {{2026,11,1},{1,59,59}}, {{2026,11,1},{1,0,0}}]).
 
 %% Check the relations of `erlang:monotonic_time/1`: the `native` value is
 %% at most 10 s after the start, each unit gives the floor of a `native`
@@ -71,6 +81,51 @@ posix() ->
               id(576460752303423488), id(-576460752303423489),
               id(9223372036854775807), id(-9223372036854775808),
               id(foo), id([1]), id({})]].
+
+%% Each date that `erlang:universaltime_to_localtime/1` does not accept: a
+%% value out of range, a term that is not `{{Y,M,D},{H,Mi,S}}`, and an
+%% element that is not a small integer.
+local_badarg() ->
+    [catch_error(fun() -> erlang:universaltime_to_localtime(T) end)
+     || T <- [{{1901,12,31},{23,59,59}}, {{2147483647,1,1},{0,0,0}},
+              {{2100,2,29},{0,0,0}}, {{2026,2,29},{0,0,0}}, {{2026,13,1},{0,0,0}},
+              {{2026,0,1},{0,0,0}}, {{2026,4,31},{0,0,0}}, {{2026,1,0},{0,0,0}},
+              {{2026,1,1},{24,0,0}}, {{2026,1,1},{0,60,0}}, {{2026,1,1},{0,0,60}},
+              {{2026,1,1},{-1,0,0}}, {{2026,1,1},{0,0,0},x}, {{2026,1,1}},
+              {2026,1,1}, foo, {{2026,1},{0,0,0}}, {{2026,1,1},{0,0}},
+              {{a,1,1},{0,0,0}}, {{2026,1,1},{0,0,a}},
+              {{id(576460752303423488),1,1},{0,0,0}},
+              {{2026,1,1},{0,0,id(-576460752303423489)}},
+              {[2026,1,1],{0,0,0}}]].
+
+%% The local time of each UTC date in the host time zone: winter, summer,
+%% the POSIX epoch, leap days, the first and the last year, and the two
+%% changes of daylight saving time in 2026.
+local() ->
+    [erlang:universaltime_to_localtime(T)
+     || T <- [{{2026,1,15},{12,0,0}}, {{2026,7,15},{12,0,0}}, {{1970,1,1},{0,0,0}},
+              {{2000,2,29},{23,59,59}}, {{2024,2,29},{0,0,0}}, {{1902,1,1},{0,0,0}},
+              {{2147483646,12,31},{23,59,59}}, {{2026,3,8},{6,59,59}},
+              {{2026,3,8},{7,0,0}}, {{2026,11,1},{5,59,59}}, {{2026,11,1},{6,0,0}}]].
+
+%% Print `ok` when local/0 gives the ERTS results of
+%% `TZ=EST5EDT,M3.2.0,M11.1.0`, and `mismatch` for another time zone.
+local_check() ->
+    io:put_chars(case local() =:= ?LOCAL of
+                     true -> <<"ok\n">>;
+                     false -> <<"mismatch\n">>
+                 end).
+
+%% Print how the local time of a time zone with leap seconds is found.
+%% ERTS on macOS adds the leap seconds with `posix2time` before
+%% `localtime_r` subtracts them (erl_time_sup.c:1822-1837), so the local
+%% time is the UTC time. ERTS on a glibc host has no `posix2time`, so the
+%% local time is 27 leap seconds earlier.
+leap_check() ->
+    io:put_chars(case erlang:universaltime_to_localtime({{2026,1,15},{12,0,0}}) of
+                     {{2026,1,15},{12,0,0}} -> <<"posix2time\n">>;
+                     {{2026,1,15},{11,59,33}} -> <<"localtime_r\n">>
+                 end).
 
 catch_error(F) -> try F() catch error:R -> {error, R} end.
 

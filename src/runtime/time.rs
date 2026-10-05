@@ -1,6 +1,6 @@
 //! The time support of ERTS (`erl_time_sup.c`): the time units, the unit
-//! conversion of `erlang:monotonic_time/1` and `os:system_time/1`, and the
-//! date of a POSIX time.
+//! conversion of `erlang:monotonic_time/1` and `os:system_time/1`, the
+//! date of a POSIX time, and the POSIX time of a UTC date.
 
 use crate::term::Term;
 
@@ -82,6 +82,11 @@ pub(super) fn time_unit_conversion(value: i64, offset_multiplier: i64, unit: &Te
     TimeValue::Value(value / divisor + offset_multiplier * (MONOTONIC_OFFSET_NATIVE / divisor))
 }
 
+/// A date and time `(year, month, day, hour, minute, second)`, as the
+/// tuple `{{Year, Month, Day}, {Hour, Minute, Second}}` of the calendar
+/// BIFs.
+pub(crate) type DateTime = (i64, i64, i64, i64, i64, i64);
+
 /// The seconds in a day, `SECONDS_PER_DAY` (`erl_time_sup.c:1664-1666`).
 const SECONDS_PER_DAY: i64 = 24 * SECONDS_PER_HOUR;
 
@@ -108,7 +113,7 @@ const SECONDS_PER_MINUTE: i64 = 60;
 /// assert_eq!(seconds_to_univ(951_782_400), (2000, 2, 29, 0, 0, 0));
 /// assert_eq!(seconds_to_univ(-62_167_219_201), (-1, 12, 30, 23, 59, 59));
 /// ```
-pub(super) fn seconds_to_univ(time: i64) -> (i64, i64, i64, i64, i64, i64) {
+pub(super) fn seconds_to_univ(time: i64) -> DateTime {
     let mut days = time / SECONDS_PER_DAY;
     let mut secs = time % SECONDS_PER_DAY;
     if secs < 0 {
@@ -139,6 +144,129 @@ pub(super) fn seconds_to_univ(time: i64) -> (i64, i64, i64, i64, i64, i64) {
         minute,
         second,
     )
+}
+
+/// The first year that `univ_to_local` accepts, `BASEYEAR`
+/// (`erl_time_sup.c:1598-1600`).
+const BASEYEAR: i64 = 1902;
+
+/// The last year that `univ_to_local` accepts, `INT_MAX - 1`
+/// (`erl_time_sup.c:1808`).
+const LAST_YEAR: i64 = i32::MAX as i64 - 1;
+
+/// The days in each month of a year that is not a leap year, `mdays`
+/// (`erl_time_sup.c:1590-1591`). Index 0 is not a month.
+const MDAYS: [i64; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/// Return the date and time of a term `{{Year, Month, Day}, {Hour, Minute,
+/// Second}}`, as ERTS `time_to_parts` (`bif.c:3903-3931`) does. Return
+/// `None` for another term, and for an element that is not a small integer
+/// (-(2^59) to 2^59 - 1). The values are not checked.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let triple = |a, b, c| Term::Tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+/// let date = Term::Tuple(vec![triple(2026, 2, 30), triple(24, 0, 0)]);
+/// assert_eq!(time_to_parts(&date), Some((2026, 2, 30, 24, 0, 0)));
+/// let date = Term::Tuple(vec![triple(1 << 59, 1, 1), triple(0, 0, 0)]);
+/// assert_eq!(time_to_parts(&date), None);
+/// assert_eq!(time_to_parts(&triple(2026, 1, 1)), None);
+/// ```
+pub(super) fn time_to_parts(date: &Term) -> Option<DateTime> {
+    let Term::Tuple(parts) = date else {
+        return None;
+    };
+    let [Term::Tuple(date), Term::Tuple(time)] = parts.as_slice() else {
+        return None;
+    };
+    let ([year, month, day], [hour, minute, second]) = (small_triple(date)?, small_triple(time)?);
+    Some((year, month, day, hour, minute, second))
+}
+
+/// Return the three small integers of a tuple with three elements, or
+/// `None` (`bif.c:3918-3929`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(small_triple(&[Term::Integer(1), Term::Integer(2), Term::Integer(3)]), Some([1, 2, 3]));
+/// assert_eq!(small_triple(&[Term::Integer(1), Term::Integer(2)]), None);
+/// ```
+fn small_triple(elements: &[Term]) -> Option<[i64; 3]> {
+    let [first, second, third] = elements else {
+        return None;
+    };
+    Some([
+        first.small_integer()?,
+        second.small_integer()?,
+        third.small_integer()?,
+    ])
+}
+
+/// Return the POSIX time of a UTC date and time, as the first part of ERTS
+/// `univ_to_local` (`erl_time_sup.c:1802-1821`) does before it calls
+/// `localtime_r`. Return `None` when a value is out of range: the year
+/// must be 1902 to 2147483646, the month 1 to 12, the day in the month
+/// (29 days in February of a leap year), the hour 0 to 23, and the minute
+/// and the second 0 to 59.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(univ_to_clock((1970, 1, 1, 0, 0, 0)), Some(0));
+/// assert_eq!(univ_to_clock((2000, 2, 29, 23, 59, 59)), Some(951_868_799));
+/// assert_eq!(univ_to_clock((1901, 12, 31, 23, 59, 59)), None);
+/// assert_eq!(univ_to_clock((2100, 2, 29, 0, 0, 0)), None);
+/// ```
+pub(super) fn univ_to_clock((year, month, day, hour, minute, second): DateTime) -> Option<i64> {
+    let valid = (BASEYEAR..=LAST_YEAR).contains(&year)
+        && (1..=12).contains(&month)
+        && (1..=MDAYS[month as usize] + i64::from(month == 2 && is_leap_year(year))).contains(&day)
+        && (0..=23).contains(&hour)
+        && (0..=59).contains(&minute)
+        && (0..=59).contains(&second);
+    valid.then(|| second + 60 * (minute + 60 * (hour + 24 * gregday(year, month, day))))
+}
+
+/// Return the days from 1970-01-01 to a date with a year from 1600, as
+/// ERTS `gregday` (`erl_time_sup.c:1644-1662`) does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(gregday(1970, 1, 1), 0);
+/// assert_eq!(gregday(2000, 3, 1), 11_017);
+/// assert_eq!(gregday(1902, 1, 1), -24_837);
+/// ```
+fn gregday(year: i64, month: i64, day: i64) -> i64 {
+    let mut ndays = 0;
+    // The days in the years from 1600 to the year before `year`.
+    let gyear = year - 1600;
+    if gyear > 0 {
+        let pyear = gyear - 1;
+        ndays = pyear / 4 - pyear / 100 + pyear / 400 + pyear * 365 + 366;
+    }
+    ndays += MDAYS[1..month as usize].iter().sum::<i64>();
+    if is_leap_year(year) && month > 2 {
+        ndays += 1;
+    }
+    ndays += day - 1;
+    // 135140 is the day of 1970-01-01 counted from 1600-01-01.
+    ndays - 135_140
+}
+
+/// Return whether `year` is a leap year in the Gregorian calendar, as the
+/// ERTS macro `is_leap_year` (`erl_time_sup.c:1594-1596`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_leap_year(2000));
+/// assert!(!is_leap_year(2100));
+/// ```
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 #[cfg(test)]
@@ -255,6 +383,79 @@ mod tests {
             (i64::MIN, (-292_277_022_657, 1, 26, 8, 29, 52)),
         ] {
             assert_eq!(seconds_to_univ(time), date, "{time}");
+        }
+    }
+
+    #[test]
+    fn reads_only_a_date_tuple_of_small_integers() {
+        let triple =
+            |a, b, c| Term::Tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+        let date = |date, time| Term::Tuple(vec![date, time]);
+        // The values are not checked here.
+        assert_eq!(
+            time_to_parts(&date(
+                triple(-(1 << 59), 13, 0),
+                triple(24, 60, (1 << 59) - 1)
+            )),
+            Some((-(1 << 59), 13, 0, 24, 60, (1 << 59) - 1))
+        );
+        for term in [
+            triple(2026, 1, 1),
+            Term::Tuple(vec![triple(2026, 1, 1)]),
+            Term::Tuple(vec![triple(2026, 1, 1), triple(0, 0, 0), triple(0, 0, 0)]),
+            date(Term::List(vec![]), triple(0, 0, 0)),
+            date(triple(2026, 1, 1), Term::Integer(0)),
+            date(
+                Term::Tuple(vec![Term::Integer(2026), Term::Integer(1)]),
+                triple(0, 0, 0),
+            ),
+            date(triple(2026, 1, 1), Term::Tuple(vec![Term::Integer(0); 4])),
+            date(triple(1 << 59, 1, 1), triple(0, 0, 0)),
+            date(triple(2026, 1, 1), triple(0, 0, -(1 << 59) - 1)),
+            date(
+                triple(2026, 1, 1),
+                Term::Tuple(vec![
+                    Term::Integer(0),
+                    Term::Integer(0),
+                    Term::static_atom("ok"),
+                ]),
+            ),
+            Term::static_atom("ok"),
+        ] {
+            assert_eq!(time_to_parts(&term), None, "{term:?}");
+        }
+    }
+
+    #[test]
+    fn gives_the_posix_time_of_a_date_in_range() {
+        for (date, clock) in [
+            ((1970, 1, 1, 0, 0, 0), 0),
+            ((1969, 12, 31, 23, 59, 59), -1),
+            ((1902, 1, 1, 0, 0, 0), -2_145_916_800),
+            ((2000, 2, 29, 23, 59, 59), 951_868_799),
+            ((2024, 3, 1, 0, 0, 0), 1_709_251_200),
+            ((2100, 3, 1, 0, 0, 0), 4_107_542_400),
+            ((2_147_483_646, 12, 31, 23, 59, 59), 67_767_976_201_996_799),
+        ] {
+            assert_eq!(univ_to_clock(date), Some(clock), "{date:?}");
+        }
+        for date in [
+            (1901, 12, 31, 23, 59, 59),
+            (2_147_483_647, 1, 1, 0, 0, 0),
+            (2100, 2, 29, 0, 0, 0),
+            (2026, 2, 29, 0, 0, 0),
+            (2026, 0, 1, 0, 0, 0),
+            (2026, 13, 1, 0, 0, 0),
+            (2026, 4, 31, 0, 0, 0),
+            (2026, 1, 0, 0, 0, 0),
+            (2026, 1, 1, -1, 0, 0),
+            (2026, 1, 1, 24, 0, 0),
+            (2026, 1, 1, 0, -1, 0),
+            (2026, 1, 1, 0, 60, 0),
+            (2026, 1, 1, 0, 0, -1),
+            (2026, 1, 1, 0, 0, 60),
+        ] {
+            assert_eq!(univ_to_clock(date), None, "{date:?}");
         }
     }
 }
