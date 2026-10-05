@@ -232,12 +232,12 @@ pub(crate) enum Instruction {
     /// `[0x0B, 0x05, 0x08, 0x21, 0x21, 0x03, 0x03]`, which calls import 33
     /// (`erlang:element/2`) with the integer 2 and `x0` and writes `x0`.
     /// `arith_probe:up/1` in `fixtures/arith/arith_probe.beam` has
-    /// `[0x7D, 0x0D, 0x2D, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03]`, which
-    /// calls import 0 (`erlang:'+'/2`) with fail label 45, live count 1,
+    /// `[0x7D, 0x0D, 0x22, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03]`, which
+    /// calls import 0 (`erlang:'+'/2`) with fail label 34, live count 1,
     /// `x0` typed, and the integer 1, and writes `x0`. `arith_probe:neg/1`
-    /// has `[0x7C, 0x0D, 0x2A, 0x10, 0x30, 0x57, 0x03, 0x10, 0x03]`, which
-    /// calls import 3 (`erlang:'-'/1`) with fail label 42, live count 1, and
-    /// `x0` typed, and writes `x0`.
+    /// has `[0x7C, 0x0D, 0x1F, 0x10, 0x30, 0x03, 0x03]`, which calls import 3
+    /// (`erlang:'-'/1`) with fail label 31, live count 1, and `x0`, and
+    /// writes `x0`.
     ///
     /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`, and
     /// `node(Pid) =:= node()` in `io:io_request/2` compiles to
@@ -250,13 +250,13 @@ pub(crate) enum Instruction {
     /// compiles to `{bif,tuple_size,{f,22},[{x,0}],{x,1}}`, which is
     /// `[0x0A, 0x0D, 0x16, 0x80, 0x03, 0x13]` with import 8. The guard
     /// `when X + 1 >= 1` of `arith_probe:up/1` compiles to
-    /// `{gc_bif,'+',{f,45},1,[{tr,{x,0},...},{integer,1}],{x,0}}`, and
+    /// `{gc_bif,'+',{f,34},1,[{tr,{x,0},...},{integer,1}],{x,0}}`, and
     /// `id(-9223372036854775808) - id(1)` in `minus_overflow/0` compiles to
     /// `{gc_bif,'-',{f,0},1,[{tr,{y,0},...},{tr,{x,0},...}],{x,0}}`. The
     /// guard `when -X > 0` of `arith_probe:neg/1` compiles to
-    /// `{gc_bif,'-',{f,42},1,[{tr,{x,0},...}],{x,0}}`, as `-F` in
-    /// `io_lib_format:field_width/3` (io_lib_format.erl:260) compiles to
-    /// `{gc_bif,'-',{f,0},3,[{tr,{x,0},...}],{x,0}}`.
+    /// `{gc_bif,'-',{f,31},1,[{x,0}],{x,0}}`, and `length(Args)` in
+    /// `proc_lib:trans_init/3` (proc_lib.erl:944) compiles to
+    /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`.
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
@@ -2371,14 +2371,14 @@ mod tests {
     #[test]
     fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction() {
         const ARITH_PROBE: &[u8] = include_bytes!("../../../fixtures/arith/arith_probe.beam");
-        // up/1: gc_bif2 f45 live 1 '+'/2 {tr,x0,1} 1 x0
-        let up = [0x7D, 0x0D, 0x2D, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03];
+        // up/1: gc_bif2 f34 live 1 '+'/2 {tr,x0,1} 1 x0
+        let up = [0x7D, 0x0D, 0x22, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03];
         // minus_overflow/0: gc_bif2 f0 live 1 '-'/2 {tr,y0,1} {tr,x0,1} x0
         let minus = [
             0x7D, 0x05, 0x10, 0x10, 0x57, 0x04, 0x10, 0x57, 0x03, 0x10, 0x03,
         ];
-        // neg/1: gc_bif1 f42 live 1 '-'/1 {tr,x0,1} x0
-        let neg = [0x7C, 0x0D, 0x2A, 0x10, 0x30, 0x57, 0x03, 0x10, 0x03];
+        // neg/1: gc_bif1 f31 live 1 '-'/1 x0 x0
+        let neg = [0x7C, 0x0D, 0x1F, 0x10, 0x30, 0x03, 0x03];
         for bytes in [&up[..], &minus, &neg] {
             assert!(
                 ARITH_PROBE
@@ -2401,7 +2401,7 @@ mod tests {
             instructions.as_slice(),
             [
                 Instruction::Bif {
-                    fail_label: 45,
+                    fail_label: 34,
                     module: plus_module,
                     name: plus,
                     arguments: plus_arguments,
@@ -2415,7 +2415,7 @@ mod tests {
                     destination: Operand::X(0),
                 },
                 Instruction::Bif {
-                    fail_label: 42,
+                    fail_label: 31,
                     module: negate_module,
                     name: negate,
                     arguments: negate_arguments,

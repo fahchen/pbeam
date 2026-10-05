@@ -1,6 +1,6 @@
 -module(arith_probe).
 -export([arith/0, guards/0, externals/0, plus_overflow/0, minus_overflow/0,
-         big_operand/0, big_guard/0, negate/0, negate_overflow/0]).
+         big_operand/0, big_guard/0, neg/1]).
 
 %% `gc_bif` `erlang:'+'/2` and `erlang:'-'/2` with fail label 0, as
 %% io_lib_format:build_bin/2 (io_lib_format.erl:133),
@@ -50,23 +50,10 @@ big_guard() -> below_big(id(1)).
 below_big(X) when X < 16#10000000000000000 -> below;
 below_big(_) -> other.
 
-%% `gc_bif` `erlang:'-'/1` with fail label 0, as
-%% io_lib_format:field_width/3 (io_lib_format.erl:260) and
-%% prim_tty:move_cursor/3 (prim_tty.erl:989) run it, in a guard with a
-%% fail label, and as an external call. -(-2^59) is an ERTS bignum. A term
-%% that is not a number raises badarith.
-negate() ->
-    Negate = id(fun erlang:'-'/1),
-    [-id(5), -id(-3), -id(0), -id(-576460752303423488), -id(9223372036854775807),
-     try -id(a) catch error:R1 -> R1 end,
-     try -id(<<>>) catch error:R2 -> R2 end,
-     neg(id(-4)), neg(id(4)), neg(id(a)),
-     Negate(id(7)),
-     try apply(id(erlang), id('-'), [id(x)]) catch error:R3 -> R3 end].
-
-%% -(-2^63) is outside the 64-bit signed range: ERTS makes a bignum.
-negate_overflow() -> -(id(-9223372036854775807) - id(1)).
-
+%% `gc_bif1` (opcode 124) `erlang:'-'/1` in a guard with a fail label, as
+%% `gc_bif` `erlang:length/1` in proc_lib:trans_init/3 (proc_lib.erl:944)
+%% has one argument. It is the decode example of `gc_bif1`. PBeam has no
+%% implementation of `erlang:'-'/1` yet.
 neg(X) when -X > 0 -> {neg, -X};
 neg(_) -> other.
 
