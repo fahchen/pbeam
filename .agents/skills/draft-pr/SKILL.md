@@ -78,7 +78,7 @@ Commit bodies are the main source of rationale. Synthesise. Do not paste raw log
 
 ### 3. Verify
 
-Run `mise run check`, even for a documentation-only or skill-only change: it runs `rumdl check .`, which catches markdown lint failures that CI also runs. Record the exact commands and results, including `Application line coverage`. Run the acceptance check of the task (for example, the ERTS comparison test). If a check fails, stop and report. Do not open the PR with a failing check unless the user accepts it as a recorded gap.
+Run `mise run check-brief`, even for a documentation-only or skill-only change. It runs the `mise run check` gate, which includes `rumdl check .`, so it catches markdown lint failures that CI also runs. It prints `check: pass` and the `Application line coverage` line, or the failed step; the full log is in `target/check.log`. Record `mise run check` with its result and the `Application line coverage` line. Record the other exact commands and results. Run the acceptance check of the task (for example, the ERTS comparison test). If a check fails, stop and report. Do not open the PR with a failing check unless the user accepts it as a recorded gap.
 
 ### 4. Surface open questions
 
