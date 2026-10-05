@@ -1,5 +1,5 @@
 -module(logger_start_probe).
--export([reverse/0, remove/0, without/0, ets/0, ets_access/0]).
+-export([reverse/0, remove/0, without/0, ets/0, ets_access/0, find/0, from_list/0, is_key/0, hd/0]).
 
 %% `lists:reverse/2` (erl_bif_lists.c:1246-1263). logger_simple_h:replay_buffer/1
 %% (logger_simple_h.erl:150) calls it with the buffer and the drop message, and
@@ -94,6 +94,59 @@ ets_access() ->
     receive {Pid, Result} -> ok end,
     receive {'DOWN', Ref, process, Pid, normal} -> ok end,
     Result ++ [ets:whereis(lsp_gone), catch_error(fun() -> ets:lookup(lsp_gone, k) end)].
+
+%% `maps:find/2` (erl_map.c:225-243). supervisor:find_child/2
+%% (supervisor.erl:1871-1872) finds a child with it. A key that the map does
+%% not hold gives error, and a term that is not a map raises {badmap, Map}.
+find() ->
+    M = id(#{a => 1, [b] => 2, 3 => three}),
+    [maps:find(a, M), maps:find([b], M), maps:find(3, M), maps:find(c, M), maps:find(a, id(#{})),
+     maps:find(40, id(big(40))), maps:find(41, id(big(40))),
+     catch_error(fun() -> maps:find(a, id(foo)) end),
+     catch_error(fun() -> maps:find(a, id([])) end)].
+
+%% `maps:from_list/1` (erl_map.c:321-363). maps:with/2 (maps.erl:1165-1166)
+%% calls it, from logger_h_common:adding_handler/1
+%% (logger_h_common.erl:74-82) and logger_std_h (logger_std_h.erl:272). A
+%% later pair of a key wins, and 43 pairs with 3 keys give a flatmap. A term
+%% that is not a proper list, an element that is not a tuple, and a tuple
+%% with an arity other than 2 raise badarg.
+from_list() ->
+    [maps:from_list(id([])),
+     maps:from_list(id([{2, b}, {1, a}, {2, c}])),
+     maps:from_list(id([{type, standard_io}])),
+     maps:keys(maps:from_list(id([{N, N} || N <- lists:seq(1, 40)]))),
+     maps:from_list(id([{N - 1, N} || N <- lists:seq(1, 40), N < 4] ++ [{2, N} || N <- lists:seq(41, 80)])),
+     catch_error(fun() -> maps:from_list(id(foo)) end),
+     catch_error(fun() -> maps:from_list(id([a])) end),
+     catch_error(fun() -> maps:from_list(id([{a, 1, 2}])) end),
+     catch_error(fun() -> maps:from_list(id([{a, 1} | b])) end)].
+
+%% `erlang:is_map_key/2` (erl_map.c:1185-1196). logger:add_handler/3
+%% (logger.erl:832) runs it in a guard. A term that is not a map raises
+%% {badmap, Map}, and in a guard the bif instruction goes to its fail label.
+is_key() ->
+    M = id(#{a => 1}),
+    [is_map_key(a, M), is_map_key(b, M), is_map_key(40, id(big(40))), is_map_key(41, id(big(40))),
+     key_guard(a, M), key_guard(b, M), key_guard(a, id(foo)),
+     catch_error(fun() -> is_map_key(a, id(foo)) end),
+     catch_error(fun() -> erlang:is_map_key(a, id([])) end)].
+
+key_guard(K, M) when is_map_key(K, M) -> yes;
+key_guard(_, _) -> no.
+
+%% `erlang:hd/1` (bif.c:2918-2925). gen_server:decode_msg/6
+%% (gen_server.erl:2380) runs it in a guard. It gives the head of a proper
+%% or an improper list. Each other term raises badarg, and in a guard the bif
+%% instruction goes to its fail label.
+hd() ->
+    [hd(id([a, b])), hd(id([a | b])), erlang:hd(id([c])),
+     hd_guard(id([a])), hd_guard(id([])), hd_guard(id(foo)),
+     catch_error(fun() -> hd(id([])) end),
+     catch_error(fun() -> hd(id(foo)) end)].
+
+hd_guard(L) when hd(L) =:= a -> yes;
+hd_guard(_) -> no.
 
 big(N) -> big(N, #{}).
 

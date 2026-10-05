@@ -2475,6 +2475,30 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
+        // ERTS accepts a tuple key; a PBeam map does not hold one yet.
+        let pair = Term::Tuple(vec![Term::Tuple(vec![]), Term::Integer(0)]);
+        let from_list = make_program(
+            vec![
+                Instruction::Move(Operand::Value(Term::List(vec![pair])), Operand::X(0)),
+                Instruction::CallExternal {
+                    arity: 1,
+                    module: "maps".into(),
+                    name: "from_list".into(),
+                    tail: true,
+                    deallocate: 0,
+                },
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[]);
+        assert_eq!(
+            from_list.unwrap_err().to_string(),
+            "unsupported map key Tuple([])"
+        );
+    }
+
+    #[test]
     fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
         let keys = |argument: Term| {
             make_program(

@@ -28,8 +28,8 @@ fn reference(function: &str) -> Vec<u8> {
 }
 
 /// Load the probe with the pinned `erlang`, `lists`, and `maps`, so
-/// `erlang:spawn_monitor/1`, `lists:reverse/1`, and `maps:without/2` run
-/// their BEAM code.
+/// `erlang:spawn_monitor/1`, `lists:reverse/1`, `lists:seq/2`, and
+/// `maps:without/2` run their BEAM code.
 fn load() -> BeamProgram {
     let erlang = pinned_beam("erlang");
     let lists = pinned_beam("lists");
@@ -240,5 +240,150 @@ fn checks_ets_access_rights_as_pinned_erts() {
     assert_eq!(
         reference("ets_access"),
         b"[[{k,v}],true,{error,badarg},{error,badarg},{error,badarg},{error,badarg},true,undefined,{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn finds_map_keys_as_pinned_erts() {
+    // `logger_start_probe:find/0` runs `maps:find/2`
+    // (`erl_map.c:225-243`), as `supervisor:find_child/2`
+    // (`supervisor.erl:1871-1872`) does. A key that the map holds gives
+    // `{ok, Value}`, also in a hashmap, and another key gives `error`. A
+    // term that is not a map raises `{badmap, Map}`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |first: Term, second: Term| Term::Tuple(vec![first, second]);
+    let ok = |value: Term| pair(atom("ok"), value);
+    let badmap = |term: Term| pair(atom("error"), pair(atom("badmap"), term));
+    let expected = vec![
+        ok(Term::Integer(1)),
+        ok(Term::Integer(2)),
+        ok(atom("three")),
+        atom("error"),
+        atom("error"),
+        ok(Term::Integer(40)),
+        atom("error"),
+        badmap(atom("foo")),
+        badmap(Term::List(vec![])),
+    ];
+    assert_eq!(
+        program.execute("logger_start_probe", "find", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("find"),
+        b"[{ok,1},{ok,2},{ok,three},error,error,{ok,40},error,{error,{badmap,foo}},{error,{badmap,[]}}]\n"
+    );
+}
+
+#[test]
+fn builds_maps_from_lists_as_pinned_erts() {
+    // `logger_start_probe:from_list/0` runs `maps:from_list/1`
+    // (`erl_map.c:321-363`), which `maps:with/2` (`maps.erl:1165-1166`)
+    // calls for the logger handler config. A later pair of a key wins. 40
+    // keys give a hashmap with the ERTS HAMT key order, and 43 pairs with 3
+    // keys give a flatmap. A term that is not a proper list, an element that
+    // is not a tuple, and a tuple with an arity other than 2 raise `badarg`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs).unwrap());
+    let integer_map = |pairs: &[(i64, i64)]| {
+        map(pairs
+            .iter()
+            .map(|&(key, value)| (Term::Integer(key), Term::Integer(value)))
+            .collect())
+    };
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let keys = [
+        18, 4, 34, 12, 19, 29, 13, 2, 7, 38, 31, 8, 10, 23, 9, 15, 35, 36, 32, 1, 25, 28, 20, 6,
+        11, 17, 24, 37, 40, 14, 33, 3, 16, 30, 21, 5, 27, 26, 22, 39,
+    ];
+    let mut expected = vec![
+        map(vec![]),
+        map(vec![
+            (Term::Integer(1), atom("a")),
+            (Term::Integer(2), atom("c")),
+        ]),
+        map(vec![(atom("type"), atom("standard_io"))]),
+        Term::List(keys.into_iter().map(Term::Integer).collect()),
+        integer_map(&[(0, 1), (1, 2), (2, 80)]),
+    ];
+    expected.extend(std::iter::repeat_n(badarg, 4));
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "from_list", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("from_list"),
+        b"[#{},#{1 => a,2 => c},#{type => standard_io},\
+          [18,4,34,12,19,29,13,2,7,38,31,8,10,23,9,15,35,36,32,1,25,28,20,6,11,17,24,37,40,14,33,3,16,30,21,5,27,26,22,39],\
+          #{0 => 1,1 => 2,2 => 80},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn tests_map_keys_as_pinned_erts() {
+    // `logger_start_probe:is_key/0` runs `erlang:is_map_key/2`
+    // (`erl_map.c:1185-1196`), in a body and in a guard, as
+    // `logger:add_handler/3` (`logger.erl:832`) does. A term that is not a
+    // map raises `{badmap, Map}` in a body. In a guard, the `bif`
+    // instruction goes to its fail label, so `key_guard/2` gives `no`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badmap =
+        |term: Term| Term::Tuple(vec![atom("error"), Term::Tuple(vec![atom("badmap"), term])]);
+    let expected = vec![
+        atom("true"),
+        atom("false"),
+        atom("true"),
+        atom("false"),
+        atom("yes"),
+        atom("no"),
+        atom("no"),
+        badmap(atom("foo")),
+        badmap(Term::List(vec![])),
+    ];
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "is_key", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("is_key"),
+        b"[true,false,true,false,yes,no,no,{error,{badmap,foo}},{error,{badmap,[]}}]\n"
+    );
+}
+
+#[test]
+fn takes_list_heads_as_pinned_erts() {
+    // `logger_start_probe:hd/0` runs `erlang:hd/1` (`bif.c:2918-2925`), in a
+    // body and in a guard, as `gen_server:decode_msg/6`
+    // (`gen_server.erl:2380`) does. It gives the head of a proper and of an
+    // improper list. `[]` and a term that is not a list raise `badarg` in a
+    // body. In a guard, the `bif` instruction goes to its fail label, so
+    // `hd_guard/1` gives `no`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let expected = vec![
+        atom("a"),
+        atom("a"),
+        atom("c"),
+        atom("yes"),
+        atom("no"),
+        atom("no"),
+        badarg.clone(),
+        badarg,
+    ];
+    assert_eq!(
+        program.execute("logger_start_probe", "hd", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("hd"),
+        b"[a,a,c,yes,no,no,{error,badarg},{error,badarg}]\n"
     );
 }
