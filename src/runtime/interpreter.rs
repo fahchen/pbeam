@@ -791,8 +791,8 @@ impl BeamProgram {
                     // not valid moves the save pointer to the first message
                     // and raises `timeout_value` (`error.h:154`;
                     // `jit/arm/instr_msg.cpp:312-338`).
-                    let timeout = read(process, source)?;
                     if process.receive_timer == ReceiveTimer::None {
+                        let timeout = read(process, source)?;
                         if timeout == Term::Integer(0) {
                             continue;
                         }
