@@ -238,12 +238,12 @@ pub(crate) enum Instruction {
     /// `[0x0B, 0x05, 0x08, 0x21, 0x21, 0x03, 0x03]`, which calls import 33
     /// (`erlang:element/2`) with the integer 2 and `x0` and writes `x0`.
     /// `arith_probe:up/1` in `fixtures/arith/arith_probe.beam` has
-    /// `[0x7D, 0x0D, 0x2D, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03]`, which
-    /// calls import 0 (`erlang:'+'/2`) with fail label 45, live count 1,
+    /// `[0x7D, 0x0D, 0x22, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03]`, which
+    /// calls import 0 (`erlang:'+'/2`) with fail label 34, live count 1,
     /// `x0` typed, and the integer 1, and writes `x0`. `arith_probe:neg/1`
-    /// has `[0x7C, 0x0D, 0x2A, 0x10, 0x30, 0x57, 0x03, 0x10, 0x03]`, which
-    /// calls import 3 (`erlang:'-'/1`) with fail label 42, live count 1, and
-    /// `x0` typed, and writes `x0`.
+    /// has `[0x7C, 0x0D, 0x1F, 0x10, 0x30, 0x03, 0x03]`, which calls import 3
+    /// (`erlang:'-'/1`) with fail label 31, live count 1, and `x0`, and
+    /// writes `x0`.
     ///
     /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`, and
     /// `node(Pid) =:= node()` in `io:io_request/2` compiles to
@@ -256,13 +256,13 @@ pub(crate) enum Instruction {
     /// compiles to `{bif,tuple_size,{f,22},[{x,0}],{x,1}}`, which is
     /// `[0x0A, 0x0D, 0x16, 0x80, 0x03, 0x13]` with import 8. The guard
     /// `when X + 1 >= 1` of `arith_probe:up/1` compiles to
-    /// `{gc_bif,'+',{f,45},1,[{tr,{x,0},...},{integer,1}],{x,0}}`, and
+    /// `{gc_bif,'+',{f,34},1,[{tr,{x,0},...},{integer,1}],{x,0}}`, and
     /// `id(-9223372036854775808) - id(1)` in `minus_overflow/0` compiles to
     /// `{gc_bif,'-',{f,0},1,[{tr,{y,0},...},{tr,{x,0},...}],{x,0}}`. The
     /// guard `when -X > 0` of `arith_probe:neg/1` compiles to
-    /// `{gc_bif,'-',{f,42},1,[{tr,{x,0},...}],{x,0}}`, as `-F` in
-    /// `io_lib_format:field_width/3` (io_lib_format.erl:260) compiles to
-    /// `{gc_bif,'-',{f,0},3,[{tr,{x,0},...}],{x,0}}`.
+    /// `{gc_bif,'-',{f,31},1,[{x,0}],{x,0}}`, and `length(Args)` in
+    /// `proc_lib:trans_init/3` (proc_lib.erl:944) compiles to
+    /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`.
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
@@ -658,24 +658,6 @@ pub(crate) enum Instruction {
         left: Operand,
         right: Operand,
     },
-    /// Jumps to `fail_label` unless the operands are equal (`is_eq`, opcode
-    /// 41) in the ERTS term order. PBeam has no float term, so this equality
-    /// is the same as the exact equality of `is_eq_exact`. Two different
-    /// references are not equal, as in ERTS, which compares them by value.
-    ///
-    /// Encoding: opcode, fail label, two operands. A typed register (extended
-    /// subtag 5) reads as its register. Example: `compare_probe:same/2` in
-    /// `fixtures/compare/compare_probe.beam` has `[0x29, 0x0D, 0x17, 0x03,
-    /// 0x13]`, which fails to label 23 unless `x0` equals `x1`.
-    ///
-    /// Erlang: `same(A, B) when A == B -> eq;` compiles to
-    /// `{test,is_eq,{f,23},[{x,0},{x,1}]}`, as `[Z] when Y == Z` in
-    /// `lists:usort/1` (lists.erl:2081) does.
-    TestEqual {
-        fail_label: u32,
-        left: Operand,
-        right: Operand,
-    },
     /// Jumps to `fail_label` unless the left operand is less than the right
     /// operand (`is_lt`, opcode 39) in the ERTS term order. Two different
     /// references give a runtime error.
@@ -820,6 +802,14 @@ pub(crate) enum Instruction {
     /// `emu/emu_load.c:1437-1445`). A `nif_start` without a `func_info`
     /// before it is a load error.
     ///
+    /// The decoder puts this instruction directly after the entry label of
+    /// the function, wherever `nif_start` is in the function. ERTS does not
+    /// check the position of `nif_start` and does not run it; a NIF
+    /// replaces the function from its entry (`beam/erl_nif.c:4922-4928`).
+    /// So a body instruction before `nif_start` does not run for a function
+    /// with a binding. `erlc` puts `nif_start` directly after the entry
+    /// label, so compiled code keeps its order.
+    ///
     /// Encoding: `[0xB3]`.
     ///
     /// Erlang: `-nifs([write_nif/2]).` makes `write_nif/2` in `prim_tty`
@@ -879,13 +869,6 @@ pub(crate) enum TestKind {
     /// `{test,is_integer,{f,11},[{x,0}]}`, as the guard of
     /// `io_lib_format:field_value/2` (io_lib_format.erl:271) does.
     Integer,
-    /// `is_float`, opcode 46. PBeam has no float term, so no PBeam term
-    /// passes this test. Example: `[0x2E, 0x0D, 0x1A, 0x03]` in
-    /// `compare_probe:real/1` fails to label 26 unless `x0` is a float.
-    /// Erlang: `real(X) when is_float(X) -> float;` compiles to
-    /// `{test,is_float,{f,26},[{x,0}]}`, as the guard of
-    /// `io_lib_format:control_small/7` (io_lib_format.erl:493) does.
-    Float,
     /// `is_boolean`, opcode 114. Example: `[0x72, 0xC5, 0x03]` in
     /// `compare_probe:kind/1` fails to label 12 unless `x0` is the atom
     /// `true` or `false`. Erlang: `kind(X) when is_boolean(X) -> boolean;`
@@ -958,6 +941,12 @@ pub(super) fn parse_code(
                         "BEAM label {label} is outside declared range 1..={number_of_labels}"
                     )));
                 }
+                // The label directly after `func_info` is the function entry.
+                if let Some((_, _, entry)) = &mut function
+                    && *entry == instructions.len()
+                {
+                    *entry += 1;
+                }
                 Instruction::Label(label)
             }
             OPCODE_FUNCTION_INFO => {
@@ -969,7 +958,7 @@ pub(super) fn parse_code(
                     .name()
                     .to_owned();
                 let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                function = Some((name.clone(), arity));
+                function = Some((name.clone(), arity, instructions.len() + 1));
                 Instruction::FunctionInfo {
                     module,
                     name,
@@ -1070,11 +1059,6 @@ pub(super) fn parse_code(
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_TEST_EXACT_NE => Instruction::TestExactNotEqual {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
-                left: read_move_operand(data, &mut cursor, atoms, literals)?,
-                right: read_move_operand(data, &mut cursor, atoms, literals)?,
-            },
-            OPCODE_TEST_EQ => Instruction::TestEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -1275,7 +1259,6 @@ pub(super) fn parse_code(
             | OPCODE_TEST_IS_MAP
             | OPCODE_TEST_IS_FUNCTION
             | OPCODE_TEST_IS_INTEGER
-            | OPCODE_TEST_IS_FLOAT
             | OPCODE_TEST_IS_BOOLEAN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -1292,10 +1275,11 @@ pub(super) fn parse_code(
                 arity: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_NIF_START => {
-                let (name, arity) = function
+                let (name, arity, entry) = function
                     .clone()
                     .ok_or_else(|| error("BEAM nif_start has no func_info before it"))?;
-                Instruction::NifStart { name, arity }
+                instructions.insert(entry, Instruction::NifStart { name, arity });
+                continue;
             }
             OPCODE_TEST_HEAP | OPCODE_INIT_YREGS => {
                 skip_unsupported_instruction(opcode, data, &mut cursor)?;
@@ -1463,7 +1447,6 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
         OPCODE_TEST_IS_MAP => Ok(TestKind::Map),
         OPCODE_TEST_IS_FUNCTION => Ok(TestKind::Function),
         OPCODE_TEST_IS_INTEGER => Ok(TestKind::Integer),
-        OPCODE_TEST_IS_FLOAT => Ok(TestKind::Float),
         OPCODE_TEST_IS_BOOLEAN => Ok(TestKind::Boolean),
         _ => Err(error(format!("unsupported BEAM type-test opcode {opcode}"))),
     }
@@ -1592,9 +1575,10 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
+        OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
-        OPCODE_TEST_IS_NUMBER
+        OPCODE_TEST_IS_FLOAT
+        | OPCODE_TEST_IS_NUMBER
         | OPCODE_TEST_IS_ATOM
         | OPCODE_TEST_IS_PID
         | OPCODE_TEST_IS_BINARY
@@ -1875,10 +1859,10 @@ mod tests {
         OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH,
         OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS,
         OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD,
-        OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
+        OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
         OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
-        OPCODE_TEST_IS_PORT, OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END,
-        parse_code, read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
+        OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
+        read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
         skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
         test_kind, unsupported_opcode_operand_count,
     };
@@ -2065,10 +2049,12 @@ mod tests {
     }
 
     #[test]
-    fn decodes_nif_start_with_the_function_of_the_func_info_before_it() {
+    fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         let code = |instructions: &[u8]| {
             let mut code = vec![0, 0, 0, 16];
-            code.extend([0; 15]);
+            code.extend([0; 11]);
+            code.push(2); // label 1 only
+            code.extend([0; 3]);
             code.push(1); // one function
             code.extend_from_slice(instructions);
             code.push(0x03);
@@ -2092,6 +2078,32 @@ mod tests {
             [
                 Instruction::FunctionInfo { .. },
                 Instruction::NifStart { name, arity: 2 },
+                Instruction::End,
+            ] if name == "write_nif"
+        ));
+        // ERTS loads `nif_start` after another instruction of the function,
+        // and a NIF replaces the function from its entry. So the dispatch
+        // goes before the `move`, which does not run for a bound MFA.
+        let (instructions, _) = parse_code(
+            &code(&[
+                0x02, 0x12, 0x22, 0x20, // func_info prim_tty write_nif 2
+                0x01, 0x10, // label 1
+                0x40, 0x12, 0x03, // move prim_tty x0
+                0xB3, // nif_start
+            ]),
+            &atoms,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::FunctionInfo { .. },
+                Instruction::Label(1),
+                Instruction::NifStart { name, arity: 2 },
+                Instruction::Move(..),
                 Instruction::End,
             ] if name == "write_nif"
         ));
@@ -2315,41 +2327,6 @@ mod tests {
     }
 
     #[test]
-    fn decodes_the_is_eq_and_is_float_tests_of_the_compare_probe_fixture() {
-        const COMPARE_PROBE: &[u8] = include_bytes!("../../../fixtures/compare/compare_probe.beam");
-        let is_eq = [0x29, 0x0D, 0x17, 0x03, 0x13]; // same/2: is_eq f23 x0 x1
-        let is_float = [0x2E, 0x0D, 0x1A, 0x03]; // real/1: is_float f26 x0
-        for bytes in [&is_eq[..], &is_float] {
-            assert!(
-                COMPARE_PROBE
-                    .windows(bytes.len())
-                    .any(|window| window == bytes),
-                "{bytes:02X?} is not in compare_probe.beam"
-            );
-        }
-        let mut code = vec![0, 0, 0, 16];
-        code.extend([0; 16]);
-        code.extend([&is_eq[..], &is_float, &[0x03]].concat());
-        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
-        assert!(matches!(
-            instructions.as_slice(),
-            [
-                Instruction::TestEqual {
-                    fail_label: 23,
-                    left: Operand::X(0),
-                    right: Operand::X(1),
-                },
-                Instruction::Test {
-                    kind: TestKind::Float,
-                    fail_label: 26,
-                    value: Operand::X(0),
-                },
-                Instruction::End,
-            ]
-        ));
-    }
-
-    #[test]
     fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
         const IO_START_PROBE: &[u8] =
             include_bytes!("../../../fixtures/io_start/io_start_probe.beam");
@@ -2537,14 +2514,14 @@ mod tests {
     #[test]
     fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction() {
         const ARITH_PROBE: &[u8] = include_bytes!("../../../fixtures/arith/arith_probe.beam");
-        // up/1: gc_bif2 f45 live 1 '+'/2 {tr,x0,1} 1 x0
-        let up = [0x7D, 0x0D, 0x2D, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03];
+        // up/1: gc_bif2 f34 live 1 '+'/2 {tr,x0,1} 1 x0
+        let up = [0x7D, 0x0D, 0x22, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03];
         // minus_overflow/0: gc_bif2 f0 live 1 '-'/2 {tr,y0,1} {tr,x0,1} x0
         let minus = [
             0x7D, 0x05, 0x10, 0x10, 0x57, 0x04, 0x10, 0x57, 0x03, 0x10, 0x03,
         ];
-        // neg/1: gc_bif1 f42 live 1 '-'/1 {tr,x0,1} x0
-        let neg = [0x7C, 0x0D, 0x2A, 0x10, 0x30, 0x57, 0x03, 0x10, 0x03];
+        // neg/1: gc_bif1 f31 live 1 '-'/1 x0 x0
+        let neg = [0x7C, 0x0D, 0x1F, 0x10, 0x30, 0x03, 0x03];
         for bytes in [&up[..], &minus, &neg] {
             assert!(
                 ARITH_PROBE
@@ -2567,7 +2544,7 @@ mod tests {
             instructions.as_slice(),
             [
                 Instruction::Bif {
-                    fail_label: 45,
+                    fail_label: 34,
                     module: plus_module,
                     name: plus,
                     arguments: plus_arguments,
@@ -2581,7 +2558,7 @@ mod tests {
                     destination: Operand::X(0),
                 },
                 Instruction::Bif {
-                    fail_label: 42,
+                    fail_label: 31,
                     module: negate_module,
                     name: negate,
                     arguments: negate_arguments,
@@ -2844,7 +2821,7 @@ mod tests {
         for (opcode, count) in [
             (OPCODE_TEST_HEAP, 2),
             (OPCODE_BIF0, 2),
-            (OPCODE_TEST_NE, 3),
+            (OPCODE_TEST_EQ, 3),
             (OPCODE_TEST_TAGGED_TUPLE, 4),
             (OPCODE_TEST_IS_MAP, 2),
             (OPCODE_BADMATCH, 1),
