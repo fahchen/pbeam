@@ -3226,16 +3226,22 @@ mod tests {
                 BADARG_EXIT
             );
         }
-        // ERTS 29.1.1: the current_stacktrace of another process is its
-        // frames, a process that is not alive gives undefined,
-        // process_info(self(), {dictionary, k}) is {{dictionary, k}, undefined},
-        // and process_info(self(), [registered_name]) is
-        // [{registered_name, []}]. PBeam does not implement them yet.
+        // ERTS 29.1.1: a process that is not alive gives undefined for each
+        // valid item, also a list of items (`erl_bif_info.c:1384-1386`).
+        for item in [
+            test_atom("current_stacktrace"),
+            Term::List(vec![test_atom("registered_name")]),
+        ] {
+            assert_eq!(
+                process_info(Term::Pid(crate::ProcessId(99)), item).unwrap(),
+                test_atom("undefined")
+            );
+        }
+        // ERTS 29.1.1: process_info(self(), {dictionary, k}) is
+        // {{dictionary, k}, undefined}, process_info(self(), [registered_name])
+        // is [{registered_name, []}], and process_info(self(), status) is
+        // {status, running}. PBeam does not implement them yet.
         for (process, item) in [
-            (
-                Term::Pid(crate::ProcessId(99)),
-                test_atom("current_stacktrace"),
-            ),
             (root(), dictionary()),
             (root(), Term::List(vec![test_atom("registered_name")])),
             (root(), test_atom("status")),
@@ -3257,6 +3263,28 @@ mod tests {
             )
             .unwrap(),
             Term::List(Vec::new())
+        );
+    }
+
+    #[test]
+    fn rejects_the_current_stacktrace_of_another_process() {
+        // ERTS 29.1.1 returns the frames of another live process. PBeam
+        // records no stack frames, so it returns a runtime error.
+        let error = run_with_child(vec![
+            Instruction::Move(atom("fixture"), Operand::X(0)),
+            Instruction::Move(atom("child"), Operand::X(1)),
+            Instruction::Move(
+                Operand::Value(Term::List(vec![test_atom("normal")])),
+                Operand::X(2),
+            ),
+            erlang_call("spawn", 3, false),
+            Instruction::Move(atom("current_stacktrace"), Operand::X(1)),
+            erlang_call("process_info", 2, true),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "unsupported erlang:process_info/2 arguments Pid(ProcessId(1)), Atom(\"current_stacktrace\")"
         );
     }
 

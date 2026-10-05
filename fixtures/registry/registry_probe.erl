@@ -1,5 +1,5 @@
 -module(registry_probe).
--export([names/0, wait/0, id/1]).
+-export([names/0, info/0, wait/0, id/1]).
 
 names() ->
     Self = self(),
@@ -14,6 +14,18 @@ names() ->
      try whereis(?MODULE:id(1)) catch error:R1 -> R1 end,
      try whereis(?MODULE:id({registry_probe_names})) catch error:R2 -> R2 end,
      freed()].
+
+info() ->
+    Named = spawn(?MODULE, wait, []),
+    true = register(registry_probe_info, Named),
+    Unnamed = spawn(?MODULE, wait, []),
+    Dead = stopped(spawn(?MODULE, wait, [])),
+    [process_info(Named, registered_name),
+     process_info(Unnamed, registered_name),
+     process_info(Dead, registered_name),
+     process_info(Dead, current_stacktrace),
+     process_info(Dead, [registered_name]),
+     try process_info(Dead, ?MODULE:id(bogus_item)) catch error:R -> R end].
 
 freed() ->
     Pid = spawn(?MODULE, wait, []),

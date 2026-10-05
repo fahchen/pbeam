@@ -94,6 +94,21 @@ impl Scheduler {
             .expect("the scheduler has a current process")
     }
 
+    /// Return the live process `id`, also the current process. Return `None`
+    /// when no live process has the pid, as `erts_try_lock_sig_free_proc`
+    /// (`erl_bif_info.c:1384-1386`) finds no process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.schedule_next();
+    /// assert_eq!(scheduler.process(ProcessId(0)).map(|process| process.id), Some(ProcessId(0)));
+    /// assert!(scheduler.process(ProcessId(99)).is_none());
+    /// ```
+    pub(super) fn process(&self, id: ProcessId) -> Option<&ProcessState> {
+        self.processes.get(&id)
+    }
+
     /// Stop the current process until a message arrives. A delivery adds it
     /// to the run queue again.
     ///
