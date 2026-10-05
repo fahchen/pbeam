@@ -114,7 +114,12 @@ unsafe extern "C" {
 /// and frees when it drops, as `regex_code_destructor`
 /// (`erl_bif_re.c:117-125`) does.
 #[derive(Debug)]
-pub(super) struct Code(NonNull<c_void>);
+pub(super) struct Code(
+    /// The owned pointer to the live `pcre2_code` that
+    /// `pcre2_compile_8` returned. The value is opaque to Rust, and only
+    /// `pcre2_code_free_8` in `Drop` frees it.
+    NonNull<c_void>,
+);
 
 /// A compile error of PCRE2: the message of `pcre2_get_error_message` and
 /// the offset in the pattern where the error was found.
