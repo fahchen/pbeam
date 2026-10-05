@@ -10,6 +10,11 @@ use crate::error::{BeamError, error};
 use crate::term::{Atom, Lambda, Term};
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
+/// The first byte of an integer operand with 9 or more payload bytes: size
+/// code 7, the sign and extended flags, and `TAG_INTEGER`. Its value is
+/// outside the 64-bit signed range, so ERTS loads it as a bignum.
+const HUGE_INTEGER_FIRST_BYTE: u8 =
+    0b1110_0000 | COMPACT_SIGN_FLAG | COMPACT_EXTENDED_FLAG | TAG_INTEGER;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
 const INSTRUCTION_SET_ERLANG: u32 = 0;
 const CODE_LABEL_COUNT_OFFSET: usize = WORD_SIZE * 3;
@@ -821,11 +826,16 @@ pub(crate) enum TestKind {
 ///
 /// `Value` holds a supported immediate term. `X` uses compact register tag 3,
 /// and `Y` uses compact register tag 4. For example, `move x0, y0` is encoded
-/// as `[0x40, 0x03, 0x04]`.
+/// as `[0x40, 0x03, 0x04]`. `UnsupportedInteger` is an integer operand with 9
+/// or more payload bytes, such as `{integer,18446744073709551616}`, encoded
+/// as `[0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]`. ERTS loads it as a
+/// bignum literal. PBeam has no bignum term, so the module loads and the
+/// instruction fails only when it reads the operand.
 #[derive(Debug, Clone)]
 pub(crate) enum Operand {
     Value(Term),
     UnsupportedLiteral(usize),
+    UnsupportedInteger,
     X(u32),
     Y(u32),
 }
@@ -1719,6 +1729,10 @@ fn read_move_operand(
         .get(*cursor)
         .ok_or_else(|| error("truncated BEAM operand"))?;
     match first & COMPACT_TAG_MASK {
+        TAG_INTEGER if first == HUGE_INTEGER_FIRST_BYTE => {
+            skip_operand(data, cursor)?;
+            Ok(Operand::UnsupportedInteger)
+        }
         TAG_INTEGER | TAG_ATOM => Ok(Operand::Value(read_value(data, cursor, atoms)?)),
         TAG_LITERAL => {
             let subtag = read_integer(data, cursor, TAG_LITERAL)?;
@@ -1844,6 +1858,17 @@ mod tests {
             &read_move_operand(&[0x17, 0x10], &mut 0, &[], &literals).unwrap(),
             Operand::Value(Term::List(values)) if values.is_empty()
         ));
+        // erlc 29.1.1 writes {integer,18446744073709551616} as 0xF9, the
+        // extra byte count 0, and nine payload bytes. It loads as an
+        // operand that fails when it runs; a short payload is malformed.
+        let mut cursor = 0;
+        let huge = [0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(matches!(
+            read_move_operand(&huge, &mut cursor, &[], &literals).unwrap(),
+            Operand::UnsupportedInteger
+        ));
+        assert_eq!(cursor, huge.len());
+        assert!(read_move_operand(&huge[..10], &mut 0, &[], &literals).is_err());
         assert!(read_move_operand(&[0x47, 0x20], &mut 0, &[], &literals).is_err());
         assert!(read_move_operand(&[0x27, 0x00], &mut 0, &[], &literals).is_err());
         assert!(read_move_operand(&[0x06], &mut 0, &[], &literals).is_err());
@@ -2292,8 +2317,8 @@ mod tests {
     #[test]
     fn decodes_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction() {
         const ARITH_PROBE: &[u8] = include_bytes!("../../../fixtures/arith/arith_probe.beam");
-        // up/1: gc_bif2 f24 live 1 '+'/2 {tr,x0,1} 1 x0
-        let up = [0x7D, 0x0D, 0x18, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03];
+        // up/1: gc_bif2 f31 live 1 '+'/2 {tr,x0,1} 1 x0
+        let up = [0x7D, 0x0D, 0x1F, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03];
         // minus_overflow/0: gc_bif2 f0 live 1 '-'/2 {tr,y0,1} {tr,x0,1} x0
         let minus = [
             0x7D, 0x05, 0x10, 0x10, 0x57, 0x04, 0x10, 0x57, 0x03, 0x10, 0x03,
@@ -2318,7 +2343,7 @@ mod tests {
             instructions.as_slice(),
             [
                 Instruction::Bif {
-                    fail_label: 24,
+                    fail_label: 31,
                     module: plus_module,
                     name: plus,
                     arguments: plus_arguments,

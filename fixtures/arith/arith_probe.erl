@@ -1,5 +1,6 @@
 -module(arith_probe).
--export([arith/0, guards/0, externals/0, plus_overflow/0, minus_overflow/0]).
+-export([arith/0, guards/0, externals/0, plus_overflow/0, minus_overflow/0,
+         big_operand/0, big_guard/0]).
 
 %% `gc_bif` `erlang:'+'/2` and `erlang:'-'/2` with fail label 0, as
 %% io_lib_format:build_bin/2 (io_lib_format.erl:133),
@@ -39,6 +40,15 @@ externals() ->
 %% Results outside the 64-bit signed range: ERTS makes a bignum.
 plus_overflow() -> id(9223372036854775807) + id(1).
 minus_overflow() -> id(-9223372036854775808) - id(1).
+
+%% Integer operands outside the 64-bit signed range in `gc_bif` and
+%% `is_lt`, as `bsl` in net:shortest_matching_prefix/3 (net.erl:865) has.
+%% ERTS loads them as bignum literals.
+big_operand() -> id(1) + 16#10000000000000000.
+big_guard() -> below_big(id(1)).
+
+below_big(X) when X < 16#10000000000000000 -> below;
+below_big(_) -> other.
 
 up(X) when X + 1 >= 1 -> {up, X + 1};
 up(_) -> other.

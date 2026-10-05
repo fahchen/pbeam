@@ -122,3 +122,28 @@ fn reports_a_result_outside_the_integer_range() {
         assert_eq!(reference(function), erts);
     }
 }
+
+#[test]
+fn loads_integer_operands_outside_the_integer_range() {
+    // `arith_probe:big_operand/0` has `gc_bif2` `erlang:'+'/2`, and
+    // `arith_probe:below_big/1` has `is_lt`, each with the operand
+    // `{integer,18446744073709551616}`, as `bsl` in
+    // `net:shortest_matching_prefix/3` (net.erl:865) has. ERTS loads the
+    // operand as a bignum literal. PBeam has no bignum term: the module
+    // loads, and only an instruction that reads the operand returns a
+    // runtime error (row "Integer range" in `docs/erts-differences.md`).
+    let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
+    for (function, erts) in [
+        ("big_operand", &b"18446744073709551617\n"[..]),
+        ("big_guard", b"below\n"),
+    ] {
+        let error = program.execute("arith_probe", function, &[]).unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "unsupported BEAM integer operand outside the 64-bit range: needs a bignum"
+            ),
+            "{error}"
+        );
+        assert_eq!(reference(function), erts);
+    }
+}

@@ -87,6 +87,8 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// move        ::= 64 move_source (x_register | y_register)
 /// move_source ::= value | x_register | y_register
 /// move_source ::= literal_value
+/// move_source ::= bignum_value ; loads, and fails when the instruction reads it
+/// bignum_value ::= huge(1) ; PBeam has no bignum term
 /// literal_value ::= compact(7) compact(0) ; compact(7) value is 4
 /// x_register  ::= compact(3)
 /// y_register  ::= compact(4)
@@ -147,6 +149,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// short(tag)   ::= value:4 0 tag:3
 /// extended(tag) ::= high:3 1 0 tag:3 low:8
 /// large(tag)   ::= size_code:3 1 1 tag:3 byte[size_code + 2] ; size_code in 0..=6
+/// huge(tag)    ::= 7:3 1 1 tag:3 extra:compact(0) byte[extra + 9]
 /// ```
 ///
 /// `container_size` counts bytes after its field, including `BEAM` and chunks.

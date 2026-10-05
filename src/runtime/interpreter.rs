@@ -1383,6 +1383,9 @@ fn read_operand(
         Operand::UnsupportedLiteral(index) => {
             Err(error(format!("unsupported BEAM literal index {index}")))
         }
+        Operand::UnsupportedInteger => Err(error(
+            "unsupported BEAM integer operand outside the 64-bit range: needs a bignum",
+        )),
         Operand::X(index) => registers
             .get(*index as usize)
             .and_then(Clone::clone)
@@ -1434,7 +1437,9 @@ fn write_operand(
             }
             stack[index] = StackSlot::Term(value);
         }
-        Operand::Value(_) => return Err(error("invalid BEAM move destination")),
+        Operand::Value(_) | Operand::UnsupportedInteger => {
+            return Err(error("invalid BEAM move destination"));
+        }
     }
     Ok(())
 }
