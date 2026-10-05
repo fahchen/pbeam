@@ -582,6 +582,17 @@ pub(crate) enum Instruction {
         source: Operand,
         destination: Operand,
     },
+    /// Copies the tail of a nonempty list to a register.
+    ///
+    /// Encoding: opcode, source, destination register. Example:
+    /// `proc_lib:trans_init/3` in the pinned `proc_lib.beam` has
+    /// `[0xA3, 0x43, 0x33]`, which writes the tail of `x4` to `x3`.
+    ///
+    /// Erlang: `rest([_ | T]) -> T.` compiles to `{get_tl,{x,0},{x,0}}`.
+    GetTail {
+        source: Operand,
+        destination: Operand,
+    },
     /// Copies the zero-based tuple element at `index` to a register.
     ///
     /// Encoding: opcode, tuple register, unsigned index, destination register.
@@ -1119,6 +1130,10 @@ pub(super) fn parse_code(
                 source: read_move_operand(data, &mut cursor, atoms, literals)?,
                 destination: read_register(data, &mut cursor)?,
             },
+            OPCODE_GET_TL => Instruction::GetTail {
+                source: read_move_operand(data, &mut cursor, atoms, literals)?,
+                destination: read_register(data, &mut cursor)?,
+            },
             OPCODE_PUT_TUPLE2 => {
                 let destination = read_register(data, &mut cursor)?;
                 if read_integer(data, &mut cursor, TAG_LITERAL)? != LIST_SUBTAG {
@@ -1559,7 +1574,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_MAP_EXACT => Some(5),
         OPCODE_GET_MAP_ELEMENTS | OPCODE_HAS_MAP_FIELDS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),
-        OPCODE_GET_TL => Some(2),
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
         OPCODE_BS_CREATE_BIN => Some(6),
@@ -2302,6 +2316,33 @@ mod tests {
     }
 
     #[test]
+    fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
+        const IO_START_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/io_start/io_start_probe.beam");
+        let get_tl = [OPCODE_GET_TL, 0x03, 0x03]; // rest/1: {get_tl,{x,0},{x,0}}
+        assert!(
+            IO_START_PROBE
+                .windows(get_tl.len())
+                .any(|window| window == get_tl),
+            "{get_tl:02X?} is not in io_start_probe.beam"
+        );
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&get_tl[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::GetTail {
+                    source: Operand::X(0),
+                    destination: Operand::X(0),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
     fn decodes_the_list_record_and_receive_wait_instructions_of_pinned_gen_statem() {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
@@ -2717,7 +2758,6 @@ mod tests {
             (OPCODE_TEST_NE, 3),
             (OPCODE_TEST_TAGGED_TUPLE, 4),
             (OPCODE_TEST_IS_MAP, 2),
-            (OPCODE_GET_TL, 2),
             (OPCODE_BADMATCH, 1),
             (OPCODE_TEST_IS_PORT, 2),
             (OPCODE_TRY_CASE_END, 1),

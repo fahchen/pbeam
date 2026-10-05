@@ -695,6 +695,15 @@ impl BeamProgram {
                     let mut values = nonempty_list(read(process, source)?)?;
                     write(process, destination, values.swap_remove(0))?;
                 }
+                Instruction::GetTail {
+                    source,
+                    destination,
+                } => {
+                    let mut values = nonempty_list(read(process, source)?)?;
+                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+                    values.remove(0);
+                    write(process, destination, Term::List(values))?;
+                }
                 Instruction::Send => {
                     let Term::Pid(target) = read(process, &Operand::X(0))? else {
                         return Err(error("unsupported BEAM send target"));
