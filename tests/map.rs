@@ -372,3 +372,50 @@ fn hashes_nested_lists_and_string_chunks_like_erts() {
           16,[[[]]],21,5,0,22,[576460752303423487],[-1]]\n"
     );
 }
+
+#[test]
+fn keeps_keys_with_equal_hashes_in_a_collision_node_like_erts() {
+    let program = BeamProgram::load(&[MAP_KEY_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let (first, second) = (
+        integers(&[246, 157, 203, 77, 19, 254, 19, 93]),
+        integers(&[161, 92, 65, 50, 231, 24, 153, 137]),
+    );
+    // The two keys have equal hashes, so ERTS keeps them next to each other in the term order.
+    let keys = Term::List(
+        [18, 4, 12, 19, 29, 13, 2]
+            .map(Term::Integer)
+            .into_iter()
+            .chain([second.clone(), first.clone()])
+            .chain(
+                [
+                    7, 31, 8, 10, 23, 9, 15, 32, 1, 25, 28, 20, 6, 11, 17, 24, 14, 3, 16, 30, 21,
+                    5, 27, 26, 22,
+                ]
+                .map(Term::Integer),
+            )
+            .collect(),
+    );
+    assert_eq!(
+        program
+            .execute("map_key_probe", "collision_keys", &[])
+            .unwrap(),
+        Term::List(vec![
+            keys,
+            atom("a"),
+            atom("b"),
+            atom("b"),
+            atom("true"),
+            atom("c"),
+            atom("d"),
+            Term::List(vec![second, first]),
+        ])
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [map_key_probe:collision_keys()])"),
+        b"[[18,4,12,19,29,13,2,[161,92,65,50,231,24,153,137],[246,157,203,77,19,254,19,93],7,31,\
+          8,10,23,9,15,32,1,25,28,20,6,11,17,24,14,3,16,30,21,5,27,26,22],a,b,b,true,c,d,\
+          [[161,92,65,50,231,24,153,137],[246,157,203,77,19,254,19,93]]]\n"
+    );
+}

@@ -1,5 +1,5 @@
 -module(map_key_probe).
--export([list_keys/0, hash_keys/0, cons/2, id/1]).
+-export([list_keys/0, hash_keys/0, collision_keys/0, cons/2, id/1]).
 
 list_keys() ->
     Big = ?MODULE:cons(300, [1]),
@@ -18,6 +18,15 @@ hash_keys() ->
     Max = ?MODULE:cons(1 bsl 59 - 1, []),
     Min = ?MODULE:cons(-(1 bsl 59), []),
     maps:keys(#{[] => v, [[]] => v, [[[]]] => v, [1, 2, 3, 4, 5] => v, [1, 2, 3, 4, 5, 6, 7, 8, 9] => v, [true, [false], true] => v, [[1], [2]] => v, [1, true, 2, 3] => v, 0 => v, 1 => v, 2 => v, 3 => v, 4 => v, 5 => v, 6 => v, 7 => v, 8 => v, 9 => v, 10 => v, 11 => v, 12 => v, 13 => v, 14 => v, 15 => v, 16 => v, 17 => v, 18 => v, 19 => v, 20 => v, 21 => v, 22 => v, 23 => v, 24 => v, Wide => v, Negative => v, Max => v, Min => v}).
+
+collision_keys() ->
+    A = [246, 157, 203, 77, 19, 254, 19, 93],
+    B = [161, 92, 65, 50, 231, 24, 153, 137],
+    Hash = ?MODULE:id(#{A => a, 1 => v, 2 => v, 3 => v, 4 => v, 5 => v, 6 => v, 7 => v, 8 => v, 9 => v, 10 => v, 11 => v, 12 => v, 13 => v, 14 => v, 15 => v, 16 => v, 17 => v, 18 => v, 19 => v, 20 => v, 21 => v, 22 => v, 23 => v, 24 => v, 25 => v, 26 => v, 27 => v, 28 => v, 29 => v, 30 => v, 31 => v, 32 => v}),
+    Both = Hash#{B => b},
+    Literal = #{A => a, B => b, 1 => v, 2 => v, 3 => v, 4 => v, 5 => v, 6 => v, 7 => v, 8 => v, 9 => v, 10 => v, 11 => v, 12 => v, 13 => v, 14 => v, 15 => v, 16 => v, 17 => v, 18 => v, 19 => v, 20 => v, 21 => v, 22 => v, 23 => v, 24 => v, 25 => v, 26 => v, 27 => v, 28 => v, 29 => v, 30 => v, 31 => v, 32 => v},
+    #{A := X, B := Y} = Both,
+    [maps:keys(Both), X, Y, map_get(B, Both), Both =:= Literal, map_get(A, Both#{A := c}), map_get(B, Both#{B => d}), maps:keys(#{A => 1, B => 2})].
 
 cons(Head, Tail) -> [Head | Tail].
 

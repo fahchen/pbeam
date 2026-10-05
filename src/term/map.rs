@@ -100,6 +100,11 @@ enum Child {
     Leaf(Term, Term),
     /// A node one level down.
     Node(Node),
+    /// The pairs of two or more keys with equal hashes, sorted in the term
+    /// order. Only a node at the last level (`HAMT_MAX_LEVEL - 1`) holds a
+    /// collision child, as an ERTS collision node is at level 16
+    /// (`erl_map.h:205-210`).
+    Collision(Vec<(Term, Term)>),
 }
 
 /// The state of the ERTS internal hash of a compound term
@@ -185,7 +190,8 @@ impl Map {
 
     /// Return the value of a key, or `None` when the map does not hold the
     /// key. A flatmap compares each key with `==`, as ERTS does. A hashmap
-    /// follows the slots of the key hash.
+    /// follows the slots of the key hash, and compares each key of a
+    /// collision child with `==` (`erts_hashmap_get`, `erl_map.c:2424-2474`).
     ///
     /// # Examples
     ///
@@ -213,6 +219,12 @@ impl Map {
             match child {
                 Child::Leaf(existing, value) => return (existing == key).then_some(value),
                 Child::Node(inner) => node = inner,
+                Child::Collision(pairs) => {
+                    return pairs
+                        .iter()
+                        .find(|(existing, _)| existing == key)
+                        .map(|(_, value)| value);
+                }
             }
             level += 1;
         }
@@ -246,6 +258,12 @@ impl Map {
             match node.child_mut(slot(hash, level))? {
                 Child::Leaf(existing, value) => return (existing == key).then_some(value),
                 Child::Node(inner) => node = inner,
+                Child::Collision(pairs) => {
+                    return pairs
+                        .iter_mut()
+                        .find(|(existing, _)| existing == key)
+                        .map(|(_, value)| value);
+                }
             }
             level += 1;
         }
@@ -349,8 +367,9 @@ impl Map {
     }
 
     /// Iterate over the pairs in the ERTS order: flatmap key order for a
-    /// flatmap, and depth-first ascending slot order for a hashmap. BEAM code
-    /// sees this order through operations such as `maps:keys/1`.
+    /// flatmap, and depth-first ascending slot order for a hashmap, with the
+    /// pairs of a collision child in the term order. BEAM code sees this
+    /// order through operations such as `maps:keys/1`.
     ///
     /// # Examples
     ///
@@ -361,24 +380,27 @@ impl Map {
     /// assert_eq!(keys, [Term::Integer(1), Term::Integer(2)]);
     /// ```
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Term, &Term)> {
-        let (pairs, mut nodes) = match &self.repr {
+        // `pairs` holds the flatmap pairs, or the pairs of the current collision child.
+        let (mut pairs, mut nodes) = match &self.repr {
             Repr::Flat(pairs) => (pairs.iter(), Vec::new()),
             Repr::Hash(hamt) => (Default::default(), vec![hamt.root.children.iter()]),
         };
-        pairs
-            .map(|(key, value)| (key, value))
-            .chain(std::iter::from_fn(move || {
-                loop {
-                    let Some(child) = nodes.last_mut()?.next() else {
-                        nodes.pop();
-                        continue;
-                    };
-                    match child {
-                        Child::Leaf(key, value) => return Some((key, value)),
-                        Child::Node(node) => nodes.push(node.children.iter()),
-                    }
+        std::iter::from_fn(move || {
+            loop {
+                if let Some((key, value)) = pairs.next() {
+                    return Some((key, value));
                 }
-            }))
+                let Some(child) = nodes.last_mut()?.next() else {
+                    nodes.pop();
+                    continue;
+                };
+                match child {
+                    Child::Leaf(key, value) => return Some((key, value)),
+                    Child::Node(node) => nodes.push(node.children.iter()),
+                    Child::Collision(collision) => pairs = collision.iter(),
+                }
+            }
+        })
     }
 
     /// Move every key and value onto a work stack. `Term` uses this to drop
@@ -405,6 +427,9 @@ impl Map {
                 match child {
                     Child::Leaf(key, value) => pending.extend([key, value]),
                     Child::Node(node) => nodes.push(node.children),
+                    Child::Collision(pairs) => {
+                        pending.extend(pairs.into_iter().flat_map(|(key, value)| [key, value]));
+                    }
                 }
             }
         }
@@ -415,7 +440,8 @@ impl Hamt {
     /// Set a key with a hash to a value, as ERTS `insert_down` does. A new
     /// key goes into the first free slot on its hash path. When that slot
     /// holds another key, add nodes until the two hashes select different
-    /// slots.
+    /// slots. A key with the hash of a collision child goes into it in the
+    /// term order, or replaces the value of an equal key.
     ///
     /// # Examples
     ///
@@ -445,15 +471,29 @@ impl Hamt {
                         *existing_value = value;
                         return;
                     }
-                    // The two keys can have equal hashes; `Node::split` stops on them.
                     let existing_hash = map_hash(existing).expect("a stored key has a hash");
                     let existing = (
                         existing_hash,
                         std::mem::replace(existing, Term::List(Vec::new())),
                         std::mem::replace(existing_value, Term::List(Vec::new())),
                     );
-                    *child = Child::Node(Node::split(level + 1, existing, (hash, key, value)));
+                    *child = Node::split(level + 1, existing, (hash, key, value));
                     self.size += 1;
+                    return;
+                }
+                // Each key here has the same 64-bit hash (erl_map.c:2598-2624).
+                Child::Collision(pairs) => {
+                    match pairs.binary_search_by(|(existing, _)| {
+                        existing
+                            .compare(&key)
+                            .expect("supported map keys have a term order")
+                    }) {
+                        Ok(index) => pairs[index].1 = value,
+                        Err(index) => {
+                            pairs.insert(index, (key, value));
+                            self.size += 1;
+                        }
+                    }
                     return;
                 }
             }
@@ -508,47 +548,60 @@ impl Node {
         Some(&mut self.children[(self.bitmap & (bit - 1)).count_ones() as usize])
     }
 
-    /// Build the node at `level` for two leaves whose hashes select the
-    /// same slots above `level`. Add one node with one child for each level
-    /// where the two hashes still select the same slot, then put the two
-    /// leaves in slot order.
+    /// Build the child at `level` for two different keys whose hashes
+    /// select the same slots above `level`, as the `insert_subnodes` step of
+    /// ERTS `insert_down` does (`erl_map.c:2633-2656`). Add one node with
+    /// one child for each level where the two hashes still select the same
+    /// slot, then put the two leaves in slot order. When the two hashes are
+    /// equal, the last of these nodes is at level 15 and holds a collision
+    /// child with the two pairs in the term order.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // The hashes 0x01 and 0x11 differ first at level 1.
-    /// let node = Node::split(0, (0x01, one, one_value), (0x11, two, two_value));
-    /// assert_eq!(node.bitmap, 1 << 1);
+    /// let child = Node::split(0, (0x01, one, one_value), (0x11, two, two_value));
+    /// assert!(matches!(child, Child::Node(Node { bitmap: 0b10, .. })));
+    /// // Equal hashes at level 16 give a collision child.
+    /// let child = Node::split(16, (0x01, one, one_value), (0x01, two, two_value));
+    /// assert!(matches!(child, Child::Collision(_)));
     /// ```
-    fn split(level: u32, first: (u64, Term, Term), second: (u64, Term, Term)) -> Node {
+    fn split(level: u32, first: (u64, Term, Term), second: (u64, Term, Term)) -> Child {
         let mut depth = level;
-        while slot(first.0, depth) == slot(second.0, depth) {
+        while depth < HAMT_MAX_LEVEL && slot(first.0, depth) == slot(second.0, depth) {
             depth += 1;
-            // ERTS keeps two keys with equal hashes in a collision node at HAMT_MAX_LEVEL.
-            // Two different list keys can have equal hashes; stop rather than loop.
-            assert!(
-                depth < HAMT_MAX_LEVEL,
-                "equal map hashes need an ERTS collision node"
-            );
         }
-        let (first_slot, second_slot) = (slot(first.0, depth), slot(second.0, depth));
         let path = first.0;
-        let (low, high) = if first_slot < second_slot {
-            (first, second)
+        let mut child = if depth == HAMT_MAX_LEVEL {
+            let order = first
+                .1
+                .compare(&second.1)
+                .expect("supported map keys have a term order");
+            let (low, high) = if order == Ordering::Less {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            Child::Collision(vec![(low.1, low.2), (high.1, high.2)])
         } else {
-            (second, first)
-        };
-        let mut node = Node {
-            bitmap: (1 << first_slot) | (1 << second_slot),
-            children: vec![Child::Leaf(low.1, low.2), Child::Leaf(high.1, high.2)],
+            let (first_slot, second_slot) = (slot(first.0, depth), slot(second.0, depth));
+            let (low, high) = if first_slot < second_slot {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            Child::Node(Node {
+                bitmap: (1 << first_slot) | (1 << second_slot),
+                children: vec![Child::Leaf(low.1, low.2), Child::Leaf(high.1, high.2)],
+            })
         };
         for depth in (level..depth).rev() {
-            node = Node {
+            child = Child::Node(Node {
                 bitmap: 1 << slot(path, depth),
-                children: vec![Child::Node(node)],
-            };
+                children: vec![child],
+            });
         }
-        node
+        child
     }
 }
 
@@ -797,7 +850,7 @@ fn mix64(mut hash: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Child, Map, Node, map_hash, mix64};
+    use super::{Child, HAMT_MAX_LEVEL, Hamt, Map, Node, Repr, map_hash, mix64};
     use crate::term::{AtomTable, Reference, Term, test_atom as atom};
 
     fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
@@ -1142,10 +1195,10 @@ mod tests {
     fn splits_a_leaf_into_nodes_until_the_hashes_differ() {
         let leaf = |key: i64| (key as u64, Term::Integer(key), Term::Integer(key));
         // 0x101 and 0x201 select the same slot at levels 0 and 1, and slots 1 and 2 at level 2.
-        let node = Node::split(0, leaf(0x201), leaf(0x101));
-        assert_eq!(node.bitmap, 1 << 1);
         assert!(matches!(
-            &node.children[..],
+            Node::split(0, leaf(0x201), leaf(0x101)),
+            Child::Node(Node { bitmap: 0b10, children }) if matches!(
+            &children[..],
             [Child::Node(Node { bitmap: 1, children })] if matches!(
                 &children[..],
                 [Child::Node(Node { bitmap: 0b110, children })] if matches!(
@@ -1153,6 +1206,82 @@ mod tests {
                     [Child::Leaf(Term::Integer(0x101), _), Child::Leaf(Term::Integer(0x201), _)]
                 )
             )
+            )
         ));
+    }
+
+    #[test]
+    fn keeps_keys_with_equal_hashes_in_a_collision_child() {
+        let key = |element: i64| Term::List(vec![Term::Integer(element)]);
+        // Two keys with equal hashes at the last level give a collision child in the term order.
+        let child = Node::split(
+            HAMT_MAX_LEVEL,
+            (0x5, key(2), Term::Integer(2)),
+            (0x5, key(1), Term::Integer(1)),
+        );
+        assert!(matches!(
+            &child,
+            Child::Collision(pairs) if pairs[..] == [(key(1), Term::Integer(1)), (key(2), Term::Integer(2))]
+        ));
+        // Fabricated hashes: 0x5 for [1], [2], and [3], and 0x15 for [4]. A leaf split takes
+        // the real hash of the stored key, so the trie starts from a split of [2] and [3].
+        let root = Node {
+            bitmap: 1 << 5,
+            children: vec![Node::split(
+                1,
+                (0x5, key(3), Term::Integer(0)),
+                (0x5, key(2), Term::Integer(2)),
+            )],
+        };
+        let mut hamt = Hamt { root, size: 2 };
+        hamt.insert(0x5, key(1), Term::Integer(1));
+        hamt.insert(0x5, key(3), Term::Integer(3));
+        hamt.insert(0x15, key(4), Term::Integer(4));
+        assert_eq!(hamt.size, 4);
+        // The only collision child is at level 16, as an ERTS collision node is.
+        let mut nodes = vec![(0, &hamt.root)];
+        let mut collision_levels = Vec::new();
+        while let Some((level, node)) = nodes.pop() {
+            for child in &node.children {
+                match child {
+                    Child::Leaf(..) => {}
+                    Child::Node(inner) => nodes.push((level + 1, inner)),
+                    Child::Collision(_) => collision_levels.push(level + 1),
+                }
+            }
+        }
+        assert_eq!(collision_levels, [HAMT_MAX_LEVEL]);
+        let map = Map {
+            repr: Repr::Hash(hamt),
+        };
+        let pairs: Vec<_> = map
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        assert_eq!(
+            pairs,
+            (1..=4)
+                .map(|n| (key(n), Term::Integer(n)))
+                .collect::<Vec<_>>()
+        );
+        let mut pending = Vec::new();
+        map.drain_into(&mut pending);
+        assert_eq!(
+            pending,
+            [4, 1, 2, 3].map(|n| [key(n), Term::Integer(n)]).concat()
+        );
+
+        // ERTS 29.1.1: these two lists have equal map hashes.
+        let first = Term::List(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
+        let second = Term::List(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
+        assert_eq!(map_hash(&first), map_hash(&second));
+        let mut map = integers(1..=32);
+        map.insert(first.clone(), Term::Integer(1)).unwrap();
+        map.insert(second.clone(), Term::Integer(2)).unwrap();
+        map.insert(second.clone(), Term::Integer(3)).unwrap();
+        assert_eq!(map.len(), 34);
+        *map.get_mut(&first).unwrap() = Term::Integer(4);
+        assert_eq!(map.get(&first), Some(&Term::Integer(4)));
+        assert_eq!(map.get(&second), Some(&Term::Integer(3)));
     }
 }
