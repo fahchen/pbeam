@@ -9,7 +9,8 @@
 //! Supported keys:
 //!
 //! - hashmap: an atom, an integer in the ERTS small-integer range, `[]`,
-//!   and a list whose elements are such keys;
+//!   a list whose elements are such keys, and an improper list whose
+//!   elements are such keys and whose tail is an atom or a small integer;
 //! - flatmap: each hashmap key, and any integer.
 //!
 //! As in ERTS, a flatmap orders two atom keys by their atom index and each
@@ -19,7 +20,7 @@
 //! ERTS order, which BEAM code sees through operations such as
 //! `maps:keys/1`. Other key types need the ERTS hash for bignums, tuples,
 //! binaries, maps, funs, pids, and references, which PBeam does not have
-//! yet.
+//! yet. So does an improper list with such a tail, for example `[1|{}]`.
 
 use std::cmp::Ordering;
 
@@ -124,8 +125,9 @@ struct InternalHash {
 /// One entry on the work stack of a list hash: the rest of a list whose
 /// head is a list, or the marker of a list end (`IHASH_CDR_MARKER`).
 enum Pending<'a> {
-    /// The elements after a list head that the hash takes later.
-    Tail(&'a [Term]),
+    /// The elements after a list head that the hash takes later, and the
+    /// ERTS word of the tail of that list.
+    Tail(&'a [Term], u64),
     /// The marker that a list head is the last element: the next `Tail`
     /// is empty.
     Cdr,
@@ -650,7 +652,8 @@ fn slot(hash: u64, level: u32) -> u32 {
 /// Return the ERTS map hash (`erts_map_hash`, `erl_term_hashing.c:2301-2319`)
 /// of a key, or `None` for a key that a hashmap does not support yet. An
 /// immediate key hashes as `ihash_mix64` of its ERTS word. A list key that
-/// is not empty hashes with the list path of `make_internal_hash`.
+/// is not empty hashes with the list path of `make_internal_hash`, also an
+/// improper list whose tail is an immediate.
 ///
 /// # Examples
 ///
@@ -662,10 +665,14 @@ fn slot(hash: u64, level: u32) -> u32 {
 /// assert!(map_hash(&Term::List(vec![Term::Integer(97)])).is_some());
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
 /// assert_eq!(map_hash(&Term::Tuple(vec![])), None);
+/// let improper = |tail| Term::ImproperList(vec![Term::Integer(1)], Box::new(tail));
+/// assert!(map_hash(&improper(Term::Integer(2))).is_some());
+/// assert_eq!(map_hash(&improper(Term::Tuple(vec![]))), None);
 /// ```
 fn map_hash(key: &Term) -> Option<u64> {
     match key {
-        Term::List(elements) if !elements.is_empty() => list_hash(elements),
+        Term::List(elements) if !elements.is_empty() => list_hash(elements, NIL_WORD),
+        Term::ImproperList(elements, tail) => list_hash(elements, immediate_word(tail)?),
         _ => immediate_word(key).map(mix64),
     }
 }
@@ -692,27 +699,31 @@ fn immediate_word(term: &Term) -> Option<u64> {
     }
 }
 
-/// Return the ERTS internal hash of a list that is not empty, as the list
-/// path of `make_internal_hash` gives it (`erl_term_hashing.c:1783-1841`).
-/// The bytes (small integers 0..255) at the start of the rest of a list go
-/// into chunks of up to 4 bytes. After them, an immediate head mixes with
+/// Return the ERTS internal hash of a list that is not empty, with the
+/// elements `list` and the ERTS word `end` of its tail, as the list path of
+/// `make_internal_hash` gives it (`erl_term_hashing.c:1783-1841`). The
+/// bytes (small integers 0..255) at the start of the rest of a list go into
+/// chunks of up to 4 bytes. After them, an immediate head mixes with
 /// `IHASH_TYPE_CAR`, and a list head goes first while its tail waits on a
-/// work stack, so a deep key does not recurse. Each list ends with `[]`,
-/// which mixes as an immediate (`erl_term_hashing.c:2211-2213`). Return
-/// `None` when an element is not an atom, a small integer, or a list of
-/// these.
+/// work stack, so a deep key does not recurse. Each list ends with its
+/// tail, `[]` or the immediate tail of an improper list, which mixes as an
+/// immediate (`erl_term_hashing.c:2211-2213`). Return `None` when an
+/// element is not an atom, a small integer, a list of these, or an improper
+/// list of these with an immediate tail.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let string = |bytes: &[u8]| bytes.iter().map(|byte| Term::Integer(i64::from(*byte))).collect();
-/// assert_ne!(list_hash(&string(b"ab")), list_hash(&string(b"ba")));
-/// assert!(list_hash(&[Term::Tuple(vec![])]).is_none());
+/// assert_ne!(list_hash(&string(b"ab"), NIL_WORD), list_hash(&string(b"ba"), NIL_WORD));
+/// // [97|1] differs from [97].
+/// assert_ne!(list_hash(&string(b"a"), 0x1F), list_hash(&string(b"a"), NIL_WORD));
+/// assert!(list_hash(&[Term::Tuple(vec![])], NIL_WORD).is_none());
 /// ```
-fn list_hash(list: &[Term]) -> Option<u64> {
+fn list_hash(list: &[Term], end: u64) -> Option<u64> {
     let mut hash = InternalHash::default();
     let mut pending = Vec::new();
-    let mut rest = list;
+    let (mut rest, mut end) = (list, end);
     loop {
         let (mut value, mut bytes) = (0, 0);
         while let [Term::Integer(byte @ 0..=255), tail @ ..] = rest {
@@ -737,26 +748,28 @@ fn list_hash(list: &[Term]) -> Option<u64> {
                 rest = tail;
                 continue;
             }
-            let Term::List(elements) = head else {
-                return None;
+            let (elements, head_end) = match head {
+                Term::List(elements) => (elements, NIL_WORD),
+                Term::ImproperList(elements, head_tail) => (elements, immediate_word(head_tail)?),
+                _ => return None,
             };
-            pending.push(Pending::Tail(tail));
+            pending.push(Pending::Tail(tail, end));
             if tail.is_empty() {
                 pending.push(Pending::Cdr);
             }
             hash.mix_alpha(IHASH_TYPE_CAR);
-            rest = elements;
+            (rest, end) = (elements, head_end);
             continue;
         }
-        // The list ends with the immediate [] (IHASH_MIX_IMMEDIATE, then pop_next).
+        // The list ends with its immediate tail (IHASH_MIX_IMMEDIATE, then pop_next).
         hash.mix_alpha(IHASH_TYPE_IMMEDIATE);
-        hash.mix_beta(NIL_WORD);
+        hash.mix_beta(end);
         loop {
             match pending.pop() {
                 None => return Some(hash.finish()),
                 Some(Pending::Cdr) => hash.mix_beta(IHASH_TYPE_CDR),
-                Some(Pending::Tail(tail)) => {
-                    rest = tail;
+                Some(Pending::Tail(tail, tail_end)) => {
+                    (rest, end) = (tail, tail_end);
                     break;
                 }
             }
@@ -975,6 +988,13 @@ mod tests {
             Term::List(vec![Term::Integer(1), Term::Tuple(vec![])]),
             Term::List(vec![Term::List(vec![Term::Tuple(vec![])])]),
             Term::List(vec![Term::Integer(1 << 59)]),
+            // [1|{}], [1|<<>>], and [[1|{}]]: an improper list tail that is not an immediate.
+            Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Tuple(vec![]))),
+            Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Binary(vec![]))),
+            Term::List(vec![Term::ImproperList(
+                vec![Term::Integer(1)],
+                Box::new(Term::Tuple(vec![])),
+            )]),
         ];
         for key in unsupported {
             assert_eq!(map_hash(&key), None);
@@ -986,6 +1006,78 @@ mod tests {
             assert_eq!(hash.len(), 33);
             assert_eq!(hash.get(&key), None);
         }
+    }
+
+    #[test]
+    fn hashes_improper_list_keys_with_their_tail_as_erts() {
+        // ERTS 29.1.1: maps:keys of #{[1|2] => v, [1,2|3] => v, [[1|2]|3] => v,
+        // [true|false] => v, [256|1] => v, [[1]|2] => v, [[]|-1] => v, 1 => v, ..., 26 => v}.
+        let improper = |elements: Vec<Term>, tail| Term::ImproperList(elements, Box::new(tail));
+        let int = Term::Integer;
+        let one_two = || improper(vec![int(1)], int(2));
+        let one_two_three = || improper(vec![int(1), int(2)], int(3));
+        let nested = || improper(vec![one_two()], int(3));
+        let booleans = || improper(vec![Term::static_atom("true")], Term::static_atom("false"));
+        let large = || improper(vec![int(256)], int(1));
+        let list_head = || improper(vec![Term::List(vec![int(1)])], int(2));
+        let nil_head = || improper(vec![Term::List(vec![])], int(-1));
+        let lists = [
+            one_two(),
+            one_two_three(),
+            nested(),
+            booleans(),
+            large(),
+            list_head(),
+            nil_head(),
+        ];
+        let map = Map::from_pairs(
+            lists
+                .into_iter()
+                .chain((1..=26).map(int))
+                .map(|key| (key, atom("v")))
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            keys(&map),
+            [
+                int(18),
+                list_head(),
+                nested(),
+                int(4),
+                large(),
+                int(12),
+                int(19),
+                int(13),
+                int(2),
+                int(7),
+                int(8),
+                int(10),
+                int(23),
+                int(9),
+                booleans(),
+                one_two(),
+                int(15),
+                one_two_three(),
+                int(1),
+                int(25),
+                int(20),
+                int(6),
+                int(11),
+                int(17),
+                int(24),
+                int(14),
+                nil_head(),
+                int(3),
+                int(16),
+                int(21),
+                int(5),
+                int(26),
+                int(22),
+            ]
+        );
+        assert_eq!(map.get(&one_two_three()), Some(&atom("v")));
+        assert_eq!(map.get(&improper(vec![int(1), int(2)], int(4))), None);
     }
 
     #[test]
