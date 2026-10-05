@@ -171,6 +171,7 @@ pub(super) fn load_nif(
 /// Return `{error, {Kind, Text}}` with `Text` as a list of its bytes, as
 /// ERTS `load_nif_error` (`beam/erl_nif.c:4530-4558`) does. ERTS makes the
 /// atom `Kind` with `mkatom`, so it goes into the atom table of the run.
+/// `load_nif` and the BIF `erlang:load_nif/2` use it.
 ///
 /// # Examples
 ///
@@ -184,7 +185,11 @@ pub(super) fn load_nif(
 ///
 /// The atom `Kind` in a full atom table gives the error of
 /// `AtomTable::put`.
-fn load_nif_error(atoms: &mut AtomTable, kind: &str, text: &str) -> Result<BifResult, BeamError> {
+pub(super) fn load_nif_error(
+    atoms: &mut AtomTable,
+    kind: &str,
+    text: &str,
+) -> Result<BifResult, BeamError> {
     let text = text
         .bytes()
         .map(|byte| Term::Integer(byte.into()))

@@ -227,7 +227,7 @@ bifs! {
     erlang:list_to_port/1 => unsupported,
     erlang:list_to_ref/1 => unsupported,
     erlang:list_to_tuple/1 => unsupported,
-    erlang:load_nif/2 => unsupported,
+    erlang:load_nif/2 => |cx, [_, _]| native::load_nif_error(&mut cx.scheduler.atoms, "bad_lib", "load_nif/2 must be explicitly called from the NIF module. It cannot be called through apply/3."),
     erlang:loaded/0 => unsupported,
     erlang:localtime/0 => unsupported,
     erlang:localtime_to_universaltime/2 => unsupported,

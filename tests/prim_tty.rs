@@ -610,6 +610,21 @@ fn raises_badarg_for_a_module_without_bindings_before_the_library_check() {
 }
 
 #[test]
+fn returns_bad_lib_from_the_bif_for_apply_and_fun_calls() {
+    // `load_nif_probe:bad_lib/0` calls `erlang:load_nif/2` through `apply`
+    // with a module that is not a literal and through a call of `fun
+    // erlang:load_nif/2`. Only the `call_ext` forms become `i_load_nif`
+    // (jit/arm/ops.tab:615-623), so these calls run the BIF, which returns
+    // the `bad_lib` error and does not check the file name `foo`
+    // (erl_nif.c:4618-4626).
+    let bad_lib = Value::error(
+        "bad_lib",
+        "load_nif/2 must be explicitly called from the NIF module. It cannot be called through apply/3.",
+    );
+    assert_load_nif_probe(&[], "nif", "bad_lib", &Value::List(vec![bad_lib; 3]));
+}
+
+#[test]
 fn returns_a_runtime_error_for_a_module_without_bindings() {
     // `load_nif_probe:other/0` calls `erlang:load_nif("load_nif_probe", 0)`.
     // ERTS opens the library with `dlopen` and returns `{error,
