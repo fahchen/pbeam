@@ -2,6 +2,7 @@
 
 use super::BifResult::Value;
 use super::*;
+use crate::runtime::ets::{Access, Operation, Table};
 
 /// The fewest and the most locks that the hidden option
 /// `{write_concurrency, {debug_hash_fixed_number_of_locks, N}}` accepts
@@ -37,8 +38,10 @@ const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
 /// Then the final type `bag`, `duplicate_bag`, or `ordered_set`, and a heir
 /// that is a live process, also the caller, give a runtime error: ERTS makes
 /// such a table, and PBeam cannot model it yet. A heir that is not alive
-/// acts as `none`, as `set_heir` (`erl_db.c:5319-5337`) does. PBeam does not
-/// store the access mode and the key position yet, because no BIF reads them.
+/// acts as `none`, as `set_heir` (`erl_db.c:5319-5337`) does. The table keeps
+/// the last access mode, `protected` changes nothing (`erl_db.c:2705-2706`),
+/// and the key position keeps only the low 32 bits, as the C `int`
+/// `tb->common.keypos` (`erl_db_util.h:346`).
 ///
 /// # Examples
 ///
@@ -66,6 +69,8 @@ pub(super) fn new(
     };
     let mut table_type = "set";
     let mut named = false;
+    let mut access = Access::Protected;
+    let mut keypos = 1;
     let mut explicit_locks = false;
     let mut heir = None;
     for option in options {
@@ -73,12 +78,18 @@ pub(super) fn new(
             Term::Atom(atom) => match atom.name() {
                 "bag" | "duplicate_bag" | "ordered_set" => table_type = atom.name(),
                 "named_table" => named = true,
-                "set" | "protected" | "public" | "private" | "compressed" => {}
+                "public" => access = Access::Public,
+                "private" => access = Access::Private,
+                "set" | "protected" | "compressed" => {}
                 _ => return Ok(BifResult::badarg()),
             },
             Term::Tuple(elements) => match elements.as_slice() {
                 [Term::Atom(key), value] => match (key.name(), value) {
-                    ("keypos", keypos) if keypos.small_integer().is_some_and(|n| n > 0) => {}
+                    ("keypos", value) => match value.small_integer() {
+                        // The C `int` keeps the low 32 bits (`erl_db_util.h:346`).
+                        Some(value) if value > 0 => keypos = value as i32,
+                        _ => return Ok(BifResult::badarg()),
+                    },
                     ("write_concurrency", Term::Atom(value))
                         if matches!(value.name(), "true" | "false" | "auto") =>
                     {
@@ -119,13 +130,132 @@ pub(super) fn new(
     let table = context.scheduler.make_ref()?;
     let owner = context.scheduler.current_process_mut().id;
     let name = named.then_some(name);
-    context
-        .scheduler
-        .ets
-        .create(table, owner, name.map(|name| name.name()));
+    context.scheduler.ets.create(
+        table,
+        name.map(|name| name.name()),
+        Table::new(owner, access, keypos),
+    );
     Ok(Value(name.map_or(Term::Reference(table), |name| {
         Term::Atom(name.clone())
     })))
+}
+
+/// Run `ets:insert(Table, Objects)` on a `set` table and return `true`, as
+/// ERTS `ets_insert_2` (`erl_db.c:2341-2381`) does. `Objects` is one tuple
+/// or a list of tuples. An object with a key that is exactly equal to the key
+/// of an object in the table replaces that object, also an earlier object of
+/// the same list (`erl_db_hash.c:1387-1402`).
+///
+/// A table that does not exist or that the caller cannot write raises
+/// `badarg` (`erl_db.c:769-798`), also for `[]`. A term that is not a tuple,
+/// and a tuple with fewer elements than the key position, raise `badarg`,
+/// and a list with such an element adds no object
+/// (`ets_insert_2_list_check`, `erl_db.c:1812-1827`). ERTS compares the
+/// unsigned size with the C `int` key position, so a negative key position
+/// makes each object bad.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let table = new(&mut context, &test_atom("t"), &Term::List(vec![]))?;
+/// let BifResult::Value(table) = table else { unreachable!() };
+/// let object = Term::Tuple(vec![test_atom("k"), test_atom("v")]);
+/// assert!(matches!(insert(&mut context, &table, &object)?, BifResult::Value(_)));
+/// assert!(matches!(insert(&mut context, &table, &test_atom("x"))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for a tuple in a table with the key position 0:
+/// ERTS aborts the emulator there (`Invalid tag in make_internal_hash`).
+pub(super) fn insert(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    objects: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let Some(table) = context.scheduler.ets.table(table, caller, Operation::Write) else {
+        return Ok(BifResult::badarg());
+    };
+    let objects = match objects {
+        Term::List(objects) => objects.as_slice(),
+        object => std::slice::from_ref(object),
+    };
+    // A C `int` compares with the unsigned arity as a 64-bit unsigned value.
+    let keypos = i64::from(table.keypos()) as u64;
+    let mut tuples = Vec::with_capacity(objects.len());
+    for object in objects {
+        match object {
+            Term::Tuple(elements) if elements.len() as u64 >= keypos => tuples.push(elements),
+            _ => return Ok(BifResult::badarg()),
+        }
+    }
+    if keypos == 0 && !tuples.is_empty() {
+        // ponytail: ERTS aborts here; see "ETS tables" in docs/erts-differences.md.
+        return Err(error(
+            "unsupported ets:insert/2 in a table with key position 0",
+        ));
+    }
+    for elements in tuples {
+        table.insert(elements.clone());
+    }
+    Ok(Value(Term::static_atom("true")))
+}
+
+/// Run `ets:lookup_element(Table, Key, Index, Default)` on a `set` table, as
+/// ERTS `ets_lookup_element_4` (`erl_db.c:2972-3001`) does: return the
+/// element at `Index` of the object with the key `Key`, or `Default` when
+/// the table has no object with that key.
+///
+/// A table that does not exist or that the caller cannot read raises
+/// `badarg` first. Then an index that is not a small integer or that is
+/// below 1 raises `badarg`. ERTS gives the index to `db_get_element` as a C
+/// `int` (`erl_db_util.h:151-155`), so only its low 32 bits count. For a
+/// found object, a negative or too large position raises `badarg`
+/// (`erl_db_hash.c:1563-1566`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let key = test_atom("k");
+/// let result = lookup_element(&mut context, &table, &key, &Term::Integer(2), &test_atom("d"))?;
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("v")));
+/// let result = lookup_element(&mut context, &table, &key, &Term::Integer(0), &test_atom("d"))?;
+/// assert!(matches!(result, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for a found object and an index whose low 32 bits
+/// are 0: ERTS reads the tuple header there and crashes.
+pub(super) fn lookup_element(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    key: &Term,
+    index: &Term,
+    default: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let Some(table) = context.scheduler.ets.table(table, caller, Operation::Read) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(index) = index.small_integer().filter(|index| *index >= 1) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(object) = table.object(key) else {
+        return Ok(Value(default.clone()));
+    };
+    let position = index as i32;
+    if position == 0 {
+        // ponytail: ERTS crashes here; see "ETS tables" in docs/erts-differences.md.
+        return Err(error(format!(
+            "unsupported ets:lookup_element/4 index {index} with position 0"
+        )));
+    }
+    Ok(usize::try_from(position)
+        .ok()
+        .and_then(|position| object.get(position - 1))
+        .map_or_else(BifResult::badarg, |element| Value(element.clone())))
 }
 
 /// Return whether `{Tag, Count}` is the hidden lock option

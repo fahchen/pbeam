@@ -475,6 +475,7 @@ mod tests {
     use super::Scheduler;
     use crate::term::test_atom;
     use crate::{
+        runtime::ets::{Access, Table},
         runtime::process::tests::frame,
         term::{AtomTable, ProcessId, Term},
     };
@@ -660,7 +661,11 @@ mod tests {
 
         scheduler.schedule_next();
         let table = scheduler.make_ref().unwrap();
-        scheduler.ets.create(table, child, Some("ets_probe_owned"));
+        scheduler.ets.create(
+            table,
+            Some("ets_probe_owned"),
+            Table::new(child, Access::Protected, 1),
+        );
         assert!(scheduler.ets.name_in_use("ets_probe_owned"));
         scheduler.finish_current(atom("normal"), None).unwrap();
 

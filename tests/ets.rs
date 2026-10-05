@@ -75,21 +75,128 @@ fn deletes_the_tables_of_an_owner_before_its_down_message_as_pinned_erts() {
 }
 
 #[test]
+fn inserts_objects_as_pinned_erts() {
+    // `ets_probe:insert/0` adds one tuple and a list of tuples. An object
+    // with a key in the table replaces the old object, also in one list
+    // (erl_db_hash.c:1387-1402). `[]` returns `true`. Each case of the list
+    // raises `badarg`: a term that is not a tuple, a tuple with fewer
+    // elements than the key position, a list with one bad element, which
+    // adds nothing (erl_db.c:1812-1827), and a table that does not exist.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
+    assert_eq!(
+        program.execute("ets_probe", "insert", &[]).unwrap(),
+        Term::List(vec![
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            Term::List(vec![badarg(); 9]),
+            Term::List(vec![atom("v1"), atom("v4"), atom("v3"), atom("d")]),
+            atom("v"),
+        ])
+    );
+    assert_eq!(
+        reference("insert"),
+        b"[true,true,true,true,true,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[v1,v4,v3,d],v]\n"
+    );
+}
+
+#[test]
+fn looks_up_elements_as_pinned_erts() {
+    // `ets_probe:lookup/0` reads elements and defaults. The key position
+    // and the index keep only their low 32 bits (erl_db_util.h:346,
+    // erl_db_util.h:151-155): the key position `(1 bsl 32) + 2` acts as 2,
+    // and the index `(1 bsl 32) + 2` reads element 2. The key position
+    // `1 bsl 31` is negative, so each insert of an object raises `badarg`.
+    // Each case of the last list raises `badarg`: an index below 1, above
+    // the size of the object, not an integer, negative after the
+    // truncation, or not a small integer, and a table that does not exist.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
+    assert_eq!(
+        program.execute("ets_probe", "lookup", &[]).unwrap(),
+        Term::List(vec![
+            atom("v"),
+            atom("x"),
+            atom("d"),
+            atom("v"),
+            atom("d"),
+            atom("v"),
+            badarg(),
+            atom("true"),
+            atom("d"),
+            Term::List(vec![badarg(); 8]),
+        ])
+    );
+    assert_eq!(
+        reference("lookup"),
+        b"[v,x,d,v,d,v,{error,badarg},true,d,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]]\n"
+    );
+}
+
+#[test]
+fn checks_table_access_as_pinned_erts() {
+    // `ets_probe:access/0` reads, writes, and writes `[]` to tables of other
+    // processes (erl_db.c:769-798). A `public` table allows each operation,
+    // a `protected` table only the read, and a `private` table none.
+    // `protected` after `private` changes nothing (erl_db.c:2705-2706). A
+    // table and its name are gone after the `DOWN` message of its owner.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let all = || Term::Tuple(vec![atom("owner"), atom("true"), atom("true")]);
+    let none = || Term::Tuple(vec![badarg(), badarg(), badarg()]);
+    assert_eq!(
+        program.execute("ets_probe", "access", &[]).unwrap(),
+        Term::List(vec![
+            Term::List(vec![
+                all(),
+                Term::Tuple(vec![atom("owner"), badarg(), badarg()]),
+                none(),
+                none(),
+                all(),
+            ]),
+            badarg(),
+            atom("owner"),
+            atom("stopped"),
+            badarg(),
+            atom("ets_probe_owned"),
+            atom("d"),
+            Term::List(vec![atom("stopped"); 5]),
+            badarg(),
+        ])
+    );
+    assert_eq!(
+        reference("access"),
+        b"[[{owner,true,true},{owner,{error,badarg},{error,badarg}},{{error,badarg},{error,badarg},{error,badarg}},{{error,badarg},{error,badarg},{error,badarg}},{owner,true,true}],{error,badarg},owner,stopped,{error,badarg},ets_probe_owned,d,[stopped,stopped,stopped,stopped,stopped],{error,badarg}]\n"
+    );
+}
+
+#[test]
 fn rejects_tables_that_pbeam_cannot_model() {
     // ERTS 29.1.1 makes each of these tables: the types bag, bag,
     // duplicate_bag, and ordered_set, and two set tables whose heir is the
-    // caller. PBeam supports only set tables without a live heir. This is
-    // the "ETS tables" row in `docs/erts-differences.md`.
+    // caller. PBeam supports only set tables without a live heir. ERTS
+    // aborts the emulator for an insert with the key position 0 (status
+    // 134, `Invalid tag in make_internal_hash`) and crashes for a found key
+    // and an index that becomes 0 (status 139). This is the "ETS tables"
+    // row in `docs/erts-differences.md`.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     for (case, detail) in [
-        ("bag", "table type bag"),
-        ("set_after_bag", "table type bag"),
-        ("duplicate_bag", "table type duplicate_bag"),
-        ("ordered_set", "table type ordered_set"),
-        ("heir", "heir ProcessId(0)"),
-        ("heir_data", "heir ProcessId(0)"),
+        ("bag", "new/2 table type bag"),
+        ("set_after_bag", "new/2 table type bag"),
+        ("duplicate_bag", "new/2 table type duplicate_bag"),
+        ("ordered_set", "new/2 table type ordered_set"),
+        ("heir", "new/2 heir ProcessId(0)"),
+        ("heir_data", "new/2 heir ProcessId(0)"),
+        ("keypos", "insert/2 in a table with key position 0"),
+        ("index", "lookup_element/4 index 4294967296 with position 0"),
     ] {
-        let message = format!("unsupported ets:new/2 {detail}");
+        let message = format!("unsupported ets:{detail}");
         let case = Term::Atom(program.atom(case).unwrap());
         let error = program
             .execute("ets_probe", "unsupported", &[case])
