@@ -1,6 +1,7 @@
 # Review Conventions
 
-Read this file before implementation. Record only problem classes that recur in review. Keep individual comments and one-time decisions in their task or PR.
+Read this file before implementation. Record only problem classes that recur in
+review. Keep individual comments and one-time decisions in the task or PR.
 
 ## Domain concepts and code names drift apart
 
@@ -68,3 +69,15 @@ Implement only behavior that the current task measures and needs. Move unmeasure
 ## Binary decoders drop required operands
 
 Consume and validate every encoded operand even when runtime semantics do not use its value. Keep the skip behavior in one helper and preserve cursor and tag checks.
+
+## Delimited readers match the complete delimiter
+
+Track every delimiter property that controls closure, including its character
+and opening length. Close a delimited region only when the closing delimiter
+satisfies the format contract.
+
+## Empty input keeps its zero-length meaning
+
+Check for empty input before a pipeline step can add records, separators, or
+newlines. Report zero-length input according to the interface contract instead
+of treating it as one empty record.
