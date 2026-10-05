@@ -1,3 +1,5 @@
+use std::process::Command;
+
 use pbeam_runtime::{BeamProgram, Term};
 
 mod common;
@@ -28,29 +30,34 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
     // `group:whereis_shell/0` resolves inside the loaded `group` module,
     // calls `erlang:group_leader/0`, runs `node/1` (`bif1`) and `node/0`
     // (`bif0`), and finds that the group leader is on the local node. It
-    // then calls `user_drv:whereis_group/0`, which reaches the unimplemented
-    // process registry lookup.
-    let error = program
-        .execute("otp_io_calls", "group_call", &[])
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unresolved external MFA erlang:whereis/1"),
-        "expected resolution into group, got {error}"
-    );
-
-    // `user_drv:whereis_group/0` resolves inside the loaded `user_drv`
-    // module and reaches the unimplemented process registry lookup.
-    let error = program
-        .execute("otp_io_calls", "user_drv_call", &[])
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unresolved external MFA erlang:whereis/1"),
-        "expected resolution into user_drv, got {error}"
-    );
+    // then calls `user_drv:whereis_group/0`. `user_drv:whereis_group/0`
+    // resolves inside the loaded `user_drv` module. No `user_drv` process
+    // runs, so `whereis(user_drv)` gives `undefined`, and
+    // `process_info(undefined, dictionary)` raises `badarg`
+    // (`user_drv.erl:159-162`). The pinned ERTS run without `user_drv`
+    // (`-nouser`) below gives the same `error:badarg`.
+    for function in ["group_call", "user_drv_call"] {
+        let error = program.execute("otp_io_calls", function, &[]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "root process exited with Tuple([Atom(\"badarg\"), List([])])",
+            "{function}"
+        );
+    }
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-nouser",
+            "-pa",
+            "fixtures/otp_io",
+            "-eval",
+            "io:format(standard_error, \"~w~n\", [[try otp_io_calls:F() of V -> {ok, V} catch C:R -> {C, R} end || F <- [group_call, user_drv_call]]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stdout.is_empty());
+    assert_eq!(reference.stderr, b"[{error,badarg},{error,badarg}]\n");
 
     // `prim_tty:ansi_regexp/0` resolves inside the loaded `prim_tty` module
     // and returns its literal binary without reaching any unresolved call.
