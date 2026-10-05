@@ -90,13 +90,14 @@ cancel_timer() ->
     R5 = erlang:start_timer(0, Self, y),
     J = receive {timeout, R5, y} -> erlang:cancel_timer(R5, [{async, false}]) end,
     K = erlang:cancel_timer(make_ref(), [{async, true}, {async, false}]),
+    L = erlang:cancel_timer(make_ref(), [{info, false}, {info, true}]),
     N = wait(300),
     Bad = [cancel_bad(T, O)
            || {T, O} <- [{foo, []}, {1, []}, {Self, []}, {R1, foo}, {R1, [foo]},
                          {R1, [{async, 1}]}, {R1, [{info, yes}]},
                          {R1, [{abs, true}]}, {R1, [{async, true, x}]},
                          {R1, [{other, true}]}, {foo, [{abs, false}]}]],
-    [A, B, C, D, E, F, G, H, I, J, K, N, Bad].
+    [A, B, C, D, E, F, G, H, I, J, K, L, N, Bad].
 
 cancel_bad(Ref, Options) ->
     try erlang:cancel_timer(Ref, Options)
