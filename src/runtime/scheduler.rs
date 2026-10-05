@@ -4,6 +4,7 @@ use super::{
     ets::EtsTables,
     persistent_term::PersistentTerms,
     process::{Frame, ProcessState},
+    resource::Resources,
 };
 use crate::{
     error::{BeamError, error},
@@ -39,6 +40,9 @@ pub(super) struct Scheduler {
     pub(super) persistent_terms: PersistentTerms,
     /// ETS tables of the node. All processes of the run share them.
     pub(super) ets: EtsTables,
+    /// NIF resources of the node, such as compiled regular expressions.
+    /// All processes of the run share them.
+    pub(super) resources: Resources,
     /// The atom table of the run, as `erts_atom_table` for one emulator. A
     /// run starts with a copy of the program table, and a BIF such as
     /// `erlang:list_to_atom/1` adds its new atoms here.
@@ -67,6 +71,7 @@ impl Scheduler {
             names: HashMap::new(),
             persistent_terms: PersistentTerms::default(),
             ets: EtsTables::default(),
+            resources: Resources::default(),
             atoms,
         }
     }

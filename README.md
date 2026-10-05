@@ -33,6 +33,8 @@ Development toolchains are pinned in [mise.toml](mise.toml). Use `mise install`
 to install them; see the [target contract](docs/terra-target.md#toolchain-baseline)
 for versions and verification limits. There is no PBeam build command yet.
 
+The Rust build compiles the PCRE2 10.47 sources of OTP 29.1.1 in `vendor/pcre2` with the host C compiler, under the licence in [vendor/pcre2/LICENCE](vendor/pcre2/LICENCE).
+
 ## Checks
 
 After installing the mise tools, install the Rust checking components and run:

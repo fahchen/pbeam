@@ -569,6 +569,38 @@ pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
     }
 }
 
+/// Return the bytes of iodata: the bytes of a binary, or the bytes of each
+/// element of an iolist in order, as `erts_iolist_to_buf` writes them.
+/// Return `None` for any other term and for an iolist with an element that
+/// is not iodata.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(iodata_bytes(&Term::Binary(b"ab".to_vec())), Some(b"ab".to_vec()));
+/// // [$a, [<<"b">>]] gives <<"ab">>.
+/// let list = Term::List(vec![Term::Integer(97), Term::List(vec![Term::Binary(b"b".to_vec())])]);
+/// assert_eq!(iodata_bytes(&list), Some(b"ab".to_vec()));
+/// assert_eq!(iodata_bytes(&Term::List(vec![Term::Integer(256)])), None);
+/// assert_eq!(iodata_bytes(&Term::static_atom("foo")), None);
+/// ```
+pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
+    match term {
+        Term::Binary(bytes) => Some(bytes.clone()),
+        Term::List(elements) => {
+            let mut bytes = Vec::new();
+            // An iovec holds only binaries.
+            for binary in iolist_iovec(elements)? {
+                if let Term::Binary(part) = &binary {
+                    bytes.extend_from_slice(part);
+                }
+            }
+            Some(bytes)
+        }
+        _ => None,
+    }
+}
+
 /// Convert the elements of an iolist to the iovec of
 /// `erlang:iolist_to_iovec/1`, or return `None` when an element is not
 /// iodata. Use a stack of list iterators, as the ERTS engine does, so that a
