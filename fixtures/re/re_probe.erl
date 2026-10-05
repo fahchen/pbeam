@@ -79,9 +79,10 @@ export() ->
      exported(re:compile([$a, ?MODULE:id(256)], [unicode, export]))]
     ++ [exported(re:compile(<<"a">>, [export | Options]))
         || Options <- [[anchored], [caseless], [dollar_endonly], [dotall],
-                       [extended], [firstline], [multiline], [ungreedy],
-                       [ucp], [no_start_optimize], [bsr_anycrlf],
-                       [bsr_unicode], [never_utf],
+                       [dupnames], [extended], [firstline], [multiline],
+                       [ungreedy], [ucp], [no_auto_capture],
+                       [no_start_optimize], [bsr_anycrlf], [bsr_unicode],
+                       [never_utf],
                        [bsr_anycrlf, bsr_unicode],
                        [bsr_unicode, bsr_anycrlf]]]
     ++ [re:compile(<<"(">>, [export])].
