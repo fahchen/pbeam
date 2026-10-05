@@ -119,3 +119,59 @@ fn tests_funs_with_is_function_as_pinned_erts() {
         b"[[a,b],one,any,none,true,false,true,false,false,true,false,false,badarg,badarg]\n"
     );
 }
+
+#[test]
+fn applies_funs_as_pinned_erts() {
+    // `fun_probe:applies/0` calls `erlang:apply/2` as `call_ext`,
+    // `call_ext_only`, and `call_ext_last`, and as an apply of
+    // `erlang:apply/3` with two elements. The JIT `i_apply_fun` raises
+    // `badarg` for an argument term that is not a list before it tests the
+    // fun, and `system_limit` for a list of 1023 elements
+    // (`jit/arm/instr_fun.cpp:253-328`). A list of 1022 elements reaches the
+    // fun and raises `badarity`. The pinned `erlang.beam` is loaded, so a
+    // call that enters its `apply/2` body, which calls itself, never returns.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, FUN_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |first: &str, second: &str| Term::Tuple(vec![atom(first), atom(second)]);
+    let badarity = |arguments| Term::Tuple(vec![atom("badarity"), atom("same"), arguments]);
+    let expected = vec![
+        pair("a", "x"),
+        pair("a", "u"),
+        pair("a", "t"),
+        pair("a", "r"),
+        atom("badarg"),
+        pair("badfun", "notfun"),
+        atom("badarg"),
+        badarity(Term::List(vec![Term::Integer(1), Term::Integer(2)])),
+        badarity(atom("same")),
+        atom("system_limit"),
+    ];
+    assert_eq!(
+        program.execute("fun_probe", "applies", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("applies"),
+        b"[{a,x},{a,u},{a,t},{a,r},badarg,{badfun,notfun},badarg,\
+          {badarity,same,[1,2]},{badarity,same,same},system_limit]\n"
+    );
+}
+
+#[test]
+fn spawns_a_fun_at_erlang_apply_2_as_pinned_erts() {
+    // `erlang:spawn/1` tests the fun with `is_function` and starts the new
+    // process at `erlang:apply(F, [])` (`erlang.erl:10601-10605`), as
+    // `standard_error:start/0` does. The process runs the body of
+    // `erlang:apply/2` in the pinned `erlang.beam`, which is
+    // `call_ext_only erlang:apply/2` (`erlang.erl:10557-10558`). A term that
+    // is not a fun raises `badarg` through `badarg_with_info/1`.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, FUN_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("fun_probe", "spawned", &[]).unwrap(),
+        Term::List(vec![atom("spawned"), atom("badarg")])
+    );
+    assert_eq!(reference("spawned"), b"[spawned,badarg]\n");
+}

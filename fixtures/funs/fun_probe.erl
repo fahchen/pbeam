@@ -1,5 +1,5 @@
 -module(fun_probe).
--export([mfas/0, locals/0, tests/0, id/1]).
+-export([mfas/0, locals/0, tests/0, applies/0, spawned/0, id/1]).
 
 %% erlang:apply/3 and the apply instruction, as proc_lib:init_p_do_apply/3
 %% runs them. apply/3 takes at most 1023 arguments.
@@ -54,6 +54,29 @@ tests() ->
      try is_function(id(Pair), id(-1)) catch error:R1 -> R1 end,
      try is_function(id(notfun), id(a)) catch error:R2 -> R2 end].
 
+%% erlang:apply/2 with a fun. apply/2 takes at most 1022 arguments on the JIT.
+applies() ->
+    Pair = make_pair(a),
+    L1022 = list1022(),
+    [apply(Pair, [x]),
+     apply(erlang, apply, [Pair, [u]]),
+     tail_apply(Pair, [t]),
+     framed_apply(Pair, [r]),
+     try apply(Pair, id(notalist)) catch error:R1 -> R1 end,
+     try apply(id(notfun), []) catch error:R2 -> R2 end,
+     try apply(id(notfun), id(notalist)) catch error:R3 -> R3 end,
+     try apply(Pair, [1, 2]) catch error:{badarity, {F1, A1}} -> {badarity, eq(F1, Pair), A1} end,
+     try apply(Pair, L1022) catch error:{badarity, {F2, A2}} -> {badarity, eq(F2, Pair), eq(A2, L1022)} end,
+     try apply(Pair, [x | L1022]) catch error:R4 -> R4 end].
+
+%% spawn/1 starts a process at erlang:apply/2.
+spawned() ->
+    Self = self(),
+    Tag = id(spawned),
+    Pid = spawn(fun() -> Self ! {Tag, self()} end),
+    Reply = receive {spawned, Pid} -> spawned end,
+    [Reply, try spawn(id(notfun)) catch error:R -> R end].
+
 %% A list of 1022 atoms x, built without arithmetic.
 list1022() ->
     L1 = id([x]), L2 = L1 ++ L1, L4 = L2 ++ L2, L8 = L4 ++ L4, L16 = L8 ++ L8,
@@ -63,7 +86,9 @@ list1022() ->
 
 make_pair(T) -> fun(X) -> {T, X} end.
 tail_call(F) -> F(tail).
+tail_apply(F, A) -> apply(F, A).
 tail_apply(M, F, A) -> apply(M, F, A).
+framed_apply(F, A) -> _ = id(x), apply(F, A).
 eq(X, X) -> same;
 eq(_, _) -> different.
 kind(F) when is_function(F, 1) -> one;

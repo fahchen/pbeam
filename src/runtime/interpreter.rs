@@ -362,7 +362,7 @@ impl BeamProgram {
                 }
                 Instruction::CallFun { arity, function } => {
                     let fun = read(process, function)?;
-                    if let Some(outcome) = self.call_fun(process, &fun, *arity)? {
+                    if let Some(outcome) = self.call_fun(process, &fun, *arity, false)? {
                         return Ok(outcome);
                     }
                 }
@@ -776,9 +776,9 @@ impl BeamProgram {
     }
 
     /// Call `module:name/arity` with the arguments in the X registers. The
-    /// call of `erlang:apply/3` runs as the ERTS `i_apply` instruction. A BIF
-    /// runs before the module code, as in ERTS. Return the outcome when the
-    /// process exits.
+    /// calls of `erlang:apply/2` and `erlang:apply/3` run as the ERTS
+    /// `i_apply_fun` and `i_apply` instructions. A BIF runs before the module
+    /// code, as in ERTS. Return the outcome when the process exits.
     ///
     /// # Examples
     ///
@@ -786,8 +786,8 @@ impl BeamProgram {
     /// // `erlang:apply(erlang, self, [])` runs the `self/0` BIF.
     /// let outcome = program.call_mfa(&mut scheduler, "erlang", "apply", 3, false)?;
     /// assert!(outcome.is_none());
-    /// // `erlang:apply/2` runs as an instruction in ERTS.
-    /// assert!(program.call_mfa(&mut scheduler, "erlang", "apply", 2, false).is_err());
+    /// // `erlang:yield/0` runs as an instruction in ERTS.
+    /// assert!(program.call_mfa(&mut scheduler, "erlang", "yield", 0, false).is_err());
     /// ```
     fn call_mfa(
         &self,
@@ -797,8 +797,10 @@ impl BeamProgram {
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        if (module, name, arity) == ("erlang", "apply", 3) {
-            return self.apply_mfa(scheduler, tail);
+        match (module, name, arity) {
+            ("erlang", "apply", 2) => return self.apply_fun(scheduler, tail),
+            ("erlang", "apply", 3) => return self.apply_mfa(scheduler, tail),
+            _ => {}
         }
         if INSTRUCTION_CALLS.contains(&(module, name, arity)) {
             // ponytail: ERTS runs these calls as instructions; see "Instruction calls" in docs/erts-differences.md.
@@ -868,27 +870,74 @@ impl BeamProgram {
         self.call_mfa(scheduler, module.name(), name.name(), arity, tail)
     }
 
+    /// Run `erlang:apply(Fun, Arguments)` with the arguments in `x0` and
+    /// `x1`, as the JIT `emit_apply_fun_shared` (`jit/arm/instr_fun.cpp:253-328`)
+    /// does for the `i_apply_fun` instructions. `Arguments` must be a list,
+    /// else the call raises `error:badarg`. A list of 1023 or more elements
+    /// raises `error:system_limit`. Then the elements go to `x0` onwards, and
+    /// the call continues as `call_fun` does, so a term that is not a fun
+    /// raises `badfun` only after these checks. Return the outcome when the
+    /// process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // x0 = fun(X) -> {a, X} end, x1 = [x] enters the lambda with x0 = x.
+    /// assert!(program.apply_fun(&mut scheduler, false)?.is_none());
+    /// // x0 = notfun, x1 = notalist raises `error:badarg`.
+    /// assert!(matches!(program.apply_fun(&mut scheduler, true)?, Some(Outcome::Exit { .. })));
+    /// ```
+    fn apply_fun(
+        &self,
+        scheduler: &mut Scheduler,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        /// The JIT stops at `MAX_REG - 1` arguments, because the loader
+        /// keeps the highest X register (`erl_vm.h:55`,
+        /// `jit/arm/instr_fun.cpp:290-297`).
+        const MAX_ARGUMENTS: usize = 1022;
+        let process = scheduler.current_process_mut();
+        let fun = read(process, &Operand::X(0))?;
+        let mut list = read(process, &Operand::X(1))?;
+        let Term::List(arguments) = &mut list else {
+            let badarg = Term::static_atom("badarg");
+            return Ok(raise(process, ExceptionClass::Error, badarg));
+        };
+        let arguments = std::mem::take(arguments);
+        if arguments.len() > MAX_ARGUMENTS {
+            let system_limit = Term::static_atom("system_limit");
+            return Ok(raise(process, ExceptionClass::Error, system_limit));
+        }
+        let arity = arguments.len() as u32;
+        for (index, argument) in (0..).zip(arguments) {
+            write(process, &Operand::X(index), argument)?;
+        }
+        self.call_fun(process, &fun, arity, tail)
+    }
+
     /// Call `fun` with the arguments in `x0` to `x(arity - 1)`, as ERTS
     /// `call_fun` (`beam_common.c:1605-1731`) does for `call_fun` and
     /// `call_fun2`. A term that is not a fun raises `error:{badfun, Term}`. A
     /// fun of another arity raises `error:{badarity, {Fun, Arguments}}`,
     /// where `Arguments` lists `x0` to `x(arity - 1)`. Else the free
     /// variables go to `x(arity)` onwards, and the call enters the code of
-    /// the lambda. Return the outcome when the process exits.
+    /// the lambda. A tail call replaces the active frame. Return the outcome
+    /// when the process exits.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // x0 = one and fun(X) -> {Tag, X} end enters the lambda with x1 = Tag.
-    /// assert!(program.call_fun(process, &pair, 1)?.is_none());
+    /// assert!(program.call_fun(process, &pair, 1, false)?.is_none());
     /// // An atom raises `error:{badfun, notfun}`.
-    /// assert!(program.call_fun(process, &Term::static_atom("notfun"), 0)?.is_some());
+    /// assert!(program.call_fun(process, &Term::static_atom("notfun"), 0, false)?.is_some());
     /// ```
     fn call_fun(
         &self,
         process: &mut ProcessState,
         fun: &Term,
         arity: u32,
+        tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
         let fun = match fun {
             Term::Fun(local) if local.lambda().arity() == arity => local,
@@ -909,7 +958,7 @@ impl BeamProgram {
         let lambda = fun.lambda();
         let total_arity = arity + fun.free().len() as u32;
         let frame = self.frame(lambda.module().name(), lambda.label(), total_arity)?;
-        enter_frame(process, frame, false);
+        enter_frame(process, frame, tail);
         Ok(None)
     }
 
@@ -1541,12 +1590,8 @@ mod tests {
             error(vec![erlang_call("is_alive", 0, false)])
                 .contains("unresolved external MFA erlang:is_alive/0")
         );
-        // The ERTS loader turns these calls into instructions. Their bodies in
-        // `erlang.beam` call themselves, so they must not run.
-        assert!(
-            error(vec![erlang_call("apply", 2, false)])
-                .contains("unsupported instruction call erlang:apply/2")
-        );
+        // The ERTS loader turns this call into an instruction. Its body in
+        // `erlang.beam` calls itself, so it must not run.
         assert!(
             error(vec![erlang_call("hibernate", 0, false)])
                 .contains("unsupported instruction call erlang:hibernate/0")
@@ -3053,7 +3098,8 @@ mod tests {
         body.push(erlang_call("apply", 3, true));
         assert_eq!(run_with_apply_targets(body).unwrap(), tuple);
         // An apply of `erlang:apply` with a list that is not three elements
-        // calls `erlang:apply/2`, which runs as an instruction in ERTS.
+        // calls `erlang:apply/2`. ERTS 29.1.1 raises `badarg` for
+        // `apply(erlang, apply, [fixture, id])`, because `id` is not a list.
         let mut body = apply_of(
             test_atom("erlang"),
             test_atom("apply"),
@@ -3062,7 +3108,7 @@ mod tests {
         body.push(erlang_call("apply", 3, true));
         assert_eq!(
             run_with_apply_targets(body).unwrap_err().to_string(),
-            "unsupported instruction call erlang:apply/2"
+            BADARG_EXIT
         );
         // `apply` copies at most 1023 arguments to the X registers. ERTS gives
         // `undef` for `apply(nomod, nofun, L1023)` and raises `system_limit`
