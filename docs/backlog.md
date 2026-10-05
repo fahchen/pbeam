@@ -17,6 +17,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the next OTP version update, or a decision to keep no third-party source in the tree.
 - **Source:** owner review of PR #124.
 
+### Select the curses library on Linux as ERTS `configure` does
+
+- `src/runtime/host/terminal.rs` links `libtinfo.so.6` by its verbatim name on Linux, as the mise ERTS build links it. A host without this SONAME, for example a musl image, cannot link PBeam. ERTS `configure` uses the first of `tinfo`, `ncurses`, `curses`, `termcap`, and `termlib` that has `tgetent` (`erts/configure.ac:1239-1242`).
+- **Trigger:** a supported Linux target without `libtinfo.so.6`, for example the musl build of the specification.
+- **Source:** Copilot review of PR #131 (#126).
+
 ## Term and loader
 
 ### Load `SMALL_BIG_EXT` and `LARGE_BIG_EXT` literals that fit in 64 bits
