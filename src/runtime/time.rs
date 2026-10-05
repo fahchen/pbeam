@@ -2,18 +2,29 @@
 //! conversion of `erlang:monotonic_time/1` and `os:system_time/1`, the
 //! date of a POSIX time, and the POSIX time of a UTC date.
 
-use crate::term::Term;
+use crate::term::{SMALL_INTEGER_MIN, Term};
 
 /// The native time unit, `ERTS_MONOTONIC_TIME_UNIT`: 1000000000 parts of a
 /// second (`erl_time.h:282-283`, `sys/unix/erl_unix_sys.h:192-204`).
 pub(super) const TIME_UNIT: i64 = 1_000_000_000;
 
+/// The internal monotonic time at the run start, `ERTS_MONOTONIC_BEGIN`:
+/// one second in the native time unit (`erl_time.h:235-236`).
+pub(super) const MONOTONIC_BEGIN: i64 = TIME_UNIT;
+
+/// The Erlang monotonic time at the run start,
+/// `ERTS_MONOTONIC_TIME_START_EXTERNAL`: the smallest small integer,
+/// rounded toward zero to a multiple of one second (`erl_time.h:316-321`).
+/// The value is -576460752000000000, as `erlang:system_info(start_time)` on
+/// the pinned ERTS.
+const MONOTONIC_TIME_START_EXTERNAL: i64 = SMALL_INTEGER_MIN / TIME_UNIT * TIME_UNIT;
+
 /// The offset from the internal monotonic time to the Erlang monotonic time
 /// in the native time unit, `ERTS_MONOTONIC_OFFSET_NATIVE`
-/// (`erl_time.h:318-321`, `331-340`): `ERTS_MONOTONIC_TIME_START_EXTERNAL`,
-/// -576460752000000000, minus `ERTS_MONOTONIC_BEGIN`, 1000000000. The
-/// offset is a multiple of one second.
-pub(super) const MONOTONIC_OFFSET_NATIVE: i64 = -576_460_753_000_000_000;
+/// (`erl_time.h:331-332`): [`MONOTONIC_TIME_START_EXTERNAL`] minus
+/// [`MONOTONIC_BEGIN`], -576460753000000000. The offset is a multiple of one
+/// second.
+pub(super) const MONOTONIC_OFFSET_NATIVE: i64 = MONOTONIC_TIME_START_EXTERNAL - MONOTONIC_BEGIN;
 
 /// The unit of `perf_counter`, `ERTS_HRTIME_UNIT`, on a host without
 /// `rdtscp` (`sys_time.c:1032-1041`, `sys/unix/erl_unix_sys.h:219`).
@@ -272,6 +283,14 @@ fn is_leap_year(year: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derives_the_monotonic_offset_as_erts() {
+        // `erlang:system_info(start_time)` on the pinned ERTS.
+        assert_eq!(MONOTONIC_TIME_START_EXTERNAL, -576_460_752_000_000_000);
+        assert_eq!(MONOTONIC_BEGIN, 1_000_000_000);
+        assert_eq!(MONOTONIC_OFFSET_NATIVE, -576_460_753_000_000_000);
+    }
 
     #[test]
     fn converts_each_unit_with_the_offset_multiplier() {
