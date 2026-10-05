@@ -1,6 +1,6 @@
 -module(alias_probe).
--export([targets/0, options/0, tags/0, modes/0, downs/0, exits/0, unsupported/1,
-         idle/0, relay/0, owner/2, id/1]).
+-export([targets/0, options/0, tags/0, modes/0, downs/0, exits/0, sends/0, call/0, unsupported/1,
+         idle/0, relay/0, owner/2, server/0, id/1]).
 
 id(X) -> X.
 
@@ -12,6 +12,9 @@ idle() -> receive stop -> ok end.
 relay() ->
     receive
         {send, To, Messages, Caller} -> [To ! M || M <- Messages], Caller ! sent, relay();
+        {send_bifs, To, Caller} ->
+            Caller ! {sent_bifs, [erlang:send(To, r1, [noconnect]), erlang:send(To, r2)]},
+            relay();
         stop -> ok
     end.
 
@@ -28,6 +31,17 @@ owner(Parent, T) ->
 
 owner_loop(Parent) ->
     receive ping -> Parent ! {pong, self()}, owner_loop(Parent) end.
+
+%% A server that answers gen calls with gen:reply/2 (gen.erl:549-554), as
+%% gen_server does. `hold` replies only after `go`, then tells the client.
+server() ->
+    receive
+        {'$gen_call', From, {echo, X}} -> gen:reply(From, {echo, X}), server();
+        {'$gen_call', From, {hold, Client}} ->
+            receive go -> gen:reply(From, late), Client ! replied end,
+            server();
+        stop -> ok
+    end.
 
 flush() -> receive M -> [M | flush()] after 0 -> [] end.
 
@@ -182,6 +196,41 @@ exits() ->
     Left = flush(),
     T ! stop,
     {[E1, E2, E3, E4, E5, E6], Alive, Down, Trapped, Left}.
+
+%% erlang:send/2 (erl_send, bif.c:2845-2908) and erlang:send/3
+%% (bif.c:2697-2799), with the alias of another process.
+sends() ->
+    R = spawn(?MODULE, relay, []),
+    T = spawn(?MODULE, idle, []),
+    Self = self(),
+    Send2 = [t(fun() -> erlang:send(?MODULE:id(To), m2) end)
+             || To <- [Self, nobody, make_ref(), {nobody, 'a@b'}, {nobody, node()}, 1]],
+    Send3 = [t(fun() -> erlang:send(?MODULE:id(To), m3, ?MODULE:id(O)) end)
+             || {To, O} <- [{Self, []}, {Self, [noconnect]}, {Self, [nosuspend, noconnect]}, {Self, [priority]},
+                            {Self, x}, {Self, [x]}, {Self, [noconnect|x]}, {{nobody, 'a@b'}, [noconnect]},
+                            {{nobody, 'a@b'}, [nosuspend]}, {{nobody, node()}, [noconnect]},
+                            {nobody, [noconnect]}, {1, []}, {make_ref(), [noconnect]}]],
+    Messages = flush(),
+    A = erlang:monitor(process, T, [{alias, reply_demonitor}]),
+    R ! {send_bifs, A, Self},
+    Relay = receive {sent_bifs, Results} -> Results end,
+    T ! stop, R ! stop,
+    {Send2, Send3, Messages, Relay, flush()}.
+
+%% gen_server:call/2,3 with a finite timeout: gen:do_call/4 (gen.erl:251-282).
+call() ->
+    S = spawn(?MODULE, server, []),
+    R1 = gen_server:call(S, {echo, 1}, 5000),
+    R2 = gen_server:call(S, {echo, 2}),
+    Self = self(),
+    R3 = try gen_server:call(S, {hold, Self}, 10)
+         catch exit:{timeout, {gen_server, call, [S, {hold, Self}, 10]}} -> timeout
+         end,
+    S ! go,
+    receive replied -> ok end,
+    Left = flush(),
+    S ! stop,
+    [R1, R2, R3, Left].
 
 %% Calls that PBeam does not support (see docs/erts-differences.md).
 unsupported(priority) -> erlang:monitor(process, spawn(?MODULE, idle, []), [priority]);

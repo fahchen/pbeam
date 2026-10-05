@@ -2,6 +2,10 @@ use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
 
+mod common;
+
+use common::pinned_beam;
+
 const ALIAS_PROBE: &[u8] = include_bytes!("../fixtures/alias/alias_probe.beam");
 
 /// Run a function of `alias_probe` under the pinned ERTS and return the
@@ -292,4 +296,69 @@ fn returns_a_runtime_error_for_an_exit_signal_that_ends_the_caller_through_its_a
         error.contains("unsupported exit signal through an alias of the caller"),
         "{error}"
     );
+}
+
+#[test]
+fn runs_erlang_send_2_and_send_3_as_pinned_erts() {
+    // `sends/0`: `erlang:send/2` returns the message as `erl_send`
+    // (bif.c:2845-2908). `erlang:send/3` reads its options first and raises
+    // `badarg` before it sends, then returns `noconnect` only for another
+    // node with `noconnect` (bif.c:2697-2799). The relay sends through a
+    // `reply_demonitor` alias with `send/3`, which ends it, so `send/2` to
+    // the alias drops `r2`.
+    let (result, atom) = run("sends");
+    let tuple = Term::Tuple;
+    let list = Term::List;
+    let badarg = || tuple(vec![atom("error"), atom("badarg")]);
+    let ok = |value: &str| tuple(vec![atom("ok"), atom(value)]);
+    let mut send3: Vec<Term> = (0..4).map(|_| ok("ok")).collect();
+    send3.extend((0..3).map(|_| badarg()));
+    send3.extend([
+        ok("noconnect"),
+        ok("ok"),
+        ok("ok"),
+        badarg(),
+        badarg(),
+        ok("ok"),
+    ]);
+    let atoms = |names: &[&str]| list(names.iter().map(|name| atom(name)).collect());
+    assert_eq!(
+        result,
+        tuple(vec![
+            list(vec![
+                ok("m2"),
+                badarg(),
+                ok("m2"),
+                ok("m2"),
+                ok("m2"),
+                badarg()
+            ]),
+            list(send3),
+            atoms(&["m2", "m3", "m3", "m3", "m3"]),
+            atoms(&["ok", "r2"]),
+            atoms(&["r1"]),
+        ])
+    );
+    assert_eq!(
+        erl_reference("sends()"),
+        "{[{ok,m2},{error,badarg},{ok,m2},{ok,m2},{ok,m2},{error,badarg}],[{ok,ok},{ok,ok},{ok,ok},{ok,ok},{error,badarg},{error,badarg},{error,badarg},{ok,noconnect},{ok,ok},{ok,ok},{error,badarg},{error,badarg},{ok,ok}],[m2,m3,m3,m3,m3],[ok,r2],[r1]}\n"
+    );
+}
+
+#[test]
+fn replies_to_a_gen_server_call_through_an_alias_as_pinned_erts() {
+    // `call/0`: `gen:do_call/4` (gen.erl:251-282) monitors the server with
+    // `[{alias, demonitor}]`, sends with `erlang:send/3`, and `gen:reply/2`
+    // answers through the alias. After the timeout, `demonitor` with `flush`
+    // ends the alias, so the late reply is dropped.
+    let gen_server = pinned_beam("gen_server");
+    let gen_module = pinned_beam("gen");
+    let program = BeamProgram::load(&[ALIAS_PROBE, &gen_server, &gen_module]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let echo = |value| Term::Tuple(vec![atom("echo"), Term::Integer(value)]);
+    assert_eq!(
+        program.execute("alias_probe", "call", &[]).unwrap(),
+        Term::List(vec![echo(1), echo(2), atom("timeout"), Term::List(vec![])])
+    );
+    assert_eq!(erl_reference("call()"), "[{echo,1},{echo,2},timeout,[]]\n");
 }
