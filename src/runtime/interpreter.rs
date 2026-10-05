@@ -140,7 +140,7 @@ impl BeamProgram {
                         scheduler.finish_current(reason, result)?;
                     }
                 }
-            } else if let Some(wait) = scheduler.timers.wait_time(now) {
+            } else if let Some(wait) = scheduler.timers.wait_time(scheduler.timers.now()) {
                 std::thread::sleep(wait);
             } else {
                 break;
