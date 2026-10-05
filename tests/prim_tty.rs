@@ -421,7 +421,8 @@ fn restores_fd_0_when_the_tty_owner_exits() {
     let [Some(stdin), None, Some(stderr)] = pbeam_modes else {
         panic!("stdin and stderr are terminals");
     };
-    // Stdin started without `ECHO` and `ICANON`.
+    // Stdin started without `ECHO` and `ICANON`, so these flags at exit
+    // show that a TTY monitor set fd 0 to the first mode of stderr.
     assert_eq!(stdin.c_lflag & CANONICAL_ECHO, CANONICAL_ECHO);
     assert_raw(&stderr);
 }
@@ -448,7 +449,8 @@ fn restores_fd_0_when_a_linked_tty_owner_exits_abnormally() {
     let [Some(stdin), None, Some(stderr)] = pbeam_modes else {
         panic!("stdin and stderr are terminals");
     };
-    // Stdin started without `ECHO` and `ICANON`.
+    // Stdin started without `ECHO` and `ICANON`, so these flags at exit
+    // show that a TTY monitor set fd 0 to the first mode of stderr.
     assert_eq!(stdin.c_lflag & CANONICAL_ECHO, CANONICAL_ECHO);
     assert_raw(&stderr);
 }
