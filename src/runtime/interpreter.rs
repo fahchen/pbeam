@@ -491,6 +491,15 @@ impl BeamProgram {
                         jump(module, process, *fail_label)?;
                     }
                 }
+                Instruction::TestExactNotEqual {
+                    fail_label,
+                    left,
+                    right,
+                } => {
+                    if read(process, left)? == read(process, right)? {
+                        jump(module, process, *fail_label)?;
+                    }
+                }
                 Instruction::TestGreaterEqual {
                     fail_label,
                     left,
@@ -2323,6 +2332,33 @@ mod tests {
                 },
             ])
             .contains("tail-call stack size")
+        );
+    }
+
+    #[test]
+    fn returns_the_iovec_of_a_binary_and_of_a_list() {
+        // On pinned ERTS, `erlang:iolist_to_iovec(<<"Hello">>)` returns
+        // `[<<"Hello">>]`, and `[1, [<<2>>]]` returns `[<<1,2>>]` through the
+        // iolist engine (`iolist_to_iovec_engine` in `erl_iolist.c`).
+        let run = |argument| {
+            make_program(
+                vec![
+                    Instruction::Move(Operand::Value(argument), Operand::X(0)),
+                    erlang_call("iolist_to_iovec", 1, true),
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+            .unwrap()
+        };
+        let hello = Term::Binary(b"Hello".to_vec());
+        assert_eq!(run(hello.clone()), Term::List(vec![hello]));
+        assert_eq!(
+            run(Term::List(vec![
+                Term::Integer(1),
+                Term::List(vec![Term::Binary(vec![2])]),
+            ])),
+            Term::List(vec![Term::Binary(vec![1, 2])])
         );
     }
 

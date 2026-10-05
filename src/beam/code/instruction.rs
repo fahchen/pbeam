@@ -58,6 +58,8 @@ const OPCODE_BS_SET_POSITION: u8 = 168;
 const OPCODE_BS_START_MATCH4: u8 = 170;
 const OPCODE_BS_GET_UTF8: u8 = 138;
 const OPCODE_BS_SKIP_UTF8: u8 = 139;
+const OPCODE_BS_GET_UTF16: u8 = 140;
+const OPCODE_BS_GET_UTF32: u8 = 142;
 const OPCODE_LINE: u8 = 153;
 const OPCODE_CALL_LAST: u8 = 5;
 const OPCODE_BIF0: u8 = 9;
@@ -509,6 +511,23 @@ pub(crate) enum Instruction {
         left: Operand,
         right: Operand,
     },
+    /// Jumps to `fail_label` when the operands are exactly equal
+    /// (`is_ne_exact`, opcode 44).
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `user_drv:server/3` in the
+    /// pinned `user_drv.beam` has `[0x2C, 0x0D, 0x9D, 0x03, 0x33]`, which
+    /// fails to label 157 when `x0` equals `x3`.
+    ///
+    /// Erlang: the guard `element(1,Req) =:= User orelse element(1,Req) =:=
+    /// Curr` of `user_drv:server/3` (user_drv.erl:542) compiles to
+    /// `{test,is_ne_exact,{f,157},[{x,0},{x,3}]}`. When the first test is
+    /// true, the jump skips the `orelse` test.
+    TestExactNotEqual {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
     /// Jumps to `fail_label` when the left operand is less than the right
     /// operand (`is_ge`, opcode 40) in the ERTS term order. Two different
     /// references give a runtime error.
@@ -815,6 +834,11 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_TEST_EXACT_EQ => Instruction::TestExactEqual {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_TEST_EXACT_NE => Instruction::TestExactNotEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -1210,7 +1234,8 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_SKIP_BITS2 => Some(5),
         OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
         OPCODE_BS_GET_TAIL | OPCODE_BS_GET_POSITION => Some(3),
-        OPCODE_BS_GET_UTF8 => Some(5),
+        // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
+        OPCODE_BS_GET_UTF8 | OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
         OPCODE_BS_SKIP_UTF8 => Some(4),
         OPCODE_BS_SET_POSITION => Some(2),
         OPCODE_GC_BIF1 => Some(5),
@@ -1221,8 +1246,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_LT | OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ
-        | OPCODE_TEST_EXACT_NE => Some(3),
+        OPCODE_TEST_LT | OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
         OPCODE_TEST_IS_INTEGER
         | OPCODE_TEST_IS_FLOAT
@@ -1487,15 +1511,16 @@ fn read_move_operand(
 mod tests {
     use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
     use super::{
-        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_INIT_WRITABLE,
-        OPCODE_BS_MATCH, OPCODE_GC_BIF2, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL,
-        OPCODE_INIT_YREGS, OPCODE_MAKE_FUN3, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD,
-        OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
-        OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
-        OPCODE_TEST_IS_PORT, OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END,
-        parse_code, read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
-        skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
-        test_kind, unsupported_opcode_operand_count,
+        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_UTF16,
+        OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GC_BIF2,
+        OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS, OPCODE_MAKE_FUN3,
+        OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE,
+        OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
+        OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_LT,
+        OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code, read_move_operand,
+        read_operand_pairs, read_pair_count, read_record_updates, skip_counted_operands,
+        skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
+        unsupported_opcode_operand_count,
     };
     use crate::{
         beam::code::{Instruction, Operand, TestKind},
@@ -1788,6 +1813,27 @@ mod tests {
     }
 
     #[test]
+    fn decodes_is_ne_exact_with_its_fail_label() {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        // Bytes of `user_drv:server/3` in the pinned `user_drv.beam`:
+        // {test,is_ne_exact,{f,157},[{x,0},{x,3}]}
+        code.extend([0x2C, 0x0D, 0x9D, 0x03, 0x33, 0x03]);
+        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::TestExactNotEqual {
+                    fail_label: 157,
+                    left: Operand::X(0),
+                    right: Operand::X(3),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
     fn decodes_is_ge_with_a_typed_register() {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
@@ -1984,6 +2030,8 @@ mod tests {
             (OPCODE_BS_INIT_WRITABLE, 0),
             (OPCODE_BS_MATCH, 3),
             (OPCODE_RAW_RAISE, 0),
+            (OPCODE_BS_GET_UTF16, 5),
+            (OPCODE_BS_GET_UTF32, 5),
         ] {
             assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
         }
