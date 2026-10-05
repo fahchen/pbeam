@@ -1200,7 +1200,8 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
 /// in the flatmap key order, as the ERTS loader sorts them, so the first key
 /// that the map does not hold is the first missing key in that order. Return
 /// the new map, or the exception reason `{badmap, Map}` for a term that is
-/// not a map and `{badkey, Key}` for a missing key.
+/// not a map and `{badkey, Key}` for a missing key. A key of a type that a
+/// PBeam map cannot hold, for example a tuple, is a missing key.
 ///
 /// # Examples
 ///
@@ -1214,8 +1215,8 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
 ///
 /// # Errors
 ///
-/// Return a runtime error for a key that the map form does not support yet,
-/// for example a tuple key: its place in the flatmap key order is unknown.
+/// Return a runtime error when the key order depends on two different
+/// references (`Map::sort_pairs`).
 fn update_map_exact(
     mut map: Term,
     mut pairs: Vec<(Term, Term)>,
@@ -1223,7 +1224,7 @@ fn update_map_exact(
     let Term::Map(entries) = &mut map else {
         return Ok(Err(Term::Tuple(vec![Term::static_atom("badmap"), map])));
     };
-    Map::sort_pairs(&mut pairs).map_err(|key| error(format!("unsupported map key {key:?}")))?;
+    Map::sort_pairs(&mut pairs)?;
     for (key, value) in pairs {
         let Some(existing) = entries.get_mut(&key) else {
             return Ok(Err(Term::Tuple(vec![Term::static_atom("badkey"), key])));
@@ -2125,7 +2126,7 @@ mod tests {
     }
 
     #[test]
-    fn raises_or_jumps_when_put_map_exact_gets_a_term_that_is_not_a_map() {
+    fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         // erlc puts an `is_map` test before each `put_map_exact`, so compiled
         // code does not reach this case. ERTS still raises `{badmap, Map}`
         // with fail label 0 and jumps to another fail label
@@ -2153,23 +2154,55 @@ mod tests {
             "root process exited with Tuple([Tuple([Atom(\"badmap\"), Atom(\"foo\")]), List([])])"
         );
         assert_eq!(run(3, atom("foo")).unwrap(), test_atom("failed"));
-        // A tuple key has no place in the PBeam flatmap key order yet.
-        let map = Operand::Value(Term::Map(Map::new()));
-        let tuple_key = make_program(
+        // A key of a type that a PBeam map cannot hold is a missing key.
+        let tuple_key = |fail_label| {
+            make_program(
+                vec![
+                    Instruction::PutMapExact {
+                        fail_label,
+                        map: Operand::Value(Term::Map(Map::new())),
+                        destination: Operand::X(0),
+                        pairs: vec![(Operand::Value(Term::Tuple(vec![])), atom("cooked"))],
+                    },
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Move(atom("failed"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        assert_eq!(
+            tuple_key(0).unwrap_err().to_string(),
+            "root process exited with Tuple([Tuple([Atom(\"badkey\"), Tuple([])]), List([])])"
+        );
+        assert_eq!(tuple_key(3).unwrap(), test_atom("failed"));
+        // Two different references have no PBeam order.
+        let references = make_program(
             vec![Instruction::PutMapExact {
                 fail_label: 0,
-                map,
+                map: Operand::Value(Term::Map(Map::new())),
                 destination: Operand::X(0),
-                pairs: vec![(Operand::Value(Term::Tuple(vec![])), atom("cooked"))],
+                pairs: vec![
+                    (
+                        Operand::Value(Term::Reference(crate::Reference(1))),
+                        atom("a"),
+                    ),
+                    (
+                        Operand::Value(Term::Reference(crate::Reference(2))),
+                        atom("b"),
+                    ),
+                ],
             }],
             0,
         )
         .execute("fixture", "main", &[]);
         assert!(
-            tuple_key
+            references
                 .unwrap_err()
                 .to_string()
-                .contains("unsupported map key Tuple([])")
+                .contains("unsupported term order of two references")
         );
     }
 

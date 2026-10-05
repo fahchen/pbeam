@@ -1,5 +1,5 @@
 -module(io_start_probe).
--export([lists/0, maps/0, merge/0, atoms/0, atom_limit/0, system/0,
+-export([lists/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
          system_other/0, format/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
@@ -50,6 +50,27 @@ get_guard(_) -> other.
 
 update_guard(M) when M#{output := cooked} =:= #{input => cooked, output => cooked} -> updated;
 update_guard(_) -> other.
+
+%% `put_map_exact` with keys of each type. ERTS sorts the keys of more than
+%% one pair with erts_cmp_flatmap_keys (erl_utils.h:266-271): two atoms
+%% compare by atom index, each other two keys in the term order, so the
+%% atoms in a tuple compare by name. A key of a type that a PBeam map cannot
+%% hold is a missing key.
+map_keys() ->
+    M = id(#{a => 1}),
+    [try M#{id({x}) := 2} catch error:R1 -> R1 end,
+     try M#{{x} := 2} catch error:R2 -> R2 end,
+     try M#{{x} := 2, b := 3} catch error:R3 -> R3 end,
+     try M#{a := 2, {x} := 3} catch error:R4 -> R4 end,
+     try M#{{x} := 1, b := 2, 1 := 3} catch error:R5 -> R5 end,
+     try M#{[a] := 1, {x} := 2} catch error:R6 -> R6 end,
+     try M#{<<"b">> := 1, {x} := 2} catch error:R7 -> R7 end,
+     try M#{{value} := 1, {abs} := 2} catch error:R8 -> R8 end,
+     try M#{#{} := 1, {} := 2, [] := 3} catch error:R9 -> R9 end,
+     key_guard(M, id({x})), key_guard(M, id(a))].
+
+key_guard(M, K) when M#{K := 2} =:= #{a => 2} -> updated;
+key_guard(_, _) -> other.
 
 %% `maps:merge/2`, as prim_tty:options/1 (prim_tty.erl:329) runs it: the
 %% values of the second map win. A first argument that is not a map raises

@@ -124,6 +124,43 @@ fn reads_and_updates_maps_as_pinned_erts() {
 }
 
 #[test]
+fn reports_the_first_missing_map_key_as_pinned_erts() {
+    // `io_start_probe:map_keys/0` runs `put_map_exact` with keys of each
+    // type. The ERTS loader does not sort one pair, and it sorts more pairs
+    // with `erts_cmp_flatmap_keys` (`beam_transform_helpers.c:54-115`,
+    // `erl_utils.h:266-271`): atoms by atom index, each other two keys in
+    // the term order. Thus `{value}` comes after `{abs}`, a tuple before a
+    // map, and a map before `[]`. A tuple key is a missing key, and in a
+    // guard it jumps to the fail label.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badkey = |key: Term| Term::Tuple(vec![atom("badkey"), key]);
+    let tuple = |name: &str| Term::Tuple(vec![atom(name)]);
+    let expected = vec![
+        badkey(tuple("x")),
+        badkey(tuple("x")),
+        badkey(atom("b")),
+        badkey(tuple("x")),
+        badkey(Term::Integer(1)),
+        badkey(tuple("x")),
+        badkey(tuple("x")),
+        badkey(tuple("abs")),
+        badkey(Term::Tuple(vec![])),
+        atom("other"),
+        atom("updated"),
+    ];
+    assert_eq!(
+        program.execute("io_start_probe", "map_keys", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("map_keys"),
+        b"[{badkey,{x}},{badkey,{x}},{badkey,b},{badkey,{x}},{badkey,1},{badkey,{x}},\
+          {badkey,{x}},{badkey,{abs}},{badkey,{}},other,updated]\n"
+    );
+}
+
+#[test]
 fn merges_maps_as_pinned_erts() {
     // `io_start_probe:merge/0` runs `maps:merge/2`, as `prim_tty:options/1`
     // (prim_tty.erl:329) does: the values of the second map win
