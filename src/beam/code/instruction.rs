@@ -654,13 +654,13 @@ pub(crate) enum Instruction {
     /// `emu/emu_load.c:1437-1445`). A `nif_start` without a `func_info`
     /// before it is a load error.
     ///
-    /// The ERTS loader does not check where `nif_start` is in the function.
-    /// It only asserts in a debug build that a `func_info` came before it.
-    /// OTP 29.1.1 loads a function with `nif_start` after another
-    /// instruction, and the instruction has no effect at run time. So PBeam
-    /// also accepts each position. `erlc` puts `nif_start` directly after
-    /// the entry label, so the binding runs at the function entry for
-    /// compiled code.
+    /// The decoder puts this instruction directly after the entry label of
+    /// the function, wherever `nif_start` is in the function. ERTS does not
+    /// check the position of `nif_start` and does not run it; a NIF
+    /// replaces the function from its entry (`beam/erl_nif.c:4922-4928`).
+    /// So a body instruction before `nif_start` does not run for a function
+    /// with a binding. `erlc` puts `nif_start` directly after the entry
+    /// label, so compiled code keeps its order.
     ///
     /// Encoding: `[0xB3]`.
     ///
@@ -770,6 +770,12 @@ pub(super) fn parse_code(
                         "BEAM label {label} is outside declared range 1..={number_of_labels}"
                     )));
                 }
+                // The label directly after `func_info` is the function entry.
+                if let Some((_, _, entry)) = &mut function
+                    && *entry == instructions.len()
+                {
+                    *entry += 1;
+                }
                 Instruction::Label(label)
             }
             OPCODE_FUNCTION_INFO => {
@@ -781,7 +787,7 @@ pub(super) fn parse_code(
                     .name()
                     .to_owned();
                 let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                function = Some((name.clone(), arity));
+                function = Some((name.clone(), arity, instructions.len() + 1));
                 Instruction::FunctionInfo {
                     module,
                     name,
@@ -989,10 +995,11 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_NIF_START => {
-                let (name, arity) = function
+                let (name, arity, entry) = function
                     .clone()
                     .ok_or_else(|| error("BEAM nif_start has no func_info before it"))?;
-                Instruction::NifStart { name, arity }
+                instructions.insert(entry, Instruction::NifStart { name, arity });
+                continue;
             }
             OPCODE_TEST_HEAP | OPCODE_INIT_YREGS => {
                 skip_unsupported_instruction(opcode, data, &mut cursor)?;
@@ -1720,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_nif_start_with_the_function_of_the_func_info_before_it() {
+    fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         let code = |instructions: &[u8]| {
             let mut code = vec![0, 0, 0, 16];
             code.extend([0; 11]);
@@ -1751,7 +1758,9 @@ mod tests {
                 Instruction::End,
             ] if name == "write_nif"
         ));
-        // ERTS loads `nif_start` after another instruction of the function.
+        // ERTS loads `nif_start` after another instruction of the function,
+        // and a NIF replaces the function from its entry. So the dispatch
+        // goes before the `move`, which does not run for a bound MFA.
         let (instructions, _) = parse_code(
             &code(&[
                 0x02, 0x12, 0x22, 0x20, // func_info prim_tty write_nif 2
@@ -1769,8 +1778,8 @@ mod tests {
             [
                 Instruction::FunctionInfo { .. },
                 Instruction::Label(1),
-                Instruction::Move(..),
                 Instruction::NifStart { name, arity: 2 },
+                Instruction::Move(..),
                 Instruction::End,
             ] if name == "write_nif"
         ));
