@@ -3,18 +3,17 @@ use std::{
     process::{Command, Stdio},
 };
 
+use pbeam_runtime::{BeamProgram, Map, Term};
+
 #[path = "common/boot.rs"]
 mod boot;
-#[expect(
-    dead_code,
-    reason = "this test crate gives BEAM paths, not bytes, to the binary"
-)]
 mod common;
 
 use boot::{BOOT_BEAM, BOOT_MODULES};
-use common::pinned_beam_path;
+use common::{pinned_beam, pinned_beam_path};
 
 const BOOT_PROBE: &str = "fixtures/boot/boot_probe.beam";
+const LOGGER_BOOT_PROBE: &[u8] = include_bytes!("../fixtures/boot/logger_boot_probe.beam");
 const BOOT_SOURCE: &str = "examples/hello_world/pbeam_boot.erl";
 
 #[test]
@@ -66,6 +65,86 @@ fn boots_the_standard_io_servers_before_the_entry_of_the_pbeam_binary() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn starts_the_logger_and_the_application_controller_as_pinned_erts() {
+    // `pbeam_boot:start/2` starts `logger_server` and
+    // `application_controller` as kernel processes through its `init`
+    // request process (init.erl:1519-1528, 768-772). Its kernel process then
+    // runs `logger:internal_init_logger/0`, the `kernel_sup` children, and
+    // `logger:add_handlers(kernel)` (kernel.erl:37-42). `add_handler/3`
+    // removes the `simple` handler after it adds `default`
+    // (logger.erl:838-848), and the kernel spec gives the primary level
+    // `notice` (logger.erl:1748-1754). `logger_boot_probe:main/0` reads this
+    // state after the boot.
+    let beams = BOOT_MODULES.map(pinned_beam);
+    let boot = fs::read(BOOT_BEAM).unwrap();
+    let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
+    modules.extend([LOGGER_BOOT_PROBE, boot.as_slice()]);
+    let program = BeamProgram::load(&modules).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let registered = |name: &str, value: &str| Term::Tuple(vec![atom(name), atom(value)]);
+    let expected = Term::Tuple(vec![
+        Term::List(vec![atom("default")]),
+        atom("notice"),
+        Term::Map(
+            Map::from_pairs(vec![
+                (atom("id"), atom("default")),
+                (atom("module"), atom("logger_std_h")),
+                (atom("level"), atom("all")),
+            ])
+            .unwrap(),
+        ),
+        Term::List(vec![
+            registered("application_controller", "true"),
+            registered("logger", "true"),
+            registered("logger_sup", "true"),
+            registered("logger_proxy", "true"),
+            registered("logger_handler_watcher", "true"),
+            registered("logger_std_h_default", "true"),
+            registered("logger_simple_h", "false"),
+        ]),
+        Term::Tuple(vec![atom("ok"), atom("notice")]),
+    ]);
+
+    assert_eq!(
+        program
+            .execute(
+                "pbeam_boot",
+                "start",
+                &[atom("logger_boot_probe"), atom("main")]
+            )
+            .unwrap(),
+        expected
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/boot",
+            "-eval",
+            "io:format(\"~w~n\", [logger_boot_probe:main()]), halt().",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        (
+            reference.stdout.as_slice(),
+            reference.stderr.as_slice(),
+            reference.status.code()
+        ),
+        (
+            &b"{[default],notice,#{id => default,module => logger_std_h,level => all},\
+               [{application_controller,true},{logger,true},{logger_sup,true},\
+               {logger_proxy,true},{logger_handler_watcher,true},\
+               {logger_std_h_default,true},{logger_simple_h,false}],{ok,notice}}\n"[..],
+            &b""[..],
+            Some(0)
+        )
+    );
 }
 
 #[test]
