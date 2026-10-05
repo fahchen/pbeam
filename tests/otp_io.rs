@@ -1,3 +1,5 @@
+use std::process::Command;
+
 use pbeam_runtime::{BeamProgram, Term};
 
 mod common;
@@ -16,41 +18,62 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
 
     // `otp_io_calls:io_call/0` calls `io:columns/0`, which resolves inside
     // the loaded `io` module. The first process is its own group leader, so
-    // the request returns `{error, calling_self}`, and `io:columns/1` then
-    // reaches its `is_integer` test (opcode 45), which PBeam does not run
-    // yet. The error proves the call ran `io`'s own code.
-    let error = program.execute("otp_io_calls", "io_call", &[]).unwrap_err();
-    assert!(
-        error.to_string().contains("unsupported BEAM opcode 45"),
-        "expected resolution into io, got {error}"
+    // the request returns `{error, calling_self}`. `io:columns/1` then fails
+    // its `is_integer` test (opcode 45) and returns `{error, enotsup}`
+    // (`io.erl:297-303`), as pinned ERTS does for a process that is its own
+    // group leader. The result proves the call ran `io`'s own code.
+    assert_eq!(
+        program.execute("otp_io_calls", "io_call", &[]).unwrap(),
+        Term::Tuple(vec![
+            Term::Atom(program.atom("error").unwrap()),
+            Term::Atom(program.atom("enotsup").unwrap()),
+        ])
     );
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/otp_io",
+            "-eval",
+            "group_leader(self(), self()), io:format(standard_error, \"~w~n\", [otp_io_calls:io_call()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stdout.is_empty());
+    assert_eq!(reference.stderr, b"{error,enotsup}\n");
 
     // `group:whereis_shell/0` resolves inside the loaded `group` module,
     // calls `erlang:group_leader/0`, runs `node/1` (`bif1`) and `node/0`
     // (`bif0`), and finds that the group leader is on the local node. It
-    // then calls `user_drv:whereis_group/0`, which reaches the unimplemented
-    // process registry lookup.
-    let error = program
-        .execute("otp_io_calls", "group_call", &[])
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unresolved external MFA erlang:whereis/1"),
-        "expected resolution into group, got {error}"
-    );
-
-    // `user_drv:whereis_group/0` resolves inside the loaded `user_drv`
-    // module and reaches the unimplemented process registry lookup.
-    let error = program
-        .execute("otp_io_calls", "user_drv_call", &[])
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unresolved external MFA erlang:whereis/1"),
-        "expected resolution into user_drv, got {error}"
-    );
+    // then calls `user_drv:whereis_group/0`. `user_drv:whereis_group/0`
+    // resolves inside the loaded `user_drv` module. No `user_drv` process
+    // runs, so `whereis(user_drv)` gives `undefined`, and
+    // `process_info(undefined, dictionary)` raises `badarg`
+    // (`user_drv.erl:159-162`). The pinned ERTS run without `user_drv`
+    // (`-nouser`) below gives the same `error:badarg`.
+    for function in ["group_call", "user_drv_call"] {
+        let error = program.execute("otp_io_calls", function, &[]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "root process exited with Tuple([Atom(\"badarg\"), List([])])",
+            "{function}"
+        );
+    }
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-nouser",
+            "-pa",
+            "fixtures/otp_io",
+            "-eval",
+            "io:format(standard_error, \"~w~n\", [[try otp_io_calls:F() of V -> {ok, V} catch C:R -> {C, R} end || F <- [group_call, user_drv_call]]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stdout.is_empty());
+    assert_eq!(reference.stderr, b"[{error,badarg},{error,badarg}]\n");
 
     // `prim_tty:ansi_regexp/0` resolves inside the loaded `prim_tty` module
     // and returns its literal binary without reaching any unresolved call.

@@ -6,8 +6,7 @@ and an ERTS reference run are preparation; none completes this target.
 
 Terra Counter follows as a broader application compatibility target. The compiled ERTS
 reference and both greeting variants are verified. PR #52 executes the pinned compiled
-Elixir IO path through `:io.put_chars/2`. Tasks #49 and #50 add only the OTP and host
-behavior reached by these fixtures. Task #42 then checks both entries through that path.
+Elixir IO path through `:io.put_chars/2`. Tasks #49, #55, #50, and #79 add only the process runtime, OTP execution, native binding, and host behavior reached by these fixtures. Task #42 then checks both entries through that path.
 This does not claim general Elixir IO or broad OTP support.
 
 ## Program
@@ -62,12 +61,12 @@ independently verify the original compiled artifacts and process-level results.
 | Instructions | `call`, `call_ext`, `call_ext_last`, `allocate`, `deallocate`, `move x/y` | Preserve arguments and return values across a local call and startup-loaded external calls | Compiled Erlang call fixture, compared with ERTS | Supports this bounded call fixture only; no scheduler, exceptions, or dynamic loading | #5; `calls.rs` |
 | Instruction | `call_ext_only 1, Elixir.IO:puts/1` | External tail call with one argument | `executes_compiled_elixir_puts_to_the_otp_io_boundary`; PR #52 | Executes the loaded Elixir implementation and reaches `io:put_chars/2` | #48; `hello.rs` |
 | Loader metadata | `label`, `line`, `func_info` | Resolve the entry label and skip line metadata | Compiled `Hello.main/0` and `Elixir.IO` execution; PR #52 | Executes the forms reached by this path, including `select_val`, `call_only`, and `jump`; other generated functions remain untested | #48; `hello.rs` |
-| Terms | Binary literals, chardata list, atom `ok` | Pass greeting chardata to `io:put_chars/2` and return the target result | A test-only BEAM probe verifies the call and return; PR #52 | The probe returns the chardata. The actual OTP result remains pending task #49 | #48; `hello.rs` |
+| Terms | Binary literals, chardata list, atom `ok` | Pass greeting chardata to `io:put_chars/2` and return the target result | A test-only BEAM probe verifies the call and return; PR #52 | The probe returns the chardata. The actual OTP result remains pending task #55 | #48; `hello.rs` |
 | Module loading | Complete `Elixir.IO.beam` code chunk | Read all code and retain unsupported instructions | `loads_the_pinned_elixir_io_module` with Elixir 1.20.4 and OTP 29.1.1 | Decode forms used by this module; do not execute unsupported forms | #51; PR #47 |
 | External MFA | `Elixir.IO:puts/1` | Execute the compiled Elixir implementation | Pinned Elixir BEAM execution; PR #52 | No native mapping is used | #48; `hello.rs` |
 | External MFA | `Elixir.IO:puts/2` | Map `:stdio`, convert binary to chardata, append newline, call `:io.put_chars/2` | Compiled BEAM execution and test-only BEAM probe; PR #52 | Supports the fixture's binary standard-output path; actual OTP IO remains pending | #48; `hello.rs` |
-| Process and IO protocol | `:io.put_chars/2` through `group`, `user_drv`, and `prim_tty` | Interpret the pinned BEAM path through the `prim_tty:write_nif/2` boundary; support the required process and IO request/reply behavior | OTP 29.1.1 disassembly and source | Implement only the instructions, scheduling, process, mailbox, and monitor behavior reached by this path | #49 |
-| Native binding and host operation | `prim_tty:write_nif/2` | Dispatch this exact verified OTP MFA to a PBeam native binding; write supplied bytes to host stdout and return success or failure to the BEAM path | OTP 29.1.1 `prim_tty` NIF declaration, load path, and terminal path | First statically linked NIF binding; this does not establish support for other OTP NIFs or replace BEAM IO functions | #50 |
+| Process and IO protocol | `:io.put_chars/2` through `group`, `user_drv`, and `prim_tty` | Interpret the pinned BEAM path through the `prim_tty:write_nif/2` boundary; support the required process and IO request/reply behavior | OTP 29.1.1 disassembly and source | Implement only the instructions, scheduling, process, mailbox, and monitor behavior reached by this path | #49 (process runtime); #55 (OTP execution) |
+| Native binding and host operation | `prim_tty:write_nif/2` | Dispatch this exact verified OTP MFA to a PBeam native binding at function entry; write supplied bytes to the host stdout of a TTY resource and return success or failure to the BEAM path | OTP 29.1.1 `prim_tty` NIF declaration, load path, and terminal path; `prim_tty_probe:main/0` compared with ERTS | First statically linked NIF binding. Task #50 runs it at `nif_start`. PBeam has no TTY resource, so the binding raises `error:badarg`, as ERTS does for a term that is not a TTY resource. Task #79 adds the TTY resource and the host write. This does not establish support for other OTP NIFs or replace BEAM IO functions | #50; `prim_tty.rs`, `io_path.rs`; #79 |
 | Compiler-generated functions | `__info__/1`, `module_info/0,1`, helper; `:erlang.get_module_info/1,2` imports | Load the whole module without running unused generated code | Static exports/imports; PBeam verification remains pending | Retains the observed `select_val`, `call_only`, `jump`, and unsupported literal forms; execution fails if reached | #42; `hello.rs` |
 
 Entry disassembly contains a literal move followed by the external tail call;
@@ -90,19 +89,9 @@ It does not add general selective receive. `call_ext*` means an imported call, n
 each available BEAM implementation, including the Elixir and OTP modules. Add
 only the runtime behavior and native host operation that the traced path needs.
 
-Task #49 interprets the OTP BEAM path through `prim_tty:write_nif/2`. Task #50 registers
-that exact native MFA and implements its host operation. Tasks #51, #48, #49, and #50 implement this observed
-path in small steps. They must execute the compiled Elixir and OTP BEAM functions. They must not intercept
-`Elixir.IO:puts/1` or `:io:put_chars/2`, print the greeting directly, or alter
-the fixture to use a PBeam-only operation. The support limit is the binary
-standard-output path reached by these fixtures. General chardata, custom devices,
-and unrelated process behavior remain out of scope.
+Task #49 adds the cooperative process runtime for this path. Task #55 interprets the OTP BEAM path through `prim_tty:write_nif/2`. Task #50 registers that exact native MFA and runs its binding at function entry. Task #79 starts the OTP IO servers, adds the TTY resource, and implements the host write of the binding. Tasks #51, #48, #49, #55, #50, and #79 implement this observed path in small steps. They must execute the compiled Elixir and OTP BEAM functions. They must not intercept `Elixir.IO:puts/1` or `:io:put_chars/2`, print the greeting directly, or alter the fixture to use a PBeam-only operation. The support limit is the binary standard-output path reached by these fixtures. General chardata, custom devices, and unrelated process behavior remain out of scope.
 
-After the task chain is implemented, compile the Elixir fixture from
-`fixtures/hello`, then run PBeam from the repository root. PR #47 removed the
-direct IO shortcut. PR #52 executes compiled Elixir IO through the OTP call
-boundary. The command cannot complete the greeting until tasks #49 and #50
-execute the OTP path through the host boundary and task #42 verifies the command:
+After the task chain is implemented, compile the Elixir fixture from `fixtures/hello`, then run PBeam from the repository root. PR #47 removed the direct IO shortcut. PR #52 executes compiled Elixir IO through the OTP call boundary. The command cannot complete the greeting until tasks #55, #50, and #79 execute the OTP path through the host boundary and task #42 verifies the command:
 
 ```sh
 mix compile --warnings-as-errors
@@ -142,9 +131,11 @@ behaviors become sibling issues under the epic, with native dependencies.
 | 3 | [#5: Calls](https://github.com/fahchen/pbeam/issues/5) | Local/external calls, preserved arguments, and correct returns |
 | 4 | [#51: Load Elixir IO](https://github.com/fahchen/pbeam/issues/51) | Load the pinned module and retain unsupported instructions |
 | 5 | [#48: Execute Elixir IO](https://github.com/fahchen/pbeam/issues/48) | Run compiled `Elixir.IO` code for the fixture's binary path |
-| 6 | [#49: Execute OTP IO protocol](https://github.com/fahchen/pbeam/issues/49) | Interpret `:io`, `group`, `user_drv`, and `prim_tty` BEAM code through `prim_tty:write_nif/2` |
-| 7 | [#50: Write standard IO through the group leader](https://github.com/fahchen/pbeam/issues/50) | Implement only the native host write at the verified NIF boundary |
-| 8 | [#42: PBeam printing](https://github.com/fahchen/pbeam/issues/42) | Both greeting variants, stdout/stderr/exit checks, and visible failures |
+| 6 | [#49: Add a cooperative process runtime](https://github.com/fahchen/pbeam/issues/49) | Process, mailbox, reply-matching, and monitor behavior on one cooperative scheduler thread for the IO request path |
+| 7 | [#55: Execute OTP group-leader IO](https://github.com/fahchen/pbeam/issues/55) | Interpret `:io`, `group`, `user_drv`, and `prim_tty` BEAM code through `prim_tty:write_nif/2` |
+| 8 | [#50: Write standard IO through the group leader](https://github.com/fahchen/pbeam/issues/50) | Register `prim_tty:write_nif/2` as a native binding and run it at function entry |
+| 9 | [#79: Start the OTP standard IO servers](https://github.com/fahchen/pbeam/issues/79) | Start the IO servers through OTP code, and add the TTY resource and the host write of `prim_tty:write_nif/2` |
+| 10 | [#42: PBeam printing](https://github.com/fahchen/pbeam/issues/42) | Both greeting variants, stdout/stderr/exit checks, and visible failures |
 
 Update the inventory, issue checklists, dependencies, and PR decisions together
 when evidence changes the chosen solution. Implementation progress and readiness
@@ -173,8 +164,7 @@ The deliverable is a runnable PBeam command plus a regression test that captures
 its stdout, stderr, and exit status. Task #42 is the final command and acceptance
 task. PR #47 implements task #51 and merged as `265f173`. It loads the pinned
 `Elixir.IO.beam` module. PR #52 implements task #48 and executes compiled `puts/1`
-and `puts/2` through the `:io.put_chars/2` boundary. The OTP protocol and host write
-remain for tasks #49 and #50.
+and `puts/2` through the `:io.put_chars/2` boundary. Task #55 executes the OTP IO path to `prim_tty:write_nif/2`. Task #50 runs the native binding of `prim_tty:write_nif/2`. The start of the OTP IO servers, the TTY resource, and the host write remain for task #79.
 
 [Reference task #41](https://github.com/fahchen/pbeam/issues/41) captures the ERTS
 baseline and disassembles its compiler output as preparation. Existing constant-return
