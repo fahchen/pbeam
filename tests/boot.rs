@@ -14,6 +14,7 @@ use common::{pinned_beam, pinned_beam_path};
 
 const BOOT_PROBE: &str = "fixtures/boot/boot_probe.beam";
 const LOGGER_BOOT_PROBE: &[u8] = include_bytes!("../fixtures/boot/logger_boot_probe.beam");
+const INIT_STOP_PROBE: &[u8] = include_bytes!("../fixtures/boot/init_stop_probe.beam");
 const BOOT_SOURCE: &str = "examples/hello_world/pbeam_boot.erl";
 
 #[test]
@@ -144,6 +145,31 @@ fn starts_the_logger_and_the_application_controller_as_pinned_erts() {
             &b""[..],
             Some(0)
         )
+    );
+}
+
+#[test]
+fn keeps_the_init_stop_request_in_the_mailbox_of_the_init_request_process() {
+    // `init:stop/0` sends `{stop, stop}` to the registered `init` process and
+    // returns `ok` (init.erl:536). The `init` request process of
+    // `pbeam_boot` keeps this message in its mailbox and does not exit, so
+    // the node does not stop (see "Run end" in docs/erts-differences.md).
+    let beams = BOOT_MODULES.map(pinned_beam);
+    let boot = fs::read(BOOT_BEAM).unwrap();
+    let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
+    modules.extend([INIT_STOP_PROBE, boot.as_slice()]);
+    let program = BeamProgram::load(&modules).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+
+    assert_eq!(
+        program
+            .execute(
+                "pbeam_boot",
+                "start",
+                &[atom("init_stop_probe"), atom("main")]
+            )
+            .unwrap(),
+        atom("running")
     );
 }
 
