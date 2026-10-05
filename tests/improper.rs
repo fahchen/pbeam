@@ -159,7 +159,12 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
     // `bif.c:613-654`), and `demonitor/2` with `[info]` gives `false` when
     // it removes no monitor. `demonitor/2` also raises `badarg` for a term
     // that is not a reference, after the option walk, and the spawn BIFs for
-    // a module or function that is not an atom.
+    // a module or function that is not an atom. `apply/3` and `apply/2`
+    // count the elements of an improper argument list before they read the
+    // tail, so 1024 (`apply/3`) or 1023 (`apply/2`) elements raise
+    // `system_limit` and fewer raise `badarg` (`beam_common.c:1500-1516`,
+    // `jit/arm/instr_fun.cpp:274-297`). An `apply/3` of `erlang:apply/3`
+    // takes its inner list only from a proper list of three elements.
     let program = BeamProgram::load(&[IMPROPER_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let int = Term::Integer;
@@ -194,6 +199,15 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
             .chain(std::iter::repeat_with(badarg).take(10))
             .chain([atom("false"), atom("true")])
             .chain(std::iter::repeat_with(badarg).take(10))
+            .chain([
+                badarg(),
+                error("system_limit"),
+                badarg(),
+                error("system_limit"),
+                error("system_limit"),
+                badarg(),
+                badarg(),
+            ])
             .collect()
         )
     );
@@ -205,7 +219,8 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
          {error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
          {error,badarg},false,true,{error,badarg},{error,badarg},{error,badarg},\
          {error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
-         {error,badarg},{error,badarg}]\n"
+         {error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,badarg},\
+         {error,system_limit},{error,system_limit},{error,badarg},{error,badarg}]\n"
     );
 }
 

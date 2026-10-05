@@ -987,7 +987,9 @@ impl BeamProgram {
     /// `i_apply` instructions. The function and the module must be atoms,
     /// and `Arguments` must be a list, else the call raises `error:badarg`.
     /// An apply of `erlang:apply/3` continues with its inner call. A list of
-    /// 1024 or more elements raises `error:system_limit`. Then the elements
+    /// 1024 or more elements raises `error:system_limit`, also when the list
+    /// is improper, because ERTS counts the elements before it reads the
+    /// tail. Then an improper list raises `error:badarg`. Else the elements
     /// go to `x0` onwards, and the call continues as `call_ext` does. Return
     /// the outcome when the process exits.
     ///
@@ -1009,23 +1011,32 @@ impl BeamProgram {
         const MAX_ARGUMENTS: usize = 1023;
         let process = scheduler.current_process_mut();
         let mut call = call_arguments(&process.registers, 3)?;
-        let (module, name, arguments) = loop {
+        let (module, name, arguments, proper) = loop {
             // Each wrong form raises the same `badarg`, so one pattern checks
             // the function, the module, and the list.
-            let [Term::Atom(module), Term::Atom(name), Term::List(arguments)] = &mut call[..]
-            else {
+            let [Term::Atom(module), Term::Atom(name), list] = &mut call[..] else {
                 let badarg = Term::static_atom("badarg");
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
-            let arguments = std::mem::take(arguments);
-            if (module.name(), name.name()) != ("erlang", "apply") || arguments.len() != 3 {
-                break (module.clone(), name.clone(), arguments);
+            let Some((arguments, proper)) = take_list_elements(list) else {
+                let badarg = Term::static_atom("badarg");
+                return Ok(raise(process, ExceptionClass::Error, badarg));
+            };
+            if !proper
+                || (module.name(), name.name()) != ("erlang", "apply")
+                || arguments.len() != 3
+            {
+                break (module.clone(), name.clone(), arguments, proper);
             }
             call = arguments;
         };
         if arguments.len() > MAX_ARGUMENTS {
             let system_limit = Term::static_atom("system_limit");
             return Ok(raise(process, ExceptionClass::Error, system_limit));
+        }
+        if !proper {
+            let badarg = Term::static_atom("badarg");
+            return Ok(raise(process, ExceptionClass::Error, badarg));
         }
         let arity = arguments.len() as u32;
         for (index, argument) in (0..).zip(arguments) {
@@ -1038,7 +1049,9 @@ impl BeamProgram {
     /// `x1`, as the JIT `emit_apply_fun_shared` (`jit/arm/instr_fun.cpp:253-328`)
     /// does for the `i_apply_fun` instructions. `Arguments` must be a list,
     /// else the call raises `error:badarg`. A list of 1023 or more elements
-    /// raises `error:system_limit`. Then the elements go to `x0` onwards, and
+    /// raises `error:system_limit`, also when the list is improper, because
+    /// the JIT counts the elements before it reads the tail. Then an improper
+    /// list raises `error:badarg`. Else the elements go to `x0` onwards, and
     /// the call continues as `call_fun` does, so a term that is not a fun
     /// raises `badfun` only after these checks. Return the outcome when the
     /// process exits.
@@ -1063,14 +1076,17 @@ impl BeamProgram {
         let process = scheduler.current_process_mut();
         let fun = read(process, &Operand::X(0))?;
         let mut list = read(process, &Operand::X(1))?;
-        let Term::List(arguments) = &mut list else {
+        let Some((arguments, proper)) = take_list_elements(&mut list) else {
             let badarg = Term::static_atom("badarg");
             return Ok(raise(process, ExceptionClass::Error, badarg));
         };
-        let arguments = std::mem::take(arguments);
         if arguments.len() > MAX_ARGUMENTS {
             let system_limit = Term::static_atom("system_limit");
             return Ok(raise(process, ExceptionClass::Error, system_limit));
+        }
+        if !proper {
+            let badarg = Term::static_atom("badarg");
+            return Ok(raise(process, ExceptionClass::Error, badarg));
         }
         let arity = arguments.len() as u32;
         for (index, argument) in (0..).zip(arguments) {
@@ -1204,6 +1220,27 @@ fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
         *current_frame(process) = frame;
     } else {
         process.frames.push(frame);
+    }
+}
+
+/// Take the elements of a list term for an apply, and tell whether the list
+/// is proper. `[]` gives no elements. Return `None` for a term that is not a
+/// list. The elements of an improper list come before its tail, so a caller
+/// can count them first, as ERTS `apply` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut list = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x")));
+/// assert_eq!(take_list_elements(&mut list), Some((vec![Term::Integer(1)], false)));
+/// assert_eq!(take_list_elements(&mut Term::List(vec![])), Some((vec![], true)));
+/// assert_eq!(take_list_elements(&mut Term::static_atom("x")), None);
+/// ```
+fn take_list_elements(list: &mut Term) -> Option<(Vec<Term>, bool)> {
+    match list {
+        Term::List(elements) => Some((std::mem::take(elements), true)),
+        Term::ImproperList(elements, _) => Some((std::mem::take(elements), false)),
+        _ => None,
     }
 }
 

@@ -61,7 +61,12 @@ list_bifs() ->
      t(fun() -> erlang:demonitor(X, ?MODULE:id([flush|x])) end), t(fun() -> erlang:demonitor(X, ?MODULE:id([])) end),
      t(fun() -> spawn(?MODULE:id(1), id, [1]) end), t(fun() -> spawn_link(?MODULE, ?MODULE:id(1), [1]) end),
      t(fun() -> spawn_opt(?MODULE:id(1), id, [1], ?MODULE:id([link|x])) end),
-     t(fun() -> spawn_opt(?MODULE:id(1), id, [1], ?MODULE:id([])) end)].
+     t(fun() -> spawn_opt(?MODULE:id(1), id, [1], ?MODULE:id([])) end),
+     t(fun() -> apply(?MODULE, id, dup(1023, 0) ++ X) end), t(fun() -> apply(?MODULE, id, dup(1024, 0) ++ X) end),
+     t(fun() -> apply(fun ?MODULE:id/1, dup(1022, 0) ++ X) end), t(fun() -> apply(fun ?MODULE:id/1, dup(1023, 0) ++ X) end),
+     t(fun() -> apply(erlang, apply, [?MODULE, id, dup(1024, 0) ++ X]) end),
+     t(fun() -> apply(erlang, apply, ?MODULE:id([?MODULE, id, Imp])) end),
+     t(fun() -> apply(erlang, apply, ?MODULE:id([?MODULE, id, [1] | x])) end)].
 
 %% The iodata and chardata BIFs with improper lists.
 iodata() ->
