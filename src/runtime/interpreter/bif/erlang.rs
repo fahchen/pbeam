@@ -348,7 +348,7 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
 /// assert!(matches!(is_function(&Term::static_atom("notfun"), &Term::Integer(-1)), BifResult::Raise { .. }));
 /// ```
 pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) -> BifResult {
-    let Term::Integer(arity) = *arity else {
+    let &Term::Integer(arity) = arity else {
         return BifResult::badarg();
     };
     if arity < 0 {
@@ -358,10 +358,13 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
     Value(Term::static_atom(if matches { "true" } else { "false" }))
 }
 
+/// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
+const MAX_ARG: i64 = 255;
+
 /// Run `erlang:make_fun/3`: return the external fun of
 /// `module:function/arity`, as ERTS `make_fun_3` (`bif.c:4467-4485`) does.
 /// The module and the function must be atoms, and the arity must be an
-/// integer in `0..=255` (`MAX_ARG` in `erl_vm.h:54`), else the call raises
+/// integer in `0..=255` ([`MAX_ARG`]), else the call raises
 /// `badarg`. The function does not need to exist.
 ///
 /// # Examples
@@ -374,8 +377,6 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 /// assert!(matches!(make_fun(&Term::Integer(1), &function, &Term::Integer(0)), BifResult::Raise { .. }));
 /// ```
 pub(super) fn make_fun(module: &Term, function: &Term, arity: &Term) -> BifResult {
-    /// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
-    const MAX_ARG: i64 = 255;
     match (module, function, arity.small_integer()) {
         (Term::Atom(module), Term::Atom(function), Some(arity @ 0..=MAX_ARG)) => Value(Term::Fun(
             Fun::external(module.clone(), function.clone(), arity as u32),
