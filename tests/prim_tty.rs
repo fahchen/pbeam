@@ -380,18 +380,21 @@ fn sets_the_terminal_mode_with_tty_init() {
 #[test]
 fn restores_fd_0_when_the_tty_owner_exits() {
     // `tty_nif_probe:monitor/0` spawns `owner/1` and monitors it. The owner
-    // sets the raw mode on a `stderr` resource and reads its window size.
-    // It then makes a second and a third `stderr` resource, whose first
-    // mode is that raw mode, and calls `tty_init/2` on the second, the
-    // first, and the third resource. Each successful `tty_init/2` makes the
-    // caller the `self` pid of the resource and monitors it
-    // (prim_tty_nif.c:1162-1165). A holder process then calls `tty_init/2`
-    // on the third resource and becomes its `self` pid. When the owner
-    // exits, its monitors run in order, and each monitor of a resource whose
-    // `self` pid is still the owner sets fd 0 to the first mode of the
-    // resource (prim_tty_nif.c:1235-1241). The monitor of the third resource
-    // runs last, but the holder owns it, so fd 0 gets the first mode of the
-    // stderr terminal from the first resource, not the raw mode.
+    // makes a `stderr` resource, and a first holder process sets the raw
+    // mode on it. The owner reads its window size. It then makes a second
+    // and a third `stderr` resource, whose first mode is that raw mode, and
+    // calls `tty_init/2` on the second, the first, and the third resource.
+    // Each successful `tty_init/2` makes the caller the `self` pid of the
+    // resource and monitors it (prim_tty_nif.c:1162-1165). A second holder
+    // then calls `tty_init/2` on the third resource and becomes its `self`
+    // pid. When the owner exits, each monitor of a resource whose `self`
+    // pid is still the owner sets fd 0 to the first mode of the resource
+    // (prim_tty_nif.c:1235-1241). In the order of the calls, the monitor of
+    // the second resource sets the raw mode, the monitor of the first
+    // resource then sets the first mode of the stderr terminal, and the
+    // monitor of the third resource does nothing, because the second
+    // holder owns it. The reverse order, or a restore without the owner
+    // check, leaves the raw mode on fd 0.
     let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("monitor"), FILES, &[]);
     assert_eq!(
         erts,

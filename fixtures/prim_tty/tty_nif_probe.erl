@@ -1,6 +1,6 @@
 -module(tty_nif_probe).
 -export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, init/0, monitor/0,
-         owner/1, holder/2, write/0]).
+         owner/1, holder/3, write/0]).
 
 isatty() ->
     [catch_error(fun() -> prim_tty:isatty(A) end)
@@ -40,26 +40,28 @@ monitor() ->
     Pid ! stop,
     receive {'DOWN', Ref, process, Pid, Reason} -> {Result, Reason} end.
 
-%% The second and third TTY get the raw mode of the first as their first
-%% mode. The owner then has four TTY monitors: the first, the second, the
-%% first again, and the third. A holder process takes over the third TTY and
-%% does not exit.
+%% A first holder process runs the first tty_init/2 on the first TTY, so
+%% the owner has no monitor for it yet. The second and third TTY get the
+%% raw mode of the first as their first mode. The owner then has three TTY
+%% monitors: the second, the first, and the third. A second holder takes
+%% over the third TTY. The holders do not exit.
 owner(Parent) ->
     {ok, First} = prim_tty:tty_create(stderr),
-    Raw = prim_tty:tty_init(First, #{input => raw}),
+    FirstHolder = spawn(?MODULE, holder, [self(), First, raw]),
+    Raw = receive {FirstHolder, R1} -> R1 end,
     Size = prim_tty:tty_window_size(First),
     {ok, Second} = prim_tty:tty_create(stderr),
     SecondInit = prim_tty:tty_init(Second, #{input => cooked}),
     FirstInit = prim_tty:tty_init(First, #{input => raw}),
     {ok, Third} = prim_tty:tty_create(stderr),
     ThirdInit = prim_tty:tty_init(Third, #{input => cooked}),
-    Holder = spawn(?MODULE, holder, [self(), Third]),
-    HolderInit = receive {Holder, R} -> R end,
+    Holder = spawn(?MODULE, holder, [self(), Third, cooked]),
+    HolderInit = receive {Holder, R2} -> R2 end,
     Parent ! {self(), [Raw, Size, SecondInit, FirstInit, ThirdInit, HolderInit]},
     receive stop -> ok end.
 
-holder(Owner, Tty) ->
-    Owner ! {self(), prim_tty:tty_init(Tty, #{input => cooked})},
+holder(Owner, Tty, Input) ->
+    Owner ! {self(), prim_tty:tty_init(Tty, #{input => Input})},
     receive stop -> ok end.
 
 write() ->
