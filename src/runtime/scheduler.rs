@@ -416,7 +416,9 @@ impl Scheduler {
     /// # Errors
     ///
     /// An abnormal exit signal to a linked process that does not trap exits
-    /// is not supported.
+    /// is not supported. The error comes after all exit stages, so the TTY
+    /// resource monitors run on each exit, as `tty_monitor_down`
+    /// (`prim_tty_nif.c:1235-1241`) does in ERTS.
     pub(super) fn finish_current(
         &mut self,
         reason: Term,
@@ -536,6 +538,7 @@ impl Scheduler {
                 _ => Err(reason.clone()),
             });
         }
+        let mut signals = Ok(());
         for linked in process.links {
             // A missing target counts as trapping; `deliver` then drops the message.
             let trap_exit = self.processes.get_mut(&linked).is_none_or(|target| {
@@ -543,13 +546,14 @@ impl Scheduler {
                 target.trap_exit
             });
             if !trap_exit {
-                if normal {
-                    continue;
+                if !normal {
+                    // ponytail: no exit-signal propagation yet; add it when a task needs linked kills.
+                    // The other exit stages still run, so fd 0 gets its TTY mode back.
+                    signals = Err(error(format!(
+                        "unsupported exit signal {reason:?} to a process that does not trap exits"
+                    )));
                 }
-                // ponytail: no exit-signal propagation yet; add it when a task needs linked kills.
-                return Err(error(format!(
-                    "unsupported exit signal {reason:?} to a process that does not trap exits"
-                )));
+                continue;
             }
             let exit = Term::Tuple(vec![
                 Term::static_atom("EXIT"),
@@ -571,7 +575,7 @@ impl Scheduler {
             ]);
             self.deliver(watcher, down);
         }
-        Ok(())
+        signals
     }
 }
 
