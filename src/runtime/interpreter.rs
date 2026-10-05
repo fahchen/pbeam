@@ -18,6 +18,11 @@ mod native;
 
 use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function, send};
 
+/// ERTS `apply` copies at most `MAX_REG - 1` arguments to the X registers,
+/// and raises `system_limit` for more, before it looks up the export
+/// (`erl_vm.h:55`, `beam_common.c:1501-1513`).
+const MAX_APPLY_ARGUMENTS: usize = 1023;
+
 #[derive(Debug)]
 pub struct BeamProgram {
     /// The loaded modules by name.
@@ -293,17 +298,21 @@ impl BeamProgram {
     /// ```
     fn run(&self, scheduler: &mut Scheduler) -> Result<Outcome, BeamError> {
         // ERTS starts each process with `i_apply_only` of its MFA
-        // (`erl_process.c:12616`; JIT `jit/beam_jit_main.cpp:258`), so a
-        // function that the module does not export goes to its export entry
-        // when the process first runs. The arity is the number of argument
-        // registers.
+        // (`erl_process.c:12616`; JIT `jit/beam_jit_main.cpp:258`). Its
+        // `apply` raises `system_limit` for more than `MAX_APPLY_ARGUMENTS`
+        // arguments, and else a function that the module does not export
+        // goes to its export entry when the process first runs. The arity is
+        // the number of argument registers.
         let process = scheduler.current_process_mut();
         if let Some((module, function)) = process.undefined_start.take() {
-            let arity = u32::try_from(process.registers.len())
-                .map_err(|_| error("arity exceeds BEAM limit"))?;
-            if let Some(outcome) =
+            let outcome = if process.registers.len() > MAX_APPLY_ARGUMENTS {
+                let system_limit = Term::static_atom("system_limit");
+                raise(process, ExceptionClass::Error, system_limit)
+            } else {
+                let arity = process.registers.len() as u32;
                 self.undefined_function(scheduler, module.name(), function.name(), arity, false)?
-            {
+            };
+            if let Some(outcome) = outcome {
                 return Ok(outcome);
             }
         }
@@ -1152,9 +1161,6 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        /// ERTS `apply` copies at most `MAX_REG - 1` arguments to the X
-        /// registers (`erl_vm.h:55`, `beam_common.c:1501-1513`).
-        const MAX_ARGUMENTS: usize = 1023;
         let process = scheduler.current_process_mut();
         let mut call = call_arguments(&process.registers, 3)?;
         let (module, name, arguments, proper) = loop {
@@ -1176,7 +1182,7 @@ impl BeamProgram {
             }
             call = arguments;
         };
-        if arguments.len() > MAX_ARGUMENTS {
+        if arguments.len() > MAX_APPLY_ARGUMENTS {
             let system_limit = Term::static_atom("system_limit");
             return Ok(raise(process, ExceptionClass::Error, system_limit));
         }
@@ -1409,8 +1415,11 @@ struct SpawnOptions {
 /// `function` that is not an atom, and `arguments` that are not a proper
 /// list, raise `badarg` (`erl_process.c:12490-12492`). A function that a
 /// loaded module does not export starts the process anyway: the process
-/// calls `undefined_function` when it first runs. A module that is not
-/// loaded is the runtime error `unresolved external MFA M:F/A`.
+/// calls `undefined_function` when it first runs. More than 1023 arguments
+/// also start the process, which then raises `error:system_limit`, as the
+/// `apply` of the ERTS `i_apply_only` start does (`beam_common.c:1501-1513`).
+/// Else a module that is not loaded is the runtime error
+/// `unresolved external MFA M:F/A`.
 ///
 /// # Examples
 ///
@@ -1440,7 +1449,16 @@ fn create_process(
     // A function that the loaded module does not export gives an undefined
     // start, which goes to `undefined_function` when the process first
     // runs, as the `i_apply_only` start of ERTS goes to its export entry.
-    let start = match program.export_frame(module.name(), function.name(), arity)? {
+    // More than `MAX_APPLY_ARGUMENTS` arguments also give an undefined start,
+    // which raises `system_limit` when the process first runs. The `apply`
+    // of ERTS checks this limit before it looks up the export, so the module
+    // can be not loaded.
+    let export = if arguments.len() > MAX_APPLY_ARGUMENTS {
+        None
+    } else {
+        program.export_frame(module.name(), function.name(), arity)?
+    };
+    let start = match export {
         Some(frame) => Start::Entry(frame),
         None => Start::Undefined {
             module: module.clone(),

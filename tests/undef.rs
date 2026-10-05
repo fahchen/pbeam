@@ -142,3 +142,65 @@ fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
         "[{undef,[{undef_target,missing,[a,b],[]}]},{handled,stop,[a,b]}]\n"
     );
 }
+
+#[test]
+fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
+    // ERTS starts each process with `i_apply_only` of its MFA
+    // (`erl_process.c:12616`). Its `apply` copies at most `MAX_REG - 1`
+    // arguments and raises `system_limit` for more, before it looks up the
+    // export (`beam_common.c:1501-1513`). Thus 1023 arguments go to the
+    // `undef` of the export entry, and 1024 arguments raise `system_limit`,
+    // also for a module that is not loaded.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, UNDEF_PROBE, UNDEF_TARGET, UNDEF_HANDLER]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let arguments = |count: usize| Term::List(vec![atom("x"); count]);
+    let down = |module: &str, count: usize| {
+        program
+            .execute(
+                "undef_probe",
+                "down",
+                &[atom(module), atom("missing"), arguments(count)],
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        down("undef_target", 1023),
+        Term::Tuple(vec![
+            atom("undef"),
+            Term::List(vec![Term::Tuple(vec![
+                atom("undef_target"),
+                atom("missing"),
+                arguments(1023),
+                Term::List(Vec::new()),
+            ])]),
+        ])
+    );
+    // PBeam gives the stack trace `[]` (row "Exception stack trace"). ERTS
+    // gives `[{erlang, apply, [Module, missing, Args], ErrorInfo}]`, so the
+    // reference compares only the reason.
+    let system_limit = Term::Tuple(vec![atom("system_limit"), Term::List(Vec::new())]);
+    assert_eq!(down("undef_target", 1024), system_limit);
+    // `missing` is not a loaded module.
+    assert_eq!(down("missing", 1024), system_limit);
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-pa",
+            "fixtures/undef",
+            "-eval",
+            "L1023 = lists:duplicate(1023, x), L1024 = lists:duplicate(1024, x), io:format(\"~w~n\", [[undef_probe:down(undef_target, missing, L1023) =:= {undef, [{undef_target, missing, L1023, []}]}, element(1, undef_probe:down(undef_target, missing, L1024)), element(1, undef_probe:down(missing, missing, L1024))]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        "[true,system_limit,system_limit]\n"
+    );
+}
