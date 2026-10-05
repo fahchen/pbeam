@@ -1,6 +1,6 @@
 -module(tty_nif_probe).
 -export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, init/0, monitor/0,
-         owner/1, holder/3, write/0]).
+         owner/1, holder/3, link/0, linker/1, linked_owner/1, write/0]).
 
 isatty() ->
     [catch_error(fun() -> prim_tty:isatty(A) end)
@@ -64,6 +64,27 @@ owner(Parent) ->
 holder(Owner, Tty, Input) ->
     Owner ! {self(), prim_tty:tty_init(Tty, #{input => Input})},
     receive stop -> ok end.
+
+%% The linker process spawns and links the owner when it gets go, so the
+%% monitor is in place before the owner exits. The owner sets the raw mode
+%% on a stderr TTY and exits with the reason boom. The linker does not trap
+%% exits, so the exit signal ends it with the same reason.
+link() ->
+    Pid = spawn(?MODULE, linker, [self()]),
+    Ref = monitor(process, Pid),
+    Pid ! go,
+    Result = receive {owner, R} -> R end,
+    receive {'DOWN', Ref, process, Pid, Reason} -> {Result, Reason} end.
+
+linker(Parent) ->
+    receive go -> ok end,
+    spawn_link(?MODULE, linked_owner, [Parent]),
+    receive stop -> ok end.
+
+linked_owner(Parent) ->
+    {ok, Tty} = prim_tty:tty_create(stderr),
+    Parent ! {owner, prim_tty:tty_init(Tty, #{input => raw})},
+    exit(boom).
 
 write() ->
     {ok, Out} = prim_tty:tty_create(stdout),
