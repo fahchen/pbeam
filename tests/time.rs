@@ -4,7 +4,7 @@ mod common;
 
 use std::process::{Command, Output, Stdio};
 
-use boot::BOOT_MODULES;
+use boot::{BOOT_BEAM, BOOT_MODULES};
 use common::{pinned_beam, pinned_beam_path};
 use pbeam_runtime::{BeamProgram, Term};
 
@@ -220,7 +220,15 @@ fn run_with_time_zone(function: &str, tz: &str) -> [(&'static str, Output); 2] {
     ]);
     let mut pbeam = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     pbeam
-        .args(["time_probe", function, "fixtures/time/time_probe.beam"])
+        .args([
+            "pbeam_boot",
+            "start",
+            "time_probe",
+            function,
+            "--",
+            BOOT_BEAM,
+            "fixtures/time/time_probe.beam",
+        ])
         .args(&beams);
     [("ERTS", erts), ("PBeam", pbeam)].map(|(name, mut command)| {
         let output = command
