@@ -470,7 +470,11 @@ mod tests {
             format!("{result:?}"),
             r#"Value(Tuple([Atom("error"), Tuple([Atom("tcsetattr"), Atom("ebadf")])]))"#
         );
-        let tty = scheduler.resources.borrow_mut::<Ttys>().get(reference).unwrap();
+        let tty = scheduler
+            .resources
+            .borrow_mut::<Ttys>()
+            .get(reference)
+            .unwrap();
         assert_eq!((&tty.state, tty.owner), (&TtyState::Enabled, None));
     }
 }
