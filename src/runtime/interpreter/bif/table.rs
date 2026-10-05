@@ -499,7 +499,7 @@ bifs! {
     maps:keys/1 => |_, [map]| maps::keys(map),
     maps:merge/2 => |_, [first, second]| maps::merge(first, second),
     maps:put/3 => unsupported,
-    maps:remove/2 => |_, [key, map]| Ok(maps::remove(key, map)),
+    maps:remove/2 => unsupported,
     maps:take/2 => unsupported,
     maps:update/3 => unsupported,
     maps:values/1 => unsupported,

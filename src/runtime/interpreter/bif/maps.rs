@@ -79,35 +79,6 @@ pub(super) fn merge(first: &Term, second: &Term) -> Result<BifResult, BeamError>
     }
 }
 
-/// Run `maps:remove/2`: return the map without the key, as ERTS
-/// `maps_remove_2` does (`erl_map.c:1929-1937`). A key that the map does not
-/// hold, also a key of a type that a PBeam map cannot hold, returns the map
-/// itself. A hashmap that keeps 32 keys becomes a flatmap, as
-/// `hashmap_delete` makes it (`erl_map.c:2989-3020`). A term that is not a
-/// map raises `error:{badmap, Map}`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let map = Term::Map(Map::from_pairs(vec![(test_atom("a"), Term::Integer(1))])?);
-/// assert!(matches!(remove(&test_atom("a"), &map), BifResult::Value(Term::Map(empty)) if empty.len() == 0));
-/// assert!(matches!(remove(&test_atom("b"), &map), BifResult::Value(same) if same == map));
-/// assert!(matches!(remove(&test_atom("a"), &test_atom("foo")), BifResult::Raise { .. }));
-/// ```
-pub(super) fn remove(key: &Term, map: &Term) -> BifResult {
-    let Term::Map(entries) = map else {
-        return error_with("badmap", map);
-    };
-    if entries.get(key).is_none() {
-        return Value(map.clone());
-    }
-    let pairs = entries.iter().filter(|(existing, _)| *existing != key);
-    let pairs = pairs.map(|(key, value)| (key.clone(), value.clone()));
-    // Each key of the rest is a key of the map, so the map form supports it.
-    let rest = Map::from_pairs(pairs.collect()).expect("the keys of a map are valid map keys");
-    Value(Term::Map(rest))
-}
-
 /// Return the `error:{Tag, Term}` exception, as ERTS `BIF_ERROR` with
 /// `BADMAP` or `BADKEY` and `fvalue` set to the term.
 ///
