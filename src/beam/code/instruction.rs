@@ -1943,6 +1943,7 @@ mod tests {
             &atoms,
             &[],
             &[],
+            &[],
         )
         .unwrap();
         assert!(matches!(
