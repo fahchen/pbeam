@@ -6,7 +6,8 @@ main() ->
      self_case(true, normal), self_case(true, boom), self_case(true, kill),
      other(false, normal), other(false, boom), other(false, kill),
      other(true, normal), other(true, kill),
-     catch_badarg(foo), catch_badarg(1), exit(make_ref(), boom), dead(), linked_case()].
+     catch_badarg(foo), catch_badarg(1), exit(make_ref(), boom), resource(), dead(),
+     linked_case()].
 
 self_case(Trap, Reason) ->
     {Pid, Ref} = spawn_monitor(?MODULE, self_exit, [Trap, Reason]),
@@ -33,6 +34,12 @@ target(Trap) ->
     exit({alive, Msgs}).
 
 catch_badarg(X) -> try exit(X, boom) catch error:E -> E end.
+
+%% A NIF resource is a magic reference in ERTS, and is_internal_ref/1 is
+%% true for it (erl_term.h:1064-1065), so exit/2 gives true and no badarg.
+resource() ->
+    {ok, {re_pattern, _, _, _, Ref}} = re:compile(<<"a">>, []),
+    exit(Ref, boom).
 
 dead() ->
     {Pid, Ref} = spawn_monitor(fun() -> ok end),
