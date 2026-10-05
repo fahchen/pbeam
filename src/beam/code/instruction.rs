@@ -54,6 +54,12 @@ const OPCODE_CATCH: u8 = 62;
 const OPCODE_CATCH_END: u8 = 63;
 const OPCODE_BS_GET_BINARY2: u8 = 119;
 const OPCODE_BS_SKIP_BITS2: u8 = 120;
+/// `bs_get_integer2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:447).
+const OPCODE_BS_GET_INTEGER2: u8 = 117;
+/// `gc_bif3 Fail Live Bif Arg1 Arg2 Arg3 Dst` (genop.tab:533).
+const OPCODE_GC_BIF3: u8 = 152;
+/// `is_any_native_record Fail Src` (genop.tab:724).
+const OPCODE_IS_ANY_NATIVE_RECORD: u8 = 186;
 const OPCODE_GC_BIF1: u8 = 124;
 const OPCODE_GC_BIF2: u8 = 125;
 const OPCODE_BS_GET_TAIL: u8 = 165;
@@ -502,6 +508,29 @@ pub(crate) enum Instruction {
         destination: Operand,
         pairs: Vec<(Operand, Operand)>,
     },
+    /// Writes a copy of a map with the value of each existing key replaced.
+    /// `pairs` holds each key and value. The live-register count is not
+    /// kept, because PBeam needs no live count. When the source is not a
+    /// map, or a key is not in the map, the instruction jumps to
+    /// `fail_label`, or with fail label 0 raises `error:{badmap, Map}` or
+    /// `error:{badkey, Key}`.
+    ///
+    /// Encoding: opcode, fail label, map operand, destination register, live
+    /// count, extended list, item count, then key and value operands in turn.
+    /// Example: `update_guard/1` in `fixtures/io_start/io_start_probe.beam`
+    /// has `[0x9B, 0x0D, 0x26, 0x03, 0x03, 0x10, 0x17, 0x20, 0x0A, 0x12,
+    /// 0x0A, 0x13]`, which sets atom 18 (`output`) to atom 19 (`cooked`) in
+    /// the map in `x0`, writes the result to `x0`, and jumps to label 38
+    /// when the key is missing.
+    ///
+    /// Erlang: `M#{output := cooked}` in a guard compiles to
+    /// `{put_map_exact,{f,38},{x,0},{x,0},1,{list,[{atom,output},{atom,cooked}]}}`.
+    PutMapExact {
+        fail_label: u32,
+        map: Operand,
+        destination: Operand,
+        pairs: Vec<(Operand, Operand)>,
+    },
     /// Exchanges the values of two registers.
     ///
     /// Encoding: opcode, two registers. Example: `[0xA9, 0x03, 0x13]` swaps
@@ -573,6 +602,17 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `hd1([H | _]) -> H.` compiles to `{get_hd,{x,0},{x,0}}`.
     GetHead {
+        source: Operand,
+        destination: Operand,
+    },
+    /// Copies the tail of a nonempty list to a register.
+    ///
+    /// Encoding: opcode, source, destination register. Example:
+    /// `proc_lib:trans_init/3` in the pinned `proc_lib.beam` has
+    /// `[0xA3, 0x43, 0x33]`, which writes the tail of `x4` to `x3`.
+    ///
+    /// Erlang: `rest([_ | T]) -> T.` compiles to `{get_tl,{x,0},{x,0}}`.
+    GetTail {
         source: Operand,
         destination: Operand,
     },
@@ -1097,6 +1137,10 @@ pub(super) fn parse_code(
                 source: read_move_operand(data, &mut cursor, atoms, literals)?,
                 destination: read_register(data, &mut cursor)?,
             },
+            OPCODE_GET_TL => Instruction::GetTail {
+                source: read_move_operand(data, &mut cursor, atoms, literals)?,
+                destination: read_register(data, &mut cursor)?,
+            },
             OPCODE_PUT_TUPLE2 => {
                 let destination = read_register(data, &mut cursor)?;
                 if read_integer(data, &mut cursor, TAG_LITERAL)? != LIST_SUBTAG {
@@ -1122,8 +1166,20 @@ pub(super) fn parse_code(
                 let _fail_label = read_operand(data, &mut cursor, TAG_LABEL)?;
                 let map = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let destination = read_register(data, &mut cursor)?;
-                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                skip_live_registers(data, &mut cursor)?;
                 Instruction::PutMapAssoc {
+                    map,
+                    destination,
+                    pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
+                }
+            }
+            OPCODE_PUT_MAP_EXACT => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let map = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let destination = read_register(data, &mut cursor)?;
+                skip_live_registers(data, &mut cursor)?;
+                Instruction::PutMapExact {
+                    fail_label,
                     map,
                     destination,
                     pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
@@ -1291,10 +1347,7 @@ pub(super) fn parse_code(
             OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2) {
-                    // PBeam has no process heap, so the live register count
-                    // for the garbage collection of `gc_bif1` and `gc_bif2`
-                    // is not kept.
-                    let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                    skip_live_registers(data, &mut cursor)?;
                 }
                 let (module, name) = bif_import(
                     imports,
@@ -1321,7 +1374,7 @@ pub(super) fn parse_code(
                 if opcode == OPCODE_ALLOCATE_HEAP {
                     skip_operand(data, &mut cursor)?;
                 }
-                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                skip_live_registers(data, &mut cursor)?;
                 Instruction::Allocate { stack_size }
             }
             OPCODE_DEALLOCATE => Instruction::Deallocate {
@@ -1474,7 +1527,6 @@ fn skip_unsupported_instruction(
     if matches!(
         opcode,
         OPCODE_PUT_MAP_ASSOC
-            | OPCODE_PUT_MAP_EXACT
             | OPCODE_HAS_MAP_FIELDS
             | OPCODE_GET_MAP_ELEMENTS
             | OPCODE_GET_RECORD_ELEMENTS
@@ -1502,6 +1554,12 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_RAISE => Some(2),
         OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
+        // `bs_get_integer2` is in `io_lib`.
+        OPCODE_BS_GET_INTEGER2 => Some(7),
+        // `gc_bif3` is in `io_lib`, for `erlang:binary_part/3`.
+        OPCODE_GC_BIF3 => Some(7),
+        // `is_any_native_record` is in `io_lib`.
+        OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
         OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
         OPCODE_BS_GET_TAIL | OPCODE_BS_GET_POSITION => Some(3),
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
@@ -1528,10 +1586,9 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_TEST_IS_PORT => Some(2),
         // `try_case_end Src` is in `erlang:processes_next/1`.
         OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_TRY_CASE_END => Some(1),
-        OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_MAP_EXACT => Some(5),
+        OPCODE_PUT_MAP_ASSOC => Some(5),
         OPCODE_GET_MAP_ELEMENTS | OPCODE_HAS_MAP_FIELDS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),
-        OPCODE_GET_TL => Some(2),
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
         OPCODE_BS_CREATE_BIN => Some(6),
@@ -1557,6 +1614,26 @@ fn skip_counted_operands(data: &[u8], cursor: &mut usize) -> Result<(), BeamErro
         return Err(error("BEAM instruction operand list exceeds code chunk"));
     }
     skip_operands(data, cursor, operand_count)
+}
+
+/// Skip the `Live` operand of an instruction that can collect garbage.
+///
+/// ERTS gives `Live` the operand type `t` (`ops.tab`), and the loader matches
+/// `t` only to the `u` tag (`beam_makeops`, `define_type_bit('t', ...)`). The
+/// ERTS garbage collector keeps X registers `0..Live` alive. PBeam has no
+/// process heap to collect, so this function does not keep the count. It
+/// validates the `u` tag and moves the cursor past the operand.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// skip_live_registers(&[0x20], &mut cursor)?;
+/// assert_eq!(cursor, 1);
+/// assert!(skip_live_registers(&[0x03], &mut 0).is_err());
+/// ```
+fn skip_live_registers(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
+    read_operand(data, cursor, TAG_UNSIGNED).map(|_live_registers| ())
 }
 
 /// Skip a fixed number of compact operands.
@@ -1795,9 +1872,10 @@ fn read_move_operand(
 mod tests {
     use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
     use super::{
-        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_UTF16,
-        OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GET_RECORD_ELEMENTS,
-        OPCODE_GET_TL, OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD,
+        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_INTEGER2,
+        OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH,
+        OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS,
+        OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD,
         OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
         OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
         OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
@@ -2266,6 +2344,88 @@ mod tests {
     }
 
     #[test]
+    fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
+        const IO_START_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/io_start/io_start_probe.beam");
+        let get_tl = [OPCODE_GET_TL, 0x03, 0x03]; // rest/1: {get_tl,{x,0},{x,0}}
+        assert!(
+            IO_START_PROBE
+                .windows(get_tl.len())
+                .any(|window| window == get_tl),
+            "{get_tl:02X?} is not in io_start_probe.beam"
+        );
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&get_tl[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::GetTail {
+                    source: Operand::X(0),
+                    destination: Operand::X(0),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
+        const IO_START_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/io_start/io_start_probe.beam");
+        // update_guard/1: {put_map_exact,{f,38},{x,0},{x,0},1,
+        // {list,[{atom,output},{atom,cooked}]}}, with output as atom 18 and
+        // cooked as atom 19 of the module.
+        let put_map_exact = [
+            OPCODE_PUT_MAP_EXACT,
+            0x0D,
+            0x26,
+            0x03,
+            0x03,
+            0x10,
+            0x17,
+            0x20,
+            0x0A,
+            0x12,
+            0x0A,
+            0x13,
+        ];
+        assert!(
+            IO_START_PROBE
+                .windows(put_map_exact.len())
+                .any(|window| window == put_map_exact),
+            "{put_map_exact:02X?} is not in io_start_probe.beam"
+        );
+        let mut table = AtomTable::new();
+        let atoms: Vec<Atom> = (1..=17)
+            .map(|index| format!("atom{index}"))
+            .chain(["output".into(), "cooked".into()])
+            .map(|name| table.put(&name).unwrap())
+            .collect();
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&put_map_exact[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::PutMapExact {
+                    fail_label: 38,
+                    map: Operand::X(0),
+                    destination: Operand::X(0),
+                    pairs,
+                },
+                Instruction::End,
+            ] if matches!(
+                pairs.as_slice(),
+                [(Operand::Value(Term::Atom(key)), Operand::Value(Term::Atom(value)))]
+                    if key.name() == "output" && value.name() == "cooked"
+            )
+        ));
+    }
+
+    #[test]
     fn decodes_the_list_record_and_receive_wait_instructions_of_pinned_gen_statem() {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
@@ -2681,7 +2841,6 @@ mod tests {
             (OPCODE_TEST_EQ, 3),
             (OPCODE_TEST_TAGGED_TUPLE, 4),
             (OPCODE_TEST_IS_MAP, 2),
-            (OPCODE_GET_TL, 2),
             (OPCODE_BADMATCH, 1),
             (OPCODE_TEST_IS_PORT, 2),
             (OPCODE_TRY_CASE_END, 1),
@@ -2696,6 +2855,9 @@ mod tests {
             (OPCODE_RAW_RAISE, 0),
             (OPCODE_BS_GET_UTF16, 5),
             (OPCODE_BS_GET_UTF32, 5),
+            (OPCODE_BS_GET_INTEGER2, 7),
+            (OPCODE_GC_BIF3, 7),
+            (OPCODE_IS_ANY_NATIVE_RECORD, 2),
         ] {
             assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
         }
