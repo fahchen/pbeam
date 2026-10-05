@@ -1,6 +1,7 @@
 -module(tty_nif_probe).
 -export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, init/0, monitor/0,
-         owner/1, holder/3, select/0, encoding/0, select_monitor/0, selector/1, write/0]).
+         owner/1, holder/3, select/0, encoding/0, select_monitor/0, selector/1, write/0,
+         write_error/0]).
 
 isatty() ->
     [catch_error(fun() -> prim_tty:isatty(A) end)
@@ -98,9 +99,23 @@ selector(Parent) ->
     Parent ! {self(), [Raw, FirstInit, SecondInit, Select]},
     receive stop -> ok end.
 
+%% A group has 1024 elements (MAXIOV, prim_tty_nif.c:71-77).
 write() ->
-    {ok, Out} = prim_tty:tty_create(stdout),
-    prim_tty:write_nif(Out, []).
+    {ok, Err} = prim_tty:tty_create(stderr),
+    Group = copies(1023, <<"b">>),
+    [catch_error(fun() -> prim_tty:write_nif(Err, I) end)
+     || I <- [[], [<<"Hello, ">>, <<>>, <<"world!\n">>], foo, <<"x">>, [<<"x">>, foo],
+              [<<"x">>, [<<"y">>]], Group ++ [foo], [<<"c">> | Group] ++ [foo],
+              [<<"c">> | Group] ++ [<<"d">>], [<<>>]]].
+
+%% Stderr is a pipe whose reader is closed.
+write_error() ->
+    {ok, Err} = prim_tty:tty_create(stderr),
+    [catch_error(fun() -> prim_tty:write_nif(Err, I) end)
+     || I <- [[], [<<"Hello">>], [<<"x">>, foo], [<<>>]]].
+
+copies(0, _) -> [];
+copies(N, Binary) -> [Binary | copies(N - 1, Binary)].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> Reason end.

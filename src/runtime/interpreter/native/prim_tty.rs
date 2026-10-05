@@ -1,9 +1,12 @@
 //! Native bindings of the `prim_tty` NIFs (`erts/emulator/nifs/common/prim_tty_nif.c`).
 
+use std::io::IoSlice;
+
 use super::*;
 use crate::runtime::{
     host::{
         errno::errno_id,
+        output,
         terminal::{self, TerminalCheck},
     },
     resource::{Resources, TtyResource, TtyState},
@@ -411,34 +414,102 @@ fn enotsup(atoms: &mut AtomTable) -> Result<Term, BeamError> {
     ]))
 }
 
-/// Run `prim_tty:write_nif(TTY, IOVec)`. The ERTS NIF `tty_write_nif`
-/// (`prim_tty_nif.c:354-427`) first gets the TTY resource from `TTY` and
-/// raises `badarg` when `TTY` is not a TTY resource (`prim_tty_nif.c:363-364`).
-/// Only then does it read `IOVec` and write it. The binding raises
-/// `error:badarg` for each term that is not a TTY resource, and it writes
-/// nothing.
+/// Return `{error, Errno}`, where `Errno` is the `erl_errno_id` atom of
+/// `errno`, as `make_error` with `make_errno` (`prim_tty_nif.c:204-220`)
+/// does.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = write_nif(&resources, &Term::static_atom("stdout"), &Term::static_atom("not_iodata"));
-/// assert!(matches!(result, Ok(BifResult::Raise { class: ExceptionClass::Error, .. })));
+/// // {error, epipe}
+/// let error = error_errno(&mut atoms, libc::EPIPE)?;
 /// ```
 ///
 /// # Errors
 ///
-/// A TTY resource gives a runtime error: PBeam has no host write yet (#116).
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
+fn error_errno(atoms: &mut AtomTable, errno: libc::c_int) -> Result<Term, BeamError> {
+    Ok(Term::Tuple(vec![
+        Term::static_atom("error"),
+        Term::Atom(atoms.put(&errno_id(errno))?),
+    ]))
+}
+
+/// The most elements of one iovec group, as `MAXIOV` (`prim_tty_nif.c:71-77`):
+/// `IOV_MAX` when the host defines it, else `UIO_MAXIOV`. Both are 1024 on
+/// macOS and Linux. The `libc` crate has no Linux `IOV_MAX`, so Linux uses
+/// `UIO_MAXIOV`, which has the same value as the glibc `IOV_MAX`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(MAXIOV, 1024);
+/// ```
+#[cfg(target_os = "macos")]
+const MAXIOV: usize = libc::IOV_MAX as usize;
+#[cfg(not(target_os = "macos"))]
+const MAXIOV: usize = libc::UIO_MAXIOV as usize;
+
+/// Run `prim_tty:write_nif(TTY, IOVec)`, as the ERTS NIF `tty_write_nif`
+/// (`prim_tty_nif.c:354-427`) does on Unix. A term that is not a TTY
+/// resource raises `error:badarg` before the binding reads `IOVec`
+/// (`prim_tty_nif.c:363-364`).
+///
+/// Else the binding reads `IOVec` in groups of `MAXIOV` elements with the
+/// checks of `enif_inspect_iovec` (`erl_nif.c:4092-4152`), and writes each
+/// group to the output fd with `host::output::write_all` before it reads the
+/// next group. Each binary that is not empty gives one `writev` entry. A
+/// term that is not a list, or a group with an element that is not a
+/// binary, raises `error:badarg`, after the binding writes the earlier
+/// groups (`prim_tty_nif.c:366-368`). A failed write gives
+/// `{error, Errno}` with the `erl_errno_id` atom
+/// (`prim_tty_nif.c:403-406`). Else the result is `ok`, also for `[]`,
+/// which writes nothing.
+///
+/// ERTS runs this NIF on a dirty IO scheduler (`prim_tty_nif.c:161`). PBeam
+/// has one scheduler thread, so a `writev` that blocks stops all processes
+/// until it returns.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let iovec = Term::List(vec![Term::Binary(b"Hello, ".to_vec()), Term::Binary(b"world!\n".to_vec())]);
+/// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// // A pipe without a reader: {error, epipe}
+/// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec)?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(write_nif(&mut scheduler, &tty, &Term::static_atom("foo"))?, BifResult::Raise { .. }));
+/// assert!(matches!(write_nif(&mut scheduler, &Term::static_atom("stdout"), &iovec)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A new errno atom in a full atom table gives the error of
+/// `AtomTable::put`.
 pub(super) fn write_nif(
-    resources: &Resources,
+    scheduler: &mut Scheduler,
     tty: &Term,
-    _iovec: &Term,
+    iovec: &Term,
 ) -> Result<BifResult, BeamError> {
-    match tty_resource(resources, tty) {
-        Some(_) => Err(error(
-            "prim_tty:write_nif/2 host write is not implemented yet (#116)",
-        )),
-        None => Ok(BifResult::badarg()),
+    let Some(&TtyResource { ofd, .. }) = tty_resource(&scheduler.resources, tty) else {
+        return Ok(BifResult::badarg());
+    };
+    let Term::List(elements) = iovec else {
+        return Ok(BifResult::badarg());
+    };
+    for group in elements.chunks(MAXIOV) {
+        let mut buffers = Vec::with_capacity(group.len());
+        for element in group {
+            match element {
+                Term::Binary(bytes) if bytes.is_empty() => {}
+                Term::Binary(bytes) => buffers.push(IoSlice::new(bytes)),
+                _ => return Ok(BifResult::badarg()),
+            }
+        }
+        if let Err(errno) = output::write_all(ofd, &mut buffers) {
+            return Ok(BifResult::Value(error_errno(&mut scheduler.atoms, errno)?));
+        }
     }
+    Ok(BifResult::Value(Term::static_atom("ok")))
 }
 
 /// Return the TTY resource of `term`, as `enif_get_resource` with the TTY

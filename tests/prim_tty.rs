@@ -43,6 +43,8 @@ enum Stream {
     /// A `Terminal` with `ECHO` and `ICANON` off, as `stty -echo -icanon`
     /// sets it.
     QuietTerminal { columns: u16, rows: u16 },
+    /// The write end of a pipe whose read end is closed before the spawn.
+    BrokenPipe,
 }
 
 /// Layout F: stdin `/dev/null`, stdout and stderr files.
@@ -493,18 +495,93 @@ fn restores_fd_0_from_the_monitor_of_tty_select() {
 }
 
 #[test]
-fn returns_a_runtime_error_from_write_nif_for_a_tty_resource() {
-    // `tty_nif_probe:write/0` makes a `stdout` TTY resource and calls
-    // `prim_tty:write_nif/2` with it. ERTS writes the iovec to the output
-    // fd (prim_tty_nif.c:366-427). PBeam has no host write yet, so the
-    // binding returns a runtime error. `tty_create/1` only reads the mode
-    // of stdout, so the test runs in this process.
-    let beams = [TTY_NIF_PROBE, STAND_IN].map(|path| fs::read(path).unwrap());
-    let program = BeamProgram::load(&beams.each_ref().map(Vec::as_slice)).unwrap();
-    let error = program.execute("tty_nif_probe", "write", &[]).unwrap_err();
+fn writes_the_iovec_of_a_tty_resource_with_writev() {
+    // `tty_nif_probe:write/0` calls `prim_tty:write_nif/2` with a `stderr`
+    // TTY resource and ten terms. The NIF reads the iovec in groups of 1024
+    // elements and writes each group with `writev` before it reads the next
+    // group (prim_tty_nif.c:366-423). An empty binary gives no `writev`
+    // entry (erl_nif.c:4122-4135). A term that is not a list, or a group
+    // with an element that is not a binary, raises `badarg`
+    // (erl_nif.c:4113-4115, 4145-4147). So `Group ++ [foo]` (one group)
+    // writes nothing, and `[<<"c">> | Group] ++ [foo]` writes its first
+    // group of 1024 binaries. `[<<>>]` calls `writev` with a count of 0,
+    // which fails with `EINVAL` on macOS and writes 0 bytes on Linux.
+    let last = if cfg!(target_os = "macos") {
+        (
+            "{error,einval}",
+            r#"Tuple([Atom("error"), Atom("einval")])"#,
+        )
+    } else {
+        ("ok", r#"Atom("ok")"#)
+    };
+    let group = format!("c{}", "b".repeat(1023));
+    let stderr = format!("Hello, world!\n{group}{group}d");
+    assert_eq!(stderr.len(), 2063);
+
+    let outputs = run_with_outputs(&mut erts_nif_probe("write"), FILES, &[]);
     assert_eq!(
-        error.to_string(),
-        "prim_tty:write_nif/2 host write is not implemented yet (#116)"
+        outputs.result.as_deref(),
+        Some(
+            format!(
+                "[ok,ok,badarg,badarg,badarg,badarg,badarg,badarg,ok,{}]\n",
+                last.0
+            )
+            .as_bytes()
+        )
+    );
+    assert_eq!(outputs.files[1].as_deref(), Some(&b""[..]));
+    assert_eq!(outputs.files[2].as_deref(), Some(stderr.as_bytes()));
+
+    let outputs = run_with_outputs(
+        &mut isolated("tty_nif_probe:write", &[TTY_NIF_PROBE, STAND_IN]),
+        FILES,
+        &[],
+    );
+    assert_eq!(
+        outputs.result.as_deref(),
+        Some(
+            format!(
+                r#"Ok(List([Atom("ok"), Atom("ok"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("ok"), {}]))"#,
+                last.1
+            )
+            .as_bytes()
+        )
+    );
+    assert_eq!(outputs.files[2].as_deref(), Some(stderr.as_bytes()));
+}
+
+#[test]
+fn returns_the_errno_of_a_failed_tty_write() {
+    // `tty_nif_probe:write_error/0` writes to a `stderr` TTY resource, and
+    // stderr is a pipe whose reader is closed. ERTS ignores `SIGPIPE`
+    // (sys_drivers.c:175), and so does the Rust runtime before `main`, so
+    // `writev` fails with `EPIPE`, and the result is `{error, epipe}`
+    // (prim_tty_nif.c:403-406). `[]` writes nothing, and `[<<"x">>, foo]`
+    // raises `badarg` before the write (prim_tty_nif.c:366-368).
+    let last = if cfg!(target_os = "macos") {
+        (
+            "{error,einval}",
+            r#"Tuple([Atom("error"), Atom("einval")])"#,
+        )
+    } else {
+        ("ok", r#"Atom("ok")"#)
+    };
+    let layout = [Stream::Null, Stream::File, Stream::BrokenPipe];
+    assert_eq!(
+        run_in_layout(&mut erts_nif_probe("write_error"), layout, &[]),
+        format!("[ok,{{error,epipe}},badarg,{}]\n", last.0).as_bytes()
+    );
+    assert_eq!(
+        run_in_layout(
+            &mut isolated("tty_nif_probe:write_error", &[TTY_NIF_PROBE, STAND_IN]),
+            layout,
+            &[]
+        ),
+        format!(
+            r#"Ok(List([Atom("ok"), Tuple([Atom("error"), Atom("epipe")]), Atom("badarg"), {}]))"#,
+            last.1
+        )
+        .as_bytes()
     );
 }
 
@@ -1252,6 +1329,9 @@ fn open_stream(stream: Stream, path: &Path, terminal: &mut Option<(OwnedFd, Owne
     let (master, slave) = match stream {
         Stream::Null => return Stdio::null(),
         Stream::File => return fs::File::create(path).unwrap().into(),
+        // `std::io::pipe` makes both ends close-on-exec, so a child of a
+        // parallel test does not keep the read end open.
+        Stream::BrokenPipe => return std::io::pipe().unwrap().1.into(),
         Stream::Terminal { columns, rows } => open_terminal(columns, rows),
         Stream::QuietTerminal { columns, rows } => {
             let (master, slave) = open_terminal(columns, rows);
