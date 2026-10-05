@@ -42,16 +42,56 @@ struct Binding {
     run: fn(&mut Scheduler, &[Term]) -> Result<BifResult, BeamError>,
 }
 
-/// The registered bindings of each module, sorted by the module name for a
-/// binary search. The bindings of a module are sorted by name, then by
-/// arity.
+/// The static NIF library of one module. ERTS finds a static library by the
+/// module name (`is_static_nif_module` in `beam/erl_nif.c:5324-5331`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(LIBRARIES[0].0, "prim_tty");
+/// const PRIM_TTY: Library = Library {
+///     module: "prim_tty",
+///     functions: &prim_tty::FUNCTIONS,
+///     bindings: prim_tty::BINDINGS,
+/// };
 /// ```
-const LIBRARIES: &[(&str, &[Binding])] = &[("prim_tty", prim_tty::BINDINGS)];
+struct Library {
+    /// The name of the module of the library.
+    module: &'static str,
+    /// The functions of the library, as `(name, arity)` in the order of its
+    /// `nif_funcs`. `erlang:load_nif/2` checks them in this order.
+    functions: &'static [(&'static str, u32)],
+    /// The bindings of the functions that PBeam implements, sorted by name,
+    /// then by arity.
+    bindings: &'static [Binding],
+}
+
+/// The registered static NIF libraries, sorted by the module name for a
+/// binary search.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(LIBRARIES[0].module, "prim_tty");
+/// ```
+const LIBRARIES: &[Library] = &[Library {
+    module: "prim_tty",
+    functions: &prim_tty::FUNCTIONS,
+    bindings: prim_tty::BINDINGS,
+}];
+
+/// Return the registered static NIF library of `module`, or `None` when
+/// PBeam has no bindings for the module.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(library("prim_tty").map(|library| library.functions[0]), Some(("isatty", 1)));
+/// assert!(library("prim_file").is_none());
+/// ```
+fn library(module: &str) -> Option<&'static Library> {
+    let index = LIBRARIES.binary_search_by_key(&module, |library| library.module);
+    Some(&LIBRARIES[index.ok()?])
+}
 
 /// Return the registered binding of exactly `module:name/arity`, or `None`
 /// when PBeam has no binding for the MFA.
@@ -64,8 +104,7 @@ const LIBRARIES: &[(&str, &[Binding])] = &[("prim_tty", prim_tty::BINDINGS)];
 /// assert!(binding("nif_error_probe", "nif_stub", 0).is_none());
 /// ```
 fn binding(module: &str, name: &str, arity: u32) -> Option<&'static Binding> {
-    let library = LIBRARIES.binary_search_by_key(&module, |&(found, _)| found);
-    let bindings = LIBRARIES[library.ok()?].1;
+    let bindings = library(module)?.bindings;
     let index =
         bindings.binary_search_by_key(&(name, arity), |binding| (binding.name, binding.arity));
     Some(&bindings[index.ok()?])
@@ -97,24 +136,6 @@ pub(super) fn call(
 ) -> Option<Result<BifResult, BeamError>> {
     let binding = binding(module, name, u32::try_from(arguments.len()).ok()?)?;
     Some((binding.run)(scheduler, arguments))
-}
-
-/// Return the functions of the static NIF library of `module`, as
-/// `(name, arity)` in the order of its `nif_funcs`, or `None` when PBeam has
-/// no bindings for the module. ERTS finds a static library by the module
-/// name (`is_static_nif_module` in `beam/erl_nif.c:5324-5331`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(library("prim_tty").map(|functions| functions[0]), Some(("isatty", 1)));
-/// assert!(library("prim_file").is_none());
-/// ```
-fn library(module: &str) -> Option<&'static [(&'static str, u32)]> {
-    match module {
-        "prim_tty" => Some(&prim_tty::FUNCTIONS),
-        _ => None,
-    }
 }
 
 /// Run `erlang:load_nif(Path, LoadInfo)` from code of the module `caller`,
@@ -170,7 +191,7 @@ pub(super) fn load_nif(
     if !is_native_filename(&arguments[0], filename_encoding()) {
         return Ok(BifResult::badarg());
     }
-    let Some(functions) = library(caller) else {
+    let Some(library) = library(caller) else {
         // ponytail: PBeam opens no NIF library; see "NIF stubs" in docs/erts-differences.md.
         return Err(error(format!(
             "erlang:load_nif/2 from {caller} is not supported: PBeam has no native bindings for the module"
@@ -187,7 +208,7 @@ pub(super) fn load_nif(
     let has_nifs = instructions
         .iter()
         .any(|instruction| matches!(instruction, Instruction::NifStart { .. }));
-    for &(name, arity) in functions {
+    for &(name, arity) in library.functions {
         let defined = instructions.iter().any(|instruction| {
             matches!(instruction, Instruction::FunctionInfo { name: found, arity: found_arity, .. }
                 if found == name && *found_arity == arity)
@@ -245,17 +266,28 @@ pub(super) fn load_nif_error(
 mod tests {
     use super::{LIBRARIES, binding};
 
-    /// `binding` finds a binding with binary searches, so the modules and the
-    /// bindings of each module are strictly increasing: sorted, with no
-    /// duplicate entry. The lookup matches the exact MFA.
+    /// `library` and `binding` find an entry with binary searches, so the
+    /// libraries and the bindings of each library are strictly increasing:
+    /// sorted, with no duplicate entry. Each binding is a function of its
+    /// library. The lookup matches the exact MFA.
     #[test]
     fn registry_is_sorted_and_matches_the_exact_mfa() {
-        assert!(LIBRARIES.windows(2).all(|pair| pair[0].0 < pair[1].0));
-        for (_, bindings) in LIBRARIES {
+        assert!(
+            LIBRARIES
+                .windows(2)
+                .all(|pair| pair[0].module < pair[1].module)
+        );
+        for library in LIBRARIES {
+            let bindings = library.bindings;
             assert!(
                 bindings
                     .windows(2)
                     .all(|pair| (pair[0].name, pair[0].arity) < (pair[1].name, pair[1].arity))
+            );
+            assert!(
+                bindings
+                    .iter()
+                    .all(|binding| library.functions.contains(&(binding.name, binding.arity)))
             );
         }
         assert!(binding("prim_tty", "write_nif", 2).is_some());
