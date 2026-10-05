@@ -1,3 +1,4 @@
+mod ets;
 mod host;
 mod interpreter;
 mod mailbox;

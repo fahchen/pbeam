@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use super::{
+    ets::EtsTables,
     persistent_term::PersistentTerms,
     process::{Frame, ProcessState},
 };
@@ -36,6 +37,8 @@ pub(super) struct Scheduler {
     names: HashMap<String, ProcessId>,
     /// Persistent terms of the node. All processes of the run share them.
     pub(super) persistent_terms: PersistentTerms,
+    /// ETS tables of the node. All processes of the run share them.
+    pub(super) ets: EtsTables,
     /// The atom table of the run, as `erts_atom_table` for one emulator. A
     /// run starts with a copy of the program table, and a BIF such as
     /// `erlang:list_to_atom/1` adds its new atoms here.
@@ -63,6 +66,7 @@ impl Scheduler {
             root_result: None,
             names: HashMap::new(),
             persistent_terms: PersistentTerms::default(),
+            ets: EtsTables::default(),
             atoms,
         }
     }
@@ -389,9 +393,11 @@ impl Scheduler {
         self.names.get(name).copied()
     }
 
-    /// Remove the current process after it exits. Free its registered name
-    /// first, then send `EXIT` to linked processes that trap exits, then
-    /// `DOWN` to monitors. ERTS (`erl_process.c`) unregisters the name in
+    /// Remove the current process after it exits. Delete its ETS tables
+    /// first, then free its registered name, then send `EXIT` to linked
+    /// processes that trap exits, then `DOWN` to monitors. ERTS
+    /// (`erl_process.c`) deletes the tables in `ERTS_CONTINUE_EXIT_USING_DB`
+    /// (`erl_process.c:14360-14368`), unregisters the name in
     /// `ERTS_CONTINUE_EXIT_FREE`, before `ERTS_CONTINUE_EXIT_LINKS` and
     /// `ERTS_CONTINUE_EXIT_MONITORS`, and sends link exit signals before
     /// monitor down signals. A process that traps exits also receives a
@@ -417,6 +423,7 @@ impl Scheduler {
             .take()
             .and_then(|id| self.processes.remove(&id))
             .expect("the scheduler has a current process");
+        self.ets.delete_owned(process.id);
         if let Some(name) = &process.registered_name {
             self.names.remove(name.name());
         }
@@ -637,6 +644,36 @@ mod tests {
                 .clone()
                 .map(Term::Atom),
             Some(name)
+        );
+    }
+
+    #[test]
+    fn deletes_the_tables_of_a_process_when_it_exits() {
+        // ERTS 29.1.1: after the owner of a named table exits, ets:new/2
+        // with the same name in the monitor process is valid when the DOWN
+        // message arrives (erl_process.c:14360-14368).
+        let mut scheduler = Scheduler::new(AtomTable::new());
+        scheduler.start(frame(), vec![]).unwrap();
+        scheduler.schedule_next();
+        let (child, monitor) = scheduler.spawn(frame(), vec![], true, false).unwrap();
+        scheduler.park_current();
+
+        scheduler.schedule_next();
+        let table = scheduler.make_ref().unwrap();
+        scheduler.ets.create(table, child, Some("ets_probe_owned"));
+        assert!(scheduler.ets.name_in_use("ets_probe_owned"));
+        scheduler.finish_current(atom("normal"), None).unwrap();
+
+        assert!(!scheduler.ets.name_in_use("ets_probe_owned"));
+        assert_eq!(
+            first_message(&scheduler, 0, 0),
+            Term::Tuple(vec![
+                atom("DOWN"),
+                Term::Reference(monitor.unwrap()),
+                atom("process"),
+                Term::Pid(child),
+                atom("normal"),
+            ])
         );
     }
 }

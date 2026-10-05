@@ -461,7 +461,7 @@ bifs! {
     ets:match_spec_compile/1 => unsupported,
     ets:match_spec_run_r/3 => unsupported,
     ets:member/2 => unsupported,
-    ets:new/2 => unsupported,
+    ets:new/2 => |cx, [name, options]| ets::new(cx, name, options),
     ets:next/2 => unsupported,
     ets:next_lookup/2 => unsupported,
     ets:prev/2 => unsupported,
