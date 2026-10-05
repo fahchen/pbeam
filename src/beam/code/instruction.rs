@@ -251,11 +251,11 @@ pub(crate) enum Instruction {
     /// Encoding: opcode, unsigned lambda number, destination register,
     /// extended list, item count, then the free variable operands. Example:
     /// `fun_probe:make_pair/1` in `fixtures/funs/fun_probe.beam` has
-    /// `[0xAB, 0x20, 0x03, 0x17, 0x10, 0x03]`, which makes a fun of `FunT`
-    /// entry 2 with the free variable `x0` and writes it to `x0`.
+    /// `[0xAB, 0x40, 0x03, 0x17, 0x10, 0x03]`, which makes a fun of `FunT`
+    /// entry 4 with the free variable `x0` and writes it to `x0`.
     ///
     /// Erlang: `make_pair(T) -> fun(X) -> {T, X} end.` compiles to
-    /// `{make_fun3,{f,49},0,0,{x,0},{list,[{x,0}]}}`.
+    /// `{make_fun3,{f,112},0,0,{x,0},{list,[{x,0}]}}`.
     MakeFun {
         lambda: Lambda,
         free: Vec<Operand>,
@@ -276,7 +276,7 @@ pub(crate) enum Instruction {
     /// number 0 and arity 1.
     ///
     /// Erlang: `(id(Const))()` compiles to `{call_fun,0}`, and
-    /// `tail_call(F) -> F(tail).` compiles to `{call_fun2,{f,53},1,{tr,{x,1},...}}`.
+    /// `tail_call(F) -> F(tail).` compiles to `{call_fun2,{f,127},1,{tr,{x,1},...}}`.
     ///
     /// BEAM has no tail form of a fun call. The compiler emits the call, then
     /// `deallocate D` and `return`. The ERTS loader joins the three
@@ -395,11 +395,11 @@ pub(crate) enum Instruction {
     ///
     /// Encoding: opcode, fail label, value, arity. Example:
     /// `fun_probe:kind/1` in `fixtures/funs/fun_probe.beam` has
-    /// `[0x73, 0x0D, 0x3A, 0x57, 0x03, 0x30, 0x11]`, which fails to label 58
+    /// `[0x73, 0x0D, 0x64, 0x57, 0x03, 0x40, 0x11]`, which fails to label 100
     /// unless the typed register `x0` holds a fun of one argument.
     ///
     /// Erlang: `kind(F) when is_function(F, 1) -> one;` compiles to
-    /// `{test,is_function2,{f,58},[{tr,{x,0},...},{integer,1}]}`.
+    /// `{test,is_function2,{f,100},[{tr,{x,0},...},{integer,1}]}`.
     TestFunctionArity {
         fail_label: u32,
         value: Operand,
@@ -767,10 +767,10 @@ pub(crate) enum TestKind {
     NonEmptyList,
     Binary,
     Map,
-    /// `is_function`, opcode 77. Example: `[0x4D, 0x0D, 0x3B, 0x57, 0x03,
-    /// 0x30]` in `fun_probe:kind/1` fails to label 59 unless the typed
+    /// `is_function`, opcode 77. Example: `[0x4D, 0x0D, 0x65, 0x57, 0x03,
+    /// 0x40]` in `fun_probe:kind/1` fails to label 101 unless the typed
     /// register `x0` holds a fun. Erlang: `kind(F) when is_function(F) ->
-    /// any;` compiles to `{test,is_function,{f,59},[{tr,{x,0},...}]}`.
+    /// any;` compiles to `{test,is_function,{f,101},[{tr,{x,0},...}]}`.
     Function,
 }
 
@@ -2188,6 +2188,22 @@ mod tests {
         assert!(parse_code(&code, &[], &[], &[], &[]).is_err());
     }
 
+    /// Assert that `bytes` occur in `fixtures/funs/fun_probe.beam`, so a test
+    /// that takes its bytes from the fixture fails when the fixture changes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_in_fun_probe(&[0x4B, 0x00]); // call_fun 0
+    /// ```
+    fn assert_in_fun_probe(bytes: &[u8]) {
+        const FUN_PROBE: &[u8] = include_bytes!("../../../fixtures/funs/fun_probe.beam");
+        assert!(
+            FUN_PROBE.windows(bytes.len()).any(|window| window == bytes),
+            "{bytes:02X?} is not in fun_probe.beam"
+        );
+    }
+
     #[test]
     fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
         let code = |instructions: &[u8]| {
@@ -2198,24 +2214,39 @@ mod tests {
             code
         };
         let atoms = vec![Atom::from_static("safe").unwrap()];
-        let module = Atom::from_static("lists").unwrap();
-        let lambda = |index, label, arity| Lambda::new(module.clone(), index, 7, label, arity);
+        let module = AtomTable::new().put("fun_probe").unwrap();
+        let lambda =
+            |index, label, arity| Lambda::new(module.clone(), index, 31_263_486, label, arity);
+        // The first five `FunT` entries of the fixture, with their free
+        // variable counts.
         let lambdas = vec![
-            (lambda(0, 53, 1), 1),
-            (lambda(1, 51, 0), 0),
-            (lambda(2, 49, 1), 1),
+            (lambda(0, 127, 1), 1),
+            (lambda(1, 125, 0), 0),
+            (lambda(2, 123, 1), 1),
+            (lambda(3, 121, 0), 0),
+            (lambda(4, 112, 1), 1),
         ];
         let parse =
             |instructions: &[u8]| parse_code(&code(instructions), &atoms, &[], &[], &lambdas);
-        // Bytes of `fixtures/funs/fun_probe.beam`, then a `call_fun2` with the
-        // atom tag `safe` and the fun in `y0`.
-        let (instructions, _) = parse(&[
-            0xAB, 0x20, 0x03, 0x17, 0x10, 0x03, // make_pair/1: make_fun3 2 x0 [x0]
-            0xAB, 0x10, 0xA4, 0x17, 0x00, // locals/0: make_fun3 1 y10 []
-            0x4B, 0x00, // locals/0: call_fun 0
-            0xB2, 0x00, 0x10, 0x57, 0x13, 0x20, // tail_call/1: call_fun2 0 1 x1
-            0xB2, 0x12, 0x00, 0x04, // call_fun2 safe 0 y0
-        ])
+        let make_pair = [0xAB, 0x40, 0x03, 0x17, 0x10, 0x03]; // make_pair/1: make_fun3 4 x0 [x0]
+        let make_const = [0xAB, 0x10, 0xA4, 0x17, 0x00]; // locals/0: make_fun3 1 y10 []
+        let call_fun = [0x4B, 0x00]; // locals/0: call_fun 0
+        let tail_call = [0xB2, 0x00, 0x10, 0x57, 0x13, 0x20]; // tail_call/1: call_fun2 0 1 x1
+        for bytes in [&make_pair[..], &make_const, &call_fun, &tail_call] {
+            assert_in_fun_probe(bytes);
+        }
+        // The fixture bytes, then a `call_fun2` with the atom tag `safe` and
+        // the fun in `y0`.
+        let (instructions, _) = parse(
+            &[
+                &make_pair[..],
+                &make_const,
+                &call_fun,
+                &tail_call,
+                &[0xB2, 0x12, 0x00, 0x04],
+            ]
+            .concat(),
+        )
         .unwrap();
         assert!(matches!(
             instructions.as_slice(),
@@ -2226,7 +2257,7 @@ mod tests {
                 Instruction::CallFun { arity: 1, function: Operand::X(1), tail: false, .. },
                 Instruction::CallFun { arity: 0, function: Operand::Y(0), tail: false, .. },
                 Instruction::End,
-            ] if *first == lambdas[2].0
+            ] if *first == lambdas[4].0
                 && matches!(free.as_slice(), [Operand::X(0)])
                 && *second == lambdas[1].0
                 && empty.is_empty()
@@ -2235,8 +2266,8 @@ mod tests {
         // A lambda number outside the table, or an environment of another
         // length than the free variables of the entry.
         for make_fun3 in [
-            [0xAB, 0x30, 0x03, 0x17, 0x00],
-            [0xAB, 0x20, 0x03, 0x17, 0x00],
+            [0xAB, 0x50, 0x03, 0x17, 0x00],
+            [0xAB, 0x40, 0x03, 0x17, 0x00],
         ] {
             assert!(error(&make_fun3).contains("does not match the lambda table"));
         }
@@ -2306,10 +2337,14 @@ mod tests {
         code.extend([0; 16]);
         // Bytes of `fun_probe:kind/1` in `fixtures/funs/fun_probe.beam`, then
         // an `is_function2` with the arity in `x1`.
+        let is_function2 = [0x73, 0x0D, 0x64, 0x57, 0x03, 0x40, 0x11]; // is_function2 f100 x0 1
+        let is_function = [0x4D, 0x0D, 0x65, 0x57, 0x03, 0x40]; // is_function f101 x0
+        assert_in_fun_probe(&is_function2);
+        assert_in_fun_probe(&is_function);
+        code.extend(is_function2);
+        code.extend(is_function);
         code.extend([
-            0x73, 0x0D, 0x3A, 0x57, 0x03, 0x30, 0x11, // is_function2 f58 {tr,x0,_} 1
-            0x4D, 0x0D, 0x3B, 0x57, 0x03, 0x30, // is_function f59 {tr,x0,_}
-            0x73, 0x0D, 0x3A, 0x03, 0x13, // is_function2 f58 x0 x1
+            0x73, 0x0D, 0x64, 0x03, 0x13, // is_function2 f100 x0 x1
             0x03,
         ]);
         let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
@@ -2317,17 +2352,17 @@ mod tests {
             instructions.as_slice(),
             [
                 Instruction::TestFunctionArity {
-                    fail_label: 58,
+                    fail_label: 100,
                     value: Operand::X(0),
                     arity: Operand::Value(Term::Integer(1)),
                 },
                 Instruction::Test {
                     kind: TestKind::Function,
-                    fail_label: 59,
+                    fail_label: 101,
                     value: Operand::X(0),
                 },
                 Instruction::TestFunctionArity {
-                    fail_label: 58,
+                    fail_label: 100,
                     value: Operand::X(0),
                     arity: Operand::X(1),
                 },

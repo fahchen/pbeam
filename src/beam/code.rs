@@ -1350,15 +1350,16 @@ mod tests {
         let mut table = AtomTable::new();
         let atoms = vec![table.put("fun_probe").unwrap(), table.put("f").unwrap()];
         let module = atoms[0].clone();
-        // `fun_probe.beam` entry 0: atom 32, total arity 2, label 53, index
-        // 0, one free variable, old unique value 111657801. A count below
-        // the number of entries reads only the counted entries, and atom
-        // index 0 is the ERTS non-value slot.
-        let entries = [[2, 2, 53, 0, 1, 111_657_801], [0, 0, 51, 1, 0, 7]];
+        // An entry of the form that erlc writes for `fun(X) -> {Tag, X} end`:
+        // atom 2, total arity 2, label 127, index 0, one free variable, old
+        // unique value 31263486. A count below the number of entries reads
+        // only the counted entries, and atom index 0 is the ERTS non-value
+        // slot.
+        let entries = [[2, 2, 127, 0, 1, 31_263_486], [0, 0, 51, 1, 0, 7]];
         assert_eq!(
             parse_lambdas(&lambda_table(2, &entries), &atoms).unwrap(),
             vec![
-                (Lambda::new(module.clone(), 0, 111_657_801, 53, 1), 1),
+                (Lambda::new(module.clone(), 0, 31_263_486, 127, 1), 1),
                 (Lambda::new(module, 1, 7, 51, 0), 0),
             ]
         );

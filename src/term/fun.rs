@@ -22,7 +22,7 @@ use super::{Atom, Term};
 /// ```rust,ignore
 /// // The `FunT` entry of `fun(X) -> {Tag, X} end` in `fun_probe:locals/0`.
 /// let module = AtomTable::new().put("fun_probe")?;
-/// let lambda = Lambda::new(module, 0, 92_581_221, 53, 1);
+/// let lambda = Lambda::new(module, 0, 31_263_486, 127, 1);
 /// assert_eq!(lambda.arity(), 1);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
