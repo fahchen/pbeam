@@ -133,3 +133,53 @@ fn reports_the_perf_counter_product_outside_the_integer_range() {
         .unwrap();
     assert!(first_seconds.contains(&erts), "{erts}");
 }
+
+#[test]
+fn gives_the_date_of_a_posix_time_as_pinned_erts() {
+    // `erlang:posixtime_to_universaltime/1` gives the date of each 64-bit
+    // integer with the C integer arithmetic of `seconds_to_univ`
+    // (`erl_time_sup.c:1669-1702`), and raises `badarg` for each other term
+    // (`bif.c:4025-4050`).
+    let program = program();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let date = |[year, month, day, hour, minute, second]: [i64; 6]| {
+        Term::Tuple(vec![
+            Term::Tuple([year, month, day].map(Term::Integer).into()),
+            Term::Tuple([hour, minute, second].map(Term::Integer).into()),
+        ])
+    };
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let mut expected: Vec<Term> = [
+        [1970, 1, 1, 0, 0, 0],
+        [1969, 12, 31, 23, 59, 59],
+        [1970, 1, 1, 23, 59, 59],
+        [1970, 1, 2, 0, 0, 0],
+        [2000, 2, 29, 0, 0, 0],
+        [2000, 3, 1, 0, 0, 0],
+        [2100, 1, 1, 0, 0, 0],
+        [1900, 1, 1, 0, 0, 0],
+        [-1, 12, 31, 0, 0, 0],
+        [-1, 12, 30, 23, 59, 59],
+        [18_267_316_009, 3, 8, 6, 58, 8],
+        [-18_267_312_070, 10, 25, 17, 1, 51],
+        [292_277_026_596, 12, 4, 15, 30, 7],
+        [-292_277_022_657, 1, 26, 8, 29, 52],
+    ]
+    .into_iter()
+    .map(date)
+    .collect();
+    expected.extend([badarg.clone(), badarg.clone(), badarg]);
+    assert_eq!(
+        program.execute("time_probe", "posix", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("posix"),
+        b"[{{1970,1,1},{0,0,0}},{{1969,12,31},{23,59,59}},{{1970,1,1},{23,59,59}},\
+{{1970,1,2},{0,0,0}},{{2000,2,29},{0,0,0}},{{2000,3,1},{0,0,0}},{{2100,1,1},{0,0,0}},\
+{{1900,1,1},{0,0,0}},{{-1,12,31},{0,0,0}},{{-1,12,30},{23,59,59}},\
+{{18267316009,3,8},{6,58,8}},{{-18267312070,10,25},{17,1,51}},\
+{{292277026596,12,4},{15,30,7}},{{-292277022657,1,26},{8,29,52}},\
+{error,badarg},{error,badarg},{error,badarg}]\n"
+    );
+}

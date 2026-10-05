@@ -1,5 +1,5 @@
 -module(time_probe).
--export([monotonic/0, system/0, units/0, convert/0, perf_counter/0]).
+-export([monotonic/0, system/0, units/0, convert/0, perf_counter/0, posix/0]).
 
 %% The Erlang monotonic time at the emulator start in `native`
 %% (`erlang:system_info(start_time)` on the pinned ERTS).
@@ -62,6 +62,15 @@ convert() ->
 
 perf_counter() ->
     erlang:monotonic_time(perf_counter).
+
+%% The date of each 64-bit POSIX time, and `badarg` for each other term.
+posix() ->
+    [catch_error(fun() -> erlang:posixtime_to_universaltime(T) end)
+     || T <- [id(0), id(-1), id(86399), id(86400), id(951782400), id(951868800),
+              id(4102444800), id(-2208988800), id(-62167219200), id(-62167219201),
+              id(576460752303423488), id(-576460752303423489),
+              id(9223372036854775807), id(-9223372036854775808),
+              id(foo), id([1]), id({})]].
 
 catch_error(F) -> try F() catch error:R -> {error, R} end.
 

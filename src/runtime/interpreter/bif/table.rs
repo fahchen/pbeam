@@ -270,7 +270,7 @@ bifs! {
     erlang:port_set_data/2 => unsupported,
     erlang:port_to_list/1 => unsupported,
     erlang:ports/0 => unsupported,
-    erlang:posixtime_to_universaltime/1 => unsupported,
+    erlang:posixtime_to_universaltime/1 => |_, [time]| Ok(erlang::posixtime_to_universaltime(time)),
     erlang:pre_loaded/0 => unsupported,
     erlang:process_flag/2 => |cx, [Term::Atom(flag), Term::Atom(value)]| where flag.name() == "trap_exit" && matches!(value.name(), "true" | "false") => erlang::trap_exit(cx, value),
     erlang:process_info/1 => unsupported,

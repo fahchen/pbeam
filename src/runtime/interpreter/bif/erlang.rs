@@ -680,6 +680,30 @@ pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> B
     }
 }
 
+/// Run `erlang:posixtime_to_universaltime/1`: return the UTC date and time
+/// `{{Year, Month, Day}, {Hour, Minute, Second}}` of `time`, the seconds
+/// since 1970-01-01 00:00:00 UTC, with [`time::seconds_to_univ`]. Each
+/// integer gives a date, and each other term raises `badarg`, as in ERTS
+/// `posixtime_to_universaltime_1` (`bif.c:4025-4050`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {{1970,1,2},{0,0,0}}
+/// assert!(matches!(posixtime_to_universaltime(&Term::Integer(86_400)), BifResult::Value(_)));
+/// assert!(matches!(posixtime_to_universaltime(&Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn posixtime_to_universaltime(time: &Term) -> BifResult {
+    let Term::Integer(time) = time else {
+        return BifResult::badarg();
+    };
+    let (year, month, day, hour, minute, second) = time::seconds_to_univ(*time);
+    Value(Term::Tuple(vec![
+        Term::Tuple([year, month, day].map(Term::Integer).into()),
+        Term::Tuple([hour, minute, second].map(Term::Integer).into()),
+    ]))
+}
+
 /// Run `erlang:element/2`: return the element at the 1-based `index` of a
 /// tuple. An `index` that is not an integer or is outside the tuple, and a
 /// `tuple` that is not a tuple, raise `badarg`, as in ERTS `element_2`

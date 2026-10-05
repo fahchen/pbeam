@@ -1,5 +1,6 @@
-//! The time support of ERTS (`erl_time_sup.c`): the time units and the unit
-//! conversion of `erlang:monotonic_time/1` and `os:system_time/1`.
+//! The time support of ERTS (`erl_time_sup.c`): the time units, the unit
+//! conversion of `erlang:monotonic_time/1` and `os:system_time/1`, and the
+//! date of a POSIX time.
 
 use crate::term::Term;
 
@@ -79,6 +80,65 @@ pub(super) fn time_unit_conversion(value: i64, offset_multiplier: i64, unit: &Te
     };
     let divisor = TIME_UNIT / per_second;
     TimeValue::Value(value / divisor + offset_multiplier * (MONOTONIC_OFFSET_NATIVE / divisor))
+}
+
+/// The seconds in a day, `SECONDS_PER_DAY` (`erl_time_sup.c:1664-1666`).
+const SECONDS_PER_DAY: i64 = 24 * SECONDS_PER_HOUR;
+
+/// The seconds in an hour, `SECONDS_PER_HOUR` (`erl_time_sup.c:1664-1666`).
+const SECONDS_PER_HOUR: i64 = 60 * SECONDS_PER_MINUTE;
+
+/// The seconds in a minute, `SECONDS_PER_MINUTE` (`erl_time_sup.c:1664-1666`).
+const SECONDS_PER_MINUTE: i64 = 60;
+
+/// Return the UTC date and time `(year, month, day, hour, minute, second)`
+/// of `time`, the seconds since 1970-01-01 00:00:00 UTC, as ERTS
+/// `seconds_to_univ` (`erl_time_sup.c:1669-1702`) does. The arithmetic is
+/// the C integer arithmetic: `/` and `%` truncate toward zero, as in Rust.
+/// Each 64-bit `time` gives a date. Before the year 1, the truncating
+/// division of the leap-year terms gives the ERTS dates, which can differ
+/// from the proleptic Gregorian calendar: -62167219200, the start of the
+/// year 0, gives -1-12-31.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(seconds_to_univ(0), (1970, 1, 1, 0, 0, 0));
+/// assert_eq!(seconds_to_univ(-1), (1969, 12, 31, 23, 59, 59));
+/// assert_eq!(seconds_to_univ(951_782_400), (2000, 2, 29, 0, 0, 0));
+/// assert_eq!(seconds_to_univ(-62_167_219_201), (-1, 12, 30, 23, 59, 59));
+/// ```
+pub(super) fn seconds_to_univ(time: i64) -> (i64, i64, i64, i64, i64, i64) {
+    let mut days = time / SECONDS_PER_DAY;
+    let mut secs = time % SECONDS_PER_DAY;
+    if secs < 0 {
+        days -= 1;
+        secs += SECONDS_PER_DAY;
+    }
+    let tmp = secs % SECONDS_PER_HOUR;
+    let (hour, minute, second) = (
+        secs / SECONDS_PER_HOUR,
+        tmp / SECONDS_PER_MINUTE,
+        tmp % SECONDS_PER_MINUTE,
+    );
+    // 719468 is the day of 1970-01-01 counted from 0000-03-01.
+    days += 719_468;
+    let mut year = (10_000 * days + 14_780) / 3_652_425;
+    let mut day_of_year = days - (365 * year + year / 4 - year / 100 + year / 400);
+    if day_of_year < 0 {
+        year -= 1;
+        day_of_year = days - (365 * year + year / 4 - year / 100 + year / 400);
+    }
+    // `mi` counts the months from March.
+    let mi = (100 * day_of_year + 52) / 3_060;
+    (
+        year + (mi + 2) / 12,
+        (mi + 2) % 12 + 1,
+        day_of_year - (mi * 306 + 5) / 10 + 1,
+        hour,
+        minute,
+        second,
+    )
 }
 
 #[cfg(test)]
@@ -178,6 +238,23 @@ mod tests {
         ] {
             assert_eq!(time_unit_conversion(5, 1, &unit), TimeValue::Badarg);
             assert_eq!(time_unit_conversion(5, 0, &unit), TimeValue::Badarg);
+        }
+    }
+
+    #[test]
+    fn gives_the_date_of_each_64_bit_posix_time() {
+        // The values of `erlang:posixtime_to_universaltime/1` on the pinned
+        // ERTS.
+        for (time, date) in [
+            (0, (1970, 1, 1, 0, 0, 0)),
+            (-1, (1969, 12, 31, 23, 59, 59)),
+            (86_400, (1970, 1, 2, 0, 0, 0)),
+            (951_868_800, (2000, 3, 1, 0, 0, 0)),
+            (-62_167_219_200, (-1, 12, 31, 0, 0, 0)),
+            (i64::MAX, (292_277_026_596, 12, 4, 15, 30, 7)),
+            (i64::MIN, (-292_277_022_657, 1, 26, 8, 29, 52)),
+        ] {
+            assert_eq!(seconds_to_univ(time), date, "{time}");
         }
     }
 }
