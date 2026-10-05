@@ -18,8 +18,9 @@ pub(super) struct Resources {
     /// `tty_create_nif` (`prim_tty_nif.c:988-1072`).
     ttys: HashMap<Reference, TtyResource>,
     /// The process monitors of the TTY resources, as the pid and the TTY
-    /// reference of each `tty_init/2` that monitors its caller
-    /// (`prim_tty_nif.c:1162-1165`), in the order of the calls. ERTS adds
+    /// reference of each `tty_init/2` or `tty_select/2` that monitors its
+    /// caller (`prim_tty_nif.c:1162-1165`, `1229-1230`), in the order of
+    /// the calls. ERTS adds
     /// each such monitor to the end of the monitor list of the process
     /// (`erl_proc_sig_queue.c:6555`), and the exit of the process runs the
     /// list in order (`ERTS_CONTINUE_EXIT_LT_MONITORS`,
@@ -111,8 +112,8 @@ impl Resources {
     }
 
     /// Add a monitor of the process `pid` for the TTY resource `reference`,
-    /// as `enif_monitor_process` in `tty_init_nif`
-    /// (`prim_tty_nif.c:1163`) does.
+    /// as `enif_monitor_process` in `tty_init_nif` (`prim_tty_nif.c:1163`)
+    /// and in `tty_select_nif` (`prim_tty_nif.c:1230`) does.
     ///
     /// # Examples
     ///

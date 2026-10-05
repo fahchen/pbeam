@@ -428,6 +428,70 @@ fn restores_fd_0_when_the_tty_owner_exits() {
 }
 
 #[test]
+fn selects_stdin_and_reads_the_encoding() {
+    // `tty_nif_probe:select/0` calls `prim_tty:tty_select/2` on a `stdout`
+    // resource with a `make_ref/0` reference, `foo`, and `undefined` as the
+    // select reference: each gives `ok`. An atom, a `make_ref/0` reference,
+    // and a `re_pattern` reference are not TTY resources, so they raise
+    // `badarg` (prim_tty_nif.c:1220-1221). On ERTS the caller also gets one
+    // `{select, Out, undefined, ready_input}` message, which the probe does
+    // not read; PBeam has no IO poll ("Input select" in
+    // docs/erts-differences.md). `encoding/0` calls
+    // `prim_tty:tty_encoding/1` with a resource, an atom, an integer, and a
+    // reference: Unix gives `utf8` for each term (prim_tty_nif.c:287-297).
+    for (function, erts, pbeam) in [
+        (
+            "select",
+            "[ok,ok,ok,badarg,badarg,badarg]\n",
+            r#"Ok(List([Atom("ok"), Atom("ok"), Atom("ok"), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#,
+        ),
+        (
+            "encoding",
+            "[utf8,utf8,utf8,utf8]\n",
+            r#"Ok(List([Atom("utf8"), Atom("utf8"), Atom("utf8"), Atom("utf8")]))"#,
+        ),
+    ] {
+        assert_eq!(run_erts_nif_probe(FILES, &[], function), erts.as_bytes());
+        assert_eq!(
+            run_isolated(
+                FILES,
+                &[],
+                &format!("tty_nif_probe:{function}"),
+                &[TTY_NIF_PROBE, STAND_IN]
+            ),
+            pbeam.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn restores_fd_0_from_the_monitor_of_tty_select() {
+    // `tty_nif_probe:select_monitor/0` spawns `selector/1` and monitors it.
+    // A holder sets the raw mode on a first `stderr` resource. The selector
+    // makes a second `stderr` resource, whose first mode is that raw mode,
+    // and calls `tty_init/2` on the first and the second resource, then
+    // `tty_select/2` on the first. `tty_select/2` monitors the caller again
+    // (prim_tty_nif.c:1229-1230). When the selector exits, its monitors set
+    // fd 0 to the first mode of the stderr terminal, to the raw mode, and
+    // to the first mode again (prim_tty_nif.c:1235-1241). Without the
+    // monitor of `tty_select/2`, fd 0 ends in the raw mode.
+    let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("select_monitor"), MONITOR, &[]);
+    assert_eq!(erts, b"{[ok,ok,ok,ok],normal}\n");
+    let mut probe = isolated("tty_nif_probe:select_monitor", &[TTY_NIF_PROBE, STAND_IN]);
+    let (pbeam, pbeam_modes) = run_with_modes(&mut probe, MONITOR, &[]);
+    assert_eq!(
+        pbeam,
+        br#"Ok(Tuple([List([Atom("ok"), Atom("ok"), Atom("ok"), Atom("ok")]), Atom("normal")]))"#
+    );
+    assert_same_modes(&erts_modes, &pbeam_modes);
+    let [Some(stdin), None, Some(_)] = pbeam_modes else {
+        panic!("stdin and stderr are terminals");
+    };
+    // Stdin started without `ECHO` and `ICANON`.
+    assert_eq!(stdin.c_lflag & CANONICAL_ECHO, CANONICAL_ECHO);
+}
+
+#[test]
 fn returns_a_runtime_error_from_write_nif_for_a_tty_resource() {
     // `tty_nif_probe:write/0` makes a `stdout` TTY resource and calls
     // `prim_tty:write_nif/2` with it. ERTS writes the iovec to the output

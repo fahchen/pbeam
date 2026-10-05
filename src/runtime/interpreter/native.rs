@@ -50,6 +50,8 @@ pub(super) fn call(
         ("prim_tty", "tty_init", [tty, options]) => {
             Some(prim_tty::tty_init(scheduler, tty, options))
         }
+        ("prim_tty", "tty_select", [tty, _]) => Some(Ok(prim_tty::tty_select(scheduler, tty))),
+        ("prim_tty", "tty_encoding", [_]) => Some(Ok(prim_tty::tty_encoding())),
         ("prim_tty", "tty_window_size", [tty]) => Some(prim_tty::tty_window_size(scheduler, tty)),
         ("prim_tty", "write_nif", [tty, iovec]) => {
             Some(prim_tty::write_nif(&scheduler.resources, tty, iovec))

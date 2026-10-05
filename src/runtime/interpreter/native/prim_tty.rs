@@ -274,6 +274,51 @@ pub(super) fn tty_init(
     Ok(BifResult::Value(Term::static_atom("ok")))
 }
 
+/// Run `prim_tty:tty_select(TTY, Ref)`, as the ERTS NIF `tty_select_nif`
+/// (`prim_tty_nif.c:1213-1233`) does on Unix. A term that is not a TTY
+/// resource raises `error:badarg` (`prim_tty_nif.c:1220-1221`). Else the
+/// resource monitors the caller (`prim_tty_nif.c:1229-1230`), and the
+/// result is `ok`.
+///
+/// ERTS also selects fd 0 for read with `Ref` as the message reference
+/// (`prim_tty_nif.c:1227`), and makes the caller the reader, which
+/// `tty_monitor_down` reads only to stop that select
+/// (`prim_tty_nif.c:1242-1244`). PBeam has no IO poll, so the binding does
+/// not read `Ref` and keeps no reader. The monitor is still observable:
+/// when the caller exits and is the owner of the resource, the monitor sets
+/// fd 0 to the first mode of the resource (`prim_tty_nif.c:1238-1239`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(tty_select(&mut scheduler, &tty), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(tty_select(&mut scheduler, &Term::static_atom("ok")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn tty_select(scheduler: &mut Scheduler, tty: &Term) -> BifResult {
+    let Term::Reference(reference) = tty else {
+        return BifResult::badarg();
+    };
+    if scheduler.resources.tty(*reference).is_none() {
+        return BifResult::badarg();
+    }
+    let caller = scheduler.current_process_mut().id;
+    scheduler.resources.monitor_tty(caller, *reference);
+    BifResult::Value(Term::static_atom("ok"))
+}
+
+/// Run `prim_tty:tty_encoding(TTY)`, as the ERTS NIF `tty_encoding_nif`
+/// (`prim_tty_nif.c:287-297`) does on Unix. Only the Windows code reads
+/// `TTY`, so each term gives `utf8`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(tty_encoding(), BifResult::Value(Term::Atom(atom)) if atom.name() == "utf8"));
+/// ```
+pub(super) fn tty_encoding() -> BifResult {
+    BifResult::Value(Term::static_atom("utf8"))
+}
+
 /// Run `prim_tty:setlocale(TTY)`, as the ERTS NIF `setlocale_nif`
 /// (`prim_tty_nif.c:747-773`) does on Unix. It does not read its argument.
 /// It sets the `LC_CTYPE` locale from the environment, and the result is
