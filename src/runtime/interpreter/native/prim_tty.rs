@@ -12,7 +12,7 @@ use crate::runtime::{
 /// The functions of the ERTS `prim_tty` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`prim_tty_nif.c:153-174`). `erlang:load_nif/2`
 /// checks each of them in this order. PBeam has a binding for only some of
-/// them; `call` in the parent module lists those.
+/// them; `BINDINGS` lists those.
 ///
 /// # Examples
 ///
@@ -41,6 +41,61 @@ pub(super) const FUNCTIONS: [(&str, u32); 20] = [
     ("tinfo_nif", 0),
     ("tigetstr_nif", 1),
     ("tputs_nif", 2),
+];
+
+/// The registered bindings of `prim_tty`, sorted by name, then by arity.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!((BINDINGS[0].name, BINDINGS[0].arity), ("isatty", 1));
+/// ```
+pub(super) const BINDINGS: &[Binding] = &[
+    Binding {
+        name: "isatty",
+        arity: 1,
+        run: |scheduler, arguments| isatty(&mut scheduler.atoms, &arguments[0]),
+    },
+    Binding {
+        name: "setlocale",
+        arity: 1,
+        run: |_, _| Ok(setlocale()),
+    },
+    Binding {
+        name: "setupterm_nif",
+        arity: 0,
+        run: |scheduler, _| setupterm_nif(&mut scheduler.atoms),
+    },
+    Binding {
+        name: "tty_create",
+        arity: 1,
+        run: |scheduler, arguments| tty_create(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "tty_encoding",
+        arity: 1,
+        run: |_, _| Ok(tty_encoding()),
+    },
+    Binding {
+        name: "tty_init",
+        arity: 2,
+        run: |scheduler, arguments| tty_init(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "tty_select",
+        arity: 2,
+        run: |scheduler, arguments| Ok(tty_select(scheduler, &arguments[0])),
+    },
+    Binding {
+        name: "tty_window_size",
+        arity: 1,
+        run: |scheduler, arguments| tty_window_size(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "write_nif",
+        arity: 2,
+        run: |scheduler, arguments| write_nif(&scheduler.resources, &arguments[0], &arguments[1]),
+    },
 ];
 
 /// Return the fd of the atom `stdin`, `stdout`, or `stderr`: 0, 1, or 2, as
@@ -84,7 +139,7 @@ fn tty_get_fd(term: &Term) -> Option<libc::c_int> {
 ///
 /// The atom `ebadf` in a full atom table gives the error of
 /// `AtomTable::put`.
-pub(super) fn isatty(atoms: &mut AtomTable, fd: &Term) -> Result<BifResult, BeamError> {
+fn isatty(atoms: &mut AtomTable, fd: &Term) -> Result<BifResult, BeamError> {
     match tty_get_fd(fd) {
         Some(fd) => isatty_fd(atoms, fd),
         None => Ok(BifResult::badarg()),
@@ -135,7 +190,7 @@ fn isatty_fd(atoms: &mut AtomTable, fd: libc::c_int) -> Result<BifResult, BeamEr
 /// # Errors
 ///
 /// A full reference counter gives the error of `Scheduler::make_ref`.
-pub(super) fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
+fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
     let Some(ofd) = tty_get_fd(fd).filter(|&ofd| ofd != libc::STDIN_FILENO) else {
         return Ok(BifResult::badarg());
     };
@@ -178,10 +233,7 @@ pub(super) fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResu
 ///
 /// The atom `enotsup` in a full atom table gives the error of
 /// `AtomTable::put`.
-pub(super) fn tty_window_size(
-    scheduler: &mut Scheduler,
-    tty: &Term,
-) -> Result<BifResult, BeamError> {
+fn tty_window_size(scheduler: &mut Scheduler, tty: &Term) -> Result<BifResult, BeamError> {
     let Some(tty) = tty_resource(&scheduler.resources, tty) else {
         return Ok(BifResult::badarg());
     };
@@ -226,11 +278,7 @@ pub(super) fn tty_window_size(
 /// # Errors
 ///
 /// A new atom in a full atom table gives the error of `AtomTable::put`.
-pub(super) fn tty_init(
-    scheduler: &mut Scheduler,
-    tty: &Term,
-    options: &Term,
-) -> Result<BifResult, BeamError> {
+fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<BifResult, BeamError> {
     let Term::Map(options) = options else {
         return Ok(BifResult::badarg());
     };
@@ -294,7 +342,7 @@ pub(super) fn tty_init(
 /// assert!(matches!(tty_select(&mut scheduler, &tty), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
 /// assert!(matches!(tty_select(&mut scheduler, &Term::static_atom("ok")), BifResult::Raise { .. }));
 /// ```
-pub(super) fn tty_select(scheduler: &mut Scheduler, tty: &Term) -> BifResult {
+fn tty_select(scheduler: &mut Scheduler, tty: &Term) -> BifResult {
     let Term::Reference(reference) = tty else {
         return BifResult::badarg();
     };
@@ -315,7 +363,7 @@ pub(super) fn tty_select(scheduler: &mut Scheduler, tty: &Term) -> BifResult {
 /// ```rust,ignore
 /// assert!(matches!(tty_encoding(), BifResult::Value(Term::Atom(atom)) if atom.name() == "utf8"));
 /// ```
-pub(super) fn tty_encoding() -> BifResult {
+fn tty_encoding() -> BifResult {
     BifResult::Value(Term::static_atom("utf8"))
 }
 
@@ -330,7 +378,7 @@ pub(super) fn tty_encoding() -> BifResult {
 /// // LC_ALL=C.UTF-8
 /// assert!(matches!(setlocale(), BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
 /// ```
-pub(super) fn setlocale() -> BifResult {
+fn setlocale() -> BifResult {
     BifResult::Value(Term::static_atom(if terminal::setlocale_utf8() {
         "true"
     } else {
@@ -355,7 +403,7 @@ pub(super) fn setlocale() -> BifResult {
 /// # Errors
 ///
 /// A new atom in a full atom table gives the error of `AtomTable::put`.
-pub(super) fn setupterm_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
+fn setupterm_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
     let result = match terminal::setupterm() {
         Ok(()) => Term::static_atom("ok"),
         Err(errno) => errno_error(atoms, "setupterm", errno)?,
@@ -428,11 +476,7 @@ fn enotsup(atoms: &mut AtomTable) -> Result<Term, BeamError> {
 /// # Errors
 ///
 /// A TTY resource gives a runtime error: PBeam has no host write yet (#116).
-pub(super) fn write_nif(
-    resources: &Resources,
-    tty: &Term,
-    _iovec: &Term,
-) -> Result<BifResult, BeamError> {
+fn write_nif(resources: &Resources, tty: &Term, _iovec: &Term) -> Result<BifResult, BeamError> {
     match tty_resource(resources, tty) {
         Some(_) => Err(error(
             "prim_tty:write_nif/2 host write is not implemented yet (#116)",
