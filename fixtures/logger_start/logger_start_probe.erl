@@ -337,21 +337,43 @@ message_queue_data() ->
 %% `erlang:process_flag/2` (bif.c:2028-2237). `trap_exit` with a value that is
 %% not a boolean, and `message_queue_data` with a value that is not an atom,
 %% raise badarg. A flag that ERTS does not know raises badarg,
-%% also a tuple that is not `{monitor_nodes, Options}`.
+%% also a tuple that is not `{monitor_nodes, Options}`. A flag that needs a
+%% subsystem that PBeam does not have also raises badarg for a value that
+%% ERTS rejects before it uses the subsystem: async_dist, sensitive, and
+%% monitor_nodes take a boolean, error_handler an atom, priority low, normal,
+%% high, or max, save_calls a small integer from 0 to 10000, and scheduler,
+%% fullsweep_after, min_heap_size, and min_bin_vheap_size a small integer of
+%% 0 or more.
 process_flag() ->
     [catch_error(fun() -> process_flag(trap_exit, id(yes)) end),
      catch_error(fun() -> process_flag(message_queue_data, id(1)) end),
      catch_error(fun() -> process_flag(id(no_such_flag), true) end),
      catch_error(fun() -> process_flag(id({foo, bar}), true) end),
      catch_error(fun() -> process_flag(id({monitor_nodes}), true) end),
-     catch_error(fun() -> process_flag(id(1), true) end)].
+     catch_error(fun() -> process_flag(id(1), true) end),
+     catch_error(fun() -> process_flag(async_dist, id(yes)) end),
+     catch_error(fun() -> process_flag(sensitive, id(1)) end),
+     catch_error(fun() -> process_flag(monitor_nodes, id(foo)) end),
+     catch_error(fun() -> process_flag(error_handler, id(1)) end),
+     catch_error(fun() -> process_flag(priority, id(foo)) end),
+     catch_error(fun() -> process_flag(save_calls, id(10001)) end),
+     catch_error(fun() -> process_flag(save_calls, id(-1)) end),
+     catch_error(fun() -> process_flag(save_calls, id(a)) end),
+     catch_error(fun() -> process_flag(scheduler, id(-1)) end),
+     catch_error(fun() -> process_flag(scheduler, id(a)) end),
+     catch_error(fun() -> process_flag(fullsweep_after, id(-1)) end),
+     catch_error(fun() -> process_flag(fullsweep_after, id(1 bsl 59)) end),
+     catch_error(fun() -> process_flag(min_heap_size, id(a)) end),
+     catch_error(fun() -> process_flag(min_bin_vheap_size, id(-1)) end)].
 
 %% A flag that needs a subsystem that PBeam does not have: the stack trace
-%% depth, the time offset, process priorities, and node monitors. ERTS gives
-%% 8, volatile, normal, and 0.
+%% depth, the time offset, process priorities, saved calls, the heap size,
+%% and node monitors. ERTS gives 8, volatile, normal, 0, 233, and 0.
 unsupported_flag(backtrace_depth) -> erlang:system_flag(backtrace_depth, 8);
 unsupported_flag(time_offset) -> erlang:system_flag(time_offset, finalize);
 unsupported_flag(priority) -> process_flag(priority, normal);
+unsupported_flag(save_calls) -> process_flag(save_calls, 0);
+unsupported_flag(min_heap_size) -> process_flag(min_heap_size, 233);
 unsupported_flag(monitor_nodes) -> process_flag({monitor_nodes, []}, false).
 
 %% `erlang:error/1` (bif.c:1436-1440) raises class error with its argument

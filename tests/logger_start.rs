@@ -729,7 +729,11 @@ fn rejects_process_flags_as_pinned_erts() {
     // (`bif.c:2028-2237`) raises `badarg` for `trap_exit` with a value that
     // is not a boolean, for `message_queue_data` with a value that is not an
     // atom, for a flag that it does not know, and for a tuple
-    // that is not `{monitor_nodes, Options}`.
+    // that is not `{monitor_nodes, Options}`. It also raises `badarg` for a
+    // value of `async_dist`, `sensitive`, `monitor_nodes`, `error_handler`,
+    // `priority`, `save_calls`, `scheduler`, `fullsweep_after`,
+    // `min_heap_size`, or `min_bin_vheap_size` that it rejects, before it
+    // uses a subsystem that PBeam does not have.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
@@ -737,11 +741,11 @@ fn rejects_process_flags_as_pinned_erts() {
         program
             .execute("logger_start_probe", "process_flag", &[])
             .unwrap(),
-        Term::List(vec![badarg; 6])
+        Term::List(vec![badarg; 20])
     );
     assert_eq!(
-        reference("process_flag"),
-        b"[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n"
+        String::from_utf8(reference("process_flag")).unwrap(),
+        format!("[{}]\n", ["{error,badarg}"; 20].join(","))
     );
 }
 
@@ -749,8 +753,9 @@ fn rejects_process_flags_as_pinned_erts() {
 fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
     // `logger_start_probe:unsupported_flag/1`: ERTS gives a value for each
     // flag (`bif.c:5108-5115`, `bif.c:5203-5224`, `bif.c:2052-2057`,
-    // `bif.c:2212-2226`). PBeam has no stack traces, time offset service,
-    // priorities, or distribution (row "System flags" in
+    // `bif.c:1907-1915`, `bif.c:2114-2130`, `bif.c:2212-2226`). PBeam has no
+    // stack traces, time offset service, priorities, saved calls, garbage
+    // collector, or distribution (rows "System flags" and "Process flags" in
     // `docs/erts-differences.md`).
     let program = load();
     for (case, message, erts) in [
@@ -768,6 +773,16 @@ fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
             "priority",
             "unsupported erlang:process_flag/2 flag priority",
             "normal",
+        ),
+        (
+            "save_calls",
+            "unsupported erlang:process_flag/2 flag save_calls",
+            "0",
+        ),
+        (
+            "min_heap_size",
+            "unsupported erlang:process_flag/2 flag min_heap_size",
+            "233",
         ),
         (
             "monitor_nodes",

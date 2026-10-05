@@ -55,6 +55,16 @@ const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
 /// value raises `badarg`. A flag that ERTS does not know raises `badarg`,
 /// also a tuple that is not `{monitor_nodes, Options}`.
 ///
+/// Each flag of `UNSUPPORTED_PROCESS_FLAGS` except `max_heap_size` first
+/// checks its value as ERTS does, and raises `badarg` for a value that is
+/// not valid: `async_dist`, `sensitive`, and `monitor_nodes` take a boolean
+/// (`erts_monitor_nodes`, `dist.c:6740-6741`), `error_handler` takes an
+/// atom, `priority` takes `low`, `normal`, `high`, or `max`
+/// (`erts_set_process_priority`, `erl_process.c:9460-9466`), `save_calls`
+/// takes a small integer from 0 to 10000 (`process_flag_aux`,
+/// `bif.c:1907-1915`), and `scheduler`, `fullsweep_after`, `min_heap_size`,
+/// and `min_bin_vheap_size` take a small integer of 0 or more.
+///
 /// PBeam has no process heap, so `message_queue_data` does not change where
 /// the messages are kept.
 ///
@@ -71,13 +81,18 @@ const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
 ///
 /// # Errors
 ///
-/// Each flag of `UNSUPPORTED_PROCESS_FLAGS` gives a runtime error.
+/// Each flag of `UNSUPPORTED_PROCESS_FLAGS` gives a runtime error for a
+/// value that passes the check, and `max_heap_size` and
+/// `{monitor_nodes, Options}` give it for each value. ERTS raises `badarg`
+/// for a `scheduler` value above the scheduler count, which PBeam does not
+/// model, and PBeam gives the runtime error.
 pub(super) fn process_flag(
     context: &mut BifContext<'_>,
     flag: &Term,
     value: &Term,
 ) -> Result<BifResult, BeamError> {
     let process = context.scheduler.current_process_mut();
+    let term = value;
     let value = match value {
         Term::Atom(value) => Some(value.name()),
         _ => None,
@@ -106,6 +121,20 @@ pub(super) fn process_flag(
             Value(old)
         }
         Term::Atom(flag) if UNSUPPORTED_PROCESS_FLAGS.contains(&flag.name()) => {
+            let small = term.small_integer();
+            let valid = match flag.name() {
+                "async_dist" | "sensitive" | "monitor_nodes" => {
+                    matches!(value, Some("true" | "false"))
+                }
+                "error_handler" => value.is_some(),
+                "priority" => matches!(value, Some("low" | "normal" | "high" | "max")),
+                "save_calls" => small.is_some_and(|calls| (0..=10_000).contains(&calls)),
+                "max_heap_size" => true,
+                _ => small.is_some_and(|size| size >= 0),
+            };
+            if !valid {
+                return Ok(BifResult::badarg());
+            }
             return Err(error(format!(
                 "unsupported erlang:process_flag/2 flag {}",
                 flag.name()
