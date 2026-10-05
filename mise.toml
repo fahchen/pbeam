@@ -83,3 +83,13 @@ flag "--write" help="Write the BEAM files that differ or are new"
 arg "[source]..." help="Fixture sources, such as fixtures/order/order_probe.erl; with none, all fixtures/*/*.erl" var=#true
 '''
 run = 'eval "set -- ${usage_source:-}"; escript scripts/fixture_beam.escript ${usage_write:+--write} "$@"'
+
+[tasks.otp-src]
+description = "Print a line range of an OTP source file at the pinned OTP tag, with line numbers"
+quiet = true
+usage = '''
+arg "<path>" help="A path in the erlang/otp repository, such as erts/emulator/beam/bif.c"
+arg "<start>" help="The first line"
+arg "<end>" help="The last line"
+'''
+run = 'bash scripts/otp_src.sh "$usage_path" "$usage_start" "$usage_end"'
