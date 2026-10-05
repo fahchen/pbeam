@@ -647,7 +647,7 @@ fn returns_a_runtime_error_for_a_module_without_bindings() {
             FILES,
             &[],
             "load_nif_probe:other",
-            &[LOAD_NIF_PROBE, "fixtures/prim_tty/nif/prim_tty.beam"]
+            &[LOAD_NIF_PROBE, STAND_IN]
         ),
         br#"Err(BeamError("erlang:load_nif/2 from load_nif_probe is not supported: PBeam has no native bindings for the module"))"#
     );
@@ -786,9 +786,9 @@ fn assert_load_nif_probe(
     );
 }
 
-/// Return the `erl` command that loads the stand-in `prim_tty` of
-/// `fixtures/prim_tty/<stand_in>` and writes the `~w` text of
-/// `load_nif_probe:Function()` to the result file. It does not call
+/// Return the `erl` command that writes the `~w` text of
+/// `load_nif_probe:Function()` to the result file, with the stand-in
+/// `prim_tty` of `fixtures/prim_tty/<stand_in>`. It does not call
 /// `prim_tty:load/1` first.
 ///
 /// # Examples
@@ -797,6 +797,19 @@ fn assert_load_nif_probe(
 /// let result = run_in_layout(&mut erts_load_nif_probe("nif", "main"), FILES, &[]);
 /// ```
 fn erts_load_nif_probe(stand_in: &str, function: &str) -> Command {
+    erts_stand_in_probe(stand_in, &format!("load_nif_probe:{function}()"))
+}
+
+/// Return the `erl` command that loads the stand-in `prim_tty` of
+/// `fixtures/prim_tty/<stand_in>` and writes the `~w` text of the Erlang
+/// expression `expression` to the result file.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = run_in_layout(&mut erts_stand_in_probe("nif", "load_nif_probe:main()"), FILES, &[]);
+/// ```
+fn erts_stand_in_probe(stand_in: &str, expression: &str) -> Command {
     let mut command = Command::new("erl");
     command.args([
         "-noinput",
@@ -807,7 +820,7 @@ fn erts_load_nif_probe(stand_in: &str, function: &str) -> Command {
         &format!(
             "{{module, prim_tty}} = code:load_abs(\"fixtures/prim_tty/{stand_in}/prim_tty\"), \
              ok = file:write_file(os:getenv(\"{RESULT}\"), \
-             io_lib:format(\"~w~n\", [load_nif_probe:{function}()])), halt()."
+             io_lib:format(\"~w~n\", [{expression}])), halt()."
         ),
     ]);
     command
@@ -873,21 +886,10 @@ fn run_erts_nif_probe(
 /// let (result, modes) = run_with_modes(&mut erts_nif_probe("init"), OUTPUT_TERMINALS, &[]);
 /// ```
 fn erts_nif_probe(function: &str) -> Command {
-    let mut command = Command::new("erl");
-    command.args([
-        "-noinput",
-        "-nostick",
-        "-pa",
-        "fixtures/prim_tty",
-        "-eval",
-        &format!(
-            "{{module, prim_tty}} = code:load_abs(\"fixtures/prim_tty/nif/prim_tty\"), \
-             ok = prim_tty:load(\"prim_tty\"), \
-             ok = file:write_file(os:getenv(\"{RESULT}\"), \
-             io_lib:format(\"~w~n\", [tty_nif_probe:{function}()])), halt()."
-        ),
-    ]);
-    command
+    erts_stand_in_probe(
+        "nif",
+        &format!("begin ok = prim_tty:load(\"prim_tty\"), tty_nif_probe:{function}() end"),
+    )
 }
 
 /// Return the `erl` command that runs `tty_init_probe:main/0` with the
