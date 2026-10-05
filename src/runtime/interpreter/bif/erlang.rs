@@ -3,7 +3,7 @@
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
-use crate::term::{Fun, Reference};
+use crate::term::{Fun, MAX_ATOM_CHARACTERS, Reference};
 
 /// Return the node of a pid or of the calling process.
 ///
@@ -274,10 +274,6 @@ pub(super) fn append(left: &Term, right: &Term) -> Result<BifResult, BeamError> 
         _ => Ok(BifResult::badarg()),
     }
 }
-
-/// The largest number of characters in an atom name (`MAX_ATOM_CHARACTERS`
-/// in `atom.h`).
-const MAX_ATOM_CHARACTERS: usize = 255;
 
 /// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
 /// name, as ERTS `atom_to_list_1` (`bif.c:3186-3210`) does. The atom `''`
