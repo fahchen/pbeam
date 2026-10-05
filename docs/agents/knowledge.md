@@ -1,8 +1,6 @@
 # Review Conventions
 
-Read this file before implementation. Record only problem classes that recur
-in review. Keep individual comments and one-time decisions in their task or
-PR.
+Read this file before implementation. Record only problem classes that recur in review. Keep individual comments and one-time decisions in their task or PR.
 
 ## Domain concepts and code names drift apart
 
@@ -58,3 +56,7 @@ Cover each supported input shape, including bare values and boundary sizes, in c
 ## Equality uses semantic identity, not dispatch metadata
 
 Define equality from the fields that identify the runtime value. Exclude fields that only select code or optimize execution.
+
+## Task scope expands beyond measured behavior
+
+Implement only behavior that the task owns and that the measured path requires. Leave other instructions and BIFs on the unsupported path until their task owns them. Update the task scope and follow-up ownership before adding shared decoding or fixture coverage.
