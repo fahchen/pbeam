@@ -2,7 +2,10 @@ use std::{
     env,
     ffi::OsStr,
     fs,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::process::CommandExt,
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
@@ -23,6 +26,23 @@ const TTY_NIF_PROBE: &str = "fixtures/prim_tty/tty_nif_probe.beam";
 const TTY_INIT_PROBE: &str = "fixtures/prim_tty/tty_init_probe.beam";
 const LOAD_NIF_PROBE: &str = "fixtures/prim_tty/load_nif_probe.beam";
 const COOKED_PROBE: &str = "fixtures/prim_tty/cooked_probe.beam";
+const HOST_WRITE_PROBE: &str = "fixtures/prim_tty/host_write_probe.beam";
+
+/// The pinned modules that `prim_tty:init/1` calls in the `disabled` input
+/// mode.
+const INIT_MODULES: [&str; 11] = [
+    "erlang",
+    "prim_tty",
+    "proc_lib",
+    "application",
+    "application_controller",
+    "ets",
+    "re",
+    "lists",
+    "maps",
+    "os",
+    "unicode",
+];
 
 /// The environment variables that give the `isolated_run` child its entry
 /// `module:function`, its BEAM files, and the file for its result. The ERTS
@@ -45,6 +65,8 @@ enum Stream {
     QuietTerminal { columns: u16, rows: u16 },
     /// The write end of a pipe whose read end is closed before the spawn.
     BrokenPipe,
+    /// A closed fd.
+    Closed,
 }
 
 /// Layout F: stdin `/dev/null`, stdout and stderr files.
@@ -599,23 +621,11 @@ fn runs_prim_tty_init_in_the_disabled_input_mode() {
     // (prim_tty_nif.c:1003-1004). `pbeam_main/0` first makes the `ac_tab`
     // table that `application:get_env/3` reads, because PBeam has no
     // application controller.
-    let beams: Vec<_> = [
-        "erlang",
-        "prim_tty",
-        "proc_lib",
-        "application",
-        "application_controller",
-        "ets",
-        "re",
-        "lists",
-        "maps",
-        "os",
-        "unicode",
-    ]
-    .map(pinned_beam_path)
-    .into_iter()
-    .chain([PathBuf::from(TTY_INIT_PROBE)])
-    .collect();
+    let beams: Vec<_> = INIT_MODULES
+        .map(pinned_beam_path)
+        .into_iter()
+        .chain([PathBuf::from(TTY_INIT_PROBE)])
+        .collect();
     let probe = || isolated("tty_init_probe:pbeam_main", &beams);
     let init = |unicode: &str, size: &str| {
         format!(
@@ -671,6 +681,44 @@ fn runs_prim_tty_init_in_the_disabled_input_mode() {
         )
     );
     assert_same_modes(&outputs.modes, &pbeam_modes);
+}
+
+#[test]
+fn writes_hello_world_from_the_pbeam_binary_through_a_prim_tty_writer() {
+    // `host_write_probe:main/0` starts a `prim_tty` writer on stdout and a
+    // second writer on stderr, each in the `raw` output mode. It sends
+    // `"Hello, world!\n"` to the stdout writer with `prim_tty:write/3`, which
+    // calls `write_nif/2` and replies `ok` (prim_tty.erl:541-566,
+    // prim_tty_nif.c:354-427). It then writes that reply and a newline to
+    // stderr. The `pbeam` binary runs `pbeam_main/0`, which first makes
+    // `ac_tab`. With stdout closed, ERTS opens `/dev/null` as fd 1
+    // (sys.c:392-399) and ignores `SIGPIPE` (sys_drivers.c:175). The Rust
+    // runtime of the `pbeam` binary does the same before `main` (Rust
+    // 1.99.0 library/std/src/sys/pal/unix/mod.rs:22-36, 51-139, 141-185), so
+    // the write to stdout gives `ok`.
+    let beams: Vec<_> = INIT_MODULES.map(pinned_beam_path).into();
+    let pbeam = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+        command
+            .args(["host_write_probe", "pbeam_main", HOST_WRITE_PROBE])
+            .args(&beams);
+        command
+    };
+    let commands: [(&str, &dyn Fn() -> Command); 2] =
+        [("ERTS", &erts_host_write_probe), ("PBeam", &pbeam)];
+    for (name, command) in commands {
+        let outputs = run_with_outputs(&mut command(), FILES, &[]);
+        assert_eq!(
+            outputs.files[1].as_deref(),
+            Some(&b"Hello, world!\n"[..]),
+            "{name}"
+        );
+        assert_eq!(outputs.files[2].as_deref(), Some(&b"ok\n"[..]), "{name}");
+
+        let layout = [Stream::Null, Stream::Closed, Stream::File];
+        let outputs = run_with_outputs(&mut command(), layout, &[]);
+        assert_eq!(outputs.files[2].as_deref(), Some(&b"ok\n"[..]), "{name}");
+    }
 }
 
 #[test]
@@ -1135,6 +1183,26 @@ fn erts_init_probe() -> Command {
     command
 }
 
+/// Return the `erl` command that runs `host_write_probe:main/0` with the
+/// pinned `prim_tty`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let outputs = run_with_outputs(&mut erts_host_write_probe(), FILES, &[]);
+/// ```
+fn erts_host_write_probe() -> Command {
+    let mut command = Command::new("erl");
+    command.args([
+        "-noshell",
+        "-pa",
+        "fixtures/prim_tty",
+        "-eval",
+        "host_write_probe:main(), halt().",
+    ]);
+    command
+}
+
 /// Return the `erl` command that runs `cooked_probe:Function()` with the
 /// pinned `prim_tty` and writes the `~w` text of its result to
 /// `standard_error`. It uses `-noinput`: under `-noshell`, `user_drv` starts
@@ -1291,6 +1359,22 @@ fn run_with_outputs(
     let [stdin, stdout, stderr] =
         std::array::from_fn(|fd| open_stream(layout[fd], &paths[fd], &mut terminals[fd]));
     let result = directory.join("result");
+    let closed = layout.map(|stream| matches!(stream, Stream::Closed));
+    if closed.contains(&true) {
+        // SAFETY: the closure calls only `close`, which is async-signal-safe,
+        // and allocates nothing. `pre_exec` runs after the standard streams
+        // are set, so each `Closed` fd stays closed at `exec`.
+        unsafe {
+            command.pre_exec(move || {
+                for (fd, closed) in (0..).zip(closed) {
+                    if closed {
+                        libc::close(fd);
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
     let status = command
         .env("TERM", "dumb")
         .env("LC_ALL", "C.UTF-8")
@@ -1327,7 +1411,8 @@ fn run_with_outputs(
 /// ```
 fn open_stream(stream: Stream, path: &Path, terminal: &mut Option<(OwnedFd, OwnedFd)>) -> Stdio {
     let (master, slave) = match stream {
-        Stream::Null => return Stdio::null(),
+        // `run_with_outputs` closes the fd of a `Closed` stream in the child.
+        Stream::Null | Stream::Closed => return Stdio::null(),
         Stream::File => return fs::File::create(path).unwrap().into(),
         // `std::io::pipe` makes both ends close-on-exec, so a child of a
         // parallel test does not keep the read end open.
