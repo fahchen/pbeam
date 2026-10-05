@@ -60,3 +60,11 @@ Define equality from the fields that identify the runtime value. Exclude fields 
 ## Task scope expands beyond measured behavior
 
 Implement only behavior that the task owns and that the measured path requires. Leave other instructions and BIFs on the unsupported path until their task owns them. Update the task scope and follow-up ownership before adding shared decoding or fixture coverage.
+
+## Changes exceed the measured task path
+
+Implement only behavior that the current task measures and needs. Move unmeasured or unrelated support to a separate task.
+
+## Binary decoders drop required operands
+
+Consume and validate every encoded operand even when runtime semantics do not use its value. Keep the skip behavior in one helper and preserve cursor and tag checks.
