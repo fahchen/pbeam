@@ -17,12 +17,21 @@ issue=$(gh issue view "$number" --json number,state,title,labels,milestone,body 
 
 # The GitHub web editor keeps CR characters. The section names come in ARGV, because macOS awk rejects newlines in -v values.
 # Headings are `#` and `##` lines outside code fences; a `###` heading stays in its section.
+# As in CommonMark, a fence has 0-3 spaces of indent. Only a fence of the same character, at least the same length, and no info string closes it.
 tr -d '\r' <<<"$issue" | awk '
   BEGIN {
     for (i = 1; i < ARGC; i++) { name[i] = ARGV[i]; want[i] = tolower(ARGV[i]); delete ARGV[i] }
     names = ARGC - 1
   }
-  /^ *(```|~~~)/ { fence = !fence }
+  /^(   |  | )?(```|~~~)/ {
+    line = $0
+    sub(/^ */, "", line)
+    char = substr(line, 1, 1)
+    for (len = 1; substr(line, len + 1, 1) == char; len++);
+    rest = substr(line, len + 1)
+    if (!fence && (char == "~" || rest !~ /`/)) { fence = char; fence_len = len }
+    else if (fence && char == fence && len >= fence_len && rest ~ /^[ \t]*$/) fence = ""
+  }
   !fence && /^[ \t]*$/ { next }
   !fence && NR > 2 && /^##? / {
     heading = $0
