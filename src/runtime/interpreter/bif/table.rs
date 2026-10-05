@@ -131,7 +131,7 @@ bifs! {
     erlang:delete_element/2 => unsupported,
     erlang:delete_module/1 => unsupported,
     erlang:demonitor/1 => unsupported,
-    erlang:demonitor/2 => |cx, [Term::Reference(reference), Term::List(options)]| erlang::demonitor(cx, *reference, options),
+    erlang:demonitor/2 => |cx, [reference, options]| Ok(erlang::demonitor(cx, reference, options)),
     erlang:display/1 => unsupported,
     erlang:display_string/2 => unsupported,
     erlang:dist_ctrl_get_data/1 => unsupported,

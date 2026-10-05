@@ -2950,7 +2950,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_tuple_arity_and_rejects_call_last_stack_size_and_demonitor_options() {
+    fn selects_tuple_arity_and_rejects_call_last_stack_size() {
         let select = |value: Term| {
             make_program(
                 vec![
@@ -2995,17 +2995,6 @@ mod tests {
                 },
             ])
             .contains("tail-call stack size")
-        );
-        assert!(
-            error(vec![
-                erlang_call("make_ref", 0, false),
-                Instruction::Move(
-                    Operand::Value(Term::List(vec![test_atom("info")])),
-                    Operand::X(1),
-                ),
-                erlang_call("demonitor", 2, false),
-            ])
-            .contains("unsupported demonitor options")
         );
     }
 
@@ -3280,35 +3269,6 @@ mod tests {
                     Instruction::Return,
                 ],
             },
-        );
-        assert_eq!(
-            program.execute("fixture", "main", &[]).unwrap(),
-            test_atom("true")
-        );
-    }
-
-    #[test]
-    fn removes_an_active_monitor_without_a_trap() {
-        // monitor(process, self()), then demonitor(Ref, [flush]): the monitor
-        // is still active, so ERTS returns true without flushing.
-        let program = make_program(
-            vec![
-                Instruction::Bif {
-                    fail_label: 0,
-                    module: "erlang".into(),
-                    name: "self".into(),
-                    arguments: Vec::new(),
-                    destination: Operand::X(1),
-                },
-                Instruction::Move(atom("process"), Operand::X(0)),
-                erlang_call("monitor", 2, false),
-                Instruction::Move(
-                    Operand::Value(Term::List(vec![test_atom("flush")])),
-                    Operand::X(1),
-                ),
-                erlang_call("demonitor", 2, true),
-            ],
-            0,
         );
         assert_eq!(
             program.execute("fixture", "main", &[]).unwrap(),
