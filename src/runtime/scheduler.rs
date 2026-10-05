@@ -115,6 +115,10 @@ pub(super) struct Scheduler {
     /// The active aliases of the run. An alias that ends, and each alias of
     /// a process that exits, leaves the table.
     aliases: HashMap<Reference, Alias>,
+    /// The process that gets the error reports of the emulator: `logger`,
+    /// `undefined`, or a pid, as `system_logger` in `erl_trace.c`. The start
+    /// value is `logger` (`erl_trace.c:339`).
+    pub(super) system_logger: Term,
 }
 
 impl Scheduler {
@@ -144,6 +148,7 @@ impl Scheduler {
             nif_libraries: HashSet::new(),
             timers: Timers::new(),
             aliases: HashMap::new(),
+            system_logger: Term::static_atom("logger"),
         }
     }
 
@@ -412,12 +417,13 @@ impl Scheduler {
     }
 
     /// Spawn a child process for the current process and optionally monitor
-    /// or link it.
+    /// or link it. `off_heap_message_queue` sets the start value of its
+    /// `message_queue_data` flag.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let (pid, monitor) = scheduler.spawn(frame, vec![], true, false)?;
+    /// let (pid, monitor) = scheduler.spawn(frame, vec![], true, false, false)?;
     /// assert!(monitor.is_some());
     /// ```
     pub(super) fn spawn(
@@ -426,8 +432,10 @@ impl Scheduler {
         arguments: Vec<Term>,
         monitor: bool,
         link: bool,
+        off_heap_message_queue: bool,
     ) -> Result<(ProcessId, Option<Reference>), BeamError> {
         let mut child = ProcessState::new(self.next_pid()?, frame, arguments);
+        child.off_heap_message_queue = off_heap_message_queue;
         let parent = self.current_process_mut().id;
         child.group_leader = self.current_process_mut().group_leader;
         let reference = if monitor {
@@ -994,7 +1002,9 @@ mod tests {
         scheduler.start(frame(), vec![]).unwrap();
         assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
         assert!(scheduler.processes.contains_key(&ProcessId(0)));
-        let (child, monitor) = scheduler.spawn(frame(), vec![], false, false).unwrap();
+        let (child, monitor) = scheduler
+            .spawn(frame(), vec![], false, false, false)
+            .unwrap();
         assert_eq!((child, monitor), (ProcessId(1), None));
 
         scheduler.park_current();
@@ -1015,8 +1025,12 @@ mod tests {
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         scheduler.current_process_mut().trap_exit = true;
-        let (monitored, monitor) = scheduler.spawn(frame(), vec![], true, false).unwrap();
-        let (linked, _) = scheduler.spawn(frame(), vec![], false, true).unwrap();
+        let (monitored, monitor) = scheduler
+            .spawn(frame(), vec![], true, false, false)
+            .unwrap();
+        let (linked, _) = scheduler
+            .spawn(frame(), vec![], false, true, false)
+            .unwrap();
         scheduler.park_current();
 
         scheduler.schedule_next();
@@ -1054,7 +1068,9 @@ mod tests {
         let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
-        let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
+        let (child, _) = scheduler
+            .spawn(frame(), vec![], false, false, false)
+            .unwrap();
         assert_eq!(scheduler.link(child).unwrap(), atom("true"));
         assert!(scheduler.link(ProcessId(99)).is_err());
         scheduler.unlink(child);
@@ -1085,7 +1101,9 @@ mod tests {
         let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
-        scheduler.spawn(frame(), vec![], false, true).unwrap();
+        scheduler
+            .spawn(frame(), vec![], false, true, false)
+            .unwrap();
         scheduler.park_current();
         scheduler.schedule_next();
         assert!(scheduler.finish_current(atom("boom"), None).is_err());
@@ -1112,7 +1130,9 @@ mod tests {
         let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
-        let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
+        let (child, _) = scheduler
+            .spawn(frame(), vec![], false, false, false)
+            .unwrap();
         assert_eq!(scheduler.processes[&child].group_leader, ProcessId(0));
         assert!(scheduler.set_group_leader(child, child));
         assert_eq!(scheduler.processes[&child].group_leader, child);
@@ -1175,7 +1195,9 @@ mod tests {
         let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
-        let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
+        let (child, _) = scheduler
+            .spawn(frame(), vec![], false, false, false)
+            .unwrap();
         let name = atom("pbeam_probe_reg");
         assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
         assert!(scheduler.register(&name, &Term::Pid(child)));
@@ -1205,7 +1227,9 @@ mod tests {
         let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
-        let (child, monitor) = scheduler.spawn(frame(), vec![], true, false).unwrap();
+        let (child, monitor) = scheduler
+            .spawn(frame(), vec![], true, false, false)
+            .unwrap();
         scheduler.park_current();
 
         scheduler.schedule_next();

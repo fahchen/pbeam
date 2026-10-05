@@ -28,24 +28,181 @@ pub(super) fn node(term: &Term) -> Result<BifResult, BeamError> {
     }
 }
 
-/// Run `erlang:process_flag(trap_exit, Value)`: set the `trap_exit` flag of
-/// the calling process and return the old flag. The table pattern accepts
-/// only `true` and `false` as the value.
+/// The flags of ERTS `process_flag_2` (`bif.c:2028-2237`) that need a
+/// subsystem that PBeam does not have: distribution, the error handler,
+/// priorities, schedulers, the garbage collector, tracing, and saved calls.
+/// The tuple `{monitor_nodes, Options}` is also such a flag.
+const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
+    "async_dist",
+    "error_handler",
+    "priority",
+    "scheduler",
+    "fullsweep_after",
+    "min_heap_size",
+    "min_bin_vheap_size",
+    "max_heap_size",
+    "sensitive",
+    "monitor_nodes",
+    "save_calls",
+];
+
+/// Run `erlang:process_flag(Flag, Value)` as ERTS `process_flag_2`
+/// (`bif.c:2028-2237`) does for the flags `trap_exit` and
+/// `message_queue_data`: set the flag of the calling process and return the
+/// old value. `trap_exit` takes `true` or `false`. `message_queue_data`
+/// takes `on_heap` or `off_heap` (`erts_change_message_queue_management`,
+/// `erl_message.c:1022-1100`), and its start value is `on_heap`. Each other
+/// value raises `badarg`. A flag that ERTS does not know raises `badarg`,
+/// also a tuple that is not `{monitor_nodes, Options}`.
+///
+/// PBeam has no process heap, so `message_queue_data` does not change where
+/// the messages are kept.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let old = trap_exit(&mut context, &true_atom)?;
+/// let old = process_flag(&mut context, &Term::static_atom("trap_exit"), &Term::static_atom("true"))?;
 /// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// let old = process_flag(&mut context, &Term::static_atom("message_queue_data"), &Term::static_atom("off_heap"))?;
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "on_heap"));
+/// assert!(matches!(process_flag(&mut context, &foo, &Term::static_atom("true"))?, BifResult::Raise { .. }));
+/// assert!(process_flag(&mut context, &Term::static_atom("priority"), &Term::static_atom("high")).is_err());
 /// ```
-pub(super) fn trap_exit(
+///
+/// # Errors
+///
+/// Each flag of `UNSUPPORTED_PROCESS_FLAGS` gives a runtime error.
+pub(super) fn process_flag(
     context: &mut BifContext<'_>,
-    value: &Atom,
+    flag: &Term,
+    value: &Term,
 ) -> Result<BifResult, BeamError> {
     let process = context.scheduler.current_process_mut();
-    let old = Term::static_atom(&process.trap_exit.to_string());
-    process.trap_exit = value.name() == "true";
-    Ok(Value(old))
+    let value = match value {
+        Term::Atom(value) => Some(value.name()),
+        _ => None,
+    };
+    Ok(match flag {
+        Term::Atom(flag) if flag.name() == "trap_exit" => {
+            let old = Term::static_atom(&process.trap_exit.to_string());
+            match value {
+                Some("true") => process.trap_exit = true,
+                Some("false") => process.trap_exit = false,
+                _ => return Ok(BifResult::badarg()),
+            }
+            Value(old)
+        }
+        Term::Atom(flag) if flag.name() == "message_queue_data" => {
+            let old = Term::static_atom(if process.off_heap_message_queue {
+                "off_heap"
+            } else {
+                "on_heap"
+            });
+            match value {
+                Some("on_heap") => process.off_heap_message_queue = false,
+                Some("off_heap") => process.off_heap_message_queue = true,
+                _ => return Ok(BifResult::badarg()),
+            }
+            Value(old)
+        }
+        Term::Atom(flag) if UNSUPPORTED_PROCESS_FLAGS.contains(&flag.name()) => {
+            return Err(error(format!(
+                "unsupported erlang:process_flag/2 flag {}",
+                flag.name()
+            )));
+        }
+        Term::Tuple(elements) if matches!(elements.as_slice(), [Term::Atom(tag), _] if tag.name() == "monitor_nodes") =>
+        {
+            return Err(error(
+                "unsupported erlang:process_flag/2 flag {monitor_nodes, Options}",
+            ));
+        }
+        _ => BifResult::badarg(),
+    })
+}
+
+/// The items of ERTS `system_flag_2` (`bif.c:4972-5304`) that need a
+/// subsystem that PBeam does not have: schedulers, the garbage collector,
+/// stack traces, tracing, the time offset, statistics, the CPU topology,
+/// and the memory allocators.
+const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
+    "multi_scheduling",
+    "schedulers_online",
+    "fullsweep_after",
+    "min_heap_size",
+    "min_bin_vheap_size",
+    "max_heap_size",
+    "backtrace_depth",
+    "trace_control_word",
+    "sequential_tracer",
+    "reset_seq_trace",
+    "scheduler_wall_time",
+    "dirty_cpu_schedulers_online",
+    "microstate_accounting",
+    "outstanding_system_requests_limit",
+    "scheduling_statistics",
+    "internal_cpu_topology",
+    "cpu_topology",
+    "scheduler_bind_type",
+    "erts_alloc",
+];
+
+/// Run `erlang:system_flag(Item, Value)` as ERTS `system_flag_2`
+/// (`bif.c:4972-5304`) does for the items `system_logger` and
+/// `debug_flags`. `system_logger` takes `logger`, `undefined`, or a local
+/// pid, sets the node value, and returns the old value
+/// (`erts_set_system_logger`, `erl_trace.c:2486-2491`). The start value is
+/// `logger` (`erl_trace.c:339`). Each other value raises `badarg`.
+/// `debug_flags` returns `true` for each value. An item that ERTS does not
+/// know raises `badarg`, also `time_offset` with a value that is not
+/// `finalize`.
+///
+/// PBeam writes no error report (row "Error report" in
+/// `docs/erts-differences.md`), so the system logger value has no other
+/// effect.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let old = system_flag(&mut context, &Term::static_atom("system_logger"), &Term::Pid(pid))?;
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "logger"));
+/// assert!(matches!(system_flag(&mut context, &foo, &Term::Integer(1))?, BifResult::Raise { .. }));
+/// assert!(system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::Integer(8)).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Each item of `UNSUPPORTED_SYSTEM_FLAGS`, and `time_offset` with
+/// `finalize`, give a runtime error.
+pub(super) fn system_flag(
+    context: &mut BifContext<'_>,
+    item: &Term,
+    value: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Atom(item) = item else {
+        return Ok(BifResult::badarg());
+    };
+    let logger = match value {
+        Term::Pid(_) => true,
+        Term::Atom(logger) => matches!(logger.name(), "logger" | "undefined"),
+        _ => false,
+    };
+    Ok(match (item.name(), value) {
+        ("system_logger", _) if logger => Value(std::mem::replace(
+            &mut context.scheduler.system_logger,
+            value.clone(),
+        )),
+        ("debug_flags", _) => Value(Term::static_atom("true")),
+        ("time_offset", Term::Atom(finalize)) if finalize.name() == "finalize" => {
+            return Err(error("unsupported erlang:system_flag/2 item time_offset"));
+        }
+        (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
+            return Err(error(format!(
+                "unsupported erlang:system_flag/2 item {name}"
+            )));
+        }
+        _ => BifResult::badarg(),
+    })
 }
 
 /// Run `erlang:exit(Id, Reason)`: send an exit signal to a local pid, as
@@ -354,11 +511,14 @@ pub(super) fn spawn_link(
 /// calls with the options `[monitor]`: start a process with the spawn
 /// options in `options`, as ERTS `spawn_opt_4` (`bif.c`) does. The option
 /// `link` links the new process and `monitor` monitors it. With `monitor`
-/// the result is `{Pid, Reference}`, else `Pid`. `options` that are not a
-/// proper list raise `badarg`, as `erts_parse_spawn_opts`
-/// (`erl_process.c:12222-12434`) does. Any other option gives a runtime
-/// error. After the options, a `module` or `function` that is not an atom
-/// raises `badarg`, as in `spawn/3`.
+/// the result is `{Pid, Reference}`, else `Pid`. The option
+/// `{message_queue_data, on_heap | off_heap}` sets the start value of the
+/// `message_queue_data` flag of the new process, and the last such option
+/// wins (`erl_process.c:12305-12319`). `options` that are not a proper list,
+/// and a `message_queue_data` option with another value, raise `badarg`, as
+/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) does. Any other
+/// option gives a runtime error. After the options, a `module` or
+/// `function` that is not an atom raises `badarg`, as in `spawn/3`.
 ///
 /// # Examples
 ///
@@ -383,6 +543,14 @@ pub(super) fn spawn_opt(
         match option {
             Term::Atom(option) if option.name() == "link" => spawn_options.link = true,
             Term::Atom(option) if option.name() == "monitor" => spawn_options.monitor = true,
+            Term::Tuple(option) if matches!(option.as_slice(), [Term::Atom(name), _] if name.name() == "message_queue_data") =>
+            {
+                spawn_options.off_heap_message_queue = match &option[1] {
+                    Term::Atom(value) if value.name() == "on_heap" => false,
+                    Term::Atom(value) if value.name() == "off_heap" => true,
+                    _ => return Ok(BifResult::badarg()),
+                };
+            }
             // ponytail: ERTS accepts more options; see "Spawn options" in docs/erts-differences.md.
             _ => return Err(error(format!("unsupported spawn option {option:?}"))),
         }

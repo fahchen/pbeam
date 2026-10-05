@@ -12,13 +12,19 @@ const LOGGER_START_PROBE: &[u8] =
 /// Run `logger_start_probe:Function()` on the pinned ERTS and return its
 /// `~w` output.
 fn reference(function: &str) -> Vec<u8> {
+    reference_call(&format!("{function}()"))
+}
+
+/// Run `logger_start_probe:Call` on the pinned ERTS, where `Call` is a
+/// function name with its arguments, and return its `~w` output.
+fn reference_call(call: &str) -> Vec<u8> {
     let reference = Command::new("erl")
         .args([
             "-noshell",
             "-pa",
             "fixtures/logger_start",
             "-eval",
-            &format!("io:format(\"~w~n\", [logger_start_probe:{function}()]), halt()."),
+            &format!("io:format(\"~w~n\", [logger_start_probe:{call}]), halt()."),
         ])
         .output()
         .unwrap();
@@ -629,4 +635,157 @@ fn removes_links_as_pinned_erts() {
         reference("unlink"),
         b"[true,true,bang,true,true,{error,badarg},{error,badarg}]\n"
     );
+}
+
+#[test]
+fn sets_the_system_logger_as_pinned_erts() {
+    // `logger_start_probe:system_logger/0` runs `erlang:system_flag/2` with
+    // `system_logger` (`bif.c:5294-5296`, `erl_trace.c:2486-2491`), as
+    // `logger_proxy:init/1` (`logger_proxy.erl:117`) does. `logger`,
+    // `undefined`, and a local pid set the node value and give the old
+    // value. Each other value raises `badarg`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let expected = vec![
+        atom("logger"),
+        atom("undefined"),
+        atom("true"),
+        atom("logger"),
+        badarg.clone(),
+        badarg.clone(),
+        badarg,
+    ];
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "system_logger", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("system_logger"),
+        b"[logger,undefined,true,logger,{error,badarg},{error,badarg},{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn rejects_system_flag_items_as_pinned_erts() {
+    // `logger_start_probe:system_flag/0`: an item that `system_flag_2`
+    // (`bif.c:4972-5304`) does not know raises `badarg`, also `time_offset`
+    // with a value that is not `finalize`. `debug_flags` gives `true`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let expected = vec![badarg.clone(), badarg.clone(), badarg, atom("true")];
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "system_flag", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("system_flag"),
+        b"[{error,badarg},{error,badarg},{error,badarg},true]\n"
+    );
+}
+
+#[test]
+fn sets_the_message_queue_data_flag_as_pinned_erts() {
+    // `logger_start_probe:message_queue_data/0` runs
+    // `process_flag(message_queue_data, Value)` (`bif.c:2167-2172`), as
+    // `logger_olp:init/1` (`logger_olp.erl:172`) does, and the spawn option
+    // `{message_queue_data, off_heap}`, as
+    // `logger_simple_h:adding_handler/1` (`logger_simple_h.erl:39-40`)
+    // does. The flag gives the old value, and the start value is `on_heap`.
+    // The last spawn option wins (`erl_process.c:12305-12319`). Each other
+    // value raises `badarg`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let expected = vec![
+        atom("on_heap"),
+        atom("off_heap"),
+        atom("off_heap"),
+        atom("off_heap"),
+        atom("off_heap"),
+        badarg.clone(),
+        badarg,
+    ];
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "message_queue_data", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("message_queue_data"),
+        b"[on_heap,off_heap,off_heap,off_heap,off_heap,{error,badarg},{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn rejects_process_flags_as_pinned_erts() {
+    // `logger_start_probe:process_flag/0`: `process_flag_2`
+    // (`bif.c:2028-2237`) raises `badarg` for `trap_exit` with a value that
+    // is not a boolean, for `message_queue_data` with a value that is not an
+    // atom, for a flag that it does not know, and for a tuple
+    // that is not `{monitor_nodes, Options}`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "process_flag", &[])
+            .unwrap(),
+        Term::List(vec![badarg; 6])
+    );
+    assert_eq!(
+        reference("process_flag"),
+        b"[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
+    // `logger_start_probe:unsupported_flag/1`: ERTS gives a value for each
+    // flag (`bif.c:5108-5115`, `bif.c:5203-5224`, `bif.c:2052-2057`,
+    // `bif.c:2212-2226`). PBeam has no stack traces, time offset service,
+    // priorities, or distribution (row "System flags" in
+    // `docs/erts-differences.md`).
+    let program = load();
+    for (case, message, erts) in [
+        (
+            "backtrace_depth",
+            "unsupported erlang:system_flag/2 item backtrace_depth",
+            "8",
+        ),
+        (
+            "time_offset",
+            "unsupported erlang:system_flag/2 item time_offset",
+            "volatile",
+        ),
+        (
+            "priority",
+            "unsupported erlang:process_flag/2 flag priority",
+            "normal",
+        ),
+        (
+            "monitor_nodes",
+            "unsupported erlang:process_flag/2 flag {monitor_nodes, Options}",
+            "0",
+        ),
+    ] {
+        let error = program
+            .execute(
+                "logger_start_probe",
+                "unsupported_flag",
+                &[Term::Atom(program.atom(case).unwrap())],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains(message), "{error}");
+        assert_eq!(
+            String::from_utf8(reference_call(&format!("unsupported_flag({case})"))).unwrap(),
+            format!("{erts}\n")
+        );
+    }
 }

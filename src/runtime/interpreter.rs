@@ -1252,6 +1252,9 @@ struct SpawnOptions {
     link: bool,
     /// Monitor the new process and return `{Pid, Reference}` (`SPO_MONITOR`).
     monitor: bool,
+    /// Start the new process with the `message_queue_data` flag `off_heap`
+    /// (`SPO_OFF_HEAP_MSGQ`), else `on_heap`.
+    off_heap_message_queue: bool,
 }
 
 /// Start a process that runs `module:function` with the elements of
@@ -1286,7 +1289,13 @@ fn create_process(
     let arguments = arguments.clone();
     let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
     let frame = program.mfa_frame(module.name(), function.name(), arity)?;
-    let (pid, reference) = scheduler.spawn(frame, arguments, options.monitor, options.link)?;
+    let SpawnOptions {
+        link,
+        monitor,
+        off_heap_message_queue,
+    } = options;
+    let (pid, reference) =
+        scheduler.spawn(frame, arguments, monitor, link, off_heap_message_queue)?;
     Ok(BifResult::Value(match reference {
         Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),

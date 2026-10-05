@@ -1,6 +1,7 @@
 -module(logger_start_probe).
 -export([reverse/0, remove/0, without/0, ets/0, ets_access/0, find/0, from_list/0, is_key/0,
-         to_list/0, map_next/0, next/0, ordered/0, demonitor/0, unlink/0, hd/0]).
+         to_list/0, map_next/0, next/0, ordered/0, demonitor/0, unlink/0, hd/0, system_logger/0,
+         message_queue_data/0, system_flag/0, process_flag/0, unsupported_flag/1]).
 
 %% `lists:reverse/2` (erl_bif_lists.c:1246-1263). logger_simple_h:replay_buffer/1
 %% (logger_simple_h.erl:150) calls it with the buffer and the drop message, and
@@ -276,6 +277,81 @@ hd() ->
 
 hd_guard(L) when hd(L) =:= a -> yes;
 hd_guard(_) -> no.
+
+%% `erlang:system_flag(system_logger, Logger)` (bif.c:5294-5296,
+%% erl_trace.c:2486-2491). logger_proxy:init/1 (logger_proxy.erl:117) sets
+%% itself as the system logger. `logger`, `undefined`, and a local pid set the
+%% node value and give the old value. The start value is `logger`
+%% (erl_trace.c:339). Each other value raises badarg.
+system_logger() ->
+    Old = erlang:system_flag(system_logger, logger),
+    Self = self(),
+    R = [erlang:system_flag(system_logger, undefined),
+         erlang:system_flag(system_logger, Self),
+         erlang:system_flag(system_logger, logger) =:= Self,
+         erlang:system_flag(system_logger, logger),
+         catch_error(fun() -> erlang:system_flag(system_logger, id(foo)) end),
+         catch_error(fun() -> erlang:system_flag(system_logger, id(1)) end),
+         catch_error(fun() -> erlang:system_flag(system_logger, id({logger})) end)],
+    _ = erlang:system_flag(system_logger, Old),
+    R.
+
+%% `erlang:system_flag/2` (bif.c:4972-5304). An item that ERTS does not know
+%% raises badarg, also `time_offset` with a value that is not `finalize`.
+%% `debug_flags` gives true for each value.
+system_flag() ->
+    [catch_error(fun() -> erlang:system_flag(id(no_such_flag), 1) end),
+     catch_error(fun() -> erlang:system_flag(id(1), 1) end),
+     catch_error(fun() -> erlang:system_flag(id(time_offset), id(preliminary)) end),
+     erlang:system_flag(debug_flags, id(foo))].
+
+%% `process_flag(message_queue_data, Value)` (bif.c:2167-2172,
+%% erl_message.c:1022-1100). logger_olp:init/1 (logger_olp.erl:172) sets
+%% `off_heap`, and logger_simple_h:adding_handler/1 (logger_simple_h.erl:39-40)
+%% spawns with the option `{message_queue_data, off_heap}`. The flag gives the
+%% old value, and the start value is `on_heap`. The last spawn option wins
+%% (erl_process.c:12305-12319). Each other value raises badarg.
+%% erlang:spawn_opt/2 (erlang.erl:10751-10757) catches the badarg of a spawn
+%% option and raises it again with a stack trace, so the badarg case calls
+%% erlang:spawn_opt/4.
+message_queue_data() ->
+    in_new_process(fun() ->
+        Self = self(),
+        {Pid, Ref} = spawn_opt(fun() -> Self ! {self(), process_flag(message_queue_data, on_heap)} end,
+                               [link, monitor, {message_queue_data, off_heap}]),
+        Child = receive {Pid, Old} -> Old end,
+        receive {'DOWN', Ref, process, Pid, normal} -> ok end,
+        {Pid2, Ref2} = spawn_opt(fun() -> Self ! {self(), process_flag(message_queue_data, on_heap)} end,
+                                 [monitor, {message_queue_data, on_heap}, {message_queue_data, off_heap}]),
+        Child2 = receive {Pid2, Old2} -> Old2 end,
+        receive {'DOWN', Ref2, process, Pid2, normal} -> ok end,
+        [process_flag(message_queue_data, off_heap),
+         process_flag(message_queue_data, off_heap),
+         process_flag(message_queue_data, on_heap),
+         Child, Child2,
+         catch_error(fun() -> process_flag(message_queue_data, id(bad)) end),
+         catch_error(fun() -> spawn_opt(erlang, apply, [fun() -> ok end, []], [{message_queue_data, id(bad)}]) end)]
+    end).
+
+%% `erlang:process_flag/2` (bif.c:2028-2237). `trap_exit` with a value that is
+%% not a boolean, and `message_queue_data` with a value that is not an atom,
+%% raise badarg. A flag that ERTS does not know raises badarg,
+%% also a tuple that is not `{monitor_nodes, Options}`.
+process_flag() ->
+    [catch_error(fun() -> process_flag(trap_exit, id(yes)) end),
+     catch_error(fun() -> process_flag(message_queue_data, id(1)) end),
+     catch_error(fun() -> process_flag(id(no_such_flag), true) end),
+     catch_error(fun() -> process_flag(id({foo, bar}), true) end),
+     catch_error(fun() -> process_flag(id({monitor_nodes}), true) end),
+     catch_error(fun() -> process_flag(id(1), true) end)].
+
+%% A flag that needs a subsystem that PBeam does not have: the stack trace
+%% depth, the time offset, process priorities, and node monitors. ERTS gives
+%% 8, volatile, normal, and 0.
+unsupported_flag(backtrace_depth) -> erlang:system_flag(backtrace_depth, 8);
+unsupported_flag(time_offset) -> erlang:system_flag(time_offset, finalize);
+unsupported_flag(priority) -> process_flag(priority, normal);
+unsupported_flag(monitor_nodes) -> process_flag({monitor_nodes, []}, false).
 
 big(N) -> big(N, #{}).
 
