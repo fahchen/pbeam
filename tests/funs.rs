@@ -44,3 +44,44 @@ fn applies_module_functions_as_pinned_erts() {
         b"[v,w,z,y,s,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,system_limit]\n"
     );
 }
+
+#[test]
+fn makes_and_calls_local_funs_as_pinned_erts() {
+    // `fun_probe:locals/0` makes funs with `make_fun3`, with and without
+    // free variables, as `standard_error:start/0` and `gen:call/4` do, and
+    // calls them with `call_fun` and `call_fun2`, as `gen:do_for_proc/2`
+    // does. Two funs of one lambda are equal when their free variables are
+    // equal, and they compare by their free variables (`utils.c:1241-1276`,
+    // `utils.c:2151-2208`). A call with the wrong arity raises
+    // `{badarity, {Fun, Args}}`, and a call of a term that is not a fun
+    // raises `{badfun, Term}` (`beam_common.c:1605-1731`).
+    let program = BeamProgram::load(&[FUN_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |first: &str, second| Term::Tuple(vec![atom(first), second]);
+    let expected = vec![
+        pair("tag", atom("one")),
+        atom("const"),
+        pair("tag", atom("tail")),
+        atom("same"),
+        atom("different"),
+        atom("same"),
+        atom("true"),
+        atom("false"),
+        Term::Tuple(vec![
+            atom("badarity"),
+            atom("same"),
+            Term::List(vec![Term::Integer(1), Term::Integer(2)]),
+        ]),
+        pair("badfun", atom("notfun")),
+        pair("badfun", pair("fun_probe", atom("id"))),
+    ];
+    assert_eq!(
+        program.execute("fun_probe", "locals", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("locals"),
+        b"[{tag,one},const,{tag,tail},same,different,same,true,false,\
+          {badarity,same,[1,2]},{badfun,notfun},{badfun,{fun_probe,id}}]\n"
+    );
+}

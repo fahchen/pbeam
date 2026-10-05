@@ -7,7 +7,7 @@ use super::{
     read_value,
 };
 use crate::error::{BeamError, error};
-use crate::term::{Atom, Term};
+use crate::term::{Atom, Lambda, Term};
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
@@ -244,6 +244,40 @@ pub(crate) enum Instruction {
         /// Register for the BIF value.
         destination: Operand,
     },
+    /// Makes a fun of a lambda with the values of `free` as its free
+    /// variables (`make_fun3`, opcode 171), and writes it to `destination`.
+    /// The loader resolves the `FunT` entry of the lambda number.
+    ///
+    /// Encoding: opcode, unsigned lambda number, destination register,
+    /// extended list, item count, then the free variable operands. Example:
+    /// `fun_probe:make_pair/1` in `fixtures/funs/fun_probe.beam` has
+    /// `[0xAB, 0x20, 0x03, 0x17, 0x10, 0x03]`, which makes a fun of `FunT`
+    /// entry 2 with the free variable `x0` and writes it to `x0`.
+    ///
+    /// Erlang: `make_pair(T) -> fun(X) -> {T, X} end.` compiles to
+    /// `{make_fun3,{f,49},0,0,{x,0},{list,[{x,0}]}}`.
+    MakeFun {
+        lambda: Lambda,
+        free: Vec<Operand>,
+        destination: Operand,
+    },
+    /// Calls the fun in `function` with the arguments in `x0` to
+    /// `x(arity - 1)` and continues after the call. `call_fun` (opcode 75)
+    /// calls the fun in `x(arity)`. `call_fun2` (opcode 178) names the fun
+    /// register and has a tag: `safe`, `unsafe`, or a lambda number. The tag
+    /// tells the JIT which tests it can skip; the result is the same, so
+    /// the tag is not kept.
+    ///
+    /// Encoding: `call_fun` has opcode and arity; `call_fun2` has opcode,
+    /// tag, arity, and the fun register. Example: `[0x4B, 0x00]` is
+    /// `call_fun 0`, and `fun_probe:tail_call/1` in
+    /// `fixtures/funs/fun_probe.beam` has `[0xB2, 0x00, 0x10, 0x57, 0x13,
+    /// 0x20]`, which calls the fun in the typed register `x1` with lambda
+    /// number 0 and arity 1.
+    ///
+    /// Erlang: `(id(Const))()` compiles to `{call_fun,0}`, and
+    /// `tail_call(F) -> F(tail).` compiles to `{call_fun2,{f,53},1,{tr,{x,1},...}}`.
+    CallFun { arity: u32, function: Operand },
     /// An instruction that is parsed so the module can load, but cannot run.
     Unsupported(u8),
     /// Writes a catch tag to a Y register. While the tag is live, an
@@ -725,7 +759,7 @@ pub(crate) enum Operand {
 /// let mut code = vec![0, 0, 0, 16]; // sub-size
 /// code.extend_from_slice(&[0; 16]); // instruction set, opcode max, labels, functions
 /// code.push(0x03); // end
-/// let (instructions, labels) = parse_code(&code, &[], &[], &[])?;
+/// let (instructions, labels) = parse_code(&code, &[], &[], &[], &[])?;
 /// assert_eq!(labels, 0);
 /// assert!(matches!(instructions.as_slice(), [Instruction::End]));
 /// ```
@@ -734,6 +768,7 @@ pub(super) fn parse_code(
     atoms: &[Atom],
     imports: &[(String, String, u32)],
     literals: &[Option<Term>],
+    lambdas: &[(Lambda, usize)],
 ) -> Result<(Vec<Instruction>, u32), BeamError> {
     if data.len() < CODE_HEADER_SIZE
         || read_u32(&data[..WORD_SIZE])? != CODE_HEADER_SUB_SIZE
@@ -957,6 +992,58 @@ pub(super) fn parse_code(
                     destination,
                     pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
                 }
+            }
+            OPCODE_MAKE_FUN3 => {
+                let number = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let destination = read_register(data, &mut cursor)?;
+                let free_count = read_list_count(data, &mut cursor)?;
+                // ERTS `gen.make_fun3` gives `i_lambda_error` for these
+                // cases (`generators.tab:128-151`), which stops the pinned
+                // JIT emulator when it runs (`jit/arm/instr_fun.cpp:472-475`).
+                // The compiler never emits them, so the load fails.
+                let (lambda, _) = usize::try_from(number)
+                    .ok()
+                    .and_then(|number| lambdas.get(number))
+                    .filter(|(_, count)| *count == free_count)
+                    .ok_or_else(|| {
+                        error(format!(
+                            "BEAM make_fun3 lambda {number} with {free_count} free \
+                             variables does not match the lambda table"
+                        ))
+                    })?;
+                let free = (0..free_count)
+                    .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
+                    .collect::<Result<_, _>>()?;
+                Instruction::MakeFun {
+                    lambda: lambda.clone(),
+                    free,
+                    destination,
+                }
+            }
+            OPCODE_CALL_FUN => {
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                Instruction::CallFun {
+                    arity,
+                    function: Operand::X(arity),
+                }
+            }
+            OPCODE_CALL_FUN2 => {
+                // The tag is an atom or a lambda number (`aF` in
+                // `jit/arm/ops.tab:879`). Atom index 0 is `[]`, not an atom.
+                let tag_kind = match data.get(cursor).map(|byte| byte & COMPACT_TAG_MASK) {
+                    Some(TAG_ATOM) => TAG_ATOM,
+                    _ => TAG_UNSIGNED,
+                };
+                let tag = read_operand(data, &mut cursor, tag_kind)?;
+                if tag_kind == TAG_ATOM {
+                    atom_at(atoms, tag as usize)?;
+                }
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let function = read_move_operand(data, &mut cursor, atoms, literals)?;
+                if !matches!(function, Operand::X(_) | Operand::Y(_)) {
+                    return Err(error("BEAM call_fun2 function is not a register"));
+                }
+                Instruction::CallFun { arity, function }
             }
             OPCODE_SWAP => Instruction::Swap(
                 read_register(data, &mut cursor)?,
@@ -1228,7 +1315,6 @@ fn skip_unsupported_instruction(
             | OPCODE_GET_RECORD_ELEMENTS
             | OPCODE_PUT_RECORD
             | OPCODE_PUT_TUPLE2
-            | OPCODE_MAKE_FUN3
             | OPCODE_INIT_YREGS
             | OPCODE_BS_CREATE_BIN
             | OPCODE_BS_MATCH
@@ -1249,7 +1335,7 @@ fn skip_unsupported_instruction(
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
         OPCODE_RAISE => Some(2),
-        OPCODE_CALL_FUN2 | OPCODE_IS_FUNCTION2 => Some(3),
+        OPCODE_IS_FUNCTION2 => Some(3),
         OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
         OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
@@ -1282,14 +1368,13 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         // `is_port Fail Src` is in `erlang:is_port/1` and `erlang:open_port/2`.
         OPCODE_TEST_IS_PORT => Some(2),
         // `try_case_end Src` is in `erlang:processes_next/1`.
-        OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_CALL_FUN | OPCODE_TRY_CASE_END => Some(1),
+        OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_TRY_CASE_END => Some(1),
         OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_MAP_EXACT => Some(5),
         OPCODE_GET_MAP_ELEMENTS | OPCODE_HAS_MAP_FIELDS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),
         OPCODE_GET_TL => Some(2),
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
-        OPCODE_MAKE_FUN3 => Some(3),
         OPCODE_BS_CREATE_BIN => Some(6),
         OPCODE_BS_INIT_WRITABLE => Some(0),
         OPCODE_BS_MATCH => Some(3),
@@ -1422,12 +1507,36 @@ fn skip_bytes(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), BeamE
     Ok(())
 }
 
-/// Read the extended list header of `select_val`, `select_tuple_arity`, or
-/// `update_record` and return the number of pairs in the list.
+/// Read the extended list header of an operand list, such as the
+/// environment of `make_fun3`, and return the number of items in the list.
 ///
 /// The header is the literal tag with `LIST_SUBTAG`, then an unsigned item
-/// count. A count that is odd, or larger than the bytes left in the chunk,
-/// is malformed.
+/// count. A count larger than the bytes left in the chunk is malformed.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// // {list,[{x,0}]}
+/// assert_eq!(read_list_count(&[0x17, 0x10, 0x03], &mut cursor)?, 1);
+/// assert_eq!(cursor, 2);
+/// ```
+fn read_list_count(data: &[u8], cursor: &mut usize) -> Result<usize, BeamError> {
+    if read_integer(data, cursor, TAG_LITERAL)? != LIST_SUBTAG {
+        return Err(error("unsupported BEAM list operand"));
+    }
+    let item_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+        .map_err(|_| error("BEAM list operand is too large"))?;
+    // Each item takes at least one byte, so a larger count is malformed.
+    if item_count > data.len().saturating_sub(*cursor) {
+        return Err(error("BEAM list operand exceeds code chunk"));
+    }
+    Ok(item_count)
+}
+
+/// Read the extended list header of `select_val`, `select_tuple_arity`, or
+/// `update_record` and return the number of pairs in the list. An odd item
+/// count is malformed.
 ///
 /// # Examples
 ///
@@ -1437,15 +1546,7 @@ fn skip_bytes(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), BeamE
 /// assert_eq!(read_pair_count(&[0x17, 0x40], &mut cursor)?, 2);
 /// ```
 fn read_pair_count(data: &[u8], cursor: &mut usize) -> Result<usize, BeamError> {
-    if read_integer(data, cursor, TAG_LITERAL)? != LIST_SUBTAG {
-        return Err(error("unsupported BEAM pair list"));
-    }
-    let item_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
-        .map_err(|_| error("BEAM pair list is too large"))?;
-    // Each item takes at least one byte, so a larger count is malformed.
-    if item_count > data.len().saturating_sub(*cursor) {
-        return Err(error("BEAM pair list exceeds code chunk"));
-    }
+    let item_count = read_list_count(data, cursor)?;
     if item_count % 2 != 0 {
         return Err(error("BEAM pair list has an incomplete pair"));
     }
@@ -1533,18 +1634,17 @@ mod tests {
     use super::{
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_UTF16,
         OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GC_BIF2,
-        OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS, OPCODE_MAKE_FUN3,
-        OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE,
-        OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
-        OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_LT,
-        OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code, read_move_operand,
-        read_operand_pairs, read_pair_count, read_record_updates, skip_counted_operands,
-        skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
-        unsupported_opcode_operand_count,
+        OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC,
+        OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP,
+        OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
+        OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_LT, OPCODE_TEST_TAGGED_TUPLE,
+        OPCODE_TRY_CASE_END, parse_code, read_move_operand, read_operand_pairs, read_pair_count,
+        read_record_updates, skip_counted_operands, skip_integer_payload, skip_operand,
+        skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
     };
     use crate::{
         beam::code::{Instruction, Operand, TestKind},
-        term::{Atom, AtomTable, Term},
+        term::{Atom, AtomTable, Lambda, Term},
     };
 
     #[test]
@@ -1569,11 +1669,12 @@ mod tests {
         assert!(read_operand(&[], &mut 0, 0).is_err());
         assert!(read_value(&[0x03], &mut 0, &[]).is_err());
         assert!(read_value(&[0x12], &mut 0, &[]).is_err());
-        assert!(parse_code(&[], &[], &[], &[]).is_err());
-        assert!(parse_code(&[0; 20], &[], &[], &[]).is_err());
+        assert!(parse_code(&[], &[], &[], &[], &[]).is_err());
+        assert!(parse_code(&[0; 20], &[], &[], &[], &[]).is_err());
         assert!(
             parse_code(
                 &[0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                &[],
                 &[],
                 &[],
                 &[],
@@ -1638,11 +1739,11 @@ mod tests {
             code
         };
 
-        assert!(parse_code(&code(&[59, 3, 21, 39]), &[], &[], &[]).is_err());
-        assert!(parse_code(&code(&[59, 3, 21, 23, 16]), &[], &[], &[]).is_err());
+        assert!(parse_code(&code(&[59, 3, 21, 39]), &[], &[], &[], &[]).is_err());
+        assert!(parse_code(&code(&[59, 3, 21, 23, 16]), &[], &[], &[], &[]).is_err());
         // A register as a selection value, with two items present.
         assert!(
-            parse_code(&code(&[59, 3, 21, 23, 32, 3, 21]), &[], &[], &[])
+            parse_code(&code(&[59, 3, 21, 23, 32, 3, 21]), &[], &[], &[], &[])
                 .unwrap_err()
                 .to_string()
                 .contains("unsupported BEAM selection value")
@@ -1650,7 +1751,7 @@ mod tests {
         // A count larger than the remaining bytes fails before any allocation.
         for opcode in [59, 60] {
             assert!(
-                parse_code(&code(&[opcode, 3, 21, 23, 32, 3]), &[], &[], &[])
+                parse_code(&code(&[opcode, 3, 21, 23, 32, 3]), &[], &[], &[], &[])
                     .unwrap_err()
                     .to_string()
                     .contains("exceeds code chunk")
@@ -1679,6 +1780,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .unwrap();
         assert!(matches!(
@@ -1704,7 +1806,7 @@ mod tests {
         ));
         // An X register cannot hold a catch tag.
         assert!(
-            parse_code(&code(&[0x68, 0x03, 0x75]), &[], &[], &[])
+            parse_code(&code(&[0x68, 0x03, 0x75]), &[], &[], &[], &[])
                 .unwrap_err()
                 .to_string()
                 .contains("unexpected BEAM operand tag 3")
@@ -1731,6 +1833,7 @@ mod tests {
             &atoms,
             &[],
             &[],
+            &[],
         )
         .unwrap();
         assert!(matches!(
@@ -1742,7 +1845,7 @@ mod tests {
             ] if name == "write_nif"
         ));
         assert_eq!(
-            parse_code(&code(&[0xB3]), &atoms, &[], &[])
+            parse_code(&code(&[0xB3]), &atoms, &[], &[], &[])
                 .unwrap_err()
                 .to_string(),
             "BEAM nif_start has no func_info before it"
@@ -1772,6 +1875,7 @@ mod tests {
             ]),
             &[],
             &imports,
+            &[],
             &[],
         )
         .unwrap();
@@ -1812,7 +1916,7 @@ mod tests {
         ));
         for bif in [&[0x09, 0x20, 0x03][..], &[0x0A, 0x05, 0x20, 0x03, 0x03]] {
             assert!(
-                parse_code(&code(bif), &[], &imports, &[])
+                parse_code(&code(bif), &[], &imports, &[], &[])
                     .unwrap_err()
                     .to_string()
                     .contains("BEAM BIF import index 2 out of range")
@@ -1836,7 +1940,7 @@ mod tests {
             ("erlang".to_owned(), "element".to_owned(), 2),
             ("erlang".to_owned(), "element".to_owned(), 2),
         ];
-        let (instructions, _) = parse_code(&code, &[], &imports, &[]).unwrap();
+        let (instructions, _) = parse_code(&code, &[], &imports, &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
@@ -1877,7 +1981,7 @@ mod tests {
         // Bytes of `user_drv:server/3` in the pinned `user_drv.beam`:
         // {test,is_ne_exact,{f,157},[{x,0},{x,3}]}
         code.extend([0x2C, 0x0D, 0x9D, 0x03, 0x33, 0x03]);
-        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
@@ -1898,7 +2002,7 @@ mod tests {
         // Bytes of `group_probe:kind/1` in `fixtures/group/group_probe.beam`:
         // {test,is_ge,{f,22},[{tr,{x,1},{t_integer,{0,16777215}}},{integer,2}]}
         code.extend([0x28, 0x0D, 0x16, 0x57, 0x13, 0x20, 0x21, 0x03]);
-        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
@@ -1930,7 +2034,7 @@ mod tests {
             0xA1, // call/3: raw_raise
             0x03,
         ]);
-        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
@@ -1988,7 +2092,7 @@ mod tests {
             0x71, 0x10, 0xB0, // terminate/7: {apply_last,1,11}
             0x03,
         ]);
-        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
@@ -2012,7 +2116,74 @@ mod tests {
         ));
         // `apply_last` without its deallocate operand is truncated.
         code.truncate(code.len() - 2);
-        assert!(parse_code(&code, &[], &[], &[]).is_err());
+        assert!(parse_code(&code, &[], &[], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
+        let code = |instructions: &[u8]| {
+            let mut code = vec![0, 0, 0, 16];
+            code.extend([0; 16]);
+            code.extend_from_slice(instructions);
+            code.push(0x03);
+            code
+        };
+        let atoms = vec![Atom::from_static("safe").unwrap()];
+        let module = Atom::from_static("lists").unwrap();
+        let lambda = |index, label, arity| Lambda::new(module.clone(), index, 7, label, arity);
+        let lambdas = vec![
+            (lambda(0, 53, 1), 1),
+            (lambda(1, 51, 0), 0),
+            (lambda(2, 49, 1), 1),
+        ];
+        let parse =
+            |instructions: &[u8]| parse_code(&code(instructions), &atoms, &[], &[], &lambdas);
+        // Bytes of `fixtures/funs/fun_probe.beam`, then a `call_fun2` with the
+        // atom tag `safe` and the fun in `y0`.
+        let (instructions, _) = parse(&[
+            0xAB, 0x20, 0x03, 0x17, 0x10, 0x03, // make_pair/1: make_fun3 2 x0 [x0]
+            0xAB, 0x10, 0xA4, 0x17, 0x00, // locals/0: make_fun3 1 y10 []
+            0x4B, 0x00, // locals/0: call_fun 0
+            0xB2, 0x00, 0x10, 0x57, 0x13, 0x20, // tail_call/1: call_fun2 0 1 x1
+            0xB2, 0x12, 0x00, 0x04, // call_fun2 safe 0 y0
+        ])
+        .unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::MakeFun { lambda: first, free, destination: Operand::X(0) },
+                Instruction::MakeFun { lambda: second, free: empty, destination: Operand::Y(10) },
+                Instruction::CallFun { arity: 0, function: Operand::X(0) },
+                Instruction::CallFun { arity: 1, function: Operand::X(1) },
+                Instruction::CallFun { arity: 0, function: Operand::Y(0) },
+                Instruction::End,
+            ] if *first == lambdas[2].0
+                && matches!(free.as_slice(), [Operand::X(0)])
+                && *second == lambdas[1].0
+                && empty.is_empty()
+        ));
+        let error = |instructions: &[u8]| parse(instructions).unwrap_err().to_string();
+        // A lambda number outside the table, or an environment of another
+        // length than the free variables of the entry.
+        for make_fun3 in [
+            [0xAB, 0x30, 0x03, 0x17, 0x00],
+            [0xAB, 0x20, 0x03, 0x17, 0x00],
+        ] {
+            assert!(error(&make_fun3).contains("does not match the lambda table"));
+        }
+        assert_eq!(
+            error(&[0xB2, 0x02, 0x00, 0x03]),
+            "BEAM atom index zero is invalid"
+        );
+        assert_eq!(
+            error(&[0xB2, 0x22, 0x00, 0x03]),
+            "BEAM atom index 2 out of range"
+        );
+        assert_eq!(
+            error(&[0xB2, 0x00, 0x00, 0x12]),
+            "BEAM call_fun2 function is not a register"
+        );
+        assert!(error(&[0xB2, 0x01, 0x00, 0x03]).contains("unexpected BEAM operand tag 1"));
     }
 
     #[test]
@@ -2033,7 +2204,7 @@ mod tests {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([OPCODE_PUT_TUPLE2, 0x03, 0x27]);
-        assert!(parse_code(&code, &[], &[], &[]).is_err());
+        assert!(parse_code(&code, &[], &[], &[], &[]).is_err());
     }
 
     #[test]
@@ -2083,7 +2254,6 @@ mod tests {
             (OPCODE_PUT_RECORD, 6),
             (OPCODE_PUT_TUPLE2, 2),
             (OPCODE_INIT_YREGS, 1),
-            (OPCODE_MAKE_FUN3, 3),
             (OPCODE_BS_CREATE_BIN, 6),
             (OPCODE_BS_INIT_WRITABLE, 0),
             (OPCODE_BS_MATCH, 3),

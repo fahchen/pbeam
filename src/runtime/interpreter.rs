@@ -9,7 +9,7 @@ use crate::{
         code::{self, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::{Atom, AtomTable, Term},
+    term::{Atom, AtomTable, Fun, Term},
 };
 use std::collections::HashMap;
 
@@ -329,6 +329,24 @@ impl BeamProgram {
                         *tail,
                         *deallocate,
                     )? {
+                        return Ok(outcome);
+                    }
+                }
+                Instruction::MakeFun {
+                    lambda,
+                    free,
+                    destination,
+                } => {
+                    let free = free
+                        .iter()
+                        .map(|operand| read(process, operand))
+                        .collect::<Result<_, _>>()?;
+                    let fun = Term::Fun(Fun::new(lambda.clone(), free));
+                    write(process, destination, fun)?;
+                }
+                Instruction::CallFun { arity, function } => {
+                    let fun = read(process, function)?;
+                    if let Some(outcome) = self.call_fun(process, &fun, *arity)? {
                         return Ok(outcome);
                     }
                 }
@@ -831,6 +849,51 @@ impl BeamProgram {
             write(process, &Operand::X(index), argument)?;
         }
         self.call_mfa(scheduler, module.name(), name.name(), arity, tail)
+    }
+
+    /// Call `fun` with the arguments in `x0` to `x(arity - 1)`, as ERTS
+    /// `call_fun` (`beam_common.c:1605-1731`) does for `call_fun` and
+    /// `call_fun2`. A term that is not a fun raises `error:{badfun, Term}`. A
+    /// fun of another arity raises `error:{badarity, {Fun, Arguments}}`,
+    /// where `Arguments` lists `x0` to `x(arity - 1)`. Else the free
+    /// variables go to `x(arity)` onwards, and the call enters the code of
+    /// the lambda. Return the outcome when the process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // x0 = one and fun(X) -> {Tag, X} end enters the lambda with x1 = Tag.
+    /// assert!(program.call_fun(process, &pair, 1)?.is_none());
+    /// // An atom raises `error:{badfun, notfun}`.
+    /// assert!(program.call_fun(process, &Term::static_atom("notfun"), 0)?.is_some());
+    /// ```
+    fn call_fun(
+        &self,
+        process: &mut ProcessState,
+        fun: &Term,
+        arity: u32,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let fun = match fun {
+            Term::Fun(local) if local.lambda().arity() == arity => local,
+            Term::Fun(_) => {
+                let arguments = call_arguments(&process.registers, arity)?;
+                let call = Term::Tuple(vec![fun.clone(), Term::List(arguments)]);
+                let reason = Term::Tuple(vec![Term::static_atom("badarity"), call]);
+                return Ok(raise(process, ExceptionClass::Error, reason));
+            }
+            _ => {
+                let reason = Term::Tuple(vec![Term::static_atom("badfun"), fun.clone()]);
+                return Ok(raise(process, ExceptionClass::Error, reason));
+            }
+        };
+        for (register, value) in (arity..).zip(fun.free()) {
+            write(process, &Operand::X(register), value.clone())?;
+        }
+        let lambda = fun.lambda();
+        let total_arity = arity + fun.free().len() as u32;
+        let frame = self.frame(lambda.module().name(), lambda.label(), total_arity)?;
+        enter_frame(process, frame, false);
+        Ok(None)
     }
 
     /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
@@ -1361,6 +1424,31 @@ mod tests {
             Instruction::Label(6),
             Instruction::Wait(5),
         ]
+    }
+
+    #[test]
+    fn exits_the_process_with_an_uncaught_badfun() {
+        // A fun call that no `try` or `catch` handles exits the process with
+        // `{{badfun, Term}, Stack}`, as ERTS `call_fun` raises it
+        // (`beam_common.c:1617-1621`). PBeam gives the stack trace `[]`.
+        let program = make_program(
+            vec![
+                Instruction::Move(atom("notfun"), Operand::X(0)),
+                Instruction::CallFun {
+                    arity: 0,
+                    function: Operand::X(0),
+                },
+                Instruction::Return,
+            ],
+            0,
+        );
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            "root process exited with Tuple([Tuple([Atom(\"badfun\"), Atom(\"notfun\")]), List([])])"
+        );
     }
 
     #[test]

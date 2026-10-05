@@ -1,4 +1,5 @@
 mod atom;
+mod fun;
 mod map;
 mod order;
 
@@ -6,6 +7,8 @@ pub use atom::Atom;
 pub(crate) use atom::AtomTable;
 #[cfg(test)]
 pub(crate) use atom::test_atom;
+pub use fun::Fun;
+pub(crate) use fun::Lambda;
 pub use map::Map;
 
 use std::fmt;
@@ -15,7 +18,7 @@ const SMALL_INTEGER_MIN: i64 = -(1 << 59);
 /// The largest ERTS small integer on a 64-bit system: 2^59 - 1.
 const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
 
-/// A BEAM term. Lists, tuples, and maps can nest to any depth, as in ERTS,
+/// A BEAM term. Lists, tuples, maps, and funs can nest to any depth, as in ERTS,
 /// so `Drop`, `Clone`, `PartialEq`, and `Debug` use explicit work stacks and
 /// do not recurse on the Rust stack.
 pub enum Term {
@@ -37,21 +40,25 @@ pub enum Term {
     Pid(ProcessId),
     /// A reference owned by this runtime.
     Reference(Reference),
+    /// A local fun: the fun entry of its lambda and its free variables.
+    Fun(Fun),
 }
 
-/// The kind of a term that contains other terms.
+/// The kind of a term that contains other terms. A fun keeps the fun entry
+/// of the source fun.
 #[derive(Clone, Copy)]
-enum Kind {
+enum Kind<'a> {
     List,
     Tuple,
     Map,
+    Fun(&'a Lambda),
 }
 
-/// The nested terms of a list, tuple, or map, in order. A map gives each
-/// key and then its value.
+/// The nested terms of a list, tuple, map, or fun, in order. A map gives
+/// each key and then its value, and a fun gives its free variables.
 type Nested<'a> = Box<dyn Iterator<Item = &'a Term> + 'a>;
 
-impl Kind {
+impl Kind<'_> {
     /// Build a term of this kind from its nested terms. For a map, the
     /// terms are keys and values in turn.
     ///
@@ -76,6 +83,7 @@ impl Kind {
                 // A hashmap copy hashes each key again; `Map` has no other way to build a map.
                 Term::Map(Map::from_pairs(pairs).expect("a copied map holds only supported keys"))
             }
+            Kind::Fun(lambda) => Term::Fun(Fun::new(lambda.clone(), terms)),
         }
     }
 }
@@ -118,8 +126,8 @@ impl Term {
         }
     }
 
-    /// Copy a term that has no nested terms. For a list, tuple, or map,
-    /// return its nested terms, kind, and count instead, so the caller
+    /// Copy a term that has no nested terms. For a list, tuple, map, or
+    /// fun, return its nested terms, kind, and count instead, so the caller
     /// copies them.
     ///
     /// # Examples
@@ -128,7 +136,7 @@ impl Term {
     /// assert_eq!(Term::Integer(1).shallow_clone().ok(), Some(Term::Integer(1)));
     /// assert!(Term::List(vec![]).shallow_clone().is_err());
     /// ```
-    fn shallow_clone(&self) -> Result<Term, (Nested<'_>, Kind, usize)> {
+    fn shallow_clone(&self) -> Result<Term, (Nested<'_>, Kind<'_>, usize)> {
         match self {
             Term::List(elements) => Err((Box::new(elements.iter()), Kind::List, elements.len())),
             Term::Tuple(elements) => Err((Box::new(elements.iter()), Kind::Tuple, elements.len())),
@@ -136,6 +144,11 @@ impl Term {
                 Box::new(map.iter().flat_map(|(key, value)| [key, value])),
                 Kind::Map,
                 map.len() * 2,
+            )),
+            Term::Fun(fun) => Err((
+                Box::new(fun.free.iter()),
+                Kind::Fun(&fun.lambda),
+                fun.free.len(),
             )),
             Term::Atom(atom) => Ok(Term::Atom(atom.clone())),
             Term::Binary(bytes) => Ok(Term::Binary(bytes.clone())),
@@ -145,8 +158,8 @@ impl Term {
         }
     }
 
-    /// Move the nested terms of a list, tuple, or map onto a work stack and
-    /// leave the term empty.
+    /// Move the nested terms of a list, tuple, map, or fun onto a work stack
+    /// and leave the term empty.
     ///
     /// # Examples
     ///
@@ -158,6 +171,7 @@ impl Term {
     fn take_nested(&mut self, pending: &mut Vec<Term>) {
         match self {
             Term::List(elements) | Term::Tuple(elements) => pending.append(elements),
+            Term::Fun(fun) => pending.append(&mut fun.free),
             Term::Map(map) => std::mem::replace(map, Map::new()).drain_into(pending),
             _ => {}
         }
@@ -184,8 +198,8 @@ impl Drop for Term {
 }
 
 impl Clone for Term {
-    /// Copy a term with a work stack of partly copied lists, tuples, and
-    /// maps.
+    /// Copy a term with a work stack of partly copied lists, tuples, maps,
+    /// and funs.
     ///
     /// # Examples
     ///
@@ -223,7 +237,9 @@ impl Clone for Term {
 impl PartialEq for Term {
     /// Compare two terms pair by pair with a work stack. Two maps are equal
     /// when their pairs in canonical order are equal, as the structural ERTS
-    /// comparison of two flatmaps or two hashmaps is.
+    /// comparison of two flatmaps or two hashmaps is. Two funs are equal when
+    /// their fun entries and their free variables are equal, as `eq` in
+    /// `utils.c:1241-1276` gives.
     ///
     /// # Examples
     ///
@@ -238,6 +254,10 @@ impl PartialEq for Term {
                 (Term::List(left), Term::List(right)) | (Term::Tuple(left), Term::Tuple(right)) => {
                     pairs.extend(left.iter().zip(right));
                     left.len() == right.len()
+                }
+                (Term::Fun(left), Term::Fun(right)) => {
+                    pairs.extend(left.free.iter().zip(&right.free));
+                    left.lambda == right.lambda && left.free.len() == right.free.len()
                 }
                 (Term::Map(left), Term::Map(right)) => {
                     for ((left_key, left_value), (right_key, right_value)) in
@@ -268,7 +288,8 @@ impl Eq for Term {}
 impl fmt::Debug for Term {
     /// Write the same text as a derived `Debug`, for example
     /// `Tuple([Atom("undef"), List([])])` or `Map([(Atom("a"), Integer(1))])`,
-    /// with a work stack.
+    /// with a work stack. A fun writes its fun entry and its free variables,
+    /// for example `Fun(Lambda { .. }, [Atom("tag")])`.
     ///
     /// # Examples
     ///
@@ -296,12 +317,14 @@ impl fmt::Debug for Term {
                 Term::Integer(value) => write!(formatter, "Integer({value:?})")?,
                 Term::Pid(pid) => write!(formatter, "Pid({pid:?})")?,
                 Term::Reference(reference) => write!(formatter, "Reference({reference:?})")?,
-                Term::List(elements) | Term::Tuple(elements) => {
-                    let name = match term {
-                        Term::List(_) => "List",
-                        _ => "Tuple",
-                    };
-                    write!(formatter, "{name}([")?;
+                Term::List(elements)
+                | Term::Tuple(elements)
+                | Term::Fun(Fun { free: elements, .. }) => {
+                    match term {
+                        Term::List(_) => formatter.write_str("List([")?,
+                        Term::Fun(fun) => write!(formatter, "Fun({:?}, [", fun.lambda)?,
+                        _ => formatter.write_str("Tuple([")?,
+                    }
                     items.push(Item::Text("])"));
                     for (index, element) in elements.iter().enumerate().rev() {
                         items.push(Item::Term(element));
@@ -341,17 +364,24 @@ pub struct Reference(pub(crate) u64);
 
 #[cfg(test)]
 mod tests {
-    use super::{AtomTable, Map, ProcessId, Reference, Term, test_atom as atom};
+    use super::{AtomTable, Fun, Lambda, Map, ProcessId, Reference, Term, test_atom as atom};
 
     fn map(pairs: Vec<(Term, Term)>) -> Term {
         Term::Map(Map::from_pairs(pairs).unwrap())
     }
 
+    /// Return a fun of a lambda of `lists` with an index and free variables.
+    fn fun(index: i32, free: Vec<Term>) -> Term {
+        let module = super::Atom::from_static("lists").unwrap();
+        Term::Fun(Fun::new(Lambda::new(module, index, 7, 53, 1), free))
+    }
+
     fn deep(levels: usize) -> Term {
-        (0..levels).fold(Term::List(vec![]), |inner, level| match level % 3 {
+        (0..levels).fold(Term::List(vec![]), |inner, level| match level % 4 {
             0 => Term::Tuple(vec![inner]),
             1 => Term::List(vec![Term::Integer(1), inner]),
-            _ => map(vec![(atom("k"), inner)]),
+            2 => map(vec![(atom("k"), inner)]),
+            _ => fun(0, vec![inner]),
         })
     }
 
@@ -361,9 +391,25 @@ mod tests {
         let copy = term.clone();
         assert_eq!(term, copy);
         assert_ne!(term, deep(999_999));
-        assert!(format!("{copy:?}").starts_with("Tuple([Map([(Atom(\"k\"), List([Integer(1), "));
+        assert!(format!("{copy:?}").starts_with(
+            "Fun(Lambda { module: Atom { index: 971, name: \"lists\" }, index: 0, old_unique: 7, \
+             label: 53, arity: 1 }, [Map([(Atom(\"k\"), List([Integer(1), Tuple([Fun("
+        ));
         drop(term);
         drop(copy);
+    }
+
+    #[test]
+    fn compares_funs_by_their_lambda_and_free_variables() {
+        // ERTS 29.1.1: two funs of one lambda are equal when their free
+        // variables are equal (`eq` in `utils.c:1241-1276`).
+        let tagged = |tag| fun(0, vec![atom(tag)]);
+        assert_eq!(tagged("a"), tagged("a").clone());
+        assert_ne!(tagged("a"), tagged("b"));
+        assert_ne!(tagged("a"), fun(1, vec![atom("a")]));
+        assert_ne!(tagged("a"), fun(0, vec![]));
+        assert_ne!(fun(0, vec![]), Term::Tuple(vec![]));
+        assert_eq!(fun(0, vec![]), fun(0, vec![]));
     }
 
     #[test]

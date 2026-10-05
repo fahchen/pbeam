@@ -1,5 +1,5 @@
 -module(fun_probe).
--export([mfas/0, id/1]).
+-export([mfas/0, locals/0, id/1]).
 
 %% erlang:apply/3 and the apply instruction, as proc_lib:init_p_do_apply/3
 %% runs them. apply/3 takes at most 1023 arguments.
@@ -20,6 +20,24 @@ mfas() ->
      try M:(id(1))(z) catch error:R8 -> R8 end,
      try apply(fun_probe, id, [x, x | list1022()]) catch error:R9 -> R9 end].
 
+%% make_fun3 with and without free variables, call_fun and call_fun2 with
+%% each tag, fun equality and order, and the badarity and badfun exceptions.
+locals() ->
+    Tag = id(tag),
+    Pair = fun(X) -> {Tag, X} end,
+    Const = fun() -> const end,
+    [Pair(one),
+     (id(Const))(),
+     tail_call(Pair),
+     eq(make_pair(a), make_pair(a)),
+     eq(make_pair(a), make_pair(b)),
+     eq(Const, id(Const)),
+     make_pair(b) >= make_pair(a),
+     make_pair(a) >= make_pair(b),
+     try (id(Pair))(1, 2) catch error:{badarity, {F, Args}} -> {badarity, eq(F, Pair), Args} end,
+     try (id(notfun))() catch error:R1 -> R1 end,
+     try (id({fun_probe, id}))(x) catch error:R2 -> R2 end].
+
 %% A list of 1022 atoms x, built without arithmetic.
 list1022() ->
     L1 = id([x]), L2 = L1 ++ L1, L4 = L2 ++ L2, L8 = L4 ++ L4, L16 = L8 ++ L8,
@@ -27,5 +45,9 @@ list1022() ->
     L512 = L256 ++ L256,
     L512 ++ L256 ++ L128 ++ L64 ++ L32 ++ L16 ++ L8 ++ L4 ++ L2.
 
+make_pair(T) -> fun(X) -> {T, X} end.
+tail_call(F) -> F(tail).
 tail_apply(M, F, A) -> apply(M, F, A).
+eq(X, X) -> same;
+eq(_, _) -> different.
 id(X) -> X.
