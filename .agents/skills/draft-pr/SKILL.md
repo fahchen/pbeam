@@ -124,7 +124,7 @@ Add `--draft` only when the user asked for a draft.
 ### 8. Update the issues
 
 - Comment on the task issue: the PR link, the acceptance evidence, and that the task stays open until merge.
-- Update the epic body: link the PR in the task bullet ("in review") and add the PR to the `## Pull requests` list.
+- Update the epic body: link the PR in the task bullet ("in review") and add the PR to the `## Pull requests` list. Read the full body with `gh issue view <epic> --json body --jq .body`, edit that text, and write it with `gh issue edit <epic> --body-file <scratch file>`. Do not use the `mise run issue` output as the body: it omits sections and blank lines.
 - Do not close the task. Do not change milestone or epic completion.
 
 Report the PR URL, labels, issue updates, and that the work stops for review.

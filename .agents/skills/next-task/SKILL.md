@@ -46,7 +46,7 @@ Read the task issue, its epic, and milestone tracker. Draft a proposed approach:
 
 When the user confirms the proposal:
 
-1. Update the task issue body with the proposed solution: `gh issue edit <N> --repo fahchen/pbeam --body-file <scratch file>`. Replace any existing `## Proposed solution` section with the current one; the body holds only the final solution, not its history. Include the scope, the key decisions, and the key code snippet. Keep it concise; do not paste the full diff or restate the acceptance criteria.
+1. Update the task issue body with the proposed solution. Read the full body with `gh issue view <N> --repo fahchen/pbeam --json body --jq .body`, edit that text, and write it with `gh issue edit <N> --repo fahchen/pbeam --body-file <scratch file>`. Do not use the `mise run issue` output as the body: it omits sections and blank lines. Replace any existing `## Proposed solution` section with the current one; the body holds only the final solution, not its history. Include the scope, the key decisions, and the key code snippet. Keep it concise; do not paste the full diff or restate the acceptance criteria.
 2. If this changes or narrows what the issue originally asked for, leave a comment on the issue explaining the change and why: `gh issue comment <N> --repo fahchen/pbeam --body "<reason>"`. The comment is the change record; skip it only when the proposal merely fills in detail the issue already implied.
 3. Move board Status to `Pending Review` (same `gh project item-edit` pattern, option id `8d836862`).
 
