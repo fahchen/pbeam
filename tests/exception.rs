@@ -1,5 +1,8 @@
 use std::process::Command;
 
+mod common;
+
+use common::pinned_beam;
 use pbeam_runtime::{BeamProgram, Term};
 
 const EXCEPTION_PROBE: &[u8] = include_bytes!("../fixtures/exception/exception_probe.beam");
@@ -78,5 +81,41 @@ fn adds_the_stack_trace_to_a_caught_error() {
             .execute("exception_probe", "catch_stub", &[])
             .unwrap(),
         pair(atom("EXIT"), pair(atom("undef"), Term::List(Vec::new())))
+    );
+}
+
+#[test]
+fn raises_the_first_argument_of_error_3_as_an_error() {
+    // ERTS puts the arguments and the `error_info` map of `erlang:error/3`
+    // only into the stack trace. `erlang:group_leader/2` in `erlang.beam`
+    // calls `erlang:error/3` when `erts_internal:group_leader/2` returns
+    // `badarg`.
+    assert_eq!(
+        erl_reference(
+            "io:format(\"~p~n~p~n\", \
+             [exception_probe:error3(), exception_probe:group_leader_badarg()])"
+        ),
+        b"[{error,badarg},{error,{my,reason}},{error,x},{error,y},{error,z}]\n{error,badarg}\n"
+    );
+
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, EXCEPTION_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let error = |reason| pair(atom("error"), reason);
+    assert_eq!(
+        program.execute("exception_probe", "error3", &[]).unwrap(),
+        Term::List(vec![
+            error(atom("badarg")),
+            error(pair(atom("my"), atom("reason"))),
+            error(atom("x")),
+            error(atom("y")),
+            error(atom("z")),
+        ])
+    );
+    assert_eq!(
+        program
+            .execute("exception_probe", "group_leader_badarg", &[])
+            .unwrap(),
+        error(atom("badarg"))
     );
 }

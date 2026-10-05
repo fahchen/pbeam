@@ -1,16 +1,20 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
-use super::process::{Frame, ProcessState};
+use super::{
+    ets::EtsTables,
+    persistent_term::PersistentTerms,
+    process::{Frame, ProcessState},
+};
 use crate::{
     error::{BeamError, error},
-    term::{ProcessId, Reference, Term},
+    term::{AtomTable, ProcessId, Reference, Term},
 };
 
 /// A cooperative scheduler on one OS thread. It follows the ERTS model: the
 /// process table holds every live process, `current_process` names the
 /// running process, and the run queue holds only processes that wait for a
 /// turn.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct Scheduler {
     /// All live processes, including the current process.
     processes: HashMap<ProcessId, ProcessState>,
@@ -26,20 +30,53 @@ pub(super) struct Scheduler {
     next_reference: u64,
     /// Return value or exit reason of the root process after it exits.
     root_result: Option<Result<Term, Term>>,
-    /// Registered names, as the keys of the ERTS `process_reg` table. An
-    /// atom name is unique in one atom table, so its text identifies it. The
-    /// process of a name is its `registered_name` field; no caller looks up
-    /// a process by name yet.
-    names: HashSet<String>,
+    /// Registered names and their processes, as the ERTS `process_reg`
+    /// table. An atom name is unique in one atom table, so its text
+    /// identifies it. The process also keeps its name in its
+    /// `registered_name` field.
+    names: HashMap<String, ProcessId>,
+    /// Persistent terms of the node. All processes of the run share them.
+    pub(super) persistent_terms: PersistentTerms,
+    /// ETS tables of the node. All processes of the run share them.
+    pub(super) ets: EtsTables,
+    /// The atom table of the run, as `erts_atom_table` for one emulator. A
+    /// run starts with a copy of the program table, and a BIF such as
+    /// `erlang:list_to_atom/1` adds its new atoms here.
+    pub(super) atoms: AtomTable,
 }
 
 impl Scheduler {
+    /// Return a scheduler with no processes and the atom table of the run.
+    /// The table is a copy of the table of the loaded program, so each atom
+    /// of the program code keeps its index.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let scheduler = Scheduler::new(program.atoms.clone());
+    /// assert_eq!(scheduler.atoms.get("ok"), Atom::from_static("ok"));
+    /// ```
+    pub(super) fn new(atoms: AtomTable) -> Self {
+        Scheduler {
+            processes: HashMap::new(),
+            runnable: VecDeque::new(),
+            current_process: None,
+            next_process_id: 0,
+            next_reference: 0,
+            root_result: None,
+            names: HashMap::new(),
+            persistent_terms: PersistentTerms::default(),
+            ets: EtsTables::default(),
+            atoms,
+        }
+    }
+
     /// Create the root process. The root process gets `ProcessId(0)`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut scheduler = Scheduler::default();
+    /// let mut scheduler = Scheduler::new(AtomTable::new());
     /// scheduler.start(frame, vec![])?;
     /// assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
     /// ```
@@ -89,6 +126,21 @@ impl Scheduler {
             .expect("the scheduler has a current process")
     }
 
+    /// Return the live process `id`, also the current process. Return `None`
+    /// when no live process has the pid, as `erts_try_lock_sig_free_proc`
+    /// (`erl_bif_info.c:1384-1386`) finds no process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.schedule_next();
+    /// assert_eq!(scheduler.process(ProcessId(0)).map(|process| process.id), Some(ProcessId(0)));
+    /// assert!(scheduler.process(ProcessId(99)).is_none());
+    /// ```
+    pub(super) fn process(&self, id: ProcessId) -> Option<&ProcessState> {
+        self.processes.get(&id)
+    }
+
     /// Stop the current process until a message arrives. A delivery adds it
     /// to the run queue again.
     ///
@@ -107,7 +159,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Scheduler::default().next_pid()?, ProcessId(0));
+    /// assert_eq!(Scheduler::new(AtomTable::new()).next_pid()?, ProcessId(0));
     /// ```
     fn next_pid(&mut self) -> Result<ProcessId, BeamError> {
         let value = self.next_process_id;
@@ -317,19 +369,38 @@ impl Scheduler {
             Some(process)
                 if name.name() != "undefined"
                     && process.registered_name.is_none()
-                    && !self.names.contains(name.name()) =>
+                    && !self.names.contains_key(name.name()) =>
             {
                 process.registered_name = Some(name.clone());
-                self.names.insert(name.name().to_owned());
+                self.names.insert(name.name().to_owned(), *id);
                 true
             }
             _ => false,
         }
     }
 
-    /// Remove the current process after it exits. Free its registered name
-    /// first, then send `EXIT` to linked processes that trap exits, then
-    /// `DOWN` to monitors. ERTS (`erl_process.c`) unregisters the name in
+    /// Return the process that has the registered name `name`, as ERTS
+    /// `erts_whereis_name_to_id` (`register.c:276-300`) finds it in the
+    /// `process_reg` table. Return `None` when no live process has the name.
+    /// PBeam has no ports, so a name never gives a port.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
+    /// assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
+    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
+    /// ```
+    pub(super) fn whereis(&self, name: &str) -> Option<ProcessId> {
+        self.names.get(name).copied()
+    }
+
+    /// Remove the current process after it exits. Delete its ETS tables
+    /// first, then free its registered name, then send `EXIT` to linked
+    /// processes that trap exits, then `DOWN` to monitors. ERTS
+    /// (`erl_process.c`) deletes the tables in `ERTS_CONTINUE_EXIT_USING_DB`
+    /// (`erl_process.c:14360-14368`), unregisters the name in
     /// `ERTS_CONTINUE_EXIT_FREE`, before `ERTS_CONTINUE_EXIT_LINKS` and
     /// `ERTS_CONTINUE_EXIT_MONITORS`, and sends link exit signals before
     /// monitor down signals. A process that traps exits also receives a
@@ -355,6 +426,7 @@ impl Scheduler {
             .take()
             .and_then(|id| self.processes.remove(&id))
             .expect("the scheduler has a current process");
+        self.ets.delete_owned(process.id);
         if let Some(name) = &process.registered_name {
             self.names.remove(name.name());
         }
@@ -406,8 +478,9 @@ mod tests {
     use super::Scheduler;
     use crate::term::test_atom;
     use crate::{
+        runtime::ets::{Access, Table},
         runtime::process::tests::frame,
-        term::{ProcessId, Term},
+        term::{AtomTable, ProcessId, Term},
     };
 
     fn atom(name: &str) -> Term {
@@ -420,7 +493,7 @@ mod tests {
 
     #[test]
     fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
         assert!(scheduler.processes.contains_key(&ProcessId(0)));
@@ -441,7 +514,7 @@ mod tests {
 
     #[test]
     fn sends_down_and_exit_messages_and_records_the_root_result() {
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         scheduler.current_process_mut().trap_exit = true;
@@ -481,7 +554,7 @@ mod tests {
 
     #[test]
     fn links_live_processes_and_ignores_normal_exit_without_trap_exit() {
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
@@ -506,7 +579,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_exit_signals_and_counter_overflow() {
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         scheduler.spawn(frame(), vec![], false, true).unwrap();
@@ -514,7 +587,7 @@ mod tests {
         scheduler.schedule_next();
         assert!(scheduler.finish_current(atom("boom"), None).is_err());
 
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         scheduler
@@ -525,7 +598,7 @@ mod tests {
         let mut scheduler = Scheduler {
             next_process_id: u64::MAX,
             next_reference: u64::MAX,
-            ..Scheduler::default()
+            ..Scheduler::new(AtomTable::new())
         };
         assert!(scheduler.start(frame(), vec![]).is_err());
         assert!(scheduler.make_ref().is_err());
@@ -533,7 +606,7 @@ mod tests {
 
     #[test]
     fn removes_active_monitors_and_sets_group_leaders() {
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
@@ -553,26 +626,62 @@ mod tests {
     fn frees_the_name_of_a_process_when_it_exits() {
         // ERTS 29.1.1: after a named process exits, register(Name, self())
         // in another process is true.
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
         let name = atom("pbeam_probe_reg");
+        assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
         assert!(scheduler.register(&name, &Term::Pid(child)));
         assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
+        assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(child));
         scheduler.park_current();
 
         scheduler.schedule_next();
         scheduler.finish_current(atom("normal"), None).unwrap();
-        assert!(scheduler.names.is_empty());
+        assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
         assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
-        assert!(scheduler.names.contains("pbeam_probe_reg"));
+        assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
         assert_eq!(
             scheduler.processes[&ProcessId(0)]
                 .registered_name
                 .clone()
                 .map(Term::Atom),
             Some(name)
+        );
+    }
+
+    #[test]
+    fn deletes_the_tables_of_a_process_when_it_exits() {
+        // ERTS 29.1.1: after the owner of a named table exits, ets:new/2
+        // with the same name in the monitor process is valid when the DOWN
+        // message arrives (erl_process.c:14360-14368).
+        let mut scheduler = Scheduler::new(AtomTable::new());
+        scheduler.start(frame(), vec![]).unwrap();
+        scheduler.schedule_next();
+        let (child, monitor) = scheduler.spawn(frame(), vec![], true, false).unwrap();
+        scheduler.park_current();
+
+        scheduler.schedule_next();
+        let table = scheduler.make_ref().unwrap();
+        scheduler.ets.create(
+            table,
+            Some("ets_probe_owned"),
+            Table::new(child, Access::Protected, 1),
+        );
+        assert!(scheduler.ets.name_in_use("ets_probe_owned"));
+        scheduler.finish_current(atom("normal"), None).unwrap();
+
+        assert!(!scheduler.ets.name_in_use("ets_probe_owned"));
+        assert_eq!(
+            first_message(&scheduler, 0, 0),
+            Term::Tuple(vec![
+                atom("DOWN"),
+                Term::Reference(monitor.unwrap()),
+                atom("process"),
+                Term::Pid(child),
+                atom("normal"),
+            ])
         );
     }
 }

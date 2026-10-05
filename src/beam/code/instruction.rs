@@ -7,9 +7,14 @@ use super::{
     read_value,
 };
 use crate::error::{BeamError, error};
-use crate::term::{Atom, Term};
+use crate::term::{Atom, Lambda, Term};
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
+/// The first byte of an integer operand with 9 or more payload bytes: size
+/// code 7, the sign and extended flags, and `TAG_INTEGER`. Its value is
+/// outside the 64-bit signed range, so ERTS loads it as a bignum.
+const HUGE_INTEGER_FIRST_BYTE: u8 =
+    0b1110_0000 | COMPACT_SIGN_FLAG | COMPACT_EXTENDED_FLAG | TAG_INTEGER;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
 const INSTRUCTION_SET_ERLANG: u32 = 0;
 const CODE_LABEL_COUNT_OFFSET: usize = WORD_SIZE * 3;
@@ -32,10 +37,10 @@ const OPCODE_RAISE: u8 = 108;
 const OPCODE_IF_END: u8 = 73;
 const OPCODE_BUILD_STACKTRACE: u8 = 160;
 const OPCODE_RAW_RAISE: u8 = 161;
-const OPCODE_IS_FUNCTION: u8 = 77;
+const OPCODE_TEST_IS_FUNCTION: u8 = 77;
 const OPCODE_APPLY: u8 = 112;
 const OPCODE_APPLY_LAST: u8 = 113;
-const OPCODE_IS_FUNCTION2: u8 = 115;
+const OPCODE_TEST_IS_FUNCTION2: u8 = 115;
 const OPCODE_CALL_FUN2: u8 = 178;
 const OPCODE_NIF_START: u8 = 179;
 const OPCODE_BADRECORD: u8 = 180;
@@ -49,6 +54,12 @@ const OPCODE_CATCH: u8 = 62;
 const OPCODE_CATCH_END: u8 = 63;
 const OPCODE_BS_GET_BINARY2: u8 = 119;
 const OPCODE_BS_SKIP_BITS2: u8 = 120;
+/// `bs_get_integer2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:447).
+const OPCODE_BS_GET_INTEGER2: u8 = 117;
+/// `gc_bif3 Fail Live Bif Arg1 Arg2 Arg3 Dst` (genop.tab:533).
+const OPCODE_GC_BIF3: u8 = 152;
+/// `is_any_native_record Fail Src` (genop.tab:724).
+const OPCODE_IS_ANY_NATIVE_RECORD: u8 = 186;
 const OPCODE_GC_BIF1: u8 = 124;
 const OPCODE_GC_BIF2: u8 = 125;
 const OPCODE_BS_GET_TAIL: u8 = 165;
@@ -206,21 +217,33 @@ pub(crate) enum Instruction {
         tail: bool,
         deallocate: u32,
     },
-    /// Calls a BIF through `bif0` (opcode 9), `bif1` (opcode 10), or `bif2`
-    /// (opcode 11) and writes its value to a register. `bif0` has no fail
-    /// label and decodes with `fail_label` 0. With fail label 0, a BIF failure
-    /// raises its exception; with another fail label, it jumps to the label.
+    /// Calls a BIF through `bif0` (opcode 9), `bif1` (opcode 10), `bif2`
+    /// (opcode 11), `gc_bif1` (opcode 124), or `gc_bif2` (opcode 125) and
+    /// writes its value to a register. `bif0` has no fail label and decodes with `fail_label` 0.
+    /// With fail label 0, a BIF failure raises its exception; with another
+    /// fail label, it jumps to the label.
     ///
     /// Encoding: `bif0` has opcode, import index, destination register;
     /// `bif1` and `bif2` have opcode, fail label, import index, one or two
-    /// arguments, destination register. An argument can be a typed register
-    /// (extended subtag 5). Example: `io:io_request/2` in the pinned `io.beam`
-    /// has `[0x0A, 0x05, 0xE0, 0x57, 0x03, 0x40, 0x23]`, which calls import 14
+    /// arguments, destination register. `gc_bif1` and `gc_bif2` have
+    /// opcode, fail label, live register count, import index, one or two
+    /// arguments, destination register. The live count tells the ERTS garbage collector which X
+    /// registers hold terms; PBeam has no process heap and does not keep it.
+    /// An argument can be a typed register (extended subtag 5). Example:
+    /// `io:io_request/2` in the pinned `io.beam` has
+    /// `[0x0A, 0x05, 0xE0, 0x57, 0x03, 0x40, 0x23]`, which calls import 14
     /// (`erlang:node/1`) with `x0` typed as a pid and writes `x2`, and
     /// `[0x09, 0xF0, 0x53]`, which calls import 15 (`erlang:node/0`) and
     /// writes `x5`. The pinned `gen_statem.beam` has
     /// `[0x0B, 0x05, 0x08, 0x21, 0x21, 0x03, 0x03]`, which calls import 33
     /// (`erlang:element/2`) with the integer 2 and `x0` and writes `x0`.
+    /// `arith_probe:up/1` in `fixtures/arith/arith_probe.beam` has
+    /// `[0x7D, 0x0D, 0x22, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03]`, which
+    /// calls import 0 (`erlang:'+'/2`) with fail label 34, live count 1,
+    /// `x0` typed, and the integer 1, and writes `x0`. `arith_probe:neg/1`
+    /// has `[0x7C, 0x0D, 0x1F, 0x10, 0x30, 0x03, 0x03]`, which calls import 3
+    /// (`erlang:'-'/1`) with fail label 31, live count 1, and `x0`, and
+    /// writes `x0`.
     ///
     /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`, and
     /// `node(Pid) =:= node()` in `io:io_request/2` compiles to
@@ -231,7 +254,15 @@ pub(crate) enum Instruction {
     /// `{bif,element,{f,0},[{integer,2},{x,0}],{x,0}}`. The guard
     /// `when tuple_size(X) >= 2` in `fixtures/group/group_probe.erl`
     /// compiles to `{bif,tuple_size,{f,22},[{x,0}],{x,1}}`, which is
-    /// `[0x0A, 0x0D, 0x16, 0x80, 0x03, 0x13]` with import 8.
+    /// `[0x0A, 0x0D, 0x16, 0x80, 0x03, 0x13]` with import 8. The guard
+    /// `when X + 1 >= 1` of `arith_probe:up/1` compiles to
+    /// `{gc_bif,'+',{f,34},1,[{tr,{x,0},...},{integer,1}],{x,0}}`, and
+    /// `id(-9223372036854775808) - id(1)` in `minus_overflow/0` compiles to
+    /// `{gc_bif,'-',{f,0},1,[{tr,{y,0},...},{tr,{x,0},...}],{x,0}}`. The
+    /// guard `when -X > 0` of `arith_probe:neg/1` compiles to
+    /// `{gc_bif,'-',{f,31},1,[{x,0}],{x,0}}`, and `length(Args)` in
+    /// `proc_lib:trans_init/3` (proc_lib.erl:944) compiles to
+    /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`.
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
@@ -243,6 +274,52 @@ pub(crate) enum Instruction {
         arguments: Vec<Operand>,
         /// Register for the BIF value.
         destination: Operand,
+    },
+    /// Makes a fun of a lambda with the values of `free` as its free
+    /// variables (`make_fun3`, opcode 171), and writes it to `destination`.
+    /// The loader resolves the `FunT` entry of the lambda number.
+    ///
+    /// Encoding: opcode, unsigned lambda number, destination register,
+    /// extended list, item count, then the free variable operands. Example:
+    /// `fun_probe:make_pair/1` in `fixtures/funs/fun_probe.beam` has
+    /// `[0xAB, 0x40, 0x03, 0x17, 0x10, 0x03]`, which makes a fun of `FunT`
+    /// entry 4 with the free variable `x0` and writes it to `x0`.
+    ///
+    /// Erlang: `make_pair(T) -> fun(X) -> {T, X} end.` compiles to
+    /// `{make_fun3,{f,112},0,0,{x,0},{list,[{x,0}]}}`.
+    MakeFun {
+        lambda: Lambda,
+        free: Vec<Operand>,
+        destination: Operand,
+    },
+    /// Calls the fun in `function` with the arguments in `x0` to
+    /// `x(arity - 1)` and continues after the call. `call_fun` (opcode 75)
+    /// calls the fun in `x(arity)`. `call_fun2` (opcode 178) names the fun
+    /// register and has a tag: `safe`, `unsafe`, or a lambda number. The tag
+    /// tells the JIT which tests it can skip; the result is the same, so
+    /// the tag is not kept.
+    ///
+    /// Encoding: `call_fun` has opcode and arity; `call_fun2` has opcode,
+    /// tag, arity, and the fun register. Example: `[0x4B, 0x00]` is
+    /// `call_fun 0`, and `fun_probe:tail_call/1` in
+    /// `fixtures/funs/fun_probe.beam` has `[0xB2, 0x00, 0x10, 0x57, 0x13,
+    /// 0x20]`, which calls the fun in the typed register `x1` with lambda
+    /// number 0 and arity 1.
+    ///
+    /// Erlang: `(id(Const))()` compiles to `{call_fun,0}`, and
+    /// `tail_call(F) -> F(tail).` compiles to `{call_fun2,{f,127},1,{tr,{x,1},...}}`.
+    ///
+    /// BEAM has no tail form of a fun call. The compiler emits the call, then
+    /// `deallocate D` and `return`. The ERTS loader joins the three
+    /// instructions into `i_call_fun_last` or `i_call_fun2_last`
+    /// (`jit/arm/ops.tab:868-880`, `emu/ops.tab:1067-1073`), and so does
+    /// `parse_code`: the call then sets `tail`, and `deallocate` is the stack
+    /// size to release first.
+    CallFun {
+        arity: u32,
+        function: Operand,
+        tail: bool,
+        deallocate: u32,
     },
     /// An instruction that is parsed so the module can load, but cannot run.
     Unsupported(u8),
@@ -340,6 +417,25 @@ pub(crate) enum Instruction {
         fail_label: u32,
         value: Operand,
     },
+    /// Jumps to `fail_label` unless the value is a fun of `arity` arguments
+    /// (`is_function2`, opcode 115). The arity is a literal or a register
+    /// (`is_function2 f s s` in `jit/arm/ops.tab:605`). The test passes only
+    /// when `erl_is_function` (`erl_bif_op.c:237-267`) returns `true`, as
+    /// the JIT does for a register arity (`jit/arm/instr_common.cpp:1266-1283`),
+    /// so an arity that is negative or not an integer fails the test.
+    ///
+    /// Encoding: opcode, fail label, value, arity. Example:
+    /// `fun_probe:kind/1` in `fixtures/funs/fun_probe.beam` has
+    /// `[0x73, 0x0D, 0x64, 0x57, 0x03, 0x40, 0x11]`, which fails to label 100
+    /// unless the typed register `x0` holds a fun of one argument.
+    ///
+    /// Erlang: `kind(F) when is_function(F, 1) -> one;` compiles to
+    /// `{test,is_function2,{f,100},[{tr,{x,0},...},{integer,1}]}`.
+    TestFunctionArity {
+        fail_label: u32,
+        value: Operand,
+        arity: Operand,
+    },
     /// Jumps to `fail_label` unless the value is a tuple with `arity`
     /// elements.
     ///
@@ -408,6 +504,29 @@ pub(crate) enum Instruction {
     /// Erlang: `add(M) -> M#{output => raw}.` compiles to
     /// `{put_map_assoc,{f,0},{x,0},{x,0},1,{list,[{atom,output},{atom,raw}]}}`.
     PutMapAssoc {
+        map: Operand,
+        destination: Operand,
+        pairs: Vec<(Operand, Operand)>,
+    },
+    /// Writes a copy of a map with the value of each existing key replaced.
+    /// `pairs` holds each key and value. The live-register count is not
+    /// kept, because PBeam needs no live count. When the source is not a
+    /// map, or a key is not in the map, the instruction jumps to
+    /// `fail_label`, or with fail label 0 raises `error:{badmap, Map}` or
+    /// `error:{badkey, Key}`.
+    ///
+    /// Encoding: opcode, fail label, map operand, destination register, live
+    /// count, extended list, item count, then key and value operands in turn.
+    /// Example: `update_guard/1` in `fixtures/io_start/io_start_probe.beam`
+    /// has `[0x9B, 0x0D, 0x26, 0x03, 0x03, 0x10, 0x17, 0x20, 0x0A, 0x12,
+    /// 0x0A, 0x13]`, which sets atom 18 (`output`) to atom 19 (`cooked`) in
+    /// the map in `x0`, writes the result to `x0`, and jumps to label 38
+    /// when the key is missing.
+    ///
+    /// Erlang: `M#{output := cooked}` in a guard compiles to
+    /// `{put_map_exact,{f,38},{x,0},{x,0},1,{list,[{atom,output},{atom,cooked}]}}`.
+    PutMapExact {
+        fail_label: u32,
         map: Operand,
         destination: Operand,
         pairs: Vec<(Operand, Operand)>,
@@ -486,6 +605,17 @@ pub(crate) enum Instruction {
         source: Operand,
         destination: Operand,
     },
+    /// Copies the tail of a nonempty list to a register.
+    ///
+    /// Encoding: opcode, source, destination register. Example:
+    /// `proc_lib:trans_init/3` in the pinned `proc_lib.beam` has
+    /// `[0xA3, 0x43, 0x33]`, which writes the tail of `x4` to `x3`.
+    ///
+    /// Erlang: `rest([_ | T]) -> T.` compiles to `{get_tl,{x,0},{x,0}}`.
+    GetTail {
+        source: Operand,
+        destination: Operand,
+    },
     /// Copies the zero-based tuple element at `index` to a register.
     ///
     /// Encoding: opcode, tuple register, unsigned index, destination register.
@@ -524,6 +654,24 @@ pub(crate) enum Instruction {
     /// `{test,is_ne_exact,{f,157},[{x,0},{x,3}]}`. When the first test is
     /// true, the jump skips the `orelse` test.
     TestExactNotEqual {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
+    /// Jumps to `fail_label` unless the left operand is less than the right
+    /// operand (`is_lt`, opcode 39) in the ERTS term order. Two different
+    /// references give a runtime error.
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `compare_probe:width/1` in
+    /// `fixtures/compare/compare_probe.beam` has `[0x27, 0xF5, 0x03, 0x01]`,
+    /// which fails to label 15 unless `x0` is less than the integer 0.
+    ///
+    /// Erlang: `width(F) when F < 0 -> left;` compiles to
+    /// `{test,is_lt,{f,15},[{x,0},{integer,0}]}`, as the guard of
+    /// `io_lib_format:field_width/3` (io_lib_format.erl:259) does, which
+    /// compares the atom `none` with 0.
+    TestLess {
         fail_label: u32,
         left: Operand,
         right: Operand,
@@ -648,6 +796,26 @@ pub(crate) enum Instruction {
     /// Erlang: the same pattern compiles to `{recv_marker_clear,{y,1}}` when
     /// the `receive` matches.
     ReceiveMarkerClear(Operand),
+    /// Starts a function that the module lists in `-nifs`. `name` and
+    /// `arity` come from the `func_info` before it, as the ERTS loader marks
+    /// the current function as a NIF (`jit/asm_load.c:651-661`,
+    /// `emu/emu_load.c:1437-1445`). A `nif_start` without a `func_info`
+    /// before it is a load error.
+    ///
+    /// The decoder puts this instruction directly after the entry label of
+    /// the function, wherever `nif_start` is in the function. ERTS does not
+    /// check the position of `nif_start` and does not run it; a NIF
+    /// replaces the function from its entry (`beam/erl_nif.c:4922-4928`).
+    /// So a body instruction before `nif_start` does not run for a function
+    /// with a binding. `erlc` puts `nif_start` directly after the entry
+    /// label, so compiled code keeps its order.
+    ///
+    /// Encoding: `[0xB3]`.
+    ///
+    /// Erlang: `-nifs([write_nif/2]).` makes `write_nif/2` in `prim_tty`
+    /// start with `nif_start`, then `{move,{atom,undef},{x,0}}` and
+    /// `{call_ext_only,1,{extfunc,erlang,nif_error,1}}`.
+    NifStart { name: String, arity: u32 },
     /// An instruction that has no runtime effect, such as `test_heap` or
     /// `init_yregs`.
     ///
@@ -690,17 +858,39 @@ pub(crate) enum TestKind {
     NonEmptyList,
     Binary,
     Map,
+    /// `is_function`, opcode 77. Example: `[0x4D, 0x0D, 0x65, 0x57, 0x03,
+    /// 0x40]` in `fun_probe:kind/1` fails to label 101 unless the typed
+    /// register `x0` holds a fun. Erlang: `kind(F) when is_function(F) ->
+    /// any;` compiles to `{test,is_function,{f,101},[{tr,{x,0},...}]}`.
+    Function,
+    /// `is_integer`, opcode 45. Example: `[0x2D, 0xB5, 0x03]` in
+    /// `compare_probe:kind/1` fails to label 11 unless `x0` is an integer.
+    /// Erlang: `kind(X) when is_integer(X) -> integer;` compiles to
+    /// `{test,is_integer,{f,11},[{x,0}]}`, as the guard of
+    /// `io_lib_format:field_value/2` (io_lib_format.erl:271) does.
+    Integer,
+    /// `is_boolean`, opcode 114. Example: `[0x72, 0xC5, 0x03]` in
+    /// `compare_probe:kind/1` fails to label 12 unless `x0` is the atom
+    /// `true` or `false`. Erlang: `kind(X) when is_boolean(X) -> boolean;`
+    /// compiles to `{test,is_boolean,{f,12},[{x,0}]}`, as the guard of
+    /// `standard_error:check_valid_opts/1` (standard_error.erl:236) does.
+    Boolean,
 }
 
 /// A source or destination in the supported `move` instruction.
 ///
 /// `Value` holds a supported immediate term. `X` uses compact register tag 3,
 /// and `Y` uses compact register tag 4. For example, `move x0, y0` is encoded
-/// as `[0x40, 0x03, 0x04]`.
+/// as `[0x40, 0x03, 0x04]`. `UnsupportedInteger` is an integer operand with 9
+/// or more payload bytes, such as `{integer,18446744073709551616}`, encoded
+/// as `[0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]`. ERTS loads it as a
+/// bignum literal. PBeam has no bignum term, so the module loads and the
+/// instruction fails only when it reads the operand.
 #[derive(Debug, Clone)]
 pub(crate) enum Operand {
     Value(Term),
     UnsupportedLiteral(usize),
+    UnsupportedInteger,
     X(u32),
     Y(u32),
 }
@@ -713,7 +903,7 @@ pub(crate) enum Operand {
 /// let mut code = vec![0, 0, 0, 16]; // sub-size
 /// code.extend_from_slice(&[0; 16]); // instruction set, opcode max, labels, functions
 /// code.push(0x03); // end
-/// let (instructions, labels) = parse_code(&code, &[], &[], &[])?;
+/// let (instructions, labels) = parse_code(&code, &[], &[], &[], &[])?;
 /// assert_eq!(labels, 0);
 /// assert!(matches!(instructions.as_slice(), [Instruction::End]));
 /// ```
@@ -722,6 +912,7 @@ pub(super) fn parse_code(
     atoms: &[Atom],
     imports: &[(String, String, u32)],
     literals: &[Option<Term>],
+    lambdas: &[(Lambda, usize)],
 ) -> Result<(Vec<Instruction>, u32), BeamError> {
     if data.len() < CODE_HEADER_SIZE
         || read_u32(&data[..WORD_SIZE])? != CODE_HEADER_SUB_SIZE
@@ -736,6 +927,7 @@ pub(super) fn parse_code(
     let mut cursor = CODE_HEADER_SIZE;
     let mut instructions = Vec::new();
     let mut function_info_count = 0;
+    let mut function = None;
     loop {
         let opcode = *data
             .get(cursor)
@@ -749,6 +941,12 @@ pub(super) fn parse_code(
                         "BEAM label {label} is outside declared range 1..={number_of_labels}"
                     )));
                 }
+                // The label directly after `func_info` is the function entry.
+                if let Some((_, _, entry)) = &mut function
+                    && *entry == instructions.len()
+                {
+                    *entry += 1;
+                }
                 Instruction::Label(label)
             }
             OPCODE_FUNCTION_INFO => {
@@ -760,13 +958,35 @@ pub(super) fn parse_code(
                     .name()
                     .to_owned();
                 let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                function = Some((name.clone(), arity, instructions.len() + 1));
                 Instruction::FunctionInfo {
                     module,
                     name,
                     arity,
                 }
             }
-            OPCODE_RETURN => Instruction::Return,
+            OPCODE_RETURN => {
+                // The ERTS loader transforms `call_fun Arity | deallocate D |
+                // return` into `i_call_fun_last Arity D`, and `call_fun2` in
+                // the same way (`jit/arm/ops.tab:868-880`; the emu loader
+                // turns `call_fun2` into `call_fun` first,
+                // `emu/generators.tab:26-52`). The fun call then replaces the
+                // frame of its caller.
+                if let [
+                    ..,
+                    Instruction::CallFun {
+                        tail, deallocate, ..
+                    },
+                    Instruction::Deallocate { stack_size },
+                ] = instructions.as_mut_slice()
+                {
+                    *tail = true;
+                    *deallocate = *stack_size;
+                    instructions.pop();
+                    continue;
+                }
+                Instruction::Return
+            }
             OPCODE_CALL => Instruction::Call {
                 arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
                 label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
@@ -843,6 +1063,11 @@ pub(super) fn parse_code(
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
+            OPCODE_TEST_LT => Instruction::TestLess {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
             OPCODE_TEST_GE => Instruction::TestGreaterEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -912,6 +1137,10 @@ pub(super) fn parse_code(
                 source: read_move_operand(data, &mut cursor, atoms, literals)?,
                 destination: read_register(data, &mut cursor)?,
             },
+            OPCODE_GET_TL => Instruction::GetTail {
+                source: read_move_operand(data, &mut cursor, atoms, literals)?,
+                destination: read_register(data, &mut cursor)?,
+            },
             OPCODE_PUT_TUPLE2 => {
                 let destination = read_register(data, &mut cursor)?;
                 if read_integer(data, &mut cursor, TAG_LITERAL)? != LIST_SUBTAG {
@@ -937,11 +1166,82 @@ pub(super) fn parse_code(
                 let _fail_label = read_operand(data, &mut cursor, TAG_LABEL)?;
                 let map = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let destination = read_register(data, &mut cursor)?;
-                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                skip_live_registers(data, &mut cursor)?;
                 Instruction::PutMapAssoc {
                     map,
                     destination,
                     pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
+                }
+            }
+            OPCODE_PUT_MAP_EXACT => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let map = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let destination = read_register(data, &mut cursor)?;
+                skip_live_registers(data, &mut cursor)?;
+                Instruction::PutMapExact {
+                    fail_label,
+                    map,
+                    destination,
+                    pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
+                }
+            }
+            OPCODE_MAKE_FUN3 => {
+                let number = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let destination = read_register(data, &mut cursor)?;
+                let free_count = read_list_count(data, &mut cursor)?;
+                // ERTS `gen.make_fun3` gives `i_lambda_error` for these
+                // cases (`generators.tab:128-151`), which stops the pinned
+                // JIT emulator when it runs (`jit/arm/instr_fun.cpp:472-475`).
+                // The compiler never emits them, so the load fails.
+                let (lambda, _) = usize::try_from(number)
+                    .ok()
+                    .and_then(|number| lambdas.get(number))
+                    .filter(|(_, count)| *count == free_count)
+                    .ok_or_else(|| {
+                        error(format!(
+                            "BEAM make_fun3 lambda {number} with {free_count} free \
+                             variables does not match the lambda table"
+                        ))
+                    })?;
+                let free = (0..free_count)
+                    .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
+                    .collect::<Result<_, _>>()?;
+                Instruction::MakeFun {
+                    lambda: lambda.clone(),
+                    free,
+                    destination,
+                }
+            }
+            OPCODE_CALL_FUN => {
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                Instruction::CallFun {
+                    arity,
+                    function: Operand::X(arity),
+                    tail: false,
+                    deallocate: 0,
+                }
+            }
+            OPCODE_CALL_FUN2 => {
+                // The tag is an atom or a lambda number (`aF` in
+                // `jit/arm/ops.tab:879`). Atom index 0 is `[]`, not an atom.
+                let tag_kind = match data.get(cursor).map(|byte| byte & COMPACT_TAG_MASK) {
+                    Some(TAG_ATOM) => TAG_ATOM,
+                    _ => TAG_UNSIGNED,
+                };
+                let tag = read_operand(data, &mut cursor, tag_kind)?;
+                if tag_kind == TAG_ATOM {
+                    atom_at(atoms, tag as usize)?;
+                }
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let function = read_move_operand(data, &mut cursor, atoms, literals)?;
+                if !matches!(function, Operand::X(_) | Operand::Y(_)) {
+                    return Err(error("BEAM call_fun2 function is not a register"));
+                }
+                Instruction::CallFun {
+                    arity,
+                    function,
+                    tail: false,
+                    deallocate: 0,
                 }
             }
             OPCODE_SWAP => Instruction::Swap(
@@ -956,7 +1256,10 @@ pub(super) fn parse_code(
             | OPCODE_TEST_IS_NIL
             | OPCODE_TEST_IS_NONEMPTY_LIST
             | OPCODE_TEST_IS_BINARY
-            | OPCODE_TEST_IS_MAP => {
+            | OPCODE_TEST_IS_MAP
+            | OPCODE_TEST_IS_FUNCTION
+            | OPCODE_TEST_IS_INTEGER
+            | OPCODE_TEST_IS_BOOLEAN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let kind = test_kind(opcode)?;
@@ -965,6 +1268,18 @@ pub(super) fn parse_code(
                     fail_label,
                     value,
                 }
+            }
+            OPCODE_TEST_IS_FUNCTION2 => Instruction::TestFunctionArity {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+                arity: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_NIF_START => {
+                let (name, arity, entry) = function
+                    .clone()
+                    .ok_or_else(|| error("BEAM nif_start has no func_info before it"))?;
+                instructions.insert(entry, Instruction::NifStart { name, arity });
+                continue;
             }
             OPCODE_TEST_HEAP | OPCODE_INIT_YREGS => {
                 skip_unsupported_instruction(opcode, data, &mut cursor)?;
@@ -1029,13 +1344,20 @@ pub(super) fn parse_code(
                     destination: read_register(data, &mut cursor)?,
                 }
             }
-            OPCODE_BIF1 | OPCODE_BIF2 => {
+            OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2) {
+                    skip_live_registers(data, &mut cursor)?;
+                }
                 let (module, name) = bif_import(
                     imports,
                     read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
                 )?;
-                let argument_count = if opcode == OPCODE_BIF1 { 1 } else { 2 };
+                let argument_count = if matches!(opcode, OPCODE_BIF1 | OPCODE_GC_BIF1) {
+                    1
+                } else {
+                    2
+                };
                 let arguments = (0..argument_count)
                     .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1052,7 +1374,7 @@ pub(super) fn parse_code(
                 if opcode == OPCODE_ALLOCATE_HEAP {
                     skip_operand(data, &mut cursor)?;
                 }
-                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                skip_live_registers(data, &mut cursor)?;
                 Instruction::Allocate { stack_size }
             }
             OPCODE_DEALLOCATE => Instruction::Deallocate {
@@ -1120,6 +1442,9 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
         OPCODE_TEST_IS_NONEMPTY_LIST => Ok(TestKind::NonEmptyList),
         OPCODE_TEST_IS_BINARY => Ok(TestKind::Binary),
         OPCODE_TEST_IS_MAP => Ok(TestKind::Map),
+        OPCODE_TEST_IS_FUNCTION => Ok(TestKind::Function),
+        OPCODE_TEST_IS_INTEGER => Ok(TestKind::Integer),
+        OPCODE_TEST_IS_BOOLEAN => Ok(TestKind::Boolean),
         _ => Err(error(format!("unsupported BEAM type-test opcode {opcode}"))),
     }
 }
@@ -1188,8 +1513,8 @@ fn read_record_updates(
 ///
 /// ```rust,ignore
 /// let mut cursor = 0;
-/// skip_unsupported_instruction(OPCODE_GC_BIF2, &[0, 0, 0, 0, 0, 0], &mut cursor)?;
-/// assert_eq!(cursor, 6);
+/// skip_unsupported_instruction(OPCODE_BS_GET_UTF16, &[0, 0, 0, 0, 0], &mut cursor)?;
+/// assert_eq!(cursor, 5);
 /// ```
 fn skip_unsupported_instruction(
     opcode: u8,
@@ -1202,13 +1527,11 @@ fn skip_unsupported_instruction(
     if matches!(
         opcode,
         OPCODE_PUT_MAP_ASSOC
-            | OPCODE_PUT_MAP_EXACT
             | OPCODE_HAS_MAP_FIELDS
             | OPCODE_GET_MAP_ELEMENTS
             | OPCODE_GET_RECORD_ELEMENTS
             | OPCODE_PUT_RECORD
             | OPCODE_PUT_TUPLE2
-            | OPCODE_MAKE_FUN3
             | OPCODE_INIT_YREGS
             | OPCODE_BS_CREATE_BIN
             | OPCODE_BS_MATCH
@@ -1223,53 +1546,51 @@ fn skip_unsupported_instruction(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(unsupported_opcode_operand_count(OPCODE_GC_BIF2), Some(6));
+/// assert_eq!(unsupported_opcode_operand_count(OPCODE_BS_GET_UTF16), Some(5));
 /// assert_eq!(unsupported_opcode_operand_count(255), None);
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
         OPCODE_RAISE => Some(2),
-        OPCODE_CALL_FUN2 | OPCODE_IS_FUNCTION2 => Some(3),
         OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
+        // `bs_get_integer2` is in `io_lib`.
+        OPCODE_BS_GET_INTEGER2 => Some(7),
+        // `gc_bif3` is in `io_lib`, for `erlang:binary_part/3`.
+        OPCODE_GC_BIF3 => Some(7),
+        // `is_any_native_record` is in `io_lib`.
+        OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
         OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
         OPCODE_BS_GET_TAIL | OPCODE_BS_GET_POSITION => Some(3),
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
         OPCODE_BS_GET_UTF8 | OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
         OPCODE_BS_SKIP_UTF8 => Some(4),
         OPCODE_BS_SET_POSITION => Some(2),
-        OPCODE_GC_BIF1 => Some(5),
-        OPCODE_GC_BIF2 => Some(6),
         OPCODE_BADRECORD => Some(1),
-        OPCODE_NIF_START | OPCODE_IF_END | OPCODE_BUILD_STACKTRACE => Some(0),
+        OPCODE_IF_END | OPCODE_BUILD_STACKTRACE => Some(0),
         // `raw_raise` is in `gen_statem:call/3`.
         OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_LT | OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
+        OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
-        OPCODE_TEST_IS_INTEGER
-        | OPCODE_TEST_IS_FLOAT
+        OPCODE_TEST_IS_FLOAT
         | OPCODE_TEST_IS_NUMBER
         | OPCODE_TEST_IS_ATOM
         | OPCODE_TEST_IS_PID
         | OPCODE_TEST_IS_BINARY
         | OPCODE_TEST_IS_LIST
         | OPCODE_TEST_IS_MAP
-        | OPCODE_TEST_IS_BOOLEAN
-        | OPCODE_TEST_IS_BITSTR
-        | OPCODE_IS_FUNCTION => Some(2),
+        | OPCODE_TEST_IS_BITSTR => Some(2),
         // `is_port Fail Src` is in `erlang:is_port/1` and `erlang:open_port/2`.
         OPCODE_TEST_IS_PORT => Some(2),
         // `try_case_end Src` is in `erlang:processes_next/1`.
-        OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_CALL_FUN | OPCODE_TRY_CASE_END => Some(1),
-        OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_MAP_EXACT => Some(5),
+        OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_TRY_CASE_END => Some(1),
+        OPCODE_PUT_MAP_ASSOC => Some(5),
         OPCODE_GET_MAP_ELEMENTS | OPCODE_HAS_MAP_FIELDS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),
-        OPCODE_GET_TL => Some(2),
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
-        OPCODE_MAKE_FUN3 => Some(3),
         OPCODE_BS_CREATE_BIN => Some(6),
         OPCODE_BS_INIT_WRITABLE => Some(0),
         OPCODE_BS_MATCH => Some(3),
@@ -1293,6 +1614,26 @@ fn skip_counted_operands(data: &[u8], cursor: &mut usize) -> Result<(), BeamErro
         return Err(error("BEAM instruction operand list exceeds code chunk"));
     }
     skip_operands(data, cursor, operand_count)
+}
+
+/// Skip the `Live` operand of an instruction that can collect garbage.
+///
+/// ERTS gives `Live` the operand type `t` (`ops.tab`), and the loader matches
+/// `t` only to the `u` tag (`beam_makeops`, `define_type_bit('t', ...)`). The
+/// ERTS garbage collector keeps X registers `0..Live` alive. PBeam has no
+/// process heap to collect, so this function does not keep the count. It
+/// validates the `u` tag and moves the cursor past the operand.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// skip_live_registers(&[0x20], &mut cursor)?;
+/// assert_eq!(cursor, 1);
+/// assert!(skip_live_registers(&[0x03], &mut 0).is_err());
+/// ```
+fn skip_live_registers(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
+    read_operand(data, cursor, TAG_UNSIGNED).map(|_live_registers| ())
 }
 
 /// Skip a fixed number of compact operands.
@@ -1402,12 +1743,36 @@ fn skip_bytes(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), BeamE
     Ok(())
 }
 
-/// Read the extended list header of `select_val`, `select_tuple_arity`, or
-/// `update_record` and return the number of pairs in the list.
+/// Read the extended list header of an operand list, such as the
+/// environment of `make_fun3`, and return the number of items in the list.
 ///
 /// The header is the literal tag with `LIST_SUBTAG`, then an unsigned item
-/// count. A count that is odd, or larger than the bytes left in the chunk,
-/// is malformed.
+/// count. A count larger than the bytes left in the chunk is malformed.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// // {list,[{x,0}]}
+/// assert_eq!(read_list_count(&[0x17, 0x10, 0x03], &mut cursor)?, 1);
+/// assert_eq!(cursor, 2);
+/// ```
+fn read_list_count(data: &[u8], cursor: &mut usize) -> Result<usize, BeamError> {
+    if read_integer(data, cursor, TAG_LITERAL)? != LIST_SUBTAG {
+        return Err(error("unsupported BEAM list operand"));
+    }
+    let item_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+        .map_err(|_| error("BEAM list operand is too large"))?;
+    // Each item takes at least one byte, so a larger count is malformed.
+    if item_count > data.len().saturating_sub(*cursor) {
+        return Err(error("BEAM list operand exceeds code chunk"));
+    }
+    Ok(item_count)
+}
+
+/// Read the extended list header of `select_val`, `select_tuple_arity`, or
+/// `update_record` and return the number of pairs in the list. An odd item
+/// count is malformed.
 ///
 /// # Examples
 ///
@@ -1417,15 +1782,7 @@ fn skip_bytes(data: &[u8], cursor: &mut usize, count: usize) -> Result<(), BeamE
 /// assert_eq!(read_pair_count(&[0x17, 0x40], &mut cursor)?, 2);
 /// ```
 fn read_pair_count(data: &[u8], cursor: &mut usize) -> Result<usize, BeamError> {
-    if read_integer(data, cursor, TAG_LITERAL)? != LIST_SUBTAG {
-        return Err(error("unsupported BEAM pair list"));
-    }
-    let item_count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
-        .map_err(|_| error("BEAM pair list is too large"))?;
-    // Each item takes at least one byte, so a larger count is malformed.
-    if item_count > data.len().saturating_sub(*cursor) {
-        return Err(error("BEAM pair list exceeds code chunk"));
-    }
+    let item_count = read_list_count(data, cursor)?;
     if item_count % 2 != 0 {
         return Err(error("BEAM pair list has an incomplete pair"));
     }
@@ -1475,6 +1832,10 @@ fn read_move_operand(
         .get(*cursor)
         .ok_or_else(|| error("truncated BEAM operand"))?;
     match first & COMPACT_TAG_MASK {
+        TAG_INTEGER if first == HUGE_INTEGER_FIRST_BYTE => {
+            skip_operand(data, cursor)?;
+            Ok(Operand::UnsupportedInteger)
+        }
         TAG_INTEGER | TAG_ATOM => Ok(Operand::Value(read_value(data, cursor, atoms)?)),
         TAG_LITERAL => {
             let subtag = read_integer(data, cursor, TAG_LITERAL)?;
@@ -1511,20 +1872,20 @@ fn read_move_operand(
 mod tests {
     use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
     use super::{
-        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_UTF16,
-        OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GC_BIF2,
-        OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS, OPCODE_MAKE_FUN3,
-        OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE,
-        OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
-        OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_LT,
-        OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code, read_move_operand,
-        read_operand_pairs, read_pair_count, read_record_updates, skip_counted_operands,
-        skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
-        unsupported_opcode_operand_count,
+        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_INTEGER2,
+        OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH,
+        OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS,
+        OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD,
+        OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
+        OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
+        OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
+        read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
+        skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
+        test_kind, unsupported_opcode_operand_count,
     };
     use crate::{
         beam::code::{Instruction, Operand, TestKind},
-        term::{Atom, Term},
+        term::{Atom, AtomTable, Lambda, Term},
     };
 
     #[test]
@@ -1549,11 +1910,12 @@ mod tests {
         assert!(read_operand(&[], &mut 0, 0).is_err());
         assert!(read_value(&[0x03], &mut 0, &[]).is_err());
         assert!(read_value(&[0x12], &mut 0, &[]).is_err());
-        assert!(parse_code(&[], &[], &[], &[]).is_err());
-        assert!(parse_code(&[0; 20], &[], &[], &[]).is_err());
+        assert!(parse_code(&[], &[], &[], &[], &[]).is_err());
+        assert!(parse_code(&[0; 20], &[], &[], &[], &[]).is_err());
         assert!(
             parse_code(
                 &[0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                &[],
                 &[],
                 &[],
                 &[],
@@ -1600,6 +1962,17 @@ mod tests {
             &read_move_operand(&[0x17, 0x10], &mut 0, &[], &literals).unwrap(),
             Operand::Value(Term::List(values)) if values.is_empty()
         ));
+        // erlc 29.1.1 writes {integer,18446744073709551616} as 0xF9, the
+        // extra byte count 0, and nine payload bytes. It loads as an
+        // operand that fails when it runs; a short payload is malformed.
+        let mut cursor = 0;
+        let huge = [0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(matches!(
+            read_move_operand(&huge, &mut cursor, &[], &literals).unwrap(),
+            Operand::UnsupportedInteger
+        ));
+        assert_eq!(cursor, huge.len());
+        assert!(read_move_operand(&huge[..10], &mut 0, &[], &literals).is_err());
         assert!(read_move_operand(&[0x47, 0x20], &mut 0, &[], &literals).is_err());
         assert!(read_move_operand(&[0x27, 0x00], &mut 0, &[], &literals).is_err());
         assert!(read_move_operand(&[0x06], &mut 0, &[], &literals).is_err());
@@ -1618,11 +1991,11 @@ mod tests {
             code
         };
 
-        assert!(parse_code(&code(&[59, 3, 21, 39]), &[], &[], &[]).is_err());
-        assert!(parse_code(&code(&[59, 3, 21, 23, 16]), &[], &[], &[]).is_err());
+        assert!(parse_code(&code(&[59, 3, 21, 39]), &[], &[], &[], &[]).is_err());
+        assert!(parse_code(&code(&[59, 3, 21, 23, 16]), &[], &[], &[], &[]).is_err());
         // A register as a selection value, with two items present.
         assert!(
-            parse_code(&code(&[59, 3, 21, 23, 32, 3, 21]), &[], &[], &[])
+            parse_code(&code(&[59, 3, 21, 23, 32, 3, 21]), &[], &[], &[], &[])
                 .unwrap_err()
                 .to_string()
                 .contains("unsupported BEAM selection value")
@@ -1630,7 +2003,7 @@ mod tests {
         // A count larger than the remaining bytes fails before any allocation.
         for opcode in [59, 60] {
             assert!(
-                parse_code(&code(&[opcode, 3, 21, 23, 32, 3]), &[], &[], &[])
+                parse_code(&code(&[opcode, 3, 21, 23, 32, 3]), &[], &[], &[], &[])
                     .unwrap_err()
                     .to_string()
                     .contains("exceeds code chunk")
@@ -1659,6 +2032,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .unwrap();
         assert!(matches!(
@@ -1684,10 +2058,77 @@ mod tests {
         ));
         // An X register cannot hold a catch tag.
         assert!(
-            parse_code(&code(&[0x68, 0x03, 0x75]), &[], &[], &[])
+            parse_code(&code(&[0x68, 0x03, 0x75]), &[], &[], &[], &[])
                 .unwrap_err()
                 .to_string()
                 .contains("unexpected BEAM operand tag 3")
+        );
+    }
+
+    #[test]
+    fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
+        let code = |instructions: &[u8]| {
+            let mut code = vec![0, 0, 0, 16];
+            code.extend([0; 11]);
+            code.push(2); // label 1 only
+            code.extend([0; 3]);
+            code.push(1); // one function
+            code.extend_from_slice(instructions);
+            code.push(0x03);
+            code
+        };
+        let mut table = AtomTable::new();
+        let atoms = ["prim_tty", "write_nif"].map(|name| table.put(name).unwrap());
+        let (instructions, _) = parse_code(
+            &code(&[
+                0x02, 0x12, 0x22, 0x20, // func_info prim_tty write_nif 2
+                0xB3, // nif_start
+            ]),
+            &atoms,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::FunctionInfo { .. },
+                Instruction::NifStart { name, arity: 2 },
+                Instruction::End,
+            ] if name == "write_nif"
+        ));
+        // ERTS loads `nif_start` after another instruction of the function,
+        // and a NIF replaces the function from its entry. So the dispatch
+        // goes before the `move`, which does not run for a bound MFA.
+        let (instructions, _) = parse_code(
+            &code(&[
+                0x02, 0x12, 0x22, 0x20, // func_info prim_tty write_nif 2
+                0x01, 0x10, // label 1
+                0x40, 0x12, 0x03, // move prim_tty x0
+                0xB3, // nif_start
+            ]),
+            &atoms,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::FunctionInfo { .. },
+                Instruction::Label(1),
+                Instruction::NifStart { name, arity: 2 },
+                Instruction::Move(..),
+                Instruction::End,
+            ] if name == "write_nif"
+        ));
+        assert_eq!(
+            parse_code(&code(&[0xB3]), &atoms, &[], &[], &[])
+                .unwrap_err()
+                .to_string(),
+            "BEAM nif_start has no func_info before it"
         );
     }
 
@@ -1714,6 +2155,7 @@ mod tests {
             ]),
             &[],
             &imports,
+            &[],
             &[],
         )
         .unwrap();
@@ -1754,7 +2196,7 @@ mod tests {
         ));
         for bif in [&[0x09, 0x20, 0x03][..], &[0x0A, 0x05, 0x20, 0x03, 0x03]] {
             assert!(
-                parse_code(&code(bif), &[], &imports, &[])
+                parse_code(&code(bif), &[], &imports, &[], &[])
                     .unwrap_err()
                     .to_string()
                     .contains("BEAM BIF import index 2 out of range")
@@ -1778,7 +2220,7 @@ mod tests {
             ("erlang".to_owned(), "element".to_owned(), 2),
             ("erlang".to_owned(), "element".to_owned(), 2),
         ];
-        let (instructions, _) = parse_code(&code, &[], &imports, &[]).unwrap();
+        let (instructions, _) = parse_code(&code, &[], &imports, &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
@@ -1819,7 +2261,7 @@ mod tests {
         // Bytes of `user_drv:server/3` in the pinned `user_drv.beam`:
         // {test,is_ne_exact,{f,157},[{x,0},{x,3}]}
         code.extend([0x2C, 0x0D, 0x9D, 0x03, 0x33, 0x03]);
-        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
@@ -1840,7 +2282,7 @@ mod tests {
         // Bytes of `group_probe:kind/1` in `fixtures/group/group_probe.beam`:
         // {test,is_ge,{f,22},[{tr,{x,1},{t_integer,{0,16777215}}},{integer,2}]}
         code.extend([0x28, 0x0D, 0x16, 0x57, 0x13, 0x20, 0x21, 0x03]);
-        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
@@ -1851,6 +2293,135 @@ mod tests {
                 },
                 Instruction::End,
             ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_is_lt_is_integer_and_is_boolean_tests_of_the_compare_probe_fixture() {
+        const COMPARE_PROBE: &[u8] = include_bytes!("../../../fixtures/compare/compare_probe.beam");
+        let next = [0x27, 0x75, 0x01, 0x57, 0x13, 0x10]; // next/1: is_lt f7 0 {tr,x1,1}
+        let width = [0x27, 0xF5, 0x03, 0x01]; // width/1: is_lt f15 x0 0
+        let is_integer = [0x2D, 0xB5, 0x03]; // kind/1: is_integer f11 x0
+        let is_boolean = [0x72, 0xC5, 0x03]; // kind/1: is_boolean f12 x0
+        for bytes in [&next[..], &width, &is_integer, &is_boolean] {
+            assert!(
+                COMPARE_PROBE
+                    .windows(bytes.len())
+                    .any(|window| window == bytes),
+                "{bytes:02X?} is not in compare_probe.beam"
+            );
+        }
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&next[..], &width, &is_integer, &is_boolean, &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::TestLess {
+                    fail_label: 7,
+                    left: Operand::Value(Term::Integer(0)),
+                    right: Operand::X(1),
+                },
+                Instruction::TestLess {
+                    fail_label: 15,
+                    left: Operand::X(0),
+                    right: Operand::Value(Term::Integer(0)),
+                },
+                Instruction::Test {
+                    kind: TestKind::Integer,
+                    fail_label: 11,
+                    value: Operand::X(0),
+                },
+                Instruction::Test {
+                    kind: TestKind::Boolean,
+                    fail_label: 12,
+                    value: Operand::X(0),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
+        const IO_START_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/io_start/io_start_probe.beam");
+        let get_tl = [OPCODE_GET_TL, 0x03, 0x03]; // rest/1: {get_tl,{x,0},{x,0}}
+        assert!(
+            IO_START_PROBE
+                .windows(get_tl.len())
+                .any(|window| window == get_tl),
+            "{get_tl:02X?} is not in io_start_probe.beam"
+        );
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&get_tl[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::GetTail {
+                    source: Operand::X(0),
+                    destination: Operand::X(0),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
+        const IO_START_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/io_start/io_start_probe.beam");
+        // update_guard/1: {put_map_exact,{f,38},{x,0},{x,0},1,
+        // {list,[{atom,output},{atom,cooked}]}}, with output as atom 18 and
+        // cooked as atom 19 of the module.
+        let put_map_exact = [
+            OPCODE_PUT_MAP_EXACT,
+            0x0D,
+            0x26,
+            0x03,
+            0x03,
+            0x10,
+            0x17,
+            0x20,
+            0x0A,
+            0x12,
+            0x0A,
+            0x13,
+        ];
+        assert!(
+            IO_START_PROBE
+                .windows(put_map_exact.len())
+                .any(|window| window == put_map_exact),
+            "{put_map_exact:02X?} is not in io_start_probe.beam"
+        );
+        let mut table = AtomTable::new();
+        let atoms: Vec<Atom> = (1..=17)
+            .map(|index| format!("atom{index}"))
+            .chain(["output".into(), "cooked".into()])
+            .map(|name| table.put(&name).unwrap())
+            .collect();
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&put_map_exact[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::PutMapExact {
+                    fail_label: 38,
+                    map: Operand::X(0),
+                    destination: Operand::X(0),
+                    pairs,
+                },
+                Instruction::End,
+            ] if matches!(
+                pairs.as_slice(),
+                [(Operand::Value(Term::Atom(key)), Operand::Value(Term::Atom(value)))]
+                    if key.name() == "output" && value.name() == "cooked"
+            )
         ));
     }
 
@@ -1872,7 +2443,7 @@ mod tests {
             0xA1, // call/3: raw_raise
             0x03,
         ]);
-        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
@@ -1930,7 +2501,7 @@ mod tests {
             0x71, 0x10, 0xB0, // terminate/7: {apply_last,1,11}
             0x03,
         ]);
-        let (instructions, _) = parse_code(&code, &[], &[], &[]).unwrap();
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
         assert!(matches!(
             instructions.as_slice(),
             [
@@ -1954,7 +2525,262 @@ mod tests {
         ));
         // `apply_last` without its deallocate operand is truncated.
         code.truncate(code.len() - 2);
-        assert!(parse_code(&code, &[], &[], &[]).is_err());
+        assert!(parse_code(&code, &[], &[], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction() {
+        const ARITH_PROBE: &[u8] = include_bytes!("../../../fixtures/arith/arith_probe.beam");
+        // up/1: gc_bif2 f34 live 1 '+'/2 {tr,x0,1} 1 x0
+        let up = [0x7D, 0x0D, 0x22, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03];
+        // minus_overflow/0: gc_bif2 f0 live 1 '-'/2 {tr,y0,1} {tr,x0,1} x0
+        let minus = [
+            0x7D, 0x05, 0x10, 0x10, 0x57, 0x04, 0x10, 0x57, 0x03, 0x10, 0x03,
+        ];
+        // neg/1: gc_bif1 f31 live 1 '-'/1 x0 x0
+        let neg = [0x7C, 0x0D, 0x1F, 0x10, 0x30, 0x03, 0x03];
+        for bytes in [&up[..], &minus, &neg] {
+            assert!(
+                ARITH_PROBE
+                    .windows(bytes.len())
+                    .any(|window| window == bytes),
+                "{bytes:02X?} is not in arith_probe.beam"
+            );
+        }
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&up[..], &minus, &neg, &[0x03]].concat());
+        let imports = vec![
+            ("erlang".to_owned(), "+".to_owned(), 2),
+            ("erlang".to_owned(), "-".to_owned(), 2),
+            ("erlang".to_owned(), "self".to_owned(), 0),
+            ("erlang".to_owned(), "-".to_owned(), 1),
+        ];
+        let (instructions, _) = parse_code(&code, &[], &imports, &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::Bif {
+                    fail_label: 34,
+                    module: plus_module,
+                    name: plus,
+                    arguments: plus_arguments,
+                    destination: Operand::X(0),
+                },
+                Instruction::Bif {
+                    fail_label: 0,
+                    module: minus_module,
+                    name: minus,
+                    arguments: minus_arguments,
+                    destination: Operand::X(0),
+                },
+                Instruction::Bif {
+                    fail_label: 31,
+                    module: negate_module,
+                    name: negate,
+                    arguments: negate_arguments,
+                    destination: Operand::X(0),
+                },
+                Instruction::End,
+            ] if plus_module == "erlang"
+                && plus == "+"
+                && matches!(
+                    plus_arguments.as_slice(),
+                    [Operand::X(0), Operand::Value(Term::Integer(1))]
+                )
+                && minus_module == "erlang"
+                && minus == "-"
+                && matches!(minus_arguments.as_slice(), [Operand::Y(0), Operand::X(0)])
+                && negate_module == "erlang"
+                && negate == "-"
+                && matches!(negate_arguments.as_slice(), [Operand::X(0)])
+        ));
+        // Without its destination and the end, the instruction is truncated.
+        code.truncate(code.len() - 2);
+        assert!(parse_code(&code, &[], &imports, &[], &[]).is_err());
+    }
+
+    /// Assert that `bytes` occur in `fixtures/funs/fun_probe.beam`, so a test
+    /// that takes its bytes from the fixture fails when the fixture changes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_in_fun_probe(&[0x4B, 0x00]); // call_fun 0
+    /// ```
+    fn assert_in_fun_probe(bytes: &[u8]) {
+        const FUN_PROBE: &[u8] = include_bytes!("../../../fixtures/funs/fun_probe.beam");
+        assert!(
+            FUN_PROBE.windows(bytes.len()).any(|window| window == bytes),
+            "{bytes:02X?} is not in fun_probe.beam"
+        );
+    }
+
+    #[test]
+    fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
+        let code = |instructions: &[u8]| {
+            let mut code = vec![0, 0, 0, 16];
+            code.extend([0; 16]);
+            code.extend_from_slice(instructions);
+            code.push(0x03);
+            code
+        };
+        let atoms = vec![Atom::from_static("safe").unwrap()];
+        let module = AtomTable::new().put("fun_probe").unwrap();
+        let lambda =
+            |index, label, arity| Lambda::new(module.clone(), index, 31_263_486, label, arity);
+        // The first five `FunT` entries of the fixture, with their free
+        // variable counts.
+        let lambdas = vec![
+            (lambda(0, 127, 1), 1),
+            (lambda(1, 125, 0), 0),
+            (lambda(2, 123, 1), 1),
+            (lambda(3, 121, 0), 0),
+            (lambda(4, 112, 1), 1),
+        ];
+        let parse =
+            |instructions: &[u8]| parse_code(&code(instructions), &atoms, &[], &[], &lambdas);
+        let make_pair = [0xAB, 0x40, 0x03, 0x17, 0x10, 0x03]; // make_pair/1: make_fun3 4 x0 [x0]
+        let make_const = [0xAB, 0x10, 0xA4, 0x17, 0x00]; // locals/0: make_fun3 1 y10 []
+        let call_fun = [0x4B, 0x00]; // locals/0: call_fun 0
+        let tail_call = [0xB2, 0x00, 0x10, 0x57, 0x13, 0x20]; // tail_call/1: call_fun2 0 1 x1
+        for bytes in [&make_pair[..], &make_const, &call_fun, &tail_call] {
+            assert_in_fun_probe(bytes);
+        }
+        // The fixture bytes, then a `call_fun2` with the atom tag `safe` and
+        // the fun in `y0`.
+        let (instructions, _) = parse(
+            &[
+                &make_pair[..],
+                &make_const,
+                &call_fun,
+                &tail_call,
+                &[0xB2, 0x12, 0x00, 0x04],
+            ]
+            .concat(),
+        )
+        .unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::MakeFun { lambda: first, free, destination: Operand::X(0) },
+                Instruction::MakeFun { lambda: second, free: empty, destination: Operand::Y(10) },
+                Instruction::CallFun { arity: 0, function: Operand::X(0), tail: false, .. },
+                Instruction::CallFun { arity: 1, function: Operand::X(1), tail: false, .. },
+                Instruction::CallFun { arity: 0, function: Operand::Y(0), tail: false, .. },
+                Instruction::End,
+            ] if *first == lambdas[4].0
+                && matches!(free.as_slice(), [Operand::X(0)])
+                && *second == lambdas[1].0
+                && empty.is_empty()
+        ));
+        let error = |instructions: &[u8]| parse(instructions).unwrap_err().to_string();
+        // A lambda number outside the table, or an environment of another
+        // length than the free variables of the entry.
+        for make_fun3 in [
+            [0xAB, 0x50, 0x03, 0x17, 0x00],
+            [0xAB, 0x40, 0x03, 0x17, 0x00],
+        ] {
+            assert!(error(&make_fun3).contains("does not match the lambda table"));
+        }
+        assert_eq!(
+            error(&[0xB2, 0x02, 0x00, 0x03]),
+            "BEAM atom index zero is invalid"
+        );
+        assert_eq!(
+            error(&[0xB2, 0x22, 0x00, 0x03]),
+            "BEAM atom index 2 out of range"
+        );
+        assert_eq!(
+            error(&[0xB2, 0x00, 0x00, 0x12]),
+            "BEAM call_fun2 function is not a register"
+        );
+        assert!(error(&[0xB2, 0x01, 0x00, 0x03]).contains("unexpected BEAM operand tag 1"));
+    }
+
+    #[test]
+    fn joins_a_fun_call_in_a_tail_position_as_the_erts_loader() {
+        // `call_fun Arity | deallocate D | return => i_call_fun_last Arity D`
+        // and the same for `call_fun2` (`jit/arm/ops.tab:868-880`). Only
+        // the three adjacent instructions join.
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend_from_slice(&[
+            0x4B, 0x10, 0x12, 0x20, 0x13, // call_fun 1, deallocate 2, return
+            0xB2, 0x00, 0x00, 0x04, // call_fun2 0 0 y0
+            0x12, 0x00, 0x13, // deallocate 0, return
+            0x4B, 0x00, 0x13, // call_fun 0, return
+            0x12, 0x00, 0x13, // deallocate 0, return
+            0x03,
+        ]);
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::CallFun {
+                    arity: 1,
+                    function: Operand::X(1),
+                    tail: true,
+                    deallocate: 2
+                },
+                Instruction::CallFun {
+                    arity: 0,
+                    function: Operand::Y(0),
+                    tail: true,
+                    deallocate: 0
+                },
+                Instruction::CallFun {
+                    arity: 0,
+                    function: Operand::X(0),
+                    tail: false,
+                    deallocate: 0
+                },
+                Instruction::Return,
+                Instruction::Deallocate { stack_size: 0 },
+                Instruction::Return,
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_is_function_tests_of_the_fun_probe_fixture() {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        // Bytes of `fun_probe:kind/1` in `fixtures/funs/fun_probe.beam`, then
+        // an `is_function2` with the arity in `x1`.
+        let is_function2 = [0x73, 0x0D, 0x64, 0x57, 0x03, 0x40, 0x11]; // is_function2 f100 x0 1
+        let is_function = [0x4D, 0x0D, 0x65, 0x57, 0x03, 0x40]; // is_function f101 x0
+        assert_in_fun_probe(&is_function2);
+        assert_in_fun_probe(&is_function);
+        code.extend(is_function2);
+        code.extend(is_function);
+        code.extend([
+            0x73, 0x0D, 0x64, 0x03, 0x13, // is_function2 f100 x0 x1
+            0x03,
+        ]);
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::TestFunctionArity {
+                    fail_label: 100,
+                    value: Operand::X(0),
+                    arity: Operand::Value(Term::Integer(1)),
+                },
+                Instruction::Test {
+                    kind: TestKind::Function,
+                    fail_label: 101,
+                    value: Operand::X(0),
+                },
+                Instruction::TestFunctionArity {
+                    fail_label: 100,
+                    value: Operand::X(0),
+                    arity: Operand::X(1),
+                },
+                Instruction::End,
+            ]
+        ));
     }
 
     #[test]
@@ -1975,7 +2801,7 @@ mod tests {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([OPCODE_PUT_TUPLE2, 0x03, 0x27]);
-        assert!(parse_code(&code, &[], &[], &[]).is_err());
+        assert!(parse_code(&code, &[], &[], &[], &[]).is_err());
     }
 
     #[test]
@@ -2012,11 +2838,9 @@ mod tests {
         for (opcode, count) in [
             (OPCODE_TEST_HEAP, 2),
             (OPCODE_BIF0, 2),
-            (OPCODE_GC_BIF2, 6),
-            (OPCODE_TEST_LT, 3),
+            (OPCODE_TEST_EQ, 3),
             (OPCODE_TEST_TAGGED_TUPLE, 4),
             (OPCODE_TEST_IS_MAP, 2),
-            (OPCODE_GET_TL, 2),
             (OPCODE_BADMATCH, 1),
             (OPCODE_TEST_IS_PORT, 2),
             (OPCODE_TRY_CASE_END, 1),
@@ -2025,13 +2849,15 @@ mod tests {
             (OPCODE_PUT_RECORD, 6),
             (OPCODE_PUT_TUPLE2, 2),
             (OPCODE_INIT_YREGS, 1),
-            (OPCODE_MAKE_FUN3, 3),
             (OPCODE_BS_CREATE_BIN, 6),
             (OPCODE_BS_INIT_WRITABLE, 0),
             (OPCODE_BS_MATCH, 3),
             (OPCODE_RAW_RAISE, 0),
             (OPCODE_BS_GET_UTF16, 5),
             (OPCODE_BS_GET_UTF32, 5),
+            (OPCODE_BS_GET_INTEGER2, 7),
+            (OPCODE_GC_BIF3, 7),
+            (OPCODE_IS_ANY_NATIVE_RECORD, 2),
         ] {
             assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
         }
@@ -2039,7 +2865,7 @@ mod tests {
 
         let mut cursor = 0;
         assert!(skip_unsupported_instruction(255, &[], &mut cursor).is_err());
-        assert!(skip_unsupported_instruction(OPCODE_GC_BIF2, &[0], &mut cursor).is_err());
+        assert!(skip_unsupported_instruction(OPCODE_BS_GET_UTF16, &[0], &mut cursor).is_err());
         assert!(skip_counted_operands(&[0x10], &mut 0).is_err());
         assert!(skip_counted_operands(&[0x20], &mut 0).is_err());
     }

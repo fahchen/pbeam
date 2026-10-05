@@ -9,20 +9,32 @@ use crate::{
         code::{self, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::{Atom, AtomTable, Term},
+    term::{Atom, AtomTable, Fun, Map, Target, Term},
 };
 use std::collections::HashMap;
 
 mod bif;
+mod native;
 
-use bif::{BifResult, INSTRUCTION_CALLS, is_bif};
+use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function};
+
+/// The largest number of arguments of `erlang:apply/3`. ERTS `apply` copies
+/// at most `MAX_REG - 1` arguments to the X registers (`erl_vm.h:55`,
+/// `beam_common.c:1501-1513`), so a longer list raises `system_limit`.
+const APPLY_MAX_ARGUMENTS: usize = 1023;
+
+/// The largest number of arguments of `erlang:apply/2`. The JIT stops at
+/// `MAX_REG - 1` arguments, because the loader keeps the highest X register
+/// (`erl_vm.h:55`, `jit/arm/instr_fun.cpp:290-297`), so a longer list
+/// raises `system_limit`.
+const APPLY_FUN_MAX_ARGUMENTS: usize = 1022;
 
 #[derive(Debug)]
 pub struct BeamProgram {
     /// The loaded modules by name.
     modules: HashMap<String, BeamModule>,
-    /// The atom table of the program. ERTS has one atom table for each
-    /// emulator, so each program has its own table.
+    /// The atom table of the loaded modules. ERTS has one atom table for
+    /// each emulator, so each run starts its own table from a copy of it.
     atoms: AtomTable,
 }
 
@@ -88,8 +100,10 @@ impl BeamProgram {
         })
     }
 
-    /// Return the atom of a name when the atom table of the program holds
-    /// it. Use it to build terms that compare with the terms of the program.
+    /// Return the atom of a name when the atom table of the loaded modules
+    /// holds it. Use it to build terms that compare with the terms of the
+    /// program. The table does not hold the atoms that a run makes, for
+    /// example with `erlang:list_to_atom/1`.
     ///
     /// # Examples
     ///
@@ -127,7 +141,7 @@ impl BeamProgram {
             .exports
             .get(&(function.to_owned(), arity))
             .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))?;
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(self.atoms.clone());
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
         while scheduler.schedule_next().is_some() {
             match self.run(&mut scheduler)? {
@@ -276,6 +290,22 @@ impl BeamProgram {
                         jump(module, process, *fail_label)?;
                     }
                 }
+                Instruction::TestFunctionArity {
+                    fail_label,
+                    value,
+                    arity,
+                } => {
+                    let result = is_function(&read(process, value)?, &read(process, arity)?);
+                    // The `badarg` of the check fails the test and raises
+                    // nothing.
+                    let passed = matches!(
+                        result,
+                        BifResult::Value(value) if value == Term::static_atom("true")
+                    );
+                    if !passed {
+                        jump(module, process, *fail_label)?;
+                    }
+                }
                 Instruction::SelectTupleArity {
                     value,
                     fail_label,
@@ -308,6 +338,12 @@ impl BeamProgram {
                     tail,
                     deallocate,
                 } => {
+                    if *tail {
+                        // `apply_last` releases the frame before it tests
+                        // the module and the function name
+                        // (`emit_apply_last` in `jit/arm/instr_call.cpp:307-316`).
+                        release_frame(process, *deallocate)?;
+                    }
                     let module = read(process, &Operand::X(*arity))?;
                     let name = read(process, &Operand::X(arity.saturating_add(1)))?;
                     // ERTS `fixed_apply` (`beam_common.c`) raises `badarg`
@@ -320,14 +356,38 @@ impl BeamProgram {
                         }
                         continue;
                     };
-                    if let Some(outcome) = self.call_external(
-                        scheduler,
-                        module.name(),
-                        name.name(),
-                        *arity,
-                        *tail,
-                        *deallocate,
-                    )? {
+                    if let Some(outcome) =
+                        self.call_mfa(scheduler, module.name(), name.name(), *arity, *tail)?
+                    {
+                        return Ok(outcome);
+                    }
+                }
+                Instruction::MakeFun {
+                    lambda,
+                    free,
+                    destination,
+                } => {
+                    let free = free
+                        .iter()
+                        .map(|operand| read(process, operand))
+                        .collect::<Result<_, _>>()?;
+                    let fun = Term::Fun(Fun::new(lambda.clone(), free));
+                    write(process, destination, fun)?;
+                }
+                Instruction::CallFun {
+                    arity,
+                    function,
+                    tail,
+                    deallocate,
+                } => {
+                    let fun = read(process, function)?;
+                    if *tail {
+                        // `i_call_fun_last` releases the frame before it
+                        // tests the fun (`emit_i_call_fun2_last` in
+                        // `jit/arm/instr_fun.cpp:425-462`).
+                        release_frame(process, *deallocate)?;
+                    }
+                    if let Some(outcome) = self.call_fun(scheduler, &fun, *arity, *tail)? {
                         return Ok(outcome);
                     }
                 }
@@ -427,6 +487,11 @@ impl BeamProgram {
                         }
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
+                        TestKind::Function => matches!(value, Term::Fun(_)),
+                        TestKind::Integer => matches!(value, Term::Integer(_)),
+                        TestKind::Boolean => {
+                            matches!(&value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
+                        }
                     };
                     if !passed {
                         jump(module, process, *fail_label)?;
@@ -476,6 +541,30 @@ impl BeamProgram {
                     }
                     write(process, destination, map)?;
                 }
+                Instruction::PutMapExact {
+                    fail_label,
+                    map,
+                    destination,
+                    pairs,
+                } => {
+                    let map = read(process, map)?;
+                    let pairs = pairs
+                        .iter()
+                        .map(|(key, value)| Ok((read(process, key)?, read(process, value)?)))
+                        .collect::<Result<Vec<_>, BeamError>>()?;
+                    // ERTS `update_map_exact` jumps to a fail label that is
+                    // not 0, and else raises the exception
+                    // (`jit/arm/instr_map.cpp:678-719`).
+                    match update_map_exact(map, pairs)? {
+                        Ok(map) => write(process, destination, map)?,
+                        Err(_) if *fail_label != 0 => jump(module, process, *fail_label)?,
+                        Err(reason) => {
+                            if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                                return Ok(outcome);
+                            }
+                        }
+                    }
+                }
                 Instruction::Swap(left, right) => {
                     let left_value = read(process, left)?;
                     let right_value = read(process, right)?;
@@ -497,6 +586,18 @@ impl BeamProgram {
                     right,
                 } => {
                     if read(process, left)? == read(process, right)? {
+                        jump(module, process, *fail_label)?;
+                    }
+                }
+                Instruction::TestLess {
+                    fail_label,
+                    left,
+                    right,
+                } => {
+                    if !read(process, left)?
+                        .compare(&read(process, right)?)?
+                        .is_lt()
+                    {
                         jump(module, process, *fail_label)?;
                     }
                 }
@@ -615,6 +716,15 @@ impl BeamProgram {
                     let mut values = nonempty_list(read(process, source)?)?;
                     write(process, destination, values.swap_remove(0))?;
                 }
+                Instruction::GetTail {
+                    source,
+                    destination,
+                } => {
+                    let mut values = nonempty_list(read(process, source)?)?;
+                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+                    values.remove(0);
+                    write(process, destination, Term::List(values))?;
+                }
                 Instruction::Send => {
                     let Term::Pid(target) = read(process, &Operand::X(0))? else {
                         return Err(error("unsupported BEAM send target"));
@@ -671,6 +781,19 @@ impl BeamProgram {
                     let reference = read(process, reference)?;
                     process.mailbox.clear_marker(&reference);
                 }
+                Instruction::NifStart { name, arity } => {
+                    // ERTS `erlang:load_nif/2` writes the NIF call over this
+                    // instruction, so each entry to the function runs the
+                    // NIF and returns its result to the caller
+                    // (`beam/erl_nif.c:4922-4928`, `5050-5098`). A function
+                    // without a binding runs its BEAM stub body.
+                    let arguments = call_arguments(&process.registers, *arity)?;
+                    if let Some(result) = native::call(&module.name, name, &arguments)
+                        && let Some(outcome) = self.finish_bif(process, result, true)?
+                    {
+                        return Ok(outcome);
+                    }
+                }
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::Return => {
                     if let Some(outcome) = return_from_frame(process)? {
@@ -697,10 +820,15 @@ impl BeamProgram {
     }
 
     /// Call `module:name/arity` with the arguments in the X registers, as
-    /// `call_ext` and `apply` do. A tail call first checks that the frame
-    /// has `deallocate` Y registers, then replaces the frame. A BIF runs
-    /// before the module code, as in ERTS. Return the outcome when the
-    /// process exits.
+    /// `call_ext` does. A tail call first checks that the frame has
+    /// `deallocate` Y registers, then replaces the frame. A tail call of
+    /// `erlang:apply/2` or `erlang:apply/3` releases the Y registers before
+    /// the apply, as the ERTS loader makes `i_apply_fun_last` and
+    /// `i_apply_last` (`jit/arm/ops.tab:649-657`), so an exception of the
+    /// apply does not see the catch tags of the frame. A tail call of a BIF
+    /// keeps the frame until the BIF returns, as `call_light_bif`,
+    /// `deallocate`, and `return` do (`jit/arm/ops.tab:711-712`). Return the
+    /// outcome when the process exits.
     ///
     /// # Examples
     ///
@@ -708,8 +836,8 @@ impl BeamProgram {
     /// // `erlang:exit/1` in a tail call with no catch tag exits the process.
     /// let outcome = program.call_external(&mut scheduler, "erlang", "exit", 1, true, 0)?;
     /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
-    /// // `erlang:apply/3` runs as an instruction in ERTS.
-    /// assert!(program.call_external(&mut scheduler, "erlang", "apply", 3, false, 0).is_err());
+    /// // A tail call from a frame with one Y register must deallocate it.
+    /// assert!(program.call_external(&mut scheduler, "erlang", "self", 0, true, 0).is_err());
     /// ```
     fn call_external(
         &self,
@@ -721,8 +849,40 @@ impl BeamProgram {
         deallocate: u32,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
-        if tail && deallocate as usize != current_frame(process).stack.len() {
+        if tail && matches!((module, name, arity), ("erlang", "apply", 2 | 3)) {
+            release_frame(process, deallocate)?;
+        } else if tail && deallocate as usize != current_frame(process).stack.len() {
             return Err(error("invalid BEAM tail-call stack size"));
+        }
+        self.call_mfa(scheduler, module, name, arity, tail)
+    }
+
+    /// Call `module:name/arity` with the arguments in the X registers. The
+    /// calls of `erlang:apply/2` and `erlang:apply/3` run as the ERTS
+    /// `i_apply_fun` and `i_apply` instructions. A BIF runs before the module
+    /// code, as in ERTS. Return the outcome when the process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // `erlang:apply(erlang, self, [])` runs the `self/0` BIF.
+    /// let outcome = program.call_mfa(&mut scheduler, "erlang", "apply", 3, false)?;
+    /// assert!(outcome.is_none());
+    /// // `erlang:yield/0` runs as an instruction in ERTS.
+    /// assert!(program.call_mfa(&mut scheduler, "erlang", "yield", 0, false).is_err());
+    /// ```
+    fn call_mfa(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        name: &str,
+        arity: u32,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        match (module, name, arity) {
+            ("erlang", "apply", 2) => return self.apply_fun(scheduler, tail),
+            ("erlang", "apply", 3) => return self.apply_mfa(scheduler, tail),
+            _ => {}
         }
         if INSTRUCTION_CALLS.contains(&(module, name, arity)) {
             // ponytail: ERTS runs these calls as instructions; see "Instruction calls" in docs/erts-differences.md.
@@ -730,42 +890,227 @@ impl BeamProgram {
                 "unsupported instruction call {module}:{name}/{arity}"
             )));
         }
-        let (frame, process) = if is_bif(module, name, arity) {
+        let process = scheduler.current_process_mut();
+        if is_bif(module, name, arity) {
             let arguments = call_arguments(&process.registers, arity)?;
             let result = self.bif(scheduler, module, name, arguments)?;
-            let process = scheduler.current_process_mut();
-            match result {
-                BifResult::Value(value) => {
-                    write(process, &Operand::X(0), value)?;
-                    return if tail {
-                        return_from_frame(process)
-                    } else {
-                        Ok(None)
-                    };
-                }
-                BifResult::Raise { class, reason } => return Ok(raise(process, class, reason)),
-                BifResult::Trap {
-                    module,
-                    function,
-                    arguments,
-                } => {
-                    let arity = u32::try_from(arguments.len())
-                        .map_err(|_| error("arity exceeds BEAM limit"))?;
-                    for (index, argument) in (0..).zip(arguments) {
-                        write(process, &Operand::X(index), argument)?;
-                    }
-                    (self.mfa_frame(module, function, arity)?, process)
+            return self.finish_bif(scheduler.current_process_mut(), result, tail);
+        }
+        enter_frame(process, self.mfa_frame(module, name, arity)?, tail);
+        Ok(None)
+    }
+
+    /// Run `erlang:apply(Module, Function, Arguments)` with the arguments in
+    /// `x0` to `x2`, as ERTS `apply` (`beam_common.c:1434-1526`) does for the
+    /// `i_apply` instructions. The function and the module must be atoms,
+    /// and `Arguments` must be a list, else the call raises `error:badarg`.
+    /// An apply of `erlang:apply/3` continues with its inner call. A list of
+    /// 1024 or more elements raises `error:system_limit`. Then the elements
+    /// go to `x0` onwards, and the call continues as `call_ext` does. Return
+    /// the outcome when the process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // x0 = erlang, x1 = apply, x2 = [fixture, id, [w]] calls fixture:id(w).
+    /// assert!(program.apply_mfa(&mut scheduler, false)?.is_none());
+    /// // x0 = 1 raises `error:badarg`.
+    /// assert!(matches!(program.apply_mfa(&mut scheduler, true)?, Some(Outcome::Exit { .. })));
+    /// ```
+    fn apply_mfa(
+        &self,
+        scheduler: &mut Scheduler,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        let mut call = call_arguments(&process.registers, 3)?;
+        let (module, name, arguments) = loop {
+            // Each wrong form raises the same `badarg`, so one pattern checks
+            // the function, the module, and the list.
+            let [Term::Atom(module), Term::Atom(name), Term::List(arguments)] = &mut call[..]
+            else {
+                let badarg = Term::static_atom("badarg");
+                return Ok(raise(process, ExceptionClass::Error, badarg));
+            };
+            let arguments = std::mem::take(arguments);
+            if (module.name(), name.name()) != ("erlang", "apply") || arguments.len() != 3 {
+                break (module.clone(), name.clone(), arguments);
+            }
+            call = arguments;
+        };
+        if arguments.len() > APPLY_MAX_ARGUMENTS {
+            let system_limit = Term::static_atom("system_limit");
+            return Ok(raise(process, ExceptionClass::Error, system_limit));
+        }
+        let arity = arguments.len() as u32;
+        for (index, argument) in (0..).zip(arguments) {
+            write(process, &Operand::X(index), argument)?;
+        }
+        self.call_mfa(scheduler, module.name(), name.name(), arity, tail)
+    }
+
+    /// Run `erlang:apply(Fun, Arguments)` with the arguments in `x0` and
+    /// `x1`, as the JIT `emit_apply_fun_shared` (`jit/arm/instr_fun.cpp:253-328`)
+    /// does for the `i_apply_fun` instructions. `Arguments` must be a list,
+    /// else the call raises `error:badarg`. A list of 1023 or more elements
+    /// raises `error:system_limit`. Then the elements go to `x0` onwards, and
+    /// the call continues as `call_fun` does, so a term that is not a fun
+    /// raises `badfun` only after these checks. Return the outcome when the
+    /// process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // x0 = fun(X) -> {a, X} end, x1 = [x] enters the lambda with x0 = x.
+    /// assert!(program.apply_fun(&mut scheduler, false)?.is_none());
+    /// // x0 = notfun, x1 = notalist raises `error:badarg`.
+    /// assert!(matches!(program.apply_fun(&mut scheduler, true)?, Some(Outcome::Exit { .. })));
+    /// ```
+    fn apply_fun(
+        &self,
+        scheduler: &mut Scheduler,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        let fun = read(process, &Operand::X(0))?;
+        let mut list = read(process, &Operand::X(1))?;
+        let Term::List(arguments) = &mut list else {
+            let badarg = Term::static_atom("badarg");
+            return Ok(raise(process, ExceptionClass::Error, badarg));
+        };
+        let arguments = std::mem::take(arguments);
+        if arguments.len() > APPLY_FUN_MAX_ARGUMENTS {
+            let system_limit = Term::static_atom("system_limit");
+            return Ok(raise(process, ExceptionClass::Error, system_limit));
+        }
+        let arity = arguments.len() as u32;
+        for (index, argument) in (0..).zip(arguments) {
+            write(process, &Operand::X(index), argument)?;
+        }
+        self.call_fun(scheduler, &fun, arity, tail)
+    }
+
+    /// Call `fun` with the arguments in `x0` to `x(arity - 1)`, as ERTS
+    /// `call_fun` (`beam_common.c:1605-1731`) does for `call_fun` and
+    /// `call_fun2`. A term that is not a fun raises `error:{badfun, Term}`. A
+    /// fun of another arity raises `error:{badarity, {Fun, Arguments}}`,
+    /// where `Arguments` lists `x0` to `x(arity - 1)`. Else a local fun puts
+    /// its free variables in `x(arity)` onwards and enters the code of the
+    /// lambda, and an external fun calls its function as `call_ext` does, so
+    /// a BIF runs as a BIF. A tail call replaces the active frame. Return the
+    /// outcome when the process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // x0 = one and fun(X) -> {Tag, X} end enters the lambda with x1 = Tag.
+    /// assert!(program.call_fun(&mut scheduler, &pair, 1, false)?.is_none());
+    /// // fun erlang:self/0 runs the `self/0` BIF.
+    /// assert!(program.call_fun(&mut scheduler, &self_fun, 0, false)?.is_none());
+    /// // An atom raises `error:{badfun, notfun}`.
+    /// assert!(program.call_fun(&mut scheduler, &Term::static_atom("notfun"), 0, false)?.is_some());
+    /// ```
+    fn call_fun(
+        &self,
+        scheduler: &mut Scheduler,
+        fun: &Term,
+        arity: u32,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        let fun = match fun {
+            Term::Fun(fun) if fun.target().arity() == arity => fun,
+            Term::Fun(_) => {
+                let arguments = call_arguments(&process.registers, arity)?;
+                let call = Term::Tuple(vec![fun.clone(), Term::List(arguments)]);
+                let reason = Term::Tuple(vec![Term::static_atom("badarity"), call]);
+                return Ok(raise(process, ExceptionClass::Error, reason));
+            }
+            _ => {
+                let reason = Term::Tuple(vec![Term::static_atom("badfun"), fun.clone()]);
+                return Ok(raise(process, ExceptionClass::Error, reason));
+            }
+        };
+        let lambda = match fun.target() {
+            Target::Local(lambda) => lambda,
+            Target::External {
+                module, function, ..
+            } => return self.call_mfa(scheduler, module.name(), function.name(), arity, tail),
+        };
+        for (register, value) in (arity..).zip(fun.free()) {
+            write(process, &Operand::X(register), value.clone())?;
+        }
+        let total_arity = arity + fun.free().len() as u32;
+        let frame = self.frame(lambda.module().name(), lambda.label(), total_arity)?;
+        enter_frame(process, frame, tail);
+        Ok(None)
+    }
+
+    /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
+    /// does for BIFs and NIFs (`emu/bif_instrs.tab:604-636`; JIT
+    /// `emit_bif_nif_epilogue` in `jit/arm/instr_bif.cpp:631-719`). A value
+    /// goes to x0, and a tail call then returns from the frame. An exception
+    /// goes to the error handler. A trap writes its arguments to the X
+    /// registers and enters the target function. Return the outcome when the
+    /// process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // A value in a body call stays in the frame.
+    /// let outcome = program.finish_bif(process, BifResult::Value(Term::static_atom("ok")), false)?;
+    /// assert!(outcome.is_none());
+    /// // `exit(normal)` with no catch tag exits the process.
+    /// let raise = BifResult::Raise { class: ExceptionClass::Exit, reason: Term::static_atom("normal") };
+    /// assert!(matches!(program.finish_bif(process, raise, true)?, Some(Outcome::Exit { .. })));
+    /// ```
+    fn finish_bif(
+        &self,
+        process: &mut ProcessState,
+        result: BifResult,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        match result {
+            BifResult::Value(value) => {
+                write(process, &Operand::X(0), value)?;
+                if tail {
+                    return_from_frame(process)
+                } else {
+                    Ok(None)
                 }
             }
-        } else {
-            (self.mfa_frame(module, name, arity)?, process)
-        };
-        if tail {
-            *current_frame(process) = frame;
-        } else {
-            process.frames.push(frame);
+            BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
+            BifResult::Trap {
+                module,
+                function,
+                arguments,
+            } => {
+                let arity = u32::try_from(arguments.len())
+                    .map_err(|_| error("arity exceeds BEAM limit"))?;
+                for (index, argument) in (0..).zip(arguments) {
+                    write(process, &Operand::X(index), argument)?;
+                }
+                enter_frame(process, self.mfa_frame(module, function, arity)?, tail);
+                Ok(None)
+            }
         }
-        Ok(None)
+    }
+}
+
+/// Enter `frame`: a tail call replaces the active frame, and a body call
+/// pushes it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// enter_frame(&mut process, program.mfa_frame("external", "effect", 1)?, false);
+/// assert_eq!(process.frames.len(), 2);
+/// ```
+fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
+    if tail {
+        *current_frame(process) = frame;
+    } else {
+        process.frames.push(frame);
     }
 }
 
@@ -826,6 +1171,26 @@ fn current_frame(process: &mut ProcessState) -> &mut Frame {
         .expect("a running process has an active frame")
 }
 
+/// Release the Y registers of the active frame before a tail call, as the
+/// ERTS `deallocate` does. The frame must have `deallocate` Y registers.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The frame has one Y register.
+/// release_frame(&mut process, 1)?;
+/// assert!(current_frame(&mut process).stack.is_empty());
+/// assert!(release_frame(&mut process, 1).is_err());
+/// ```
+fn release_frame(process: &mut ProcessState, deallocate: u32) -> Result<(), BeamError> {
+    let stack = &mut current_frame(process).stack;
+    if stack.len() != deallocate as usize {
+        return Err(error("invalid BEAM tail-call stack size"));
+    }
+    stack.clear();
+    Ok(())
+}
+
 /// Pop the active frame. Return the exit outcome when it was the last frame.
 ///
 /// # Examples
@@ -843,6 +1208,45 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
         reason: Term::static_atom("normal"),
         result: Some(result),
     }))
+}
+
+/// Replace the value of each existing key of a map, as ERTS
+/// `erts_gc_update_map_exact` does (`beam_common.c:2203-2345`). The pairs go
+/// in the flatmap key order, as the ERTS loader sorts them, so the first key
+/// that the map does not hold is the first missing key in that order. Return
+/// the new map, or the exception reason `{badmap, Map}` for a term that is
+/// not a map and `{badkey, Key}` for a missing key. A key of a type that a
+/// PBeam map cannot hold, for example a tuple, is a missing key.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))])?);
+/// let cooked = vec![(Term::static_atom("output"), Term::static_atom("cooked"))];
+/// assert!(matches!(update_map_exact(map, cooked.clone())?, Ok(Term::Map(_))));
+/// let badmap = update_map_exact(Term::static_atom("foo"), cooked)?.unwrap_err();
+/// assert_eq!(badmap, Term::Tuple(vec![Term::static_atom("badmap"), Term::static_atom("foo")]));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when the key order depends on two different
+/// references (`Map::sort_pairs`).
+fn update_map_exact(
+    mut map: Term,
+    mut pairs: Vec<(Term, Term)>,
+) -> Result<Result<Term, Term>, BeamError> {
+    let Term::Map(entries) = &mut map else {
+        return Ok(Err(Term::Tuple(vec![Term::static_atom("badmap"), map])));
+    };
+    Map::sort_pairs(&mut pairs)?;
+    for (key, value) in pairs {
+        let Some(existing) = entries.get_mut(&key) else {
+            return Ok(Err(Term::Tuple(vec![Term::static_atom("badkey"), key])));
+        };
+        *existing = value;
+    }
+    Ok(Ok(map))
 }
 
 /// Raise an exception in the process, as ERTS `handle_error` does: continue
@@ -1082,6 +1486,9 @@ fn read_operand(
         Operand::UnsupportedLiteral(index) => {
             Err(error(format!("unsupported BEAM literal index {index}")))
         }
+        Operand::UnsupportedInteger => Err(error(
+            "unsupported BEAM integer operand outside the 64-bit range: needs a bignum",
+        )),
         Operand::X(index) => registers
             .get(*index as usize)
             .and_then(Clone::clone)
@@ -1133,7 +1540,9 @@ fn write_operand(
             }
             stack[index] = StackSlot::Term(value);
         }
-        Operand::Value(_) => return Err(error("invalid BEAM move destination")),
+        Operand::Value(_) | Operand::UnsupportedInteger => {
+            return Err(error("invalid BEAM move destination"));
+        }
     }
     Ok(())
 }
@@ -1143,11 +1552,14 @@ mod tests {
     use std::{collections::HashMap, path::PathBuf, process::Command};
 
     use super::bif::{BIFS, INSTRUCTION_CALLS};
-    use super::{BeamProgram, call_arguments, function_at_label, read_operand, write_operand};
+    use super::{
+        BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand,
+        write_operand,
+    };
     use crate::{
         BeamModule, Map, Term,
         beam::code::{self, Instruction, Operand, TestKind},
-        term::{AtomTable, test_atom},
+        term::{Atom, AtomTable, Lambda, test_atom},
     };
 
     /// The runtime error of a root process that exits with an uncaught
@@ -1232,6 +1644,152 @@ mod tests {
     }
 
     #[test]
+    fn tests_a_fun_with_a_register_arity_as_erl_is_function() {
+        // The OTP 29.1.1 compiler emits `bif is_function` for an arity that
+        // is not a literal, but the loader accepts `is_function2` with a
+        // register arity (`jit/arm/ops.tab:605`). The JIT then calls
+        // `erl_is_function` and passes only on `true`
+        // (`jit/arm/instr_common.cpp:1266-1283`), so a `badarg` arity fails
+        // the test and raises nothing.
+        let run = |arity| {
+            let lambda = Lambda::new(Atom::from_static("erlang").unwrap(), 0, 0, 2, 1);
+            make_program(
+                vec![
+                    Instruction::MakeFun {
+                        lambda,
+                        free: Vec::new(),
+                        destination: Operand::X(0),
+                    },
+                    Instruction::Move(Operand::Value(arity), Operand::X(1)),
+                    Instruction::TestFunctionArity {
+                        fail_label: 3,
+                        value: Operand::X(0),
+                        arity: Operand::X(1),
+                    },
+                    Instruction::Move(atom("pass"), Operand::X(0)),
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Move(atom("fail"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+            .unwrap()
+        };
+        assert_eq!(run(Term::Integer(1)), test_atom("pass"));
+        for arity in [Term::Integer(0), Term::Integer(-1), test_atom("a")] {
+            assert_eq!(run(arity), test_atom("fail"));
+        }
+    }
+
+    #[test]
+    fn calls_an_external_fun_of_a_missing_function_as_call_ext() {
+        // A call of an external fun goes to the export entry of its
+        // function, as `call_ext` does (`beam_common.c:1605-1731`). ERTS 29.1.1
+        // raises `undef` for `(erlang:make_fun(missing, run, 0))()`; PBeam
+        // gives the runtime error of the row "Exception raise sites".
+        let program = make_program(
+            vec![
+                Instruction::Move(atom("missing"), Operand::X(0)),
+                Instruction::Move(atom("run"), Operand::X(1)),
+                Instruction::Move(Operand::Value(Term::Integer(0)), Operand::X(2)),
+                erlang_call("make_fun", 3, false),
+                Instruction::CallFun {
+                    arity: 0,
+                    function: Operand::X(0),
+                    tail: false,
+                    deallocate: 0,
+                },
+                Instruction::Return,
+            ],
+            0,
+        );
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            "unresolved external MFA missing:run/0"
+        );
+    }
+
+    #[test]
+    fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
+        // `fun_probe:tail_wait/1` ends with `call_fun 0`, `deallocate 1`, and
+        // `return`, which ERTS runs as `i_call_fun_last`
+        // (`jit/arm/ops.tab:868`). The lambda replaces the frame of
+        // `tail_wait/1`, so the process that waits in the lambda has one
+        // frame, and a loop of tail fun calls uses constant stack, as in ERTS.
+        let program =
+            BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
+        let label = program.modules["fun_probe"].exports[&("tail_wait".to_owned(), 1)];
+        let mut scheduler = Scheduler::new(program.atoms.clone());
+        let frame = program.frame("fun_probe", label, 1).unwrap();
+        scheduler.start(frame, vec![Term::Integer(1)]).unwrap();
+        scheduler.schedule_next().unwrap();
+        assert!(matches!(
+            program.run(&mut scheduler).unwrap(),
+            Outcome::Wait
+        ));
+        let frames = &scheduler.current_process_mut().frames;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].function, "-tail_wait/1-fun-0-");
+    }
+
+    #[test]
+    fn requires_the_frame_size_for_a_fun_call_in_a_tail_position() {
+        // `i_call_fun_last` releases exactly the Y registers of the frame.
+        let program = make_program(
+            vec![
+                Instruction::Move(atom("notfun"), Operand::X(0)),
+                Instruction::CallFun {
+                    arity: 0,
+                    function: Operand::X(0),
+                    tail: true,
+                    deallocate: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        );
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            "invalid BEAM tail-call stack size"
+        );
+    }
+
+    #[test]
+    fn exits_the_process_with_an_uncaught_badfun() {
+        // A fun call that no `try` or `catch` handles exits the process with
+        // `{{badfun, Term}, Stack}`, as ERTS `call_fun` raises it
+        // (`beam_common.c:1617-1621`). PBeam gives the stack trace `[]`.
+        let program = make_program(
+            vec![
+                Instruction::Move(atom("notfun"), Operand::X(0)),
+                Instruction::CallFun {
+                    arity: 0,
+                    function: Operand::X(0),
+                    tail: false,
+                    deallocate: 0,
+                },
+                Instruction::Return,
+            ],
+            0,
+        );
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            "root process exited with Tuple([Tuple([Atom(\"badfun\"), Atom(\"notfun\")]), List([])])"
+        );
+    }
+
+    #[test]
     fn reports_process_exits_and_unsupported_exit_signals() {
         let error = |body| run_with_child(body).unwrap_err().to_string();
         assert!(
@@ -1264,12 +1822,8 @@ mod tests {
             error(vec![erlang_call("is_alive", 0, false)])
                 .contains("unresolved external MFA erlang:is_alive/0")
         );
-        // The ERTS loader turns these calls into instructions. Their bodies in
-        // `erlang.beam` call themselves, so they must not run.
-        assert!(
-            error(vec![erlang_call("apply", 3, false)])
-                .contains("unsupported instruction call erlang:apply/3")
-        );
+        // The ERTS loader turns this call into an instruction. Its body in
+        // `erlang.beam` calls itself, so it must not run.
         assert!(
             error(vec![erlang_call("hibernate", 0, false)])
                 .contains("unsupported instruction call erlang:hibernate/0")
@@ -1583,6 +2137,115 @@ mod tests {
                 )],
             }])
             .contains("unsupported map key Tuple([])")
+        );
+    }
+
+    #[test]
+    fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
+        // erlc puts an `is_map` test before each `put_map_exact`, so compiled
+        // code does not reach this case. ERTS still raises `{badmap, Map}`
+        // with fail label 0 and jumps to another fail label
+        // (`beam_common.c:2231-2234`).
+        let run = |fail_label, map| {
+            make_program(
+                vec![
+                    Instruction::PutMapExact {
+                        fail_label,
+                        map,
+                        destination: Operand::X(0),
+                        pairs: vec![(atom("output"), atom("cooked"))],
+                    },
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Move(atom("failed"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        assert_eq!(
+            run(0, atom("foo")).unwrap_err().to_string(),
+            "root process exited with Tuple([Tuple([Atom(\"badmap\"), Atom(\"foo\")]), List([])])"
+        );
+        assert_eq!(run(3, atom("foo")).unwrap(), test_atom("failed"));
+        // A key of a type that a PBeam map cannot hold is a missing key.
+        let tuple_key = |fail_label| {
+            make_program(
+                vec![
+                    Instruction::PutMapExact {
+                        fail_label,
+                        map: Operand::Value(Term::Map(Map::new())),
+                        destination: Operand::X(0),
+                        pairs: vec![(Operand::Value(Term::Tuple(vec![])), atom("cooked"))],
+                    },
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Move(atom("failed"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        assert_eq!(
+            tuple_key(0).unwrap_err().to_string(),
+            "root process exited with Tuple([Tuple([Atom(\"badkey\"), Tuple([])]), List([])])"
+        );
+        assert_eq!(tuple_key(3).unwrap(), test_atom("failed"));
+        // Two different references have no PBeam order.
+        let references = make_program(
+            vec![Instruction::PutMapExact {
+                fail_label: 0,
+                map: Operand::Value(Term::Map(Map::new())),
+                destination: Operand::X(0),
+                pairs: vec![
+                    (
+                        Operand::Value(Term::Reference(crate::Reference(1))),
+                        atom("a"),
+                    ),
+                    (
+                        Operand::Value(Term::Reference(crate::Reference(2))),
+                        atom("b"),
+                    ),
+                ],
+            }],
+            0,
+        )
+        .execute("fixture", "main", &[]);
+        assert!(
+            references
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported term order of two references")
+        );
+    }
+
+    #[test]
+    fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
+        // A flatmap accepts the integer 2^59, and a hashmap does not yet.
+        let pairs = |keys: std::ops::RangeInclusive<i64>| {
+            let pairs = keys.map(|key| (Term::Integer(key), Term::Integer(0)));
+            Term::Map(Map::from_pairs(pairs.collect()).unwrap())
+        };
+        let merge = make_program(
+            vec![
+                Instruction::Move(Operand::Value(pairs(1 << 59..=1 << 59)), Operand::X(0)),
+                Instruction::Move(Operand::Value(pairs(1..=32)), Operand::X(1)),
+                Instruction::CallExternal {
+                    arity: 2,
+                    module: "maps".into(),
+                    name: "merge".into(),
+                    tail: true,
+                    deallocate: 0,
+                },
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[]);
+        assert_eq!(
+            merge.unwrap_err().to_string(),
+            "unsupported map key Integer(576460752303423488)"
         );
     }
 
@@ -2336,6 +2999,39 @@ mod tests {
     }
 
     #[test]
+    fn puts_a_new_atom_into_the_atom_table_of_the_run() {
+        // ERTS has one atom table for each emulator, and
+        // `erlang:list_to_atom/1` gives a new atom the next index
+        // (`erts_atom_put`). A run starts with a copy of the table of the
+        // loaded modules, so `pbeam_alpha` gets index 1151 after
+        // `pbeam_zeta` (1150). The table of the loaded modules does not
+        // change, so each run gives the same index.
+        let mut program = make_program(
+            vec![
+                Instruction::Move(
+                    Operand::Value(Term::List(
+                        "pbeam_alpha"
+                            .bytes()
+                            .map(|byte| Term::Integer(i64::from(byte)))
+                            .collect(),
+                    )),
+                    Operand::X(0),
+                ),
+                erlang_call("list_to_atom", 1, true),
+            ],
+            0,
+        );
+        assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1150);
+        for _ in 0..2 {
+            assert!(matches!(
+                program.execute("fixture", "main", &[]).unwrap(),
+                Term::Atom(ref alpha) if alpha.name() == "pbeam_alpha" && alpha.index() == 1151
+            ));
+        }
+        assert_eq!(program.atom("pbeam_alpha"), None);
+    }
+
+    #[test]
     fn returns_the_iovec_of_a_binary_and_of_a_list() {
         // On pinned ERTS, `erlang:iolist_to_iovec(<<"Hello">>)` returns
         // `[<<"Hello">>]`, and `[1, [<<2>>]]` returns `[<<1,2>>]` through the
@@ -2710,14 +3406,72 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_apply_of_an_instruction_call_or_a_stack_mismatch_and_raises_badarg() {
-        let error = |body| run_with_apply_targets(body).unwrap_err().to_string();
-        // ERTS runs `erlang:apply(fixture, id, [x, y, z])` through `{apply,3}`
-        // and gives `{x,y,z}`. PBeam keeps the instruction-call guard.
-        assert_eq!(
-            error(apply_body(3, atom("erlang"), atom("apply"))),
-            "unsupported instruction call erlang:apply/3"
+    fn applies_erlang_apply_3_as_the_i_apply_instruction() {
+        let xyz = || Term::List(vec![test_atom("x"), test_atom("y"), test_atom("z")]);
+        let apply_of = |module: Term, function: Term, arguments: Term| {
+            vec![
+                Instruction::Move(Operand::Value(module), Operand::X(0)),
+                Instruction::Move(Operand::Value(function), Operand::X(1)),
+                Instruction::Move(Operand::Value(arguments), Operand::X(2)),
+            ]
+        };
+        // `M:F(fixture, id, [x, y, z])` with `erlang` and `apply` compiles to
+        // `{apply,3}`. ERTS `fixed_apply` runs `apply` (`beam_common.c`),
+        // which calls `fixture:id/3` and gives `{x,y,z}`.
+        let mut body = apply_of(test_atom("fixture"), test_atom("id"), xyz());
+        body.extend(apply_body(3, atom("erlang"), atom("apply")));
+        let tuple = Term::Tuple(vec![test_atom("x"), test_atom("y"), test_atom("z")]);
+        assert_eq!(run_with_apply_targets(body).unwrap(), tuple);
+        // `erlang:apply(erlang, apply, [fixture, id, [x, y, z]])` as a tail
+        // `call_ext` runs the inner call.
+        let mut body = apply_of(
+            test_atom("erlang"),
+            test_atom("apply"),
+            Term::List(vec![test_atom("fixture"), test_atom("id"), xyz()]),
         );
+        body.push(erlang_call("apply", 3, true));
+        assert_eq!(run_with_apply_targets(body).unwrap(), tuple);
+        // An apply of `erlang:apply` with a list that is not three elements
+        // calls `erlang:apply/2`. ERTS 29.1.1 raises `badarg` for
+        // `apply(erlang, apply, [fixture, id])`, because `id` is not a list.
+        let mut body = apply_of(
+            test_atom("erlang"),
+            test_atom("apply"),
+            Term::List(vec![test_atom("fixture"), test_atom("id")]),
+        );
+        body.push(erlang_call("apply", 3, true));
+        assert_eq!(
+            run_with_apply_targets(body).unwrap_err().to_string(),
+            BADARG_EXIT
+        );
+        // `apply` copies at most 1023 arguments to the X registers. ERTS gives
+        // `undef` for `apply(nomod, nofun, L1023)` and raises `system_limit`
+        // for a list of 1024 elements.
+        let mut body = apply_of(
+            test_atom("fixture"),
+            test_atom("missing"),
+            Term::List(vec![test_atom("x"); 1023]),
+        );
+        body.push(erlang_call("apply", 3, true));
+        assert_eq!(
+            run_with_apply_targets(body).unwrap_err().to_string(),
+            "unresolved external MFA fixture:missing/1023"
+        );
+        let mut body = apply_of(
+            test_atom("fixture"),
+            test_atom("missing"),
+            Term::List(vec![test_atom("x"); 1024]),
+        );
+        body.push(erlang_call("apply", 3, true));
+        assert_eq!(
+            run_with_apply_targets(body).unwrap_err().to_string(),
+            "root process exited with Tuple([Atom(\"system_limit\"), List([])])"
+        );
+    }
+
+    #[test]
+    fn rejects_an_apply_with_a_stack_mismatch_and_raises_badarg() {
+        let error = |body| run_with_apply_targets(body).unwrap_err().to_string();
         // ERTS 29.1.1 raises `badarg` for `M:F()` with `1` and `f`, or with
         // `m` and `1`.
         assert_eq!(
@@ -3048,27 +3802,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_is_ge_on_two_different_references() {
+    fn rejects_is_ge_and_is_lt_on_two_different_references() {
         // ERTS orders two references by the scheduler thread that made each
         // one; this is the "Term order" row in `docs/erts-differences.md`.
         let reference = |number| Operand::Value(Term::Reference(crate::Reference(number)));
-        let body = vec![
-            Instruction::TestGreaterEqual {
-                fail_label: 3,
-                left: reference(1),
-                right: reference(2),
-            },
-            Instruction::Label(3),
-            Instruction::Return,
-        ];
-        assert_eq!(
-            make_program(body, 0)
-                .execute("fixture", "main", &[])
-                .unwrap_err()
-                .to_string(),
-            "unsupported term order of two references Reference(Reference(1)) and \
-             Reference(Reference(2))"
-        );
+        let is_ge = Instruction::TestGreaterEqual {
+            fail_label: 3,
+            left: reference(1),
+            right: reference(2),
+        };
+        let is_lt = Instruction::TestLess {
+            fail_label: 3,
+            left: reference(1),
+            right: reference(2),
+        };
+        for test in [is_ge, is_lt] {
+            let body = vec![test, Instruction::Label(3), Instruction::Return];
+            assert_eq!(
+                make_program(body, 0)
+                    .execute("fixture", "main", &[])
+                    .unwrap_err()
+                    .to_string(),
+                "unsupported term order of two references Reference(Reference(1)) and \
+                 Reference(Reference(2))"
+            );
+        }
     }
 
     #[test]
@@ -3134,16 +3892,22 @@ mod tests {
                 BADARG_EXIT
             );
         }
-        // ERTS 29.1.1: the current_stacktrace of another process is its
-        // frames, a process that is not alive gives undefined,
-        // process_info(self(), {dictionary, k}) is {{dictionary, k}, undefined},
-        // and process_info(self(), [registered_name]) is
-        // [{registered_name, []}]. PBeam does not implement them yet.
+        // ERTS 29.1.1: a process that is not alive gives undefined for each
+        // valid item, also a list of items (`erl_bif_info.c:1384-1386`).
+        for item in [
+            test_atom("current_stacktrace"),
+            Term::List(vec![test_atom("registered_name")]),
+        ] {
+            assert_eq!(
+                process_info(Term::Pid(crate::ProcessId(99)), item).unwrap(),
+                test_atom("undefined")
+            );
+        }
+        // ERTS 29.1.1: process_info(self(), {dictionary, k}) is
+        // {{dictionary, k}, undefined}, process_info(self(), [registered_name])
+        // is [{registered_name, []}], and process_info(self(), status) is
+        // {status, running}. PBeam does not implement them yet.
         for (process, item) in [
-            (
-                Term::Pid(crate::ProcessId(99)),
-                test_atom("current_stacktrace"),
-            ),
             (root(), dictionary()),
             (root(), Term::List(vec![test_atom("registered_name")])),
             (root(), test_atom("status")),
@@ -3165,6 +3929,28 @@ mod tests {
             )
             .unwrap(),
             Term::List(Vec::new())
+        );
+    }
+
+    #[test]
+    fn rejects_the_current_stacktrace_of_another_process() {
+        // ERTS 29.1.1 returns the frames of another live process. PBeam
+        // records no stack frames, so it returns a runtime error.
+        let error = run_with_child(vec![
+            Instruction::Move(atom("fixture"), Operand::X(0)),
+            Instruction::Move(atom("child"), Operand::X(1)),
+            Instruction::Move(
+                Operand::Value(Term::List(vec![test_atom("normal")])),
+                Operand::X(2),
+            ),
+            erlang_call("spawn", 3, false),
+            Instruction::Move(atom("current_stacktrace"), Operand::X(1)),
+            erlang_call("process_info", 2, true),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "unsupported erlang:process_info/2 arguments Pid(ProcessId(1)), Atom(\"current_stacktrace\")"
         );
     }
 

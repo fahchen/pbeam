@@ -17,7 +17,10 @@
 //! such as `maps:keys/1`. Other key types need the ERTS flatmap key order
 //! and hash for bignums and compound terms, which PBeam does not have yet.
 
+use std::cmp::Ordering;
+
 use super::Term;
+use crate::error::BeamError;
 
 /// The largest number of keys in a flatmap (`MAP_SMALL_MAP_LIMIT` in a
 /// release build of ERTS). A map with more keys is a hashmap.
@@ -178,6 +181,83 @@ impl Map {
             }
             level += 1;
         }
+    }
+
+    /// Return the value of a key for a change in place, or `None` when the
+    /// map does not hold the key. The key lookup is the one of `get`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// *map.get_mut(&Term::Integer(1)).unwrap() = Term::Integer(3);
+    /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(3)));
+    /// assert!(map.get_mut(&Term::Integer(2)).is_none());
+    /// ```
+    pub(crate) fn get_mut(&mut self, key: &Term) -> Option<&mut Term> {
+        let hamt = match &mut self.repr {
+            Repr::Flat(pairs) => {
+                return pairs
+                    .iter_mut()
+                    .find(|(existing, _)| existing == key)
+                    .map(|(_, value)| value);
+            }
+            Repr::Hash(hamt) => hamt,
+        };
+        let hash = map_hash(key)?;
+        let mut node = &mut hamt.root;
+        let mut level = 0;
+        loop {
+            match node.child_mut(slot(hash, level))? {
+                Child::Leaf(existing, value) => return (existing == key).then_some(value),
+                Child::Node(inner) => node = inner,
+            }
+            level += 1;
+        }
+    }
+
+    /// Sort key and value pairs by the flatmap key order, as the ERTS loader
+    /// sorts the pairs of a map instruction (`beam_load_map_key_sort`,
+    /// `beam_transform_helpers.c:54-115`) with `erts_cmp_flatmap_keys`
+    /// (`erl_utils.h:266-271`): two atoms compare by atom index, and each
+    /// other two keys compare in the term order. `put_map_exact` then
+    /// reports the first missing key in this order. The keys can be of any
+    /// type, also a type that a PBeam map cannot hold.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut pairs = vec![
+    ///     (Term::Tuple(vec![]), Term::Integer(0)),
+    ///     (Term::static_atom("abs"), Term::Integer(1)),
+    ///     (Term::static_atom("value"), Term::Integer(2)),
+    /// ];
+    /// Map::sort_pairs(&mut pairs)?;
+    /// // value has atom index 745, abs has atom index 762, and an atom
+    /// // comes before a tuple.
+    /// assert_eq!(pairs[0].0, Term::static_atom("value"));
+    /// assert_eq!(pairs[2].0, Term::Tuple(vec![]));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order depends on two different
+    /// references, which have no PBeam term order. Compiled code cannot get
+    /// this error: the ERTS loader sorts only literal keys, and a literal
+    /// cannot hold a reference.
+    pub(crate) fn sort_pairs(pairs: &mut [(Term, Term)]) -> Result<(), BeamError> {
+        let mut failure = None;
+        pairs.sort_by(|(left, _), (right, _)| {
+            let order = match (left, right) {
+                (Term::Atom(left), Term::Atom(right)) => Ok(left.index().cmp(&right.index())),
+                _ => left.compare(right),
+            };
+            order.unwrap_or_else(|error| {
+                failure.get_or_insert(error);
+                Ordering::Equal
+            })
+        });
+        failure.map_or(Ok(()), Err)
     }
 
     /// Set a key to a value. Replace the value when the key exists. A
@@ -379,6 +459,22 @@ impl Node {
         Some(&self.children[(self.bitmap & (bit - 1)).count_ones() as usize])
     }
 
+    /// Return the child in a slot for a change in place, or `None` when the
+    /// slot is free.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Node::empty().child_mut(3).is_none());
+    /// ```
+    fn child_mut(&mut self, slot: u32) -> Option<&mut Child> {
+        let bit = 1 << slot;
+        if self.bitmap & bit == 0 {
+            return None;
+        }
+        Some(&mut self.children[(self.bitmap & (bit - 1)).count_ones() as usize])
+    }
+
     /// Build the node at `level` for two leaves whose hashes select the
     /// same slots above `level`. Add one node with one child for each level
     /// where the two hashes still select the same slot, then put the two
@@ -495,7 +591,7 @@ fn mix64(mut hash: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{Child, Map, Node, map_hash, mix64};
-    use crate::term::{AtomTable, Term, test_atom as atom};
+    use crate::term::{AtomTable, Reference, Term, test_atom as atom};
 
     fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
         Map::from_pairs(
@@ -712,6 +808,74 @@ mod tests {
             Err(Term::Integer(1 << 59))
         );
         assert_eq!(map.len(), 32);
+    }
+
+    #[test]
+    fn changes_the_value_of_an_existing_key_in_place() {
+        let mut flat = integers([1, 2]);
+        *flat.get_mut(&Term::Integer(2)).unwrap() = Term::Integer(0);
+        assert_eq!(flat.get(&Term::Integer(2)), Some(&Term::Integer(0)));
+        assert!(flat.get_mut(&Term::Integer(3)).is_none());
+        // Each root slot of 1..64 is used, so a key can be in a node below the root.
+        let mut hash = integers(1..=64);
+        for key in 1..=64 {
+            *hash.get_mut(&Term::Integer(key)).unwrap() = Term::Integer(-key);
+        }
+        assert!((1..=64).all(|key| hash.get(&Term::Integer(key)) == Some(&Term::Integer(-key))));
+        assert!(hash.get_mut(&Term::Integer(65)).is_none());
+        assert!(integers(1..=33).get_mut(&Term::Integer(34)).is_none());
+        assert!(hash.get_mut(&Term::Integer(1 << 59)).is_none());
+        assert!(hash.get_mut(&Term::Tuple(vec![])).is_none());
+    }
+
+    #[test]
+    fn sorts_pairs_by_the_flatmap_key_order() {
+        // ERTS 29.1.1: (id(#{}))#{abs := 1, value := 2} raises {badkey,value},
+        // because value (index 745) comes before abs (index 762).
+        let mut pairs = vec![
+            (Term::static_atom("abs"), Term::Integer(1)),
+            (Term::static_atom("value"), Term::Integer(2)),
+            (Term::Integer(7), Term::Integer(3)),
+        ];
+        Map::sort_pairs(&mut pairs).unwrap();
+        let sorted: Vec<_> = pairs.iter().map(|(key, _)| key.clone()).collect();
+        assert_eq!(
+            sorted,
+            [
+                Term::Integer(7),
+                Term::static_atom("value"),
+                Term::static_atom("abs")
+            ]
+        );
+        // ERTS 29.1.1: (id(#{a => 1}))#{{value} := 1, {abs} := 2} raises
+        // {badkey,{abs}}: in a tuple, atoms compare by name. A tuple comes
+        // before a map, and a map before [].
+        let mut compound = vec![
+            (Term::List(vec![]), Term::Integer(1)),
+            (Term::Map(Map::new()), Term::Integer(2)),
+            (
+                Term::Tuple(vec![Term::static_atom("value")]),
+                Term::Integer(3),
+            ),
+            (
+                Term::Tuple(vec![Term::static_atom("abs")]),
+                Term::Integer(4),
+            ),
+            (Term::static_atom("abs"), Term::Integer(5)),
+        ];
+        Map::sort_pairs(&mut compound).unwrap();
+        let values: Vec<_> = compound.iter().map(|(_, value)| value.clone()).collect();
+        assert_eq!(values, [5, 4, 3, 2, 1].map(Term::Integer));
+        let mut references = vec![
+            (Term::Reference(Reference(1)), Term::Integer(1)),
+            (Term::Reference(Reference(2)), Term::Integer(2)),
+        ];
+        assert!(
+            Map::sort_pairs(&mut references)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported term order of two references")
+        );
     }
 
     #[test]

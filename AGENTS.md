@@ -13,7 +13,7 @@ Write `docs/agents/knowledge.md` and `docs/agents/improvements.md` only through 
 ## Scope and source of truth
 
 - Read `README.md` and `docs/portable-beam-spec.md` before changing runtime behavior.
-- Use GitHub Issues and their dependencies for planning and progress. Track at-a-glance status on the [project board](https://github.com/users/fahchen/projects/2). Do not create `tasks/plan.md`, `tasks/todo.md`, or another file-based task tracker.
+- Use GitHub Issues and their dependencies for planning and progress. Track at-a-glance status on the [project board](https://github.com/users/fahchen/projects/2). Do not create `tasks/plan.md`, `tasks/todo.md`, or another file-based task tracker. The one exception is `docs/backlog.md`: record there each optional improvement and each idea to consider later that has no current consumer or no owner decision, with its reason, evidence, and trigger. When an item gets a consumer or an owner decision, open a task issue for it and remove the item in the PR that closes the issue.
 - Stay within the requested task. Resolve unknowns explicitly; do not invent Terra identity, compatibility guarantees, supported platforms, or working commands.
 
 ## GitHub hierarchy
@@ -75,6 +75,12 @@ Whenever direction or a solution changes, update the affected task bodies, accep
 ## Tools and collaboration
 
 - Set development tool versions in `mise.toml`; local and CI setup must use those pins rather than duplicating version settings in commands or fixture projects.
+- Use these compact `mise` tasks in development loops. They print results and failures, not full logs. `mise run check` stays the merge gate. `mise run <task> --help` shows the arguments.
+  - `mise run check-brief`: run `mise run check`. Print the result and the coverage line, or the failure. The full log is in `target/check.log`.
+  - `mise run test-focus [cargo test arguments] [-- <harness arguments>]`: run selected Rust tests, for example `--test order -- --nocapture`.
+  - `mise run erts-eval [--pa <dir>] '<expressions>'`: evaluate on the pinned OTP as `erl -eval` does. Print the value or `exception <class>: <reason>`. The evaluating process traps exits, as with `erl -eval`. Exit signals arrive as `{'EXIT', From, Reason}` messages. Only `exit(self(), kill)` stops the runtime.
+  - `mise run disasm <module | file.beam> [name/arity]...`: print the `beam_disasm` instructions without `{line,_}`.
+  - `mise run fixture-beam [--write] [fixtures/<dir>/<name>.erl]...`: compile the Erlang fixtures and compare them with the committed `.beam` files, except `CInf` and `Dbgi`.
 - Prefer `fd` and `rg`; use `ast-grep` for structural searches when appropriate.
 - Use fish for shell work and `gh` for GitHub operations. Prefer command help before external documentation. Use Context7 for library/API documentation and setup/code-generation guidance when available.
 - Follow the directory's JavaScript lockfile: `bun.lock` means bun; `pnpm-lock.yaml` means pnpm.
