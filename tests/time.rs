@@ -78,7 +78,9 @@ fn raises_badarg_for_a_unit_that_is_not_valid_as_pinned_erts() {
 #[test]
 fn converts_the_time_unit_in_the_pinned_erlang_beam() {
     // `erts_internal:perf_counter_unit/0` gives `ERTS_HRTIME_UNIT`
-    // (`erl_time_sup.c:2607-2610`), and `erlang:convert_time_unit/3` runs
+    // (`erl_time_sup.c:2607-2610`) on each current host, also on x86_64
+    // (row "Clocks" in `docs/erts-differences.md`), so the ERTS reference
+    // is the same on each host. `erlang:convert_time_unit/3` runs
     // `gc_bif` `erlang:'*'/2`, `erlang:'-'/2`, and `erlang:'div'/2`
     // (`erlang.erl:5299-5340`). It rounds a negative time down.
     let program = program();
