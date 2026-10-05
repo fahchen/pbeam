@@ -90,7 +90,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Keep the frames that `erlang:raise/3` receives
 
-- After #155 (PR #177), `erlang:raise/3` checks its stack trace argument but gives the exception `[]`. ERTS keeps the frames (at most `backtrace_depth`) with the location `[]`. The "Exception stack trace" row of PR #177 records this.
+- After #155 (PR #177), `erlang:raise/3` checks its stack trace argument but gives the exception `[]`. ERTS keeps the frames, at most `backtrace_depth` and at least one when the depth is 0. A frame with a location keeps its location, and an old frame without a location (`{Fun, Args}` or `{M, F, A}`) gets the location `[]` (`bif.c:1626-1681`). The "Exception stack trace" row of PR #177 records this.
 - **Trigger:** the stack-trace work, or a consumer that reads raised frames.
 - **Source:** review of #155.
 
