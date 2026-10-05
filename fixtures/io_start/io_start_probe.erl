@@ -1,5 +1,5 @@
 -module(io_start_probe).
--export([lists/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
+-export([lists/0, reverse/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
          system_other/0, format/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
@@ -71,6 +71,17 @@ map_keys() ->
 
 key_guard(M, K) when M#{K := 2} =:= #{a => 2} -> updated;
 key_guard(_, _) -> other.
+
+%% `lists:reverse/2`, which the IO start path runs: the reversed first list,
+%% then the second term. An empty first list returns the second term
+%% itself, and a first term that is not a list raises badarg.
+reverse() ->
+    [lists:reverse(id([a, b, c]), id([d])),
+     lists:reverse(id([]), id(foo)),
+     lists:reverse(id([a]), id([])),
+     lists:reverse(id([]), id([])),
+     try lists:reverse(id(foo), id([])) catch error:R1 -> R1 end,
+     try lists:reverse(id(<<1>>), id(foo)) catch error:R2 -> R2 end].
 
 %% `maps:merge/2`, as prim_tty:options/1 (prim_tty.erl:329) runs it: the
 %% values of the second map win. A first argument that is not a map raises
