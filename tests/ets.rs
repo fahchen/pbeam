@@ -2,6 +2,10 @@ use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
 
+mod common;
+
+use common::pinned_beam;
+
 const ETS_PROBE: &[u8] = include_bytes!("../fixtures/ets/ets_probe.beam");
 
 /// Run `ets_probe:Function()` under the pinned ERTS and return its `~w`
@@ -173,6 +177,44 @@ fn checks_table_access_as_pinned_erts() {
     assert_eq!(
         reference("access"),
         b"[[{owner,true,true},{owner,{error,badarg},{error,badarg}},{{error,badarg},{error,badarg},{error,badarg}},{{error,badarg},{error,badarg},{error,badarg}},{owner,true,true}],{error,badarg},owner,stopped,{error,badarg},ets_probe_owned,d,[stopped,stopped,stopped,stopped,stopped],{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn reads_the_application_environment_from_ac_tab_as_pinned_erts() {
+    // `application:get_env/3` calls `application_controller:get_env/3`,
+    // which reads `ac_tab` with `ets:lookup_element/4`
+    // (application_controller.erl:360-361). On ERTS,
+    // `application_controller` makes `ac_tab` with `[set, public,
+    // named_table, {read_concurrency, true}]`
+    // (application_controller.erl:544-545). PBeam has no
+    // `application_controller`, so `ets_probe:main/0` makes `ac_tab` with
+    // these options in an owner process, then runs `env/0`. The reference
+    // run calls `env/0` with the `ac_tab` of `application_controller` and
+    // shows the same options with `ets:info/2`.
+    let application = pinned_beam("application");
+    let application_controller = pinned_beam("application_controller");
+    let program = BeamProgram::load(&[&application, &application_controller, ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("ets_probe", "main", &[]).unwrap(),
+        Term::List(vec![atom("default"), atom("true"), atom("value")])
+    );
+    let output = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/ets",
+            "-eval",
+            "io:format(\"~w~n\", [[[ets:info(ac_tab, I) || I <- [type, protection, named_table, keypos, read_concurrency]], ets_probe:env()]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        output.stdout,
+        b"[[set,public,true,1,true],[default,true,value]]\n"
     );
 }
 

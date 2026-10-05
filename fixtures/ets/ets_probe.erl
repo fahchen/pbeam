@@ -1,6 +1,6 @@
 -module(ets_probe).
--export([new/0, owner_exit/0, insert/0, lookup/0, access/0, unsupported/1,
-         own/2]).
+-export([new/0, owner_exit/0, insert/0, lookup/0, access/0, main/0, env/0,
+         unsupported/1, own/2]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -100,6 +100,17 @@ access() ->
      [stop(Owner) || {_, Owner} <- Tables],
      catch_error(fun() -> ets:lookup_element(tid(Public), k, 2, d) end)].
 
+%% PBeam has no application_controller, so main/0 makes ac_tab with the
+%% options of application_controller.erl:544-545 in an owner process.
+main() ->
+    _ = start(ac_tab),
+    env().
+
+env() ->
+    [application:get_env(kernel, standard_io_encoding, default),
+     ets:insert(ac_tab, {{env, ets_probe, key}, value}),
+     application:get_env(ets_probe, key, default)].
+
 %% Calls that ERTS runs and PBeam does not support yet.
 unsupported(Case) ->
     case Case of
@@ -123,6 +134,8 @@ start(Options) ->
         {Owner, Table} -> {Owner, Table}
     end.
 
+own(Parent, ac_tab) ->
+    own(Parent, ac_tab, [set, public, named_table, {read_concurrency, true}]);
 own(Parent, Options) ->
     Name = case lists:member(named_table, Options) of
                true -> ets_probe_owned;
