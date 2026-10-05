@@ -17,8 +17,11 @@ if ! git -C "$src" rev-parse --git-dir >/dev/null 2>&1; then
   exit 1
 fi
 if ! git -C "$src" rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+  # A --depth fetch makes a full clone shallow, so give it only to a shallow repository.
+  depth=
+  [[ $(git -C "$src" rev-parse --is-shallow-repository) == true ]] && depth=' --depth 1'
   echo "otp-src: no tag $tag in $src; run:" >&2
-  echo "git -C $src fetch --depth 1 origin tag $tag" >&2
+  echo "git -C $src fetch$depth origin tag $tag" >&2
   exit 1
 fi
 
