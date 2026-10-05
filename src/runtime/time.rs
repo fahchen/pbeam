@@ -26,8 +26,13 @@ const MONOTONIC_TIME_START_EXTERNAL: i64 = SMALL_INTEGER_MIN / TIME_UNIT * TIME_
 /// second.
 pub(super) const MONOTONIC_OFFSET_NATIVE: i64 = MONOTONIC_TIME_START_EXTERNAL - MONOTONIC_BEGIN;
 
-/// The unit of `perf_counter`, `ERTS_HRTIME_UNIT`, on a host without
-/// `rdtscp` (`sys_time.c:1032-1041`, `sys/unix/erl_unix_sys.h:219`).
+/// The unit of `perf_counter`, `ERTS_HRTIME_UNIT` (`sys_time.c:1032-1041`,
+/// `sys/unix/erl_unix_sys.h:219`). ERTS uses the TSC frequency only when
+/// `have_rdtscp` finds bits 8 and 23 of the `cpuid` leaf `0x80000007` `edx`
+/// (`sys_time.c:989-1007`, `ethr_aux.c:167-168`). Intel and AMD define no
+/// bit 23 there: the bit numbers come from the Linux software flags
+/// `constant_tsc` and `tsc_reliable`. Thus ERTS gives this unit also on an
+/// x86_64 host.
 pub(super) const PERF_COUNTER_UNIT: i64 = 1_000_000_000;
 
 /// The result of [`time_unit_conversion`].
