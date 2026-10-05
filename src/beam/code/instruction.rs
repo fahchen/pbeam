@@ -648,12 +648,22 @@ pub(crate) enum Instruction {
     /// Erlang: the same pattern compiles to `{recv_marker_clear,{y,1}}` when
     /// the `receive` matches.
     ReceiveMarkerClear(Operand),
-    /// An instruction that has no runtime effect, such as `test_heap`,
-    /// `init_yregs`, or `nif_start`.
+    /// Starts a function that the module lists in `-nifs`. `name` and
+    /// `arity` come from the `func_info` before it, as the ERTS loader marks
+    /// the current function as a NIF (`jit/asm_load.c:651-661`,
+    /// `emu/emu_load.c:1437-1445`). A `nif_start` without a `func_info`
+    /// before it is a load error.
     ///
-    /// Erlang: `g(X) -> {X, X}.` compiles to `{test_heap,3,1}` first. A
-    /// function in `-nifs([f/0]).` starts with `nif_start`. ERTS only marks
-    /// that function at load time, so `erlang:load_nif/2` can replace it.
+    /// Encoding: `[0xB3]`.
+    ///
+    /// Erlang: `-nifs([write_nif/2]).` makes `write_nif/2` in `prim_tty`
+    /// start with `nif_start`, then `{move,{atom,undef},{x,0}}` and
+    /// `{call_ext_only,1,{extfunc,erlang,nif_error,1}}`.
+    NifStart { name: String, arity: u32 },
+    /// An instruction that has no runtime effect, such as `test_heap` or
+    /// `init_yregs`.
+    ///
+    /// Erlang: `g(X) -> {X, X}.` compiles to `{test_heap,3,1}` first.
     Noop,
     /// Returns the value in `x0` from the active function.
     ///
@@ -738,6 +748,7 @@ pub(super) fn parse_code(
     let mut cursor = CODE_HEADER_SIZE;
     let mut instructions = Vec::new();
     let mut function_info_count = 0;
+    let mut function = None;
     loop {
         let opcode = *data
             .get(cursor)
@@ -762,6 +773,7 @@ pub(super) fn parse_code(
                     .name()
                     .to_owned();
                 let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                function = Some((name.clone(), arity));
                 Instruction::FunctionInfo {
                     module,
                     name,
@@ -968,7 +980,13 @@ pub(super) fn parse_code(
                     value,
                 }
             }
-            OPCODE_TEST_HEAP | OPCODE_INIT_YREGS | OPCODE_NIF_START => {
+            OPCODE_NIF_START => {
+                let (name, arity) = function
+                    .clone()
+                    .ok_or_else(|| error("BEAM nif_start has no func_info before it"))?;
+                Instruction::NifStart { name, arity }
+            }
+            OPCODE_TEST_HEAP | OPCODE_INIT_YREGS => {
                 skip_unsupported_instruction(opcode, data, &mut cursor)?;
                 Instruction::Noop
             }
@@ -1243,7 +1261,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_GC_BIF1 => Some(5),
         OPCODE_GC_BIF2 => Some(6),
         OPCODE_BADRECORD => Some(1),
-        OPCODE_NIF_START | OPCODE_IF_END | OPCODE_BUILD_STACKTRACE => Some(0),
+        OPCODE_IF_END | OPCODE_BUILD_STACKTRACE => Some(0),
         // `raw_raise` is in `gen_statem:call/3`.
         OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
@@ -1526,7 +1544,7 @@ mod tests {
     };
     use crate::{
         beam::code::{Instruction, Operand, TestKind},
-        term::{Atom, Term},
+        term::{Atom, AtomTable, Term},
     };
 
     #[test]
@@ -1690,6 +1708,44 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("unexpected BEAM operand tag 3")
+        );
+    }
+
+    #[test]
+    fn decodes_nif_start_with_the_function_of_the_func_info_before_it() {
+        let code = |instructions: &[u8]| {
+            let mut code = vec![0, 0, 0, 16];
+            code.extend([0; 15]);
+            code.push(1); // one function
+            code.extend_from_slice(instructions);
+            code.push(0x03);
+            code
+        };
+        let mut table = AtomTable::new();
+        let atoms = ["prim_tty", "write_nif"].map(|name| table.put(name).unwrap());
+        let (instructions, _) = parse_code(
+            &code(&[
+                0x02, 0x12, 0x22, 0x20, // func_info prim_tty write_nif 2
+                0xB3, // nif_start
+            ]),
+            &atoms,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::FunctionInfo { .. },
+                Instruction::NifStart { name, arity: 2 },
+                Instruction::End,
+            ] if name == "write_nif"
+        ));
+        assert_eq!(
+            parse_code(&code(&[0xB3]), &atoms, &[], &[])
+                .unwrap_err()
+                .to_string(),
+            "BEAM nif_start has no func_info before it"
         );
     }
 

@@ -14,6 +14,7 @@ use crate::{
 use std::collections::HashMap;
 
 mod bif;
+mod native;
 
 use bif::{BifResult, INSTRUCTION_CALLS, is_bif};
 
@@ -671,6 +672,19 @@ impl BeamProgram {
                     let reference = read(process, reference)?;
                     process.mailbox.clear_marker(&reference);
                 }
+                Instruction::NifStart { name, arity } => {
+                    // ERTS `erlang:load_nif/2` writes the NIF call over this
+                    // instruction, so each entry to the function runs the
+                    // NIF and returns its result to the caller
+                    // (`beam/erl_nif.c:4922-4928`, `5050-5098`). A function
+                    // without a binding runs its BEAM stub body.
+                    let arguments = call_arguments(&process.registers, *arity)?;
+                    if let Some(result) = native::call(&module.name, name, &arguments)
+                        && let Some(outcome) = self.finish_bif(process, result, true)?
+                    {
+                        return Ok(outcome);
+                    }
+                }
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::Return => {
                     if let Some(outcome) = return_from_frame(process)? {
@@ -739,7 +753,7 @@ impl BeamProgram {
         Ok(None)
     }
 
-    /// Finish a BIF call with its result, as the ERTS `nif_bif.epilogue`
+    /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
     /// does for BIFs and NIFs (`emu/bif_instrs.tab:604-636`; JIT
     /// `emit_bif_nif_epilogue` in `jit/arm/instr_bif.cpp:631-719`). A value
     /// goes to x0, and a tail call then returns from the frame. An exception
