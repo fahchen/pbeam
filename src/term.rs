@@ -29,9 +29,12 @@ pub enum Term {
     /// A proper list of BEAM terms.
     List(Vec<Term>),
     /// An improper list: its elements and the tail after the last element,
-    /// for example `[1, 2 | x]`. It holds at least one element, and its tail
-    /// is never `List` or `ImproperList`, so each improper list has one
-    /// form. `Term::list_with_tail` keeps this form.
+    /// for example `[1, 2 | x]`. Its canonical form holds at least one
+    /// element and a tail that is not `List` or `ImproperList`, so each
+    /// improper list has one form. The runtime builds each improper list
+    /// in this form with `Term::list_with_tail`. The type does not enforce
+    /// the form: a caller that gives an argument to an `execute` function
+    /// must use it, because equality, order, and map keys compare the form.
     ImproperList(Vec<Term>, Box<Term>),
     /// A BEAM tuple.
     Tuple(Vec<Term>),
