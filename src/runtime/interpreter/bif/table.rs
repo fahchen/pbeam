@@ -321,7 +321,7 @@ bifs! {
     erlang:time_offset/0 => unsupported,
     erlang:time_offset/1 => unsupported,
     erlang:timestamp/0 => unsupported,
-    erlang:tl/1 => |_, [list]| Ok(match list { Term::List(elements) if !elements.is_empty() => Value(Term::List(elements[1..].to_vec())), Term::ImproperList(elements, tail) => Value(Term::list_with_tail(elements[1..].to_vec(), (**tail).clone())), _ => BifResult::badarg() }),
+    erlang:tl/1 => |_, [list]| Ok(erlang::tl(list)),
     erlang:trace_delivered/1 => unsupported,
     erlang:trace_info/2 => unsupported,
     erlang:trunc/1 => unsupported,

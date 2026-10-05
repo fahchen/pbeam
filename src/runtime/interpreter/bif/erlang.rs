@@ -333,6 +333,31 @@ pub(super) fn append(left: &Term, right: &Term) -> BifResult {
     }
 }
 
+/// Run `erlang:tl/1`: return the tail of the first cons cell of a nonempty
+/// list, as ERTS `tl_1` (`bif.c:2931-2938`) does. The tail of a proper list
+/// is a proper list, and the tail of `[1|x]` is `x`. `[]` and a term that is
+/// not a list raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let x = Term::static_atom("x");
+/// let proper = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
+/// assert!(matches!(tl(&proper), BifResult::Value(Term::List(rest)) if rest == [Term::Integer(2)]));
+/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x.clone()));
+/// assert!(matches!(tl(&improper), BifResult::Value(term) if term == x));
+/// assert!(matches!(tl(&Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn tl(list: &Term) -> BifResult {
+    let (elements, tail) = match list {
+        Term::List(elements) if !elements.is_empty() => (elements, Term::List(Vec::new())),
+        Term::ImproperList(elements, tail) => (elements, (**tail).clone()),
+        _ => return BifResult::badarg(),
+    };
+    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+    Value(Term::list_with_tail(elements[1..].to_vec(), tail))
+}
+
 /// The largest number of characters in an atom name (`MAX_ATOM_CHARACTERS`
 /// in `atom.h`).
 const MAX_ATOM_CHARACTERS: usize = 255;
