@@ -550,7 +550,7 @@ bifs! {
     prim_file:internal_normalize_utf8/1 => unsupported,
     prim_file:is_translatable/1 => unsupported,
     re:compile/1 => unsupported,
-    re:compile/2 => unsupported,
+    re:compile/2 => |cx, [pattern, options]| re::compile(cx, pattern, options),
     re:import/1 => unsupported,
     re:inspect/2 => unsupported,
     re:internal_run/4 => unsupported,
