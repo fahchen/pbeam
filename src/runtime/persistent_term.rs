@@ -15,10 +15,9 @@ const LOAD_FACTOR: usize = 50;
 /// slot, after the last slot to slot 0, until it finds a free slot or a key
 /// that is exactly equal (`lookup`). A new key that finds the table half
 /// full first doubles the table, which puts the old keys again in old slot
-/// order (`put_common`, `copy_table`). The ERTS table order is visible only
-/// through `persistent_term:get/0`, which returns the `[{Key, Value}]` list
-/// in table order. PBeam does not implement it yet.
-/// `persistent_term:info/0` returns only `#{count := Count, memory := Memory}`.
+/// order (`put_common`, `copy_table`). `persistent_term:get/0` returns the
+/// pairs in descending slot order (`get_all`), so the layout is visible to
+/// BEAM code.
 #[derive(Debug)]
 pub(super) struct PersistentTerms {
     /// The slots of the table. The number of slots is a power of two.
@@ -89,6 +88,38 @@ impl PersistentTerms {
         }
         self.buckets[slot] = Some((key.clone(), value.clone()));
         self.num_entries += 1;
+    }
+
+    /// Return all stored pairs as the list `[{Key, Value}]`, in descending
+    /// slot order. `do_get_all` of `persistent_term_get_0` in
+    /// `erl_bif_persistent.c` reads the slots from slot 0 and puts each pair
+    /// at the head of the list. A trap continues the same list, so the order
+    /// does not change. `persistent_term:get/0` never raises.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut terms = PersistentTerms::default();
+    /// // true hashes to slot 7 of 8, and 7 to slot 3.
+    /// terms.put(&Term::static_atom("true"), &Term::Integer(1));
+    /// terms.put(&Term::Integer(7), &Term::Integer(4));
+    /// assert_eq!(
+    ///     terms.get_all(),
+    ///     Term::List(vec![
+    ///         Term::Tuple(vec![Term::static_atom("true"), Term::Integer(1)]),
+    ///         Term::Tuple(vec![Term::Integer(7), Term::Integer(4)]),
+    ///     ])
+    /// );
+    /// ```
+    pub(super) fn get_all(&self) -> Term {
+        Term::List(
+            self.buckets
+                .iter()
+                .rev()
+                .flatten()
+                .map(|(key, value)| Term::Tuple(vec![key.clone(), value.clone()]))
+                .collect(),
+        )
     }
 
     /// Return the slot of `key`: the slot that holds an exactly equal key,
