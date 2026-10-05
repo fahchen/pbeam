@@ -1,6 +1,6 @@
 -module(re_probe).
 -export([main/0, options/0, errors/0, badarg/0, iodata/0, unicode_list/0,
-         unsupported/1, id/1]).
+         export/0, unsupported/1, id/1]).
 
 %% prim_tty:init/1 compiles the ANSI regular expression (prim_tty.erl:238).
 %% The fifth element is a reference (erl_bif_re.c:607-609).
@@ -70,15 +70,21 @@ unicode_list() ->
      info(re:compile(["(a)", <<"(b)">>], [unicode])),
      re:compile("(", [unicode])].
 
+%% The export option (build_compile_export, erl_bif_re.c:644-700).
+export() ->
+    [exported(re:compile(<<"a">>, [export])),
+     exported(re:compile(["a", <<"b">>], [export, caseless])),
+     exported(re:compile([$a, ?MODULE:id(256)], [unicode, export])),
+     re:compile(<<"(">>, [export])].
+
 %% Calls that ERTS runs and PBeam does not support yet.
-unsupported(Case) ->
-    case Case of
-        export -> re:compile(<<"a">>, [export]);
-        chardata -> re:compile(foo, [unicode])
-    end.
+unsupported(chardata) -> re:compile(foo, [unicode]).
 
 info({ok, {re_pattern, Count, Unicode, Crlf, Ref}}) when is_reference(Ref) ->
     {Count, Unicode, Crlf}.
+
+exported({ok, {re_exported_pattern, Header, Source, Options, Encoded}}) ->
+    [Header, Source, Options, Encoded].
 
 kind(Ref) when is_reference(Ref) -> reference;
 kind(_) -> other.

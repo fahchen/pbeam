@@ -75,9 +75,10 @@ const ERROR_MESSAGE_SIZE: usize = 120;
 /// as `ERTS_PCRE_STACK_MARGIN` (`erl_bif_re.c:157`).
 const STACK_MARGIN: usize = 10 * 1024;
 
-// The PCRE2 functions that the compile path uses (`pcre2.h:650-751` and
-// `pcre2.h:878`). `pcre2_code_8` and `pcre2_compile_context_8` are opaque C
-// structs, so a `c_void` pointer stands for each.
+// The PCRE2 functions that the compile path and the `export` option use
+// (`pcre2.h:650-751`, `pcre2.h:826-834`, and `pcre2.h:878`).
+// `pcre2_code_8`, `pcre2_compile_context_8`, and `pcre2_general_context_8`
+// are opaque C structs, so a `c_void` pointer stands for each.
 unsafe extern "C" {
     fn pcre2_compile_context_create_8(general: *mut c_void) -> *mut c_void;
     fn pcre2_compile_context_free_8(context: *mut c_void);
@@ -98,6 +99,14 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn pcre2_pattern_info_8(code: *const c_void, what: u32, place: *mut c_void) -> c_int;
     fn pcre2_get_error_message_8(code: c_int, buffer: *mut u8, size: usize) -> c_int;
+    fn pcre2_serialize_encode_8(
+        codes: *const *const c_void,
+        number_of_codes: i32,
+        serialized_bytes: *mut *mut u8,
+        serialized_size: *mut usize,
+        general: *mut c_void,
+    ) -> i32;
+    fn pcre2_serialize_free_8(bytes: *mut u8);
     fn pcre2_code_free_8(code: *mut c_void);
 }
 
@@ -141,6 +150,46 @@ impl Code {
     /// ```
     pub(super) fn newline(&self) -> u32 {
         self.info(INFO_NEWLINE)
+    }
+
+    /// Return the serialized form of this code, as `build_compile_export`
+    /// (`erl_bif_re.c:663-665`) makes it with `pcre2_serialize_encode`: a
+    /// header with the magic number, the version, and the configuration of
+    /// PCRE2, the character tables, and a copy of the code in which the
+    /// memory control, table, and JIT fields are zero
+    /// (`pcre2_serialize.c:70-154`). The bytes are equal for equal patterns
+    /// and options.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let encoded = compile(b"a", 0, None, None)?.serialize();
+    /// assert_eq!(encoded.len(), 1265); // aarch64 macOS, as ERTS
+    /// // SERIALIZED_DATA_MAGIC (pcre2_serialize.c:53), in host byte order
+    /// assert_eq!(&encoded[..4], &0x5052_3253u32.to_ne_bytes());
+    /// ```
+    pub(super) fn serialize(&self) -> Vec<u8> {
+        let code = self.0.as_ptr().cast_const();
+        let mut bytes = std::ptr::null_mut();
+        let mut size = 0;
+        // SAFETY: `code` is a live `pcre2_code`, and the array of one
+        // pointer is valid for the call. With no general context, PCRE2
+        // allocates the buffer with `malloc` and writes its address and size
+        // into `bytes` and `size`. The slice copies `size` bytes from it
+        // before `pcre2_serialize_free_8` frees it once.
+        unsafe {
+            let count = pcre2_serialize_encode_8(
+                &raw const code,
+                1,
+                &raw mut bytes,
+                &raw mut size,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(count, 1, "PCRE2 serialize failed with {count}");
+            let encoded = std::slice::from_raw_parts(bytes, size).to_vec();
+            pcre2_serialize_free_8(bytes);
+            encoded
+        }
     }
 
     /// Return one `uint32_t` item of `pcre2_pattern_info`. ERTS ignores the

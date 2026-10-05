@@ -121,7 +121,10 @@ fn lookup(table: &[(&str, u32)], name: &str) -> Option<u32> {
 /// 4. A pattern that PCRE2 does not compile gives
 ///    `{error, {Message, Offset}}`, where `Message` is a list of character
 ///    codes (`build_compile_error`, `erl_bif_re.c:802-836`).
-/// 5. Else the result is `{ok, {re_pattern, CaptureCount, Unicode, UseCrlf,
+/// 5. With `export`, the result is `{ok, {re_exported_pattern, Header,
+///    Source, Options, Encoded}}` (`build_compile_export`,
+///    `erl_bif_re.c:644-700`), and no reference is made. See `export`.
+/// 6. Else the result is `{ok, {re_pattern, CaptureCount, Unicode, UseCrlf,
 ///    Ref}}` (`build_compile_result`, `erl_bif_re.c:581-615`). `Unicode` is
 ///    1 for the `unicode` option. `UseCrlf` is 1 when the newline
 ///    convention of the code is `any`, `crlf`, or `anycrlf`, also from an
@@ -143,8 +146,7 @@ fn lookup(table: &[(&str, u32)], name: &str) -> Option<u32> {
 ///
 /// # Errors
 ///
-/// Return a runtime error for the `export` option of a pattern that
-/// compiles, because PBeam does not make exported patterns yet.
+/// Return a runtime error when the scheduler has no new reference.
 pub(super) fn compile(
     context: &mut BifContext<'_>,
     pattern: &Term,
@@ -179,8 +181,7 @@ pub(super) fn compile(
         }
     };
     if parsed.export {
-        // ponytail: `build_compile_export` (erl_bif_re.c:644-700) comes in the next commit of #113.
-        return Err(error("unsupported re:compile/2 option export"));
+        return Ok(Value(export(&code, unicode, bytes, options)));
     }
     let use_crlf = matches!(
         code.newline(),
@@ -202,4 +203,69 @@ pub(super) fn compile(
             Term::Reference(reference),
         ]),
     ])))
+}
+
+/// The title of the header of an exported pattern
+/// (`erl_bif_re.c:687`).
+const EXPORT_TITLE: &[u8; 8] = b"re-PCRE2";
+
+/// The encode version of the header of an exported pattern,
+/// `EXPORTED_ENCODE_VERSION` (`erl_bif_re.c:633`).
+const EXPORT_VERSION: u8 = 1;
+
+/// Return `{ok, {re_exported_pattern, Header, Source, Options, Encoded}}`,
+/// as `build_compile_export` (`erl_bif_re.c:644-700`) makes it:
+///
+/// - `Header` is 14 bytes (`erl_bif_re.c:617-627`): the title `re-PCRE2`,
+///   the zlib CRC-32 of `Encoded` as a big-endian 32-bit value, the encode
+///   version 1, and the `unicode` byte.
+/// - `Source` is the pattern bytes as a binary (`get_iolist_as_bytes`,
+///   `erl_bif_re.c:850-889`).
+/// - `Options` is the option term of the call, as it is.
+/// - `Encoded` is the `pcre2_serialize_encode` form of the code.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let code = pcre2::compile(b"a", 0, None, None)?;
+/// let options = Term::List(vec![Term::static_atom("export")]);
+/// // {ok, {re_exported_pattern, <<"re-PCRE2",163,240,192,168,1,0>>,
+/// //       <<"a">>, [export], Encoded}} on aarch64 macOS, as ERTS
+/// let result = export(&code, false, b"a".to_vec(), &options);
+/// ```
+fn export(code: &pcre2::Code, unicode: bool, source: Vec<u8>, options: &Term) -> Term {
+    let encoded = code.serialize();
+    let mut header = EXPORT_TITLE.to_vec();
+    header.extend_from_slice(&crc32(&encoded).to_be_bytes());
+    header.push(EXPORT_VERSION);
+    header.push(unicode.into());
+    Term::Tuple(vec![
+        Term::static_atom("ok"),
+        Term::Tuple(vec![
+            Term::static_atom("re_exported_pattern"),
+            Term::Binary(header),
+            Term::Binary(source),
+            options.clone(),
+            Term::Binary(encoded),
+        ]),
+    ])
+}
+
+/// Return the zlib CRC-32 of `bytes`, as `calc_checksum`
+/// (`erl_bif_re.c:635-639`) gets it with `crc32(0, bytes, size)`: the
+/// reflected polynomial `0xEDB88320`, the initial value and the final XOR
+/// `0xFFFFFFFF`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+/// assert_eq!(crc32(b""), 0);
+/// ```
+fn crc32(bytes: &[u8]) -> u32 {
+    !bytes.iter().fold(u32::MAX, |crc, &byte| {
+        (0..8).fold(crc ^ u32::from(byte), |crc, _| {
+            (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg())
+        })
+    })
 }

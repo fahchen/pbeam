@@ -1,10 +1,10 @@
 //! Build the PCRE2 10.47 sources of OTP 29.1.1 in `vendor/pcre2`, which
 //! `re:compile/2` uses.
 
-/// The PCRE2 sources that the compile path links. ERTS builds them with
-/// `-DERLANG_INTEGRATION` (`pcre.mk:60`), so `pcre2_internal.h` includes
-/// `local_config.h`.
-const SOURCES: [&str; 18] = [
+/// The PCRE2 sources that the compile path and the `export` option link.
+/// ERTS builds them with `-DERLANG_INTEGRATION` (`pcre.mk:60`), so
+/// `pcre2_internal.h` includes `local_config.h`.
+const SOURCES: [&str; 19] = [
     "pcre2_auto_possess.c",
     "pcre2_chartables.c",
     "pcre2_chkdint.c",
@@ -17,6 +17,7 @@ const SOURCES: [&str; 18] = [
     "pcre2_newline.c",
     "pcre2_ord2utf.c",
     "pcre2_pattern_info.c",
+    "pcre2_serialize.c",
     "pcre2_string_utils.c",
     "pcre2_study.c",
     "pcre2_tables.c",

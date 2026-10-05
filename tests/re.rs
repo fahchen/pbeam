@@ -16,13 +16,19 @@ fn program() -> BeamProgram {
 /// Run `re_probe:Function()` under the pinned ERTS and return its `~w`
 /// output.
 fn reference(function: &str) -> String {
+    reference_of(&format!("re_probe:{function}()"))
+}
+
+/// Evaluate `Expression` with `re_probe` under the pinned ERTS and return
+/// its `~w` output.
+fn reference_of(expression: &str) -> String {
     let output = Command::new("erl")
         .args([
             "-noshell",
             "-pa",
             "fixtures/re",
             "-eval",
-            &format!("io:format(\"~w~n\", [re_probe:{function}()]), halt()."),
+            &format!("io:format(\"~w~n\", [{expression}]), halt()."),
         ])
         .output()
         .unwrap();
@@ -216,23 +222,99 @@ fn compiles_unicode_character_lists_through_re_ucompile_as_pinned_erts() {
 }
 
 #[test]
-fn reports_unsupported_compile_calls() {
-    // ERTS returns an exported pattern for `export` (erl_bif_re.c:644-700),
-    // and raises `badarg` through `re:ucompile/2` for a `unicode` pattern
-    // that is not chardata. PBeam gives a runtime error for both. This is
-    // the "Regular expressions" row in `docs/erts-differences.md`.
+fn exports_compiled_patterns_as_pinned_erts() {
+    // The `export` option gives `{ok, {re_exported_pattern, Header, Source,
+    // Options, Encoded}}` (build_compile_export, erl_bif_re.c:644-700).
+    // `Header` is "re-PCRE2", the zlib CRC-32 of `Encoded`, the encode
+    // version 1, and the unicode byte (erl_bif_re.c:617-639). `Source` is
+    // the pattern bytes, also of iodata and of a character list that
+    // `re:ucompile/2` converts. `Options` is the option term as given.
+    // `Encoded` is the `pcre2_serialize_encode` form, which depends on the
+    // host, so each binary is compared with the ERTS bytes on this host. A
+    // compile error is not exported.
     let program = program();
-    for (case, message) in [
-        ("export", "unsupported re:compile/2 option export"),
-        ("chardata", "unsupported chardata Atom(\"foo\")"),
-    ] {
-        let case = Term::Atom(program.atom(case).unwrap());
-        let error = program
-            .execute("re_probe", "unsupported", &[case])
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(message),
-            "expected {message}, got {error}"
-        );
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let result = program.execute("re_probe", "export", &[]).unwrap();
+    let Term::List(results) = &result else {
+        panic!("export/0 returns a list, got {result:?}");
+    };
+    let (failure, results) = results.split_last().unwrap();
+    assert_eq!(
+        failure,
+        &compile_error(&program, "missing closing parenthesis", 1)
+    );
+    let expected = [
+        (b"a".as_slice(), vec![atom("export")], 0),
+        (b"ab", vec![atom("export"), atom("caseless")], 0),
+        (
+            "a\u{100}".as_bytes(),
+            vec![atom("unicode"), atom("export")],
+            1,
+        ),
+    ];
+    assert_eq!(results.len(), expected.len());
+    let mut bytes = Vec::new();
+    for (result, (source, options, unicode)) in results.iter().zip(expected) {
+        let Term::List(elements) = result else {
+            panic!("expected [Header, Source, Options, Encoded], got {result:?}");
+        };
+        let [
+            Term::Binary(header),
+            Term::Binary(pattern),
+            Term::List(given),
+            Term::Binary(encoded),
+        ] = elements.as_slice()
+        else {
+            panic!("expected three binaries and an option list, got {elements:?}");
+        };
+        assert_eq!(header.len(), 14);
+        assert_eq!(&header[..8], b"re-PCRE2");
+        assert_eq!(header[12..], [1, unicode]);
+        assert_eq!(pattern.as_slice(), source);
+        assert_eq!(given, &options);
+        bytes.push([header, pattern, encoded]);
     }
+    let text = |bytes: &[u8]| {
+        let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
+        format!("[{}]", bytes.join(","))
+    };
+    let exports: Vec<String> = bytes
+        .iter()
+        .map(|binaries| {
+            let binaries: Vec<String> = binaries.iter().map(|bytes| text(bytes)).collect();
+            format!("[{}]", binaries.join(","))
+        })
+        .collect();
+    assert_eq!(
+        reference_of(
+            "[[binary_to_list(B) || B <- [H, S, E]] \
+             || [H, S, _, E] <- lists:droplast(re_probe:export())]"
+        ),
+        format!("[{}]\n", exports.join(","))
+    );
+    assert_eq!(
+        reference_of("lists:last(re_probe:export())"),
+        format!("{}\n", compile_error_text("missing closing parenthesis", 1))
+    );
+}
+
+#[test]
+fn reports_unsupported_chardata() {
+    // ERTS raises `badarg` through `re:ucompile/2` for a `unicode` pattern
+    // that is not chardata. PBeam gives a runtime error. This is the
+    // "Regular expressions" row in `docs/erts-differences.md`.
+    let program = program();
+    let error = program
+        .execute(
+            "re_probe",
+            "unsupported",
+            &[Term::Atom(program.atom("chardata").unwrap())],
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported chardata Atom(\"foo\")"),
+        "got {error}"
+    );
 }
