@@ -1,5 +1,5 @@
 -module(fun_probe).
--export([mfas/0, locals/0, tests/0, applies/0, spawned/0, id/1]).
+-export([mfas/0, locals/0, tests/0, applies/0, spawned/0, externals/0, id/1]).
 
 %% erlang:apply/3 and the apply instruction, as proc_lib:init_p_do_apply/3
 %% runs them. apply/3 takes at most 1023 arguments.
@@ -76,6 +76,25 @@ spawned() ->
     Pid = spawn(fun() -> Self ! {Tag, self()} end),
     Reply = receive {spawned, Pid} -> spawned end,
     [Reply, try spawn(id(notfun)) catch error:R -> R end].
+
+%% erlang:make_fun/3 makes an external fun, as gen_server:init_it/6 does.
+externals() ->
+    M = id(fun_probe), F = id(id),
+    Ext = fun M:F/1,
+    Pair = make_pair(a),
+    [Ext(v), apply(Ext, [w]), eq((erlang:make_fun(id(erlang), id(self), 0))(), self()),
+     eq(Ext, erlang:make_fun(M, F, id(1))),
+     eq(Ext, erlang:make_fun(M, F, id(2))),
+     Ext >= Pair, Pair >= Ext,
+     erlang:make_fun(M, id(mfas), id(0)) >= Ext,
+     kind(Ext),
+     try (id(Ext))(1, 2) catch error:{badarity, {F1, A1}} -> {badarity, eq(F1, Ext), A1} end,
+     try erlang:make_fun(id(1), F, 1) catch error:R1 -> R1 end,
+     try erlang:make_fun(M, id("id"), 1) catch error:R2 -> R2 end,
+     try erlang:make_fun(M, F, id(-1)) catch error:R3 -> R3 end,
+     try erlang:make_fun(M, F, id(256)) catch error:R4 -> R4 end,
+     try erlang:make_fun(M, F, id(a)) catch error:R5 -> R5 end,
+     eq(erlang:make_fun(M, F, id(255)), erlang:make_fun(M, F, id(255)))].
 
 %% A list of 1022 atoms x, built without arithmetic.
 list1022() ->

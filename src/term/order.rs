@@ -11,9 +11,11 @@
 //!
 //! - atom: by the bytes of the UTF-8 name, as `erts_cmp_atoms` does, not by
 //!   the atom index;
-//! - fun: by the module name, the lambda index, and the old unique value of
-//!   the fun entry, then by the number of free variables, then free variable
-//!   by free variable (`utils.c:2157-2187`);
+//! - fun: a local fun is less than an external fun. Local funs compare by
+//!   the module name, the lambda index, and the old unique value of the fun
+//!   entry, then by the number of free variables, then free variable by
+//!   free variable (`utils.c:2157-2187`). External funs compare by the
+//!   module name, the function name, and the arity (`utils.c:2189-2207`);
 //! - pid: by the process counter, which gives the order of creation, as the
 //!   ERTS pid data does until the process table uses a slot again;
 //! - tuple: by size, then element by element;
@@ -127,8 +129,8 @@ fn compare_pair<'a>(
         (Term::Map(left), Term::Map(right)) => left.len().cmp(&right.len()),
         (Term::Fun(left), Term::Fun(right)) => {
             let order = left
-                .lambda()
-                .compare(right.lambda())
+                .target()
+                .compare(right.target())
                 .then(left.free().len().cmp(&right.free().len()));
             if order.is_eq() {
                 let pairs = left.free().iter().zip(right.free()).rev();
@@ -338,6 +340,58 @@ mod tests {
                 fun("lists", 0, 0, vec![atom("a")]),
                 fun("lists", 0, 0, vec![atom("a")]),
                 Equal,
+            ),
+        ];
+        for (left, right, order) in pairs {
+            assert_eq!(
+                left.compare(&right).unwrap(),
+                order,
+                "{left:?} and {right:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn orders_external_funs_by_mfa_and_after_local_funs() {
+        // `erts_cmp_compound` (`utils.c:2189-2207`) compares the module name,
+        // the function name, and the arity of two external funs, and puts a
+        // local fun before an external fun. ERTS 29.1.1: `fun fun_probe:id/1
+        // >= fun_probe:make_pair(a)` is true, and `fun fun_probe:mfas/0 >=
+        // fun fun_probe:id/1` is true.
+        let external = |module, function, arity| {
+            let atom = |name| Atom::from_static(name).unwrap();
+            Term::Fun(Fun::external(atom(module), atom(function), arity))
+        };
+        let pairs = [
+            (
+                external("lists", "put", 2),
+                external("maps", "get", 2),
+                Less,
+            ),
+            (
+                external("lists", "put", 2),
+                external("lists", "get", 3),
+                Greater,
+            ),
+            (
+                external("lists", "put", 1),
+                external("lists", "put", 2),
+                Less,
+            ),
+            (
+                external("lists", "put", 2),
+                external("lists", "put", 2),
+                Equal,
+            ),
+            (
+                fun("maps", 9, 9, vec![atom("a")]),
+                external("lists", "put", 0),
+                Less,
+            ),
+            (
+                external("lists", "put", 0),
+                fun("maps", 9, 9, vec![]),
+                Greater,
             ),
         ];
         for (left, right, order) in pairs {

@@ -231,7 +231,7 @@ bifs! {
     erlang:loaded/0 => unsupported,
     erlang:localtime/0 => unsupported,
     erlang:localtime_to_universaltime/2 => unsupported,
-    erlang:make_fun/3 => unsupported,
+    erlang:make_fun/3 => |_, [module, function, arity]| Ok(erlang::make_fun(module, function, arity)),
     erlang:make_ref/0 => |cx, []| Ok(Value(Term::Reference(cx.scheduler.make_ref()?))),
     erlang:make_tuple/2 => unsupported,
     erlang:make_tuple/3 => unsupported,

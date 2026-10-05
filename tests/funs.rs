@@ -175,3 +175,48 @@ fn spawns_a_fun_at_erlang_apply_2_as_pinned_erts() {
     );
     assert_eq!(reference("spawned"), b"[spawned,badarg]\n");
 }
+
+#[test]
+fn makes_and_calls_external_funs_as_pinned_erts() {
+    // `fun_probe:externals/0` makes external funs with `erlang:make_fun/3`,
+    // as `gen_server:init_it/6` does (`gen_server.erl:2234, 2355-2364`), and
+    // calls them with `call_fun` and `call_fun2`, as the `try_handle_*`
+    // functions of `gen_server` do. A call runs the function of the fun, so
+    // `fun erlang:self/0` runs the BIF. Two external funs are equal when
+    // their modules, functions, and arities are equal, and an external fun
+    // is greater than a local fun (`utils.c:1270-1273`,
+    // `utils.c:2189-2207`). A module or function that is not an atom, and an
+    // arity that is not an integer in `0..=255`, raise `badarg`
+    // (`bif.c:4467-4485`).
+    let program = BeamProgram::load(&[FUN_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let mut expected: Vec<Term> = [
+        "v",
+        "w",
+        "same",
+        "same",
+        "different",
+        "true",
+        "false",
+        "true",
+        "one",
+    ]
+    .map(atom)
+    .into();
+    expected.push(Term::Tuple(vec![
+        atom("badarity"),
+        atom("same"),
+        Term::List(vec![Term::Integer(1), Term::Integer(2)]),
+    ]));
+    expected.extend(std::iter::repeat_n(atom("badarg"), 5));
+    expected.push(atom("same"));
+    assert_eq!(
+        program.execute("fun_probe", "externals", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("externals"),
+        b"[v,w,same,same,different,true,false,true,one,{badarity,same,[1,2]},\
+          badarg,badarg,badarg,badarg,badarg,same]\n"
+    );
+}

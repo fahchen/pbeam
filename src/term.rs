@@ -8,7 +8,7 @@ pub(crate) use atom::AtomTable;
 #[cfg(test)]
 pub(crate) use atom::test_atom;
 pub use fun::Fun;
-pub(crate) use fun::Lambda;
+pub(crate) use fun::{Lambda, Target};
 pub use map::Map;
 
 use std::fmt;
@@ -40,18 +40,19 @@ pub enum Term {
     Pid(ProcessId),
     /// A reference owned by this runtime.
     Reference(Reference),
-    /// A local fun: the fun entry of its lambda and its free variables.
+    /// A fun: the fun entry of a lambda and its free variables for a local
+    /// fun, or the module, function, and arity for an external fun.
     Fun(Fun),
 }
 
-/// The kind of a term that contains other terms. A fun keeps the fun entry
-/// of the source fun.
+/// The kind of a term that contains other terms. A fun keeps the entry of
+/// the source fun.
 #[derive(Clone, Copy)]
 enum Kind<'a> {
     List,
     Tuple,
     Map,
-    Fun(&'a Lambda),
+    Fun(&'a Target),
 }
 
 /// The nested terms of a list, tuple, map, or fun, in order. A map gives
@@ -83,7 +84,10 @@ impl Kind<'_> {
                 // A hashmap copy hashes each key again; `Map` has no other way to build a map.
                 Term::Map(Map::from_pairs(pairs).expect("a copied map holds only supported keys"))
             }
-            Kind::Fun(lambda) => Term::Fun(Fun::new(lambda.clone(), terms)),
+            Kind::Fun(target) => Term::Fun(Fun {
+                target: target.clone(),
+                free: terms,
+            }),
         }
     }
 }
@@ -147,7 +151,7 @@ impl Term {
             )),
             Term::Fun(fun) => Err((
                 Box::new(fun.free.iter()),
-                Kind::Fun(&fun.lambda),
+                Kind::Fun(&fun.target),
                 fun.free.len(),
             )),
             Term::Atom(atom) => Ok(Term::Atom(atom.clone())),
@@ -237,9 +241,10 @@ impl Clone for Term {
 impl PartialEq for Term {
     /// Compare two terms pair by pair with a work stack. Two maps are equal
     /// when their pairs in canonical order are equal, as the structural ERTS
-    /// comparison of two flatmaps or two hashmaps is. Two funs are equal when
-    /// their fun entries and their free variables are equal, as `eq` in
-    /// `utils.c:1241-1276` gives.
+    /// comparison of two flatmaps or two hashmaps is. Two local funs are
+    /// equal when their fun entries and their free variables are equal, and
+    /// two external funs are equal when their modules, functions, and
+    /// arities are equal, as `eq` in `utils.c:1241-1276` gives.
     ///
     /// # Examples
     ///
@@ -257,7 +262,7 @@ impl PartialEq for Term {
                 }
                 (Term::Fun(left), Term::Fun(right)) => {
                     pairs.extend(left.free.iter().zip(&right.free));
-                    left.lambda == right.lambda && left.free.len() == right.free.len()
+                    left.target == right.target && left.free.len() == right.free.len()
                 }
                 (Term::Map(left), Term::Map(right)) => {
                     for ((left_key, left_value), (right_key, right_value)) in
@@ -288,8 +293,8 @@ impl Eq for Term {}
 impl fmt::Debug for Term {
     /// Write the same text as a derived `Debug`, for example
     /// `Tuple([Atom("undef"), List([])])` or `Map([(Atom("a"), Integer(1))])`,
-    /// with a work stack. A fun writes its fun entry and its free variables,
-    /// for example `Fun(Lambda { .. }, [Atom("tag")])`.
+    /// with a work stack. A fun writes its entry and its free variables, for
+    /// example `Fun(Local(Lambda { .. }), [Atom("tag")])`.
     ///
     /// # Examples
     ///
@@ -322,7 +327,7 @@ impl fmt::Debug for Term {
                 | Term::Fun(Fun { free: elements, .. }) => {
                     match term {
                         Term::List(_) => formatter.write_str("List([")?,
-                        Term::Fun(fun) => write!(formatter, "Fun({:?}, [", fun.lambda)?,
+                        Term::Fun(fun) => write!(formatter, "Fun({:?}, [", fun.target)?,
                         _ => formatter.write_str("Tuple([")?,
                     }
                     items.push(Item::Text("])"));
@@ -392,8 +397,8 @@ mod tests {
         assert_eq!(term, copy);
         assert_ne!(term, deep(999_999));
         assert!(format!("{copy:?}").starts_with(
-            "Fun(Lambda { module: Atom { index: 971, name: \"lists\" }, index: 0, old_unique: 7, \
-             label: 53, arity: 1 }, [Map([(Atom(\"k\"), List([Integer(1), Tuple([Fun("
+            "Fun(Local(Lambda { module: Atom { index: 971, name: \"lists\" }, index: 0, \
+             old_unique: 7, label: 53, arity: 1 }), [Map([(Atom(\"k\"), List([Integer(1), Tuple([Fun("
         ));
         drop(term);
         drop(copy);
@@ -410,6 +415,26 @@ mod tests {
         assert_ne!(tagged("a"), fun(0, vec![]));
         assert_ne!(fun(0, vec![]), Term::Tuple(vec![]));
         assert_eq!(fun(0, vec![]), fun(0, vec![]));
+    }
+
+    #[test]
+    fn compares_external_funs_by_their_mfa() {
+        // ERTS 29.1.1: two external funs are equal when their modules,
+        // functions, and arities are equal (`eq` in `utils.c:1270-1273`), and
+        // an external fun is not equal to a local fun.
+        let external = |function, arity| {
+            let atom = |name| super::Atom::from_static(name).unwrap();
+            Term::Fun(Fun::external(atom("lists"), atom(function), arity))
+        };
+        assert_eq!(external("get", 1), external("get", 1).clone());
+        assert_ne!(external("get", 1), external("get", 2));
+        assert_ne!(external("get", 1), external("put", 1));
+        assert_ne!(external("get", 1), fun(0, vec![]));
+        assert_eq!(
+            format!("{:?}", external("get", 1)),
+            "Fun(External { module: Atom { index: 971, name: \"lists\" }, function: Atom { \
+             index: 781, name: \"get\" }, arity: 1 }, [])"
+        );
     }
 
     #[test]

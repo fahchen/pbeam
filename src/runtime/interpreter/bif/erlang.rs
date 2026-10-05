@@ -2,7 +2,7 @@
 
 use super::BifResult::{Trap, Value};
 use super::*;
-use crate::term::Reference;
+use crate::term::{Fun, Reference};
 
 /// Return the node of a pid or of the calling process.
 ///
@@ -320,8 +320,34 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
     if arity < 0 {
         return BifResult::badarg();
     }
-    let matches = matches!(term, Term::Fun(fun) if i64::from(fun.lambda().arity()) == arity);
+    let matches = matches!(term, Term::Fun(fun) if i64::from(fun.target().arity()) == arity);
     Value(Term::static_atom(if matches { "true" } else { "false" }))
+}
+
+/// Run `erlang:make_fun/3`: return the external fun of
+/// `module:function/arity`, as ERTS `make_fun_3` (`bif.c:4467-4485`) does.
+/// The module and the function must be atoms, and the arity must be an
+/// integer in `0..=255` (`MAX_ARG` in `erl_vm.h:54`), else the call raises
+/// `badarg`. The function does not need to exist.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let module = Term::static_atom("erlang");
+/// let function = Term::static_atom("self");
+/// assert!(matches!(make_fun(&module, &function, &Term::Integer(0)), BifResult::Value(Term::Fun(_))));
+/// assert!(matches!(make_fun(&module, &function, &Term::Integer(256)), BifResult::Raise { .. }));
+/// assert!(matches!(make_fun(&Term::Integer(1), &function, &Term::Integer(0)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn make_fun(module: &Term, function: &Term, arity: &Term) -> BifResult {
+    /// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
+    const MAX_ARG: i64 = 255;
+    match (module, function, arity.small_integer()) {
+        (Term::Atom(module), Term::Atom(function), Some(arity @ 0..=MAX_ARG)) => Value(Term::Fun(
+            Fun::external(module.clone(), function.clone(), arity as u32),
+        )),
+        _ => BifResult::badarg(),
+    }
 }
 
 /// The largest binary, in bytes, that `erlang:iolist_to_iovec/1` copies into

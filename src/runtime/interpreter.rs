@@ -9,7 +9,7 @@ use crate::{
         code::{self, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::{Atom, AtomTable, Fun, Term},
+    term::{Atom, AtomTable, Fun, Target, Term},
 };
 use std::collections::HashMap;
 
@@ -362,7 +362,7 @@ impl BeamProgram {
                 }
                 Instruction::CallFun { arity, function } => {
                     let fun = read(process, function)?;
-                    if let Some(outcome) = self.call_fun(process, &fun, *arity, false)? {
+                    if let Some(outcome) = self.call_fun(scheduler, &fun, *arity, false)? {
                         return Ok(outcome);
                     }
                 }
@@ -912,35 +912,39 @@ impl BeamProgram {
         for (index, argument) in (0..).zip(arguments) {
             write(process, &Operand::X(index), argument)?;
         }
-        self.call_fun(process, &fun, arity, tail)
+        self.call_fun(scheduler, &fun, arity, tail)
     }
 
     /// Call `fun` with the arguments in `x0` to `x(arity - 1)`, as ERTS
     /// `call_fun` (`beam_common.c:1605-1731`) does for `call_fun` and
     /// `call_fun2`. A term that is not a fun raises `error:{badfun, Term}`. A
     /// fun of another arity raises `error:{badarity, {Fun, Arguments}}`,
-    /// where `Arguments` lists `x0` to `x(arity - 1)`. Else the free
-    /// variables go to `x(arity)` onwards, and the call enters the code of
-    /// the lambda. A tail call replaces the active frame. Return the outcome
-    /// when the process exits.
+    /// where `Arguments` lists `x0` to `x(arity - 1)`. Else a local fun puts
+    /// its free variables in `x(arity)` onwards and enters the code of the
+    /// lambda, and an external fun calls its function as `call_ext` does, so
+    /// a BIF runs as a BIF. A tail call replaces the active frame. Return the
+    /// outcome when the process exits.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // x0 = one and fun(X) -> {Tag, X} end enters the lambda with x1 = Tag.
-    /// assert!(program.call_fun(process, &pair, 1, false)?.is_none());
+    /// assert!(program.call_fun(&mut scheduler, &pair, 1, false)?.is_none());
+    /// // fun erlang:self/0 runs the `self/0` BIF.
+    /// assert!(program.call_fun(&mut scheduler, &self_fun, 0, false)?.is_none());
     /// // An atom raises `error:{badfun, notfun}`.
-    /// assert!(program.call_fun(process, &Term::static_atom("notfun"), 0, false)?.is_some());
+    /// assert!(program.call_fun(&mut scheduler, &Term::static_atom("notfun"), 0, false)?.is_some());
     /// ```
     fn call_fun(
         &self,
-        process: &mut ProcessState,
+        scheduler: &mut Scheduler,
         fun: &Term,
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
         let fun = match fun {
-            Term::Fun(local) if local.lambda().arity() == arity => local,
+            Term::Fun(fun) if fun.target().arity() == arity => fun,
             Term::Fun(_) => {
                 let arguments = call_arguments(&process.registers, arity)?;
                 let call = Term::Tuple(vec![fun.clone(), Term::List(arguments)]);
@@ -952,10 +956,15 @@ impl BeamProgram {
                 return Ok(raise(process, ExceptionClass::Error, reason));
             }
         };
+        let lambda = match fun.target() {
+            Target::Local(lambda) => lambda,
+            Target::External {
+                module, function, ..
+            } => return self.call_mfa(scheduler, module.name(), function.name(), arity, tail),
+        };
         for (register, value) in (arity..).zip(fun.free()) {
             write(process, &Operand::X(register), value.clone())?;
         }
-        let lambda = fun.lambda();
         let total_arity = arity + fun.free().len() as u32;
         let frame = self.frame(lambda.module().name(), lambda.label(), total_arity)?;
         enter_frame(process, frame, tail);
@@ -1530,6 +1539,35 @@ mod tests {
         for arity in [Term::Integer(0), Term::Integer(-1), test_atom("a")] {
             assert_eq!(run(arity), test_atom("fail"));
         }
+    }
+
+    #[test]
+    fn calls_an_external_fun_of_a_missing_function_as_call_ext() {
+        // A call of an external fun goes to the export entry of its
+        // function, as `call_ext` does (`beam_common.c:1605-1731`). ERTS 29.1.1
+        // raises `undef` for `(erlang:make_fun(missing, run, 0))()`; PBeam
+        // gives the runtime error of the row "Exception raise sites".
+        let program = make_program(
+            vec![
+                Instruction::Move(atom("missing"), Operand::X(0)),
+                Instruction::Move(atom("run"), Operand::X(1)),
+                Instruction::Move(Operand::Value(Term::Integer(0)), Operand::X(2)),
+                erlang_call("make_fun", 3, false),
+                Instruction::CallFun {
+                    arity: 0,
+                    function: Operand::X(0),
+                },
+                Instruction::Return,
+            ],
+            0,
+        );
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            "unresolved external MFA missing:run/0"
+        );
     }
 
     #[test]
