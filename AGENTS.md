@@ -13,7 +13,7 @@ Write `docs/agents/knowledge.md` and `docs/agents/improvements.md` only through 
 ## Scope and source of truth
 
 - Read `README.md` and `docs/portable-beam-spec.md` before changing runtime behavior.
-- Use GitHub Issues and their dependencies for planning and progress. Track at-a-glance status on the [project board](https://github.com/users/fahchen/projects/2). Do not create `tasks/plan.md`, `tasks/todo.md`, or another file-based task tracker.
+- Use GitHub Issues and their dependencies for planning and progress. Track at-a-glance status on the [project board](https://github.com/users/fahchen/projects/2). Do not create `tasks/plan.md`, `tasks/todo.md`, or another file-based task tracker. The one exception is `docs/backlog.md`: record there each optional improvement and each idea to consider later that has no current consumer or no owner decision, with its reason, evidence, and trigger. When an item gets a consumer or an owner decision, open a task issue for it and remove the item in the PR that closes the issue.
 - Stay within the requested task. Resolve unknowns explicitly; do not invent Terra identity, compatibility guarantees, supported platforms, or working commands.
 
 ## GitHub hierarchy
