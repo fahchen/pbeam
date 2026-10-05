@@ -62,3 +62,29 @@ fn matches_erts_demonitor_options_and_argument_errors() {
         b"{{badarg,badarg,badarg,badarg,badarg},{value,false},[true,true,true,true,true,true],true,[true,true,false,false,false,false],[true,true,false,false,false,false],[{true,down},{true,none},{false,down},{false,none},{false,down},{false,none}]}\n"
     );
 }
+
+#[test]
+fn creates_no_monitor_when_a_process_monitors_itself() {
+    let program = BeamProgram::load(&[DEMONITOR_PROBE]).unwrap();
+
+    assert_eq!(
+        program
+            .execute("demonitor_probe", "self_monitor", &[])
+            .unwrap(),
+        Term::Atom(program.atom("false").unwrap())
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/demonitor",
+            "-eval",
+            "io:format(\"~w~n\", [demonitor_probe:self_monitor()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stdout, b"false\n");
+}

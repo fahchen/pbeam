@@ -224,6 +224,8 @@ impl Scheduler {
     /// Monitor a local process for the current process, as
     /// `erlang:monitor(process, Pid)` does. A process that does not exist
     /// gets an immediate `{'DOWN', Ref, process, Pid, noproc}`, as in ERTS.
+    /// A process that monitors itself gets a reference but no monitor, as
+    /// ERTS does (`bif.c:781-783`).
     ///
     /// # Examples
     ///
@@ -234,6 +236,7 @@ impl Scheduler {
         let reference = self.make_ref()?;
         let current = self.current_process_mut().id;
         match self.processes.get_mut(&target) {
+            Some(_) if target == current => {}
             Some(process) => process.monitored_by.push((current, reference)),
             None => self.deliver(
                 current,

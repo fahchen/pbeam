@@ -1,6 +1,6 @@
 -module(demonitor_probe).
 -compile(nowarn_deprecated_catch).
--export([main/0, id/1, holder/0, gone/0]).
+-export([main/0, self_monitor/0, id/1, holder/0, gone/0]).
 
 main() ->
     Holder = spawn(?MODULE, holder, []),
@@ -19,6 +19,8 @@ main() ->
     Holder ! stop,
     Fired = [fired(Options) || Options <- options()],
     {Invalid, Target, Active, First, Removed, Unknown, Fired}.
+
+self_monitor() -> demonitor(monitor(process, self()), [info]).
 
 options() -> [[], [flush], [info], [flush, info], [info, info], [info, flush, flush]].
 

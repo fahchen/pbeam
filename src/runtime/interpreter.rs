@@ -2544,35 +2544,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn removes_an_active_monitor_without_a_trap() {
-        // monitor(process, self()), then demonitor(Ref, [flush]): the monitor
-        // is still active, so ERTS returns true without flushing.
-        let program = make_program(
-            vec![
-                Instruction::Bif {
-                    fail_label: 0,
-                    module: "erlang".into(),
-                    name: "self".into(),
-                    arguments: Vec::new(),
-                    destination: Operand::X(1),
-                },
-                Instruction::Move(atom("process"), Operand::X(0)),
-                erlang_call("monitor", 2, false),
-                Instruction::Move(
-                    Operand::Value(Term::List(vec![test_atom("flush")])),
-                    Operand::X(1),
-                ),
-                erlang_call("demonitor", 2, true),
-            ],
-            0,
-        );
-        assert_eq!(
-            program.execute("fixture", "main", &[]).unwrap(),
-            test_atom("true")
-        );
-    }
-
     /// Run `main/0` with the functions `zero/0`, `id/3`, and `last/2` of
     /// the probe that gives the ERTS values of the `apply` tests:
     /// `zero() -> zero.`, `id(A, B, C) -> {A, B, C}.`, and
