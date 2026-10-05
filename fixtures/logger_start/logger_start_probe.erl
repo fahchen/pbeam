@@ -1,5 +1,6 @@
 -module(logger_start_probe).
--export([reverse/0, remove/0, without/0, ets/0, ets_access/0, find/0, from_list/0, is_key/0, hd/0]).
+-export([reverse/0, remove/0, without/0, ets/0, ets_access/0, find/0, from_list/0, is_key/0,
+         to_list/0, map_next/0, next/0, ordered/0, hd/0]).
 
 %% `lists:reverse/2` (erl_bif_lists.c:1246-1263). logger_simple_h:replay_buffer/1
 %% (logger_simple_h.erl:150) calls it with the buffer and the drop message, and
@@ -135,6 +136,91 @@ is_key() ->
 key_guard(K, M) when is_map_key(K, M) -> yes;
 key_guard(_, _) -> no.
 
+%% `erts_internal:map_next/3` (erl_map.c:3593-4135), through maps:to_list/1
+%% (maps.erl:525-542). logger_h_common:filter_config/1
+%% (logger_h_common.erl:441), logger_std_h (logger_std_h.erl:306),
+%% logger_olp (logger_olp.erl:418), and logger_formatter
+%% (logger_formatter.erl:721) call it. A flatmap gives all pairs in one call.
+%% A hashmap gives the pairs in the HAMT order, in chunks.
+to_list() ->
+    [maps:to_list(id(#{})),
+     maps:to_list(id(#{2 => b, 1 => a, three => 3})),
+     maps:to_list(id(#{type => standard_io})),
+     maps:to_list(id(big(40))),
+     maps:to_list(id(big(100)))].
+
+%% Direct `erts_internal:map_next/3` calls in list mode and iterator mode. The
+%% calls run in a new process, which has its full reduction budget, so a
+%% hashmap call at path 0 gives 32 pairs (MAP_SMALL_MAP_LIMIT) and the next
+%% call gives the rest. A flatmap needs a small path from 0 to its size. A
+%% term that is not a map, a third argument that is not iterator or a list,
+%% and a path that selects no entry of a node raise badarg.
+map_next() ->
+    in_new_process(fun() ->
+        Big = id(big(40)),
+        [Path, Big | First] = erts_internal:map_next(0, Big, []),
+        Rest = erts_internal:map_next(Path, Big, First),
+        [Path2, Big | First2] = erts_internal:map_next(0, Big, [end_]),
+        [erts_internal:map_next(0, id(#{2 => b, 1 => a}), []),
+         erts_internal:map_next(0, id(#{2 => b, 1 => a}), [x]),
+         erts_internal:map_next(2, id(#{2 => b, 1 => a}), []),
+         erts_internal:map_next(0, id(#{2 => b, 1 => a}), iterator),
+         erts_internal:map_next(0, id(#{}), iterator),
+         Path, length(First), First, Rest,
+         Path2, lists:last(First2),
+         catch_error(fun() -> erts_internal:map_next(3, id(#{2 => b, 1 => a}), []) end),
+         catch_error(fun() -> erts_internal:map_next(-1, id(#{a => 1}), []) end),
+         catch_error(fun() -> erts_internal:map_next(a, id(#{a => 1}), []) end),
+         catch_error(fun() -> erts_internal:map_next(0, id(foo), []) end),
+         catch_error(fun() -> erts_internal:map_next(0, id(#{a => 1}), foo) end),
+         catch_error(fun() -> erts_internal:map_next(a, Big, []) end),
+         catch_error(fun() -> erts_internal:map_next(16#ff, Big, []) end),
+         catch_error(fun() -> erts_internal:map_next(-1, Big, iterator) end)]
+    end).
+
+%% maps:next/1 (maps.erl:1094-1115) on maps:iterator/1 (maps.erl:1000, 1060),
+%% which is [0 | Map]. The iterator of a hashmap holds 32 pairs and then
+%% [Path | Map].
+next() ->
+    in_new_process(fun() ->
+        Big = id(big(40)),
+        {K1, V1, I1} = maps:next(maps:iterator(Big)),
+        [keys_of(maps:iterator(id(#{2 => b, 1 => a}))),
+         keys_of(maps:iterator(Big)),
+         {K1, V1},
+         element(3, erts_internal:map_next(0, Big, iterator)) =:= I1,
+         iterator_path(erts_internal:map_next(0, Big, iterator)),
+         erts_internal:map_next(iterator_path(erts_internal:map_next(0, Big, iterator)), Big, iterator) =/= none]
+    end).
+
+%% The ordered iterator: a path that is a list of keys (maps.erl:1062-1072).
+%% The BIF gives the keys in the order of the list, in chunks of at most
+%% CONTEXT_REDS / 32 keys (erl_map.c:3654-3660), so 130 keys need two calls.
+%% A key that the map does not hold and a tail that is not [] raise badarg,
+%% also in the second call, and a list path in list mode raises badarg.
+ordered() ->
+    in_new_process(fun() ->
+        M = id(#{b => 2, a => 1, c => 3}),
+        [keys_of([[a, b, c] | M]),
+         keys_of([lists:reverse(lists:seq(1, 40)) | id(big(40))]),
+         keys_of([lists:seq(1, 130) | id(big(130))]) =:= lists:seq(1, 130),
+         catch_error(fun() -> keys_of([lists:seq(1, 130) ++ b | id(big(130))]) end),
+         erts_internal:map_next([c, a], M, iterator),
+         erts_internal:map_next([], M, iterator),
+         catch_error(fun() -> erts_internal:map_next([d], M, iterator) end),
+         catch_error(fun() -> erts_internal:map_next([a | b], M, iterator) end),
+         catch_error(fun() -> erts_internal:map_next([a], M, []) end)]
+    end).
+
+keys_of(I) ->
+    case maps:next(I) of
+        none -> [];
+        {K, _, Next} -> [K | keys_of(Next)]
+    end.
+
+iterator_path({_, _, Next}) -> iterator_path(Next);
+iterator_path([Path | _]) -> Path.
+
 %% `erlang:hd/1` (bif.c:2918-2925). gen_server:decode_msg/6
 %% (gen_server.erl:2380) runs it in a guard. It gives the head of a proper
 %% or an improper list. Each other term raises badarg, and in a guard the bif
@@ -155,6 +241,10 @@ big(N, M) -> big(N - 1, M#{N => N}).
 
 drop(N, To, M) when N > To -> M;
 drop(N, To, M) -> drop(N + 1, To, maps:remove(N, M)).
+
+in_new_process(Fun) ->
+    {Pid, Ref} = spawn_monitor(fun() -> exit({result, Fun()}) end),
+    receive {'DOWN', Ref, process, Pid, {result, Result}} -> Result end.
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

@@ -387,3 +387,180 @@ fn takes_list_heads_as_pinned_erts() {
         b"[a,a,c,yes,no,no,{error,badarg},{error,badarg}]\n"
     );
 }
+
+/// The keys of `big(40)` and `big(100)` of the probe in the ERTS HAMT order.
+const BIG_40_KEYS: [i64; 40] = [
+    18, 4, 34, 12, 19, 29, 13, 2, 7, 38, 31, 8, 10, 23, 9, 15, 35, 36, 32, 1, 25, 28, 20, 6, 11,
+    17, 24, 37, 40, 14, 33, 3, 16, 30, 21, 5, 27, 26, 22, 39,
+];
+const BIG_100_KEYS: [i64; 100] = [
+    54, 18, 96, 94, 84, 4, 72, 68, 93, 34, 46, 52, 92, 12, 19, 91, 41, 100, 29, 13, 42, 55, 2, 98,
+    7, 90, 38, 56, 61, 99, 65, 31, 70, 8, 44, 10, 23, 9, 82, 49, 79, 71, 66, 75, 64, 78, 80, 15,
+    35, 36, 76, 97, 32, 58, 1, 25, 28, 60, 20, 87, 6, 95, 83, 43, 57, 11, 81, 73, 89, 88, 48, 17,
+    24, 37, 40, 14, 33, 53, 3, 16, 30, 62, 86, 21, 5, 77, 27, 85, 47, 63, 26, 51, 22, 50, 45, 67,
+    69, 59, 74, 39,
+];
+
+/// Return the `~w` text of `[{K,K}, ...]` for integer keys.
+fn pairs_text(keys: &[i64]) -> String {
+    let pairs: Vec<_> = keys.iter().map(|key| format!("{{{key},{key}}}")).collect();
+    format!("[{}]", pairs.join(","))
+}
+
+/// Return the list `[{K, K}, ...]` of integer keys.
+fn integer_pairs(keys: &[i64]) -> Term {
+    let pair = |key: &i64| Term::Tuple(vec![Term::Integer(*key), Term::Integer(*key)]);
+    Term::List(keys.iter().map(pair).collect())
+}
+
+#[test]
+fn lists_map_pairs_as_pinned_erts() {
+    // `logger_start_probe:to_list/0` runs the pinned `maps:to_list/1`
+    // (`maps.erl:525-542`), which calls `erts_internal:map_next/3`
+    // (`erl_map.c:3637-4135`) until no path remains, as
+    // `logger_h_common:filter_config/1` (`logger_h_common.erl:441`) does. A
+    // flatmap gives its pairs in the flatmap order. A hashmap gives the last
+    // 32 pairs at path 0 and the rest in the next call, in the HAMT order.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |key: Term, value: Term| Term::Tuple(vec![key, value]);
+    let expected = vec![
+        Term::List(vec![]),
+        Term::List(vec![
+            pair(Term::Integer(1), atom("a")),
+            pair(Term::Integer(2), atom("b")),
+            pair(atom("three"), Term::Integer(3)),
+        ]),
+        Term::List(vec![pair(atom("type"), atom("standard_io"))]),
+        integer_pairs(&BIG_40_KEYS),
+        integer_pairs(&BIG_100_KEYS),
+    ];
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "to_list", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    let text = format!(
+        "[[],[{{1,a}},{{2,b}},{{three,3}}],[{{type,standard_io}}],{},{}]\n",
+        pairs_text(&BIG_40_KEYS),
+        pairs_text(&BIG_100_KEYS)
+    );
+    assert_eq!(String::from_utf8(reference("to_list")).unwrap(), text);
+}
+
+#[test]
+fn walks_maps_with_a_path_as_pinned_erts() {
+    // `logger_start_probe:map_next/0` calls `erts_internal:map_next/3` in a
+    // new process, which has a full reduction budget on ERTS. A flatmap
+    // gives all pairs for a small path from 0 to its size. In list mode, a
+    // hashmap at path 0 gives its last 32 pairs and the path 43, and the
+    // next call adds the 8 other pairs in front. A path that is not a small
+    // integer for a flatmap, a negative small integer (2^60 - 1 as a path),
+    // a term that is not a map, a third argument that is not `iterator` or
+    // a list, and a path element that selects no entry of a node raise
+    // `badarg`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |key: i64, value: &str| Term::Tuple(vec![Term::Integer(key), atom(value)]);
+    let small = Term::List(vec![pair(1, "a"), pair(2, "b")]);
+    let iterator = Term::Tuple(vec![
+        Term::Integer(1),
+        atom("a"),
+        Term::Tuple(vec![Term::Integer(2), atom("b"), atom("none")]),
+    ]);
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let mut expected = vec![
+        small.clone(),
+        Term::List(vec![pair(1, "a"), pair(2, "b"), atom("x")]),
+        small,
+        iterator,
+        atom("none"),
+        Term::Integer(43),
+        Term::Integer(32),
+        integer_pairs(&BIG_40_KEYS[8..]),
+        integer_pairs(&BIG_40_KEYS),
+        Term::Integer(43),
+        atom("end_"),
+    ];
+    expected.extend(std::iter::repeat_n(badarg, 8));
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "map_next", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    let text = format!(
+        "[[{{1,a}},{{2,b}}],[{{1,a}},{{2,b}},x],[{{1,a}},{{2,b}}],{{1,a,{{2,b,none}}}},none,43,32,{},{},43,end_,{}]\n",
+        pairs_text(&BIG_40_KEYS[8..]),
+        pairs_text(&BIG_40_KEYS),
+        ["{error,badarg}"; 8].join(",")
+    );
+    assert_eq!(String::from_utf8(reference("map_next")).unwrap(), text);
+}
+
+#[test]
+fn iterates_maps_as_pinned_erts() {
+    // `logger_start_probe:next/0` runs the pinned `maps:next/1`
+    // (`maps.erl:1094-1115`) on `maps:iterator/1`, which is `[0 | Map]`. In
+    // iterator mode, a hashmap at path 0 gives its first 32 pairs and then
+    // `[26 | Map]`, and the call with path 26 gives the rest.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let integers = |keys: &[i64]| Term::List(keys.iter().copied().map(Term::Integer).collect());
+    let expected = vec![
+        integers(&[1, 2]),
+        integers(&BIG_40_KEYS),
+        Term::Tuple(vec![Term::Integer(18), Term::Integer(18)]),
+        atom("true"),
+        Term::Integer(26),
+        atom("true"),
+    ];
+    assert_eq!(
+        program.execute("logger_start_probe", "next", &[]).unwrap(),
+        Term::List(expected)
+    );
+    let keys: Vec<_> = BIG_40_KEYS.iter().map(i64::to_string).collect();
+    let text = format!("[[1,2],[{}],{{18,18}},true,26,true]\n", keys.join(","));
+    assert_eq!(String::from_utf8(reference("next")).unwrap(), text);
+}
+
+#[test]
+fn iterates_maps_in_a_given_key_order_as_pinned_erts() {
+    // `logger_start_probe:ordered/0` runs the ordered iterator of
+    // `erts_internal:map_next/3` (`erl_map.c:3653-3707`): a list path of
+    // keys, as `maps:iterator/2` (`maps.erl:1062-1072`) makes it. The BIF
+    // gives the keys in the order of the list, also for a hashmap, and `[]`
+    // gives `none`. A call takes at most 125 keys, so 130 keys need a
+    // second call with the rest of the list. A key that the map does not
+    // hold, a tail that is not `[]`, also in the second call, and a list
+    // path in list mode raise `badarg`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let mut expected = vec![
+        Term::List(vec![atom("a"), atom("b"), atom("c")]),
+        Term::List((1..=40).rev().map(Term::Integer).collect()),
+        atom("true"),
+        badarg.clone(),
+        Term::Tuple(vec![
+            atom("c"),
+            Term::Integer(3),
+            Term::Tuple(vec![atom("a"), Term::Integer(1), atom("none")]),
+        ]),
+        atom("none"),
+    ];
+    expected.extend(std::iter::repeat_n(badarg, 3));
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "ordered", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    let keys: Vec<_> = (1..=40).rev().map(|key: i64| key.to_string()).collect();
+    let text = format!(
+        "[[a,b,c],[{}],true,{{error,badarg}},{{c,3,{{a,1,none}}}},none,{{error,badarg}},{{error,badarg}},{{error,badarg}}]\n",
+        keys.join(",")
+    );
+    assert_eq!(String::from_utf8(reference("ordered")).unwrap(), text);
+}

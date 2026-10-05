@@ -2,6 +2,7 @@
 
 use super::BifResult::Value;
 use super::*;
+use crate::term::Direction;
 
 /// Run `maps:keys/1`: return the keys of a map in map order. A term that is
 /// not a map gives a runtime error.
@@ -129,6 +130,143 @@ pub(super) fn is_key(key: &Term, map: &Term) -> BifResult {
     } else {
         "false"
     }))
+}
+
+/// Run `erts_internal:map_next/3`: return the next pairs of a map walk, as
+/// ERTS `erts_internal_map_next_3` does (`erl_map.c:3637-4135`).
+/// `maps:to_list/1` (`maps.erl:525-542`) calls it with a list third
+/// argument, and `maps:next/1` (`maps.erl:1094-1115`) with `iterator`.
+///
+/// - List mode: the pairs as `{K, V}` before the third argument, after
+///   `[Path, Map]` when pairs remain.
+/// - Iterator mode with an integer path: `{K1, V1, {K2, V2, Next}}`, where
+///   `Next` is `[Path | Map]` when pairs remain and `none` when no pair
+///   remains.
+/// - Iterator mode with a list path: the ordered iterator of
+///   `maps:iterator/2` (`maps.erl:1062-1072`). The BIF takes the keys of the
+///   list in order, and `Next` is `[Rest | Map]` or `none`.
+///
+/// ERTS takes as many pairs as the reductions of the process permit. PBeam
+/// has no reductions, so it takes the pairs of a full budget
+/// (`CONTEXT_REDS`, `erl_vm.h:53`), as a new ERTS process does.
+///
+/// A term that is not a map, a third argument that is not `iterator` or a
+/// list, a path that `Map::chunk` does not accept, a key that the map does
+/// not hold, and a list path with a tail that is not `[]` raise
+/// `error:badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), test_atom("a"))])?);
+/// let pair = Term::Tuple(vec![Term::Integer(1), test_atom("a")]);
+/// assert!(matches!(map_next(&Term::Integer(0), &map, &Term::List(vec![]))?, BifResult::Value(Term::List(pairs)) if pairs == [pair]));
+/// assert!(matches!(map_next(&Term::Integer(2), &map, &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of `Map::chunk` for a next path that PBeam
+/// cannot hold.
+pub(super) fn map_next(path: &Term, map: &Term, acc: &Term) -> Result<BifResult, BeamError> {
+    /// The pairs of a hashmap call with a full budget: `FCALLS_ELEMS` is
+    /// `CONTEXT_REDS / 4` (`erl_map.c:3727-3746`).
+    const HASHMAP_BUDGET: usize = 1000;
+    let Term::Map(entries) = map else {
+        return Ok(BifResult::badarg());
+    };
+    let direction = match acc {
+        Term::List(_) | Term::ImproperList(..) => Direction::Backward,
+        _ if *acc == Term::static_atom("iterator") => Direction::Forward,
+        _ => return Ok(BifResult::badarg()),
+    };
+    match (direction, path) {
+        (Direction::Forward, Term::List(keys)) => {
+            return Ok(ordered_next(keys, None, entries, map));
+        }
+        (Direction::Forward, Term::ImproperList(keys, tail)) => {
+            return Ok(ordered_next(keys, Some(tail), entries, map));
+        }
+        _ => {}
+    }
+    let Some(chunk) = entries.chunk(path, HASHMAP_BUDGET, direction)? else {
+        return Ok(BifResult::badarg());
+    };
+    let pairs = chunk.pairs.into_iter();
+    let next = chunk.next.map(Term::Integer);
+    Ok(Value(match direction {
+        Direction::Forward => {
+            let next = next.map_or(Term::static_atom("none"), |path| {
+                Term::list_with_tail(vec![path], map.clone())
+            });
+            iterator_pairs(pairs, next)
+        }
+        Direction::Backward => {
+            let pairs = pairs.map(|(key, value)| Term::Tuple(vec![key.clone(), value.clone()]));
+            let list = Term::list_with_tail(pairs.collect(), acc.clone());
+            match next {
+                Some(path) => Term::list_with_tail(vec![path, map.clone()], list),
+                None => list,
+            }
+        }
+    }))
+}
+
+/// Run the ordered iterator of `erts_internal:map_next/3`
+/// (`erl_map.c:3653-3707`) for a list path of `keys` and the `tail` of an
+/// improper list path: take the keys in order, up to
+/// `MAX(1, reductions / 32)` keys. With a full budget, this is 125 keys. A
+/// key that the map does not hold, and a tail that is not `[]` after the
+/// last key, raise `error:badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), test_atom("a"))])?);
+/// let Term::Map(entries) = &map else { unreachable!() };
+/// let first = Term::Tuple(vec![Term::Integer(1), test_atom("a"), test_atom("none")]);
+/// assert!(matches!(ordered_next(&[Term::Integer(1)], None, entries, &map), BifResult::Value(value) if value == first));
+/// assert!(matches!(ordered_next(&[Term::Integer(2)], None, entries, &map), BifResult::Raise { .. }));
+/// ```
+fn ordered_next(keys: &[Term], tail: Option<&Term>, entries: &Map, map: &Term) -> BifResult {
+    /// `CONTEXT_REDS / ORDERED_ITER_FACTOR` (`erl_vm.h:53`, `erl_map.c:3654-3660`).
+    const ORDERED_BUDGET: usize = 125;
+    let (taken, rest) = keys.split_at(keys.len().min(ORDERED_BUDGET));
+    let next = match (rest, tail) {
+        ([], None) => Term::static_atom("none"),
+        ([], Some(_)) => return BifResult::badarg(),
+        (rest, tail) => {
+            let tail = tail.cloned().unwrap_or(Term::List(Vec::new()));
+            let rest = Term::list_with_tail(rest.to_vec(), tail);
+            Term::list_with_tail(vec![rest], map.clone())
+        }
+    };
+    let pairs = taken
+        .iter()
+        .map(|key| entries.get(key).map(|value| (key, value)));
+    let Some(pairs) = pairs.collect::<Option<Vec<_>>>() else {
+        return BifResult::badarg();
+    };
+    Value(iterator_pairs(pairs.into_iter(), next))
+}
+
+/// Build the iterator result `{K1, V1, {K2, V2, Next}}` of pairs, or `Next`
+/// when there is no pair.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (key, value) = (Term::Integer(1), test_atom("a"));
+/// let result = iterator_pairs([(&key, &value)].into_iter(), test_atom("none"));
+/// assert_eq!(result, Term::Tuple(vec![key.clone(), value.clone(), test_atom("none")]));
+/// ```
+fn iterator_pairs<'a>(
+    pairs: impl DoubleEndedIterator<Item = (&'a Term, &'a Term)>,
+    next: Term,
+) -> Term {
+    pairs.rev().fold(next, |rest, (key, value)| {
+        Term::Tuple(vec![key.clone(), value.clone(), rest])
+    })
 }
 
 /// Run `maps:merge/2`: return the first map with each pair of the second

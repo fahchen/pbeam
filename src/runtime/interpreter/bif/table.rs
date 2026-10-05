@@ -392,7 +392,7 @@ bifs! {
     erts_internal:is_system_process/1 => unsupported,
     erts_internal:list_to_integer/2 => unsupported,
     erts_internal:map_hashmap_children/1 => unsupported,
-    erts_internal:map_next/3 => unsupported,
+    erts_internal:map_next/3 => |_, [path, map, acc]| maps::map_next(path, map, acc),
     erts_internal:map_to_tuple_keys/1 => unsupported,
     erts_internal:new_connection/1 => unsupported,
     erts_internal:no_aux_work_threads/0 => unsupported,

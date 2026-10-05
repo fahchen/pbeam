@@ -25,7 +25,7 @@
 use std::cmp::Ordering;
 
 use super::Term;
-use crate::error::BeamError;
+use crate::error::{BeamError, error};
 
 /// The largest number of keys in a flatmap (`MAP_SMALL_MAP_LIMIT` in a
 /// release build of ERTS). A map with more keys is a hashmap.
@@ -62,6 +62,48 @@ const IHASH_CHUNK_BYTES: u64 = 4;
 /// `IHASH_C2`, `erl_term_hashing.c:1665-1666`).
 const IHASH_C1: u64 = 0x87C3_7B91_1142_53D5;
 const IHASH_C2: u64 = 0x4CF5_AD43_2745_937F;
+/// The number of path elements in one ERTS bignum digit
+/// (`PATH_ELEMS_PER_DIGIT`, `erl_map.c:3635`). A path element has
+/// `SLOT_BITS` bits.
+const PATH_ELEMS_PER_DIGIT: usize = (u64::BITS / SLOT_BITS) as usize;
+
+/// The direction of an `erts_internal:map_next/3` walk over a map.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Direction {
+    /// The `iterator` mode: from the first pair of the map order onwards.
+    Forward,
+    /// The list mode: from the last pair of the map order backwards.
+    Backward,
+}
+
+/// The pairs of one `erts_internal:map_next/3` call and the path of the
+/// next call.
+pub(crate) struct Chunk<'a> {
+    /// The pairs of the chunk, in the map order.
+    pub(crate) pairs: Vec<(&'a Term, &'a Term)>,
+    /// The path of the first pair that the chunk does not hold, or `None`
+    /// when the chunk ends the walk.
+    pub(crate) next: Option<i64>,
+}
+
+/// The entries of one ERTS hashmap node, as the walk of
+/// `erts_internal:map_next/3` sees them: a HAMT node, or a collision child,
+/// which ERTS keeps as a collision node of leaves.
+#[derive(Clone, Copy)]
+enum Entries<'a> {
+    /// The children of a HAMT node.
+    Node(&'a Node),
+    /// The pairs of a collision child.
+    Collision(&'a [(Term, Term)]),
+}
+
+/// One entry of a hashmap node: a pair, or a node one level down.
+enum Entry<'a> {
+    /// A key and its value.
+    Leaf(&'a Term, &'a Term),
+    /// The entries one level down.
+    Inner(Entries<'a>),
+}
 
 /// A BEAM map: a flatmap up to 32 keys and a HAMT above 32 keys, as in
 /// ERTS. The layout is private, so every map is in its canonical form.
@@ -436,6 +478,194 @@ impl Map {
             }
         }
     }
+
+    /// Return the pairs of one `erts_internal:map_next/3` call from an
+    /// integer path, as `erts_internal_map_next_3` does
+    /// (`erl_map.c:3681-4135`). Return `None` when ERTS raises `badarg` for
+    /// the path.
+    ///
+    /// A flatmap needs a small integer path from 0 to the map size, and it
+    /// gives all pairs (`erl_map.c:3681-3708`). A hashmap reads the path as
+    /// ERTS does: a small integer as its low 60 bits (`unsigned_val`), and an
+    /// integer from 2^59 to 2^63 - 1 as the one digit of a positive bignum.
+    /// A negative bignum or another term gives `None`. Each 4-bit element of
+    /// the path, root first, selects an entry of a node: forward from the
+    /// first entry for `Forward`, back from the last entry for `Backward`.
+    /// After 16 elements, and after the last element, the path continues
+    /// with element 0 down to a pair. An element that selects no entry gives
+    /// `None`. The walk then takes up to `budget` pairs (at most
+    /// the map size, at most 32 at path 0), but never part of a collision
+    /// node (`erl_map.c:3902-3915`, `erl_map.c:3984-3997`). The next path
+    /// selects the first pair that the chunk does not hold.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::from_pairs((1..=40).map(|key| (Term::Integer(key), Term::Integer(key))).collect())?;
+    /// let chunk = map.chunk(&Term::Integer(0), 1000, Direction::Backward)?.unwrap();
+    /// // ERTS 29.1.1: the last 32 pairs and the path 43.
+    /// assert_eq!((chunk.pairs.len(), chunk.next), (32, Some(43)));
+    /// let rest = map.chunk(&Term::Integer(43), 1000, Direction::Backward)?.unwrap();
+    /// assert_eq!((rest.pairs.len(), rest.next), (8, None));
+    /// assert!(map.chunk(&Term::Integer(0xff), 1000, Direction::Backward)?.is_none());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the next path has 15 elements and a
+    /// value below 2^59, or 16 or more elements. ERTS returns a bignum for
+    /// such a path (`erl_map.c:4058-4114`), which is not in normal form or
+    /// is above 2^63 - 1, and which PBeam cannot hold.
+    pub(crate) fn chunk(
+        &self,
+        path: &Term,
+        budget: usize,
+        direction: Direction,
+    ) -> Result<Option<Chunk<'_>>, BeamError> {
+        let hamt = match &self.repr {
+            Repr::Flat(pairs) => {
+                let size = pairs.len() as u64;
+                let path = path.small_integer().map(unsigned_val);
+                return Ok(path.filter(|path| *path <= size).map(|_| Chunk {
+                    pairs: pairs.iter().map(|(key, value)| (key, value)).collect(),
+                    next: None,
+                }));
+            }
+            Repr::Hash(hamt) => hamt,
+        };
+        let (path, mut limit) = match path {
+            Term::Integer(value) if path.small_integer().is_some() => {
+                let path = unsigned_val(*value);
+                let limit = if path == 0 {
+                    SMALL_MAP_LIMIT
+                } else {
+                    usize::MAX
+                };
+                (path, limit)
+            }
+            // A positive bignum of one digit.
+            Term::Integer(value) if *value > 0 => (*value as u64, usize::MAX),
+            _ => return Ok(None),
+        };
+        limit = limit.min(budget).min(hamt.size);
+        hamt.chunk(path, limit, direction)
+    }
+}
+
+impl Hamt {
+    /// Walk the trie from a path and take up to `limit` pairs, as the
+    /// hashmap part of `erts_internal_map_next_3` does
+    /// (`erl_map.c:3710-4134`). Keep the entries above the current one on a
+    /// stack, with the position of the child that the walk is in. A
+    /// position counts in the walk direction, so it is also the path
+    /// element. Return `None` when the path selects no entry.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let chunk = hamt.chunk(0, 32, Direction::Forward)?.unwrap();
+    /// assert_eq!(chunk.pairs.len(), 32);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return the runtime error of `encode_path` for a next path that PBeam
+    /// cannot hold.
+    fn chunk(
+        &self,
+        path: u64,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Option<Chunk<'_>>, BeamError> {
+        let mut above: Vec<(Entries, usize)> = Vec::new();
+        let mut entries = Entries::Node(&self.root);
+        let mut position = loop {
+            let position = path_element(path, above.len());
+            if position >= entries.len() {
+                return Ok(None);
+            }
+            match entries.at(position, direction) {
+                Entry::Leaf(..) => break position,
+                Entry::Inner(inner) => {
+                    above.push((entries, position));
+                    entries = inner;
+                }
+            }
+        };
+        let (mut pairs, mut remaining) = (Vec::new(), limit);
+        let next = loop {
+            if position == entries.len() {
+                let Some((outer, child)) = above.pop() else {
+                    break None;
+                };
+                (entries, position) = (outer, child + 1);
+                continue;
+            }
+            if remaining == 0 {
+                let elements = above.iter().map(|(_, child)| *child);
+                break Some(encode_path(elements.chain([position]).collect())?);
+            }
+            // A chunk takes a whole collision node: it may hold more than 16 pairs.
+            if let (0, Entries::Collision(collision)) = (position, entries) {
+                remaining = remaining.max(collision.len());
+            }
+            match entries.at(position, direction) {
+                Entry::Leaf(key, value) => {
+                    pairs.push((key, value));
+                    (position, remaining) = (position + 1, remaining - 1);
+                }
+                Entry::Inner(inner) => {
+                    above.push((entries, position));
+                    (entries, position) = (inner, 0);
+                }
+            }
+        };
+        if direction == Direction::Backward {
+            pairs.reverse();
+        }
+        Ok(Some(Chunk { pairs, next }))
+    }
+}
+
+impl<'a> Entries<'a> {
+    /// Return the number of entries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Entries::Node(&Node::empty()).len(), 0);
+    /// ```
+    fn len(self) -> usize {
+        match self {
+            Entries::Node(node) => node.children.len(),
+            Entries::Collision(pairs) => pairs.len(),
+        }
+    }
+
+    /// Return the entry at a position in the walk direction: the index for
+    /// `Forward`, and the index from the end for `Backward`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let pairs = [(Term::Integer(1), Term::Integer(1)), (Term::Integer(2), Term::Integer(2))];
+    /// let entries = Entries::Collision(&pairs);
+    /// assert!(matches!(entries.at(0, Direction::Backward), Entry::Leaf(Term::Integer(2), _)));
+    /// ```
+    fn at(self, position: usize, direction: Direction) -> Entry<'a> {
+        let index = match direction {
+            Direction::Forward => position,
+            Direction::Backward => self.len() - 1 - position,
+        };
+        match self {
+            Entries::Node(node) => match &node.children[index] {
+                Child::Leaf(key, value) => Entry::Leaf(key, value),
+                Child::Node(inner) => Entry::Inner(Entries::Node(inner)),
+                Child::Collision(pairs) => Entry::Inner(Entries::Collision(pairs)),
+            },
+            Entries::Collision(pairs) => Entry::Leaf(&pairs[index].0, &pairs[index].1),
+        }
+    }
 }
 
 impl Hamt {
@@ -647,6 +877,76 @@ fn flatmap_order(left: &Term, right: &Term) -> Result<Ordering, BeamError> {
 /// ```
 fn slot(hash: u64, level: u32) -> u32 {
     ((hash >> (SLOT_BITS * level)) & SLOT_MASK) as u32
+}
+
+/// Return the value that ERTS `unsigned_val` reads from the word of a small
+/// integer: the low 60 bits of the value, so -1 gives 2^60 - 1.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(unsigned_val(43), 43);
+/// assert_eq!(unsigned_val(-1), (1 << 60) - 1);
+/// ```
+fn unsigned_val(value: i64) -> u64 {
+    value as u64 & (u64::MAX >> SMALL_INTEGER_TAG_BITS)
+}
+
+/// Return the element of an `erts_internal:map_next/3` path at a node
+/// depth. The first 16 elements come from the path digit, root first, and
+/// each later element is 0 (`erl_map.c:3770-3812`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(path_element(0x2b, 0), 0xb);
+/// assert_eq!(path_element(0x2b, 1), 2);
+/// assert_eq!(path_element(u64::MAX, 16), 0);
+/// ```
+fn path_element(path: u64, depth: usize) -> usize {
+    if depth >= PATH_ELEMS_PER_DIGIT {
+        return 0;
+    }
+    ((path >> (SLOT_BITS as usize * depth)) & SLOT_MASK) as usize
+}
+
+/// Return the integer of the path elements of a next pair, root first, as
+/// `erts_internal_map_next_3` builds it (`erl_map.c:4058-4114`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(encode_path(vec![0xb, 2])?, 0x2b);
+/// assert!(encode_path(vec![0; 16]).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for a path that ERTS returns as a bignum which
+/// PBeam cannot hold. ERTS makes a bignum of `(n + 1) * 4` bits for a path
+/// of `n >= 15` elements. With 15 elements, it is one digit, which is in
+/// normal form only above 2^59 - 1. With 16 elements, the top digit is 0,
+/// so the bignum is not in normal form: on ERTS 29.1.1, it is not equal to
+/// the integer of the same value. With 17 elements, a path into a collision
+/// node, the value is 2^64 or more, or the top digit is 0.
+fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
+    let depth = elements.len();
+    let value = if depth < PATH_ELEMS_PER_DIGIT {
+        let value = elements
+            .iter()
+            .rev()
+            .fold(0, |value, element| (value << SLOT_BITS) | *element as i64);
+        let bignum = depth + 1 >= PATH_ELEMS_PER_DIGIT;
+        (!bignum || Term::Integer(value).small_integer().is_none()).then_some(value)
+    } else {
+        None
+    };
+    value.ok_or_else(|| {
+        error(format!(
+            "unsupported erts_internal:map_next/3 path of {depth} elements: \
+             ERTS returns a bignum that is not in normal form or above 2^63 - 1"
+        ))
+    })
 }
 
 /// Return the ERTS map hash (`erts_map_hash`, `erl_term_hashing.c:2301-2319`)
@@ -863,7 +1163,9 @@ fn mix64(mut hash: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Child, HAMT_MAX_LEVEL, Hamt, Map, Node, Repr, map_hash, mix64};
+    use super::{
+        Child, Direction, HAMT_MAX_LEVEL, Hamt, Map, Node, Repr, encode_path, map_hash, mix64,
+    };
     use crate::term::{AtomTable, Reference, Term, test_atom as atom};
 
     fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
@@ -1375,5 +1677,136 @@ mod tests {
         *map.get_mut(&first).unwrap() = Term::Integer(4);
         assert_eq!(map.get(&first), Some(&Term::Integer(4)));
         assert_eq!(map.get(&second), Some(&Term::Integer(3)));
+    }
+
+    /// Return the map of each key to itself.
+    fn identity(keys: Vec<Term>) -> Map {
+        Map::from_pairs(keys.into_iter().map(|key| (key.clone(), key)).collect()).unwrap()
+    }
+
+    /// Return the keys of the pairs of a chunk.
+    fn chunk_keys(map: &Map, path: Term, direction: Direction) -> (Vec<Term>, Option<i64>) {
+        let chunk = map.chunk(&path, 1000, direction).unwrap().unwrap();
+        let keys = chunk.pairs.iter().map(|(key, _)| (*key).clone()).collect();
+        (keys, chunk.next)
+    }
+
+    #[test]
+    fn takes_a_whole_collision_node_in_a_chunk() {
+        // ERTS 29.1.1: these two lists have equal map hashes, so they share a collision node.
+        let a = Term::List(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
+        let b = Term::List(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
+        let before = [
+            19, 213, 340, 110, 91, 164, 399, 139, 361, 212, 41, 114, 100, 29, 347, 365, 171, 140,
+            13, 42, 149, 55, 2, 146, 372, 317, 191, 316, 202, 192, 233,
+        ];
+        let mut keys = list(&before);
+        keys.extend([b.clone(), a.clone()]);
+        keys.extend(list(&[312, 98, 333]));
+        let map = identity(keys.clone());
+        // ERTS 29.1.1 in a new process: map_next(0, Map, iterator) gives 33
+        // pairs, because the 32nd pair starts the collision node, and the path 369.
+        assert_eq!(
+            chunk_keys(&map, Term::Integer(0), Direction::Forward),
+            (keys[..33].to_vec(), Some(369))
+        );
+        // map_next(113, Map, iterator) selects the collision node at depth
+        // 16, after the 16 elements of the path digit.
+        assert_eq!(
+            chunk_keys(&map, Term::Integer(113), Direction::Forward),
+            (keys[31..].to_vec(), None)
+        );
+        // A path other than 0 has no limit of 32 pairs: -(2^59) reads as
+        // 2^59, and 2^59 is a bignum. A leaf above the last element ends the path.
+        for path in [-(1 << 59), 1 << 59] {
+            assert_eq!(
+                chunk_keys(&map, Term::Integer(path), Direction::Forward),
+                (keys.clone(), None)
+            );
+        }
+        // A negative bignum raises badarg.
+        assert!(
+            map.chunk(&Term::Integer(-(1 << 60)), 1000, Direction::Forward)
+                .unwrap()
+                .is_none()
+        );
+        // ERTS 29.1.1: map_next(0, Map, []) gives the last 33 pairs and the path 97.
+        let after = [
+            312, 98, 333, 7, 398, 285, 90, 343, 38, 325, 326, 284, 281, 56, 153, 61, 99, 113, 383,
+            201, 237, 314, 65, 322, 137, 141, 308, 315, 230, 104, 187,
+        ];
+        let mut keys = list(&[202, 192, 233]);
+        keys.extend([b, a]);
+        keys.extend(list(&after));
+        let map = identity(keys.clone());
+        assert_eq!(
+            chunk_keys(&map, Term::Integer(0), Direction::Backward),
+            (keys[3..].to_vec(), Some(97))
+        );
+        // A flatmap needs a small integer path.
+        assert!(
+            integers([1])
+                .chunk(&Term::Integer(1 << 59), 1000, Direction::Backward)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
+        // The hashes of the last five keys share their low 60 bits in two
+        // groups (see becomes_a_hashmap_with_the_erts_order_above_32_keys),
+        // so each group is in a node at level 15.
+        let deep = [
+            329898321527737274,
+            446694106686689078,
+            413866500823436792,
+            -101714049538469044,
+            -74925715755171563,
+        ];
+        let before = [
+            319, 169, 371, 359, 160, 388, 136, 324, 348, 287, 296, 357, 239, 179, 289, 263, 313,
+            235, 226, 240, 211, 128, 247, 194, 384, 269, 168, 373, 265,
+        ];
+        let keys: Vec<_> = list(&before).into_iter().chain(list(&deep)).collect();
+        let map = identity(keys.clone());
+        // ERTS 29.1.1: map_next(0, Map, iterator) stops in the node at level
+        // 15, so the path has 16 elements. ERTS returns 2^60 + 18 as a
+        // bignum of two digits, which is not equal to 1152921504606846994.
+        let failure = map.chunk(&Term::Integer(0), 1000, Direction::Forward);
+        assert_eq!(
+            failure.err().unwrap().to_string(),
+            "unsupported erts_internal:map_next/3 path of 16 elements: ERTS returns a bignum \
+             that is not in normal form or above 2^63 - 1"
+        );
+        // ERTS 29.1.1: map_next(1152921504606846994, Map, iterator) gives the last two pairs.
+        assert_eq!(
+            chunk_keys(&map, Term::Integer((1 << 60) + 18), Direction::Forward),
+            (keys[32..].to_vec(), None)
+        );
+        let after = [
+            126, 390, 155, 165, 228, 227, 242, 151, 208, 197, 350, 133, 301, 392, 196, 205, 332,
+            353, 177, 225, 142, 223, 275, 200, 377, 145, 107, 108, 184, 255, 272,
+        ];
+        let keys: Vec<_> = list(&deep).into_iter().chain(list(&after)).collect();
+        let map = identity(keys.clone());
+        assert!(
+            map.chunk(&Term::Integer(0), 1000, Direction::Backward)
+                .is_err()
+        );
+        // ERTS 29.1.1: map_next(1152921504606847762, Map, []) gives the first four pairs.
+        assert_eq!(
+            chunk_keys(&map, Term::Integer((1 << 60) + 786), Direction::Backward),
+            (keys[..4].to_vec(), None)
+        );
+        // A path of 15 elements is a bignum of one digit, in normal form only above 2^59 - 1.
+        let mut elements = vec![0; 14];
+        assert_eq!(encode_path(elements.clone()), Ok(0));
+        elements.push(8);
+        assert_eq!(encode_path(elements.clone()), Ok(1 << 59));
+        *elements.last_mut().unwrap() = 7;
+        assert!(encode_path(elements.clone()).is_err());
+        elements.extend([1, 1]);
+        assert!(encode_path(elements).is_err());
     }
 }
