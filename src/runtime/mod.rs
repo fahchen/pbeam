@@ -5,9 +5,11 @@ mod mailbox;
 mod pcre2;
 mod persistent_term;
 mod process;
-mod resource;
+mod regex_code;
+mod resources;
 mod scheduler;
 mod timer;
+mod tty;
 mod unicode;
 
 pub use interpreter::BeamProgram;
