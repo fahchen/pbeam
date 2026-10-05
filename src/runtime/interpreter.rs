@@ -822,8 +822,11 @@ impl BeamProgram {
     /// `i_apply_last` (`jit/arm/ops.tab:649-657`), so an exception of the
     /// apply does not see the catch tags of the frame. A tail call of a BIF
     /// keeps the frame until the BIF returns, as `call_light_bif`,
-    /// `deallocate`, and `return` do (`jit/arm/ops.tab:711-712`). Return the
-    /// outcome when the process exits.
+    /// `deallocate`, and `return` do (`jit/arm/ops.tab:711-712`). A call of
+    /// `erlang:load_nif/2` runs as the `i_load_nif` instruction with the
+    /// module of the current frame, and a tail call keeps the frame until
+    /// the instruction finishes (`jit/arm/ops.tab:615-623`,
+    /// `emu/ops.tab:854-862`). Return the outcome when the process exits.
     ///
     /// # Examples
     ///
@@ -848,6 +851,11 @@ impl BeamProgram {
             release_frame(process, deallocate)?;
         } else if tail && deallocate as usize != current_frame(process).stack.len() {
             return Err(error("invalid BEAM tail-call stack size"));
+        }
+        if (module, name, arity) == ("erlang", "load_nif", 2) {
+            let caller = current_frame(process).module.clone();
+            let result = native::load_nif(self, scheduler, &caller)?;
+            return self.finish_bif(scheduler.current_process_mut(), result, tail);
         }
         self.call_mfa(scheduler, module, name, arity, tail)
     }

@@ -9,6 +9,40 @@ use crate::runtime::{
     resource::{Resources, TtyResource, TtyState},
 };
 
+/// The functions of the ERTS `prim_tty` NIF library, as `(name, arity)` in
+/// the order of `nif_funcs` (`prim_tty_nif.c:153-174`). `erlang:load_nif/2`
+/// checks each of them in this order. PBeam has a binding for only some of
+/// them; `call` in the parent module lists those.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(FUNCTIONS[2], ("tty_init", 2));
+/// assert_eq!(FUNCTIONS[19], ("tputs_nif", 2));
+/// ```
+pub(super) const FUNCTIONS: [(&str, u32); 20] = [
+    ("isatty", 1),
+    ("tty_create", 1),
+    ("tty_init", 2),
+    ("setlocale", 1),
+    ("tty_is_open", 2),
+    ("tty_select", 2),
+    ("tty_window_size", 1),
+    ("write_nif", 2),
+    ("tty_encoding", 1),
+    ("read_nif", 3),
+    ("isprint", 1),
+    ("wcwidth", 1),
+    ("wcswidth", 1),
+    ("sizeof_wchar", 0),
+    ("setupterm_nif", 0),
+    ("tigetnum_nif", 1),
+    ("tigetflag_nif", 1),
+    ("tinfo_nif", 0),
+    ("tigetstr_nif", 1),
+    ("tputs_nif", 2),
+];
+
 /// Return the fd of the atom `stdin`, `stdout`, or `stderr`: 0, 1, or 2, as
 /// ERTS `tty_get_fd` (`prim_tty_nif.c:228-239`) gives with `fileno` of the
 /// C standard streams. Return `None` for each other term.

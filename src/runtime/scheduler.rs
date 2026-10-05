@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::{
     ets::EtsTables,
@@ -47,6 +47,11 @@ pub(super) struct Scheduler {
     /// run starts with a copy of the program table, and a BIF such as
     /// `erlang:list_to_atom/1` adds its new atoms here.
     pub(super) atoms: AtomTable,
+    /// The modules whose NIF library `erlang:load_nif/2` loaded in the run,
+    /// as the `nif` field of the ERTS module instance
+    /// (`beam/erl_nif.c:4774-4777`, `4990-4997`). PBeam has one instance of
+    /// each module, so the module name identifies it.
+    pub(super) nif_libraries: HashSet<String>,
 }
 
 impl Scheduler {
@@ -73,6 +78,7 @@ impl Scheduler {
             ets: EtsTables::default(),
             resources: Resources::default(),
             atoms,
+            nif_libraries: HashSet::new(),
         }
     }
 

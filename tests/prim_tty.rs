@@ -21,6 +21,7 @@ const PRIM_TTY_PROBE: &[u8] = include_bytes!("../fixtures/prim_tty/prim_tty_prob
 const STAND_IN: &str = "fixtures/prim_tty/nif/prim_tty.beam";
 const TTY_NIF_PROBE: &str = "fixtures/prim_tty/tty_nif_probe.beam";
 const TTY_INIT_PROBE: &str = "fixtures/prim_tty/tty_init_probe.beam";
+const LOAD_NIF_PROBE: &str = "fixtures/prim_tty/load_nif_probe.beam";
 
 /// The environment variables that give the `isolated_run` child its entry
 /// `module:function`, its BEAM files, and the file for its result. The ERTS
@@ -528,6 +529,273 @@ fn runs_prim_tty_init_in_the_disabled_input_mode() {
         )
     );
     assert_same_modes(&outputs.modes, &pbeam_modes);
+}
+
+#[test]
+fn runs_load_nif_as_an_instruction_with_the_host_filename_encoding() {
+    // `load_nif_probe:main/0` calls `erlang:load_nif/2` through the
+    // `call_ext_only` (`prim_tty:load/1`), `call_ext`
+    // (`prim_tty:load_body/1`), and `call_ext_last` (`prim_tty:load_last/1`)
+    // forms of the stand-in. Before the load, each file name that ERTS does
+    // not accept raises `badarg` (erl_nif.c:4730-4741, erl_unicode.c:2057-2119,
+    // 2222-2398). The first valid call returns `ok`. Then each valid name
+    // gives the `reload` error (erl_nif.c:4774-4777), and each name that is
+    // not valid still raises `badarg`. A code point above 255 is valid only
+    // with the UTF-8 file name encoding: always on macOS, and on another host
+    // only when the `LC_CTYPE` codeset is `UTF-8`
+    // (erl_sys_common_misc.c:54-56, 95-124).
+    let reload = Value::error(
+        "reload",
+        "NIF library already loaded (reload disallowed since OTP 20).",
+    );
+    let badarg = || Value::Atom("badarg");
+    for locale in ["C.UTF-8", "C", "pbeam-unknown"] {
+        let utf8 = cfg!(target_os = "macos") || locale == "C.UTF-8";
+        let wide = || if utf8 { reload.clone() } else { badarg() };
+        let mut loaded = vec![reload.clone(); 6];
+        loaded.extend([wide(), wide(), badarg(), badarg()]);
+        let expected = Value::List(vec![
+            Value::List(vec![badarg(); 7]),
+            Value::Tuple(vec![Value::Atom("ok"), Value::Atom("body")]),
+            Value::List(loaded),
+            reload.clone(),
+            badarg(),
+            badarg(),
+        ]);
+        assert_load_nif_probe(&[("LC_ALL", locale)], "nif", "main", &expected);
+    }
+}
+
+#[test]
+fn checks_the_library_functions_against_the_calling_module() {
+    // `load_nif_probe:twice/0` calls `prim_tty:load/1` two times. In the
+    // order of `nif_funcs` (prim_tty_nif.c:153-174), a function that the
+    // module does not define gives "Function not found", and a function
+    // that is not in the `-nifs` list gives "Function not declared as nif"
+    // (erl_nif.c:4845-4866). `nif_missing` has no `tty_init/2` and no
+    // `tputs_nif/2`, and `nif_undeclared` has no `setlocale/1` in `-nifs`
+    // and no `tputs_nif/2`. An error does not load the library, so the
+    // second call gives the same error (erl_nif.c:5019-5034). A module
+    // without `-nifs` accepts each function (erl_nif.c:4700-4704).
+    let loaded = Value::List(vec![
+        Value::Atom("ok"),
+        Value::error(
+            "reload",
+            "NIF library already loaded (reload disallowed since OTP 20).",
+        ),
+    ]);
+    let twice = |text| Value::List(vec![Value::error("bad_lib", text); 2]);
+    for (stand_in, expected) in [
+        ("nif", loaded.clone()),
+        ("nif_plain", loaded),
+        (
+            "nif_missing",
+            twice("Function not found prim_tty:tty_init/2"),
+        ),
+        (
+            "nif_undeclared",
+            twice("Function not declared as nif prim_tty:setlocale/1"),
+        ),
+    ] {
+        assert_load_nif_probe(&[], stand_in, "twice", &expected);
+    }
+}
+
+#[test]
+fn raises_badarg_for_a_module_without_bindings_before_the_library_check() {
+    // `load_nif_probe:other_badarg/0` calls `erlang:load_nif(foo, 0)` from
+    // `load_nif_probe`. The file name check comes before the library check
+    // (erl_nif.c:4730-4757).
+    assert_load_nif_probe(&[], "nif", "other_badarg", &Value::Atom("badarg"));
+}
+
+#[test]
+fn returns_a_runtime_error_for_a_module_without_bindings() {
+    // `load_nif_probe:other/0` calls `erlang:load_nif("load_nif_probe", 0)`.
+    // ERTS opens the library with `dlopen` and returns `{error,
+    // {load_failed, Text}}` with host text (erl_nif.c:4778-4787). PBeam
+    // opens no library and returns a runtime error.
+    let erts = String::from_utf8(run_in_layout(
+        &mut erts_load_nif_probe("nif", "other"),
+        FILES,
+        &[],
+    ))
+    .unwrap();
+    let slogan = Value::Text("Failed to load NIF library").erts();
+    let prefix = format!(
+        "{{error,{{load_failed,{}",
+        slogan.strip_suffix(']').unwrap()
+    );
+    assert!(erts.starts_with(&prefix), "{erts}");
+    assert_eq!(
+        run_isolated(
+            FILES,
+            &[],
+            "load_nif_probe:other",
+            &[LOAD_NIF_PROBE, "fixtures/prim_tty/nif/prim_tty.beam"]
+        ),
+        br#"Err(BeamError("erlang:load_nif/2 from load_nif_probe is not supported: PBeam has no native bindings for the module"))"#
+    );
+}
+
+/// An expected Erlang term, written as ERTS `~w` text and as the `Debug`
+/// text of the PBeam term.
+#[derive(Clone)]
+enum Value {
+    /// An atom.
+    Atom(&'static str),
+    /// A string: a list of the bytes of the text.
+    Text(&'static str),
+    /// A tuple.
+    Tuple(Vec<Value>),
+    /// A list.
+    List(Vec<Value>),
+}
+
+impl Value {
+    /// Return `{error, {Kind, Text}}`, the result of the ERTS
+    /// `load_nif_error` (erl_nif.c:4530-4558).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Value::error("reload", "a").erts(), "{error,{reload,[97]}}");
+    /// ```
+    fn error(kind: &'static str, text: &'static str) -> Value {
+        Value::Tuple(vec![
+            Value::Atom("error"),
+            Value::Tuple(vec![Value::Atom(kind), Value::Text(text)]),
+        ])
+    }
+
+    /// Return the ERTS `~w` text of the term.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Value::List(vec![Value::Atom("ok"), Value::Text("a")]).erts(), "[ok,[97]]");
+    /// ```
+    fn erts(&self) -> String {
+        match self {
+            Value::Atom(name) => (*name).to_owned(),
+            Value::Text(text) => format!(
+                "[{}]",
+                text.bytes()
+                    .map(|byte| byte.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Value::Tuple(elements) => format!("{{{}}}", Value::join(elements, Value::erts, ",")),
+            Value::List(elements) => format!("[{}]", Value::join(elements, Value::erts, ",")),
+        }
+    }
+
+    /// Return the `Debug` text of the PBeam term.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Value::List(vec![Value::Atom("ok"), Value::Text("a")]).pbeam(), r#"List([Atom("ok"), List([Integer(97)])])"#);
+    /// ```
+    fn pbeam(&self) -> String {
+        match self {
+            Value::Atom(name) => format!("Atom({name:?})"),
+            Value::Text(text) => format!(
+                "List([{}])",
+                text.bytes()
+                    .map(|byte| format!("Integer({byte})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Value::Tuple(elements) => {
+                format!("Tuple([{}])", Value::join(elements, Value::pbeam, ", "))
+            }
+            Value::List(elements) => {
+                format!("List([{}])", Value::join(elements, Value::pbeam, ", "))
+            }
+        }
+    }
+
+    /// Join the text of each element with `separator`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Value::join(&[Value::Atom("a"), Value::Atom("b")], Value::erts, ","), "a,b");
+    /// ```
+    fn join(elements: &[Value], text: fn(&Value) -> String, separator: &str) -> String {
+        elements
+            .iter()
+            .map(text)
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+}
+
+/// Run `load_nif_probe:Function()` with the stand-in `prim_tty` of
+/// `fixtures/prim_tty/<stand_in>` and the variables of `environment`, on
+/// the pinned ERTS and in PBeam, and assert that both give `expected`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_load_nif_probe(&[], "nif", "other_badarg", &Value::Atom("badarg"));
+/// ```
+fn assert_load_nif_probe(
+    environment: &[(&str, &str)],
+    stand_in: &str,
+    function: &str,
+    expected: &Value,
+) {
+    assert_eq!(
+        String::from_utf8(run_in_layout(
+            &mut erts_load_nif_probe(stand_in, function),
+            FILES,
+            environment
+        ))
+        .unwrap(),
+        format!("{}\n", expected.erts()),
+        "ERTS {stand_in} {function} {environment:?}"
+    );
+    let stand_in = format!("fixtures/prim_tty/{stand_in}/prim_tty.beam");
+    assert_eq!(
+        String::from_utf8(run_isolated(
+            FILES,
+            environment,
+            &format!("load_nif_probe:{function}"),
+            &[LOAD_NIF_PROBE, &stand_in]
+        ))
+        .unwrap(),
+        format!("Ok({})", expected.pbeam()),
+        "PBeam {stand_in} {function} {environment:?}"
+    );
+}
+
+/// Return the `erl` command that loads the stand-in `prim_tty` of
+/// `fixtures/prim_tty/<stand_in>` and writes the `~w` text of
+/// `load_nif_probe:Function()` to the result file. It does not call
+/// `prim_tty:load/1` first.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = run_in_layout(&mut erts_load_nif_probe("nif", "main"), FILES, &[]);
+/// ```
+fn erts_load_nif_probe(stand_in: &str, function: &str) -> Command {
+    let mut command = Command::new("erl");
+    command.args([
+        "-noinput",
+        "-nostick",
+        "-pa",
+        "fixtures/prim_tty",
+        "-eval",
+        &format!(
+            "{{module, prim_tty}} = code:load_abs(\"fixtures/prim_tty/{stand_in}/prim_tty\"), \
+             ok = file:write_file(os:getenv(\"{RESULT}\"), \
+             io_lib:format(\"~w~n\", [load_nif_probe:{function}()])), halt()."
+        ),
+    ]);
+    command
 }
 
 /// The `ICANON` and `ECHO` flags of `c_lflag`.
