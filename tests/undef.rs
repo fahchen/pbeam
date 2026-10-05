@@ -81,3 +81,56 @@ fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
         "[{error,undef,{undef_target,missing,[a],[]}},{error,undef,{undef_target,missing,[b],[]}},{error,undef,{undef_target,missing,[c],[]}},{error,undef,{undef_target,missing,[d],[]}},{error,undef,{undef_target,missing,[e],[]}},{error,undef,{undef_target,missing,[f],[]}},{error,undef,{undef_target,missing,[g],[]}},{error,undef,{undef_target,missing,[h],[]}},{error,undef,{undef_target,missing,[i],[]}},{error,undef,{undef_target,missing,[j,k],[]}},{error,undef,{undef_target,missing,[],[]}},{'EXIT',undef,{undef_target,missing,[l],[]}},{handled,missing,[m]},{handled,other,[n,o]}]\n"
     );
 }
+
+#[test]
+fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
+    // ERTS starts each process with `i_apply_only` of its MFA
+    // (`erl_process.c:12616`), so the child goes to the export entry of
+    // `missing/1` when it first runs. It exits with the `undef` of
+    // `error_handler:crash/1`, or calls the handler of `undef_handler` and
+    // returns.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, UNDEF_PROBE, UNDEF_TARGET, UNDEF_HANDLER]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let down = |module: &str| {
+        program
+            .execute("undef_probe", "down", &[atom(module)])
+            .unwrap()
+    };
+    assert_eq!(
+        down("undef_target"),
+        Term::Tuple(vec![
+            atom("undef"),
+            Term::List(vec![Term::Tuple(vec![
+                atom("undef_target"),
+                atom("missing"),
+                Term::List(vec![atom("p")]),
+                Term::List(Vec::new()),
+            ])]),
+        ])
+    );
+    assert_eq!(down("undef_handler"), atom("normal"));
+
+    // The reference uses the `erl` flags of the row "Undefined functions":
+    // without `-kernel logger_level none`, ERTS can write an error report of
+    // the child to stderr.
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-pa",
+            "fixtures/undef",
+            "-eval",
+            "io:format(\"~w~n\", [[undef_probe:down(undef_target), undef_probe:down(undef_handler)]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        "[{undef,[{undef_target,missing,[p],[]}]},normal]\n"
+    );
+}

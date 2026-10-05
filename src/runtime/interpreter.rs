@@ -1,5 +1,5 @@
 use super::{
-    process::{Frame, ProcessState, ReceiveTimer, StackSlot},
+    process::{Frame, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::Scheduler,
     unicode::characters_to_utf8,
 };
@@ -280,14 +280,33 @@ impl BeamProgram {
     }
 
     /// Run the current process until it waits for a message, calls
-    /// `erlang:hibernate/0`, or exits.
+    /// `erlang:hibernate/0`, or exits. A process with an undefined start
+    /// first calls `undefined_function` with its start MFA.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert!(matches!(program.run(&mut scheduler)?, Outcome::Wait));
+    /// // `spawn(undef_target, missing, [p])` exits with
+    /// // `{undef, [{undef_target, missing, [p], []}]}`.
+    /// assert!(matches!(program.run(&mut scheduler)?, Outcome::Exit { result: None, .. }));
     /// ```
     fn run(&self, scheduler: &mut Scheduler) -> Result<Outcome, BeamError> {
+        // ERTS starts each process with `i_apply_only` of its MFA
+        // (`erl_process.c:12616`; JIT `jit/beam_jit_main.cpp:258`), so a
+        // function that the module does not export goes to its export entry
+        // when the process first runs. The arity is the number of argument
+        // registers.
+        let process = scheduler.current_process_mut();
+        if let Some((module, function)) = process.undefined_start.take() {
+            let arity = u32::try_from(process.registers.len())
+                .map_err(|_| error("arity exceeds BEAM limit"))?;
+            if let Some(outcome) =
+                self.undefined_function(scheduler, module.name(), function.name(), arity, false)?
+            {
+                return Ok(outcome);
+            }
+        }
         loop {
             let process = scheduler.current_process_mut();
             let frame = current_frame(process);
@@ -1388,7 +1407,10 @@ struct SpawnOptions {
 /// `arguments`, as ERTS `erl_create_process` does. Return the pid, or
 /// `{Pid, Reference}` when `options.monitor` is set. A `module` or
 /// `function` that is not an atom, and `arguments` that are not a proper
-/// list, raise `badarg` (`erl_process.c:12490-12492`).
+/// list, raise `badarg` (`erl_process.c:12490-12492`). A function that a
+/// loaded module does not export starts the process anyway: the process
+/// calls `undefined_function` when it first runs. A module that is not
+/// loaded is the runtime error `unresolved external MFA M:F/A`.
 ///
 /// # Examples
 ///
@@ -1415,14 +1437,23 @@ fn create_process(
     };
     let arguments = arguments.clone();
     let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-    let frame = program.mfa_frame(module.name(), function.name(), arity)?;
+    // A function that the loaded module does not export gives an undefined
+    // start, which goes to `undefined_function` when the process first
+    // runs, as the `i_apply_only` start of ERTS goes to its export entry.
+    let start = match program.export_frame(module.name(), function.name(), arity)? {
+        Some(frame) => Start::Entry(frame),
+        None => Start::Undefined {
+            module: module.clone(),
+            function: function.clone(),
+        },
+    };
     let SpawnOptions {
         link,
         monitor,
         off_heap_message_queue,
     } = options;
     let (pid, reference) =
-        scheduler.spawn(frame, arguments, monitor, link, off_heap_message_queue)?;
+        scheduler.spawn(start, arguments, monitor, link, off_heap_message_queue)?;
     Ok(BifResult::Value(match reference {
         Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),

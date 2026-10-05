@@ -1,6 +1,6 @@
 -module(undef_probe).
 -compile(nowarn_deprecated_catch).
--export([calls/0, id/1, last/1, only/1, apply_last/3, apply3_last/3]).
+-export([calls/0, down/1, id/1, last/1, only/1, apply_last/3, apply3_last/3]).
 
 %% Call functions that undef_target and undef_handler do not export, through
 %% each call instruction. A try returns the class, the reason, and the first
@@ -25,6 +25,12 @@ calls() ->
      case catch undef_target:missing(l) of {'EXIT', {R12, [Frame | _]}} -> {'EXIT', R12, Frame} end,
      undef_handler:missing(m),
      erlang:apply(undef_handler, id(other), [n, o])].
+
+%% Return the DOWN reason of a process that starts at a function that the
+%% module does not export.
+down(Module) ->
+    {Pid, Ref} = spawn_monitor(Module, missing, [p]),
+    receive {'DOWN', Ref, process, Pid, Reason} -> Reason end.
 
 id(X) -> X.
 
