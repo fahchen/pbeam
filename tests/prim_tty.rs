@@ -1,7 +1,9 @@
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -10,7 +12,7 @@ use pbeam_runtime::{BeamProgram, Term};
 
 mod common;
 
-use common::pinned_beam;
+use common::{pinned_beam, pinned_beam_path};
 
 const PRIM_TTY_PROBE: &[u8] = include_bytes!("../fixtures/prim_tty/prim_tty_probe.beam");
 
@@ -18,6 +20,7 @@ const PRIM_TTY_PROBE: &[u8] = include_bytes!("../fixtures/prim_tty/prim_tty_prob
 /// a subdirectory, so `-pa fixtures/prim_tty` does not load it at boot.
 const STAND_IN: &str = "fixtures/prim_tty/nif/prim_tty.beam";
 const TTY_NIF_PROBE: &str = "fixtures/prim_tty/tty_nif_probe.beam";
+const TTY_INIT_PROBE: &str = "fixtures/prim_tty/tty_init_probe.beam";
 
 /// The environment variables that give the `isolated_run` child its entry
 /// `module:function`, its BEAM files, and the file for its result. The ERTS
@@ -70,6 +73,20 @@ const TERMINALS: [Stream; 3] = [
         columns: 0,
         rows: 0,
     },
+];
+
+/// Layout T: stdin a 120 by 40 and stdout a 100 by 30 pseudo-terminal, and
+/// stderr a file.
+const STDIN_STDOUT_TERMINALS: [Stream; 3] = [
+    Stream::Terminal {
+        columns: 120,
+        rows: 40,
+    },
+    Stream::Terminal {
+        columns: 100,
+        rows: 30,
+    },
+    Stream::File,
 ];
 
 /// Layout M: stdin a 120 by 40 pseudo-terminal with `ECHO` and `ICANON`
@@ -420,6 +437,88 @@ fn returns_a_runtime_error_from_write_nif_for_a_tty_resource() {
     );
 }
 
+#[test]
+fn runs_prim_tty_init_in_the_disabled_input_mode() {
+    // `tty_init_probe:main/0` returns `isatty/1` of the three standard
+    // atoms and the result of `prim_tty:init/1` in three new processes:
+    // output `raw` on stdout, output `cooked` on `ofd => stderr`, and
+    // `ofd => stdin`. `prim_tty:init/1` calls `tty_create/1`,
+    // `setlocale/1`, `setupterm_nif/0`, `tty_init/2`, and
+    // `tty_window_size/1`, and starts the writer process
+    // (prim_tty.erl:216-306). Each result is `unicode/1`, `output_mode/1`,
+    // the read handle, `is_writer/2` of the registered writer, and
+    // `window_size/1`. `tty_create(stdin)` raises `badarg`
+    // (prim_tty_nif.c:1003-1004). `pbeam_main/0` first makes the `ac_tab`
+    // table that `application:get_env/3` reads, because PBeam has no
+    // application controller.
+    let beams: Vec<_> = [
+        "erlang",
+        "prim_tty",
+        "proc_lib",
+        "application",
+        "application_controller",
+        "ets",
+        "re",
+        "lists",
+        "maps",
+        "os",
+        "unicode",
+    ]
+    .map(pinned_beam_path)
+    .into_iter()
+    .chain([PathBuf::from(TTY_INIT_PROBE)])
+    .collect();
+    let probe = || isolated("tty_init_probe:pbeam_main", &beams);
+    let init = |unicode: &str, size: &str| {
+        format!(
+            r#"List([Atom("{unicode}"), Atom("raw"), Atom("undefined"), Atom("true"), {size}]), List([Atom("{unicode}"), Atom("cooked"), Atom("undefined"), Atom("true"), {size}]), Atom("badarg")"#
+        )
+    };
+    let enotsup = r#"Tuple([Atom("error"), Atom("enotsup")])"#;
+    for (locale, erts, unicode) in [
+        (
+            "C.UTF-8",
+            "[false,false,false,[true,raw,undefined,true,{error,enotsup}],[true,cooked,undefined,true,{error,enotsup}],badarg]\n",
+            "true",
+        ),
+        (
+            "C",
+            "[false,false,false,[false,raw,undefined,true,{error,enotsup}],[false,cooked,undefined,true,{error,enotsup}],badarg]\n",
+            "false",
+        ),
+    ] {
+        let environment = [("LC_ALL", locale)];
+        let outputs = run_with_outputs(&mut erts_init_probe(), FILES, &environment);
+        assert_eq!(outputs.files[1].as_deref(), Some(&b""[..]));
+        assert_eq!(outputs.files[2].as_deref(), Some(erts.as_bytes()));
+        assert_eq!(
+            String::from_utf8(run_in_layout(&mut probe(), FILES, &environment)).unwrap(),
+            format!(
+                r#"Ok(List([Atom("false"), Atom("false"), Atom("false"), {}]))"#,
+                init(unicode, enotsup)
+            )
+        );
+    }
+
+    // Layout T: fd 0 is a terminal, so it gives the window size of each
+    // output fd (prim_tty_nif.c:1179-1189).
+    let outputs = run_with_outputs(&mut erts_init_probe(), STDIN_STDOUT_TERMINALS, &[]);
+    assert_eq!(
+        outputs.files[2].as_deref(),
+        Some(&b"[true,true,false,[true,raw,undefined,true,{ok,{120,40}}],[true,cooked,undefined,true,{ok,{120,40}}],badarg]\n"[..])
+    );
+    assert_eq!(
+        String::from_utf8(run_in_layout(&mut probe(), STDIN_STDOUT_TERMINALS, &[])).unwrap(),
+        format!(
+            r#"Ok(List([Atom("true"), Atom("true"), Atom("false"), {}]))"#,
+            init(
+                "true",
+                r#"Tuple([Atom("ok"), Tuple([Integer(120), Integer(40)])])"#
+            )
+        )
+    );
+}
+
 /// The `ICANON` and `ECHO` flags of `c_lflag`.
 const CANONICAL_ECHO: libc::tcflag_t = libc::ICANON | libc::ECHO;
 
@@ -497,6 +596,27 @@ fn erts_nif_probe(function: &str) -> Command {
     command
 }
 
+/// Return the `erl` command that runs `tty_init_probe:main/0` with the
+/// pinned `prim_tty` and writes the `~w` text of its result to
+/// `standard_error`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let outputs = run_with_outputs(&mut erts_init_probe(), FILES, &[]);
+/// ```
+fn erts_init_probe() -> Command {
+    let mut command = Command::new("erl");
+    command.args([
+        "-noshell",
+        "-pa",
+        "fixtures/prim_tty",
+        "-eval",
+        "io:format(standard_error, \"~w~n\", [tty_init_probe:main()]), halt().",
+    ]);
+    command
+}
+
 /// Run `entry` (`module:function`) of the BEAM files at `beams` in PBeam, in
 /// a child copy of this test binary with the standard streams of `layout`,
 /// and return the `Debug` text of the result. A child process is necessary,
@@ -526,7 +646,7 @@ fn run_isolated(
 /// let command = isolated("tty_nif_probe:init", &[TTY_NIF_PROBE, STAND_IN]);
 /// let (result, modes) = run_with_modes(&mut command, OUTPUT_TERMINALS, &[]);
 /// ```
-fn isolated(entry: &str, beams: &[&str]) -> Command {
+fn isolated(entry: &str, beams: &[impl AsRef<OsStr>]) -> Command {
     let mut command = Command::new(env::current_exe().unwrap());
     command
         .args(["--exact", "isolated_run", "--include-ignored", "--quiet"])
@@ -585,6 +705,37 @@ fn run_with_modes(
     layout: [Stream; 3],
     environment: &[(&str, &str)],
 ) -> (Vec<u8>, [Option<libc::termios>; 3]) {
+    let outputs = run_with_outputs(command, layout, environment);
+    (outputs.result.unwrap(), outputs.modes)
+}
+
+/// What one command leaves after it exits in a layout.
+struct Outputs {
+    /// The bytes of the file in the `PBEAM_TTY_RESULT` variable, or `None`
+    /// when the command does not write it.
+    result: Option<Vec<u8>>,
+    /// The mode of each pseudo-terminal of the layout, by fd.
+    modes: [Option<libc::termios>; 3],
+    /// The bytes of each file stream of the layout, by fd.
+    files: [Option<Vec<u8>>; 3],
+}
+
+/// Run `command` with `TERM=dumb`, `LC_ALL=C.UTF-8`, the variables of
+/// `environment`, which replace these values, and the standard streams of
+/// `layout`, and return what it leaves after it exits. Each pseudo-terminal
+/// master stays open until the command exits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let outputs = run_with_outputs(&mut erts_init_probe(), FILES, &[]);
+/// assert_eq!(outputs.files[1].as_deref(), Some(&b""[..]));
+/// ```
+fn run_with_outputs(
+    command: &mut Command,
+    layout: [Stream; 3],
+    environment: &[(&str, &str)],
+) -> Outputs {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let directory = env::temp_dir().join(format!(
         "pbeam-prim-tty-{}-{}",
@@ -592,14 +743,10 @@ fn run_with_modes(
         RUNS.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir(&directory).unwrap();
+    let paths: [_; 3] = std::array::from_fn(|fd| directory.join(format!("fd{fd}")));
     let mut terminals: [Option<(OwnedFd, OwnedFd)>; 3] = Default::default();
-    let [stdin, stdout, stderr] = std::array::from_fn(|fd| {
-        open_stream(
-            layout[fd],
-            &directory.join(format!("fd{fd}")),
-            &mut terminals[fd],
-        )
-    });
+    let [stdin, stdout, stderr] =
+        std::array::from_fn(|fd| open_stream(layout[fd], &paths[fd], &mut terminals[fd]));
     let result = directory.join("result");
     let status = command
         .env("TERM", "dumb")
@@ -611,11 +758,16 @@ fn run_with_modes(
         .stderr(stderr)
         .status()
         .unwrap();
-    let modes = terminals.map(|terminal| terminal.map(|(_, slave)| mode(&slave)));
-    let output = fs::read(&result);
+    let outputs = Outputs {
+        result: fs::read(&result).ok(),
+        modes: terminals.map(|terminal| terminal.map(|(_, slave)| mode(&slave))),
+        files: std::array::from_fn(|fd| {
+            matches!(layout[fd], Stream::File).then(|| fs::read(&paths[fd]).unwrap())
+        }),
+    };
     fs::remove_dir_all(&directory).unwrap();
     assert!(status.success(), "{command:?} exited with {status}");
-    (output.unwrap(), modes)
+    outputs
 }
 
 /// Open one standard stream for a child. A file stream creates `path`. A
