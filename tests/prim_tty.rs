@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    os::fd::{FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     process::{Command, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
@@ -35,6 +35,9 @@ enum Stream {
     File,
     /// The slave of a new pseudo-terminal with this window size.
     Terminal { columns: u16, rows: u16 },
+    /// A `Terminal` with `ECHO` and `ICANON` off, as `stty -echo -icanon`
+    /// sets it.
+    QuietTerminal { columns: u16, rows: u16 },
 }
 
 /// Layout F: stdin `/dev/null`, stdout and stderr files.
@@ -66,6 +69,22 @@ const TERMINALS: [Stream; 3] = [
     Stream::Terminal {
         columns: 0,
         rows: 0,
+    },
+];
+
+/// Layout M: stdin a 120 by 40 pseudo-terminal with `ECHO` and `ICANON`
+/// off, stdout a file, and stderr an 80 by 24 pseudo-terminal. Stdout is
+/// not a terminal, so ERTS does not set fd 0 to its start mode when it
+/// exits (sys.c:182-190, erl_child_setup.c:563-576).
+const MONITOR: [Stream; 3] = [
+    Stream::QuietTerminal {
+        columns: 120,
+        rows: 40,
+    },
+    Stream::File,
+    Stream::Terminal {
+        columns: 80,
+        rows: 24,
     },
 ];
 
@@ -299,12 +318,99 @@ fn reads_the_terminfo_entry_with_setupterm() {
 }
 
 #[test]
+fn sets_the_terminal_mode_with_tty_init() {
+    // `tty_nif_probe:init/0` calls `prim_tty:tty_init/2`. A term that is not
+    // a map, a term that is not a TTY resource, and a map without `input`
+    // raise `badarg` in this order (prim_tty_nif.c:1081-1089). On the
+    // `stdout` resource, `raw` sets the raw mode, `cooked` sets the first
+    // mode again, and `foo` finds the first mode set and does not call
+    // `tcsetattr` (prim_tty_nif.c:1099-1134). Last, `raw` on the `stderr`
+    // resource. A resource on a file is `unavailable`: `raw` gives
+    // `{error, enotsup}` and each other input gives `ok`
+    // (prim_tty_nif.c:1091-1095).
+    let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("init"), FILES, &[]);
+    assert_eq!(
+        erts,
+        b"[badarg,badarg,badarg,badarg,{error,enotsup},ok,ok,{error,enotsup}]\n"
+    );
+    let probe = || isolated("tty_nif_probe:init", &[TTY_NIF_PROBE, STAND_IN]);
+    let (pbeam, pbeam_modes) = run_with_modes(&mut probe(), FILES, &[]);
+    assert_eq!(
+        pbeam,
+        br#"Ok(List([Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Tuple([Atom("error"), Atom("enotsup")]), Atom("ok"), Atom("ok"), Tuple([Atom("error"), Atom("enotsup")])]))"#
+    );
+    assert_same_modes(&erts_modes, &pbeam_modes);
+
+    let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("init"), OUTPUT_TERMINALS, &[]);
+    assert_eq!(erts, b"[badarg,badarg,badarg,badarg,ok,ok,ok,ok]\n");
+    let (pbeam, pbeam_modes) = run_with_modes(&mut probe(), OUTPUT_TERMINALS, &[]);
+    assert_eq!(
+        pbeam,
+        br#"Ok(List([Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("ok"), Atom("ok"), Atom("ok"), Atom("ok")]))"#
+    );
+    // The stdout terminal has its first mode again, and the stderr terminal
+    // has the raw mode. On macOS the kernel adds `PENDIN` to the stdout
+    // mode when `ICANON` comes back, so the modes are compared with the
+    // ERTS run.
+    assert_same_modes(&erts_modes, &pbeam_modes);
+    let [_, Some(stdout), Some(stderr)] = pbeam_modes else {
+        panic!("stdout and stderr are terminals");
+    };
+    assert_eq!(stdout.c_lflag & CANONICAL_ECHO, CANONICAL_ECHO);
+    assert_raw(&stderr);
+}
+
+#[test]
+fn restores_fd_0_when_the_tty_owner_exits() {
+    // `tty_nif_probe:monitor/0` spawns `owner/1` and monitors it. The owner
+    // sets the raw mode on a `stderr` resource and reads its window size.
+    // It then makes a second and a third `stderr` resource, whose first
+    // mode is that raw mode, and calls `tty_init/2` on the second, the
+    // first, and the third resource. Each successful `tty_init/2` makes the
+    // caller the `self` pid of the resource and monitors it
+    // (prim_tty_nif.c:1162-1165). A holder process then calls `tty_init/2`
+    // on the third resource and becomes its `self` pid. When the owner
+    // exits, its monitors run in order, and each monitor of a resource whose
+    // `self` pid is still the owner sets fd 0 to the first mode of the
+    // resource (prim_tty_nif.c:1235-1241). The monitor of the third resource
+    // runs last, but the holder owns it, so fd 0 gets the first mode of the
+    // stderr terminal from the first resource, not the raw mode.
+    let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("monitor"), FILES, &[]);
+    assert_eq!(
+        erts,
+        b"{[{error,enotsup},{error,enotsup},ok,{error,enotsup},ok,ok],normal}\n"
+    );
+    let probe = || isolated("tty_nif_probe:monitor", &[TTY_NIF_PROBE, STAND_IN]);
+    let (pbeam, pbeam_modes) = run_with_modes(&mut probe(), FILES, &[]);
+    assert_eq!(
+        pbeam,
+        br#"Ok(Tuple([List([Tuple([Atom("error"), Atom("enotsup")]), Tuple([Atom("error"), Atom("enotsup")]), Atom("ok"), Tuple([Atom("error"), Atom("enotsup")]), Atom("ok"), Atom("ok")]), Atom("normal")]))"#
+    );
+    assert_same_modes(&erts_modes, &pbeam_modes);
+
+    let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("monitor"), MONITOR, &[]);
+    assert_eq!(erts, b"{[ok,{ok,{120,40}},ok,ok,ok,ok],normal}\n");
+    let (pbeam, pbeam_modes) = run_with_modes(&mut probe(), MONITOR, &[]);
+    assert_eq!(
+        pbeam,
+        br#"Ok(Tuple([List([Atom("ok"), Tuple([Atom("ok"), Tuple([Integer(120), Integer(40)])]), Atom("ok"), Atom("ok"), Atom("ok"), Atom("ok")]), Atom("normal")]))"#
+    );
+    assert_same_modes(&erts_modes, &pbeam_modes);
+    let [Some(stdin), None, Some(stderr)] = pbeam_modes else {
+        panic!("stdin and stderr are terminals");
+    };
+    // Stdin started without `ECHO` and `ICANON`.
+    assert_eq!(stdin.c_lflag & CANONICAL_ECHO, CANONICAL_ECHO);
+    assert_raw(&stderr);
+}
+
+#[test]
 fn returns_a_runtime_error_from_write_nif_for_a_tty_resource() {
     // `tty_nif_probe:write/0` makes a `stdout` TTY resource and calls
     // `prim_tty:write_nif/2` with it. ERTS writes the iovec to the output
     // fd (prim_tty_nif.c:366-427). PBeam has no host write yet, so the
-    // binding returns a runtime error. `tty_create/1` makes no host call,
-    // so the test runs in this process.
+    // binding returns a runtime error. `tty_create/1` only reads the mode
+    // of stdout, so the test runs in this process.
     let beams = [TTY_NIF_PROBE, STAND_IN].map(|path| fs::read(path).unwrap());
     let program = BeamProgram::load(&beams.each_ref().map(Vec::as_slice)).unwrap();
     let error = program.execute("tty_nif_probe", "write", &[]).unwrap_err();
@@ -314,10 +420,44 @@ fn returns_a_runtime_error_from_write_nif_for_a_tty_resource() {
     );
 }
 
+/// The `ICANON` and `ECHO` flags of `c_lflag`.
+const CANONICAL_ECHO: libc::tcflag_t = libc::ICANON | libc::ECHO;
+
+/// Assert that two runs leave the same mode on each terminal. `termios`
+/// has no `PartialEq`, so the test compares its `Debug` text, which shows
+/// each field.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_same_modes(&erts_modes, &pbeam_modes);
+/// ```
+fn assert_same_modes(erts: &[Option<libc::termios>; 3], pbeam: &[Option<libc::termios>; 3]) {
+    assert_eq!(format!("{erts:?}"), format!("{pbeam:?}"));
+}
+
+/// Assert that `mode` has the raw changes of `tty_init/2`
+/// (prim_tty_nif.c:1108-1128).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_raw(&stderr);
+/// ```
+fn assert_raw(mode: &libc::termios) {
+    assert_eq!(mode.c_iflag & (libc::ISTRIP | libc::ICRNL), 0);
+    assert_eq!(mode.c_lflag & CANONICAL_ECHO, 0);
+    assert_eq!(mode.c_oflag & libc::OPOST, 0);
+    assert_eq!((mode.c_cc[libc::VMIN], mode.c_cc[libc::VTIME]), (1, 0));
+}
+
 /// Run `tty_nif_probe:Function()` on the pinned ERTS with the stand-in
 /// `prim_tty` and the standard streams of `layout`, and return the `~w`
 /// text of its result. The probe writes with `file:write_file/2`, because
-/// the boot IO servers call the stand-in after `code:load_abs/1`.
+/// the boot IO servers call the stand-in after `code:load_abs/1`. With
+/// `-noinput`, no boot IO server reads fd 0, as in PBeam. A read of a
+/// macOS terminal clears the `PENDIN` flag (measured) that the kernel sets when
+/// `ICANON` comes back, so a reader changes the final mode of fd 0.
 ///
 /// # Examples
 ///
@@ -329,9 +469,20 @@ fn run_erts_nif_probe(
     environment: &[(&str, &str)],
     function: &str,
 ) -> Vec<u8> {
+    run_in_layout(&mut erts_nif_probe(function), layout, environment)
+}
+
+/// Return the `erl` command of `run_erts_nif_probe`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (result, modes) = run_with_modes(&mut erts_nif_probe("init"), OUTPUT_TERMINALS, &[]);
+/// ```
+fn erts_nif_probe(function: &str) -> Command {
     let mut command = Command::new("erl");
     command.args([
-        "-noshell",
+        "-noinput",
         "-nostick",
         "-pa",
         "fixtures/prim_tty",
@@ -343,7 +494,7 @@ fn run_erts_nif_probe(
              io_lib:format(\"~w~n\", [tty_nif_probe:{function}()])), halt()."
         ),
     ]);
-    run_in_layout(&mut command, layout, environment)
+    command
 }
 
 /// Run `entry` (`module:function`) of the BEAM files at `beams` in PBeam, in
@@ -364,12 +515,24 @@ fn run_isolated(
     entry: &str,
     beams: &[&str],
 ) -> Vec<u8> {
+    run_in_layout(&mut isolated(entry, beams), layout, environment)
+}
+
+/// Return the child command of `run_isolated`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let command = isolated("tty_nif_probe:init", &[TTY_NIF_PROBE, STAND_IN]);
+/// let (result, modes) = run_with_modes(&mut command, OUTPUT_TERMINALS, &[]);
+/// ```
+fn isolated(entry: &str, beams: &[&str]) -> Command {
     let mut command = Command::new(env::current_exe().unwrap());
     command
         .args(["--exact", "isolated_run", "--include-ignored", "--quiet"])
         .env(ENTRY, entry)
         .env(BEAMS, env::join_paths(beams).unwrap());
-    run_in_layout(&mut command, layout, environment)
+    command
 }
 
 /// The child side of `run_isolated`: load the BEAM files, run the entry, and
@@ -404,6 +567,24 @@ fn run_in_layout(
     layout: [Stream; 3],
     environment: &[(&str, &str)],
 ) -> Vec<u8> {
+    run_with_modes(command, layout, environment).0
+}
+
+/// Run `command` as `run_in_layout` does, and also return the mode of each
+/// pseudo-terminal of `layout` after the command exits, by fd. A stream
+/// that is not a terminal gives `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (result, [_, stdout, stderr]) = run_with_modes(&mut erts_nif_probe("init"), OUTPUT_TERMINALS, &[]);
+/// assert!(stdout.is_some());
+/// ```
+fn run_with_modes(
+    command: &mut Command,
+    layout: [Stream; 3],
+    environment: &[(&str, &str)],
+) -> (Vec<u8>, [Option<libc::termios>; 3]) {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let directory = env::temp_dir().join(format!(
         "pbeam-prim-tty-{}-{}",
@@ -411,9 +592,13 @@ fn run_in_layout(
         RUNS.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir(&directory).unwrap();
-    let mut masters = Vec::new();
+    let mut terminals: [Option<(OwnedFd, OwnedFd)>; 3] = Default::default();
     let [stdin, stdout, stderr] = std::array::from_fn(|fd| {
-        open_stream(layout[fd], &directory.join(format!("fd{fd}")), &mut masters)
+        open_stream(
+            layout[fd],
+            &directory.join(format!("fd{fd}")),
+            &mut terminals[fd],
+        )
     });
     let result = directory.join("result");
     let status = command
@@ -426,31 +611,62 @@ fn run_in_layout(
         .stderr(stderr)
         .status()
         .unwrap();
-    drop(masters);
+    let modes = terminals.map(|terminal| terminal.map(|(_, slave)| mode(&slave)));
     let output = fs::read(&result);
     fs::remove_dir_all(&directory).unwrap();
     assert!(status.success(), "{command:?} exited with {status}");
-    output.unwrap()
+    (output.unwrap(), modes)
 }
 
 /// Open one standard stream for a child. A file stream creates `path`. A
-/// terminal stream adds the master of its pseudo-terminal to `masters`.
+/// terminal stream keeps the master of its pseudo-terminal and a copy of
+/// its slave in `terminal`, so the pseudo-terminal stays open and its mode
+/// can be read after the child exits.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let stdout = open_stream(Stream::Terminal { columns: 100, rows: 30 }, &path, &mut masters);
-/// assert_eq!(masters.len(), 1);
+/// let mut terminal = None;
+/// let stdout = open_stream(Stream::Terminal { columns: 100, rows: 30 }, &path, &mut terminal);
+/// assert!(terminal.is_some());
 /// ```
-fn open_stream(stream: Stream, path: &Path, masters: &mut Vec<OwnedFd>) -> Stdio {
-    match stream {
-        Stream::Null => Stdio::null(),
-        Stream::File => fs::File::create(path).unwrap().into(),
-        Stream::Terminal { columns, rows } => {
+fn open_stream(stream: Stream, path: &Path, terminal: &mut Option<(OwnedFd, OwnedFd)>) -> Stdio {
+    let (master, slave) = match stream {
+        Stream::Null => return Stdio::null(),
+        Stream::File => return fs::File::create(path).unwrap().into(),
+        Stream::Terminal { columns, rows } => open_terminal(columns, rows),
+        Stream::QuietTerminal { columns, rows } => {
             let (master, slave) = open_terminal(columns, rows);
-            masters.push(master);
-            slave.into()
+            let mut quiet = mode(&slave);
+            quiet.c_lflag &= !(libc::ECHO | libc::ICANON);
+            // SAFETY: `tcsetattr` reads one `termios` from the pointer.
+            assert_eq!(
+                unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &quiet) },
+                0
+            );
+            (master, slave)
         }
+    };
+    let child = slave.try_clone().unwrap();
+    *terminal = Some((master, slave));
+    child.into()
+}
+
+/// Read the mode of the terminal `fd` with `tcgetattr`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (_master, slave) = open_terminal(80, 24);
+/// assert_ne!(mode(&slave).c_lflag & libc::ECHO, 0);
+/// ```
+fn mode(fd: &OwnedFd) -> libc::termios {
+    // SAFETY: `termios` is a C struct of integers, so all zeros is a valid
+    // value, and `tcgetattr` writes one `termios` to the pointer.
+    unsafe {
+        let mut mode: libc::termios = std::mem::zeroed();
+        assert_eq!(libc::tcgetattr(fd.as_raw_fd(), &raw mut mode), 0);
+        mode
     }
 }
 

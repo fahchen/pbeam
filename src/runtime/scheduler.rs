@@ -400,7 +400,8 @@ impl Scheduler {
 
     /// Remove the current process after it exits. Delete its ETS tables
     /// first, then free its registered name, then send `EXIT` to linked
-    /// processes that trap exits, then `DOWN` to monitors. ERTS
+    /// processes that trap exits, then run its TTY resource monitors and
+    /// send `DOWN` to monitors. ERTS
     /// (`erl_process.c`) deletes the tables in `ERTS_CONTINUE_EXIT_USING_DB`
     /// (`erl_process.c:14360-14368`), unregisters the name in
     /// `ERTS_CONTINUE_EXIT_FREE`, before `ERTS_CONTINUE_EXIT_LINKS` and
@@ -461,6 +462,9 @@ impl Scheduler {
             ]);
             self.deliver(linked, exit);
         }
+        // ERTS runs the NIF resource monitors of the process in the monitor
+        // stage too (`ERTS_CONTINUE_EXIT_LT_MONITORS`).
+        self.resources.process_down(process.id);
         for (watcher, reference) in process.monitored_by {
             let down = Term::Tuple(vec![
                 Term::static_atom("DOWN"),

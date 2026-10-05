@@ -1,5 +1,5 @@
-//! Read the host terminal state of an fd, the locale, and the terminfo
-//! entry, as the Unix part of the ERTS `prim_tty` NIFs does
+//! Read and set the host terminal state of an fd, and read the locale and
+//! the terminfo entry, as the Unix part of the ERTS `prim_tty` NIFs does
 //! (`erts/emulator/nifs/common/prim_tty_nif.c`).
 
 use std::{
@@ -175,4 +175,100 @@ fn read_window_size(fd: libc::c_int) -> Option<libc::winsize> {
     // SAFETY: `TIOCGWINSZ` writes one `winsize` to the pointer, and an fd
     // that is not a terminal gives an error, not undefined behavior.
     (unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &raw mut size) } == 0).then_some(size)
+}
+
+/// The mode of a TTY resource whose output fd is not a terminal: all zeros,
+/// as the `memset` of `tty_create_nif` leaves it when `tcgetattr` fails
+/// (`prim_tty_nif.c:992`, `1006-1010`).
+// SAFETY: `termios` is a C struct of integers and integer arrays, so all
+// zeros is a valid value.
+pub(crate) const EMPTY_MODE: libc::termios = unsafe { std::mem::zeroed() };
+
+/// Read the mode of the terminal `fd` with `tcgetattr`, as `tty_create_nif`
+/// (`prim_tty_nif.c:1007`) does. Return `None` when `tcgetattr` fails, for
+/// example for an fd that is not a terminal.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // A file on stdout.
+/// assert!(get_mode(libc::STDOUT_FILENO).is_none());
+/// // A pseudo-terminal on stderr.
+/// assert!(get_mode(libc::STDERR_FILENO).is_some());
+/// ```
+pub(crate) fn get_mode(fd: c_int) -> Option<libc::termios> {
+    let mut mode = EMPTY_MODE;
+    // SAFETY: `tcgetattr` writes one `termios` to the pointer, and an fd
+    // that is not a terminal gives an error, not undefined behavior.
+    (unsafe { libc::tcgetattr(fd, &raw mut mode) } >= 0).then_some(mode)
+}
+
+/// Set the mode of the terminal `fd` at once with `tcsetattr(fd, TCSANOW,
+/// mode)`, as `tty_init_nif` (`prim_tty_nif.c:1131`) and `tty_monitor_down`
+/// (`prim_tty_nif.c:1239`) do. A failure returns the `errno` of the call.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(set_mode(-1, &EMPTY_MODE), Err(libc::EBADF));
+/// ```
+pub(crate) fn set_mode(fd: c_int, mode: &libc::termios) -> Result<(), c_int> {
+    // SAFETY: `tcsetattr` reads one `termios` from the pointer, and an fd
+    // that is not a terminal gives an error, not undefined behavior.
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, mode) } < 0 {
+        return Err(errno());
+    }
+    Ok(())
+}
+
+/// Return whether two modes are equal, as the `sys_memcmp` of the two
+/// modes in `tty_init_nif` (`prim_tty_nif.c:1103`) finds. The comparison
+/// is field by field, because a Rust copy of a mode does not keep its
+/// padding bytes. Each mode that PBeam keeps comes from `tcgetattr` or from
+/// a change of its fields, so the result is the same.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(same_mode(&EMPTY_MODE, &EMPTY_MODE));
+/// assert!(!same_mode(&EMPTY_MODE, &raw_mode(&EMPTY_MODE)));
+/// ```
+pub(crate) fn same_mode(left: &libc::termios, right: &libc::termios) -> bool {
+    #[cfg(target_os = "linux")]
+    let same_line = left.c_line == right.c_line;
+    #[cfg(not(target_os = "linux"))]
+    let same_line = true;
+    same_line
+        && left.c_iflag == right.c_iflag
+        && left.c_oflag == right.c_oflag
+        && left.c_cflag == right.c_cflag
+        && left.c_lflag == right.c_lflag
+        && left.c_cc == right.c_cc
+        && left.c_ispeed == right.c_ispeed
+        && left.c_ospeed == right.c_ospeed
+}
+
+/// Return the raw mode of `mode`, as `tty_init_nif` makes it for the
+/// input `raw` (`prim_tty_nif.c:1108-1128`): no `ISTRIP`, `ICRNL`,
+/// `ICANON`, `OPOST`, or `ECHO`, `VMIN` 1, `VTIME` 0, and `VDSUSP` 0 where
+/// the host has `VDSUSP`. Linux has no `VDSUSP`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let raw = raw_mode(&EMPTY_MODE);
+/// assert_eq!((raw.c_cc[libc::VMIN], raw.c_cc[libc::VTIME]), (1, 0));
+/// ```
+pub(crate) fn raw_mode(mode: &libc::termios) -> libc::termios {
+    let mut raw = *mode;
+    raw.c_iflag &= !(libc::ISTRIP | libc::ICRNL);
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+    raw.c_oflag &= !libc::OPOST;
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 0;
+    #[cfg(not(target_os = "linux"))]
+    {
+        raw.c_cc[libc::VDSUSP] = 0;
+    }
+    raw
 }

@@ -41,6 +41,9 @@ pub(super) fn call(
         ("prim_tty", "tty_create", [fd]) => Some(prim_tty::tty_create(scheduler, fd)),
         ("prim_tty", "setlocale", [_]) => Some(Ok(prim_tty::setlocale())),
         ("prim_tty", "setupterm_nif", []) => Some(prim_tty::setupterm_nif(&mut scheduler.atoms)),
+        ("prim_tty", "tty_init", [tty, options]) => {
+            Some(prim_tty::tty_init(scheduler, tty, options))
+        }
         ("prim_tty", "tty_window_size", [tty]) => Some(prim_tty::tty_window_size(scheduler, tty)),
         ("prim_tty", "write_nif", [tty, iovec]) => {
             Some(prim_tty::write_nif(&scheduler.resources, tty, iovec))
