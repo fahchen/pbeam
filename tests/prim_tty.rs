@@ -428,6 +428,33 @@ fn restores_fd_0_when_the_tty_owner_exits() {
 }
 
 #[test]
+fn restores_fd_0_when_a_linked_tty_owner_exits_abnormally() {
+    // `tty_nif_probe:link/0` monitors a linker process. The linker spawns
+    // and links an owner. The owner sets the raw mode on a `stderr`
+    // resource and exits with the reason `boom`. ERTS runs the TTY monitor
+    // of the owner on each exit (prim_tty_nif.c:1235-1241), so fd 0 gets
+    // the first mode of the stderr terminal. The linker does not trap
+    // exits, so ERTS also ends it with `boom`. PBeam does not propagate
+    // this exit signal yet and returns a runtime error, but it must
+    // restore fd 0 before it returns the error.
+    let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("link"), MONITOR, &[]);
+    assert_eq!(erts, b"{ok,boom}\n");
+    let probe = || isolated("tty_nif_probe:link", &[TTY_NIF_PROBE, STAND_IN]);
+    let (pbeam, pbeam_modes) = run_with_modes(&mut probe(), MONITOR, &[]);
+    assert_eq!(
+        String::from_utf8(pbeam).unwrap(),
+        "Err(BeamError(\"unsupported exit signal Atom(\\\"boom\\\") to a process that does not trap exits\"))"
+    );
+    assert_same_modes(&erts_modes, &pbeam_modes);
+    let [Some(stdin), None, Some(stderr)] = pbeam_modes else {
+        panic!("stdin and stderr are terminals");
+    };
+    // Stdin started without `ECHO` and `ICANON`.
+    assert_eq!(stdin.c_lflag & CANONICAL_ECHO, CANONICAL_ECHO);
+    assert_raw(&stderr);
+}
+
+#[test]
 fn returns_a_runtime_error_from_write_nif_for_a_tty_resource() {
     // `tty_nif_probe:write/0` makes a `stdout` TTY resource and calls
     // `prim_tty:write_nif/2` with it. ERTS writes the iovec to the output
