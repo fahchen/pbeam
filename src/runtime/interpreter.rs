@@ -511,10 +511,17 @@ impl BeamProgram {
                         TestKind::Pid => matches!(value, Term::Pid(_)),
                         TestKind::Reference => matches!(value, Term::Reference(_)),
                         TestKind::Tuple => matches!(value, Term::Tuple(_)),
-                        TestKind::List => matches!(value, Term::List(_)),
+                        // `is_list` and `is_nonempty_list` test the cons tag, so an
+                        // improper list passes (emu `instrs.tab:879-891`; JIT
+                        // `emit_is_list` and `emit_is_nonempty_list` in
+                        // `jit/arm/instr_common.cpp:1118-1364`).
+                        TestKind::List => matches!(value, Term::List(_) | Term::ImproperList(..)),
                         TestKind::Nil => matches!(&value, Term::List(values) if values.is_empty()),
                         TestKind::NonEmptyList => {
-                            matches!(&value, Term::List(values) if !values.is_empty())
+                            matches!(
+                                &value,
+                                Term::List(values) if !values.is_empty()
+                            ) || matches!(value, Term::ImproperList(..))
                         }
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
@@ -676,14 +683,13 @@ impl BeamProgram {
                     tail,
                     destination,
                 } => {
+                    // ERTS `put_list` stores any tail in the new cons cell, so a
+                    // tail that is not a list gives an improper list (emu
+                    // `instrs.tab:732-737`; JIT `emit_put_list` in
+                    // `jit/arm/instr_common.cpp:707-721`).
                     let head = read(process, head)?;
-                    let mut tail = read(process, tail)?;
-                    let Term::List(values) = &mut tail else {
-                        return Err(error("unsupported BEAM list tail"));
-                    };
-                    let mut values = std::mem::take(values);
-                    values.insert(0, head);
-                    write(process, destination, Term::List(values))?;
+                    let tail = read(process, tail)?;
+                    write(process, destination, Term::list_with_tail(vec![head], tail))?;
                 }
                 Instruction::PutTuple {
                     elements,
@@ -733,27 +739,23 @@ impl BeamProgram {
                     write(process, destination, record)?;
                 }
                 Instruction::GetList { source, head, tail } => {
-                    let mut values = nonempty_list(read(process, source)?)?;
-                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
-                    let first = values.remove(0);
+                    let (first, rest) = nonempty_list(read(process, source)?)?;
                     write(process, head, first)?;
-                    write(process, tail, Term::List(values))?;
+                    write(process, tail, rest)?;
                 }
                 Instruction::GetHead {
                     source,
                     destination,
                 } => {
-                    let mut values = nonempty_list(read(process, source)?)?;
-                    write(process, destination, values.swap_remove(0))?;
+                    let (first, _) = nonempty_list(read(process, source)?)?;
+                    write(process, destination, first)?;
                 }
                 Instruction::GetTail {
                     source,
                     destination,
                 } => {
-                    let mut values = nonempty_list(read(process, source)?)?;
-                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
-                    values.remove(0);
-                    write(process, destination, Term::List(values))?;
+                    let (_, rest) = nonempty_list(read(process, source)?)?;
+                    write(process, destination, rest)?;
                 }
                 Instruction::Send => {
                     // ERTS `send` calls `erl_send` and writes its result to
@@ -1442,23 +1444,40 @@ fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
     write(process, &Operand::Y(register), Term::List(Vec::new()))
 }
 
-/// Return the elements of a nonempty list, which `get_list` and `get_hd`
-/// read. The BEAM validator makes sure that the source is a nonempty list.
+/// Return the head and the tail of a nonempty proper or improper list,
+/// which `get_list`, `get_hd`, and `get_tl` read as the `CAR` and the `CDR`
+/// of the first cons cell (emu `instrs.tab:389-407`; JIT
+/// `jit/arm/instr_common.cpp:274-318`). The BEAM validator makes sure that
+/// the source is a nonempty list.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
+/// let x = || Term::static_atom("x");
 /// let list = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
-/// assert_eq!(nonempty_list(list)?, vec![Term::Integer(1), Term::Integer(2)]);
+/// assert_eq!(nonempty_list(list)?, (Term::Integer(1), Term::List(vec![Term::Integer(2)])));
+/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x()));
+/// assert_eq!(nonempty_list(improper)?, (Term::Integer(1), x()));
 /// assert!(nonempty_list(Term::List(vec![])).is_err());
 /// ```
-fn nonempty_list(mut list: Term) -> Result<Vec<Term>, BeamError> {
-    match &mut list {
-        Term::List(values) if !values.is_empty() => Ok(std::mem::take(values)),
-        _ => Err(error(format!(
-            "BEAM list source {list:?} is not a nonempty list"
-        ))),
-    }
+fn nonempty_list(mut list: Term) -> Result<(Term, Term), BeamError> {
+    let (mut values, tail) = match &mut list {
+        Term::List(values) if !values.is_empty() => {
+            (std::mem::take(values), Term::List(Vec::new()))
+        }
+        Term::ImproperList(values, tail) => (
+            std::mem::take(values),
+            std::mem::replace(&mut **tail, Term::List(Vec::new())),
+        ),
+        _ => {
+            return Err(error(format!(
+                "BEAM list source {list:?} is not a nonempty list"
+            )));
+        }
+    };
+    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+    let head = values.remove(0);
+    Ok((head, Term::list_with_tail(values, tail)))
 }
 
 /// Continue execution after a label in the active module.
@@ -2634,7 +2653,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_a_list_from_nil_and_rejects_an_unsupported_tail() {
+    fn builds_a_proper_and_an_improper_list() {
         let list = make_program(
             vec![
                 Instruction::PutList {
@@ -2651,7 +2670,8 @@ mod tests {
             Term::List(vec![Term::Integer(10)])
         );
 
-        let invalid_tail = make_program(
+        // ERTS: [10 | 0] is the improper list [10|0].
+        let improper = make_program(
             vec![
                 Instruction::PutList {
                     head: Operand::Value(Term::Integer(10)),
@@ -2662,7 +2682,10 @@ mod tests {
             ],
             0,
         );
-        assert!(invalid_tail.execute("fixture", "main", &[]).is_err());
+        assert_eq!(
+            improper.execute("fixture", "main", &[]).unwrap(),
+            Term::ImproperList(vec![Term::Integer(10)], Box::new(Term::Integer(0)))
+        );
     }
 
     /// The values come from a pinned OTP 29.1.1 run of `lst/1`, `hd1/1`, and
@@ -2718,6 +2741,23 @@ mod tests {
             )
         };
         assert_eq!(get_head(list(&["x", "y"])).unwrap(), test_atom("x"));
+        // ERTS: lst([a|x]) is {a,x}, lst([a,b|x]) is {a,[b|x]}, and
+        // hd1([x|y]) is x.
+        let improper = |names: &[&str], tail: &str| {
+            Term::ImproperList(
+                names.iter().map(|name| test_atom(name)).collect(),
+                Box::new(test_atom(tail)),
+            )
+        };
+        assert_eq!(
+            get_list(improper(&["a"], "x")).unwrap(),
+            Term::Tuple(vec![test_atom("a"), test_atom("x")])
+        );
+        assert_eq!(
+            get_list(improper(&["a", "b"], "x")).unwrap(),
+            Term::Tuple(vec![test_atom("a"), improper(&["b"], "x")])
+        );
+        assert_eq!(get_head(improper(&["x"], "y")).unwrap(), test_atom("x"));
         // ERTS: nil([]) is nil, nil([a]) is nonempty, and nil(a) is other.
         let classify = |argument: Term| {
             run(
@@ -2748,6 +2788,8 @@ mod tests {
         assert_eq!(classify(list(&[])), test_atom("nil"));
         assert_eq!(classify(list(&["a"])), test_atom("nonempty"));
         assert_eq!(classify(test_atom("a")), test_atom("other"));
+        // ERTS: nil([a|x]) is nonempty.
+        assert_eq!(classify(improper(&["a"], "x")), test_atom("nonempty"));
         // The BEAM validator makes sure that the source is a nonempty list.
         assert_eq!(
             get_list(list(&[])).unwrap_err().to_string(),

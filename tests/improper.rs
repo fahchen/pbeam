@@ -106,3 +106,41 @@ fn loads_compares_and_hashes_improper_list_literals_as_pinned_erts() {
          [1,2|3],1,25,20,6,11,17,24,14,[[]|-1],3,16,21,5,26,22],v}\n"
     );
 }
+
+#[test]
+fn builds_and_matches_improper_lists_as_pinned_erts() {
+    // `instructions/0` builds `[alias | Ref]` with `put_list` and a register
+    // tail, as `gen:do_call/4` does, and matches it in a receive with
+    // `is_nonempty_list` and `get_list`. It reads improper lists with
+    // `get_hd`, `get_tl`, and `get_list`, and tests them with `is_list`,
+    // `is_nonempty_list`, and `is_nil`.
+    let program = BeamProgram::load(&[IMPROPER_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let int = Term::Integer;
+    let imp = || improper(vec![int(1)], atom("x"));
+    let two = || improper(vec![int(0), int(1)], atom("x"));
+    assert_eq!(
+        program
+            .execute("improper_probe", "instructions", &[])
+            .unwrap(),
+        Term::List(vec![
+            atom("reply"),
+            imp(),
+            two(),
+            improper(vec![improper(vec![int(1)], int(2))], int(3)),
+            int(0),
+            imp(),
+            atom("x"),
+            Term::Tuple(vec![int(1), int(2), int(3)]),
+            atom("nonempty"),
+            atom("nil"),
+            atom("other"),
+            Term::List(vec![two()]),
+            atom("true"),
+        ])
+    );
+    assert_eq!(
+        erl_reference("instructions"),
+        "[reply,[1|x],[0,1|x],[[1|2]|3],0,[1|x],x,{1,2,3},nonempty,nil,other,[[0,1|x]],true]\n"
+    );
+}
