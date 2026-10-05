@@ -93,3 +93,12 @@ arg "<start>" help="The first line"
 arg "<end>" help="The last line"
 '''
 run = 'bash scripts/otp_src.sh "$usage_path" "$usage_start" "$usage_end"'
+
+[tasks.issue]
+description = "Print the title, labels, milestone, and named body sections of an issue"
+quiet = true
+usage = '''
+arg "<number>" help="The issue number"
+arg "[section]..." help="Section headings or their first words, such as Acceptance or Dependencies; with none, print the headings only" var=#true
+'''
+run = 'eval "set -- ${usage_section:-}"; bash scripts/issue.sh "$usage_number" "$@"'

@@ -1,10 +1,11 @@
 ---
 name: next-task
 description: This skill should be used when the user asks "what's next", "what's the next task", "what can run in parallel", "/next-task", or otherwise wants the ready task issues in the pbeam repo. Finds every open `kind:task` issue whose blockers are closed/merged, reports all ready tasks grouped by parallel-safe vs sequential, and after the user selects one, confirms before moving its project board Status to `Designing` and proposing a solution.
-version: 0.4.0
+version: 0.5.0
 user-invocable: true
 allowed-tools:
   - Bash(gh *)
+  - Bash(mise run issue *)
 ---
 
 # Next Task
@@ -14,7 +15,7 @@ Find every ready task issue, not just one. Then, once the user picks one, confir
 ## Step 1: find ready tasks (read-only)
 
 1. List open `kind:task` issues: `gh issue list --repo fahchen/pbeam --label "kind:task" --state open --json number,title,labels,milestone -L 50`
-2. For each candidate, read its body for "Blocked by" / "Dependencies" text: `gh issue view <N> --repo fahchen/pbeam --json number,title,state,body,labels`
+2. For each candidate, read its body for "Blocked by" / "Dependencies" text: `mise run issue <N> Dependencies Delivery`. It prints the title, state, labels, the text before the first section, and the named sections. Older issues name blockers in a `Delivery` section or a `**Dependencies:**` line before the first section, so a `no section` line for one name is normal.
 3. Collect every blocker number named, dedupe, check each blocker's state: `gh issue view <blocker> --repo fahchen/pbeam --json number,state`
 4. A task is ready when every blocker it names is `CLOSED` and any prerequisite PR it names is merged. Verify directly; don't trust stale "ready" wording in the body.
 5. Among ready tasks, flag which can run in parallel:

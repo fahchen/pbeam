@@ -1,7 +1,7 @@
 ---
 name: draft-pr
 description: This skill should be used when the user asks to "create a PR", "open a PR", "create a draft PR", "make a PR", "/pr", "/draft-pr", or otherwise requests a GitHub pull request for the current branch in the pbeam repo. Uses the task issue title as the PR title, fills the repo PR template with task links, decisions, and exact verification, checks each Review boundary item and stops to ask if one fails, applies content labels, updates the task issue and epic, and stops for review.
-version: 0.3.0
+version: 0.4.0
 user-invocable: true
 allowed-tools:
   - Bash(git *)
@@ -49,10 +49,10 @@ Refuse to continue, and say why, when a rule is broken.
 Get the task issue number from the user, the branch, or the commits. Ask if it is unknown. Then read:
 
 ```bash
-gh issue view <task> --json number,title,body,labels,milestone
+mise run issue <task> Acceptance Scope Dependencies
 ```
 
-From the body, take the epic issue, the milestone tracking issue, the acceptance criteria, the scope, and the blockers. Read the epic issue for its task and PR lists.
+It prints the title, labels, milestone, the epic and milestone tracking issue links, and the named sections. From it, take the acceptance criteria, the scope, and the blockers. Read the task and PR lists of the epic with `mise run issue <epic> Tasks 'Pull requests'`.
 
 ### 1. Pre-flight
 
