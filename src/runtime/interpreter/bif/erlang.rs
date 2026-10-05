@@ -1,6 +1,6 @@
 //! Bodies of the `erlang` BIFs that do not fit on one table line.
 
-use super::BifResult::{Trap, Value};
+use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::term::{Fun, Reference};
 
@@ -272,6 +272,83 @@ pub(super) fn append(left: &Term, right: &Term) -> Result<BifResult, BeamError> 
         ))),
         _ => Ok(BifResult::badarg()),
     }
+}
+
+/// The largest number of characters in an atom name (`MAX_ATOM_CHARACTERS`
+/// in `atom.h`).
+const MAX_ATOM_CHARACTERS: usize = 255;
+
+/// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
+/// name, as ERTS `atom_to_list_1` (`bif.c:3186-3210`) does. The atom `''`
+/// gives `[]`. A term that is not an atom raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = atom_to_list(&Term::static_atom("ok"));
+/// assert!(matches!(list, BifResult::Value(Term::List(codes)) if codes == [Term::Integer(111), Term::Integer(107)]));
+/// assert!(matches!(atom_to_list(&Term::static_atom("")), BifResult::Value(Term::List(codes)) if codes.is_empty()));
+/// assert!(matches!(atom_to_list(&Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn atom_to_list(term: &Term) -> BifResult {
+    match term {
+        Term::Atom(atom) => Value(Term::List(
+            atom.name()
+                .chars()
+                .map(|character| Term::Integer(i64::from(u32::from(character))))
+                .collect(),
+        )),
+        _ => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:list_to_atom/1`: return the atom whose name has the code
+/// points of a list, and put a new atom into the atom table of the run, as
+/// ERTS `list_to_atom_1` (`bif.c:3217-3236`) does with
+/// `erts_unicode_list_to_buf` (`utils.c:2862-2942`). ERTS counts each
+/// element before it checks it, so a 256th element raises `system_limit`,
+/// also when it is not a character. An element that is not an integer in
+/// `0..=0x10FFFF` outside `0xD800..=0xDFFF`, and a term that is not a list,
+/// raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut atoms = AtomTable::new();
+/// let ok = list_to_atom(&mut atoms, &Term::List(vec![Term::Integer(111), Term::Integer(107)]))?;
+/// assert!(matches!(ok, BifResult::Value(atom) if atom == Term::static_atom("ok")));
+/// let surrogate = Term::List(vec![Term::Integer(0xD800)]);
+/// assert!(matches!(list_to_atom(&mut atoms, &surrogate)?, BifResult::Raise { .. }));
+/// let long = Term::List(vec![Term::Integer(97); 256]);
+/// assert!(matches!(list_to_atom(&mut atoms, &long)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`,
+/// where ERTS stops the emulator.
+pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResult, BeamError> {
+    let Term::List(elements) = term else {
+        return Ok(BifResult::badarg());
+    };
+    let mut name = String::new();
+    for (count, element) in elements.iter().enumerate() {
+        if count == MAX_ATOM_CHARACTERS {
+            return Ok(Raise {
+                class: ExceptionClass::Error,
+                reason: Term::static_atom("system_limit"),
+            });
+        }
+        let character = match element {
+            Term::Integer(code) => u32::try_from(*code).ok().and_then(char::from_u32),
+            _ => None,
+        };
+        let Some(character) = character else {
+            return Ok(BifResult::badarg());
+        };
+        name.push(character);
+    }
+    Ok(Value(Term::Atom(atoms.put(&name)?)))
 }
 
 /// Run `erlang:'+'/2` or `erlang:'-'/2` with `operation`, the checked `i64`

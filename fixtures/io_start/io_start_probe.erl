@@ -1,5 +1,5 @@
 -module(io_start_probe).
--export([lists/0, maps/0, merge/0, format/0]).
+-export([lists/0, maps/0, merge/0, atoms/0, atom_limit/0, format/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
 %% runs it, and in a guard. `get_tl`, as proc_lib:trans_init/3
@@ -67,6 +67,38 @@ merge() ->
 big(N) -> big(N, #{}).
 big(0, M) -> M;
 big(N, M) -> big(N - 1, M#{N => N}).
+
+%% `erlang:atom_to_list/1` and `erlang:list_to_atom/1`, as
+%% prim_tty:set_name/2 (prim_tty.erl:569-571) runs them. A term that is not
+%% an atom, and a list element that is not a Unicode scalar value, raise
+%% badarg.
+atoms() ->
+    [atom_to_list(id(user_drv)),
+     atom_to_list(id('')),
+     atom_to_list(id('héllo')),
+     try atom_to_list(id("user")) catch error:R1 -> R1 end,
+     list_to_atom(id("user_drv_writer")) =:= user_drv_writer,
+     list_to_atom(id("")),
+     atom_to_list(list_to_atom([104, 233, id(1024), id(128512)])),
+     try list_to_atom(id(foo)) catch error:R2 -> R2 end,
+     try list_to_atom(id([a])) catch error:R3 -> R3 end,
+     try list_to_atom([id(-1)]) catch error:R4 -> R4 end,
+     try list_to_atom([id(16#D800)]) catch error:R5 -> R5 end,
+     try list_to_atom([id(16#110000)]) catch error:R6 -> R6 end,
+     try list_to_atom(id(<<"ok">>)) catch error:R7 -> R7 end].
+
+%% `erlang:list_to_atom/1` counts each element before it checks it
+%% (utils.c:2862-2930): 255 characters make an atom, and a 256th element
+%% raises system_limit, also when it is not a character.
+atom_limit() ->
+    A = list_to_atom(dup(255, 16#1F600)),
+    [length(atom_to_list(A)),
+     try list_to_atom(dup(256, $a)) catch error:R1 -> R1 end,
+     try list_to_atom(dup(255, $a) ++ [foo]) catch error:R2 -> R2 end,
+     try list_to_atom([foo | dup(255, $a)]) catch error:R3 -> R3 end].
+
+dup(0, _) -> [];
+dup(N, C) -> [C | dup(N - 1, C)].
 
 %% `io_lib:bformat/2`, as user_drv:init_shell/2 (user_drv.erl:374) runs it
 %% with the empty slogan of `-noshell` (user_drv.erl:271-273).

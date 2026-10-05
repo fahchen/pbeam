@@ -22,8 +22,8 @@ use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function};
 pub struct BeamProgram {
     /// The loaded modules by name.
     modules: HashMap<String, BeamModule>,
-    /// The atom table of the program. ERTS has one atom table for each
-    /// emulator, so each program has its own table.
+    /// The atom table of the loaded modules. ERTS has one atom table for
+    /// each emulator, so each run starts its own table from a copy of it.
     atoms: AtomTable,
 }
 
@@ -89,8 +89,10 @@ impl BeamProgram {
         })
     }
 
-    /// Return the atom of a name when the atom table of the program holds
-    /// it. Use it to build terms that compare with the terms of the program.
+    /// Return the atom of a name when the atom table of the loaded modules
+    /// holds it. Use it to build terms that compare with the terms of the
+    /// program. The table does not hold the atoms that a run makes, for
+    /// example with `erlang:list_to_atom/1`.
     ///
     /// # Examples
     ///
@@ -129,6 +131,7 @@ impl BeamProgram {
             .get(&(function.to_owned(), arity))
             .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))?;
         let mut scheduler = Scheduler::default();
+        scheduler.atoms = self.atoms.clone();
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
         while scheduler.schedule_next().is_some() {
             match self.run(&mut scheduler)? {
@@ -2956,6 +2959,39 @@ mod tests {
             ])
             .contains("unsupported demonitor options")
         );
+    }
+
+    #[test]
+    fn puts_a_new_atom_into_the_atom_table_of_the_run() {
+        // ERTS has one atom table for each emulator, and
+        // `erlang:list_to_atom/1` gives a new atom the next index
+        // (`erts_atom_put`). A run starts with a copy of the table of the
+        // loaded modules, so `pbeam_alpha` gets index 1151 after
+        // `pbeam_zeta` (1150). The table of the loaded modules does not
+        // change, so each run gives the same index.
+        let mut program = make_program(
+            vec![
+                Instruction::Move(
+                    Operand::Value(Term::List(
+                        "pbeam_alpha"
+                            .bytes()
+                            .map(|byte| Term::Integer(i64::from(byte)))
+                            .collect(),
+                    )),
+                    Operand::X(0),
+                ),
+                erlang_call("list_to_atom", 1, true),
+            ],
+            0,
+        );
+        assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1150);
+        for _ in 0..2 {
+            assert!(matches!(
+                program.execute("fixture", "main", &[]).unwrap(),
+                Term::Atom(ref alpha) if alpha.name() == "pbeam_alpha" && alpha.index() == 1151
+            ));
+        }
+        assert_eq!(program.atom("pbeam_alpha"), None);
     }
 
     #[test]

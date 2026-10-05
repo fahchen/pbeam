@@ -84,11 +84,24 @@ impl Atom {
     }
 }
 
-/// The atom table of one program (`erts_atom_table` in ERTS).
-#[derive(Debug)]
+/// The atom table of one program or one run (`erts_atom_table` in ERTS).
+#[derive(Debug, Clone)]
 pub(crate) struct AtomTable {
     /// The index of each atom. The next new atom gets index `indices.len()`.
     indices: HashMap<String, u32>,
+}
+
+impl Default for AtomTable {
+    /// Return a table with only the static atoms, as `AtomTable::new` does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(AtomTable::default().get("ok"), Atom::from_static("ok"));
+    /// ```
+    fn default() -> Self {
+        AtomTable::new()
+    }
 }
 
 impl AtomTable {

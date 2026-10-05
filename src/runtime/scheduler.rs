@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     error::{BeamError, error},
-    term::{ProcessId, Reference, Term},
+    term::{AtomTable, ProcessId, Reference, Term},
 };
 
 /// A cooperative scheduler on one OS thread. It follows the ERTS model: the
@@ -36,6 +36,10 @@ pub(super) struct Scheduler {
     names: HashMap<String, ProcessId>,
     /// Persistent terms of the node. All processes of the run share them.
     pub(super) persistent_terms: PersistentTerms,
+    /// The atom table of the run, as `erts_atom_table` for one emulator. A
+    /// run starts with a copy of the program table, and a BIF such as
+    /// `erlang:list_to_atom/1` adds its new atoms here.
+    pub(super) atoms: AtomTable,
 }
 
 impl Scheduler {

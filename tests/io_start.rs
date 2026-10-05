@@ -175,6 +175,76 @@ fn merges_maps_as_pinned_erts() {
 }
 
 #[test]
+fn converts_atoms_and_lists_as_pinned_erts() {
+    // `io_start_probe:atoms/0` runs `erlang:atom_to_list/1` and
+    // `erlang:list_to_atom/1`, as `prim_tty:set_name/2`
+    // (prim_tty.erl:569-571) does (`bif.c:3186-3236`). A term that is not an
+    // atom, a term that is not a list, and an element that is not a Unicode
+    // scalar value raise `badarg`. `list_to_atom/1` puts a new atom into the
+    // atom table of the run, so the test compares it by its code points.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let codes = |text: &str| {
+        Term::List(
+            text.chars()
+                .map(|character| Term::Integer(i64::from(u32::from(character))))
+                .collect(),
+        )
+    };
+    let expected = vec![
+        codes("user_drv"),
+        codes(""),
+        codes("héllo"),
+        atom("badarg"),
+        atom("true"),
+        atom(""),
+        codes("hé\u{400}\u{1F600}"),
+        atom("badarg"),
+        atom("badarg"),
+        atom("badarg"),
+        atom("badarg"),
+        atom("badarg"),
+        atom("badarg"),
+    ];
+    assert_eq!(
+        program.execute("io_start_probe", "atoms", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("atoms"),
+        b"[[117,115,101,114,95,100,114,118],[],[104,233,108,108,111],badarg,true,'',\
+          [104,233,1024,128512],badarg,badarg,badarg,badarg,badarg,badarg]\n"
+    );
+}
+
+#[test]
+fn limits_atom_names_to_255_characters_as_pinned_erts() {
+    // `io_start_probe:atom_limit/0`: `erlang:list_to_atom/1` makes an atom of
+    // 255 characters. It counts each element before it checks it
+    // (`utils.c:2862-2930`, `MAX_ATOM_CHARACTERS` in `atom.h`), so a 256th
+    // element raises `system_limit`, also when it is not a character, and a
+    // first element that is not a character raises `badarg`.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let expected = vec![
+        Term::Integer(255),
+        atom("system_limit"),
+        atom("system_limit"),
+        atom("badarg"),
+    ];
+    assert_eq!(
+        program
+            .execute("io_start_probe", "atom_limit", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("atom_limit"),
+        b"[255,system_limit,system_limit,badarg]\n"
+    );
+}
+
+#[test]
 fn formats_the_empty_noshell_slogan_as_pinned_erts() {
     // `user_drv:init_shell/2` (user_drv.erl:374) runs
     // `io_lib:bformat("~ts", [""])` with the empty slogan of `-noshell`
