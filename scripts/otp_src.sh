@@ -29,8 +29,11 @@ fi
 # The `.` keeps trailing blank lines; the here-string adds back the last newline.
 blob=$(git -C "$src" cat-file blob "$tag:$path" && echo .)
 blob=${blob%.}
-awk -v head="$tag $path:$start-$end" -v start="$start" -v end="$end" -v path="$path" '
-  NR == start { print head }
-  NR >= start { print NR "\t" $0 }
+# The header comes in END with the last line read, so an <end> after the last line cites only the printed lines.
+awk -v tag="$tag" -v start="$start" -v end="$end" -v path="$path" '
+  NR >= start { lines = lines NR "\t" $0 "\n" }
   NR == end { exit }
-  END { if (NR < start) { print "otp-src: " path " has " NR " lines" > "/dev/stderr"; exit 1 } }' <<<"${blob%$'\n'}"
+  END {
+    if (NR < start) { print "otp-src: " path " has " NR " lines" > "/dev/stderr"; exit 1 }
+    printf "%s %s:%d-%d\n%s", tag, path, start, NR, lines
+  }' <<<"${blob%$'\n'}"
