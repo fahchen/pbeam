@@ -180,6 +180,6 @@ dead() ->
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.
 
-%% Keep an integer outside 0..255 out of a literal: PBeam loads only
-%% SMALL_INTEGER_EXT integers in literals.
+%% Keep an integer outside the 32-bit signed range out of a literal: PBeam
+%% does not load SMALL_BIG_EXT integers in literals.
 id(X) -> X.

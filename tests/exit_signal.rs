@@ -45,9 +45,11 @@ const EXIT_PROBE: &[u8] = include_bytes!("../fixtures/exit_signal/exit_probe.bea
 
 #[test]
 fn sends_exit_signals_with_exit_2_as_erts_does() {
-    // `erlang:spawn_monitor/1,3` run from the pinned `erlang.beam`.
+    // `erlang:spawn_monitor/1,3` run from the pinned `erlang.beam`, and
+    // `re:compile/2` gives the NIF resource reference from the pinned `re.beam`.
     let erlang = pinned_beam("erlang");
-    let program = BeamProgram::load(&[&erlang, EXIT_PROBE]).unwrap();
+    let re = pinned_beam("re");
+    let program = BeamProgram::load(&[&erlang, &re, EXIT_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let returned = Term::Tuple(vec![atom("returned"), atom("true"), atom("true")]);
     let pair = |tag: &str, value: &str| Term::Tuple(vec![atom(tag), atom(value)]);
@@ -69,6 +71,7 @@ fn sends_exit_signals_with_exit_2_as_erts_does() {
             atom("badarg"),
             atom("true"),
             atom("true"),
+            atom("true"),
             pair("linked", "boom"),
         ])
     );
@@ -87,6 +90,6 @@ fn sends_exit_signals_with_exit_2_as_erts_does() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         reference.stdout,
-        b"[normal,boom,killed,{returned,true,true},{returned,true,true},killed,{alive,none},boom,killed,{alive,{normal,true}},killed,badarg,badarg,true,true,{linked,boom}]\n"
+        b"[normal,boom,killed,{returned,true,true},{returned,true,true},killed,{alive,none},boom,killed,{alive,{normal,true}},killed,badarg,badarg,true,true,true,{linked,boom}]\n"
     );
 }
