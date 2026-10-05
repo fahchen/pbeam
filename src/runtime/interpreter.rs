@@ -120,8 +120,12 @@ impl BeamProgram {
     /// timer, as ERTS bumps the timers in `check_activities_to_run`
     /// (`erl_process.c:9797-9810`). When no process can run, it sleeps until
     /// the first timer end, as `scheduler_wait` sleeps until the next
-    /// timeout (`erl_process.c:3452-3620`). The run ends when no process can
-    /// run and no timer is active.
+    /// timeout (`erl_process.c:3452-3620`). The run ends when the root
+    /// process exits, also when another process can run or a timer is
+    /// active, as `halt()` after `-eval` stops the ERTS node
+    /// (`erlang.erl:3357-3358`) and as `init` halts after a boot process
+    /// exit that is not `normal` (`init.erl:710-712`). A root process that
+    /// waits when no process can run and no timer is active gives an error.
     ///
     /// # Examples
     ///
@@ -139,7 +143,7 @@ impl BeamProgram {
         let label = self.entry_label(module, function, arity)?;
         let mut scheduler = Scheduler::new(self.atoms.clone());
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
-        loop {
+        while !scheduler.root_exited() {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
             if scheduler.schedule_next().is_some() {

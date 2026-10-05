@@ -393,6 +393,21 @@ impl Scheduler {
         Ok(Reference(value))
     }
 
+    /// Return whether the root process exited.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.start(frame, vec![])?;
+    /// assert!(!scheduler.root_exited());
+    /// scheduler.schedule_next();
+    /// scheduler.finish_current(Term::static_atom("normal"), Some(Term::static_atom("ok")))?;
+    /// assert!(scheduler.root_exited());
+    /// ```
+    pub(super) fn root_exited(&self) -> bool {
+        self.root_result.is_some()
+    }
+
     /// Return the root result. `None` means the root process did not exit.
     ///
     /// # Examples
