@@ -29,6 +29,11 @@ fi
 # The `.` keeps trailing blank lines; the here-string adds back the last newline.
 blob=$(git -C "$src" cat-file blob "$tag:$path" && echo .)
 blob=${blob%.}
+# The here-string gives awk one empty line for an empty blob, so stop here.
+if [[ -z $blob ]]; then
+  echo "otp-src: $path has 0 lines" >&2
+  exit 1
+fi
 # The header comes in END with the last line read, so an <end> after the last line cites only the printed lines.
 awk -v tag="$tag" -v start="$start" -v end="$end" -v path="$path" '
   NR >= start { lines = lines NR "\t" $0 "\n" }
