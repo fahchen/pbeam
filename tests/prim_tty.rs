@@ -22,6 +22,7 @@ const STAND_IN: &str = "fixtures/prim_tty/nif/prim_tty.beam";
 const TTY_NIF_PROBE: &str = "fixtures/prim_tty/tty_nif_probe.beam";
 const TTY_INIT_PROBE: &str = "fixtures/prim_tty/tty_init_probe.beam";
 const LOAD_NIF_PROBE: &str = "fixtures/prim_tty/load_nif_probe.beam";
+const COOKED_PROBE: &str = "fixtures/prim_tty/cooked_probe.beam";
 
 /// The environment variables that give the `isolated_run` child its entry
 /// `module:function`, its BEAM files, and the file for its result. The ERTS
@@ -596,6 +597,86 @@ fn runs_prim_tty_init_in_the_disabled_input_mode() {
 }
 
 #[test]
+fn starts_the_cooked_reader_and_the_signal_handler_with_prim_tty_init() {
+    // `cooked_probe:main/0` calls `prim_tty:init/1` in the `cooked` input
+    // mode from a registered process. It starts the reader process, which
+    // calls `tty_select/2` and `tty_encoding/1` (prim_tty.erl:436-448), and
+    // adds `prim_tty_sighandler` to `erl_signal_server` with
+    // `gen_event:add_handler/3` (prim_tty.erl:284-298). The handler init
+    // matches its state with `has_map_fields` and calls `os:set_signal/2`
+    // for `sigcont` and `sigwinch` (prim_tty_sighandler.erl:28-31). The probe
+    // then sends `{notify, sigwinch}`, the message of the ERTS signal
+    // dispatcher (sys.c:589-607), to `erl_signal_server`; the handler
+    // forwards it to the `prim_tty:init/1` caller only when it has the
+    // correct state (prim_tty_sighandler.erl:33-36). `pbeam_main/0` first
+    // makes `ac_tab` and starts `erl_signal_server` with
+    // `erl_signal_handler`, as the kernel boot does. The PBeam run is a
+    // child, because the handler init changes the signal dispositions.
+    let beams: Vec<_> = [
+        "erlang",
+        "prim_tty",
+        "proc_lib",
+        "application",
+        "application_controller",
+        "ets",
+        "re",
+        "lists",
+        "maps",
+        "os",
+        "unicode",
+        "gen_event",
+        "gen",
+        "prim_tty_sighandler",
+        "erl_signal_handler",
+    ]
+    .map(pinned_beam_path)
+    .into_iter()
+    .chain([PathBuf::from(COOKED_PROBE)])
+    .collect();
+    for (locale, unicode) in [("C.UTF-8", "true"), ("C", "false")] {
+        let environment = [("LC_ALL", locale)];
+        let outputs = run_with_outputs(&mut erts_cooked_probe("main"), FILES, &environment);
+        assert_eq!(outputs.files[1].as_deref(), Some(&b""[..]));
+        assert_eq!(
+            outputs.files[2].as_deref(),
+            Some(
+                format!("[{unicode},raw,true,true,{{error,enotsup}},sigwinch,[prim_tty_sighandler,erl_signal_handler]]\n")
+                    .as_bytes()
+            )
+        );
+        assert_eq!(
+            String::from_utf8(run_in_layout(
+                &mut isolated("cooked_probe:pbeam_main", &beams),
+                FILES,
+                &environment
+            ))
+            .unwrap(),
+            format!(
+                r#"Ok(List([Atom("{unicode}"), Atom("raw"), Atom("true"), Atom("true"), Tuple([Atom("error"), Atom("enotsup")]), Atom("sigwinch"), List([Atom("prim_tty_sighandler"), Atom("erl_signal_handler")])]))"#
+            )
+        );
+    }
+
+    // `cooked_probe:read/0` calls `prim_tty:read/1` and waits for the data
+    // of the reader. On ERTS the reader gets the select message of fd 0 and
+    // reads `eof` from `/dev/null` (prim_tty.erl:470-490). PBeam has no IO
+    // poll, so the message never arrives and the run ends with a runtime
+    // error ("Input select" in docs/erts-differences.md).
+    let outputs = run_with_outputs(&mut erts_cooked_probe("read"), FILES, &[]);
+    assert_eq!(outputs.files[1].as_deref(), Some(&b""[..]));
+    assert_eq!(outputs.files[2].as_deref(), Some(&b"eof\n"[..]));
+    assert_eq!(
+        String::from_utf8(run_in_layout(
+            &mut isolated("cooked_probe:pbeam_read", &beams),
+            FILES,
+            &[]
+        ))
+        .unwrap(),
+        r#"Err(BeamError("root process waits for a message that cannot arrive"))"#
+    );
+}
+
+#[test]
 fn runs_load_nif_as_an_instruction_with_the_host_filename_encoding() {
     // `load_nif_probe:main/0` calls `erlang:load_nif/2` through the
     // `call_ext_only` (`prim_tty:load/1`), `call_ext`
@@ -973,6 +1054,31 @@ fn erts_init_probe() -> Command {
         "fixtures/prim_tty",
         "-eval",
         "io:format(standard_error, \"~w~n\", [tty_init_probe:main()]), halt().",
+    ]);
+    command
+}
+
+/// Return the `erl` command that runs `cooked_probe:Function()` with the
+/// pinned `prim_tty` and writes the `~w` text of its result to
+/// `standard_error`. It uses `-noinput`: under `-noshell`, `user_drv` starts
+/// its own cooked reader on fd 0 (user_sup.erl:129-130), and the select of
+/// the probe reader makes ERTS log "stealing control of fd=0" on stdout
+/// (erl_check_io.c:1608). Under `-noinput`, no other process reads fd 0
+/// (user_sup.erl:135-136), as in PBeam.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let outputs = run_with_outputs(&mut erts_cooked_probe("main"), FILES, &[]);
+/// ```
+fn erts_cooked_probe(function: &str) -> Command {
+    let mut command = Command::new("erl");
+    command.args([
+        "-noinput",
+        "-pa",
+        "fixtures/prim_tty",
+        "-eval",
+        &format!("io:format(standard_error, \"~w~n\", [cooked_probe:{function}()]), halt()."),
     ]);
     command
 }
