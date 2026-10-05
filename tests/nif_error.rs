@@ -42,9 +42,10 @@ fn raises_undef_for_a_local_function_that_calls_nif_error() {
 }
 
 #[test]
-fn runs_nif_start_as_a_no_op_before_the_nif_error_fallback() {
+fn runs_the_nif_error_fallback_of_a_nif_without_a_binding() {
     // The function `nif_stub/0` is in `-nifs`, so its first instruction is
     // `nif_start`. No NIF library is loaded, so ERTS runs the Erlang body.
+    // PBeam has no native binding for it, so PBeam also runs the body.
     let reference = Command::new("erl")
         .args([
             "-noshell",
