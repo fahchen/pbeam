@@ -6,7 +6,7 @@ use crate::runtime::{
         errno::errno_id,
         terminal::{self, TerminalCheck},
     },
-    resource::{Resources, TtyResource, TtyState},
+    tty::{TtyResource, TtyState, Ttys},
 };
 
 /// The functions of the ERTS `prim_tty` NIF library, as `(name, arity)` in
@@ -94,7 +94,13 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "write_nif",
         arity: 2,
-        run: |scheduler, arguments| write_nif(&scheduler.resources, &arguments[0], &arguments[1]),
+        run: |scheduler, arguments| {
+            write_nif(
+                scheduler.state.borrow_mut::<Ttys>(),
+                &arguments[0],
+                &arguments[1],
+            )
+        },
     },
 ];
 
@@ -199,7 +205,7 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
         None => (TtyState::Unavailable, terminal::EMPTY_MODE),
     };
     let reference = scheduler.make_ref()?;
-    scheduler.resources.insert_tty(
+    scheduler.state.borrow_mut::<Ttys>().insert(
         reference,
         TtyResource {
             ofd,
@@ -234,7 +240,7 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
 /// The atom `enotsup` in a full atom table gives the error of
 /// `AtomTable::put`.
 fn tty_window_size(scheduler: &mut Scheduler, tty: &Term) -> Result<BifResult, BeamError> {
-    let Some(tty) = tty_resource(&scheduler.resources, tty) else {
+    let Some(tty) = tty_resource(scheduler.state.borrow_mut::<Ttys>(), tty) else {
         return Ok(BifResult::badarg());
     };
     let result = match terminal::window_size(tty.ofd) {
@@ -286,7 +292,8 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
     let Term::Reference(reference) = tty else {
         return Ok(BifResult::badarg());
     };
-    let Some(tty) = scheduler.resources.tty_mut(*reference) else {
+    let ttys = scheduler.state.borrow_mut::<Ttys>();
+    let Some(tty) = ttys.get_mut(*reference) else {
         return Ok(BifResult::badarg());
     };
     let Some(input) = options.get(&Term::static_atom("input")) else {
@@ -318,7 +325,7 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
         }
     }
     tty.owner = Some(caller);
-    scheduler.resources.monitor_tty(caller, *reference);
+    ttys.monitor(caller, *reference);
     Ok(BifResult::Value(Term::static_atom("ok")))
 }
 
@@ -346,11 +353,12 @@ fn tty_select(scheduler: &mut Scheduler, tty: &Term) -> BifResult {
     let Term::Reference(reference) = tty else {
         return BifResult::badarg();
     };
-    if scheduler.resources.tty(*reference).is_none() {
+    let caller = scheduler.current_process_mut().id;
+    let ttys = scheduler.state.borrow_mut::<Ttys>();
+    if ttys.get(*reference).is_none() {
         return BifResult::badarg();
     }
-    let caller = scheduler.current_process_mut().id;
-    scheduler.resources.monitor_tty(caller, *reference);
+    ttys.monitor(caller, *reference);
     BifResult::Value(Term::static_atom("ok"))
 }
 
@@ -469,15 +477,15 @@ fn enotsup(atoms: &mut AtomTable) -> Result<Term, BeamError> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = write_nif(&resources, &Term::static_atom("stdout"), &Term::static_atom("not_iodata"));
+/// let result = write_nif(&ttys, &Term::static_atom("stdout"), &Term::static_atom("not_iodata"));
 /// assert!(matches!(result, Ok(BifResult::Raise { class: ExceptionClass::Error, .. })));
 /// ```
 ///
 /// # Errors
 ///
 /// A TTY resource gives a runtime error: PBeam has no host write yet (#116).
-fn write_nif(resources: &Resources, tty: &Term, _iovec: &Term) -> Result<BifResult, BeamError> {
-    match tty_resource(resources, tty) {
+fn write_nif(ttys: &Ttys, tty: &Term, _iovec: &Term) -> Result<BifResult, BeamError> {
+    match tty_resource(ttys, tty) {
         Some(_) => Err(error(
             "prim_tty:write_nif/2 host write is not implemented yet (#116)",
         )),
@@ -493,12 +501,12 @@ fn write_nif(resources: &Resources, tty: &Term, _iovec: &Term) -> Result<BifResu
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(tty_resource(&resources, &Term::Reference(tty)).is_some());
-/// assert!(tty_resource(&resources, &Term::static_atom("stdout")).is_none());
+/// assert!(tty_resource(&ttys, &Term::Reference(tty)).is_some());
+/// assert!(tty_resource(&ttys, &Term::static_atom("stdout")).is_none());
 /// ```
-fn tty_resource<'a>(resources: &'a Resources, term: &Term) -> Option<&'a TtyResource> {
+fn tty_resource<'a>(ttys: &'a Ttys, term: &Term) -> Option<&'a TtyResource> {
     match term {
-        Term::Reference(reference) => resources.tty(*reference),
+        Term::Reference(reference) => ttys.get(*reference),
         _ => None,
     }
 }
@@ -534,7 +542,7 @@ mod tests {
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let reference = scheduler.make_ref().unwrap();
-        scheduler.resources.insert_tty(
+        scheduler.state.borrow_mut::<Ttys>().insert(
             reference,
             TtyResource {
                 ofd: -1,
@@ -552,7 +560,7 @@ mod tests {
             format!("{result:?}"),
             r#"Value(Tuple([Atom("error"), Tuple([Atom("tcsetattr"), Atom("ebadf")])]))"#
         );
-        let tty = scheduler.resources.tty(reference).unwrap();
+        let tty = scheduler.state.borrow_mut::<Ttys>().get(reference).unwrap();
         assert_eq!((&tty.state, tty.owner), (&TtyState::Enabled, None));
     }
 }
