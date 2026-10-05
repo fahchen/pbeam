@@ -49,11 +49,12 @@ untrusted input write outside its output directory.
 
 ## External identifiers lack trusted-origin validation
 
-Validate the trusted origin of an external identifier before you take a local
-number or name from it. Do not use data from an unvalidated identifier for a
-local action or an error report.
+Validate the trusted origin of an external identifier before you take a local number or name from it. Do not use data from an unvalidated identifier for a local action or an error report.
 
 ## Compiled fixtures omit representative input shapes
 
-Cover each supported input shape, including bare values and boundary sizes, in
-compiled fixtures. Assert exact results against pinned ERTS.
+Cover each supported input shape, including bare values and boundary sizes, in compiled fixtures. Assert exact results against pinned ERTS.
+
+## Equality uses semantic identity, not dispatch metadata
+
+Define equality from the fields that identify the runtime value. Exclude fields that only select code or optimize execution.
