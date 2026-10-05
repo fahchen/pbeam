@@ -245,7 +245,7 @@ bifs! {
     erlang:md5_update/2 => unsupported,
     erlang:min/2 => unsupported,
     erlang:module_loaded/1 => unsupported,
-    erlang:monitor/2 => |cx, [Term::Atom(kind), Term::Pid(target)]| where kind.name() == "process" => Ok(Value(Term::Reference(cx.scheduler.monitor(*target)?))),
+    erlang:monitor/2 => |cx, [kind, target]| erlang::monitor(cx, kind, target),
     erlang:monitor/3 => unsupported,
     erlang:monitor_node/2 => unsupported,
     erlang:monitor_node/3 => unsupported,

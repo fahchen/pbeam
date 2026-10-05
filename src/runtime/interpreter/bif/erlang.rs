@@ -3,6 +3,7 @@
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
+use crate::runtime::scheduler::MonitorTarget;
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use crate::term::Fun;
 
@@ -157,6 +158,72 @@ pub(super) fn demonitor(
             Term::static_atom("false"),
             result,
         ],
+    }
+}
+
+/// Run `erlang:monitor(Type, Target)` as ERTS `monitor_2` (`bif.c:983-986`)
+/// and `monitor` (`bif.c:758-981`) do. The type `process` accepts a pid, a
+/// registered name, and `{Name, nonode@nohost}`; the type `port` accepts a
+/// registered name and `{Name, nonode@nohost}`. PBeam is a node that is not
+/// alive, so `{Name, Node}` with another node raises `badarg`
+/// (`bif.c:881-882`). Each other target, and each other type, raises
+/// `badarg`. A monitor of the caller creates no monitor, and each port name
+/// gives the `noproc` `DOWN` message (see [`Scheduler::monitor`]).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = monitor(&mut context, &process, &Term::Pid(child))?;
+/// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
+/// assert!(matches!(monitor(&mut context, &port, &Term::Pid(child))?, BifResult::Raise { .. }));
+/// assert!(monitor(&mut context, &time_offset, &clock_service).is_err());
+/// ```
+///
+/// # Errors
+///
+/// A `time_offset` monitor of `clock_service` is not supported.
+pub(super) fn monitor(
+    context: &mut BifContext<'_>,
+    kind: &Term,
+    target: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Atom(kind) = kind else {
+        return Ok(BifResult::badarg());
+    };
+    let target = match (kind.name(), target) {
+        ("process", Term::Pid(id)) => Some(MonitorTarget::Process(*id)),
+        ("process", target) => local_name(target).map(MonitorTarget::ProcessName),
+        ("port", target) => local_name(target).map(MonitorTarget::PortName),
+        ("time_offset", Term::Atom(service)) if service.name() == "clock_service" => {
+            // ponytail: no time offset service yet; add it when a measured path monitors it.
+            return Err(error("unsupported time_offset monitor"));
+        }
+        _ => None,
+    };
+    let Some(target) = target else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(Term::Reference(context.scheduler.monitor(target)?)))
+}
+
+/// Return the name of a local monitor target by name: an atom, or
+/// `{Name, nonode@nohost}` with an atom name. Return `None` for each other
+/// term, which `monitor` (`bif.c:875-896`, `938-950`) rejects with `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(local_name(&Term::Tuple(vec![name.clone(), local_node()])), Some(atom));
+/// assert_eq!(local_name(&Term::Integer(1)), None);
+/// ```
+fn local_name(target: &Term) -> Option<Atom> {
+    match target {
+        Term::Atom(name) => Some(name.clone()),
+        Term::Tuple(pair) => match pair.as_slice() {
+            [Term::Atom(name), node] if *node == local_node() => Some(name.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

@@ -3,14 +3,28 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use super::{
     ets::EtsTables,
     persistent_term::PersistentTerms,
-    process::{Frame, ProcessState, ReceiveTimer},
+    process::{Frame, Monitor, ProcessState, ReceiveTimer},
     resource::Resources,
     timer::{Receiver, Timer, Timers},
 };
 use crate::{
     error::{BeamError, error},
-    term::{AtomTable, ProcessId, Reference, Term},
+    term::{Atom, AtomTable, ProcessId, Reference, Term},
 };
+
+/// The target of `erlang:monitor/2`, after the BIF checked the type and the
+/// target term as ERTS `monitor` does (`bif.c:758-981`).
+#[derive(Debug)]
+pub(super) enum MonitorTarget {
+    /// The `process` type with a pid.
+    Process(ProcessId),
+    /// The `process` type with a registered name, or with
+    /// `{Name, nonode@nohost}`.
+    ProcessName(Atom),
+    /// The `port` type with a registered name, or with
+    /// `{Name, nonode@nohost}`.
+    PortName(Atom),
+}
 
 /// A cooperative scheduler on one OS thread. It follows the ERTS model: the
 /// process table holds every live process, `current_process` names the
@@ -372,7 +386,11 @@ impl Scheduler {
         child.group_leader = self.current_process_mut().group_leader;
         let reference = if monitor {
             let reference = self.make_ref()?;
-            child.monitored_by.push((parent, reference));
+            child.monitored_by.push(Monitor {
+                watcher: parent,
+                reference,
+                name: None,
+            });
             Some(reference)
         } else {
             None
@@ -411,30 +429,47 @@ impl Scheduler {
         Ok(Term::static_atom("true"))
     }
 
-    /// Monitor a local process for the current process, as
-    /// `erlang:monitor(process, Pid)` does. A process that does not exist
-    /// gets an immediate `{'DOWN', Ref, process, Pid, noproc}`, as in ERTS.
+    /// Monitor a target for the current process, as ERTS `monitor`
+    /// (`bif.c:758-981`) does after its checks. A process by name is the
+    /// process that has the name now (`erts_whereis_name_to_id`). A monitor
+    /// of the current process creates no monitor (`bif.c:781-784`). A
+    /// process that does not exist, a name that no process has, and each
+    /// port name give the message `{'DOWN', Ref, Type, Item, noproc}` at
+    /// once: PBeam has no ports, so the port lookup always fails
+    /// (`bif.c:910-914`). `Item` is the pid, or `{Name, nonode@nohost}` for a
+    /// name.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let reference = scheduler.monitor(child)?;
+    /// let reference = scheduler.monitor(MonitorTarget::Process(child))?;
+    /// let gone = scheduler.monitor(MonitorTarget::PortName(name))?;
     /// ```
-    pub(super) fn monitor(&mut self, target: ProcessId) -> Result<Reference, BeamError> {
+    pub(super) fn monitor(&mut self, target: MonitorTarget) -> Result<Reference, BeamError> {
         let reference = self.make_ref()?;
-        let current = self.current_process_mut().id;
-        match self.processes.get_mut(&target) {
-            Some(process) => process.monitored_by.push((current, reference)),
-            None => self.deliver(
-                current,
-                Term::Tuple(vec![
-                    Term::static_atom("DOWN"),
-                    Term::Reference(reference),
-                    Term::static_atom("process"),
-                    Term::Pid(target),
-                    Term::static_atom("noproc"),
-                ]),
-            ),
+        let watcher = self.current_process_mut().id;
+        let (kind, id, item, name) = match target {
+            MonitorTarget::Process(id) => ("process", Some(id), Term::Pid(id), None),
+            MonitorTarget::ProcessName(name) => {
+                let id = self.whereis(name.name());
+                ("process", id, named_item(&name), Some(name))
+            }
+            MonitorTarget::PortName(name) => ("port", None, named_item(&name), Some(name)),
+        };
+        if id == Some(watcher) {
+            return Ok(reference);
+        }
+        let monitor = Monitor {
+            watcher,
+            reference,
+            name,
+        };
+        match id.and_then(|id| self.processes.get_mut(&id)) {
+            Some(process) => process.monitored_by.push(monitor),
+            None => {
+                let down = down_message(reference, kind, item, Term::static_atom("noproc"));
+                self.deliver(watcher, down);
+            }
         }
         Ok(reference)
     }
@@ -456,7 +491,7 @@ impl Scheduler {
             if let Some(index) = process
                 .monitored_by
                 .iter()
-                .position(|&entry| entry == (current, reference))
+                .position(|monitor| monitor.watcher == current && monitor.reference == reference)
             {
                 process.monitored_by.remove(index);
                 return true;
@@ -699,28 +734,59 @@ impl Scheduler {
         // ERTS runs the NIF resource monitors of the process in the monitor
         // stage too (`ERTS_CONTINUE_EXIT_LT_MONITORS`).
         self.resources.process_down(process.id);
-        for (watcher, reference) in process.monitored_by {
-            let down = Term::Tuple(vec![
-                Term::static_atom("DOWN"),
-                Term::Reference(reference),
-                Term::static_atom("process"),
-                Term::Pid(process.id),
-                reason.clone(),
-            ]);
-            self.deliver(watcher, down);
+        for monitor in process.monitored_by {
+            let item = monitor
+                .name
+                .as_ref()
+                .map_or(Term::Pid(process.id), named_item);
+            let down = down_message(monitor.reference, "process", item, reason.clone());
+            self.deliver(monitor.watcher, down);
         }
         signals
     }
 }
 
+/// Return the `DOWN` item of a monitor by name: `{Name, nonode@nohost}`, as
+/// ERTS builds it for a local name (`erl_proc_sig_queue.c:4942-4955`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(named_item(&name), Term::Tuple(vec![Term::Atom(name.clone()), Term::static_atom("nonode@nohost")]));
+/// ```
+fn named_item(name: &Atom) -> Term {
+    Term::Tuple(vec![
+        Term::Atom(name.clone()),
+        Term::static_atom("nonode@nohost"),
+    ])
+}
+
+/// Return the message `{'DOWN', Reference, Type, Item, Reason}` of a
+/// monitor.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let down = down_message(reference, "process", Term::Pid(child), Term::static_atom("normal"));
+/// ```
+fn down_message(reference: Reference, kind: &str, item: Term, reason: Term) -> Term {
+    Term::Tuple(vec![
+        Term::static_atom("DOWN"),
+        Term::Reference(reference),
+        Term::static_atom(kind),
+        item,
+        reason,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Scheduler;
+    use super::{MonitorTarget, Scheduler};
     use crate::term::test_atom;
     use crate::{
         runtime::ets::{Access, Table},
         runtime::process::{ReceiveTimer, tests::frame},
-        term::{AtomTable, ProcessId, Term},
+        term::{Atom, AtomTable, ProcessId, Term},
     };
 
     fn atom(name: &str) -> Term {
@@ -855,11 +921,50 @@ mod tests {
         assert_eq!(scheduler.processes[&child].group_leader, child);
         assert!(!scheduler.set_group_leader(ProcessId(99), child));
 
-        let reference = scheduler.monitor(child).unwrap();
+        let reference = scheduler.monitor(MonitorTarget::Process(child)).unwrap();
         assert_eq!(scheduler.processes[&child].monitored_by.len(), 1);
         assert!(scheduler.demonitor(reference));
         assert!(scheduler.processes[&child].monitored_by.is_empty());
         assert!(!scheduler.demonitor(reference));
+    }
+
+    #[test]
+    fn creates_no_monitor_of_the_caller_and_sends_noproc_for_a_missing_target() {
+        // ERTS 29.1.1: `monitor(process, self())` creates no monitor
+        // (`bif.c:781-784`), and a missing target gets the noproc message.
+        let mut scheduler = Scheduler::new(AtomTable::new());
+        scheduler.start(frame(), vec![]).unwrap();
+        scheduler.schedule_next();
+        let own = scheduler
+            .monitor(MonitorTarget::Process(ProcessId(0)))
+            .unwrap();
+        assert!(scheduler.processes[&ProcessId(0)].monitored_by.is_empty());
+        assert!(!scheduler.demonitor(own));
+        let gone = scheduler
+            .monitor(MonitorTarget::Process(ProcessId(9)))
+            .unwrap();
+        let name = Atom::from_static("undefined").unwrap();
+        let port = scheduler.monitor(MonitorTarget::PortName(name)).unwrap();
+        let named = Term::Tuple(vec![atom("undefined"), atom("nonode@nohost")]);
+        assert_eq!(
+            scheduler.processes[&ProcessId(0)].mailbox.messages(),
+            [
+                Term::Tuple(vec![
+                    atom("DOWN"),
+                    Term::Reference(gone),
+                    atom("process"),
+                    Term::Pid(ProcessId(9)),
+                    atom("noproc"),
+                ]),
+                Term::Tuple(vec![
+                    atom("DOWN"),
+                    Term::Reference(port),
+                    atom("port"),
+                    named,
+                    atom("noproc"),
+                ]),
+            ]
+        );
     }
 
     #[test]
