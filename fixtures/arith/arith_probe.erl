@@ -1,6 +1,7 @@
 -module(arith_probe).
 -export([arith/0, guards/0, externals/0, plus_overflow/0, minus_overflow/0,
-         big_operand/0, big_guard/0, neg/1]).
+         big_operand/0, big_guard/0, neg/1, times/0, int_div/0,
+         times_overflow/0, div_overflow/0]).
 
 %% `gc_bif` `erlang:'+'/2` and `erlang:'-'/2` with fail label 0, as
 %% io_lib_format:build_bin/2 (io_lib_format.erl:133),
@@ -40,6 +41,34 @@ externals() ->
 %% Results outside the 64-bit signed range: ERTS makes a bignum.
 plus_overflow() -> id(9223372036854775807) + id(1).
 minus_overflow() -> id(-9223372036854775808) - id(1).
+
+%% `gc_bif` `erlang:'*'/2`, as erlang:convert_time_unit/3
+%% (erlang.erl:5333-5335) runs it. A term that is not a number raises
+%% badarith.
+times() ->
+    [id(6) * id(7), id(-3) * id(4), id(-3) * id(-4), id(0) * id(-9),
+     id(2147483648) * id(2147483648), id(-4294967296) * id(2147483648),
+     id(3037000499) * id(3037000499),
+     try id(a) * id(1) catch error:R1 -> R1 end,
+     try id(1) * id([]) catch error:R2 -> R2 end,
+     try id({}) * id(<<>>) catch error:R3 -> R3 end].
+
+%% `gc_bif` `erlang:'div'/2`, as erlang:convert_time_unit/3
+%% (erlang.erl:5333-5336) runs it. The quotient is truncated toward zero. A
+%% divisor of 0 raises badarith before the operand types are checked.
+int_div() ->
+    [id(7) div id(2), id(-7) div id(2), id(7) div id(-2), id(-7) div id(-2),
+     id(0) div id(5), id(-9223372036854775808) div id(1),
+     id(9223372036854775807) div id(-1), id(-9223372036854775808) div id(2),
+     try id(1) div id(0) catch error:R1 -> R1 end,
+     try id(a) div id(0) catch error:R2 -> R2 end,
+     try id(a) div id(1) catch error:R3 -> R3 end,
+     try id(1) div id(a) catch error:R4 -> R4 end].
+
+%% Results of `*` and `div` outside the 64-bit signed range: ERTS makes a
+%% bignum.
+times_overflow() -> id(9223372036854775807) * id(2).
+div_overflow() -> id(-9223372036854775808) div id(-1).
 
 %% Integer operands outside the 64-bit signed range in `gc_bif` and
 %% `is_lt`, as `bsl` in net:shortest_matching_prefix/3 (net.erl:865) has.

@@ -584,18 +584,25 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
     }
 }
 
-/// Run `erlang:'+'/2` or `erlang:'-'/2` with `operation`, the checked `i64`
-/// sum or difference, as ERTS `erts_mixed_plus` and `erts_mixed_minus`
-/// (`erl_arith.c:370-389`, `erl_arith.c:585-602`) do for two integers. An
-/// operand that is not a number raises `badarith`. PBeam has no float term,
-/// so each number is an integer. A result outside the `i64` range gives a
-/// runtime error, where ERTS makes a bignum.
+/// Run `erlang:'+'/2`, `erlang:'-'/2`, `erlang:'*'/2`, or `erlang:'div'/2`
+/// with `operation`, the checked `i64` sum, difference, product, or
+/// quotient, as ERTS `erts_mixed_plus`, `erts_mixed_minus`, `stimes_2`, and
+/// `intdiv_2` (`erl_arith.c:370-389`, `erl_arith.c:585-602`,
+/// `erl_arith.c:117-143`) do for two integers. The JIT runs `*` with
+/// `emit_i_mul_add` and `div` with `emit_i_int_div` and `emit_div_rem`
+/// (`jit/arm/instr_arith.cpp:542`, `jit/arm/instr_arith.cpp:968`,
+/// `jit/arm/instr_arith.cpp:1067`) with the same results. An operand that is
+/// not a number raises `badarith`. PBeam has no float term, so each number
+/// is an integer. A result outside the `i64` range gives a runtime error,
+/// where ERTS makes a bignum.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let sum = arith("+", &Term::Integer(1), &Term::Integer(2), i64::checked_add)?;
 /// assert!(matches!(sum, BifResult::Value(Term::Integer(3))));
+/// let product = arith("*", &Term::Integer(-3), &Term::Integer(4), i64::checked_mul)?;
+/// assert!(matches!(product, BifResult::Value(Term::Integer(-12))));
 /// let atom = Term::static_atom("a");
 /// assert!(matches!(arith("-", &atom, &Term::Integer(1), i64::checked_sub)?, BifResult::Raise { .. }));
 /// assert!(arith("+", &Term::Integer(i64::MAX), &Term::Integer(1), i64::checked_add).is_err());
@@ -616,6 +623,27 @@ pub(super) fn arith(
         ))
     })?;
     Ok(Value(Term::Integer(result)))
+}
+
+/// Run `erlang:'div'/2`: return the integer quotient of `left` and `right`,
+/// truncated toward zero, as ERTS `intdiv_2` (`erl_arith.c:127-143`) does.
+/// A `right` of `0` raises `badarith` before the operand types are checked
+/// (`erl_arith.c:131-133`), so `a div 0` raises `badarith` too. Each other
+/// case runs as [`arith`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let quotient = int_div(&Term::Integer(-7), &Term::Integer(2))?;
+/// assert!(matches!(quotient, BifResult::Value(Term::Integer(-3))));
+/// assert!(matches!(int_div(&Term::Integer(1), &Term::Integer(0))?, BifResult::Raise { .. }));
+/// assert!(int_div(&Term::Integer(i64::MIN), &Term::Integer(-1)).is_err());
+/// ```
+pub(super) fn int_div(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
+    if *right == Term::Integer(0) {
+        return Ok(BifResult::badarith());
+    }
+    arith("div", left, right, i64::checked_div)
 }
 
 /// Run `erlang:element/2`: return the element at the 1-based `index` of a
