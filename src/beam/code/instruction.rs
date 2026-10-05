@@ -54,6 +54,12 @@ const OPCODE_CATCH: u8 = 62;
 const OPCODE_CATCH_END: u8 = 63;
 const OPCODE_BS_GET_BINARY2: u8 = 119;
 const OPCODE_BS_SKIP_BITS2: u8 = 120;
+/// `bs_get_integer2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:447).
+const OPCODE_BS_GET_INTEGER2: u8 = 117;
+/// `gc_bif3 Fail Live Bif Arg1 Arg2 Arg3 Dst` (genop.tab:533).
+const OPCODE_GC_BIF3: u8 = 152;
+/// `is_any_native_record Fail Src` (genop.tab:724).
+const OPCODE_IS_ANY_NATIVE_RECORD: u8 = 186;
 const OPCODE_GC_BIF1: u8 = 124;
 const OPCODE_GC_BIF2: u8 = 125;
 const OPCODE_BS_GET_TAIL: u8 = 165;
@@ -1519,6 +1525,12 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_RAISE => Some(2),
         OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
+        // `bs_get_integer2` is in `io_lib`.
+        OPCODE_BS_GET_INTEGER2 => Some(7),
+        // `gc_bif3` is in `io_lib`, for `erlang:binary_part/3`.
+        OPCODE_GC_BIF3 => Some(7),
+        // `is_any_native_record` is in `io_lib`.
+        OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
         OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
         OPCODE_BS_GET_TAIL | OPCODE_BS_GET_POSITION => Some(3),
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
@@ -1811,13 +1823,14 @@ fn read_move_operand(
 mod tests {
     use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
     use super::{
-        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_UTF16,
-        OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GET_RECORD_ELEMENTS,
-        OPCODE_GET_TL, OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD,
-        OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
-        OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
-        OPCODE_TEST_IS_PORT, OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END,
-        parse_code, read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
+        OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_INTEGER2,
+        OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH,
+        OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS,
+        OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
+        OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
+        OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
+        OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
+        read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
         skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
         test_kind, unsupported_opcode_operand_count,
     };
@@ -2719,6 +2732,9 @@ mod tests {
             (OPCODE_RAW_RAISE, 0),
             (OPCODE_BS_GET_UTF16, 5),
             (OPCODE_BS_GET_UTF32, 5),
+            (OPCODE_BS_GET_INTEGER2, 7),
+            (OPCODE_GC_BIF3, 7),
+            (OPCODE_IS_ANY_NATIVE_RECORD, 2),
         ] {
             assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
         }
