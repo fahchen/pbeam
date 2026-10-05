@@ -77,7 +77,7 @@ bifs! {
     erlang:"+"/1 => unsupported,
     erlang:"+"/2 => |_, [left, right]| erlang::arith("+", left, right, i64::checked_add),
     erlang:"++"/2 => |_, [left, right]| erlang::append(left, right),
-    erlang:"-"/1 => unsupported,
+    erlang:"-"/1 => |_, [value]| erlang::negate(value),
     erlang:"-"/2 => |_, [left, right]| erlang::arith("-", left, right, i64::checked_sub),
     erlang:"--"/2 => unsupported,
     erlang:"/"/2 => unsupported,

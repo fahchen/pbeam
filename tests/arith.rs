@@ -147,3 +147,55 @@ fn loads_integer_operands_outside_the_integer_range() {
         assert_eq!(reference(function), erts);
     }
 }
+
+#[test]
+fn negates_integers_as_pinned_erts() {
+    // `arith_probe:negate/0` runs `gc_bif1` `erlang:'-'/1` with fail label
+    // 0, as `io_lib_format:field_width/3` does, in the guard of `neg/1` with
+    // a fail label, and as an external fun and an `apply`. -(-2^59) is an
+    // ERTS bignum with the same value. An operand that is not a number
+    // raises `error:badarith` (`erl_arith.c:532-535`), and in a guard it
+    // jumps to the fail label (`jit/arm/instr_arith.cpp:276-283`).
+    let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("arith_probe", "negate", &[]).unwrap(),
+        Term::List(vec![
+            Term::Integer(-5),
+            Term::Integer(3),
+            Term::Integer(0),
+            Term::Integer(576_460_752_303_423_488),
+            Term::Integer(-i64::MAX),
+            atom("badarith"),
+            atom("badarith"),
+            Term::Tuple(vec![atom("neg"), Term::Integer(4)]),
+            atom("other"),
+            atom("other"),
+            Term::Integer(-7),
+            atom("badarith"),
+        ])
+    );
+    assert_eq!(
+        reference("negate"),
+        b"[-5,3,0,576460752303423488,-9223372036854775807,badarith,badarith,{neg,4},\
+          other,other,-7,badarith]\n"
+    );
+}
+
+#[test]
+fn reports_a_negation_outside_the_integer_range() {
+    // ERTS makes the bignum 2^63 for -(-2^63) (`erl_arith.c:524-530`).
+    // PBeam has no bignum term and returns a runtime error (row "Integer
+    // range" in `docs/erts-differences.md`).
+    let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
+    let error = program
+        .execute("arith_probe", "negate_overflow", &[])
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported erlang:-/1 result of -9223372036854775808: needs a bignum"),
+        "{error}"
+    );
+    assert_eq!(reference("negate_overflow"), b"9223372036854775808\n");
+}
