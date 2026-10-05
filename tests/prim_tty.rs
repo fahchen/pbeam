@@ -506,14 +506,19 @@ fn runs_prim_tty_init_in_the_disabled_input_mode() {
     }
 
     // Layout T: fd 0 is a terminal, so it gives the window size of each
-    // output fd (prim_tty_nif.c:1179-1189).
+    // output fd (prim_tty_nif.c:1179-1189). In the `disabled` input mode,
+    // `tty_init/2` keeps the first mode of stdout (prim_tty_nif.c:1103).
+    // When the `init/3` process of stdout exits, its monitor sets fd 0 to
+    // that first mode (prim_tty_nif.c:1235-1241). Both terminals must end
+    // in the modes of the ERTS run.
     let outputs = run_with_outputs(&mut erts_init_probe(), STDIN_STDOUT_TERMINALS, &[]);
     assert_eq!(
         outputs.files[2].as_deref(),
         Some(&b"[true,true,false,[true,raw,undefined,true,{ok,{120,40}}],[true,cooked,undefined,true,{ok,{120,40}}],badarg]\n"[..])
     );
+    let (pbeam, pbeam_modes) = run_with_modes(&mut probe(), STDIN_STDOUT_TERMINALS, &[]);
     assert_eq!(
-        String::from_utf8(run_in_layout(&mut probe(), STDIN_STDOUT_TERMINALS, &[])).unwrap(),
+        String::from_utf8(pbeam).unwrap(),
         format!(
             r#"Ok(List([Atom("true"), Atom("true"), Atom("false"), {}]))"#,
             init(
@@ -522,6 +527,7 @@ fn runs_prim_tty_init_in_the_disabled_input_mode() {
             )
         )
     );
+    assert_same_modes(&outputs.modes, &pbeam_modes);
 }
 
 /// The `ICANON` and `ECHO` flags of `c_lflag`.
