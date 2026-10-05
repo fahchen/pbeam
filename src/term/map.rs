@@ -1693,6 +1693,8 @@ mod tests {
 
     #[test]
     fn takes_a_whole_collision_node_in_a_chunk() {
+        // `walks_collision_nodes_and_bignum_paths_as_pinned_erts` in
+        // `tests/logger_start.rs` checks these maps and paths against the pinned ERTS.
         // ERTS 29.1.1: these two lists have equal map hashes, so they share a collision node.
         let a = Term::List(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
         let b = Term::List(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
@@ -1754,6 +1756,9 @@ mod tests {
 
     #[test]
     fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
+        // `walks_collision_nodes_and_bignum_paths_as_pinned_erts` in
+        // `tests/logger_start.rs` checks the paths 2^60 + 18 and 2^60 + 786
+        // against the pinned ERTS.
         // The hashes of the last five keys share their low 60 bits in two
         // groups (see becomes_a_hashmap_with_the_erts_order_above_32_keys),
         // so each group is in a node at level 15.

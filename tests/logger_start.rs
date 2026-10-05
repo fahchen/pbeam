@@ -851,3 +851,78 @@ fn returns_a_runtime_error_for_a_raise_of_class_throw() {
     );
     assert_eq!(reference("raise_throw"), b"{throw,r}\n");
 }
+
+#[test]
+fn walks_collision_nodes_and_bignum_paths_as_pinned_erts() {
+    // `logger_start_probe:map_paths/0` calls `erts_internal:map_next/3`
+    // (`erl_map.c:3593-4135`) in a new process. Two list keys share a
+    // collision node, and a chunk at path 0 takes the whole node, so it
+    // gives 33 pairs and the path 369. Path 113 selects the collision node.
+    // The bignum path 2^59 and the path -(2^59) walk all pairs. The negative
+    // bignum -(2^60), and a bignum path for a flatmap, raise `badarg`. The
+    // paths 2^60 + 18 and 2^60 + 786 have 16 elements and select a node at
+    // level 15.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let integers = |keys: &[i64]| keys.iter().copied().map(Term::Integer).collect::<Vec<_>>();
+    let a = [246, 157, 203, 77, 19, 254, 19, 93];
+    let b = [161, 92, 65, 50, 231, 24, 153, 137];
+    let collision = [Term::List(integers(&b)), Term::List(integers(&a))];
+    let before = [
+        19, 213, 340, 110, 91, 164, 399, 139, 361, 212, 41, 114, 100, 29, 347, 365, 171, 140, 13,
+        42, 149, 55, 2, 146, 372, 317, 191, 316, 202, 192, 233,
+    ];
+    let after = [312, 98, 333];
+    let tail = [
+        7, 398, 285, 90, 343, 38, 325, 326, 284, 281, 56, 153, 61, 99, 113, 383, 201, 237, 314, 65,
+        322, 137, 141, 308, 315, 230, 104, 187,
+    ];
+    let deep = [
+        329898321527737274,
+        446694106686689078,
+        413866500823436792,
+        -101714049538469044,
+        -74925715755171563,
+    ];
+    let keys = |parts: &[&[Term]]| Term::List(parts.concat());
+    let chunk = |keys: Term, path: Term| Term::Tuple(vec![keys, path]);
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let all = keys(&[&integers(&before), &collision, &integers(&after)]);
+    let expected = vec![
+        chunk(keys(&[&integers(&before), &collision]), Term::Integer(369)),
+        chunk(keys(&[&collision, &integers(&after)]), atom("none")),
+        chunk(all.clone(), atom("none")),
+        chunk(all, atom("none")),
+        badarg.clone(),
+        chunk(
+            keys(&[&collision, &integers(&after), &integers(&tail)]),
+            Term::Integer(97),
+        ),
+        badarg,
+        chunk(keys(&[&integers(&deep[3..])]), atom("none")),
+        chunk(keys(&[&integers(&deep[..4])]), atom("none")),
+    ];
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "map_paths", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    let text = |keys: &[i64]| {
+        keys.iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let collision = format!("[{}],[{}]", text(&b), text(&a));
+    let (before, after, tail) = (text(&before), text(&after), text(&tail));
+    let all = format!("{before},{collision},{after}");
+    assert_eq!(
+        String::from_utf8(reference("map_paths")).unwrap(),
+        format!(
+            "[{{[{before},{collision}],369}},{{[{collision},{after}],none}},{{[{all}],none}},{{[{all}],none}},{{error,badarg}},{{[{collision},{after},{tail}],97}},{{error,badarg}},{{[{}],none}},{{[{}],none}}]\n",
+            text(&deep[3..]),
+            text(&deep[..4])
+        )
+    );
+}

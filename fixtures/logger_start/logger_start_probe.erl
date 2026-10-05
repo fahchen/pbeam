@@ -2,7 +2,7 @@
 -export([reverse/0, remove/0, without/0, ets/0, ets_access/0, find/0, from_list/0, is_key/0,
          to_list/0, map_next/0, next/0, ordered/0, demonitor/0, unlink/0, hd/0, system_logger/0,
          message_queue_data/0, system_flag/0, process_flag/0, unsupported_flag/1, raise/0,
-         raise_throw/0]).
+         raise_throw/0, map_paths/0]).
 
 %% `lists:reverse/2` (erl_bif_lists.c:1246-1263). logger_simple_h:replay_buffer/1
 %% (logger_simple_h.erl:150) calls it with the buffer and the drop message, and
@@ -179,6 +179,59 @@ map_next() ->
          catch_error(fun() -> erts_internal:map_next(16#ff, Big, []) end),
          catch_error(fun() -> erts_internal:map_next(-1, Big, iterator) end)]
     end).
+
+%% `erts_internal:map_next/3` paths that reach a collision node and paths
+%% that are bignums. Lists A and B have equal map hashes, so they share a
+%% collision node at depth 16. A chunk takes the whole collision node, so path
+%% 0 gives 33 pairs. Path 113 selects the collision node. A path other than 0
+%% has no limit of 32 pairs: 2^59 (a bignum of one digit) and -(2^59) walk
+%% from the first leaf to the end, and -(2^60) (a negative bignum) raises
+%% badarg. A flatmap needs a small path. The Deep keys share their low 60
+%% hash bits in two groups, so a path of 16 elements, such as 2^60 + 18 and
+%% 2^60 + 786, selects a node at level 15.
+map_paths() ->
+    in_new_process(fun() ->
+        A = [246, 157, 203, 77, 19, 254, 19, 93],
+        B = [161, 92, 65, 50, 231, 24, 153, 137],
+        M1 = identity([19, 213, 340, 110, 91, 164, 399, 139, 361, 212, 41, 114, 100, 29, 347,
+                       365, 171, 140, 13, 42, 149, 55, 2, 146, 372, 317, 191, 316, 202, 192,
+                       233, B, A, 312, 98, 333]),
+        M2 = identity([202, 192, 233, B, A, 312, 98, 333, 7, 398, 285, 90, 343, 38, 325, 326,
+                       284, 281, 56, 153, 61, 99, 113, 383, 201, 237, 314, 65, 322, 137, 141,
+                       308, 315, 230, 104, 187]),
+        %% Each Deep key is an operand, not a literal list: PBeam reads no
+        %% bignum in the literal table.
+        Deep = [id(329898321527737274), id(446694106686689078), id(413866500823436792),
+                id(-101714049538469044), id(-74925715755171563)],
+        M3 = identity([319, 169, 371, 359, 160, 388, 136, 324, 348, 287, 296, 357, 239, 179,
+                       289, 263, 313, 235, 226, 240, 211, 128, 247, 194, 384, 269, 168, 373,
+                       265 | Deep]),
+        M4 = identity(Deep ++ [126, 390, 155, 165, 228, 227, 242, 151, 208, 197, 350, 133, 301,
+                               392, 196, 205, 332, 353, 177, 225, 142, 223, 275, 200, 377, 145,
+                               107, 108, 184, 255, 272]),
+        [iterator_keys(erts_internal:map_next(0, M1, iterator)),
+         iterator_keys(erts_internal:map_next(113, M1, iterator)),
+         iterator_keys(erts_internal:map_next(id(1 bsl 59), M1, iterator)),
+         iterator_keys(erts_internal:map_next(id(-(1 bsl 59)), M1, iterator)),
+         catch_error(fun() -> erts_internal:map_next(id(-(1 bsl 60)), M1, iterator) end),
+         list_keys(erts_internal:map_next(0, M2, [])),
+         catch_error(fun() -> erts_internal:map_next(id(1 bsl 59), id(#{1 => 1}), []) end),
+         iterator_keys(erts_internal:map_next(id((1 bsl 60) + 18), M3, iterator)),
+         list_keys(erts_internal:map_next(id((1 bsl 60) + 786), M4, []))]
+    end).
+
+identity(Keys) -> maps:from_list([{K, K} || K <- Keys]).
+
+%% The keys of an iterator-mode result and the path that it ends with.
+iterator_keys(none) -> {[], none};
+iterator_keys([Path | _]) -> {[], Path};
+iterator_keys({K, _, Next}) ->
+    {Keys, Path} = iterator_keys(Next),
+    {[K | Keys], Path}.
+
+%% The keys of a list-mode result and the path that it starts with.
+list_keys([Path, _ | Pairs]) when is_integer(Path) -> {[K || {K, _} <- Pairs], Path};
+list_keys(Pairs) -> {[K || {K, _} <- Pairs], none}.
 
 %% maps:next/1 (maps.erl:1094-1115) on maps:iterator/1 (maps.erl:1000, 1060),
 %% which is [0 | Map]. The iterator of a hashmap holds 32 pairs and then
