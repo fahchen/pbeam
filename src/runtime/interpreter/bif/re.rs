@@ -2,7 +2,7 @@
 
 use super::BifResult::{Trap, Value};
 use super::*;
-use crate::runtime::pcre2;
+use crate::runtime::{pcre2, regex_code::RegexCodes};
 
 /// The atom options of `re:compile/2` that set one `PCRE2_*` compile bit
 /// (`parse_options`, `erl_bif_re.c:442-537`).
@@ -191,8 +191,10 @@ pub(super) fn compile(
     let reference = context.scheduler.make_ref()?;
     context
         .scheduler
-        .resources
-        .insert_regex_code(reference, code);
+        .state
+        .borrow_mut::<RegexCodes>()
+        .0
+        .insert(reference, code);
     Ok(Value(Term::Tuple(vec![
         Term::static_atom("ok"),
         Term::Tuple(vec![
