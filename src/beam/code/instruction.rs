@@ -490,6 +490,24 @@ pub(crate) enum Instruction {
         map: Operand,
         pairs: Vec<(Operand, Operand)>,
     },
+    /// Jumps to `fail_label` when a key is not in a map, and writes no
+    /// register. Each key is a literal or a register. The ERTS loader changes
+    /// this test to `get_map_elements` with a scratch destination for each
+    /// key (`generators.tab:230-253`).
+    ///
+    /// Encoding: opcode, fail label, map operand, extended list, item count,
+    /// then the key operands. Example: `[0x9D, 0x35, 0x03, 0x17, 0x10, 0x12]`
+    /// tests that the map in `x0` has atom 1, or fails to label 3.
+    ///
+    /// Erlang: `pair(#{input := _, output := _}) -> both;` compiles to
+    /// `{test,has_map_fields,{f,17},{x,0},{list,[{atom,input},{atom,output}]}}`,
+    /// and the `#{K := _}` pattern of `key(K, M)` compiles to
+    /// `{test,has_map_fields,{f,20},{x,1},{list,[{x,0}]}}`.
+    HasMapFields {
+        fail_label: u32,
+        map: Operand,
+        keys: Vec<Operand>,
+    },
     /// Writes a copy of a map with each key set to its value. `pairs` holds
     /// each key and value. The fail label and live-register count are not
     /// kept: the compiler emits fail label 0, and PBeam needs no live count.
@@ -1165,6 +1183,19 @@ pub(super) fn parse_code(
                 map: read_move_operand(data, &mut cursor, atoms, literals)?,
                 pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
             },
+            OPCODE_HAS_MAP_FIELDS => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let map = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let key_count = read_list_count(data, &mut cursor)?;
+                let keys = (0..key_count)
+                    .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
+                    .collect::<Result<_, _>>()?;
+                Instruction::HasMapFields {
+                    fail_label,
+                    map,
+                    keys,
+                }
+            }
             OPCODE_PUT_MAP_ASSOC => {
                 let _fail_label = read_operand(data, &mut cursor, TAG_LABEL)?;
                 let map = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -1533,7 +1564,6 @@ fn skip_unsupported_instruction(
     if matches!(
         opcode,
         OPCODE_PUT_MAP_ASSOC
-            | OPCODE_HAS_MAP_FIELDS
             | OPCODE_GET_MAP_ELEMENTS
             | OPCODE_GET_RECORD_ELEMENTS
             | OPCODE_PUT_RECORD
@@ -1593,7 +1623,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         // `try_case_end Src` is in `erlang:processes_next/1`.
         OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_TRY_CASE_END => Some(1),
         OPCODE_PUT_MAP_ASSOC => Some(5),
-        OPCODE_GET_MAP_ELEMENTS | OPCODE_HAS_MAP_FIELDS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
+        OPCODE_GET_MAP_ELEMENTS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
@@ -1860,12 +1890,12 @@ mod tests {
     use super::{
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_INTEGER2,
         OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH,
-        OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS,
-        OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD,
-        OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
-        OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
-        OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
-        read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
+        OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
+        OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
+        OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_EQ, OPCODE_TEST_HEAP,
+        OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
+        OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END,
+        parse_code, read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
         skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
         test_kind, unsupported_opcode_operand_count,
     };
@@ -2409,6 +2439,83 @@ mod tests {
                     if key.name() == "output" && value.name() == "cooked"
             )
         ));
+    }
+
+    #[test]
+    fn decodes_the_has_map_fields_tests_of_the_map_probe_fixture() {
+        const MAP_PROBE: &[u8] = include_bytes!("../../../fixtures/map/map_probe.beam");
+        // pair/1: {test,has_map_fields,{f,17},{x,0},{list,[{atom,input},{atom,output}]}},
+        // with output as atom 4 and input as atom 17 of the module.
+        let pair = [
+            OPCODE_HAS_MAP_FIELDS,
+            0x0D,
+            0x11,
+            0x03,
+            0x17,
+            0x20,
+            0x0A,
+            0x11,
+            0x42,
+        ];
+        // key/2: {test,has_map_fields,{f,20},{x,1},{list,[{x,0}]}}.
+        let key = [OPCODE_HAS_MAP_FIELDS, 0x0D, 0x14, 0x13, 0x17, 0x10, 0x03];
+        for bytes in [&pair[..], &key[..]] {
+            assert!(
+                MAP_PROBE.windows(bytes.len()).any(|window| window == bytes),
+                "{bytes:02X?} is not in map_probe.beam"
+            );
+        }
+        let mut table = AtomTable::new();
+        let atoms: Vec<Atom> = (1..=17)
+            .map(|index| match index {
+                4 => "output".to_owned(),
+                17 => "input".to_owned(),
+                _ => format!("atom{index}"),
+            })
+            .map(|name| table.put(&name).unwrap())
+            .collect();
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&pair[..], &key[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::HasMapFields {
+                    fail_label: 17,
+                    map: Operand::X(0),
+                    keys,
+                },
+                Instruction::HasMapFields {
+                    fail_label: 20,
+                    map: Operand::X(1),
+                    keys: register_keys,
+                },
+                Instruction::End,
+            ] if matches!(
+                keys.as_slice(),
+                [Operand::Value(Term::Atom(first)), Operand::Value(Term::Atom(second))]
+                    if first.name() == "input" && second.name() == "output"
+            ) && matches!(register_keys.as_slice(), [Operand::X(0)])
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_has_map_fields_key_lists() {
+        let error = |operands: &[u8]| {
+            let mut code = vec![0, 0, 0, 16];
+            code.extend([0; 16]);
+            code.extend([&[OPCODE_HAS_MAP_FIELDS, 0x35, 0x03], operands].concat());
+            parse_code(&code, &[], &[], &[], &[])
+                .unwrap_err()
+                .to_string()
+        };
+        // The key list must be an extended list.
+        assert!(error(&[0x27, 0x10, 0x03]).contains("unsupported BEAM list operand"));
+        // Eight keys with one byte left.
+        assert!(error(&[0x17, 0x80, 0x03]).contains("exceeds code chunk"));
+        // A label is not a key operand.
+        assert!(error(&[0x17, 0x10, 0x05, 0x03]).contains("unsupported move operand tag 5"));
     }
 
     #[test]

@@ -115,6 +115,20 @@ fn uses_a_flatmap_up_to_32_keys_and_a_hashmap_above_like_erts() {
 }
 
 #[test]
+fn tests_map_keys_with_has_map_fields_like_erts() {
+    let program = BeamProgram::load(&[MAP_PROBE]).unwrap();
+    assert_eq!(
+        program.execute("map_probe", "fields", &[]).unwrap(),
+        atoms(&program, "both,none,none,none,found,missing,missing")
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~p~n\", [map_probe:fields()])"),
+        b"[both,none,none,none,found,missing,missing]\n"
+    );
+}
+
+#[test]
 fn takes_the_badmap_path_when_add_gets_a_non_map() {
     // `add/1` tests is_map and then calls erlang:error({badmap, M}), which
     // PBeam does not resolve yet: `erlang:error/1` is not implemented.
