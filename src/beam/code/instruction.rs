@@ -618,6 +618,24 @@ pub(crate) enum Instruction {
         left: Operand,
         right: Operand,
     },
+    /// Jumps to `fail_label` unless the operands are equal (`is_eq`, opcode
+    /// 41) in the ERTS term order. PBeam has no float term, so this equality
+    /// is the same as the exact equality of `is_eq_exact`. Two different
+    /// references are not equal, as in ERTS, which compares them by value.
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `compare_probe:same/2` in
+    /// `fixtures/compare/compare_probe.beam` has `[0x29, 0x0D, 0x17, 0x03,
+    /// 0x13]`, which fails to label 23 unless `x0` equals `x1`.
+    ///
+    /// Erlang: `same(A, B) when A == B -> eq;` compiles to
+    /// `{test,is_eq,{f,23},[{x,0},{x,1}]}`, as `[Z] when Y == Z` in
+    /// `lists:usort/1` (lists.erl:2081) does.
+    TestEqual {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
     /// Jumps to `fail_label` unless the left operand is less than the right
     /// operand (`is_lt`, opcode 39) in the ERTS term order. Two different
     /// references give a runtime error.
@@ -821,6 +839,13 @@ pub(crate) enum TestKind {
     /// `{test,is_integer,{f,11},[{x,0}]}`, as the guard of
     /// `io_lib_format:field_value/2` (io_lib_format.erl:271) does.
     Integer,
+    /// `is_float`, opcode 46. PBeam has no float term, so no PBeam term
+    /// passes this test. Example: `[0x2E, 0x0D, 0x1A, 0x03]` in
+    /// `compare_probe:real/1` fails to label 26 unless `x0` is a float.
+    /// Erlang: `real(X) when is_float(X) -> float;` compiles to
+    /// `{test,is_float,{f,26},[{x,0}]}`, as the guard of
+    /// `io_lib_format:control_small/7` (io_lib_format.erl:493) does.
+    Float,
     /// `is_boolean`, opcode 114. Example: `[0x72, 0xC5, 0x03]` in
     /// `compare_probe:kind/1` fails to label 12 unless `x0` is the atom
     /// `true` or `false`. Erlang: `kind(X) when is_boolean(X) -> boolean;`
@@ -1009,6 +1034,11 @@ pub(super) fn parse_code(
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
+            OPCODE_TEST_EQ => Instruction::TestEqual {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
             OPCODE_TEST_LT => Instruction::TestLess {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -1189,6 +1219,7 @@ pub(super) fn parse_code(
             | OPCODE_TEST_IS_MAP
             | OPCODE_TEST_IS_FUNCTION
             | OPCODE_TEST_IS_INTEGER
+            | OPCODE_TEST_IS_FLOAT
             | OPCODE_TEST_IS_BOOLEAN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -1376,6 +1407,7 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
         OPCODE_TEST_IS_MAP => Ok(TestKind::Map),
         OPCODE_TEST_IS_FUNCTION => Ok(TestKind::Function),
         OPCODE_TEST_IS_INTEGER => Ok(TestKind::Integer),
+        OPCODE_TEST_IS_FLOAT => Ok(TestKind::Float),
         OPCODE_TEST_IS_BOOLEAN => Ok(TestKind::Boolean),
         _ => Err(error(format!("unsupported BEAM type-test opcode {opcode}"))),
     }
@@ -1499,10 +1531,9 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
+        OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
-        OPCODE_TEST_IS_FLOAT
-        | OPCODE_TEST_IS_NUMBER
+        OPCODE_TEST_IS_NUMBER
         | OPCODE_TEST_IS_ATOM
         | OPCODE_TEST_IS_PID
         | OPCODE_TEST_IS_BINARY
@@ -1783,10 +1814,10 @@ mod tests {
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_UTF16,
         OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH, OPCODE_GET_RECORD_ELEMENTS,
         OPCODE_GET_TL, OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD,
-        OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
+        OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
         OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
-        OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
-        read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
+        OPCODE_TEST_IS_PORT, OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END,
+        parse_code, read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
         skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
         test_kind, unsupported_opcode_operand_count,
     };
@@ -2223,6 +2254,41 @@ mod tests {
     }
 
     #[test]
+    fn decodes_the_is_eq_and_is_float_tests_of_the_compare_probe_fixture() {
+        const COMPARE_PROBE: &[u8] = include_bytes!("../../../fixtures/compare/compare_probe.beam");
+        let is_eq = [0x29, 0x0D, 0x17, 0x03, 0x13]; // same/2: is_eq f23 x0 x1
+        let is_float = [0x2E, 0x0D, 0x1A, 0x03]; // real/1: is_float f26 x0
+        for bytes in [&is_eq[..], &is_float] {
+            assert!(
+                COMPARE_PROBE
+                    .windows(bytes.len())
+                    .any(|window| window == bytes),
+                "{bytes:02X?} is not in compare_probe.beam"
+            );
+        }
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&is_eq[..], &is_float, &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::TestEqual {
+                    fail_label: 23,
+                    left: Operand::X(0),
+                    right: Operand::X(1),
+                },
+                Instruction::Test {
+                    kind: TestKind::Float,
+                    fail_label: 26,
+                    value: Operand::X(0),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
     fn decodes_the_list_record_and_receive_wait_instructions_of_pinned_gen_statem() {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
@@ -2635,7 +2701,7 @@ mod tests {
         for (opcode, count) in [
             (OPCODE_TEST_HEAP, 2),
             (OPCODE_BIF0, 2),
-            (OPCODE_TEST_EQ, 3),
+            (OPCODE_TEST_NE, 3),
             (OPCODE_TEST_TAGGED_TUPLE, 4),
             (OPCODE_TEST_IS_MAP, 2),
             (OPCODE_GET_TL, 2),

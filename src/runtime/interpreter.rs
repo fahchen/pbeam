@@ -479,6 +479,8 @@ impl BeamProgram {
                         TestKind::Map => matches!(value, Term::Map(_)),
                         TestKind::Function => matches!(value, Term::Fun(_)),
                         TestKind::Integer => matches!(value, Term::Integer(_)),
+                        // PBeam has no float term.
+                        TestKind::Float => false,
                         TestKind::Boolean => {
                             matches!(&value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
                         }
@@ -552,6 +554,17 @@ impl BeamProgram {
                     right,
                 } => {
                     if read(process, left)? == read(process, right)? {
+                        jump(module, process, *fail_label)?;
+                    }
+                }
+                // Without floats, `==` is `=:=`: ERTS `is_eq` compares two
+                // references by value, so their scheduler order is not used.
+                Instruction::TestEqual {
+                    fail_label,
+                    left,
+                    right,
+                } => {
+                    if read(process, left)? != read(process, right)? {
                         jump(module, process, *fail_label)?;
                     }
                 }

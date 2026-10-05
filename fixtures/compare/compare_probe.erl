@@ -1,5 +1,5 @@
 -module(compare_probe).
--export([exact/0, guards/0, id/1]).
+-export([exact/0, guards/0, equal/0, id/1]).
 
 %% `bif` `erlang:'=:='/2` and `erlang:'=/='/2` with fail label 0, as
 %% user_drv:init/1 (user_drv.erl:184-186), user_drv:init_shell/2
@@ -50,5 +50,25 @@ width(F) when F >= 0 -> right.
 
 less(A, B) when A < B -> lt;
 less(_, _) -> nlt.
+
+%% The tests `is_eq` and `is_float`. `same/2` is `is_eq` on two registers,
+%% as lists:usort/1 (lists.erl:2076-2100) runs it after `is_lt`. Without
+%% floats, `==` gives the same result as `=:=`, also for two references.
+%% `real/1` is the `is_float` test of io_lib_format:control_small/7
+%% (io_lib_format.erl:493); no PBeam term is a float.
+equal() ->
+    Ref = make_ref(),
+    [[same(id(1), id(1)), same(id(1), id(2)), same(id(1), id(a)), same(id(a), id(a)),
+      same(id({1, [a]}), id({1, [a]})), same(id({1, [a]}), id({1, [b]})),
+      same(id(<<"x">>), id(<<"x">>)), same(id(#{a => 1}), id(#{a => 1})),
+      same(id(#{a => 1}), id(#{a => 2})), same(self(), self()), same(Ref, Ref),
+      same(Ref, make_ref()), same(id(576460752303423488), id(576460752303423488))],
+     [real(id(1)), real(id(a)), real(id([])), real(id(<<>>)), real(id({1})), real(self())]].
+
+same(A, B) when A == B -> eq;
+same(_, _) -> ne.
+
+real(X) when is_float(X) -> float;
+real(_) -> other.
 
 id(X) -> X.
