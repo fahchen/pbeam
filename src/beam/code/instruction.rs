@@ -654,6 +654,14 @@ pub(crate) enum Instruction {
     /// `emu/emu_load.c:1437-1445`). A `nif_start` without a `func_info`
     /// before it is a load error.
     ///
+    /// The ERTS loader does not check where `nif_start` is in the function.
+    /// It only asserts in a debug build that a `func_info` came before it.
+    /// OTP 29.1.1 loads a function with `nif_start` after another
+    /// instruction, and the instruction has no effect at run time. So PBeam
+    /// also accepts each position. `erlc` puts `nif_start` directly after
+    /// the entry label, so the binding runs at the function entry for
+    /// compiled code.
+    ///
     /// Encoding: `[0xB3]`.
     ///
     /// Erlang: `-nifs([write_nif/2]).` makes `write_nif/2` in `prim_tty`
@@ -1715,7 +1723,9 @@ mod tests {
     fn decodes_nif_start_with_the_function_of_the_func_info_before_it() {
         let code = |instructions: &[u8]| {
             let mut code = vec![0, 0, 0, 16];
-            code.extend([0; 15]);
+            code.extend([0; 11]);
+            code.push(2); // label 1 only
+            code.extend([0; 3]);
             code.push(1); // one function
             code.extend_from_slice(instructions);
             code.push(0x03);
@@ -1737,6 +1747,29 @@ mod tests {
             instructions.as_slice(),
             [
                 Instruction::FunctionInfo { .. },
+                Instruction::NifStart { name, arity: 2 },
+                Instruction::End,
+            ] if name == "write_nif"
+        ));
+        // ERTS loads `nif_start` after another instruction of the function.
+        let (instructions, _) = parse_code(
+            &code(&[
+                0x02, 0x12, 0x22, 0x20, // func_info prim_tty write_nif 2
+                0x01, 0x10, // label 1
+                0x40, 0x12, 0x03, // move prim_tty x0
+                0xB3, // nif_start
+            ]),
+            &atoms,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::FunctionInfo { .. },
+                Instruction::Label(1),
+                Instruction::Move(..),
                 Instruction::NifStart { name, arity: 2 },
                 Instruction::End,
             ] if name == "write_nif"
