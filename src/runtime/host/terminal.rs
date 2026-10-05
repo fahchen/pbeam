@@ -36,3 +36,43 @@ pub(crate) fn check(fd: libc::c_int) -> TerminalCheck {
         _ => TerminalCheck::Error,
     }
 }
+
+/// Return the window size of the terminal as `(columns, rows)`, as
+/// `tty_window_size_nif` (`prim_tty_nif.c:1179-1189`) reads it: the
+/// `TIOCGWINSZ` size of fd 0, or of `ofd` only when fd 0 fails. A count of
+/// 0 and a failure of both fds give -1.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // fd 0 is `/dev/null`, and stdout is an 80 by 0 pseudo-terminal.
+/// assert_eq!(window_size(libc::STDOUT_FILENO), (80, -1));
+/// // Neither fd is a terminal.
+/// assert_eq!(window_size(libc::STDOUT_FILENO), (-1, -1));
+/// ```
+pub(crate) fn window_size(ofd: libc::c_int) -> (libc::c_int, libc::c_int) {
+    let count = |value: libc::c_ushort| if value > 0 { value.into() } else { -1 };
+    read_window_size(libc::STDIN_FILENO)
+        .or_else(|| read_window_size(ofd))
+        .map_or((-1, -1), |size| (count(size.ws_col), count(size.ws_row)))
+}
+
+/// Read the `TIOCGWINSZ` window size of `fd`. Return `None` when the
+/// `ioctl` fails, for example for an fd that is not a terminal.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(read_window_size(-1).is_none());
+/// ```
+fn read_window_size(fd: libc::c_int) -> Option<libc::winsize> {
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `TIOCGWINSZ` writes one `winsize` to the pointer, and an fd
+    // that is not a terminal gives an error, not undefined behavior.
+    (unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &raw mut size) } == 0).then_some(size)
+}

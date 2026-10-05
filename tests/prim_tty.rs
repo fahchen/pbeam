@@ -101,7 +101,8 @@ fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
     );
 
     // The `nif_start` instruction of `write_nif/2` runs the PBeam binding,
-    // which raises `badarg` for each term. Without the binding, the stub
+    // which raises `badarg` for each term that is not a TTY resource, also a
+    // `make_ref/0` reference. Without the binding, the stub
     // body gives `{undef, []}`. PBeam gives the stack trace `[]`; this is
     // the "Exception stack trace" row in `docs/erts-differences.md`.
     let modules = ["erlang", "prim_tty"].map(pinned_beam);
@@ -148,6 +149,72 @@ fn classifies_the_standard_fds_with_isatty() {
             pbeam.as_bytes()
         );
     }
+}
+
+#[test]
+fn makes_tty_resources_and_reads_the_window_size() {
+    // `tty_nif_probe:create/0` makes TTY resources for `stdout` and
+    // `stderr`, and returns the `badarg` raises of `stdin` (fd 0), `foo`,
+    // `1`, and a reference (prim_tty_nif.c:1003-1004). `window_size/0`
+    // reads the window size of the `stdout` and `stderr` resources: the
+    // `TIOCGWINSZ` size of fd 0, else of the output fd, where a count of 0
+    // gives -1, and `{error, enotsup}` when both counts are -1
+    // (prim_tty_nif.c:1179-1189, 1201-1202). An atom, a `make_ref/0`
+    // reference, and the reference of a `re_pattern` are not TTY resources,
+    // so they raise `badarg` (prim_tty_nif.c:1174-1175).
+    let create = "[badarg,badarg,badarg,badarg]\n";
+    let create_pbeam =
+        r#"Ok(List([Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#;
+    for (layout, erts, pbeam) in [
+        (
+            FILES,
+            "[{error,enotsup},{error,enotsup},badarg,badarg,badarg]\n",
+            r#"Ok(List([Tuple([Atom("error"), Atom("enotsup")]), Tuple([Atom("error"), Atom("enotsup")]), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#,
+        ),
+        // fd 0 is `/dev/null`, so the output fd gives the size.
+        (
+            OUTPUT_TERMINALS,
+            "[{ok,{100,30}},{ok,{80,-1}},badarg,badarg,badarg]\n",
+            r#"Ok(List([Tuple([Atom("ok"), Tuple([Integer(100), Integer(30)])]), Tuple([Atom("ok"), Tuple([Integer(80), Integer(-1)])]), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#,
+        ),
+        // fd 0 is a terminal, so it gives the size of both resources.
+        (
+            TERMINALS,
+            "[{ok,{120,40}},{ok,{120,40}},badarg,badarg,badarg]\n",
+            r#"Ok(List([Tuple([Atom("ok"), Tuple([Integer(120), Integer(40)])]), Tuple([Atom("ok"), Tuple([Integer(120), Integer(40)])]), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#,
+        ),
+    ] {
+        assert_eq!(run_erts_nif_probe(layout, "create"), create.as_bytes());
+        assert_eq!(
+            run_isolated(layout, "tty_nif_probe:create", &[TTY_NIF_PROBE, STAND_IN]),
+            create_pbeam.as_bytes()
+        );
+        assert_eq!(run_erts_nif_probe(layout, "window_size"), erts.as_bytes());
+        assert_eq!(
+            run_isolated(
+                layout,
+                "tty_nif_probe:window_size",
+                &[TTY_NIF_PROBE, STAND_IN]
+            ),
+            pbeam.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn returns_a_runtime_error_from_write_nif_for_a_tty_resource() {
+    // `tty_nif_probe:write/0` makes a `stdout` TTY resource and calls
+    // `prim_tty:write_nif/2` with it. ERTS writes the iovec to the output
+    // fd (prim_tty_nif.c:366-427). PBeam has no host write yet, so the
+    // binding returns a runtime error. `tty_create/1` makes no host call,
+    // so the test runs in this process.
+    let beams = [TTY_NIF_PROBE, STAND_IN].map(|path| fs::read(path).unwrap());
+    let program = BeamProgram::load(&beams.each_ref().map(Vec::as_slice)).unwrap();
+    let error = program.execute("tty_nif_probe", "write", &[]).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "prim_tty:write_nif/2 host write is not implemented yet (#116)"
+    );
 }
 
 /// Run `tty_nif_probe:Function()` on the pinned ERTS with the stand-in

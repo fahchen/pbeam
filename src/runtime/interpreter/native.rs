@@ -38,7 +38,11 @@ pub(super) fn call(
 ) -> Option<Result<BifResult, BeamError>> {
     match (module, name, arguments) {
         ("prim_tty", "isatty", [tty]) => Some(prim_tty::isatty(&mut scheduler.atoms, tty)),
-        ("prim_tty", "write_nif", [tty, iovec]) => Some(Ok(prim_tty::write_nif(tty, iovec))),
+        ("prim_tty", "tty_create", [fd]) => Some(prim_tty::tty_create(scheduler, fd)),
+        ("prim_tty", "tty_window_size", [tty]) => Some(prim_tty::tty_window_size(scheduler, tty)),
+        ("prim_tty", "write_nif", [tty, iovec]) => {
+            Some(prim_tty::write_nif(&scheduler.resources, tty, iovec))
+        }
         _ => None,
     }
 }
