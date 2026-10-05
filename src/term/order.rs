@@ -6,11 +6,16 @@
 //!
 //! `number < atom < reference < fun < port < pid < tuple < map < [] < list < bitstring`
 //!
-//! PBeam has no float, fun, or port term, so a number is an integer and
-//! integers compare by value. Terms of one type compare as follows:
+//! PBeam has no float or port term, so a number is an integer and integers
+//! compare by value. Terms of one type compare as follows:
 //!
 //! - atom: by the bytes of the UTF-8 name, as `erts_cmp_atoms` does, not by
 //!   the atom index;
+//! - fun: a local fun is less than an external fun. Local funs compare by
+//!   the module name, the lambda index, and the old unique value of the fun
+//!   entry, then by the number of free variables, then free variable by
+//!   free variable (`utils.c:2157-2187`). External funs compare by the
+//!   module name, the function name, and the arity (`utils.c:2189-2207`);
 //! - pid: by the process counter, which gives the order of creation, as the
 //!   ERTS pid data does until the process table uses a slot again;
 //! - tuple: by size, then element by element;
@@ -74,9 +79,9 @@ impl Term {
     }
 }
 
-/// Compare two terms without their nested terms. For two lists, tuples, or
-/// maps that the sizes do not order, push the nested pairs onto `steps` and
-/// return `Equal`.
+/// Compare two terms without their nested terms. For two lists, tuples,
+/// maps, or funs that the sizes and fun entries do not order, push the
+/// nested pairs onto `steps` and return `Equal`.
 ///
 /// # Examples
 ///
@@ -122,6 +127,17 @@ fn compare_pair<'a>(
             Ordering::Equal
         }
         (Term::Map(left), Term::Map(right)) => left.len().cmp(&right.len()),
+        (Term::Fun(left), Term::Fun(right)) => {
+            let order = left
+                .target()
+                .compare(right.target())
+                .then(left.free().len().cmp(&right.free().len()));
+            if order.is_eq() {
+                let pairs = left.free().iter().zip(right.free()).rev();
+                steps.extend(pairs.map(|(l, r)| Step::Pair(l, r)));
+            }
+            order
+        }
         _ => type_rank(left).cmp(&type_rank(right)),
     };
     Ok(order)
@@ -160,12 +176,13 @@ fn type_rank(term: &Term) -> u8 {
         Term::Integer(_) => 0,
         Term::Atom(_) => 1,
         Term::Reference(_) => 2,
-        Term::Pid(_) => 3,
-        Term::Tuple(_) => 4,
-        Term::Map(_) => 5,
-        Term::List(elements) if elements.is_empty() => 6,
-        Term::List(_) => 7,
-        Term::Binary(_) => 8,
+        Term::Fun(_) => 3,
+        Term::Pid(_) => 4,
+        Term::Tuple(_) => 5,
+        Term::Map(_) => 6,
+        Term::List(elements) if elements.is_empty() => 7,
+        Term::List(_) => 8,
+        Term::Binary(_) => 9,
     }
 }
 
@@ -173,21 +190,35 @@ fn type_rank(term: &Term) -> u8 {
 mod tests {
     use std::cmp::Ordering::{Equal, Greater, Less};
 
-    use super::super::{AtomTable, Map, ProcessId, Reference, Term, test_atom as atom};
+    use super::super::{
+        Atom, AtomTable, Fun, Lambda, Map, ProcessId, Reference, Term, test_atom as atom,
+    };
 
     fn map(pairs: Vec<(Term, Term)>) -> Term {
         Term::Map(Map::from_pairs(pairs).unwrap())
     }
 
+    /// Return a fun of a lambda of `module` with an index, an old unique
+    /// value, and free variables.
+    fn fun(module: &str, index: i32, old_unique: i32, free: Vec<Term>) -> Term {
+        let module = Atom::from_static(module).unwrap();
+        Term::Fun(Fun::new(
+            Lambda::new(module, index, old_unique, 53, 1),
+            free,
+        ))
+    }
+
     #[test]
     fn orders_terms_of_different_types_by_type() {
         // ERTS 29.1.1: lists:sort/1 gives
-        // [-1,1,ab,#Ref<...>,<0.10.0>,{},#{},[],[a],<<>>] for these terms.
+        // [-1,1,ab,#Ref<...>,<0.10.0>,{},#{},[],[a],<<>>] for these terms,
+        // and puts a fun between a reference and a pid.
         let sorted = [
             Term::Integer(-1),
             Term::Integer(1),
             atom("ab"),
             Term::Reference(Reference(1)),
+            fun("lists", 0, 0, vec![]),
             Term::Pid(ProcessId(0)),
             Term::Tuple(vec![]),
             map(vec![]),
@@ -275,6 +306,101 @@ mod tests {
         let deep =
             |levels| (0..levels).fold(Term::List(vec![]), |inner, _| Term::List(vec![inner]));
         assert_eq!(deep(1_000_000).compare(&deep(999_999)).unwrap(), Greater);
+    }
+
+    #[test]
+    fn orders_local_funs_by_fun_entry_then_free_variables() {
+        // `erts_cmp_compound` (`utils.c:2157-2187`) compares the module name,
+        // the index, the old unique value, the number of free variables, and
+        // then the free variables. ERTS 29.1.1: `fun_probe:make_pair(b) >=
+        // fun_probe:make_pair(a)` is true.
+        let pairs = [
+            (fun("lists", 9, 9, vec![]), fun("maps", 0, 0, vec![]), Less),
+            (
+                fun("lists", 1, 0, vec![]),
+                fun("lists", 0, 9, vec![]),
+                Greater,
+            ),
+            (
+                fun("lists", 0, -1, vec![]),
+                fun("lists", 0, 1, vec![]),
+                Less,
+            ),
+            (
+                fun("lists", 0, 0, vec![atom("a")]),
+                fun("lists", 0, 0, vec![]),
+                Greater,
+            ),
+            (
+                fun("lists", 0, 0, vec![atom("b")]),
+                fun("lists", 0, 0, vec![atom("a")]),
+                Greater,
+            ),
+            (
+                fun("lists", 0, 0, vec![atom("a")]),
+                fun("lists", 0, 0, vec![atom("a")]),
+                Equal,
+            ),
+        ];
+        for (left, right, order) in pairs {
+            assert_eq!(
+                left.compare(&right).unwrap(),
+                order,
+                "{left:?} and {right:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn orders_external_funs_by_mfa_and_after_local_funs() {
+        // `erts_cmp_compound` (`utils.c:2189-2207`) compares the module name,
+        // the function name, and the arity of two external funs, and puts a
+        // local fun before an external fun. ERTS 29.1.1: `fun fun_probe:id/1
+        // >= fun_probe:make_pair(a)` is true, and `fun fun_probe:mfas/0 >=
+        // fun fun_probe:id/1` is true.
+        let external = |module, function, arity| {
+            let atom = |name| Atom::from_static(name).unwrap();
+            Term::Fun(Fun::external(atom(module), atom(function), arity))
+        };
+        let pairs = [
+            (
+                external("lists", "put", 2),
+                external("maps", "get", 2),
+                Less,
+            ),
+            (
+                external("lists", "put", 2),
+                external("lists", "get", 3),
+                Greater,
+            ),
+            (
+                external("lists", "put", 1),
+                external("lists", "put", 2),
+                Less,
+            ),
+            (
+                external("lists", "put", 2),
+                external("lists", "put", 2),
+                Equal,
+            ),
+            (
+                fun("maps", 9, 9, vec![atom("a")]),
+                external("lists", "put", 0),
+                Less,
+            ),
+            (
+                external("lists", "put", 0),
+                fun("maps", 9, 9, vec![]),
+                Greater,
+            ),
+        ];
+        for (left, right, order) in pairs {
+            assert_eq!(
+                left.compare(&right).unwrap(),
+                order,
+                "{left:?} and {right:?}"
+            );
+        }
     }
 
     #[test]

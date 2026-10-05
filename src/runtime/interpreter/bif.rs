@@ -12,6 +12,8 @@ mod lists;
 mod maps;
 mod unicode;
 
+pub(super) use erlang::is_function;
+
 /// What a BIF call does to the calling process.
 #[derive(Debug)]
 pub(super) enum BifResult {

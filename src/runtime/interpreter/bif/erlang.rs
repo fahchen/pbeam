@@ -2,7 +2,7 @@
 
 use super::BifResult::{Trap, Value};
 use super::*;
-use crate::term::Reference;
+use crate::term::{Fun, Reference};
 
 /// Return the node of a pid or of the calling process.
 ///
@@ -296,6 +296,59 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
         .and_then(|index| index.checked_sub(1))
         .and_then(|index| elements.get(index))
         .map_or_else(BifResult::badarg, |element| Value(element.clone()))
+}
+
+/// Run `erlang:is_function/2`: return `true` when `term` is a fun of
+/// `arity` arguments, as ERTS `erl_is_function` (`erl_bif_op.c:237-267`)
+/// does. An `arity` that is negative or not an integer raises `badarg`. A
+/// non-negative arity that no fun has gives `false`. The `is_function2`
+/// instruction runs the same check and passes only when it returns `true`
+/// (`jit/arm/instr_common.cpp:1266-1283`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // fun(X) -> {Tag, X} end
+/// assert!(matches!(is_function(&pair, &Term::Integer(1)), BifResult::Value(value) if value == Term::static_atom("true")));
+/// assert!(matches!(is_function(&pair, &Term::Integer(0)), BifResult::Value(value) if value == Term::static_atom("false")));
+/// assert!(matches!(is_function(&Term::static_atom("notfun"), &Term::Integer(-1)), BifResult::Raise { .. }));
+/// ```
+pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) -> BifResult {
+    let &Term::Integer(arity) = arity else {
+        return BifResult::badarg();
+    };
+    if arity < 0 {
+        return BifResult::badarg();
+    }
+    let matches = matches!(term, Term::Fun(fun) if i64::from(fun.target().arity()) == arity);
+    Value(Term::static_atom(if matches { "true" } else { "false" }))
+}
+
+/// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
+const MAX_ARG: i64 = 255;
+
+/// Run `erlang:make_fun/3`: return the external fun of
+/// `module:function/arity`, as ERTS `make_fun_3` (`bif.c:4467-4485`) does.
+/// The module and the function must be atoms, and the arity must be an
+/// integer in `0..=255` ([`MAX_ARG`]), else the call raises
+/// `badarg`. The function does not need to exist.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let module = Term::static_atom("erlang");
+/// let function = Term::static_atom("self");
+/// assert!(matches!(make_fun(&module, &function, &Term::Integer(0)), BifResult::Value(Term::Fun(_))));
+/// assert!(matches!(make_fun(&module, &function, &Term::Integer(256)), BifResult::Raise { .. }));
+/// assert!(matches!(make_fun(&Term::Integer(1), &function, &Term::Integer(0)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn make_fun(module: &Term, function: &Term, arity: &Term) -> BifResult {
+    match (module, function, arity.small_integer()) {
+        (Term::Atom(module), Term::Atom(function), Some(arity @ 0..=MAX_ARG)) => Value(Term::Fun(
+            Fun::external(module.clone(), function.clone(), arity as u32),
+        )),
+        _ => BifResult::badarg(),
+    }
 }
 
 /// The largest binary, in bytes, that `erlang:iolist_to_iovec/1` copies into
