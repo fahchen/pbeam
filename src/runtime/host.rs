@@ -1,10 +1,12 @@
 //! Read the host system information that ERTS reads at emulator start
 //! (`sys/unix/sys.c`, `sys/common/erl_sys_common_misc.c`), the host
-//! terminal that the `prim_tty` NIFs use and write to, and the host signal
-//! dispositions that `os:set_signal/2` sets.
+//! terminal that the `prim_tty` NIFs use and write to, the host signal
+//! dispositions that `os:set_signal/2` sets, and the host clocks that the
+//! time BIFs read.
 
 use std::{ffi::CStr, sync::OnceLock};
 
+pub(crate) mod clock;
 pub(crate) mod errno;
 pub(crate) mod output;
 pub(crate) mod signal;

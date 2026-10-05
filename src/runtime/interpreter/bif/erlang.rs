@@ -5,6 +5,7 @@ use super::*;
 use crate::runtime::host;
 use crate::runtime::local_node;
 use crate::runtime::scheduler::{AliasMode, MonitorOptions, MonitorTarget};
+use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use crate::term::Fun;
 
@@ -644,6 +645,39 @@ pub(super) fn int_div(left: &Term, right: &Term) -> Result<BifResult, BeamError>
         return Ok(BifResult::badarith());
     }
     arith("div", left, right, i64::checked_div)
+}
+
+/// Convert `value`, a time in the native unit, to `unit` with
+/// [`time::time_unit_conversion`], as `erlang:monotonic_time/1` and
+/// `os:system_time/1` do (`erl_time_sup.c:2268-2350`). A converted time
+/// is the BIF result, and a unit that is not valid raises `badarg`. A trap
+/// calls `erlang:convert_time_unit(Value, 1000000000, Unit)`
+/// (`erts_convert_time_unit_trap`, `bif.c:5557`), which the pinned
+/// `erlang.beam` runs (`erlang.erl:5299-5340`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = convert_time(1_500_000_000, 0, &Term::static_atom("second"));
+/// assert!(matches!(result, BifResult::Value(Term::Integer(1))));
+/// let result = convert_time(1_000_000_000, 1, &Term::static_atom("perf_counter"));
+/// assert!(matches!(result, BifResult::Trap { function: "convert_time_unit", .. }));
+/// assert!(matches!(convert_time(1, 0, &Term::Integer(0)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> BifResult {
+    match time::time_unit_conversion(value, offset_multiplier, unit) {
+        TimeValue::Value(value) => Value(Term::Integer(value)),
+        TimeValue::Trap(native) => Trap {
+            module: "erlang",
+            function: "convert_time_unit",
+            arguments: vec![
+                Term::Integer(native),
+                Term::Integer(time::TIME_UNIT),
+                unit.clone(),
+            ],
+        },
+        TimeValue::Badarg => BifResult::badarg(),
+    }
 }
 
 /// Run `erlang:element/2`: return the element at the 1-based `index` of a

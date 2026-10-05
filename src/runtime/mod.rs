@@ -7,6 +7,7 @@ mod persistent_term;
 mod process;
 mod resource;
 mod scheduler;
+mod time;
 mod timer;
 mod unicode;
 

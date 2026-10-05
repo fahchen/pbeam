@@ -2,6 +2,7 @@
 
 use super::BifResult::Value;
 use super::*;
+use crate::runtime::host::clock;
 use crate::runtime::host::signal::{self, Disposition};
 
 /// Run `os:set_signal(Signal, Mode)`: set the host disposition of `Signal`
@@ -37,4 +38,20 @@ pub(super) fn set_signal(signal: &Term, mode: &Term) -> BifResult {
         }
         _ => BifResult::badarg(),
     }
+}
+
+/// Run `os:system_time(Unit)`: convert the host `CLOCK_REALTIME` in
+/// nanoseconds to `Unit` with no offset, as `os_system_time_1`
+/// (`erl_time_sup.c:2595-2599`) does. A host time before 1970 traps for
+/// each unit (see [`super::erlang::convert_time`]).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(system_time(&Term::static_atom("second")), BifResult::Value(Term::Integer(_))));
+/// assert!(matches!(system_time(&Term::Integer(3)), BifResult::Trap { .. }));
+/// assert!(matches!(system_time(&Term::Integer(0)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn system_time(unit: &Term) -> BifResult {
+    super::erlang::convert_time(clock::system_time(), 0, unit)
 }
