@@ -1,5 +1,5 @@
 -module(tty_nif_probe).
--export([isatty/0, create/0, window_size/0, write/0]).
+-export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, write/0]).
 
 isatty() ->
     [catch_error(fun() -> prim_tty:isatty(A) end)
@@ -16,6 +16,12 @@ window_size() ->
     {ok, {re_pattern, _, _, _, Re}} = re:compile("a", []),
     [catch_error(fun() -> prim_tty:tty_window_size(A) end)
      || A <- [Out, Err, foo, make_ref(), Re]].
+
+setlocale() ->
+    [prim_tty:setlocale(A) || A <- [foo, make_ref()]].
+
+setupterm() ->
+    [prim_tty:setupterm_nif(), prim_tty:setupterm_nif()].
 
 write() ->
     {ok, Out} = prim_tty:tty_create(stdout),

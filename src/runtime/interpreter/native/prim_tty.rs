@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::runtime::{
-    host::terminal::{self, TerminalCheck},
+    host::{
+        errno::errno_id,
+        terminal::{self, TerminalCheck},
+    },
     resource::{Resources, TtyResource},
 };
 
@@ -149,6 +152,77 @@ pub(super) fn tty_window_size(
         ]),
     };
     Ok(BifResult::Value(result))
+}
+
+/// Run `prim_tty:setlocale(TTY)`, as the ERTS NIF `setlocale_nif`
+/// (`prim_tty_nif.c:747-773`) does on Unix. It does not read its argument.
+/// It sets the `LC_CTYPE` locale from the environment, and the result is
+/// `true` when the codeset of that locale is UTF-8, else `false`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // LC_ALL=C.UTF-8
+/// assert!(matches!(setlocale(), BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// ```
+pub(super) fn setlocale() -> BifResult {
+    BifResult::Value(Term::static_atom(if terminal::setlocale_utf8() {
+        "true"
+    } else {
+        "false"
+    }))
+}
+
+/// Run `prim_tty:setupterm_nif()`, as the ERTS NIF `tty_setupterm_nif`
+/// (`prim_tty_nif.c:774-791`) does with `HAVE_TERMCAP`. The result is `ok`
+/// when `setupterm` reads the terminfo entry of `TERM`, else
+/// `{error, {setupterm, Errno}}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TERM=dumb
+/// assert!(matches!(setupterm_nif(&mut atoms)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// // TERM=pbeam-unknown-term on macOS: {error, {setupterm, enoent}}
+/// assert!(matches!(setupterm_nif(&mut atoms)?, BifResult::Value(Term::Tuple(_))));
+/// ```
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
+pub(super) fn setupterm_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
+    let result = match terminal::setupterm() {
+        Ok(()) => Term::static_atom("ok"),
+        Err(errno) => errno_error(atoms, "setupterm", errno)?,
+    };
+    Ok(BifResult::Value(result))
+}
+
+/// Return `{error, {Function, Errno}}`, where `Errno` is the `erl_errno_id`
+/// atom of `errno`, as `make_errno_error` (`prim_tty_nif.c:214-226`) does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {error, {setupterm, enoent}}
+/// let error = errno_error(&mut atoms, "setupterm", libc::ENOENT)?;
+/// ```
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
+fn errno_error(
+    atoms: &mut AtomTable,
+    function: &str,
+    errno: libc::c_int,
+) -> Result<Term, BeamError> {
+    Ok(Term::Tuple(vec![
+        Term::static_atom("error"),
+        Term::Tuple(vec![
+            Term::Atom(atoms.put(function)?),
+            Term::Atom(atoms.put(&errno_id(errno))?),
+        ]),
+    ]))
 }
 
 /// Run `prim_tty:write_nif(TTY, IOVec)`. The ERTS NIF `tty_write_nif`

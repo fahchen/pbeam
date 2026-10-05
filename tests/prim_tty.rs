@@ -143,9 +143,14 @@ fn classifies_the_standard_fds_with_isatty() {
             r#"Ok(List([Atom("true"), Atom("true"), Atom("true"), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#,
         ),
     ] {
-        assert_eq!(run_erts_nif_probe(layout, "isatty"), erts.as_bytes());
+        assert_eq!(run_erts_nif_probe(layout, &[], "isatty"), erts.as_bytes());
         assert_eq!(
-            run_isolated(layout, "tty_nif_probe:isatty", &[TTY_NIF_PROBE, STAND_IN]),
+            run_isolated(
+                layout,
+                &[],
+                "tty_nif_probe:isatty",
+                &[TTY_NIF_PROBE, STAND_IN]
+            ),
             pbeam.as_bytes()
         );
     }
@@ -184,21 +189,113 @@ fn makes_tty_resources_and_reads_the_window_size() {
             r#"Ok(List([Tuple([Atom("ok"), Tuple([Integer(120), Integer(40)])]), Tuple([Atom("ok"), Tuple([Integer(120), Integer(40)])]), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#,
         ),
     ] {
-        assert_eq!(run_erts_nif_probe(layout, "create"), create.as_bytes());
-        assert_eq!(
-            run_isolated(layout, "tty_nif_probe:create", &[TTY_NIF_PROBE, STAND_IN]),
-            create_pbeam.as_bytes()
-        );
-        assert_eq!(run_erts_nif_probe(layout, "window_size"), erts.as_bytes());
+        assert_eq!(run_erts_nif_probe(layout, &[], "create"), create.as_bytes());
         assert_eq!(
             run_isolated(
                 layout,
+                &[],
+                "tty_nif_probe:create",
+                &[TTY_NIF_PROBE, STAND_IN]
+            ),
+            create_pbeam.as_bytes()
+        );
+        assert_eq!(
+            run_erts_nif_probe(layout, &[], "window_size"),
+            erts.as_bytes()
+        );
+        assert_eq!(
+            run_isolated(
+                layout,
+                &[],
                 "tty_nif_probe:window_size",
                 &[TTY_NIF_PROBE, STAND_IN]
             ),
             pbeam.as_bytes()
         );
     }
+}
+
+#[test]
+fn reads_the_utf8_codeset_of_the_locale_with_setlocale() {
+    // `tty_nif_probe:setlocale/0` calls `prim_tty:setlocale/1` with `foo`
+    // and a reference. The NIF does not read its argument. It returns `true`
+    // when `setlocale(LC_CTYPE, "")` succeeds and the codeset is `UTF-8`,
+    // else `false` (prim_tty_nif.c:766-771).
+    for (locale, erts, pbeam) in [
+        (
+            "C.UTF-8",
+            "[true,true]\n",
+            r#"Ok(List([Atom("true"), Atom("true")]))"#,
+        ),
+        (
+            "C",
+            "[false,false]\n",
+            r#"Ok(List([Atom("false"), Atom("false")]))"#,
+        ),
+    ] {
+        let environment = [("LC_ALL", locale)];
+        assert_eq!(
+            run_erts_nif_probe(FILES, &environment, "setlocale"),
+            erts.as_bytes()
+        );
+        assert_eq!(
+            run_isolated(
+                FILES,
+                &environment,
+                "tty_nif_probe:setlocale",
+                &[TTY_NIF_PROBE, STAND_IN]
+            ),
+            pbeam.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn reads_the_terminfo_entry_with_setupterm() {
+    // `tty_nif_probe:setupterm/0` calls `prim_tty:setupterm_nif/0` two
+    // times, so the second success frees the terminal of the first with
+    // `del_curterm` (prim_tty_nif.c:785-788).
+    assert_eq!(run_erts_nif_probe(FILES, &[], "setupterm"), b"[ok,ok]\n");
+    assert_eq!(
+        run_isolated(
+            FILES,
+            &[],
+            "tty_nif_probe:setupterm",
+            &[TTY_NIF_PROBE, STAND_IN]
+        ),
+        br#"Ok(List([Atom("ok"), Atom("ok")]))"#
+    );
+
+    // A `TERM` without a terminfo entry makes `setupterm` fail, and the
+    // result is `{error, {setupterm, Errno}}` with the `erl_errno_id` atom
+    // of the `errno` that `setupterm` leaves (prim_tty_nif.c:214-226,
+    // 780-782). The curses library sets this `errno`, so the test takes the
+    // atom from the ERTS run on the same host.
+    let environment = [("TERM", "pbeam-unknown-term")];
+    let erts = run_erts_nif_probe(FILES, &environment, "setupterm");
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        erts,
+        b"[{error,{setupterm,enoent}},{error,{setupterm,enoent}}]\n"
+    );
+    let errno = String::from_utf8(erts)
+        .unwrap()
+        .strip_prefix("[{error,{setupterm,")
+        .and_then(|rest| rest.split_once('}'))
+        .unwrap()
+        .0
+        .to_owned();
+    let error = format!(r#"Tuple([Atom("error"), Tuple([Atom("setupterm"), Atom("{errno}")])])"#);
+    assert_eq!(
+        String::from_utf8(run_isolated(
+            FILES,
+            &environment,
+            "tty_nif_probe:setupterm",
+            &[TTY_NIF_PROBE, STAND_IN]
+        ))
+        .unwrap(),
+        format!("Ok(List([{error}, {error}]))")
+    );
 }
 
 #[test]
@@ -225,9 +322,13 @@ fn returns_a_runtime_error_from_write_nif_for_a_tty_resource() {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(run_erts_nif_probe(FILES, "isatty"), b"[false,false,false,badarg,badarg,badarg]\n");
+/// assert_eq!(run_erts_nif_probe(FILES, &[], "isatty"), b"[false,false,false,badarg,badarg,badarg]\n");
 /// ```
-fn run_erts_nif_probe(layout: [Stream; 3], function: &str) -> Vec<u8> {
+fn run_erts_nif_probe(
+    layout: [Stream; 3],
+    environment: &[(&str, &str)],
+    function: &str,
+) -> Vec<u8> {
     let mut command = Command::new("erl");
     command.args([
         "-noshell",
@@ -242,7 +343,7 @@ fn run_erts_nif_probe(layout: [Stream; 3], function: &str) -> Vec<u8> {
              io_lib:format(\"~w~n\", [tty_nif_probe:{function}()])), halt()."
         ),
     ]);
-    run_in_layout(&mut command, layout)
+    run_in_layout(&mut command, layout, environment)
 }
 
 /// Run `entry` (`module:function`) of the BEAM files at `beams` in PBeam, in
@@ -254,16 +355,21 @@ fn run_erts_nif_probe(layout: [Stream; 3], function: &str) -> Vec<u8> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = run_isolated(FILES, "tty_nif_probe:isatty", &[TTY_NIF_PROBE, STAND_IN]);
+/// let result = run_isolated(FILES, &[], "tty_nif_probe:isatty", &[TTY_NIF_PROBE, STAND_IN]);
 /// assert!(result.starts_with(b"Ok(List(["));
 /// ```
-fn run_isolated(layout: [Stream; 3], entry: &str, beams: &[&str]) -> Vec<u8> {
+fn run_isolated(
+    layout: [Stream; 3],
+    environment: &[(&str, &str)],
+    entry: &str,
+    beams: &[&str],
+) -> Vec<u8> {
     let mut command = Command::new(env::current_exe().unwrap());
     command
         .args(["--exact", "isolated_run", "--include-ignored", "--quiet"])
         .env(ENTRY, entry)
         .env(BEAMS, env::join_paths(beams).unwrap());
-    run_in_layout(&mut command, layout)
+    run_in_layout(&mut command, layout, environment)
 }
 
 /// The child side of `run_isolated`: load the BEAM files, run the entry, and
@@ -282,17 +388,22 @@ fn isolated_run() {
     fs::write(env::var_os(RESULT).unwrap(), format!("{result:?}")).unwrap();
 }
 
-/// Run `command` with `TERM=dumb`, `LC_ALL=C.UTF-8`, and the standard
-/// streams of `layout`, and return the bytes that it writes to the file in
+/// Run `command` with `TERM=dumb`, `LC_ALL=C.UTF-8`, the variables of
+/// `environment`, which replace these values, and the standard streams of
+/// `layout`, and return the bytes that it writes to the file in
 /// the `PBEAM_TTY_RESULT` variable. Each pseudo-terminal master stays open
 /// until the command exits.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = run_in_layout(Command::new("erl").args(["-noshell", "-eval", "..."]), FILES);
+/// let result = run_in_layout(Command::new("erl").args(["-noshell", "-eval", "..."]), FILES, &[]);
 /// ```
-fn run_in_layout(command: &mut Command, layout: [Stream; 3]) -> Vec<u8> {
+fn run_in_layout(
+    command: &mut Command,
+    layout: [Stream; 3],
+    environment: &[(&str, &str)],
+) -> Vec<u8> {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let directory = env::temp_dir().join(format!(
         "pbeam-prim-tty-{}-{}",
@@ -308,6 +419,7 @@ fn run_in_layout(command: &mut Command, layout: [Stream; 3]) -> Vec<u8> {
     let status = command
         .env("TERM", "dumb")
         .env("LC_ALL", "C.UTF-8")
+        .envs(environment.iter().copied())
         .env(RESULT, &result)
         .stdin(stdin)
         .stdout(stdout)

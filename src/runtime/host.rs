@@ -3,6 +3,7 @@
 
 use std::ffi::CStr;
 
+pub(crate) mod errno;
 pub(crate) mod terminal;
 
 /// Return the OS flavor of the host: the `uname` system name with each
