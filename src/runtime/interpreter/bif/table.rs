@@ -253,7 +253,7 @@ bifs! {
     erlang:monotonic_time/1 => unsupported,
     erlang:nif_error/1 => |_, [reason]| Ok(Raise { class: ExceptionClass::Error, reason: reason.clone() }),
     erlang:nif_error/2 => unsupported,
-    erlang:node/0 => |_, []| Ok(Value(erlang::local_node())),
+    erlang:node/0 => |_, []| Ok(Value(crate::runtime::local_node())),
     erlang:node/1 => |_, [term]| erlang::node(term),
     erlang:nodes/0 => unsupported,
     erlang:nodes/1 => unsupported,

@@ -3,23 +3,10 @@
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
+use crate::runtime::local_node;
 use crate::runtime::scheduler::{AliasMode, MonitorOptions, MonitorTarget};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use crate::term::Fun;
-
-/// Return the node of a pid or of the calling process.
-///
-/// PBeam is a local node that is not distributed, so every pid is local and
-/// its node is `nonode@nohost`, as on ERTS (`dist.c`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(local_node(), Term::static_atom("nonode@nohost"));
-/// ```
-pub(super) fn local_node() -> Term {
-    Term::static_atom("nonode@nohost")
-}
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
 /// gives a runtime error.

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::{
     ets::EtsTables,
+    local_node,
     persistent_term::PersistentTerms,
     process::{Frame, Monitor, ProcessState, ReceiveTimer},
     resource::Resources,
@@ -915,13 +916,10 @@ impl Scheduler {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(named_item(&name), Term::Tuple(vec![Term::Atom(name.clone()), Term::static_atom("nonode@nohost")]));
+/// assert_eq!(named_item(&name), Term::Tuple(vec![Term::Atom(name.clone()), local_node()]));
 /// ```
 fn named_item(name: &Atom) -> Term {
-    Term::Tuple(vec![
-        Term::Atom(name.clone()),
-        Term::static_atom("nonode@nohost"),
-    ])
+    Term::Tuple(vec![Term::Atom(name.clone()), local_node()])
 }
 
 /// Return the message `{Tag, Reference, Type, Item, Reason}` of a monitor.
