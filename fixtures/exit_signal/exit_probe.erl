@@ -29,7 +29,7 @@ target(Trap) ->
     process_flag(trap_exit, Trap),
     receive {ready, P} -> P ! ready end,
     receive report -> ok end,
-    Msgs = receive {'EXIT', _, R} -> R after 0 -> none end,
+    Msgs = receive {'EXIT', From, R} -> {R, From =:= P} after 0 -> none end,
     exit({alive, Msgs}).
 
 catch_badarg(X) -> try exit(X, boom) catch error:E -> E end.

@@ -63,7 +63,7 @@ fn sends_exit_signals_with_exit_2_as_erts_does() {
             pair("alive", "none"),
             atom("boom"),
             atom("killed"),
-            pair("alive", "normal"),
+            Term::Tuple(vec![atom("alive"), pair("normal", "true")]),
             atom("killed"),
             atom("badarg"),
             atom("badarg"),
@@ -87,6 +87,6 @@ fn sends_exit_signals_with_exit_2_as_erts_does() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         reference.stdout,
-        b"[normal,boom,killed,{returned,true,true},{returned,true,true},killed,{alive,none},boom,killed,{alive,normal},killed,badarg,badarg,true,true,{linked,boom}]\n"
+        b"[normal,boom,killed,{returned,true,true},{returned,true,true},killed,{alive,none},boom,killed,{alive,{normal,true}},killed,badarg,badarg,true,true,{linked,boom}]\n"
     );
 }
