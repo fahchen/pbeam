@@ -29,7 +29,8 @@ init() ->
     {ok, Err} = prim_tty:tty_create(stderr),
     {ok, {re_pattern, _, _, _, Re}} = re:compile("a", []),
     [catch_error(fun() -> prim_tty:tty_init(T, O) end)
-     || {T, O} <- [{Out, foo}, {foo, #{input => raw}}, {Re, #{input => raw}}, {Out, #{}},
+     || {T, O} <- [{Out, foo}, {foo, #{input => raw}}, {make_ref(), #{input => raw}},
+                   {Re, #{input => raw}}, {Out, #{}},
                    {Out, #{input => raw}}, {Out, #{input => cooked}},
                    {Out, #{input => foo}}, {Err, #{input => raw}}]].
 

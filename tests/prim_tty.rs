@@ -107,11 +107,12 @@ const MONITOR: [Stream; 3] = [
 
 #[test]
 fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
-    // `main/0` starts three pinned `prim_tty:writer_loop/2` writers and
+    // `main/0` starts four pinned `prim_tty:writer_loop/2` writers and
     // returns their exit reasons. The first gets the sync `{write, From,
     // Chars}` message (prim_tty.erl:560), the second gets the async
-    // `{write, Chars}` message (prim_tty.erl:554), and the third gets the
-    // atom `stdout` as its TTY and `not_iodata` as its iovec. Each writer
+    // `{write, Chars}` message (prim_tty.erl:554), the third gets the atom
+    // `stdout` as its TTY and `not_iodata` as its iovec, and the fourth
+    // gets the reference of a `re_pattern` as its TTY. Each writer
     // calls the local `write_nif/2`. The ERTS NIF raises `badarg` because
     // its first argument is not a TTY resource (prim_tty_nif.c:363-364),
     // before it reads the iovec. The logger level `none` stops the
@@ -133,12 +134,12 @@ fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         reference.stdout,
-        b"[{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif}]\n"
+        b"[{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif}]\n"
     );
 
     // The `nif_start` instruction of `write_nif/2` runs the PBeam binding,
     // which raises `badarg` for each term that is not a TTY resource, also a
-    // `make_ref/0` reference. Without the binding, the stub
+    // `make_ref/0` reference and a `re_pattern` reference. Without the binding, the stub
     // body gives `{undef, []}`. PBeam gives the stack trace `[]`; this is
     // the "Exception stack trace" row in `docs/erts-differences.md`.
     let modules = ["erlang", "prim_tty"].map(pinned_beam);
@@ -151,7 +152,7 @@ fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
     ]);
     assert_eq!(
         program.execute("prim_tty_probe", "main", &[]).unwrap(),
-        Term::List(vec![badarg.clone(), badarg.clone(), badarg])
+        Term::List(vec![badarg.clone(), badarg.clone(), badarg.clone(), badarg])
     );
 }
 
@@ -337,8 +338,9 @@ fn reads_the_terminfo_entry_with_setupterm() {
 #[test]
 fn sets_the_terminal_mode_with_tty_init() {
     // `tty_nif_probe:init/0` calls `prim_tty:tty_init/2`. A term that is not
-    // a map, a term that is not a TTY resource, and a map without `input`
-    // raise `badarg` in this order (prim_tty_nif.c:1081-1089). On the
+    // a map, three terms that are not a TTY resource (an atom, a
+    // `make_ref/0` reference, and a `re_pattern` reference), and a map
+    // without `input` raise `badarg` in this order (prim_tty_nif.c:1081-1089). On the
     // `stdout` resource, `raw` sets the raw mode, `cooked` sets the first
     // mode again, and `foo` finds the first mode set and does not call
     // `tcsetattr` (prim_tty_nif.c:1099-1134). Last, `raw` on the `stderr`
@@ -348,22 +350,22 @@ fn sets_the_terminal_mode_with_tty_init() {
     let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("init"), FILES, &[]);
     assert_eq!(
         erts,
-        b"[badarg,badarg,badarg,badarg,{error,enotsup},ok,ok,{error,enotsup}]\n"
+        b"[badarg,badarg,badarg,badarg,badarg,{error,enotsup},ok,ok,{error,enotsup}]\n"
     );
     let probe = || isolated("tty_nif_probe:init", &[TTY_NIF_PROBE, STAND_IN]);
     let (pbeam, pbeam_modes) = run_with_modes(&mut probe(), FILES, &[]);
     assert_eq!(
         pbeam,
-        br#"Ok(List([Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Tuple([Atom("error"), Atom("enotsup")]), Atom("ok"), Atom("ok"), Tuple([Atom("error"), Atom("enotsup")])]))"#
+        br#"Ok(List([Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Tuple([Atom("error"), Atom("enotsup")]), Atom("ok"), Atom("ok"), Tuple([Atom("error"), Atom("enotsup")])]))"#
     );
     assert_same_modes(&erts_modes, &pbeam_modes);
 
     let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("init"), OUTPUT_TERMINALS, &[]);
-    assert_eq!(erts, b"[badarg,badarg,badarg,badarg,ok,ok,ok,ok]\n");
+    assert_eq!(erts, b"[badarg,badarg,badarg,badarg,badarg,ok,ok,ok,ok]\n");
     let (pbeam, pbeam_modes) = run_with_modes(&mut probe(), OUTPUT_TERMINALS, &[]);
     assert_eq!(
         pbeam,
-        br#"Ok(List([Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("ok"), Atom("ok"), Atom("ok"), Atom("ok")]))"#
+        br#"Ok(List([Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("ok"), Atom("ok"), Atom("ok"), Atom("ok")]))"#
     );
     // The stdout terminal has its first mode again, and the stderr terminal
     // has the raw mode. On macOS the kernel adds `PENDIN` to the stdout
