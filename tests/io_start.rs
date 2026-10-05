@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{BeamProgram, Map, Term};
 
 mod common;
 
@@ -75,4 +75,119 @@ fn takes_the_tail_and_the_length_of_lists_as_pinned_erts() {
         reference("lists"),
         b"[[b,c],[],badarg,badarg,0,3,badarg,badarg,[y,z],two,other,other,long,other]\n"
     );
+}
+
+#[test]
+fn reads_and_updates_maps_as_pinned_erts() {
+    // `io_start_probe:maps/0` runs `bif` `erlang:map_get/2` with fail label
+    // 0, as `prim_tty:init/1` (prim_tty.erl:220) and `user_drv:init/1`
+    // (user_drv.erl:202) do, and `put_map_exact` with fail label 0, as
+    // `io_lib_format:count_small/2` (io_lib_format.erl:325) does, and both in
+    // a guard. A missing key raises `{badkey, Key}`, and a term that is not a
+    // map raises `{badmap, Map}` (`erl_map.c:250-269`, `beam_common.c:2203-2345`).
+    // With two missing keys, `put_map_exact` reports `value` (atom index 745)
+    // before `abs` (762), the flatmap key order. In a guard, the exception
+    // jumps to the fail label, and the next clause runs.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let tagged = |tag: &str, name: &str| Term::Tuple(vec![atom(tag), atom(name)]);
+    let expected = vec![
+        atom("cooked"),
+        tagged("badkey", "ofd"),
+        tagged("badmap", "foo"),
+        atom("cooked"),
+        atom("other"),
+        atom("other"),
+        Term::Map(
+            Map::from_pairs(vec![
+                (atom("input"), atom("cooked")),
+                (atom("output"), atom("cooked")),
+            ])
+            .unwrap(),
+        ),
+        tagged("badkey", "output"),
+        tagged("badkey", "value"),
+        atom("updated"),
+        atom("other"),
+        atom("other"),
+    ];
+    assert_eq!(
+        program.execute("io_start_probe", "maps", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("maps"),
+        b"[cooked,{badkey,ofd},{badmap,foo},cooked,other,other,\
+          #{input => cooked,output => cooked},{badkey,output},{badkey,value},\
+          updated,other,other]\n"
+    );
+}
+
+#[test]
+fn merges_maps_as_pinned_erts() {
+    // `io_start_probe:merge/0` runs `maps:merge/2`, as `prim_tty:options/1`
+    // (prim_tty.erl:329) does: the values of the second map win
+    // (`erl_map.c:1257-1284`). A merge of a hashmap and a flatmap gives a
+    // hashmap, which `Map` keeps in the ERTS layout. A first argument that is not a map raises
+    // `{badmap, First}`, else a second argument that is not a map raises
+    // `{badmap, Second}`.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs).unwrap());
+    let options = map(vec![
+        (atom("input"), atom("cooked")),
+        (atom("output"), atom("raw")),
+    ]);
+    let big = (1..=33)
+        .map(|key| (Term::Integer(key), Term::Integer(key)))
+        .chain([
+            (Term::Integer(1), atom("one")),
+            (Term::Integer(40), atom("forty")),
+        ])
+        .collect();
+    let expected = vec![
+        map(vec![
+            (atom("input"), atom("cooked")),
+            (atom("output"), atom("raw")),
+            (atom("ofd"), atom("stdout")),
+        ]),
+        options.clone(),
+        options,
+        map(big),
+        Term::Tuple(vec![atom("badmap"), atom("foo")]),
+        Term::Tuple(vec![atom("badmap"), atom("bar")]),
+        Term::Tuple(vec![atom("badmap"), atom("foo")]),
+    ];
+    assert_eq!(
+        program.execute("io_start_probe", "merge", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("merge"),
+        b"[#{input => cooked,output => raw,ofd => stdout},\
+          #{input => cooked,output => raw},#{input => cooked,output => raw},\
+          #{18 => 18,4 => 4,12 => 12,19 => 19,29 => 29,13 => 13,2 => 2,7 => 7,31 => 31,\
+          8 => 8,10 => 10,23 => 23,9 => 9,15 => 15,32 => 32,1 => one,25 => 25,28 => 28,\
+          20 => 20,6 => 6,11 => 11,17 => 17,24 => 24,40 => forty,14 => 14,33 => 33,3 => 3,\
+          16 => 16,30 => 30,21 => 21,5 => 5,27 => 27,26 => 26,22 => 22},\
+          {badmap,foo},{badmap,bar},{badmap,foo}]\n"
+    );
+}
+
+#[test]
+fn formats_the_empty_noshell_slogan_as_pinned_erts() {
+    // `user_drv:init_shell/2` (user_drv.erl:374) runs
+    // `io_lib:bformat("~ts", [""])` with the empty slogan of `-noshell`
+    // (user_drv.erl:271-273). It runs `io_lib_format`, `lists`, and
+    // `unicode`, and `put_map_exact` in `io_lib_format:count_small/2`
+    // (io_lib_format.erl:325).
+    let modules = ["io_lib", "io_lib_format", "lists", "unicode"].map(pinned_beam);
+    let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
+    beams.push(IO_START_PROBE);
+    let program = BeamProgram::load(&beams).unwrap();
+    assert_eq!(
+        program.execute("io_start_probe", "format", &[]).unwrap(),
+        Term::Binary(Vec::new())
+    );
+    assert_eq!(reference("format"), b"<<>>\n");
 }

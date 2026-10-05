@@ -180,6 +180,69 @@ impl Map {
         }
     }
 
+    /// Return the value of a key for a change in place, or `None` when the
+    /// map does not hold the key. The key lookup is the one of `get`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// *map.get_mut(&Term::Integer(1)).unwrap() = Term::Integer(3);
+    /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(3)));
+    /// assert!(map.get_mut(&Term::Integer(2)).is_none());
+    /// ```
+    pub(crate) fn get_mut(&mut self, key: &Term) -> Option<&mut Term> {
+        let hamt = match &mut self.repr {
+            Repr::Flat(pairs) => {
+                return pairs
+                    .iter_mut()
+                    .find(|(existing, _)| existing == key)
+                    .map(|(_, value)| value);
+            }
+            Repr::Hash(hamt) => hamt,
+        };
+        let hash = map_hash(key)?;
+        let mut node = &mut hamt.root;
+        let mut level = 0;
+        loop {
+            match node.child_mut(slot(hash, level))? {
+                Child::Leaf(existing, value) => return (existing == key).then_some(value),
+                Child::Node(inner) => node = inner,
+            }
+            level += 1;
+        }
+    }
+
+    /// Sort key and value pairs by the flatmap key order, as the ERTS loader
+    /// sorts the pairs of a map instruction (`beam_load_map_key_sort`,
+    /// `beam_transform_helpers.c:54-110`). `put_map_exact` then reports the
+    /// first missing key in this order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut pairs = vec![
+    ///     (Term::static_atom("abs"), Term::Integer(1)),
+    ///     (Term::static_atom("value"), Term::Integer(2)),
+    /// ];
+    /// Map::sort_pairs(&mut pairs)?;
+    /// // value has atom index 745, abs has atom index 762.
+    /// assert_eq!(pairs[0].0, Term::static_atom("value"));
+    /// assert!(Map::sort_pairs(&mut [(Term::Tuple(vec![]), Term::Integer(1))]).is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return the first key that the flatmap key order does not support yet.
+    /// The pairs do not change.
+    pub(crate) fn sort_pairs(pairs: &mut [(Term, Term)]) -> Result<(), Term> {
+        if let Some((key, _)) = pairs.iter().find(|(key, _)| flat_key(key).is_none()) {
+            return Err(key.clone());
+        }
+        pairs.sort_by_key(|(key, _)| flat_key(key));
+        Ok(())
+    }
+
     /// Set a key to a value. Replace the value when the key exists. A
     /// flatmap that gets its 33rd key becomes a hashmap, as in ERTS.
     ///
@@ -377,6 +440,22 @@ impl Node {
             return None;
         }
         Some(&self.children[(self.bitmap & (bit - 1)).count_ones() as usize])
+    }
+
+    /// Return the child in a slot for a change in place, or `None` when the
+    /// slot is free.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Node::empty().child_mut(3).is_none());
+    /// ```
+    fn child_mut(&mut self, slot: u32) -> Option<&mut Child> {
+        let bit = 1 << slot;
+        if self.bitmap & bit == 0 {
+            return None;
+        }
+        Some(&mut self.children[(self.bitmap & (bit - 1)).count_ones() as usize])
     }
 
     /// Build the node at `level` for two leaves whose hashes select the
@@ -712,6 +791,51 @@ mod tests {
             Err(Term::Integer(1 << 59))
         );
         assert_eq!(map.len(), 32);
+    }
+
+    #[test]
+    fn changes_the_value_of_an_existing_key_in_place() {
+        let mut flat = integers([1, 2]);
+        *flat.get_mut(&Term::Integer(2)).unwrap() = Term::Integer(0);
+        assert_eq!(flat.get(&Term::Integer(2)), Some(&Term::Integer(0)));
+        assert!(flat.get_mut(&Term::Integer(3)).is_none());
+        // Each root slot of 1..64 is used, so a key can be in a node below the root.
+        let mut hash = integers(1..=64);
+        for key in 1..=64 {
+            *hash.get_mut(&Term::Integer(key)).unwrap() = Term::Integer(-key);
+        }
+        assert!((1..=64).all(|key| hash.get(&Term::Integer(key)) == Some(&Term::Integer(-key))));
+        assert!(hash.get_mut(&Term::Integer(65)).is_none());
+        assert!(integers(1..=33).get_mut(&Term::Integer(34)).is_none());
+        assert!(hash.get_mut(&Term::Integer(1 << 59)).is_none());
+        assert!(hash.get_mut(&Term::Tuple(vec![])).is_none());
+    }
+
+    #[test]
+    fn sorts_pairs_by_the_flatmap_key_order() {
+        // ERTS 29.1.1: (id(#{}))#{abs := 1, value := 2} raises {badkey,value},
+        // because value (index 745) comes before abs (index 762).
+        let mut pairs = vec![
+            (Term::static_atom("abs"), Term::Integer(1)),
+            (Term::static_atom("value"), Term::Integer(2)),
+            (Term::Integer(7), Term::Integer(3)),
+        ];
+        Map::sort_pairs(&mut pairs).unwrap();
+        let sorted: Vec<_> = pairs.iter().map(|(key, _)| key.clone()).collect();
+        assert_eq!(
+            sorted,
+            [
+                Term::Integer(7),
+                Term::static_atom("value"),
+                Term::static_atom("abs")
+            ]
+        );
+        let mut unsupported = vec![
+            (Term::static_atom("abs"), Term::Integer(1)),
+            (Term::Tuple(vec![]), Term::Integer(2)),
+        ];
+        assert_eq!(Map::sort_pairs(&mut unsupported), Err(Term::Tuple(vec![])));
+        assert_eq!(unsupported[0].0, Term::static_atom("abs"));
     }
 
     #[test]

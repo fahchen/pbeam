@@ -508,6 +508,29 @@ pub(crate) enum Instruction {
         destination: Operand,
         pairs: Vec<(Operand, Operand)>,
     },
+    /// Writes a copy of a map with the value of each existing key replaced.
+    /// `pairs` holds each key and value. The live-register count is not
+    /// kept, because PBeam needs no live count. When the source is not a
+    /// map, or a key is not in the map, the instruction jumps to
+    /// `fail_label`, or with fail label 0 raises `error:{badmap, Map}` or
+    /// `error:{badkey, Key}`.
+    ///
+    /// Encoding: opcode, fail label, map operand, destination register, live
+    /// count, extended list, item count, then key and value operands in turn.
+    /// Example: `update_guard/1` in `fixtures/io_start/io_start_probe.beam`
+    /// has `[0x9B, 0x0D, 0x26, 0x03, 0x03, 0x10, 0x17, 0x20, 0x0A, 0x12,
+    /// 0x0A, 0x13]`, which sets atom 18 (`output`) to atom 19 (`cooked`) in
+    /// the map in `x0`, writes the result to `x0`, and jumps to label 38
+    /// when the key is missing.
+    ///
+    /// Erlang: `M#{output := cooked}` in a guard compiles to
+    /// `{put_map_exact,{f,38},{x,0},{x,0},1,{list,[{atom,output},{atom,cooked}]}}`.
+    PutMapExact {
+        fail_label: u32,
+        map: Operand,
+        destination: Operand,
+        pairs: Vec<(Operand, Operand)>,
+    },
     /// Exchanges the values of two registers.
     ///
     /// Encoding: opcode, two registers. Example: `[0xA9, 0x03, 0x13]` swaps
@@ -1166,6 +1189,18 @@ pub(super) fn parse_code(
                     pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
                 }
             }
+            OPCODE_PUT_MAP_EXACT => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let map = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let destination = read_register(data, &mut cursor)?;
+                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                Instruction::PutMapExact {
+                    fail_label,
+                    map,
+                    destination,
+                    pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
+                }
+            }
             OPCODE_MAKE_FUN3 => {
                 let number = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
                 let destination = read_register(data, &mut cursor)?;
@@ -1512,7 +1547,6 @@ fn skip_unsupported_instruction(
     if matches!(
         opcode,
         OPCODE_PUT_MAP_ASSOC
-            | OPCODE_PUT_MAP_EXACT
             | OPCODE_HAS_MAP_FIELDS
             | OPCODE_GET_MAP_ELEMENTS
             | OPCODE_GET_RECORD_ELEMENTS
@@ -1571,7 +1605,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_TEST_IS_PORT => Some(2),
         // `try_case_end Src` is in `erlang:processes_next/1`.
         OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_TRY_CASE_END => Some(1),
-        OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_MAP_EXACT => Some(5),
+        OPCODE_PUT_MAP_ASSOC => Some(5),
         OPCODE_GET_MAP_ELEMENTS | OPCODE_HAS_MAP_FIELDS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),
         OPCODE_PUT_TUPLE2 => Some(2),
@@ -1840,11 +1874,11 @@ mod tests {
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_INTEGER2,
         OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH,
         OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_INIT_YREGS,
-        OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
-        OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
-        OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
-        OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
-        read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
+        OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD,
+        OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
+        OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
+        OPCODE_TEST_IS_PORT, OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END,
+        parse_code, read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
         skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
         test_kind, unsupported_opcode_operand_count,
     };
@@ -2339,6 +2373,61 @@ mod tests {
                 },
                 Instruction::End,
             ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
+        const IO_START_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/io_start/io_start_probe.beam");
+        // update_guard/1: {put_map_exact,{f,38},{x,0},{x,0},1,
+        // {list,[{atom,output},{atom,cooked}]}}, with output as atom 18 and
+        // cooked as atom 19 of the module.
+        let put_map_exact = [
+            OPCODE_PUT_MAP_EXACT,
+            0x0D,
+            0x26,
+            0x03,
+            0x03,
+            0x10,
+            0x17,
+            0x20,
+            0x0A,
+            0x12,
+            0x0A,
+            0x13,
+        ];
+        assert!(
+            IO_START_PROBE
+                .windows(put_map_exact.len())
+                .any(|window| window == put_map_exact),
+            "{put_map_exact:02X?} is not in io_start_probe.beam"
+        );
+        let mut table = AtomTable::new();
+        let atoms: Vec<Atom> = (1..=17)
+            .map(|index| format!("atom{index}"))
+            .chain(["output".into(), "cooked".into()])
+            .map(|name| table.put(&name).unwrap())
+            .collect();
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&put_map_exact[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::PutMapExact {
+                    fail_label: 38,
+                    map: Operand::X(0),
+                    destination: Operand::X(0),
+                    pairs,
+                },
+                Instruction::End,
+            ] if matches!(
+                pairs.as_slice(),
+                [(Operand::Value(Term::Atom(key)), Operand::Value(Term::Atom(value)))]
+                    if key.name() == "output" && value.name() == "cooked"
+            )
         ));
     }
 

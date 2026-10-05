@@ -1,5 +1,5 @@
 -module(io_start_probe).
--export([lists/0]).
+-export([lists/0, maps/0, merge/0, format/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
 %% runs it, and in a guard. `get_tl`, as proc_lib:trans_init/3
@@ -26,5 +26,51 @@ tail_guard(_) -> other.
 
 length_guard(L) when length(L) > 2 -> long;
 length_guard(_) -> other.
+
+%% `bif` `erlang:map_get/2` with fail label 0, as prim_tty:init/1
+%% (prim_tty.erl:220) and user_drv:init/1 (user_drv.erl:202) run it, and in
+%% a guard. `put_map_exact` with fail label 0, as
+%% io_lib_format:count_small/2 (io_lib_format.erl:325) runs it, and in a
+%% guard. With two missing keys, ERTS reports the first key in the flatmap
+%% key order (atom index): `value` before `abs`.
+maps() ->
+    M = id(#{input => cooked, output => raw}),
+    [map_get(input, M),
+     try map_get(ofd, M) catch error:R1 -> R1 end,
+     try map_get(input, id(foo)) catch error:R2 -> R2 end,
+     get_guard(M), get_guard(id(#{})), get_guard(id(foo)),
+     M#{output := cooked},
+     try (id(#{}))#{output := cooked} catch error:R3 -> R3 end,
+     try (id(#{}))#{abs := 1, value := 2} catch error:R4 -> R4 end,
+     update_guard(M), update_guard(id(#{input => cooked})), update_guard(id(foo))].
+
+get_guard(M) when map_get(input, M) =:= cooked -> cooked;
+get_guard(_) -> other.
+
+update_guard(M) when M#{output := cooked} =:= #{input => cooked, output => cooked} -> updated;
+update_guard(_) -> other.
+
+%% `maps:merge/2`, as prim_tty:options/1 (prim_tty.erl:329) runs it: the
+%% values of the second map win. A first argument that is not a map raises
+%% {badmap, First}, else a second argument that is not a map raises
+%% {badmap, Second}.
+merge() ->
+    M = id(#{input => cooked, output => raw}),
+    [maps:merge(id(#{input => raw, output => cooked, ofd => stdout}), M),
+     maps:merge(M, id(#{})),
+     maps:merge(M, M),
+     maps:merge(id(big(33)), id(#{1 => one, 40 => forty})),
+     try maps:merge(id(foo), M) catch error:R1 -> R1 end,
+     try maps:merge(M, id(bar)) catch error:R2 -> R2 end,
+     try maps:merge(id(foo), id(bar)) catch error:R3 -> R3 end].
+
+big(N) -> big(N, #{}).
+big(0, M) -> M;
+big(N, M) -> big(N - 1, M#{N => N}).
+
+%% `io_lib:bformat/2`, as user_drv:init_shell/2 (user_drv.erl:374) runs it
+%% with the empty slogan of `-noshell` (user_drv.erl:271-273).
+format() ->
+    io_lib:bformat(id("~ts"), [id("")]).
 
 id(X) -> X.

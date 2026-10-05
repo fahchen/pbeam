@@ -9,7 +9,7 @@ use crate::{
         code::{self, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::{Atom, AtomTable, Fun, Target, Term},
+    term::{Atom, AtomTable, Fun, Map, Target, Term},
 };
 use std::collections::HashMap;
 
@@ -532,6 +532,30 @@ impl BeamProgram {
                             .map_err(|key| error(format!("unsupported map key {key:?}")))?;
                     }
                     write(process, destination, map)?;
+                }
+                Instruction::PutMapExact {
+                    fail_label,
+                    map,
+                    destination,
+                    pairs,
+                } => {
+                    let map = read(process, map)?;
+                    let pairs = pairs
+                        .iter()
+                        .map(|(key, value)| Ok((read(process, key)?, read(process, value)?)))
+                        .collect::<Result<Vec<_>, BeamError>>()?;
+                    // ERTS `update_map_exact` jumps to a fail label that is
+                    // not 0, and else raises the exception
+                    // (`jit/arm/instr_map.cpp:678-719`).
+                    match update_map_exact(map, pairs)? {
+                        Ok(map) => write(process, destination, map)?,
+                        Err(_) if *fail_label != 0 => jump(module, process, *fail_label)?,
+                        Err(reason) => {
+                            if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                                return Ok(outcome);
+                            }
+                        }
+                    }
                 }
                 Instruction::Swap(left, right) => {
                     let left_value = read(process, left)?;
@@ -1166,6 +1190,44 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
         reason: Term::static_atom("normal"),
         result: Some(result),
     }))
+}
+
+/// Replace the value of each existing key of a map, as ERTS
+/// `erts_gc_update_map_exact` does (`beam_common.c:2203-2345`). The pairs go
+/// in the flatmap key order, as the ERTS loader sorts them, so the first key
+/// that the map does not hold is the first missing key in that order. Return
+/// the new map, or the exception reason `{badmap, Map}` for a term that is
+/// not a map and `{badkey, Key}` for a missing key.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))])?);
+/// let cooked = vec![(Term::static_atom("output"), Term::static_atom("cooked"))];
+/// assert!(matches!(update_map_exact(map, cooked.clone())?, Ok(Term::Map(_))));
+/// let badmap = update_map_exact(Term::static_atom("foo"), cooked)?.unwrap_err();
+/// assert_eq!(badmap, Term::Tuple(vec![Term::static_atom("badmap"), Term::static_atom("foo")]));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for a key that the map form does not support yet,
+/// for example a tuple key: its place in the flatmap key order is unknown.
+fn update_map_exact(
+    mut map: Term,
+    mut pairs: Vec<(Term, Term)>,
+) -> Result<Result<Term, Term>, BeamError> {
+    let Term::Map(entries) = &mut map else {
+        return Ok(Err(Term::Tuple(vec![Term::static_atom("badmap"), map])));
+    };
+    Map::sort_pairs(&mut pairs).map_err(|key| error(format!("unsupported map key {key:?}")))?;
+    for (key, value) in pairs {
+        let Some(existing) = entries.get_mut(&key) else {
+            return Ok(Err(Term::Tuple(vec![Term::static_atom("badkey"), key])));
+        };
+        *existing = value;
+    }
+    Ok(Ok(map))
 }
 
 /// Raise an exception in the process, as ERTS `handle_error` does: continue
@@ -2056,6 +2118,83 @@ mod tests {
                 )],
             }])
             .contains("unsupported map key Tuple([])")
+        );
+    }
+
+    #[test]
+    fn raises_or_jumps_when_put_map_exact_gets_a_term_that_is_not_a_map() {
+        // erlc puts an `is_map` test before each `put_map_exact`, so compiled
+        // code does not reach this case. ERTS still raises `{badmap, Map}`
+        // with fail label 0 and jumps to another fail label
+        // (`beam_common.c:2231-2234`).
+        let run = |fail_label, map| {
+            make_program(
+                vec![
+                    Instruction::PutMapExact {
+                        fail_label,
+                        map,
+                        destination: Operand::X(0),
+                        pairs: vec![(atom("output"), atom("cooked"))],
+                    },
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Move(atom("failed"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        assert_eq!(
+            run(0, atom("foo")).unwrap_err().to_string(),
+            "root process exited with Tuple([Tuple([Atom(\"badmap\"), Atom(\"foo\")]), List([])])"
+        );
+        assert_eq!(run(3, atom("foo")).unwrap(), test_atom("failed"));
+        // A tuple key has no place in the PBeam flatmap key order yet.
+        let map = Operand::Value(Term::Map(Map::new()));
+        let tuple_key = make_program(
+            vec![Instruction::PutMapExact {
+                fail_label: 0,
+                map,
+                destination: Operand::X(0),
+                pairs: vec![(Operand::Value(Term::Tuple(vec![])), atom("cooked"))],
+            }],
+            0,
+        )
+        .execute("fixture", "main", &[]);
+        assert!(
+            tuple_key
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported map key Tuple([])")
+        );
+    }
+
+    #[test]
+    fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
+        // A flatmap accepts the integer 2^59, and a hashmap does not yet.
+        let pairs = |keys: std::ops::RangeInclusive<i64>| {
+            let pairs = keys.map(|key| (Term::Integer(key), Term::Integer(0)));
+            Term::Map(Map::from_pairs(pairs.collect()).unwrap())
+        };
+        let merge = make_program(
+            vec![
+                Instruction::Move(Operand::Value(pairs(1 << 59..=1 << 59)), Operand::X(0)),
+                Instruction::Move(Operand::Value(pairs(1..=32)), Operand::X(1)),
+                Instruction::CallExternal {
+                    arity: 2,
+                    module: "maps".into(),
+                    name: "merge".into(),
+                    tail: true,
+                    deallocate: 0,
+                },
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[]);
+        assert_eq!(
+            merge.unwrap_err().to_string(),
+            "unsupported map key Integer(576460752303423488)"
         );
     }
 

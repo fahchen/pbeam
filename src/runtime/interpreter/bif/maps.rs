@@ -22,3 +22,75 @@ pub(super) fn keys(map: &Term) -> Result<BifResult, BeamError> {
         _ => Err(error("unsupported maps:keys/1 argument: not a map")),
     }
 }
+
+/// Run `erlang:map_get/2`: return the value of a key in a map, as ERTS
+/// `maps_get_2` does (`erl_map.c:250-269`). A key that the map does not
+/// hold raises `error:{badkey, Key}`, and a term that is not a map raises
+/// `error:{badmap, Map}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(test_atom("input"), test_atom("cooked"))])?);
+/// assert!(matches!(get(&test_atom("input"), &map), BifResult::Value(value) if value == test_atom("cooked")));
+/// assert!(matches!(get(&test_atom("ofd"), &map), BifResult::Raise { .. }));
+/// assert!(matches!(get(&test_atom("input"), &test_atom("foo")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn get(key: &Term, map: &Term) -> BifResult {
+    let Term::Map(entries) = map else {
+        return error_with("badmap", map);
+    };
+    entries
+        .get(key)
+        .map_or_else(|| error_with("badkey", key), |value| Value(value.clone()))
+}
+
+/// Run `maps:merge/2`: return the first map with each pair of the second
+/// map put into it, so the values of the second map win, as ERTS
+/// `maps_merge_2` does (`erl_map.c:1257-1284`). When the first argument is
+/// not a map, raise `error:{badmap, First}`; else when the second argument
+/// is not a map, raise `error:{badmap, Second}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let first = Term::Map(Map::from_pairs(vec![(test_atom("input"), test_atom("raw"))])?);
+/// let second = Term::Map(Map::from_pairs(vec![(test_atom("input"), test_atom("cooked"))])?);
+/// assert!(matches!(merge(&first, &second)?, BifResult::Value(merged) if merged == second));
+/// assert!(matches!(merge(&test_atom("foo"), &second)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when the merged map gets a key that the map form
+/// does not support yet, for example an integer outside the small-integer
+/// range in a map of more than 32 keys.
+pub(super) fn merge(first: &Term, second: &Term) -> Result<BifResult, BeamError> {
+    match (first, second) {
+        (Term::Map(first), Term::Map(second)) => {
+            let pairs = first.iter().chain(second.iter());
+            let pairs = pairs.map(|(key, value)| (key.clone(), value.clone()));
+            let merged = Map::from_pairs(pairs.collect())
+                .map_err(|key| error(format!("unsupported map key {key:?}")))?;
+            Ok(Value(Term::Map(merged)))
+        }
+        (Term::Map(_), _) => Ok(error_with("badmap", second)),
+        _ => Ok(error_with("badmap", first)),
+    }
+}
+
+/// Return the `error:{Tag, Term}` exception, as ERTS `BIF_ERROR` with
+/// `BADMAP` or `BADKEY` and `fvalue` set to the term.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let BifResult::Raise { reason, .. } = error_with("badmap", &test_atom("foo")) else { panic!() };
+/// assert_eq!(reason, Term::Tuple(vec![test_atom("badmap"), test_atom("foo")]));
+/// ```
+fn error_with(tag: &str, term: &Term) -> BifResult {
+    BifResult::Raise {
+        class: ExceptionClass::Error,
+        reason: Term::Tuple(vec![Term::static_atom(tag), term.clone()]),
+    }
+}
