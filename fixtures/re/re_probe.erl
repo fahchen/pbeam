@@ -71,11 +71,20 @@ unicode_list() ->
      re:compile("(", [unicode])].
 
 %% The export option (build_compile_export, erl_bif_re.c:644-700).
+%% Encoded holds the compile options and the bsr convention of the code,
+%% so each compile option gives other bytes. The last bsr option applies.
 export() ->
     [exported(re:compile(<<"a">>, [export])),
      exported(re:compile(["a", <<"b">>], [export, caseless])),
-     exported(re:compile([$a, ?MODULE:id(256)], [unicode, export])),
-     re:compile(<<"(">>, [export])].
+     exported(re:compile([$a, ?MODULE:id(256)], [unicode, export]))]
+    ++ [exported(re:compile(<<"a">>, [export | Options]))
+        || Options <- [[anchored], [caseless], [dollar_endonly], [dotall],
+                       [extended], [firstline], [multiline], [ungreedy],
+                       [ucp], [no_start_optimize], [bsr_anycrlf],
+                       [bsr_unicode], [never_utf],
+                       [bsr_anycrlf, bsr_unicode],
+                       [bsr_unicode, bsr_anycrlf]]]
+    ++ [re:compile(<<"(">>, [export])].
 
 %% Calls that ERTS runs and PBeam does not support yet.
 unsupported(chardata) -> re:compile(foo, [unicode]).

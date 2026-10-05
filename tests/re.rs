@@ -230,8 +230,11 @@ fn exports_compiled_patterns_as_pinned_erts() {
     // the pattern bytes, also of iodata and of a character list that
     // `re:ucompile/2` converts. `Options` is the option term as given.
     // `Encoded` is the `pcre2_serialize_encode` form, which depends on the
-    // host, so each binary is compared with the ERTS bytes on this host. A
-    // compile error is not exported.
+    // host, so each binary is compared with the ERTS bytes on this host.
+    // `Encoded` holds the compile options and the bsr convention of the
+    // code, so this comparison checks the PCRE2 bits of each compile
+    // option, and that the last bsr option applies. A compile error is not
+    // exported.
     let program = program();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let result = program.execute("re_probe", "export", &[]).unwrap();
@@ -243,7 +246,7 @@ fn exports_compiled_patterns_as_pinned_erts() {
         failure,
         &compile_error(&program, "missing closing parenthesis", 1)
     );
-    let expected = [
+    let mut expected = vec![
         (b"a".as_slice(), vec![atom("export")], 0),
         (b"ab", vec![atom("export"), atom("caseless")], 0),
         (
@@ -252,6 +255,29 @@ fn exports_compiled_patterns_as_pinned_erts() {
             1,
         ),
     ];
+    let single_options = [
+        "anchored",
+        "caseless",
+        "dollar_endonly",
+        "dotall",
+        "extended",
+        "firstline",
+        "multiline",
+        "ungreedy",
+        "ucp",
+        "no_start_optimize",
+        "bsr_anycrlf",
+        "bsr_unicode",
+        "never_utf",
+    ];
+    let option_lists = single_options.iter().map(|&option| vec![option]).chain([
+        vec!["bsr_anycrlf", "bsr_unicode"],
+        vec!["bsr_unicode", "bsr_anycrlf"],
+    ]);
+    for options in option_lists {
+        let given = std::iter::once("export").chain(options).map(atom);
+        expected.push((b"a", given.collect(), 0));
+    }
     assert_eq!(results.len(), expected.len());
     let mut bytes = Vec::new();
     for (result, (source, options, unicode)) in results.iter().zip(expected) {
@@ -274,6 +300,19 @@ fn exports_compiled_patterns_as_pinned_erts() {
         assert_eq!(given, &options);
         bytes.push([header, pattern, encoded]);
     }
+    // Each compile option changes `Encoded`. `bsr_unicode` is the default,
+    // and a later bsr option replaces an earlier one.
+    let encoded: Vec<&Vec<u8>> = bytes.iter().map(|[_, _, encoded]| *encoded).collect();
+    let plain = encoded[0];
+    let (by_option, bsr_orders) = encoded[3..].split_at(single_options.len());
+    for (option, &bytes) in single_options.iter().zip(by_option) {
+        assert_eq!(bytes == plain, *option == "bsr_unicode", "{option}");
+    }
+    assert_eq!(bsr_orders[0], plain);
+    let bsr_anycrlf = single_options
+        .iter()
+        .position(|&option| option == "bsr_anycrlf");
+    assert_eq!(bsr_orders[1], by_option[bsr_anycrlf.unwrap()]);
     let text = |bytes: &[u8]| {
         let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
         format!("[{}]", bytes.join(","))
