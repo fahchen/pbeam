@@ -18,6 +18,17 @@ mod native;
 
 use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function};
 
+/// The largest number of arguments of `erlang:apply/3`. ERTS `apply` copies
+/// at most `MAX_REG - 1` arguments to the X registers (`erl_vm.h:55`,
+/// `beam_common.c:1501-1513`), so a longer list raises `system_limit`.
+const APPLY_MAX_ARGUMENTS: usize = 1023;
+
+/// The largest number of arguments of `erlang:apply/2`. The JIT stops at
+/// `MAX_REG - 1` arguments, because the loader keeps the highest X register
+/// (`erl_vm.h:55`, `jit/arm/instr_fun.cpp:290-297`), so a longer list
+/// raises `system_limit`.
+const APPLY_FUN_MAX_ARGUMENTS: usize = 1022;
+
 #[derive(Debug)]
 pub struct BeamProgram {
     /// The loaded modules by name.
@@ -860,9 +871,6 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        /// ERTS `apply` copies at most `MAX_REG - 1` arguments to the X
-        /// registers (`erl_vm.h:55`, `beam_common.c:1501-1513`).
-        const MAX_ARGUMENTS: usize = 1023;
         let process = scheduler.current_process_mut();
         let mut call = call_arguments(&process.registers, 3)?;
         let (module, name, arguments) = loop {
@@ -879,7 +887,7 @@ impl BeamProgram {
             }
             call = arguments;
         };
-        if arguments.len() > MAX_ARGUMENTS {
+        if arguments.len() > APPLY_MAX_ARGUMENTS {
             let system_limit = Term::static_atom("system_limit");
             return Ok(raise(process, ExceptionClass::Error, system_limit));
         }
@@ -912,10 +920,6 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        /// The JIT stops at `MAX_REG - 1` arguments, because the loader
-        /// keeps the highest X register (`erl_vm.h:55`,
-        /// `jit/arm/instr_fun.cpp:290-297`).
-        const MAX_ARGUMENTS: usize = 1022;
         let process = scheduler.current_process_mut();
         let fun = read(process, &Operand::X(0))?;
         let mut list = read(process, &Operand::X(1))?;
@@ -924,7 +928,7 @@ impl BeamProgram {
             return Ok(raise(process, ExceptionClass::Error, badarg));
         };
         let arguments = std::mem::take(arguments);
-        if arguments.len() > MAX_ARGUMENTS {
+        if arguments.len() > APPLY_FUN_MAX_ARGUMENTS {
             let system_limit = Term::static_atom("system_limit");
             return Ok(raise(process, ExceptionClass::Error, system_limit));
         }
