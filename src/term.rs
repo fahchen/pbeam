@@ -4,9 +4,9 @@ mod map;
 mod order;
 
 pub use atom::Atom;
-pub(crate) use atom::AtomTable;
 #[cfg(test)]
 pub(crate) use atom::test_atom;
+pub(crate) use atom::{AtomTable, MAX_ATOM_CHARACTERS};
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target};
 pub use map::Map;

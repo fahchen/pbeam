@@ -9,7 +9,7 @@ use crate::{
         code::{self, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::{Atom, AtomTable, Fun, Target, Term},
+    term::{Atom, AtomTable, Fun, Map, Target, Term},
 };
 use std::collections::HashMap;
 
@@ -33,8 +33,8 @@ const APPLY_FUN_MAX_ARGUMENTS: usize = 1022;
 pub struct BeamProgram {
     /// The loaded modules by name.
     modules: HashMap<String, BeamModule>,
-    /// The atom table of the program. ERTS has one atom table for each
-    /// emulator, so each program has its own table.
+    /// The atom table of the loaded modules. ERTS has one atom table for
+    /// each emulator, so each run starts its own table from a copy of it.
     atoms: AtomTable,
 }
 
@@ -100,8 +100,10 @@ impl BeamProgram {
         })
     }
 
-    /// Return the atom of a name when the atom table of the program holds
-    /// it. Use it to build terms that compare with the terms of the program.
+    /// Return the atom of a name when the atom table of the loaded modules
+    /// holds it. Use it to build terms that compare with the terms of the
+    /// program. The table does not hold the atoms that a run makes, for
+    /// example with `erlang:list_to_atom/1`.
     ///
     /// # Examples
     ///
@@ -139,7 +141,7 @@ impl BeamProgram {
             .exports
             .get(&(function.to_owned(), arity))
             .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))?;
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(self.atoms.clone());
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
         while scheduler.schedule_next().is_some() {
             match self.run(&mut scheduler)? {
@@ -486,6 +488,10 @@ impl BeamProgram {
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
                         TestKind::Function => matches!(value, Term::Fun(_)),
+                        TestKind::Integer => matches!(value, Term::Integer(_)),
+                        TestKind::Boolean => {
+                            matches!(&value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
+                        }
                     };
                     if !passed {
                         jump(module, process, *fail_label)?;
@@ -535,6 +541,30 @@ impl BeamProgram {
                     }
                     write(process, destination, map)?;
                 }
+                Instruction::PutMapExact {
+                    fail_label,
+                    map,
+                    destination,
+                    pairs,
+                } => {
+                    let map = read(process, map)?;
+                    let pairs = pairs
+                        .iter()
+                        .map(|(key, value)| Ok((read(process, key)?, read(process, value)?)))
+                        .collect::<Result<Vec<_>, BeamError>>()?;
+                    // ERTS `update_map_exact` jumps to a fail label that is
+                    // not 0, and else raises the exception
+                    // (`jit/arm/instr_map.cpp:678-719`).
+                    match update_map_exact(map, pairs)? {
+                        Ok(map) => write(process, destination, map)?,
+                        Err(_) if *fail_label != 0 => jump(module, process, *fail_label)?,
+                        Err(reason) => {
+                            if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                                return Ok(outcome);
+                            }
+                        }
+                    }
+                }
                 Instruction::Swap(left, right) => {
                     let left_value = read(process, left)?;
                     let right_value = read(process, right)?;
@@ -556,6 +586,18 @@ impl BeamProgram {
                     right,
                 } => {
                     if read(process, left)? == read(process, right)? {
+                        jump(module, process, *fail_label)?;
+                    }
+                }
+                Instruction::TestLess {
+                    fail_label,
+                    left,
+                    right,
+                } => {
+                    if !read(process, left)?
+                        .compare(&read(process, right)?)?
+                        .is_lt()
+                    {
                         jump(module, process, *fail_label)?;
                     }
                 }
@@ -673,6 +715,15 @@ impl BeamProgram {
                 } => {
                     let mut values = nonempty_list(read(process, source)?)?;
                     write(process, destination, values.swap_remove(0))?;
+                }
+                Instruction::GetTail {
+                    source,
+                    destination,
+                } => {
+                    let mut values = nonempty_list(read(process, source)?)?;
+                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+                    values.remove(0);
+                    write(process, destination, Term::List(values))?;
                 }
                 Instruction::Send => {
                     let Term::Pid(target) = read(process, &Operand::X(0))? else {
@@ -1159,6 +1210,45 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
     }))
 }
 
+/// Replace the value of each existing key of a map, as ERTS
+/// `erts_gc_update_map_exact` does (`beam_common.c:2203-2345`). The pairs go
+/// in the flatmap key order, as the ERTS loader sorts them, so the first key
+/// that the map does not hold is the first missing key in that order. Return
+/// the new map, or the exception reason `{badmap, Map}` for a term that is
+/// not a map and `{badkey, Key}` for a missing key. A key of a type that a
+/// PBeam map cannot hold, for example a tuple, is a missing key.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))])?);
+/// let cooked = vec![(Term::static_atom("output"), Term::static_atom("cooked"))];
+/// assert!(matches!(update_map_exact(map, cooked.clone())?, Ok(Term::Map(_))));
+/// let badmap = update_map_exact(Term::static_atom("foo"), cooked)?.unwrap_err();
+/// assert_eq!(badmap, Term::Tuple(vec![Term::static_atom("badmap"), Term::static_atom("foo")]));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when the key order depends on two different
+/// references (`Map::sort_pairs`).
+fn update_map_exact(
+    mut map: Term,
+    mut pairs: Vec<(Term, Term)>,
+) -> Result<Result<Term, Term>, BeamError> {
+    let Term::Map(entries) = &mut map else {
+        return Ok(Err(Term::Tuple(vec![Term::static_atom("badmap"), map])));
+    };
+    Map::sort_pairs(&mut pairs)?;
+    for (key, value) in pairs {
+        let Some(existing) = entries.get_mut(&key) else {
+            return Ok(Err(Term::Tuple(vec![Term::static_atom("badkey"), key])));
+        };
+        *existing = value;
+    }
+    Ok(Ok(map))
+}
+
 /// Raise an exception in the process, as ERTS `handle_error` does: continue
 /// at the nearest live catch tag, or return the exit outcome when no frame
 /// holds one.
@@ -1396,6 +1486,9 @@ fn read_operand(
         Operand::UnsupportedLiteral(index) => {
             Err(error(format!("unsupported BEAM literal index {index}")))
         }
+        Operand::UnsupportedInteger => Err(error(
+            "unsupported BEAM integer operand outside the 64-bit range: needs a bignum",
+        )),
         Operand::X(index) => registers
             .get(*index as usize)
             .and_then(Clone::clone)
@@ -1447,7 +1540,9 @@ fn write_operand(
             }
             stack[index] = StackSlot::Term(value);
         }
-        Operand::Value(_) => return Err(error("invalid BEAM move destination")),
+        Operand::Value(_) | Operand::UnsupportedInteger => {
+            return Err(error("invalid BEAM move destination"));
+        }
     }
     Ok(())
 }
@@ -1629,7 +1724,7 @@ mod tests {
         let program =
             BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
         let label = program.modules["fun_probe"].exports[&("tail_wait".to_owned(), 1)];
-        let mut scheduler = Scheduler::default();
+        let mut scheduler = Scheduler::new(program.atoms.clone());
         let frame = program.frame("fun_probe", label, 1).unwrap();
         scheduler.start(frame, vec![Term::Integer(1)]).unwrap();
         scheduler.schedule_next().unwrap();
@@ -2042,6 +2137,115 @@ mod tests {
                 )],
             }])
             .contains("unsupported map key Tuple([])")
+        );
+    }
+
+    #[test]
+    fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
+        // erlc puts an `is_map` test before each `put_map_exact`, so compiled
+        // code does not reach this case. ERTS still raises `{badmap, Map}`
+        // with fail label 0 and jumps to another fail label
+        // (`beam_common.c:2231-2234`).
+        let run = |fail_label, map| {
+            make_program(
+                vec![
+                    Instruction::PutMapExact {
+                        fail_label,
+                        map,
+                        destination: Operand::X(0),
+                        pairs: vec![(atom("output"), atom("cooked"))],
+                    },
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Move(atom("failed"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        assert_eq!(
+            run(0, atom("foo")).unwrap_err().to_string(),
+            "root process exited with Tuple([Tuple([Atom(\"badmap\"), Atom(\"foo\")]), List([])])"
+        );
+        assert_eq!(run(3, atom("foo")).unwrap(), test_atom("failed"));
+        // A key of a type that a PBeam map cannot hold is a missing key.
+        let tuple_key = |fail_label| {
+            make_program(
+                vec![
+                    Instruction::PutMapExact {
+                        fail_label,
+                        map: Operand::Value(Term::Map(Map::new())),
+                        destination: Operand::X(0),
+                        pairs: vec![(Operand::Value(Term::Tuple(vec![])), atom("cooked"))],
+                    },
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Move(atom("failed"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        assert_eq!(
+            tuple_key(0).unwrap_err().to_string(),
+            "root process exited with Tuple([Tuple([Atom(\"badkey\"), Tuple([])]), List([])])"
+        );
+        assert_eq!(tuple_key(3).unwrap(), test_atom("failed"));
+        // Two different references have no PBeam order.
+        let references = make_program(
+            vec![Instruction::PutMapExact {
+                fail_label: 0,
+                map: Operand::Value(Term::Map(Map::new())),
+                destination: Operand::X(0),
+                pairs: vec![
+                    (
+                        Operand::Value(Term::Reference(crate::Reference(1))),
+                        atom("a"),
+                    ),
+                    (
+                        Operand::Value(Term::Reference(crate::Reference(2))),
+                        atom("b"),
+                    ),
+                ],
+            }],
+            0,
+        )
+        .execute("fixture", "main", &[]);
+        assert!(
+            references
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported term order of two references")
+        );
+    }
+
+    #[test]
+    fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
+        // A flatmap accepts the integer 2^59, and a hashmap does not yet.
+        let pairs = |keys: std::ops::RangeInclusive<i64>| {
+            let pairs = keys.map(|key| (Term::Integer(key), Term::Integer(0)));
+            Term::Map(Map::from_pairs(pairs.collect()).unwrap())
+        };
+        let merge = make_program(
+            vec![
+                Instruction::Move(Operand::Value(pairs(1 << 59..=1 << 59)), Operand::X(0)),
+                Instruction::Move(Operand::Value(pairs(1..=32)), Operand::X(1)),
+                Instruction::CallExternal {
+                    arity: 2,
+                    module: "maps".into(),
+                    name: "merge".into(),
+                    tail: true,
+                    deallocate: 0,
+                },
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[]);
+        assert_eq!(
+            merge.unwrap_err().to_string(),
+            "unsupported map key Integer(576460752303423488)"
         );
     }
 
@@ -2803,6 +3007,39 @@ mod tests {
             ])
             .contains("unsupported demonitor options")
         );
+    }
+
+    #[test]
+    fn puts_a_new_atom_into_the_atom_table_of_the_run() {
+        // ERTS has one atom table for each emulator, and
+        // `erlang:list_to_atom/1` gives a new atom the next index
+        // (`erts_atom_put`). A run starts with a copy of the table of the
+        // loaded modules, so `pbeam_alpha` gets index 1151 after
+        // `pbeam_zeta` (1150). The table of the loaded modules does not
+        // change, so each run gives the same index.
+        let mut program = make_program(
+            vec![
+                Instruction::Move(
+                    Operand::Value(Term::List(
+                        "pbeam_alpha"
+                            .bytes()
+                            .map(|byte| Term::Integer(i64::from(byte)))
+                            .collect(),
+                    )),
+                    Operand::X(0),
+                ),
+                erlang_call("list_to_atom", 1, true),
+            ],
+            0,
+        );
+        assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1150);
+        for _ in 0..2 {
+            assert!(matches!(
+                program.execute("fixture", "main", &[]).unwrap(),
+                Term::Atom(ref alpha) if alpha.name() == "pbeam_alpha" && alpha.index() == 1151
+            ));
+        }
+        assert_eq!(program.atom("pbeam_alpha"), None);
     }
 
     #[test]
@@ -3605,27 +3842,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_is_ge_on_two_different_references() {
+    fn rejects_is_ge_and_is_lt_on_two_different_references() {
         // ERTS orders two references by the scheduler thread that made each
         // one; this is the "Term order" row in `docs/erts-differences.md`.
         let reference = |number| Operand::Value(Term::Reference(crate::Reference(number)));
-        let body = vec![
-            Instruction::TestGreaterEqual {
-                fail_label: 3,
-                left: reference(1),
-                right: reference(2),
-            },
-            Instruction::Label(3),
-            Instruction::Return,
-        ];
-        assert_eq!(
-            make_program(body, 0)
-                .execute("fixture", "main", &[])
-                .unwrap_err()
-                .to_string(),
-            "unsupported term order of two references Reference(Reference(1)) and \
-             Reference(Reference(2))"
-        );
+        let is_ge = Instruction::TestGreaterEqual {
+            fail_label: 3,
+            left: reference(1),
+            right: reference(2),
+        };
+        let is_lt = Instruction::TestLess {
+            fail_label: 3,
+            left: reference(1),
+            right: reference(2),
+        };
+        for test in [is_ge, is_lt] {
+            let body = vec![test, Instruction::Label(3), Instruction::Return];
+            assert_eq!(
+                make_program(body, 0)
+                    .execute("fixture", "main", &[])
+                    .unwrap_err()
+                    .to_string(),
+                "unsupported term order of two references Reference(Reference(1)) and \
+                 Reference(Reference(2))"
+            );
+        }
     }
 
     #[test]

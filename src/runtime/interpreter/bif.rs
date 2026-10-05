@@ -1,13 +1,14 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `erlang`, `erts_internal`, `lists`, `maps`, and `unicode` modules hold
-//! the BIF bodies that do not fit on one table line.
+//! The `erlang`, `erts_internal`, `ets`, `lists`, `maps`, and `unicode`
+//! modules hold the BIF bodies that do not fit on one table line.
 
 use super::*;
 
 mod erlang;
 mod erts_internal;
+mod ets;
 mod lists;
 mod maps;
 mod unicode;
@@ -52,6 +53,22 @@ impl BifResult {
         BifResult::Raise {
             class: ExceptionClass::Error,
             reason: Term::static_atom("badarg"),
+        }
+    }
+
+    /// Return the `error:badarith` exception, which ERTS raises with
+    /// `BADARITH` for an arithmetic operand that is not a number
+    /// (`erl_arith.c`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(BifResult::badarith(), BifResult::Raise { class: ExceptionClass::Error, .. }));
+    /// ```
+    pub(super) fn badarith() -> BifResult {
+        BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("badarith"),
         }
     }
 }

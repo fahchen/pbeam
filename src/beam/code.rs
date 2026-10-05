@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::module::BeamModule;
 use crate::{
     error::{BeamError, error},
-    term::{Atom, AtomTable, Fun, Lambda, Map, Term},
+    term::{Atom, AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, Map, Term},
 };
 
 const WORD_SIZE: usize = 4;
@@ -43,9 +43,6 @@ const ETF_EXPORT_EXT: u8 = 113;
 const ETF_MAP_EXT: u8 = 116;
 const ETF_SMALL_ATOM_UTF8_EXT: u8 = 119;
 const FIRST_ATOM_INDEX: usize = 1;
-/// The largest number of characters in an atom name (`MAX_ATOM_CHARACTERS`
-/// in `atom.h`).
-const MAX_ATOM_CHARACTERS: usize = 255;
 const FIRST_LABEL_NUMBER: u32 = 1;
 
 /// Parse the BEAM subset used by this runtime.
@@ -87,6 +84,8 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// move        ::= 64 move_source (x_register | y_register)
 /// move_source ::= value | x_register | y_register
 /// move_source ::= literal_value
+/// move_source ::= bignum_value ; loads, and fails when the instruction reads it
+/// bignum_value ::= huge(1) ; PBeam has no bignum term
 /// literal_value ::= compact(7) compact(0) ; compact(7) value is 4
 /// x_register  ::= compact(3)
 /// y_register  ::= compact(4)
@@ -106,7 +105,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// selection_list ::= compact(7, short=1) compact(0) selection_pair[select_count/2]
 /// selection_pair ::= atom_value compact(5)
 /// type_test ::= test_opcode compact(5) register
-/// test_opcode ::= 48 ; is_atom | 49 ; is_pid | 50 ; is_reference | 53 ; is_binary | 55 ; is_list | 57 ; is_tuple | 77 ; is_function | 156 ; is_map
+/// test_opcode ::= 45 ; is_integer | 48 ; is_atom | 49 ; is_pid | 50 ; is_reference | 53 ; is_binary | 55 ; is_list | 57 ; is_tuple | 77 ; is_function | 114 ; is_boolean | 156 ; is_map
 /// is_function2 ::= 115 compact(5) move_source move_source ; the arity is a literal or a register
 /// put_list ::= 69 move_source move_source register
 /// make_fun3 ::= 171 lambda_number:compact(0) register environment
@@ -147,6 +146,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// short(tag)   ::= value:4 0 tag:3
 /// extended(tag) ::= high:3 1 0 tag:3 low:8
 /// large(tag)   ::= size_code:3 1 1 tag:3 byte[size_code + 2] ; size_code in 0..=6
+/// huge(tag)    ::= 7:3 1 1 tag:3 extra:compact(0) byte[extra + 9]
 /// ```
 ///
 /// `container_size` counts bytes after its field, including `BEAM` and chunks.
