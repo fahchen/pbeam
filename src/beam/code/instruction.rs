@@ -277,7 +277,19 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `(id(Const))()` compiles to `{call_fun,0}`, and
     /// `tail_call(F) -> F(tail).` compiles to `{call_fun2,{f,53},1,{tr,{x,1},...}}`.
-    CallFun { arity: u32, function: Operand },
+    ///
+    /// BEAM has no tail form of a fun call. The compiler emits the call, then
+    /// `deallocate D` and `return`. The ERTS loader joins the three
+    /// instructions into `i_call_fun_last` or `i_call_fun2_last`
+    /// (`jit/arm/ops.tab:868-880`, `emu/ops.tab:1067-1073`), and so does
+    /// `parse_code`: the call then sets `tail`, and `deallocate` is the stack
+    /// size to release first.
+    CallFun {
+        arity: u32,
+        function: Operand,
+        tail: bool,
+        deallocate: u32,
+    },
     /// An instruction that is parsed so the module can load, but cannot run.
     Unsupported(u8),
     /// Writes a catch tag to a Y register. While the tag is live, an
@@ -839,7 +851,28 @@ pub(super) fn parse_code(
                     arity,
                 }
             }
-            OPCODE_RETURN => Instruction::Return,
+            OPCODE_RETURN => {
+                // The ERTS loader transforms `call_fun Arity | deallocate D |
+                // return` into `i_call_fun_last Arity D`, and `call_fun2` in
+                // the same way (`jit/arm/ops.tab:868-880`; the emu loader
+                // turns `call_fun2` into `call_fun` first,
+                // `emu/generators.tab:26-52`). The fun call then replaces the
+                // frame of its caller.
+                if let [
+                    ..,
+                    Instruction::CallFun {
+                        tail, deallocate, ..
+                    },
+                    Instruction::Deallocate { stack_size },
+                ] = instructions.as_mut_slice()
+                {
+                    *tail = true;
+                    *deallocate = *stack_size;
+                    instructions.pop();
+                    continue;
+                }
+                Instruction::Return
+            }
             OPCODE_CALL => Instruction::Call {
                 arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
                 label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
@@ -1049,6 +1082,8 @@ pub(super) fn parse_code(
                 Instruction::CallFun {
                     arity,
                     function: Operand::X(arity),
+                    tail: false,
+                    deallocate: 0,
                 }
             }
             OPCODE_CALL_FUN2 => {
@@ -1067,7 +1102,12 @@ pub(super) fn parse_code(
                 if !matches!(function, Operand::X(_) | Operand::Y(_)) {
                     return Err(error("BEAM call_fun2 function is not a register"));
                 }
-                Instruction::CallFun { arity, function }
+                Instruction::CallFun {
+                    arity,
+                    function,
+                    tail: false,
+                    deallocate: 0,
+                }
             }
             OPCODE_SWAP => Instruction::Swap(
                 read_register(data, &mut cursor)?,
@@ -2182,9 +2222,9 @@ mod tests {
             [
                 Instruction::MakeFun { lambda: first, free, destination: Operand::X(0) },
                 Instruction::MakeFun { lambda: second, free: empty, destination: Operand::Y(10) },
-                Instruction::CallFun { arity: 0, function: Operand::X(0) },
-                Instruction::CallFun { arity: 1, function: Operand::X(1) },
-                Instruction::CallFun { arity: 0, function: Operand::Y(0) },
+                Instruction::CallFun { arity: 0, function: Operand::X(0), tail: false, .. },
+                Instruction::CallFun { arity: 1, function: Operand::X(1), tail: false, .. },
+                Instruction::CallFun { arity: 0, function: Operand::Y(0), tail: false, .. },
                 Instruction::End,
             ] if *first == lambdas[2].0
                 && matches!(free.as_slice(), [Operand::X(0)])
@@ -2213,6 +2253,51 @@ mod tests {
             "BEAM call_fun2 function is not a register"
         );
         assert!(error(&[0xB2, 0x01, 0x00, 0x03]).contains("unexpected BEAM operand tag 1"));
+    }
+
+    #[test]
+    fn joins_a_fun_call_in_a_tail_position_as_the_erts_loader() {
+        // `call_fun Arity | deallocate D | return => i_call_fun_last Arity D`
+        // and the same for `call_fun2` (`jit/arm/ops.tab:868-880`). Only
+        // the three adjacent instructions join.
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend_from_slice(&[
+            0x4B, 0x10, 0x12, 0x20, 0x13, // call_fun 1, deallocate 2, return
+            0xB2, 0x00, 0x00, 0x04, // call_fun2 0 0 y0
+            0x12, 0x00, 0x13, // deallocate 0, return
+            0x4B, 0x00, 0x13, // call_fun 0, return
+            0x12, 0x00, 0x13, // deallocate 0, return
+            0x03,
+        ]);
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::CallFun {
+                    arity: 1,
+                    function: Operand::X(1),
+                    tail: true,
+                    deallocate: 2
+                },
+                Instruction::CallFun {
+                    arity: 0,
+                    function: Operand::Y(0),
+                    tail: true,
+                    deallocate: 0
+                },
+                Instruction::CallFun {
+                    arity: 0,
+                    function: Operand::X(0),
+                    tail: false,
+                    deallocate: 0
+                },
+                Instruction::Return,
+                Instruction::Deallocate { stack_size: 0 },
+                Instruction::Return,
+                Instruction::End,
+            ]
+        ));
     }
 
     #[test]

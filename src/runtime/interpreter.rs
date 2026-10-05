@@ -360,9 +360,24 @@ impl BeamProgram {
                     let fun = Term::Fun(Fun::new(lambda.clone(), free));
                     write(process, destination, fun)?;
                 }
-                Instruction::CallFun { arity, function } => {
+                Instruction::CallFun {
+                    arity,
+                    function,
+                    tail,
+                    deallocate,
+                } => {
                     let fun = read(process, function)?;
-                    if let Some(outcome) = self.call_fun(scheduler, &fun, *arity, false)? {
+                    if *tail {
+                        // `i_call_fun_last` releases the frame before it
+                        // tests the fun (`emit_i_call_fun2_last` in
+                        // `jit/arm/instr_fun.cpp:425-462`).
+                        let stack = &mut current_frame(process).stack;
+                        if stack.len() != *deallocate as usize {
+                            return Err(error("invalid BEAM tail-call stack size"));
+                        }
+                        stack.clear();
+                    }
+                    if let Some(outcome) = self.call_fun(scheduler, &fun, *arity, *tail)? {
                         return Ok(outcome);
                     }
                 }
@@ -1413,7 +1428,10 @@ mod tests {
     use std::{collections::HashMap, path::PathBuf, process::Command};
 
     use super::bif::{BIFS, INSTRUCTION_CALLS};
-    use super::{BeamProgram, call_arguments, function_at_label, read_operand, write_operand};
+    use super::{
+        BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand,
+        write_operand,
+    };
     use crate::{
         BeamModule, Map, Term,
         beam::code::{self, Instruction, Operand, TestKind},
@@ -1556,6 +1574,8 @@ mod tests {
                 Instruction::CallFun {
                     arity: 0,
                     function: Operand::X(0),
+                    tail: false,
+                    deallocate: 0,
                 },
                 Instruction::Return,
             ],
@@ -1571,6 +1591,54 @@ mod tests {
     }
 
     #[test]
+    fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
+        // `fun_probe:tail_wait/1` ends with `call_fun 0`, `deallocate 1`, and
+        // `return`, which ERTS runs as `i_call_fun_last`
+        // (`jit/arm/ops.tab:868`). The lambda replaces the frame of
+        // `tail_wait/1`, so the process that waits in the lambda has one
+        // frame, and a loop of tail fun calls uses constant stack, as in ERTS.
+        let program =
+            BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
+        let label = program.modules["fun_probe"].exports[&("tail_wait".to_owned(), 1)];
+        let mut scheduler = Scheduler::default();
+        let frame = program.frame("fun_probe", label, 1).unwrap();
+        scheduler.start(frame, vec![Term::Integer(1)]).unwrap();
+        scheduler.schedule_next().unwrap();
+        assert!(matches!(
+            program.run(&mut scheduler).unwrap(),
+            Outcome::Wait
+        ));
+        let frames = &scheduler.current_process_mut().frames;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].function, "-tail_wait/1-fun-0-");
+    }
+
+    #[test]
+    fn requires_the_frame_size_for_a_fun_call_in_a_tail_position() {
+        // `i_call_fun_last` releases exactly the Y registers of the frame.
+        let program = make_program(
+            vec![
+                Instruction::Move(atom("notfun"), Operand::X(0)),
+                Instruction::CallFun {
+                    arity: 0,
+                    function: Operand::X(0),
+                    tail: true,
+                    deallocate: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        );
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            "invalid BEAM tail-call stack size"
+        );
+    }
+
+    #[test]
     fn exits_the_process_with_an_uncaught_badfun() {
         // A fun call that no `try` or `catch` handles exits the process with
         // `{{badfun, Term}, Stack}`, as ERTS `call_fun` raises it
@@ -1581,6 +1649,8 @@ mod tests {
                 Instruction::CallFun {
                     arity: 0,
                     function: Operand::X(0),
+                    tail: false,
+                    deallocate: 0,
                 },
                 Instruction::Return,
             ],

@@ -1,5 +1,5 @@
 -module(fun_probe).
--export([mfas/0, locals/0, tests/0, applies/0, spawned/0, externals/0, id/1]).
+-export([mfas/0, locals/0, tests/0, applies/0, spawned/0, externals/0, tail_wait/1, id/1]).
 
 %% erlang:apply/3 and the apply instruction, as proc_lib:init_p_do_apply/3
 %% runs them. apply/3 takes at most 1023 arguments.
@@ -95,6 +95,13 @@ externals() ->
      try erlang:make_fun(M, F, id(256)) catch error:R4 -> R4 end,
      try erlang:make_fun(M, F, id(a)) catch error:R5 -> R5 end,
      eq(erlang:make_fun(M, F, id(255)), erlang:make_fun(M, F, id(255)))].
+
+%% A fun call in a tail position replaces the frame of its caller, as the
+%% ERTS loader makes i_call_fun_last of call_fun, deallocate, and return.
+tail_wait(Tag) ->
+    F = id(fun() -> receive Tag -> Tag end end),
+    _ = id(x),
+    F().
 
 %% A list of 1022 atoms x, built without arithmetic.
 list1022() ->
