@@ -191,7 +191,7 @@ pub(super) fn compile(
     let reference = context.scheduler.make_ref()?;
     context
         .scheduler
-        .state
+        .resources
         .borrow_mut::<RegexCodes>()
         .0
         .insert(reference, code);
