@@ -156,7 +156,7 @@ fn sorted_pairs(map: &super::Map) -> Vec<(&Term, &Term)> {
     let mut pairs: Vec<_> = map.iter().collect();
     pairs.sort_unstable_by(|(left, _), (right, _)| {
         left.compare(right)
-            .expect("a map key is an integer or an atom")
+            .expect("a map key is an integer, an atom, or a list of these")
     });
     pairs
 }

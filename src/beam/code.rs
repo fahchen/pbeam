@@ -1258,8 +1258,8 @@ mod tests {
             read(&[131, 116, 0, 0, 0, 0]).unwrap(),
             Some(Term::Map(Map::from_pairs(vec![]).unwrap()))
         );
-        // A map key that `Map` does not support yet makes the literal unsupported.
-        assert_eq!(read(&[131, 116, 0, 0, 0, 1, 106, 106]).unwrap(), None);
+        // A map key that `Map` does not support yet makes the literal unsupported: #{{} => []}.
+        assert_eq!(read(&[131, 116, 0, 0, 0, 1, 104, 0, 106]).unwrap(), None);
         // ERTS rejects a MAP_EXT with a duplicate key: #{1 => [], 1 => []}.
         assert_eq!(
             read(&[131, 116, 0, 0, 0, 2, 97, 1, 106, 97, 1, 106])

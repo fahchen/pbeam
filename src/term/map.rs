@@ -8,14 +8,18 @@
 //!
 //! Supported keys:
 //!
-//! - flatmap: any integer and any atom;
-//! - hashmap: any atom, and an integer in the ERTS small-integer range.
+//! - hashmap: an atom, an integer in the ERTS small-integer range, `[]`,
+//!   and a list whose elements are such keys;
+//! - flatmap: each hashmap key, and any integer.
 //!
-//! As in ERTS, a flatmap orders atom keys by their atom index, and a hashmap
-//! hashes an atom key by its atom word `(index << 6) | 0xB`. Thus the pair
-//! order of a map is the ERTS order, which BEAM code sees through operations
-//! such as `maps:keys/1`. Other key types need the ERTS flatmap key order
-//! and hash for bignums and compound terms, which PBeam does not have yet.
+//! As in ERTS, a flatmap orders two atom keys by their atom index and each
+//! other two keys in the term order, so an atom in a list compares by name.
+//! A hashmap hashes a key with the ERTS internal hash, and an atom hashes by
+//! its atom word `(index << 6) | 0xB`. Thus the pair order of a map is the
+//! ERTS order, which BEAM code sees through operations such as
+//! `maps:keys/1`. Other key types need the ERTS hash for bignums, tuples,
+//! binaries, maps, funs, pids, and references, which PBeam does not have
+//! yet.
 
 use std::cmp::Ordering;
 
@@ -39,6 +43,24 @@ const SMALL_INTEGER_TAG: u64 = 0xF;
 const ATOM_TAG_BITS: u32 = 6;
 /// The tag bits of an ERTS atom word (`_TAG_IMMED2_ATOM`).
 const ATOM_TAG: u64 = 0xB;
+/// The ERTS word of `[]` (`NIL`, `erl_term.h:293`).
+const NIL_WORD: u64 = 0x3B;
+/// The type of an immediate term in the ERTS internal hash
+/// (`IHASH_TYPE_IMMEDIATE`, `erl_term_hashing.c:1637`).
+const IHASH_TYPE_IMMEDIATE: u64 = 1;
+/// The type of a list head in the ERTS internal hash (`IHASH_TYPE_CAR`).
+const IHASH_TYPE_CAR: u64 = 3;
+/// The type of a list end in the ERTS internal hash (`IHASH_TYPE_CDR`).
+const IHASH_TYPE_CDR: u64 = 4;
+/// The type of a chunk of list bytes in the ERTS internal hash
+/// (`IHASH_TYPE_STRING`).
+const IHASH_TYPE_STRING: u64 = 5;
+/// The largest number of list bytes in one chunk of the ERTS internal hash.
+const IHASH_CHUNK_BYTES: u64 = 4;
+/// The multiplier constants of the ERTS internal hash (`IHASH_C1`,
+/// `IHASH_C2`, `erl_term_hashing.c:1665-1666`).
+const IHASH_C1: u64 = 0x87C3_7B91_1142_53D5;
+const IHASH_C2: u64 = 0x4CF5_AD43_2745_937F;
 
 /// A BEAM map: a flatmap up to 32 keys and a HAMT above 32 keys, as in
 /// ERTS. The layout is private, so every map is in its canonical form.
@@ -80,15 +102,28 @@ enum Child {
     Node(Node),
 }
 
-/// The flatmap sort key of a supported key. The derived order puts every
-/// integer before every atom, as the ERTS term order puts numbers before
-/// atoms.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum FlatKey {
-    /// An integer key, ordered by value.
-    Integer(i64),
-    /// An atom key, ordered by atom index, as `erts_cmp_flatmap_keys` does.
-    Atom(u32),
+/// The state of the ERTS internal hash of a compound term
+/// (`make_internal_hash`, `erl_term_hashing.c:1770-1782`): two 64-bit
+/// MurmurHash3 lanes and the number of mix steps. The salt of a map hash is
+/// 0, so both lanes start at 0.
+#[derive(Default)]
+struct InternalHash {
+    /// The lane that `IHASH_MIX_ALPHA` changes.
+    alpha: u64,
+    /// The lane that `IHASH_MIX_BETA` changes.
+    beta: u64,
+    /// The number of mix steps (`hash_ticks`).
+    ticks: u64,
+}
+
+/// One entry on the work stack of a list hash: the rest of a list whose
+/// head is a list, or the marker of a list end (`IHASH_CDR_MARKER`).
+enum Pending<'a> {
+    /// The elements after a list head that the hash takes later.
+    Tail(&'a [Term]),
+    /// The marker that a list head is the last element: the next `Tail`
+    /// is empty.
+    Cdr,
 }
 
 impl Map {
@@ -219,7 +254,7 @@ impl Map {
     /// Sort key and value pairs by the flatmap key order, as the ERTS loader
     /// sorts the pairs of a map instruction (`beam_load_map_key_sort`,
     /// `beam_transform_helpers.c:54-115`) with `erts_cmp_flatmap_keys`
-    /// (`erl_utils.h:266-271`): two atoms compare by atom index, and each
+    /// (`erl_utils.h:267-272`): two atoms compare by atom index, and each
     /// other two keys compare in the term order. `put_map_exact` then
     /// reports the first missing key in this order. The keys can be of any
     /// type, also a type that a PBeam map cannot hold.
@@ -248,11 +283,7 @@ impl Map {
     pub(crate) fn sort_pairs(pairs: &mut [(Term, Term)]) -> Result<(), BeamError> {
         let mut failure = None;
         pairs.sort_by(|(left, _), (right, _)| {
-            let order = match (left, right) {
-                (Term::Atom(left), Term::Atom(right)) => Ok(left.index().cmp(&right.index())),
-                _ => left.compare(right),
-            };
-            order.unwrap_or_else(|error| {
+            flatmap_order(left, right).unwrap_or_else(|error| {
                 failure.get_or_insert(error);
                 Ordering::Equal
             })
@@ -288,10 +319,12 @@ impl Map {
                 return Ok(());
             }
         };
-        let Some(order) = flat_key(&key) else {
+        if !matches!(key, Term::Integer(_)) && map_hash(&key).is_none() {
             return Err(key);
-        };
-        match pairs.binary_search_by(|(existing, _)| flat_key(existing).cmp(&Some(order))) {
+        }
+        match pairs.binary_search_by(|(existing, _)| {
+            flatmap_order(existing, &key).expect("supported map keys have a term order")
+        }) {
             Ok(index) => pairs[index].1 = value,
             Err(index) if pairs.len() < SMALL_MAP_LIMIT => pairs.insert(index, (key, value)),
             Err(_) => {
@@ -412,7 +445,7 @@ impl Hamt {
                         *existing_value = value;
                         return;
                     }
-                    // mix64 is a bijection, so two different keys have two different hashes.
+                    // The two keys can have equal hashes; `Node::split` stops on them.
                     let existing_hash = map_hash(existing).expect("a stored key has a hash");
                     let existing = (
                         existing_hash,
@@ -492,8 +525,8 @@ impl Node {
         while slot(first.0, depth) == slot(second.0, depth) {
             depth += 1;
             // ERTS keeps two keys with equal hashes in a collision node at HAMT_MAX_LEVEL.
-            // Supported keys have different hashes, because mix64 is a bijection.
-            debug_assert!(
+            // Two different list keys can have equal hashes; stop rather than loop.
+            assert!(
                 depth < HAMT_MAX_LEVEL,
                 "equal map hashes need an ERTS collision node"
             );
@@ -519,21 +552,32 @@ impl Node {
     }
 }
 
-/// Return the flatmap sort key of a supported flatmap key.
+/// Compare two flatmap keys in the flatmap key order, as
+/// `erts_cmp_flatmap_keys` does (`erl_utils.h:267-272`): two atoms compare
+/// by atom index, and each other two keys compare in the term order. Thus
+/// an atom in a list compares by name.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(flat_key(&Term::Integer(1)) < flat_key(&Term::static_atom("false")));
-/// // true (index 1) comes before abs_path (index 26).
-/// assert!(flat_key(&Term::static_atom("true")) < flat_key(&Term::static_atom("abs_path")));
-/// assert!(flat_key(&Term::Tuple(vec![])).is_none());
+/// use std::cmp::Ordering;
+///
+/// // true has index 1 and abs_path has index 26.
+/// let (abs_path, true_) = (Term::static_atom("abs_path"), Term::static_atom("true"));
+/// assert_eq!(flatmap_order(&true_, &abs_path)?, Ordering::Less);
+/// let list = |atom: &Term| Term::List(vec![atom.clone()]);
+/// assert_eq!(flatmap_order(&list(&true_), &list(&abs_path))?, Ordering::Greater);
+/// assert_eq!(flatmap_order(&Term::Integer(1), &true_)?, Ordering::Less);
 /// ```
-fn flat_key(key: &Term) -> Option<FlatKey> {
-    match key {
-        Term::Integer(value) => Some(FlatKey::Integer(*value)),
-        Term::Atom(atom) => Some(FlatKey::Atom(atom.index())),
-        _ => None,
+///
+/// # Errors
+///
+/// Return a runtime error when the order depends on two different
+/// references, which have no PBeam term order.
+fn flatmap_order(left: &Term, right: &Term) -> Result<Ordering, BeamError> {
+    match (left, right) {
+        (Term::Atom(left), Term::Atom(right)) => Ok(left.index().cmp(&right.index())),
+        _ => left.compare(right),
     }
 }
 
@@ -550,10 +594,10 @@ fn slot(hash: u64, level: u32) -> u32 {
     ((hash >> (SLOT_BITS * level)) & SLOT_MASK) as u32
 }
 
-/// Return the ERTS map hash (`erts_map_hash`) of a key, or `None` for a key
-/// that a hashmap does not support yet. A small integer hashes as its raw
-/// ERTS word `(value << 4) | 0xF`. An atom hashes as its raw ERTS word
-/// `(index << 6) | 0xB`.
+/// Return the ERTS map hash (`erts_map_hash`, `erl_term_hashing.c:2301-2319`)
+/// of a key, or `None` for a key that a hashmap does not support yet. An
+/// immediate key hashes as `ihash_mix64` of its ERTS word. A list key that
+/// is not empty hashes with the list path of `make_internal_hash`.
 ///
 /// # Examples
 ///
@@ -561,14 +605,177 @@ fn slot(hash: u64, level: u32) -> u32 {
 /// assert_eq!(map_hash(&Term::Integer(1)), Some(7938660269479274665));
 /// // true has index 1, so its word is 0x4B.
 /// assert_eq!(map_hash(&Term::static_atom("true")), Some(14558535449716669319));
+/// assert_eq!(map_hash(&Term::List(vec![])), Some(mix64(0x3B)));
+/// assert!(map_hash(&Term::List(vec![Term::Integer(97)])).is_some());
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
+/// assert_eq!(map_hash(&Term::Tuple(vec![])), None);
 /// ```
 fn map_hash(key: &Term) -> Option<u64> {
     match key {
-        Term::Atom(atom) => Some(mix64((u64::from(atom.index()) << ATOM_TAG_BITS) | ATOM_TAG)),
-        _ => key
+        Term::List(elements) if !elements.is_empty() => list_hash(elements),
+        _ => immediate_word(key).map(mix64),
+    }
+}
+
+/// Return the ERTS word of a key that ERTS stores as an immediate: an atom
+/// is `(index << 6) | 0xB`, a small integer is `(value << 4) | 0xF`, and
+/// `[]` is 0x3B (`erl_term.h:83-90`, 293). Return `None` for each other term.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(immediate_word(&Term::Integer(1)), Some(0x1F));
+/// assert_eq!(immediate_word(&Term::static_atom("true")), Some(0x4B));
+/// assert_eq!(immediate_word(&Term::List(vec![])), Some(0x3B));
+/// assert_eq!(immediate_word(&Term::Integer(1 << 59)), None);
+/// ```
+fn immediate_word(term: &Term) -> Option<u64> {
+    match term {
+        Term::Atom(atom) => Some((u64::from(atom.index()) << ATOM_TAG_BITS) | ATOM_TAG),
+        Term::List(elements) if elements.is_empty() => Some(NIL_WORD),
+        _ => term
             .small_integer()
-            .map(|value| mix64(((value as u64) << SMALL_INTEGER_TAG_BITS) | SMALL_INTEGER_TAG)),
+            .map(|value| ((value as u64) << SMALL_INTEGER_TAG_BITS) | SMALL_INTEGER_TAG),
+    }
+}
+
+/// Return the ERTS internal hash of a list that is not empty, as the list
+/// path of `make_internal_hash` gives it (`erl_term_hashing.c:1783-1841`).
+/// The bytes (small integers 0..255) at the start of the rest of a list go
+/// into chunks of up to 4 bytes. After them, an immediate head mixes with
+/// `IHASH_TYPE_CAR`, and a list head goes first while its tail waits on a
+/// work stack, so a deep key does not recurse. Each list ends with `[]`,
+/// which mixes as an immediate (`erl_term_hashing.c:2211-2213`). Return
+/// `None` when an element is not an atom, a small integer, or a list of
+/// these.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let string = |bytes: &[u8]| bytes.iter().map(|byte| Term::Integer(i64::from(*byte))).collect();
+/// assert_ne!(list_hash(&string(b"ab")), list_hash(&string(b"ba")));
+/// assert!(list_hash(&[Term::Tuple(vec![])]).is_none());
+/// ```
+fn list_hash(list: &[Term]) -> Option<u64> {
+    let mut hash = InternalHash::default();
+    let mut pending = Vec::new();
+    let mut rest = list;
+    loop {
+        let (mut value, mut bytes) = (0, 0);
+        while let [Term::Integer(byte @ 0..=255), tail @ ..] = rest {
+            value = (value << 8) | *byte as u64;
+            bytes += 1;
+            if bytes == IHASH_CHUNK_BYTES {
+                hash.mix_alpha(IHASH_TYPE_STRING | (bytes << 8) | (value << 32));
+                (value, bytes) = (0, 0);
+            }
+            rest = tail;
+        }
+        if bytes > 0 {
+            hash.mix_alpha(IHASH_TYPE_STRING | (bytes << 8) | (value << 32));
+        }
+        if let [head, tail @ ..] = rest {
+            if let Some(word) = immediate_word(head) {
+                hash.mix_alpha(IHASH_TYPE_IMMEDIATE | (IHASH_TYPE_CAR << 32));
+                hash.mix_beta(word);
+                if tail.is_empty() {
+                    hash.mix_alpha(IHASH_TYPE_CDR);
+                }
+                rest = tail;
+                continue;
+            }
+            let Term::List(elements) = head else {
+                return None;
+            };
+            pending.push(Pending::Tail(tail));
+            if tail.is_empty() {
+                pending.push(Pending::Cdr);
+            }
+            hash.mix_alpha(IHASH_TYPE_CAR);
+            rest = elements;
+            continue;
+        }
+        // The list ends with the immediate [] (IHASH_MIX_IMMEDIATE, then pop_next).
+        hash.mix_alpha(IHASH_TYPE_IMMEDIATE);
+        hash.mix_beta(NIL_WORD);
+        loop {
+            match pending.pop() {
+                None => return Some(hash.finish()),
+                Some(Pending::Cdr) => hash.mix_beta(IHASH_TYPE_CDR),
+                Some(Pending::Tail(tail)) => {
+                    rest = tail;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl InternalHash {
+    /// Mix a word into the alpha lane, as `IHASH_MIX_ALPHA` does
+    /// (`erl_term_hashing.c:1668-1680`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut hash = InternalHash::default();
+    /// hash.mix_alpha(1);
+    /// assert_eq!(hash.ticks, 1);
+    /// ```
+    fn mix_alpha(&mut self, word: u64) {
+        let word = word
+            .wrapping_mul(IHASH_C1)
+            .rotate_left(31)
+            .wrapping_mul(IHASH_C2);
+        self.alpha = (self.alpha ^ word)
+            .rotate_left(27)
+            .wrapping_add(self.beta)
+            .wrapping_mul(5)
+            .wrapping_add(0x52DC_E729);
+        self.ticks += 1;
+    }
+
+    /// Mix a word into the beta lane, as `IHASH_MIX_BETA` does
+    /// (`erl_term_hashing.c:1684-1695`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut hash = InternalHash::default();
+    /// hash.mix_beta(0x3B);
+    /// assert_eq!(hash.ticks, 1);
+    /// ```
+    fn mix_beta(&mut self, word: u64) {
+        let word = word
+            .wrapping_mul(IHASH_C2)
+            .rotate_left(33)
+            .wrapping_mul(IHASH_C1);
+        self.beta = (self.beta ^ word)
+            .rotate_left(31)
+            .wrapping_add(self.alpha)
+            .wrapping_mul(5)
+            .wrapping_add(0x3849_5AB5);
+        self.ticks += 1;
+    }
+
+    /// Return the hash at the end, when the work stack is empty
+    /// (`erl_term_hashing.c:2220-2236`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let hash = InternalHash::default().finish();
+    /// assert_eq!(hash, 0);
+    /// ```
+    fn finish(self) -> u64 {
+        let alpha = self.alpha ^ self.ticks;
+        let beta = self.beta ^ self.ticks;
+        let alpha = alpha.wrapping_add(beta);
+        let beta = beta.wrapping_add(alpha);
+        let (alpha, beta) = (mix64(alpha), mix64(beta));
+        let alpha = alpha.wrapping_add(beta);
+        let beta = beta.wrapping_add(alpha);
+        alpha ^ beta
     }
 }
 
@@ -687,6 +894,45 @@ mod tests {
             Err(Term::Tuple(vec![]))
         );
         assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn orders_atoms_in_list_keys_by_name_in_a_flatmap() {
+        // A fresh table for this test makes z before a, so z has the lower atom index.
+        let mut table = AtomTable::new();
+        let mut atom = |name: &str| Term::Atom(table.put(name).unwrap());
+        let (z, a, v) = (atom("z"), atom("a"), atom("v"));
+        let list = |term: &Term| Term::List(vec![term.clone()]);
+        let map = Map::from_pairs(vec![
+            (list(&z), v.clone()),
+            (a.clone(), v.clone()),
+            (list(&a), v.clone()),
+            (z.clone(), v),
+        ])
+        .unwrap();
+        // erts_cmp_flatmap_keys: two atoms by index, two lists in the term order.
+        assert_eq!(keys(&map), [z.clone(), a.clone(), list(&a), list(&z)]);
+        assert_eq!(map.get(&list(&z)), Some(&atom("v")));
+    }
+
+    #[test]
+    fn rejects_list_keys_with_unsupported_elements() {
+        assert_eq!(map_hash(&Term::List(vec![])), Some(mix64(0x3B)));
+        let unsupported = [
+            Term::List(vec![Term::Integer(1), Term::Tuple(vec![])]),
+            Term::List(vec![Term::List(vec![Term::Tuple(vec![])])]),
+            Term::List(vec![Term::Integer(1 << 59)]),
+        ];
+        for key in unsupported {
+            assert_eq!(map_hash(&key), None);
+            let mut flat = integers([1]);
+            assert_eq!(flat.insert(key.clone(), atom("v")), Err(key.clone()));
+            assert_eq!(keys(&flat), list(&[1]));
+            let mut hash = integers(1..=33);
+            assert_eq!(hash.insert(key.clone(), atom("v")), Err(key.clone()));
+            assert_eq!(hash.len(), 33);
+            assert_eq!(hash.get(&key), None);
+        }
     }
 
     #[test]
