@@ -1,7 +1,7 @@
 ---
 name: address-pr
 description: This skill should be used when the user asks to "address PR comments", "address PR review comments", "respond to PR feedback", "go through PR review comments", "what comments are on this PR", "/address-pr", or otherwise wants to walk through and respond to GitHub pull request review threads on a pbeam PR. Full lifecycle - fetch unanswered threads, discuss one by one, reconcile decisions, implement, commit via the commit skill, push, post all replies in one batch, and update the PR and issues. GitHub is the only record; the skill writes no tracking file and never resolves threads.
-version: 0.2.0
+version: 0.3.0
 user-invocable: true
 argument-hint: "[<PR#>] [only my comments | @<login>]"
 allowed-tools:
@@ -162,7 +162,7 @@ Skip if every decision is `keep`. Otherwise:
 - Read each file before you edit it.
 - Make the smallest change that satisfies the decision. Do not change adjacent code.
 - Keep the project gates: Rustdoc with `# Examples` on every function, a doc comment on every field, instruction encodings with byte and Erlang examples, 100% application line coverage, no Clippy warnings.
-- Run focused checks (`cargo test <name>`, `cargo clippy --all-targets -- -D warnings`).
+- Run focused checks (`mise run test-focus <name>`, `cargo clippy --all-targets -- -D warnings`).
 - When a decision changes the direction, update the affected documents in the same round (`docs/portable-beam-spec.md`, `docs/agents/knowledge.md` through `capture-learnings`, `AGENTS.md`).
 - If a fix needs scope expansion, set the thread to `discuss` and return to Phase 2.
 
@@ -170,7 +170,7 @@ Record the `file:line` for each fix.
 
 ### Phase 5: Commit
 
-Stage explicit paths only. Invoke the `commit` skill. Make one commit per logical change; several threads can share a commit when they are one change. Run `mise run check` before the last commit of the round. Record the short SHA for each `fix`.
+Stage explicit paths only. Invoke the `commit` skill. Make one commit per logical change; several threads can share a commit when they are one change. Run `mise run check-brief` before the last commit of the round. It runs the `mise run check` gate and prints only the result; the full log is in `target/check.log`. Record the short SHA for each `fix`.
 
 ### Phase 6: Reply preview
 

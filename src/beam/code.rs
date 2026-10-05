@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::module::BeamModule;
 use crate::{
     error::{BeamError, error},
-    term::{Atom, AtomTable, Map, Term},
+    term::{Atom, AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, Map, Term},
 };
 
 const WORD_SIZE: usize = 4;
@@ -15,6 +15,8 @@ const CHUNK_HEADER_SIZE: usize = WORD_SIZE * 2;
 const CONTAINER_HEADER_SIZE: usize = WORD_SIZE * 3;
 const EXPORT_ENTRY_SIZE: usize = WORD_SIZE * 3;
 const IMPORT_ENTRY_SIZE: usize = WORD_SIZE * 3;
+/// The size of a `FunT` entry: six 32-bit fields.
+const LAMBDA_ENTRY_SIZE: usize = WORD_SIZE * 6;
 const COMPACT_TAG_MASK: u8 = 0b111;
 const COMPACT_EXTENDED_FLAG: u8 = 0b1000;
 const COMPACT_SIGN_FLAG: u8 = 0b1_0000;
@@ -36,12 +38,11 @@ const ETF_NIL_EXT: u8 = 106;
 const ETF_STRING_EXT: u8 = 107;
 const ETF_LIST_EXT: u8 = 108;
 const ETF_BINARY_EXT: u8 = 109;
+/// `EXPORT_EXT`, an external fun such as `fun lists:reverse/1`.
+const ETF_EXPORT_EXT: u8 = 113;
 const ETF_MAP_EXT: u8 = 116;
 const ETF_SMALL_ATOM_UTF8_EXT: u8 = 119;
 const FIRST_ATOM_INDEX: usize = 1;
-/// The largest number of characters in an atom name (`MAX_ATOM_CHARACTERS`
-/// in `atom.h`).
-const MAX_ATOM_CHARACTERS: usize = 255;
 const FIRST_LABEL_NUMBER: u32 = 1;
 
 /// Parse the BEAM subset used by this runtime.
@@ -77,12 +78,14 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// opcode_max ::= u32be
 /// label_count ::= u32be
 /// function_count ::= u32be
-/// executable_instruction ::= label | function_info | move | call | call_only | call_ext | jump | select_val | test | put_list | allocate | deallocate | return | noop | generated_instruction
+/// executable_instruction ::= label | function_info | move | call | call_only | call_ext | jump | select_val | test | put_list | allocate | deallocate | return | noop | make_fun3 | call_fun | call_fun2 | is_function2 | generated_instruction
 /// label       ::= 1 compact(0)
 /// function_info ::= 2 compact(2) compact(2) compact(0)
 /// move        ::= 64 move_source (x_register | y_register)
 /// move_source ::= value | x_register | y_register
 /// move_source ::= literal_value
+/// move_source ::= bignum_value ; loads, and fails when the instruction reads it
+/// bignum_value ::= huge(1) ; PBeam has no bignum term
 /// literal_value ::= compact(7) compact(0) ; compact(7) value is 4
 /// x_register  ::= compact(3)
 /// y_register  ::= compact(4)
@@ -102,14 +105,24 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// selection_list ::= compact(7, short=1) compact(0) selection_pair[select_count/2]
 /// selection_pair ::= atom_value compact(5)
 /// type_test ::= test_opcode compact(5) register
-/// test_opcode ::= 48 ; is_atom | 49 ; is_pid | 50 ; is_reference | 53 ; is_binary | 55 ; is_list | 57 ; is_tuple | 156 ; is_map
+/// test_opcode ::= 45 ; is_integer | 48 ; is_atom | 49 ; is_pid | 50 ; is_reference | 53 ; is_binary | 55 ; is_list | 57 ; is_tuple | 77 ; is_function | 114 ; is_boolean | 156 ; is_map
+/// is_function2 ::= 115 compact(5) move_source move_source ; the arity is a literal or a register
 /// put_list ::= 69 move_source move_source register
+/// make_fun3 ::= 171 lambda_number:compact(0) register environment
+/// environment ::= compact(7, short=1) count:compact(0) move_source[count]
+/// call_fun ::= 75 arity:compact(0)
+/// call_fun2 ::= 178 call_fun2_tag arity:compact(0) (register | typed_register)
+/// call_fun2_tag ::= atom_value | lambda_number:compact(0) ; the atom safe or unsafe
 /// noop ::= 16 test_heap_operands | 172 init_yregs_operands
 /// int_code_end ::= 3
 /// imports_chunk ::= "ImpT" chunk_size import_table padding
 /// import_table ::= import_count import[import_count]
 /// import_count ::= u32be
 /// import ::= module_atom_index:u32be function_atom_index:u32be arity:u32be
+/// lambdas_chunk ::= "FunT" chunk_size lambda_table padding
+/// lambda_table ::= lambda_count:i32be lambda[lambda_count] lambda*
+/// lambda ::= function_atom_index:i32be total_arity:i32be label:i32be index:i32be
+///            free_count:i32be old_unique:i32be
 /// value       ::= integer_value | atom_value
 /// integer_value ::= compact(1) ; a large(1) payload is two's complement
 /// atom_value  ::= compact(2)
@@ -118,7 +131,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// literal_count ::= u32be
 /// literal_entry ::= term_size:u32be 131 external_term ; term_size bytes in total
 /// external_term ::= binary_term | string_term | nil_term | atom_term | tuple_term | list_term
-///                 | map_term | small_integer_term
+///                 | map_term | small_integer_term | export_term
 /// small_integer_term ::= 97 value:u8
 /// binary_term ::= 109 binary_size:u32be byte[binary_size]
 /// string_term ::= 107 string_size:u16be byte[string_size]
@@ -127,11 +140,13 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// tuple_term  ::= 104 arity:u8 external_term[arity]
 /// list_term   ::= 108 length:u32be external_term[length] tail:external_term
 /// map_term    ::= 116 pair_count:u32be (key:external_term value:external_term)[pair_count]
+/// export_term ::= 113 module:atom_term function:atom_term arity:small_integer_term
 ///
 /// compact(tag) ::= short(tag) | extended(tag) | large(tag)
 /// short(tag)   ::= value:4 0 tag:3
 /// extended(tag) ::= high:3 1 0 tag:3 low:8
 /// large(tag)   ::= size_code:3 1 1 tag:3 byte[size_code + 2] ; size_code in 0..=6
+/// huge(tag)    ::= 7:3 1 1 tag:3 extra:compact(0) byte[extra + 9]
 /// ```
 ///
 /// `container_size` counts bytes after its field, including `BEAM` and chunks.
@@ -146,6 +161,18 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// byte order, as the ERTS loader does. `ExpT` contains exactly the declared number of
 /// 12-byte entries. Export and code labels must be in `1..=label_count`.
 /// `function_count` must match the number of `function_info` instructions.
+/// The `FunT` chunk is optional, and an empty `FunT` chunk is the same as no
+/// chunk, as `parse_lambda_chunk` (`beam_file.c:394-441`) reads it. Its
+/// bytes after the count are 24-byte entries, and `lambda_count` must not
+/// be more than their number. A `function_atom_index` is in
+/// `0..=atom_count`, and a lambda `label` is in `1..label_count`. A
+/// lambda has `total_arity - free_count` arguments, so `free_count` must
+/// be in `0..=total_arity`. `make_fun3` and a numeric `call_fun2_tag` refer to
+/// a `FunT` entry by its zero-based position. The `environment` of
+/// `make_fun3` lists the free variables: a `lambda_number` outside the
+/// table or a `count` other than the `free_count` of the entry is an error.
+/// For example, `[0xAB, 0x20, 0x03, 0x17, 0x10, 0x03]` makes a fun of
+/// entry 2 with the free variable `x0` and writes it to `x0`.
 /// `opcode_max` is not checked. The parser rejects duplicate chunk IDs. It
 /// supports only the listed instructions and compact operand forms. `LitT`
 /// supports uncompressed tables. A literal loads as a value only when every
@@ -235,14 +262,28 @@ pub(crate) fn parse(bytes: &[u8], atom_table: &mut AtomTable) -> Result<BeamModu
         .map(|data| parse_literals(data, atom_table))
         .transpose()?
         .unwrap_or_default();
+    let lambdas = chunks
+        .get(b"FunT".as_slice())
+        .filter(|data| !data.is_empty())
+        .map(|data| parse_lambdas(data, &atoms))
+        .transpose()?
+        .unwrap_or_default();
     let (instructions, number_of_labels) =
-        instruction::parse_code(code, &atoms, &imports, &literals)?;
+        instruction::parse_code(code, &atoms, &imports, &literals, &lambdas)?;
     if let Some(label) = exports
         .values()
         .find(|&&label| label < FIRST_LABEL_NUMBER || label > number_of_labels)
     {
         return Err(error(format!(
             "BEAM export label {label} is outside declared range 1..={number_of_labels}"
+        )));
+    }
+    if let Some((lambda, _)) = lambdas.iter().find(|(lambda, _)| {
+        lambda.label() < FIRST_LABEL_NUMBER || lambda.label() >= number_of_labels
+    }) {
+        return Err(error(format!(
+            "BEAM lambda label {} is outside declared range 1..{number_of_labels}",
+            lambda.label()
         )));
     }
     Ok(BeamModule {
@@ -399,6 +440,74 @@ fn parse_imports(data: &[u8], atoms: &[Atom]) -> Result<Vec<(String, String, u32
         .collect()
 }
 
+/// Read the entries of a `FunT` chunk, as `parse_lambda_chunk`
+/// (`beam_file.c:394-441`) does, and return the fun entry and the number of
+/// free variables of each one. The caller checks the labels against the
+/// label count of the `Code` chunk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // fun(X) -> {Tag, X} end: function atom 2, total arity 2, label 53,
+/// // index 0, one free variable, old unique value 7.
+/// let entry = [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 53, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 7];
+/// let lambdas = parse_lambdas(&entry, &atoms)?;
+/// assert_eq!((lambdas[0].0.arity(), lambdas[0].1), (1, 1));
+/// ```
+///
+/// # Errors
+///
+/// A negative count, a count of more entries than the chunk holds, bytes
+/// that are not whole entries, a function atom index outside
+/// `0..=atom_count`, and a number of free variables outside
+/// `0..=total_arity` are errors.
+fn parse_lambdas(data: &[u8], atoms: &[Atom]) -> Result<Vec<(Lambda, usize)>, BeamError> {
+    let field = |entry: &[u8], position: usize| {
+        let bytes = &entry[position * WORD_SIZE..(position + 1) * WORD_SIZE];
+        i32::from_be_bytes(bytes.try_into().expect("a FunT entry has six fields"))
+    };
+    let count =
+        usize::try_from(read_u32(data)? as i32).map_err(|_| error("negative BEAM lambda count"))?;
+    let entries = &data[WORD_SIZE..];
+    // ERTS also hashes the entries into the module MD5, and it rejects
+    // bytes that are not whole entries (`beam_file.c:1773-1802`).
+    if !entries.len().is_multiple_of(LAMBDA_ENTRY_SIZE) || count > entries.len() / LAMBDA_ENTRY_SIZE
+    {
+        return Err(error("invalid BEAM lambda table size"));
+    }
+    let module = atom_at(atoms, FIRST_ATOM_INDEX)?;
+    entries
+        .chunks(LAMBDA_ENTRY_SIZE)
+        .take(count)
+        .map(|entry| {
+            let [
+                atom_index,
+                total_arity,
+                label,
+                index,
+                free_count,
+                old_unique,
+            ] = [0, 1, 2, 3, 4, 5].map(|position| field(entry, position));
+            // ERTS keeps atom index 0 as the non-value slot of `[]`.
+            if !usize::try_from(atom_index).is_ok_and(|index| index <= atoms.len()) {
+                return Err(error("BEAM lambda function atom index out of range"));
+            }
+            let arity = total_arity
+                .checked_sub(free_count)
+                .filter(|&arity| free_count >= 0 && arity >= 0)
+                .ok_or_else(|| error("BEAM lambda has more free variables than arguments"))?;
+            let lambda = Lambda::new(
+                module.clone(),
+                index,
+                old_unique,
+                label as u32,
+                arity as u32,
+            );
+            Ok((lambda, free_count as usize))
+        })
+        .collect()
+}
+
 /// Read supported terms from an uncompressed `LitT` chunk. Put the atoms of
 /// each literal, in byte order, into the atom table, as `erts_decode_ext`
 /// does.
@@ -530,6 +639,26 @@ fn read_external_term(
                 Term::List(characters)
             }
             ETF_NIL_EXT => Term::List(Vec::new()),
+            ETF_EXPORT_EXT => {
+                // `dec_term` (`external.c:5006-5041`) reads two atoms and a
+                // non-negative integer, else the decode fails.
+                let mut part = || read_external_term(data, cursor, atom_table);
+                let (Some(module), Some(function), Some(arity)) = (part()?, part()?, part()?)
+                else {
+                    return Ok(None);
+                };
+                let (Term::Atom(module), Term::Atom(function), &Term::Integer(arity)) =
+                    (&module, &function, &arity)
+                else {
+                    return Err(error("invalid BEAM external fun literal"));
+                };
+                // A `SMALL_INTEGER_EXT` arity is in `0..=255`.
+                Term::Fun(Fun::external(
+                    module.clone(),
+                    function.clone(),
+                    arity as u32,
+                ))
+            }
             ETF_SMALL_INTEGER_EXT => Term::Integer(i64::from(take(data, cursor, 1)?[0])),
             ETF_SMALL_ATOM_UTF8_EXT => {
                 let size = take(data, cursor, 1)?[0] as usize;
@@ -887,10 +1016,41 @@ fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        atom_at, atom_chunk_name, parse_atoms, parse_exports, parse_literals, read_literal,
-        read_u32,
+        atom_at, atom_chunk_name, parse, parse_atoms, parse_exports, parse_lambdas, parse_literals,
+        read_literal, read_u32,
     };
-    use crate::term::{AtomTable, Map, Term};
+    use crate::term::{AtomTable, Fun, Lambda, Map, Term};
+
+    /// Return a `FunT` payload with a count and entries. Each entry gives
+    /// its function atom index, total arity, label, index, number of free
+    /// variables, and old unique value.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(lambda_table(0, &[]), [0, 0, 0, 0]);
+    /// ```
+    fn lambda_table(count: i32, entries: &[[i32; 6]]) -> Vec<u8> {
+        let fields = std::iter::once(count).chain(entries.iter().flatten().copied());
+        fields.flat_map(i32::to_be_bytes).collect()
+    }
+
+    /// Return `fixtures/beam/constant.beam` with a `FunT` chunk added.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(parse(&with_lambda_chunk(&lambda_table(0, &[])), &mut AtomTable::new()).is_ok());
+    /// ```
+    fn with_lambda_chunk(payload: &[u8]) -> Vec<u8> {
+        let mut beam = include_bytes!("../../fixtures/beam/constant.beam").to_vec();
+        beam.extend(b"FunT");
+        beam.extend((payload.len() as u32).to_be_bytes());
+        beam.extend(payload);
+        let size = (beam.len() - 8) as u32;
+        beam[4..8].copy_from_slice(&size.to_be_bytes());
+        beam
+    }
 
     /// Return the atom term of a name that exists in a table.
     ///
@@ -1139,6 +1299,38 @@ mod tests {
     }
 
     #[test]
+    fn reads_external_fun_literals_as_export_ext() {
+        let mut atoms = AtomTable::new();
+        let mut read = |bytes: &[u8]| read_literal(bytes, &mut atoms);
+        // erlc writes `fun lists:reverse/1` as EXPORT_EXT (113), two atoms,
+        // and SMALL_INTEGER_EXT.
+        let mut reverse = vec![131, 113, 119, 5];
+        reverse.extend(b"lists");
+        reverse.extend([119, 7]);
+        reverse.extend(b"reverse");
+        reverse.extend([97, 1]);
+        let reverse = read(&reverse).unwrap();
+        // An atom tag that PBeam does not decode, such as ATOM_EXT (100),
+        // makes the literal unsupported.
+        assert_eq!(read(&[131, 113, 100, 0, 1, b'm']).unwrap(), None);
+        // ERTS `dec_term` (`external.c:5006-5041`) fails for a module or
+        // function that is not an atom, or an arity that is not an integer.
+        for bytes in [
+            &[131, 113, 106, 119, 1, b'f', 97, 1][..],
+            &[131, 113, 119, 1, b'm', 106, 97, 1],
+            &[131, 113, 119, 1, b'm', 119, 1, b'f', 106],
+        ] {
+            assert_eq!(
+                read(bytes).unwrap_err().to_string(),
+                "invalid BEAM external fun literal"
+            );
+        }
+        let atom = |name| atoms.get(name).unwrap();
+        let fun = Fun::external(atom("lists"), atom("reverse"), 1);
+        assert_eq!(reverse, Some(Term::Fun(fun)));
+    }
+
+    #[test]
     fn rejects_invalid_literal_tables() {
         let mut atoms = AtomTable::new();
         let mut parse = |bytes: &[u8]| parse_literals(bytes, &mut atoms);
@@ -1151,5 +1343,77 @@ mod tests {
         let mut malformed_binary = vec![0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 7];
         malformed_binary.extend([131, 109, 0, 0, 0, 2, b'x']);
         assert!(parse(&malformed_binary).is_err());
+    }
+
+    #[test]
+    fn reads_the_lambda_table_as_parse_lambda_chunk() {
+        let mut table = AtomTable::new();
+        let atoms = vec![table.put("fun_probe").unwrap(), table.put("f").unwrap()];
+        let module = atoms[0].clone();
+        // An entry of the form that erlc writes for `fun(X) -> {Tag, X} end`:
+        // atom 2, total arity 2, label 127, index 0, one free variable, old
+        // unique value 31263486. A count below the number of entries reads
+        // only the counted entries, and atom index 0 is the ERTS non-value
+        // slot.
+        let entries = [[2, 2, 127, 0, 1, 31_263_486], [0, 0, 51, 1, 0, 7]];
+        assert_eq!(
+            parse_lambdas(&lambda_table(2, &entries), &atoms).unwrap(),
+            vec![
+                (Lambda::new(module.clone(), 0, 31_263_486, 127, 1), 1),
+                (Lambda::new(module, 1, 7, 51, 0), 0),
+            ]
+        );
+        assert_eq!(
+            parse_lambdas(&lambda_table(1, &entries), &atoms)
+                .unwrap()
+                .len(),
+            1
+        );
+        let error = |bytes: Vec<u8>| parse_lambdas(&bytes, &atoms).unwrap_err().to_string();
+        assert_eq!(error(lambda_table(-1, &[])), "negative BEAM lambda count");
+        assert_eq!(
+            error(lambda_table(2, &entries[..1])),
+            "invalid BEAM lambda table size"
+        );
+        let mut partial = lambda_table(1, &entries[..1]);
+        partial.push(0);
+        assert_eq!(error(partial), "invalid BEAM lambda table size");
+        assert!(error(vec![0, 0]).contains("truncated"));
+        for atom_index in [3, -1] {
+            assert_eq!(
+                error(lambda_table(1, &[[atom_index, 0, 1, 0, 0, 0]])),
+                "BEAM lambda function atom index out of range"
+            );
+        }
+        for (total_arity, free_count) in [(1, 2), (1, -1)] {
+            assert_eq!(
+                error(lambda_table(1, &[[1, total_arity, 1, 0, free_count, 0]])),
+                "BEAM lambda has more free variables than arguments"
+            );
+        }
+    }
+
+    #[test]
+    fn checks_lambda_labels_against_the_code_label_count() {
+        let beam = include_bytes!("../../fixtures/beam/constant.beam");
+        let code = beam.windows(4).position(|id| id == b"Code").unwrap();
+        // The label count is the fourth field of the code header.
+        let label_count = read_u32(&beam[code + 20..]).unwrap() as i32;
+        let load = |label: i32| {
+            let table = lambda_table(1, &[[1, 0, label, 0, 0, 0]]);
+            parse(&with_lambda_chunk(&table), &mut AtomTable::new())
+        };
+        assert!(load(1).is_ok());
+        assert!(load(label_count - 1).is_ok());
+        for label in [0, label_count, -1] {
+            assert!(
+                load(label)
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("BEAM lambda label")
+            );
+        }
+        // An empty `FunT` chunk is no chunk, as in ERTS.
+        assert!(parse(&with_lambda_chunk(&[]), &mut AtomTable::new()).is_ok());
     }
 }

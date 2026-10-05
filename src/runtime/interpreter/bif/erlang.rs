@@ -1,8 +1,9 @@
 //! Bodies of the `erlang` BIFs that do not fit on one table line.
 
-use super::BifResult::{Trap, Value};
+use super::BifResult::{Raise, Trap, Value};
 use super::*;
-use crate::term::Reference;
+use crate::runtime::host;
+use crate::term::{Fun, MAX_ATOM_CHARACTERS, Reference};
 
 /// Return the node of a pid or of the calling process.
 ///
@@ -274,6 +275,147 @@ pub(super) fn append(left: &Term, right: &Term) -> Result<BifResult, BeamError> 
     }
 }
 
+/// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
+/// name, as ERTS `atom_to_list_1` (`bif.c:3186-3210`) does. The atom `''`
+/// gives `[]`. A term that is not an atom raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = atom_to_list(&Term::static_atom("ok"));
+/// assert!(matches!(list, BifResult::Value(Term::List(codes)) if codes == [Term::Integer(111), Term::Integer(107)]));
+/// assert!(matches!(atom_to_list(&Term::static_atom("")), BifResult::Value(Term::List(codes)) if codes.is_empty()));
+/// assert!(matches!(atom_to_list(&Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn atom_to_list(term: &Term) -> BifResult {
+    match term {
+        Term::Atom(atom) => Value(Term::List(
+            atom.name()
+                .chars()
+                .map(|character| Term::Integer(i64::from(u32::from(character))))
+                .collect(),
+        )),
+        _ => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:list_to_atom/1`: return the atom whose name has the code
+/// points of a list, and put a new atom into the atom table of the run, as
+/// ERTS `list_to_atom_1` (`bif.c:3217-3236`) does with
+/// `erts_unicode_list_to_buf` (`utils.c:2862-2942`). ERTS counts each
+/// element before it checks it, so a 256th element raises `system_limit`,
+/// also when it is not a character. An element that is not an integer in
+/// `0..=0x10FFFF` outside `0xD800..=0xDFFF`, and a term that is not a list,
+/// raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut atoms = AtomTable::new();
+/// let ok = list_to_atom(&mut atoms, &Term::List(vec![Term::Integer(111), Term::Integer(107)]))?;
+/// assert!(matches!(ok, BifResult::Value(atom) if atom == Term::static_atom("ok")));
+/// let surrogate = Term::List(vec![Term::Integer(0xD800)]);
+/// assert!(matches!(list_to_atom(&mut atoms, &surrogate)?, BifResult::Raise { .. }));
+/// let long = Term::List(vec![Term::Integer(97); 256]);
+/// assert!(matches!(list_to_atom(&mut atoms, &long)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`,
+/// where ERTS stops the emulator.
+pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResult, BeamError> {
+    let Term::List(elements) = term else {
+        return Ok(BifResult::badarg());
+    };
+    let mut name = String::new();
+    for (count, element) in elements.iter().enumerate() {
+        if count == MAX_ATOM_CHARACTERS {
+            return Ok(Raise {
+                class: ExceptionClass::Error,
+                reason: Term::static_atom("system_limit"),
+            });
+        }
+        let character = match element {
+            Term::Integer(code) => u32::try_from(*code).ok().and_then(char::from_u32),
+            _ => None,
+        };
+        let Some(character) = character else {
+            return Ok(BifResult::badarg());
+        };
+        name.push(character);
+    }
+    Ok(Value(Term::Atom(atoms.put(&name)?)))
+}
+
+/// Run `erlang:system_info/1`. The item `os_type` returns `{unix, Flavor}`,
+/// as ERTS `system_info_1` (`erl_bif_info.c:3026-3027`) does with `os_type`
+/// `"unix"` (`sys/unix/sys.c:835`) and the OS flavor of the host. ERTS makes
+/// both atoms at emulator start (`os_info_init` in
+/// `erl_bif_info.c:6418-6440`); PBeam puts them into the atom table of the
+/// run at this call.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut atoms = AtomTable::new();
+/// let os_type = system_info(&mut atoms, &Term::static_atom("os_type"))?;
+/// // macOS: {unix, darwin}.
+/// assert!(matches!(os_type, BifResult::Value(Term::Tuple(_))));
+/// assert!(system_info(&mut atoms, &Term::static_atom("otp_release")).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Each other item gives a runtime error, also an item that ERTS rejects
+/// with `badarg`. A new atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResult, BeamError> {
+    match item {
+        Term::Atom(atom) if atom.name() == "os_type" => Ok(Value(Term::Tuple(vec![
+            Term::Atom(atoms.put("unix")?),
+            Term::Atom(atoms.put(&host::os_flavor())?),
+        ]))),
+        _ => Err(error(format!(
+            "unsupported erlang:system_info/1 argument {item:?}"
+        ))),
+    }
+}
+
+/// Run `erlang:'+'/2` or `erlang:'-'/2` with `operation`, the checked `i64`
+/// sum or difference, as ERTS `erts_mixed_plus` and `erts_mixed_minus`
+/// (`erl_arith.c:370-389`, `erl_arith.c:585-602`) do for two integers. An
+/// operand that is not a number raises `badarith`. PBeam has no float term,
+/// so each number is an integer. A result outside the `i64` range gives a
+/// runtime error, where ERTS makes a bignum.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let sum = arith("+", &Term::Integer(1), &Term::Integer(2), i64::checked_add)?;
+/// assert!(matches!(sum, BifResult::Value(Term::Integer(3))));
+/// let atom = Term::static_atom("a");
+/// assert!(matches!(arith("-", &atom, &Term::Integer(1), i64::checked_sub)?, BifResult::Raise { .. }));
+/// assert!(arith("+", &Term::Integer(i64::MAX), &Term::Integer(1), i64::checked_add).is_err());
+/// ```
+pub(super) fn arith(
+    name: &str,
+    left: &Term,
+    right: &Term,
+    operation: fn(i64, i64) -> Option<i64>,
+) -> Result<BifResult, BeamError> {
+    let (Term::Integer(left), Term::Integer(right)) = (left, right) else {
+        return Ok(BifResult::badarith());
+    };
+    // ponytail: a result outside i64 needs a bignum term; see "Integer range" in docs/erts-differences.md.
+    let result = operation(*left, *right).ok_or_else(|| {
+        error(format!(
+            "unsupported erlang:{name}/2 result of {left} and {right}: needs a bignum"
+        ))
+    })?;
+    Ok(Value(Term::Integer(result)))
+}
+
 /// Run `erlang:element/2`: return the element at the 1-based `index` of a
 /// tuple. An `index` that is not an integer or is outside the tuple, and a
 /// `tuple` that is not a tuple, raise `badarg`, as in ERTS `element_2`
@@ -296,6 +438,59 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
         .and_then(|index| index.checked_sub(1))
         .and_then(|index| elements.get(index))
         .map_or_else(BifResult::badarg, |element| Value(element.clone()))
+}
+
+/// Run `erlang:is_function/2`: return `true` when `term` is a fun of
+/// `arity` arguments, as ERTS `erl_is_function` (`erl_bif_op.c:237-267`)
+/// does. An `arity` that is negative or not an integer raises `badarg`. A
+/// non-negative arity that no fun has gives `false`. The `is_function2`
+/// instruction runs the same check and passes only when it returns `true`
+/// (`jit/arm/instr_common.cpp:1266-1283`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // fun(X) -> {Tag, X} end
+/// assert!(matches!(is_function(&pair, &Term::Integer(1)), BifResult::Value(value) if value == Term::static_atom("true")));
+/// assert!(matches!(is_function(&pair, &Term::Integer(0)), BifResult::Value(value) if value == Term::static_atom("false")));
+/// assert!(matches!(is_function(&Term::static_atom("notfun"), &Term::Integer(-1)), BifResult::Raise { .. }));
+/// ```
+pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) -> BifResult {
+    let &Term::Integer(arity) = arity else {
+        return BifResult::badarg();
+    };
+    if arity < 0 {
+        return BifResult::badarg();
+    }
+    let matches = matches!(term, Term::Fun(fun) if i64::from(fun.target().arity()) == arity);
+    Value(Term::static_atom(if matches { "true" } else { "false" }))
+}
+
+/// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
+const MAX_ARG: i64 = 255;
+
+/// Run `erlang:make_fun/3`: return the external fun of
+/// `module:function/arity`, as ERTS `make_fun_3` (`bif.c:4467-4485`) does.
+/// The module and the function must be atoms, and the arity must be an
+/// integer in `0..=255` ([`MAX_ARG`]), else the call raises
+/// `badarg`. The function does not need to exist.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let module = Term::static_atom("erlang");
+/// let function = Term::static_atom("self");
+/// assert!(matches!(make_fun(&module, &function, &Term::Integer(0)), BifResult::Value(Term::Fun(_))));
+/// assert!(matches!(make_fun(&module, &function, &Term::Integer(256)), BifResult::Raise { .. }));
+/// assert!(matches!(make_fun(&Term::Integer(1), &function, &Term::Integer(0)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn make_fun(module: &Term, function: &Term, arity: &Term) -> BifResult {
+    match (module, function, arity.small_integer()) {
+        (Term::Atom(module), Term::Atom(function), Some(arity @ 0..=MAX_ARG)) => Value(Term::Fun(
+            Fun::external(module.clone(), function.clone(), arity as u32),
+        )),
+        _ => BifResult::badarg(),
+    }
 }
 
 /// The largest binary, in bytes, that `erlang:iolist_to_iovec/1` copies into

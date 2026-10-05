@@ -18,14 +18,30 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
 
     // `otp_io_calls:io_call/0` calls `io:columns/0`, which resolves inside
     // the loaded `io` module. The first process is its own group leader, so
-    // the request returns `{error, calling_self}`, and `io:columns/1` then
-    // reaches its `is_integer` test (opcode 45), which PBeam does not run
-    // yet. The error proves the call ran `io`'s own code.
-    let error = program.execute("otp_io_calls", "io_call", &[]).unwrap_err();
-    assert!(
-        error.to_string().contains("unsupported BEAM opcode 45"),
-        "expected resolution into io, got {error}"
+    // the request returns `{error, calling_self}`. `io:columns/1` then fails
+    // its `is_integer` test (opcode 45) and returns `{error, enotsup}`
+    // (`io.erl:297-303`), as pinned ERTS does for a process that is its own
+    // group leader. The result proves the call ran `io`'s own code.
+    assert_eq!(
+        program.execute("otp_io_calls", "io_call", &[]).unwrap(),
+        Term::Tuple(vec![
+            Term::Atom(program.atom("error").unwrap()),
+            Term::Atom(program.atom("enotsup").unwrap()),
+        ])
     );
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/otp_io",
+            "-eval",
+            "group_leader(self(), self()), io:format(standard_error, \"~w~n\", [otp_io_calls:io_call()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stdout.is_empty());
+    assert_eq!(reference.stderr, b"{error,enotsup}\n");
 
     // `group:whereis_shell/0` resolves inside the loaded `group` module,
     // calls `erlang:group_leader/0`, runs `node/1` (`bif1`) and `node/0`

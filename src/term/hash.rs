@@ -14,9 +14,15 @@
 //! so a deep term does not recurse. A reference hashes as an ERTS local
 //! reference that scheduler 1 made with the PBeam reference counter as its
 //! value (`erts_set_ref_numbers` in `erl_bif_unique.h`).
+//!
+//! A local fun mixes the index and the old unique value of its fun entry,
+//! the atom word of its module, and then its free variables. An external fun
+//! mixes the address of its ERTS export entry, which changes from run to run,
+//! so PBeam mixes the word `(module index << 40) | (function index << 20) |
+//! arity` in its place. Equal external funs give equal words.
 
 use super::{
-    Map, ProcessId, Reference, Term,
+    Fun, Map, ProcessId, Reference, Target, Term,
     map::{Child, Form, Node},
 };
 
@@ -46,6 +52,8 @@ const TYPE_HASHMAP_HEAD_ARRAY: u64 = 9;
 const TYPE_HASHMAP_HEAD_BITMAP: u64 = 10;
 const TYPE_HASHMAP_NODE: u64 = 11;
 const TYPE_BINARY: u64 = 12;
+const TYPE_LOCAL_FUN: u64 = 13;
+const TYPE_EXTERNAL_FUN: u64 = 14;
 const TYPE_NEG_BIGNUM: u64 = 15;
 const TYPE_POS_BIGNUM: u64 = 16;
 const TYPE_LOCAL_REF: u64 = 17;
@@ -69,6 +77,13 @@ const REF_NUMBER_1_MASK: u64 = 0xFFFC_0000;
 /// normal scheduler the number 1 (`init_scheduler_data` in
 /// `erl_process.c`).
 const REF_THREAD: u64 = 1;
+
+/// The shift of the module atom index in the export word of an external
+/// fun. An atom index is below `ATOM_LIMIT`, 2^20.
+const EXPORT_MODULE_SHIFT: u32 = 40;
+/// The shift of the function atom index in the export word of an external
+/// fun. The arity is at most 255 (`MAX_ARG`), below the function index.
+const EXPORT_FUNCTION_SHIFT: u32 = 20;
 
 /// Return the ERTS internal hash of a term (`erts_internal_hash`).
 ///
@@ -99,6 +114,7 @@ enum Shape<'a> {
     Bignum(i64),
     /// The counter value of a reference.
     Reference(u64),
+    Fun(&'a Fun),
 }
 
 /// Return the ERTS layout of a term.
@@ -112,7 +128,7 @@ enum Shape<'a> {
 /// ```
 fn shape(term: &Term) -> Shape<'_> {
     match term {
-        Term::Atom(atom) => Shape::Immediate((u64::from(atom.index()) << ATOM_TAG_BITS) | ATOM_TAG),
+        Term::Atom(atom) => Shape::Immediate(atom_word(atom.index())),
         Term::Pid(ProcessId(number)) => Shape::Immediate((number << IMMED1_TAG_BITS) | PID_TAG),
         Term::List(cells) if cells.is_empty() => Shape::Immediate(NIL),
         Term::List(cells) => Shape::List(cells),
@@ -126,7 +142,20 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Map(map) => Shape::Map(map),
         Term::Binary(bytes) => Shape::Binary(bytes),
         Term::Reference(Reference(value)) => Shape::Reference(*value),
+        Term::Fun(fun) => Shape::Fun(fun),
     }
+}
+
+/// Return the ERTS word of the atom with an atom-table index.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // true has index 1.
+/// assert_eq!(atom_word(1), 0x4B);
+/// ```
+fn atom_word(index: u32) -> u64 {
+    (u64::from(index) << ATOM_TAG_BITS) | ATOM_TAG
 }
 
 /// Return the byte value of a list element, as the ERTS check `is_byte`
@@ -438,6 +467,35 @@ impl State {
                 self.mix_alpha(pair(TYPE_LOCAL_REF, value & REF_NUMBER_0_MASK));
                 self.mix_beta(pair((value & REF_NUMBER_1_MASK) | REF_THREAD, value >> 32));
             }
+            Shape::Fun(fun) => match fun.target() {
+                Target::Local(lambda) => {
+                    let free = fun.free();
+                    self.mix_alpha(pair(TYPE_LOCAL_FUN, free.len() as u64));
+                    // ERTS widens the C `int` fields with their sign.
+                    self.mix_beta(pair(
+                        i64::from(lambda.index) as u64,
+                        i64::from(lambda.old_unique) as u64,
+                    ));
+                    self.mix_immediate(atom_word(lambda.module().index()));
+                    let (last, free) = free.split_last()?;
+                    for value in free {
+                        self.push_term(stack, value);
+                    }
+                    return Some(Item::Term(last));
+                }
+                Target::External {
+                    module,
+                    function,
+                    arity,
+                } => {
+                    self.mix_alpha(TYPE_EXTERNAL_FUN);
+                    self.mix_beta(
+                        (u64::from(module.index()) << EXPORT_MODULE_SHIFT)
+                            | (u64::from(function.index()) << EXPORT_FUNCTION_SHIFT)
+                            | u64::from(*arity),
+                    );
+                }
+            },
         }
         None
     }
@@ -504,7 +562,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::{internal_hash, mix64};
-    use crate::term::{Map, ProcessId, Reference, Term};
+    use crate::term::{Atom, Fun, Lambda, Map, ProcessId, Reference, Term};
 
     fn atom(name: &str) -> Term {
         Term::static_atom(name)
@@ -613,13 +671,84 @@ mod tests {
         }
     }
 
+    /// Return a local fun of `lists` with a fun entry and free variables.
+    fn local(index: i32, old_unique: i32, arity: u32, free: Vec<Term>) -> Term {
+        let module = Atom::from_static("lists").unwrap();
+        Term::Fun(Fun::new(
+            Lambda::new(module, index, old_unique, 53, arity),
+            free,
+        ))
+    }
+
+    fn external(function: &str, arity: u32) -> Term {
+        let atom = |name| Atom::from_static(name).unwrap();
+        Term::Fun(Fun::external(atom("lists"), atom(function), arity))
+    }
+
+    #[test]
+    fn hashes_local_funs_as_pinned_erts() {
+        // Each value is erts_debug:get_internal_state({internal_hash, Term}) on ERTS 29.1.1,
+        // for a fun that binary_to_term/1 makes from NEW_FUN_EXT with the module lists, the
+        // index, the old index, the old unique value, and the free variables.
+        let zero = || local(0, 7, 1, vec![]);
+        let free = local(0, 7, 1, vec![Term::Integer(1), Term::Tuple(vec![])]);
+        let negative = || local(3, -5, 2, vec![Term::Binary(b"ab".to_vec()), atom("ok")]);
+        let cases = [
+            (zero(), 16900316212850717680),
+            (free.clone(), 15970829942560899780),
+            (negative(), 12860429061993126401),
+            (
+                Term::Tuple(vec![zero(), Term::Integer(1)]),
+                9006137623669004246,
+            ),
+            (
+                map([(atom("ok"), free), (Term::Integer(1), zero())]),
+                14001711515840955162,
+            ),
+            (Term::List(vec![negative()]), 1176312308706464788),
+        ];
+        for (term, hash) in cases {
+            assert_eq!(internal_hash(&term), hash, "{term:?}");
+        }
+        // The entry label only selects code, so it is not part of the hash.
+        let module = Atom::from_static("lists").unwrap();
+        let relabeled = Term::Fun(Fun::new(Lambda::new(module, 0, 7, 61, 1), vec![]));
+        assert_eq!(internal_hash(&relabeled), internal_hash(&zero()));
+    }
+
+    #[test]
+    fn hashes_external_funs_by_their_mfa() {
+        // ERTS mixes the export entry address, which changes from run to run:
+        // fun lists:reverse/1 gave 638061310806519221 and 18158401298541009015.
+        // PBeam mixes a word of the module, function, and arity in its place.
+        let reverse = external("reverse", 1);
+        assert_eq!(internal_hash(&reverse), internal_hash(&reverse.clone()));
+        let funs = [
+            reverse,
+            external("reverse", 2),
+            external("member", 1),
+            Term::Fun(Fun::external(
+                Atom::from_static("erlang").unwrap(),
+                Atom::from_static("reverse").unwrap(),
+                1,
+            )),
+            local(0, 7, 1, vec![]),
+        ];
+        for (index, term) in funs.iter().enumerate() {
+            for other in &funs[index + 1..] {
+                assert_ne!(internal_hash(term), internal_hash(other), "{term:?}");
+            }
+        }
+    }
+
     #[test]
     fn hashes_a_deep_term_without_recursion() {
         let deep = |levels: usize| {
-            (0..levels).fold(Term::List(vec![]), |inner, level| match level % 3 {
+            (0..levels).fold(Term::List(vec![]), |inner, level| match level % 4 {
                 0 => Term::Tuple(vec![inner, Term::Binary(vec![])]),
                 1 => Term::List(vec![inner, Term::Integer(1)]),
-                _ => map([(atom("ok"), inner)]),
+                2 => map([(atom("ok"), inner)]),
+                _ => local(0, 7, 1, vec![inner, Term::Integer(1)]),
             })
         };
         let hash = internal_hash(&deep(1_000_000));
