@@ -1,8 +1,9 @@
 //! Bodies of the `erlang` BIFs that do not fit on one table line.
 
-use super::BifResult::{Trap, Value};
+use super::BifResult::{Raise, Trap, Value};
 use super::*;
-use crate::term::{Fun, Reference};
+use crate::runtime::host;
+use crate::term::{Fun, MAX_ATOM_CHARACTERS, Reference};
 
 /// Return the node of a pid or of the calling process.
 ///
@@ -271,6 +272,113 @@ pub(super) fn append(left: &Term, right: &Term) -> Result<BifResult, BeamError> 
             "unsupported erlang:++/2 tail {right:?}: not a list"
         ))),
         _ => Ok(BifResult::badarg()),
+    }
+}
+
+/// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
+/// name, as ERTS `atom_to_list_1` (`bif.c:3186-3210`) does. The atom `''`
+/// gives `[]`. A term that is not an atom raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = atom_to_list(&Term::static_atom("ok"));
+/// assert!(matches!(list, BifResult::Value(Term::List(codes)) if codes == [Term::Integer(111), Term::Integer(107)]));
+/// assert!(matches!(atom_to_list(&Term::static_atom("")), BifResult::Value(Term::List(codes)) if codes.is_empty()));
+/// assert!(matches!(atom_to_list(&Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn atom_to_list(term: &Term) -> BifResult {
+    match term {
+        Term::Atom(atom) => Value(Term::List(
+            atom.name()
+                .chars()
+                .map(|character| Term::Integer(i64::from(u32::from(character))))
+                .collect(),
+        )),
+        _ => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:list_to_atom/1`: return the atom whose name has the code
+/// points of a list, and put a new atom into the atom table of the run, as
+/// ERTS `list_to_atom_1` (`bif.c:3217-3236`) does with
+/// `erts_unicode_list_to_buf` (`utils.c:2862-2942`). ERTS counts each
+/// element before it checks it, so a 256th element raises `system_limit`,
+/// also when it is not a character. An element that is not an integer in
+/// `0..=0x10FFFF` outside `0xD800..=0xDFFF`, and a term that is not a list,
+/// raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut atoms = AtomTable::new();
+/// let ok = list_to_atom(&mut atoms, &Term::List(vec![Term::Integer(111), Term::Integer(107)]))?;
+/// assert!(matches!(ok, BifResult::Value(atom) if atom == Term::static_atom("ok")));
+/// let surrogate = Term::List(vec![Term::Integer(0xD800)]);
+/// assert!(matches!(list_to_atom(&mut atoms, &surrogate)?, BifResult::Raise { .. }));
+/// let long = Term::List(vec![Term::Integer(97); 256]);
+/// assert!(matches!(list_to_atom(&mut atoms, &long)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`,
+/// where ERTS stops the emulator.
+pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResult, BeamError> {
+    let Term::List(elements) = term else {
+        return Ok(BifResult::badarg());
+    };
+    let mut name = String::new();
+    for (count, element) in elements.iter().enumerate() {
+        if count == MAX_ATOM_CHARACTERS {
+            return Ok(Raise {
+                class: ExceptionClass::Error,
+                reason: Term::static_atom("system_limit"),
+            });
+        }
+        let character = match element {
+            Term::Integer(code) => u32::try_from(*code).ok().and_then(char::from_u32),
+            _ => None,
+        };
+        let Some(character) = character else {
+            return Ok(BifResult::badarg());
+        };
+        name.push(character);
+    }
+    Ok(Value(Term::Atom(atoms.put(&name)?)))
+}
+
+/// Run `erlang:system_info/1`. The item `os_type` returns `{unix, Flavor}`,
+/// as ERTS `system_info_1` (`erl_bif_info.c:3026-3027`) does with `os_type`
+/// `"unix"` (`sys/unix/sys.c:835`) and the OS flavor of the host. ERTS makes
+/// both atoms at emulator start (`os_info_init` in
+/// `erl_bif_info.c:6418-6440`); PBeam puts them into the atom table of the
+/// run at this call.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut atoms = AtomTable::new();
+/// let os_type = system_info(&mut atoms, &Term::static_atom("os_type"))?;
+/// // macOS: {unix, darwin}.
+/// assert!(matches!(os_type, BifResult::Value(Term::Tuple(_))));
+/// assert!(system_info(&mut atoms, &Term::static_atom("otp_release")).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Each other item gives a runtime error, also an item that ERTS rejects
+/// with `badarg`. A new atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResult, BeamError> {
+    match item {
+        Term::Atom(atom) if atom.name() == "os_type" => Ok(Value(Term::Tuple(vec![
+            Term::Atom(atoms.put("unix")?),
+            Term::Atom(atoms.put(&host::os_flavor())?),
+        ]))),
+        _ => Err(error(format!(
+            "unsupported erlang:system_info/1 argument {item:?}"
+        ))),
     }
 }
 
