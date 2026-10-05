@@ -10,6 +10,13 @@ const RESULTS: &str = "lt,ge,lt,ge,ge,lt,ge,ge,ge,lt,ge,ge,ge,lt,lt,ge,ge,ge,lt,
 
 /// The `erlang:'>='/2` result of each pair: `true` for each `ge` of
 /// [`RESULTS`], else `false`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // RESULTS starts with "lt,ge,lt,ge,ge,lt".
+/// assert!(bif_results().starts_with("false,true,false,true,true,false"));
+/// ```
 fn bif_results() -> String {
     RESULTS
         .split(',')
