@@ -184,7 +184,9 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// `logger` (`erl_trace.c:339`). Each other value raises `badarg`.
 /// `debug_flags` returns `true` for each value. An item that ERTS does not
 /// know raises `badarg`, also `time_offset` with a value that is not
-/// `finalize`.
+/// `finalize`. Each item of `UNSUPPORTED_SYSTEM_FLAGS` first checks its
+/// value as ERTS does (`unsupported_system_flag_value`), and raises
+/// `badarg` for a value that is not valid.
 ///
 /// PBeam writes no error report (row "Error report" in
 /// `docs/erts-differences.md`), so the system logger value has no other
@@ -197,12 +199,14 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "logger"));
 /// assert!(matches!(system_flag(&mut context, &foo, &Term::Integer(1))?, BifResult::Raise { .. }));
 /// assert!(system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::Integer(8)).is_err());
+/// let depth = system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::static_atom("foo"))?;
+/// assert!(matches!(depth, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
 ///
-/// Each item of `UNSUPPORTED_SYSTEM_FLAGS`, and `time_offset` with
-/// `finalize`, give a runtime error.
+/// Each item of `UNSUPPORTED_SYSTEM_FLAGS` with a value that passes the
+/// check, and `time_offset` with `finalize`, give a runtime error.
 pub(super) fn system_flag(
     context: &mut BifContext<'_>,
     item: &Term,
@@ -226,12 +230,110 @@ pub(super) fn system_flag(
             return Err(error("unsupported erlang:system_flag/2 item time_offset"));
         }
         (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
+            if !unsupported_system_flag_value(name, value) {
+                return Ok(BifResult::badarg());
+            }
             return Err(error(format!(
                 "unsupported erlang:system_flag/2 item {name}"
             )));
         }
         _ => BifResult::badarg(),
     })
+}
+
+/// Tell whether ERTS `system_flag_2` (`bif.c:4972-5304`) accepts `value` for
+/// the item `name` of `UNSUPPORTED_SYSTEM_FLAGS` before it uses the missing
+/// subsystem. ERTS raises `badarg` for a value that this check rejects:
+///
+/// - `multi_scheduling` takes `block`, `unblock`, `block_normal`, or
+///   `unblock_normal`.
+/// - `schedulers_online` and `dirty_cpu_schedulers_online` take a small
+///   integer of 1 or more (`erts_set_schedulers_online`,
+///   `erl_process.c:8241-8242`).
+/// - `fullsweep_after`, `min_heap_size`, `min_bin_vheap_size`, and
+///   `backtrace_depth` take a small integer of 0 or more.
+/// - `trace_control_word` takes an integer from 0 to `u32::MAX`
+///   (`db_set_trace_control_word`, `erl_db_util.c:1091-1103`).
+/// - `sequential_tracer` takes `false`, a pid, or `{Module, State}` with an
+///   atom `Module` (`erts_term_to_tracer`, `erl_trace.c:3090-3129`).
+/// - `scheduler_wall_time` takes `true` or `false`, and
+///   `microstate_accounting` takes `true`, `false`, or `reset`.
+/// - `outstanding_system_requests_limit` takes an integer from 1 to
+///   `2^27 - 1` (`erts_set_outstanding_system_requests_limit`,
+///   `beam_bif_load.c:115-126`).
+/// - `scheduling_statistics` takes `disable`, `enable`, or `clear`.
+/// - `internal_cpu_topology` takes `undefined` or a non-empty proper list of
+///   tuples `{cpu, Node, Processor, ProcessorNode, Core, Thread, Logical}`
+///   (`erts_set_cpu_topology`, `erl_cpu_topology.c:1348-1400`).
+/// - `erts_alloc` takes `{Allocator, Parameter, Value}` with two atoms and
+///   an integer (`erts_alloc_set_dyn_param`, `erl_alloc.c:3445-3462`).
+///
+/// `max_heap_size`, `reset_seq_trace`, `cpu_topology`, and
+/// `scheduler_bind_type` accept each value here. ERTS also rejects a value
+/// that this check accepts when the value needs the state of the missing
+/// subsystem: the scheduler count, the tracer module, the allocator names,
+/// the CPU topology checks, the minimum heap size, and the CPU binding
+/// support of the host.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!unsupported_system_flag_value("backtrace_depth", &Term::static_atom("foo")));
+/// assert!(unsupported_system_flag_value("backtrace_depth", &Term::Integer(8)));
+/// assert!(!unsupported_system_flag_value("schedulers_online", &Term::Integer(0)));
+/// ```
+fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
+    let atom = match value {
+        Term::Atom(atom) => Some(atom.name()),
+        _ => None,
+    };
+    let integer = match value {
+        Term::Integer(integer) => Some(*integer),
+        _ => None,
+    };
+    let small = value.small_integer();
+    let cpu = |cpu: &Term| match cpu {
+        Term::Tuple(elements) => {
+            matches!(elements.as_slice(), [Term::Atom(tag), _, _, _, _, _, _] if tag.name() == "cpu")
+        }
+        _ => false,
+    };
+    match name {
+        "multi_scheduling" => matches!(
+            atom,
+            Some("block" | "unblock" | "block_normal" | "unblock_normal")
+        ),
+        "schedulers_online" | "dirty_cpu_schedulers_online" => {
+            small.is_some_and(|count| count >= 1)
+        }
+        "fullsweep_after" | "min_heap_size" | "min_bin_vheap_size" | "backtrace_depth" => {
+            small.is_some_and(|size| size >= 0)
+        }
+        "trace_control_word" => integer.is_some_and(|word| u32::try_from(word).is_ok()),
+        "sequential_tracer" => match value {
+            Term::Pid(_) => true,
+            Term::Tuple(elements) => matches!(elements.as_slice(), [Term::Atom(_), _]),
+            _ => atom == Some("false"),
+        },
+        "scheduler_wall_time" => matches!(atom, Some("true" | "false")),
+        "microstate_accounting" => matches!(atom, Some("true" | "false" | "reset")),
+        "outstanding_system_requests_limit" => {
+            integer.is_some_and(|limit| (1..1 << 27).contains(&limit))
+        }
+        "scheduling_statistics" => matches!(atom, Some("disable" | "enable" | "clear")),
+        "internal_cpu_topology" => match value {
+            Term::List(cpus) => !cpus.is_empty() && cpus.iter().all(cpu),
+            _ => atom == Some("undefined"),
+        },
+        "erts_alloc" => match value {
+            Term::Tuple(elements) => matches!(
+                elements.as_slice(),
+                [Term::Atom(_), Term::Atom(_), Term::Integer(_)]
+            ),
+            _ => false,
+        },
+        _ => true,
+    }
 }
 
 /// Run `erlang:raise(Class, Reason, Stacktrace)` as ERTS `raise_3`

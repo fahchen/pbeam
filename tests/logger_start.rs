@@ -672,11 +672,16 @@ fn sets_the_system_logger_as_pinned_erts() {
 fn rejects_system_flag_items_as_pinned_erts() {
     // `logger_start_probe:system_flag/0`: an item that `system_flag_2`
     // (`bif.c:4972-5304`) does not know raises `badarg`, also `time_offset`
-    // with a value that is not `finalize`. `debug_flags` gives `true`.
+    // with a value that is not `finalize`. `debug_flags` gives `true`. It
+    // also raises `badarg` for a value that it rejects for an item that
+    // needs a subsystem that PBeam does not have, before it uses the
+    // subsystem.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
-    let expected = vec![badarg.clone(), badarg.clone(), badarg, atom("true")];
+    let mut expected = vec![badarg.clone(); 3];
+    expected.push(atom("true"));
+    expected.extend(vec![badarg; 29]);
     assert_eq!(
         program
             .execute("logger_start_probe", "system_flag", &[])
@@ -684,8 +689,12 @@ fn rejects_system_flag_items_as_pinned_erts() {
         Term::List(expected)
     );
     assert_eq!(
-        reference("system_flag"),
-        b"[{error,badarg},{error,badarg},{error,badarg},true]\n"
+        String::from_utf8(reference("system_flag")).unwrap(),
+        format!(
+            "[{},true,{}]\n",
+            ["{error,badarg}"; 3].join(","),
+            ["{error,badarg}"; 29].join(",")
+        )
     );
 }
 
@@ -752,10 +761,11 @@ fn rejects_process_flags_as_pinned_erts() {
 #[test]
 fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
     // `logger_start_probe:unsupported_flag/1`: ERTS gives a value for each
-    // flag (`bif.c:5108-5115`, `bif.c:5203-5224`, `bif.c:2052-2057`,
-    // `bif.c:1907-1915`, `bif.c:2114-2130`, `bif.c:2212-2226`). PBeam has no
-    // stack traces, time offset service, priorities, saved calls, garbage
-    // collector, or distribution (rows "System flags" and "Process flags" in
+    // flag (`bif.c:5108-5115`, `bif.c:5203-5224`, `bif.c:5116-5172`,
+    // `bif.c:2052-2057`, `bif.c:1907-1915`, `bif.c:2114-2130`,
+    // `bif.c:2212-2226`). PBeam has no stack traces, time offset service,
+    // tracing, priorities, saved calls, garbage collector, or distribution
+    // (rows "System flags" and "Process flags" in
     // `docs/erts-differences.md`).
     let program = load();
     for (case, message, erts) in [
@@ -768,6 +778,21 @@ fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
             "time_offset",
             "unsupported erlang:system_flag/2 item time_offset",
             "volatile",
+        ),
+        (
+            "trace_control_word",
+            "unsupported erlang:system_flag/2 item trace_control_word",
+            "0",
+        ),
+        (
+            "sequential_tracer",
+            "unsupported erlang:system_flag/2 item sequential_tracer",
+            "false",
+        ),
+        (
+            "reset_seq_trace",
+            "unsupported erlang:system_flag/2 item reset_seq_trace",
+            "true",
         ),
         (
             "priority",
