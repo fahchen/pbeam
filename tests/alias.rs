@@ -90,3 +90,206 @@ fn returns_a_runtime_error_for_a_time_offset_monitor() {
     );
     assert!(erl_reference("unsupported(time_offset)").starts_with("#Ref<"));
 }
+
+/// Return the result of `alias_probe:Function()` in PBeam, and a function
+/// that makes an atom of the loaded program.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (result, atom) = run("modes");
+/// assert_eq!(result, Term::Tuple(vec![/* ... */]));
+/// ```
+fn run(function: &str) -> (Term, impl Fn(&str) -> Term) {
+    let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
+    let result = program.execute("alias_probe", function, &[]).unwrap();
+    (result, move |name: &str| {
+        Term::Atom(program.atom(name).unwrap())
+    })
+}
+
+/// Return the error text of `alias_probe:unsupported(Case)` in PBeam.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(unsupported("priority").contains("unsupported monitor option priority"));
+/// ```
+fn unsupported(case: &str) -> String {
+    let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
+    let case = Term::Atom(program.atom(case).unwrap());
+    program
+        .execute("alias_probe", "unsupported", &[case])
+        .unwrap_err()
+        .to_string()
+}
+
+#[test]
+fn reads_the_options_of_monitor_3_before_the_type_as_pinned_erts() {
+    // `options/0`: `erts_monitor_opts` (bif.c:701-756) rejects each other
+    // element and an improper tail with `badarg` before `monitor` checks the
+    // type and the target (bif.c:988-997).
+    let (result, atom) = run("options");
+    let tuple = Term::Tuple;
+    let list = Term::List;
+    let badarg = || tuple(vec![atom("error"), atom("badarg")]);
+    let ok = |value: &str| tuple(vec![atom("ok"), atom(value)]);
+    let mut first: Vec<Term> = (0..9).map(|_| badarg()).collect();
+    first.extend((0..5).map(|_| ok("true")));
+    let mut second: Vec<Term> = (0..5).map(|_| badarg()).collect();
+    second.push(ok("false"));
+    assert_eq!(
+        result,
+        tuple(vec![tuple(vec![list(first), list(second)]), list(vec![])])
+    );
+    assert_eq!(
+        erl_reference("options()"),
+        "{{[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{ok,true},{ok,true},{ok,true},{ok,true},{ok,true}],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{ok,false}]},[]}\n"
+    );
+}
+
+#[test]
+fn tags_down_messages_with_the_tag_option_as_pinned_erts() {
+    // `tags/0`: the last `tag` option replaces `'DOWN'`
+    // (erl_proc_sig_queue.c:6417-6429), also by name, for noproc, and for
+    // a port name.
+    let (result, atom) = run("tags");
+    let tuple = Term::Tuple;
+    let list = Term::List;
+    let named = |name: &str| tuple(vec![atom(name), atom("nonode@nohost")]);
+    let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Integer(2)));
+    assert_eq!(
+        result,
+        tuple(vec![
+            list(vec![
+                tuple(vec![atom("my_down"), atom("t"), atom("normal")]),
+                tuple(vec![improper, atom("t"), atom("normal")]),
+                tuple(vec![
+                    atom("named"),
+                    named("alias_probe_named"),
+                    atom("boom")
+                ]),
+            ]),
+            list(vec![
+                tuple(vec![
+                    atom("gone"),
+                    atom("process"),
+                    atom("t"),
+                    atom("noproc")
+                ]),
+                tuple(vec![
+                    atom("nobody"),
+                    atom("process"),
+                    named("alias_probe_nobody"),
+                    atom("noproc"),
+                ]),
+                tuple(vec![
+                    atom("p"),
+                    atom("port"),
+                    named("alias_probe_nobody"),
+                    atom("noproc"),
+                ]),
+            ]),
+            list(vec![]),
+        ])
+    );
+    assert_eq!(
+        erl_reference("tags()"),
+        "{[{my_down,t,normal},{[1|2],t,normal},{named,{alias_probe_named,nonode@nohost},boom}],[{gone,process,t,noproc},{nobody,process,{alias_probe_nobody,nonode@nohost},noproc},{p,port,{alias_probe_nobody,nonode@nohost},noproc}],[]}\n"
+    );
+}
+
+#[test]
+fn ends_each_alias_mode_as_pinned_erts() {
+    // `modes/0`: a `demonitor` alias ends at `demonitor`, a
+    // `reply_demonitor` alias at its first message, which also removes the
+    // monitor, and an `explicit_unalias` alias stays (bif.c:452-492,
+    // erl_proc_sig_queue.c:6026-6070). A monitor of the caller makes no
+    // alias (bif.c:781-784), and the last alias option wins.
+    let (result, atom) = run("modes");
+    let atoms = |names: &[&str]| Term::List(names.iter().map(|name| atom(name)).collect());
+    assert_eq!(
+        result,
+        Term::Tuple(vec![
+            atoms(&["true", "false", "true", "false", "false", "false"]),
+            atoms(&["a1", "a2", "b1", "c1", "c2", "e1"]),
+        ])
+    );
+    assert_eq!(
+        erl_reference("modes()"),
+        "{[true,false,true,false,false,false],[a1,a2,b1,c1,c2,e1]}\n"
+    );
+}
+
+#[test]
+fn ends_an_alias_at_the_down_message_unless_explicit_unalias_as_pinned_erts() {
+    // `downs/0`: the DOWN message ends a `demonitor` and a
+    // `reply_demonitor` alias, and keeps an `explicit_unalias` alias, also
+    // for the noproc DOWN message (erl_proc_sig_queue.c:6463-6490).
+    let (result, atom) = run("downs");
+    let tuple = Term::Tuple;
+    let list = Term::List;
+    let pair = |tag: &str| tuple(vec![atom(tag), atom("normal")]);
+    let noproc = |kind: &str| tuple(vec![atom("DOWN"), atom(kind), atom("noproc")]);
+    assert_eq!(
+        result,
+        tuple(vec![
+            list(vec![pair("my_down"), pair("DOWN"), pair("DOWN")]),
+            list(vec![atom("false"); 3]),
+            list(vec![noproc("process"), noproc("process"), noproc("port")]),
+            list(vec![atom("g2"), atom("h2")]),
+        ])
+    );
+    assert_eq!(
+        erl_reference("downs()"),
+        "{[{my_down,normal},{'DOWN',normal},{'DOWN',normal}],[false,false,false],[{'DOWN',process,noproc},{'DOWN',process,noproc},{'DOWN',port,noproc}],[g2,h2]}\n"
+    );
+}
+
+#[test]
+fn sends_an_exit_signal_through_an_active_alias_as_pinned_erts() {
+    // `exits/0`: `erlang:exit/2` with an active alias sends the signal to
+    // its owner (erl_proc_sig_queue.c:1650-1658); `normal` is ignored
+    // without trap_exit, because a reference is never `exit2_suicide`
+    // (bif.c:1750-1772). A reference that is not an active alias gives
+    // `true` with no signal (erl_proc_sig_queue.c:4659-4672).
+    let (result, atom) = run("exits");
+    assert_eq!(
+        result,
+        Term::Tuple(vec![
+            Term::List(vec![atom("true"); 6]),
+            atom("alive"),
+            atom("boom"),
+            atom("true"),
+            Term::List(vec![]),
+        ])
+    );
+    assert_eq!(
+        erl_reference("exits()"),
+        "{[true,true,true,true,true,true],alive,boom,true,[]}\n"
+    );
+}
+
+#[test]
+fn returns_a_runtime_error_for_the_priority_monitor_option() {
+    // ERTS 29.1.1 returns a reference and makes a priority DOWN message
+    // (bif.c:711-713). PBeam has no priority messages (row "Monitors").
+    let error = unsupported("priority");
+    assert!(
+        error.contains("unsupported monitor option priority"),
+        "{error}"
+    );
+    assert!(erl_reference("unsupported(priority)").starts_with("#Ref<"));
+}
+
+#[test]
+fn returns_a_runtime_error_for_an_exit_signal_that_ends_the_caller_through_its_alias() {
+    // ERTS 29.1.1: `exit(OwnAlias, kill)` returns `true`, and the caller
+    // ends with `killed` when it next handles signals. PBeam has no signal
+    // queue (row "Exit signals").
+    let error = unsupported("own_alias");
+    assert!(
+        error.contains("unsupported exit signal through an alias of the caller"),
+        "{error}"
+    );
+}

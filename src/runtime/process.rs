@@ -59,6 +59,9 @@ pub(super) struct Monitor {
     /// gives `{Name, nonode@nohost}` as its item, not the pid
     /// (`erl_proc_sig_queue.c:4942-4955`).
     pub(super) name: Option<Atom>,
+    /// The first element of the `DOWN` message: `'DOWN'`, or the `tag`
+    /// option of `erlang:monitor/3` (`erl_proc_sig_queue.c:6417-6429`).
+    pub(super) tag: Term,
 }
 
 /// The execution state and mailbox of one process.

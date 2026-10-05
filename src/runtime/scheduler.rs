@@ -26,6 +26,47 @@ pub(super) enum MonitorTarget {
     PortName(Atom),
 }
 
+/// The options of `erlang:monitor/3`, after the BIF checked them as ERTS
+/// `erts_monitor_opts` does (`bif.c:701-756`).
+#[derive(Debug)]
+pub(super) struct MonitorOptions {
+    /// The alias mode of the `alias` option, or `None` without it.
+    pub(super) alias: Option<AliasMode>,
+    /// The first element of the `DOWN` message: `'DOWN'`, or the `tag`
+    /// option.
+    pub(super) tag: Term,
+    /// True with the `priority` option.
+    pub(super) priority: bool,
+}
+
+/// The mode of an alias that `erlang:monitor/3` makes, as the alias state
+/// of an ERTS monitor (`ERTS_ML_STATE_ALIAS_MASK`, `erl_monitor_link.h`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AliasMode {
+    /// `{alias, explicit_unalias}`: the alias stays after `demonitor` and
+    /// after the `DOWN` message (`bif.c:470-482`,
+    /// `erl_proc_sig_queue.c:6465-6480`).
+    ExplicitUnalias,
+    /// `{alias, demonitor}`: the alias ends with its monitor.
+    Demonitor,
+    /// `{alias, reply_demonitor}`: the alias ends with its monitor, and at
+    /// the first message through it, which also removes the monitor
+    /// (`erl_proc_sig_queue.c:6047-6070`).
+    ReplyDemonitor,
+}
+
+/// An active alias: the process that gets the messages and exit signals to
+/// the alias reference, and the mode of the alias. In ERTS the reference
+/// holds the pid of the owner (`erts_get_pid_of_ref`,
+/// `erl_bif_unique.h:279`), and the monitor of the owner holds the mode.
+#[derive(Debug)]
+struct Alias {
+    /// The process that made the alias.
+    owner: ProcessId,
+    /// The mode of the alias.
+    mode: AliasMode,
+}
+
 /// A cooperative scheduler on one OS thread. It follows the ERTS model: the
 /// process table holds every live process, `current_process` names the
 /// running process, and the run queue holds only processes that wait for a
@@ -70,6 +111,9 @@ pub(super) struct Scheduler {
     /// The timers of the run and the run clock. All processes of the run
     /// share them.
     pub(super) timers: Timers,
+    /// The active aliases of the run. An alias that ends, and each alias of
+    /// a process that exits, leaves the table.
+    aliases: HashMap<Reference, Alias>,
 }
 
 impl Scheduler {
@@ -98,6 +142,7 @@ impl Scheduler {
             atoms,
             nif_libraries: HashSet::new(),
             timers: Timers::new(),
+            aliases: HashMap::new(),
         }
     }
 
@@ -390,6 +435,7 @@ impl Scheduler {
                 watcher: parent,
                 reference,
                 name: None,
+                tag: Term::static_atom("DOWN"),
             });
             Some(reference)
         } else {
@@ -432,20 +478,34 @@ impl Scheduler {
     /// Monitor a target for the current process, as ERTS `monitor`
     /// (`bif.c:758-981`) does after its checks. A process by name is the
     /// process that has the name now (`erts_whereis_name_to_id`). A monitor
-    /// of the current process creates no monitor (`bif.c:781-784`). A
-    /// process that does not exist, a name that no process has, and each
-    /// port name give the message `{'DOWN', Ref, Type, Item, noproc}` at
-    /// once: PBeam has no ports, so the port lookup always fails
-    /// (`bif.c:910-914`). `Item` is the pid, or `{Name, nonode@nohost}` for a
-    /// name.
+    /// of the current process creates no monitor and no alias
+    /// (`bif.c:781-784`). A process that does not exist, a name that no
+    /// process has, and each port name give the message
+    /// `{Tag, Ref, Type, Item, noproc}` at once: PBeam has no ports, so the
+    /// port lookup always fails (`bif.c:910-914`). `Item` is the pid, or
+    /// `{Name, nonode@nohost}` for a name.
+    ///
+    /// With an alias option, the reference is also an active alias of the
+    /// current process. The `noproc` `DOWN` message ends a `demonitor` or
+    /// `reply_demonitor` alias at once (`erl_proc_sig_queue.c:6463-6490`),
+    /// so only an `explicit_unalias` alias stays for it.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let reference = scheduler.monitor(MonitorTarget::Process(child))?;
-    /// let gone = scheduler.monitor(MonitorTarget::PortName(name))?;
+    /// let reference = scheduler.monitor(MonitorTarget::Process(child), options)?;
+    /// let gone = scheduler.monitor(MonitorTarget::PortName(name), options)?;
     /// ```
-    pub(super) fn monitor(&mut self, target: MonitorTarget) -> Result<Reference, BeamError> {
+    ///
+    /// # Errors
+    ///
+    /// The `priority` option of a monitor that is not of the current process
+    /// is not supported.
+    pub(super) fn monitor(
+        &mut self,
+        target: MonitorTarget,
+        options: MonitorOptions,
+    ) -> Result<Reference, BeamError> {
         let reference = self.make_ref()?;
         let watcher = self.current_process_mut().id;
         let (kind, id, item, name) = match target {
@@ -459,45 +519,140 @@ impl Scheduler {
         if id == Some(watcher) {
             return Ok(reference);
         }
+        if options.priority {
+            // ponytail: no priority messages yet; add them when a measured path uses the option.
+            return Err(error("unsupported monitor option priority"));
+        }
         let monitor = Monitor {
             watcher,
             reference,
             name,
+            tag: options.tag,
         };
-        match id.and_then(|id| self.processes.get_mut(&id)) {
-            Some(process) => process.monitored_by.push(monitor),
-            None => {
-                let down = down_message(reference, kind, item, Term::static_atom("noproc"));
-                self.deliver(watcher, down);
+        let mode = match id.and_then(|id| self.processes.get_mut(&id)) {
+            Some(process) => {
+                process.monitored_by.push(monitor);
+                options.alias
             }
+            None => {
+                let noproc = Term::static_atom("noproc");
+                let down = down_message(monitor.tag, reference, kind, item, noproc);
+                self.deliver(watcher, down);
+                options
+                    .alias
+                    .filter(|&mode| mode == AliasMode::ExplicitUnalias)
+            }
+        };
+        if let Some(mode) = mode {
+            let alias = Alias {
+                owner: watcher,
+                mode,
+            };
+            self.aliases.insert(reference, alias);
         }
         Ok(reference)
     }
 
     /// Remove a monitor that the current process holds, as the ERTS
     /// `demonitor` function does. Return true when an active monitor was
-    /// removed, and false when it already fired or never existed.
+    /// removed, and false when it already fired or never existed. The
+    /// removal ends a `demonitor` or `reply_demonitor` alias of the
+    /// monitor, and keeps an `explicit_unalias` alias (`bif.c:470-492`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let reference = scheduler.monitor(child)?;
+    /// let reference = scheduler.monitor(MonitorTarget::Process(child), options)?;
     /// assert!(scheduler.demonitor(reference));
     /// assert!(!scheduler.demonitor(reference));
     /// ```
     pub(super) fn demonitor(&mut self, reference: Reference) -> bool {
         let current = self.current_process_mut().id;
+        let removed = self.remove_monitor(current, reference);
+        if removed {
+            self.end_monitor_alias(reference);
+        }
+        removed
+    }
+
+    /// Remove the monitor `reference` of `watcher` from its target. Return
+    /// true when the monitor was active.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.remove_monitor(watcher, reference));
+    /// assert!(!scheduler.remove_monitor(watcher, reference));
+    /// ```
+    fn remove_monitor(&mut self, watcher: ProcessId, reference: Reference) -> bool {
         for process in self.processes.values_mut() {
             if let Some(index) = process
                 .monitored_by
                 .iter()
-                .position(|monitor| monitor.watcher == current && monitor.reference == reference)
+                .position(|monitor| monitor.watcher == watcher && monitor.reference == reference)
             {
                 process.monitored_by.remove(index);
                 return true;
             }
         }
         false
+    }
+
+    /// End the alias of the monitor `reference` when its monitor ends,
+    /// unless it is an `explicit_unalias` alias (`bif.c:470-492`,
+    /// `erl_proc_sig_queue.c:6463-6490`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.end_monitor_alias(reference);
+    /// assert_eq!(scheduler.alias_owner(reference), None);
+    /// ```
+    fn end_monitor_alias(&mut self, reference: Reference) {
+        if self
+            .aliases
+            .get(&reference)
+            .is_some_and(|alias| alias.mode != AliasMode::ExplicitUnalias)
+        {
+            self.aliases.remove(&reference);
+        }
+    }
+
+    /// Return the owner of the active alias `reference`, or `None` when the
+    /// reference is not an active alias. ERTS takes the pid from the
+    /// reference (`erts_get_pid_of_ref`, `erl_bif_unique.h:279`), and the
+    /// owner ignores a signal through an alias that is not active
+    /// (`erl_proc_sig_queue.c:4659-4672`, `6026-6041`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.alias_owner(alias), Some(owner));
+    /// assert_eq!(scheduler.alias_owner(plain_reference), None);
+    /// ```
+    pub(super) fn alias_owner(&self, reference: Reference) -> Option<ProcessId> {
+        self.aliases.get(&reference).map(|alias| alias.owner)
+    }
+
+    /// Return the receiver of a message to the reference `reference`: the
+    /// owner of the active alias, or `None` to drop the message. A message
+    /// through a `reply_demonitor` alias ends the alias and removes its
+    /// monitor (`erl_proc_sig_queue.c:6047-6070`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.alias_message_receiver(once), Some(owner));
+    /// assert_eq!(scheduler.alias_message_receiver(once), None);
+    /// ```
+    pub(super) fn alias_message_receiver(&mut self, reference: Reference) -> Option<ProcessId> {
+        let alias = self.aliases.get(&reference)?;
+        let owner = alias.owner;
+        if alias.mode == AliasMode::ReplyDemonitor {
+            self.aliases.remove(&reference);
+            self.remove_monitor(owner, reference);
+        }
+        Some(owner)
     }
 
     /// Set the group leader of a live local process, as
@@ -739,9 +894,17 @@ impl Scheduler {
                 .name
                 .as_ref()
                 .map_or(Term::Pid(process.id), named_item);
-            let down = down_message(monitor.reference, "process", item, reason.clone());
+            self.end_monitor_alias(monitor.reference);
+            let down = down_message(
+                monitor.tag,
+                monitor.reference,
+                "process",
+                item,
+                reason.clone(),
+            );
             self.deliver(monitor.watcher, down);
         }
+        self.aliases.retain(|_, alias| alias.owner != process.id);
         signals
     }
 }
@@ -761,17 +924,17 @@ fn named_item(name: &Atom) -> Term {
     ])
 }
 
-/// Return the message `{'DOWN', Reference, Type, Item, Reason}` of a
-/// monitor.
+/// Return the message `{Tag, Reference, Type, Item, Reason}` of a monitor.
+/// `Tag` is `'DOWN'`, or the `tag` option of `erlang:monitor/3`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let down = down_message(reference, "process", Term::Pid(child), Term::static_atom("normal"));
+/// let down = down_message(Term::static_atom("DOWN"), reference, "process", Term::Pid(child), Term::static_atom("normal"));
 /// ```
-fn down_message(reference: Reference, kind: &str, item: Term, reason: Term) -> Term {
+fn down_message(tag: Term, reference: Reference, kind: &str, item: Term, reason: Term) -> Term {
     Term::Tuple(vec![
-        Term::static_atom("DOWN"),
+        tag,
         Term::Reference(reference),
         Term::static_atom(kind),
         item,
@@ -781,13 +944,22 @@ fn down_message(reference: Reference, kind: &str, item: Term, reason: Term) -> T
 
 #[cfg(test)]
 mod tests {
-    use super::{MonitorTarget, Scheduler};
+    use super::{MonitorOptions, MonitorTarget, Scheduler};
     use crate::term::test_atom;
     use crate::{
         runtime::ets::{Access, Table},
         runtime::process::{ReceiveTimer, tests::frame},
         term::{Atom, AtomTable, ProcessId, Term},
     };
+
+    /// Return the options of `erlang:monitor/2`.
+    fn no_options() -> MonitorOptions {
+        MonitorOptions {
+            alias: None,
+            tag: atom("DOWN"),
+            priority: false,
+        }
+    }
 
     fn atom(name: &str) -> Term {
         test_atom(name)
@@ -921,7 +1093,9 @@ mod tests {
         assert_eq!(scheduler.processes[&child].group_leader, child);
         assert!(!scheduler.set_group_leader(ProcessId(99), child));
 
-        let reference = scheduler.monitor(MonitorTarget::Process(child)).unwrap();
+        let reference = scheduler
+            .monitor(MonitorTarget::Process(child), no_options())
+            .unwrap();
         assert_eq!(scheduler.processes[&child].monitored_by.len(), 1);
         assert!(scheduler.demonitor(reference));
         assert!(scheduler.processes[&child].monitored_by.is_empty());
@@ -936,15 +1110,17 @@ mod tests {
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let own = scheduler
-            .monitor(MonitorTarget::Process(ProcessId(0)))
+            .monitor(MonitorTarget::Process(ProcessId(0)), no_options())
             .unwrap();
         assert!(scheduler.processes[&ProcessId(0)].monitored_by.is_empty());
         assert!(!scheduler.demonitor(own));
         let gone = scheduler
-            .monitor(MonitorTarget::Process(ProcessId(9)))
+            .monitor(MonitorTarget::Process(ProcessId(9)), no_options())
             .unwrap();
         let name = Atom::from_static("undefined").unwrap();
-        let port = scheduler.monitor(MonitorTarget::PortName(name)).unwrap();
+        let port = scheduler
+            .monitor(MonitorTarget::PortName(name), no_options())
+            .unwrap();
         let named = Term::Tuple(vec![atom("undefined"), atom("nonode@nohost")]);
         assert_eq!(
             scheduler.processes[&ProcessId(0)].mailbox.messages(),
