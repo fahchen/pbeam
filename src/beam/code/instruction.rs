@@ -780,6 +780,14 @@ pub(crate) enum Instruction {
     /// `emu/emu_load.c:1437-1445`). A `nif_start` without a `func_info`
     /// before it is a load error.
     ///
+    /// The decoder puts this instruction directly after the entry label of
+    /// the function, wherever `nif_start` is in the function. ERTS does not
+    /// check the position of `nif_start` and does not run it; a NIF
+    /// replaces the function from its entry (`beam/erl_nif.c:4922-4928`).
+    /// So a body instruction before `nif_start` does not run for a function
+    /// with a binding. `erlc` puts `nif_start` directly after the entry
+    /// label, so compiled code keeps its order.
+    ///
     /// Encoding: `[0xB3]`.
     ///
     /// Erlang: `-nifs([write_nif/2]).` makes `write_nif/2` in `prim_tty`
@@ -918,6 +926,12 @@ pub(super) fn parse_code(
                         "BEAM label {label} is outside declared range 1..={number_of_labels}"
                     )));
                 }
+                // The label directly after `func_info` is the function entry.
+                if let Some((_, _, entry)) = &mut function
+                    && *entry == instructions.len()
+                {
+                    *entry += 1;
+                }
                 Instruction::Label(label)
             }
             OPCODE_FUNCTION_INFO => {
@@ -929,7 +943,7 @@ pub(super) fn parse_code(
                     .name()
                     .to_owned();
                 let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                function = Some((name.clone(), arity));
+                function = Some((name.clone(), arity, instructions.len() + 1));
                 Instruction::FunctionInfo {
                     module,
                     name,
@@ -1236,10 +1250,11 @@ pub(super) fn parse_code(
                 arity: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_NIF_START => {
-                let (name, arity) = function
+                let (name, arity, entry) = function
                     .clone()
                     .ok_or_else(|| error("BEAM nif_start has no func_info before it"))?;
-                Instruction::NifStart { name, arity }
+                instructions.insert(entry, Instruction::NifStart { name, arity });
+                continue;
             }
             OPCODE_TEST_HEAP | OPCODE_INIT_YREGS => {
                 skip_unsupported_instruction(opcode, data, &mut cursor)?;
@@ -2004,10 +2019,12 @@ mod tests {
     }
 
     #[test]
-    fn decodes_nif_start_with_the_function_of_the_func_info_before_it() {
+    fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         let code = |instructions: &[u8]| {
             let mut code = vec![0, 0, 0, 16];
-            code.extend([0; 15]);
+            code.extend([0; 11]);
+            code.push(2); // label 1 only
+            code.extend([0; 3]);
             code.push(1); // one function
             code.extend_from_slice(instructions);
             code.push(0x03);
@@ -2031,6 +2048,32 @@ mod tests {
             [
                 Instruction::FunctionInfo { .. },
                 Instruction::NifStart { name, arity: 2 },
+                Instruction::End,
+            ] if name == "write_nif"
+        ));
+        // ERTS loads `nif_start` after another instruction of the function,
+        // and a NIF replaces the function from its entry. So the dispatch
+        // goes before the `move`, which does not run for a bound MFA.
+        let (instructions, _) = parse_code(
+            &code(&[
+                0x02, 0x12, 0x22, 0x20, // func_info prim_tty write_nif 2
+                0x01, 0x10, // label 1
+                0x40, 0x12, 0x03, // move prim_tty x0
+                0xB3, // nif_start
+            ]),
+            &atoms,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::FunctionInfo { .. },
+                Instruction::Label(1),
+                Instruction::NifStart { name, arity: 2 },
+                Instruction::Move(..),
                 Instruction::End,
             ] if name == "write_nif"
         ));
