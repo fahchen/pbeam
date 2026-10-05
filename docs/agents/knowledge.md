@@ -40,3 +40,8 @@ Run automation that processes untrusted text with least-privilege credentials an
 ## External identifiers lack trusted-origin validation
 
 Validate the trusted origin of an external identifier before you take a local number or name from it. Do not use data from an unvalidated identifier for a local action or an error report.
+
+## Equality uses semantic identity, not dispatch metadata
+
+Define equality from the fields that identify the runtime value. Exclude fields
+that only select code or optimize execution.
