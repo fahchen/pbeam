@@ -1,7 +1,8 @@
 -module(logger_start_probe).
 -export([reverse/0, remove/0, without/0, ets/0, ets_access/0, find/0, from_list/0, is_key/0,
          to_list/0, map_next/0, next/0, ordered/0, demonitor/0, unlink/0, hd/0, system_logger/0,
-         message_queue_data/0, system_flag/0, process_flag/0, unsupported_flag/1]).
+         message_queue_data/0, system_flag/0, process_flag/0, unsupported_flag/1, raise/0,
+         raise_throw/0]).
 
 %% `lists:reverse/2` (erl_bif_lists.c:1246-1263). logger_simple_h:replay_buffer/1
 %% (logger_simple_h.erl:150) calls it with the buffer and the drop message, and
@@ -353,6 +354,39 @@ unsupported_flag(time_offset) -> erlang:system_flag(time_offset, finalize);
 unsupported_flag(priority) -> process_flag(priority, normal);
 unsupported_flag(monitor_nodes) -> process_flag({monitor_nodes, []}, false).
 
+%% `erlang:error/1` (bif.c:1436-1440) raises class error with its argument
+%% as the reason. `erlang:raise/3` (bif.c:1549-1692) raises the class error
+%% or exit with Reason. It returns the atom badarg, and does not raise, for a
+%% class that is not error, exit, or throw, and for a stack trace that is not
+%% a proper list of {Fun, Args}, {Fun, Args, Location}, {M, F, A}, or
+%% {M, F, A, Location} with a list Location. gen_server:try_terminate/3
+%% (gen_server.erl:2513) raises the exception of a terminate callback again
+%% with it.
+raise() ->
+    F = fun id/1,
+    Valid = [{m, f, 1}, {m, f, [x], []}, {m, f, 1, [{line, 1} | x]}, {F, [x]}, {F, [x], [x]},
+             {fun lists:map/2, [], []}],
+    [catch_class(fun() -> erlang:error(id(foo)) end),
+     catch_class(fun() -> erlang:error(id({a, b})) end),
+     catch_class(fun() -> erlang:raise(id(error), id(r), id([])) end),
+     catch_class(fun() -> erlang:raise(id(exit), id({r}), id(Valid)) end),
+     erlang:raise(id(foo), id(r), id([])),
+     erlang:raise(id(1), id(r), id([])),
+     erlang:raise(id(error), id(r), id(foo)),
+     erlang:raise(id(error), id(r), id([{m, f, 1} | x])),
+     erlang:raise(id(throw), id(r), id([foo])),
+     erlang:raise(id(exit), id(r), id([{m}])),
+     erlang:raise(id(error), id(r), id([{m, []}])),
+     erlang:raise(id(error), id(r), id([{F, [], x}])),
+     erlang:raise(id(error), id(r), id([{1, f, 1}])),
+     erlang:raise(id(error), id(r), id([{m, 1, 1, []}])),
+     erlang:raise(id(error), id(r), id([{m, f, 1, x}])),
+     erlang:raise(id(error), id(r), id([{m, f, 1, [], x}]))].
+
+%% The class throw, which PBeam does not implement. ERTS gives {throw, r}.
+raise_throw() ->
+    catch_class(fun() -> erlang:raise(id(throw), id(r), id([])) end).
+
 big(N) -> big(N, #{}).
 
 big(0, M) -> M;
@@ -367,5 +401,8 @@ in_new_process(Fun) ->
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.
+
+catch_class(Fun) ->
+    try Fun() catch Class:Reason -> {Class, Reason} end.
 
 id(X) -> X.

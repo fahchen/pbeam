@@ -205,6 +205,70 @@ pub(super) fn system_flag(
     })
 }
 
+/// Run `erlang:raise(Class, Reason, Stacktrace)` as ERTS `raise_3`
+/// (`bif.c:1549-1692`) does: raise an exception of class `error` or `exit`
+/// with `Reason`. A class that is not `error`, `exit`, or `throw`, or a
+/// stack trace that is not valid, makes the BIF return the atom `badarg`; it
+/// does not raise. A valid stack trace is a proper list of `{Fun, Args}`,
+/// `{Fun, Args, Location}`, `{M, F, A}`, or `{M, F, A, Location}`, where
+/// `Fun` is a fun, `M` and `F` are atoms, and `Location` is a list.
+///
+/// PBeam records no stack frames (row "Exception stack trace" in
+/// `docs/erts-differences.md`), so the exception gets the stack trace `[]`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = raise(&Term::static_atom("exit"), &reason, &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Raise { class: ExceptionClass::Exit, .. }));
+/// let result = raise(&Term::static_atom("foo"), &reason, &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "badarg"));
+/// assert!(raise(&Term::static_atom("throw"), &reason, &Term::List(vec![])).is_err());
+/// ```
+///
+/// # Errors
+///
+/// The class `throw` with a valid stack trace gives a runtime error: PBeam
+/// does not implement the `throw` class.
+pub(super) fn raise(
+    class: &Term,
+    reason: &Term,
+    stacktrace: &Term,
+) -> Result<BifResult, BeamError> {
+    let class = match class {
+        Term::Atom(class) if class.name() == "error" => Some(ExceptionClass::Error),
+        Term::Atom(class) if class.name() == "exit" => Some(ExceptionClass::Exit),
+        Term::Atom(class) if class.name() == "throw" => None,
+        _ => return Ok(Value(Term::static_atom("badarg"))),
+    };
+    let location = |location: &Term| matches!(location, Term::List(_) | Term::ImproperList(..));
+    let frame = |frame: &Term| match frame {
+        Term::Tuple(elements) => match elements.as_slice() {
+            [Term::Fun(_), _] => true,
+            [Term::Fun(_), _, place] => location(place),
+            [Term::Atom(_), Term::Atom(_), _] => true,
+            [Term::Atom(_), Term::Atom(_), _, place] => location(place),
+            _ => false,
+        },
+        _ => false,
+    };
+    let Term::List(frames) = stacktrace else {
+        return Ok(Value(Term::static_atom("badarg")));
+    };
+    if !frames.iter().all(frame) {
+        return Ok(Value(Term::static_atom("badarg")));
+    }
+    let Some(class) = class else {
+        return Err(error(
+            "unsupported erlang:raise/3 class throw: the throw class is not implemented",
+        ));
+    };
+    Ok(Raise {
+        class,
+        reason: reason.clone(),
+    })
+}
+
 /// Run `erlang:exit(Id, Reason)`: send an exit signal to a local pid, as
 /// ERTS `send_exit_signal_bif` (`bif.c:1750-1772`) does, and return `true`.
 /// A signal that ends the caller gives [`BifResult::Exited`] instead.

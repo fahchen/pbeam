@@ -789,3 +789,50 @@ fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
         );
     }
 }
+
+#[test]
+fn raises_exceptions_as_pinned_erts() {
+    // `logger_start_probe:raise/0`: `erlang:error/1` (`bif.c:1436-1440`)
+    // raises class `error`. `erlang:raise/3` (`bif.c:1549-1692`) raises the
+    // class `error` or `exit` for a valid stack trace, and returns the atom
+    // `badarg` for a class or a stack trace that is not valid.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |class: &str, reason: Term| Term::Tuple(vec![atom(class), reason]);
+    let mut expected = vec![
+        pair("error", atom("foo")),
+        pair("error", Term::Tuple(vec![atom("a"), atom("b")])),
+        pair("error", atom("r")),
+        pair("exit", Term::Tuple(vec![atom("r")])),
+    ];
+    expected.extend(std::iter::repeat_n(atom("badarg"), 12));
+    assert_eq!(
+        program.execute("logger_start_probe", "raise", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        String::from_utf8(reference("raise")).unwrap(),
+        format!(
+            "[{{error,foo}},{{error,{{a,b}}}},{{error,r}},{{exit,{{r}}}},{}]\n",
+            ["badarg"; 12].join(",")
+        )
+    );
+}
+
+#[test]
+fn returns_a_runtime_error_for_a_raise_of_class_throw() {
+    // `logger_start_probe:raise_throw/0`: ERTS raises class `throw`, which
+    // PBeam does not implement (row "Exception raise sites" in
+    // `docs/erts-differences.md`).
+    let program = load();
+    let error = program
+        .execute("logger_start_probe", "raise_throw", &[])
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported erlang:raise/3 class throw"),
+        "{error}"
+    );
+    assert_eq!(reference("raise_throw"), b"{throw,r}\n");
+}
