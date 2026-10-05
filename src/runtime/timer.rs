@@ -63,7 +63,11 @@ pub(super) enum Receiver {
 /// is a FIFO list: `insert_timer_into_slot` adds a timer at the tail
 /// (`time.c:647-668`), and `erts_bump_timers` expires slots in tick order
 /// from the head (`time.c:784-1000`). The key (end tick, start number) gives
-/// the same order, so timers with the same end expire in start order.
+/// the same order, so timers with the same end expire in start order. ERTS
+/// starts a timer of 16384 ms or more in the later wheel and later moves it
+/// to the tail of its soon wheel slot (`time.c:1030-1130`), so it can expire
+/// after a timer with the same end that started later. PBeam keeps the start
+/// order for these timers too (`docs/erts-differences.md`, "Timers").
 #[derive(Debug)]
 pub(super) struct Timers {
     /// The run start, at the internal monotonic time `MONOTONIC_BEGIN`.
