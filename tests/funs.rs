@@ -187,7 +187,10 @@ fn makes_and_calls_external_funs_as_pinned_erts() {
     // is greater than a local fun (`utils.c:1270-1273`,
     // `utils.c:2189-2207`). A module or function that is not an atom, and an
     // arity that is not an integer in `0..=255`, raise `badarg`
-    // (`bif.c:4467-4485`).
+    // (`bif.c:4467-4485`). The literal `fun fun_probe:id/1` loads from
+    // `EXPORT_EXT` in the literal table (`external.c:5006-5041`), as
+    // `fun edlin_expand:expand/2` in `group:init/3` does, and is equal to the
+    // fun of `erlang:make_fun/3`.
     let program = BeamProgram::load(&[FUN_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let mut expected: Vec<Term> = [
@@ -209,7 +212,7 @@ fn makes_and_calls_external_funs_as_pinned_erts() {
         Term::List(vec![Term::Integer(1), Term::Integer(2)]),
     ]));
     expected.extend(std::iter::repeat_n(atom("badarg"), 5));
-    expected.push(atom("same"));
+    expected.extend(["same", "lit", "same"].map(atom));
     assert_eq!(
         program.execute("fun_probe", "externals", &[]).unwrap(),
         Term::List(expected)
@@ -217,6 +220,6 @@ fn makes_and_calls_external_funs_as_pinned_erts() {
     assert_eq!(
         reference("externals"),
         b"[v,w,same,same,different,true,false,true,one,{badarity,same,[1,2]},\
-          badarg,badarg,badarg,badarg,badarg,same]\n"
+          badarg,badarg,badarg,badarg,badarg,same,lit,same]\n"
     );
 }

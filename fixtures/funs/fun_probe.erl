@@ -77,7 +77,8 @@ spawned() ->
     Reply = receive {spawned, Pid} -> spawned end,
     [Reply, try spawn(id(notfun)) catch error:R -> R end].
 
-%% erlang:make_fun/3 makes an external fun, as gen_server:init_it/6 does.
+%% erlang:make_fun/3 makes an external fun, as gen_server:init_it/6 does. An
+%% external fun literal loads from the literal table, as in group:init/3.
 externals() ->
     M = id(fun_probe), F = id(id),
     Ext = fun M:F/1,
@@ -94,7 +95,8 @@ externals() ->
      try erlang:make_fun(M, F, id(-1)) catch error:R3 -> R3 end,
      try erlang:make_fun(M, F, id(256)) catch error:R4 -> R4 end,
      try erlang:make_fun(M, F, id(a)) catch error:R5 -> R5 end,
-     eq(erlang:make_fun(M, F, id(255)), erlang:make_fun(M, F, id(255)))].
+     eq(erlang:make_fun(M, F, id(255)), erlang:make_fun(M, F, id(255))),
+     (id(fun fun_probe:id/1))(lit), eq(Ext, fun fun_probe:id/1)].
 
 %% A fun call in a tail position replaces the frame of its caller, as the
 %% ERTS loader makes i_call_fun_last of call_fun, deallocate, and return.

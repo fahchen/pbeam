@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::module::BeamModule;
 use crate::{
     error::{BeamError, error},
-    term::{Atom, AtomTable, Lambda, Map, Term},
+    term::{Atom, AtomTable, Fun, Lambda, Map, Term},
 };
 
 const WORD_SIZE: usize = 4;
@@ -38,6 +38,8 @@ const ETF_NIL_EXT: u8 = 106;
 const ETF_STRING_EXT: u8 = 107;
 const ETF_LIST_EXT: u8 = 108;
 const ETF_BINARY_EXT: u8 = 109;
+/// `EXPORT_EXT`, an external fun such as `fun lists:reverse/1`.
+const ETF_EXPORT_EXT: u8 = 113;
 const ETF_MAP_EXT: u8 = 116;
 const ETF_SMALL_ATOM_UTF8_EXT: u8 = 119;
 const FIRST_ATOM_INDEX: usize = 1;
@@ -130,7 +132,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// literal_count ::= u32be
 /// literal_entry ::= term_size:u32be 131 external_term ; term_size bytes in total
 /// external_term ::= binary_term | string_term | nil_term | atom_term | tuple_term | list_term
-///                 | map_term | small_integer_term
+///                 | map_term | small_integer_term | export_term
 /// small_integer_term ::= 97 value:u8
 /// binary_term ::= 109 binary_size:u32be byte[binary_size]
 /// string_term ::= 107 string_size:u16be byte[string_size]
@@ -139,6 +141,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// tuple_term  ::= 104 arity:u8 external_term[arity]
 /// list_term   ::= 108 length:u32be external_term[length] tail:external_term
 /// map_term    ::= 116 pair_count:u32be (key:external_term value:external_term)[pair_count]
+/// export_term ::= 113 module:atom_term function:atom_term arity:small_integer_term
 ///
 /// compact(tag) ::= short(tag) | extended(tag) | large(tag)
 /// short(tag)   ::= value:4 0 tag:3
@@ -636,6 +639,26 @@ fn read_external_term(
                 Term::List(characters)
             }
             ETF_NIL_EXT => Term::List(Vec::new()),
+            ETF_EXPORT_EXT => {
+                // `dec_term` (`external.c:5006-5041`) reads two atoms and a
+                // non-negative integer, else the decode fails.
+                let mut part = || read_external_term(data, cursor, atom_table);
+                let (Some(module), Some(function), Some(arity)) = (part()?, part()?, part()?)
+                else {
+                    return Ok(None);
+                };
+                let (Term::Atom(module), Term::Atom(function), &Term::Integer(arity)) =
+                    (&module, &function, &arity)
+                else {
+                    return Err(error("invalid BEAM external fun literal"));
+                };
+                // A `SMALL_INTEGER_EXT` arity is in `0..=255`.
+                Term::Fun(Fun::external(
+                    module.clone(),
+                    function.clone(),
+                    arity as u32,
+                ))
+            }
             ETF_SMALL_INTEGER_EXT => Term::Integer(i64::from(take(data, cursor, 1)?[0])),
             ETF_SMALL_ATOM_UTF8_EXT => {
                 let size = take(data, cursor, 1)?[0] as usize;
@@ -996,7 +1019,7 @@ mod tests {
         atom_at, atom_chunk_name, parse, parse_atoms, parse_exports, parse_lambdas, parse_literals,
         read_literal, read_u32,
     };
-    use crate::term::{AtomTable, Lambda, Map, Term};
+    use crate::term::{AtomTable, Fun, Lambda, Map, Term};
 
     /// Return a `FunT` payload with a count and entries. Each entry gives
     /// its function atom index, total arity, label, index, number of free
@@ -1273,6 +1296,38 @@ mod tests {
         let list = Some(Term::List(vec![atom(&atoms, "a"), atom(&atoms, "b")]));
         assert_eq!(improper, list);
         assert_eq!(proper, list);
+    }
+
+    #[test]
+    fn reads_external_fun_literals_as_export_ext() {
+        let mut atoms = AtomTable::new();
+        let mut read = |bytes: &[u8]| read_literal(bytes, &mut atoms);
+        // erlc writes `fun lists:reverse/1` as EXPORT_EXT (113), two atoms,
+        // and SMALL_INTEGER_EXT.
+        let mut reverse = vec![131, 113, 119, 5];
+        reverse.extend(b"lists");
+        reverse.extend([119, 7]);
+        reverse.extend(b"reverse");
+        reverse.extend([97, 1]);
+        let reverse = read(&reverse).unwrap();
+        // An atom tag that PBeam does not decode, such as ATOM_EXT (100),
+        // makes the literal unsupported.
+        assert_eq!(read(&[131, 113, 100, 0, 1, b'm']).unwrap(), None);
+        // ERTS `dec_term` (`external.c:5006-5041`) fails for a module or
+        // function that is not an atom, or an arity that is not an integer.
+        for bytes in [
+            &[131, 113, 106, 119, 1, b'f', 97, 1][..],
+            &[131, 113, 119, 1, b'm', 106, 97, 1],
+            &[131, 113, 119, 1, b'm', 119, 1, b'f', 106],
+        ] {
+            assert_eq!(
+                read(bytes).unwrap_err().to_string(),
+                "invalid BEAM external fun literal"
+            );
+        }
+        let atom = |name| atoms.get(name).unwrap();
+        let fun = Fun::external(atom("lists"), atom("reverse"), 1);
+        assert_eq!(reverse, Some(Term::Fun(fun)));
     }
 
     #[test]
