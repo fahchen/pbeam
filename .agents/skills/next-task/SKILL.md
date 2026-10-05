@@ -18,7 +18,7 @@ Find every ready task issue, not just one. Then, once the user picks one, confir
 2. For each candidate, read its body for "Blocked by" / "Dependencies" text: `mise run issue <N> Dependencies Delivery`. It prints the title, state, labels, the text before the first section, and the named sections. Older issues name blockers in a `Delivery` section or a `**Dependencies:**` line before the first section, so a `no section` line for one name is normal.
 3. Collect every blocker number named, dedupe, check each blocker's state: `gh issue view <blocker> --repo fahchen/pbeam --json number,state`
 4. A task is ready when every blocker it names is `CLOSED` and any prerequisite PR it names is merged. Verify directly; don't trust stale "ready" wording in the body.
-5. Among ready tasks, flag which can run in parallel:
+5. Among ready tasks, flag which can run in parallel. For each ready task, read its scope and acceptance criteria: `mise run issue <N> Scope Acceptance`. Older issues hold `**Scope:**` and `**Acceptance:**` lines before the first section.
    - Same epic, sequential acceptance criteria, or one's output feeds another (check epic body ordering) → sequential, not parallel.
    - Different epics, or same epic but explicitly independent scope (no shared files/modules per task body "Scope" section) → parallel-safe.
 6. Report every ready task: issue number, title, epic, milestone, one-line why-ready (which blocker merged, PR #). Group into "parallel-safe" vs "sequential". If nothing is ready, say so and name what blocks the nearest candidates.
