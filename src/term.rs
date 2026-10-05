@@ -1,5 +1,6 @@
 mod atom;
 mod fun;
+mod hash;
 mod map;
 mod order;
 
@@ -9,6 +10,7 @@ pub(crate) use atom::AtomTable;
 pub(crate) use atom::test_atom;
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target};
+pub(crate) use hash::internal_hash;
 pub(crate) use map::Direction;
 pub use map::Map;
 
