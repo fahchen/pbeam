@@ -145,7 +145,7 @@ impl BeamProgram {
                         scheduler.finish_current(reason, result)?;
                     }
                 }
-            } else if let Some(wait) = scheduler.timers.wait_time(now) {
+            } else if let Some(wait) = scheduler.timers.wait_time(scheduler.timers.now()) {
                 std::thread::sleep(wait);
             } else {
                 break;
@@ -797,8 +797,8 @@ impl BeamProgram {
                     // not valid moves the save pointer to the first message
                     // and raises `timeout_value` (`error.h:154`;
                     // `jit/arm/instr_msg.cpp:312-338`).
-                    let timeout = read(process, source)?;
                     if process.receive_timer == ReceiveTimer::None {
+                        let timeout = read(process, source)?;
                         if timeout == Term::Integer(0) {
                             continue;
                         }
