@@ -20,3 +20,15 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
+
+## 20261005: Put shared limits in their owning module
+
+**Problem:** The same atom-name limit was defined in both the loader and a BIF module.
+
+**Root Cause:** The limit was added where it was first needed instead of where the term owns it.
+
+**Fix:** Define the limit once in the atom term module and import it from both consumers.
+
+**Guardrail:** Search for an existing domain limit before adding a constant.
+
+**Reference:** `src/term/atom.rs`

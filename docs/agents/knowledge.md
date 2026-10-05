@@ -40,3 +40,14 @@ Run automation that processes untrusted text with least-privilege credentials an
 ## External identifiers lack trusted-origin validation
 
 Validate the trusted origin of an external identifier before you take a local number or name from it. Do not use data from an unvalidated identifier for a local action or an error report.
+
+## Changes exceed the measured task path
+
+Implement only behavior that the current task measures and needs. Move
+unmeasured or unrelated support to a separate task.
+
+## Binary decoders drop required operands
+
+Consume and validate every encoded operand even when runtime semantics do not
+use its value. Keep the skip behavior in one helper and preserve cursor and tag
+checks.
