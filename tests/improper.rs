@@ -205,3 +205,40 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
          {error,badarg}]\n"
     );
 }
+
+#[test]
+fn gives_the_iodata_and_chardata_results_of_pinned_erts_for_improper_lists() {
+    // `iodata/0` runs the iodata and chardata BIFs with improper lists. A
+    // binary tail of each list level is part of the data, and each other
+    // tail raises `badarg`: `erlang:iolist_to_iovec/1` and the `re:compile/2`
+    // pattern walk it as `generic_iolist_size` does
+    // (`erl_iolist.c:153-236`), and `unicode:characters_to_binary/2` as
+    // `utf8_need` does (`erl_unicode.c:342-505`, 963-965). `utf8_need` also
+    // rejects `[foo]` and `[-1|x]` before the conversion. An improper option
+    // list of `re:compile/2` raises `badarg`.
+    let program = BeamProgram::load(&[IMPROPER_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    assert_eq!(
+        program.execute("improper_probe", "iodata", &[]).unwrap(),
+        Term::List(vec![
+            Term::List(vec![binary(b"ab")]),
+            Term::List(vec![binary(b"abc")]),
+            badarg(),
+            atom("ok"),
+            badarg(),
+            badarg(),
+            binary(b"ab"),
+            binary(&[195, 169]),
+            badarg(),
+            badarg(),
+            badarg(),
+        ])
+    );
+    assert_eq!(
+        erl_reference("iodata"),
+        "[[<<97,98>>],[<<97,98,99>>],{error,badarg},ok,{error,badarg},{error,badarg},\
+         <<97,98>>,<<195,169>>,{error,badarg},{error,badarg},{error,badarg}]\n"
+    );
+}

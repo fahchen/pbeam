@@ -2637,11 +2637,12 @@ mod tests {
             convert(chardata(), "unicode").unwrap(),
             Term::Binary(b"Hello\n".to_vec())
         );
+        // ERTS 29.1.1 raises badarg for a term that is not chardata.
         assert_eq!(
             convert(Term::Integer(1), "unicode")
                 .unwrap_err()
                 .to_string(),
-            "unsupported chardata Integer(1): not a binary or a list"
+            BADARG_EXIT
         );
         // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], utf8)
         // is <<"Hello\n">>.

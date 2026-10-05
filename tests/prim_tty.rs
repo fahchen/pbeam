@@ -547,15 +547,19 @@ fn restores_fd_0_when_a_linked_tty_owner_exits_abnormally() {
 #[test]
 fn writes_the_iovec_of_a_tty_resource_with_writev() {
     // `tty_nif_probe:write/0` calls `prim_tty:write_nif/2` with a `stderr`
-    // TTY resource and ten terms. The NIF reads the iovec in groups of 1024
-    // elements and writes each group with `writev` before it reads the next
-    // group (prim_tty_nif.c:366-423). An empty binary gives no `writev`
-    // entry (erl_nif.c:4122-4135). A term that is not a list, or a group
-    // with an element that is not a binary, raises `badarg`
-    // (erl_nif.c:4113-4115, 4145-4147). So `Group ++ [foo]` (one group)
-    // writes nothing, and `[<<"c">> | Group] ++ [foo]` writes its first
-    // group of 1024 binaries. `[<<>>]` calls `writev` with a count of 0,
-    // which fails with `EINVAL` on macOS and writes 0 bytes on Linux.
+    // TTY resource and fourteen terms. The NIF reads the iovec in groups of
+    // 1024 elements and writes each group with `writev` before it reads the
+    // next group (prim_tty_nif.c:366-423). An empty binary gives no `writev`
+    // entry (erl_nif.c:4122-4135). A term that is not a list, a group with
+    // an element that is not a binary, or a group whose list ends in a tail
+    // that is not `[]` raises `badarg` (erl_nif.c:4113-4115, 4145-4147). So
+    // `Group ++ [foo]` (one group) writes nothing, and
+    // `[<<"c">> | Group] ++ [foo]` writes its first group of 1024 binaries.
+    // The improper lists `[<<"e">> | x]`, `[<<"f">> | Group] ++ x` (one
+    // group), and `[<<"h">> | <<"i">>]` write nothing, and
+    // `[<<"g">>, <<"g">> | Group] ++ x` writes its first group of 1024
+    // binaries. `[<<>>]` calls `writev` with a count of 0, which fails with
+    // `EINVAL` on macOS and writes 0 bytes on Linux.
     let last = if cfg!(target_os = "macos") {
         (
             "{error,einval}",
@@ -565,15 +569,15 @@ fn writes_the_iovec_of_a_tty_resource_with_writev() {
         ("ok", r#"Atom("ok")"#)
     };
     let group = format!("c{}", "b".repeat(1023));
-    let stderr = format!("Hello, world!\n{group}{group}d");
-    assert_eq!(stderr.len(), 2063);
+    let stderr = format!("Hello, world!\n{group}{group}dgg{}", "b".repeat(1022));
+    assert_eq!(stderr.len(), 3087);
 
     let outputs = run_with_outputs(&mut erts_nif_probe("write"), FILES, &[]);
     assert_eq!(
         outputs.result.as_deref(),
         Some(
             format!(
-                "[ok,ok,badarg,badarg,badarg,badarg,badarg,badarg,ok,{}]\n",
+                "[ok,ok,badarg,badarg,badarg,badarg,badarg,badarg,ok,badarg,badarg,badarg,badarg,{}]\n",
                 last.0
             )
             .as_bytes()
@@ -591,7 +595,7 @@ fn writes_the_iovec_of_a_tty_resource_with_writev() {
         outputs.result.as_deref(),
         Some(
             format!(
-                r#"Ok(List([Atom("ok"), Atom("ok"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("ok"), {}]))"#,
+                r#"Ok(List([Atom("ok"), Atom("ok"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("ok"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), {}]))"#,
                 last.1
             )
             .as_bytes()

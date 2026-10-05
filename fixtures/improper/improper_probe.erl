@@ -1,5 +1,5 @@
 -module(improper_probe).
--export([literals/0, instructions/0, list_bifs/0, cons/2, id/1, ge/2, lt/2]).
+-export([literals/0, instructions/0, list_bifs/0, iodata/0, cons/2, id/1, ge/2, lt/2]).
 
 %% Literal improper lists: exact equality, the term order, and map keys.
 literals() ->
@@ -58,6 +58,20 @@ list_bifs() ->
      t(fun() -> erlang:cancel_timer(make_ref(), ?MODULE:id([{async, false}|x])) end),
      t(fun() -> ets:new(t, ?MODULE:id([set|x])) end),
      t(fun() -> ets:insert(ets:new(t, []), ?MODULE:id([{a}|x])) end)].
+
+%% The iodata and chardata BIFs with improper lists.
+iodata() ->
+    [t(fun() -> erlang:iolist_to_iovec(?MODULE:id([97|<<"b">>])) end),
+     t(fun() -> erlang:iolist_to_iovec(?MODULE:id([[97|<<"b">>], 99])) end),
+     t(fun() -> erlang:iolist_to_iovec(?MODULE:id([97|x])) end),
+     t(fun() -> element(1, re:compile(?MODULE:id([97|<<"b">>]), [])) end),
+     t(fun() -> re:compile(?MODULE:id([97|x]), []) end),
+     t(fun() -> re:compile(<<"a">>, ?MODULE:id([unicode|x])) end),
+     t(fun() -> unicode:characters_to_binary(?MODULE:id([97|<<"b">>]), unicode) end),
+     t(fun() -> unicode:characters_to_binary(?MODULE:id([[<<195>>|<<169>>]]), unicode) end),
+     t(fun() -> unicode:characters_to_binary(?MODULE:id([97|x]), unicode) end),
+     t(fun() -> unicode:characters_to_binary(?MODULE:id([-1|x]), unicode) end),
+     t(fun() -> unicode:characters_to_binary(?MODULE:id([foo]), unicode) end)].
 
 %% Run a fun and return its result, or `{Class, Reason}` of its exception.
 t(Fun) -> try Fun() catch Class:Reason -> {Class, Reason} end.

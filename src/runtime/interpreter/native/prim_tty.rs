@@ -507,9 +507,11 @@ const MAXIOV: usize = libc::UIO_MAXIOV as usize;
 /// checks of `enif_inspect_iovec` (`erl_nif.c:4092-4152`), and writes each
 /// group to the output fd with `host::output::write_all` before it reads the
 /// next group. Each binary that is not empty gives one `writev` entry. A
-/// term that is not a list, or a group with an element that is not a
-/// binary, raises `error:badarg`, after the binding writes the earlier
-/// groups (`prim_tty_nif.c:366-368`). A failed write gives
+/// term that is not a list, a group with an element that is not a binary,
+/// or the group that holds the last element of an improper list, whatever
+/// its tail, raises `error:badarg`, after the binding writes the earlier
+/// groups (`examine_iovec_term`, `erl_nif.c:4092-4150`;
+/// `prim_tty_nif.c:366-368`). A failed write gives
 /// `{error, Errno}` with the `erl_errno_id` atom
 /// (`prim_tty_nif.c:403-406`). Else the result is `ok`, also for `[]`,
 /// which writes nothing.
@@ -526,6 +528,9 @@ const MAXIOV: usize = libc::UIO_MAXIOV as usize;
 /// // A pipe without a reader: {error, epipe}
 /// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec)?, BifResult::Value(Term::Tuple(_))));
 /// assert!(matches!(write_nif(&mut scheduler, &tty, &Term::static_atom("foo"))?, BifResult::Raise { .. }));
+/// // [<<"h">> | <<"i">>] writes nothing.
+/// let improper = Term::ImproperList(vec![Term::Binary(b"h".to_vec())], Box::new(Term::Binary(b"i".to_vec())));
+/// assert!(matches!(write_nif(&mut scheduler, &tty, &improper)?, BifResult::Raise { .. }));
 /// assert!(matches!(write_nif(&mut scheduler, &Term::static_atom("stdout"), &iovec)?, BifResult::Raise { .. }));
 /// ```
 ///
@@ -537,10 +542,17 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
     let Some(&TtyResource { ofd, .. }) = tty_resource(&scheduler.resources, tty) else {
         return Ok(BifResult::badarg());
     };
-    let Term::List(elements) = iovec else {
-        return Ok(BifResult::badarg());
+    let (elements, improper) = match iovec {
+        Term::List(elements) => (elements, false),
+        Term::ImproperList(elements, _) => (elements, true),
+        _ => return Ok(BifResult::badarg()),
     };
-    for group in elements.chunks(MAXIOV) {
+    let mut groups = elements.chunks(MAXIOV).peekable();
+    while let Some(group) = groups.next() {
+        // The group of the last element reads the tail after it.
+        if improper && groups.peek().is_none() {
+            return Ok(BifResult::badarg());
+        }
         let mut buffers = Vec::with_capacity(group.len());
         for element in group {
             match element {
