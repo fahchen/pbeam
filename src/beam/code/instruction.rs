@@ -1381,17 +1381,16 @@ pub(super) fn parse_code(
                 // call hibernates first and returns after that
                 // (`jit/arm/ops.tab:669-673`; `emu/ops.tab:896-898`).
                 if (module.as_str(), name.as_str(), arity) == ("erlang", "hibernate", 0) {
-                    if opcode == OPCODE_CALL_EXT {
-                        Instruction::Hibernate
-                    } else {
-                        instructions.push(Instruction::Hibernate);
-                        if opcode == OPCODE_CALL_EXT_LAST {
-                            instructions.push(Instruction::Deallocate {
-                                stack_size: deallocate,
-                            });
-                        }
-                        Instruction::Return
+                    instructions.push(Instruction::Hibernate);
+                    if opcode == OPCODE_CALL_EXT_LAST {
+                        instructions.push(Instruction::Deallocate {
+                            stack_size: deallocate,
+                        });
                     }
+                    if opcode != OPCODE_CALL_EXT {
+                        instructions.push(Instruction::Return);
+                    }
+                    continue;
                 } else {
                     Instruction::CallExternal {
                         arity,
