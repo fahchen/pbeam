@@ -15,9 +15,10 @@
 //! hashes an atom key by its atom word `(index << 6) | 0xB`. Thus the pair
 //! order of a map is the ERTS order, which BEAM code sees through operations
 //! such as `maps:keys/1`. Other key types need the ERTS flatmap key order
-//! and hash for bignums and compound terms, which PBeam does not have yet.
+//! and the hashmap insertion of bignums and compound keys, which PBeam does
+//! not have yet.
 
-use super::Term;
+use super::{Term, hash::internal_hash};
 
 /// The largest number of keys in a flatmap (`MAP_SMALL_MAP_LIMIT` in a
 /// release build of ERTS). A map with more keys is a hashmap.
@@ -28,14 +29,10 @@ const SLOT_BITS: u32 = 4;
 const HAMT_MAX_LEVEL: u32 = u64::BITS / SLOT_BITS;
 /// The mask of the hash bits that select a slot.
 const SLOT_MASK: u64 = 0xF;
-/// The width of the tag of an ERTS small integer word (`_TAG_IMMED1_SIZE`).
-const SMALL_INTEGER_TAG_BITS: u32 = 4;
-/// The tag bits of an ERTS small integer word (`_TAG_IMMED1_SMALL`).
-const SMALL_INTEGER_TAG: u64 = 0xF;
-/// The width of the tag of an ERTS atom word (`_TAG_IMMED2_SIZE`).
-const ATOM_TAG_BITS: u32 = 6;
-/// The tag bits of an ERTS atom word (`_TAG_IMMED2_ATOM`).
-const ATOM_TAG: u64 = 0xB;
+/// The bitmap of a node that uses all 16 slots. ERTS gives such a root the
+/// `HEAD_ARRAY` header instead of `HEAD_BITMAP` (`hashmap_from_*` in
+/// `erl_map.c`).
+const FULL_BITMAP: u16 = 0xFFFF;
 
 /// A BEAM map: a flatmap up to 32 keys and a HAMT above 32 keys, as in
 /// ERTS. The layout is private, so every map is in its canonical form.
@@ -60,9 +57,17 @@ struct Hamt {
     size: usize,
 }
 
+/// The form of a map, as the ERTS internal hash reads it.
+pub(super) enum Form<'a> {
+    /// The pairs of a flatmap, in flatmap key order.
+    Flat(&'a [(Term, Term)]),
+    /// The number of keys and the root node of a hashmap.
+    Hash { size: usize, root: &'a Node },
+}
+
 /// A HAMT node. Bit `i` of `bitmap` is set when slot `i` holds a child.
 /// `children` holds one child per set bit, in ascending slot order.
-struct Node {
+pub(super) struct Node {
     /// The occupied slots.
     bitmap: u16,
     /// The child of each occupied slot, in ascending slot order.
@@ -70,7 +75,7 @@ struct Node {
 }
 
 /// The child in one slot of a HAMT node.
-enum Child {
+pub(super) enum Child {
     /// A key and its value.
     Leaf(Term, Term),
     /// A node one level down.
@@ -142,6 +147,25 @@ impl Map {
         match &self.repr {
             Repr::Flat(pairs) => pairs.len(),
             Repr::Hash(hamt) => hamt.size,
+        }
+    }
+
+    /// Return the flatmap pairs or the hashmap root, so that the ERTS
+    /// internal hash reads the map in its ERTS layout.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// assert!(matches!(map.form(), Form::Flat([(Term::Integer(1), Term::Integer(2))])));
+    /// ```
+    pub(super) fn form(&self) -> Form<'_> {
+        match &self.repr {
+            Repr::Flat(pairs) => Form::Flat(pairs),
+            Repr::Hash(hamt) => Form::Hash {
+                size: hamt.size,
+                root: &hamt.root,
+            },
         }
     }
 
@@ -332,7 +356,8 @@ impl Hamt {
                         *existing_value = value;
                         return;
                     }
-                    // mix64 is a bijection, so two different keys have two different hashes.
+                    // The hash of a supported key is mix64 of its word, a bijection, so two
+                    // different keys have two different hashes.
                     let existing_hash = map_hash(existing).expect("a stored key has a hash");
                     let existing = (
                         existing_hash,
@@ -379,6 +404,29 @@ impl Node {
         Some(&self.children[(self.bitmap & (bit - 1)).count_ones() as usize])
     }
 
+    /// Return true when the node uses all 16 slots. A hashmap root with all
+    /// slots has the ERTS `HEAD_ARRAY` header.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!Node::empty().is_full());
+    /// ```
+    pub(super) fn is_full(&self) -> bool {
+        self.bitmap == FULL_BITMAP
+    }
+
+    /// Return the children in ascending slot order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Node::empty().children().is_empty());
+    /// ```
+    pub(super) fn children(&self) -> &[Child] {
+        &self.children
+    }
+
     /// Build the node at `level` for two leaves whose hashes select the
     /// same slots above `level`. Add one node with one child for each level
     /// where the two hashes still select the same slot, then put the two
@@ -396,7 +444,8 @@ impl Node {
         while slot(first.0, depth) == slot(second.0, depth) {
             depth += 1;
             // ERTS keeps two keys with equal hashes in a collision node at HAMT_MAX_LEVEL.
-            // Supported keys have different hashes, because mix64 is a bijection.
+            // Supported keys have different hashes, because their hash is mix64 of their
+            // word, a bijection.
             debug_assert!(
                 depth < HAMT_MAX_LEVEL,
                 "equal map hashes need an ERTS collision node"
@@ -455,9 +504,9 @@ fn slot(hash: u64, level: u32) -> u32 {
 }
 
 /// Return the ERTS map hash (`erts_map_hash`) of a key, or `None` for a key
-/// that a hashmap does not support yet. A small integer hashes as its raw
-/// ERTS word `(value << 4) | 0xF`. An atom hashes as its raw ERTS word
-/// `(index << 6) | 0xB`.
+/// that a hashmap does not support yet. The map hash is the ERTS internal
+/// hash, so an atom hashes as its word `(index << 6) | 0xB`, and a small
+/// integer as its word `(value << 4) | 0xF`.
 ///
 /// # Examples
 ///
@@ -468,33 +517,12 @@ fn slot(hash: u64, level: u32) -> u32 {
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
 /// ```
 fn map_hash(key: &Term) -> Option<u64> {
-    match key {
-        Term::Atom(atom) => Some(mix64((u64::from(atom.index()) << ATOM_TAG_BITS) | ATOM_TAG)),
-        _ => key
-            .small_integer()
-            .map(|value| mix64(((value as u64) << SMALL_INTEGER_TAG_BITS) | SMALL_INTEGER_TAG)),
-    }
-}
-
-/// Mix a 64-bit word, as ERTS `ihash_mix64` does (the MurmurHash3 fmix64
-/// finalizer). The function is a bijection on `u64`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(mix64(0x1F), 7938660269479274665);
-/// ```
-fn mix64(mut hash: u64) -> u64 {
-    hash ^= hash >> 33;
-    hash = hash.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-    hash ^= hash >> 33;
-    hash = hash.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
-    hash ^ (hash >> 33)
+    (matches!(key, Term::Atom(_)) || key.small_integer().is_some()).then(|| internal_hash(key))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Child, Map, Node, map_hash, mix64};
+    use super::{Child, Map, Node, map_hash};
     use crate::term::{AtomTable, Term, test_atom as atom};
 
     fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
@@ -518,7 +546,6 @@ mod tests {
     fn hashes_small_integers_as_erts() {
         assert_eq!(map_hash(&Term::Integer(1)), Some(7938660269479274665));
         assert_eq!(map_hash(&Term::Integer(-1)), Some(7256831767414464289));
-        assert_eq!(mix64(0x1F), 7938660269479274665);
         assert!(map_hash(&Term::Integer((1 << 59) - 1)).is_some());
         assert!(map_hash(&Term::Integer(-(1 << 59))).is_some());
         assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
@@ -528,15 +555,14 @@ mod tests {
     #[test]
     fn hashes_atoms_by_their_index_as_erts() {
         // true has index 1: its ERTS word is (1 << 6) | 0xB = 0x4B.
-        assert_eq!(mix64(0x4B), 14558535449716669319);
         assert_eq!(
             map_hash(&Term::static_atom("true")),
             Some(14558535449716669319)
         );
-        // abs_path has index 26.
+        // abs_path has index 26. ERTS 29.1.1: its internal hash.
         assert_eq!(
             map_hash(&Term::static_atom("abs_path")),
-            Some(mix64((26 << 6) | 0xB))
+            Some(17379220480677090226)
         );
     }
 
