@@ -103,6 +103,35 @@ fn negates_booleans_as_pinned_erts() {
 }
 
 #[test]
+fn finds_key_members_as_pinned_erts() {
+    // `io_start_probe:keymembers/0` runs `lists:keymember/3` with `call_ext`,
+    // as `user_sup:get_user/1` (user_sup.erl:121-122) does, and through the
+    // `apply` instruction. It returns `true` when `keyfind` finds a tuple,
+    // else the `keyfind` result (`erl_bif_lists.c:1265-1277`). Elements that
+    // are not tuples, and tuples with fewer elements than the position, do
+    // not match. A position that is not a small integer of at least 1, also
+    // `1 bsl 60`, and a third argument that is not a list raise `badarg`
+    // (`erl_bif_lists.c:1301-1380`).
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let expected = [
+        "true", "true", "true", "true", "false", "false", "true", "true", "false", "false",
+        "badarg", "badarg", "badarg", "badarg", "badarg", "badarg", "true",
+    ]
+    .map(atom);
+    assert_eq!(
+        program
+            .execute("io_start_probe", "keymembers", &[])
+            .unwrap(),
+        Term::List(expected.to_vec())
+    );
+    assert_eq!(
+        reference("keymembers"),
+        b"[true,true,true,true,false,false,true,true,false,false,badarg,badarg,badarg,badarg,badarg,badarg,true]\n"
+    );
+}
+
+#[test]
 fn reads_and_updates_maps_as_pinned_erts() {
     // `io_start_probe:maps/0` runs `bif` `erlang:map_get/2` with fail label
     // 0, as `prim_tty:init/1` (prim_tty.erl:220) and `user_drv:init/1`

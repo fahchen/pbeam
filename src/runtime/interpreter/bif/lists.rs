@@ -34,3 +34,25 @@ pub(super) fn keyfind(key: &Term, position: &Term, list: &Term) -> BifResult {
     );
     Value(found.cloned().unwrap_or_else(|| Term::static_atom("false")))
 }
+
+/// Run `lists:keymember/3`: return `true` when [`keyfind`] finds a tuple,
+/// else the result of [`keyfind`], as ERTS `lists_keymember_3` does
+/// (`erl_bif_lists.c`). Thus `false` comes when no tuple matches, and the
+/// arguments that [`keyfind`] does not accept raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let entry = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
+/// let found = keymember(&Term::static_atom("ok"), &Term::Integer(1), &Term::List(vec![entry]));
+/// assert!(matches!(found, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// let missing = keymember(&Term::Integer(1), &Term::Integer(1), &Term::List(vec![]));
+/// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(keymember(&Term::Integer(1), &Term::Integer(0), &Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn keymember(key: &Term, position: &Term, list: &Term) -> BifResult {
+    match keyfind(key, position, list) {
+        Value(Term::Tuple(_)) => Value(Term::static_atom("true")),
+        result => result,
+    }
+}

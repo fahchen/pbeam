@@ -487,7 +487,7 @@ bifs! {
     file:native_name_encoding/0 => unsupported,
     io:printable_range/0 => unsupported,
     lists:keyfind/3 => |_, [key, position, list]| Ok(lists::keyfind(key, position, list)),
-    lists:keymember/3 => unsupported,
+    lists:keymember/3 => |_, [key, position, list]| Ok(lists::keymember(key, position, list)),
     lists:keysearch/3 => unsupported,
     lists:member/2 => |_, [element, list]| Ok(match list { Term::List(elements) => Value(Term::static_atom(if elements.contains(element) { "true" } else { "false" })), _ => BifResult::badarg() }),
     lists:reverse/2 => unsupported,
