@@ -9,7 +9,7 @@ if ! [[ $start =~ ^[1-9][0-9]*$ && $end =~ ^[1-9][0-9]*$ ]] || ((start > end)); 
 fi
 
 tag="OTP-$(mise config get --file mise.toml tools.erlang)"
-src=${PBEAM_OTP_SRC:-${XDG_CACHE_HOME:-$HOME/.cache}/pbeam/otp}
+src=${PBEAM_OTP_SRC:-$HOME/.cache/pbeam/otp}
 if ! git -C "$src" rev-parse --git-dir >/dev/null 2>&1; then
   echo "otp-src: no OTP git repository at $src" >&2
   echo 'Set PBEAM_OTP_SRC to an erlang/otp clone, or run:' >&2
