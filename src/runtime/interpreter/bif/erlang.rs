@@ -470,6 +470,59 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
     Value(Term::static_atom(if matches { "true" } else { "false" }))
 }
 
+/// Send `message` to `to` and return the message, as ERTS `erl_send`
+/// (`bif.c:2845-2908`) and `do_send` (`bif.c:2458-2695`) do for the `send`
+/// instruction.
+///
+/// - A pid gets the message. ERTS drops a message to a process that does
+///   not exist.
+/// - A reference drops the message. ERTS sends an alias message, and the
+///   receiver drops it when the reference is not an active alias. PBeam has
+///   no aliases.
+/// - An atom gives the message to its registered process. A name that no
+///   process has raises `badarg`. PBeam has no ports.
+/// - `{Name, Node}` with two atoms and the local node gives the message to
+///   the registered process, or drops it when no process has the name.
+///   Another node drops the message, as ERTS does on a node that is not
+///   alive (`dist.c:3234-3235`, `bif.c:2397-2400`, `2870-2872`). Each other
+///   tuple raises `badarg`.
+/// - Each other term raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(send(scheduler, &Term::Pid(pid), ok.clone()), BifResult::Value(value) if value == ok));
+/// assert!(matches!(send(scheduler, &Term::static_atom("nobody"), ok.clone()), BifResult::Raise { .. }));
+/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// assert!(matches!(send(scheduler, &remote, ok.clone()), BifResult::Value(_)));
+/// ```
+pub(in crate::runtime::interpreter) fn send(
+    scheduler: &mut Scheduler,
+    to: &Term,
+    message: Term,
+) -> BifResult {
+    let target = match to {
+        Term::Pid(pid) => Some(*pid),
+        Term::Reference(_) => None,
+        Term::Atom(name) => match scheduler.whereis(name.name()) {
+            Some(pid) => Some(pid),
+            None => return BifResult::badarg(),
+        },
+        Term::Tuple(elements) => match elements.as_slice() {
+            [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
+                scheduler.whereis(name.name())
+            }
+            [Term::Atom(_), Term::Atom(_)] => None,
+            _ => return BifResult::badarg(),
+        },
+        _ => return BifResult::badarg(),
+    };
+    if let Some(target) = target {
+        scheduler.deliver(target, message.clone());
+    }
+    Value(message)
+}
+
 /// Run `erlang:make_fun/3`: return the external fun of
 /// `module:function/arity`, as ERTS `make_fun_3` (`bif.c:4467-4485`) does.
 /// The module and the function must be atoms, and the arity must be an

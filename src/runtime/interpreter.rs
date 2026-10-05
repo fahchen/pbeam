@@ -16,7 +16,7 @@ use std::collections::HashMap;
 mod bif;
 mod native;
 
-use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function};
+use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function, send};
 
 #[derive(Debug)]
 pub struct BeamProgram {
@@ -715,12 +715,17 @@ impl BeamProgram {
                     write(process, destination, Term::List(values))?;
                 }
                 Instruction::Send => {
-                    let Term::Pid(target) = read(process, &Operand::X(0))? else {
-                        return Err(error("unsupported BEAM send target"));
-                    };
+                    // ERTS `send` calls `erl_send` and writes its result to
+                    // x0, or raises (`emu/bif_instrs.tab:425-454`; JIT
+                    // `emit_send` in `jit/arm/instr_bif.cpp:612-625`).
+                    let to = read(process, &Operand::X(0))?;
                     let message = read(process, &Operand::X(1))?;
-                    scheduler.deliver(target, message.clone());
-                    write(scheduler.current_process_mut(), &Operand::X(0), message)?;
+                    let result = send(scheduler, &to, message);
+                    if let Some(outcome) =
+                        self.finish_bif(scheduler.current_process_mut(), result, false)?
+                    {
+                        return Ok(outcome);
+                    }
                 }
                 Instruction::LoopReceive {
                     fail_label,
@@ -1937,7 +1942,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_tuple_access_sends_and_bifs() {
+    fn rejects_invalid_tuple_access_receives_and_bifs() {
         let error = |body| run_with_child(body).unwrap_err().to_string();
         let element = |tuple, index| Instruction::GetTupleElement {
             tuple: Operand::Value(tuple),
@@ -1948,13 +1953,6 @@ mod tests {
         assert!(error(vec![Instruction::RemoveMessage]).contains("remove_message"));
         assert!(error(vec![element(Term::Integer(1), 0)]).contains("not a tuple"));
         assert!(error(vec![element(Term::Tuple(vec![]), 0)]).contains("no element 0"));
-        assert!(
-            error(vec![
-                Instruction::Move(atom("nobody"), Operand::X(0)),
-                Instruction::Send
-            ])
-            .contains("send target")
-        );
         assert!(
             error(vec![Instruction::Bif {
                 fail_label: 0,

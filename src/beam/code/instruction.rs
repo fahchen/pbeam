@@ -708,7 +708,10 @@ pub(crate) enum Instruction {
         arity: u32,
         tag: Term,
     },
-    /// Sends `x1` to the process in `x0`, then writes the message to `x0`.
+    /// Sends `x1` to the destination in `x0`, then writes the message to
+    /// `x0`. The destination is a pid, a registered name, `{Name, Node}`, or
+    /// a reference. A name that no process has, a tuple that is not two
+    /// atoms, and each other term raise `error:badarg`.
     ///
     /// Encoding: `[0x14]`.
     ///
