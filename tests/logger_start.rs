@@ -27,12 +27,14 @@ fn reference(function: &str) -> Vec<u8> {
     reference.stdout
 }
 
-/// Load the probe with the pinned `lists` and `maps`, so `lists:reverse/1`
-/// and `maps:without/2` run their BEAM code.
+/// Load the probe with the pinned `erlang`, `lists`, and `maps`, so
+/// `erlang:spawn_monitor/1`, `lists:reverse/1`, and `maps:without/2` run
+/// their BEAM code.
 fn load() -> BeamProgram {
+    let erlang = pinned_beam("erlang");
     let lists = pinned_beam("lists");
     let maps = pinned_beam("maps");
-    BeamProgram::load(&[&lists, &maps, LOGGER_START_PROBE]).unwrap()
+    BeamProgram::load(&[&erlang, &lists, &maps, LOGGER_START_PROBE]).unwrap()
 }
 
 #[test]
@@ -150,5 +152,93 @@ fn removes_map_keys_through_maps_without() {
     assert_eq!(
         reference("without"),
         b"[#{type => standard_io},#{1 => one,2 => two}]\n"
+    );
+}
+
+#[test]
+fn reads_and_deletes_ets_keys_as_pinned_erts() {
+    // `logger_start_probe:ets/0` runs `ets:whereis/1`
+    // (`erl_db.c:2849-2872`), `ets:lookup/2` (`erl_db.c:2877-2900`),
+    // `ets:member/2` (`erl_db.c:2905-2928`), and `ets:delete/2`
+    // (`erl_db.c:3328-3349`), as `logger_config` (`logger_config.erl:45-98`)
+    // does. `whereis/1` gives the table reference of a named table and
+    // `undefined` for an unnamed table and a free name. A set table compares
+    // keys with exact equality, also with the key position 2. `delete/2`
+    // returns `true` also for a key that the table does not hold. A name
+    // that is not an atom, a free name, and a term that is not an atom or a
+    // reference raise `badarg`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |first: Term, second: Term| Term::Tuple(vec![first, second]);
+    let found = |key: Term, value: Term| Term::List(vec![pair(key, value)]);
+    let badarg = pair(atom("error"), atom("badarg"));
+    let mut expected = vec![
+        atom("logger_start_probe"),
+        atom("true"),
+        atom("true"),
+        atom("undefined"),
+        atom("undefined"),
+        found(atom("a"), Term::Integer(1)),
+        found(pair(atom("h"), atom("b")), Term::Integer(2)),
+        found(Term::List(vec![atom("x")]), Term::Integer(3)),
+        Term::List(vec![]),
+        found(atom("v"), atom("k")),
+        Term::List(vec![]),
+        atom("true"),
+        atom("true"),
+        atom("false"),
+        atom("true"),
+        atom("true"),
+        atom("true"),
+        atom("true"),
+        Term::List(vec![]),
+        atom("false"),
+        found(pair(atom("h"), atom("b")), Term::Integer(2)),
+    ];
+    expected.extend(std::iter::repeat_n(badarg, 8));
+    assert_eq!(
+        program.execute("logger_start_probe", "ets", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("ets"),
+        b"[logger_start_probe,true,true,undefined,undefined,[{a,1}],[{{h,b},2}],[{[x],3}],[],[{v,k}],[],\
+          true,true,false,true,true,true,true,[],false,[{{h,b},2}],\
+          {error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn checks_ets_access_rights_as_pinned_erts() {
+    // `logger_start_probe:ets_access/0` reads the tables of the caller from
+    // another process. `ets:lookup/2` and `ets:member/2` need `DB_READ`, and
+    // `ets:delete/2` needs `DB_WRITE` (`erl_db_util.h:449-450`), so a
+    // protected table raises `badarg` only for `delete/2`, and a private
+    // table raises `badarg` for all three. `ets:whereis/1` needs only
+    // `DB_INFO` (`erl_db_util.h:451`), so it finds the private table. The
+    // exit of the owner deletes its table and frees its name.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let expected = vec![
+        Term::List(vec![Term::Tuple(vec![atom("k"), atom("v")])]),
+        atom("true"),
+        badarg.clone(),
+        badarg.clone(),
+        badarg.clone(),
+        badarg.clone(),
+        atom("true"),
+        atom("undefined"),
+        badarg,
+    ];
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "ets_access", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("ets_access"),
+        b"[[{k,v}],true,{error,badarg},{error,badarg},{error,badarg},{error,badarg},true,undefined,{error,badarg}]\n"
     );
 }

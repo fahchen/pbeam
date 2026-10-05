@@ -262,6 +262,73 @@ pub(super) fn lookup_element(
         .map_or_else(BifResult::badarg, |element| Value(element.clone())))
 }
 
+/// Run `ets:lookup(Table, Key)` on a `set` table, as ERTS `ets_lookup_2`
+/// (`erl_db.c:2877-2900`) and `db_get_hash` (`erl_db_hash.c:1492-1516`) do:
+/// return `[Object]` for the object with a key that is exactly equal to
+/// `Key`, or `[]`. A table that does not exist or that the caller cannot
+/// read raises `badarg` (`erl_db.c:769-912`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = lookup(&mut context, &table, &test_atom("k"));
+/// assert!(matches!(result, BifResult::Value(Term::List(objects)) if objects.len() == 1));
+/// assert!(matches!(lookup(&mut context, &test_atom("missing"), &test_atom("k")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn lookup(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
+    let caller = context.scheduler.current_process_mut().id;
+    let Some(table) = context.scheduler.ets.table(table, caller, Operation::Read) else {
+        return BifResult::badarg();
+    };
+    let object = table.object(key).map(|object| Term::Tuple(object.to_vec()));
+    Value(Term::List(object.into_iter().collect()))
+}
+
+/// Run `ets:member(Table, Key)` on a `set` table, as ERTS `ets_member_2`
+/// (`erl_db.c:2905-2928`) and `db_member_hash` (`erl_db_hash.c:1518-1542`)
+/// do: return `true` when the table has an object with a key that is
+/// exactly equal to `Key`, else `false`. A table that does not exist or that
+/// the caller cannot read raises `badarg` (`erl_db.c:769-912`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = member(&mut context, &table, &test_atom("k"));
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
+/// assert!(matches!(member(&mut context, &Term::Integer(1), &test_atom("k")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn member(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
+    let caller = context.scheduler.current_process_mut().id;
+    let Some(table) = context.scheduler.ets.table(table, caller, Operation::Read) else {
+        return BifResult::badarg();
+    };
+    let found = table.object(key).is_some();
+    Value(Term::static_atom(if found { "true" } else { "false" }))
+}
+
+/// Run `ets:delete(Table, Key)` on a `set` table and return `true`, as ERTS
+/// `ets_delete_2` (`erl_db.c:3328-3349`) and `db_erase_hash`
+/// (`erl_db_hash.c:1613-1664`) do. The object with a key that is exactly
+/// equal to `Key` goes out of the table. A key that the table does not hold
+/// also returns `true`. A table that does not exist or that the caller
+/// cannot write raises `badarg` (`erl_db.c:769-912`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = delete(&mut context, &table, &test_atom("k"));
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
+/// assert!(matches!(delete(&mut context, &Term::List(vec![]), &test_atom("k")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn delete(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
+    let caller = context.scheduler.current_process_mut().id;
+    let Some(table) = context.scheduler.ets.table(table, caller, Operation::Write) else {
+        return BifResult::badarg();
+    };
+    table.delete(key);
+    Value(Term::static_atom("true"))
+}
+
 /// Return whether `{Tag, Count}` is the hidden lock option
 /// `{debug_hash_fixed_number_of_locks, Count}` with a count in `LOCKS`, as
 /// `ets_new_2` checks it (`erl_db.c:2639-2655`).
