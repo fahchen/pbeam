@@ -476,6 +476,27 @@ impl Scheduler {
         Ok(Term::static_atom("true"))
     }
 
+    /// Remove the link between the current process and `target`, as
+    /// `erlang:unlink/1` (`bif.c:1236-1256`) does for a local pid. PBeam has
+    /// no signal queue, so both sides lose the link at once. A target
+    /// without a link, a target that does not exist, and the current process
+    /// itself change nothing. An `EXIT` message in the mailbox stays.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.link(child)?;
+    /// scheduler.unlink(child);
+    /// assert!(scheduler.current_process_mut().links.is_empty());
+    /// ```
+    pub(super) fn unlink(&mut self, target: ProcessId) {
+        let current = self.current_process_mut().id;
+        if let Some(process) = self.processes.get_mut(&target) {
+            process.links.remove(&current);
+        }
+        self.current_process_mut().links.remove(&target);
+    }
+
     /// Monitor a target for the current process, as ERTS `monitor`
     /// (`bif.c:758-981`) does after its checks. A process by name is the
     /// process that has the name now (`erts_whereis_name_to_id`). A monitor
@@ -1029,13 +1050,19 @@ mod tests {
     }
 
     #[test]
-    fn links_live_processes_and_ignores_normal_exit_without_trap_exit() {
+    fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
         let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, _) = scheduler.spawn(frame(), vec![], false, false).unwrap();
         assert_eq!(scheduler.link(child).unwrap(), atom("true"));
         assert!(scheduler.link(ProcessId(99)).is_err());
+        scheduler.unlink(child);
+        assert!(scheduler.current_process_mut().links.is_empty());
+        assert!(scheduler.processes[&child].links.is_empty());
+        scheduler.unlink(ProcessId(99));
+        scheduler.unlink(ProcessId(0));
+        assert_eq!(scheduler.link(child).unwrap(), atom("true"));
         scheduler.park_current();
 
         scheduler.schedule_next();

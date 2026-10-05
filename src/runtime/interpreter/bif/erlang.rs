@@ -117,7 +117,9 @@ pub(super) fn exit(
 /// `info`; each other element, and a tail that is not `[]`, raise `badarg`
 /// before the monitor is removed. After the options, a `Reference` that is
 /// not a reference raises `badarg`. The result is `true`, or `false` with
-/// `info` when no active monitor was removed.
+/// `info` when no active monitor was removed. `erlang:demonitor/1` passes
+/// `[]`, so it returns `true` for each removal result, as `demonitor_1`
+/// (`bif.c:598-611`) does.
 ///
 /// With `flush`, ERTS flushes only when no active monitor was removed: the
 /// DOWN message can then be queued. The flush traps into

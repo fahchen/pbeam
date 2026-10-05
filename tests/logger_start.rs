@@ -564,3 +564,69 @@ fn iterates_maps_in_a_given_key_order_as_pinned_erts() {
     );
     assert_eq!(String::from_utf8(reference("ordered")).unwrap(), text);
 }
+
+#[test]
+fn removes_monitors_as_pinned_erts() {
+    // `logger_start_probe:demonitor/0` runs `erlang:demonitor/1`
+    // (`bif.c:598-611`), as `logger_simple_h:adding_handler/1`
+    // (`logger_simple_h.erl:45`) does. It removes an active monitor, so no
+    // `DOWN` message comes. It gives `true` also when the monitor already
+    // fired, and the queued `DOWN` message with reason `normal` stays. A
+    // term that is not a reference raises `badarg`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let expected = vec![
+        atom("true"),
+        atom("none"),
+        atom("true"),
+        atom("normal"),
+        atom("true"),
+        atom("true"),
+        badarg.clone(),
+        badarg,
+    ];
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "demonitor", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("demonitor"),
+        b"[true,none,true,normal,true,true,{error,badarg},{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn removes_links_as_pinned_erts() {
+    // `logger_start_probe:unlink/0` runs `erlang:unlink/1`
+    // (`bif.c:1223-1364`), as `logger_simple_h:loop/2`
+    // (`logger_simple_h.erl:124`) does. After the unlink, the `boom` exit of
+    // the child sends no exit signal to the caller. The unlink of a process
+    // that is gone gives `true`, and its queued `EXIT` message with reason
+    // `bang` stays. The caller itself and a pid without a link give `true`.
+    // A term that is not a pid raises `badarg`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let expected = vec![
+        atom("true"),
+        atom("true"),
+        atom("bang"),
+        atom("true"),
+        atom("true"),
+        badarg.clone(),
+        badarg,
+    ];
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "unlink", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("unlink"),
+        b"[true,true,bang,true,true,{error,badarg},{error,badarg}]\n"
+    );
+}

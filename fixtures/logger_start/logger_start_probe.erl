@@ -1,6 +1,6 @@
 -module(logger_start_probe).
 -export([reverse/0, remove/0, without/0, ets/0, ets_access/0, find/0, from_list/0, is_key/0,
-         to_list/0, map_next/0, next/0, ordered/0, hd/0]).
+         to_list/0, map_next/0, next/0, ordered/0, demonitor/0, unlink/0, hd/0]).
 
 %% `lists:reverse/2` (erl_bif_lists.c:1246-1263). logger_simple_h:replay_buffer/1
 %% (logger_simple_h.erl:150) calls it with the buffer and the drop message, and
@@ -220,6 +220,49 @@ keys_of(I) ->
 
 iterator_path({_, _, Next}) -> iterator_path(Next);
 iterator_path([Path | _]) -> Path.
+
+%% `erlang:demonitor/1` (bif.c:598-611). logger_simple_h:adding_handler/1
+%% (logger_simple_h.erl:45) removes its monitor of the new handler process.
+%% It runs the demonitor/2 step with [] and gives true, also when no active
+%% monitor was removed. A DOWN message in the queue stays, and a term that is
+%% not a reference raises badarg.
+demonitor() ->
+    {Pid, Ref} = spawn_monitor(fun() -> receive stop -> ok end end),
+    R1 = erlang:demonitor(Ref),
+    Pid ! stop,
+    Ref2 = erlang:monitor(process, Pid),
+    receive {'DOWN', Ref2, process, Pid, _} -> ok end,
+    {Pid3, Ref3} = spawn_monitor(fun() -> ok end),
+    Ref4 = erlang:monitor(process, Pid3),
+    receive {'DOWN', Ref4, process, Pid3, _} -> ok end,
+    R3 = erlang:demonitor(Ref3),
+    Queued = receive {'DOWN', Ref3, process, Pid3, Reason} -> Reason after 0 -> none end,
+    [R1, receive {'DOWN', Ref, _, _, _} -> down after 0 -> none end,
+     R3, Queued, erlang:demonitor(Ref3), erlang:demonitor(make_ref()),
+     catch_error(fun() -> erlang:demonitor(id(foo)) end),
+     catch_error(fun() -> erlang:demonitor(id(self())) end)].
+
+%% `erlang:unlink/1` (bif.c:1223-1364). logger_simple_h:loop/1
+%% (logger_simple_h.erl:124) unlinks from the logger process. A local pid
+%% gives true, also for a pid without a link, a process that is gone, and the
+%% caller. An EXIT message in the queue stays. Each other term raises badarg.
+unlink() ->
+    in_new_process(fun() ->
+        Child = spawn_link(fun() -> receive stop -> exit(boom) end end),
+        R1 = unlink(Child),
+        Ref = erlang:monitor(process, Child),
+        Child ! stop,
+        receive {'DOWN', Ref, process, Child, boom} -> ok end,
+        process_flag(trap_exit, true),
+        Child2 = spawn_link(fun() -> exit(bang) end),
+        Ref2 = erlang:monitor(process, Child2),
+        receive {'DOWN', Ref2, process, Child2, bang} -> ok end,
+        R2 = unlink(Child2),
+        Exit = receive {'EXIT', Child2, Why} -> Why after 0 -> none end,
+        [R1, R2, Exit, unlink(self()), unlink(Child),
+         catch_error(fun() -> unlink(id(foo)) end),
+         catch_error(fun() -> unlink(id(make_ref())) end)]
+    end).
 
 %% `erlang:hd/1` (bif.c:2918-2925). gen_server:decode_msg/6
 %% (gen_server.erl:2380) runs it in a guard. It gives the head of a proper
