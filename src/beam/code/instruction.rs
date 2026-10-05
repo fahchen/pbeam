@@ -1166,7 +1166,7 @@ pub(super) fn parse_code(
                 let _fail_label = read_operand(data, &mut cursor, TAG_LABEL)?;
                 let map = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let destination = read_register(data, &mut cursor)?;
-                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                skip_live_registers(data, &mut cursor)?;
                 Instruction::PutMapAssoc {
                     map,
                     destination,
@@ -1177,7 +1177,7 @@ pub(super) fn parse_code(
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let map = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let destination = read_register(data, &mut cursor)?;
-                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                skip_live_registers(data, &mut cursor)?;
                 Instruction::PutMapExact {
                     fail_label,
                     map,
@@ -1347,10 +1347,7 @@ pub(super) fn parse_code(
             OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2) {
-                    // PBeam has no process heap, so the live register count
-                    // for the garbage collection of `gc_bif1` and `gc_bif2`
-                    // is not kept.
-                    let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                    skip_live_registers(data, &mut cursor)?;
                 }
                 let (module, name) = bif_import(
                     imports,
@@ -1377,7 +1374,7 @@ pub(super) fn parse_code(
                 if opcode == OPCODE_ALLOCATE_HEAP {
                     skip_operand(data, &mut cursor)?;
                 }
-                let _live_registers = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                skip_live_registers(data, &mut cursor)?;
                 Instruction::Allocate { stack_size }
             }
             OPCODE_DEALLOCATE => Instruction::Deallocate {
@@ -1617,6 +1614,26 @@ fn skip_counted_operands(data: &[u8], cursor: &mut usize) -> Result<(), BeamErro
         return Err(error("BEAM instruction operand list exceeds code chunk"));
     }
     skip_operands(data, cursor, operand_count)
+}
+
+/// Skip the `Live` operand of an instruction that can collect garbage.
+///
+/// ERTS gives `Live` the operand type `t` (`ops.tab`), and the loader matches
+/// `t` only to the `u` tag (`beam_makeops`, `define_type_bit('t', ...)`). The
+/// ERTS garbage collector keeps X registers `0..Live` alive. PBeam has no
+/// process heap to collect, so this function does not keep the count. It
+/// validates the `u` tag and moves the cursor past the operand.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// skip_live_registers(&[0x20], &mut cursor)?;
+/// assert_eq!(cursor, 1);
+/// assert!(skip_live_registers(&[0x03], &mut 0).is_err());
+/// ```
+fn skip_live_registers(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
+    read_operand(data, cursor, TAG_UNSIGNED).map(|_live_registers| ())
 }
 
 /// Skip a fixed number of compact operands.
