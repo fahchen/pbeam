@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::module::BeamModule;
 use crate::{
     error::{BeamError, error},
-    term::{Atom, AtomTable, Fun, Lambda, Map, Term},
+    term::{Atom, AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, Map, Term},
 };
 
 const WORD_SIZE: usize = 4;
@@ -46,9 +46,6 @@ const ETF_EXPORT_EXT: u8 = 113;
 const ETF_MAP_EXT: u8 = 116;
 const ETF_SMALL_ATOM_UTF8_EXT: u8 = 119;
 const FIRST_ATOM_INDEX: usize = 1;
-/// The largest number of characters in an atom name (`MAX_ATOM_CHARACTERS`
-/// in `atom.h`).
-const MAX_ATOM_CHARACTERS: usize = 255;
 const FIRST_LABEL_NUMBER: u32 = 1;
 
 /// Parse the BEAM subset used by this runtime.
