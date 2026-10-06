@@ -81,6 +81,10 @@ pub(super) struct ProcessState {
     pub(super) receive_timer: ReceiveTimer,
     /// True when exit signals from linked processes become `EXIT` messages.
     pub(super) trap_exit: bool,
+    /// True when the `message_queue_data` flag is `off_heap`
+    /// (`FS_OFF_HEAP_MSGQ`), false for `on_heap`. PBeam has no process heap,
+    /// so the flag does not change where the messages are kept.
+    pub(super) off_heap_message_queue: bool,
     /// Processes linked to this process.
     pub(super) links: HashSet<ProcessId>,
     /// Monitors that send a `DOWN` message when this process exits.
@@ -115,6 +119,7 @@ impl ProcessState {
             waiting: false,
             receive_timer: ReceiveTimer::None,
             trap_exit: false,
+            off_heap_message_queue: false,
             links: HashSet::new(),
             monitored_by: Vec::new(),
             group_leader: id,

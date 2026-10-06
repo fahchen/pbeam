@@ -141,14 +141,26 @@ fn tests_map_keys_with_has_map_fields_like_erts() {
 #[test]
 fn takes_the_badmap_path_when_add_gets_a_non_map() {
     // `add/1` tests is_map and then calls erlang:error({badmap, M}), which
-    // PBeam does not resolve yet: `erlang:error/1` is not implemented.
+    // raises class `error` with the reason `{badmap, 1}`. PBeam gives each
+    // `error` exception the stack trace `[]` (row "Exception stack trace" in
+    // `docs/erts-differences.md`).
     let program = BeamProgram::load(&[MAP_PROBE]).unwrap();
+    let error = program
+        .execute("map_probe", "add", &[Term::Integer(1)])
+        .unwrap_err()
+        .to_string();
     assert!(
-        program
-            .execute("map_probe", "add", &[Term::Integer(1)])
-            .unwrap_err()
-            .to_string()
-            .contains("unresolved external MFA erlang:error/1")
+        error.contains(
+            "root process exited with Tuple([Tuple([Atom(\"badmap\"), Integer(1)]), List([])])"
+        ),
+        "{error}"
+    );
+
+    assert_eq!(
+        erl_reference(
+            "io:format(\"~p~n\", [try map_probe:add(1) catch Class:Reason -> {Class, Reason} end])"
+        ),
+        b"{error,{badmap,1}}\n"
     );
 }
 

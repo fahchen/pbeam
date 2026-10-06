@@ -28,24 +28,376 @@ pub(super) fn node(term: &Term) -> Result<BifResult, BeamError> {
     }
 }
 
-/// Run `erlang:process_flag(trap_exit, Value)`: set the `trap_exit` flag of
-/// the calling process and return the old flag. The table pattern accepts
-/// only `true` and `false` as the value.
+/// The flags of ERTS `process_flag_2` (`bif.c:2028-2237`) that need a
+/// subsystem that PBeam does not have: distribution, the error handler,
+/// priorities, schedulers, the garbage collector, tracing, and saved calls.
+/// The tuple `{monitor_nodes, Options}` is also such a flag.
+const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
+    "async_dist",
+    "error_handler",
+    "priority",
+    "scheduler",
+    "fullsweep_after",
+    "min_heap_size",
+    "min_bin_vheap_size",
+    "max_heap_size",
+    "sensitive",
+    "monitor_nodes",
+    "save_calls",
+];
+
+/// Run `erlang:process_flag(Flag, Value)` as ERTS `process_flag_2`
+/// (`bif.c:2028-2237`) does for the flags `trap_exit` and
+/// `message_queue_data`: set the flag of the calling process and return the
+/// old value. `trap_exit` takes `true` or `false`. `message_queue_data`
+/// takes `on_heap` or `off_heap` (`erts_change_message_queue_management`,
+/// `erl_message.c:1022-1100`), and its start value is `on_heap`. Each other
+/// value raises `badarg`. A flag that ERTS does not know raises `badarg`,
+/// also a tuple that is not `{monitor_nodes, Options}`.
+///
+/// Each flag of `UNSUPPORTED_PROCESS_FLAGS` except `max_heap_size` first
+/// checks its value as ERTS does, and raises `badarg` for a value that is
+/// not valid: `async_dist`, `sensitive`, and `monitor_nodes` take a boolean
+/// (`erts_monitor_nodes`, `dist.c:6740-6741`), `error_handler` takes an
+/// atom, `priority` takes `low`, `normal`, `high`, or `max`
+/// (`erts_set_process_priority`, `erl_process.c:9460-9466`), `save_calls`
+/// takes a small integer from 0 to 10000 (`process_flag_aux`,
+/// `bif.c:1907-1915`), and `scheduler`, `fullsweep_after`, `min_heap_size`,
+/// and `min_bin_vheap_size` take a small integer of 0 or more.
+///
+/// PBeam has no process heap, so `message_queue_data` does not change where
+/// the messages are kept.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let old = trap_exit(&mut context, &true_atom)?;
+/// let old = process_flag(&mut context, &Term::static_atom("trap_exit"), &Term::static_atom("true"))?;
 /// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// let old = process_flag(&mut context, &Term::static_atom("message_queue_data"), &Term::static_atom("off_heap"))?;
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "on_heap"));
+/// assert!(matches!(process_flag(&mut context, &foo, &Term::static_atom("true"))?, BifResult::Raise { .. }));
+/// assert!(process_flag(&mut context, &Term::static_atom("priority"), &Term::static_atom("high")).is_err());
 /// ```
-pub(super) fn trap_exit(
+///
+/// # Errors
+///
+/// Each flag of `UNSUPPORTED_PROCESS_FLAGS` gives a runtime error for a
+/// value that passes the check, and `max_heap_size` and
+/// `{monitor_nodes, Options}` give it for each value. ERTS raises `badarg`
+/// for a `scheduler` value above the scheduler count, which PBeam does not
+/// model, and PBeam gives the runtime error.
+pub(super) fn process_flag(
     context: &mut BifContext<'_>,
-    value: &Atom,
+    flag: &Term,
+    value: &Term,
 ) -> Result<BifResult, BeamError> {
     let process = context.scheduler.current_process_mut();
-    let old = Term::static_atom(&process.trap_exit.to_string());
-    process.trap_exit = value.name() == "true";
-    Ok(Value(old))
+    let term = value;
+    let value = match value {
+        Term::Atom(value) => Some(value.name()),
+        _ => None,
+    };
+    Ok(match flag {
+        Term::Atom(flag) if flag.name() == "trap_exit" => {
+            let old = Term::static_atom(&process.trap_exit.to_string());
+            match value {
+                Some("true") => process.trap_exit = true,
+                Some("false") => process.trap_exit = false,
+                _ => return Ok(BifResult::badarg()),
+            }
+            Value(old)
+        }
+        Term::Atom(flag) if flag.name() == "message_queue_data" => {
+            let old = Term::static_atom(if process.off_heap_message_queue {
+                "off_heap"
+            } else {
+                "on_heap"
+            });
+            match value {
+                Some("on_heap") => process.off_heap_message_queue = false,
+                Some("off_heap") => process.off_heap_message_queue = true,
+                _ => return Ok(BifResult::badarg()),
+            }
+            Value(old)
+        }
+        Term::Atom(flag) if UNSUPPORTED_PROCESS_FLAGS.contains(&flag.name()) => {
+            let small = term.small_integer();
+            let valid = match flag.name() {
+                "async_dist" | "sensitive" | "monitor_nodes" => {
+                    matches!(value, Some("true" | "false"))
+                }
+                "error_handler" => value.is_some(),
+                "priority" => matches!(value, Some("low" | "normal" | "high" | "max")),
+                "save_calls" => small.is_some_and(|calls| (0..=10_000).contains(&calls)),
+                "max_heap_size" => true,
+                _ => small.is_some_and(|size| size >= 0),
+            };
+            if !valid {
+                return Ok(BifResult::badarg());
+            }
+            return Err(error(format!(
+                "unsupported erlang:process_flag/2 flag {}",
+                flag.name()
+            )));
+        }
+        Term::Tuple(elements) if matches!(elements.as_slice(), [Term::Atom(tag), _] if tag.name() == "monitor_nodes") =>
+        {
+            return Err(error(
+                "unsupported erlang:process_flag/2 flag {monitor_nodes, Options}",
+            ));
+        }
+        _ => BifResult::badarg(),
+    })
+}
+
+/// The items of ERTS `system_flag_2` (`bif.c:4972-5304`) that need a
+/// subsystem that PBeam does not have: schedulers, the garbage collector,
+/// stack traces, tracing, the time offset, statistics, the CPU topology,
+/// and the memory allocators.
+const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
+    "multi_scheduling",
+    "schedulers_online",
+    "fullsweep_after",
+    "min_heap_size",
+    "min_bin_vheap_size",
+    "max_heap_size",
+    "backtrace_depth",
+    "trace_control_word",
+    "sequential_tracer",
+    "reset_seq_trace",
+    "scheduler_wall_time",
+    "dirty_cpu_schedulers_online",
+    "microstate_accounting",
+    "outstanding_system_requests_limit",
+    "scheduling_statistics",
+    "internal_cpu_topology",
+    "cpu_topology",
+    "scheduler_bind_type",
+    "erts_alloc",
+];
+
+/// Run `erlang:system_flag(Item, Value)` as ERTS `system_flag_2`
+/// (`bif.c:4972-5304`) does for the items `system_logger` and
+/// `debug_flags`. `system_logger` takes `logger`, `undefined`, or a local
+/// pid, sets the node value, and returns the old value
+/// (`erts_set_system_logger`, `erl_trace.c:2486-2491`). The start value is
+/// `logger` (`erl_trace.c:339`). Each other value raises `badarg`.
+/// `debug_flags` returns `true` for each value. An item that ERTS does not
+/// know raises `badarg`, also `time_offset` with a value that is not
+/// `finalize`. Each item of `UNSUPPORTED_SYSTEM_FLAGS` first checks its
+/// value as ERTS does (`unsupported_system_flag_value`), and raises
+/// `badarg` for a value that is not valid.
+///
+/// PBeam writes no error report (row "Error report" in
+/// `docs/erts-differences.md`), so the system logger value has no other
+/// effect.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let old = system_flag(&mut context, &Term::static_atom("system_logger"), &Term::Pid(pid))?;
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "logger"));
+/// assert!(matches!(system_flag(&mut context, &foo, &Term::Integer(1))?, BifResult::Raise { .. }));
+/// assert!(system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::Integer(8)).is_err());
+/// let depth = system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::static_atom("foo"))?;
+/// assert!(matches!(depth, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Each item of `UNSUPPORTED_SYSTEM_FLAGS` with a value that passes the
+/// check, and `time_offset` with `finalize`, give a runtime error.
+pub(super) fn system_flag(
+    context: &mut BifContext<'_>,
+    item: &Term,
+    value: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Atom(item) = item else {
+        return Ok(BifResult::badarg());
+    };
+    let logger = match value {
+        Term::Pid(_) => true,
+        Term::Atom(logger) => matches!(logger.name(), "logger" | "undefined"),
+        _ => false,
+    };
+    Ok(match (item.name(), value) {
+        ("system_logger", _) if logger => Value(std::mem::replace(
+            &mut context.scheduler.system_logger,
+            value.clone(),
+        )),
+        ("debug_flags", _) => Value(Term::static_atom("true")),
+        ("time_offset", Term::Atom(finalize)) if finalize.name() == "finalize" => {
+            return Err(error("unsupported erlang:system_flag/2 item time_offset"));
+        }
+        (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
+            if !unsupported_system_flag_value(name, value) {
+                return Ok(BifResult::badarg());
+            }
+            return Err(error(format!(
+                "unsupported erlang:system_flag/2 item {name}"
+            )));
+        }
+        _ => BifResult::badarg(),
+    })
+}
+
+/// Tell whether ERTS `system_flag_2` (`bif.c:4972-5304`) accepts `value` for
+/// the item `name` of `UNSUPPORTED_SYSTEM_FLAGS` before it uses the missing
+/// subsystem. ERTS raises `badarg` for a value that this check rejects:
+///
+/// - `multi_scheduling` takes `block`, `unblock`, `block_normal`, or
+///   `unblock_normal`.
+/// - `schedulers_online` and `dirty_cpu_schedulers_online` take a small
+///   integer of 1 or more (`erts_set_schedulers_online`,
+///   `erl_process.c:8241-8242`).
+/// - `fullsweep_after`, `min_heap_size`, `min_bin_vheap_size`, and
+///   `backtrace_depth` take a small integer of 0 or more.
+/// - `trace_control_word` takes an integer from 0 to `u32::MAX`
+///   (`db_set_trace_control_word`, `erl_db_util.c:1091-1103`).
+/// - `sequential_tracer` takes `false`, a pid, or `{Module, State}` with an
+///   atom `Module` (`erts_term_to_tracer`, `erl_trace.c:3090-3129`).
+/// - `scheduler_wall_time` takes `true` or `false`, and
+///   `microstate_accounting` takes `true`, `false`, or `reset`.
+/// - `outstanding_system_requests_limit` takes an integer from 1 to
+///   `2^27 - 1` (`erts_set_outstanding_system_requests_limit`,
+///   `beam_bif_load.c:115-126`).
+/// - `scheduling_statistics` takes `disable`, `enable`, or `clear`.
+/// - `internal_cpu_topology` takes `undefined` or a non-empty proper list of
+///   tuples `{cpu, Node, Processor, ProcessorNode, Core, Thread, Logical}`
+///   (`erts_set_cpu_topology`, `erl_cpu_topology.c:1348-1400`).
+/// - `erts_alloc` takes `{Allocator, Parameter, Value}` with two atoms and
+///   an integer (`erts_alloc_set_dyn_param`, `erl_alloc.c:3445-3462`).
+///
+/// `max_heap_size`, `reset_seq_trace`, `cpu_topology`, and
+/// `scheduler_bind_type` accept each value here. ERTS also rejects a value
+/// that this check accepts when the value needs the state of the missing
+/// subsystem: the scheduler count, the tracer module, the allocator names,
+/// the CPU topology checks, the minimum heap size, and the CPU binding
+/// support of the host.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!unsupported_system_flag_value("backtrace_depth", &Term::static_atom("foo")));
+/// assert!(unsupported_system_flag_value("backtrace_depth", &Term::Integer(8)));
+/// assert!(!unsupported_system_flag_value("schedulers_online", &Term::Integer(0)));
+/// ```
+fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
+    let atom = match value {
+        Term::Atom(atom) => Some(atom.name()),
+        _ => None,
+    };
+    let integer = match value {
+        Term::Integer(integer) => Some(*integer),
+        _ => None,
+    };
+    let small = value.small_integer();
+    let cpu = |cpu: &Term| match cpu {
+        Term::Tuple(elements) => {
+            matches!(elements.as_slice(), [Term::Atom(tag), _, _, _, _, _, _] if tag.name() == "cpu")
+        }
+        _ => false,
+    };
+    match name {
+        "multi_scheduling" => matches!(
+            atom,
+            Some("block" | "unblock" | "block_normal" | "unblock_normal")
+        ),
+        "schedulers_online" | "dirty_cpu_schedulers_online" => {
+            small.is_some_and(|count| count >= 1)
+        }
+        "fullsweep_after" | "min_heap_size" | "min_bin_vheap_size" | "backtrace_depth" => {
+            small.is_some_and(|size| size >= 0)
+        }
+        "trace_control_word" => integer.is_some_and(|word| u32::try_from(word).is_ok()),
+        "sequential_tracer" => match value {
+            Term::Pid(_) => true,
+            Term::Tuple(elements) => matches!(elements.as_slice(), [Term::Atom(_), _]),
+            _ => atom == Some("false"),
+        },
+        "scheduler_wall_time" => matches!(atom, Some("true" | "false")),
+        "microstate_accounting" => matches!(atom, Some("true" | "false" | "reset")),
+        "outstanding_system_requests_limit" => {
+            integer.is_some_and(|limit| (1..1 << 27).contains(&limit))
+        }
+        "scheduling_statistics" => matches!(atom, Some("disable" | "enable" | "clear")),
+        "internal_cpu_topology" => match value {
+            Term::List(cpus) => !cpus.is_empty() && cpus.iter().all(cpu),
+            _ => atom == Some("undefined"),
+        },
+        "erts_alloc" => match value {
+            Term::Tuple(elements) => matches!(
+                elements.as_slice(),
+                [Term::Atom(_), Term::Atom(_), Term::Integer(_)]
+            ),
+            _ => false,
+        },
+        _ => true,
+    }
+}
+
+/// Run `erlang:raise(Class, Reason, Stacktrace)` as ERTS `raise_3`
+/// (`bif.c:1549-1692`) does: raise an exception of class `error` or `exit`
+/// with `Reason`. A class that is not `error`, `exit`, or `throw`, or a
+/// stack trace that is not valid, makes the BIF return the atom `badarg`; it
+/// does not raise. A valid stack trace is a proper list of `{Fun, Args}`,
+/// `{Fun, Args, Location}`, `{M, F, A}`, or `{M, F, A, Location}`, where
+/// `Fun` is a fun, `M` and `F` are atoms, and `Location` is a list.
+///
+/// PBeam records no stack frames (row "Exception stack trace" in
+/// `docs/erts-differences.md`), so the exception gets the stack trace `[]`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = raise(&Term::static_atom("exit"), &reason, &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Raise { class: ExceptionClass::Exit, .. }));
+/// let result = raise(&Term::static_atom("foo"), &reason, &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "badarg"));
+/// assert!(raise(&Term::static_atom("throw"), &reason, &Term::List(vec![])).is_err());
+/// ```
+///
+/// # Errors
+///
+/// The class `throw` with a valid stack trace gives a runtime error: PBeam
+/// does not implement the `throw` class.
+pub(super) fn raise(
+    class: &Term,
+    reason: &Term,
+    stacktrace: &Term,
+) -> Result<BifResult, BeamError> {
+    let class = match class {
+        Term::Atom(class) if class.name() == "error" => Some(ExceptionClass::Error),
+        Term::Atom(class) if class.name() == "exit" => Some(ExceptionClass::Exit),
+        Term::Atom(class) if class.name() == "throw" => None,
+        _ => return Ok(Value(Term::static_atom("badarg"))),
+    };
+    let location = |location: &Term| matches!(location, Term::List(_) | Term::ImproperList(..));
+    let frame = |frame: &Term| match frame {
+        Term::Tuple(elements) => match elements.as_slice() {
+            [Term::Fun(_), _] => true,
+            [Term::Fun(_), _, place] => location(place),
+            [Term::Atom(_), Term::Atom(_), _] => true,
+            [Term::Atom(_), Term::Atom(_), _, place] => location(place),
+            _ => false,
+        },
+        _ => false,
+    };
+    let Term::List(frames) = stacktrace else {
+        return Ok(Value(Term::static_atom("badarg")));
+    };
+    if !frames.iter().all(frame) {
+        return Ok(Value(Term::static_atom("badarg")));
+    }
+    let Some(class) = class else {
+        return Err(error(
+            "unsupported erlang:raise/3 class throw: the throw class is not implemented",
+        ));
+    };
+    Ok(Raise {
+        class,
+        reason: reason.clone(),
+    })
 }
 
 /// Run `erlang:exit(Id, Reason)`: send an exit signal to a local pid, as
@@ -118,6 +470,8 @@ pub(super) fn exit(
 /// then a `Reference` that is not a reference raises `badarg`. The checks
 /// come before the monitor is removed, so a call that raises leaves the
 /// monitor active.
+/// `erlang:demonitor/1` passes `[]`, as ERTS `demonitor_1` (bif.c) does,
+/// so it returns `true`.
 ///
 /// The result is `true`. With `info`, it is `false` when no active monitor
 /// was removed. With `flush` and no active monitor removed, the DOWN
@@ -358,11 +712,14 @@ pub(super) fn spawn_link(
 /// calls with the options `[monitor]`: start a process with the spawn
 /// options in `options`, as ERTS `spawn_opt_4` (`bif.c`) does. The option
 /// `link` links the new process and `monitor` monitors it. With `monitor`
-/// the result is `{Pid, Reference}`, else `Pid`. `options` that are not a
-/// proper list raise `badarg`, as `erts_parse_spawn_opts`
-/// (`erl_process.c:12222-12434`) does. Any other option gives a runtime
-/// error. After the options, a `module` or `function` that is not an atom
-/// raises `badarg`, as in `spawn/3`.
+/// the result is `{Pid, Reference}`, else `Pid`. The option
+/// `{message_queue_data, on_heap | off_heap}` sets the start value of the
+/// `message_queue_data` flag of the new process, and the last such option
+/// wins (`erl_process.c:12305-12319`). `options` that are not a proper list,
+/// and a `message_queue_data` option with another value, raise `badarg`, as
+/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) does. Any other
+/// option gives a runtime error. After the options, a `module` or
+/// `function` that is not an atom raises `badarg`, as in `spawn/3`.
 ///
 /// # Examples
 ///
@@ -387,6 +744,14 @@ pub(super) fn spawn_opt(
         match option {
             Term::Atom(option) if option.name() == "link" => spawn_options.link = true,
             Term::Atom(option) if option.name() == "monitor" => spawn_options.monitor = true,
+            Term::Tuple(option) if matches!(option.as_slice(), [Term::Atom(name), _] if name.name() == "message_queue_data") =>
+            {
+                spawn_options.off_heap_message_queue = match &option[1] {
+                    Term::Atom(value) if value.name() == "on_heap" => false,
+                    Term::Atom(value) if value.name() == "off_heap" => true,
+                    _ => return Ok(BifResult::badarg()),
+                };
+            }
             // ponytail: ERTS accepts more options; see "Spawn options" in docs/erts-differences.md.
             _ => return Err(error(format!("unsupported spawn option {option:?}"))),
         }

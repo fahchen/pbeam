@@ -1255,6 +1255,9 @@ struct SpawnOptions {
     link: bool,
     /// Monitor the new process and return `{Pid, Reference}` (`SPO_MONITOR`).
     monitor: bool,
+    /// Start the new process with the `message_queue_data` flag `off_heap`
+    /// (`SPO_OFF_HEAP_MSGQ`), else `on_heap`.
+    off_heap_message_queue: bool,
 }
 
 /// Start a process that runs `module:function` with the elements of
@@ -1289,7 +1292,13 @@ fn create_process(
     let arguments = arguments.clone();
     let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
     let frame = program.mfa_frame(module.name(), function.name(), arity)?;
-    let (pid, reference) = scheduler.spawn(frame, arguments, options.monitor, options.link)?;
+    let SpawnOptions {
+        link,
+        monitor,
+        off_heap_message_queue,
+    } = options;
+    let (pid, reference) =
+        scheduler.spawn(frame, arguments, monitor, link, off_heap_message_queue)?;
     Ok(BifResult::Value(match reference {
         Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),
@@ -2474,6 +2483,30 @@ mod tests {
         assert_eq!(
             merge.unwrap_err().to_string(),
             "unsupported map key Integer(576460752303423488)"
+        );
+    }
+
+    #[test]
+    fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
+        // ERTS accepts a tuple key; a PBeam map does not hold one yet.
+        let pair = Term::Tuple(vec![Term::Tuple(vec![]), Term::Integer(0)]);
+        let from_list = make_program(
+            vec![
+                Instruction::Move(Operand::Value(Term::List(vec![pair])), Operand::X(0)),
+                Instruction::CallExternal {
+                    arity: 1,
+                    module: "maps".into(),
+                    name: "from_list".into(),
+                    tail: true,
+                    deallocate: 0,
+                },
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[]);
+        assert_eq!(
+            from_list.unwrap_err().to_string(),
+            "unsupported map key Tuple([])"
         );
     }
 
