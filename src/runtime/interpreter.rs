@@ -683,7 +683,20 @@ impl BeamProgram {
                     write(process, left, right_value)?;
                     write(process, right, left_value)?;
                 }
-                Instruction::TestExactEqual {
+                // ERTS `is_eq` (emu instrs.tab:1109-1113, JIT
+                // instr_common.cpp:2055-2079) runs `CMP_EQ_ACTION`
+                // (erl_utils.h:132-133). `EQ_SPEC` (erl_utils.h:137-147) and
+                // `erts_cmp_compound(A, B, 0, 1)` (utils.c:1658) compare in
+                // the arithmetic order, which differs from exact equality
+                // only for a float (`1 == 1.0` is true). PBeam has no float
+                // term, so exact equality gives the ERTS result. The
+                // float-term task must change this arm.
+                Instruction::TestEqual {
+                    fail_label,
+                    left,
+                    right,
+                }
+                | Instruction::TestExactEqual {
                     fail_label,
                     left,
                     right,

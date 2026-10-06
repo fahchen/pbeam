@@ -58,6 +58,32 @@ fn compares_terms_exactly_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_is_eq_test_as_pinned_erts() {
+    // `compare_probe:equal/0` runs the `is_eq` test of `compare_probe:eq/2`,
+    // as the guard `CtrlSync==0` of `logger_h_common:handle_load/2` does, on
+    // pairs of the same or of a different type. 2^59 is an ERTS bignum.
+    let program = BeamProgram::load(&[COMPARE_PROBE]).unwrap();
+    let equal = [
+        true, false, false, true, false, true, false, true, false, true, false, true, false, true,
+        true, false, true, false, true, false,
+    ];
+    assert_eq!(
+        program.execute("compare_probe", "equal", &[]).unwrap(),
+        Term::List(
+            equal
+                .iter()
+                .map(|&equal| Term::Atom(program.atom(&equal.to_string()).unwrap()))
+                .collect()
+        )
+    );
+    assert_eq!(
+        reference("equal"),
+        b"[true,false,false,true,false,true,false,true,false,true,false,true,false,true,\
+          true,false,true,false,true,false]\n"
+    );
+}
+
+#[test]
 fn runs_the_is_lt_is_integer_and_is_boolean_tests_as_pinned_erts() {
     // `compare_probe:guards/0` runs `is_lt` after a `gc_bif2` guard, as
     // `io_lib_format:build_limited_bin/5` does, on the atom `none` and 0, as
