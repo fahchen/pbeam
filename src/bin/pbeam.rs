@@ -1,23 +1,27 @@
 use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
-use pbeam_runtime::BeamProgram;
+use pbeam_runtime::{BeamProgram, Term};
 
 #[derive(Parser)]
 #[command(
     name = "pbeam",
     version,
-    about = "Run a zero-argument function from BEAM files."
+    about = "Load BEAM files and run a function as the root process."
 )]
 struct Cli {
-    /// Module name, such as `Elixir.Hello`.
-    #[arg(value_name = "ENTRY_MODULE")]
-    entry_module: String,
+    /// Module name, such as `pbeam_boot`.
+    #[arg(value_name = "MODULE")]
+    module: String,
     /// Function name to run.
-    #[arg(value_name = "ENTRY_FUNCTION")]
-    entry_function: String,
-    /// BEAM files to load.
-    #[arg(value_name = "BEAM_FILE", required = true, num_args = 1..)]
+    #[arg(value_name = "FUNCTION")]
+    function: String,
+    /// Arguments of the function. Each argument is an atom that the
+    /// loaded modules hold, such as a module or function name.
+    #[arg(value_name = "ATOM")]
+    arguments: Vec<String>,
+    /// BEAM files to load, after `--`.
+    #[arg(value_name = "BEAM_FILE", required = true, num_args = 1.., last = true)]
     beam_files: Vec<PathBuf>,
 }
 
@@ -27,7 +31,7 @@ struct Cli {
 /// # Examples
 ///
 /// ```rust,ignore
-/// // $ pbeam Elixir.Hello main Elixir.Hello.beam Elixir.IO.beam
+/// // $ pbeam pbeam_boot start boot_probe main -- pbeam_boot.beam boot_probe.beam erlang.beam ...
 /// // Hello, world!
 /// ```
 fn main() -> ExitCode {
@@ -40,14 +44,21 @@ fn main() -> ExitCode {
     }
 }
 
-/// Read the BEAM files, load them, and run the zero-argument entry function.
+/// Read and load the BEAM files, and run `Module:Function(Atoms...)` as the
+/// root process.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let arguments = Cli::parse_from(["pbeam", "hello", "main", "hello.beam"]);
+/// let arguments = Cli::parse_from(["pbeam", "hello", "main", "--", "hello.beam"]);
 /// run(arguments)?;
 /// ```
+///
+/// # Errors
+///
+/// A file that cannot be read, a BEAM file that does not load, an argument
+/// that is not an atom of the loaded modules, and the errors of
+/// [`BeamProgram::execute`].
 fn run(arguments: Cli) -> Result<(), String> {
     let mut modules = Vec::with_capacity(arguments.beam_files.len());
     for path in arguments.beam_files {
@@ -59,8 +70,18 @@ fn run(arguments: Cli) -> Result<(), String> {
     let module_slices = modules.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let program = BeamProgram::load(&module_slices)
         .map_err(|load_error| format!("cannot load BEAM modules: {load_error}"))?;
+    let atoms = arguments
+        .arguments
+        .iter()
+        .map(|name| {
+            program
+                .atom(name)
+                .map(Term::Atom)
+                .ok_or_else(|| format!("argument {name} is not an atom of the loaded modules"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     program
-        .execute(&arguments.entry_module, &arguments.entry_function, &[])
+        .execute(&arguments.module, &arguments.function, &atoms)
         .map(|_| ())
         .map_err(|execution_error| execution_error.to_string())
 }
