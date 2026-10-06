@@ -81,6 +81,7 @@ const OPCODE_FDIV: u8 = 101;
 const OPCODE_GC_BIF1: u8 = 124;
 const OPCODE_GC_BIF2: u8 = 125;
 const OPCODE_BS_GET_TAIL: u8 = 165;
+/// `bs_start_match3 Fail Bin Live Dst` (genop.tab:597).
 const OPCODE_BS_START_MATCH3: u8 = 166;
 const OPCODE_BS_GET_POSITION: u8 = 167;
 const OPCODE_BS_SET_POSITION: u8 = 168;
@@ -787,6 +788,21 @@ pub(crate) enum Instruction {
         arity: u32,
         tag: Term,
     },
+    /// Jumps to `fail_label` when `source` is not a binary
+    /// (`bs_start_match3`, opcode 166). For a binary, ERTS makes a match
+    /// context, which PBeam does not have, so the instruction returns a
+    /// runtime error.
+    ///
+    /// Encoding: opcode, fail label, source, unsigned live count, destination
+    /// register. The decoder skips the live count and the destination,
+    /// because PBeam makes no match context. Example: `binary_match_probe:kind/1`
+    /// in `fixtures/binary_match/binary_match_probe.beam` has `[0xA6, 0x55,
+    /// 0x03, 0x10, 0x03]`, which fails to label 5 unless `x0` is a binary.
+    ///
+    /// Erlang: `kind(<<_/utf8, _/binary>>) -> utf8;` compiles to
+    /// `{test,bs_start_match3,{f,5},1,[{x,0}],{x,0}}`, as
+    /// `unicode_util:cp/1` does for its argument.
+    BinaryMatchStart { fail_label: u32, source: Operand },
     /// Sends `x1` to the destination in `x0`, then writes the message to
     /// `x0`. The destination is a pid, a registered name, `{Name, Node}`, or
     /// a reference. A name that no process has, a tuple that is not two
@@ -1140,6 +1156,12 @@ pub(super) fn parse_code(
                     arity,
                     tag,
                 }
+            }
+            OPCODE_BS_START_MATCH3 => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let source = read_move_operand(data, &mut cursor, atoms, literals)?;
+                skip_operands(data, &mut cursor, 2)?;
+                Instruction::BinaryMatchStart { fail_label, source }
             }
             OPCODE_TEST_EQ => Instruction::TestEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
@@ -1687,7 +1709,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_GC_BIF3 => Some(7),
         // `is_any_native_record` is in `io_lib`.
         OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
-        OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
+        OPCODE_BS_START_MATCH4 => Some(4),
         OPCODE_BS_GET_TAIL | OPCODE_BS_GET_POSITION => Some(3),
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
         OPCODE_BS_GET_UTF8 | OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
@@ -1984,15 +2006,16 @@ mod tests {
     use super::{
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_INTEGER2,
         OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH,
-        OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FSUB,
-        OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
-        OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
-        OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP,
-        OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
-        OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE,
-        OPCODE_TRY_CASE_END, parse_code, read_move_operand, read_operand_pairs, read_pair_count,
-        read_record_updates, skip_counted_operands, skip_integer_payload, skip_operand,
-        skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
+        OPCODE_BS_START_MATCH4, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
+        OPCODE_FSUB, OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL,
+        OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD,
+        OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
+        OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
+        OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
+        OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
+        read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
+        skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
+        test_kind, unsupported_opcode_operand_count,
     };
     use crate::{
         beam::code::{Instruction, Operand, TestKind},
@@ -2493,6 +2516,34 @@ mod tests {
                     fail_label: 25,
                     left: Operand::X(0),
                     right: Operand::X(1),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_bs_start_match3_test_of_the_binary_match_probe_fixture() {
+        const BINARY_MATCH_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/binary_match/binary_match_probe.beam");
+        // kind/1: bs_start_match3 f5 x0 1 x0
+        let bs_start_match3 = [0xA6, 0x55, 0x03, 0x10, 0x03];
+        assert!(
+            BINARY_MATCH_PROBE
+                .windows(bs_start_match3.len())
+                .any(|window| window == bs_start_match3),
+            "{bs_start_match3:02X?} is not in binary_match_probe.beam"
+        );
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&bs_start_match3[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::BinaryMatchStart {
+                    fail_label: 5,
+                    source: Operand::X(0),
                 },
                 Instruction::End,
             ]
@@ -3150,6 +3201,7 @@ mod tests {
             (OPCODE_BS_CREATE_BIN, 6),
             (OPCODE_BS_INIT_WRITABLE, 0),
             (OPCODE_BS_MATCH, 3),
+            (OPCODE_BS_START_MATCH4, 4),
             (OPCODE_RAW_RAISE, 0),
             (OPCODE_BS_GET_UTF16, 5),
             (OPCODE_BS_GET_UTF32, 5),
