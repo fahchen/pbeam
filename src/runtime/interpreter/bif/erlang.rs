@@ -1037,6 +1037,33 @@ pub(super) fn int_div(left: &Term, right: &Term) -> Result<BifResult, BeamError>
     arith("div", left, right, i64::checked_div)
 }
 
+/// Run `erlang:'rem'/2`: return the integer remainder of `left` and `right`,
+/// with the sign of `left`, as ERTS `rem_2` (`erl_arith.c:145-161`) and the
+/// JIT `emit_i_rem` (`jit/arm/instr_arith.cpp:1078-1087`) do. A `right` of
+/// `0` raises `badarith` before the operand types are checked
+/// (`erl_arith.c:149-151`), so `a rem 0` raises `badarith` too. Each other
+/// case runs as [`arith`]. `i64::MIN rem -1` gives `0`, as the bignum path
+/// `erts_int_div_rem` (`erl_arith.c:1172`) does, so no result leaves the
+/// `i64` range.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let remainder = int_rem(&Term::Integer(-7), &Term::Integer(3))?;
+/// assert!(matches!(remainder, BifResult::Value(Term::Integer(-1))));
+/// let remainder = int_rem(&Term::Integer(i64::MIN), &Term::Integer(-1))?;
+/// assert!(matches!(remainder, BifResult::Value(Term::Integer(0))));
+/// assert!(matches!(int_rem(&Term::static_atom("a"), &Term::Integer(0))?, BifResult::Raise { .. }));
+/// ```
+pub(super) fn int_rem(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
+    if *right == Term::Integer(0) {
+        return Ok(BifResult::badarith());
+    }
+    arith("rem", left, right, |left, right| {
+        Some(left.wrapping_rem(right))
+    })
+}
+
 /// Convert `value`, a time in the native unit, to `unit` with
 /// [`time::time_unit_conversion`], as `erlang:monotonic_time/1` and
 /// `os:system_time/1` do (`erl_time_sup.c:2268-2350`). A converted time

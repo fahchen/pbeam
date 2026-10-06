@@ -7,13 +7,19 @@ const EVENT_BIF_PROBE: &[u8] = include_bytes!("../fixtures/event_bif/event_bif_p
 /// Run `event_bif_probe:Function()` on the pinned ERTS and return its `~w`
 /// output.
 fn reference(function: &str) -> Vec<u8> {
+    evaluate(&format!("event_bif_probe:{function}()"))
+}
+
+/// Evaluate `expression` on the pinned ERTS, with the fixture on the code
+/// path, and return its `~w` output.
+fn evaluate(expression: &str) -> Vec<u8> {
     let reference = Command::new("erl")
         .args([
             "-noshell",
             "-pa",
             "fixtures/event_bif",
             "-eval",
-            &format!("io:format(\"~w~n\", [event_bif_probe:{function}()]), halt()."),
+            &format!("io:format(\"~w~n\", [{expression}]), halt()."),
         ])
         .output()
         .unwrap();
@@ -93,4 +99,78 @@ fn counts_iolist_bytes_as_pinned_erts() {
         b"[0,0,3,3,4,3,2,{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
           {error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n"
     );
+}
+
+#[test]
+fn takes_integer_remainders_as_pinned_erts() {
+    // `event_bif_probe:remainder/0` runs `erlang:rem/2`, as
+    // `logger_formatter:timestamp_to_datetimemicro/2` does. The remainder has
+    // the sign of the dividend (`rem_2`, `erl_arith.c:145-161`), also for
+    // ERTS bignum operands, and `-2^63 rem -1` gives `0`. A divisor of `0`
+    // raises `badarith` before the type check (`erl_arith.c:149-151`), so
+    // `a rem 0` raises `badarith`, and an operand that is not an integer
+    // raises `badarith`.
+    let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
+    let mut expected: Vec<Term> = [1, -1, 1, -1, 0, 5, 7, 0, -1].map(Term::Integer).into();
+    expected.extend(errors(&program, "badarith", 5));
+    assert_eq!(
+        program
+            .execute("event_bif_probe", "remainder", &[])
+            .unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("remainder"),
+        b"[1,-1,1,-1,0,5,7,0,-1,{error,badarith},{error,badarith},{error,badarith},\
+          {error,badarith},{error,badarith}]\n"
+    );
+}
+
+#[test]
+fn selects_the_minimum_as_pinned_erts() {
+    // `event_bif_probe:minimum/0` runs `erlang:min/2`, as
+    // `io_lib_format:term_bin/8` does. The result is the second argument only
+    // when the first is greater in the term order, so `min(1, 1)` and
+    // `min(Ref, Ref)` give the first argument (`min_2`,
+    // `erl_bif_guard.c:475-479`).
+    let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("event_bif_probe", "minimum", &[]).unwrap(),
+        Term::List(vec![
+            Term::Integer(1),
+            Term::Integer(1),
+            Term::Integer(1),
+            Term::Integer(1),
+            Term::Integer(1),
+            atom("a"),
+            Term::Tuple(vec![Term::Integer(1)]),
+            Term::Tuple(vec![Term::Integer(1)]),
+            Term::Binary(b"a".to_vec()),
+            atom("true"),
+            atom("a"),
+            Term::Tuple(vec![]),
+        ])
+    );
+    assert_eq!(
+        reference("minimum"),
+        b"[1,1,1,1,1,a,{1},{1},<<97>>,true,a,{}]\n"
+    );
+}
+
+#[test]
+fn stops_at_the_minimum_of_two_references() {
+    // `event_bif_probe:refs/0` runs `erlang:min/2` on two different
+    // references. ERTS gives one of the references. PBeam cannot give the
+    // ERTS order of two references and returns the runtime error of the row
+    // "Term order" in `docs/erts-differences.md`.
+    let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
+    let error = program.execute("event_bif_probe", "refs", &[]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported term order of two references"),
+        "{error}"
+    );
+    assert_eq!(evaluate("is_reference(event_bif_probe:refs())"), b"true\n");
 }
