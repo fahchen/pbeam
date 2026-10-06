@@ -569,5 +569,5 @@ bifs! {
     string:list_to_float/1 => unsupported,
     unicode:bin_is_7bit/1 => unsupported,
     unicode:characters_to_binary/2 => |_, [chardata, encoding]| unicode::characters_to_binary(chardata, encoding),
-    unicode:characters_to_list/2 => unsupported,
+    unicode:characters_to_list/2 => |_, [chardata, encoding]| Ok(unicode::characters_to_list(chardata, encoding)),
 }
