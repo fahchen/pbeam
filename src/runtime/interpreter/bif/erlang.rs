@@ -1421,8 +1421,8 @@ pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
 /// the byte count of a binary, or the byte count of each element and each
 /// binary tail of an iolist. The walk has the type rules of
 /// `generic_iolist_size` (`erl_iolist.c:153-236`), which
-/// `erlang:iolist_to_iovec/1` also uses, so [`iolist_iovec`] gives the
-/// binaries to count. An integer outside `0..=255`, a tail that is not a
+/// `erlang:iolist_to_iovec/1` also uses, so [`walk_iolist`] gives the bytes
+/// to count without a copy. An integer outside `0..=255`, a tail that is not a
 /// binary or `[]`, or another term that is not iodata raises `badarg`. ERTS
 /// raises `system_limit` only for a size above 64 bignum words, which a
 /// PBeam term cannot have.
@@ -1438,20 +1438,11 @@ pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
 /// assert!(matches!(iolist_size(&Term::Integer(1)), BifResult::Raise { .. }));
 /// ```
 pub(super) fn iolist_size(term: &Term) -> BifResult {
+    let mut size = 0;
     match term {
-        Term::Binary(bytes) => Value(Term::Integer(bytes.len() as i64)),
-        Term::List(_) | Term::ImproperList(..) => {
-            let Some(iovec) = iolist_iovec(term) else {
-                return BifResult::badarg();
-            };
-            let mut size = 0;
-            // An iovec holds only binaries.
-            for binary in &iovec {
-                if let Term::Binary(bytes) = binary {
-                    size += bytes.len();
-                }
-            }
-            Value(Term::Integer(size as i64))
+        Term::Binary(_) | Term::List(_) | Term::ImproperList(..) => {
+            walk_iolist(term, |bytes| size += bytes.len())
+                .map_or_else(BifResult::badarg, |()| Value(Term::Integer(size as i64)))
         }
         _ => BifResult::badarg(),
     }
@@ -1477,16 +1468,10 @@ pub(super) fn iolist_size(term: &Term) -> BifResult {
 /// assert_eq!(iodata_bytes(&Term::static_atom("foo")), None);
 /// ```
 pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
     match term {
-        Term::Binary(bytes) => Some(bytes.clone()),
-        Term::List(_) | Term::ImproperList(..) => {
-            let mut bytes = Vec::new();
-            // An iovec holds only binaries.
-            for binary in iolist_iovec(term)? {
-                if let Term::Binary(part) = &binary {
-                    bytes.extend_from_slice(part);
-                }
-            }
+        Term::Binary(_) | Term::List(_) | Term::ImproperList(..) => {
+            walk_iolist(term, |part| bytes.extend_from_slice(part))?;
             Some(bytes)
         }
         _ => None,
@@ -1495,12 +1480,7 @@ pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
 
 /// Convert a proper or improper iolist to the iovec of
 /// `erlang:iolist_to_iovec/1`, or return `None` when an element or a tail is
-/// not iodata. A binary tail of a list comes after the elements of that
-/// list. Each other tail gives `None`, whatever comes before it, because
-/// ERTS walks the whole term before it builds the result
-/// (`generic_iolist_size`, `erl_iolist.c:153-236`). Use a stack of list
-/// iterators, as the ERTS engine does, so that a deep nested list does not
-/// use the Rust call stack.
+/// not iodata. [`walk_iolist`] gives the bytes in order.
 ///
 /// # Examples
 ///
@@ -1516,9 +1496,51 @@ pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
 fn iolist_iovec(list: &Term) -> Option<Vec<Term>> {
     let mut iovec = Vec::new();
     let mut merged = Vec::new();
+    walk_iolist(list, |bytes| {
+        if bytes.len() <= IOVEC_COPY_LIMIT {
+            merged.extend_from_slice(bytes);
+        } else {
+            if !merged.is_empty() {
+                iovec.push(Term::Binary(std::mem::take(&mut merged)));
+            }
+            iovec.push(Term::Binary(bytes.to_vec()));
+        }
+    })?;
+    if !merged.is_empty() {
+        iovec.push(Term::Binary(merged));
+    }
+    Some(iovec)
+}
+
+/// Walk iodata in order and give `sink` the bytes of each binary, and each
+/// byte integer as one byte, or return `None` when an element or a tail is
+/// not iodata. This is the one copy of the `generic_iolist_size` type rules
+/// (`erl_iolist.c:153-236`) that `erlang:iolist_to_iovec/1`,
+/// `erlang:iolist_size/1`, and [`iodata_bytes`] use. A binary tail of a list
+/// comes after the elements of that list. Each other tail gives `None`. The
+/// caller discards what `sink` got before a `None`, because ERTS walks the
+/// whole term before it builds the result. A top-level integer is a byte
+/// here, so each caller selects the top-level terms itself. Use a stack of
+/// list iterators, as the ERTS engine does, so that a deep nested list does
+/// not use the Rust call stack.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [1, [<<2,3>>] | <<4>>] gives [1], [2,3], and [4].
+/// let iolist = Term::ImproperList(
+///     vec![Term::Integer(1), Term::List(vec![Term::Binary(vec![2, 3])])],
+///     Box::new(Term::Binary(vec![4])),
+/// );
+/// let mut parts = Vec::new();
+/// assert_eq!(walk_iolist(&iolist, |bytes| parts.push(bytes.to_vec())), Some(()));
+/// assert_eq!(parts, [vec![1], vec![2, 3], vec![4]]);
+/// assert_eq!(walk_iolist(&Term::List(vec![Term::Integer(256)]), |_| ()), None);
+/// ```
+fn walk_iolist(term: &Term, mut sink: impl FnMut(&[u8])) -> Option<()> {
     // Each level holds the elements of a list that the walk did not read
     // yet, and its binary tail, which comes after them.
-    let mut lists = vec![(std::slice::from_ref(list).iter(), None)];
+    let mut lists = vec![(std::slice::from_ref(term).iter(), None)];
     while let Some((elements, tail)) = lists.last_mut() {
         let Some(element) = elements.next().or_else(|| tail.take()) else {
             lists.pop();
@@ -1529,23 +1551,12 @@ fn iolist_iovec(list: &Term) -> Option<Vec<Term>> {
             Term::ImproperList(inner, tail) if matches!(**tail, Term::Binary(_)) => {
                 lists.push((inner.iter(), Some(&**tail)));
             }
-            Term::Integer(byte) => merged.push(u8::try_from(*byte).ok()?),
-            Term::Binary(bytes) if bytes.len() <= IOVEC_COPY_LIMIT => {
-                merged.extend_from_slice(bytes);
-            }
-            binary @ Term::Binary(_) => {
-                if !merged.is_empty() {
-                    iovec.push(Term::Binary(std::mem::take(&mut merged)));
-                }
-                iovec.push(binary.clone());
-            }
+            Term::Integer(byte) => sink(&[u8::try_from(*byte).ok()?]),
+            Term::Binary(bytes) => sink(bytes),
             _ => return None,
         }
     }
-    if !merged.is_empty() {
-        iovec.push(Term::Binary(merged));
-    }
-    Some(iovec)
+    Some(())
 }
 
 /// The item atoms that `erlang:process_info/2` accepts (`pi_arg2ix` in
