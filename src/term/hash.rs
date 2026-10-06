@@ -71,16 +71,6 @@ const STRING_CHUNK: u64 = 4;
 /// The binary block size: two 64-bit words, one for each state.
 const BINARY_BLOCK: usize = 16;
 
-/// The mask of the first reference number (`REF_MASK`, 18 bits).
-const REF_NUMBER_0_MASK: u64 = 0x3_FFFF;
-/// The mask of the counter bits in the second reference number
-/// (`ERTS_REF1_NUM_MASK__`).
-const REF_NUMBER_1_MASK: u64 = 0xFFFC_0000;
-/// The scheduler thread number of a PBeam reference. ERTS gives the first
-/// normal scheduler the number 1 (`init_scheduler_data` in
-/// `erl_process.c`).
-const REF_THREAD: u64 = 1;
-
 /// The shift of the module atom index in the export word of an external
 /// fun. An atom index is below `ATOM_LIMIT`, 2^20.
 const EXPORT_MODULE_SHIFT: u32 = 40;
@@ -116,8 +106,7 @@ enum Shape<'a> {
     Binary(&'a [u8]),
     /// An integer outside the small-integer range.
     Bignum(i64),
-    /// The counter value of a reference.
-    Reference(u64),
+    Reference(Reference),
     Fun(&'a Fun),
 }
 
@@ -146,7 +135,7 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Tuple(elements) => Shape::Tuple(elements),
         Term::Map(map) => Shape::Map(map),
         Term::Binary(bytes) => Shape::Binary(bytes),
-        Term::Reference(Reference(value)) => Shape::Reference(*value),
+        Term::Reference(reference) => Shape::Reference(*reference),
         Term::Fun(fun) => Shape::Fun(fun),
     }
 }
@@ -475,9 +464,10 @@ impl State {
                 self.mix_alpha(pair(sign, 1));
                 self.mix_beta(value.unsigned_abs());
             }
-            Shape::Reference(value) => {
-                self.mix_alpha(pair(TYPE_LOCAL_REF, value & REF_NUMBER_0_MASK));
-                self.mix_beta(pair((value & REF_NUMBER_1_MASK) | REF_THREAD, value >> 32));
+            Shape::Reference(reference) => {
+                let [number_0, number_1, number_2] = reference.numbers().map(u64::from);
+                self.mix_alpha(pair(TYPE_LOCAL_REF, number_0));
+                self.mix_beta(pair(number_1, number_2));
             }
             Shape::Fun(fun) => match fun.target() {
                 Target::Local(lambda) => {
