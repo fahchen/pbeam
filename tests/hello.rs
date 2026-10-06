@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
@@ -25,6 +26,11 @@ use log_event::LOG_EVENT_MODULES;
 use run::{broken_pipe, run_dumb_utf8, run_with_time_limit};
 
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
+
+/// The paths of the pinned `BOOT_MODULES`. Each `pinned_beam_path` call
+/// starts `erl`, so the tests of this crate find the paths only once.
+static BOOT_PATHS: LazyLock<[PathBuf; BOOT_MODULES.len()]> =
+    LazyLock::new(|| BOOT_MODULES.map(pinned_beam_path));
 
 #[test]
 fn loads_compiled_elixir_greetings() {
@@ -115,8 +121,7 @@ fn prints_each_greeting_through_the_booted_otp_io_servers() {
         ("Elixir.Hello", "Hello, world!\n"),
         ("Elixir.HelloVariant", "Another greeting.\n"),
     ] {
-        let mut beams = vec![beam_file(&format!("{module}.beam")), io.clone()];
-        beams.extend(BOOT_MODULES.map(pinned_beam_path));
+        let beams = hello_beams(module, &io);
         let erts = run_dumb_utf8(
             &mut erl_eval(module, "main", &io),
             Stdio::piped(),
@@ -147,8 +152,7 @@ fn fails_visibly_for_a_missing_entry_through_the_boot() {
     // functions"). Without `ERL_CRASH_DUMP_SECONDS=0`, ERTS writes
     // `erl_crash.dump` into the working directory.
     let io = elixir_io_path();
-    let mut beams = vec![beam_file("Elixir.Hello.beam"), io.clone()];
-    beams.extend(BOOT_MODULES.map(pinned_beam_path));
+    let beams = hello_beams("Elixir.Hello", &io);
     for (module, function, erts_stderr, pbeam_stderr) in [
         (
             "Elixir.Hello",
@@ -194,8 +198,7 @@ fn stops_at_the_binary_match_of_a_locale_that_is_not_utf8() {
     // match context for a binary, so the run stops at `bs_start_match3`
     // (rows "Boot" and "Binary matching").
     let io = elixir_io_path();
-    let mut beams = vec![beam_file("Elixir.Hello.beam"), io.clone()];
-    beams.extend(BOOT_MODULES.map(pinned_beam_path));
+    let beams = hello_beams("Elixir.Hello", &io);
     let erts = run_with_time_limit(
         erl_eval("Elixir.Hello", "main", &io)
             .env("TERM", "dumb")
@@ -238,8 +241,7 @@ fn raises_terminated_in_the_entry_after_a_failed_stdout_write() {
     // log event modules before the caller gets `DOWN`. PBeam gives the stack
     // trace `[]` (row "Exception stack trace").
     let io = elixir_io_path();
-    let mut beams = vec![beam_file("Elixir.Hello.beam"), io.clone()];
-    beams.extend(BOOT_MODULES.map(pinned_beam_path));
+    let mut beams = hello_beams("Elixir.Hello", &io);
     beams.extend(LOG_EVENT_MODULES.map(pinned_beam_path));
     let erts = run_dumb_utf8(
         erl_eval("Elixir.Hello", "main", &io).args(["-kernel", "logger_level", "none"]),
@@ -357,6 +359,22 @@ fn beam_file(file: &str) -> PathBuf {
         .join(file)
 }
 
+/// Return the BEAM files of a booted Hello World run: the fixture module
+/// `module`, the pinned `Elixir.IO` module at `io`, and the pinned boot
+/// modules. `pbeam_boot` adds `BOOT_BEAM`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let beams = hello_beams("Elixir.Hello", &elixir_io_path());
+/// assert_eq!(beams.len(), 2 + BOOT_MODULES.len());
+/// ```
+fn hello_beams(module: &str, io: &Path) -> Vec<PathBuf> {
+    let mut beams = vec![beam_file(&format!("{module}.beam")), io.to_path_buf()];
+    beams.extend(BOOT_PATHS.iter().cloned());
+    beams
+}
+
 fn elixir_io_beam() -> Vec<u8> {
     std::fs::read(elixir_io_path()).unwrap()
 }
@@ -406,8 +424,7 @@ fn erl_eval(module: &str, function: &str, io: &Path) -> Command {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let mut beams = vec![beam_file("Elixir.Hello.beam"), elixir_io_path()];
-/// beams.extend(BOOT_MODULES.map(pinned_beam_path));
+/// let beams = hello_beams("Elixir.Hello", &elixir_io_path());
 /// let output = run_dumb_utf8(&mut pbeam_boot("Elixir.Hello", "main", &beams), Stdio::piped(), RUN_TIME_LIMIT);
 /// assert_run("PBeam", &output, ("Hello, world!\n", "", Some(0)));
 /// ```
