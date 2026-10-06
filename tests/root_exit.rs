@@ -72,15 +72,6 @@ fn writes_the_root_exit_reason_as_pinned_erts_prints_it() {
             .to_string(),
         format!("root process exited with {TERMS_TEXT}")
     );
-    // PBeam numbers its first process and its first reference from 0
-    // (row "Process and reference counters").
-    assert_eq!(
-        program
-            .execute("root_exit_probe", "identifiers", &[])
-            .unwrap_err()
-            .to_string(),
-        "root process exited with {<0.0.0>,#Ref<0.0.1.0>}"
-    );
 }
 
 #[test]
@@ -109,21 +100,45 @@ fn ends_the_binary_with_the_erts_reason_text_and_status_1() {
     }
 }
 
+/// Assert that `reason` has the ERTS form `{<0.N.0>,#Ref<0.N.N.N>}` of the
+/// reason of `root_exit_probe:identifiers/0`, where each `N` is a decimal
+/// number. `name` names the runtime in the failure message.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_identifiers_form("PBeam", "{<0.0.0>,#Ref<0.0.1.0>}");
+/// ```
+fn assert_identifiers_form(name: &str, reason: &str) {
+    let is_number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let (pid_number, reference) = reason
+        .strip_prefix("{<0.")
+        .and_then(|rest| rest.strip_suffix(">}"))
+        .and_then(|rest| rest.split_once(".0>,#Ref<0."))
+        .unwrap_or_else(|| panic!("unexpected {name} reason {reason:?}"));
+    assert!(is_number(pid_number), "{name}: {reason}");
+    let numbers: Vec<_> = reference.split('.').collect();
+    assert_eq!(numbers.len(), 3, "{name}: {reason}");
+    assert!(numbers.into_iter().all(is_number), "{name}: {reason}");
+}
+
 #[test]
 fn prints_the_root_pid_and_a_reference_in_the_erts_form() {
     // ERTS gives the `-eval` process another pid number, and each run a new
     // reference, so only the form compares: `{<0.N.0>,#Ref<0.N.N.N>}`.
     let output = erts_run("identifiers");
     assert_eq!(output.status.code(), Some(1));
-    let reason = erts_reason("identifiers", &output);
-    let is_number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
-    let (pid_number, reference) = reason
-        .strip_prefix("{<0.")
-        .and_then(|rest| rest.strip_suffix(">}"))
-        .and_then(|rest| rest.split_once(".0>,#Ref<0."))
-        .unwrap_or_else(|| panic!("unexpected ERTS reason {reason:?}"));
-    assert!(is_number(pid_number), "{reason}");
-    let numbers: Vec<_> = reference.split('.').collect();
-    assert_eq!(numbers.len(), 3, "{reason}");
-    assert!(numbers.into_iter().all(is_number), "{reason}");
+    assert_identifiers_form("ERTS", &erts_reason("identifiers", &output));
+    let program = BeamProgram::load(&[ROOT_EXIT_PROBE]).unwrap();
+    let error = program
+        .execute("root_exit_probe", "identifiers", &[])
+        .unwrap_err()
+        .to_string();
+    let reason = error
+        .strip_prefix("root process exited with ")
+        .unwrap_or_else(|| panic!("unexpected PBeam error {error:?}"));
+    assert_identifiers_form("PBeam", reason);
+    // PBeam numbers its first process and its first reference from 0
+    // (row "Process and reference counters").
+    assert_eq!(reason, "{<0.0.0>,#Ref<0.0.1.0>}");
 }
