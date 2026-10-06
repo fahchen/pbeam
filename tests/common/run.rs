@@ -8,23 +8,25 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Run a command with stdin `/dev/null` and return its output. Kill it and
-/// panic with its stdout when it does not end in `limit`. The caller sets
-/// the arguments and the environment.
+/// Run a command with stdin `/dev/null` and stdout `stdout`, and return its
+/// output. With `Stdio::piped()`, the output has the stdout of the command.
+/// Kill the command and panic with its stdout when it does not end in
+/// `limit`. The caller sets the arguments and the environment.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let output = run_with_time_limit(
 ///     Command::new("erl").args(["-noshell", "-eval", "halt()."]),
+///     Stdio::piped(),
 ///     Duration::from_secs(10),
 /// );
 /// assert_eq!(output.status.code(), Some(0));
 /// ```
-pub fn run_with_time_limit(command: &mut Command, limit: Duration) -> Output {
+pub fn run_with_time_limit(command: &mut Command, stdout: Stdio, limit: Duration) -> Output {
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -53,10 +55,15 @@ pub fn run_with_time_limit(command: &mut Command, limit: Duration) -> Output {
 /// ```rust,ignore
 /// let output = run_dumb_utf8(
 ///     Command::new("erl").args(["-noshell", "-eval", "halt()."]),
+///     Stdio::piped(),
 ///     Duration::from_secs(10),
 /// );
 /// assert_eq!(output.status.code(), Some(0));
 /// ```
-pub fn run_dumb_utf8(command: &mut Command, limit: Duration) -> Output {
-    run_with_time_limit(command.env("TERM", "dumb").env("LC_ALL", "C.UTF-8"), limit)
+pub fn run_dumb_utf8(command: &mut Command, stdout: Stdio, limit: Duration) -> Output {
+    run_with_time_limit(
+        command.env("TERM", "dumb").env("LC_ALL", "C.UTF-8"),
+        stdout,
+        limit,
+    )
 }

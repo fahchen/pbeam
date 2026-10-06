@@ -1,4 +1,7 @@
-use std::{process::Command, time::Duration};
+use std::{
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 #[path = "common/boot.rs"]
 mod boot;
@@ -49,6 +52,7 @@ fn writes_a_log_event_through_the_default_handler_after_the_boot() {
             "-eval",
             "ok = log_probe:main(), halt().",
         ]),
+        Stdio::piped(),
         RUN_TIME_LIMIT,
     );
     let pbeam = run_dumb_utf8(
@@ -57,6 +61,7 @@ fn writes_a_log_event_through_the_default_handler_after_the_boot() {
             .args(&beams)
             .args(&events)
             .arg(BOOT_BEAM),
+        Stdio::piped(),
         RUN_TIME_LIMIT,
     );
     for (name, output) in [("ERTS", erts), ("PBeam", pbeam)] {

@@ -1,4 +1,7 @@
-use std::{process::Command, time::Duration};
+use std::{
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 #[path = "common/boot.rs"]
 mod boot;
@@ -60,6 +63,7 @@ fn ends_the_run_at_the_root_exit_while_a_timer_stays_active() {
                     &format!("run_end_probe:{function}(), halt()."),
                 ])
                 .env("ERL_CRASH_DUMP_SECONDS", "0"),
+            Stdio::piped(),
             RUN_TIME_LIMIT,
         );
         let pbeam = run_dumb_utf8(
@@ -74,6 +78,7 @@ fn ends_the_run_at_the_root_exit_while_a_timer_stays_active() {
                 ])
                 .args(&beams)
                 .arg(BOOT_BEAM),
+            Stdio::piped(),
             RUN_TIME_LIMIT,
         );
         for (name, output, stderr) in [("ERTS", erts, erts_stderr), ("PBeam", pbeam, pbeam_stderr)]
