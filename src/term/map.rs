@@ -18,10 +18,9 @@
 //! A hashmap hashes a key with the ERTS internal hash, and an atom hashes by
 //! its atom word `(index << 6) | 0xB`. Thus the pair order of a map is the
 //! ERTS order, which BEAM code sees through operations such as
-//! `maps:keys/1`. The ERTS internal hash of each PBeam term exists
-//! (`super::hash`), but PBeam does not support other key types yet, for
-//! example a tuple or an improper list with a tuple tail such as `[1|{}]`.
-//! No current consumer needs them.
+//! `maps:keys/1`. Other key types need the hashmap insertion of bignums,
+//! tuples, binaries, maps, funs, pids, and references, which PBeam does not
+//! have yet. So does an improper list with such a tail, for example `[1|{}]`.
 
 use std::cmp::Ordering;
 
@@ -37,11 +36,12 @@ const SLOT_BITS: u32 = 4;
 const HAMT_MAX_LEVEL: u32 = u64::BITS / SLOT_BITS;
 /// The mask of the hash bits that select a slot.
 const SLOT_MASK: u64 = 0xF;
+/// The bitmap of a node that uses all 16 slots. ERTS gives such a root the
+/// `HEAD_ARRAY` header instead of `HEAD_BITMAP` (`hashmap_from_*` in
+/// `erl_map.c`).
+const FULL_BITMAP: u16 = 0xFFFF;
 /// The width of the tag of an ERTS small integer word (`_TAG_IMMED1_SIZE`).
 const SMALL_INTEGER_TAG_BITS: u32 = 4;
-/// The bitmap of a node that uses all 16 slots. ERTS gives such a root the
-/// `HEAD_ARRAY` header instead of `HEAD_BITMAP` (`erl_map.c:1146`).
-const FULL_BITMAP: u16 = 0xFFFF;
 /// The number of path elements in one ERTS bignum digit
 /// (`PATH_ELEMS_PER_DIGIT`, `erl_map.c:3635`). A path element has
 /// `SLOT_BITS` bits.
@@ -747,7 +747,7 @@ impl Node {
     }
 
     /// Return true when the node uses all 16 slots. A hashmap root with all
-    /// slots has the ERTS `HEAD_ARRAY` header (`erl_map.c:1146`).
+    /// slots has the ERTS `HEAD_ARRAY` header.
     ///
     /// # Examples
     ///
@@ -956,9 +956,10 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 
 /// Return the ERTS map hash (`erts_map_hash`, `erl_term_hashing.c:2301-2319`)
 /// of a key, or `None` for a key that a hashmap does not support yet. The
-/// map hash is the ERTS internal hash, so an immediate key hashes as
-/// `ihash_mix64` of its ERTS word, and a list key, also an improper list
-/// key, with the list path of `make_internal_hash`.
+/// map hash is the ERTS internal hash, so an atom hashes as its word
+/// `(index << 6) | 0xB`, a small integer as its word `(value << 4) | 0xF`, and
+/// a list key that is not empty with the list path of `make_internal_hash`,
+/// also an improper list whose tail is an atom or a small integer.
 ///
 /// # Examples
 ///
@@ -966,55 +967,33 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert_eq!(map_hash(&Term::Integer(1)), Some(7938660269479274665));
 /// // true has index 1, so its word is 0x4B.
 /// assert_eq!(map_hash(&Term::static_atom("true")), Some(14558535449716669319));
+/// assert_eq!(map_hash(&Term::List(vec![])), Some(internal_hash(&Term::List(vec![]))));
 /// assert!(map_hash(&Term::List(vec![Term::Integer(97)])).is_some());
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
 /// assert_eq!(map_hash(&Term::Tuple(vec![])), None);
 /// let improper = |tail| Term::ImproperList(vec![Term::Integer(1)], Box::new(tail));
-/// assert_eq!(map_hash(&improper(Term::Integer(2))), Some(5915944085625558568));
+/// assert!(map_hash(&improper(Term::Integer(2))).is_some());
 /// assert_eq!(map_hash(&improper(Term::Tuple(vec![]))), None);
 /// ```
 fn map_hash(key: &Term) -> Option<u64> {
-    supported_key(key).then(|| internal_hash(key))
-}
-
-/// Return true for a hashmap key that PBeam supports: an atom, a small
-/// integer, `[]`, a list of such keys, or an improper list of such keys
-/// whose tail is an atom or a small integer. The check uses a work stack,
-/// so a deep key does not recurse.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(supported_key(&Term::List(vec![Term::List(vec![]), Term::static_atom("ok")])));
-/// let improper = |tail| Term::ImproperList(vec![Term::Integer(1)], Box::new(tail));
-/// assert!(supported_key(&improper(Term::static_atom("x"))));
-/// assert!(!supported_key(&improper(Term::Tuple(vec![]))));
-/// assert!(!supported_key(&Term::List(vec![Term::Integer(1 << 59)])));
-/// ```
-fn supported_key(key: &Term) -> bool {
     let mut pending = vec![key];
     while let Some(term) = pending.pop() {
         match term {
             Term::Atom(_) => {}
             Term::List(elements) => pending.extend(elements),
-            Term::ImproperList(elements, tail) => {
-                if !matches!(**tail, Term::Atom(_)) && tail.small_integer().is_none() {
-                    return false;
-                }
-                pending.extend(elements);
+            Term::ImproperList(elements, tail) => pending.extend(elements.iter().chain([&**tail])),
+            _ => {
+                term.small_integer()?;
             }
-            _ if term.small_integer().is_some() => {}
-            _ => return false,
         }
     }
-    true
+    Some(internal_hash(key))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Child, Direction, HAMT_MAX_LEVEL, Hamt, Map, Node, Repr, encode_path, map_hash};
-    use crate::term::hash::mix64;
-    use crate::term::{AtomTable, Reference, Term, test_atom as atom};
+    use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom};
 
     fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
         Map::from_pairs(
@@ -1037,7 +1016,6 @@ mod tests {
     fn hashes_small_integers_as_erts() {
         assert_eq!(map_hash(&Term::Integer(1)), Some(7938660269479274665));
         assert_eq!(map_hash(&Term::Integer(-1)), Some(7256831767414464289));
-        assert_eq!(mix64(0x1F), 7938660269479274665);
         assert!(map_hash(&Term::Integer((1 << 59) - 1)).is_some());
         assert!(map_hash(&Term::Integer(-(1 << 59))).is_some());
         assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
@@ -1047,15 +1025,14 @@ mod tests {
     #[test]
     fn hashes_atoms_by_their_index_as_erts() {
         // true has index 1: its ERTS word is (1 << 6) | 0xB = 0x4B.
-        assert_eq!(mix64(0x4B), 14558535449716669319);
         assert_eq!(
             map_hash(&Term::static_atom("true")),
             Some(14558535449716669319)
         );
-        // abs_path has index 26.
+        // abs_path has index 26. ERTS 29.1.1: its internal hash.
         assert_eq!(
             map_hash(&Term::static_atom("abs_path")),
-            Some(mix64((26 << 6) | 0xB))
+            Some(17379220480677090226)
         );
     }
 
@@ -1133,7 +1110,10 @@ mod tests {
 
     #[test]
     fn rejects_list_keys_with_unsupported_elements() {
-        assert_eq!(map_hash(&Term::List(vec![])), Some(mix64(0x3B)));
+        assert_eq!(
+            map_hash(&Term::List(vec![])),
+            Some(internal_hash(&Term::List(vec![])))
+        );
         let unsupported = [
             Term::List(vec![Term::Integer(1), Term::Tuple(vec![])]),
             Term::List(vec![Term::List(vec![Term::Tuple(vec![])])]),
