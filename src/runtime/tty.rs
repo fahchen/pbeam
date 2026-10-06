@@ -1,7 +1,7 @@
 //! The TTY resources of the node, as the `TTYResource` objects of
 //! `prim_tty_nif.c` and their magic references (`erl_binary.h`), with the
-//! process monitors of these resources. The scheduler keeps them in its
-//! `Resources`, and all processes of a run share them.
+//! process monitors of these resources. The scheduler keeps them as the
+//! `Ttys` value of its `Resources`, and all processes of a run share them.
 
 use std::collections::HashMap;
 
@@ -15,7 +15,7 @@ use crate::term::{ProcessId, Reference};
 pub(super) struct Ttys {
     /// Each TTY resource by its reference, as the `TTYResource` objects of
     /// `tty_create_nif` (`prim_tty_nif.c:988-1072`).
-    resources: HashMap<Reference, TtyResource>,
+    by_reference: HashMap<Reference, TtyResource>,
     /// The process monitors of the TTY resources, as the pid and the TTY
     /// reference of each `tty_init/2` that monitors its caller
     /// (`prim_tty_nif.c:1162-1165`), in the order of the calls. ERTS adds
@@ -67,7 +67,7 @@ impl Ttys {
     /// ttys.insert(Reference(0), tty);
     /// ```
     pub(super) fn insert(&mut self, reference: Reference, tty: TtyResource) {
-        self.resources.insert(reference, tty);
+        self.by_reference.insert(reference, tty);
     }
 
     /// Return the TTY resource of `reference`, as `enif_get_resource` with
@@ -82,7 +82,7 @@ impl Ttys {
     /// assert!(ttys.get(Reference(1)).is_none());
     /// ```
     pub(super) fn get(&self, reference: Reference) -> Option<&TtyResource> {
-        self.resources.get(&reference)
+        self.by_reference.get(&reference)
     }
 
     /// Return the TTY resource of `reference` for a change, as `Ttys::get`
@@ -94,7 +94,7 @@ impl Ttys {
     /// ttys.get_mut(Reference(0)).unwrap().owner = Some(ProcessId(0));
     /// ```
     pub(super) fn get_mut(&mut self, reference: Reference) -> Option<&mut TtyResource> {
-        self.resources.get_mut(&reference)
+        self.by_reference.get_mut(&reference)
     }
 
     /// Add a monitor of the process `pid` for the TTY resource `reference`,
@@ -129,7 +129,7 @@ impl Ttys {
             .partition(|&(monitor, _)| monitor == pid);
         self.monitors = kept;
         for (_, reference) in down {
-            let tty = &self.resources[&reference];
+            let tty = &self.by_reference[&reference];
             if tty.owner == Some(pid) {
                 // ERTS ignores the result (prim_tty_nif.c:1239).
                 let _ = terminal::set_mode(libc::STDIN_FILENO, &tty.first_mode);
