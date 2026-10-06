@@ -200,6 +200,22 @@ pub(crate) enum Instruction {
         tail: bool,
         deallocate: u32,
     },
+    /// Runs `erlang:hibernate/0` as the ERTS `i_hibernate` instruction: it
+    /// writes `ok` to `x0`, keeps the frame, and stops the run of the
+    /// process. The loader turns `call_ext 0 erlang:hibernate/0` into
+    /// `Hibernate`, `call_ext_last 0 erlang:hibernate/0 D` into `Hibernate`,
+    /// `Deallocate { stack_size: D }`, `Return`, and
+    /// `call_ext_only 0 erlang:hibernate/0` into `Hibernate`, `Return`
+    /// (`jit/arm/ops.tab:669-673`; `emu/ops.tab:896-898`).
+    ///
+    /// Encoding: `[0x07, 0x00, 0x00]` is `call_ext 0` of import 0, where
+    /// import 0 is `erlang:hibernate/0`.
+    ///
+    /// Erlang: `gen_server:loop_hibernate/4` compiles
+    /// `erlang:hibernate()` to `{call_ext,0,{extfunc,erlang,hibernate,0}}`,
+    /// and `erlang.beam` compiles `hibernate() -> erlang:hibernate().` to
+    /// `{call_ext_only,0,{extfunc,erlang,hibernate,0}}`.
+    Hibernate,
     /// Calls the function whose module is in `x(arity)` and whose name is in
     /// `x(arity + 1)`, with the arguments in `x0` to `x(arity - 1)`. `apply`
     /// (opcode 112) continues after the call. `apply_last` (opcode 113) sets
@@ -1344,12 +1360,28 @@ pub(super) fn parse_code(
                 } else {
                     0
                 };
-                Instruction::CallExternal {
-                    arity,
-                    module: module.clone(),
-                    name: name.clone(),
-                    tail: opcode != OPCODE_CALL_EXT,
-                    deallocate,
+                // `i_hibernate` returns to the next instruction, so a tail
+                // call hibernates first and returns after that
+                // (`jit/arm/ops.tab:669-673`; `emu/ops.tab:896-898`).
+                if (module.as_str(), name.as_str(), arity) == ("erlang", "hibernate", 0) {
+                    instructions.push(Instruction::Hibernate);
+                    if opcode == OPCODE_CALL_EXT_LAST {
+                        instructions.push(Instruction::Deallocate {
+                            stack_size: deallocate,
+                        });
+                    }
+                    if opcode != OPCODE_CALL_EXT {
+                        instructions.push(Instruction::Return);
+                    }
+                    continue;
+                } else {
+                    Instruction::CallExternal {
+                        arity,
+                        module: module.clone(),
+                        name: name.clone(),
+                        tail: opcode != OPCODE_CALL_EXT,
+                        deallocate,
+                    }
                 }
             }
             OPCODE_APPLY | OPCODE_APPLY_LAST => {
@@ -2849,6 +2881,41 @@ mod tests {
                 Instruction::Deallocate { stack_size: 0 },
                 Instruction::Return,
                 Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn turns_a_call_of_erlang_hibernate_into_the_erts_hibernate_instruction() {
+        // `call_ext`, `call_ext_last`, and `call_ext_only` of
+        // `erlang:hibernate/0` (`jit/arm/ops.tab:669-673`).
+        let decode = |bytes: &[u8]| {
+            let mut code = vec![0, 0, 0, 16];
+            code.extend([0; 16]);
+            code.extend_from_slice(bytes);
+            code.push(0x03);
+            let imports = [("erlang".to_owned(), "hibernate".to_owned(), 0)];
+            parse_code(&code, &[], &imports, &[], &[]).unwrap().0
+        };
+        assert!(matches!(
+            decode(&[0x07, 0x00, 0x00]).as_slice(), // call_ext 0 import 0
+            [Instruction::Hibernate, Instruction::End]
+        ));
+        assert!(matches!(
+            decode(&[0x08, 0x00, 0x00, 0x20]).as_slice(), // call_ext_last 0 import 0 2
+            [
+                Instruction::Hibernate,
+                Instruction::Deallocate { stack_size: 2 },
+                Instruction::Return,
+                Instruction::End
+            ]
+        ));
+        assert!(matches!(
+            decode(&[0x4E, 0x00, 0x00]).as_slice(), // call_ext_only 0 import 0
+            [
+                Instruction::Hibernate,
+                Instruction::Return,
+                Instruction::End
             ]
         ));
     }

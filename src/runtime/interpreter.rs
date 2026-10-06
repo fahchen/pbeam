@@ -43,6 +43,9 @@ pub struct BeamProgram {
 enum Outcome {
     /// The process waits for a new message.
     Wait,
+    /// The process called `erlang:hibernate/0`. It continues at its next
+    /// instruction when the scheduler runs it again.
+    Hibernate,
     /// The process exited. `result` is the return value of a normal exit.
     Exit { reason: Term, result: Option<Term> },
 }
@@ -117,7 +120,8 @@ impl BeamProgram {
     }
 
     /// Run an exported function as the root process. Processes that it
-    /// spawns run on the same cooperative scheduler. Before it takes the
+    /// spawns run on the same cooperative scheduler. A process runs until it
+    /// waits, calls `erlang:hibernate/0`, or exits. Before it takes the
     /// next process, the scheduler reads the run clock and expires each due
     /// timer, as ERTS bumps the timers in `check_activities_to_run`
     /// (`erl_process.c:9797-9810`). When no process can run, it sleeps until
@@ -147,6 +151,7 @@ impl BeamProgram {
             if scheduler.schedule_next().is_some() {
                 match self.run(&mut scheduler)? {
                     Outcome::Wait => scheduler.park_current(),
+                    Outcome::Hibernate => scheduler.hibernate_current(),
                     Outcome::Exit { reason, result } => {
                         scheduler.finish_current(reason, result)?;
                     }
@@ -249,7 +254,8 @@ impl BeamProgram {
             .ok_or_else(|| error(format!("missing BEAM module {name}")))
     }
 
-    /// Run the current process until it waits for a message or exits.
+    /// Run the current process until it waits for a message, calls
+    /// `erlang:hibernate/0`, or exits.
     ///
     /// # Examples
     ///
@@ -862,6 +868,13 @@ impl BeamProgram {
                     {
                         return Ok(outcome);
                     }
+                }
+                Instruction::Hibernate => {
+                    // `emit_i_hibernate` writes `ok` to `x0` and switches
+                    // the context; the process keeps its frame
+                    // (`jit/arm/instr_trace.cpp:222-238`).
+                    write(process, &Operand::X(0), Term::static_atom("ok"))?;
+                    return Ok(Outcome::Hibernate);
                 }
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::Return => {
@@ -1938,8 +1951,8 @@ mod tests {
         // The ERTS loader turns this call into an instruction. Its body in
         // `erlang.beam` calls itself, so it must not run.
         assert!(
-            error(vec![erlang_call("hibernate", 0, false)])
-                .contains("unsupported instruction call erlang:hibernate/0")
+            error(vec![erlang_call("yield", 0, false)])
+                .contains("unsupported instruction call erlang:yield/0")
         );
     }
 
@@ -2573,9 +2586,9 @@ mod tests {
         builtin.sort_unstable();
         builtin.dedup();
         // `erts_is_builtin` (`beam_common.c`) marks apply/2, apply/3, and
-        // yield/0 as builtin, but not hibernate/0.
+        // yield/0 as builtin.
         for mfa in INSTRUCTION_CALLS {
-            assert_eq!(builtin.contains(&mfa), mfa.1 != "hibernate");
+            assert!(builtin.contains(&mfa));
         }
         builtin.retain(|mfa| !INSTRUCTION_CALLS.contains(mfa));
         assert_eq!(BIFS, builtin.as_slice());
