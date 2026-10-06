@@ -84,3 +84,46 @@ fn loads_the_float_register_instructions_and_stops_when_one_runs() {
     assert!(reference.stderr.is_empty());
     assert_eq!(reference.stdout, b"4.0\n");
 }
+
+#[test]
+fn raises_badarith_when_fconv_gets_a_term_that_is_not_a_number() {
+    // `float_test_probe:halves/0` runs `half/1` on one term of each kind
+    // that PBeam has and that is not a number. ERTS `fconv` raises
+    // `error:badarith` for each one (emu float_instrs.tab:38-52; JIT
+    // `emit_fconv_shared` in jit/arm/instr_float.cpp:96-135).
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, FLOAT_TEST_PROBE]).unwrap();
+    let badarith = Term::Atom(program.atom("badarith").unwrap());
+    assert_eq!(
+        program.execute("float_test_probe", "halves", &[]).unwrap(),
+        Term::List(vec![badarith.clone(); 10])
+    );
+    // Without a catch, the exception ends the root process. PBeam gives each
+    // `error` exception the stack trace `[]` (row "Exception stack trace" in
+    // `docs/erts-differences.md`).
+    let error = program
+        .execute("float_test_probe", "half", &[badarith])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("root process exited with Tuple([Atom(\"badarith\"), List([])])"),
+        "{error}"
+    );
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/float_test",
+            "-eval",
+            "io:format(\"~w~n\", [float_test_probe:halves()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        reference.stdout,
+        b"[badarith,badarith,badarith,badarith,badarith,badarith,badarith,badarith,badarith,\
+          badarith]\n"
+    );
+}

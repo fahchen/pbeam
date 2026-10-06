@@ -773,6 +773,21 @@ impl BeamProgram {
                     }
                     jump(module, process, *fail_label)?;
                 }
+                // ERTS `fconv` converts a small integer, a bignum, or a float
+                // to a float register, and raises `badarith` for each other
+                // term (emu float_instrs.tab:38-52; JIT `emit_fconv` and
+                // `emit_fconv_shared` in jit/arm/instr_float.cpp:96-135).
+                // PBeam has no float register and no float or bignum term,
+                // so an integer stops the run.
+                Instruction::FloatConvert { source } => {
+                    if let Term::Integer(_) = read(process, source)? {
+                        return Err(error("unsupported BEAM opcode 97"));
+                    }
+                    let badarith = Term::static_atom("badarith");
+                    if let Some(outcome) = raise(process, ExceptionClass::Error, badarith) {
+                        return Ok(outcome);
+                    }
+                }
                 Instruction::SelectValue {
                     value,
                     fail_label,

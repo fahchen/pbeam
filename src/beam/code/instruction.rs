@@ -803,6 +803,19 @@ pub(crate) enum Instruction {
     /// `{test,bs_start_match3,{f,5},1,[{x,0}],{x,0}}`, as
     /// `unicode_util:cp/1` does for its argument.
     BinaryMatchStart { fail_label: u32, source: Operand },
+    /// Converts `source` to a float in a float register (`fconv`, opcode
+    /// 97). ERTS raises `error:badarith` for a term that is not a number.
+    /// PBeam has no float register, so an integer source returns the runtime
+    /// error `unsupported BEAM opcode 97`.
+    ///
+    /// Encoding: opcode, source, float register (extended subtag 2). The
+    /// decoder skips the float register. Example: `float_test_probe:half/1`
+    /// in `fixtures/float_test/float_test_probe.beam` has `[0x61, 0x03, 0x27,
+    /// 0x00]`, which converts `x0` to `fr0`.
+    ///
+    /// Erlang: `half(X) -> X / 2.` compiles to `{fconv,{x,0},{fr,0}}`, as
+    /// the `/` operators of `string` and `erl_scan` do.
+    FloatConvert { source: Operand },
     /// Sends `x1` to the destination in `x0`, then writes the message to
     /// `x0`. The destination is a pid, a registered name, `{Name, Node}`, or
     /// a reference. A name that no process has, a tuple that is not two
@@ -1156,6 +1169,11 @@ pub(super) fn parse_code(
                     arity,
                     tag,
                 }
+            }
+            OPCODE_FCONV => {
+                let source = read_move_operand(data, &mut cursor, atoms, literals)?;
+                skip_operands(data, &mut cursor, 1)?;
+                Instruction::FloatConvert { source }
             }
             OPCODE_BS_START_MATCH3 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
@@ -1743,8 +1761,9 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_INIT_WRITABLE => Some(0),
         OPCODE_BS_MATCH => Some(3),
         // The float-register instructions are in `string` and `erl_scan`.
-        // PBeam has no float term, so each one stops the run.
-        OPCODE_FMOVE | OPCODE_FCONV => Some(2),
+        // PBeam has no float term, so each one stops the run. `fconv`
+        // decodes as `Instruction::FloatConvert`.
+        OPCODE_FMOVE => Some(2),
         OPCODE_FADD | OPCODE_FSUB | OPCODE_FMUL | OPCODE_FDIV => Some(4),
         _ => None,
     }
@@ -2551,6 +2570,32 @@ mod tests {
     }
 
     #[test]
+    fn decodes_the_fconv_instruction_of_the_float_test_probe_fixture() {
+        const FLOAT_TEST_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/float_test/float_test_probe.beam");
+        let fconv = [OPCODE_FCONV, 0x03, 0x27, 0x00]; // half/1: fconv x0 fr0
+        assert!(
+            FLOAT_TEST_PROBE
+                .windows(fconv.len())
+                .any(|window| window == fconv),
+            "{fconv:02X?} is not in float_test_probe.beam"
+        );
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&fconv[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::FloatConvert {
+                    source: Operand::X(0),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
     fn decodes_the_is_float_test_of_the_float_test_probe_fixture() {
         const FLOAT_TEST_PROBE: &[u8] =
             include_bytes!("../../../fixtures/float_test/float_test_probe.beam");
@@ -3209,7 +3254,6 @@ mod tests {
             (OPCODE_GC_BIF3, 7),
             (OPCODE_IS_ANY_NATIVE_RECORD, 2),
             (OPCODE_FMOVE, 2),
-            (OPCODE_FCONV, 2),
             (OPCODE_FADD, 4),
             (OPCODE_FSUB, 4),
             (OPCODE_FMUL, 4),
