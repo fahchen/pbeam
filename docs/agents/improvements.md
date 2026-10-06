@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261006: Verify OTP hardware assumptions against source behavior
+
+**Problem:** The clock documentation and test rationale assumed that ERTS returns the host TSC frequency when RDTSCP is available.
+
+**Root Cause:** The implementation inferred ERTS behavior from hardware terminology instead of checking the pinned OTP source and running the reference on the target hosts.
+
+**Fix:** Correct the documentation and keep the fixed test value only after confirming the pinned ERTS result on the supported hosts.
+
+**Guardrail:** Before documenting host-dependent behavior, inspect the pinned OTP feature detection and compare the exact reference output on each supported host.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/176#issuecomment-6005160493>
+
 ## 20261006: Verify task references in difference records
 
 **Problem:** A difference row named a prerequisite task as the owner of a follow-up that the task does not implement.
