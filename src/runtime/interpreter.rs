@@ -596,6 +596,12 @@ impl BeamProgram {
                         TestKind::Map => matches!(value, Term::Map(_)),
                         TestKind::Function => matches!(value, Term::Fun(_)),
                         TestKind::Integer => matches!(value, Term::Integer(_)),
+                        // `is_float` passes only for a boxed term with the
+                        // `HEADER_FLONUM` header (emu `instrs.tab:951-955`,
+                        // `erl_term.h:484-485`; JIT `emit_is_float` in
+                        // `jit/arm/instr_common.cpp:1229-1245`). PBeam has no
+                        // float term, so the test fails for each term.
+                        TestKind::Float => false,
                         TestKind::Boolean => {
                             matches!(&value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
                         }
