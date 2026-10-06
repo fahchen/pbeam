@@ -127,7 +127,8 @@ write() ->
     [catch_error(fun() -> prim_tty:write_nif(Err, I) end)
      || I <- [[], [<<"Hello, ">>, <<>>, <<"world!\n">>], foo, <<"x">>, [<<"x">>, foo],
               [<<"x">>, [<<"y">>]], Group ++ [foo], [<<"c">> | Group] ++ [foo],
-              [<<"c">> | Group] ++ [<<"d">>], [<<>>]]].
+              [<<"c">> | Group] ++ [<<"d">>], [<<"e">> | x], [<<"f">> | Group] ++ x,
+              [<<"g">>, <<"g">> | Group] ++ x, [<<"h">> | <<"i">>], [<<>>]]].
 
 %% Stderr is a pipe whose reader is closed.
 write_error() ->

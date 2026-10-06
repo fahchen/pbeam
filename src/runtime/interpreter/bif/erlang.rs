@@ -168,6 +168,8 @@ pub(super) fn demonitor(
 
 /// Run `erlang:spawn/3`: start a process that runs `module:function` with the
 /// elements of `arguments`, as ERTS `spawn_3` does with default spawn options.
+/// A `module` or `function` that is not an atom, and `arguments` that are not
+/// a proper list, raise `badarg`.
 ///
 /// # Examples
 ///
@@ -177,8 +179,8 @@ pub(super) fn demonitor(
 /// ```
 pub(super) fn spawn(
     context: &mut BifContext<'_>,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
 ) -> Result<BifResult, BeamError> {
     create_process(
@@ -189,7 +191,6 @@ pub(super) fn spawn(
         arguments,
         SpawnOptions::default(),
     )
-    .map(Value)
 }
 
 /// Run `erlang:spawn_link/3`: start a linked process, as ERTS `spawn_link_3`
@@ -203,8 +204,8 @@ pub(super) fn spawn(
 /// ```
 pub(super) fn spawn_link(
     context: &mut BifContext<'_>,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
 ) -> Result<BifResult, BeamError> {
     let options = SpawnOptions {
@@ -219,30 +220,36 @@ pub(super) fn spawn_link(
         arguments,
         options,
     )
-    .map(Value)
 }
 
 /// Run `erlang:spawn_opt/4`, which `erlang:spawn_monitor/3` in `erlang.beam`
 /// calls with the options `[monitor]`: start a process with the spawn
 /// options in `options`, as ERTS `spawn_opt_4` (`bif.c`) does. The option
 /// `link` links the new process and `monitor` monitors it. With `monitor`
-/// the result is `{Pid, Reference}`, else `Pid`. Any other option gives a
-/// runtime error.
+/// the result is `{Pid, Reference}`, else `Pid`. `options` that are not a
+/// proper list raise `badarg`, as `erts_parse_spawn_opts`
+/// (`erl_process.c:12222-12434`) does. Any other option gives a runtime
+/// error. After the options, a `module` or `function` that is not an atom
+/// raises `badarg`, as in `spawn/3`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &[monitor])?;
+/// let result = spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &Term::List(vec![monitor]))?;
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
-/// assert!(spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &[priority]).is_err());
+/// assert!(matches!(spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &link_x)?, BifResult::Raise { .. }));
+/// assert!(spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &Term::List(vec![priority])).is_err());
 /// ```
 pub(super) fn spawn_opt(
     context: &mut BifContext<'_>,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
-    options: &[Term],
+    options: &Term,
 ) -> Result<BifResult, BeamError> {
+    let Term::List(options) = options else {
+        return Ok(BifResult::badarg());
+    };
     let mut spawn_options = SpawnOptions::default();
     for option in options {
         match option {
@@ -260,7 +267,6 @@ pub(super) fn spawn_opt(
         arguments,
         spawn_options,
     )
-    .map(Value)
 }
 
 /// Run `erlang:put/2`: set the value of `key` in the process dictionary of
@@ -312,35 +318,50 @@ pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
     )
 }
 
-/// Run `erlang:'++'/2`: append `right` to the proper list `left`. With an
-/// empty `left`, return `right` itself, which can be any term, as ERTS
-/// `append` (`erl_bif_lists.c`) does. A `left` that is not a list raises
-/// `badarg`. A non-empty `left` with a `right` that is not a list gives a
-/// runtime error, because PBeam has no improper lists. ERTS returns the
-/// improper list `[1 | x]` for `[1] ++ x`.
+/// Run `erlang:'++'/2`: append `right` to the proper list `left`, as ERTS
+/// `append` (`erl_bif_lists.c:262-338`) does. `right` can be any term, so
+/// `[1] ++ x` gives the improper list `[1|x]`, and an empty `left` gives
+/// `right` itself. A `left` that is not a proper list raises `badarg`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let x = Term::static_atom("ok");
-/// assert!(matches!(append(&Term::List(vec![]), &x)?, BifResult::Value(term) if term == x));
-/// let list = append(&Term::List(vec![Term::Integer(1)]), &Term::List(vec![Term::Integer(2)]))?;
-/// assert!(matches!(list, BifResult::Value(Term::List(elements)) if elements.len() == 2));
-/// assert!(matches!(append(&x, &Term::List(vec![]))?, BifResult::Raise { .. }));
-/// assert!(append(&Term::List(vec![Term::Integer(1)]), &x).is_err());
+/// let x = Term::static_atom("x");
+/// assert!(matches!(append(&Term::List(vec![]), &x), BifResult::Value(term) if term == x));
+/// let list = append(&Term::List(vec![Term::Integer(1)]), &x);
+/// assert!(matches!(list, BifResult::Value(Term::ImproperList(elements, _)) if elements.len() == 1));
+/// assert!(matches!(append(&x, &Term::List(vec![])), BifResult::Raise { .. }));
 /// ```
-pub(super) fn append(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
-    match (left, right) {
-        (Term::List(left), right) if left.is_empty() => Ok(Value(right.clone())),
-        (Term::List(left), Term::List(right)) => Ok(Value(Term::List(
-            left.iter().chain(right).cloned().collect(),
-        ))),
-        // ponytail: an improper list result needs an improper list term; see "BIF arguments" in docs/erts-differences.md.
-        (Term::List(_), right) => Err(error(format!(
-            "unsupported erlang:++/2 tail {right:?}: not a list"
-        ))),
-        _ => Ok(BifResult::badarg()),
+pub(super) fn append(left: &Term, right: &Term) -> BifResult {
+    match left {
+        Term::List(left) => Value(Term::list_with_tail(left.clone(), right.clone())),
+        _ => BifResult::badarg(),
     }
+}
+
+/// Run `erlang:tl/1`: return the tail of the first cons cell of a nonempty
+/// list, as ERTS `tl_1` (`bif.c:2931-2938`) does. The tail of a proper list
+/// is a proper list, and the tail of `[1|x]` is `x`. `[]` and a term that is
+/// not a list raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let x = Term::static_atom("x");
+/// let proper = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
+/// assert!(matches!(tl(&proper), BifResult::Value(Term::List(rest)) if rest == [Term::Integer(2)]));
+/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x.clone()));
+/// assert!(matches!(tl(&improper), BifResult::Value(term) if term == x));
+/// assert!(matches!(tl(&Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn tl(list: &Term) -> BifResult {
+    let (elements, tail) = match list {
+        Term::List(elements) if !elements.is_empty() => (elements, Term::List(Vec::new())),
+        Term::ImproperList(elements, tail) => (elements, (**tail).clone()),
+        _ => return BifResult::badarg(),
+    };
+    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+    Value(Term::list_with_tail(elements[1..].to_vec(), tail))
 }
 
 /// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
@@ -372,9 +393,11 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
 /// ERTS `list_to_atom_1` (`bif.c:3217-3236`) does with
 /// `erts_unicode_list_to_buf` (`utils.c:2862-2942`). ERTS counts each
 /// element before it checks it, so a 256th element raises `system_limit`,
-/// also when it is not a character. An element that is not an integer in
-/// `0..=0x10FFFF` outside `0xD800..=0xDFFF`, and a term that is not a list,
-/// raise `badarg`.
+/// also when it is not a character. ERTS checks the tail after the 255th
+/// element, so an improper list of 300 characters raises `system_limit`.
+/// An element that is not an integer in `0..=0x10FFFF` outside
+/// `0xD800..=0xDFFF`, a tail that is not `[]`, and a term that is not a
+/// list, raise `badarg`.
 ///
 /// # Examples
 ///
@@ -386,6 +409,8 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
 /// assert!(matches!(list_to_atom(&mut atoms, &surrogate)?, BifResult::Raise { .. }));
 /// let long = Term::List(vec![Term::Integer(97); 256]);
 /// assert!(matches!(list_to_atom(&mut atoms, &long)?, BifResult::Raise { .. }));
+/// let improper = Term::ImproperList(vec![Term::Integer(97)], Box::new(Term::static_atom("x")));
+/// assert!(matches!(list_to_atom(&mut atoms, &improper)?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -393,8 +418,10 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
 /// A new atom in a full atom table gives the error of `AtomTable::put`,
 /// where ERTS stops the emulator.
 pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResult, BeamError> {
-    let Term::List(elements) = term else {
-        return Ok(BifResult::badarg());
+    let (elements, proper) = match term {
+        Term::List(elements) => (elements, true),
+        Term::ImproperList(elements, _) => (elements, false),
+        _ => return Ok(BifResult::badarg()),
     };
     let mut name = String::new();
     for (count, element) in elements.iter().enumerate() {
@@ -412,6 +439,9 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
             return Ok(BifResult::badarg());
         };
         name.push(character);
+    }
+    if !proper {
+        return Ok(BifResult::badarg());
     }
     Ok(Value(Term::Atom(atoms.put(&name)?)))
 }
@@ -624,11 +654,14 @@ const IOVEC_COPY_LIMIT: usize = 512;
 /// Run `erlang:iolist_to_iovec/1` as ERTS `iolist_to_iovec_1` and
 /// `iolist_to_iovec_engine` (`erl_iolist.c`) do. Return `[]` for `[]` and
 /// `<<>>`, and `[Bin]` for a binary `Bin` that is not empty. For a list, walk
-/// the nested lists in order. Copy each byte and each binary of at most
+/// the nested lists in order. A binary tail of a list, as in `[97|<<"b">>]`,
+/// comes after the elements of that list (`generic_iolist_size`,
+/// `erl_iolist.c:153-236`). Copy each byte and each binary of at most
 /// [`IOVEC_COPY_LIMIT`] bytes into one merged binary. Each larger binary
 /// closes the current merged binary, if it is not empty, and is an element of
 /// the result itself. An empty merged binary is not in the result. An integer
-/// outside `0..=255` or another term that is not iodata raises `badarg`.
+/// outside `0..=255`, a tail that is not a binary, or another term that is
+/// not iodata raises `badarg`.
 ///
 /// ERTS also copies a sub-binary at a bit offset that is not a multiple of 8,
 /// whatever its size. PBeam binaries always start at a byte, so only the size
@@ -647,6 +680,9 @@ const IOVEC_COPY_LIMIT: usize = 512;
 /// let large = Term::Binary(vec![0; 513]);
 /// let list = Term::List(vec![Term::Integer(1), large.clone()]);
 /// assert!(matches!(iolist_to_iovec(&list), BifResult::Value(Term::List(iovec)) if iovec == [Term::Binary(vec![1]), large]));
+/// // [97|<<"b">>] gives [<<"ab">>].
+/// let improper = Term::ImproperList(vec![Term::Integer(97)], Box::new(Term::Binary(b"b".to_vec())));
+/// assert!(matches!(iolist_to_iovec(&improper), BifResult::Value(Term::List(iovec)) if iovec == [Term::Binary(b"ab".to_vec())]));
 /// assert!(matches!(iolist_to_iovec(&Term::List(vec![Term::Integer(256)])), BifResult::Raise { .. }));
 /// assert!(matches!(iolist_to_iovec(&Term::static_atom("foo")), BifResult::Raise { .. }));
 /// ```
@@ -654,17 +690,17 @@ pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
     match term {
         Term::Binary(bytes) if bytes.is_empty() => Value(Term::List(Vec::new())),
         Term::Binary(_) => Value(Term::List(vec![term.clone()])),
-        Term::List(elements) => {
-            iolist_iovec(elements).map_or_else(BifResult::badarg, |iovec| Value(Term::List(iovec)))
+        Term::List(_) | Term::ImproperList(..) => {
+            iolist_iovec(term).map_or_else(BifResult::badarg, |iovec| Value(Term::List(iovec)))
         }
         _ => BifResult::badarg(),
     }
 }
 
 /// Return the bytes of iodata: the bytes of a binary, or the bytes of each
-/// element of an iolist in order, as `erts_iolist_to_buf` writes them.
-/// Return `None` for any other term and for an iolist with an element that
-/// is not iodata.
+/// element and each binary tail of an iolist in order, as
+/// `erts_iolist_to_buf` writes them. Return `None` for any other term and
+/// for an iolist with an element or a tail that is not iodata.
 ///
 /// # Examples
 ///
@@ -673,16 +709,20 @@ pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
 /// // [$a, [<<"b">>]] gives <<"ab">>.
 /// let list = Term::List(vec![Term::Integer(97), Term::List(vec![Term::Binary(b"b".to_vec())])]);
 /// assert_eq!(iodata_bytes(&list), Some(b"ab".to_vec()));
+/// // [$a|<<"b">>] gives <<"ab">>, and [$a|x] is not iodata.
+/// let tail = |tail| Term::ImproperList(vec![Term::Integer(97)], Box::new(tail));
+/// assert_eq!(iodata_bytes(&tail(Term::Binary(b"b".to_vec()))), Some(b"ab".to_vec()));
+/// assert_eq!(iodata_bytes(&tail(Term::static_atom("x"))), None);
 /// assert_eq!(iodata_bytes(&Term::List(vec![Term::Integer(256)])), None);
 /// assert_eq!(iodata_bytes(&Term::static_atom("foo")), None);
 /// ```
 pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
     match term {
         Term::Binary(bytes) => Some(bytes.clone()),
-        Term::List(elements) => {
+        Term::List(_) | Term::ImproperList(..) => {
             let mut bytes = Vec::new();
             // An iovec holds only binaries.
-            for binary in iolist_iovec(elements)? {
+            for binary in iolist_iovec(term)? {
                 if let Term::Binary(part) = &binary {
                     bytes.extend_from_slice(part);
                 }
@@ -693,39 +733,53 @@ pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
     }
 }
 
-/// Convert the elements of an iolist to the iovec of
-/// `erlang:iolist_to_iovec/1`, or return `None` when an element is not
-/// iodata. Use a stack of list iterators, as the ERTS engine does, so that a
-/// deep nested list does not use the Rust call stack.
+/// Convert a proper or improper iolist to the iovec of
+/// `erlang:iolist_to_iovec/1`, or return `None` when an element or a tail is
+/// not iodata. A binary tail of a list comes after the elements of that
+/// list. Each other tail gives `None`, whatever comes before it, because
+/// ERTS walks the whole term before it builds the result
+/// (`generic_iolist_size`, `erl_iolist.c:153-236`). Use a stack of list
+/// iterators, as the ERTS engine does, so that a deep nested list does not
+/// use the Rust call stack.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let iolist = [Term::List(vec![]), Term::Binary(vec![]), Term::Integer(7)];
+/// let iolist = Term::List(vec![Term::List(vec![]), Term::Binary(vec![]), Term::Integer(7)]);
 /// assert_eq!(iolist_iovec(&iolist), Some(vec![Term::Binary(vec![7])]));
-/// assert_eq!(iolist_iovec(&[Term::Integer(-1)]), None);
+/// // [7|<<8>>] gives [<<7,8>>], and [7|8] is not iodata.
+/// let improper = |tail| Term::ImproperList(vec![Term::Integer(7)], Box::new(tail));
+/// assert_eq!(iolist_iovec(&improper(Term::Binary(vec![8]))), Some(vec![Term::Binary(vec![7, 8])]));
+/// assert_eq!(iolist_iovec(&improper(Term::Integer(8))), None);
+/// assert_eq!(iolist_iovec(&Term::List(vec![Term::Integer(-1)])), None);
 /// ```
-fn iolist_iovec(elements: &[Term]) -> Option<Vec<Term>> {
+fn iolist_iovec(list: &Term) -> Option<Vec<Term>> {
     let mut iovec = Vec::new();
     let mut merged = Vec::new();
-    let mut lists = vec![elements.iter()];
-    while let Some(list) = lists.last_mut() {
-        match list.next() {
-            None => {
-                lists.pop();
+    // Each level holds the elements of a list that the walk did not read
+    // yet, and its binary tail, which comes after them.
+    let mut lists = vec![(std::slice::from_ref(list).iter(), None)];
+    while let Some((elements, tail)) = lists.last_mut() {
+        let Some(element) = elements.next().or_else(|| tail.take()) else {
+            lists.pop();
+            continue;
+        };
+        match element {
+            Term::List(inner) => lists.push((inner.iter(), None)),
+            Term::ImproperList(inner, tail) if matches!(**tail, Term::Binary(_)) => {
+                lists.push((inner.iter(), Some(&**tail)));
             }
-            Some(Term::List(inner)) => lists.push(inner.iter()),
-            Some(Term::Integer(byte)) => merged.push(u8::try_from(*byte).ok()?),
-            Some(Term::Binary(bytes)) if bytes.len() <= IOVEC_COPY_LIMIT => {
+            Term::Integer(byte) => merged.push(u8::try_from(*byte).ok()?),
+            Term::Binary(bytes) if bytes.len() <= IOVEC_COPY_LIMIT => {
                 merged.extend_from_slice(bytes);
             }
-            Some(binary @ Term::Binary(_)) => {
+            binary @ Term::Binary(_) => {
                 if !merged.is_empty() {
                     iovec.push(Term::Binary(std::mem::take(&mut merged)));
                 }
                 iovec.push(binary.clone());
             }
-            Some(_) => return None,
+            _ => return None,
         }
     }
     if !merged.is_empty() {

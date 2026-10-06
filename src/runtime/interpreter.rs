@@ -521,10 +521,17 @@ impl BeamProgram {
                         TestKind::Pid => matches!(value, Term::Pid(_)),
                         TestKind::Reference => matches!(value, Term::Reference(_)),
                         TestKind::Tuple => matches!(value, Term::Tuple(_)),
-                        TestKind::List => matches!(value, Term::List(_)),
+                        // `is_list` and `is_nonempty_list` test the cons tag, so an
+                        // improper list passes (emu `instrs.tab:879-891`; JIT
+                        // `emit_is_list` and `emit_is_nonempty_list` in
+                        // `jit/arm/instr_common.cpp:1118-1364`).
+                        TestKind::List => matches!(value, Term::List(_) | Term::ImproperList(..)),
                         TestKind::Nil => matches!(&value, Term::List(values) if values.is_empty()),
                         TestKind::NonEmptyList => {
-                            matches!(&value, Term::List(values) if !values.is_empty())
+                            matches!(
+                                &value,
+                                Term::List(values) if !values.is_empty()
+                            ) || matches!(value, Term::ImproperList(..))
                         }
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
@@ -686,14 +693,13 @@ impl BeamProgram {
                     tail,
                     destination,
                 } => {
+                    // ERTS `put_list` stores any tail in the new cons cell, so a
+                    // tail that is not a list gives an improper list (emu
+                    // `instrs.tab:732-737`; JIT `emit_put_list` in
+                    // `jit/arm/instr_common.cpp:707-721`).
                     let head = read(process, head)?;
-                    let mut tail = read(process, tail)?;
-                    let Term::List(values) = &mut tail else {
-                        return Err(error("unsupported BEAM list tail"));
-                    };
-                    let mut values = std::mem::take(values);
-                    values.insert(0, head);
-                    write(process, destination, Term::List(values))?;
+                    let tail = read(process, tail)?;
+                    write(process, destination, Term::list_with_tail(vec![head], tail))?;
                 }
                 Instruction::PutTuple {
                     elements,
@@ -743,27 +749,23 @@ impl BeamProgram {
                     write(process, destination, record)?;
                 }
                 Instruction::GetList { source, head, tail } => {
-                    let mut values = nonempty_list(read(process, source)?)?;
-                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
-                    let first = values.remove(0);
+                    let (first, rest) = nonempty_list(read(process, source)?)?;
                     write(process, head, first)?;
-                    write(process, tail, Term::List(values))?;
+                    write(process, tail, rest)?;
                 }
                 Instruction::GetHead {
                     source,
                     destination,
                 } => {
-                    let mut values = nonempty_list(read(process, source)?)?;
-                    write(process, destination, values.swap_remove(0))?;
+                    let (first, _) = nonempty_list(read(process, source)?)?;
+                    write(process, destination, first)?;
                 }
                 Instruction::GetTail {
                     source,
                     destination,
                 } => {
-                    let mut values = nonempty_list(read(process, source)?)?;
-                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
-                    values.remove(0);
-                    write(process, destination, Term::List(values))?;
+                    let (_, rest) = nonempty_list(read(process, source)?)?;
+                    write(process, destination, rest)?;
                 }
                 Instruction::Send => {
                     // ERTS `send` calls `erl_send` and writes its result to
@@ -995,7 +997,9 @@ impl BeamProgram {
     /// `i_apply` instructions. The function and the module must be atoms,
     /// and `Arguments` must be a list, else the call raises `error:badarg`.
     /// An apply of `erlang:apply/3` continues with its inner call. A list of
-    /// 1024 or more elements raises `error:system_limit`. Then the elements
+    /// 1024 or more elements raises `error:system_limit`, also when the list
+    /// is improper, because ERTS counts the elements before it reads the
+    /// tail. Then an improper list raises `error:badarg`. Else the elements
     /// go to `x0` onwards, and the call continues as `call_ext` does. Return
     /// the outcome when the process exits.
     ///
@@ -1014,23 +1018,32 @@ impl BeamProgram {
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         let mut call = call_arguments(&process.registers, 3)?;
-        let (module, name, arguments) = loop {
+        let (module, name, arguments, proper) = loop {
             // Each wrong form raises the same `badarg`, so one pattern checks
             // the function, the module, and the list.
-            let [Term::Atom(module), Term::Atom(name), Term::List(arguments)] = &mut call[..]
-            else {
+            let [Term::Atom(module), Term::Atom(name), list] = &mut call[..] else {
                 let badarg = Term::static_atom("badarg");
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
-            let arguments = std::mem::take(arguments);
-            if (module.name(), name.name()) != ("erlang", "apply") || arguments.len() != 3 {
-                break (module.clone(), name.clone(), arguments);
+            let Some((arguments, proper)) = take_list_elements(list) else {
+                let badarg = Term::static_atom("badarg");
+                return Ok(raise(process, ExceptionClass::Error, badarg));
+            };
+            if !proper
+                || (module.name(), name.name()) != ("erlang", "apply")
+                || arguments.len() != 3
+            {
+                break (module.clone(), name.clone(), arguments, proper);
             }
             call = arguments;
         };
         if arguments.len() > APPLY_MAX_ARGUMENTS {
             let system_limit = Term::static_atom("system_limit");
             return Ok(raise(process, ExceptionClass::Error, system_limit));
+        }
+        if !proper {
+            let badarg = Term::static_atom("badarg");
+            return Ok(raise(process, ExceptionClass::Error, badarg));
         }
         let arity = arguments.len() as u32;
         for (index, argument) in (0..).zip(arguments) {
@@ -1043,7 +1056,9 @@ impl BeamProgram {
     /// `x1`, as the JIT `emit_apply_fun_shared` (`jit/arm/instr_fun.cpp:253-328`)
     /// does for the `i_apply_fun` instructions. `Arguments` must be a list,
     /// else the call raises `error:badarg`. A list of 1023 or more elements
-    /// raises `error:system_limit`. Then the elements go to `x0` onwards, and
+    /// raises `error:system_limit`, also when the list is improper, because
+    /// the JIT counts the elements before it reads the tail. Then an improper
+    /// list raises `error:badarg`. Else the elements go to `x0` onwards, and
     /// the call continues as `call_fun` does, so a term that is not a fun
     /// raises `badfun` only after these checks. Return the outcome when the
     /// process exits.
@@ -1064,14 +1079,17 @@ impl BeamProgram {
         let process = scheduler.current_process_mut();
         let fun = read(process, &Operand::X(0))?;
         let mut list = read(process, &Operand::X(1))?;
-        let Term::List(arguments) = &mut list else {
+        let Some((arguments, proper)) = take_list_elements(&mut list) else {
             let badarg = Term::static_atom("badarg");
             return Ok(raise(process, ExceptionClass::Error, badarg));
         };
-        let arguments = std::mem::take(arguments);
         if arguments.len() > APPLY_FUN_MAX_ARGUMENTS {
             let system_limit = Term::static_atom("system_limit");
             return Ok(raise(process, ExceptionClass::Error, system_limit));
+        }
+        if !proper {
+            let badarg = Term::static_atom("badarg");
+            return Ok(raise(process, ExceptionClass::Error, badarg));
         }
         let arity = arguments.len() as u32;
         for (index, argument) in (0..).zip(arguments) {
@@ -1208,6 +1226,27 @@ fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
     }
 }
 
+/// Take the elements of a list term for an apply, and tell whether the list
+/// is proper. `[]` gives no elements. Return `None` for a term that is not a
+/// list. The elements of an improper list come before its tail, so a caller
+/// can count them first, as ERTS `apply` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut list = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x")));
+/// assert_eq!(take_list_elements(&mut list), Some((vec![Term::Integer(1)], false)));
+/// assert_eq!(take_list_elements(&mut Term::List(vec![])), Some((vec![], true)));
+/// assert_eq!(take_list_elements(&mut Term::static_atom("x")), None);
+/// ```
+fn take_list_elements(list: &mut Term) -> Option<(Vec<Term>, bool)> {
+    match list {
+        Term::List(elements) => Some((std::mem::take(elements), true)),
+        Term::ImproperList(elements, _) => Some((std::mem::take(elements), false)),
+        _ => None,
+    }
+}
+
 /// The spawn options that this runtime supports, as the flags of ERTS
 /// `ErlSpawnOpts`.
 #[derive(Default)]
@@ -1220,34 +1259,41 @@ struct SpawnOptions {
 
 /// Start a process that runs `module:function` with the elements of
 /// `arguments`, as ERTS `erl_create_process` does. Return the pid, or
-/// `{Pid, Reference}` when `options.monitor` is set.
+/// `{Pid, Reference}` when `options.monitor` is set. A `module` or
+/// `function` that is not an atom, and `arguments` that are not a proper
+/// list, raise `badarg` (`erl_process.c:12490-12492`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let result = create_process(&program, &mut scheduler, &module, &function, &Term::List(vec![]), SpawnOptions::default())?;
-/// assert!(matches!(result, Term::Pid(_)));
-/// assert!(create_process(&program, &mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default()).is_err());
+/// assert!(matches!(result, BifResult::Value(Term::Pid(_))));
+/// let result = create_process(&program, &mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default())?;
+/// assert!(matches!(result, BifResult::Raise { .. }));
+/// let result = create_process(&program, &mut scheduler, &Term::Integer(1), &function, &Term::List(vec![]), SpawnOptions::default())?;
+/// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 fn create_process(
     program: &BeamProgram,
     scheduler: &mut Scheduler,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
     options: SpawnOptions,
-) -> Result<Term, BeamError> {
-    let Term::List(arguments) = arguments else {
-        return Err(error("spawn arguments are not a proper list"));
+) -> Result<BifResult, BeamError> {
+    let (Term::Atom(module), Term::Atom(function), Term::List(arguments)) =
+        (module, function, arguments)
+    else {
+        return Ok(BifResult::badarg());
     };
     let arguments = arguments.clone();
     let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
     let frame = program.mfa_frame(module.name(), function.name(), arity)?;
     let (pid, reference) = scheduler.spawn(frame, arguments, options.monitor, options.link)?;
-    Ok(match reference {
+    Ok(BifResult::Value(match reference {
         Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),
-    })
+    }))
 }
 
 /// Return the active frame of a running process.
@@ -1445,23 +1491,40 @@ fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
     write(process, &Operand::Y(register), Term::List(Vec::new()))
 }
 
-/// Return the elements of a nonempty list, which `get_list` and `get_hd`
-/// read. The BEAM validator makes sure that the source is a nonempty list.
+/// Return the head and the tail of a nonempty proper or improper list,
+/// which `get_list`, `get_hd`, and `get_tl` read as the `CAR` and the `CDR`
+/// of the first cons cell (emu `instrs.tab:389-407`; JIT
+/// `jit/arm/instr_common.cpp:274-318`). The BEAM validator makes sure that
+/// the source is a nonempty list.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
+/// let x = || Term::static_atom("x");
 /// let list = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
-/// assert_eq!(nonempty_list(list)?, vec![Term::Integer(1), Term::Integer(2)]);
+/// assert_eq!(nonempty_list(list)?, (Term::Integer(1), Term::List(vec![Term::Integer(2)])));
+/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x()));
+/// assert_eq!(nonempty_list(improper)?, (Term::Integer(1), x()));
 /// assert!(nonempty_list(Term::List(vec![])).is_err());
 /// ```
-fn nonempty_list(mut list: Term) -> Result<Vec<Term>, BeamError> {
-    match &mut list {
-        Term::List(values) if !values.is_empty() => Ok(std::mem::take(values)),
-        _ => Err(error(format!(
-            "BEAM list source {list:?} is not a nonempty list"
-        ))),
-    }
+fn nonempty_list(mut list: Term) -> Result<(Term, Term), BeamError> {
+    let (mut values, tail) = match &mut list {
+        Term::List(values) if !values.is_empty() => {
+            (std::mem::take(values), Term::List(Vec::new()))
+        }
+        Term::ImproperList(values, tail) => (
+            std::mem::take(values),
+            std::mem::replace(&mut **tail, Term::List(Vec::new())),
+        ),
+        _ => {
+            return Err(error(format!(
+                "BEAM list source {list:?} is not a nonempty list"
+            )));
+        }
+    };
+    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+    let head = values.remove(0);
+    Ok((head, Term::list_with_tail(values, tail)))
 }
 
 /// Continue execution after a label in the active module.
@@ -1941,7 +2004,8 @@ mod tests {
         let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
         body.push(Instruction::Return);
         assert!(matches!(run_with_child(body), Ok(Term::Pid(_))));
-        assert!(error(spawn_link_child(Term::Integer(1))).contains("not a proper list"));
+        // ERTS 29.1.1: spawn_link(M, F, 1) raises badarg.
+        assert_eq!(error(spawn_link_child(Term::Integer(1))), BADARG_EXIT);
         // `erlang:is_alive/0` is not a BIF: it runs the code of the `erlang`
         // module, which this program does not load.
         assert!(
@@ -2618,11 +2682,12 @@ mod tests {
             convert(chardata(), "unicode").unwrap(),
             Term::Binary(b"Hello\n".to_vec())
         );
+        // ERTS 29.1.1 raises badarg for a term that is not chardata.
         assert_eq!(
             convert(Term::Integer(1), "unicode")
                 .unwrap_err()
                 .to_string(),
-            "unsupported chardata Integer(1): not a binary or a list"
+            BADARG_EXIT
         );
         // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], utf8)
         // is <<"Hello\n">>.
@@ -2637,7 +2702,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_a_list_from_nil_and_rejects_an_unsupported_tail() {
+    fn builds_a_proper_and_an_improper_list() {
         let list = make_program(
             vec![
                 Instruction::PutList {
@@ -2654,7 +2719,8 @@ mod tests {
             Term::List(vec![Term::Integer(10)])
         );
 
-        let invalid_tail = make_program(
+        // ERTS: [10 | 0] is the improper list [10|0].
+        let improper = make_program(
             vec![
                 Instruction::PutList {
                     head: Operand::Value(Term::Integer(10)),
@@ -2665,7 +2731,10 @@ mod tests {
             ],
             0,
         );
-        assert!(invalid_tail.execute("fixture", "main", &[]).is_err());
+        assert_eq!(
+            improper.execute("fixture", "main", &[]).unwrap(),
+            Term::ImproperList(vec![Term::Integer(10)], Box::new(Term::Integer(0)))
+        );
     }
 
     /// The values come from a pinned OTP 29.1.1 run of `lst/1`, `hd1/1`, and
@@ -2721,6 +2790,23 @@ mod tests {
             )
         };
         assert_eq!(get_head(list(&["x", "y"])).unwrap(), test_atom("x"));
+        // ERTS: lst([a|x]) is {a,x}, lst([a,b|x]) is {a,[b|x]}, and
+        // hd1([x|y]) is x.
+        let improper = |names: &[&str], tail: &str| {
+            Term::ImproperList(
+                names.iter().map(|name| test_atom(name)).collect(),
+                Box::new(test_atom(tail)),
+            )
+        };
+        assert_eq!(
+            get_list(improper(&["a"], "x")).unwrap(),
+            Term::Tuple(vec![test_atom("a"), test_atom("x")])
+        );
+        assert_eq!(
+            get_list(improper(&["a", "b"], "x")).unwrap(),
+            Term::Tuple(vec![test_atom("a"), improper(&["b"], "x")])
+        );
+        assert_eq!(get_head(improper(&["x"], "y")).unwrap(), test_atom("x"));
         // ERTS: nil([]) is nil, nil([a]) is nonempty, and nil(a) is other.
         let classify = |argument: Term| {
             run(
@@ -2751,6 +2837,8 @@ mod tests {
         assert_eq!(classify(list(&[])), test_atom("nil"));
         assert_eq!(classify(list(&["a"])), test_atom("nonempty"));
         assert_eq!(classify(test_atom("a")), test_atom("other"));
+        // ERTS: nil([a|x]) is nonempty.
+        assert_eq!(classify(improper(&["a"], "x")), test_atom("nonempty"));
         // The BEAM validator makes sure that the source is a nonempty list.
         assert_eq!(
             get_list(list(&[])).unwrap_err().to_string(),
@@ -3795,10 +3883,8 @@ mod tests {
         // ERTS 29.1.1: [1] ++ x is the improper list [1|x], and a ++ []
         // and a ++ x raise badarg.
         assert_eq!(
-            append(integers(&[1]), test_atom("x"))
-                .unwrap_err()
-                .to_string(),
-            "unsupported erlang:++/2 tail Atom(\"x\"): not a list"
+            append(integers(&[1]), test_atom("x")).unwrap(),
+            Term::ImproperList(vec![Term::Integer(1)], Box::new(test_atom("x")))
         );
         for right in [Term::List(Vec::new()), test_atom("x")] {
             assert_eq!(
@@ -3809,7 +3895,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_a_lists_reverse_result_that_is_an_improper_list() {
+    fn reverses_a_list_onto_a_tail_that_is_not_a_list() {
         // ERTS 29.1.1: lists:reverse([a], x) is the improper list [a|x].
         let reverse = call_ext_with(
             "lists",
@@ -3817,8 +3903,8 @@ mod tests {
             vec![Term::List(vec![test_atom("a")]), test_atom("x")],
         );
         assert_eq!(
-            reverse.unwrap_err().to_string(),
-            "unsupported lists:reverse/2 tail Atom(\"x\"): not a list"
+            reverse.unwrap(),
+            Term::ImproperList(vec![test_atom("a")], Box::new(test_atom("x")))
         );
     }
 

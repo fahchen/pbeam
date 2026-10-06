@@ -9,7 +9,8 @@
 //! Supported keys:
 //!
 //! - hashmap: an atom, an integer in the ERTS small-integer range, `[]`,
-//!   and a list whose elements are such keys;
+//!   a list whose elements are such keys, and an improper list whose
+//!   elements are such keys and whose tail is an atom or a small integer;
 //! - flatmap: each hashmap key, and any integer.
 //!
 //! As in ERTS, a flatmap orders two atom keys by their atom index and each
@@ -19,7 +20,7 @@
 //! ERTS order, which BEAM code sees through operations such as
 //! `maps:keys/1`. Other key types need the hashmap insertion of bignums,
 //! tuples, binaries, maps, funs, pids, and references, which PBeam does not
-//! have yet.
+//! have yet. So does an improper list with such a tail, for example `[1|{}]`.
 
 use std::cmp::Ordering;
 
@@ -655,7 +656,8 @@ fn slot(hash: u64, level: u32) -> u32 {
 /// of a key, or `None` for a key that a hashmap does not support yet. The
 /// map hash is the ERTS internal hash, so an atom hashes as its word
 /// `(index << 6) | 0xB`, a small integer as its word `(value << 4) | 0xF`, and
-/// a list key that is not empty with the list path of `make_internal_hash`.
+/// a list key that is not empty with the list path of `make_internal_hash`,
+/// also an improper list whose tail is an atom or a small integer.
 ///
 /// # Examples
 ///
@@ -667,6 +669,9 @@ fn slot(hash: u64, level: u32) -> u32 {
 /// assert!(map_hash(&Term::List(vec![Term::Integer(97)])).is_some());
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
 /// assert_eq!(map_hash(&Term::Tuple(vec![])), None);
+/// let improper = |tail| Term::ImproperList(vec![Term::Integer(1)], Box::new(tail));
+/// assert!(map_hash(&improper(Term::Integer(2))).is_some());
+/// assert_eq!(map_hash(&improper(Term::Tuple(vec![]))), None);
 /// ```
 fn map_hash(key: &Term) -> Option<u64> {
     let mut pending = vec![key];
@@ -674,6 +679,7 @@ fn map_hash(key: &Term) -> Option<u64> {
         match term {
             Term::Atom(_) => {}
             Term::List(elements) => pending.extend(elements),
+            Term::ImproperList(elements, tail) => pending.extend(elements.iter().chain([&**tail])),
             _ => {
                 term.small_integer()?;
             }
@@ -810,6 +816,13 @@ mod tests {
             Term::List(vec![Term::Integer(1), Term::Tuple(vec![])]),
             Term::List(vec![Term::List(vec![Term::Tuple(vec![])])]),
             Term::List(vec![Term::Integer(1 << 59)]),
+            // [1|{}], [1|<<>>], and [[1|{}]]: an improper list tail that is not an immediate.
+            Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Tuple(vec![]))),
+            Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Binary(vec![]))),
+            Term::List(vec![Term::ImproperList(
+                vec![Term::Integer(1)],
+                Box::new(Term::Tuple(vec![])),
+            )]),
         ];
         for key in unsupported {
             assert_eq!(map_hash(&key), None);
@@ -821,6 +834,78 @@ mod tests {
             assert_eq!(hash.len(), 33);
             assert_eq!(hash.get(&key), None);
         }
+    }
+
+    #[test]
+    fn hashes_improper_list_keys_with_their_tail_as_erts() {
+        // ERTS 29.1.1: maps:keys of #{[1|2] => v, [1,2|3] => v, [[1|2]|3] => v,
+        // [true|false] => v, [256|1] => v, [[1]|2] => v, [[]|-1] => v, 1 => v, ..., 26 => v}.
+        let improper = |elements: Vec<Term>, tail| Term::ImproperList(elements, Box::new(tail));
+        let int = Term::Integer;
+        let one_two = || improper(vec![int(1)], int(2));
+        let one_two_three = || improper(vec![int(1), int(2)], int(3));
+        let nested = || improper(vec![one_two()], int(3));
+        let booleans = || improper(vec![Term::static_atom("true")], Term::static_atom("false"));
+        let large = || improper(vec![int(256)], int(1));
+        let list_head = || improper(vec![Term::List(vec![int(1)])], int(2));
+        let nil_head = || improper(vec![Term::List(vec![])], int(-1));
+        let lists = [
+            one_two(),
+            one_two_three(),
+            nested(),
+            booleans(),
+            large(),
+            list_head(),
+            nil_head(),
+        ];
+        let map = Map::from_pairs(
+            lists
+                .into_iter()
+                .chain((1..=26).map(int))
+                .map(|key| (key, atom("v")))
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            keys(&map),
+            [
+                int(18),
+                list_head(),
+                nested(),
+                int(4),
+                large(),
+                int(12),
+                int(19),
+                int(13),
+                int(2),
+                int(7),
+                int(8),
+                int(10),
+                int(23),
+                int(9),
+                booleans(),
+                one_two(),
+                int(15),
+                one_two_three(),
+                int(1),
+                int(25),
+                int(20),
+                int(6),
+                int(11),
+                int(17),
+                int(24),
+                int(14),
+                nil_head(),
+                int(3),
+                int(16),
+                int(21),
+                int(5),
+                int(26),
+                int(22),
+            ]
+        );
+        assert_eq!(map.get(&one_two_three()), Some(&atom("v")));
+        assert_eq!(map.get(&improper(vec![int(1), int(2)], int(4))), None);
     }
 
     #[test]

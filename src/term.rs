@@ -30,13 +30,22 @@ pub enum Term {
     Integer(i64),
     /// A proper list of BEAM terms.
     List(Vec<Term>),
+    /// An improper list: its elements and the tail after the last element,
+    /// for example `[1, 2 | x]`. Its canonical form holds at least one
+    /// element and a tail that is not `List` or `ImproperList`, so each
+    /// improper list has one form. The runtime builds each improper list
+    /// in this form with `Term::list_with_tail`. The type does not enforce
+    /// the form: a caller that gives an argument to an `execute` function
+    /// must use it, because equality, order, and map keys compare the form.
+    ImproperList(Vec<Term>, Box<Term>),
     /// A BEAM tuple.
     Tuple(Vec<Term>),
     /// A BEAM map: a flatmap up to 32 keys and a hashmap above 32 keys, as
     /// in ERTS. `Map` keeps each map in its canonical form, so two maps with
-    /// the same pairs are equal. A key is an atom, a small integer, `[]`, or
-    /// a list of these keys; a flatmap also accepts any integer. Atom keys
-    /// are ordered and hashed by their atom index, as in ERTS.
+    /// the same pairs are equal. A key is an atom, a small integer, `[]`, a
+    /// list of these keys, or an improper list of these keys whose tail is
+    /// an atom or a small integer; a flatmap also accepts any integer. Atom
+    /// keys are ordered and hashed by their atom index, as in ERTS.
     Map(Map),
     /// A process identifier owned by this runtime.
     Pid(ProcessId),
@@ -52,13 +61,16 @@ pub enum Term {
 #[derive(Clone, Copy)]
 enum Kind<'a> {
     List,
+    /// An improper list. Its last nested term is the tail.
+    ImproperList,
     Tuple,
     Map,
     Fun(&'a Target),
 }
 
-/// The nested terms of a list, tuple, map, or fun, in order. A map gives
-/// each key and then its value, and a fun gives its free variables.
+/// The nested terms of a list, tuple, map, or fun, in order. An improper
+/// list gives its elements and then its tail, a map gives each key and then
+/// its value, and a fun gives its free variables.
 type Nested<'a> = Box<dyn Iterator<Item = &'a Term> + 'a>;
 
 impl Kind<'_> {
@@ -72,10 +84,16 @@ impl Kind<'_> {
     /// let map = Kind::Map.build(vec![Term::static_atom("ok"), Term::Integer(1)]);
     /// let pairs = vec![(Term::static_atom("ok"), Term::Integer(1))];
     /// assert_eq!(map, Term::Map(Map::from_pairs(pairs)?));
+    /// let improper = Kind::ImproperList.build(vec![Term::Integer(1), Term::static_atom("x")]);
+    /// assert_eq!(improper, Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x"))));
     /// ```
-    fn build(self, terms: Vec<Term>) -> Term {
+    fn build(self, mut terms: Vec<Term>) -> Term {
         match self {
             Kind::List => Term::List(terms),
+            Kind::ImproperList => {
+                let tail = terms.pop().expect("an improper list copy has a tail");
+                Term::ImproperList(terms, Box::new(tail))
+            }
             Kind::Tuple => Term::Tuple(terms),
             Kind::Map => {
                 let mut pairs = Vec::with_capacity(terms.len() / 2);
@@ -132,6 +150,40 @@ impl Term {
         }
     }
 
+    /// Build a list of `elements` followed by `tail`, in the one form of
+    /// each list: a proper list tail gives a proper list, an improper list
+    /// tail gives an improper list with its tail, and no elements give the
+    /// tail itself. Each other tail gives an improper list.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let one = || vec![Term::Integer(1)];
+    /// let x = Term::static_atom("x");
+    /// assert_eq!(Term::list_with_tail(one(), Term::List(vec![Term::Integer(2)])), Term::List(vec![Term::Integer(1), Term::Integer(2)]));
+    /// assert_eq!(Term::list_with_tail(one(), x.clone()), Term::ImproperList(one(), Box::new(x.clone())));
+    /// assert_eq!(Term::list_with_tail(vec![], x.clone()), x);
+    /// ```
+    pub(crate) fn list_with_tail(mut elements: Vec<Term>, mut tail: Term) -> Term {
+        if elements.is_empty() {
+            return tail;
+        }
+        match &mut tail {
+            Term::List(rest) => {
+                elements.append(rest);
+                Term::List(elements)
+            }
+            Term::ImproperList(rest, end) => {
+                elements.append(rest);
+                Term::ImproperList(
+                    elements,
+                    std::mem::replace(end, Box::new(Term::List(vec![]))),
+                )
+            }
+            _ => Term::ImproperList(elements, Box::new(tail)),
+        }
+    }
+
     /// Copy a term that has no nested terms. For a list, tuple, map, or
     /// fun, return its nested terms, kind, and count instead, so the caller
     /// copies them.
@@ -145,6 +197,11 @@ impl Term {
     fn shallow_clone(&self) -> Result<Term, (Nested<'_>, Kind<'_>, usize)> {
         match self {
             Term::List(elements) => Err((Box::new(elements.iter()), Kind::List, elements.len())),
+            Term::ImproperList(elements, tail) => Err((
+                Box::new(elements.iter().chain([&**tail])),
+                Kind::ImproperList,
+                elements.len() + 1,
+            )),
             Term::Tuple(elements) => Err((Box::new(elements.iter()), Kind::Tuple, elements.len())),
             Term::Map(map) => Err((
                 Box::new(map.iter().flat_map(|(key, value)| [key, value])),
@@ -165,7 +222,7 @@ impl Term {
     }
 
     /// Move the nested terms of a list, tuple, map, or fun onto a work stack
-    /// and leave the term empty.
+    /// and leave the term empty. An improper list leaves `[]` as its tail.
     ///
     /// # Examples
     ///
@@ -177,6 +234,10 @@ impl Term {
     fn take_nested(&mut self, pending: &mut Vec<Term>) {
         match self {
             Term::List(elements) | Term::Tuple(elements) => pending.append(elements),
+            Term::ImproperList(elements, tail) => {
+                pending.append(elements);
+                pending.push(std::mem::replace(&mut **tail, Term::List(vec![])));
+            }
             Term::Fun(fun) => pending.append(&mut fun.free),
             Term::Map(map) => std::mem::replace(map, Map::new()).drain_into(pending),
             _ => {}
@@ -241,7 +302,9 @@ impl Clone for Term {
 }
 
 impl PartialEq for Term {
-    /// Compare two terms pair by pair with a work stack. Two maps are equal
+    /// Compare two terms pair by pair with a work stack. Two improper lists
+    /// are equal when their elements and their tails are equal, as `eq` in
+    /// `utils.c:1137-1162` compares each head and then the last tail. Two maps are equal
     /// when their pairs in canonical order are equal, as the structural ERTS
     /// comparison of two flatmaps or two hashmaps is. Two local funs are
     /// equal when their fun entries and their free variables are equal, and
@@ -260,6 +323,11 @@ impl PartialEq for Term {
             let equal = match pair {
                 (Term::List(left), Term::List(right)) | (Term::Tuple(left), Term::Tuple(right)) => {
                     pairs.extend(left.iter().zip(right));
+                    left.len() == right.len()
+                }
+                (Term::ImproperList(left, left_tail), Term::ImproperList(right, right_tail)) => {
+                    pairs.extend(left.iter().zip(right));
+                    pairs.push((left_tail, right_tail));
                     left.len() == right.len()
                 }
                 (Term::Fun(left), Term::Fun(right)) => {
@@ -294,8 +362,8 @@ impl Eq for Term {}
 
 impl fmt::Debug for Term {
     /// Write the same text as a derived `Debug`, for example
-    /// `Tuple([Atom("undef"), List([])])` or `Map([(Atom("a"), Integer(1))])`,
-    /// with a work stack. A fun writes its entry and its free variables, for
+    /// `Tuple([Atom("undef"), List([])])`, `ImproperList([Integer(1)], Atom("x"))`,
+    /// or `Map([(Atom("a"), Integer(1))])`, with a work stack. A fun writes its entry and its free variables, for
     /// example `Fun(Local(Lambda { .. }), [Atom("tag")])`.
     ///
     /// # Examples
@@ -325,14 +393,22 @@ impl fmt::Debug for Term {
                 Term::Pid(pid) => write!(formatter, "Pid({pid:?})")?,
                 Term::Reference(reference) => write!(formatter, "Reference({reference:?})")?,
                 Term::List(elements)
+                | Term::ImproperList(elements, _)
                 | Term::Tuple(elements)
                 | Term::Fun(Fun { free: elements, .. }) => {
                     match term {
                         Term::List(_) => formatter.write_str("List([")?,
+                        Term::ImproperList(..) => formatter.write_str("ImproperList([")?,
                         Term::Fun(fun) => write!(formatter, "Fun({:?}, [", fun.target)?,
                         _ => formatter.write_str("Tuple([")?,
                     }
-                    items.push(Item::Text("])"));
+                    if let Term::ImproperList(_, tail) = term {
+                        items.push(Item::Text(")"));
+                        items.push(Item::Term(tail));
+                        items.push(Item::Text("], "));
+                    } else {
+                        items.push(Item::Text("])"));
+                    }
                     for (index, element) in elements.iter().enumerate().rev() {
                         items.push(Item::Term(element));
                         if index > 0 {
@@ -404,6 +480,84 @@ mod tests {
         ));
         drop(term);
         drop(copy);
+    }
+
+    #[test]
+    fn clones_compares_formats_and_drops_deep_improper_lists_without_recursion() {
+        // Each level nests through the tail or through the first element.
+        let deep = |levels: usize| {
+            (0..levels).fold(atom("x"), |inner, level| match level % 2 {
+                0 => Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Tuple(vec![inner]))),
+                _ => Term::ImproperList(vec![inner], Box::new(atom("t"))),
+            })
+        };
+        let term = deep(1_000_000);
+        let copy = term.clone();
+        assert_eq!(term, copy);
+        assert_ne!(term, deep(999_999));
+        assert!(format!("{copy:?}").starts_with(
+            "ImproperList([ImproperList([Integer(1)], Tuple([ImproperList([ImproperList(["
+        ));
+        drop(term);
+        drop(copy);
+    }
+
+    #[test]
+    fn compares_and_formats_improper_lists_by_elements_and_tail() {
+        // ERTS 29.1.1: [1|x] =:= [1|x] is true, and [1,2|a] =:= [1,2|b],
+        // [1|a] =:= [1], and [1|2] =:= [1|x] are false (`eq`, `utils.c:1137-1162`).
+        let improper = |elements: &[i64], tail| {
+            Term::ImproperList(
+                elements
+                    .iter()
+                    .map(|element| Term::Integer(*element))
+                    .collect(),
+                Box::new(tail),
+            )
+        };
+        assert_eq!(improper(&[1], atom("x")), improper(&[1], atom("x")).clone());
+        assert_ne!(improper(&[1, 2], atom("a")), improper(&[1, 2], atom("b")));
+        assert_ne!(
+            improper(&[1], atom("a")),
+            Term::List(vec![Term::Integer(1)])
+        );
+        assert_ne!(improper(&[1], Term::Integer(2)), improper(&[1], atom("x")));
+        assert_ne!(improper(&[1], atom("x")), improper(&[1, 2], atom("x")));
+        assert_ne!(improper(&[1], atom("x")), improper(&[2], atom("x")));
+        assert_eq!(
+            format!(
+                "{:?}",
+                Term::Tuple(vec![improper(&[1, 2], Term::Tuple(vec![atom("t")]))])
+            ),
+            "Tuple([ImproperList([Integer(1), Integer(2)], Tuple([Atom(\"t\")]))])"
+        );
+    }
+
+    #[test]
+    fn builds_each_list_in_its_one_form() {
+        let one = || vec![Term::Integer(1)];
+        let x = || Box::new(atom("x"));
+        assert_eq!(
+            Term::list_with_tail(one(), Term::List(vec![Term::Integer(2)])),
+            Term::List(vec![Term::Integer(1), Term::Integer(2)])
+        );
+        assert_eq!(
+            Term::list_with_tail(one(), Term::List(vec![])),
+            Term::List(one())
+        );
+        assert_eq!(
+            Term::list_with_tail(one(), Term::ImproperList(vec![Term::Integer(2)], x())),
+            Term::ImproperList(vec![Term::Integer(1), Term::Integer(2)], x())
+        );
+        assert_eq!(
+            Term::list_with_tail(one(), *x()),
+            Term::ImproperList(one(), x())
+        );
+        assert_eq!(Term::list_with_tail(vec![], *x()), *x());
+        assert_eq!(
+            Term::list_with_tail(vec![], Term::List(one())),
+            Term::List(one())
+        );
     }
 
     #[test]

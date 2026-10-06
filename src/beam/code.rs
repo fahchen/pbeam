@@ -181,10 +181,12 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// supports only the listed instructions and compact operand forms. `LitT`
 /// supports uncompressed tables. A literal loads as a value only when every
 /// nested tag is listed; another tag, such as a bignum (`SMALL_BIG_EXT`, 110,
-/// as `1 bsl 64` is `[110, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]`), an improper
-/// list tail, or a map key that `Map` does not support yet, makes the literal
-/// unsupported, and execution fails only if an instruction uses it.
-/// `[a|[b]]` and `[a,b]` give the same list. `[97, 1]` is the integer 1, and
+/// as `1 bsl 64` is `[110, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]`), or a map key
+/// that `Map` does not support yet, makes the literal unsupported, and
+/// execution fails only if an instruction uses it. `[a|[b]]` and `[a,b]`
+/// give the same list, a `list_term` whose tail is not a list gives an
+/// improper list such as `[a|b]`, and a `list_term` of length 0 gives its
+/// tail. `[97, 1]` is the integer 1, and
 /// `[98, 255, 255, 255, 255]` is `-1`. On a 64-bit ERTS each `INTEGER_EXT`
 /// value is a small integer (`dec_term`, `external.c:4435-4447`). A
 /// map literal is a flatmap up to 32 pairs and a hashmap above 32 pairs, in
@@ -602,8 +604,8 @@ enum PartialTerm {
 }
 
 /// Read one external term at the cursor and advance past it. Put each atom
-/// into the atom table when it is read. Return `None` for a tag or list tail
-/// that `literal_entry` does not list, or for a map key that `Map` does not
+/// into the atom table when it is read. Return `None` for a tag that
+/// `literal_entry` does not list, or for a map key that `Map` does not
 /// support yet.
 /// Nested lists, tuples, and maps use a work stack, so nesting has no fixed
 /// depth limit, as in the ERTS decoder.
@@ -753,12 +755,10 @@ fn read_external_term(
                         },
                     });
                 }
-                Some(PartialTerm::ListTail { mut elements }) => {
-                    let Term::List(tail) = &mut term else {
-                        return Ok(None);
-                    };
-                    elements.append(tail);
-                    term = Term::List(elements);
+                // A tail that is not a list gives an improper list, and a
+                // LIST_EXT of length 0 gives its tail (`dec_term`, external.c:4581-4588).
+                Some(PartialTerm::ListTail { elements }) => {
+                    term = Term::list_with_tail(elements, term);
                     continue;
                 }
                 Some(PartialTerm::Map {
@@ -1229,7 +1229,7 @@ mod tests {
         let mut atoms = AtomTable::new();
         let mut read = |bytes: &[u8]| read_literal(bytes, &mut atoms);
         // [a|[b]] gives the same list as [a,b].
-        let improper = read(&[
+        let nested = read(&[
             131, 108, 0, 0, 0, 1, 119, 1, b'a', 108, 0, 0, 0, 1, 119, 1, b'b', 106,
         ])
         .unwrap();
@@ -1240,7 +1240,7 @@ mod tests {
                 Term::List(vec![])
             ]))
         );
-        // NEW_FLOAT_EXT (70) 1.0 inside a tuple or a list, and an improper tail.
+        // NEW_FLOAT_EXT (70) 1.0 inside a tuple, inside a list, and as a list tail.
         let float = [70, 63, 240, 0, 0, 0, 0, 0, 0];
         assert_eq!(read(&[&[131, 104, 1][..], &float].concat()).unwrap(), None);
         assert_eq!(
@@ -1248,9 +1248,15 @@ mod tests {
             None
         );
         assert_eq!(
-            read(&[131, 108, 0, 0, 0, 1, 106, 119, 1, b't']).unwrap(),
+            read(&[&[131, 108, 0, 0, 0, 1, 106][..], &float].concat()).unwrap(),
             None
         );
+        // [[]|t] has an atom tail, and [a|[b|t]] keeps the tail of its list tail.
+        let nil_head = read(&[131, 108, 0, 0, 0, 1, 106, 119, 1, b't']).unwrap();
+        let tail = [108, 0, 0, 0, 1, 119, 1, b'b', 119, 1, b't'];
+        let list_tail = read(&[&[131, 108, 0, 0, 0, 1, 119, 1, b'a'][..], &tail].concat()).unwrap();
+        // A LIST_EXT of length 0 gives its tail (external.c:4581-4588).
+        let empty = read(&[131, 108, 0, 0, 0, 0, 119, 1, b't']).unwrap();
         assert!(read(&[131, 119, 1, 0xff]).is_err());
         assert!(read(&[131, 106, 106]).is_err());
         assert!(read(&[131, 104]).is_err());
@@ -1326,7 +1332,20 @@ mod tests {
         assert!(format!("{term:?}").starts_with("Tuple([Tuple(["));
 
         let list = Some(Term::List(vec![atom(&atoms, "a"), atom(&atoms, "b")]));
-        assert_eq!(improper, list);
+        assert_eq!(nested, list);
+        let t = || Box::new(atom(&atoms, "t"));
+        assert_eq!(
+            nil_head,
+            Some(Term::ImproperList(vec![Term::List(vec![])], t()))
+        );
+        assert_eq!(
+            list_tail,
+            Some(Term::ImproperList(
+                vec![atom(&atoms, "a"), atom(&atoms, "b")],
+                t()
+            ))
+        );
+        assert_eq!(empty, Some(*t()));
         assert_eq!(proper, list);
     }
 

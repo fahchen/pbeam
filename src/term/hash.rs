@@ -105,8 +105,9 @@ pub(crate) fn internal_hash(term: &Term) -> u64 {
 enum Shape<'a> {
     /// The word of an atom, a small integer, `[]`, or a pid.
     Immediate(u64),
-    /// The cells of a list that is not empty.
-    List(&'a [Term]),
+    /// The cells of a list that is not empty, and the tail of an improper
+    /// list (`None` is `[]`).
+    List(&'a [Term], Option<&'a Term>),
     Tuple(&'a [Term]),
     Map(&'a Map),
     Binary(&'a [u8]),
@@ -131,7 +132,8 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Atom(atom) => Shape::Immediate(atom_word(atom.index())),
         Term::Pid(ProcessId(number)) => Shape::Immediate((number << IMMED1_TAG_BITS) | PID_TAG),
         Term::List(cells) if cells.is_empty() => Shape::Immediate(NIL),
-        Term::List(cells) => Shape::List(cells),
+        Term::List(cells) => Shape::List(cells, None),
+        Term::ImproperList(cells, tail) => Shape::List(cells, Some(tail)),
         Term::Integer(value) => match term.small_integer() {
             Some(small) => {
                 Shape::Immediate(((small as u64) << IMMED1_TAG_BITS) | SMALL_INTEGER_TAG)
@@ -421,7 +423,7 @@ impl State {
     fn mix_term<'a>(&mut self, stack: &mut Vec<Item<'a>>, term: &'a Term) -> Option<Item<'a>> {
         match shape(term) {
             Shape::Immediate(word) => self.mix_immediate(word),
-            Shape::List(cells) => return self.mix_cells(stack, cells, None),
+            Shape::List(cells, tail) => return self.mix_cells(stack, cells, tail),
             Shape::Tuple(elements) => {
                 self.mix_alpha(TYPE_TUPLE);
                 self.mix_beta(elements.len() as u64);
@@ -617,8 +619,9 @@ impl State {
 }
 
 /// Follow a list tail into its cells while no cells are left, so the next
-/// cell is the next ERTS cons cell. A tail is a list only in the
-/// `[Key | Value]` cell of a collision node, when the value is a list.
+/// cell is the next ERTS cons cell. A tail is a list that is not empty only
+/// in the `[Key | Value]` cell of a collision node, when the value is such a
+/// list or an improper list. A tail `[]` stays, and mixes as an immediate.
 ///
 /// # Examples
 ///
@@ -626,15 +629,18 @@ impl State {
 /// let value = Term::List(vec![Term::Integer(120)]);
 /// let (cells, tail) = rest(&[], Some(&value));
 /// assert!(matches!((cells, tail), ([Term::Integer(120)], None)));
+/// let value = Term::ImproperList(vec![Term::Integer(120)], Box::new(Term::Integer(1)));
+/// let (cells, tail) = rest(&[], Some(&value));
+/// assert!(matches!((cells, tail), ([Term::Integer(120)], Some(Term::Integer(1)))));
 /// let tail = Term::Tuple(vec![]);
 /// assert!(matches!(rest(&[], Some(&tail)), ([], Some(Term::Tuple(_)))));
 /// ```
 fn rest<'a>(mut cells: &'a [Term], mut tail: Option<&'a Term>) -> (&'a [Term], Option<&'a Term>) {
     while cells.is_empty() {
-        match tail {
-            Some(Term::List(next)) => (cells, tail) = (next, None),
-            _ => break,
-        }
+        let Some(Shape::List(next, end)) = tail.map(shape) else {
+            break;
+        };
+        (cells, tail) = (next, end);
     }
     (cells, tail)
 }

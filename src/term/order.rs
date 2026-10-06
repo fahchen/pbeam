@@ -21,8 +21,12 @@
 //! - tuple: by size, then element by element;
 //! - map: by size, then by the keys in term order, then by the values in key
 //!   order;
-//! - list: element by element, and a shorter list is less when it is a
-//!   prefix of the other, because `[]` is less than a list;
+//! - list: element by element, then by the tails, where a proper list has
+//!   the tail `[]` (`utils.c:1827-1851`). With equal lengths, the two tails
+//!   compare. When one list is shorter, its tail compares with the rest of
+//!   the other list, which is a list that is not empty. Thus a shorter
+//!   proper list is less when it is a prefix of the other, because `[]` is
+//!   less than a list, `[1|x] < [1,2]`, and `[1|<<>>] > [1,2]`;
 //! - binary: by the bytes, then by the size.
 //!
 //! Two different references have no PBeam order: ERTS orders them by a
@@ -34,12 +38,17 @@ use std::cmp::Ordering;
 use super::Term;
 use crate::error::{BeamError, error};
 
+/// The rank of `[]` in the ERTS term order (`NIL_DEF`).
+const NIL_RANK: u8 = 7;
+/// The rank of a list that is not empty in the ERTS term order (`LIST_DEF`).
+const LIST_RANK: u8 = 8;
+
 /// One step of a comparison on the work stack.
 enum Step<'a> {
     /// Compare two terms.
     Pair(&'a Term, &'a Term),
-    /// The result when every step above this one gives `Equal`: the length
-    /// order of two lists.
+    /// The result when every step above this one gives `Equal`: the order
+    /// of the tails of two lists that the types of the tails give.
     Then(Ordering),
 }
 
@@ -81,7 +90,8 @@ impl Term {
 
 /// Compare two terms without their nested terms. For two lists, tuples,
 /// maps, or funs that the sizes and fun entries do not order, push the
-/// nested pairs onto `steps` and return `Equal`.
+/// nested pairs onto `steps` and return `Equal`. Two lists that are not
+/// empty push their element pairs and then the comparison of their tails.
 ///
 /// # Examples
 ///
@@ -97,6 +107,17 @@ fn compare_pair<'a>(
     right: &'a Term,
     steps: &mut Vec<Step<'a>>,
 ) -> Result<Ordering, BeamError> {
+    if let (Some(left), Some(right)) = (list_parts(left), list_parts(right)) {
+        steps.extend(compare_tails(left, right));
+        steps.extend(
+            left.0
+                .iter()
+                .zip(right.0)
+                .rev()
+                .map(|(l, r)| Step::Pair(l, r)),
+        );
+        return Ok(Ordering::Equal);
+    }
     let order = match (left, right) {
         (Term::Integer(left), Term::Integer(right)) => left.cmp(right),
         (Term::Atom(left), Term::Atom(right)) => left.name().cmp(right.name()),
@@ -113,11 +134,6 @@ fn compare_pair<'a>(
             Ordering::Equal
         }
         (Term::Tuple(left), Term::Tuple(right)) => left.len().cmp(&right.len()),
-        (Term::List(left), Term::List(right)) if !left.is_empty() && !right.is_empty() => {
-            steps.push(Step::Then(left.len().cmp(&right.len())));
-            steps.extend(left.iter().zip(right).rev().map(|(l, r)| Step::Pair(l, r)));
-            Ordering::Equal
-        }
         (Term::Map(left), Term::Map(right)) if left.len() == right.len() => {
             // ERTS compares all keys first, then the values (`erts_cmp_compound`).
             let (left, right) = (sorted_pairs(left), sorted_pairs(right));
@@ -143,6 +159,60 @@ fn compare_pair<'a>(
     Ok(order)
 }
 
+/// The elements of a list that is not empty, and its tail: `None` for the
+/// tail `[]` of a proper list.
+type ListParts<'a> = (&'a [Term], Option<&'a Term>);
+
+/// Return the elements and the tail of a list that is not empty, or `None`
+/// for each other term.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let x = Term::static_atom("x");
+/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x.clone()));
+/// assert_eq!(list_parts(&improper), Some((&[Term::Integer(1)][..], Some(&x))));
+/// assert_eq!(list_parts(&Term::List(vec![Term::Integer(1)])), Some((&[Term::Integer(1)][..], None)));
+/// assert_eq!(list_parts(&Term::List(vec![])), None);
+/// ```
+fn list_parts(term: &Term) -> Option<ListParts<'_>> {
+    match term {
+        Term::List(elements) if !elements.is_empty() => Some((elements, None)),
+        Term::ImproperList(elements, tail) => Some((elements, Some(tail))),
+        _ => None,
+    }
+}
+
+/// Return the step that compares two lists after their common elements, as
+/// `erts_cmp_compound` does (`utils.c:1827-1851`). With equal lengths, the
+/// two tails compare, and a proper list has the tail `[]`. When one list is
+/// shorter, its tail compares with the rest of the other list, which is a
+/// list that is not empty. A tail is never a list, so only two improper
+/// tails need a nested comparison. Return `None` for two proper lists of
+/// equal length.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [1|x] < [1,2]: the tail x is an atom, which is less than a list.
+/// let x = Term::static_atom("x");
+/// let step = compare_tails((&[Term::Integer(1)], Some(&x)), (&[Term::Integer(1), Term::Integer(2)], None));
+/// assert!(matches!(step, Some(Step::Then(Ordering::Less))));
+/// ```
+fn compare_tails<'a>(left: ListParts<'a>, right: ListParts<'a>) -> Option<Step<'a>> {
+    let rank = |tail: Option<&Term>| tail.map_or(NIL_RANK, type_rank);
+    let order = match left.0.len().cmp(&right.0.len()) {
+        Ordering::Equal => match (left.1, right.1) {
+            (None, None) => return None,
+            (Some(left), Some(right)) => return Some(Step::Pair(left, right)),
+            (left, right) => rank(left).cmp(&rank(right)),
+        },
+        Ordering::Less => rank(left.1).cmp(&LIST_RANK),
+        Ordering::Greater => LIST_RANK.cmp(&rank(right.1)),
+    };
+    Some(Step::Then(order))
+}
+
 /// Return the pairs of a map, sorted by the term order of the keys.
 ///
 /// # Examples
@@ -163,7 +233,7 @@ fn sorted_pairs(map: &super::Map) -> Vec<(&Term, &Term)> {
 
 /// Return the rank of the type of a term in the ERTS term order. `[]` and a
 /// list that is not empty have different ranks, as `NIL_DEF` and `LIST_DEF`
-/// do.
+/// do. An improper list has the rank of a list that is not empty.
 ///
 /// # Examples
 ///
@@ -180,8 +250,8 @@ fn type_rank(term: &Term) -> u8 {
         Term::Pid(_) => 4,
         Term::Tuple(_) => 5,
         Term::Map(_) => 6,
-        Term::List(elements) if elements.is_empty() => 7,
-        Term::List(_) => 8,
+        Term::List(elements) if elements.is_empty() => NIL_RANK,
+        Term::List(_) | Term::ImproperList(..) => LIST_RANK,
         Term::Binary(_) => 9,
     }
 }
@@ -306,6 +376,61 @@ mod tests {
         let deep =
             |levels| (0..levels).fold(Term::List(vec![]), |inner, _| Term::List(vec![inner]));
         assert_eq!(deep(1_000_000).compare(&deep(999_999)).unwrap(), Greater);
+    }
+
+    #[test]
+    fn orders_improper_lists_by_elements_then_tails_as_pinned_erts() {
+        // ERTS 29.1.1 (`erts_cmp_compound`, `utils.c:1827-1851`): with equal
+        // lengths the tails compare, and a proper list has the tail []. The
+        // tail of a shorter list compares with a list that is not empty.
+        let list =
+            |elements: &[i64]| Term::List(elements.iter().map(|e| Term::Integer(*e)).collect());
+        let improper = |elements: &[i64], tail| {
+            Term::ImproperList(
+                elements
+                    .iter()
+                    .map(|element| Term::Integer(*element))
+                    .collect(),
+                Box::new(tail),
+            )
+        };
+        let tuple = |name| Term::Tuple(vec![atom(name)]);
+        let pairs = [
+            (improper(&[1], atom("x")), list(&[1, 2]), Less),
+            (improper(&[1], Term::Binary(vec![])), list(&[1, 2]), Greater),
+            (
+                improper(&[1, 2], atom("a")),
+                improper(&[1, 2], atom("b")),
+                Less,
+            ),
+            (improper(&[1], atom("a")), list(&[1]), Less),
+            (
+                improper(&[1], Term::Integer(2)),
+                improper(&[1], atom("x")),
+                Less,
+            ),
+            (list(&[]), improper(&[1], atom("x")), Less),
+            (tuple("a"), improper(&[1], atom("x")), Less),
+            (improper(&[1], atom("x")), improper(&[1], atom("x")), Equal),
+            (improper(&[1], Term::Tuple(vec![])), list(&[1]), Less),
+            (list(&[1, 2]), improper(&[1], atom("x")), Greater),
+            (list(&[1]), improper(&[1], atom("a")), Greater),
+            (improper(&[1], tuple("a")), improper(&[1], tuple("b")), Less),
+            (
+                improper(&[1, 2], atom("x")),
+                improper(&[1], Term::Binary(vec![])),
+                Less,
+            ),
+            (improper(&[2], atom("x")), list(&[1, 2]), Greater),
+            (improper(&[1], map(vec![])), list(&[1]), Less),
+        ];
+        for (left, right, order) in pairs {
+            assert_eq!(
+                left.compare(&right).unwrap(),
+                order,
+                "{left:?} and {right:?}"
+            );
+        }
     }
 
     #[test]
