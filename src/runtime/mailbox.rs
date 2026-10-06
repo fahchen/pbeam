@@ -118,6 +118,27 @@ impl Mailbox {
         false
     }
 
+    /// Return the number of messages in the queue. A receive marker is not a
+    /// message, as the ERTS message count `mq_len` counts only messages
+    /// (`erl_proc_sig_queue.h:100-110`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Mailbox::default().message_count(), 0);
+    /// mailbox.push(Term::Integer(1));
+    /// assert_eq!(mailbox.message_count(), 1);
+    /// ```
+    pub(super) fn message_count(&self) -> usize {
+        let mut count = 0;
+        let mut node = self.first;
+        while let Some(current) = node {
+            count += usize::from(self.nodes[current].message.is_some());
+            node = self.nodes[current].next;
+        }
+        count
+    }
+
     /// Return the message at the save pointer, as `loop_rec` reads it.
     ///
     /// # Examples
@@ -447,10 +468,15 @@ mod tests {
     fn counts_messages_but_not_receive_markers() {
         let mut mailbox = Mailbox::default();
         assert!(!mailbox.has_messages());
+        assert_eq!(mailbox.message_count(), 0);
         mailbox.append(None);
         assert!(!mailbox.has_messages());
+        assert_eq!(mailbox.message_count(), 0);
         mailbox.push(int(1));
         assert!(mailbox.has_messages());
+        mailbox.append(None);
+        mailbox.push(int(2));
+        assert_eq!(mailbox.message_count(), 2);
     }
 
     #[test]
