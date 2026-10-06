@@ -540,7 +540,7 @@ bifs! {
     os:timestamp/0 => unsupported,
     os:unsetenv/1 => unsupported,
     persistent_term:erase/1 => unsupported,
-    persistent_term:get/0 => unsupported,
+    persistent_term:get/0 => |cx, []| Ok(Value(cx.scheduler.persistent_terms.get_all())),
     persistent_term:get/1 => unsupported,
     persistent_term:get/2 => |cx, [key, default]| Ok(Value(cx.scheduler.persistent_terms.get(key).unwrap_or(default).clone())),
     persistent_term:info/0 => unsupported,
