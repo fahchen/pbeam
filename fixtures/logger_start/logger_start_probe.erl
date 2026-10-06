@@ -1,6 +1,7 @@
 -module(logger_start_probe).
 -export([reverse/0, remove/0, without/0, ets/0, ets_access/0, find/0, from_list/0, is_key/0,
-         to_list/0, map_next/0, next/0, ordered/0, demonitor/0, unlink/0, hd/0, system_logger/0,
+         to_list/0, map_next/0, next/0, ordered/0, ordered_second_call_badarg/0,
+         demonitor/0, unlink/0, hd/0, system_logger/0,
          message_queue_data/0, system_flag/0, process_flag/0, unsupported_flag/1, raise/0,
          raise_throw/0, map_paths/0]).
 
@@ -251,20 +252,36 @@ next() ->
 %% The ordered iterator: a path that is a list of keys (maps.erl:1062-1072).
 %% The BIF gives the keys in the order of the list, in chunks of at most
 %% CONTEXT_REDS / 32 keys (erl_map.c:3654-3660), so 130 keys need two calls.
-%% A key that the map does not hold and a tail that is not [] raise badarg,
-%% also in the second call, and a list path in list mode raises badarg.
+%% A key that the map does not hold, a tail that is not [], and a list path
+%% in list mode raise badarg. The second-call badarg case is in
+%% ordered_second_call_badarg/0, because ERTS crashes on it.
 ordered() ->
     in_new_process(fun() ->
         M = id(#{b => 2, a => 1, c => 3}),
         [keys_of([[a, b, c] | M]),
          keys_of([lists:reverse(lists:seq(1, 40)) | id(big(40))]),
          keys_of([lists:seq(1, 130) | id(big(130))]) =:= lists:seq(1, 130),
-         catch_error(fun() -> keys_of([lists:seq(1, 130) ++ b | id(big(130))]) end),
          erts_internal:map_next([c, a], M, iterator),
          erts_internal:map_next([], M, iterator),
          catch_error(fun() -> erts_internal:map_next([d], M, iterator) end),
          catch_error(fun() -> erts_internal:map_next([a | b], M, iterator) end),
          catch_error(fun() -> erts_internal:map_next([a], M, []) end)]
+    end).
+
+%% The ordered iterator raises badarg when the tail of the key list is not []
+%% (here b), also when the badarg is in the second call, after the first chunk
+%% of keys. On ERTS 29.1.1 (JIT) this crashes the emulator with SIGSEGV in
+%% about one run in four: the BIF builds a tuple per key in a heap fragment
+%% and raises badarg before it sets the last tuple's third element
+%% (erl_map.c:3670-3707). HRelease keeps the half-built tuples in the
+%% fragment, the GC after the BIF call copies and scans the fragment
+%% (collect_live_heap_frags, erl_gc.c), and the unset element, which holds
+%% uninitialised heap memory, reads as a wild boxed or list pointer. Because
+%% the reference run would crash, the Rust test checks only PBeam here and
+%% records the ERTS crash in docs/erts-differences.md.
+ordered_second_call_badarg() ->
+    in_new_process(fun() ->
+        catch_error(fun() -> keys_of([lists:seq(1, 130) ++ b | id(big(130))]) end)
     end).
 
 keys_of(I) ->

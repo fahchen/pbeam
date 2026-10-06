@@ -107,6 +107,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
 
     // `cancel_timer/2` gives the time left, `false`, or `ok`, and sends
     // `{cancel_timer, Ref, Result}` with `async` (`erl_hl_timer.c:2078-2147`).
+    // A repeated option takes the last value (`erl_hl_timer.c:2364-2394`).
     // The canceled timers send no message. Each option that is not
     // `{async, Bool}` or `{info, Bool}` and each term that is not a reference
     // raise `badarg` (`erl_hl_timer.c:2237-2398`).
@@ -122,6 +123,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
             atom("ok"),
             atom("false"),
             atom("ok"),
+            atom("false"),
             atom("false"),
             atom("false"),
             atom("none"),
@@ -172,6 +174,6 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         reference.stdout,
-        b"[[true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,false,ok,ok,ok,true,ok,false,ok,false,false,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[false,false,named,none],[[1,2,3,4,40,50,60],recv,bif],[ok,ok,{error,badarg},{error,badarg}]]\n"
+        b"[[true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,false,ok,ok,ok,true,ok,false,ok,false,false,false,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[false,false,named,none],[[1,2,3,4,40,50,60],recv,bif],[ok,ok,{error,badarg},{error,badarg}]]\n"
     );
 }
