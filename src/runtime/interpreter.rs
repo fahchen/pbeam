@@ -793,8 +793,9 @@ impl BeamProgram {
                     // (`beam/erl_nif.c:4922-4928`, `5050-5098`). A function
                     // without a binding runs its BEAM stub body.
                     let arguments = call_arguments(&process.registers, *arity)?;
-                    if let Some(result) = native::call(&module.name, name, &arguments)
-                        && let Some(outcome) = self.finish_bif(process, result, true)?
+                    if let Some(result) = native::call(scheduler, &module.name, name, &arguments)
+                        && let Some(outcome) =
+                            self.finish_bif(scheduler.current_process_mut(), result?, true)?
                     {
                         return Ok(outcome);
                     }

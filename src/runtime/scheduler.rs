@@ -6,6 +6,7 @@ use super::{
     process::{Frame, ProcessState},
     regex_code::RegexCodes,
     resources::Resources,
+    tty::Ttys,
 };
 use crate::{
     error::{BeamError, error},
@@ -42,8 +43,8 @@ pub(super) struct Scheduler {
     /// ETS tables of the node. All processes of the run share them.
     pub(super) ets: EtsTables,
     /// Typed values of the node, one value of each type, such as the
-    /// compiled regular expressions in `RegexCodes`. All processes of the
-    /// run share them.
+    /// compiled regular expressions in `RegexCodes` and the TTY resources
+    /// in `Ttys`. All processes of the run share them.
     pub(super) resources: Resources,
     /// The atom table of the run, as `erts_atom_table` for one emulator. A
     /// run starts with a copy of the program table, and a BIF such as
@@ -65,6 +66,7 @@ impl Scheduler {
     pub(super) fn new(atoms: AtomTable) -> Self {
         let mut resources = Resources::default();
         resources.put(RegexCodes::default());
+        resources.put(Ttys::default());
         Scheduler {
             processes: HashMap::new(),
             runnable: VecDeque::new(),
@@ -407,7 +409,8 @@ impl Scheduler {
 
     /// Remove the current process after it exits. Delete its ETS tables
     /// first, then free its registered name, then send `EXIT` to linked
-    /// processes that trap exits, then `DOWN` to monitors. ERTS
+    /// processes that trap exits, then run its TTY resource monitors and
+    /// send `DOWN` to monitors. ERTS
     /// (`erl_process.c`) deletes the tables in `ERTS_CONTINUE_EXIT_USING_DB`
     /// (`erl_process.c:14360-14368`), unregisters the name in
     /// `ERTS_CONTINUE_EXIT_FREE`, before `ERTS_CONTINUE_EXIT_LINKS` and
@@ -424,7 +427,9 @@ impl Scheduler {
     /// # Errors
     ///
     /// An abnormal exit signal to a linked process that does not trap exits
-    /// is not supported.
+    /// is not supported. The error comes after all exit stages, so the TTY
+    /// resource monitors run on each exit, as `tty_monitor_down`
+    /// (`prim_tty_nif.c:1235-1241`) does in ERTS.
     pub(super) fn finish_current(
         &mut self,
         reason: Term,
@@ -446,6 +451,7 @@ impl Scheduler {
                 _ => Err(reason.clone()),
             });
         }
+        let mut signals = Ok(());
         for linked in process.links {
             // A missing target counts as trapping; `deliver` then drops the message.
             let trap_exit = self.processes.get_mut(&linked).is_none_or(|target| {
@@ -453,13 +459,14 @@ impl Scheduler {
                 target.trap_exit
             });
             if !trap_exit {
-                if normal {
-                    continue;
+                if !normal {
+                    // ponytail: no exit-signal propagation yet; add it when a task needs linked kills.
+                    // The other exit stages still run, so fd 0 gets its TTY mode back.
+                    signals = Err(error(format!(
+                        "unsupported exit signal {reason:?} to a process that does not trap exits"
+                    )));
                 }
-                // ponytail: no exit-signal propagation yet; add it when a task needs linked kills.
-                return Err(error(format!(
-                    "unsupported exit signal {reason:?} to a process that does not trap exits"
-                )));
+                continue;
             }
             let exit = Term::Tuple(vec![
                 Term::static_atom("EXIT"),
@@ -468,6 +475,9 @@ impl Scheduler {
             ]);
             self.deliver(linked, exit);
         }
+        // ERTS runs the NIF resource monitors of the process in the monitor
+        // stage too (`ERTS_CONTINUE_EXIT_LT_MONITORS`).
+        self.resources.borrow_mut::<Ttys>().process_down(process.id);
         for (watcher, reference) in process.monitored_by {
             let down = Term::Tuple(vec![
                 Term::static_atom("DOWN"),
@@ -478,7 +488,7 @@ impl Scheduler {
             ]);
             self.deliver(watcher, down);
         }
-        Ok(())
+        signals
     }
 }
 
