@@ -17,6 +17,10 @@ const LOGGER_BOOT_PROBE: &[u8] = include_bytes!("../fixtures/boot/logger_boot_pr
 const INIT_STOP_PROBE: &[u8] = include_bytes!("../fixtures/boot/init_stop_probe.beam");
 const BOOT_SOURCE: &str = "examples/hello_world/pbeam_boot.erl";
 
+/// The environment variable that `run_isolated` sets for its child, so an
+/// isolated test does not run the boot in the process of the other tests.
+const ISOLATED: &str = "PBEAM_BOOT_ISOLATED";
+
 #[test]
 fn boots_the_standard_io_servers_before_the_entry_of_the_pbeam_binary() {
     // `boot_probe:main/0` matches `whereis(user)` with `group_leader()` and
@@ -78,12 +82,45 @@ fn starts_the_logger_and_the_application_controller_as_pinned_erts() {
     // removes the `simple` handler after it adds `default`
     // (logger.erl:838-848), and the kernel spec gives the primary level
     // `notice` (logger.erl:1748-1754). `logger_boot_probe:main/0` reads this
-    // state after the boot.
-    let beams = BOOT_MODULES.map(pinned_beam);
-    let boot = fs::read(BOOT_BEAM).unwrap();
-    let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
-    modules.extend([LOGGER_BOOT_PROBE, boot.as_slice()]);
-    let program = BeamProgram::load(&modules).unwrap();
+    // state after the boot. `isolated_logger_boot` does the PBeam run.
+    run_isolated("isolated_logger_boot");
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/boot",
+            "-eval",
+            "io:format(\"~w~n\", [logger_boot_probe:main()]), halt().",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        (
+            reference.stdout.as_slice(),
+            reference.stderr.as_slice(),
+            reference.status.code()
+        ),
+        (
+            &b"{[default],notice,#{id => default,module => logger_std_h,level => all},\
+               [{application_controller,true},{logger,true},{logger_sup,true},\
+               {logger_proxy,true},{logger_handler_watcher,true},\
+               {logger_std_h_default,true},{logger_simple_h,false}],{ok,notice}}\n"[..],
+            &b""[..],
+            Some(0)
+        )
+    );
+}
+
+/// The child side of
+/// `starts_the_logger_and_the_application_controller_as_pinned_erts`: run
+/// the boot and `logger_boot_probe:main/0`, and compare the result with the
+/// pinned ERTS result.
+#[test]
+#[ignore = "starts_the_logger_and_the_application_controller_as_pinned_erts runs it in a child process"]
+fn isolated_logger_boot() {
+    let program = boot_program(LOGGER_BOOT_PROBE);
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let registered = |name: &str, value: &str| Term::Tuple(vec![atom(name), atom(value)]);
     let expected = Term::Tuple(vec![
@@ -119,33 +156,6 @@ fn starts_the_logger_and_the_application_controller_as_pinned_erts() {
             .unwrap(),
         expected
     );
-
-    let reference = Command::new("erl")
-        .args([
-            "-noshell",
-            "-pa",
-            "fixtures/boot",
-            "-eval",
-            "io:format(\"~w~n\", [logger_boot_probe:main()]), halt().",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert_eq!(
-        (
-            reference.stdout.as_slice(),
-            reference.stderr.as_slice(),
-            reference.status.code()
-        ),
-        (
-            &b"{[default],notice,#{id => default,module => logger_std_h,level => all},\
-               [{application_controller,true},{logger,true},{logger_sup,true},\
-               {logger_proxy,true},{logger_handler_watcher,true},\
-               {logger_std_h_default,true},{logger_simple_h,false}],{ok,notice}}\n"[..],
-            &b""[..],
-            Some(0)
-        )
-    );
 }
 
 #[test]
@@ -154,11 +164,18 @@ fn keeps_the_init_stop_request_in_the_mailbox_of_the_init_request_process() {
     // returns `ok` (init.erl:536). The `init` request process of
     // `pbeam_boot` keeps this message in its mailbox and does not exit, so
     // the node does not stop (see "Run end" in docs/erts-differences.md).
-    let beams = BOOT_MODULES.map(pinned_beam);
-    let boot = fs::read(BOOT_BEAM).unwrap();
-    let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
-    modules.extend([INIT_STOP_PROBE, boot.as_slice()]);
-    let program = BeamProgram::load(&modules).unwrap();
+    // `isolated_init_stop` does the PBeam run.
+    run_isolated("isolated_init_stop");
+}
+
+/// The child side of
+/// `keeps_the_init_stop_request_in_the_mailbox_of_the_init_request_process`:
+/// run the boot and `init_stop_probe:main/0`, which gives `running` when
+/// `init` does not exit.
+#[test]
+#[ignore = "keeps_the_init_stop_request_in_the_mailbox_of_the_init_request_process runs it in a child process"]
+fn isolated_init_stop() {
+    let program = boot_program(INIT_STOP_PROBE);
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
 
     assert_eq!(
@@ -170,6 +187,42 @@ fn keeps_the_init_stop_request_in_the_mailbox_of_the_init_request_process() {
             )
             .unwrap(),
         atom("running")
+    );
+}
+
+/// Load the pinned boot modules, `probe`, and the boot module.
+fn boot_program(probe: &[u8]) -> BeamProgram {
+    assert!(
+        env::var_os(ISOLATED).is_some(),
+        "run_isolated runs this test in a child process"
+    );
+    let beams = BOOT_MODULES.map(pinned_beam);
+    let boot = fs::read(BOOT_BEAM).unwrap();
+    let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
+    modules.extend([probe, boot.as_slice()]);
+    BeamProgram::load(&modules).unwrap()
+}
+
+/// Run the ignored test `name` of this test binary in a child process, and
+/// require that it passes. A child process is necessary, because the boot
+/// starts `prim_tty` in the `cooked` input mode, and the
+/// `prim_tty_sighandler` init calls `os:set_signal/2` for `sigcont` and
+/// `sigwinch` (prim_tty.erl:284-298, prim_tty_sighandler.erl:28-31). A
+/// disposition is the same for all threads of a process, so it would change
+/// the process of the other tests. The child inherits `LLVM_PROFILE_FILE`,
+/// so `cargo llvm-cov` measures it.
+fn run_isolated(name: &str) {
+    let child = Command::new(env::current_exe().unwrap())
+        .args(["--exact", name, "--include-ignored", "--quiet"])
+        .env(ISOLATED, "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "{name} exited with {}\n{}",
+        child.status,
+        String::from_utf8_lossy(&child.stdout)
     );
 }
 
