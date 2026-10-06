@@ -96,3 +96,9 @@ Run every required exit cleanup and notification stage before returning an error
 ## Invariant violations remain visible
 
 Treat a broken runtime invariant as an explicit failure. Do not skip missing entries when skipping would hide a defect or leave runtime state inconsistent.
+
+## Public values can violate documented canonical forms
+
+When a public type cannot enforce a canonical representation, document it as a
+runtime-produced form, not as a type invariant. State that callers must
+preserve the form when they pass values into runtime operations.

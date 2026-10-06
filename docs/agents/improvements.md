@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261006: Keep semantic branches explicit
+
+**Problem:** A one-line closure compressed proper-list and improper-list behavior into one expression.
+
+**Root Cause:** The implementation optimized for brevity instead of showing the separate semantic cases.
+
+**Fix:** Move each case into a multi-line match or a named helper with explicit branches.
+
+**Guardrail:** When a branch handles distinct runtime cases, inspect each case on its own line before merging.
+
+**Reference:** https://github.com/fahchen/pbeam/pull/174#discussion_r4188917531
+
 ## 20261006: Verify task references in difference records
 
 **Problem:** A difference row named a prerequisite task as the owner of a follow-up that the task does not implement.
