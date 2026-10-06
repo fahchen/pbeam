@@ -190,6 +190,51 @@ fn gives_the_default_printable_range_as_pinned_erts() {
 }
 
 #[test]
+fn checks_process_liveness_as_pinned_erts() {
+    // `event_bif_probe:alive/0` runs `erlang:is_process_alive/1`, as
+    // `logger_h_common:log/2` does. The caller and a waiting process give
+    // `true`, a process after its `DOWN` message gives `false`, and a term
+    // that is not a pid raises `badarg` (`is_process_alive_1`,
+    // `erl_bif_info.c:4060-4114`).
+    let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let mut expected = vec![atom("true"), atom("false"), atom("true")];
+    expected.extend(errors(&program, "badarg", 5));
+    assert_eq!(
+        program.execute("event_bif_probe", "alive", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("alive"),
+        b"[true,false,true,{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+          {error,badarg}]\n"
+    );
+}
+
+#[test]
+fn counts_queued_messages_as_pinned_erts() {
+    // `event_bif_probe:queue_len/0` runs `erlang:process_info/2` with the
+    // item `message_queue_len`, as `logger_olp:flush/2` and
+    // `logger_olp:check_load/1` do, for the caller and for a process that
+    // waits for another message. The count holds each message that is still
+    // in the queue (`erl_bif_info.c:1742-1754`).
+    let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
+    let item = Term::Atom(program.atom("message_queue_len").unwrap());
+    let expected = [0, 2, 1, 2].map(|count| Term::Tuple(vec![item.clone(), Term::Integer(count)]));
+    assert_eq!(
+        program
+            .execute("event_bif_probe", "queue_len", &[])
+            .unwrap(),
+        Term::List(expected.into())
+    );
+    assert_eq!(
+        reference("queue_len"),
+        b"[{message_queue_len,0},{message_queue_len,2},{message_queue_len,1},\
+          {message_queue_len,2}]\n"
+    );
+}
+
+#[test]
 fn gets_persistent_terms_as_pinned_erts() {
     // `event_bif_probe:term/0` runs `persistent_term:get/1`, as
     // `erl_features:keywords/0` does. A stored key gives its value, and a

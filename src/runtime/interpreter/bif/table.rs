@@ -210,7 +210,7 @@ bifs! {
     erlang:is_number/1 => unsupported,
     erlang:is_pid/1 => unsupported,
     erlang:is_port/1 => unsupported,
-    erlang:is_process_alive/1 => unsupported,
+    erlang:is_process_alive/1 => |cx, [term]| Ok(match term { Term::Pid(id) => Value(Term::static_atom(if cx.scheduler.process(*id).is_some() { "true" } else { "false" })), _ => BifResult::badarg() }),
     erlang:is_record/1 => unsupported,
     erlang:is_record/2 => unsupported,
     erlang:is_record/3 => unsupported,
