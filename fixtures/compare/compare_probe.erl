@@ -1,5 +1,5 @@
 -module(compare_probe).
--export([exact/0, guards/0, id/1]).
+-export([exact/0, equal/0, guards/0, id/1]).
 
 %% `bif` `erlang:'=:='/2` and `erlang:'=/='/2` with fail label 0, as
 %% user_drv:init/1 (user_drv.erl:184-186), user_drv:init_shell/2
@@ -52,3 +52,17 @@ less(A, B) when A < B -> lt;
 less(_, _) -> nlt.
 
 id(X) -> X.
+
+%% The `is_eq` test, as the guard `CtrlSync==0` of
+%% logger_h_common:handle_load/2 (logger_h_common.erl:250).
+equal() ->
+    Ref = make_ref(),
+    Pairs = [{1, 1}, {1, 2}, {1, a}, {a, a}, {a, b}, {{1, a}, {id(1), a}}, {{1, a}, {1, b}},
+             {[1, 2], [1 | id([2])]}, {[], [1]}, {<<"x">>, <<"x">>}, {<<"x">>, <<"y">>},
+             {#{a => 1}, #{a => id(1)}}, {#{a => 1}, #{a => 2}}, {self(), self()},
+             {Ref, Ref}, {Ref, make_ref()}, {fun id/1, fun id/1}, {fun id/1, fun ?MODULE:id/1},
+             {576460752303423488, id(576460752303423488)}, {[a | b], [a | c]}],
+    [eq(id(A), id(B)) || {A, B} <- Pairs].
+
+eq(A, B) when A == B -> id(true);
+eq(_, _) -> id(false).

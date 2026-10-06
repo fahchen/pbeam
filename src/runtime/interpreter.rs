@@ -689,7 +689,20 @@ impl BeamProgram {
                     write(process, left, right_value)?;
                     write(process, right, left_value)?;
                 }
-                Instruction::TestExactEqual {
+                // ERTS `is_eq` (emu instrs.tab:1109-1113, JIT
+                // instr_common.cpp:2055-2079) runs `CMP_EQ_ACTION`
+                // (erl_utils.h:132-133). `EQ_SPEC` (erl_utils.h:137-147) and
+                // `erts_cmp_compound(A, B, 0, 1)` (utils.c:1658) compare in
+                // the arithmetic order, which differs from exact equality
+                // only for a float (`1 == 1.0` is true). PBeam has no float
+                // term, so exact equality gives the ERTS result. The
+                // float-term task must change this arm.
+                Instruction::TestEqual {
+                    fail_label,
+                    left,
+                    right,
+                }
+                | Instruction::TestExactEqual {
                     fail_label,
                     left,
                     right,
@@ -745,6 +758,40 @@ impl BeamProgram {
                     );
                     if !passed {
                         jump(module, process, *fail_label)?;
+                    }
+                }
+                // ERTS `i_bs_start_match3` jumps to `Fail` for each term
+                // that is not a bitstring, and makes or reuses a match
+                // context for a bitstring (emu bs_instrs.tab:1074-1110 and
+                // 1199-1238; JIT `emit_i_bs_start_match3` in
+                // jit/arm/instr_bs.cpp:134-189; `erts_bs_start_match_3` in
+                // erl_bits.c:81). A literal source loads as `jump Fail` (emu
+                // ops.tab:1266-1267; JIT jit/arm/ops.tab:1054-1055), which
+                // gives the same result. The compiler gives a real fail
+                // label (beam_ssa_codegen.erl:1666-1673), so the label is
+                // never 0. PBeam has no match context, so a binary stops the
+                // run.
+                Instruction::BinaryMatchStart { fail_label, source } => {
+                    if let Term::Binary(_) = read(process, source)? {
+                        return Err(error(
+                            "unsupported bs_start_match3 of a binary: needs a match context",
+                        ));
+                    }
+                    jump(module, process, *fail_label)?;
+                }
+                // ERTS `fconv` converts a small integer, a bignum, or a float
+                // to a float register, and raises `badarith` for each other
+                // term (emu float_instrs.tab:38-52; JIT `emit_fconv` and
+                // `emit_fconv_shared` in jit/arm/instr_float.cpp:96-135).
+                // PBeam has no float register and no float or bignum term,
+                // so an integer stops the run.
+                Instruction::FloatConvert { source } => {
+                    if let Term::Integer(_) = read(process, source)? {
+                        return Err(error("unsupported BEAM opcode 97"));
+                    }
+                    let badarith = Term::static_atom("badarith");
+                    if let Some(outcome) = raise(process, ExceptionClass::Error, badarith) {
+                        return Ok(outcome);
                     }
                 }
                 Instruction::SelectValue {
