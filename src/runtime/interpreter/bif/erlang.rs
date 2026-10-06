@@ -7,7 +7,7 @@ use crate::runtime::local_node;
 use crate::runtime::scheduler::{AliasMode, MonitorOptions, MonitorTarget};
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
-use crate::term::Fun;
+use crate::term::{Fun, MAX_ATOM_CHARACTERS};
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
 /// gives a runtime error.
@@ -465,30 +465,34 @@ pub(super) fn exit(
 }
 
 /// Run `erlang:demonitor(Reference, Options)` as ERTS `demonitor_2`
-/// (`bif.c:613-654`) does. The options are a proper list of `flush` and
-/// `info`; each other element, and a tail that is not `[]`, raise `badarg`
-/// before the monitor is removed. After the options, a `Reference` that is
-/// not a reference raises `badarg`. The result is `true`, or `false` with
-/// `info` when no active monitor was removed. `erlang:demonitor/1` passes
-/// `[]`, so it returns `true` for each removal result, as `demonitor_1`
-/// (`bif.c:598-611`) does.
+/// (bif.c) does. `Options` is a list of `flush` and `info` in any order,
+/// with repeats. An options term that is not such a list raises `badarg`,
+/// then a `Reference` that is not a reference raises `badarg`. The checks
+/// come before the monitor is removed, so a call that raises leaves the
+/// monitor active.
+/// `erlang:demonitor/1` passes `[]`, as ERTS `demonitor_1` (bif.c) does,
+/// so it returns `true`.
 ///
-/// With `flush`, ERTS flushes only when no active monitor was removed: the
-/// DOWN message can then be queued. The flush traps into
-/// `erts_internal:flush_monitor_messages/3`, which returns its third
-/// argument, the result.
+/// The result is `true`. With `info`, it is `false` when no active monitor
+/// was removed. With `flush` and no active monitor removed, the DOWN
+/// message can be queued, so the BIF traps into
+/// `erts_internal:flush_monitor_messages(Reference, false, Result)`. ERTS
+/// gives `Multi = true` only for a time-offset monitor, which PBeam does
+/// not support.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = demonitor(&mut context, &reference, &Term::List(vec![]));
+/// let result = demonitor(&mut context, &Term::Reference(reference), &Term::List(vec![]));
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let result = demonitor(&mut context, &gone, &Term::List(vec![Term::static_atom("info")]));
+/// let info = Term::List(vec![Term::static_atom("info")]);
+/// let result = demonitor(&mut context, &Term::Reference(reference), &info);
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
-/// let result = demonitor(&mut context, &gone, &Term::List(vec![Term::static_atom("flush")]));
+/// let flush = Term::List(vec![Term::static_atom("flush")]);
+/// let result = demonitor(&mut context, &Term::Reference(gone), &flush);
 /// assert!(matches!(result, BifResult::Trap { function: "flush_monitor_messages", .. }));
-/// assert!(matches!(demonitor(&mut context, &gone, &Term::static_atom("x")), BifResult::Raise { .. }));
-/// assert!(matches!(demonitor(&mut context, &Term::static_atom("x"), &Term::List(vec![])), BifResult::Raise { .. }));
+/// let result = demonitor(&mut context, &Term::Integer(1), &Term::List(vec![]));
+/// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 pub(super) fn demonitor(
     context: &mut BifContext<'_>,
@@ -501,24 +505,26 @@ pub(super) fn demonitor(
     let (mut flush, mut info) = (false, false);
     for option in options {
         match option {
-            Term::Atom(option) if option.name() == "flush" => flush = true,
-            Term::Atom(option) if option.name() == "info" => info = true,
+            Term::Atom(atom) if atom.name() == "flush" => flush = true,
+            Term::Atom(atom) if atom.name() == "info" => info = true,
             _ => return BifResult::badarg(),
         }
     }
-    let Term::Reference(reference) = *reference else {
+    let Term::Reference(reference) = reference else {
         return BifResult::badarg();
     };
-    let removed = context.scheduler.demonitor(reference);
-    let result = Term::static_atom(if removed || !info { "true" } else { "false" });
-    if removed || !flush {
+    if context.scheduler.demonitor(*reference) {
+        return Value(Term::static_atom("true"));
+    }
+    let result = Term::static_atom(if info { "false" } else { "true" });
+    if !flush {
         return Value(result);
     }
     Trap {
         module: "erts_internal",
         function: "flush_monitor_messages",
         arguments: vec![
-            Term::Reference(reference),
+            Term::Reference(*reference),
             Term::static_atom("false"),
             result,
         ],
@@ -855,10 +861,6 @@ pub(super) fn tl(list: &Term) -> BifResult {
     Value(Term::list_with_tail(elements[1..].to_vec(), tail))
 }
 
-/// The largest number of characters in an atom name (`MAX_ATOM_CHARACTERS`
-/// in `atom.h`).
-const MAX_ATOM_CHARACTERS: usize = 255;
-
 /// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
 /// name, as ERTS `atom_to_list_1` (`bif.c:3186-3210`) does. The atom `''`
 /// gives `[]`. A term that is not an atom raises `badarg`.
@@ -1170,7 +1172,7 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
 /// assert!(matches!(is_function(&Term::static_atom("notfun"), &Term::Integer(-1)), BifResult::Raise { .. }));
 /// ```
 pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) -> BifResult {
-    let Term::Integer(arity) = *arity else {
+    let &Term::Integer(arity) = arity else {
         return BifResult::badarg();
     };
     if arity < 0 {
@@ -1310,10 +1312,13 @@ fn deliver_to(scheduler: &mut Scheduler, to: &Term, message: Term) -> Option<Sen
     Some(Sent::Local)
 }
 
+/// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
+const MAX_ARG: i64 = 255;
+
 /// Run `erlang:make_fun/3`: return the external fun of
 /// `module:function/arity`, as ERTS `make_fun_3` (`bif.c:4467-4485`) does.
 /// The module and the function must be atoms, and the arity must be an
-/// integer in `0..=255` (`MAX_ARG` in `erl_vm.h:54`), else the call raises
+/// integer in `0..=255` ([`MAX_ARG`]), else the call raises
 /// `badarg`. The function does not need to exist.
 ///
 /// # Examples
@@ -1326,8 +1331,6 @@ fn deliver_to(scheduler: &mut Scheduler, to: &Term, message: Term) -> Option<Sen
 /// assert!(matches!(make_fun(&Term::Integer(1), &function, &Term::Integer(0)), BifResult::Raise { .. }));
 /// ```
 pub(super) fn make_fun(module: &Term, function: &Term, arity: &Term) -> BifResult {
-    /// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
-    const MAX_ARG: i64 = 255;
     match (module, function, arity.small_integer()) {
         (Term::Atom(module), Term::Atom(function), Some(arity @ 0..=MAX_ARG)) => Value(Term::Fun(
             Fun::external(module.clone(), function.clone(), arity as u32),
