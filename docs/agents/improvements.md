@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261006: Verify documented error behavior against the active dispatch path
+
+**Problem:** The PR description named an unsupported BIF error, but the active dispatch path returned an unresolved external MFA error.
+
+**Root Cause:** The documentation used an evidence location that did not handle the operation.
+
+**Fix:** Run a compiled probe through the current runtime and document the observed error.
+
+**Guardrail:** Trace each documented error from the operation's dispatch entry to its fallback before writing the claim.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/181#issuecomment-6005540768>
+
 ## 20261006: Verify task references in difference records
 
 **Problem:** A difference row named a prerequisite task as the owner of a follow-up that the task does not implement.
