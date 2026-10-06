@@ -25,6 +25,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Term and loader
 
+### Add float terms
+
+- PBeam has no float term. After #183 (PR #189), the loader accepts `fmove`, `fconv`, `fadd`, `fsub`, `fmul`, and `fdiv`, but each one stops the run with `unsupported BEAM opcode N` when it runs. The only exception is `fconv` of a term that is not a number, which raises `badarith`. `fnegate` is a load error. A float literal stops the run with `unsupported BEAM literal index N` when an instruction reads it. Each BIF that makes or reads a float, such as `erlang:'/'/2`, `erlang:float/1`, and `erlang:float_to_list/1`, stops with `unresolved external MFA`. `is_float` (#167) always fails, because no term is a float. The "Float terms" row of `docs/erts-differences.md` records this.
+- The work: a float `Term` variant with the ERTS term order and the `==` arithmetic equality (`1 == 1.0`), float registers and the six instructions with `fnegate`, float literals in the loader, the float BIFs, the ERTS float text in `print_term` (#6), and the ERTS internal hash of a float (`erl_term_hashing.c`).
+- **Trigger:** a measured path runs float arithmetic or reads a float literal, for example a `/` operator in a consumer program.
+- **Source:** owner question on PR #189 (#183).
+
 ### Load `SMALL_BIG_EXT` and `LARGE_BIG_EXT` literals that fit in 64 bits
 
 - ERTS `dec_term` makes a small integer when the value fits (`external.c:4457-4495`). PBeam loads `SMALL_INTEGER_EXT` and `INTEGER_EXT` only, so a fixture keeps such integers out of literals with `id/1`.
