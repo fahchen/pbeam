@@ -49,3 +49,38 @@ fn runs_the_is_float_test_as_pinned_erts() {
           114,101,115,116,97,114,116,105,110,103]]\n"
     );
 }
+
+#[test]
+fn loads_the_float_register_instructions_and_stops_when_one_runs() {
+    // `float_test_probe:half/1` divides with `fconv`, `fmove`, and `fdiv`,
+    // as `string` and `erl_scan` do. ERTS loads these instructions with
+    // their float registers (emu ops.tab:1329-1343; JIT
+    // jit/arm/ops.tab:1118-1130). PBeam has no float term, so the run stops
+    // at the first one, `fconv` (opcode 97).
+    let erlang = pinned_beam("erlang");
+    let lists = pinned_beam("lists");
+    let string = pinned_beam("string");
+    let erl_scan = pinned_beam("erl_scan");
+    let program =
+        BeamProgram::load(&[&erlang, &lists, &string, &erl_scan, FLOAT_TEST_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("float_test_probe", "half", &[Term::Integer(8)])
+            .unwrap_err()
+            .to_string(),
+        "unsupported BEAM opcode 97"
+    );
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/float_test",
+            "-eval",
+            "io:format(\"~w~n\", [float_test_probe:half(8)]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stdout, b"4.0\n");
+}

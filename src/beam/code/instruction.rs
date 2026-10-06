@@ -60,6 +60,24 @@ const OPCODE_BS_GET_INTEGER2: u8 = 117;
 const OPCODE_GC_BIF3: u8 = 152;
 /// `is_any_native_record Fail Src` (genop.tab:724).
 const OPCODE_IS_ANY_NATIVE_RECORD: u8 = 186;
+/// `fmove Src Dst` (genop.tab:410). ERTS loads it as `fstore` or `fload`
+/// (emu ops.tab:1337-1338; JIT jit/arm/ops.tab:1124-1125).
+const OPCODE_FMOVE: u8 = 96;
+/// `fconv Src Dst` (genop.tab:411). ERTS loads it as `fconv` (emu
+/// ops.tab:1335, 1343; JIT jit/arm/ops.tab:1130).
+const OPCODE_FCONV: u8 = 97;
+/// `fadd Fail A B Dst` (genop.tab:412). ERTS loads it as `i_fadd` (emu
+/// ops.tab:1329; JIT jit/arm/ops.tab:1118).
+const OPCODE_FADD: u8 = 98;
+/// `fsub Fail A B Dst` (genop.tab:413). ERTS loads it as `i_fsub` (emu
+/// ops.tab:1330; JIT jit/arm/ops.tab:1119).
+const OPCODE_FSUB: u8 = 99;
+/// `fmul Fail A B Dst` (genop.tab:414). ERTS loads it as `i_fmul` (emu
+/// ops.tab:1331; JIT jit/arm/ops.tab:1120).
+const OPCODE_FMUL: u8 = 100;
+/// `fdiv Fail A B Dst` (genop.tab:415). ERTS loads it as `i_fdiv` (emu
+/// ops.tab:1332; JIT jit/arm/ops.tab:1121).
+const OPCODE_FDIV: u8 = 101;
 const OPCODE_GC_BIF1: u8 = 124;
 const OPCODE_GC_BIF2: u8 = 125;
 const OPCODE_BS_GET_TAIL: u8 = 165;
@@ -1679,6 +1697,10 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_CREATE_BIN => Some(6),
         OPCODE_BS_INIT_WRITABLE => Some(0),
         OPCODE_BS_MATCH => Some(3),
+        // The float-register instructions are in `string` and `erl_scan`.
+        // PBeam has no float term, so each one stops the run.
+        OPCODE_FMOVE | OPCODE_FCONV => Some(2),
+        OPCODE_FADD | OPCODE_FSUB | OPCODE_FMUL | OPCODE_FDIV => Some(4),
         _ => None,
     }
 }
@@ -1939,6 +1961,7 @@ mod tests {
     use super::{
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_INTEGER2,
         OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH,
+        OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FSUB,
         OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
         OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
         OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_EQ, OPCODE_TEST_HEAP,
@@ -3083,6 +3106,12 @@ mod tests {
             (OPCODE_BS_GET_INTEGER2, 7),
             (OPCODE_GC_BIF3, 7),
             (OPCODE_IS_ANY_NATIVE_RECORD, 2),
+            (OPCODE_FMOVE, 2),
+            (OPCODE_FCONV, 2),
+            (OPCODE_FADD, 4),
+            (OPCODE_FSUB, 4),
+            (OPCODE_FMUL, 4),
+            (OPCODE_FDIV, 4),
         ] {
             assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
         }
