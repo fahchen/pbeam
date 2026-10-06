@@ -1,14 +1,16 @@
 mod atom;
 mod fun;
+mod hash;
 mod map;
 mod order;
 
 pub use atom::Atom;
-pub(crate) use atom::AtomTable;
 #[cfg(test)]
 pub(crate) use atom::test_atom;
+pub(crate) use atom::{AtomTable, MAX_ATOM_CHARACTERS};
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target};
+pub(crate) use hash::internal_hash;
 pub use map::Map;
 
 use std::fmt;
@@ -18,9 +20,9 @@ pub(crate) const SMALL_INTEGER_MIN: i64 = -(1 << 59);
 /// The largest ERTS small integer on a 64-bit system: 2^59 - 1.
 const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
 
-/// A BEAM term. Lists, tuples, maps, and funs can nest to any depth, as in ERTS,
-/// so `Drop`, `Clone`, `PartialEq`, and `Debug` use explicit work stacks and
-/// do not recurse on the Rust stack.
+/// A BEAM term. Lists, tuples, maps, and funs can nest to any depth, as in
+/// ERTS, so `Drop`, `Clone`, `PartialEq`, and `Debug` use explicit work
+/// stacks and do not recurse on the Rust stack.
 pub enum Term {
     /// An atom: its index in the atom table of the program, and its name.
     Atom(Atom),

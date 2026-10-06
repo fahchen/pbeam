@@ -21,6 +21,10 @@ use crate::term::Term;
 /// the default of the `+t` emulator flag).
 const ATOM_LIMIT: usize = 1 << 20;
 
+/// The largest number of characters in an atom name (`MAX_ATOM_CHARACTERS`
+/// in `atom.h`).
+pub(crate) const MAX_ATOM_CHARACTERS: usize = 255;
+
 /// The index of each static atom, made once for the process.
 static STATIC_INDICES: LazyLock<HashMap<&'static str, u32>> = LazyLock::new(|| {
     (0..)
