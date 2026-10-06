@@ -1,7 +1,7 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `erlang`, `erts_internal`, `ets`, `lists`, `maps`, `re`, and
+//! The `erlang`, `erts_internal`, `ets`, `lists`, `maps`, `os`, `re`, and
 //! `unicode` modules hold the BIF bodies that do not fit on one table line.
 
 use super::*;
@@ -11,6 +11,7 @@ mod erts_internal;
 mod ets;
 mod lists;
 mod maps;
+mod os;
 mod re;
 mod unicode;
 
@@ -39,6 +40,11 @@ pub(super) enum BifResult {
         /// Arguments for the trap target, in `x0` onwards.
         arguments: Vec<Term>,
     },
+    /// The calling process exits with this reason, and no catch tag sees
+    /// it, as `ERTS_BIF_EXITED` does. `erlang:exit/2` to the caller traps to
+    /// the C function `erts_internal:await_exit/0`, which ends the process
+    /// before the BIF returns (`bif.c:1699-1716`).
+    Exited(Term),
 }
 
 impl BifResult {
