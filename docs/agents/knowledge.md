@@ -88,3 +88,11 @@ Describe only behavior that exists in the current branch. Mark future behavior a
 ## Encoded examples match complete operands
 
 Validate each encoded example against the actual encoder or disassembler. Include every operand and use the correct tag for each value.
+
+## Exit cleanup is completed before errors return
+
+Run every required exit cleanup and notification stage before returning an error. Preserve the first error and return it after cleanup completes.
+
+## Invariant violations remain visible
+
+Treat a broken runtime invariant as an explicit failure. Do not skip missing entries when skipping would hide a defect or leave runtime state inconsistent.

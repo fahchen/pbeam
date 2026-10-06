@@ -1,6 +1,6 @@
 # Improvements
 
-Lessons from wrong turns. Only **titles are loaded into agent context** — the agent reads full entries on demand when a title seems relevant to the current task.
+Lessons from wrong turns. Only **titles are loaded into context** — the agent reads full entries on demand when a title seems relevant to the current task.
 
 If a lesson becomes a standing rule, **graduate it to `knowledge.md`** and remove it from here.
 
@@ -23,19 +23,27 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 ## 20261006: Verify task references in difference records
 
-**Problem:** A difference row named a prerequisite task as the owner of a
-follow-up that the task does not implement.
+**Problem:** A difference row named a prerequisite task as the owner of a follow-up that the task does not implement.
 
-**Root Cause:** The row reused a nearby task reference without checking its
-actual scope and the status of the follow-up work.
+**Root Cause:** The row reused a nearby task reference without checking its actual scope and the status of the follow-up work.
 
-**Fix:** Remove the stale task reference and name the task that records the
-difference, or leave the owner unset until a task exists.
+**Fix:** Remove the stale task reference and name the task that records the difference, or leave the owner unset until a task exists.
 
-**Guardrail:** Check each issue reference in a difference record against the
-task scope before merging the documentation.
+**Guardrail:** Check each issue reference in a difference record against the task scope before merging the documentation.
 
 **Reference:** `docs/erts-differences.md`
+
+## 20261006: Preserve failure artifacts until assertions finish
+
+**Problem:** A test removed its temporary output directory before it asserted child-process success.
+
+**Root Cause:** Cleanup ran before the assertion that could explain a failed child process.
+
+**Fix:** Assert child-process success first and include the directory path in the failure message.
+
+**Guardrail:** Keep diagnostic artifacts until all failure-producing assertions that use them have completed.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/131#discussion_r4188922478>
 
 ## 20261005: Keep explicit exception raise sites separate
 
