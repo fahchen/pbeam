@@ -75,10 +75,12 @@ unmeasured or unrelated support to a separate task.
 
 ## Binary decoders drop required operands
 
-Consume and validate every encoded operand even when runtime semantics do not use
-its value. Keep the skip behavior in one helper and preserve cursor and tag
-checks.
+Consume and validate every encoded operand even when runtime semantics do not use its value. Keep the skip behavior in one helper and preserve cursor and tag checks.
 
 ## Opaque resource fields lack ownership documentation
 
 Document every struct field that wraps an opaque or owned resource. State the owner, the live representation, and the operation that releases it.
+
+## Documentation must match the current branch
+
+Describe only behavior that exists in the current branch. Mark future behavior as planned work, not as current behavior.
