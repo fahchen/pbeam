@@ -1,11 +1,14 @@
+#[path = "common/run.rs"]
+mod run;
+
 use std::{
     path::PathBuf,
-    process::{Command, Output, Stdio},
-    thread,
+    process::{Command, Output},
     time::{Duration, Instant},
 };
 
 use pbeam_runtime::{BeamProgram, Term};
+use run::run_with_time_limit;
 
 #[test]
 fn loads_compiled_elixir_greetings() {
@@ -173,23 +176,8 @@ fn elixir_io_beam() -> Vec<u8> {
 }
 
 fn run_pbeam(arguments: &[&str]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pbeam"))
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let started = Instant::now();
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            break;
-        }
-        if started.elapsed() >= Duration::from_secs(5) {
-            child.kill().unwrap();
-            panic!("PBeam test process exceeded its five-second limit");
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    child.wait_with_output().unwrap()
+    run_with_time_limit(
+        Command::new(env!("CARGO_BIN_EXE_pbeam")).args(arguments),
+        Duration::from_secs(5),
+    )
 }
