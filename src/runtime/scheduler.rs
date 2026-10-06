@@ -3,9 +3,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use super::{
     ets::EtsTables,
     persistent_term::PersistentTerms,
-    process::{Frame, ProcessState},
+    process::{Frame, ProcessState, ReceiveTimer},
     regex_code::RegexCodes,
     resources::Resources,
+    timer::{Receiver, Timer, Timers},
     tty::Ttys,
 };
 use crate::{
@@ -55,6 +56,9 @@ pub(super) struct Scheduler {
     /// (`beam/erl_nif.c:4774-4777`, `4990-4997`). PBeam has one instance of
     /// each module, so the module name identifies it.
     pub(super) nif_libraries: HashSet<String>,
+    /// The timers of the run and the run clock. All processes of the run
+    /// share them.
+    pub(super) timers: Timers,
 }
 
 impl Scheduler {
@@ -85,6 +89,7 @@ impl Scheduler {
             resources,
             atoms,
             nif_libraries: HashSet::new(),
+            timers: Timers::new(),
         }
     }
 
@@ -116,7 +121,10 @@ impl Scheduler {
     }
 
     /// Take the next process from the run queue and make it the current
-    /// process.
+    /// process. A process whose receive timer expired continues at the
+    /// instruction after its `wait_timeout` with `F_TIMO`, also when a
+    /// message woke it first, as ERTS does before it runs the process
+    /// (`erl_process.c:10451-10458`).
     ///
     /// # Examples
     ///
@@ -125,7 +133,101 @@ impl Scheduler {
     /// ```
     pub(super) fn schedule_next(&mut self) -> Option<ProcessId> {
         self.current_process = self.runnable.pop_front();
+        let process = self
+            .current_process
+            .and_then(|id| self.processes.get_mut(&id))?;
+        if let ReceiveTimer::Expired { resume } = process.receive_timer
+            && let Some(frame) = process.frames.last_mut()
+        {
+            frame.next_instruction = resume;
+            process.receive_timer = ReceiveTimer::Timo;
+        }
         self.current_process
+    }
+
+    /// Expire each timer that is due at the time `now`, in end order. A
+    /// process whose receive timer expires goes to the end of the run queue
+    /// when it waits, and a process in the run queue stays there
+    /// (`proc_timeout_common`, `erl_hl_timer.c:692-706`). A BIF timer sends
+    /// its message to its pid, or to the process that has its name now, and
+    /// a name that no process has drops the message (`bif_timer_timeout`,
+    /// `erl_hl_timer.c:1146-1203`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.expire_timers(scheduler.timers.now());
+    /// ```
+    pub(super) fn expire_timers(&mut self, now: i64) {
+        while let Some(timer) = self.timers.pop_due(now) {
+            match timer {
+                Timer::Receive(id) => {
+                    if self
+                        .processes
+                        .get_mut(&id)
+                        .is_some_and(ProcessState::time_out)
+                    {
+                        self.runnable.push_back(id);
+                    }
+                }
+                Timer::Bif {
+                    receiver, message, ..
+                } => {
+                    let target = match receiver {
+                        Receiver::Process(id) => Some(id),
+                        Receiver::Name(name) => self.whereis(name.name()),
+                    };
+                    if let Some(target) = target {
+                        self.deliver(target, message);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Start the receive timer of the current process for the
+    /// `wait_timeout` value `timeout` at the time `now`, as
+    /// `erts_set_proc_timer_term` (`erl_hl_timer.c:2786-2805`) does. The
+    /// process continues at the instruction index `resume` when the timer
+    /// expires. Return false and start no timer for a value that is not an
+    /// integer from 0 to 4294967295, or whose end is after
+    /// `ERTS_MONOTONIC_END`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(100), 7));
+    /// assert!(!scheduler.set_receive_timer(1_000_000_000, &Term::Integer(-1), 7));
+    /// ```
+    pub(super) fn set_receive_timer(&mut self, now: i64, timeout: &Term, resume: usize) -> bool {
+        let end = match *timeout {
+            Term::Integer(msec) if msec >> 32 == 0 => Timers::timeout_position(now, msec),
+            _ => None,
+        };
+        let Some(end) = end else {
+            return false;
+        };
+        let id = self.current_process_mut().id;
+        let key = self.timers.start(end, Timer::Receive(id));
+        self.current_process_mut().receive_timer = ReceiveTimer::Set { key, resume };
+        true
+    }
+
+    /// Stop the receive timer of the current process and clear `F_TIMO`, as
+    /// `CANCEL_TIMER` (`erl_process.h:1841-1849`) does in `remove_message`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.cancel_receive_timer();
+    /// assert_eq!(scheduler.current_process_mut().receive_timer, ReceiveTimer::None);
+    /// ```
+    pub(super) fn cancel_receive_timer(&mut self) {
+        let process = self.current_process_mut();
+        let state = std::mem::replace(&mut process.receive_timer, ReceiveTimer::None);
+        if let ReceiveTimer::Set { key, .. } = state {
+            self.timers.cancel(key);
+        }
     }
 
     /// Return the current process.
@@ -504,9 +606,10 @@ impl Scheduler {
     }
 
     /// Remove the process `id` after it exits, and take it out of the run
-    /// queue. Delete its ETS tables first, then free its registered name,
-    /// then send `EXIT` to linked processes that trap exits, then run its TTY
-    /// resource monitors and send `DOWN` to monitors. ERTS (`erl_process.c`)
+    /// queue. Stop its receive timer and the BIF timers to its pid. Delete
+    /// its ETS tables first, then free its registered name, then send `EXIT`
+    /// to linked processes that trap exits, then run its TTY resource
+    /// monitors and send `DOWN` to monitors. ERTS (`erl_process.c`)
     /// deletes the tables in `ERTS_CONTINUE_EXIT_USING_DB`
     /// (`erl_process.c:14360-14368`), unregisters the name in
     /// `ERTS_CONTINUE_EXIT_FREE`, before `ERTS_CONTINUE_EXIT_LINKS` and
@@ -536,6 +639,12 @@ impl Scheduler {
             .remove(&id)
             .expect("the exiting process is alive");
         self.runnable.retain(|&runnable| runnable != id);
+        // ERTS cancels the receive timer first (`erl_process.c:14207-14210`),
+        // then the BIF timers to the pid (`erl_process.c:14300-14303`).
+        if let ReceiveTimer::Set { key, .. } = process.receive_timer {
+            self.timers.cancel(key);
+        }
+        self.timers.cancel_process(id);
         self.ets.delete_owned(process.id);
         if let Some(name) = &process.registered_name {
             self.names.remove(name.name());
@@ -594,7 +703,7 @@ mod tests {
     use crate::term::test_atom;
     use crate::{
         runtime::ets::{Access, Table},
-        runtime::process::tests::frame,
+        runtime::process::{ReceiveTimer, tests::frame},
         term::{AtomTable, ProcessId, Term},
     };
 
@@ -797,6 +906,82 @@ mod tests {
                 Term::Pid(child),
                 atom("normal"),
             ])
+        );
+    }
+
+    #[test]
+    fn resumes_after_wait_timeout_when_the_timer_expires_after_a_message() {
+        // ERTS 29.1.1: a process that a message woke and whose receive timer
+        // then expires stays in the run queue once, and it continues at the
+        // instruction after `wait_timeout` with `F_TIMO`
+        // (`erl_hl_timer.c:692-706`, `erl_process.c:10451-10458`).
+        let mut scheduler = Scheduler::new(AtomTable::new());
+        scheduler.start(frame(), vec![]).unwrap();
+        scheduler.schedule_next();
+        assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(100), 7));
+        scheduler.park_current();
+        scheduler.deliver(ProcessId(0), atom("early"));
+        scheduler.expire_timers(1_099_999_999);
+        assert!(matches!(
+            scheduler.processes[&ProcessId(0)].receive_timer,
+            ReceiveTimer::Set { resume: 7, .. }
+        ));
+        scheduler.expire_timers(1_100_000_000);
+        assert_eq!(Vec::from(scheduler.runnable.clone()), vec![ProcessId(0)]);
+        assert_eq!(
+            scheduler.processes[&ProcessId(0)].receive_timer,
+            ReceiveTimer::Expired { resume: 7 }
+        );
+
+        assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+        let process = scheduler.current_process_mut();
+        assert_eq!(process.frames[0].next_instruction, 7);
+        assert_eq!(process.receive_timer, ReceiveTimer::Timo);
+        scheduler.cancel_receive_timer();
+        assert_eq!(
+            scheduler.current_process_mut().receive_timer,
+            ReceiveTimer::None
+        );
+    }
+
+    #[test]
+    fn wakes_a_waiting_process_and_stops_receive_timers_at_cancel_and_exit() {
+        let mut scheduler = Scheduler::new(AtomTable::new());
+        scheduler.start(frame(), vec![]).unwrap();
+        scheduler.schedule_next();
+        assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
+        scheduler.park_current();
+        scheduler.expire_timers(1_001_000_000);
+        assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+
+        assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
+        scheduler.cancel_receive_timer();
+        assert_eq!(scheduler.timers.wait_time(1_000_000_000), None);
+        assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
+        scheduler.finish_current(atom("normal"), None).unwrap();
+        assert_eq!(scheduler.timers.wait_time(1_000_000_000), None);
+    }
+
+    #[test]
+    fn rejects_receive_timeouts_as_erts_set_proc_timer_term() {
+        // `erts_set_proc_timer_term` (`erl_hl_timer.c:2786-2805`) accepts an
+        // integer from 0 to 4294967295 whose end is not after
+        // `ERTS_MONOTONIC_END`.
+        let mut scheduler = Scheduler::new(AtomTable::new());
+        scheduler.start(frame(), vec![]).unwrap();
+        scheduler.schedule_next();
+        for timeout in [Term::Integer(-1), Term::Integer(4_294_967_296), atom("foo")] {
+            assert!(!scheduler.set_receive_timer(1_000_000_000, &timeout, 0));
+        }
+        let end = 9_223_372_036_000_000_000;
+        assert!(!scheduler.set_receive_timer(end, &Term::Integer(1), 0));
+        assert!(scheduler.set_receive_timer(end - 1_000_000, &Term::Integer(1), 0));
+        assert_eq!(
+            scheduler.current_process_mut().receive_timer,
+            ReceiveTimer::Set {
+                key: (9_223_372_036_000, 0),
+                resume: 0
+            }
         );
     }
 }

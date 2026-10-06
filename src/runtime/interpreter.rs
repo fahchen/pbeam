@@ -1,5 +1,5 @@
 use super::{
-    process::{Frame, ProcessState, StackSlot},
+    process::{Frame, ProcessState, ReceiveTimer, StackSlot},
     scheduler::Scheduler,
     unicode::characters_to_utf8,
 };
@@ -117,8 +117,13 @@ impl BeamProgram {
     }
 
     /// Run an exported function as the root process. Processes that it
-    /// spawns run on the same cooperative scheduler until the root exits or
-    /// no process can run.
+    /// spawns run on the same cooperative scheduler. Before it takes the
+    /// next process, the scheduler reads the run clock and expires each due
+    /// timer, as ERTS bumps the timers in `check_activities_to_run`
+    /// (`erl_process.c:9797-9810`). When no process can run, it sleeps until
+    /// the first timer end, as `scheduler_wait` sleeps until the next
+    /// timeout (`erl_process.c:3452-3620`). The run ends when no process can
+    /// run and no timer is active.
     ///
     /// # Examples
     ///
@@ -136,10 +141,20 @@ impl BeamProgram {
         let label = self.entry_label(module, function, arity)?;
         let mut scheduler = Scheduler::new(self.atoms.clone());
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
-        while scheduler.schedule_next().is_some() {
-            match self.run(&mut scheduler)? {
-                Outcome::Wait => scheduler.park_current(),
-                Outcome::Exit { reason, result } => scheduler.finish_current(reason, result)?,
+        loop {
+            let now = scheduler.timers.now();
+            scheduler.expire_timers(now);
+            if scheduler.schedule_next().is_some() {
+                match self.run(&mut scheduler)? {
+                    Outcome::Wait => scheduler.park_current(),
+                    Outcome::Exit { reason, result } => {
+                        scheduler.finish_current(reason, result)?;
+                    }
+                }
+            } else if let Some(wait) = scheduler.timers.wait_time(scheduler.timers.now()) {
+                std::thread::sleep(wait);
+            } else {
+                break;
             }
         }
         match scheduler.into_root_result() {
@@ -774,21 +789,50 @@ impl BeamProgram {
                     if !process.mailbox.remove_current() {
                         return Err(error("remove_message without a current message"));
                     }
+                    scheduler.cancel_receive_timer();
                 }
                 Instruction::Wait(label) => {
                     jump(module, process, *label)?;
                     return Ok(Outcome::Wait);
                 }
                 Instruction::WaitTimeout { label, source } => {
-                    let timeout = read(process, source)?;
-                    if timeout != Term::static_atom("infinity") {
-                        // ponytail: PBeam has no timers; see "Receive timeout" in docs/erts-differences.md.
-                        return Err(error(format!("unsupported receive timeout {timeout:?}")));
+                    // ERTS `beam_jit_wait_timeout` reads the timeout only
+                    // when the process has no receive timer and no `F_TIMO`
+                    // (`jit/beam_jit_common.cpp:1208-1240`). A value that is
+                    // not valid moves the save pointer to the first message
+                    // and raises `timeout_value` (`error.h:154`;
+                    // `jit/arm/instr_msg.cpp:312-338`).
+                    if process.receive_timer == ReceiveTimer::None {
+                        let timeout = read(process, source)?;
+                        if timeout == Term::Integer(0) {
+                            continue;
+                        }
+                        if timeout == Term::static_atom("infinity") {
+                            process.receive_timer = ReceiveTimer::Timo;
+                        } else {
+                            let resume = current_frame(process).next_instruction;
+                            let now = scheduler.timers.now();
+                            if !scheduler.set_receive_timer(now, &timeout, resume) {
+                                let process = scheduler.current_process_mut();
+                                process.mailbox.set_save_first();
+                                let reason = Term::static_atom("timeout_value");
+                                if let Some(outcome) = raise(process, ExceptionClass::Error, reason)
+                                {
+                                    return Ok(outcome);
+                                }
+                                continue;
+                            }
+                        }
                     }
-                    jump(module, process, *label)?;
+                    jump(module, scheduler.current_process_mut(), *label)?;
                     return Ok(Outcome::Wait);
                 }
-                Instruction::Timeout => process.mailbox.set_save_first(),
+                Instruction::Timeout => {
+                    // ERTS `beam_jit_timeout` clears `F_TIMO`
+                    // (`jit/beam_jit_common.cpp:1242-1251`).
+                    process.receive_timer = ReceiveTimer::None;
+                    process.mailbox.set_save_first();
+                }
                 Instruction::ReceiveMarkerReserve(marker) => {
                     let id = process.mailbox.reserve_marker();
                     write(process, marker, id)?;
@@ -2786,10 +2830,13 @@ mod tests {
         );
     }
 
-    /// A `wait_timeout` with `infinity` waits as `wait` does: the `DOWN`
-    /// message of a monitored child continues the receive at its label.
+    /// ERTS 29.1.1 `beam_jit_wait_timeout` (`jit/beam_jit_common.cpp:1208-1240`):
+    /// `infinity` waits as `wait` does, so the `DOWN` message of a monitored
+    /// child continues the receive at its label. `0` continues at once at
+    /// `timeout`. A value that is not valid and that no `try` catches exits
+    /// the process with `{timeout_value, Stack}`.
     #[test]
-    fn waits_for_a_message_with_an_infinity_timeout_and_rejects_other_timeouts() {
+    fn waits_or_continues_at_a_receive_timeout_and_raises_timeout_value() {
         let wait = |timeout: Term| {
             let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
             body.pop();
@@ -2804,6 +2851,7 @@ mod tests {
                     fail_label: 6,
                     destination: Operand::X(0),
                 },
+                Instruction::RemoveMessage,
                 Instruction::Return,
                 Instruction::Label(6),
                 Instruction::WaitTimeout {
@@ -2823,15 +2871,10 @@ mod tests {
                     && fields[2] == test_atom("process")
                     && fields[4] == Term::Integer(1)
         ));
-        // ERTS 29.1.1: `receive M -> M after T -> timeout end` with T = 0
-        // returns timeout at once. PBeam has no timers yet.
+        assert_eq!(wait(Term::Integer(0)).unwrap(), test_atom("timeout"));
         assert_eq!(
-            wait(Term::Integer(0)).unwrap_err().to_string(),
-            "unsupported receive timeout Integer(0)"
-        );
-        assert_eq!(
-            wait(Term::Integer(100)).unwrap_err().to_string(),
-            "unsupported receive timeout Integer(100)"
+            wait(test_atom("foo")).unwrap_err().to_string(),
+            "root process exited with Tuple([Atom(\"timeout_value\"), List([])])"
         );
     }
 

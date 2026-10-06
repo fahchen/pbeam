@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::mailbox::Mailbox;
+use super::{mailbox::Mailbox, timer::TimerKey};
 use crate::term::{Atom, ProcessId, Reference, Term};
 
 /// One active function call: its module, code position, and Y registers.
@@ -28,6 +28,25 @@ pub(super) enum StackSlot {
     Catch(usize),
 }
 
+/// The receive timeout state of a process, as the ERTS process flags
+/// `F_TIMO` and `F_INSLPQUEUE`, the process timer `common.timer`, and the
+/// resume address in `def_arg_reg[0]` (`erl_process.h:1841-1849`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReceiveTimer {
+    /// No flag: the next `wait_timeout` reads its timeout.
+    None,
+    /// `F_TIMO`: the receive waits with `infinity`, or its timer expired and
+    /// the process continues at `timeout`.
+    Timo,
+    /// `F_INSLPQUEUE`: the receive timer with the key `key` is active.
+    /// `resume` is the index of the instruction after `wait_timeout`, as
+    /// `def_arg_reg[0]`.
+    Set { key: TimerKey, resume: usize },
+    /// `ERTS_PTMR_TIMEDOUT`: the receive timer expired. The process
+    /// continues at `resume` the next time it runs.
+    Expired { resume: usize },
+}
+
 /// The execution state and mailbox of one process.
 #[derive(Debug)]
 pub(super) struct ProcessState {
@@ -41,6 +60,8 @@ pub(super) struct ProcessState {
     pub(super) mailbox: Mailbox,
     /// True while the process waits in `wait` for a new message.
     waiting: bool,
+    /// The receive timeout state.
+    pub(super) receive_timer: ReceiveTimer,
     /// True when exit signals from linked processes become `EXIT` messages.
     pub(super) trap_exit: bool,
     /// Processes linked to this process.
@@ -75,6 +96,7 @@ impl ProcessState {
             registers: arguments.into_iter().map(Some).collect(),
             mailbox: Mailbox::default(),
             waiting: false,
+            receive_timer: ReceiveTimer::None,
             trap_exit: false,
             links: HashSet::new(),
             monitored_by: Vec::new(),
@@ -108,11 +130,31 @@ impl ProcessState {
         self.mailbox.push(term);
         std::mem::take(&mut self.waiting)
     }
+
+    /// Mark the receive timer as expired, as `proc_timeout_common`
+    /// (`erl_hl_timer.c:692-706`) does. Return true when the process waited,
+    /// so the scheduler must run it again. A process that a message woke
+    /// stays in the run queue.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.receive_timer = ReceiveTimer::Set { key: (1100, 0), resume: 7 };
+    /// process.wait();
+    /// assert!(process.time_out());
+    /// assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
+    /// ```
+    pub(super) fn time_out(&mut self) -> bool {
+        if let ReceiveTimer::Set { resume, .. } = self.receive_timer {
+            self.receive_timer = ReceiveTimer::Expired { resume };
+        }
+        std::mem::take(&mut self.waiting)
+    }
 }
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::{Frame, ProcessState};
+    use super::{Frame, ProcessState, ReceiveTimer};
     use crate::term::test_atom;
     use crate::term::{ProcessId, Term};
 
@@ -133,5 +175,19 @@ pub(super) mod tests {
         process.wait();
         assert!(process.receive(test_atom("late")));
         assert!(!process.receive(test_atom("later")));
+    }
+
+    #[test]
+    fn expires_the_receive_timer_and_wakes_only_a_waiting_process() {
+        let mut process = ProcessState::new(ProcessId(0), frame(), vec![]);
+        process.receive_timer = ReceiveTimer::Set {
+            key: (1100, 0),
+            resume: 7,
+        };
+        process.wait();
+        assert!(process.time_out());
+        assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
+        assert!(!process.time_out());
+        assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
     }
 }
