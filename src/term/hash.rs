@@ -11,7 +11,8 @@
 //!
 //! Any other term goes through `make_internal_hash`, a MurmurHash3 variant
 //! with two 64-bit states. It reads the term with a work stack, as ERTS does,
-//! so a deep term does not recurse. A reference hashes as an ERTS local
+//! so a deep term does not recurse. An improper list mixes its tail after its
+//! cells, as the ERTS cons cells give it. A reference hashes as an ERTS local
 //! reference that scheduler 1 made with the PBeam reference counter as its
 //! value (`erts_set_ref_numbers` in `erl_bif_unique.h`).
 //!
@@ -662,6 +663,10 @@ mod tests {
         Term::Map(Map::from_pairs(pairs.into_iter().collect()).unwrap())
     }
 
+    fn improper(cells: Vec<Term>, tail: Term) -> Term {
+        Term::ImproperList(cells, Box::new(tail))
+    }
+
     #[test]
     fn mixes_a_word_as_erts_ihash_mix64() {
         assert_eq!(mix64(0x1F), 7938660269479274665);
@@ -828,6 +833,54 @@ mod tests {
     }
 
     #[test]
+    fn hashes_improper_lists_as_pinned_erts() {
+        // Each value is erts_debug:get_internal_state({internal_hash, Term}) on ERTS 29.1.1.
+        let cases = [
+            (
+                improper(vec![Term::Integer(1)], Term::Integer(2)),
+                5915944085625558568,
+            ),
+            (
+                improper(vec![Term::Integer(97), Term::Integer(98)], atom("ok")),
+                6406651010506344343,
+            ),
+            (
+                improper(vec![Term::Tuple(vec![])], atom("ok")),
+                10451236899705497869,
+            ),
+            (
+                improper(vec![Term::Integer(1)], Term::Tuple(vec![])),
+                4641139002621691555,
+            ),
+            (
+                improper(
+                    vec![improper(vec![Term::Integer(1)], Term::Integer(2))],
+                    Term::Integer(3),
+                ),
+                6434836968081835632,
+            ),
+            (
+                improper(vec![integers(&[1])], Term::Binary(vec![])),
+                465555062996238064,
+            ),
+            (
+                improper(vec![atom("ok")], atom("true")),
+                12145861372843638597,
+            ),
+            (
+                improper(
+                    vec![Term::Integer(1), Term::Tuple(vec![])],
+                    Term::Integer(2),
+                ),
+                502573382164607531,
+            ),
+        ];
+        for (term, hash) in cases {
+            assert_eq!(internal_hash(&term), hash, "{term:?}");
+        }
+    }
+
+    #[test]
     fn hashes_collision_nodes_as_pinned_erts() {
         // The keys of each pair have the same internal hash on pinned ERTS
         // 29.1.1, so each map has one collision node (`erts_debug:map_info/1`
@@ -854,6 +907,17 @@ mod tests {
                 ),
                 9593933779384815641,
             ),
+            // An improper list value continues the [Key | Value] cell as more cells.
+            (
+                with(
+                    (
+                        a.clone(),
+                        improper(vec![Term::Integer(1)], Term::Integer(2)),
+                    ),
+                    (b.clone(), Term::Tuple(vec![])),
+                ),
+                243852246011044368,
+            ),
             (
                 with((a, integers(&[120, 121])), (b, Term::List(vec![]))),
                 2185849235149492526,
@@ -871,10 +935,11 @@ mod tests {
     #[test]
     fn hashes_a_deep_term_without_recursion() {
         let deep = |levels: usize| {
-            (0..levels).fold(Term::List(vec![]), |inner, level| match level % 4 {
+            (0..levels).fold(Term::List(vec![]), |inner, level| match level % 5 {
                 0 => Term::Tuple(vec![inner, Term::Binary(vec![])]),
                 1 => Term::List(vec![inner, Term::Integer(1)]),
                 2 => map([(atom("ok"), inner)]),
+                3 => improper(vec![inner], Term::Integer(1)),
                 _ => local(0, 7, 1, vec![inner, Term::Integer(1)]),
             })
         };
