@@ -82,3 +82,8 @@ checks.
 ## Opaque resource fields lack ownership documentation
 
 Document every struct field that wraps an opaque or owned resource. State the owner, the live representation, and the operation that releases it.
+
+## Encoded examples match complete operands
+
+Validate each encoded example against the actual encoder or disassembler.
+Include every operand and use the correct tag for each value.
