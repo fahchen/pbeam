@@ -8,6 +8,7 @@ mod process;
 mod regex_code;
 mod resources;
 mod scheduler;
+mod tty;
 mod unicode;
 
 pub use interpreter::BeamProgram;

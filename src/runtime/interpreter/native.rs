@@ -22,7 +22,7 @@ mod prim_tty;
 /// const WRITE_NIF: Binding = Binding {
 ///     name: "write_nif",
 ///     arity: 2,
-///     run: |arguments| write_nif(&arguments[0], &arguments[1]),
+///     run: |scheduler, arguments| write_nif(scheduler.resources.borrow_mut::<Ttys>(), &arguments[0], &arguments[1]),
 /// };
 /// ```
 struct Binding {
@@ -30,8 +30,9 @@ struct Binding {
     name: &'static str,
     /// The arity of the NIF function.
     arity: u32,
-    /// Runs the NIF. The lookup gives exactly `arity` arguments.
-    run: fn(&[Term]) -> BifResult,
+    /// Runs the NIF for the current process of the scheduler. The lookup
+    /// gives exactly `arity` arguments.
+    run: fn(&mut Scheduler, &[Term]) -> Result<BifResult, BeamError>,
 }
 
 /// The registered bindings of each module, sorted by the module name for a
@@ -64,20 +65,31 @@ fn binding(module: &str, name: &str, arity: u32) -> Option<&'static Binding> {
 }
 
 /// Run the native binding of `module:name/arity`, with the arity of
-/// `arguments`. Return `None` when PBeam has no binding for the MFA; the
-/// function then runs its BEAM stub body.
+/// `arguments`, for the current process of `scheduler`. Return `None` when
+/// PBeam has no binding for the MFA; the function then runs its BEAM stub
+/// body.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let tty = Term::static_atom("stdout");
-/// let iovec = Term::List(Vec::new());
-/// assert!(matches!(call("prim_tty", "write_nif", &[tty, iovec]), Some(BifResult::Raise { .. })));
-/// assert!(call("nif_error_probe", "nif_stub", &[]).is_none());
+/// let stdout = Term::Atom(scheduler.atoms.put("stdout")?);
+/// // `false` when stdout is a file.
+/// assert!(matches!(call(&mut scheduler, "prim_tty", "isatty", &[stdout]), Some(Ok(BifResult::Value(_)))));
+/// assert!(call(&mut scheduler, "nif_error_probe", "nif_stub", &[]).is_none());
 /// ```
-pub(super) fn call(module: &str, name: &str, arguments: &[Term]) -> Option<BifResult> {
+///
+/// # Errors
+///
+/// A binding gives a runtime error for a part that PBeam does not implement
+/// yet, or when a new result atom does not fit in the atom table.
+pub(super) fn call(
+    scheduler: &mut Scheduler,
+    module: &str,
+    name: &str,
+    arguments: &[Term],
+) -> Option<Result<BifResult, BeamError>> {
     let binding = binding(module, name, u32::try_from(arguments.len()).ok()?)?;
-    Some((binding.run)(arguments))
+    Some((binding.run)(scheduler, arguments))
 }
 
 #[cfg(test)]

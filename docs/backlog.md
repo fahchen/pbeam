@@ -17,6 +17,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the next OTP version update, or a decision to keep no third-party source in the tree.
 - **Source:** owner review of PR #124.
 
+### Select the curses library on Linux as ERTS `configure` does
+
+- `src/runtime/host/terminal.rs` links `libtinfo.so.6` by its verbatim name on Linux, as the mise ERTS build links it. A host without this SONAME, for example a musl image, cannot link PBeam. ERTS `configure` uses the first of `tinfo`, `ncurses`, `curses`, `termcap`, and `termlib` that has `tgetent` (`erts/configure.ac:1239-1242`).
+- **Trigger:** a supported Linux target without `libtinfo.so.6`, for example the musl build of the specification.
+- **Source:** Copilot review of PR #131 (#126).
+
 ## Term and loader
 
 ### Load `SMALL_BIG_EXT` and `LARGE_BIG_EXT` literals that fit in 64 bits
@@ -25,9 +31,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path loads such a literal.
 - **Source:** review of PR #160 (#138).
 
-### Run `erlang:'-'/1`, `is_eq`, and `is_float` (was #128)
+### Run `erlang:'-'/1` and `is_eq` (was #128)
 
-- The measured M2 start path does not run them (pinned ERTS call trace and line counters). #110 removed them.
+- The measured M2 start path does not run them (pinned ERTS call trace and line counters). #110 removed them. The `is_float` test of the same task now has a consumer on the logger start and is task #167.
 - **Trigger:** a measured consumer, for example a `~e`, `~f`, or `~g` format, or `lists:usort/1` with three elements.
 - **Source:** review of PR #121 (#110).
 
@@ -51,6 +57,24 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a path reads the group leader of a boot server.
 - **Source:** review of PR #161 (#139).
 
+### Model the ERTS timer wheels
+
+- After #150 (PR #172), PBeam keeps one timer list ordered by end time. ERTS uses soon and later wheels and a high-level timer tree, so a timer of 16384 ms or more that moves into a soon slot expires after the timers with the same end that are already in the slot (pinned probe gives `[b,a]`).
+- **Trigger:** a measured path depends on the order of timers with the same end.
+- **Source:** review of #150.
+
+### Accept every `erlang:spawn_opt/4` option
+
+- PBeam accepts only `link` and `monitor` and gives a runtime error for each other option. ERTS accepts many more and raises `badarg` for an option it does not know (`erts_parse_spawn_opts`). The "Spawn options" row records this.
+- **Trigger:** a consumer needs another spawn option.
+- **Source:** review of #152.
+
+### Parse BIF option lists with one shared function
+
+- Each BIF that takes an option list has its own parser: `timer_options` for `erlang:cancel_timer/2` (PR #172), `parse_options` for `re:compile/2`, and the `spawn_opt/4` options. Extract one function that takes the option term and a schema of the accepted options, and returns the parsed values or `badarg` for an option list that is not valid. Each BIF then gives only its schema.
+- **Trigger:** the next BIF that takes an option list, or a change to an existing option parser.
+- **Source:** owner review of PR #172 (#150).
+
 ### Delete one key of a hashmap in place
 
 - `maps:remove/2` (#129) rebuilds the map, which is O(n). ERTS changes one HAMT path.
@@ -61,6 +85,44 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - `give_away_to_heir`, the `ETS-TRANSFER` message, and the heir checks of `ets:new/2`.
 - **Trigger:** the first consumer of `ets:give_away/3`, `ets:setopts/2`, or a live heir.
 - **Source:** #112.
+
+## Exceptions
+
+### `erlang:error/2` and the `throw` class
+
+- After #155 (PR #177), `erlang:error/2` is still `unsupported`; `re:ucompile/2` (`re.erl:1742-1751`) stops at it. `erlang:throw/1` and `erlang:raise(throw, R, Stack)` give runtime errors.
+- **Trigger:** a measured path raises through them.
+- **Source:** review of #155.
+
+### Run `error_handler.beam` for an undefined function
+
+- After #166 (PR #180), PBeam gives the result of `error_handler:undefined_function/3` in Rust for a loaded module: it calls `'$handle_undefined_function'/2` or raises `undef` with the first frame. ERTS runs `error_handler.beam` from the export entry (`beam_common.c:1294-1342`). Running the BEAM module needs caller frames in the stack trace (`crash/1` calls `tl/1` on it), `erlang:raise/3` that keeps its frames, and `ensure_loaded/1` through `code_server` or `init` (`error_handler.erl:165-198`). The "Undefined functions" row records the difference.
+- **Trigger:** the stack-trace work gives caller frames and `raise/3` frames, or a consumer sets `process_flag(error_handler, Module)`.
+- **Source:** review of #166.
+
+### Raise `undef` for an entry module that the run does not load
+
+- After #42 (PR #194), the `pbeam` binary accepts only an argument atom that a loaded module holds. It stops with `argument <M> is not an atom of the loaded modules` or `unresolved external MFA M:F/A`. ERTS raises `undef` through `error_handler` after a load attempt. Doing the same needs a `BeamProgram` API to add an atom, and the undefined-module path of `error_handler` (a code server or a load attempt). The "Run arguments" and "Undefined functions" rows record the difference.
+- **Trigger:** a consumer runs an entry module that is not in the loaded BEAM files.
+- **Source:** review of #42.
+
+### Halt the PBeam boot with the `init` crash text
+
+- After #6 (PR #195), the `pbeam` binary writes `pbeam: root process exited with <Reason>` for a root exit. Under `erl -noshell -eval`, ERTS writes `Error! Failed to eval: ...` and then `Runtime terminating during boot (<Reason>)` through `init:crash/2` and `erlang:halt/1` (init.erl:665-679, 1552-1567). Doing the same needs `erlang:halt/1,2` with the run end at the halt, `erts_internal:term_to_string/2` (it can use the `print_term` of #6), and an `init` process that watches the boot process.
+- **Trigger:** a consumer needs the ERTS crash text byte for byte.
+- **Source:** design of #6.
+
+### Keep the frames that `erlang:raise/3` receives
+
+- After #155 (PR #177), `erlang:raise/3` checks its stack trace argument but gives the exception `[]`. ERTS keeps the frames, at most `backtrace_depth` and at least one when the depth is 0. A frame with a location keeps its location, and an old frame without a location (`{Fun, Args}` or `{M, F, A}`) gets the location `[]` (`bif.c:1626-1681`). The "Exception stack trace" row of PR #177 records this.
+- **Trigger:** the stack-trace work, or a consumer that reads raised frames.
+- **Source:** review of #155.
+
+### Value checks of `process_flag/2` and `system_flag/2`
+
+- After #155 (PR #177), `max_heap_size` (`erl_gc.c:3824-3872`, needs the process minimum heap size), `{monitor_nodes, Options}` (`dist.c:6732-6799`), a `scheduler` value above the scheduler count, and the `system_flag/2` sub-checks of `internal_cpu_topology`, `erts_alloc`, `sequential_tracer`, `schedulers_online`, and `dirty_cpu_schedulers_online` give the runtime error where ERTS raises `badarg`. The "System flags" row of PR #177 records them.
+- **Trigger:** a consumer sets one of these flags.
+- **Source:** review of #155.
 
 ## Tests and tooling
 

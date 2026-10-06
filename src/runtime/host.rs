@@ -1,7 +1,10 @@
 //! Read the host system information that ERTS reads at emulator start
-//! (`sys/unix/sys.c`).
+//! (`sys/unix/sys.c`), and the host terminal that the `prim_tty` NIFs use.
 
 use std::ffi::CStr;
+
+pub(crate) mod errno;
+pub(crate) mod terminal;
 
 /// Return the OS flavor of the host: the `uname` system name with each
 /// ASCII uppercase letter in lowercase, as ERTS `os_flavor`

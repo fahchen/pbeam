@@ -10,10 +10,7 @@
 //! label of its code, `Target` is the entry of either kind, and `Fun` is the
 //! thing.
 
-use std::{
-    cmp::Ordering,
-    hash::{Hash, Hasher},
-};
+use std::cmp::Ordering;
 
 use super::{Atom, Term};
 
@@ -33,9 +30,9 @@ pub(crate) struct Lambda {
     /// The module that defines the lambda.
     module: Atom,
     /// The index of the lambda in the `FunT` chunk (`ErlFunEntry.index`).
-    index: i32,
+    pub(super) index: i32,
     /// The old unique value of the `FunT` entry (`ErlFunEntry.old_uniq`).
-    old_unique: i32,
+    pub(super) old_unique: i32,
     /// The entry label of the code of the lambda.
     label: u32,
     /// The number of arguments of a call of the fun, without the free
@@ -139,30 +136,6 @@ impl PartialEq for Lambda {
 
 impl Eq for Lambda {}
 
-impl Hash for Lambda {
-    /// Hash the fields that `PartialEq` compares: the module, the index,
-    /// the old unique value, and the arity. The entry label is not part of
-    /// the hash, so two equal entries with other labels give the same hash.
-    /// The module adds only its atom index, because equal atoms have the
-    /// same index.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use std::hash::{BuildHasher, RandomState};
-    ///
-    /// let state = RandomState::new();
-    /// let hash = |label| state.hash_one(Lambda::new(atom.clone(), 0, 1, label, 1));
-    /// assert_eq!(hash(53), hash(61));
-    /// ```
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.module.index().hash(state);
-        self.index.hash(state);
-        self.old_unique.hash(state);
-        self.arity.hash(state);
-    }
-}
-
 /// The entry that a fun points to: the fun entry of a lambda for a local
 /// fun, or the module, function, and arity for an external fun, as the
 /// `entry` union of ERTS `ErlFunThing` is.
@@ -186,37 +159,6 @@ pub(crate) enum Target {
         function: Atom,
         arity: u32,
     },
-}
-
-impl Hash for Target {
-    /// Hash the entry, consistent with `PartialEq`: the kind of the entry,
-    /// and then the fun entry of a local fun, or the module, function, and
-    /// arity of an external fun. An atom adds only its atom index.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use std::hash::{BuildHasher, RandomState};
-    ///
-    /// let state = RandomState::new();
-    /// let target = Target::External { module, function, arity: 1 };
-    /// assert_eq!(state.hash_one(&target), state.hash_one(target.clone()));
-    /// ```
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            Target::Local(lambda) => lambda.hash(state),
-            Target::External {
-                module,
-                function,
-                arity,
-            } => {
-                module.index().hash(state);
-                function.index().hash(state);
-                arity.hash(state);
-            }
-        }
-    }
 }
 
 impl Target {

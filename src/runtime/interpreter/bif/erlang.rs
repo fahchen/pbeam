@@ -3,7 +3,7 @@
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
-use crate::term::{Fun, MAX_ATOM_CHARACTERS, Reference};
+use crate::term::{Fun, MAX_ATOM_CHARACTERS};
 
 /// Return the node of a pid or of the calling process.
 ///
@@ -58,44 +58,69 @@ pub(super) fn trap_exit(
     Ok(Value(old))
 }
 
-/// Run `erlang:demonitor(Reference, Options)` with the options `[]` or
-/// `[flush]`. Other options give a runtime error.
+/// Run `erlang:demonitor(Reference, Options)` as ERTS `demonitor_2`
+/// (bif.c) does. `Options` is a list of `flush` and `info` in any order,
+/// with repeats. An options term that is not such a list raises `badarg`,
+/// then a `Reference` that is not a reference raises `badarg`. The checks
+/// come before the monitor is removed, so a call that raises leaves the
+/// monitor active.
 ///
-/// ERTS `demonitor_2` (bif.c) flushes only when no active monitor was
-/// removed: the DOWN message can then be queued. The flush traps into
-/// `erts_internal:flush_monitor_messages/3`.
+/// The result is `true`. With `info`, it is `false` when no active monitor
+/// was removed. With `flush` and no active monitor removed, the DOWN
+/// message can be queued, so the BIF traps into
+/// `erts_internal:flush_monitor_messages(Reference, false, Result)`. ERTS
+/// gives `Multi = true` only for a time-offset monitor, which PBeam does
+/// not support.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = demonitor(&mut context, reference, &[])?;
+/// let result = demonitor(&mut context, &Term::Reference(reference), &Term::List(vec![]));
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let result = demonitor(&mut context, gone, &[Term::static_atom("flush")])?;
+/// let info = Term::List(vec![Term::static_atom("info")]);
+/// let result = demonitor(&mut context, &Term::Reference(reference), &info);
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// let flush = Term::List(vec![Term::static_atom("flush")]);
+/// let result = demonitor(&mut context, &Term::Reference(gone), &flush);
 /// assert!(matches!(result, BifResult::Trap { function: "flush_monitor_messages", .. }));
+/// let result = demonitor(&mut context, &Term::Integer(1), &Term::List(vec![]));
+/// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 pub(super) fn demonitor(
     context: &mut BifContext<'_>,
-    reference: Reference,
-    options: &[Term],
-) -> Result<BifResult, BeamError> {
-    let flush = match options {
-        [] => false,
-        [Term::Atom(option)] if option.name() == "flush" => true,
-        _ => return Err(error(format!("unsupported demonitor options {options:?}"))),
+    reference: &Term,
+    options: &Term,
+) -> BifResult {
+    let Term::List(options) = options else {
+        return BifResult::badarg();
     };
-    let removed = context.scheduler.demonitor(reference);
-    if removed || !flush {
-        return Ok(Value(Term::static_atom("true")));
+    let (mut flush, mut info) = (false, false);
+    for option in options {
+        match option {
+            Term::Atom(atom) if atom.name() == "flush" => flush = true,
+            Term::Atom(atom) if atom.name() == "info" => info = true,
+            _ => return BifResult::badarg(),
+        }
     }
-    Ok(Trap {
+    let Term::Reference(reference) = reference else {
+        return BifResult::badarg();
+    };
+    if context.scheduler.demonitor(*reference) {
+        return Value(Term::static_atom("true"));
+    }
+    let result = Term::static_atom(if info { "false" } else { "true" });
+    if !flush {
+        return Value(result);
+    }
+    Trap {
         module: "erts_internal",
         function: "flush_monitor_messages",
         arguments: vec![
-            Term::Reference(reference),
+            Term::Reference(*reference),
             Term::static_atom("false"),
-            Term::static_atom("true"),
+            result,
         ],
-    })
+    }
 }
 
 /// Run `erlang:spawn/3`: start a process that runs `module:function` with the
@@ -464,6 +489,59 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
     }
     let matches = matches!(term, Term::Fun(fun) if i64::from(fun.target().arity()) == arity);
     Value(Term::static_atom(if matches { "true" } else { "false" }))
+}
+
+/// Send `message` to `to` and return the message, as ERTS `erl_send`
+/// (`bif.c:2845-2908`) and `do_send` (`bif.c:2458-2695`) do for the `send`
+/// instruction.
+///
+/// - A pid gets the message. ERTS drops a message to a process that does
+///   not exist.
+/// - A reference drops the message. ERTS sends an alias message, and the
+///   receiver drops it when the reference is not an active alias. PBeam has
+///   no aliases.
+/// - An atom gives the message to its registered process. A name that no
+///   process has raises `badarg`. PBeam has no ports.
+/// - `{Name, Node}` with two atoms and the local node gives the message to
+///   the registered process, or drops it when no process has the name.
+///   Another node drops the message, as ERTS does on a node that is not
+///   alive (`dist.c:3234-3235`, `bif.c:2397-2400`, `2870-2872`). Each other
+///   tuple raises `badarg`.
+/// - Each other term raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(send(scheduler, &Term::Pid(pid), ok.clone()), BifResult::Value(value) if value == ok));
+/// assert!(matches!(send(scheduler, &Term::static_atom("nobody"), ok.clone()), BifResult::Raise { .. }));
+/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// assert!(matches!(send(scheduler, &remote, ok.clone()), BifResult::Value(_)));
+/// ```
+pub(in crate::runtime::interpreter) fn send(
+    scheduler: &mut Scheduler,
+    to: &Term,
+    message: Term,
+) -> BifResult {
+    let target = match to {
+        Term::Pid(pid) => Some(*pid),
+        Term::Reference(_) => None,
+        Term::Atom(name) => match scheduler.whereis(name.name()) {
+            Some(pid) => Some(pid),
+            None => return BifResult::badarg(),
+        },
+        Term::Tuple(elements) => match elements.as_slice() {
+            [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
+                scheduler.whereis(name.name())
+            }
+            [Term::Atom(_), Term::Atom(_)] => None,
+            _ => return BifResult::badarg(),
+        },
+        _ => return BifResult::badarg(),
+    };
+    if let Some(target) = target {
+        scheduler.deliver(target, message.clone());
+    }
+    Value(message)
 }
 
 /// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).

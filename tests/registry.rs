@@ -82,3 +82,86 @@ fn reads_the_registered_name_of_another_process_as_pinned_erts() {
         b"[{registered_name,registry_probe_info},[],undefined,undefined,undefined,badarg]\n"
     );
 }
+
+#[test]
+fn sends_to_registered_names_as_pinned_erts() {
+    // `registry_probe:send/0` sends to its own name, to the name of an echo
+    // process, and to `{Name, node()}`; the echo process sends back to a
+    // pid. A name that no process has, a tuple that is not two atoms, and
+    // each other term raise `error:badarg`. `{Name, node()}` without a
+    // process, another node, and a reference drop the message and return
+    // it, as ERTS `do_send` (`bif.c:2458-2695`) and `erl_send`
+    // (`bif.c:2845-2908`) do. `empty` shows that no dropped message came
+    // back.
+    let program = BeamProgram::load(&[REGISTRY_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let errors = [
+        "badarg", "badarg", "badarg", "badarg", "dropped", "dropped", "badarg", "badarg", "badarg",
+        "dropped",
+    ];
+    assert_eq!(
+        program.execute("registry_probe", "send", &[]).unwrap(),
+        Term::List(vec![
+            atom("to_self"),
+            atom("received"),
+            atom("to_echo"),
+            atom("received"),
+            atom("to_tuple"),
+            atom("received"),
+            Term::List(errors.into_iter().map(atom).collect()),
+            atom("empty"),
+        ])
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/registry",
+            "-eval",
+            "io:format(\"~w~n\", [registry_probe:send()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        reference.stdout,
+        b"[to_self,received,to_echo,received,to_tuple,received,[badarg,badarg,badarg,badarg,dropped,dropped,badarg,badarg,badarg,dropped],empty]\n"
+    );
+}
+
+#[test]
+fn exits_with_badarg_for_an_uncaught_send_to_a_missing_name() {
+    // `registry_probe:send_to/1` sends to a name that no process has, with
+    // no `try` around the send. ERTS raises `error:badarg`.
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/registry",
+            "-eval",
+            "try registry_probe:send_to(registry_probe_missing) \
+             catch Class:Reason -> io:format(\"~w ~w~n\", [Class, Reason]) end, \
+             halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stdout, b"error badarg\n");
+
+    // PBeam exits with the same reason but an empty stack trace. This is the
+    // "Exception stack trace" row in `docs/erts-differences.md`.
+    let program = BeamProgram::load(&[REGISTRY_PROBE]).unwrap();
+    let missing = Term::Atom(program.atom("registry_probe_missing").unwrap());
+    let error = program
+        .execute("registry_probe", "send_to", &[missing])
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("root process exited with Tuple([Atom(\"badarg\"), List([])])"),
+        "expected a badarg exit reason with an empty stack trace, got {error}"
+    );
+}

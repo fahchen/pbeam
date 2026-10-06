@@ -16,7 +16,7 @@ use std::collections::HashMap;
 mod bif;
 mod native;
 
-use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function};
+use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function, send};
 
 /// The largest number of arguments of `erlang:apply/3`. ERTS `apply` copies
 /// at most `MAX_REG - 1` arguments to the X registers (`erl_vm.h:55`,
@@ -726,12 +726,17 @@ impl BeamProgram {
                     write(process, destination, Term::List(values))?;
                 }
                 Instruction::Send => {
-                    let Term::Pid(target) = read(process, &Operand::X(0))? else {
-                        return Err(error("unsupported BEAM send target"));
-                    };
+                    // ERTS `send` calls `erl_send` and writes its result to
+                    // x0, or raises (`emu/bif_instrs.tab:425-454`; JIT
+                    // `emit_send` in `jit/arm/instr_bif.cpp:612-625`).
+                    let to = read(process, &Operand::X(0))?;
                     let message = read(process, &Operand::X(1))?;
-                    scheduler.deliver(target, message.clone());
-                    write(scheduler.current_process_mut(), &Operand::X(0), message)?;
+                    let result = send(scheduler, &to, message);
+                    if let Some(outcome) =
+                        self.finish_bif(scheduler.current_process_mut(), result, false)?
+                    {
+                        return Ok(outcome);
+                    }
                 }
                 Instruction::LoopReceive {
                     fail_label,
@@ -788,8 +793,9 @@ impl BeamProgram {
                     // (`beam/erl_nif.c:4922-4928`, `5050-5098`). A function
                     // without a binding runs its BEAM stub body.
                     let arguments = call_arguments(&process.registers, *arity)?;
-                    if let Some(result) = native::call(&module.name, name, &arguments)
-                        && let Some(outcome) = self.finish_bif(process, result, true)?
+                    if let Some(result) = native::call(scheduler, &module.name, name, &arguments)
+                        && let Some(outcome) =
+                            self.finish_bif(scheduler.current_process_mut(), result?, true)?
                     {
                         return Ok(outcome);
                     }
@@ -1941,7 +1947,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_tuple_access_sends_and_bifs() {
+    fn rejects_invalid_tuple_access_receives_and_bifs() {
         let error = |body| run_with_child(body).unwrap_err().to_string();
         let element = |tuple, index| Instruction::GetTupleElement {
             tuple: Operand::Value(tuple),
@@ -1952,13 +1958,6 @@ mod tests {
         assert!(error(vec![Instruction::RemoveMessage]).contains("remove_message"));
         assert!(error(vec![element(Term::Integer(1), 0)]).contains("not a tuple"));
         assert!(error(vec![element(Term::Tuple(vec![]), 0)]).contains("no element 0"));
-        assert!(
-            error(vec![
-                Instruction::Move(atom("nobody"), Operand::X(0)),
-                Instruction::Send
-            ])
-            .contains("send target")
-        );
         assert!(
             error(vec![Instruction::Bif {
                 fail_label: 0,
@@ -2950,7 +2949,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_tuple_arity_and_rejects_call_last_stack_size_and_demonitor_options() {
+    fn selects_tuple_arity_and_rejects_call_last_stack_size() {
         let select = |value: Term| {
             make_program(
                 vec![
@@ -2995,17 +2994,6 @@ mod tests {
                 },
             ])
             .contains("tail-call stack size")
-        );
-        assert!(
-            error(vec![
-                erlang_call("make_ref", 0, false),
-                Instruction::Move(
-                    Operand::Value(Term::List(vec![test_atom("info")])),
-                    Operand::X(1),
-                ),
-                erlang_call("demonitor", 2, false),
-            ])
-            .contains("unsupported demonitor options")
         );
     }
 
@@ -3280,35 +3268,6 @@ mod tests {
                     Instruction::Return,
                 ],
             },
-        );
-        assert_eq!(
-            program.execute("fixture", "main", &[]).unwrap(),
-            test_atom("true")
-        );
-    }
-
-    #[test]
-    fn removes_an_active_monitor_without_a_trap() {
-        // monitor(process, self()), then demonitor(Ref, [flush]): the monitor
-        // is still active, so ERTS returns true without flushing.
-        let program = make_program(
-            vec![
-                Instruction::Bif {
-                    fail_label: 0,
-                    module: "erlang".into(),
-                    name: "self".into(),
-                    arguments: Vec::new(),
-                    destination: Operand::X(1),
-                },
-                Instruction::Move(atom("process"), Operand::X(0)),
-                erlang_call("monitor", 2, false),
-                Instruction::Move(
-                    Operand::Value(Term::List(vec![test_atom("flush")])),
-                    Operand::X(1),
-                ),
-                erlang_call("demonitor", 2, true),
-            ],
-            0,
         );
         assert_eq!(
             program.execute("fixture", "main", &[]).unwrap(),
