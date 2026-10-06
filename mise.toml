@@ -45,3 +45,60 @@ run = '''mix run --no-start -e 'for module <- [Hello, HelloVariant] do path = :c
 [tasks.beam-inventory]
 description = "Disassemble the constant-return BEAM fixture"
 run = '''erl -noshell -eval 'io:format("~p~n", [beam_disasm:file("fixtures/beam/constant.beam")]), halt().' '''
+
+[tasks.check-brief]
+description = "Run all required checks and print only the result; the full log goes to target/check.log"
+quiet = true
+run = "bash scripts/check_brief.sh"
+
+[tasks.test-focus]
+description = "Run selected Rust tests and print only the results and failures"
+quiet = true
+usage = 'arg "[args]..." help="Arguments for cargo test, such as --test group, a test name filter, or -- --exact" var=#true double_dash="preserve"'
+run = 'eval "set -- ${usage_args:-}"; bash scripts/test_focus.sh "$@"'
+
+[tasks.erts-eval]
+description = "Evaluate Erlang expressions on the pinned OTP and print the value or the exception"
+quiet = true
+usage = '''
+flag "--pa <dir>" help="Add this directory to the code path, for example fixtures/order"
+arg "<expr>" help="Erlang expressions, as for erl -eval"
+'''
+run = 'escript scripts/erts_eval.escript "${usage_pa:-}" "$usage_expr"'
+
+[tasks.disasm]
+description = "Disassemble selected functions of a module or BEAM file with beam_disasm, without line instructions"
+quiet = true
+usage = '''
+arg "<module>" help="A module on the pinned OTP code path, such as erlang or io, or a .beam file"
+arg "[function]..." help="Functions as name/arity; with none, all functions" var=#true
+'''
+run = 'eval "set -- ${usage_function:-}"; escript scripts/disasm.escript "$usage_module" "$@"'
+
+[tasks.fixture-beam]
+description = "Compile Erlang fixtures and compare each result with the committed BEAM file, except the CInf and Dbgi chunks"
+quiet = true
+usage = '''
+flag "--write" help="Write the BEAM files that differ or are new"
+arg "[source]..." help="Fixture sources, such as fixtures/order/order_probe.erl; with none, all fixtures/*/*.erl" var=#true
+'''
+run = 'eval "set -- ${usage_source:-}"; escript scripts/fixture_beam.escript ${usage_write:+--write} "$@"'
+
+[tasks.otp-src]
+description = "Print a line range of an OTP source file at the pinned OTP tag, with line numbers"
+quiet = true
+usage = '''
+arg "<path>" help="A path in the erlang/otp repository, such as erts/emulator/beam/bif.c"
+arg "<start>" help="The first line"
+arg "<end>" help="The last line"
+'''
+run = 'bash scripts/otp_src.sh "$usage_path" "$usage_start" "$usage_end"'
+
+[tasks.issue]
+description = "Print the title, labels, milestone, and named body sections of an issue"
+quiet = true
+usage = '''
+arg "<number>" help="The issue number"
+arg "[section]..." help="Section headings or their first words, such as Acceptance or Dependencies; with none, print the headings only" var=#true
+'''
+run = 'eval "set -- ${usage_section:-}"; bash scripts/issue.sh "$usage_number" "$@"'
