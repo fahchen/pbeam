@@ -539,8 +539,10 @@ fn iterates_maps_in_a_given_key_order_as_pinned_erts() {
     // gives the keys in the order of the list, also for a hashmap, and `[]`
     // gives `none`. A call takes at most 125 keys, so 130 keys need a
     // second call with the rest of the list. A key that the map does not
-    // hold, a tail that is not `[]`, also in the second call, and a list
-    // path in list mode raise `badarg`.
+    // hold, a tail that is not `[]`, and a list path in list mode raise
+    // `badarg`. The second-call badarg case is in
+    // `ordered_second_call_badarg/0`, which crashes ERTS; the test below
+    // checks PBeam for it without a reference run.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
@@ -548,7 +550,6 @@ fn iterates_maps_in_a_given_key_order_as_pinned_erts() {
         Term::List(vec![atom("a"), atom("b"), atom("c")]),
         Term::List((1..=40).rev().map(Term::Integer).collect()),
         atom("true"),
-        badarg.clone(),
         Term::Tuple(vec![
             atom("c"),
             Term::Integer(3),
@@ -565,10 +566,35 @@ fn iterates_maps_in_a_given_key_order_as_pinned_erts() {
     );
     let keys: Vec<_> = (1..=40).rev().map(|key: i64| key.to_string()).collect();
     let text = format!(
-        "[[a,b,c],[{}],true,{{error,badarg}},{{c,3,{{a,1,none}}}},none,{{error,badarg}},{{error,badarg}},{{error,badarg}}]\n",
+        "[[a,b,c],[{}],true,{{c,3,{{a,1,none}}}},none,{{error,badarg}},{{error,badarg}},{{error,badarg}}]\n",
         keys.join(",")
     );
     assert_eq!(String::from_utf8(reference("ordered")).unwrap(), text);
+}
+
+#[test]
+fn returns_badarg_for_an_ordered_path_that_crashes_pinned_erts() {
+    // `logger_start_probe:ordered_second_call_badarg/0` runs the ordered
+    // iterator of `erts_internal:map_next/3` with a 130-key path whose tail
+    // is not `[]`, so the badarg is raised in the second call, after the
+    // first chunk of keys. PBeam returns `{error, badarg}` every time. On the
+    // pinned ERTS (OTP 29.1.1, JIT) this input crashes the emulator with
+    // SIGSEGV in about one run in four: the BIF builds one tuple per key in a
+    // heap fragment and raises badarg before it sets the last tuple's third
+    // element (`erl_map.c:3670-3707`); `HRelease` keeps the half-built tuples
+    // in the fragment, the GC after the BIF call copies and scans the whole
+    // fragment (`collect_live_heap_frags`, `erl_gc.c`), and the unset element
+    // holds uninitialised heap memory that reads as a wild boxed or list
+    // pointer. There is thus no stable reference output to compare, so this
+    // test checks only PBeam; `docs/erts-differences.md` records the crash.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "ordered_second_call_badarg", &[])
+            .unwrap(),
+        Term::Tuple(vec![atom("error"), atom("badarg")])
+    );
 }
 
 #[test]
