@@ -1,8 +1,4 @@
-use std::{
-    ops::RangeInclusive,
-    process::{Command, Output},
-    time::Duration,
-};
+use std::{ops::RangeInclusive, process::Command, time::Duration};
 
 #[path = "common/boot.rs"]
 mod boot;
@@ -16,7 +12,7 @@ mod run;
 
 use boot::{BOOT_BEAM, BOOT_MODULES};
 use common::pinned_beam_path;
-use run::run_with_time_limit;
+use run::run_dumb_utf8;
 
 const LOG_PROBE: &str = "fixtures/log/log_probe.beam";
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
@@ -134,22 +130,6 @@ fn is_header_time(time: &str) -> bool {
         && digits(micro, 6..=6)
 }
 
-/// Run a command with `TERM=dumb` and `LC_ALL=C.UTF-8`, and return its
-/// output. Kill it and panic when it does not end in `RUN_TIME_LIMIT`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let output = run_to_end(Command::new("erl").args(["-noshell", "-eval", "halt()."]));
-/// assert_eq!(output.status.code(), Some(0));
-/// ```
-fn run_to_end(command: &mut Command) -> Output {
-    run_with_time_limit(
-        command.env("TERM", "dumb").env("LC_ALL", "C.UTF-8"),
-        RUN_TIME_LIMIT,
-    )
-}
-
 #[test]
 fn writes_a_log_event_through_the_default_handler_after_the_boot() {
     // `?LOG_ERROR` calls `logger:allow/2` and then `logger:macro_log/4`
@@ -171,19 +151,23 @@ fn writes_a_log_event_through_the_default_handler_after_the_boot() {
     // the run.
     let beams = BOOT_MODULES.map(pinned_beam_path);
     let events = LOG_EVENT_MODULES.map(pinned_beam_path);
-    let erts = run_to_end(Command::new("erl").args([
-        "-noshell",
-        "-pa",
-        "fixtures/log",
-        "-eval",
-        "ok = log_probe:main(), halt().",
-    ]));
-    let pbeam = run_to_end(
+    let erts = run_dumb_utf8(
+        Command::new("erl").args([
+            "-noshell",
+            "-pa",
+            "fixtures/log",
+            "-eval",
+            "ok = log_probe:main(), halt().",
+        ]),
+        RUN_TIME_LIMIT,
+    );
+    let pbeam = run_dumb_utf8(
         Command::new(env!("CARGO_BIN_EXE_pbeam"))
             .args(["pbeam_boot", "start", "log_probe", "main", "--", LOG_PROBE])
             .args(&beams)
             .args(&events)
             .arg(BOOT_BEAM),
+        RUN_TIME_LIMIT,
     );
     for (name, output) in [("ERTS", erts), ("PBeam", pbeam)] {
         assert_eq!(

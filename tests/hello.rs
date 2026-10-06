@@ -1,3 +1,7 @@
+#[expect(
+    dead_code,
+    reason = "this test crate runs the binary without the terminal variables"
+)]
 #[path = "common/run.rs"]
 mod run;
 
