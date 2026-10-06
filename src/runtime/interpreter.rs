@@ -426,7 +426,7 @@ impl BeamProgram {
                             }
                         }
                         // The compiler emits a `bif` instruction only for a
-                        // BIF that does not trap.
+                        // BIF that does not trap or end the caller.
                         trap => {
                             return Err(error(format!(
                                 "unsupported {bif_module}:{name}/{} result {trap:?}",
@@ -1064,8 +1064,8 @@ impl BeamProgram {
     /// `emit_bif_nif_epilogue` in `jit/arm/instr_bif.cpp:631-719`). A value
     /// goes to x0, and a tail call then returns from the frame. An exception
     /// goes to the error handler. A trap writes its arguments to the X
-    /// registers and enters the target function. Return the outcome when the
-    /// process exits.
+    /// registers and enters the target function. An exit ends the process,
+    /// and no catch tag sees it. Return the outcome when the process exits.
     ///
     /// # Examples
     ///
@@ -1106,6 +1106,10 @@ impl BeamProgram {
                 enter_frame(process, self.mfa_frame(module, function, arity)?, tail);
                 Ok(None)
             }
+            BifResult::Exited(reason) => Ok(Some(Outcome::Exit {
+                reason,
+                result: None,
+            })),
         }
     }
 }

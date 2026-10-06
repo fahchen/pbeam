@@ -413,16 +413,8 @@ impl Scheduler {
         self.names.get(name).copied()
     }
 
-    /// Remove the current process after it exits. Delete its ETS tables
-    /// first, then free its registered name, then send `EXIT` to linked
-    /// processes that trap exits, then run its TTY resource monitors and
-    /// send `DOWN` to monitors. ERTS
-    /// (`erl_process.c`) deletes the tables in `ERTS_CONTINUE_EXIT_USING_DB`
-    /// (`erl_process.c:14360-14368`), unregisters the name in
-    /// `ERTS_CONTINUE_EXIT_FREE`, before `ERTS_CONTINUE_EXIT_LINKS` and
-    /// `ERTS_CONTINUE_EXIT_MONITORS`, and sends link exit signals before
-    /// monitor down signals. A process that traps exits also receives a
-    /// `normal` exit.
+    /// Remove the current process after it exits, as [`Self::exit_process`]
+    /// does.
     ///
     /// # Examples
     ///
@@ -441,11 +433,109 @@ impl Scheduler {
         reason: Term,
         result: Option<Term>,
     ) -> Result<(), BeamError> {
-        let process = self
+        let id = self
             .current_process
             .take()
-            .and_then(|id| self.processes.remove(&id))
             .expect("the scheduler has a current process");
+        self.exit_process(id, reason, result)
+    }
+
+    /// Send the exit signal of `erlang:exit(Target, Reason)` from the current
+    /// process to the local process `target`, and handle it in the receiver
+    /// at once, as the row "Signal queue" of `docs/erts-differences.md`
+    /// records. ERTS sends the signal in `send_exit_signal_bif`
+    /// (`bif.c:1759-1772`), and the receiver handles it in
+    /// `handle_exit_signal` (`erl_proc_sig_queue.c:4740-4770`):
+    ///
+    /// - A receiver that does not exist drops the signal.
+    /// - A receiver that traps exits gets `{'EXIT', Caller, Reason}`, unless
+    ///   `Reason` is `kill`.
+    /// - Else `normal` is ignored, unless the caller sends it to itself:
+    ///   `exit2_suicide` sets `normal_kills` (`erl_proc_sig_queue.c:1807-1809`).
+    /// - Else the receiver exits with `Reason`, and `kill` gives `killed`.
+    ///
+    /// Return `Some(reason)` when the caller is the receiver and must exit
+    /// before `exit/2` returns. Another receiver exits here.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.send_exit(child, Term::static_atom("kill"))?, None);
+    /// assert!(scheduler.process(child).is_none());
+    /// let caller = scheduler.current_process_mut().id;
+    /// assert_eq!(
+    ///     scheduler.send_exit(caller, Term::static_atom("kill"))?,
+    ///     Some(Term::static_atom("killed"))
+    /// );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An abnormal exit of the receiver to a linked process that does not
+    /// trap exits is not supported.
+    pub(super) fn send_exit(
+        &mut self,
+        target: ProcessId,
+        reason: Term,
+    ) -> Result<Option<Term>, BeamError> {
+        let caller = self.current_process_mut().id;
+        let Some(process) = self.processes.get(&target) else {
+            return Ok(None);
+        };
+        let kill = reason == Term::static_atom("kill");
+        if process.trap_exit && !kill {
+            let exit = Term::Tuple(vec![Term::static_atom("EXIT"), Term::Pid(caller), reason]);
+            self.deliver(target, exit);
+            return Ok(None);
+        }
+        if reason == Term::static_atom("normal") && target != caller {
+            return Ok(None);
+        }
+        let reason = if kill {
+            Term::static_atom("killed")
+        } else {
+            reason
+        };
+        if target == caller {
+            return Ok(Some(reason));
+        }
+        self.exit_process(target, reason, None)?;
+        Ok(None)
+    }
+
+    /// Remove the process `id` after it exits, and take it out of the run
+    /// queue. Delete its ETS tables first, then free its registered name,
+    /// then send `EXIT` to linked processes that trap exits, then run its TTY
+    /// resource monitors and send `DOWN` to monitors. ERTS (`erl_process.c`)
+    /// deletes the tables in `ERTS_CONTINUE_EXIT_USING_DB`
+    /// (`erl_process.c:14360-14368`), unregisters the name in
+    /// `ERTS_CONTINUE_EXIT_FREE`, before `ERTS_CONTINUE_EXIT_LINKS` and
+    /// `ERTS_CONTINUE_EXIT_MONITORS`, and sends link exit signals before
+    /// monitor down signals. A process that traps exits also receives a
+    /// `normal` exit.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.exit_process(child, Term::static_atom("killed"), None)?;
+    /// assert!(scheduler.process(child).is_none());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An abnormal exit signal to a linked process that does not trap exits
+    /// is not supported.
+    fn exit_process(
+        &mut self,
+        id: ProcessId,
+        reason: Term,
+        result: Option<Term>,
+    ) -> Result<(), BeamError> {
+        let process = self
+            .processes
+            .remove(&id)
+            .expect("the exiting process is alive");
+        self.runnable.retain(|&runnable| runnable != id);
         self.ets.delete_owned(process.id);
         if let Some(name) = &process.registered_name {
             self.names.remove(name.name());

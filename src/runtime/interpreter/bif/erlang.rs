@@ -58,6 +58,48 @@ pub(super) fn trap_exit(
     Ok(Value(old))
 }
 
+/// Run `erlang:exit(Id, Reason)`: send an exit signal to a local pid, as
+/// ERTS `send_exit_signal_bif` (`bif.c:1750-1772`) does, and return `true`.
+/// A signal that ends the caller gives [`BifResult::Exited`] instead. A
+/// reference gives `true` and sends nothing: PBeam has no process alias, so
+/// `erts_get_pid_of_ref` gives `undefined` (`erl_bif_unique.h:279-286`), and
+/// `send_gen_exit_signal` drops the signal (`erl_proc_sig_queue.c:1650-1655`).
+/// The reference of a NIF resource also gives `true`: in ERTS it is a magic
+/// reference, and `is_internal_ref` is true for it (`erl_term.h:1064-1065`).
+/// Each other term raises `error:badarg` (`bif.c:1864-1866`). PBeam cannot
+/// represent a port or a remote pid.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = exit(&mut context, &Term::Reference(reference), &boom)?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// let result = exit(&mut context, &Term::Pid(caller), &kill)?;
+/// assert!(matches!(result, BifResult::Exited(Term::Atom(atom)) if atom.name() == "killed"));
+/// assert!(matches!(exit(&mut context, &foo, &boom)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// An abnormal exit of the receiver to a linked process that does not trap
+/// exits is not supported.
+pub(super) fn exit(
+    context: &mut BifContext<'_>,
+    id: &Term,
+    reason: &Term,
+) -> Result<BifResult, BeamError> {
+    match id {
+        Term::Pid(target) => Ok(
+            match context.scheduler.send_exit(*target, reason.clone())? {
+                Some(reason) => BifResult::Exited(reason),
+                None => Value(Term::static_atom("true")),
+            },
+        ),
+        Term::Reference(_) => Ok(Value(Term::static_atom("true"))),
+        _ => Ok(BifResult::badarg()),
+    }
+}
+
 /// Run `erlang:demonitor(Reference, Options)` as ERTS `demonitor_2`
 /// (bif.c) does. `Options` is a list of `flush` and `info` in any order,
 /// with repeats. An options term that is not such a list raises `badarg`,

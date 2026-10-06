@@ -156,7 +156,7 @@ bifs! {
     erlang:error/2 => unsupported,
     erlang:error/3 => |_, [reason, _, _]| Ok(Raise { class: ExceptionClass::Error, reason: reason.clone() }),
     erlang:exit/1 => |_, [reason]| Ok(Raise { class: ExceptionClass::Exit, reason: reason.clone() }),
-    erlang:exit/2 => unsupported,
+    erlang:exit/2 => |cx, [id, reason]| erlang::exit(cx, id, reason),
     erlang:exit/3 => unsupported,
     erlang:exit_signal/2 => unsupported,
     erlang:exit_signal/3 => unsupported,

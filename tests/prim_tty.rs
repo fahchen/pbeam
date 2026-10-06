@@ -722,7 +722,12 @@ fn writes_hello_world_from_the_pbeam_binary_through_a_prim_tty_writer() {
     // (sys.c:392-399) and ignores `SIGPIPE` (sys_drivers.c:175). The Rust
     // runtime of the `pbeam` binary does the same before `main` (Rust
     // 1.99.0 library/std/src/sys/pal/unix/mod.rs:22-36, 51-139, 141-185), so
-    // the write to stdout gives `ok`.
+    // the write to stdout gives `ok`. With stdout a pipe whose reader is
+    // closed, `write_nif/2` gives `{error, epipe}`, and the writer calls
+    // `exit(self(), epipe)` (prim_tty.erl:559-566). It does not trap exits,
+    // so it exits before `exit/2` returns (bif.c:1759-1772). The probe writes
+    // the `DOWN` reason of its monitor and the `EXIT` reason of its link to
+    // stderr.
     let beams: Vec<_> = INIT_MODULES.map(pinned_beam_path).into();
     let pbeam = || {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
@@ -745,6 +750,14 @@ fn writes_hello_world_from_the_pbeam_binary_through_a_prim_tty_writer() {
         let layout = [Stream::Null, Stream::Closed, Stream::File];
         let outputs = run_with_outputs(&mut command(), layout, &[]);
         assert_eq!(outputs.files[2].as_deref(), Some(&b"ok\n"[..]), "{name}");
+
+        let layout = [Stream::Null, Stream::BrokenPipe, Stream::File];
+        let outputs = run_with_outputs(&mut command(), layout, &[]);
+        assert_eq!(
+            outputs.files[2].as_deref(),
+            Some(&b"{epipe,epipe}\n"[..]),
+            "{name}"
+        );
     }
 }
 
