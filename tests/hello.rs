@@ -1,10 +1,3 @@
-#[expect(
-    dead_code,
-    reason = "this test crate runs the binary without the terminal variables"
-)]
-#[path = "common/run.rs"]
-mod run;
-
 use std::{
     path::PathBuf,
     process::{Command, Output, Stdio},
@@ -12,7 +5,22 @@ use std::{
 };
 
 use pbeam_runtime::{BeamProgram, Term};
-use run::run_with_time_limit;
+
+#[path = "common/boot.rs"]
+mod boot;
+#[expect(
+    dead_code,
+    reason = "this test crate gives BEAM paths, not bytes, to the binary"
+)]
+mod common;
+#[path = "common/run.rs"]
+mod run;
+
+use boot::{BOOT_BEAM, BOOT_MODULES};
+use common::pinned_beam_path;
+use run::{run_dumb_utf8, run_with_time_limit};
+
+const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
 
 #[test]
 fn loads_compiled_elixir_greetings() {
@@ -83,6 +91,64 @@ fn reports_the_unavailable_string_conversion_for_non_binary_data() {
             .to_string()
             .contains("unresolved external MFA Elixir.String.Chars:to_string/1")
     );
+}
+
+#[test]
+fn prints_each_greeting_through_the_booted_otp_io_servers() {
+    // Each `main/0` moves its greeting literal to `x0` and calls
+    // `Elixir.IO:puts/1`. `IO.puts/2` calls
+    // `:io.put_chars(map_dev(:stdio), [to_chardata(item), ?\n])`, and
+    // `map_dev(:stdio)` is `:standard_io` (Elixir 1.20.4 io.ex:331-332,
+    // 853). `io:put_chars/2` sends the request to `group_leader()`
+    // (io.erl:265-266, 1652-1655). `pbeam_boot` sets `user` as the group
+    // leader of the root before it calls the entry, as `start_em/1` does
+    // before `-eval` (init.erl:1539-1546). `user` and `user_drv` send the
+    // output to the `prim_tty` writer, which calls `write_nif/2`
+    // (prim_tty.erl:555-566). The PBeam child runs without `PATH`, so it
+    // cannot start `erl` or `elixir`. It keeps the other variables, because
+    // `cargo llvm-cov` gives `LLVM_PROFILE_FILE` to the child.
+    let io = elixir_io_path();
+    let beams = BOOT_MODULES.map(pinned_beam_path);
+    for (module, expected) in [
+        ("Elixir.Hello", "Hello, world!\n"),
+        ("Elixir.HelloVariant", "Another greeting.\n"),
+    ] {
+        let erts = run_dumb_utf8(
+            Command::new("erl")
+                .args([
+                    "-noshell",
+                    "-pa",
+                    "fixtures/hello/_build/test/lib/hello_reference/ebin",
+                    "-pa",
+                ])
+                .arg(io.parent().unwrap())
+                .args(["-eval", &format!("'{module}':main(), halt().")]),
+            Stdio::piped(),
+            RUN_TIME_LIMIT,
+        );
+        let pbeam = run_dumb_utf8(
+            Command::new(env!("CARGO_BIN_EXE_pbeam"))
+                .args(["pbeam_boot", "start", module, "main", "--"])
+                .arg(beam_file(&format!("{module}.beam")))
+                .arg(&io)
+                .args(&beams)
+                .arg(BOOT_BEAM)
+                .env_remove("PATH"),
+            Stdio::piped(),
+            RUN_TIME_LIMIT,
+        );
+        for (name, output) in [("ERTS", erts), ("PBeam", pbeam)] {
+            assert_eq!(
+                (
+                    String::from_utf8_lossy(&output.stdout).as_ref(),
+                    String::from_utf8_lossy(&output.stderr).as_ref(),
+                    output.status.code()
+                ),
+                (expected, "", Some(0)),
+                "{name} {module}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -171,12 +237,16 @@ fn beam_file(file: &str) -> PathBuf {
 }
 
 fn elixir_io_beam() -> Vec<u8> {
+    std::fs::read(elixir_io_path()).unwrap()
+}
+
+fn elixir_io_path() -> PathBuf {
     let path = Command::new("elixir")
         .args(["-e", "IO.write(:code.which(IO))"])
         .output()
         .unwrap();
     assert!(path.status.success());
-    std::fs::read(PathBuf::from(String::from_utf8(path.stdout).unwrap())).unwrap()
+    PathBuf::from(String::from_utf8(path.stdout).unwrap())
 }
 
 fn run_pbeam(arguments: &[&str]) -> Output {
