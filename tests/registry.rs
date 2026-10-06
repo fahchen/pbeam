@@ -161,7 +161,7 @@ fn exits_with_badarg_for_an_uncaught_send_to_a_missing_name() {
     assert!(
         error
             .to_string()
-            .contains("root process exited with Tuple([Atom(\"badarg\"), List([])])"),
+            .contains("root process exited with {badarg,[]}"),
         "expected a badarg exit reason with an empty stack trace, got {error}"
     );
 }

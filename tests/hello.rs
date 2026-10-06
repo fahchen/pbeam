@@ -160,7 +160,7 @@ fn fails_visibly_for_a_missing_entry_through_the_boot() {
             "Elixir.Hello",
             "start",
             "Error! Failed to eval: 'Elixir.Hello':start(), halt().\r\n\r\nRuntime terminating during boot ({undef,[{'Elixir.Hello',start,[],[]},{erl_eval,do_apply,7,[{file,\"erl_eval.erl\"},{line,1044}]},{erl_eval,exprs,6,[{file,\"erl_eval.erl\"},{line,276}]},{init,start_it,1,[]},{init,start_em,1,[]},{init,do_boot,3,[]}]})\r\n",
-            "pbeam: root process exited with Tuple([Atom(\"undef\"), List([Tuple([Atom(\"Elixir.Hello\"), Atom(\"start\"), List([]), List([])])])])\n",
+            "pbeam: root process exited with {undef,[{'Elixir.Hello',start,[],[]}]}\n",
         ),
         (
             "Elixir.String.Chars",
@@ -272,7 +272,7 @@ fn raises_terminated_in_the_entry_after_a_failed_stdout_write() {
         &pbeam,
         (
             "",
-            "pbeam: root process exited with Tuple([Atom(\"terminated\"), List([])])\n",
+            "pbeam: root process exited with {terminated,[]}\n",
             Some(1),
         ),
     );

@@ -3,6 +3,7 @@ mod fun;
 mod hash;
 mod map;
 mod order;
+mod print;
 
 pub use atom::Atom;
 pub(crate) use atom::AtomTable;
@@ -13,6 +14,7 @@ pub(crate) use fun::{Lambda, Target};
 pub(crate) use hash::internal_hash;
 pub(crate) use map::Direction;
 pub use map::Map;
+pub(crate) use print::print_term;
 
 use std::fmt;
 
