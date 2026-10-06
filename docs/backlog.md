@@ -88,6 +88,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path raises through them.
 - **Source:** review of #155.
 
+### Raise `undef` for an entry module that the run does not load
+
+- After #42 (PR #194), the `pbeam` binary accepts only an argument atom that a loaded module holds. It stops with `argument <M> is not an atom of the loaded modules` or `unresolved external MFA M:F/A`. ERTS raises `undef` through `error_handler` after a load attempt. Doing the same needs a `BeamProgram` API to add an atom, and the undefined-module path of `error_handler` (a code server or a load attempt). The "Run arguments" and "Undefined functions" rows record the difference.
+- **Trigger:** a consumer runs an entry module that is not in the loaded BEAM files.
+- **Source:** review of #42.
+
 ### Halt the PBeam boot with the `init` crash text
 
 - After #6 (PR #195), the `pbeam` binary writes `pbeam: root process exited with <Reason>` for a root exit. Under `erl -noshell -eval`, ERTS writes `Error! Failed to eval: ...` and then `Runtime terminating during boot (<Reason>)` through `init:crash/2` and `erlang:halt/1` (init.erl:665-679, 1552-1567). Doing the same needs `erlang:halt/1,2` with the run end at the halt, `erts_internal:term_to_string/2` (it can use the `print_term` of #6), and an `init` process that watches the boot process.
