@@ -4,7 +4,7 @@ use super::{
     ets::EtsTables,
     local_node,
     persistent_term::PersistentTerms,
-    process::{Frame, Monitor, ProcessState, ReceiveTimer},
+    process::{Frame, Monitor, ProcessState, ReceiveTimer, Start},
     regex_code::RegexCodes,
     resources::Resources,
     timer::{Receiver, Timer, Timers},
@@ -169,7 +169,7 @@ impl Scheduler {
     /// ```
     pub(super) fn start(&mut self, frame: Frame, arguments: Vec<Term>) -> Result<(), BeamError> {
         let id = self.next_pid()?;
-        self.insert(ProcessState::new(id, frame, arguments));
+        self.insert(ProcessState::new(id, Start::Entry(frame), arguments));
         Ok(())
     }
 
@@ -178,7 +178,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.insert(ProcessState::new(ProcessId(1), frame, vec![]));
+    /// scheduler.insert(ProcessState::new(ProcessId(1), Start::Entry(frame), vec![]));
     /// ```
     fn insert(&mut self, process: ProcessState) {
         self.runnable.push_back(process.id);
@@ -423,24 +423,25 @@ impl Scheduler {
     }
 
     /// Spawn a child process for the current process and optionally monitor
-    /// or link it. `off_heap_message_queue` sets the start value of its
+    /// or link it. `start` gives its entry frame or its undefined start MFA.
+    /// `off_heap_message_queue` sets the start value of its
     /// `message_queue_data` flag.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let (pid, monitor) = scheduler.spawn(frame, vec![], true, false, false)?;
+    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], true, false, false)?;
     /// assert!(monitor.is_some());
     /// ```
     pub(super) fn spawn(
         &mut self,
-        frame: Frame,
+        start: Start,
         arguments: Vec<Term>,
         monitor: bool,
         link: bool,
         off_heap_message_queue: bool,
     ) -> Result<(ProcessId, Option<Reference>), BeamError> {
-        let mut child = ProcessState::new(self.next_pid()?, frame, arguments);
+        let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = off_heap_message_queue;
         let parent = self.current_process_mut().id;
         child.group_leader = self.current_process_mut().group_leader;
@@ -981,7 +982,7 @@ mod tests {
     use crate::term::test_atom;
     use crate::{
         runtime::ets::{Access, Table},
-        runtime::process::{ReceiveTimer, tests::frame},
+        runtime::process::{ReceiveTimer, Start, tests::frame},
         term::{Atom, AtomTable, ProcessId, Term},
     };
 
@@ -1009,7 +1010,7 @@ mod tests {
         assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
         assert!(scheduler.processes.contains_key(&ProcessId(0)));
         let (child, monitor) = scheduler
-            .spawn(frame(), vec![], false, false, false)
+            .spawn(Start::Entry(frame()), vec![], false, false, false)
             .unwrap();
         assert_eq!((child, monitor), (ProcessId(1), None));
 
@@ -1032,10 +1033,10 @@ mod tests {
         scheduler.schedule_next();
         scheduler.current_process_mut().trap_exit = true;
         let (monitored, monitor) = scheduler
-            .spawn(frame(), vec![], true, false, false)
+            .spawn(Start::Entry(frame()), vec![], true, false, false)
             .unwrap();
         let (linked, _) = scheduler
-            .spawn(frame(), vec![], false, true, false)
+            .spawn(Start::Entry(frame()), vec![], false, true, false)
             .unwrap();
         scheduler.park_current();
 
@@ -1075,7 +1076,7 @@ mod tests {
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, _) = scheduler
-            .spawn(frame(), vec![], false, false, false)
+            .spawn(Start::Entry(frame()), vec![], false, false, false)
             .unwrap();
         assert_eq!(scheduler.link(child).unwrap(), atom("true"));
         assert!(scheduler.link(ProcessId(99)).is_err());
@@ -1108,7 +1109,7 @@ mod tests {
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         scheduler
-            .spawn(frame(), vec![], false, true, false)
+            .spawn(Start::Entry(frame()), vec![], false, true, false)
             .unwrap();
         scheduler.park_current();
         scheduler.schedule_next();
@@ -1137,7 +1138,7 @@ mod tests {
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, _) = scheduler
-            .spawn(frame(), vec![], false, false, false)
+            .spawn(Start::Entry(frame()), vec![], false, false, false)
             .unwrap();
         assert_eq!(scheduler.processes[&child].group_leader, ProcessId(0));
         assert!(scheduler.set_group_leader(child, child));
@@ -1202,7 +1203,7 @@ mod tests {
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, _) = scheduler
-            .spawn(frame(), vec![], false, false, false)
+            .spawn(Start::Entry(frame()), vec![], false, false, false)
             .unwrap();
         let name = atom("pbeam_probe_reg");
         assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
@@ -1234,7 +1235,7 @@ mod tests {
         scheduler.start(frame(), vec![]).unwrap();
         scheduler.schedule_next();
         let (child, monitor) = scheduler
-            .spawn(frame(), vec![], true, false, false)
+            .spawn(Start::Entry(frame()), vec![], true, false, false)
             .unwrap();
         scheduler.park_current();
 

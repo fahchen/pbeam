@@ -395,6 +395,15 @@ pub(crate) enum Instruction {
         /// Index of the Y register that holds the tag.
         register: u32,
     },
+    /// Gives the stack trace of the exception in `x0` as a list. The
+    /// compiler moves the stack trace from `x2` to `x0` first. PBeam keeps
+    /// the stack trace as a list, so `x0` does not change.
+    ///
+    /// Encoding: `[0xA0]`.
+    ///
+    /// Erlang: `try f() catch C:R:S -> S end` compiles to
+    /// `{move,{x,2},{x,0}}` and `build_stacktrace` after `try_case`.
+    BuildStacktrace,
     /// Allocates `stack_size` Y registers for the active function.
     /// `allocate_heap` (opcode 13) also maps here: PBeam terms do not use a
     /// process heap, so its heap need has no effect.
@@ -1123,6 +1132,7 @@ pub(super) fn parse_code(
             OPCODE_CATCH_END => Instruction::CatchEnd {
                 register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
             },
+            OPCODE_BUILD_STACKTRACE => Instruction::BuildStacktrace,
             OPCODE_SEND => Instruction::Send,
             OPCODE_REMOVE_MESSAGE => Instruction::RemoveMessage,
             OPCODE_LOOP_REC => Instruction::LoopReceive {
@@ -1632,7 +1642,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_SKIP_UTF8 => Some(4),
         OPCODE_BS_SET_POSITION => Some(2),
         OPCODE_BADRECORD => Some(1),
-        OPCODE_IF_END | OPCODE_BUILD_STACKTRACE => Some(0),
+        OPCODE_IF_END => Some(0),
         // `raw_raise` is in `gen_statem:call/3`.
         OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
@@ -2074,6 +2084,24 @@ mod tests {
                     .contains("exceeds code chunk")
             );
         }
+    }
+
+    #[test]
+    fn decodes_build_stacktrace_without_operands() {
+        // `try f() catch C:R:S -> S end` compiles to `{move,{x,2},{x,0}}`
+        // and `build_stacktrace`.
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([0x40, 0x23, 0x03, 0xA0, 0x03]);
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::Move(Operand::X(2), Operand::X(0)),
+                Instruction::BuildStacktrace,
+                Instruction::End,
+            ]
+        ));
     }
 
     #[test]

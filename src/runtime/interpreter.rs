@@ -1,5 +1,5 @@
 use super::{
-    process::{Frame, ProcessState, ReceiveTimer, StackSlot},
+    process::{Frame, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::Scheduler,
     unicode::characters_to_utf8,
 };
@@ -196,24 +196,60 @@ impl BeamProgram {
             .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))
     }
 
-    /// Create the frame for an exported function.
+    /// Create the frame for an exported function of a loaded module. Return
+    /// `None` when the module does not export the function: ERTS then runs
+    /// the export entry of the function, which calls the error handler
+    /// (`call_error_handler` in `beam_common.c:1294-1342`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(program.export_frame("undef_handler", "$handle_undefined_function", 2)?.is_some());
+    /// assert!(program.export_frame("undef_target", "missing", 1)?.is_none());
+    /// assert!(program.export_frame("nomod", "missing", 1).is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A module that is not loaded is the runtime error
+    /// `unresolved external MFA M:F/A`. ERTS loads it from the code path.
+    fn export_frame(
+        &self,
+        module: &str,
+        function: &str,
+        arity: u32,
+    ) -> Result<Option<Frame>, BeamError> {
+        let loaded = self.modules.get(module).ok_or_else(|| {
+            error(format!(
+                "unresolved external MFA {module}:{function}/{arity}"
+            ))
+        })?;
+        loaded
+            .exports
+            .get(&(function.to_owned(), arity))
+            .map(|label| self.frame(module, *label, arity))
+            .transpose()
+    }
+
+    /// Create the frame for an exported function, such as the target of a
+    /// BIF trap.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let frame = program.mfa_frame("external", "effect", 1)?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// A module that is not loaded or a function that the module does not
+    /// export is the runtime error `unresolved external MFA M:F/A`.
     fn mfa_frame(&self, module: &str, function: &str, arity: u32) -> Result<Frame, BeamError> {
-        let label = self
-            .modules
-            .get(module)
-            .and_then(|loaded| loaded.exports.get(&(function.to_owned(), arity)))
-            .ok_or_else(|| {
-                error(format!(
-                    "unresolved external MFA {module}:{function}/{arity}"
-                ))
-            })?;
-        self.frame(module, *label, arity)
+        self.export_frame(module, function, arity)?.ok_or_else(|| {
+            error(format!(
+                "unresolved external MFA {module}:{function}/{arity}"
+            ))
+        })
     }
 
     /// Create the frame for the function at an entry label.
@@ -255,14 +291,37 @@ impl BeamProgram {
     }
 
     /// Run the current process until it waits for a message, calls
-    /// `erlang:hibernate/0`, or exits.
+    /// `erlang:hibernate/0`, or exits. A process with an undefined start
+    /// first calls `undefined_function` with its start MFA.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert!(matches!(program.run(&mut scheduler)?, Outcome::Wait));
+    /// // `spawn(undef_target, missing, [p])` exits with
+    /// // `{undef, [{undef_target, missing, [p], []}]}`.
+    /// assert!(matches!(program.run(&mut scheduler)?, Outcome::Exit { result: None, .. }));
     /// ```
     fn run(&self, scheduler: &mut Scheduler) -> Result<Outcome, BeamError> {
+        // ERTS starts each process with `i_apply_only` of its MFA
+        // (`erl_process.c:12616`; JIT `jit/beam_jit_main.cpp:258`). Its
+        // `apply` raises `system_limit` for more than `APPLY_MAX_ARGUMENTS`
+        // arguments, and else a function that the module does not export
+        // goes to its export entry when the process first runs. The arity is
+        // the number of argument registers.
+        let process = scheduler.current_process_mut();
+        if let Some((module, function)) = process.undefined_start.take() {
+            let outcome = if process.registers.len() > APPLY_MAX_ARGUMENTS {
+                let system_limit = Term::static_atom("system_limit");
+                raise(process, ExceptionClass::Error, system_limit)
+            } else {
+                let arity = process.registers.len() as u32;
+                self.undefined_function(scheduler, module.name(), function.name(), arity, false)?
+            };
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+        }
         loop {
             let process = scheduler.current_process_mut();
             let frame = current_frame(process);
@@ -878,6 +937,13 @@ impl BeamProgram {
                     write(process, &Operand::X(0), Term::static_atom("ok"))?;
                     return Ok(Outcome::Hibernate);
                 }
+                // ERTS `build_stacktrace` changes the raw stack trace in
+                // `x0` to a list (emu `instrs.tab:1247-1251`; JIT
+                // `emit_build_stacktrace` in
+                // `jit/arm/instr_common.cpp:3046-3056`). The compiler moves
+                // it from `x2` first. PBeam keeps the list in `x2`, so `x0`
+                // already holds it.
+                Instruction::BuildStacktrace => {}
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::Return => {
                     if let Some(outcome) = return_from_frame(process)? {
@@ -952,7 +1018,9 @@ impl BeamProgram {
     /// Call `module:name/arity` with the arguments in the X registers. The
     /// calls of `erlang:apply/2` and `erlang:apply/3` run as the ERTS
     /// `i_apply_fun` and `i_apply` instructions. A BIF runs before the module
-    /// code, as in ERTS. Return the outcome when the process exits.
+    /// code, as in ERTS. A function that a loaded module does not export
+    /// goes to `undefined_function`. Return the outcome when the process
+    /// exits.
     ///
     /// # Examples
     ///
@@ -988,8 +1056,91 @@ impl BeamProgram {
             let result = self.bif(scheduler, module, name, arguments)?;
             return self.finish_bif(scheduler.current_process_mut(), result, tail);
         }
-        enter_frame(process, self.mfa_frame(module, name, arity)?, tail);
-        Ok(None)
+        match self.export_frame(module, name, arity)? {
+            Some(frame) => {
+                enter_frame(process, frame, tail);
+                Ok(None)
+            }
+            None => self.undefined_function(scheduler, module, name, arity, tail),
+        }
+    }
+
+    /// Call a function that a loaded module does not export, with the
+    /// arguments in `x0` to `x(arity - 1)`. ERTS goes to the export entry of
+    /// the function, which calls `error_handler:undefined_function/3` with
+    /// the module, the function, and the argument list `Args`
+    /// (`call_error_handler` in `beam_common.c:1294-1342`; JIT
+    /// `emit_export_trampoline` in `jit/arm/beam_asm_global.cpp:164-232`).
+    /// For a loaded module, `undefined_function/3` calls
+    /// `call_undefined_function_handler/3` (`error_handler.erl:85-98`).
+    /// PBeam does the result of these functions here and does not run
+    /// `error_handler.beam` (see "Undefined functions" in
+    /// `docs/erts-differences.md`):
+    ///
+    /// - When the module exports `'$handle_undefined_function'/2`, enter it
+    ///   with `x0 = Function` and `x1 = Args`, as the tail call
+    ///   `Module:Handler(Func, Args)` does (`error_handler.erl:206-213`). A
+    ///   tail call replaces the active frame.
+    /// - Else raise `error:undef` with the stack trace
+    ///   `[{Module, Function, Args, []}]`, as `crash/3` and `crash/1` do
+    ///   (`error_handler.erl:165-178`). ERTS puts the caller frames after
+    ///   this frame. PBeam records no frames.
+    ///
+    /// Return the outcome when the process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // `undef_handler:missing(m)` enters the handler with x0 = missing, x1 = [m].
+    /// assert!(program.undefined_function(&mut scheduler, "undef_handler", "missing", 1, false)?.is_none());
+    /// // `undef_target:missing(a)` with no catch tag exits with
+    /// // `{undef, [{undef_target, missing, [a], []}]}`.
+    /// let outcome = program.undefined_function(&mut scheduler, "undef_target", "missing", 1, false)?;
+    /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A module or function name that the atom table of the run does not
+    /// hold is a runtime error. Each name comes from an import or an atom
+    /// term of the program, so the table holds it.
+    fn undefined_function(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        function: &str,
+        arity: u32,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let atom = |name: &str| {
+            scheduler
+                .atoms
+                .get(name)
+                .map(Term::Atom)
+                .ok_or_else(|| error(format!("atom table does not hold {name}")))
+        };
+        let (module_atom, function_atom) = (atom(module)?, atom(function)?);
+        let process = scheduler.current_process_mut();
+        let arguments = Term::List(call_arguments(&process.registers, arity)?);
+        if let Some(handler) = self.export_frame(module, "$handle_undefined_function", 2)? {
+            enter_frame(process, handler, tail);
+            write(process, &Operand::X(0), function_atom)?;
+            write(process, &Operand::X(1), arguments)?;
+            return Ok(None);
+        }
+        let frame = Term::Tuple(vec![
+            module_atom,
+            function_atom,
+            arguments,
+            Term::List(Vec::new()),
+        ]);
+        let undef = Term::static_atom("undef");
+        Ok(raise_with_stacktrace(
+            process,
+            ExceptionClass::Error,
+            undef,
+            Term::List(vec![frame]),
+        ))
     }
 
     /// Run `erlang:apply(Module, Function, Arguments)` with the arguments in
@@ -1264,7 +1415,13 @@ struct SpawnOptions {
 /// `arguments`, as ERTS `erl_create_process` does. Return the pid, or
 /// `{Pid, Reference}` when `options.monitor` is set. A `module` or
 /// `function` that is not an atom, and `arguments` that are not a proper
-/// list, raise `badarg` (`erl_process.c:12490-12492`).
+/// list, raise `badarg` (`erl_process.c:12490-12492`). A function that a
+/// loaded module does not export starts the process anyway: the process
+/// calls `undefined_function` when it first runs. More than 1023 arguments
+/// also start the process, which then raises `error:system_limit`, as the
+/// `apply` of the ERTS `i_apply_only` start does (`beam_common.c:1501-1513`).
+/// Else a module that is not loaded is the runtime error
+/// `unresolved external MFA M:F/A`.
 ///
 /// # Examples
 ///
@@ -1291,14 +1448,32 @@ fn create_process(
     };
     let arguments = arguments.clone();
     let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-    let frame = program.mfa_frame(module.name(), function.name(), arity)?;
+    // A function that the loaded module does not export gives an undefined
+    // start, which goes to `undefined_function` when the process first
+    // runs, as the `i_apply_only` start of ERTS goes to its export entry.
+    // More than `APPLY_MAX_ARGUMENTS` arguments also give an undefined start,
+    // which raises `system_limit` when the process first runs. The `apply`
+    // of ERTS checks this limit before it looks up the export, so the module
+    // can be not loaded.
+    let export = if arguments.len() > APPLY_MAX_ARGUMENTS {
+        None
+    } else {
+        program.export_frame(module.name(), function.name(), arity)?
+    };
+    let start = match export {
+        Some(frame) => Start::Entry(frame),
+        None => Start::Undefined {
+            module: module.clone(),
+            function: function.clone(),
+        },
+    };
     let SpawnOptions {
         link,
         monitor,
         off_heap_message_queue,
     } = options;
     let (pid, reference) =
-        scheduler.spawn(frame, arguments, monitor, link, off_heap_message_queue)?;
+        scheduler.spawn(start, arguments, monitor, link, off_heap_message_queue)?;
     Ok(BifResult::Value(match reference {
         Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),
@@ -1430,16 +1605,8 @@ fn map_values<'a>(
         .collect()
 }
 
-/// Raise an exception in the process, as ERTS `handle_error` does: continue
-/// at the nearest live catch tag, or return the exit outcome when no frame
-/// holds one.
-///
-/// The scan starts at the newest frame and, in one frame, at the lowest Y
-/// index, as ERTS `next_catch` scans up from the stack top. The frames above
-/// the tag are dropped, and the tag becomes `[]`. The handler gets the
-/// non-value in `x0`, the reason in `x1`, the stack trace `[]` in `x2`, and
-/// the class atom in `x3`. An uncaught `error` exits the process with
-/// `{Reason, []}`, and an uncaught `exit` exits it with `Reason`.
+/// Raise an exception with the stack trace `[]` in the process, as
+/// `raise_with_stacktrace` does.
 ///
 /// # Examples
 ///
@@ -1448,6 +1615,39 @@ fn map_values<'a>(
 /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
 /// ```
 fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Option<Outcome> {
+    raise_with_stacktrace(process, class, reason, Term::List(Vec::new()))
+}
+
+/// Raise an exception in the process, as ERTS `handle_error` does: continue
+/// at the nearest live catch tag, or return the exit outcome when no frame
+/// holds one.
+///
+/// The scan starts at the newest frame and, in one frame, at the lowest Y
+/// index, as ERTS `next_catch` scans up from the stack top. The frames above
+/// the tag are dropped, and the tag becomes `[]`. The handler gets the
+/// non-value in `x0`, the reason in `x1`, the stack trace in `x2`, and the
+/// class atom in `x3` (`beam_common.c:543`). ERTS keeps a raw stack trace
+/// in `x2` that `build_stacktrace` and `catch_end` change to a list
+/// (`beam_common.c:730-735`, `1204-1292`). PBeam keeps the list. An
+/// uncaught `error` exits the process with `{Reason, Stacktrace}`
+/// (`beam_common.c:684-692`), and an uncaught `exit` exits it with
+/// `Reason`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let frame = Term::Tuple(vec![module, function, Term::List(vec![]), Term::List(vec![])]);
+/// let undef = Term::static_atom("undef");
+/// let outcome = raise_with_stacktrace(&mut process, ExceptionClass::Error, undef, Term::List(vec![frame]));
+/// // With no catch tag, the exit reason is `{undef, [Frame]}`.
+/// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
+/// ```
+fn raise_with_stacktrace(
+    process: &mut ProcessState,
+    class: ExceptionClass,
+    reason: Term,
+    stacktrace: Term,
+) -> Option<Outcome> {
     let tag = process
         .frames
         .iter()
@@ -1465,7 +1665,7 @@ fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Opt
         });
     let Some((depth, slot, handler)) = tag else {
         let reason = match class {
-            ExceptionClass::Error => Term::Tuple(vec![reason, Term::List(Vec::new())]),
+            ExceptionClass::Error => Term::Tuple(vec![reason, stacktrace]),
             ExceptionClass::Exit => reason,
         };
         return Some(Outcome::Exit {
@@ -1482,7 +1682,7 @@ fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Opt
         .resize(process.registers.len().max(4), None);
     process.registers[0] = None;
     process.registers[1] = Some(reason);
-    process.registers[2] = Some(Term::List(Vec::new()));
+    process.registers[2] = Some(stacktrace);
     process.registers[3] = Some(Term::static_atom(class.name()));
     None
 }
@@ -3586,6 +3786,11 @@ mod tests {
     /// `zero() -> zero.`, `id(A, B, C) -> {A, B, C}.`, and
     /// `last(M, F) -> M:F(bye).`, which compiles to `{apply_last,1,0}`.
     fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
+        apply_targets_program(body).execute("fixture", "main", &[])
+    }
+
+    /// Return the program of `run_with_apply_targets`.
+    fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
         let mut program = make_program(body, 0);
         let module = program.modules.get_mut("fixture").unwrap();
         module.exports.extend([
@@ -3628,7 +3833,7 @@ mod tests {
                 deallocate: 0,
             },
         ]);
-        program.execute("fixture", "main", &[])
+        program
     }
 
     /// Return the body that moves the module and the function name of an
@@ -3749,18 +3954,41 @@ mod tests {
             run_with_apply_targets(body).unwrap_err().to_string(),
             BADARG_EXIT
         );
-        // `apply` copies at most 1023 arguments to the X registers. ERTS gives
-        // `undef` for `apply(nomod, nofun, L1023)` and raises `system_limit`
-        // for a list of 1024 elements.
+        // `apply` copies at most 1023 arguments to the X registers. ERTS
+        // raises `undef` for `apply(fixture, missing, L1023)`, because the
+        // loaded module `fixture` does not export `missing/1023`, and raises
+        // `system_limit` for a list of 1024 elements.
         let mut body = apply_of(
             test_atom("fixture"),
             test_atom("missing"),
             Term::List(vec![test_atom("x"); 1023]),
         );
         body.push(erlang_call("apply", 3, true));
+        let mut program = apply_targets_program(body);
+        // The atoms of the `undef` frame come from the atom table of the run.
         assert_eq!(
-            run_with_apply_targets(body).unwrap_err().to_string(),
-            "unresolved external MFA fixture:missing/1023"
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            "atom table does not hold fixture"
+        );
+        for name in ["fixture", "missing"] {
+            program.atoms.put(name).unwrap();
+        }
+        let frame = Term::Tuple(vec![
+            test_atom("fixture"),
+            test_atom("missing"),
+            Term::List(vec![test_atom("x"); 1023]),
+            Term::List(Vec::new()),
+        ]);
+        let reason = Term::Tuple(vec![test_atom("undef"), Term::List(vec![frame])]);
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            format!("root process exited with {reason:?}")
         );
         let mut body = apply_of(
             test_atom("fixture"),
