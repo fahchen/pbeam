@@ -145,10 +145,12 @@ fn fails_visibly_for_a_missing_entry_through_the_boot() {
     // (init.erl:678-679, 710-712). The `pbeam` binary accepts only an
     // argument atom that a loaded module holds: `start` is an atom of
     // `pbeam_boot`, and `Elixir.String.Chars` is an atom of `Elixir.IO`.
-    // For a missing export, PBeam raises `undef` with the first frame of
-    // ERTS. PBeam gives the stack trace `[]` (row "Exception stack trace")
-    // and its own report of the root exit (row "Run end"). For a module
-    // that the run does not load, PBeam stops at the call (row "Undefined
+    // For a missing export, PBeam raises `undef` with the stack trace
+    // `[{'Elixir.Hello',start,[],[]}]`: the first frame of ERTS and no
+    // caller frames (rows "Exception stack trace" and "Undefined
+    // functions"). PBeam writes its own report of the root exit (row "Run
+    // end"). For a module that the run does not load, PBeam stops at the
+    // call with a runtime error and no root exit (row "Undefined
     // functions"). Without `ERL_CRASH_DUMP_SECONDS=0`, ERTS writes
     // `erl_crash.dump` into the working directory.
     let io = elixir_io_path();
@@ -238,8 +240,10 @@ fn raises_terminated_in_the_entry_after_a_failed_stdout_write() {
     // `-kernel logger_level none`, the ERTS report of `user_drv` can mix
     // with the halt text. PBeam ends the run at the root exit before the
     // `default` handler writes (row "Run end"), but `?LOG_ERROR` calls the
-    // log event modules before the caller gets `DOWN`. PBeam gives the stack
-    // trace `[]` (row "Exception stack trace").
+    // log event modules before the caller gets `DOWN`. Thus the run also
+    // loads `LOG_EVENT_MODULES`. Without them, it stops with
+    // `unresolved external MFA logger_backend:log_allowed/3` (measured).
+    // PBeam gives the stack trace `[]` (row "Exception stack trace").
     let io = elixir_io_path();
     let mut beams = hello_beams("Elixir.Hello", &io);
     beams.extend(LOG_EVENT_MODULES.map(pinned_beam_path));
