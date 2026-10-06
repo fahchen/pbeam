@@ -1,10 +1,12 @@
 //! Read the host system information that ERTS reads at emulator start
-//! (`sys/unix/sys.c`, `sys/common/erl_sys_common_misc.c`), and the host
-//! terminal that the `prim_tty` NIFs use.
+//! (`sys/unix/sys.c`, `sys/common/erl_sys_common_misc.c`), the host
+//! terminal that the `prim_tty` NIFs use, and the host signal dispositions
+//! that `os:set_signal/2` sets.
 
 use std::{ffi::CStr, sync::OnceLock};
 
 pub(crate) mod errno;
+pub(crate) mod signal;
 pub(crate) mod terminal;
 
 /// Return the OS flavor of the host: the `uname` system name with each

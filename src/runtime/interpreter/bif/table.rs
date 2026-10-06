@@ -533,7 +533,7 @@ bifs! {
     os:getpid/0 => unsupported,
     os:perf_counter/0 => unsupported,
     os:putenv/2 => unsupported,
-    os:set_signal/2 => unsupported,
+    os:set_signal/2 => |_, [signal, mode]| Ok(os::set_signal(signal, mode)),
     os:system_time/0 => unsupported,
     os:system_time/1 => unsupported,
     os:timestamp/0 => unsupported,

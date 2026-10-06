@@ -501,24 +501,23 @@ impl BeamProgram {
                     fail_label,
                     map,
                     pairs,
-                } => {
-                    let map = read(process, map)?;
-                    let Term::Map(map) = &map else {
-                        return Err(error("BEAM get_map_elements source is not a map"));
-                    };
-                    let mut found = Vec::with_capacity(pairs.len());
-                    for (key, destination) in pairs {
-                        let Some(value) = map.get(&read(process, key)?) else {
-                            break;
-                        };
-                        found.push((destination, value.clone()));
-                    }
-                    if found.len() < pairs.len() {
-                        jump(module, process, *fail_label)?;
-                    } else {
-                        for (destination, value) in found {
+                } => match map_values(process, map, pairs.iter().map(|(key, _)| key))? {
+                    Some(values) => {
+                        for ((_, destination), value) in pairs.iter().zip(values) {
                             write(process, destination, value)?;
                         }
+                    }
+                    None => jump(module, process, *fail_label)?,
+                },
+                // ERTS loads `has_map_fields` as `get_map_elements` with
+                // scratch destinations (`generators.tab:230-253`).
+                Instruction::HasMapFields {
+                    fail_label,
+                    map,
+                    keys,
+                } => {
+                    if map_values(process, map, keys)?.is_none() {
+                        jump(module, process, *fail_label)?;
                     }
                 }
                 Instruction::PutMapAssoc {
@@ -1261,6 +1260,38 @@ fn update_map_exact(
         *existing = value;
     }
     Ok(Ok(map))
+}
+
+/// Read the value of each key in the map of a `get_map_elements` or
+/// `has_map_fields` instruction, or return `None` at the first key that the
+/// map does not hold.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // x0 holds #{output => raw}.
+/// let output = Operand::Value(Term::static_atom("output"));
+/// assert_eq!(map_values(&process, &Operand::X(0), [&output])?, Some(vec![Term::static_atom("raw")]));
+/// let input = Operand::Value(Term::static_atom("input"));
+/// assert_eq!(map_values(&process, &Operand::X(0), [&output, &input])?, None);
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when the source is not a map. The compiler puts an
+/// `is_map` test before each of these instructions.
+fn map_values<'a>(
+    process: &ProcessState,
+    map: &Operand,
+    keys: impl IntoIterator<Item = &'a Operand>,
+) -> Result<Option<Vec<Term>>, BeamError> {
+    let map = read(process, map)?;
+    let Term::Map(map) = &map else {
+        return Err(error("BEAM get_map_elements source is not a map"));
+    };
+    keys.into_iter()
+        .map(|key| Ok(map.get(&read(process, key)?).cloned()))
+        .collect()
 }
 
 /// Raise an exception in the process, as ERTS `handle_error` does: continue
@@ -2144,6 +2175,51 @@ mod tests {
                 )],
             }])
             .contains("unsupported map key Tuple([])")
+        );
+    }
+
+    #[test]
+    fn tests_map_keys_with_has_map_fields_and_writes_no_register() {
+        let map = Operand::Value(Term::Map(
+            Map::from_pairs(vec![
+                (test_atom("input"), test_atom("cooked")),
+                (Term::Integer(1), test_atom("one")),
+            ])
+            .unwrap(),
+        ));
+        let run = |keys: Vec<Operand>, map: Operand| {
+            make_program(
+                vec![
+                    Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(1)),
+                    Instruction::Move(atom("none"), Operand::X(0)),
+                    Instruction::HasMapFields {
+                        fail_label: 3,
+                        map,
+                        keys,
+                    },
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Move(atom("missing"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        // All keys present: x0 keeps its value.
+        assert_eq!(
+            run(vec![atom("input"), Operand::X(1)], map.clone()).unwrap(),
+            test_atom("none")
+        );
+        assert_eq!(
+            run(vec![atom("input"), atom("output")], map).unwrap(),
+            test_atom("missing")
+        );
+        assert!(
+            run(vec![atom("input")], atom("raw"))
+                .unwrap_err()
+                .to_string()
+                .contains("get_map_elements source is not a map")
         );
     }
 

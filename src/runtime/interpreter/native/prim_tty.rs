@@ -72,9 +72,19 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, arguments| tty_create(scheduler, &arguments[0]),
     },
     Binding {
+        name: "tty_encoding",
+        arity: 1,
+        run: |_, _| Ok(tty_encoding()),
+    },
+    Binding {
         name: "tty_init",
         arity: 2,
         run: |scheduler, arguments| tty_init(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "tty_select",
+        arity: 2,
+        run: |scheduler, arguments| Ok(tty_select(scheduler, &arguments[0])),
     },
     Binding {
         name: "tty_window_size",
@@ -317,6 +327,52 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
     tty.owner = Some(caller);
     ttys.monitor(caller, *reference);
     Ok(BifResult::Value(Term::static_atom("ok")))
+}
+
+/// Run `prim_tty:tty_select(TTY, Ref)`, as the ERTS NIF `tty_select_nif`
+/// (`prim_tty_nif.c:1213-1233`) does on Unix. A term that is not a TTY
+/// resource raises `error:badarg` (`prim_tty_nif.c:1220-1221`). Else the
+/// resource monitors the caller (`prim_tty_nif.c:1229-1230`), and the
+/// result is `ok`.
+///
+/// ERTS also selects fd 0 for read with `Ref` as the message reference
+/// (`prim_tty_nif.c:1227`), and makes the caller the reader, which
+/// `tty_monitor_down` reads only to stop that select
+/// (`prim_tty_nif.c:1242-1244`). PBeam has no IO poll, so the binding does
+/// not read `Ref` and keeps no reader. The monitor is still observable:
+/// when the caller exits and is the owner of the resource, the monitor sets
+/// fd 0 to the first mode of the resource (`prim_tty_nif.c:1238-1239`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(tty_select(&mut scheduler, &tty), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(tty_select(&mut scheduler, &Term::static_atom("ok")), BifResult::Raise { .. }));
+/// ```
+fn tty_select(scheduler: &mut Scheduler, tty: &Term) -> BifResult {
+    let Term::Reference(reference) = tty else {
+        return BifResult::badarg();
+    };
+    let caller = scheduler.current_process_mut().id;
+    let ttys = scheduler.resources.borrow_mut::<Ttys>();
+    if ttys.get(*reference).is_none() {
+        return BifResult::badarg();
+    }
+    ttys.monitor(caller, *reference);
+    BifResult::Value(Term::static_atom("ok"))
+}
+
+/// Run `prim_tty:tty_encoding(TTY)`, as the ERTS NIF `tty_encoding_nif`
+/// (`prim_tty_nif.c:287-297`) does on Unix. Only the Windows code reads
+/// `TTY`, so each term gives `utf8`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(tty_encoding(), BifResult::Value(Term::Atom(atom)) if atom.name() == "utf8"));
+/// ```
+fn tty_encoding() -> BifResult {
+    BifResult::Value(Term::static_atom("utf8"))
 }
 
 /// Run `prim_tty:setlocale(TTY)`, as the ERTS NIF `setlocale_nif`

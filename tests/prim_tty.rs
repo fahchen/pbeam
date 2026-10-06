@@ -22,6 +22,7 @@ const STAND_IN: &str = "fixtures/prim_tty/nif/prim_tty.beam";
 const TTY_NIF_PROBE: &str = "fixtures/prim_tty/tty_nif_probe.beam";
 const TTY_INIT_PROBE: &str = "fixtures/prim_tty/tty_init_probe.beam";
 const LOAD_NIF_PROBE: &str = "fixtures/prim_tty/load_nif_probe.beam";
+const COOKED_PROBE: &str = "fixtures/prim_tty/cooked_probe.beam";
 
 /// The environment variables that give the `isolated_run` child its entry
 /// `module:function`, its BEAM files, and the file for its result. The ERTS
@@ -369,9 +370,7 @@ fn sets_the_terminal_mode_with_tty_init() {
         br#"Ok(List([Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("ok"), Atom("ok"), Atom("ok"), Atom("ok")]))"#
     );
     // The stdout terminal has its first mode again, and the stderr terminal
-    // has the raw mode. On macOS the kernel adds `PENDIN` to the stdout
-    // mode when `ICANON` comes back, so the modes are compared with the
-    // ERTS run.
+    // has the raw mode.
     assert_same_modes(&erts_modes, &pbeam_modes);
     let [_, Some(stdout), Some(stderr)] = pbeam_modes else {
         panic!("stdout and stderr are terminals");
@@ -426,6 +425,70 @@ fn restores_fd_0_when_the_tty_owner_exits() {
     // show that a TTY monitor set fd 0 to the first mode of stderr.
     assert_eq!(stdin.c_lflag & CANONICAL_ECHO, CANONICAL_ECHO);
     assert_raw(&stderr);
+}
+
+#[test]
+fn selects_stdin_and_reads_the_encoding() {
+    // `tty_nif_probe:select/0` calls `prim_tty:tty_select/2` on a `stdout`
+    // resource with a `make_ref/0` reference, `foo`, and `undefined` as the
+    // select reference: each gives `ok`. An atom, a `make_ref/0` reference,
+    // and a `re_pattern` reference are not TTY resources, so they raise
+    // `badarg` (prim_tty_nif.c:1220-1221). On ERTS the caller also gets one
+    // `{select, Out, undefined, ready_input}` message, which the probe does
+    // not read; PBeam has no IO poll ("Input select" in
+    // docs/erts-differences.md). `encoding/0` calls
+    // `prim_tty:tty_encoding/1` with a resource, an atom, an integer, and a
+    // reference: Unix gives `utf8` for each term (prim_tty_nif.c:287-297).
+    for (function, erts, pbeam) in [
+        (
+            "select",
+            "[ok,ok,ok,badarg,badarg,badarg]\n",
+            r#"Ok(List([Atom("ok"), Atom("ok"), Atom("ok"), Atom("badarg"), Atom("badarg"), Atom("badarg")]))"#,
+        ),
+        (
+            "encoding",
+            "[utf8,utf8,utf8,utf8]\n",
+            r#"Ok(List([Atom("utf8"), Atom("utf8"), Atom("utf8"), Atom("utf8")]))"#,
+        ),
+    ] {
+        assert_eq!(run_erts_nif_probe(FILES, &[], function), erts.as_bytes());
+        assert_eq!(
+            run_isolated(
+                FILES,
+                &[],
+                &format!("tty_nif_probe:{function}"),
+                &[TTY_NIF_PROBE, STAND_IN]
+            ),
+            pbeam.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn restores_fd_0_from_the_monitor_of_tty_select() {
+    // `tty_nif_probe:select_monitor/0` spawns `selector/1` and monitors it.
+    // A holder sets the raw mode on a first `stderr` resource. The selector
+    // makes a second `stderr` resource, whose first mode is that raw mode,
+    // and calls `tty_init/2` on the first and the second resource, then
+    // `tty_select/2` on the first. `tty_select/2` monitors the caller again
+    // (prim_tty_nif.c:1229-1230). When the selector exits, its monitors set
+    // fd 0 to the first mode of the stderr terminal, to the raw mode, and
+    // to the first mode again (prim_tty_nif.c:1235-1241). Without the
+    // monitor of `tty_select/2`, fd 0 ends in the raw mode.
+    let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("select_monitor"), MONITOR, &[]);
+    assert_eq!(erts, b"{[ok,ok,ok,ok],normal}\n");
+    let mut probe = isolated("tty_nif_probe:select_monitor", &[TTY_NIF_PROBE, STAND_IN]);
+    let (pbeam, pbeam_modes) = run_with_modes(&mut probe, MONITOR, &[]);
+    assert_eq!(
+        pbeam,
+        br#"Ok(Tuple([List([Atom("ok"), Atom("ok"), Atom("ok"), Atom("ok")]), Atom("normal")]))"#
+    );
+    assert_same_modes(&erts_modes, &pbeam_modes);
+    let [Some(stdin), None, Some(_)] = pbeam_modes else {
+        panic!("stdin and stderr are terminals");
+    };
+    // Stdin started without `ECHO` and `ICANON`.
+    assert_eq!(stdin.c_lflag & CANONICAL_ECHO, CANONICAL_ECHO);
 }
 
 #[test]
@@ -558,6 +621,86 @@ fn runs_prim_tty_init_in_the_disabled_input_mode() {
         )
     );
     assert_same_modes(&outputs.modes, &pbeam_modes);
+}
+
+#[test]
+fn starts_the_cooked_reader_and_the_signal_handler_with_prim_tty_init() {
+    // `cooked_probe:main/0` calls `prim_tty:init/1` in the `cooked` input
+    // mode from a registered process. It starts the reader process, which
+    // calls `tty_select/2` and `tty_encoding/1` (prim_tty.erl:436-448), and
+    // adds `prim_tty_sighandler` to `erl_signal_server` with
+    // `gen_event:add_handler/3` (prim_tty.erl:284-298). The handler init
+    // matches its state with `has_map_fields` and calls `os:set_signal/2`
+    // for `sigcont` and `sigwinch` (prim_tty_sighandler.erl:28-31). The probe
+    // then sends `{notify, sigwinch}`, the message of the ERTS signal
+    // dispatcher (sys.c:589-607), to `erl_signal_server`; the handler
+    // forwards it to the `prim_tty:init/1` caller only when it has the
+    // correct state (prim_tty_sighandler.erl:33-36). `pbeam_main/0` first
+    // makes `ac_tab` and starts `erl_signal_server` with
+    // `erl_signal_handler`, as the kernel boot does. The PBeam run is a
+    // child, because the handler init changes the signal dispositions.
+    let beams: Vec<_> = [
+        "erlang",
+        "prim_tty",
+        "proc_lib",
+        "application",
+        "application_controller",
+        "ets",
+        "re",
+        "lists",
+        "maps",
+        "os",
+        "unicode",
+        "gen_event",
+        "gen",
+        "prim_tty_sighandler",
+        "erl_signal_handler",
+    ]
+    .map(pinned_beam_path)
+    .into_iter()
+    .chain([PathBuf::from(COOKED_PROBE)])
+    .collect();
+    for (locale, unicode) in [("C.UTF-8", "true"), ("C", "false")] {
+        let environment = [("LC_ALL", locale)];
+        let outputs = run_with_outputs(&mut erts_cooked_probe("main"), FILES, &environment);
+        assert_eq!(outputs.files[1].as_deref(), Some(&b""[..]));
+        assert_eq!(
+            outputs.files[2].as_deref(),
+            Some(
+                format!("[{unicode},raw,true,true,{{error,enotsup}},sigwinch,[prim_tty_sighandler,erl_signal_handler]]\n")
+                    .as_bytes()
+            )
+        );
+        assert_eq!(
+            String::from_utf8(run_in_layout(
+                &mut isolated("cooked_probe:pbeam_main", &beams),
+                FILES,
+                &environment
+            ))
+            .unwrap(),
+            format!(
+                r#"Ok(List([Atom("{unicode}"), Atom("raw"), Atom("true"), Atom("true"), Tuple([Atom("error"), Atom("enotsup")]), Atom("sigwinch"), List([Atom("prim_tty_sighandler"), Atom("erl_signal_handler")])]))"#
+            )
+        );
+    }
+
+    // `cooked_probe:read/0` calls `prim_tty:read/1` and waits for the data
+    // of the reader. On ERTS the reader gets the select message of fd 0 and
+    // reads `eof` from `/dev/null` (prim_tty.erl:470-490). PBeam has no IO
+    // poll, so the message never arrives and the run ends with a runtime
+    // error ("Input select" in docs/erts-differences.md).
+    let outputs = run_with_outputs(&mut erts_cooked_probe("read"), FILES, &[]);
+    assert_eq!(outputs.files[1].as_deref(), Some(&b""[..]));
+    assert_eq!(outputs.files[2].as_deref(), Some(&b"eof\n"[..]));
+    assert_eq!(
+        String::from_utf8(run_in_layout(
+            &mut isolated("cooked_probe:pbeam_read", &beams),
+            FILES,
+            &[]
+        ))
+        .unwrap(),
+        r#"Err(BeamError("root process waits for a message that cannot arrive"))"#
+    );
 }
 
 #[test]
@@ -862,13 +1005,32 @@ const CANONICAL_ECHO: libc::tcflag_t = libc::ICANON | libc::ECHO;
 /// has no `PartialEq`, so the test compares its `Debug` text, which shows
 /// each field.
 ///
+/// The comparison ignores the `PENDIN` flag of `c_lflag`. It is a status
+/// flag of the terminal driver, not a part of the mode that `tty_init/2`
+/// saves and sets. The macOS kernel sets it when `ICANON` comes back, and
+/// clears it when a reader or a poll of the terminal processes the pending
+/// input. After `tty_select/2`, the ERTS poll thread watches fd 0, so the
+/// final `PENDIN` of fd 0 in ERTS depends on the thread timing (measured:
+/// unset in 2 of 30 ERTS runs under CPU load, set in each PBeam run).
+///
 /// # Examples
 ///
 /// ```rust,ignore
 /// assert_same_modes(&erts_modes, &pbeam_modes);
 /// ```
 fn assert_same_modes(erts: &[Option<libc::termios>; 3], pbeam: &[Option<libc::termios>; 3]) {
-    assert_eq!(format!("{erts:?}"), format!("{pbeam:?}"));
+    let without_pendin = |modes: &[Option<libc::termios>; 3]| {
+        modes.map(|mode| {
+            mode.map(|mut mode| {
+                mode.c_lflag &= !libc::PENDIN;
+                mode
+            })
+        })
+    };
+    assert_eq!(
+        format!("{:?}", without_pendin(erts)),
+        format!("{:?}", without_pendin(pbeam))
+    );
 }
 
 /// Assert that `mode` has the raw changes of `tty_init/2`
@@ -890,9 +1052,7 @@ fn assert_raw(mode: &libc::termios) {
 /// `prim_tty` and the standard streams of `layout`, and return the `~w`
 /// text of its result. The probe writes with `file:write_file/2`, because
 /// the boot IO servers call the stand-in after `code:load_abs/1`. With
-/// `-noinput`, no boot IO server reads fd 0, as in PBeam. A read of a
-/// macOS terminal clears the `PENDIN` flag (measured) that the kernel sets when
-/// `ICANON` comes back, so a reader changes the final mode of fd 0.
+/// `-noinput`, no boot IO server reads fd 0, as in PBeam.
 ///
 /// # Examples
 ///
@@ -938,6 +1098,31 @@ fn erts_init_probe() -> Command {
         "fixtures/prim_tty",
         "-eval",
         "io:format(standard_error, \"~w~n\", [tty_init_probe:main()]), halt().",
+    ]);
+    command
+}
+
+/// Return the `erl` command that runs `cooked_probe:Function()` with the
+/// pinned `prim_tty` and writes the `~w` text of its result to
+/// `standard_error`. It uses `-noinput`: under `-noshell`, `user_drv` starts
+/// its own cooked reader on fd 0 (user_sup.erl:129-130), and the select of
+/// the probe reader makes ERTS log "stealing control of fd=0" on stdout
+/// (erl_check_io.c:1608). Under `-noinput`, no other process reads fd 0
+/// (user_sup.erl:135-136), as in PBeam.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let outputs = run_with_outputs(&mut erts_cooked_probe("main"), FILES, &[]);
+/// ```
+fn erts_cooked_probe(function: &str) -> Command {
+    let mut command = Command::new("erl");
+    command.args([
+        "-noinput",
+        "-pa",
+        "fixtures/prim_tty",
+        "-eval",
+        &format!("io:format(standard_error, \"~w~n\", [cooked_probe:{function}()]), halt()."),
     ]);
     command
 }
