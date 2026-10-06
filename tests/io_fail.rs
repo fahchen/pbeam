@@ -1,8 +1,4 @@
-use std::{
-    io,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::{process::Command, time::Duration};
 
 #[path = "common/boot.rs"]
 mod boot;
@@ -19,7 +15,7 @@ mod run;
 use boot::{BOOT_BEAM, BOOT_MODULES};
 use common::pinned_beam_path;
 use log_event::{LOG_EVENT_MODULES, mask_time};
-use run::run_dumb_utf8;
+use run::{broken_pipe, run_dumb_utf8};
 
 const IO_FAIL_PROBE: &str = "fixtures/io_fail/io_fail_probe.beam";
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
@@ -94,19 +90,4 @@ fn raises_terminated_after_a_failed_stdout_write_through_user_drv() {
             "{name}"
         );
     }
-}
-
-/// Return the write end of a new pipe whose read end is closed. A write to
-/// it fails with `EPIPE`. `std::io::pipe` makes both ends close-on-exec, so
-/// a child process that a parallel test starts does not keep the read end.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let output = run_dumb_utf8(&mut command, broken_pipe(), RUN_TIME_LIMIT);
-/// ```
-fn broken_pipe() -> Stdio {
-    let (reader, writer) = io::pipe().unwrap();
-    drop(reader);
-    writer.into()
 }
