@@ -1,7 +1,7 @@
 ---
 name: commit
 description: This skill should be used when the user asks to "commit", "commit changes", "make a commit", "/commit", or otherwise requests a git commit on a feature branch in the pbeam repo. Enforces Conventional Commits subjects without scopes, one logical change per commit, why-over-what bodies in ASD-STE100, no attribution trailers, scratch-file protection, and new atomic commits (not amends or fixups) for review feedback.
-version: 0.1.0
+version: 0.2.0
 user-invocable: true
 argument-hint: "[--fast]"
 allowed-tools:
@@ -142,7 +142,7 @@ Skip the body only for self-explanatory commits.
 
 ### 7. Verify and commit
 
-Run the focused check for the change. For Rust changes, run `cargo clippy --all-targets -- -D warnings` and the affected tests. Run `mise run check` before the last commit of a PR. Do not use `--no-verify`.
+Run the focused check for the change. For Rust changes, run `cargo clippy --all-targets -- -D warnings` and the affected tests with `mise run test-focus`. Run `mise run check-brief` before the last commit of a PR. It runs the `mise run check` gate and prints only the result; the full log is in `target/check.log`. Do not use `--no-verify`.
 
 ```bash
 git commit -m "$(cat <<'EOF'
