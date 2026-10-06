@@ -16,7 +16,7 @@ pub use map::Map;
 use std::fmt;
 
 /// The smallest ERTS small integer on a 64-bit system: -(2^59).
-const SMALL_INTEGER_MIN: i64 = -(1 << 59);
+pub(crate) const SMALL_INTEGER_MIN: i64 = -(1 << 59);
 /// The largest ERTS small integer on a 64-bit system: 2^59 - 1.
 const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
 

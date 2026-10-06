@@ -102,7 +102,7 @@ fn calls_the_arithmetic_bifs_externally_as_pinned_erts() {
 #[test]
 fn reports_a_result_outside_the_integer_range() {
     // ERTS makes a bignum for a result outside the 64-bit signed range
-    // (`erl_arith.c:378-384`). PBeam has no bignum term and returns a
+    // (`erl_arith.c:378-384`, `erl_arith.c:134-142`). PBeam has no bignum term and returns a
     // runtime error (row "Integer range" in `docs/erts-differences.md`).
     let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
     for (function, message, erts) in [
@@ -115,6 +115,16 @@ fn reports_a_result_outside_the_integer_range() {
             "minus_overflow",
             "unsupported erlang:-/2 result of -9223372036854775808 and 1: needs a bignum",
             b"-9223372036854775809\n",
+        ),
+        (
+            "times_overflow",
+            "unsupported erlang:*/2 result of 9223372036854775807 and 2: needs a bignum",
+            b"18446744073709551614\n",
+        ),
+        (
+            "div_overflow",
+            "unsupported erlang:div/2 result of -9223372036854775808 and -1: needs a bignum",
+            b"9223372036854775808\n",
         ),
     ] {
         let error = program.execute("arith_probe", function, &[]).unwrap_err();
@@ -146,4 +156,60 @@ fn loads_integer_operands_outside_the_integer_range() {
         );
         assert_eq!(reference(function), erts);
     }
+}
+
+#[test]
+fn multiplies_and_divides_integers_as_pinned_erts() {
+    // `arith_probe:times/0` and `arith_probe:int_div/0` run `gc_bif2`
+    // `erlang:'*'/2` and `erlang:'div'/2` with fail label 0, as
+    // `erlang:convert_time_unit/3` does (erlang.erl:5333-5336). An operand
+    // that is not a number raises `error:badarith` (`stimes_2`,
+    // `erl_arith.c:117-120`). `div` truncates toward zero, and a divisor of
+    // 0 raises `badarith` before the operand types are checked (`intdiv_2`,
+    // `erl_arith.c:127-143`).
+    let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
+    let badarith = Term::Atom(program.atom("badarith").unwrap());
+    let mut times: Vec<Term> = [
+        42,
+        -12,
+        12,
+        0,
+        4_611_686_018_427_387_904,
+        i64::MIN,
+        9_223_372_030_926_249_001,
+    ]
+    .map(Term::Integer)
+    .into();
+    times.extend(std::iter::repeat_n(badarith.clone(), 3));
+    assert_eq!(
+        program.execute("arith_probe", "times", &[]).unwrap(),
+        Term::List(times)
+    );
+    assert_eq!(
+        reference("times"),
+        b"[42,-12,12,0,4611686018427387904,-9223372036854775808,9223372030926249001,\
+          badarith,badarith,badarith]\n"
+    );
+    let mut quotients: Vec<Term> = [
+        3,
+        -3,
+        -3,
+        3,
+        0,
+        i64::MIN,
+        -i64::MAX,
+        -4_611_686_018_427_387_904,
+    ]
+    .map(Term::Integer)
+    .into();
+    quotients.extend(std::iter::repeat_n(badarith, 4));
+    assert_eq!(
+        program.execute("arith_probe", "int_div", &[]).unwrap(),
+        Term::List(quotients)
+    );
+    assert_eq!(
+        reference("int_div"),
+        b"[3,-3,-3,3,0,-9223372036854775808,-9223372036854775807,-4611686018427387904,\
+          badarith,badarith,badarith,badarith]\n"
+    );
 }

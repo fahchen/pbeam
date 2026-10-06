@@ -5,6 +5,7 @@ use super::*;
 use crate::runtime::host;
 use crate::runtime::local_node;
 use crate::runtime::scheduler::{AliasMode, MonitorOptions, MonitorTarget};
+use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use crate::term::{Fun, MAX_ATOM_CHARACTERS};
 
@@ -611,18 +612,25 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
     }
 }
 
-/// Run `erlang:'+'/2` or `erlang:'-'/2` with `operation`, the checked `i64`
-/// sum or difference, as ERTS `erts_mixed_plus` and `erts_mixed_minus`
-/// (`erl_arith.c:370-389`, `erl_arith.c:585-602`) do for two integers. An
-/// operand that is not a number raises `badarith`. PBeam has no float term,
-/// so each number is an integer. A result outside the `i64` range gives a
-/// runtime error, where ERTS makes a bignum.
+/// Run `erlang:'+'/2`, `erlang:'-'/2`, `erlang:'*'/2`, or `erlang:'div'/2`
+/// with `operation`, the checked `i64` sum, difference, product, or
+/// quotient, as ERTS `erts_mixed_plus`, `erts_mixed_minus`, `stimes_2`, and
+/// `intdiv_2` (`erl_arith.c:370-389`, `erl_arith.c:585-602`,
+/// `erl_arith.c:117-143`) do for two integers. The JIT runs `*` with
+/// `emit_i_mul_add` and `div` with `emit_i_int_div` and `emit_div_rem`
+/// (`jit/arm/instr_arith.cpp:542`, `jit/arm/instr_arith.cpp:968`,
+/// `jit/arm/instr_arith.cpp:1067`) with the same results. An operand that is
+/// not a number raises `badarith`. PBeam has no float term, so each number
+/// is an integer. A result outside the `i64` range gives a runtime error,
+/// where ERTS makes a bignum.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let sum = arith("+", &Term::Integer(1), &Term::Integer(2), i64::checked_add)?;
 /// assert!(matches!(sum, BifResult::Value(Term::Integer(3))));
+/// let product = arith("*", &Term::Integer(-3), &Term::Integer(4), i64::checked_mul)?;
+/// assert!(matches!(product, BifResult::Value(Term::Integer(-12))));
 /// let atom = Term::static_atom("a");
 /// assert!(matches!(arith("-", &atom, &Term::Integer(1), i64::checked_sub)?, BifResult::Raise { .. }));
 /// assert!(arith("+", &Term::Integer(i64::MAX), &Term::Integer(1), i64::checked_add).is_err());
@@ -643,6 +651,120 @@ pub(super) fn arith(
         ))
     })?;
     Ok(Value(Term::Integer(result)))
+}
+
+/// Run `erlang:'div'/2`: return the integer quotient of `left` and `right`,
+/// truncated toward zero, as ERTS `intdiv_2` (`erl_arith.c:127-143`) does.
+/// A `right` of `0` raises `badarith` before the operand types are checked
+/// (`erl_arith.c:131-133`), so `a div 0` raises `badarith` too. Each other
+/// case runs as [`arith`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let quotient = int_div(&Term::Integer(-7), &Term::Integer(2))?;
+/// assert!(matches!(quotient, BifResult::Value(Term::Integer(-3))));
+/// assert!(matches!(int_div(&Term::Integer(1), &Term::Integer(0))?, BifResult::Raise { .. }));
+/// assert!(int_div(&Term::Integer(i64::MIN), &Term::Integer(-1)).is_err());
+/// ```
+pub(super) fn int_div(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
+    if *right == Term::Integer(0) {
+        return Ok(BifResult::badarith());
+    }
+    arith("div", left, right, i64::checked_div)
+}
+
+/// Convert `value`, a time in the native unit, to `unit` with
+/// [`time::time_unit_conversion`], as `erlang:monotonic_time/1` and
+/// `os:system_time/1` do (`erl_time_sup.c:2268-2350`). A converted time
+/// is the BIF result, and a unit that is not valid raises `badarg`. A trap
+/// calls `erlang:convert_time_unit(Value, 1000000000, Unit)`
+/// (`erts_convert_time_unit_trap`, `bif.c:5557`), which the pinned
+/// `erlang.beam` runs (`erlang.erl:5299-5340`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = convert_time(1_500_000_000, 0, &Term::static_atom("second"));
+/// assert!(matches!(result, BifResult::Value(Term::Integer(1))));
+/// let result = convert_time(1_000_000_000, 1, &Term::static_atom("perf_counter"));
+/// assert!(matches!(result, BifResult::Trap { function: "convert_time_unit", .. }));
+/// assert!(matches!(convert_time(1, 0, &Term::Integer(0)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> BifResult {
+    match time::time_unit_conversion(value, offset_multiplier, unit) {
+        TimeValue::Value(value) => Value(Term::Integer(value)),
+        TimeValue::Trap(native) => Trap {
+            module: "erlang",
+            function: "convert_time_unit",
+            arguments: vec![
+                Term::Integer(native),
+                Term::Integer(time::TIME_UNIT),
+                unit.clone(),
+            ],
+        },
+        TimeValue::Badarg => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:posixtime_to_universaltime/1`: return the UTC date and time
+/// `{{Year, Month, Day}, {Hour, Minute, Second}}` of `time`, the seconds
+/// since 1970-01-01 00:00:00 UTC, with [`time::seconds_to_univ`]. Each
+/// integer gives a date, and each other term raises `badarg`, as in ERTS
+/// `posixtime_to_universaltime_1` (`bif.c:4025-4050`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {{1970,1,2},{0,0,0}}
+/// assert!(matches!(posixtime_to_universaltime(&Term::Integer(86_400)), BifResult::Value(_)));
+/// assert!(matches!(posixtime_to_universaltime(&Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn posixtime_to_universaltime(time: &Term) -> BifResult {
+    let Term::Integer(time) = time else {
+        return BifResult::badarg();
+    };
+    Value(date_time(time::seconds_to_univ(*time)))
+}
+
+/// Run `erlang:universaltime_to_localtime/1`: return the local date and time
+/// of a UTC date and time `{{Year, Month, Day}, {Hour, Minute, Second}}` in
+/// the host time zone, as ERTS `universaltime_to_localtime_1`
+/// (`bif.c:3975-3995`) does. A term that [`time::time_to_parts`] does not
+/// read, a value that [`time::univ_to_clock`] does not accept, and a
+/// failed `localtime_r` ([`host::clock::local_time`]) raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let triple = |a, b, c| Term::Tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+/// // TZ=EST5EDT,M3.2.0,M11.1.0: {{2026,1,15},{7,0,0}}
+/// let date = Term::Tuple(vec![triple(2026, 1, 15), triple(12, 0, 0)]);
+/// assert!(matches!(universaltime_to_localtime(&date), BifResult::Value(_)));
+/// let date = Term::Tuple(vec![triple(1901, 12, 31), triple(23, 59, 59)]);
+/// assert!(matches!(universaltime_to_localtime(&date), BifResult::Raise { .. }));
+/// ```
+pub(super) fn universaltime_to_localtime(date: &Term) -> BifResult {
+    time::time_to_parts(date)
+        .and_then(time::univ_to_clock)
+        .and_then(host::clock::local_time)
+        .map_or_else(BifResult::badarg, |local| Value(date_time(local)))
+}
+
+/// Return the term `{{Year, Month, Day}, {Hour, Minute, Second}}` of a date
+/// and time.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {{1970,1,2},{0,0,0}}
+/// let term = date_time((1970, 1, 2, 0, 0, 0));
+/// ```
+fn date_time((year, month, day, hour, minute, second): time::DateTime) -> Term {
+    Term::Tuple(vec![
+        Term::Tuple([year, month, day].map(Term::Integer).into()),
+        Term::Tuple([hour, minute, second].map(Term::Integer).into()),
+    ])
 }
 
 /// Run `erlang:element/2`: return the element at the 1-based `index` of a

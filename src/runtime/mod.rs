@@ -8,6 +8,7 @@ mod process;
 mod regex_code;
 mod resources;
 mod scheduler;
+mod time;
 mod timer;
 mod tty;
 mod unicode;

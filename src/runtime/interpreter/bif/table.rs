@@ -14,6 +14,7 @@
 
 use super::BifResult::{Raise, Value};
 use super::*;
+use crate::runtime::time;
 
 bifs! {
     atomics:add/3 => unsupported,
@@ -73,7 +74,7 @@ bifs! {
     erl_debugger:whereis/0 => unsupported,
     erl_debugger:xregs_count/1 => unsupported,
     erlang:"!"/2 => unsupported,
-    erlang:"*"/2 => unsupported,
+    erlang:"*"/2 => |_, [left, right]| erlang::arith("*", left, right, i64::checked_mul),
     erlang:"+"/1 => unsupported,
     erlang:"+"/2 => |_, [left, right]| erlang::arith("+", left, right, i64::checked_add),
     erlang:"++"/2 => |_, [left, right]| Ok(erlang::append(left, right)),
@@ -141,7 +142,7 @@ bifs! {
     erlang:dist_ctrl_put_data/2 => unsupported,
     erlang:dist_ctrl_set_opt/3 => unsupported,
     erlang:dist_get_stat/1 => unsupported,
-    erlang:div/2 => unsupported,
+    erlang:div/2 => |_, [left, right]| erlang::int_div(left, right),
     erlang:dt_append_vm_tag_data/1 => unsupported,
     erlang:dt_get_tag/0 => unsupported,
     erlang:dt_get_tag_data/0 => unsupported,
@@ -250,7 +251,7 @@ bifs! {
     erlang:monitor_node/2 => unsupported,
     erlang:monitor_node/3 => unsupported,
     erlang:monotonic_time/0 => unsupported,
-    erlang:monotonic_time/1 => unsupported,
+    erlang:monotonic_time/1 => |cx, [unit]| Ok(erlang::convert_time(cx.scheduler.timers.now(), 1, unit)),
     erlang:nif_error/1 => |_, [reason]| Ok(Raise { class: ExceptionClass::Error, reason: reason.clone() }),
     erlang:nif_error/2 => unsupported,
     erlang:node/0 => |_, []| Ok(Value(crate::runtime::local_node())),
@@ -269,7 +270,7 @@ bifs! {
     erlang:port_set_data/2 => unsupported,
     erlang:port_to_list/1 => unsupported,
     erlang:ports/0 => unsupported,
-    erlang:posixtime_to_universaltime/1 => unsupported,
+    erlang:posixtime_to_universaltime/1 => |_, [time]| Ok(erlang::posixtime_to_universaltime(time)),
     erlang:pre_loaded/0 => unsupported,
     erlang:process_flag/2 => |cx, [Term::Atom(flag), Term::Atom(value)]| where flag.name() == "trap_exit" && matches!(value.name(), "true" | "false") => erlang::trap_exit(cx, value),
     erlang:process_info/1 => unsupported,
@@ -331,7 +332,7 @@ bifs! {
     erlang:unique_integer/0 => unsupported,
     erlang:unique_integer/1 => unsupported,
     erlang:universaltime/0 => unsupported,
-    erlang:universaltime_to_localtime/1 => unsupported,
+    erlang:universaltime_to_localtime/1 => |_, [date]| Ok(erlang::universaltime_to_localtime(date)),
     erlang:universaltime_to_posixtime/1 => unsupported,
     erlang:unlink/1 => unsupported,
     erlang:unregister/1 => unsupported,
@@ -397,7 +398,7 @@ bifs! {
     erts_internal:no_aux_work_threads/0 => unsupported,
     erts_internal:notify_breakpoint_hit/3 => unsupported,
     erts_internal:open_port/2 => unsupported,
-    erts_internal:perf_counter_unit/0 => unsupported,
+    erts_internal:perf_counter_unit/0 => |_, []| Ok(Value(Term::Integer(time::PERF_COUNTER_UNIT))),
     erts_internal:port_call/3 => unsupported,
     erts_internal:port_close/1 => unsupported,
     erts_internal:port_command/3 => unsupported,
@@ -535,7 +536,7 @@ bifs! {
     os:putenv/2 => unsupported,
     os:set_signal/2 => |_, [signal, mode]| Ok(os::set_signal(signal, mode)),
     os:system_time/0 => unsupported,
-    os:system_time/1 => unsupported,
+    os:system_time/1 => |_, [unit]| Ok(os::system_time(unit)),
     os:timestamp/0 => unsupported,
     os:unsetenv/1 => unsupported,
     persistent_term:erase/1 => unsupported,

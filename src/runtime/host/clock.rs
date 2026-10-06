@@ -1,0 +1,85 @@
+//! Read the host clocks that ERTS reads (`sys/unix/sys_time.c`), and the
+//! local time of the host time zone (`sys/unix/erl_unix_sys.h`).
+
+use crate::runtime::time::DateTime;
+
+/// Return the OS system time: the host `CLOCK_REALTIME` in nanoseconds
+/// since 1970, as the ERTS `erts_os_system_time` reads it with
+/// `posix_clock_gettime` (`sys_time.c:469-497`). On the pinned ERTS,
+/// `erlang:system_info(os_system_time_source)` gives
+/// `{function,clock_gettime}` and `{clock_id,'CLOCK_REALTIME'}`.
+///
+/// ERTS aborts the emulator when `clock_gettime` fails, which needs a
+/// clock id that the host does not have. `CLOCK_REALTIME` exists on each
+/// Unix host, so the call does not fail.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // 2023-11-14 and later.
+/// assert!(system_time() > 1_700_000_000_000_000_000);
+/// ```
+pub(crate) fn system_time() -> i64 {
+    // SAFETY: all zeros is a valid `timespec`, and `clock_gettime` writes
+    // only into the struct that the pointer gives.
+    let time = unsafe {
+        let mut time: libc::timespec = std::mem::zeroed();
+        libc::clock_gettime(libc::CLOCK_REALTIME, &raw mut time);
+        time
+    };
+    time.tv_sec * 1_000_000_000 + time.tv_nsec
+}
+
+unsafe extern "C" {
+    /// POSIX `tzset`: read the time zone of the `TZ` environment variable
+    /// into the C library. libc 0.2.190 has no binding for Unix.
+    fn tzset();
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    /// macOS `posix2time`: add the leap seconds of the time zone to a POSIX
+    /// time. libc 0.2.190 has no binding.
+    fn posix2time(time: libc::time_t) -> libc::time_t;
+}
+
+/// Return the local date and time of `clock`, a POSIX time, in the host
+/// time zone, as the end of ERTS `univ_to_local`
+/// (`erl_time_sup.c:1822-1848`) does. On macOS, ERTS has `posix2time`
+/// (`HAVE_POSIX2TIME`) and adds the leap seconds of the time zone first. A
+/// glibc host has no `posix2time`. Then `sys_localtime_r` calls `tzset`,
+/// so a change of `TZ` takes effect, and `localtime_r`
+/// (`sys/unix/erl_unix_sys.h:331-343`). Return `None` when `localtime_r`
+/// fails.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TZ=EST5EDT,M3.2.0,M11.1.0
+/// assert_eq!(local_time(0), Some((1969, 12, 31, 19, 0, 0)));
+/// ```
+pub(crate) fn local_time(clock: i64) -> Option<DateTime> {
+    #[cfg(target_os = "macos")]
+    // SAFETY: `posix2time` reads only its argument and the time zone data
+    // of the C library.
+    let clock = unsafe { posix2time(clock) };
+    // SAFETY: all zeros is a valid `tm`. `tzset` changes only the time zone
+    // data of the C library, and `localtime_r` reads the time that the
+    // first pointer gives and writes only into the struct that the second
+    // pointer gives.
+    let (result, tm) = unsafe {
+        tzset();
+        let mut tm: libc::tm = std::mem::zeroed();
+        (libc::localtime_r(&raw const clock, &raw mut tm), tm)
+    };
+    (!result.is_null()).then(|| {
+        (
+            i64::from(tm.tm_year) + 1900,
+            i64::from(tm.tm_mon) + 1,
+            i64::from(tm.tm_mday),
+            i64::from(tm.tm_hour),
+            i64::from(tm.tm_min),
+            i64::from(tm.tm_sec),
+        )
+    })
+}

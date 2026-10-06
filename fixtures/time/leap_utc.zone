@@ -1,0 +1,3 @@
+# A UTC zone with the leap seconds of the tz database. Build with:
+# zic -d fixtures/time -L /usr/share/zoneinfo/leapseconds fixtures/time/leap_utc.zone
+Zone leap_utc 0 - UTC
