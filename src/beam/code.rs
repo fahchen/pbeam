@@ -33,6 +33,9 @@ const TAG_LITERAL: u8 = 7;
 const LIST_SUBTAG: i128 = 1;
 const ETF_VERSION: u8 = 131;
 const ETF_SMALL_INTEGER_EXT: u8 = 97;
+/// `INTEGER_EXT`, a 32-bit big-endian signed integer, such as `-1` as
+/// `[98, 255, 255, 255, 255]`.
+const ETF_INTEGER_EXT: u8 = 98;
 const ETF_SMALL_TUPLE_EXT: u8 = 104;
 const ETF_NIL_EXT: u8 = 106;
 const ETF_STRING_EXT: u8 = 107;
@@ -131,8 +134,9 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// literal_count ::= u32be
 /// literal_entry ::= term_size:u32be 131 external_term ; term_size bytes in total
 /// external_term ::= binary_term | string_term | nil_term | atom_term | tuple_term | list_term
-///                 | map_term | small_integer_term | export_term
+///                 | map_term | small_integer_term | integer_term | export_term
 /// small_integer_term ::= 97 value:u8
+/// integer_term ::= 98 value:i32be
 /// binary_term ::= 109 binary_size:u32be byte[binary_size]
 /// string_term ::= 107 string_size:u16be byte[string_size]
 /// nil_term    ::= 106
@@ -176,11 +180,13 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// `opcode_max` is not checked. The parser rejects duplicate chunk IDs. It
 /// supports only the listed instructions and compact operand forms. `LitT`
 /// supports uncompressed tables. A literal loads as a value only when every
-/// nested tag is listed; another tag, such as an integer outside `0..=255`
-/// (`INTEGER_EXT`, 98, as `-1` is `[98, 255, 255, 255, 255]`), an improper
+/// nested tag is listed; another tag, such as a bignum (`SMALL_BIG_EXT`, 110,
+/// as `1 bsl 64` is `[110, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]`), an improper
 /// list tail, or a map key that `Map` does not support yet, makes the literal
 /// unsupported, and execution fails only if an instruction uses it.
-/// `[a|[b]]` and `[a,b]` give the same list. `[97, 1]` is the integer 1. A
+/// `[a|[b]]` and `[a,b]` give the same list. `[97, 1]` is the integer 1, and
+/// `[98, 255, 255, 255, 255]` is `-1`. On a 64-bit ERTS each `INTEGER_EXT`
+/// value is a small integer (`dec_term`, `external.c:4435-4447`). A
 /// map literal is a flatmap up to 32 pairs and a hashmap above 32 pairs, in
 /// any input order, as in ERTS. A map literal with a duplicate key is an
 /// error, as ERTS rejects it with `badarg`. The
@@ -616,7 +622,8 @@ enum PartialTerm {
 /// # Errors
 ///
 /// A truncated term, an atom that is not UTF-8, a new atom when the atom
-/// table is full, or a map with a duplicate key is an error.
+/// table is full, a map with a duplicate key, or an external fun with an
+/// arity outside `0..=255` is an error.
 fn read_external_term(
     data: &[u8],
     cursor: &mut usize,
@@ -641,7 +648,11 @@ fn read_external_term(
             ETF_NIL_EXT => Term::List(Vec::new()),
             ETF_EXPORT_EXT => {
                 // `dec_term` (`external.c:5006-5041`) reads two atoms and a
-                // non-negative integer, else the decode fails.
+                // non-negative integer, else the decode fails. The arity can
+                // be `INTEGER_EXT`, as `[98, 0, 0, 0, 1]` loads as arity 1.
+                // A fun has at most 255 arguments. ERTS has no defined result
+                // above 255: arity 256 makes a fun of arity 0, and arity 257
+                // stops the VM.
                 let mut part = || read_external_term(data, cursor, atom_table);
                 let (Some(module), Some(function), Some(arity)) = (part()?, part()?, part()?)
                 else {
@@ -652,14 +663,22 @@ fn read_external_term(
                 else {
                     return Err(error("invalid BEAM external fun literal"));
                 };
-                // A `SMALL_INTEGER_EXT` arity is in `0..=255`.
+                let Ok(arity) = u8::try_from(arity) else {
+                    return Err(error("invalid BEAM external fun literal"));
+                };
                 Term::Fun(Fun::external(
                     module.clone(),
                     function.clone(),
-                    arity as u32,
+                    u32::from(arity),
                 ))
             }
             ETF_SMALL_INTEGER_EXT => Term::Integer(i64::from(take(data, cursor, 1)?[0])),
+            ETF_INTEGER_EXT => {
+                let bytes = take(data, cursor, WORD_SIZE)?;
+                Term::Integer(i64::from(i32::from_be_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                ])))
+            }
             ETF_SMALL_ATOM_UTF8_EXT => {
                 let size = take(data, cursor, 1)?[0] as usize;
                 let name = std::str::from_utf8(take(data, cursor, size)?)
@@ -1193,10 +1212,11 @@ mod tests {
             "Tuple([Atom(\"pbeam_lit_b\"), Map([(Atom(\"pbeam_lit_b\"), Integer(2)), \
              (Atom(\"pbeam_lit_a\"), Integer(1))])])"
         );
-        // [pbeam_x, 256, pbeam_y]: the atoms after the unsupported INTEGER_EXT are not created.
+        // [pbeam_x, 1 bsl 64, pbeam_y]: the atoms after the unsupported SMALL_BIG_EXT are not
+        // created.
         let mut unsupported = vec![131, 108, 0, 0, 0, 3, 119, 7];
         unsupported.extend(b"pbeam_x");
-        unsupported.extend([98, 0, 0, 1, 0, 119, 7]);
+        unsupported.extend([110, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 119, 7]);
         unsupported.extend(b"pbeam_y");
         unsupported.push(106);
         assert_eq!(read_literal(&unsupported, &mut atoms).unwrap(), None);
@@ -1220,10 +1240,11 @@ mod tests {
                 Term::List(vec![])
             ]))
         );
-        // INTEGER_EXT (98) 256 inside a tuple or a list, and an improper tail.
-        assert_eq!(read(&[131, 104, 1, 98, 0, 0, 1, 0]).unwrap(), None);
+        // NEW_FLOAT_EXT (70) 1.0 inside a tuple or a list, and an improper tail.
+        let float = [70, 63, 240, 0, 0, 0, 0, 0, 0];
+        assert_eq!(read(&[&[131, 104, 1][..], &float].concat()).unwrap(), None);
         assert_eq!(
-            read(&[131, 108, 0, 0, 0, 1, 98, 0, 0, 1, 0, 106]).unwrap(),
+            read(&[&[131, 108, 0, 0, 0, 1][..], &float, &[106]].concat()).unwrap(),
             None
         );
         assert_eq!(
@@ -1255,8 +1276,8 @@ mod tests {
             read(&[131, 116, 0, 0, 0, 0]).unwrap(),
             Some(Term::Map(Map::from_pairs(vec![]).unwrap()))
         );
-        // A map key that `Map` does not support yet makes the literal unsupported.
-        assert_eq!(read(&[131, 116, 0, 0, 0, 1, 106, 106]).unwrap(), None);
+        // A map key that `Map` does not support yet makes the literal unsupported: #{{} => []}.
+        assert_eq!(read(&[131, 116, 0, 0, 0, 1, 104, 0, 106]).unwrap(), None);
         // ERTS rejects a MAP_EXT with a duplicate key: #{1 => [], 1 => []}.
         assert_eq!(
             read(&[131, 116, 0, 0, 0, 2, 97, 1, 106, 97, 1, 106])
@@ -1268,6 +1289,17 @@ mod tests {
         // SMALL_INTEGER_EXT: 1 and 255.
         assert_eq!(read(&[131, 97, 1]).unwrap(), Some(Term::Integer(1)));
         assert_eq!(read(&[131, 97, 255]).unwrap(), Some(Term::Integer(255)));
+        // INTEGER_EXT: 256, -1, and the i32 limits, as term_to_binary/1 writes them.
+        for (bytes, value) in [
+            ([0, 0, 1, 0], 256),
+            ([255, 255, 255, 255], -1),
+            ([127, 255, 255, 255], i64::from(i32::MAX)),
+            ([128, 0, 0, 0], i64::from(i32::MIN)),
+        ] {
+            let literal = [&[131, 98][..], &bytes].concat();
+            assert_eq!(read(&literal).unwrap(), Some(Term::Integer(value)));
+        }
+        assert!(read(&[131, 98, 0, 0, 1]).is_err());
 
         // erlc writes #{1 => v, ..., 33 => v} as 131,116,0,0,0,33,97,1,119,1,118,...;
         // 33 keys give a hashmap in the ERTS order, from either input order.
@@ -1325,9 +1357,27 @@ mod tests {
                 "invalid BEAM external fun literal"
             );
         }
+        // ERTS 29.1.1 loads an INTEGER_EXT arity in `0..=255`, as
+        // `[98, 0, 0, 0, 1]` and `[98, 0, 0, 0, 255]`. It rejects -1 as a
+        // corrupt literal table, and it has no defined result above 255.
+        let export = |arity: &[u8]| [&[131, 113, 119, 1, b'm', 119, 1, b'f'][..], arity].concat();
+        let integer_one = read(&export(&[98, 0, 0, 0, 1])).unwrap();
+        let integer_max = read(&export(&[98, 0, 0, 0, 255])).unwrap();
+        for arity in [&[98, 255, 255, 255, 255][..], &[98, 0, 0, 1, 0]] {
+            assert_eq!(
+                read(&export(arity)).unwrap_err().to_string(),
+                "invalid BEAM external fun literal"
+            );
+        }
         let atom = |name| atoms.get(name).unwrap();
         let fun = Fun::external(atom("lists"), atom("reverse"), 1);
         assert_eq!(reverse, Some(Term::Fun(fun)));
+        for (fun, arity) in [(integer_one, 1), (integer_max, 255)] {
+            assert_eq!(
+                fun,
+                Some(Term::Fun(Fun::external(atom("m"), atom("f"), arity)))
+            );
+        }
     }
 
     #[test]

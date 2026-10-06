@@ -34,9 +34,9 @@ pub enum Term {
     Tuple(Vec<Term>),
     /// A BEAM map: a flatmap up to 32 keys and a hashmap above 32 keys, as
     /// in ERTS. `Map` keeps each map in its canonical form, so two maps with
-    /// the same pairs are equal. A key is an integer or an atom; a hashmap
-    /// accepts atoms and small integers. Atom keys are ordered and hashed by
-    /// their atom index, as in ERTS.
+    /// the same pairs are equal. A key is an atom, a small integer, `[]`, or
+    /// a list of these keys; a flatmap also accepts any integer. Atom keys
+    /// are ordered and hashed by their atom index, as in ERTS.
     Map(Map),
     /// A process identifier owned by this runtime.
     Pid(ProcessId),
