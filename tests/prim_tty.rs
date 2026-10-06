@@ -2,7 +2,10 @@ use std::{
     env,
     ffi::OsStr,
     fs,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::process::CommandExt,
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
@@ -23,6 +26,23 @@ const TTY_NIF_PROBE: &str = "fixtures/prim_tty/tty_nif_probe.beam";
 const TTY_INIT_PROBE: &str = "fixtures/prim_tty/tty_init_probe.beam";
 const LOAD_NIF_PROBE: &str = "fixtures/prim_tty/load_nif_probe.beam";
 const COOKED_PROBE: &str = "fixtures/prim_tty/cooked_probe.beam";
+const HOST_WRITE_PROBE: &str = "fixtures/prim_tty/host_write_probe.beam";
+
+/// The pinned modules that `prim_tty:init/1` calls in the `disabled` input
+/// mode.
+const INIT_MODULES: [&str; 11] = [
+    "erlang",
+    "prim_tty",
+    "proc_lib",
+    "application",
+    "application_controller",
+    "ets",
+    "re",
+    "lists",
+    "maps",
+    "os",
+    "unicode",
+];
 
 /// The environment variables that give the `isolated_run` child its entry
 /// `module:function`, its BEAM files, and the file for its result. The ERTS
@@ -43,6 +63,10 @@ enum Stream {
     /// A `Terminal` with `ECHO` and `ICANON` off, as `stty -echo -icanon`
     /// sets it.
     QuietTerminal { columns: u16, rows: u16 },
+    /// The write end of a pipe whose read end is closed before the spawn.
+    BrokenPipe,
+    /// A closed fd.
+    Closed,
 }
 
 /// Layout F: stdin `/dev/null`, stdout and stderr files.
@@ -520,18 +544,93 @@ fn restores_fd_0_when_a_linked_tty_owner_exits_abnormally() {
 }
 
 #[test]
-fn returns_a_runtime_error_from_write_nif_for_a_tty_resource() {
-    // `tty_nif_probe:write/0` makes a `stdout` TTY resource and calls
-    // `prim_tty:write_nif/2` with it. ERTS writes the iovec to the output
-    // fd (prim_tty_nif.c:366-427). PBeam has no host write yet, so the
-    // binding returns a runtime error. `tty_create/1` only reads the mode
-    // of stdout, so the test runs in this process.
-    let beams = [TTY_NIF_PROBE, STAND_IN].map(|path| fs::read(path).unwrap());
-    let program = BeamProgram::load(&beams.each_ref().map(Vec::as_slice)).unwrap();
-    let error = program.execute("tty_nif_probe", "write", &[]).unwrap_err();
+fn writes_the_iovec_of_a_tty_resource_with_writev() {
+    // `tty_nif_probe:write/0` calls `prim_tty:write_nif/2` with a `stderr`
+    // TTY resource and ten terms. The NIF reads the iovec in groups of 1024
+    // elements and writes each group with `writev` before it reads the next
+    // group (prim_tty_nif.c:366-423). An empty binary gives no `writev`
+    // entry (erl_nif.c:4122-4135). A term that is not a list, or a group
+    // with an element that is not a binary, raises `badarg`
+    // (erl_nif.c:4113-4115, 4145-4147). So `Group ++ [foo]` (one group)
+    // writes nothing, and `[<<"c">> | Group] ++ [foo]` writes its first
+    // group of 1024 binaries. `[<<>>]` calls `writev` with a count of 0,
+    // which fails with `EINVAL` on macOS and writes 0 bytes on Linux.
+    let last = if cfg!(target_os = "macos") {
+        (
+            "{error,einval}",
+            r#"Tuple([Atom("error"), Atom("einval")])"#,
+        )
+    } else {
+        ("ok", r#"Atom("ok")"#)
+    };
+    let group = format!("c{}", "b".repeat(1023));
+    let stderr = format!("Hello, world!\n{group}{group}d");
+    assert_eq!(stderr.len(), 2063);
+
+    let outputs = run_with_outputs(&mut erts_nif_probe("write"), FILES, &[]);
     assert_eq!(
-        error.to_string(),
-        "prim_tty:write_nif/2 host write is not implemented yet (#116)"
+        outputs.result.as_deref(),
+        Some(
+            format!(
+                "[ok,ok,badarg,badarg,badarg,badarg,badarg,badarg,ok,{}]\n",
+                last.0
+            )
+            .as_bytes()
+        )
+    );
+    assert_eq!(outputs.files[1].as_deref(), Some(&b""[..]));
+    assert_eq!(outputs.files[2].as_deref(), Some(stderr.as_bytes()));
+
+    let outputs = run_with_outputs(
+        &mut isolated("tty_nif_probe:write", &[TTY_NIF_PROBE, STAND_IN]),
+        FILES,
+        &[],
+    );
+    assert_eq!(
+        outputs.result.as_deref(),
+        Some(
+            format!(
+                r#"Ok(List([Atom("ok"), Atom("ok"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("ok"), {}]))"#,
+                last.1
+            )
+            .as_bytes()
+        )
+    );
+    assert_eq!(outputs.files[2].as_deref(), Some(stderr.as_bytes()));
+}
+
+#[test]
+fn returns_the_errno_of_a_failed_tty_write() {
+    // `tty_nif_probe:write_error/0` writes to a `stderr` TTY resource, and
+    // stderr is a pipe whose reader is closed. ERTS ignores `SIGPIPE`
+    // (sys_drivers.c:175), and so does the Rust runtime before `main`, so
+    // `writev` fails with `EPIPE`, and the result is `{error, epipe}`
+    // (prim_tty_nif.c:403-406). `[]` writes nothing, and `[<<"x">>, foo]`
+    // raises `badarg` before the write (prim_tty_nif.c:366-368).
+    let last = if cfg!(target_os = "macos") {
+        (
+            "{error,einval}",
+            r#"Tuple([Atom("error"), Atom("einval")])"#,
+        )
+    } else {
+        ("ok", r#"Atom("ok")"#)
+    };
+    let layout = [Stream::Null, Stream::File, Stream::BrokenPipe];
+    assert_eq!(
+        run_in_layout(&mut erts_nif_probe("write_error"), layout, &[]),
+        format!("[ok,{{error,epipe}},badarg,{}]\n", last.0).as_bytes()
+    );
+    assert_eq!(
+        run_in_layout(
+            &mut isolated("tty_nif_probe:write_error", &[TTY_NIF_PROBE, STAND_IN]),
+            layout,
+            &[]
+        ),
+        format!(
+            r#"Ok(List([Atom("ok"), Tuple([Atom("error"), Atom("epipe")]), Atom("badarg"), {}]))"#,
+            last.1
+        )
+        .as_bytes()
     );
 }
 
@@ -549,23 +648,11 @@ fn runs_prim_tty_init_in_the_disabled_input_mode() {
     // (prim_tty_nif.c:1003-1004). `pbeam_main/0` first makes the `ac_tab`
     // table that `application:get_env/3` reads, because PBeam has no
     // application controller.
-    let beams: Vec<_> = [
-        "erlang",
-        "prim_tty",
-        "proc_lib",
-        "application",
-        "application_controller",
-        "ets",
-        "re",
-        "lists",
-        "maps",
-        "os",
-        "unicode",
-    ]
-    .map(pinned_beam_path)
-    .into_iter()
-    .chain([PathBuf::from(TTY_INIT_PROBE)])
-    .collect();
+    let beams: Vec<_> = INIT_MODULES
+        .map(pinned_beam_path)
+        .into_iter()
+        .chain([PathBuf::from(TTY_INIT_PROBE)])
+        .collect();
     let probe = || isolated("tty_init_probe:pbeam_main", &beams);
     let init = |unicode: &str, size: &str| {
         format!(
@@ -621,6 +708,44 @@ fn runs_prim_tty_init_in_the_disabled_input_mode() {
         )
     );
     assert_same_modes(&outputs.modes, &pbeam_modes);
+}
+
+#[test]
+fn writes_hello_world_from_the_pbeam_binary_through_a_prim_tty_writer() {
+    // `host_write_probe:main/0` starts a `prim_tty` writer on stdout and a
+    // second writer on stderr, each in the `raw` output mode. It sends
+    // `"Hello, world!\n"` to the stdout writer with `prim_tty:write/3`, which
+    // calls `write_nif/2` and replies `ok` (prim_tty.erl:541-566,
+    // prim_tty_nif.c:354-427). It then writes that reply and a newline to
+    // stderr. The `pbeam` binary runs `pbeam_main/0`, which first makes
+    // `ac_tab`. With stdout closed, ERTS opens `/dev/null` as fd 1
+    // (sys.c:392-399) and ignores `SIGPIPE` (sys_drivers.c:175). The Rust
+    // runtime of the `pbeam` binary does the same before `main` (Rust
+    // 1.99.0 library/std/src/sys/pal/unix/mod.rs:22-36, 51-139, 141-185), so
+    // the write to stdout gives `ok`.
+    let beams: Vec<_> = INIT_MODULES.map(pinned_beam_path).into();
+    let pbeam = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+        command
+            .args(["host_write_probe", "pbeam_main", HOST_WRITE_PROBE])
+            .args(&beams);
+        command
+    };
+    let commands: [(&str, &dyn Fn() -> Command); 2] =
+        [("ERTS", &erts_host_write_probe), ("PBeam", &pbeam)];
+    for (name, command) in commands {
+        let outputs = run_with_outputs(&mut command(), FILES, &[]);
+        assert_eq!(
+            outputs.files[1].as_deref(),
+            Some(&b"Hello, world!\n"[..]),
+            "{name}"
+        );
+        assert_eq!(outputs.files[2].as_deref(), Some(&b"ok\n"[..]), "{name}");
+
+        let layout = [Stream::Null, Stream::Closed, Stream::File];
+        let outputs = run_with_outputs(&mut command(), layout, &[]);
+        assert_eq!(outputs.files[2].as_deref(), Some(&b"ok\n"[..]), "{name}");
+    }
 }
 
 #[test]
@@ -1102,6 +1227,26 @@ fn erts_init_probe() -> Command {
     command
 }
 
+/// Return the `erl` command that runs `host_write_probe:main/0` with the
+/// pinned `prim_tty`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let outputs = run_with_outputs(&mut erts_host_write_probe(), FILES, &[]);
+/// ```
+fn erts_host_write_probe() -> Command {
+    let mut command = Command::new("erl");
+    command.args([
+        "-noshell",
+        "-pa",
+        "fixtures/prim_tty",
+        "-eval",
+        "host_write_probe:main(), halt().",
+    ]);
+    command
+}
+
 /// Return the `erl` command that runs `cooked_probe:Function()` with the
 /// pinned `prim_tty` and writes the `~w` text of its result to
 /// `standard_error`. It uses `-noinput`: under `-noshell`, `user_drv` starts
@@ -1258,6 +1403,22 @@ fn run_with_outputs(
     let [stdin, stdout, stderr] =
         std::array::from_fn(|fd| open_stream(layout[fd], &paths[fd], &mut terminals[fd]));
     let result = directory.join("result");
+    let closed = layout.map(|stream| matches!(stream, Stream::Closed));
+    if closed.contains(&true) {
+        // SAFETY: the closure calls only `close`, which is async-signal-safe,
+        // and allocates nothing. `pre_exec` runs after the standard streams
+        // are set, so each `Closed` fd stays closed at `exec`.
+        unsafe {
+            command.pre_exec(move || {
+                for (fd, closed) in (0..).zip(closed) {
+                    if closed {
+                        libc::close(fd);
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
     let status = command
         .env("TERM", "dumb")
         .env("LC_ALL", "C.UTF-8")
@@ -1299,8 +1460,12 @@ fn run_with_outputs(
 /// ```
 fn open_stream(stream: Stream, path: &Path, terminal: &mut Option<(OwnedFd, OwnedFd)>) -> Stdio {
     let (master, slave) = match stream {
-        Stream::Null => return Stdio::null(),
+        // `run_with_outputs` closes the fd of a `Closed` stream in the child.
+        Stream::Null | Stream::Closed => return Stdio::null(),
         Stream::File => return fs::File::create(path).unwrap().into(),
+        // `std::io::pipe` makes both ends close-on-exec, so a child of a
+        // parallel test does not keep the read end open.
+        Stream::BrokenPipe => return std::io::pipe().unwrap().1.into(),
         Stream::Terminal { columns, rows } => open_terminal(columns, rows),
         Stream::QuietTerminal { columns, rows } => {
             let (master, slave) = open_terminal(columns, rows);

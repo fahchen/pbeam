@@ -1,7 +1,23 @@
-//! Name an errno value as the ERTS `erl_errno_id`
-//! (`erts/emulator/beam/erl_errno_str.c:1228-1309`) does.
+//! Read the `errno` of the last host call, and name an errno value as the
+//! ERTS `erl_errno_id` (`erts/emulator/beam/erl_errno_str.c:1228-1309`)
+//! does.
 
 use std::ffi::c_int;
+
+/// Return the `errno` of the last host call of this thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // SAFETY: `isatty` of fd -1 sets `errno` to `EBADF`.
+/// unsafe { libc::isatty(-1) };
+/// assert_eq!(errno(), libc::EBADF);
+/// ```
+pub(crate) fn errno() -> c_int {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or_default()
+}
 
 /// The cases of the ERTS `errno_name` switch (`erl_errno_str.c:986-1105`),
 /// in its order, each with the names of its `#if` guard. Some names have
