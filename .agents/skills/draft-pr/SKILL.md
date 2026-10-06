@@ -1,7 +1,7 @@
 ---
 name: draft-pr
 description: This skill should be used when the user asks to "create a PR", "open a PR", "create a draft PR", "make a PR", "/pr", "/draft-pr", or otherwise requests a GitHub pull request for the current branch in the pbeam repo. Uses the task issue title as the PR title, fills the repo PR template with task links, decisions, and exact verification, checks each Review boundary item and stops to ask if one fails, applies content labels, updates the task issue and epic, and stops for review.
-version: 0.3.0
+version: 0.4.0
 user-invocable: true
 allowed-tools:
   - Bash(git *)
@@ -49,10 +49,10 @@ Refuse to continue, and say why, when a rule is broken.
 Get the task issue number from the user, the branch, or the commits. Ask if it is unknown. Then read:
 
 ```bash
-gh issue view <task> --json number,title,body,labels,milestone
+mise run issue <task> Acceptance Scope Dependencies
 ```
 
-From the body, take the epic issue, the milestone tracking issue, the acceptance criteria, the scope, and the blockers. Read the epic issue for its task and PR lists.
+It prints the title, labels, milestone, the epic and milestone tracking issue links, and the named sections. From it, take the acceptance criteria, the scope, and the blockers. Read the task and PR lists of the epic with `mise run issue <epic> Tasks 'Pull requests'`.
 
 ### 1. Pre-flight
 
@@ -78,7 +78,7 @@ Commit bodies are the main source of rationale. Synthesise. Do not paste raw log
 
 ### 3. Verify
 
-Run `mise run check`, even for a documentation-only or skill-only change: it runs `rumdl check .`, which catches markdown lint failures that CI also runs. Record the exact commands and results, including `Application line coverage`. Run the acceptance check of the task (for example, the ERTS comparison test). If a check fails, stop and report. Do not open the PR with a failing check unless the user accepts it as a recorded gap.
+Run `mise run check-brief`, even for a documentation-only or skill-only change. It runs the `mise run check` gate, which includes `rumdl check .`, so it catches markdown lint failures that CI also runs. It prints `check: pass` and the `Application line coverage` line, or the failed step; the full log is in `target/check.log`. Record `mise run check` with its result and the `Application line coverage` line. Record the other exact commands and results. Run the acceptance check of the task (for example, the ERTS comparison test). If a check fails, stop and report. Do not open the PR with a failing check unless the user accepts it as a recorded gap.
 
 ### 4. Surface open questions
 
@@ -124,7 +124,7 @@ Add `--draft` only when the user asked for a draft.
 ### 8. Update the issues
 
 - Comment on the task issue: the PR link, the acceptance evidence, and that the task stays open until merge.
-- Update the epic body: link the PR in the task bullet ("in review") and add the PR to the `## Pull requests` list.
+- Update the epic body: link the PR in the task bullet ("in review") and add the PR to the `## Pull requests` list. Read the full body with `gh issue view <epic> --json body --jq .body`, edit that text, and write it with `gh issue edit <epic> --body-file <scratch file>`. Do not use the `mise run issue` output as the body: it omits sections and blank lines.
 - Do not close the task. Do not change milestone or epic completion.
 
 Report the PR URL, labels, issue updates, and that the work stops for review.
