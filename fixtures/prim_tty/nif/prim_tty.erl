@@ -1,7 +1,7 @@
 -module(prim_tty).
--export([load/1, isatty/1, tty_create/1, tty_init/2, setlocale/1, tty_select/2,
-         tty_window_size/1, tty_encoding/1, tty_is_open/2, write_nif/2, read_nif/3,
-         isprint/1, wcwidth/1, wcswidth/1, sizeof_wchar/0, setupterm_nif/0,
+-export([load/1, load_body/1, load_last/1, isatty/1, tty_create/1, tty_init/2, setlocale/1,
+         tty_select/2, tty_window_size/1, tty_encoding/1, tty_is_open/2, write_nif/2,
+         read_nif/3, isprint/1, wcwidth/1, wcswidth/1, sizeof_wchar/0, setupterm_nif/0,
          tigetnum_nif/1, tigetflag_nif/1, tigetstr_nif/1, tinfo_nif/0, tputs_nif/2]).
 -nifs([isatty/1, tty_create/1, tty_init/2, setlocale/1, tty_select/2, tty_window_size/1,
        tty_encoding/1, tty_is_open/2, write_nif/2, read_nif/3, isprint/1, wcwidth/1,
@@ -9,6 +9,10 @@
        tigetstr_nif/1, tinfo_nif/0, tputs_nif/2]).
 
 load(Path) -> erlang:load_nif(Path, #{}).
+load_body(Path) -> {erlang:load_nif(Path, #{}), body}.
+load_last(Path) -> erlang:load_nif(id(Path), #{}).
+
+id(X) -> X.
 
 isatty(_) -> erlang:nif_error(undef).
 tty_create(_) -> erlang:nif_error(undef).
