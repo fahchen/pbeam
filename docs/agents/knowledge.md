@@ -68,3 +68,13 @@ Implement only behavior that the current task measures and needs. Move unmeasure
 ## Binary decoders drop required operands
 
 Consume and validate every encoded operand even when runtime semantics do not use its value. Keep the skip behavior in one helper and preserve cursor and tag checks.
+
+## Exit cleanup is completed before errors return
+
+Run every required exit cleanup and notification stage before returning an
+error. Preserve the first error and return it after cleanup completes.
+
+## Invariant violations remain visible
+
+Treat a broken runtime invariant as an explicit failure. Do not skip missing
+entries when skipping would hide a defect or leave runtime state inconsistent.
