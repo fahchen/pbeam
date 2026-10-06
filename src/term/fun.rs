@@ -30,9 +30,9 @@ pub(crate) struct Lambda {
     /// The module that defines the lambda.
     module: Atom,
     /// The index of the lambda in the `FunT` chunk (`ErlFunEntry.index`).
-    index: i32,
+    pub(super) index: i32,
     /// The old unique value of the `FunT` entry (`ErlFunEntry.old_uniq`).
-    old_unique: i32,
+    pub(super) old_unique: i32,
     /// The entry label of the code of the lambda.
     label: u32,
     /// The number of arguments of a call of the fun, without the free
