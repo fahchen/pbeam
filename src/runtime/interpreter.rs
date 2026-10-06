@@ -426,7 +426,7 @@ impl BeamProgram {
                             }
                         }
                         // The compiler emits a `bif` instruction only for a
-                        // BIF that does not trap.
+                        // BIF that does not trap or end the caller.
                         trap => {
                             return Err(error(format!(
                                 "unsupported {bif_module}:{name}/{} result {trap:?}",
@@ -1064,8 +1064,8 @@ impl BeamProgram {
     /// `emit_bif_nif_epilogue` in `jit/arm/instr_bif.cpp:631-719`). A value
     /// goes to x0, and a tail call then returns from the frame. An exception
     /// goes to the error handler. A trap writes its arguments to the X
-    /// registers and enters the target function. Return the outcome when the
-    /// process exits.
+    /// registers and enters the target function. An exit ends the process,
+    /// and no catch tag sees it. Return the outcome when the process exits.
     ///
     /// # Examples
     ///
@@ -1106,6 +1106,10 @@ impl BeamProgram {
                 enter_frame(process, self.mfa_frame(module, function, arity)?, tail);
                 Ok(None)
             }
+            BifResult::Exited(reason) => Ok(Some(Outcome::Exit {
+                reason,
+                result: None,
+            })),
         }
     }
 }
@@ -2428,7 +2432,7 @@ mod tests {
                 Instruction::CallExternal {
                     arity: 3,
                     module: "lists".into(),
-                    name: "keymember".into(),
+                    name: "keysearch".into(),
                     tail: true,
                     deallocate: 0,
                 },
@@ -2439,11 +2443,11 @@ mod tests {
             "lists".into(),
             BeamModule {
                 name: "lists".into(),
-                exports: HashMap::from([(("keymember".into(), 3), 1)]),
+                exports: HashMap::from([(("keysearch".into(), 3), 1)]),
                 instructions: vec![
                     Instruction::FunctionInfo {
                         module: "lists".into(),
-                        name: "keymember".into(),
+                        name: "keysearch".into(),
                         arity: 3,
                     },
                     Instruction::Label(1),
@@ -2452,14 +2456,14 @@ mod tests {
                 ],
             },
         );
-        // `lists:keymember/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
+        // `lists:keysearch/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
         // BIF, so the BEAM stub body of the loaded `lists` module must not run.
         assert_eq!(
             program
                 .execute("fixture", "main", &[])
                 .unwrap_err()
                 .to_string(),
-            "unresolved external MFA lists:keymember/3"
+            "unresolved external MFA lists:keysearch/3"
         );
         // `is_bif` finds an entry with a binary search.
         // Strictly increasing: sorted for a binary search, with no duplicate entry.
