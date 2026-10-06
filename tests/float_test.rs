@@ -127,3 +127,51 @@ fn raises_badarith_when_fconv_gets_a_term_that_is_not_a_number() {
           badarith]\n"
     );
 }
+
+#[test]
+fn stops_at_a_float_register_instruction_before_the_fconv_that_raises_badarith() {
+    // ERTS runs `fconv` of the integer 8 and `fmove` of the float literal
+    // 2.0 to a float register, then raises `error:badarith` at the `fconv`
+    // of `a` (emu float_instrs.tab:38-52; JIT `emit_fconv_shared` in
+    // jit/arm/instr_float.cpp:96-135). PBeam has no float register, so the
+    // run stops at the first instruction: `fconv` (opcode 97) of
+    // `divide(8, a)` and `fmove` (opcode 96) of `two_over(a)`. `divide(a, 8)`
+    // raises at the first `fconv`, so it gives `badarith` as in ERTS.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, FLOAT_TEST_PROBE]).unwrap();
+    let a = Term::Atom(program.atom("a").unwrap());
+    assert_eq!(
+        program
+            .execute("float_test_probe", "divide", &[a.clone(), Term::Integer(8)])
+            .unwrap(),
+        Term::Atom(program.atom("badarith").unwrap())
+    );
+    assert_eq!(
+        program
+            .execute("float_test_probe", "divide", &[Term::Integer(8), a.clone()])
+            .unwrap_err()
+            .to_string(),
+        "unsupported BEAM opcode 97"
+    );
+    assert_eq!(
+        program
+            .execute("float_test_probe", "two_over", &[a])
+            .unwrap_err()
+            .to_string(),
+        "unsupported BEAM opcode 96"
+    );
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/float_test",
+            "-eval",
+            "io:format(\"~w~n\", [[float_test_probe:divide(a, 8), \
+             float_test_probe:divide(8, a), float_test_probe:two_over(a)]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stdout, b"[badarith,badarith,badarith]\n");
+}
