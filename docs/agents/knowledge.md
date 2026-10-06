@@ -84,3 +84,7 @@ Document every struct field that wraps an opaque or owned resource. State the ow
 ## Documentation must match the current branch
 
 Describe only behavior that exists in the current branch. Mark future behavior as planned work, not as current behavior.
+
+## Encoded examples match complete operands
+
+Validate each encoded example against the actual encoder or disassembler. Include every operand and use the correct tag for each value.
