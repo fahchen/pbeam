@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261006: Verify task references in difference records
+
+**Problem:** A difference row named a prerequisite task as the owner of a follow-up that the task does not implement.
+
+**Root Cause:** The row reused a nearby task reference without checking its actual scope and the status of the follow-up work.
+
+**Fix:** Remove the stale task reference and name the task that records the difference, or leave the owner unset until a task exists.
+
+**Guardrail:** Check each issue reference in a difference record against the task scope before merging the documentation.
+
+**Reference:** `docs/erts-differences.md`
+
 ## 20261006: Preserve failure artifacts until assertions finish
 
 **Problem:** A test removed its temporary output directory before it asserted child-process success.
@@ -31,11 +43,12 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Guardrail:** Keep diagnostic artifacts until all failure-producing assertions that use them have completed.
 
-**Reference:** https://github.com/fahchen/pbeam/pull/131#discussion_r4188922478
+**Reference:** <https://github.com/fahchen/pbeam/pull/131#discussion_r4188922478>
 
 ## 20261005: Keep explicit exception raise sites separate
 
-**Problem:** An explicit exception raise site was grouped with BIFs that raise `badarg`, although it raises the class `error` with its first argument as the reason.
+**Problem:** An explicit exception raise site was grouped with BIFs that raise
+`badarg`, although it raises the class `error` with its first argument as the reason.
 
 **Root Cause:** The documentation grouped operations by a similar failure shape instead of recording each operation's exact exception class and reason.
 
