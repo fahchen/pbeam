@@ -3,22 +3,10 @@
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
+use crate::runtime::local_node;
+use crate::runtime::scheduler::{AliasMode, MonitorOptions, MonitorTarget};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use crate::term::{Fun, MAX_ATOM_CHARACTERS};
-
-/// Return the node of a pid or of the calling process.
-///
-/// PBeam is a local node that is not distributed, so every pid is local and
-/// its node is `nonode@nohost`, as on ERTS (`dist.c`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(local_node(), Term::static_atom("nonode@nohost"));
-/// ```
-pub(super) fn local_node() -> Term {
-    Term::static_atom("nonode@nohost")
-}
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
 /// gives a runtime error.
@@ -61,12 +49,17 @@ pub(super) fn trap_exit(
 
 /// Run `erlang:exit(Id, Reason)`: send an exit signal to a local pid, as
 /// ERTS `send_exit_signal_bif` (`bif.c:1750-1772`) does, and return `true`.
-/// A signal that ends the caller gives [`BifResult::Exited`] instead. A
-/// reference gives `true` and sends nothing: PBeam has no process alias, so
-/// `erts_get_pid_of_ref` gives `undefined` (`erl_bif_unique.h:279-286`), and
-/// `send_gen_exit_signal` drops the signal (`erl_proc_sig_queue.c:1650-1655`).
-/// The reference of a NIF resource also gives `true`: in ERTS it is a magic
-/// reference, and `is_internal_ref` is true for it (`erl_term.h:1064-1065`).
+/// A signal that ends the caller gives [`BifResult::Exited`] instead.
+///
+/// A reference sends the signal to the owner of its active alias, with the
+/// caller as the sender (`erl_proc_sig_queue.c:1650-1658`). A reference that
+/// is not an active alias gives `true` and sends nothing: the owner ignores
+/// the signal (`erl_proc_sig_queue.c:4659-4672`). A reference is never
+/// `exit2_suicide`, so `normal` through the alias of the caller is ignored
+/// without `trap_exit`. The reference of a NIF resource also gives `true`:
+/// in ERTS it is a magic reference, and `is_internal_ref` is true for it
+/// (`erl_term.h:1064-1065`).
+///
 /// Each other term raises `error:badarg` (`bif.c:1864-1866`). PBeam cannot
 /// represent a port or a remote pid.
 ///
@@ -83,22 +76,39 @@ pub(super) fn trap_exit(
 /// # Errors
 ///
 /// An abnormal exit of the receiver to a linked process that does not trap
-/// exits is not supported.
+/// exits is not supported. An exit signal through an alias of the caller
+/// that ends the caller is not supported: ERTS ends the caller only when
+/// it next handles signals, after `exit/2` returns `true`.
 pub(super) fn exit(
     context: &mut BifContext<'_>,
     id: &Term,
     reason: &Term,
 ) -> Result<BifResult, BeamError> {
-    match id {
-        Term::Pid(target) => Ok(
-            match context.scheduler.send_exit(*target, reason.clone())? {
-                Some(reason) => BifResult::Exited(reason),
-                None => Value(Term::static_atom("true")),
-            },
-        ),
-        Term::Reference(_) => Ok(Value(Term::static_atom("true"))),
-        _ => Ok(BifResult::badarg()),
-    }
+    let target = match id {
+        Term::Pid(target) => *target,
+        Term::Reference(reference) => {
+            let Some(owner) = context.scheduler.alias_owner(*reference) else {
+                return Ok(Value(Term::static_atom("true")));
+            };
+            let caller = context.scheduler.current_process_mut();
+            let trapped = caller.trap_exit && *reason != Term::static_atom("kill");
+            if owner == caller.id && !trapped {
+                if !caller.trap_exit && *reason == Term::static_atom("normal") {
+                    return Ok(Value(Term::static_atom("true")));
+                }
+                // ponytail: no signal queue yet (#10); ERTS ends the caller at its next signal handling.
+                return Err(error(
+                    "unsupported exit signal through an alias of the caller",
+                ));
+            }
+            owner
+        }
+        _ => return Ok(BifResult::badarg()),
+    };
+    Ok(match context.scheduler.send_exit(target, reason.clone())? {
+        Some(reason) => BifResult::Exited(reason),
+        None => Value(Term::static_atom("true")),
+    })
 }
 
 /// Run `erlang:demonitor(Reference, Options)` as ERTS `demonitor_2`
@@ -163,6 +173,127 @@ pub(super) fn demonitor(
             Term::static_atom("false"),
             result,
         ],
+    }
+}
+
+/// Run `erlang:monitor(Type, Target, Options)` as ERTS `monitor_3`
+/// (`bif.c:988-997`) and `monitor` (`bif.c:758-981`) do;
+/// `erlang:monitor/2` passes `[]` as `monitor_2` (`bif.c:983-986`) does.
+/// The options come first (see [`monitor_options`]). The type `process`
+/// accepts a pid, a registered name, and `{Name, nonode@nohost}`; the type
+/// `port` accepts a registered name and `{Name, nonode@nohost}`. PBeam is a
+/// node that is not alive, so `{Name, Node}` with another node raises
+/// `badarg` (`bif.c:881-882`). Each other target, and each other type,
+/// raises `badarg`. A monitor of the caller creates no monitor and no
+/// alias, and each port name gives the `noproc` `DOWN` message (see
+/// [`Scheduler::monitor`]).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = monitor(&mut context, &process, &Term::Pid(child), &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
+/// assert!(matches!(monitor(&mut context, &port, &Term::Pid(child), &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// assert!(matches!(monitor(&mut context, &process, &Term::Pid(child), &x)?, BifResult::Raise { .. }));
+/// assert!(monitor(&mut context, &time_offset, &clock_service, &Term::List(vec![])).is_err());
+/// ```
+///
+/// # Errors
+///
+/// A `time_offset` monitor of `clock_service`, and the `priority` option
+/// of a monitor that is not of the caller, are not supported.
+pub(super) fn monitor(
+    context: &mut BifContext<'_>,
+    kind: &Term,
+    target: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(options) = monitor_options(options) else {
+        return Ok(BifResult::badarg());
+    };
+    let Term::Atom(kind) = kind else {
+        return Ok(BifResult::badarg());
+    };
+    let target = match (kind.name(), target) {
+        ("process", Term::Pid(id)) => Some(MonitorTarget::Process(*id)),
+        ("process", target) => local_name(target).map(MonitorTarget::ProcessName),
+        ("port", target) => local_name(target).map(MonitorTarget::PortName),
+        ("time_offset", Term::Atom(service)) if service.name() == "clock_service" => {
+            // ponytail: no time offset service yet; add it when a measured path monitors it.
+            return Err(error("unsupported time_offset monitor"));
+        }
+        _ => None,
+    };
+    let Some(target) = target else {
+        return Ok(BifResult::badarg());
+    };
+    let reference = context.scheduler.monitor(target, options)?;
+    Ok(Value(Term::Reference(reference)))
+}
+
+/// Read the options of `erlang:monitor/3` as ERTS `erts_monitor_opts`
+/// (`bif.c:701-756`) does. The options are a proper list of `priority`,
+/// `{alias, explicit_unalias | demonitor | reply_demonitor}`, and
+/// `{tag, Tag}`; the last `alias` and the last `tag` option win. Return
+/// `None` for each other element and for a tail that is not `[]`, which
+/// `monitor_3` rejects with `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let alias = Term::Tuple(vec![Term::static_atom("alias"), Term::static_atom("demonitor")]);
+/// let options = monitor_options(&Term::List(vec![alias])).unwrap();
+/// assert_eq!(options.alias, Some(AliasMode::Demonitor));
+/// assert!(monitor_options(&Term::static_atom("x")).is_none());
+/// ```
+fn monitor_options(options: &Term) -> Option<MonitorOptions> {
+    let Term::List(options) = options else {
+        return None;
+    };
+    let mut result = MonitorOptions {
+        alias: None,
+        tag: Term::static_atom("DOWN"),
+        priority: false,
+    };
+    for option in options {
+        match option {
+            Term::Atom(option) if option.name() == "priority" => result.priority = true,
+            Term::Tuple(pair) => match pair.as_slice() {
+                [Term::Atom(key), Term::Atom(mode)] if key.name() == "alias" => {
+                    result.alias = Some(match mode.name() {
+                        "explicit_unalias" => AliasMode::ExplicitUnalias,
+                        "demonitor" => AliasMode::Demonitor,
+                        "reply_demonitor" => AliasMode::ReplyDemonitor,
+                        _ => return None,
+                    });
+                }
+                [Term::Atom(key), tag] if key.name() == "tag" => result.tag = tag.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    Some(result)
+}
+
+/// Return the name of a local monitor target by name: an atom, or
+/// `{Name, nonode@nohost}` with an atom name. Return `None` for each other
+/// term, which `monitor` (`bif.c:875-896`, `938-950`) rejects with `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(local_name(&Term::Tuple(vec![name.clone(), local_node()])), Some(atom));
+/// assert_eq!(local_name(&Term::Integer(1)), None);
+/// ```
+fn local_name(target: &Term) -> Option<Atom> {
+    match target {
+        Term::Atom(name) => Some(name.clone()),
+        Term::Tuple(pair) => match pair.as_slice() {
+            [Term::Atom(name), node] if *node == local_node() => Some(name.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -565,22 +696,9 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 }
 
 /// Send `message` to `to` and return the message, as ERTS `erl_send`
-/// (`bif.c:2845-2908`) and `do_send` (`bif.c:2458-2695`) do for the `send`
-/// instruction.
-///
-/// - A pid gets the message. ERTS drops a message to a process that does
-///   not exist.
-/// - A reference drops the message. ERTS sends an alias message, and the
-///   receiver drops it when the reference is not an active alias. PBeam has
-///   no aliases.
-/// - An atom gives the message to its registered process. A name that no
-///   process has raises `badarg`. PBeam has no ports.
-/// - `{Name, Node}` with two atoms and the local node gives the message to
-///   the registered process, or drops it when no process has the name.
-///   Another node drops the message, as ERTS does on a node that is not
-///   alive (`dist.c:3234-3235`, `bif.c:2397-2400`, `2870-2872`). Each other
-///   tuple raises `badarg`.
-/// - Each other term raises `badarg`.
+/// (`bif.c:2845-2908`) does for the `send` instruction and for
+/// `erlang:send/2` (`send_2`, `bif.c:2801-2804`). A `to` that
+/// [`deliver_to`] rejects raises `badarg`.
 ///
 /// # Examples
 ///
@@ -595,26 +713,116 @@ pub(in crate::runtime::interpreter) fn send(
     to: &Term,
     message: Term,
 ) -> BifResult {
+    match deliver_to(scheduler, to, message.clone()) {
+        Some(_) => Value(message),
+        None => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:send(To, Message, Options)` as ERTS `send_3`
+/// (`bif.c:2697-2799`) does. The options come first: a proper list of
+/// `noconnect`, `nosuspend`, and `priority`. Each other element, and a tail
+/// that is not `[]`, raise `badarg`, and nothing is sent. Then the message
+/// goes to `to` as [`deliver_to`] gives it, and a `to` that it rejects
+/// raises `badarg`. The result is `noconnect` for `{Name, Node}` on another
+/// node with `noconnect`, and `ok` for each other send.
+///
+/// PBeam has no distribution and no ports, so `nosuspend` changes nothing.
+/// A `priority` message is an ordinary message unless its receiver gets it
+/// through a priority alias (`erl_proc_sig_queue.c:6021-6045`). Only
+/// `erlang:alias/1` makes a priority alias, so `priority` also changes
+/// nothing. ERTS gives the `badarg` of an option the `error_info` cause
+/// `badopt`, which PBeam does not model.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let noconnect = Term::List(vec![Term::static_atom("noconnect")]);
+/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// assert!(matches!(send3(scheduler, &remote, ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "noconnect"));
+/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok, &Term::static_atom("x")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn send3(
+    scheduler: &mut Scheduler,
+    to: &Term,
+    message: &Term,
+    options: &Term,
+) -> BifResult {
+    let Term::List(options) = options else {
+        return BifResult::badarg();
+    };
+    let mut connect = true;
+    for option in options {
+        match option {
+            Term::Atom(option) if option.name() == "noconnect" => connect = false,
+            Term::Atom(option) if matches!(option.name(), "nosuspend" | "priority") => {}
+            _ => return BifResult::badarg(),
+        }
+    }
+    match deliver_to(scheduler, to, message.clone()) {
+        Some(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
+        Some(_) => Value(Term::static_atom("ok")),
+        None => BifResult::badarg(),
+    }
+}
+
+/// The result of a send that does not raise, as ERTS `do_send`
+/// (`bif.c:2458-2695`) gives it to `erl_send` and `send_3`.
+enum Sent {
+    /// The message went to a local process, or a local send dropped it.
+    Local,
+    /// The message was to `{Name, Node}` on another node, and was dropped
+    /// (`SEND_NOCONNECT`).
+    NoConnect,
+}
+
+/// Give `message` to the process that `to` names, as ERTS `do_send`
+/// (`bif.c:2458-2695`) does. Return `None` for a `to` that `do_send`
+/// rejects with `SEND_BADARG`.
+///
+/// - A pid gets the message. ERTS drops a message to a process that does
+///   not exist.
+/// - A reference gives the message to the owner of its active alias, and
+///   drops it when the reference is not an active alias
+///   (`erl_proc_sig_queue.c:6026-6041`). A message through a
+///   `reply_demonitor` alias ends the alias (see
+///   [`Scheduler::alias_message_receiver`]).
+/// - An atom gives the message to its registered process. A name that no
+///   process has gives `None`. PBeam has no ports.
+/// - `{Name, Node}` with two atoms and the local node gives the message to
+///   the registered process, or drops it when no process has the name.
+///   Another node drops the message and gives [`Sent::NoConnect`], as ERTS
+///   does on a node that is not alive (`remote_send`, `bif.c:2397-2400`).
+///   Each other tuple gives `None`.
+/// - Each other term gives `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(deliver_to(scheduler, &Term::Pid(pid), ok.clone()), Some(Sent::Local)));
+/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// assert!(matches!(deliver_to(scheduler, &remote, ok.clone()), Some(Sent::NoConnect)));
+/// assert!(deliver_to(scheduler, &Term::static_atom("nobody"), ok).is_none());
+/// ```
+fn deliver_to(scheduler: &mut Scheduler, to: &Term, message: Term) -> Option<Sent> {
     let target = match to {
         Term::Pid(pid) => Some(*pid),
-        Term::Reference(_) => None,
-        Term::Atom(name) => match scheduler.whereis(name.name()) {
-            Some(pid) => Some(pid),
-            None => return BifResult::badarg(),
-        },
+        Term::Reference(reference) => scheduler.alias_message_receiver(*reference),
+        Term::Atom(name) => Some(scheduler.whereis(name.name())?),
         Term::Tuple(elements) => match elements.as_slice() {
             [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
                 scheduler.whereis(name.name())
             }
-            [Term::Atom(_), Term::Atom(_)] => None,
-            _ => return BifResult::badarg(),
+            [Term::Atom(_), Term::Atom(_)] => return Some(Sent::NoConnect),
+            _ => return None,
         },
-        _ => return BifResult::badarg(),
+        _ => return None,
     };
     if let Some(target) = target {
-        scheduler.deliver(target, message.clone());
+        scheduler.deliver(target, message);
     }
-    Value(message)
+    Some(Sent::Local)
 }
 
 /// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).

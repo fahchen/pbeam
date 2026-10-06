@@ -3527,6 +3527,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn removes_an_active_monitor_without_a_trap() {
+        // monitor(process, Child), then demonitor(Ref, [flush]) before the
+        // child runs: the monitor is still active, so ERTS returns true
+        // without flushing.
+        let mut body = spawn_link_child(Term::List(vec![test_atom("normal")]));
+        body.pop();
+        body.push(erlang_call("spawn", 3, false));
+        body.extend([
+            Instruction::Move(Operand::X(0), Operand::X(1)),
+            Instruction::Move(atom("process"), Operand::X(0)),
+            erlang_call("monitor", 2, false),
+            Instruction::Move(
+                Operand::Value(Term::List(vec![test_atom("flush")])),
+                Operand::X(1),
+            ),
+            erlang_call("demonitor", 2, true),
+        ]);
+        assert_eq!(run_with_child(body).unwrap(), test_atom("true"));
+    }
+
     /// Run `main/0` with the functions `zero/0`, `id/3`, and `last/2` of
     /// the probe that gives the ERTS values of the `apply` tests:
     /// `zero() -> zero.`, `id(A, B, C) -> {A, B, C}.`, and

@@ -47,6 +47,23 @@ pub(super) enum ReceiveTimer {
     Expired { resume: usize },
 }
 
+/// A monitor of another process on this process, as the target part of an
+/// ERTS monitor (`ErtsMonitorData`, `erl_monitor_link.h`).
+#[derive(Debug)]
+pub(super) struct Monitor {
+    /// The process that gets the `DOWN` message.
+    pub(super) watcher: ProcessId,
+    /// The reference of the monitor.
+    pub(super) reference: Reference,
+    /// The registered name of a monitor by name. The `DOWN` message then
+    /// gives `{Name, nonode@nohost}` as its item, not the pid
+    /// (`erl_proc_sig_queue.c:4942-4955`).
+    pub(super) name: Option<Atom>,
+    /// The first element of the `DOWN` message: `'DOWN'`, or the `tag`
+    /// option of `erlang:monitor/3` (`erl_proc_sig_queue.c:6417-6429`).
+    pub(super) tag: Term,
+}
+
 /// The execution state and mailbox of one process.
 #[derive(Debug)]
 pub(super) struct ProcessState {
@@ -66,8 +83,8 @@ pub(super) struct ProcessState {
     pub(super) trap_exit: bool,
     /// Processes linked to this process.
     pub(super) links: HashSet<ProcessId>,
-    /// Watchers that get a `DOWN` message when this process exits.
-    pub(super) monitored_by: Vec<(ProcessId, Reference)>,
+    /// Monitors that send a `DOWN` message when this process exits.
+    pub(super) monitored_by: Vec<Monitor>,
     /// Group leader that receives the IO requests of this process. A new
     /// process starts as its own group leader, as `init` does in ERTS; a
     /// spawned process gets the group leader of its parent.
