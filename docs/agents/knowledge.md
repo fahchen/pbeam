@@ -47,34 +47,44 @@ untrusted input write outside its output directory.
 
 ## External identifiers lack trusted-origin validation
 
-Validate the trusted origin of an external identifier before you take a local number or name from it. Do not use data from an unvalidated identifier for a local action or an error report.
+Validate the trusted origin of an external identifier before you take a local
+number or name from it. Do not use data from an unvalidated identifier for a
+local action or an error report.
 
 ## Compiled fixtures omit representative input shapes
 
-Cover each supported input shape, including bare values and boundary sizes, in compiled fixtures. Assert exact results against pinned ERTS.
+Cover each supported input shape, including bare values and boundary sizes, in
+compiled fixtures. Assert exact results against pinned ERTS.
 
 ## Equality uses semantic identity, not dispatch metadata
 
-Define equality from the fields that identify the runtime value. Exclude fields that only select code or optimize execution.
+Define equality from the fields that identify the runtime value. Exclude fields
+that only select code or optimize execution.
 
 ## Task scope expands beyond measured behavior
 
-Implement only behavior that the task owns and that the measured path requires. Leave other instructions and BIFs on the unsupported path until their task owns them. Update the task scope and follow-up ownership before adding shared decoding or fixture coverage.
+Implement only behavior that the task owns and that the measured path requires.
+Leave other instructions and BIFs on the unsupported path until their task owns
+them. Update the task scope and follow-up ownership before adding shared
+decoding or fixture coverage.
 
 ## Changes exceed the measured task path
 
-Implement only behavior that the current task measures and needs. Move unmeasured or unrelated support to a separate task.
+Implement only behavior that the current task measures and needs. Move
+unmeasured or unrelated support to a separate task.
 
 ## Binary decoders drop required operands
 
 Consume and validate every encoded operand even when runtime semantics do not use its value. Keep the skip behavior in one helper and preserve cursor and tag checks.
 
+## Opaque resource fields lack ownership documentation
+
+Document every struct field that wraps an opaque or owned resource. State the owner, the live representation, and the operation that releases it.
+
 ## Exit cleanup is completed before errors return
 
-Run every required exit cleanup and notification stage before returning an
-error. Preserve the first error and return it after cleanup completes.
+Run every required exit cleanup and notification stage before returning an error. Preserve the first error and return it after cleanup completes.
 
 ## Invariant violations remain visible
 
-Treat a broken runtime invariant as an explicit failure. Do not skip missing
-entries when skipping would hide a defect or leave runtime state inconsistent.
+Treat a broken runtime invariant as an explicit failure. Do not skip missing entries when skipping would hide a defect or leave runtime state inconsistent.

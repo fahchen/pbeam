@@ -8,6 +8,8 @@ use std::{
     sync::atomic::{AtomicPtr, Ordering},
 };
 
+use super::errno::errno;
+
 // The curses library that the pinned ERTS links:
 // `/usr/lib/libncurses.5.4.dylib` on macOS, and `libtinfo.so.6` in the
 // Linux build that mise installs. The Linux name is verbatim, because a
@@ -120,21 +122,6 @@ pub(crate) fn setupterm() -> Result<(), c_int> {
         SAVED_TERMINAL.store(cur_term, Ordering::Relaxed);
     }
     Ok(())
-}
-
-/// Return the `errno` of the last host call of this thread.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// // SAFETY: `isatty` of fd -1 sets `errno` to `EBADF`.
-/// unsafe { libc::isatty(-1) };
-/// assert_eq!(errno(), libc::EBADF);
-/// ```
-fn errno() -> c_int {
-    std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or_default()
 }
 
 /// Return the window size of the terminal as `(columns, rows)`, as

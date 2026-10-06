@@ -426,7 +426,7 @@ impl BeamProgram {
                             }
                         }
                         // The compiler emits a `bif` instruction only for a
-                        // BIF that does not trap.
+                        // BIF that does not trap or end the caller.
                         trap => {
                             return Err(error(format!(
                                 "unsupported {bif_module}:{name}/{} result {trap:?}",
@@ -501,24 +501,23 @@ impl BeamProgram {
                     fail_label,
                     map,
                     pairs,
-                } => {
-                    let map = read(process, map)?;
-                    let Term::Map(map) = &map else {
-                        return Err(error("BEAM get_map_elements source is not a map"));
-                    };
-                    let mut found = Vec::with_capacity(pairs.len());
-                    for (key, destination) in pairs {
-                        let Some(value) = map.get(&read(process, key)?) else {
-                            break;
-                        };
-                        found.push((destination, value.clone()));
-                    }
-                    if found.len() < pairs.len() {
-                        jump(module, process, *fail_label)?;
-                    } else {
-                        for (destination, value) in found {
+                } => match map_values(process, map, pairs.iter().map(|(key, _)| key))? {
+                    Some(values) => {
+                        for ((_, destination), value) in pairs.iter().zip(values) {
                             write(process, destination, value)?;
                         }
+                    }
+                    None => jump(module, process, *fail_label)?,
+                },
+                // ERTS loads `has_map_fields` as `get_map_elements` with
+                // scratch destinations (`generators.tab:230-253`).
+                Instruction::HasMapFields {
+                    fail_label,
+                    map,
+                    keys,
+                } => {
+                    if map_values(process, map, keys)?.is_none() {
+                        jump(module, process, *fail_label)?;
                     }
                 }
                 Instruction::PutMapAssoc {
@@ -833,8 +832,11 @@ impl BeamProgram {
     /// `i_apply_last` (`jit/arm/ops.tab:649-657`), so an exception of the
     /// apply does not see the catch tags of the frame. A tail call of a BIF
     /// keeps the frame until the BIF returns, as `call_light_bif`,
-    /// `deallocate`, and `return` do (`jit/arm/ops.tab:711-712`). Return the
-    /// outcome when the process exits.
+    /// `deallocate`, and `return` do (`jit/arm/ops.tab:711-712`). A call of
+    /// `erlang:load_nif/2` runs as the `i_load_nif` instruction with the
+    /// module of the current frame, and a tail call keeps the frame until
+    /// the instruction finishes (`jit/arm/ops.tab:615-623`,
+    /// `emu/ops.tab:854-862`). Return the outcome when the process exits.
     ///
     /// # Examples
     ///
@@ -859,6 +861,11 @@ impl BeamProgram {
             release_frame(process, deallocate)?;
         } else if tail && deallocate as usize != current_frame(process).stack.len() {
             return Err(error("invalid BEAM tail-call stack size"));
+        }
+        if (module, name, arity) == ("erlang", "load_nif", 2) {
+            let caller = current_frame(process).module.clone();
+            let result = native::load_nif(self, scheduler, &caller)?;
+            return self.finish_bif(scheduler.current_process_mut(), result, tail);
         }
         self.call_mfa(scheduler, module, name, arity, tail)
     }
@@ -1057,8 +1064,8 @@ impl BeamProgram {
     /// `emit_bif_nif_epilogue` in `jit/arm/instr_bif.cpp:631-719`). A value
     /// goes to x0, and a tail call then returns from the frame. An exception
     /// goes to the error handler. A trap writes its arguments to the X
-    /// registers and enters the target function. Return the outcome when the
-    /// process exits.
+    /// registers and enters the target function. An exit ends the process,
+    /// and no catch tag sees it. Return the outcome when the process exits.
     ///
     /// # Examples
     ///
@@ -1099,6 +1106,10 @@ impl BeamProgram {
                 enter_frame(process, self.mfa_frame(module, function, arity)?, tail);
                 Ok(None)
             }
+            BifResult::Exited(reason) => Ok(Some(Outcome::Exit {
+                reason,
+                result: None,
+            })),
         }
     }
 }
@@ -1253,6 +1264,38 @@ fn update_map_exact(
         *existing = value;
     }
     Ok(Ok(map))
+}
+
+/// Read the value of each key in the map of a `get_map_elements` or
+/// `has_map_fields` instruction, or return `None` at the first key that the
+/// map does not hold.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // x0 holds #{output => raw}.
+/// let output = Operand::Value(Term::static_atom("output"));
+/// assert_eq!(map_values(&process, &Operand::X(0), [&output])?, Some(vec![Term::static_atom("raw")]));
+/// let input = Operand::Value(Term::static_atom("input"));
+/// assert_eq!(map_values(&process, &Operand::X(0), [&output, &input])?, None);
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when the source is not a map. The compiler puts an
+/// `is_map` test before each of these instructions.
+fn map_values<'a>(
+    process: &ProcessState,
+    map: &Operand,
+    keys: impl IntoIterator<Item = &'a Operand>,
+) -> Result<Option<Vec<Term>>, BeamError> {
+    let map = read(process, map)?;
+    let Term::Map(map) = &map else {
+        return Err(error("BEAM get_map_elements source is not a map"));
+    };
+    keys.into_iter()
+        .map(|key| Ok(map.get(&read(process, key)?).cloned()))
+        .collect()
 }
 
 /// Raise an exception in the process, as ERTS `handle_error` does: continue
@@ -2140,6 +2183,51 @@ mod tests {
     }
 
     #[test]
+    fn tests_map_keys_with_has_map_fields_and_writes_no_register() {
+        let map = Operand::Value(Term::Map(
+            Map::from_pairs(vec![
+                (test_atom("input"), test_atom("cooked")),
+                (Term::Integer(1), test_atom("one")),
+            ])
+            .unwrap(),
+        ));
+        let run = |keys: Vec<Operand>, map: Operand| {
+            make_program(
+                vec![
+                    Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(1)),
+                    Instruction::Move(atom("none"), Operand::X(0)),
+                    Instruction::HasMapFields {
+                        fail_label: 3,
+                        map,
+                        keys,
+                    },
+                    Instruction::Return,
+                    Instruction::Label(3),
+                    Instruction::Move(atom("missing"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+                0,
+            )
+            .execute("fixture", "main", &[])
+        };
+        // All keys present: x0 keeps its value.
+        assert_eq!(
+            run(vec![atom("input"), Operand::X(1)], map.clone()).unwrap(),
+            test_atom("none")
+        );
+        assert_eq!(
+            run(vec![atom("input"), atom("output")], map).unwrap(),
+            test_atom("missing")
+        );
+        assert!(
+            run(vec![atom("input")], atom("raw"))
+                .unwrap_err()
+                .to_string()
+                .contains("get_map_elements source is not a map")
+        );
+    }
+
+    #[test]
     fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         // erlc puts an `is_map` test before each `put_map_exact`, so compiled
         // code does not reach this case. ERTS still raises `{badmap, Map}`
@@ -2344,7 +2432,7 @@ mod tests {
                 Instruction::CallExternal {
                     arity: 3,
                     module: "lists".into(),
-                    name: "keymember".into(),
+                    name: "keysearch".into(),
                     tail: true,
                     deallocate: 0,
                 },
@@ -2355,11 +2443,11 @@ mod tests {
             "lists".into(),
             BeamModule {
                 name: "lists".into(),
-                exports: HashMap::from([(("keymember".into(), 3), 1)]),
+                exports: HashMap::from([(("keysearch".into(), 3), 1)]),
                 instructions: vec![
                     Instruction::FunctionInfo {
                         module: "lists".into(),
-                        name: "keymember".into(),
+                        name: "keysearch".into(),
                         arity: 3,
                     },
                     Instruction::Label(1),
@@ -2368,14 +2456,14 @@ mod tests {
                 ],
             },
         );
-        // `lists:keymember/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
+        // `lists:keysearch/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
         // BIF, so the BEAM stub body of the loaded `lists` module must not run.
         assert_eq!(
             program
                 .execute("fixture", "main", &[])
                 .unwrap_err()
                 .to_string(),
-            "unresolved external MFA lists:keymember/3"
+            "unresolved external MFA lists:keysearch/3"
         );
         // `is_bif` finds an entry with a binary search.
         // Strictly increasing: sorted for a binary search, with no duplicate entry.
