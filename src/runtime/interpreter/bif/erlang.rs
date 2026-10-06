@@ -975,17 +975,20 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
     }
 }
 
-/// Run `erlang:'+'/2`, `erlang:'-'/2`, `erlang:'*'/2`, or `erlang:'div'/2`
-/// with `operation`, the checked `i64` sum, difference, product, or
-/// quotient, as ERTS `erts_mixed_plus`, `erts_mixed_minus`, `stimes_2`, and
-/// `intdiv_2` (`erl_arith.c:370-389`, `erl_arith.c:585-602`,
-/// `erl_arith.c:117-143`) do for two integers. The JIT runs `*` with
-/// `emit_i_mul_add` and `div` with `emit_i_int_div` and `emit_div_rem`
-/// (`jit/arm/instr_arith.cpp:542`, `jit/arm/instr_arith.cpp:968`,
-/// `jit/arm/instr_arith.cpp:1067`) with the same results. An operand that is
+/// Run `erlang:'+'/2`, `erlang:'-'/2`, `erlang:'*'/2`, `erlang:'div'/2`, or
+/// `erlang:'rem'/2` with `operation`, the checked `i64` sum, difference,
+/// product, or quotient, or the remainder, as ERTS `erts_mixed_plus`,
+/// `erts_mixed_minus`, `stimes_2`, `intdiv_2`, and `rem_2`
+/// (`erl_arith.c:370-389`, `erl_arith.c:585-602`, `erl_arith.c:117-143`,
+/// `erl_arith.c:145-161`) do for two integers. The JIT runs `*` with
+/// `emit_i_mul_add`, `div` with `emit_i_int_div` and `emit_div_rem`, and
+/// `rem` with `emit_i_rem` (`jit/arm/instr_arith.cpp:542`,
+/// `jit/arm/instr_arith.cpp:968`, `jit/arm/instr_arith.cpp:1067`,
+/// `jit/arm/instr_arith.cpp:1078`) with the same results. An operand that is
 /// not a number raises `badarith`. PBeam has no float term, so each number
 /// is an integer. A result outside the `i64` range gives a runtime error,
-/// where ERTS makes a bignum.
+/// where ERTS makes a bignum. The `rem` operation never returns `None`, so
+/// `rem` never gives this error (see [`int_rem`]).
 ///
 /// # Examples
 ///
