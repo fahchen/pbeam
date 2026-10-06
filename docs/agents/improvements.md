@@ -20,3 +20,27 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
+
+## 20261005: Keep explicit exception raise sites separate
+
+**Problem:** An explicit exception raise site was grouped with BIFs that raise `badarg`, although it raises the class `error` with its first argument as the reason.
+
+**Root Cause:** The documentation grouped operations by a similar failure shape instead of recording each operation's exact exception class and reason.
+
+**Fix:** List explicit raise sites separately from `badarg` BIFs and state the class and reason that each site produces.
+
+**Guardrail:** Compare every documented exception row with a pinned ERTS result before grouping it with another raise site.
+
+**Reference:** `docs/erts-differences.md`
+
+## 20261005: Put shared limits in their owning module
+
+**Problem:** The same atom-name limit was defined in both the loader and a BIF module.
+
+**Root Cause:** The limit was added where it was first needed instead of where the term owns it.
+
+**Fix:** Define the limit once in the atom term module and import it from both consumers.
+
+**Guardrail:** Search for an existing domain limit before adding a constant.
+
+**Reference:** `src/term/atom.rs`
