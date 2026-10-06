@@ -528,7 +528,7 @@ bifs! {
     math:sqrt/1 => unsupported,
     math:tan/1 => unsupported,
     math:tanh/1 => unsupported,
-    net_kernel:dflag_unicode_io/1 => unsupported,
+    net_kernel:dflag_unicode_io/1 => |_, [term]| Ok(match term { Term::Pid(_) => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     os:env/0 => unsupported,
     os:getenv/1 => |_, [name]| os::getenv(name),
     os:getpid/0 => unsupported,
