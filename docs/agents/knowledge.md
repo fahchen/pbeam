@@ -75,24 +75,36 @@ unmeasured or unrelated support to a separate task.
 
 ## Binary decoders drop required operands
 
-Consume and validate every encoded operand even when runtime semantics do not use its value. Keep the skip behavior in one helper and preserve cursor and tag checks.
+Consume and validate every encoded operand even when runtime semantics do not use
+its value. Keep the skip behavior in one helper and preserve cursor and tag
+checks.
 
 ## Opaque resource fields lack ownership documentation
 
-Document every struct field that wraps an opaque or owned resource. State the owner, the live representation, and the operation that releases it.
+Document every struct field that wraps an opaque or owned resource. State the
+owner, the live representation, and the operation that releases it.
 
 ## Documentation must match the current branch
 
-Describe only behavior that exists in the current branch. Mark future behavior as planned work, not as current behavior.
+Describe only behavior that exists in the current branch. Mark future behavior
+as planned work, not as current behavior.
 
 ## Encoded examples match complete operands
 
-Validate each encoded example against the actual encoder or disassembler. Include every operand and use the correct tag for each value.
+Validate each encoded example against the actual encoder or disassembler. Include
+every operand and use the correct tag for each value.
 
 ## Exit cleanup is completed before errors return
 
-Run every required exit cleanup and notification stage before returning an error. Preserve the first error and return it after cleanup completes.
+Run every required exit cleanup and notification stage before returning an error.
+Preserve the first error and return it after cleanup completes.
 
 ## Invariant violations remain visible
 
-Treat a broken runtime invariant as an explicit failure. Do not skip missing entries when skipping would hide a defect or leave runtime state inconsistent.
+Treat a broken runtime invariant as an explicit failure. Do not skip missing
+entries when skipping would hide a defect or leave runtime state inconsistent.
+
+## Difference records match measured behavior
+
+Verify every documented runtime difference against the pinned ERTS before
+merging. State observed behavior instead of explanations based on assumptions.
