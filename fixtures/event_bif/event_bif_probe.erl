@@ -1,5 +1,6 @@
 -module(event_bif_probe).
--export([to_list/0, size/0, remainder/0, minimum/0, refs/0, id/1]).
+-export([to_list/0, size/0, remainder/0, minimum/0, refs/0, range/0, term/0,
+         id/1]).
 
 %% erlang:integer_to_list/1, as io_lib:write1/4 (io_lib.erl:816) runs it.
 to_list() ->
@@ -35,5 +36,15 @@ minimum() ->
 %% erlang:min/2 of two different references.
 refs() ->
     min(make_ref(), make_ref()).
+
+%% io:printable_range/0, as io_lib:printable_list/1 (io_lib.erl:1374) runs it.
+range() ->
+    io:printable_range().
+
+%% persistent_term:get/1, as erl_features:keywords/0 (erl_features.erl:497-499) runs it.
+term() ->
+    ok = persistent_term:put({?MODULE, key}, value),
+    [persistent_term:get({?MODULE, key}),
+     try persistent_term:get({?MODULE, missing}) catch error:R -> {error, R} end].
 
 id(X) -> X.

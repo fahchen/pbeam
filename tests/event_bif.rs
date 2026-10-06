@@ -174,3 +174,33 @@ fn stops_at_the_minimum_of_two_references() {
     );
     assert_eq!(evaluate("is_reference(event_bif_probe:refs())"), b"true\n");
 }
+
+#[test]
+fn gives_the_default_printable_range_as_pinned_erts() {
+    // `event_bif_probe:range/0` runs `io:printable_range/0`, as
+    // `io_lib:printable_list/1` does. ERTS gives `latin1` without the
+    // emulator flag `+pc unicode` (`io_printable_range_0`,
+    // `erl_unicode.c:2943-2950`), and PBeam takes no emulator flags.
+    let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
+    assert_eq!(
+        program.execute("event_bif_probe", "range", &[]).unwrap(),
+        Term::Atom(program.atom("latin1").unwrap())
+    );
+    assert_eq!(reference("range"), b"latin1\n");
+}
+
+#[test]
+fn gets_persistent_terms_as_pinned_erts() {
+    // `event_bif_probe:term/0` runs `persistent_term:get/1`, as
+    // `erl_features:keywords/0` does. A stored key gives its value, and a
+    // missing key raises `badarg` (`persistent_term_get_1`,
+    // `erl_bif_persistent.c:380-388`).
+    let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
+    let mut expected = vec![Term::Atom(program.atom("value").unwrap())];
+    expected.extend(errors(&program, "badarg", 1));
+    assert_eq!(
+        program.execute("event_bif_probe", "term", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(reference("term"), b"[value,{error,badarg}]\n");
+}
