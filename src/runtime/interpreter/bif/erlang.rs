@@ -1389,6 +1389,47 @@ pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
     }
 }
 
+/// Run `erlang:iolist_size/1` as ERTS `iolist_size_1` and
+/// `iolist_size_dispatch` (`erl_iolist.c:1005-1068, 1084-1094`) do: return
+/// the byte count of a binary, or the byte count of each element and each
+/// binary tail of an iolist. The walk has the type rules of
+/// `generic_iolist_size` (`erl_iolist.c:153-236`), which
+/// `erlang:iolist_to_iovec/1` also uses, so [`iolist_iovec`] gives the
+/// binaries to count. An integer outside `0..=255`, a tail that is not a
+/// binary or `[]`, or another term that is not iodata raises `badarg`. ERTS
+/// raises `system_limit` only for a size above 64 bignum words, which a
+/// PBeam term cannot have.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(iolist_size(&Term::Binary(b"abc".to_vec())), BifResult::Value(Term::Integer(3))));
+/// // [1, <<2,3>> | <<4>>] gives 4.
+/// let improper = Term::ImproperList(vec![Term::Integer(1), Term::Binary(vec![2, 3])], Box::new(Term::Binary(vec![4])));
+/// assert!(matches!(iolist_size(&improper), BifResult::Value(Term::Integer(4))));
+/// assert!(matches!(iolist_size(&Term::List(vec![Term::Integer(256)])), BifResult::Raise { .. }));
+/// assert!(matches!(iolist_size(&Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn iolist_size(term: &Term) -> BifResult {
+    match term {
+        Term::Binary(bytes) => Value(Term::Integer(bytes.len() as i64)),
+        Term::List(_) | Term::ImproperList(..) => {
+            let Some(iovec) = iolist_iovec(term) else {
+                return BifResult::badarg();
+            };
+            let mut size = 0;
+            // An iovec holds only binaries.
+            for binary in &iovec {
+                if let Term::Binary(bytes) = binary {
+                    size += bytes.len();
+                }
+            }
+            Value(Term::Integer(size as i64))
+        }
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Return the bytes of iodata: the bytes of a binary, or the bytes of each
 /// element and each binary tail of an iolist in order, as
 /// `erts_iolist_to_buf` writes them. Return `None` for any other term and
