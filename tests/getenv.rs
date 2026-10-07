@@ -3,6 +3,7 @@ use std::{
     ffi::OsStr,
     fs,
     os::unix::ffi::OsStrExt,
+    path::PathBuf,
     process::{Command, Stdio},
 };
 
@@ -125,6 +126,14 @@ fn environment<'a>(command: &'a mut Command, locale: &str) -> &'a mut Command {
     command.env("LC_ALL", locale).stdin(Stdio::null())
 }
 
+/// Return the path of the first `erl` script in `PATH`.
+fn erl() -> PathBuf {
+    env::split_paths(&env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("erl"))
+        .find(|path| path.is_file())
+        .unwrap()
+}
+
 #[test]
 fn reads_the_os_environment_with_os_getenv_as_erts() {
     for locale in ["C.UTF-8", "C"] {
@@ -140,7 +149,12 @@ fn reads_the_os_environment_with_os_getenv_as_erts() {
                     .join(",")
             )
         };
-        let erts = environment(&mut Command::new("erl"), locale)
+        // Run the `erl` script with bash. The script starts with
+        // `#!/bin/sh`, and dash, the `/bin/sh` of Ubuntu, removes the
+        // variable `PBEAM_é` from the environment because its name is not
+        // a shell name. Bash keeps the variable.
+        let erts = environment(&mut Command::new("bash"), locale)
+            .arg(erl())
             .args([
                 "-noshell",
                 "-pa",
