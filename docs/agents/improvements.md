@@ -31,7 +31,7 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Guardrail:** Name the operation type when a difference record contains a BIF and a BEAM instruction with the same name.
 
-**Reference:** https://github.com/fahchen/pbeam/pull/177#discussion_r4188965048
+**Reference:** <https://github.com/fahchen/pbeam/pull/177#discussion_r4188965048>
 
 ## 20261006: Verify task references in difference records
 
