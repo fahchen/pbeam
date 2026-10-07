@@ -1,6 +1,7 @@
 //! Convert chardata to UTF-8, as the ERTS BIF `unicode:characters_to_binary/2`
-//! does with the `unicode` encoding, and check file names, as ERTS does
-//! before it uses a name (`erl_unicode.c`).
+//! does with the `unicode` encoding, check and convert file names to their
+//! native bytes, as ERTS does before it uses a name, and convert native
+//! bytes back to a name (`erl_unicode.c`).
 
 use super::host::FilenameEncoding;
 use crate::{
@@ -139,17 +140,8 @@ fn is_chardata(chardata: &Term) -> bool {
 /// `erts_convert_filename_to_encoding` with `allow_empty` and without
 /// `allow_atom` does (`erl_unicode.c:2057-2119`). A binary is valid with
 /// each content, because ERTS copies its bytes without a check. `[]` and a
-/// list are valid when `erts_native_filename_need` accepts them
-/// (`erl_unicode.c:2222-2398`): each element is a character, `[]`, or a
-/// list of the same. A character is a small integer from 1 to 255 in
-/// Latin-1, and from 1 to `0x10FFFF`, except `0xD800` to `0xDFFF`, in
-/// UTF-8. ERTS reads a negative small integer as a large unsigned value, so
-/// it is not valid. Each other term is not valid: an atom, an integer, a
-/// tuple, and a binary or a bignum in a list.
-///
-/// The walk uses an explicit work stack, as ERTS does with an `ESTACK`, so
-/// nested lists of any depth do not use the Rust stack. PBeam opens no file
-/// with the name, so this function does not make the bytes.
+/// list are valid when [`native_filename`] accepts them. Each other term is
+/// not valid, for example an atom, an integer, and a tuple.
 ///
 /// # Examples
 ///
@@ -161,11 +153,38 @@ fn is_chardata(chardata: &Term) -> bool {
 /// assert!(!is_native_filename(&Term::List(vec![Term::Integer(0)]), FilenameEncoding::Utf8));
 /// ```
 pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> bool {
-    let elements = match name {
-        Term::Binary(_) => return true,
-        Term::List(elements) => elements,
-        _ => return false,
+    matches!(name, Term::Binary(_)) || native_filename(name, encoding).is_some()
+}
+
+/// Return the native bytes of the file name `name` in `encoding`, as
+/// `erts_native_filename_put` writes them (`erl_unicode.c:2400-2555`), or
+/// `None` when `erts_native_filename_need` rejects the name
+/// (`erl_unicode.c:2222-2398`). `[]` and a proper list are valid when each
+/// element is a character, `[]`, or a proper list of the same. A character
+/// is a small integer from 1 to 255 in Latin-1, which gives one byte, and
+/// from 1 to `0x10FFFF`, except `0xD800` to `0xDFFF`, in UTF-8, which gives
+/// its UTF-8 bytes. ERTS reads a negative small integer as a large unsigned
+/// value, so it is not valid. Each other term is not valid: an atom, a
+/// binary, an improper list, and a bignum, a binary, or another term in a
+/// list. The callers that accept an atom or a binary check it first.
+///
+/// The walk uses an explicit work stack, as ERTS does with an `ESTACK`, so
+/// nested lists of any depth do not use the Rust stack.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let name = Term::List(vec![Term::List(vec![Term::Integer(97)]), Term::List(vec![]), Term::Integer(233)]);
+/// assert_eq!(native_filename(&name, FilenameEncoding::Latin1), Some(vec![97, 233]));
+/// assert_eq!(native_filename(&name, FilenameEncoding::Utf8), Some(vec![97, 195, 169]));
+/// assert_eq!(native_filename(&Term::List(vec![Term::Integer(256)]), FilenameEncoding::Latin1), None);
+/// assert_eq!(native_filename(&Term::Binary(vec![97]), FilenameEncoding::Utf8), None);
+/// ```
+pub(super) fn native_filename(name: &Term, encoding: FilenameEncoding) -> Option<Vec<u8>> {
+    let Term::List(elements) = name else {
+        return None;
     };
+    let mut bytes = Vec::new();
     let mut pending = vec![elements.iter()];
     while let Some(elements) = pending.last_mut() {
         let Some(element) = elements.next() else {
@@ -176,25 +195,97 @@ pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> boo
             pending.push(nested.iter());
             continue;
         }
-        let Some(character) = element.small_integer() else {
-            return false;
-        };
-        let valid = match encoding {
-            FilenameEncoding::Latin1 => (1..=0xFF).contains(&character),
-            FilenameEncoding::Utf8 => {
-                (1..=0x10FFFF).contains(&character) && !(0xD800..=0xDFFF).contains(&character)
+        let character = u32::try_from(element.small_integer()?)
+            .ok()
+            .filter(|&character| character != 0)?;
+        match encoding {
+            FilenameEncoding::Latin1 => bytes.push(u8::try_from(character).ok()?),
+            FilenameEncoding::Utf8 | FilenameEncoding::Utf8Mac => {
+                let character = char::from_u32(character)?;
+                bytes.extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes());
             }
-        };
-        if !valid {
-            return false;
         }
     }
-    true
+    Some(bytes)
+}
+
+/// The code points that start a composition in ERTS on macOS: the
+/// candidates of `is_candidate` (`erl_unicode.c:1418-1428`), in order. They
+/// are the bits of `comp_candidate_map` (`erl_unicode_normalize.h:1587-1690`)
+/// and the code points 12441 and 12442, which are the first-level keys of
+/// `compose_tab` (`erl_unicode_normalize.h:1523-1585`).
+const COMPOSITION_CANDIDATES: [u32; 61] = [
+    768, 769, 770, 771, 772, 774, 775, 776, 777, 778, 779, 780, 781, 783, 785, 787, 788, 795, 803,
+    804, 805, 807, 808, 813, 814, 816, 817, 834, 837, 1463, 1464, 1465, 1468, 1471, 1473, 1474,
+    2364, 2492, 2494, 2519, 2620, 2876, 2878, 2902, 2903, 3006, 3031, 3158, 3266, 3285, 3286, 3390,
+    3415, 3634, 3762, 3953, 3968, 4021, 4023, 12441, 12442,
+];
+
+/// Convert the native bytes of a name to a list of characters, as
+/// `erts_convert_native_to_filename` does (`erl_unicode.c:2164-2220`). In
+/// Latin-1, and in UTF-8 when the bytes are not valid UTF-8
+/// (`erts_analyze_utf8` in `erl_unicode.c:1180-1270`), each byte is one
+/// character. Valid UTF-8 gives its code points. The UTF-8 check of ERTS
+/// rejects overlong forms, surrogates, code points above `0x10FFFF`, and an
+/// incomplete sequence, as [`std::str::from_utf8`] does.
+///
+/// In `Utf8Mac`, ERTS composes the code points (`do_utf8_to_list_normalize`
+/// in `erl_unicode.c:1569-1630`). PBeam has no composition table, so valid
+/// UTF-8 with a code point of [`COMPOSITION_CANDIDATES`] returns a runtime
+/// error (see "OS environment" in `docs/erts-differences.md`). ERTS changes
+/// no other value.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // ERTS on macOS: a\xc3\xa9 gives [97,233], and a\xff gives [97,255].
+/// let list = |characters: &[i64]| Term::List(characters.iter().copied().map(Term::Integer).collect());
+/// assert_eq!(filename_from_native(b"a\xc3\xa9", FilenameEncoding::Utf8Mac)?, list(&[97, 233]));
+/// assert_eq!(filename_from_native(b"a\xc3\xa9", FilenameEncoding::Latin1)?, list(&[97, 195, 169]));
+/// assert_eq!(filename_from_native(b"a\xff", FilenameEncoding::Utf8)?, list(&[97, 255]));
+/// assert!(filename_from_native(b"ae\xcc\x81", FilenameEncoding::Utf8Mac).is_err());
+/// ```
+pub(super) fn filename_from_native(
+    bytes: &[u8],
+    encoding: FilenameEncoding,
+) -> Result<Term, BeamError> {
+    let text = match encoding {
+        FilenameEncoding::Latin1 => None,
+        FilenameEncoding::Utf8 | FilenameEncoding::Utf8Mac => std::str::from_utf8(bytes).ok(),
+    };
+    let Some(text) = text else {
+        return Ok(Term::List(
+            bytes
+                .iter()
+                .map(|&byte| Term::Integer(byte.into()))
+                .collect(),
+        ));
+    };
+    if encoding == FilenameEncoding::Utf8Mac
+        && let Some(candidate) = text.chars().find(|&character| {
+            COMPOSITION_CANDIDATES
+                .binary_search(&character.into())
+                .is_ok()
+        })
+    {
+        return Err(error(format!(
+            "unsupported composition of the native name code point {} on macOS: see \"OS environment\" in docs/erts-differences.md",
+            u32::from(candidate)
+        )));
+    }
+    Ok(Term::List(
+        text.chars()
+            .map(|character| Term::Integer(u32::from(character).into()))
+            .collect(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FilenameEncoding, characters_to_utf8, is_native_filename};
+    use super::{
+        COMPOSITION_CANDIDATES, FilenameEncoding, characters_to_utf8, filename_from_native,
+        is_native_filename, native_filename,
+    };
     use crate::term::{Term, test_atom};
 
     fn binary(bytes: &[u8]) -> Term {
@@ -351,9 +442,17 @@ mod tests {
         let list = |characters: &[i64]| {
             Term::List(characters.iter().copied().map(Term::Integer).collect())
         };
+        // UTF-8 with composition checks a name as UTF-8 does, so it must
+        // give the same result as UTF-8.
         let check = |name: &Term| {
-            [FilenameEncoding::Latin1, FilenameEncoding::Utf8]
-                .map(|encoding| is_native_filename(name, encoding))
+            let [latin1, utf8, utf8_mac] = [
+                FilenameEncoding::Latin1,
+                FilenameEncoding::Utf8,
+                FilenameEncoding::Utf8Mac,
+            ]
+            .map(|encoding| is_native_filename(name, encoding));
+            assert_eq!(utf8, utf8_mac, "{name:?}");
+            [latin1, utf8]
         };
         // Each expected pair is [Latin-1, UTF-8]. ERTS accepts a binary with
         // each content, also with a 0 byte, `[]`, and nested lists.
@@ -380,6 +479,11 @@ mod tests {
         for name in [
             list(&[1 << 59]),
             Term::List(vec![binary(b"a")]),
+            Term::ImproperList(vec![Term::Integer(97)], Box::new(binary(b"b"))),
+            Term::List(vec![Term::ImproperList(
+                vec![Term::Integer(97)],
+                Box::new(Term::Integer(98)),
+            )]),
             Term::List(vec![Term::Integer(97), test_atom("foo")]),
             Term::List(vec![Term::Tuple(vec![])]),
             Term::List(vec![Term::List(vec![Term::Integer(97), Term::Integer(0)])]),
@@ -398,5 +502,102 @@ mod tests {
             name = Term::List(vec![name, Term::List(vec![])]);
         }
         assert!(is_native_filename(&name, FilenameEncoding::Latin1));
+    }
+
+    #[test]
+    fn writes_the_native_bytes_of_a_file_name_in_each_encoding() {
+        let list = |characters: &[i64]| {
+            Term::List(characters.iter().copied().map(Term::Integer).collect())
+        };
+        let bytes = |name: &Term| {
+            [
+                FilenameEncoding::Latin1,
+                FilenameEncoding::Utf8,
+                FilenameEncoding::Utf8Mac,
+            ]
+            .map(|encoding| native_filename(name, encoding))
+        };
+        // Latin-1 writes one byte for each character, and UTF-8 writes the
+        // UTF-8 bytes of each character (erl_unicode.c:2400-2555).
+        let some = |bytes: &[u8]| Some(bytes.to_vec());
+        assert_eq!(bytes(&list(&[])), [some(b""), some(b""), some(b"")]);
+        assert_eq!(
+            bytes(&Term::List(vec![
+                list(&[80]),
+                list(&[]),
+                Term::Integer(233)
+            ])),
+            [
+                some(&[80, 233]),
+                some(&[80, 195, 169]),
+                some(&[80, 195, 169])
+            ]
+        );
+        assert_eq!(
+            bytes(&list(&[1046, 0x10FFFF])),
+            [
+                None,
+                some(&[208, 150, 244, 143, 191, 191]),
+                some(&[208, 150, 244, 143, 191, 191])
+            ]
+        );
+        // A binary is a valid file name, but it has no native bytes here.
+        assert_eq!(bytes(&binary(b"a")), [None, None, None]);
+    }
+
+    #[test]
+    fn converts_native_bytes_to_a_file_name_in_each_encoding() {
+        let list = |characters: &[i64]| {
+            Term::List(characters.iter().copied().map(Term::Integer).collect())
+        };
+        let convert = |bytes: &[u8], encoding| filename_from_native(bytes, encoding);
+        // Each expected list comes from erl_unicode.c:2164-2220. Measured on
+        // ERTS 29.1.1 on macOS: a\xc3\xa9 gives [97,233], a\xff gives
+        // [97,255], and \xd0\x96 gives [1046].
+        for (bytes, latin1, utf8) in [
+            (&b""[..], &[][..], &[][..]),
+            (b"yes", &[121, 101, 115], &[121, 101, 115]),
+            (b"a\xc3\xa9", &[97, 195, 169], &[97, 233]),
+            (b"a\xff", &[97, 255], &[97, 255]),
+            (b"\xc0\x80", &[192, 128], &[192, 128]),
+            (b"\xed\xa0\x80", &[237, 160, 128], &[237, 160, 128]),
+            (b"\xd0\x96", &[208, 150], &[1046]),
+            (b"ae\xcc\x81", &[97, 101, 204, 129], &[97, 101, 769]),
+        ] {
+            assert_eq!(convert(bytes, FilenameEncoding::Latin1), Ok(list(latin1)));
+            assert_eq!(convert(bytes, FilenameEncoding::Utf8), Ok(list(utf8)));
+            if !bytes.starts_with(b"ae") {
+                assert_eq!(convert(bytes, FilenameEncoding::Utf8Mac), Ok(list(utf8)));
+            }
+        }
+        // ERTS on macOS composes ae\xcc\x81 to [97,233], and PBeam has no
+        // composition table. Invalid UTF-8 is not composed.
+        assert_eq!(
+            convert(b"ae\xcc\x81", FilenameEncoding::Utf8Mac)
+                .unwrap_err()
+                .to_string(),
+            "unsupported composition of the native name code point 769 on macOS: see \"OS environment\" in docs/erts-differences.md"
+        );
+        assert_eq!(
+            convert(b"\xcc\x81\xff", FilenameEncoding::Utf8Mac),
+            Ok(list(&[204, 129, 255]))
+        );
+        // Each candidate returns the runtime error. The code points next to
+        // the candidates are not candidates: measured on ERTS 29.1.1 on
+        // macOS, prim_file:internal_native2name/1, which also calls
+        // erts_convert_native_to_filename, gives [767], [773], [4024], and
+        // [12443] for their UTF-8 bytes.
+        assert!(COMPOSITION_CANDIDATES.is_sorted());
+        for candidate in COMPOSITION_CANDIDATES {
+            let text = char::from_u32(candidate).unwrap().to_string();
+            assert!(convert(text.as_bytes(), FilenameEncoding::Utf8Mac).is_err());
+        }
+        for code_point in [767_i64, 773, 4024, 12443] {
+            let text = char::from_u32(code_point as u32).unwrap().to_string();
+            assert_eq!(
+                convert(text.as_bytes(), FilenameEncoding::Utf8Mac),
+                Ok(list(&[code_point]))
+            );
+        }
     }
 }

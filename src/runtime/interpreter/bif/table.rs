@@ -530,7 +530,7 @@ bifs! {
     math:tanh/1 => unsupported,
     net_kernel:dflag_unicode_io/1 => unsupported,
     os:env/0 => unsupported,
-    os:getenv/1 => unsupported,
+    os:getenv/1 => |_, [name]| os::getenv(name),
     os:getpid/0 => unsupported,
     os:perf_counter/0 => unsupported,
     os:putenv/2 => unsupported,
