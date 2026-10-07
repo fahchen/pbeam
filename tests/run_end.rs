@@ -1,7 +1,4 @@
-use std::{
-    process::{Command, Output},
-    time::Duration,
-};
+use std::{process::Command, time::Duration};
 
 #[path = "common/boot.rs"]
 mod boot;
@@ -15,26 +12,10 @@ mod run;
 
 use boot::{BOOT_BEAM, BOOT_MODULES};
 use common::pinned_beam_path;
-use run::run_with_time_limit;
+use run::run_dumb_utf8;
 
 const RUN_END_PROBE: &str = "fixtures/run_end/run_end_probe.beam";
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
-
-/// Run a command with `TERM=dumb` and `LC_ALL=C.UTF-8`, and return its
-/// output. Kill it and panic when it does not end in `RUN_TIME_LIMIT`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let output = run_to_end(Command::new("erl").args(["-noshell", "-eval", "halt()."]));
-/// assert_eq!(output.status.code(), Some(0));
-/// ```
-fn run_to_end(command: &mut Command) -> Output {
-    run_with_time_limit(
-        command.env("TERM", "dumb").env("LC_ALL", "C.UTF-8"),
-        RUN_TIME_LIMIT,
-    )
-}
 
 #[test]
 fn ends_the_run_at_the_root_exit_while_a_timer_stays_active() {
@@ -69,7 +50,7 @@ fn ends_the_run_at_the_root_exit_while_a_timer_stays_active() {
     ] {
         // Without `ERL_CRASH_DUMP_SECONDS=0`, ERTS writes `erl_crash.dump`
         // into the working directory for the crash cases.
-        let erts = run_to_end(
+        let erts = run_dumb_utf8(
             Command::new("erl")
                 .args([
                     "-noshell",
@@ -79,8 +60,9 @@ fn ends_the_run_at_the_root_exit_while_a_timer_stays_active() {
                     &format!("run_end_probe:{function}(), halt()."),
                 ])
                 .env("ERL_CRASH_DUMP_SECONDS", "0"),
+            RUN_TIME_LIMIT,
         );
-        let pbeam = run_to_end(
+        let pbeam = run_dumb_utf8(
             Command::new(env!("CARGO_BIN_EXE_pbeam"))
                 .args([
                     "pbeam_boot",
@@ -92,6 +74,7 @@ fn ends_the_run_at_the_root_exit_while_a_timer_stays_active() {
                 ])
                 .args(&beams)
                 .arg(BOOT_BEAM),
+            RUN_TIME_LIMIT,
         );
         for (name, output, stderr) in [("ERTS", erts, erts_stderr), ("PBeam", pbeam, pbeam_stderr)]
         {

@@ -43,3 +43,20 @@ pub fn run_with_time_limit(command: &mut Command, limit: Duration) -> Output {
     }
     child.wait_with_output().unwrap()
 }
+
+/// Run a command with `TERM=dumb` and `LC_ALL=C.UTF-8` through
+/// `run_with_time_limit`, and return its output. The two variables give the
+/// same terminal and encoding to ERTS and to PBeam.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let output = run_dumb_utf8(
+///     Command::new("erl").args(["-noshell", "-eval", "halt()."]),
+///     Duration::from_secs(10),
+/// );
+/// assert_eq!(output.status.code(), Some(0));
+/// ```
+pub fn run_dumb_utf8(command: &mut Command, limit: Duration) -> Output {
+    run_with_time_limit(command.env("TERM", "dumb").env("LC_ALL", "C.UTF-8"), limit)
+}
