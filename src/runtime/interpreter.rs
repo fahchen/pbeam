@@ -1,7 +1,7 @@
 use super::{
-    process::{Frame, ProcessState, StackSlot},
+    process::{Frame, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::Scheduler,
-    unicode::characters_to_utf8,
+    unicode::{characters_to_code_points, characters_to_utf8},
 };
 use crate::{
     beam::{
@@ -9,7 +9,7 @@ use crate::{
         code::{self, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::{Atom, AtomTable, Fun, Map, Target, Term},
+    term::{Atom, AtomTable, Fun, Map, Target, Term, print_term},
 };
 use std::collections::HashMap;
 
@@ -43,6 +43,9 @@ pub struct BeamProgram {
 enum Outcome {
     /// The process waits for a new message.
     Wait,
+    /// The process called `erlang:hibernate/0`. It continues at its next
+    /// instruction when the scheduler runs it again.
+    Hibernate,
     /// The process exited. `result` is the return value of a normal exit.
     Exit { reason: Term, result: Option<Term> },
 }
@@ -117,8 +120,23 @@ impl BeamProgram {
     }
 
     /// Run an exported function as the root process. Processes that it
-    /// spawns run on the same cooperative scheduler until the root exits or
-    /// no process can run.
+    /// spawns run on the same cooperative scheduler. A process runs until it
+    /// waits, calls `erlang:hibernate/0`, or exits. Before it takes the
+    /// next process, the scheduler reads the run clock and expires each due
+    /// timer, as ERTS bumps the timers in `check_activities_to_run`
+    /// (`erl_process.c:9797-9810`). When no process can run, it sleeps until
+    /// the first timer end, as `scheduler_wait` sleeps until the next
+    /// timeout (`erl_process.c:3452-3620`). The run ends at the next
+    /// scheduling step after the root process exits, also when another
+    /// process can run or a timer is active. A process that ends the root
+    /// process with an exit signal continues until it waits or exits. This
+    /// is as `halt()` after `-eval` stops the ERTS node
+    /// (`erlang.erl:3357-3358`) and as `init` halts after a boot process
+    /// exit that is not `normal` (`init.erl:710-712`). A root process exit
+    /// gives the error `root process exited with <Reason>`, with the reason
+    /// as ERTS prints a term (`print_term`), for example
+    /// `root process exited with {badarg,[]}`. A root process that
+    /// waits when no process can run and no timer is active gives an error.
     ///
     /// # Examples
     ///
@@ -136,15 +154,31 @@ impl BeamProgram {
         let label = self.entry_label(module, function, arity)?;
         let mut scheduler = Scheduler::new(self.atoms.clone());
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
-        while scheduler.schedule_next().is_some() {
-            match self.run(&mut scheduler)? {
-                Outcome::Wait => scheduler.park_current(),
-                Outcome::Exit { reason, result } => scheduler.finish_current(reason, result)?,
+        while !scheduler.root_exited() {
+            let now = scheduler.timers.now();
+            scheduler.expire_timers(now);
+            if scheduler.schedule_next().is_some() {
+                match self.run(&mut scheduler)? {
+                    Outcome::Wait => scheduler.park_current(),
+                    Outcome::Hibernate => scheduler.hibernate_current(),
+                    Outcome::Exit { reason, result } => {
+                        scheduler.finish_current(reason, result)?;
+                    }
+                }
+            } else if let Some(wait) = scheduler.timers.wait_time(scheduler.timers.now()) {
+                std::thread::sleep(wait);
+            } else {
+                break;
             }
         }
         match scheduler.into_root_result() {
             Some(Ok(result)) => Ok(result),
-            Some(Err(reason)) => Err(error(format!("root process exited with {reason:?}"))),
+            Some(Err(reason)) => {
+                // `erlang:halt/1` writes each byte of the `%T` text as one code
+                // point (`bif.c:4372-4387`), so the text is valid UTF-8.
+                let text: String = print_term(&reason).into_iter().map(char::from).collect();
+                Err(error(format!("root process exited with {text}")))
+            }
             None => Err(error("root process waits for a message that cannot arrive")),
         }
     }
@@ -176,24 +210,60 @@ impl BeamProgram {
             .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))
     }
 
-    /// Create the frame for an exported function.
+    /// Create the frame for an exported function of a loaded module. Return
+    /// `None` when the module does not export the function: ERTS then runs
+    /// the export entry of the function, which calls the error handler
+    /// (`call_error_handler` in `beam_common.c:1294-1342`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(program.export_frame("undef_handler", "$handle_undefined_function", 2)?.is_some());
+    /// assert!(program.export_frame("undef_target", "missing", 1)?.is_none());
+    /// assert!(program.export_frame("nomod", "missing", 1).is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A module that is not loaded is the runtime error
+    /// `unresolved external MFA M:F/A`. ERTS loads it from the code path.
+    fn export_frame(
+        &self,
+        module: &str,
+        function: &str,
+        arity: u32,
+    ) -> Result<Option<Frame>, BeamError> {
+        let loaded = self.modules.get(module).ok_or_else(|| {
+            error(format!(
+                "unresolved external MFA {module}:{function}/{arity}"
+            ))
+        })?;
+        loaded
+            .exports
+            .get(&(function.to_owned(), arity))
+            .map(|label| self.frame(module, *label, arity))
+            .transpose()
+    }
+
+    /// Create the frame for an exported function, such as the target of a
+    /// BIF trap.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let frame = program.mfa_frame("external", "effect", 1)?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// A module that is not loaded or a function that the module does not
+    /// export is the runtime error `unresolved external MFA M:F/A`.
     fn mfa_frame(&self, module: &str, function: &str, arity: u32) -> Result<Frame, BeamError> {
-        let label = self
-            .modules
-            .get(module)
-            .and_then(|loaded| loaded.exports.get(&(function.to_owned(), arity)))
-            .ok_or_else(|| {
-                error(format!(
-                    "unresolved external MFA {module}:{function}/{arity}"
-                ))
-            })?;
-        self.frame(module, *label, arity)
+        self.export_frame(module, function, arity)?.ok_or_else(|| {
+            error(format!(
+                "unresolved external MFA {module}:{function}/{arity}"
+            ))
+        })
     }
 
     /// Create the frame for the function at an entry label.
@@ -234,14 +304,38 @@ impl BeamProgram {
             .ok_or_else(|| error(format!("missing BEAM module {name}")))
     }
 
-    /// Run the current process until it waits for a message or exits.
+    /// Run the current process until it waits for a message, calls
+    /// `erlang:hibernate/0`, or exits. A process with an undefined start
+    /// first calls `undefined_function` with its start MFA.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert!(matches!(program.run(&mut scheduler)?, Outcome::Wait));
+    /// // `spawn(undef_target, missing, [p])` exits with
+    /// // `{undef, [{undef_target, missing, [p], []}]}`.
+    /// assert!(matches!(program.run(&mut scheduler)?, Outcome::Exit { result: None, .. }));
     /// ```
     fn run(&self, scheduler: &mut Scheduler) -> Result<Outcome, BeamError> {
+        // ERTS starts each process with `i_apply_only` of its MFA
+        // (`erl_process.c:12616`; JIT `jit/beam_jit_main.cpp:258`). Its
+        // `apply` raises `system_limit` for more than `APPLY_MAX_ARGUMENTS`
+        // arguments, and else a function that the module does not export
+        // goes to its export entry when the process first runs. The arity is
+        // the number of argument registers.
+        let process = scheduler.current_process_mut();
+        if let Some((module, function)) = process.undefined_start.take() {
+            let outcome = if process.registers.len() > APPLY_MAX_ARGUMENTS {
+                let system_limit = Term::static_atom("system_limit");
+                raise(process, ExceptionClass::Error, system_limit)
+            } else {
+                let arity = process.registers.len() as u32;
+                self.undefined_function(scheduler, module.name(), function.name(), arity, false)?
+            };
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+        }
         loop {
             let process = scheduler.current_process_mut();
             let frame = current_frame(process);
@@ -500,15 +594,28 @@ impl BeamProgram {
                         TestKind::Pid => matches!(value, Term::Pid(_)),
                         TestKind::Reference => matches!(value, Term::Reference(_)),
                         TestKind::Tuple => matches!(value, Term::Tuple(_)),
-                        TestKind::List => matches!(value, Term::List(_)),
+                        // `is_list` and `is_nonempty_list` test the cons tag, so an
+                        // improper list passes (emu `instrs.tab:879-891`; JIT
+                        // `emit_is_list` and `emit_is_nonempty_list` in
+                        // `jit/arm/instr_common.cpp:1118-1364`).
+                        TestKind::List => matches!(value, Term::List(_) | Term::ImproperList(..)),
                         TestKind::Nil => matches!(&value, Term::List(values) if values.is_empty()),
                         TestKind::NonEmptyList => {
-                            matches!(&value, Term::List(values) if !values.is_empty())
+                            matches!(
+                                &value,
+                                Term::List(values) if !values.is_empty()
+                            ) || matches!(value, Term::ImproperList(..))
                         }
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
                         TestKind::Function => matches!(value, Term::Fun(_)),
                         TestKind::Integer => matches!(value, Term::Integer(_)),
+                        // `is_float` passes only for a boxed term with the
+                        // `HEADER_FLONUM` header (emu `instrs.tab:951-955`,
+                        // `erl_term.h:484-485`; JIT `emit_is_float` in
+                        // `jit/arm/instr_common.cpp:1229-1245`). PBeam has no
+                        // float term, so the test fails for each term.
+                        TestKind::Float => false,
                         TestKind::Boolean => {
                             matches!(&value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
                         }
@@ -590,7 +697,20 @@ impl BeamProgram {
                     write(process, left, right_value)?;
                     write(process, right, left_value)?;
                 }
-                Instruction::TestExactEqual {
+                // ERTS `is_eq` (emu instrs.tab:1109-1113, JIT
+                // instr_common.cpp:2055-2079) runs `CMP_EQ_ACTION`
+                // (erl_utils.h:132-133). `EQ_SPEC` (erl_utils.h:137-147) and
+                // `erts_cmp_compound(A, B, 0, 1)` (utils.c:1658) compare in
+                // the arithmetic order, which differs from exact equality
+                // only for a float (`1 == 1.0` is true). PBeam has no float
+                // term, so exact equality gives the ERTS result. The
+                // float-term task must change this arm.
+                Instruction::TestEqual {
+                    fail_label,
+                    left,
+                    right,
+                }
+                | Instruction::TestExactEqual {
                     fail_label,
                     left,
                     right,
@@ -648,6 +768,40 @@ impl BeamProgram {
                         jump(module, process, *fail_label)?;
                     }
                 }
+                // ERTS `i_bs_start_match3` jumps to `Fail` for each term
+                // that is not a bitstring, and makes or reuses a match
+                // context for a bitstring (emu bs_instrs.tab:1074-1110 and
+                // 1199-1238; JIT `emit_i_bs_start_match3` in
+                // jit/arm/instr_bs.cpp:134-189; `erts_bs_start_match_3` in
+                // erl_bits.c:81). A literal source loads as `jump Fail` (emu
+                // ops.tab:1266-1267; JIT jit/arm/ops.tab:1054-1055), which
+                // gives the same result. The compiler gives a real fail
+                // label (beam_ssa_codegen.erl:1666-1673), so the label is
+                // never 0. PBeam has no match context, so a binary stops the
+                // run.
+                Instruction::BinaryMatchStart { fail_label, source } => {
+                    if let Term::Binary(_) = read(process, source)? {
+                        return Err(error(
+                            "unsupported bs_start_match3 of a binary: needs a match context",
+                        ));
+                    }
+                    jump(module, process, *fail_label)?;
+                }
+                // ERTS `fconv` converts a small integer, a bignum, or a float
+                // to a float register, and raises `badarith` for each other
+                // term (emu float_instrs.tab:38-52; JIT `emit_fconv` and
+                // `emit_fconv_shared` in jit/arm/instr_float.cpp:96-135).
+                // PBeam has no float register and no float or bignum term,
+                // so an integer stops the run.
+                Instruction::FloatConvert { source } => {
+                    if let Term::Integer(_) = read(process, source)? {
+                        return Err(error("unsupported BEAM opcode 97"));
+                    }
+                    let badarith = Term::static_atom("badarith");
+                    if let Some(outcome) = raise(process, ExceptionClass::Error, badarith) {
+                        return Ok(outcome);
+                    }
+                }
                 Instruction::SelectValue {
                     value,
                     fail_label,
@@ -665,14 +819,13 @@ impl BeamProgram {
                     tail,
                     destination,
                 } => {
+                    // ERTS `put_list` stores any tail in the new cons cell, so a
+                    // tail that is not a list gives an improper list (emu
+                    // `instrs.tab:732-737`; JIT `emit_put_list` in
+                    // `jit/arm/instr_common.cpp:707-721`).
                     let head = read(process, head)?;
-                    let mut tail = read(process, tail)?;
-                    let Term::List(values) = &mut tail else {
-                        return Err(error("unsupported BEAM list tail"));
-                    };
-                    let mut values = std::mem::take(values);
-                    values.insert(0, head);
-                    write(process, destination, Term::List(values))?;
+                    let tail = read(process, tail)?;
+                    write(process, destination, Term::list_with_tail(vec![head], tail))?;
                 }
                 Instruction::PutTuple {
                     elements,
@@ -722,27 +875,23 @@ impl BeamProgram {
                     write(process, destination, record)?;
                 }
                 Instruction::GetList { source, head, tail } => {
-                    let mut values = nonempty_list(read(process, source)?)?;
-                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
-                    let first = values.remove(0);
+                    let (first, rest) = nonempty_list(read(process, source)?)?;
                     write(process, head, first)?;
-                    write(process, tail, Term::List(values))?;
+                    write(process, tail, rest)?;
                 }
                 Instruction::GetHead {
                     source,
                     destination,
                 } => {
-                    let mut values = nonempty_list(read(process, source)?)?;
-                    write(process, destination, values.swap_remove(0))?;
+                    let (first, _) = nonempty_list(read(process, source)?)?;
+                    write(process, destination, first)?;
                 }
                 Instruction::GetTail {
                     source,
                     destination,
                 } => {
-                    let mut values = nonempty_list(read(process, source)?)?;
-                    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
-                    values.remove(0);
-                    write(process, destination, Term::List(values))?;
+                    let (_, rest) = nonempty_list(read(process, source)?)?;
+                    write(process, destination, rest)?;
                 }
                 Instruction::Send => {
                     // ERTS `send` calls `erl_send` and writes its result to
@@ -774,21 +923,50 @@ impl BeamProgram {
                     if !process.mailbox.remove_current() {
                         return Err(error("remove_message without a current message"));
                     }
+                    scheduler.cancel_receive_timer();
                 }
                 Instruction::Wait(label) => {
                     jump(module, process, *label)?;
                     return Ok(Outcome::Wait);
                 }
                 Instruction::WaitTimeout { label, source } => {
-                    let timeout = read(process, source)?;
-                    if timeout != Term::static_atom("infinity") {
-                        // ponytail: PBeam has no timers; see "Receive timeout" in docs/erts-differences.md.
-                        return Err(error(format!("unsupported receive timeout {timeout:?}")));
+                    // ERTS `beam_jit_wait_timeout` reads the timeout only
+                    // when the process has no receive timer and no `F_TIMO`
+                    // (`jit/beam_jit_common.cpp:1208-1240`). A value that is
+                    // not valid moves the save pointer to the first message
+                    // and raises `timeout_value` (`error.h:154`;
+                    // `jit/arm/instr_msg.cpp:312-338`).
+                    if process.receive_timer == ReceiveTimer::None {
+                        let timeout = read(process, source)?;
+                        if timeout == Term::Integer(0) {
+                            continue;
+                        }
+                        if timeout == Term::static_atom("infinity") {
+                            process.receive_timer = ReceiveTimer::Timo;
+                        } else {
+                            let resume = current_frame(process).next_instruction;
+                            let now = scheduler.timers.now();
+                            if !scheduler.set_receive_timer(now, &timeout, resume) {
+                                let process = scheduler.current_process_mut();
+                                process.mailbox.set_save_first();
+                                let reason = Term::static_atom("timeout_value");
+                                if let Some(outcome) = raise(process, ExceptionClass::Error, reason)
+                                {
+                                    return Ok(outcome);
+                                }
+                                continue;
+                            }
+                        }
                     }
-                    jump(module, process, *label)?;
+                    jump(module, scheduler.current_process_mut(), *label)?;
                     return Ok(Outcome::Wait);
                 }
-                Instruction::Timeout => process.mailbox.set_save_first(),
+                Instruction::Timeout => {
+                    // ERTS `beam_jit_timeout` clears `F_TIMO`
+                    // (`jit/beam_jit_common.cpp:1242-1251`).
+                    process.receive_timer = ReceiveTimer::None;
+                    process.mailbox.set_save_first();
+                }
                 Instruction::ReceiveMarkerReserve(marker) => {
                     let id = process.mailbox.reserve_marker();
                     write(process, marker, id)?;
@@ -819,6 +997,20 @@ impl BeamProgram {
                         return Ok(outcome);
                     }
                 }
+                Instruction::Hibernate => {
+                    // `emit_i_hibernate` writes `ok` to `x0` and switches
+                    // the context; the process keeps its frame
+                    // (`jit/arm/instr_trace.cpp:222-238`).
+                    write(process, &Operand::X(0), Term::static_atom("ok"))?;
+                    return Ok(Outcome::Hibernate);
+                }
+                // ERTS `build_stacktrace` changes the raw stack trace in
+                // `x0` to a list (emu `instrs.tab:1247-1251`; JIT
+                // `emit_build_stacktrace` in
+                // `jit/arm/instr_common.cpp:3046-3056`). The compiler moves
+                // it from `x2` first. PBeam keeps the list in `x2`, so `x0`
+                // already holds it.
+                Instruction::BuildStacktrace => {}
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::Return => {
                     if let Some(outcome) = return_from_frame(process)? {
@@ -893,7 +1085,9 @@ impl BeamProgram {
     /// Call `module:name/arity` with the arguments in the X registers. The
     /// calls of `erlang:apply/2` and `erlang:apply/3` run as the ERTS
     /// `i_apply_fun` and `i_apply` instructions. A BIF runs before the module
-    /// code, as in ERTS. Return the outcome when the process exits.
+    /// code, as in ERTS. A function that a loaded module does not export
+    /// goes to `undefined_function`. Return the outcome when the process
+    /// exits.
     ///
     /// # Examples
     ///
@@ -929,8 +1123,91 @@ impl BeamProgram {
             let result = self.bif(scheduler, module, name, arguments)?;
             return self.finish_bif(scheduler.current_process_mut(), result, tail);
         }
-        enter_frame(process, self.mfa_frame(module, name, arity)?, tail);
-        Ok(None)
+        match self.export_frame(module, name, arity)? {
+            Some(frame) => {
+                enter_frame(process, frame, tail);
+                Ok(None)
+            }
+            None => self.undefined_function(scheduler, module, name, arity, tail),
+        }
+    }
+
+    /// Call a function that a loaded module does not export, with the
+    /// arguments in `x0` to `x(arity - 1)`. ERTS goes to the export entry of
+    /// the function, which calls `error_handler:undefined_function/3` with
+    /// the module, the function, and the argument list `Args`
+    /// (`call_error_handler` in `beam_common.c:1294-1342`; JIT
+    /// `emit_export_trampoline` in `jit/arm/beam_asm_global.cpp:164-232`).
+    /// For a loaded module, `undefined_function/3` calls
+    /// `call_undefined_function_handler/3` (`error_handler.erl:85-98`).
+    /// PBeam does the result of these functions here and does not run
+    /// `error_handler.beam` (see "Undefined functions" in
+    /// `docs/erts-differences.md`):
+    ///
+    /// - When the module exports `'$handle_undefined_function'/2`, enter it
+    ///   with `x0 = Function` and `x1 = Args`, as the tail call
+    ///   `Module:Handler(Func, Args)` does (`error_handler.erl:206-213`). A
+    ///   tail call replaces the active frame.
+    /// - Else raise `error:undef` with the stack trace
+    ///   `[{Module, Function, Args, []}]`, as `crash/3` and `crash/1` do
+    ///   (`error_handler.erl:165-178`). ERTS puts the caller frames after
+    ///   this frame. PBeam records no frames.
+    ///
+    /// Return the outcome when the process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // `undef_handler:missing(m)` enters the handler with x0 = missing, x1 = [m].
+    /// assert!(program.undefined_function(&mut scheduler, "undef_handler", "missing", 1, false)?.is_none());
+    /// // `undef_target:missing(a)` with no catch tag exits with
+    /// // `{undef, [{undef_target, missing, [a], []}]}`.
+    /// let outcome = program.undefined_function(&mut scheduler, "undef_target", "missing", 1, false)?;
+    /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A module or function name that the atom table of the run does not
+    /// hold is a runtime error. Each name comes from an import or an atom
+    /// term of the program, so the table holds it.
+    fn undefined_function(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        function: &str,
+        arity: u32,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let atom = |name: &str| {
+            scheduler
+                .atoms
+                .get(name)
+                .map(Term::Atom)
+                .ok_or_else(|| error(format!("atom table does not hold {name}")))
+        };
+        let (module_atom, function_atom) = (atom(module)?, atom(function)?);
+        let process = scheduler.current_process_mut();
+        let arguments = Term::List(call_arguments(&process.registers, arity)?);
+        if let Some(handler) = self.export_frame(module, "$handle_undefined_function", 2)? {
+            enter_frame(process, handler, tail);
+            write(process, &Operand::X(0), function_atom)?;
+            write(process, &Operand::X(1), arguments)?;
+            return Ok(None);
+        }
+        let frame = Term::Tuple(vec![
+            module_atom,
+            function_atom,
+            arguments,
+            Term::List(Vec::new()),
+        ]);
+        let undef = Term::static_atom("undef");
+        Ok(raise_with_stacktrace(
+            process,
+            ExceptionClass::Error,
+            undef,
+            Term::List(vec![frame]),
+        ))
     }
 
     /// Run `erlang:apply(Module, Function, Arguments)` with the arguments in
@@ -938,7 +1215,9 @@ impl BeamProgram {
     /// `i_apply` instructions. The function and the module must be atoms,
     /// and `Arguments` must be a list, else the call raises `error:badarg`.
     /// An apply of `erlang:apply/3` continues with its inner call. A list of
-    /// 1024 or more elements raises `error:system_limit`. Then the elements
+    /// 1024 or more elements raises `error:system_limit`, also when the list
+    /// is improper, because ERTS counts the elements before it reads the
+    /// tail. Then an improper list raises `error:badarg`. Else the elements
     /// go to `x0` onwards, and the call continues as `call_ext` does. Return
     /// the outcome when the process exits.
     ///
@@ -957,23 +1236,32 @@ impl BeamProgram {
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         let mut call = call_arguments(&process.registers, 3)?;
-        let (module, name, arguments) = loop {
+        let (module, name, arguments, proper) = loop {
             // Each wrong form raises the same `badarg`, so one pattern checks
             // the function, the module, and the list.
-            let [Term::Atom(module), Term::Atom(name), Term::List(arguments)] = &mut call[..]
-            else {
+            let [Term::Atom(module), Term::Atom(name), list] = &mut call[..] else {
                 let badarg = Term::static_atom("badarg");
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
-            let arguments = std::mem::take(arguments);
-            if (module.name(), name.name()) != ("erlang", "apply") || arguments.len() != 3 {
-                break (module.clone(), name.clone(), arguments);
+            let Some((arguments, proper)) = take_list_elements(list) else {
+                let badarg = Term::static_atom("badarg");
+                return Ok(raise(process, ExceptionClass::Error, badarg));
+            };
+            if !proper
+                || (module.name(), name.name()) != ("erlang", "apply")
+                || arguments.len() != 3
+            {
+                break (module.clone(), name.clone(), arguments, proper);
             }
             call = arguments;
         };
         if arguments.len() > APPLY_MAX_ARGUMENTS {
             let system_limit = Term::static_atom("system_limit");
             return Ok(raise(process, ExceptionClass::Error, system_limit));
+        }
+        if !proper {
+            let badarg = Term::static_atom("badarg");
+            return Ok(raise(process, ExceptionClass::Error, badarg));
         }
         let arity = arguments.len() as u32;
         for (index, argument) in (0..).zip(arguments) {
@@ -986,7 +1274,9 @@ impl BeamProgram {
     /// `x1`, as the JIT `emit_apply_fun_shared` (`jit/arm/instr_fun.cpp:253-328`)
     /// does for the `i_apply_fun` instructions. `Arguments` must be a list,
     /// else the call raises `error:badarg`. A list of 1023 or more elements
-    /// raises `error:system_limit`. Then the elements go to `x0` onwards, and
+    /// raises `error:system_limit`, also when the list is improper, because
+    /// the JIT counts the elements before it reads the tail. Then an improper
+    /// list raises `error:badarg`. Else the elements go to `x0` onwards, and
     /// the call continues as `call_fun` does, so a term that is not a fun
     /// raises `badfun` only after these checks. Return the outcome when the
     /// process exits.
@@ -1007,14 +1297,17 @@ impl BeamProgram {
         let process = scheduler.current_process_mut();
         let fun = read(process, &Operand::X(0))?;
         let mut list = read(process, &Operand::X(1))?;
-        let Term::List(arguments) = &mut list else {
+        let Some((arguments, proper)) = take_list_elements(&mut list) else {
             let badarg = Term::static_atom("badarg");
             return Ok(raise(process, ExceptionClass::Error, badarg));
         };
-        let arguments = std::mem::take(arguments);
         if arguments.len() > APPLY_FUN_MAX_ARGUMENTS {
             let system_limit = Term::static_atom("system_limit");
             return Ok(raise(process, ExceptionClass::Error, system_limit));
+        }
+        if !proper {
+            let badarg = Term::static_atom("badarg");
+            return Ok(raise(process, ExceptionClass::Error, badarg));
         }
         let arity = arguments.len() as u32;
         for (index, argument) in (0..).zip(arguments) {
@@ -1151,6 +1444,27 @@ fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
     }
 }
 
+/// Take the elements of a list term for an apply, and tell whether the list
+/// is proper. `[]` gives no elements. Return `None` for a term that is not a
+/// list. The elements of an improper list come before its tail, so a caller
+/// can count them first, as ERTS `apply` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut list = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x")));
+/// assert_eq!(take_list_elements(&mut list), Some((vec![Term::Integer(1)], false)));
+/// assert_eq!(take_list_elements(&mut Term::List(vec![])), Some((vec![], true)));
+/// assert_eq!(take_list_elements(&mut Term::static_atom("x")), None);
+/// ```
+fn take_list_elements(list: &mut Term) -> Option<(Vec<Term>, bool)> {
+    match list {
+        Term::List(elements) => Some((std::mem::take(elements), true)),
+        Term::ImproperList(elements, _) => Some((std::mem::take(elements), false)),
+        _ => None,
+    }
+}
+
 /// The spawn options that this runtime supports, as the flags of ERTS
 /// `ErlSpawnOpts`.
 #[derive(Default)]
@@ -1159,38 +1473,78 @@ struct SpawnOptions {
     link: bool,
     /// Monitor the new process and return `{Pid, Reference}` (`SPO_MONITOR`).
     monitor: bool,
+    /// Start the new process with the `message_queue_data` flag `off_heap`
+    /// (`SPO_OFF_HEAP_MSGQ`), else `on_heap`.
+    off_heap_message_queue: bool,
 }
 
 /// Start a process that runs `module:function` with the elements of
 /// `arguments`, as ERTS `erl_create_process` does. Return the pid, or
-/// `{Pid, Reference}` when `options.monitor` is set.
+/// `{Pid, Reference}` when `options.monitor` is set. A `module` or
+/// `function` that is not an atom, and `arguments` that are not a proper
+/// list, raise `badarg` (`erl_process.c:12490-12492`). A function that a
+/// loaded module does not export starts the process anyway: the process
+/// calls `undefined_function` when it first runs. More than 1023 arguments
+/// also start the process, which then raises `error:system_limit`, as the
+/// `apply` of the ERTS `i_apply_only` start does (`beam_common.c:1501-1513`).
+/// Else a module that is not loaded is the runtime error
+/// `unresolved external MFA M:F/A`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let result = create_process(&program, &mut scheduler, &module, &function, &Term::List(vec![]), SpawnOptions::default())?;
-/// assert!(matches!(result, Term::Pid(_)));
-/// assert!(create_process(&program, &mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default()).is_err());
+/// assert!(matches!(result, BifResult::Value(Term::Pid(_))));
+/// let result = create_process(&program, &mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default())?;
+/// assert!(matches!(result, BifResult::Raise { .. }));
+/// let result = create_process(&program, &mut scheduler, &Term::Integer(1), &function, &Term::List(vec![]), SpawnOptions::default())?;
+/// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 fn create_process(
     program: &BeamProgram,
     scheduler: &mut Scheduler,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
     options: SpawnOptions,
-) -> Result<Term, BeamError> {
-    let Term::List(arguments) = arguments else {
-        return Err(error("spawn arguments are not a proper list"));
+) -> Result<BifResult, BeamError> {
+    let (Term::Atom(module), Term::Atom(function), Term::List(arguments)) =
+        (module, function, arguments)
+    else {
+        return Ok(BifResult::badarg());
     };
     let arguments = arguments.clone();
     let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-    let frame = program.mfa_frame(module.name(), function.name(), arity)?;
-    let (pid, reference) = scheduler.spawn(frame, arguments, options.monitor, options.link)?;
-    Ok(match reference {
+    // A function that the loaded module does not export gives an undefined
+    // start, which goes to `undefined_function` when the process first
+    // runs, as the `i_apply_only` start of ERTS goes to its export entry.
+    // More than `APPLY_MAX_ARGUMENTS` arguments also give an undefined start,
+    // which raises `system_limit` when the process first runs. The `apply`
+    // of ERTS checks this limit before it looks up the export, so the module
+    // can be not loaded.
+    let export = if arguments.len() > APPLY_MAX_ARGUMENTS {
+        None
+    } else {
+        program.export_frame(module.name(), function.name(), arity)?
+    };
+    let start = match export {
+        Some(frame) => Start::Entry(frame),
+        None => Start::Undefined {
+            module: module.clone(),
+            function: function.clone(),
+        },
+    };
+    let SpawnOptions {
+        link,
+        monitor,
+        off_heap_message_queue,
+    } = options;
+    let (pid, reference) =
+        scheduler.spawn(start, arguments, monitor, link, off_heap_message_queue)?;
+    Ok(BifResult::Value(match reference {
         Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),
-    })
+    }))
 }
 
 /// Return the active frame of a running process.
@@ -1318,16 +1672,8 @@ fn map_values<'a>(
         .collect()
 }
 
-/// Raise an exception in the process, as ERTS `handle_error` does: continue
-/// at the nearest live catch tag, or return the exit outcome when no frame
-/// holds one.
-///
-/// The scan starts at the newest frame and, in one frame, at the lowest Y
-/// index, as ERTS `next_catch` scans up from the stack top. The frames above
-/// the tag are dropped, and the tag becomes `[]`. The handler gets the
-/// non-value in `x0`, the reason in `x1`, the stack trace `[]` in `x2`, and
-/// the class atom in `x3`. An uncaught `error` exits the process with
-/// `{Reason, []}`, and an uncaught `exit` exits it with `Reason`.
+/// Raise an exception with the stack trace `[]` in the process, as
+/// `raise_with_stacktrace` does.
 ///
 /// # Examples
 ///
@@ -1336,6 +1682,39 @@ fn map_values<'a>(
 /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
 /// ```
 fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Option<Outcome> {
+    raise_with_stacktrace(process, class, reason, Term::List(Vec::new()))
+}
+
+/// Raise an exception in the process, as ERTS `handle_error` does: continue
+/// at the nearest live catch tag, or return the exit outcome when no frame
+/// holds one.
+///
+/// The scan starts at the newest frame and, in one frame, at the lowest Y
+/// index, as ERTS `next_catch` scans up from the stack top. The frames above
+/// the tag are dropped, and the tag becomes `[]`. The handler gets the
+/// non-value in `x0`, the reason in `x1`, the stack trace in `x2`, and the
+/// class atom in `x3` (`beam_common.c:543`). ERTS keeps a raw stack trace
+/// in `x2` that `build_stacktrace` and `catch_end` change to a list
+/// (`beam_common.c:730-735`, `1204-1292`). PBeam keeps the list. An
+/// uncaught `error` exits the process with `{Reason, Stacktrace}`
+/// (`beam_common.c:684-692`), and an uncaught `exit` exits it with
+/// `Reason`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let frame = Term::Tuple(vec![module, function, Term::List(vec![]), Term::List(vec![])]);
+/// let undef = Term::static_atom("undef");
+/// let outcome = raise_with_stacktrace(&mut process, ExceptionClass::Error, undef, Term::List(vec![frame]));
+/// // With no catch tag, the exit reason is `{undef, [Frame]}`.
+/// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
+/// ```
+fn raise_with_stacktrace(
+    process: &mut ProcessState,
+    class: ExceptionClass,
+    reason: Term,
+    stacktrace: Term,
+) -> Option<Outcome> {
     let tag = process
         .frames
         .iter()
@@ -1353,7 +1732,7 @@ fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Opt
         });
     let Some((depth, slot, handler)) = tag else {
         let reason = match class {
-            ExceptionClass::Error => Term::Tuple(vec![reason, Term::List(Vec::new())]),
+            ExceptionClass::Error => Term::Tuple(vec![reason, stacktrace]),
             ExceptionClass::Exit => reason,
         };
         return Some(Outcome::Exit {
@@ -1370,7 +1749,7 @@ fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Opt
         .resize(process.registers.len().max(4), None);
     process.registers[0] = None;
     process.registers[1] = Some(reason);
-    process.registers[2] = Some(Term::List(Vec::new()));
+    process.registers[2] = Some(stacktrace);
     process.registers[3] = Some(Term::static_atom(class.name()));
     None
 }
@@ -1388,23 +1767,40 @@ fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
     write(process, &Operand::Y(register), Term::List(Vec::new()))
 }
 
-/// Return the elements of a nonempty list, which `get_list` and `get_hd`
-/// read. The BEAM validator makes sure that the source is a nonempty list.
+/// Return the head and the tail of a nonempty proper or improper list,
+/// which `get_list`, `get_hd`, and `get_tl` read as the `CAR` and the `CDR`
+/// of the first cons cell (emu `instrs.tab:389-407`; JIT
+/// `jit/arm/instr_common.cpp:274-318`). The BEAM validator makes sure that
+/// the source is a nonempty list.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
+/// let x = || Term::static_atom("x");
 /// let list = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
-/// assert_eq!(nonempty_list(list)?, vec![Term::Integer(1), Term::Integer(2)]);
+/// assert_eq!(nonempty_list(list)?, (Term::Integer(1), Term::List(vec![Term::Integer(2)])));
+/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x()));
+/// assert_eq!(nonempty_list(improper)?, (Term::Integer(1), x()));
 /// assert!(nonempty_list(Term::List(vec![])).is_err());
 /// ```
-fn nonempty_list(mut list: Term) -> Result<Vec<Term>, BeamError> {
-    match &mut list {
-        Term::List(values) if !values.is_empty() => Ok(std::mem::take(values)),
-        _ => Err(error(format!(
-            "BEAM list source {list:?} is not a nonempty list"
-        ))),
-    }
+fn nonempty_list(mut list: Term) -> Result<(Term, Term), BeamError> {
+    let (mut values, tail) = match &mut list {
+        Term::List(values) if !values.is_empty() => {
+            (std::mem::take(values), Term::List(Vec::new()))
+        }
+        Term::ImproperList(values, tail) => (
+            std::mem::take(values),
+            std::mem::replace(&mut **tail, Term::List(Vec::new())),
+        ),
+        _ => {
+            return Err(error(format!(
+                "BEAM list source {list:?} is not a nonempty list"
+            )));
+        }
+    };
+    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+    let head = values.remove(0);
+    Ok((head, Term::list_with_tail(values, tail)))
 }
 
 /// Continue execution after a label in the active module.
@@ -1633,7 +2029,7 @@ mod tests {
 
     /// The runtime error of a root process that exits with an uncaught
     /// `error:badarg`. PBeam gives the stack trace `[]`.
-    const BADARG_EXIT: &str = "root process exited with Tuple([Atom(\"badarg\"), List([])])";
+    const BADARG_EXIT: &str = "root process exited with {badarg,[]}";
 
     fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
         let mut instructions = vec![
@@ -1854,7 +2250,7 @@ mod tests {
                 .execute("fixture", "main", &[])
                 .unwrap_err()
                 .to_string(),
-            "root process exited with Tuple([Tuple([Atom(\"badfun\"), Atom(\"notfun\")]), List([])])"
+            "root process exited with {{badfun,notfun},[]}"
         );
     }
 
@@ -1866,14 +2262,14 @@ mod tests {
                 Instruction::Move(atom("boom"), Operand::X(0)),
                 erlang_call("exit", 1, false),
             ])
-            .contains("root process exited with Atom(\"boom\")")
+            .contains("root process exited with boom")
         );
         assert!(
             error(vec![
                 Instruction::Move(atom("undef"), Operand::X(0)),
                 erlang_call("nif_error", 1, false),
             ])
-            .contains("root process exited with Tuple([Atom(\"undef\"), List([])])")
+            .contains("root process exited with {undef,[]}")
         );
         let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
         body.extend(wait_forever());
@@ -1884,7 +2280,8 @@ mod tests {
         let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
         body.push(Instruction::Return);
         assert!(matches!(run_with_child(body), Ok(Term::Pid(_))));
-        assert!(error(spawn_link_child(Term::Integer(1))).contains("not a proper list"));
+        // ERTS 29.1.1: spawn_link(M, F, 1) raises badarg.
+        assert_eq!(error(spawn_link_child(Term::Integer(1))), BADARG_EXIT);
         // `erlang:is_alive/0` is not a BIF: it runs the code of the `erlang`
         // module, which this program does not load.
         assert!(
@@ -1894,8 +2291,8 @@ mod tests {
         // The ERTS loader turns this call into an instruction. Its body in
         // `erlang.beam` calls itself, so it must not run.
         assert!(
-            error(vec![erlang_call("hibernate", 0, false)])
-                .contains("unsupported instruction call erlang:hibernate/0")
+            error(vec![erlang_call("yield", 0, false)])
+                .contains("unsupported instruction call erlang:yield/0")
         );
     }
 
@@ -2273,7 +2670,7 @@ mod tests {
         };
         assert_eq!(
             run(0, atom("foo")).unwrap_err().to_string(),
-            "root process exited with Tuple([Tuple([Atom(\"badmap\"), Atom(\"foo\")]), List([])])"
+            "root process exited with {{badmap,foo},[]}"
         );
         assert_eq!(run(3, atom("foo")).unwrap(), test_atom("failed"));
         // A key of a type that a PBeam map cannot hold is a missing key.
@@ -2297,7 +2694,7 @@ mod tests {
         };
         assert_eq!(
             tuple_key(0).unwrap_err().to_string(),
-            "root process exited with Tuple([Tuple([Atom(\"badkey\"), Tuple([])]), List([])])"
+            "root process exited with {{badkey,{}},[]}"
         );
         assert_eq!(tuple_key(3).unwrap(), test_atom("failed"));
         // Two different references have no PBeam order.
@@ -2353,6 +2750,30 @@ mod tests {
         assert_eq!(
             merge.unwrap_err().to_string(),
             "unsupported map key Integer(576460752303423488)"
+        );
+    }
+
+    #[test]
+    fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
+        // ERTS accepts a tuple key; a PBeam map does not hold one yet.
+        let pair = Term::Tuple(vec![Term::Tuple(vec![]), Term::Integer(0)]);
+        let from_list = make_program(
+            vec![
+                Instruction::Move(Operand::Value(Term::List(vec![pair])), Operand::X(0)),
+                Instruction::CallExternal {
+                    arity: 1,
+                    module: "maps".into(),
+                    name: "from_list".into(),
+                    tail: true,
+                    deallocate: 0,
+                },
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[]);
+        assert_eq!(
+            from_list.unwrap_err().to_string(),
+            "unsupported map key Tuple([])"
         );
     }
 
@@ -2529,9 +2950,9 @@ mod tests {
         builtin.sort_unstable();
         builtin.dedup();
         // `erts_is_builtin` (`beam_common.c`) marks apply/2, apply/3, and
-        // yield/0 as builtin, but not hibernate/0.
+        // yield/0 as builtin.
         for mfa in INSTRUCTION_CALLS {
-            assert_eq!(builtin.contains(&mfa), mfa.1 != "hibernate");
+            assert!(builtin.contains(&mfa));
         }
         builtin.retain(|mfa| !INSTRUCTION_CALLS.contains(mfa));
         assert_eq!(BIFS, builtin.as_slice());
@@ -2561,11 +2982,12 @@ mod tests {
             convert(chardata(), "unicode").unwrap(),
             Term::Binary(b"Hello\n".to_vec())
         );
+        // ERTS 29.1.1 raises badarg for a term that is not chardata.
         assert_eq!(
             convert(Term::Integer(1), "unicode")
                 .unwrap_err()
                 .to_string(),
-            "unsupported chardata Integer(1): not a binary or a list"
+            BADARG_EXIT
         );
         // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], utf8)
         // is <<"Hello\n">>.
@@ -2580,7 +3002,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_a_list_from_nil_and_rejects_an_unsupported_tail() {
+    fn builds_a_proper_and_an_improper_list() {
         let list = make_program(
             vec![
                 Instruction::PutList {
@@ -2597,7 +3019,8 @@ mod tests {
             Term::List(vec![Term::Integer(10)])
         );
 
-        let invalid_tail = make_program(
+        // ERTS: [10 | 0] is the improper list [10|0].
+        let improper = make_program(
             vec![
                 Instruction::PutList {
                     head: Operand::Value(Term::Integer(10)),
@@ -2608,7 +3031,10 @@ mod tests {
             ],
             0,
         );
-        assert!(invalid_tail.execute("fixture", "main", &[]).is_err());
+        assert_eq!(
+            improper.execute("fixture", "main", &[]).unwrap(),
+            Term::ImproperList(vec![Term::Integer(10)], Box::new(Term::Integer(0)))
+        );
     }
 
     /// The values come from a pinned OTP 29.1.1 run of `lst/1`, `hd1/1`, and
@@ -2664,6 +3090,23 @@ mod tests {
             )
         };
         assert_eq!(get_head(list(&["x", "y"])).unwrap(), test_atom("x"));
+        // ERTS: lst([a|x]) is {a,x}, lst([a,b|x]) is {a,[b|x]}, and
+        // hd1([x|y]) is x.
+        let improper = |names: &[&str], tail: &str| {
+            Term::ImproperList(
+                names.iter().map(|name| test_atom(name)).collect(),
+                Box::new(test_atom(tail)),
+            )
+        };
+        assert_eq!(
+            get_list(improper(&["a"], "x")).unwrap(),
+            Term::Tuple(vec![test_atom("a"), test_atom("x")])
+        );
+        assert_eq!(
+            get_list(improper(&["a", "b"], "x")).unwrap(),
+            Term::Tuple(vec![test_atom("a"), improper(&["b"], "x")])
+        );
+        assert_eq!(get_head(improper(&["x"], "y")).unwrap(), test_atom("x"));
         // ERTS: nil([]) is nil, nil([a]) is nonempty, and nil(a) is other.
         let classify = |argument: Term| {
             run(
@@ -2694,6 +3137,8 @@ mod tests {
         assert_eq!(classify(list(&[])), test_atom("nil"));
         assert_eq!(classify(list(&["a"])), test_atom("nonempty"));
         assert_eq!(classify(test_atom("a")), test_atom("other"));
+        // ERTS: nil([a|x]) is nonempty.
+        assert_eq!(classify(improper(&["a"], "x")), test_atom("nonempty"));
         // The BEAM validator makes sure that the source is a nonempty list.
         assert_eq!(
             get_list(list(&[])).unwrap_err().to_string(),
@@ -2786,10 +3231,13 @@ mod tests {
         );
     }
 
-    /// A `wait_timeout` with `infinity` waits as `wait` does: the `DOWN`
-    /// message of a monitored child continues the receive at its label.
+    /// ERTS 29.1.1 `beam_jit_wait_timeout` (`jit/beam_jit_common.cpp:1208-1240`):
+    /// `infinity` waits as `wait` does, so the `DOWN` message of a monitored
+    /// child continues the receive at its label. `0` continues at once at
+    /// `timeout`. A value that is not valid and that no `try` catches exits
+    /// the process with `{timeout_value, Stack}`.
     #[test]
-    fn waits_for_a_message_with_an_infinity_timeout_and_rejects_other_timeouts() {
+    fn waits_or_continues_at_a_receive_timeout_and_raises_timeout_value() {
         let wait = |timeout: Term| {
             let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
             body.pop();
@@ -2804,6 +3252,7 @@ mod tests {
                     fail_label: 6,
                     destination: Operand::X(0),
                 },
+                Instruction::RemoveMessage,
                 Instruction::Return,
                 Instruction::Label(6),
                 Instruction::WaitTimeout {
@@ -2823,15 +3272,10 @@ mod tests {
                     && fields[2] == test_atom("process")
                     && fields[4] == Term::Integer(1)
         ));
-        // ERTS 29.1.1: `receive M -> M after T -> timeout end` with T = 0
-        // returns timeout at once. PBeam has no timers yet.
+        assert_eq!(wait(Term::Integer(0)).unwrap(), test_atom("timeout"));
         assert_eq!(
-            wait(Term::Integer(0)).unwrap_err().to_string(),
-            "unsupported receive timeout Integer(0)"
-        );
-        assert_eq!(
-            wait(Term::Integer(100)).unwrap_err().to_string(),
-            "unsupported receive timeout Integer(100)"
+            wait(test_atom("foo")).unwrap_err().to_string(),
+            "root process exited with {timeout_value,[]}"
         );
     }
 
@@ -3208,7 +3652,7 @@ mod tests {
             run(body)
                 .unwrap_err()
                 .to_string()
-                .contains("root process exited with Tuple([Atom(\"undef\"), List([])])")
+                .contains("root process exited with {undef,[]}")
         );
     }
 
@@ -3383,11 +3827,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn removes_an_active_monitor_without_a_trap() {
+        // monitor(process, Child), then demonitor(Ref, [flush]) before the
+        // child runs: the monitor is still active, so ERTS returns true
+        // without flushing.
+        let mut body = spawn_link_child(Term::List(vec![test_atom("normal")]));
+        body.pop();
+        body.push(erlang_call("spawn", 3, false));
+        body.extend([
+            Instruction::Move(Operand::X(0), Operand::X(1)),
+            Instruction::Move(atom("process"), Operand::X(0)),
+            erlang_call("monitor", 2, false),
+            Instruction::Move(
+                Operand::Value(Term::List(vec![test_atom("flush")])),
+                Operand::X(1),
+            ),
+            erlang_call("demonitor", 2, true),
+        ]);
+        assert_eq!(run_with_child(body).unwrap(), test_atom("true"));
+    }
+
     /// Run `main/0` with the functions `zero/0`, `id/3`, and `last/2` of
     /// the probe that gives the ERTS values of the `apply` tests:
     /// `zero() -> zero.`, `id(A, B, C) -> {A, B, C}.`, and
     /// `last(M, F) -> M:F(bye).`, which compiles to `{apply_last,1,0}`.
     fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
+        apply_targets_program(body).execute("fixture", "main", &[])
+    }
+
+    /// Return the program of `run_with_apply_targets`.
+    fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
         let mut program = make_program(body, 0);
         let module = program.modules.get_mut("fixture").unwrap();
         module.exports.extend([
@@ -3430,7 +3900,7 @@ mod tests {
                 deallocate: 0,
             },
         ]);
-        program.execute("fixture", "main", &[])
+        program
     }
 
     /// Return the body that moves the module and the function name of an
@@ -3551,18 +4021,37 @@ mod tests {
             run_with_apply_targets(body).unwrap_err().to_string(),
             BADARG_EXIT
         );
-        // `apply` copies at most 1023 arguments to the X registers. ERTS gives
-        // `undef` for `apply(nomod, nofun, L1023)` and raises `system_limit`
-        // for a list of 1024 elements.
+        // `apply` copies at most 1023 arguments to the X registers. ERTS
+        // raises `undef` for `apply(fixture, missing, L1023)`, because the
+        // loaded module `fixture` does not export `missing/1023`, and raises
+        // `system_limit` for a list of 1024 elements.
         let mut body = apply_of(
             test_atom("fixture"),
             test_atom("missing"),
             Term::List(vec![test_atom("x"); 1023]),
         );
         body.push(erlang_call("apply", 3, true));
+        let mut program = apply_targets_program(body);
+        // The atoms of the `undef` frame come from the atom table of the run.
         assert_eq!(
-            run_with_apply_targets(body).unwrap_err().to_string(),
-            "unresolved external MFA fixture:missing/1023"
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            "atom table does not hold fixture"
+        );
+        for name in ["fixture", "missing"] {
+            program.atoms.put(name).unwrap();
+        }
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "root process exited with {{undef,[{{fixture,missing,[{}],[]}}]}}",
+                ["x"; 1023].join(",")
+            )
         );
         let mut body = apply_of(
             test_atom("fixture"),
@@ -3572,7 +4061,7 @@ mod tests {
         body.push(erlang_call("apply", 3, true));
         assert_eq!(
             run_with_apply_targets(body).unwrap_err().to_string(),
-            "root process exited with Tuple([Atom(\"system_limit\"), List([])])"
+            "root process exited with {system_limit,[]}"
         );
     }
 
@@ -3739,10 +4228,8 @@ mod tests {
         // ERTS 29.1.1: [1] ++ x is the improper list [1|x], and a ++ []
         // and a ++ x raise badarg.
         assert_eq!(
-            append(integers(&[1]), test_atom("x"))
-                .unwrap_err()
-                .to_string(),
-            "unsupported erlang:++/2 tail Atom(\"x\"): not a list"
+            append(integers(&[1]), test_atom("x")).unwrap(),
+            Term::ImproperList(vec![Term::Integer(1)], Box::new(test_atom("x")))
         );
         for right in [Term::List(Vec::new()), test_atom("x")] {
             assert_eq!(
@@ -3753,7 +4240,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_a_lists_reverse_result_that_is_an_improper_list() {
+    fn reverses_a_list_onto_a_tail_that_is_not_a_list() {
         // ERTS 29.1.1: lists:reverse([a], x) is the improper list [a|x].
         let reverse = call_ext_with(
             "lists",
@@ -3761,8 +4248,8 @@ mod tests {
             vec![Term::List(vec![test_atom("a")]), test_atom("x")],
         );
         assert_eq!(
-            reverse.unwrap_err().to_string(),
-            "unsupported lists:reverse/2 tail Atom(\"x\"): not a list"
+            reverse.unwrap(),
+            Term::ImproperList(vec![test_atom("a")], Box::new(test_atom("x")))
         );
     }
 
