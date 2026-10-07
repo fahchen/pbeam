@@ -40,14 +40,14 @@ fn ends_the_run_at_the_root_exit_while_a_timer_stays_active() {
         (
             "crash",
             "Error! Failed to eval: run_end_probe:crash(), halt().\r\n\r\nRuntime terminating during boot (boom)\r\n",
-            "pbeam: root process exited with Atom(\"boom\")\n",
+            "pbeam: root process exited with boom\n",
             "",
             1,
         ),
         (
             "killed",
             "Runtime terminating during boot (killed)\r\n",
-            "pbeam: root process exited with Atom(\"killed\")\n",
+            "pbeam: root process exited with killed\n",
             "",
             1,
         ),
