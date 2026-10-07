@@ -1,12 +1,13 @@
 //! Read the host system information that ERTS reads at emulator start
 //! (`sys/unix/sys.c`, `sys/common/erl_sys_common_misc.c`), the host
 //! terminal that the `prim_tty` NIFs use and write to, the host signal
-//! dispositions that `os:set_signal/2` sets, and the host clocks that the
-//! time BIFs read.
+//! dispositions that `os:set_signal/2` sets, the host clocks that the
+//! time BIFs read, and the OS environment that `os:getenv/1` reads.
 
 use std::{ffi::CStr, sync::OnceLock};
 
 pub(crate) mod clock;
+pub(crate) mod environment;
 pub(crate) mod errno;
 pub(crate) mod output;
 pub(crate) mod signal;
@@ -48,19 +49,25 @@ pub(crate) fn os_flavor() -> String {
 }
 
 /// The encoding of file names on the host, as the ERTS
-/// `filename_encoding` (`erl_sys_common_misc.c:50-52`). ERTS on Windows
-/// uses `ERL_FILENAME_WIN_WCHAR`, and ERTS on macOS uses
-/// `ERL_FILENAME_UTF8_MAC`, which checks a name as `ERL_FILENAME_UTF8`
-/// does. PBeam supports neither Windows nor the `+fnl`, `+fnu`, and `+fna`
-/// emulator flags.
+/// `filename_encoding` (`erl_sys_common_misc.c:50-56`). ERTS on Windows
+/// uses `ERL_FILENAME_WIN_WCHAR`. PBeam supports neither Windows nor the
+/// `+fnl`, `+fnu`, and `+fna` emulator flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FilenameEncoding {
     /// `ERL_FILENAME_LATIN1`: each character of a name is one byte. Only a
     /// host other than macOS uses it.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Latin1,
-    /// `ERL_FILENAME_UTF8`: a name is UTF-8.
+    /// `ERL_FILENAME_UTF8`: a name is UTF-8. Only a host other than macOS
+    /// uses it.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Utf8,
+    /// `ERL_FILENAME_UTF8_MAC`: a name is UTF-8, and only macOS uses it.
+    /// ERTS checks and writes a name as `ERL_FILENAME_UTF8` does
+    /// (`erl_unicode.c:2222-2555`), but it composes the code points of a
+    /// native name that it reads (`erl_unicode.c:2177-2190`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Utf8Mac,
 }
 
 /// Return the file name encoding of the host. ERTS sets it once at
@@ -68,8 +75,8 @@ pub(crate) enum FilenameEncoding {
 /// `erl_sys_common_misc.c:89-126`), so the first call reads it and each
 /// later call returns the same value.
 ///
-/// On macOS the encoding is always UTF-8 (`erl_sys_common_misc.c:54-56`,
-/// `120-124`). On another host it is UTF-8 when the `LC_CTYPE` locale of
+/// On macOS the encoding is always UTF-8 with composition
+/// (`erl_sys_common_misc.c:54-56`, `120-124`). On another host it is UTF-8 when the `LC_CTYPE` locale of
 /// the environment exists and its codeset is `UTF-8`, else Latin-1
 /// (`erl_sys_common_misc.c:95-119`). ERTS reads the locale with
 /// `setlocale(LC_CTYPE, "")`, which also sets the locale of the process.
@@ -80,7 +87,7 @@ pub(crate) enum FilenameEncoding {
 ///
 /// ```rust,ignore
 /// // macOS, also with `LC_ALL=C`.
-/// assert_eq!(filename_encoding(), FilenameEncoding::Utf8);
+/// assert_eq!(filename_encoding(), FilenameEncoding::Utf8Mac);
 /// // Linux with `LC_ALL=C` or a locale that does not exist.
 /// assert_eq!(filename_encoding(), FilenameEncoding::Latin1);
 /// ```
@@ -89,16 +96,17 @@ pub(crate) fn filename_encoding() -> FilenameEncoding {
     *ENCODING.get_or_init(read_filename_encoding)
 }
 
-/// Return the file name encoding of macOS (`erl_sys_common_misc.c:54-56`).
+/// Return the file name encoding of macOS, `ERL_FILENAME_UTF8_MAC`
+/// (`erl_sys_common_misc.c:54-56`, `120-124`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(read_filename_encoding(), FilenameEncoding::Utf8);
+/// assert_eq!(read_filename_encoding(), FilenameEncoding::Utf8Mac);
 /// ```
 #[cfg(target_os = "macos")]
 fn read_filename_encoding() -> FilenameEncoding {
-    FilenameEncoding::Utf8
+    FilenameEncoding::Utf8Mac
 }
 
 /// Return the file name encoding from the `LC_CTYPE` codeset of the
