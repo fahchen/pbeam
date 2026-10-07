@@ -16,6 +16,25 @@ pub(super) struct Frame {
     pub(super) stack: Vec<StackSlot>,
 }
 
+/// The start of a new process. ERTS starts each process with `i_apply_only`
+/// of its MFA (`erl_process.c:12616`; JIT `jit/beam_jit_main.cpp:258`), so
+/// the process calls the export entry of the function when it first runs.
+#[derive(Debug)]
+pub(super) enum Start {
+    /// The entry frame of an exported function.
+    Entry(Frame),
+    /// A function that its loaded module does not export, or a start with
+    /// more than 1023 arguments. When the process first runs, it raises
+    /// `system_limit` for more than 1023 arguments, as the `apply` of ERTS
+    /// does. Else it calls the export entry, and thus the error handler.
+    Undefined {
+        /// The module of the start MFA.
+        module: Atom,
+        /// The function of the start MFA.
+        function: Atom,
+    },
+}
+
 /// One Y register of a frame.
 #[derive(Debug)]
 pub(super) enum StackSlot {
@@ -71,6 +90,10 @@ pub(super) struct ProcessState {
     pub(super) id: ProcessId,
     /// Call stack. The last frame is the active function.
     pub(super) frames: Vec<Frame>,
+    /// The module and the function of a `Start::Undefined` start until the
+    /// process first runs. The process then has no frame, and the arity is
+    /// the number of argument registers.
+    pub(super) undefined_start: Option<(Atom, Atom)>,
     /// X registers. All frames of the process share them.
     pub(super) registers: Vec<Option<Term>>,
     /// Messages and receive markers, with the receive save pointer.
@@ -102,18 +125,28 @@ pub(super) struct ProcessState {
 }
 
 impl ProcessState {
-    /// Create a runnable process with one entry frame and argument registers.
+    /// Create a runnable process with argument registers. An entry start
+    /// gives one frame. An undefined start gives no frame and keeps the
+    /// module and the function in `undefined_start`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let process = ProcessState::new(ProcessId(0), frame, vec![]);
+    /// let process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![]);
     /// assert!(!process.waiting);
+    /// let start = Start::Undefined { module: module.clone(), function: function.clone() };
+    /// let process = ProcessState::new(ProcessId(1), start, vec![Term::Integer(1)]);
+    /// assert_eq!(process.undefined_start, Some((module, function)));
     /// ```
-    pub(super) fn new(id: ProcessId, frame: Frame, arguments: Vec<Term>) -> Self {
+    pub(super) fn new(id: ProcessId, start: Start, arguments: Vec<Term>) -> Self {
+        let (frames, undefined_start) = match start {
+            Start::Entry(frame) => (vec![frame], None),
+            Start::Undefined { module, function } => (Vec::new(), Some((module, function))),
+        };
         Self {
             id,
-            frames: vec![frame],
+            frames,
+            undefined_start,
             registers: arguments.into_iter().map(Some).collect(),
             mailbox: Mailbox::default(),
             waiting: false,
@@ -176,9 +209,9 @@ impl ProcessState {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::{Frame, ProcessState, ReceiveTimer};
+    use super::{Frame, ProcessState, ReceiveTimer, Start};
     use crate::term::test_atom;
-    use crate::term::{ProcessId, Term};
+    use crate::term::{Atom, ProcessId, Term};
 
     pub(in crate::runtime) fn frame() -> Frame {
         Frame {
@@ -191,8 +224,11 @@ pub(super) mod tests {
 
     #[test]
     fn wakes_only_a_waiting_process() {
-        let mut process = ProcessState::new(ProcessId(0), frame(), vec![Term::Integer(1)]);
+        let mut process =
+            ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![Term::Integer(1)]);
         assert_eq!(process.registers, vec![Some(Term::Integer(1))]);
+        assert_eq!(process.frames.len(), 1);
+        assert_eq!(process.undefined_start, None);
         assert!(!process.receive(test_atom("early")));
         process.wait();
         assert!(process.receive(test_atom("late")));
@@ -201,7 +237,7 @@ pub(super) mod tests {
 
     #[test]
     fn expires_the_receive_timer_and_wakes_only_a_waiting_process() {
-        let mut process = ProcessState::new(ProcessId(0), frame(), vec![]);
+        let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
         process.receive_timer = ReceiveTimer::Set {
             key: (1100, 0),
             resume: 7,
@@ -211,5 +247,19 @@ pub(super) mod tests {
         assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
         assert!(!process.time_out());
         assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
+    }
+
+    #[test]
+    fn keeps_the_mfa_of_an_undefined_start_without_a_frame() {
+        let module = Atom::from_static("erlang").unwrap();
+        let function = Atom::from_static("ok").unwrap();
+        let start = Start::Undefined {
+            module: module.clone(),
+            function: function.clone(),
+        };
+        let process = ProcessState::new(ProcessId(1), start, vec![Term::Integer(1)]);
+        assert!(process.frames.is_empty());
+        assert_eq!(process.undefined_start, Some((module, function)));
+        assert_eq!(process.registers, vec![Some(Term::Integer(1))]);
     }
 }

@@ -3,6 +3,7 @@ mod fun;
 mod hash;
 mod map;
 mod order;
+mod print;
 
 pub use atom::Atom;
 #[cfg(test)]
@@ -13,6 +14,7 @@ pub(crate) use fun::{Lambda, Target};
 pub(crate) use hash::internal_hash;
 pub(crate) use map::Direction;
 pub use map::Map;
+pub(crate) use print::print_term;
 
 use std::fmt;
 
@@ -446,6 +448,44 @@ pub struct ProcessId(pub(crate) u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Reference(pub(crate) u64);
 
+/// The mask of the first reference number (`REF_MASK`, 18 bits).
+const REF_NUMBER_0_MASK: u64 = 0x3_FFFF;
+/// The mask of the counter bits in the second reference number
+/// (`ERTS_REF1_NUM_MASK__`).
+const REF_NUMBER_1_MASK: u64 = 0xFFFC_0000;
+/// The scheduler thread number of a PBeam reference. ERTS gives the first
+/// normal scheduler the number 1 (`init_scheduler_data` in
+/// `erl_process.c`).
+const REF_THREAD: u64 = 1;
+
+impl Reference {
+    /// Return the three ERTS reference numbers `[N0, N1, N2]` of the
+    /// reference. ERTS makes them from a 64-bit counter value of a
+    /// scheduler (`erts_set_ref_numbers`, `erl_bif_unique.h:117-131`): `N0` is the
+    /// low 18 bits, `N1` is the next 14 counter bits with the scheduler
+    /// number in its low bits, and `N2` is the high 32 bits. PBeam takes
+    /// its reference value as the counter value of scheduler 1. ERTS prints
+    /// the reference as `#Ref<0.N2.N1.N0>`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Reference(0).numbers(), [0, 1, 0]);
+    /// assert_eq!(
+    ///     Reference(0xF55F_5681_5BA8_8196).numbers(),
+    ///     [33174, 1537736705, 4116665985]
+    /// );
+    /// ```
+    pub(crate) fn numbers(self) -> [u32; 3] {
+        let Reference(value) = self;
+        [
+            (value & REF_NUMBER_0_MASK) as u32,
+            ((value & REF_NUMBER_1_MASK) | REF_THREAD) as u32,
+            (value >> 32) as u32,
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AtomTable, Fun, Lambda, Map, ProcessId, Reference, Term, test_atom as atom};
@@ -678,5 +718,17 @@ mod tests {
         assert_eq!(format!("{:?}", forty.clone()), format!("{forty:?}"));
         assert!(format!("{forty:?}").starts_with("Map([(Integer(18), Atom(\"v\")), (Integer(4), "));
         assert_ne!(forty, hash(&mut (2..=41)));
+    }
+
+    #[test]
+    fn gives_a_reference_its_erts_reference_numbers() {
+        // ERTS 29.1.1 prints the reference with the counter value
+        // 0xF55F56815BA88196 of scheduler 1 as
+        // #Ref<0.4116665985.1537736705.33174>: `#Ref<0.N2.N1.N0>`.
+        assert_eq!(
+            Reference(0xF55F_5681_5BA8_8196).numbers(),
+            [33174, 1537736705, 4116665985]
+        );
+        assert_eq!(Reference(0).numbers(), [0, 1, 0]);
     }
 }
