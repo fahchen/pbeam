@@ -31,7 +31,7 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Guardrail:** When a branch handles distinct runtime cases, inspect each case on its own line before merging.
 
-**Reference:** https://github.com/fahchen/pbeam/pull/174#discussion_r4188917531
+**Reference:** <https://github.com/fahchen/pbeam/pull/174#discussion_r4188917531>
 
 ## 20261006: Verify task references in difference records
 
