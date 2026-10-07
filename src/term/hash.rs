@@ -12,9 +12,7 @@
 //! Any other term goes through `make_internal_hash`, a MurmurHash3 variant
 //! with two 64-bit states. It reads the term with a work stack, as ERTS does,
 //! so a deep term does not recurse. An improper list mixes its tail after its
-//! cells, as the ERTS cons cells give it. A hashmap collision node mixes as
-//! the tuple of its `[Key | Value]` cells, as ERTS keeps it
-//! (`erl_map.h:205-210`). A reference hashes as an ERTS local
+//! cells, as the ERTS cons cells give it. A reference hashes as an ERTS local
 //! reference that scheduler 1 made with the PBeam reference counter as its
 //! value (`erts_set_ref_numbers` in `erl_bif_unique.h`).
 //!
@@ -99,7 +97,7 @@ enum Shape<'a> {
     /// The word of an atom, a small integer, `[]`, or a pid.
     Immediate(u64),
     /// The cells of a list that is not empty, and the tail of an improper
-    /// list.
+    /// list (`None` is `[]`).
     List(&'a [Term], Option<&'a Term>),
     Tuple(&'a [Term]),
     Map(&'a Map),
@@ -125,7 +123,7 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Pid(ProcessId(number)) => Shape::Immediate((number << IMMED1_TAG_BITS) | PID_TAG),
         Term::List(cells) if cells.is_empty() => Shape::Immediate(NIL),
         Term::List(cells) => Shape::List(cells, None),
-        Term::ImproperList(cells, tail) => Shape::List(cells, Some(&**tail)),
+        Term::ImproperList(cells, tail) => Shape::List(cells, Some(tail)),
         Term::Integer(value) => match term.small_integer() {
             Some(small) => {
                 Shape::Immediate(((small as u64) << IMMED1_TAG_BITS) | SMALL_INTEGER_TAG)
@@ -176,7 +174,7 @@ fn byte(term: &Term) -> Option<u64> {
 /// ```rust,ignore
 /// assert_eq!(mix64(0x1F), 7938660269479274665);
 /// ```
-pub(super) fn mix64(mut hash: u64) -> u64 {
+fn mix64(mut hash: u64) -> u64 {
     hash ^= hash >> 33;
     hash = hash.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
     hash ^= hash >> 33;
@@ -200,8 +198,8 @@ enum Item<'a> {
     /// A term to hash.
     Term(&'a Term),
     /// The cells of a list from one element, and the tail after them: `None`
-    /// is `[]`. A tail can be a list only in the `[Key | Value]` cell of a
-    /// collision node, when the value is a list.
+    /// is `[]`. A tail is `Some` only in the `[Key | Value]` cell of a
+    /// collision node.
     Cells(&'a [Term], Option<&'a Term>),
     /// A hashmap collision node, which ERTS hashes as the tuple of its
     /// `[Key | Value]` cells.
@@ -289,10 +287,9 @@ impl State {
         }
     }
 
-    /// Mix the leaves of a hashmap node and push its inner nodes and
-    /// collision nodes, in slot order. A leaf pushes its value and then its
-    /// key, as the `[Key | Value]` cell of an ERTS leaf does. An inner node
-    /// or a collision node mixes nothing here (`erl_term_hashing.c:1976-1983`).
+    /// Mix the leaves of a hashmap node and push its inner nodes, in slot
+    /// order. A leaf pushes its value and then its key, as the `[Key | Value]`
+    /// cell of an ERTS leaf does.
     ///
     /// # Examples
     ///
@@ -521,7 +518,7 @@ impl State {
     /// let cells = [Term::Integer(104), Term::Tuple(vec![])];
     /// assert!(matches!(state.mix_cells(&mut stack, &cells, None), Some(Item::Term(_))));
     /// assert!(matches!(stack[..], [Item::Cells([], None), Item::CdrMarker]));
-    /// // [1|{}]: the tail {} continues after the cells.
+    /// // The `[Key | Value]` cell of a collision node with the value {}.
     /// let tail = Term::Tuple(vec![]);
     /// let next = state.mix_cells(&mut stack, &[], Some(&tail));
     /// assert!(matches!(next, Some(Item::Term(Term::Tuple(_)))));
@@ -579,8 +576,9 @@ impl State {
     /// Mix a hashmap collision node as the tuple it is in ERTS: a tuple of
     /// the `[Key | Value]` cells of its pairs, in their map-key order
     /// (`erl_map.h:197`, 205-210; tuple path `erl_term_hashing.c:1878-1893`).
-    /// Each cell except the last waits on the work stack, and the last cell
-    /// continues at once.
+    /// The node itself mixes no array element mark, as a pushed inner node
+    /// (`erl_term_hashing.c:1976-1983`). Each cell except the last waits on
+    /// the work stack, and the last cell continues at once.
     ///
     /// # Examples
     ///
@@ -612,8 +610,9 @@ impl State {
 }
 
 /// Follow a list tail into its cells while no cells are left, so the next
-/// cell is the next ERTS cons cell. A tail is a list only in the
-/// `[Key | Value]` cell of a collision node, when the value is a list.
+/// cell is the next ERTS cons cell. A tail is a list that is not empty only
+/// in the `[Key | Value]` cell of a collision node, when the value is such a
+/// list or an improper list. A tail `[]` stays, and mixes as an immediate.
 ///
 /// # Examples
 ///
@@ -621,16 +620,18 @@ impl State {
 /// let value = Term::List(vec![Term::Integer(120)]);
 /// let (cells, tail) = rest(&[], Some(&value));
 /// assert!(matches!((cells, tail), ([Term::Integer(120)], None)));
+/// let value = Term::ImproperList(vec![Term::Integer(120)], Box::new(Term::Integer(1)));
+/// let (cells, tail) = rest(&[], Some(&value));
+/// assert!(matches!((cells, tail), ([Term::Integer(120)], Some(Term::Integer(1)))));
 /// let tail = Term::Tuple(vec![]);
 /// assert!(matches!(rest(&[], Some(&tail)), ([], Some(Term::Tuple(_)))));
 /// ```
 fn rest<'a>(mut cells: &'a [Term], mut tail: Option<&'a Term>) -> (&'a [Term], Option<&'a Term>) {
     while cells.is_empty() {
-        match tail {
-            Some(Term::List(next)) => (cells, tail) = (next, None),
-            Some(Term::ImproperList(next, end)) => (cells, tail) = (next, Some(&**end)),
-            _ => break,
-        }
+        let Some(Shape::List(next, end)) = tail.map(shape) else {
+            break;
+        };
+        (cells, tail) = (next, end);
     }
     (cells, tail)
 }
@@ -751,95 +752,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hashes_improper_lists_as_pinned_erts() {
-        // Each value is erts_debug:get_internal_state({internal_hash, Term}) on ERTS 29.1.1.
-        let cases = [
-            (
-                improper(vec![Term::Integer(1)], Term::Integer(2)),
-                5915944085625558568,
-            ),
-            (
-                improper(vec![Term::Integer(97), Term::Integer(98)], atom("ok")),
-                6406651010506344343,
-            ),
-            (
-                improper(vec![Term::Tuple(vec![])], atom("ok")),
-                10451236899705497869,
-            ),
-            (
-                improper(vec![Term::Integer(1)], Term::Tuple(vec![])),
-                4641139002621691555,
-            ),
-            (
-                improper(
-                    vec![improper(vec![Term::Integer(1)], Term::Integer(2))],
-                    Term::Integer(3),
-                ),
-                6434836968081835632,
-            ),
-            (
-                improper(vec![integers(&[1])], Term::Binary(vec![])),
-                465555062996238064,
-            ),
-            (
-                improper(vec![atom("ok")], atom("true")),
-                12145861372843638597,
-            ),
-            (
-                improper(
-                    vec![Term::Integer(1), Term::Tuple(vec![])],
-                    Term::Integer(2),
-                ),
-                502573382164607531,
-            ),
-        ];
-        for (term, hash) in cases {
-            assert_eq!(internal_hash(&term), hash, "{term:?}");
-        }
-    }
-
-    #[test]
-    fn hashes_collision_nodes_as_pinned_erts() {
-        // Two 8-byte strings with equal internal hashes on ERTS 29.1.1.
-        let a = integers(&[126, 114, 233, 199, 27, 172, 209, 95]);
-        let b = integers(&[57, 112, 19, 186, 16, 195, 81, 198]);
-        assert_eq!(internal_hash(&a), 16578151383281136240);
-        assert_eq!(internal_hash(&b), 16578151383281136240);
-        // maps:from_list([{A, VA}, {B, VB} | [{I, I} || I <- lists:seq(1, 31)]]) has one
-        // collision node (erts_debug:map_info/1). Each value is
-        // erts_debug:get_internal_state({internal_hash, Map}) on ERTS 29.1.1.
-        let with = |va: Term, vb: Term| {
-            map([(a.clone(), va), (b.clone(), vb)]
-                .into_iter()
-                .chain((1..=31).map(|key| (Term::Integer(key), Term::Integer(key)))))
-        };
-        let cases = [
-            (
-                with(Term::Integer(100), Term::Integer(200)),
-                9593933779384815641,
-            ),
-            // A list value continues the [Key | Value] cell as more cells.
-            (
-                with(
-                    integers(b"xy".map(i64::from).as_slice()),
-                    Term::List(vec![]),
-                ),
-                2185849235149492526,
-            ),
-            (
-                with(
-                    improper(vec![Term::Integer(1)], Term::Integer(2)),
-                    Term::Tuple(vec![]),
-                ),
-                243852246011044368,
-            ),
-        ];
-        for (term, hash) in cases {
-            assert_eq!(internal_hash(&term), hash, "{term:?}");
-        }
-    }
-
     /// Return a local fun of `lists` with a fun entry and free variables.
     fn local(index: i32, old_unique: i32, arity: u32, free: Vec<Term>) -> Term {
         let module = Atom::from_static("lists").unwrap();
@@ -907,6 +819,106 @@ mod tests {
             for other in &funs[index + 1..] {
                 assert_ne!(internal_hash(term), internal_hash(other), "{term:?}");
             }
+        }
+    }
+
+    #[test]
+    fn hashes_improper_lists_as_pinned_erts() {
+        // Each value is erts_debug:get_internal_state({internal_hash, Term}) on ERTS 29.1.1.
+        let cases = [
+            (
+                improper(vec![Term::Integer(1)], Term::Integer(2)),
+                5915944085625558568,
+            ),
+            (
+                improper(vec![Term::Integer(97), Term::Integer(98)], atom("ok")),
+                6406651010506344343,
+            ),
+            (
+                improper(vec![Term::Tuple(vec![])], atom("ok")),
+                10451236899705497869,
+            ),
+            (
+                improper(vec![Term::Integer(1)], Term::Tuple(vec![])),
+                4641139002621691555,
+            ),
+            (
+                improper(
+                    vec![improper(vec![Term::Integer(1)], Term::Integer(2))],
+                    Term::Integer(3),
+                ),
+                6434836968081835632,
+            ),
+            (
+                improper(vec![integers(&[1])], Term::Binary(vec![])),
+                465555062996238064,
+            ),
+            (
+                improper(vec![atom("ok")], atom("true")),
+                12145861372843638597,
+            ),
+            (
+                improper(
+                    vec![Term::Integer(1), Term::Tuple(vec![])],
+                    Term::Integer(2),
+                ),
+                502573382164607531,
+            ),
+        ];
+        for (term, hash) in cases {
+            assert_eq!(internal_hash(&term), hash, "{term:?}");
+        }
+    }
+
+    #[test]
+    fn hashes_collision_nodes_as_pinned_erts() {
+        // The keys of each pair have the same internal hash on pinned ERTS
+        // 29.1.1, so each map has one collision node (`erts_debug:map_info/1`
+        // gives `{collisions,1,...}`). ERTS hashes the node as the tuple of
+        // its `[Key | Value]` cells (erl_map.h:197, 205-210).
+        let a = integers(&[126, 114, 233, 199, 27, 172, 209, 95]);
+        let b = integers(&[57, 112, 19, 186, 16, 195, 81, 198]);
+        let c = integers(&[161, 92, 65, 50, 231, 24, 153, 137]);
+        let d = integers(&[246, 157, 203, 77, 19, 254, 19, 93]);
+        assert_eq!(internal_hash(&a), 16578151383281136240);
+        assert_eq!(internal_hash(&b), 16578151383281136240);
+        assert_eq!(internal_hash(&c), 10130931470384579971);
+        assert_eq!(internal_hash(&d), 10130931470384579971);
+        let with = |first: (Term, Term), second: (Term, Term)| {
+            map([first, second]
+                .into_iter()
+                .chain((1..=31).map(|key| (Term::Integer(key), Term::Integer(key)))))
+        };
+        let cases = [
+            (
+                with(
+                    (a.clone(), Term::Integer(100)),
+                    (b.clone(), Term::Integer(200)),
+                ),
+                9593933779384815641,
+            ),
+            // An improper list value continues the [Key | Value] cell as more cells.
+            (
+                with(
+                    (
+                        a.clone(),
+                        improper(vec![Term::Integer(1)], Term::Integer(2)),
+                    ),
+                    (b.clone(), Term::Tuple(vec![])),
+                ),
+                243852246011044368,
+            ),
+            (
+                with((a, integers(&[120, 121])), (b, Term::List(vec![]))),
+                2185849235149492526,
+            ),
+            (
+                with((c, Term::Integer(1000)), (d, Term::Tuple(vec![]))),
+                3981912085379260197,
+            ),
+        ];
+        for (term, hash) in cases {
+            assert_eq!(internal_hash(&term), hash);
         }
     }
 
