@@ -99,6 +99,4 @@ Treat a broken runtime invariant as an explicit failure. Do not skip missing ent
 
 ## Public values can violate documented canonical forms
 
-When a public type cannot enforce a canonical representation, document it as a
-runtime-produced form, not as a type invariant. State that callers must
-preserve the form when they pass values into runtime operations.
+When a public type cannot enforce a canonical representation, document it as a runtime-produced form, not as a type invariant. State that callers must preserve the form when they pass values into runtime operations.
