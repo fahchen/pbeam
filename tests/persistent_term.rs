@@ -85,7 +85,7 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
          28 => 28,20 => 20,6 => 6,11 => 11,17 => 17,24 => 24,14 => 14,33 => 33,3 => 3,16 => 16,\
          30 => 30,21 => 21,5 => 5,27 => 27,26 => 26,22 => 22},13},{{ok},5},{[97,98,99],7},\
          {<<48,49,50,51,52,53,54,55,56,57,97,98,99,100,101,102,103>>,6},{#{1 => <<>>,ok => []},12},\
-         {[ok,{}],10},{1152921504606846976,8},{true,1},{7,4},{-1,11},{ok,30}]}\n"
+         {[ok,{}],10},{1152921504606846976,8},{[1|2],14},{true,1},{7,4},{-1,11},{ok,30}]}\n"
     );
 
     let program = BeamProgram::load(&[PERSISTENT_TERM_PROBE]).unwrap();
@@ -141,6 +141,10 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
                 pair(small_map, 12),
                 pair(Term::List(vec![atom("ok"), Term::Tuple(vec![])]), 10),
                 pair(Term::Integer(1 << 60), 8),
+                pair(
+                    Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Integer(2))),
+                    14,
+                ),
                 pair(atom("true"), 1),
                 pair(Term::Integer(7), 4),
                 pair(Term::Integer(-1), 11),
