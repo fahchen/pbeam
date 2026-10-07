@@ -3,22 +3,11 @@
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
+use crate::runtime::local_node;
+use crate::runtime::scheduler::{AliasMode, MonitorOptions, MonitorTarget};
+use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use crate::term::{Fun, MAX_ATOM_CHARACTERS};
-
-/// Return the node of a pid or of the calling process.
-///
-/// PBeam is a local node that is not distributed, so every pid is local and
-/// its node is `nonode@nohost`, as on ERTS (`dist.c`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(local_node(), Term::static_atom("nonode@nohost"));
-/// ```
-pub(super) fn local_node() -> Term {
-    Term::static_atom("nonode@nohost")
-}
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
 /// gives a runtime error.
@@ -39,34 +28,391 @@ pub(super) fn node(term: &Term) -> Result<BifResult, BeamError> {
     }
 }
 
-/// Run `erlang:process_flag(trap_exit, Value)`: set the `trap_exit` flag of
-/// the calling process and return the old flag. The table pattern accepts
-/// only `true` and `false` as the value.
+/// The flags of ERTS `process_flag_2` (`bif.c:2028-2237`) that need a
+/// subsystem that PBeam does not have: distribution, the error handler,
+/// priorities, schedulers, the garbage collector, tracing, and saved calls.
+/// The tuple `{monitor_nodes, Options}` is also such a flag.
+const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
+    "async_dist",
+    "error_handler",
+    "priority",
+    "scheduler",
+    "fullsweep_after",
+    "min_heap_size",
+    "min_bin_vheap_size",
+    "max_heap_size",
+    "sensitive",
+    "monitor_nodes",
+    "save_calls",
+];
+
+/// Run `erlang:process_flag(Flag, Value)` as ERTS `process_flag_2`
+/// (`bif.c:2028-2237`) does for the flags `trap_exit` and
+/// `message_queue_data`: set the flag of the calling process and return the
+/// old value. `trap_exit` takes `true` or `false`. `message_queue_data`
+/// takes `on_heap` or `off_heap` (`erts_change_message_queue_management`,
+/// `erl_message.c:1022-1100`), and its start value is `on_heap`. Each other
+/// value raises `badarg`. A flag that ERTS does not know raises `badarg`,
+/// also a tuple that is not `{monitor_nodes, Options}`.
+///
+/// Each flag of `UNSUPPORTED_PROCESS_FLAGS` except `max_heap_size` first
+/// checks its value as ERTS does, and raises `badarg` for a value that is
+/// not valid: `async_dist`, `sensitive`, and `monitor_nodes` take a boolean
+/// (`erts_monitor_nodes`, `dist.c:6740-6741`), `error_handler` takes an
+/// atom, `priority` takes `low`, `normal`, `high`, or `max`
+/// (`erts_set_process_priority`, `erl_process.c:9460-9466`), `save_calls`
+/// takes a small integer from 0 to 10000 (`process_flag_aux`,
+/// `bif.c:1907-1915`), and `scheduler`, `fullsweep_after`, `min_heap_size`,
+/// and `min_bin_vheap_size` take a small integer of 0 or more.
+///
+/// PBeam has no process heap, so `message_queue_data` does not change where
+/// the messages are kept.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let old = trap_exit(&mut context, &true_atom)?;
+/// let old = process_flag(&mut context, &Term::static_atom("trap_exit"), &Term::static_atom("true"))?;
 /// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// let old = process_flag(&mut context, &Term::static_atom("message_queue_data"), &Term::static_atom("off_heap"))?;
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "on_heap"));
+/// assert!(matches!(process_flag(&mut context, &foo, &Term::static_atom("true"))?, BifResult::Raise { .. }));
+/// assert!(process_flag(&mut context, &Term::static_atom("priority"), &Term::static_atom("high")).is_err());
 /// ```
-pub(super) fn trap_exit(
+///
+/// # Errors
+///
+/// Each flag of `UNSUPPORTED_PROCESS_FLAGS` gives a runtime error for a
+/// value that passes the check, and `max_heap_size` and
+/// `{monitor_nodes, Options}` give it for each value. ERTS raises `badarg`
+/// for a `scheduler` value above the scheduler count, which PBeam does not
+/// model, and PBeam gives the runtime error.
+pub(super) fn process_flag(
     context: &mut BifContext<'_>,
-    value: &Atom,
+    flag: &Term,
+    value: &Term,
 ) -> Result<BifResult, BeamError> {
     let process = context.scheduler.current_process_mut();
-    let old = Term::static_atom(&process.trap_exit.to_string());
-    process.trap_exit = value.name() == "true";
-    Ok(Value(old))
+    let term = value;
+    let value = match value {
+        Term::Atom(value) => Some(value.name()),
+        _ => None,
+    };
+    Ok(match flag {
+        Term::Atom(flag) if flag.name() == "trap_exit" => {
+            let old = Term::static_atom(&process.trap_exit.to_string());
+            match value {
+                Some("true") => process.trap_exit = true,
+                Some("false") => process.trap_exit = false,
+                _ => return Ok(BifResult::badarg()),
+            }
+            Value(old)
+        }
+        Term::Atom(flag) if flag.name() == "message_queue_data" => {
+            let old = Term::static_atom(if process.off_heap_message_queue {
+                "off_heap"
+            } else {
+                "on_heap"
+            });
+            match value {
+                Some("on_heap") => process.off_heap_message_queue = false,
+                Some("off_heap") => process.off_heap_message_queue = true,
+                _ => return Ok(BifResult::badarg()),
+            }
+            Value(old)
+        }
+        Term::Atom(flag) if UNSUPPORTED_PROCESS_FLAGS.contains(&flag.name()) => {
+            let small = term.small_integer();
+            let valid = match flag.name() {
+                "async_dist" | "sensitive" | "monitor_nodes" => {
+                    matches!(value, Some("true" | "false"))
+                }
+                "error_handler" => value.is_some(),
+                "priority" => matches!(value, Some("low" | "normal" | "high" | "max")),
+                "save_calls" => small.is_some_and(|calls| (0..=10_000).contains(&calls)),
+                "max_heap_size" => true,
+                _ => small.is_some_and(|size| size >= 0),
+            };
+            if !valid {
+                return Ok(BifResult::badarg());
+            }
+            return Err(error(format!(
+                "unsupported erlang:process_flag/2 flag {}",
+                flag.name()
+            )));
+        }
+        Term::Tuple(elements) if matches!(elements.as_slice(), [Term::Atom(tag), _] if tag.name() == "monitor_nodes") =>
+        {
+            return Err(error(
+                "unsupported erlang:process_flag/2 flag {monitor_nodes, Options}",
+            ));
+        }
+        _ => BifResult::badarg(),
+    })
+}
+
+/// The items of ERTS `system_flag_2` (`bif.c:4972-5304`) that need a
+/// subsystem that PBeam does not have: schedulers, the garbage collector,
+/// stack traces, tracing, the time offset, statistics, the CPU topology,
+/// and the memory allocators.
+const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
+    "multi_scheduling",
+    "schedulers_online",
+    "fullsweep_after",
+    "min_heap_size",
+    "min_bin_vheap_size",
+    "max_heap_size",
+    "backtrace_depth",
+    "trace_control_word",
+    "sequential_tracer",
+    "reset_seq_trace",
+    "scheduler_wall_time",
+    "dirty_cpu_schedulers_online",
+    "microstate_accounting",
+    "outstanding_system_requests_limit",
+    "scheduling_statistics",
+    "internal_cpu_topology",
+    "cpu_topology",
+    "scheduler_bind_type",
+    "erts_alloc",
+];
+
+/// Run `erlang:system_flag(Item, Value)` as ERTS `system_flag_2`
+/// (`bif.c:4972-5304`) does for the items `system_logger` and
+/// `debug_flags`. `system_logger` takes `logger`, `undefined`, or a local
+/// pid, sets the node value, and returns the old value
+/// (`erts_set_system_logger`, `erl_trace.c:2486-2491`). The start value is
+/// `logger` (`erl_trace.c:339`). Each other value raises `badarg`.
+/// `debug_flags` returns `true` for each value. An item that ERTS does not
+/// know raises `badarg`, also `time_offset` with a value that is not
+/// `finalize`. Each item of `UNSUPPORTED_SYSTEM_FLAGS` first checks its
+/// value as ERTS does (`unsupported_system_flag_value`), and raises
+/// `badarg` for a value that is not valid.
+///
+/// PBeam writes no error report (row "Error report" in
+/// `docs/erts-differences.md`), so the system logger value has no other
+/// effect.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let old = system_flag(&mut context, &Term::static_atom("system_logger"), &Term::Pid(pid))?;
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "logger"));
+/// assert!(matches!(system_flag(&mut context, &foo, &Term::Integer(1))?, BifResult::Raise { .. }));
+/// assert!(system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::Integer(8)).is_err());
+/// let depth = system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::static_atom("foo"))?;
+/// assert!(matches!(depth, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Each item of `UNSUPPORTED_SYSTEM_FLAGS` with a value that passes the
+/// check, and `time_offset` with `finalize`, give a runtime error.
+pub(super) fn system_flag(
+    context: &mut BifContext<'_>,
+    item: &Term,
+    value: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Atom(item) = item else {
+        return Ok(BifResult::badarg());
+    };
+    let logger = match value {
+        Term::Pid(_) => true,
+        Term::Atom(logger) => matches!(logger.name(), "logger" | "undefined"),
+        _ => false,
+    };
+    Ok(match (item.name(), value) {
+        ("system_logger", _) if logger => Value(std::mem::replace(
+            &mut context.scheduler.system_logger,
+            value.clone(),
+        )),
+        ("debug_flags", _) => Value(Term::static_atom("true")),
+        ("time_offset", Term::Atom(finalize)) if finalize.name() == "finalize" => {
+            return Err(error("unsupported erlang:system_flag/2 item time_offset"));
+        }
+        (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
+            if !unsupported_system_flag_value(name, value) {
+                return Ok(BifResult::badarg());
+            }
+            return Err(error(format!(
+                "unsupported erlang:system_flag/2 item {name}"
+            )));
+        }
+        _ => BifResult::badarg(),
+    })
+}
+
+/// Tell whether ERTS `system_flag_2` (`bif.c:4972-5304`) accepts `value` for
+/// the item `name` of `UNSUPPORTED_SYSTEM_FLAGS` before it uses the missing
+/// subsystem. ERTS raises `badarg` for a value that this check rejects:
+///
+/// - `multi_scheduling` takes `block`, `unblock`, `block_normal`, or
+///   `unblock_normal`.
+/// - `schedulers_online` and `dirty_cpu_schedulers_online` take a small
+///   integer of 1 or more (`erts_set_schedulers_online`,
+///   `erl_process.c:8241-8242`).
+/// - `fullsweep_after`, `min_heap_size`, `min_bin_vheap_size`, and
+///   `backtrace_depth` take a small integer of 0 or more.
+/// - `trace_control_word` takes an integer from 0 to `u32::MAX`
+///   (`db_set_trace_control_word`, `erl_db_util.c:1091-1103`).
+/// - `sequential_tracer` takes `false`, a pid, or `{Module, State}` with an
+///   atom `Module` (`erts_term_to_tracer`, `erl_trace.c:3090-3129`).
+/// - `scheduler_wall_time` takes `true` or `false`, and
+///   `microstate_accounting` takes `true`, `false`, or `reset`.
+/// - `outstanding_system_requests_limit` takes an integer from 1 to
+///   `2^27 - 1` (`erts_set_outstanding_system_requests_limit`,
+///   `beam_bif_load.c:115-126`).
+/// - `scheduling_statistics` takes `disable`, `enable`, or `clear`.
+/// - `internal_cpu_topology` takes `undefined` or a non-empty proper list of
+///   tuples `{cpu, Node, Processor, ProcessorNode, Core, Thread, Logical}`
+///   (`erts_set_cpu_topology`, `erl_cpu_topology.c:1348-1400`).
+/// - `erts_alloc` takes `{Allocator, Parameter, Value}` with two atoms and
+///   an integer (`erts_alloc_set_dyn_param`, `erl_alloc.c:3445-3462`).
+///
+/// `max_heap_size`, `reset_seq_trace`, `cpu_topology`, and
+/// `scheduler_bind_type` accept each value here. ERTS also rejects a value
+/// that this check accepts when the value needs the state of the missing
+/// subsystem: the scheduler count, the tracer module, the allocator names,
+/// the CPU topology checks, the minimum heap size, and the CPU binding
+/// support of the host.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!unsupported_system_flag_value("backtrace_depth", &Term::static_atom("foo")));
+/// assert!(unsupported_system_flag_value("backtrace_depth", &Term::Integer(8)));
+/// assert!(!unsupported_system_flag_value("schedulers_online", &Term::Integer(0)));
+/// ```
+fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
+    let atom = match value {
+        Term::Atom(atom) => Some(atom.name()),
+        _ => None,
+    };
+    let integer = match value {
+        Term::Integer(integer) => Some(*integer),
+        _ => None,
+    };
+    let small = value.small_integer();
+    let cpu = |cpu: &Term| match cpu {
+        Term::Tuple(elements) => {
+            matches!(elements.as_slice(), [Term::Atom(tag), _, _, _, _, _, _] if tag.name() == "cpu")
+        }
+        _ => false,
+    };
+    match name {
+        "multi_scheduling" => matches!(
+            atom,
+            Some("block" | "unblock" | "block_normal" | "unblock_normal")
+        ),
+        "schedulers_online" | "dirty_cpu_schedulers_online" => {
+            small.is_some_and(|count| count >= 1)
+        }
+        "fullsweep_after" | "min_heap_size" | "min_bin_vheap_size" | "backtrace_depth" => {
+            small.is_some_and(|size| size >= 0)
+        }
+        "trace_control_word" => integer.is_some_and(|word| u32::try_from(word).is_ok()),
+        "sequential_tracer" => match value {
+            Term::Pid(_) => true,
+            Term::Tuple(elements) => matches!(elements.as_slice(), [Term::Atom(_), _]),
+            _ => atom == Some("false"),
+        },
+        "scheduler_wall_time" => matches!(atom, Some("true" | "false")),
+        "microstate_accounting" => matches!(atom, Some("true" | "false" | "reset")),
+        "outstanding_system_requests_limit" => {
+            integer.is_some_and(|limit| (1..1 << 27).contains(&limit))
+        }
+        "scheduling_statistics" => matches!(atom, Some("disable" | "enable" | "clear")),
+        "internal_cpu_topology" => match value {
+            Term::List(cpus) => !cpus.is_empty() && cpus.iter().all(cpu),
+            _ => atom == Some("undefined"),
+        },
+        "erts_alloc" => match value {
+            Term::Tuple(elements) => matches!(
+                elements.as_slice(),
+                [Term::Atom(_), Term::Atom(_), Term::Integer(_)]
+            ),
+            _ => false,
+        },
+        _ => true,
+    }
+}
+
+/// Run `erlang:raise(Class, Reason, Stacktrace)` as ERTS `raise_3`
+/// (`bif.c:1549-1692`) does: raise an exception of class `error` or `exit`
+/// with `Reason`. A class that is not `error`, `exit`, or `throw`, or a
+/// stack trace that is not valid, makes the BIF return the atom `badarg`; it
+/// does not raise. A valid stack trace is a proper list of `{Fun, Args}`,
+/// `{Fun, Args, Location}`, `{M, F, A}`, or `{M, F, A, Location}`, where
+/// `Fun` is a fun, `M` and `F` are atoms, and `Location` is a list.
+///
+/// PBeam records no stack frames (row "Exception stack trace" in
+/// `docs/erts-differences.md`), so the exception gets the stack trace `[]`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = raise(&Term::static_atom("exit"), &reason, &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Raise { class: ExceptionClass::Exit, .. }));
+/// let result = raise(&Term::static_atom("foo"), &reason, &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "badarg"));
+/// assert!(raise(&Term::static_atom("throw"), &reason, &Term::List(vec![])).is_err());
+/// ```
+///
+/// # Errors
+///
+/// The class `throw` with a valid stack trace gives a runtime error: PBeam
+/// does not implement the `throw` class.
+pub(super) fn raise(
+    class: &Term,
+    reason: &Term,
+    stacktrace: &Term,
+) -> Result<BifResult, BeamError> {
+    let class = match class {
+        Term::Atom(class) if class.name() == "error" => Some(ExceptionClass::Error),
+        Term::Atom(class) if class.name() == "exit" => Some(ExceptionClass::Exit),
+        Term::Atom(class) if class.name() == "throw" => None,
+        _ => return Ok(Value(Term::static_atom("badarg"))),
+    };
+    let location = |location: &Term| matches!(location, Term::List(_) | Term::ImproperList(..));
+    let frame = |frame: &Term| match frame {
+        Term::Tuple(elements) => match elements.as_slice() {
+            [Term::Fun(_), _] => true,
+            [Term::Fun(_), _, place] => location(place),
+            [Term::Atom(_), Term::Atom(_), _] => true,
+            [Term::Atom(_), Term::Atom(_), _, place] => location(place),
+            _ => false,
+        },
+        _ => false,
+    };
+    let Term::List(frames) = stacktrace else {
+        return Ok(Value(Term::static_atom("badarg")));
+    };
+    if !frames.iter().all(frame) {
+        return Ok(Value(Term::static_atom("badarg")));
+    }
+    let Some(class) = class else {
+        return Err(error(
+            "unsupported erlang:raise/3 class throw: the throw class is not implemented",
+        ));
+    };
+    Ok(Raise {
+        class,
+        reason: reason.clone(),
+    })
 }
 
 /// Run `erlang:exit(Id, Reason)`: send an exit signal to a local pid, as
 /// ERTS `send_exit_signal_bif` (`bif.c:1750-1772`) does, and return `true`.
-/// A signal that ends the caller gives [`BifResult::Exited`] instead. A
-/// reference gives `true` and sends nothing: PBeam has no process alias, so
-/// `erts_get_pid_of_ref` gives `undefined` (`erl_bif_unique.h:279-286`), and
-/// `send_gen_exit_signal` drops the signal (`erl_proc_sig_queue.c:1650-1655`).
-/// The reference of a NIF resource also gives `true`: in ERTS it is a magic
-/// reference, and `is_internal_ref` is true for it (`erl_term.h:1064-1065`).
+/// A signal that ends the caller gives [`BifResult::Exited`] instead.
+///
+/// A reference sends the signal to the owner of its active alias, with the
+/// caller as the sender (`erl_proc_sig_queue.c:1650-1658`). A reference that
+/// is not an active alias gives `true` and sends nothing: the owner ignores
+/// the signal (`erl_proc_sig_queue.c:4659-4672`). A reference is never
+/// `exit2_suicide`, so `normal` through the alias of the caller is ignored
+/// without `trap_exit`. The reference of a NIF resource also gives `true`:
+/// in ERTS it is a magic reference, and `is_internal_ref` is true for it
+/// (`erl_term.h:1064-1065`).
+///
 /// Each other term raises `error:badarg` (`bif.c:1864-1866`). PBeam cannot
 /// represent a port or a remote pid.
 ///
@@ -83,22 +429,39 @@ pub(super) fn trap_exit(
 /// # Errors
 ///
 /// An abnormal exit of the receiver to a linked process that does not trap
-/// exits is not supported.
+/// exits is not supported. An exit signal through an alias of the caller
+/// that ends the caller is not supported: ERTS ends the caller only when
+/// it next handles signals, after `exit/2` returns `true`.
 pub(super) fn exit(
     context: &mut BifContext<'_>,
     id: &Term,
     reason: &Term,
 ) -> Result<BifResult, BeamError> {
-    match id {
-        Term::Pid(target) => Ok(
-            match context.scheduler.send_exit(*target, reason.clone())? {
-                Some(reason) => BifResult::Exited(reason),
-                None => Value(Term::static_atom("true")),
-            },
-        ),
-        Term::Reference(_) => Ok(Value(Term::static_atom("true"))),
-        _ => Ok(BifResult::badarg()),
-    }
+    let target = match id {
+        Term::Pid(target) => *target,
+        Term::Reference(reference) => {
+            let Some(owner) = context.scheduler.alias_owner(*reference) else {
+                return Ok(Value(Term::static_atom("true")));
+            };
+            let caller = context.scheduler.current_process_mut();
+            let trapped = caller.trap_exit && *reason != Term::static_atom("kill");
+            if owner == caller.id && !trapped {
+                if !caller.trap_exit && *reason == Term::static_atom("normal") {
+                    return Ok(Value(Term::static_atom("true")));
+                }
+                // ponytail: no signal queue yet (#10); ERTS ends the caller at its next signal handling.
+                return Err(error(
+                    "unsupported exit signal through an alias of the caller",
+                ));
+            }
+            owner
+        }
+        _ => return Ok(BifResult::badarg()),
+    };
+    Ok(match context.scheduler.send_exit(target, reason.clone())? {
+        Some(reason) => BifResult::Exited(reason),
+        None => Value(Term::static_atom("true")),
+    })
 }
 
 /// Run `erlang:demonitor(Reference, Options)` as ERTS `demonitor_2`
@@ -107,6 +470,8 @@ pub(super) fn exit(
 /// then a `Reference` that is not a reference raises `badarg`. The checks
 /// come before the monitor is removed, so a call that raises leaves the
 /// monitor active.
+/// `erlang:demonitor/1` passes `[]`, as ERTS `demonitor_1` (bif.c) does,
+/// so it returns `true`.
 ///
 /// The result is `true`. With `info`, it is `false` when no active monitor
 /// was removed. With `flush` and no active monitor removed, the DOWN
@@ -166,8 +531,131 @@ pub(super) fn demonitor(
     }
 }
 
+/// Run `erlang:monitor(Type, Target, Options)` as ERTS `monitor_3`
+/// (`bif.c:988-997`) and `monitor` (`bif.c:758-981`) do;
+/// `erlang:monitor/2` passes `[]` as `monitor_2` (`bif.c:983-986`) does.
+/// The options come first (see [`monitor_options`]). The type `process`
+/// accepts a pid, a registered name, and `{Name, nonode@nohost}`; the type
+/// `port` accepts a registered name and `{Name, nonode@nohost}`. PBeam is a
+/// node that is not alive, so `{Name, Node}` with another node raises
+/// `badarg` (`bif.c:881-882`). Each other target, and each other type,
+/// raises `badarg`. A monitor of the caller creates no monitor and no
+/// alias, and each port name gives the `noproc` `DOWN` message (see
+/// [`Scheduler::monitor`]).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = monitor(&mut context, &process, &Term::Pid(child), &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
+/// assert!(matches!(monitor(&mut context, &port, &Term::Pid(child), &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// assert!(matches!(monitor(&mut context, &process, &Term::Pid(child), &x)?, BifResult::Raise { .. }));
+/// assert!(monitor(&mut context, &time_offset, &clock_service, &Term::List(vec![])).is_err());
+/// ```
+///
+/// # Errors
+///
+/// A `time_offset` monitor of `clock_service`, and the `priority` option
+/// of a monitor that is not of the caller, are not supported.
+pub(super) fn monitor(
+    context: &mut BifContext<'_>,
+    kind: &Term,
+    target: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(options) = monitor_options(options) else {
+        return Ok(BifResult::badarg());
+    };
+    let Term::Atom(kind) = kind else {
+        return Ok(BifResult::badarg());
+    };
+    let target = match (kind.name(), target) {
+        ("process", Term::Pid(id)) => Some(MonitorTarget::Process(*id)),
+        ("process", target) => local_name(target).map(MonitorTarget::ProcessName),
+        ("port", target) => local_name(target).map(MonitorTarget::PortName),
+        ("time_offset", Term::Atom(service)) if service.name() == "clock_service" => {
+            // ponytail: no time offset service yet; add it when a measured path monitors it.
+            return Err(error("unsupported time_offset monitor"));
+        }
+        _ => None,
+    };
+    let Some(target) = target else {
+        return Ok(BifResult::badarg());
+    };
+    let reference = context.scheduler.monitor(target, options)?;
+    Ok(Value(Term::Reference(reference)))
+}
+
+/// Read the options of `erlang:monitor/3` as ERTS `erts_monitor_opts`
+/// (`bif.c:701-756`) does. The options are a proper list of `priority`,
+/// `{alias, explicit_unalias | demonitor | reply_demonitor}`, and
+/// `{tag, Tag}`; the last `alias` and the last `tag` option win. Return
+/// `None` for each other element and for a tail that is not `[]`, which
+/// `monitor_3` rejects with `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let alias = Term::Tuple(vec![Term::static_atom("alias"), Term::static_atom("demonitor")]);
+/// let options = monitor_options(&Term::List(vec![alias])).unwrap();
+/// assert_eq!(options.alias, Some(AliasMode::Demonitor));
+/// assert!(monitor_options(&Term::static_atom("x")).is_none());
+/// ```
+fn monitor_options(options: &Term) -> Option<MonitorOptions> {
+    let Term::List(options) = options else {
+        return None;
+    };
+    let mut result = MonitorOptions {
+        alias: None,
+        tag: Term::static_atom("DOWN"),
+        priority: false,
+    };
+    for option in options {
+        match option {
+            Term::Atom(option) if option.name() == "priority" => result.priority = true,
+            Term::Tuple(pair) => match pair.as_slice() {
+                [Term::Atom(key), Term::Atom(mode)] if key.name() == "alias" => {
+                    result.alias = Some(match mode.name() {
+                        "explicit_unalias" => AliasMode::ExplicitUnalias,
+                        "demonitor" => AliasMode::Demonitor,
+                        "reply_demonitor" => AliasMode::ReplyDemonitor,
+                        _ => return None,
+                    });
+                }
+                [Term::Atom(key), tag] if key.name() == "tag" => result.tag = tag.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    Some(result)
+}
+
+/// Return the name of a local monitor target by name: an atom, or
+/// `{Name, nonode@nohost}` with an atom name. Return `None` for each other
+/// term, which `monitor` (`bif.c:875-896`, `938-950`) rejects with `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(local_name(&Term::Tuple(vec![name.clone(), local_node()])), Some(atom));
+/// assert_eq!(local_name(&Term::Integer(1)), None);
+/// ```
+fn local_name(target: &Term) -> Option<Atom> {
+    match target {
+        Term::Atom(name) => Some(name.clone()),
+        Term::Tuple(pair) => match pair.as_slice() {
+            [Term::Atom(name), node] if *node == local_node() => Some(name.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Run `erlang:spawn/3`: start a process that runs `module:function` with the
 /// elements of `arguments`, as ERTS `spawn_3` does with default spawn options.
+/// A `module` or `function` that is not an atom, and `arguments` that are not
+/// a proper list, raise `badarg`.
 ///
 /// # Examples
 ///
@@ -177,8 +665,8 @@ pub(super) fn demonitor(
 /// ```
 pub(super) fn spawn(
     context: &mut BifContext<'_>,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
 ) -> Result<BifResult, BeamError> {
     create_process(
@@ -189,7 +677,6 @@ pub(super) fn spawn(
         arguments,
         SpawnOptions::default(),
     )
-    .map(Value)
 }
 
 /// Run `erlang:spawn_link/3`: start a linked process, as ERTS `spawn_link_3`
@@ -203,8 +690,8 @@ pub(super) fn spawn(
 /// ```
 pub(super) fn spawn_link(
     context: &mut BifContext<'_>,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
 ) -> Result<BifResult, BeamError> {
     let options = SpawnOptions {
@@ -219,35 +706,52 @@ pub(super) fn spawn_link(
         arguments,
         options,
     )
-    .map(Value)
 }
 
 /// Run `erlang:spawn_opt/4`, which `erlang:spawn_monitor/3` in `erlang.beam`
 /// calls with the options `[monitor]`: start a process with the spawn
 /// options in `options`, as ERTS `spawn_opt_4` (`bif.c`) does. The option
 /// `link` links the new process and `monitor` monitors it. With `monitor`
-/// the result is `{Pid, Reference}`, else `Pid`. Any other option gives a
-/// runtime error.
+/// the result is `{Pid, Reference}`, else `Pid`. The option
+/// `{message_queue_data, on_heap | off_heap}` sets the start value of the
+/// `message_queue_data` flag of the new process, and the last such option
+/// wins (`erl_process.c:12305-12319`). `options` that are not a proper list,
+/// and a `message_queue_data` option with another value, raise `badarg`, as
+/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) does. Any other
+/// option gives a runtime error. After the options, a `module` or
+/// `function` that is not an atom raises `badarg`, as in `spawn/3`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &[monitor])?;
+/// let result = spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &Term::List(vec![monitor]))?;
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
-/// assert!(spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &[priority]).is_err());
+/// assert!(matches!(spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &link_x)?, BifResult::Raise { .. }));
+/// assert!(spawn_opt(&mut context, &module, &function, &Term::List(vec![]), &Term::List(vec![priority])).is_err());
 /// ```
 pub(super) fn spawn_opt(
     context: &mut BifContext<'_>,
-    module: &Atom,
-    function: &Atom,
+    module: &Term,
+    function: &Term,
     arguments: &Term,
-    options: &[Term],
+    options: &Term,
 ) -> Result<BifResult, BeamError> {
+    let Term::List(options) = options else {
+        return Ok(BifResult::badarg());
+    };
     let mut spawn_options = SpawnOptions::default();
     for option in options {
         match option {
             Term::Atom(option) if option.name() == "link" => spawn_options.link = true,
             Term::Atom(option) if option.name() == "monitor" => spawn_options.monitor = true,
+            Term::Tuple(option) if matches!(option.as_slice(), [Term::Atom(name), _] if name.name() == "message_queue_data") =>
+            {
+                spawn_options.off_heap_message_queue = match &option[1] {
+                    Term::Atom(value) if value.name() == "on_heap" => false,
+                    Term::Atom(value) if value.name() == "off_heap" => true,
+                    _ => return Ok(BifResult::badarg()),
+                };
+            }
             // ponytail: ERTS accepts more options; see "Spawn options" in docs/erts-differences.md.
             _ => return Err(error(format!("unsupported spawn option {option:?}"))),
         }
@@ -260,7 +764,6 @@ pub(super) fn spawn_opt(
         arguments,
         spawn_options,
     )
-    .map(Value)
 }
 
 /// Run `erlang:put/2`: set the value of `key` in the process dictionary of
@@ -312,35 +815,50 @@ pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
     )
 }
 
-/// Run `erlang:'++'/2`: append `right` to the proper list `left`. With an
-/// empty `left`, return `right` itself, which can be any term, as ERTS
-/// `append` (`erl_bif_lists.c`) does. A `left` that is not a list raises
-/// `badarg`. A non-empty `left` with a `right` that is not a list gives a
-/// runtime error, because PBeam has no improper lists. ERTS returns the
-/// improper list `[1 | x]` for `[1] ++ x`.
+/// Run `erlang:'++'/2`: append `right` to the proper list `left`, as ERTS
+/// `append` (`erl_bif_lists.c:262-338`) does. `right` can be any term, so
+/// `[1] ++ x` gives the improper list `[1|x]`, and an empty `left` gives
+/// `right` itself. A `left` that is not a proper list raises `badarg`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let x = Term::static_atom("ok");
-/// assert!(matches!(append(&Term::List(vec![]), &x)?, BifResult::Value(term) if term == x));
-/// let list = append(&Term::List(vec![Term::Integer(1)]), &Term::List(vec![Term::Integer(2)]))?;
-/// assert!(matches!(list, BifResult::Value(Term::List(elements)) if elements.len() == 2));
-/// assert!(matches!(append(&x, &Term::List(vec![]))?, BifResult::Raise { .. }));
-/// assert!(append(&Term::List(vec![Term::Integer(1)]), &x).is_err());
+/// let x = Term::static_atom("x");
+/// assert!(matches!(append(&Term::List(vec![]), &x), BifResult::Value(term) if term == x));
+/// let list = append(&Term::List(vec![Term::Integer(1)]), &x);
+/// assert!(matches!(list, BifResult::Value(Term::ImproperList(elements, _)) if elements.len() == 1));
+/// assert!(matches!(append(&x, &Term::List(vec![])), BifResult::Raise { .. }));
 /// ```
-pub(super) fn append(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
-    match (left, right) {
-        (Term::List(left), right) if left.is_empty() => Ok(Value(right.clone())),
-        (Term::List(left), Term::List(right)) => Ok(Value(Term::List(
-            left.iter().chain(right).cloned().collect(),
-        ))),
-        // ponytail: an improper list result needs an improper list term; see "BIF arguments" in docs/erts-differences.md.
-        (Term::List(_), right) => Err(error(format!(
-            "unsupported erlang:++/2 tail {right:?}: not a list"
-        ))),
-        _ => Ok(BifResult::badarg()),
+pub(super) fn append(left: &Term, right: &Term) -> BifResult {
+    match left {
+        Term::List(left) => Value(Term::list_with_tail(left.clone(), right.clone())),
+        _ => BifResult::badarg(),
     }
+}
+
+/// Run `erlang:tl/1`: return the tail of the first cons cell of a nonempty
+/// list, as ERTS `tl_1` (`bif.c:2931-2938`) does. The tail of a proper list
+/// is a proper list, and the tail of `[1|x]` is `x`. `[]` and a term that is
+/// not a list raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let x = Term::static_atom("x");
+/// let proper = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
+/// assert!(matches!(tl(&proper), BifResult::Value(Term::List(rest)) if rest == [Term::Integer(2)]));
+/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x.clone()));
+/// assert!(matches!(tl(&improper), BifResult::Value(term) if term == x));
+/// assert!(matches!(tl(&Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn tl(list: &Term) -> BifResult {
+    let (elements, tail) = match list {
+        Term::List(elements) if !elements.is_empty() => (elements, Term::List(Vec::new())),
+        Term::ImproperList(elements, tail) => (elements, (**tail).clone()),
+        _ => return BifResult::badarg(),
+    };
+    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
+    Value(Term::list_with_tail(elements[1..].to_vec(), tail))
 }
 
 /// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
@@ -372,9 +890,11 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
 /// ERTS `list_to_atom_1` (`bif.c:3217-3236`) does with
 /// `erts_unicode_list_to_buf` (`utils.c:2862-2942`). ERTS counts each
 /// element before it checks it, so a 256th element raises `system_limit`,
-/// also when it is not a character. An element that is not an integer in
-/// `0..=0x10FFFF` outside `0xD800..=0xDFFF`, and a term that is not a list,
-/// raise `badarg`.
+/// also when it is not a character. ERTS checks the tail after the 255th
+/// element, so an improper list of 300 characters raises `system_limit`.
+/// An element that is not an integer in `0..=0x10FFFF` outside
+/// `0xD800..=0xDFFF`, a tail that is not `[]`, and a term that is not a
+/// list, raise `badarg`.
 ///
 /// # Examples
 ///
@@ -386,6 +906,8 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
 /// assert!(matches!(list_to_atom(&mut atoms, &surrogate)?, BifResult::Raise { .. }));
 /// let long = Term::List(vec![Term::Integer(97); 256]);
 /// assert!(matches!(list_to_atom(&mut atoms, &long)?, BifResult::Raise { .. }));
+/// let improper = Term::ImproperList(vec![Term::Integer(97)], Box::new(Term::static_atom("x")));
+/// assert!(matches!(list_to_atom(&mut atoms, &improper)?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -393,8 +915,10 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
 /// A new atom in a full atom table gives the error of `AtomTable::put`,
 /// where ERTS stops the emulator.
 pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResult, BeamError> {
-    let Term::List(elements) = term else {
-        return Ok(BifResult::badarg());
+    let (elements, proper) = match term {
+        Term::List(elements) => (elements, true),
+        Term::ImproperList(elements, _) => (elements, false),
+        _ => return Ok(BifResult::badarg()),
     };
     let mut name = String::new();
     for (count, element) in elements.iter().enumerate() {
@@ -412,6 +936,9 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
             return Ok(BifResult::badarg());
         };
         name.push(character);
+    }
+    if !proper {
+        return Ok(BifResult::badarg());
     }
     Ok(Value(Term::Atom(atoms.put(&name)?)))
 }
@@ -450,18 +977,28 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
     }
 }
 
-/// Run `erlang:'+'/2` or `erlang:'-'/2` with `operation`, the checked `i64`
-/// sum or difference, as ERTS `erts_mixed_plus` and `erts_mixed_minus`
-/// (`erl_arith.c:370-389`, `erl_arith.c:585-602`) do for two integers. An
-/// operand that is not a number raises `badarith`. PBeam has no float term,
-/// so each number is an integer. A result outside the `i64` range gives a
-/// runtime error, where ERTS makes a bignum.
+/// Run `erlang:'+'/2`, `erlang:'-'/2`, `erlang:'*'/2`, `erlang:'div'/2`, or
+/// `erlang:'rem'/2` with `operation`, the checked `i64` sum, difference,
+/// product, or quotient, or the remainder, as ERTS `erts_mixed_plus`,
+/// `erts_mixed_minus`, `stimes_2`, `intdiv_2`, and `rem_2`
+/// (`erl_arith.c:370-389`, `erl_arith.c:585-602`, `erl_arith.c:117-143`,
+/// `erl_arith.c:145-161`) do for two integers. The JIT runs `*` with
+/// `emit_i_mul_add`, `div` with `emit_i_int_div` and `emit_div_rem`, and
+/// `rem` with `emit_i_rem` (`jit/arm/instr_arith.cpp:542`,
+/// `jit/arm/instr_arith.cpp:968`, `jit/arm/instr_arith.cpp:1067`,
+/// `jit/arm/instr_arith.cpp:1078`) with the same results. An operand that is
+/// not a number raises `badarith`. PBeam has no float term, so each number
+/// is an integer. A result outside the `i64` range gives a runtime error,
+/// where ERTS makes a bignum. The `rem` operation never returns `None`, so
+/// `rem` never gives this error (see [`int_rem`]).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let sum = arith("+", &Term::Integer(1), &Term::Integer(2), i64::checked_add)?;
 /// assert!(matches!(sum, BifResult::Value(Term::Integer(3))));
+/// let product = arith("*", &Term::Integer(-3), &Term::Integer(4), i64::checked_mul)?;
+/// assert!(matches!(product, BifResult::Value(Term::Integer(-12))));
 /// let atom = Term::static_atom("a");
 /// assert!(matches!(arith("-", &atom, &Term::Integer(1), i64::checked_sub)?, BifResult::Raise { .. }));
 /// assert!(arith("+", &Term::Integer(i64::MAX), &Term::Integer(1), i64::checked_add).is_err());
@@ -482,6 +1019,147 @@ pub(super) fn arith(
         ))
     })?;
     Ok(Value(Term::Integer(result)))
+}
+
+/// Run `erlang:'div'/2`: return the integer quotient of `left` and `right`,
+/// truncated toward zero, as ERTS `intdiv_2` (`erl_arith.c:127-143`) does.
+/// A `right` of `0` raises `badarith` before the operand types are checked
+/// (`erl_arith.c:131-133`), so `a div 0` raises `badarith` too. Each other
+/// case runs as [`arith`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let quotient = int_div(&Term::Integer(-7), &Term::Integer(2))?;
+/// assert!(matches!(quotient, BifResult::Value(Term::Integer(-3))));
+/// assert!(matches!(int_div(&Term::Integer(1), &Term::Integer(0))?, BifResult::Raise { .. }));
+/// assert!(int_div(&Term::Integer(i64::MIN), &Term::Integer(-1)).is_err());
+/// ```
+pub(super) fn int_div(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
+    if *right == Term::Integer(0) {
+        return Ok(BifResult::badarith());
+    }
+    arith("div", left, right, i64::checked_div)
+}
+
+/// Run `erlang:'rem'/2`: return the integer remainder of `left` and `right`,
+/// with the sign of `left`, as ERTS `rem_2` (`erl_arith.c:145-161`) and the
+/// JIT `emit_i_rem` (`jit/arm/instr_arith.cpp:1078-1087`) do. A `right` of
+/// `0` raises `badarith` before the operand types are checked
+/// (`erl_arith.c:149-151`), so `a rem 0` raises `badarith` too. Each other
+/// case runs as [`arith`]. `i64::MIN rem -1` gives `0`, as the bignum path
+/// `erts_int_div_rem` (`erl_arith.c:1172`) does, so no result leaves the
+/// `i64` range.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let remainder = int_rem(&Term::Integer(-7), &Term::Integer(3))?;
+/// assert!(matches!(remainder, BifResult::Value(Term::Integer(-1))));
+/// let remainder = int_rem(&Term::Integer(i64::MIN), &Term::Integer(-1))?;
+/// assert!(matches!(remainder, BifResult::Value(Term::Integer(0))));
+/// assert!(matches!(int_rem(&Term::static_atom("a"), &Term::Integer(0))?, BifResult::Raise { .. }));
+/// ```
+pub(super) fn int_rem(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
+    if *right == Term::Integer(0) {
+        return Ok(BifResult::badarith());
+    }
+    arith("rem", left, right, |left, right| {
+        Some(left.wrapping_rem(right))
+    })
+}
+
+/// Convert `value`, a time in the native unit, to `unit` with
+/// [`time::time_unit_conversion`], as `erlang:monotonic_time/1` and
+/// `os:system_time/1` do (`erl_time_sup.c:2268-2350`). A converted time
+/// is the BIF result, and a unit that is not valid raises `badarg`. A trap
+/// calls `erlang:convert_time_unit(Value, 1000000000, Unit)`
+/// (`erts_convert_time_unit_trap`, `bif.c:5557`), which the pinned
+/// `erlang.beam` runs (`erlang.erl:5299-5340`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = convert_time(1_500_000_000, 0, &Term::static_atom("second"));
+/// assert!(matches!(result, BifResult::Value(Term::Integer(1))));
+/// let result = convert_time(1_000_000_000, 1, &Term::static_atom("perf_counter"));
+/// assert!(matches!(result, BifResult::Trap { function: "convert_time_unit", .. }));
+/// assert!(matches!(convert_time(1, 0, &Term::Integer(0)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> BifResult {
+    match time::time_unit_conversion(value, offset_multiplier, unit) {
+        TimeValue::Value(value) => Value(Term::Integer(value)),
+        TimeValue::Trap(native) => Trap {
+            module: "erlang",
+            function: "convert_time_unit",
+            arguments: vec![
+                Term::Integer(native),
+                Term::Integer(time::TIME_UNIT),
+                unit.clone(),
+            ],
+        },
+        TimeValue::Badarg => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:posixtime_to_universaltime/1`: return the UTC date and time
+/// `{{Year, Month, Day}, {Hour, Minute, Second}}` of `time`, the seconds
+/// since 1970-01-01 00:00:00 UTC, with [`time::seconds_to_univ`]. Each
+/// integer gives a date, and each other term raises `badarg`, as in ERTS
+/// `posixtime_to_universaltime_1` (`bif.c:4025-4050`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {{1970,1,2},{0,0,0}}
+/// assert!(matches!(posixtime_to_universaltime(&Term::Integer(86_400)), BifResult::Value(_)));
+/// assert!(matches!(posixtime_to_universaltime(&Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn posixtime_to_universaltime(time: &Term) -> BifResult {
+    let Term::Integer(time) = time else {
+        return BifResult::badarg();
+    };
+    Value(date_time(time::seconds_to_univ(*time)))
+}
+
+/// Run `erlang:universaltime_to_localtime/1`: return the local date and time
+/// of a UTC date and time `{{Year, Month, Day}, {Hour, Minute, Second}}` in
+/// the host time zone, as ERTS `universaltime_to_localtime_1`
+/// (`bif.c:3975-3995`) does. A term that [`time::time_to_parts`] does not
+/// read, a value that [`time::univ_to_clock`] does not accept, and a
+/// failed `localtime_r` ([`host::clock::local_time`]) raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let triple = |a, b, c| Term::Tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+/// // TZ=EST5EDT,M3.2.0,M11.1.0: {{2026,1,15},{7,0,0}}
+/// let date = Term::Tuple(vec![triple(2026, 1, 15), triple(12, 0, 0)]);
+/// assert!(matches!(universaltime_to_localtime(&date), BifResult::Value(_)));
+/// let date = Term::Tuple(vec![triple(1901, 12, 31), triple(23, 59, 59)]);
+/// assert!(matches!(universaltime_to_localtime(&date), BifResult::Raise { .. }));
+/// ```
+pub(super) fn universaltime_to_localtime(date: &Term) -> BifResult {
+    time::time_to_parts(date)
+        .and_then(time::univ_to_clock)
+        .and_then(host::clock::local_time)
+        .map_or_else(BifResult::badarg, |local| Value(date_time(local)))
+}
+
+/// Return the term `{{Year, Month, Day}, {Hour, Minute, Second}}` of a date
+/// and time.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {{1970,1,2},{0,0,0}}
+/// let term = date_time((1970, 1, 2, 0, 0, 0));
+/// ```
+fn date_time((year, month, day, hour, minute, second): time::DateTime) -> Term {
+    Term::Tuple(vec![
+        Term::Tuple([year, month, day].map(Term::Integer).into()),
+        Term::Tuple([hour, minute, second].map(Term::Integer).into()),
+    ])
 }
 
 /// Run `erlang:element/2`: return the element at the 1-based `index` of a
@@ -535,22 +1213,9 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 }
 
 /// Send `message` to `to` and return the message, as ERTS `erl_send`
-/// (`bif.c:2845-2908`) and `do_send` (`bif.c:2458-2695`) do for the `send`
-/// instruction.
-///
-/// - A pid gets the message. ERTS drops a message to a process that does
-///   not exist.
-/// - A reference drops the message. ERTS sends an alias message, and the
-///   receiver drops it when the reference is not an active alias. PBeam has
-///   no aliases.
-/// - An atom gives the message to its registered process. A name that no
-///   process has raises `badarg`. PBeam has no ports.
-/// - `{Name, Node}` with two atoms and the local node gives the message to
-///   the registered process, or drops it when no process has the name.
-///   Another node drops the message, as ERTS does on a node that is not
-///   alive (`dist.c:3234-3235`, `bif.c:2397-2400`, `2870-2872`). Each other
-///   tuple raises `badarg`.
-/// - Each other term raises `badarg`.
+/// (`bif.c:2845-2908`) does for the `send` instruction and for
+/// `erlang:send/2` (`send_2`, `bif.c:2801-2804`). A `to` that
+/// [`deliver_to`] rejects raises `badarg`.
 ///
 /// # Examples
 ///
@@ -565,26 +1230,116 @@ pub(in crate::runtime::interpreter) fn send(
     to: &Term,
     message: Term,
 ) -> BifResult {
+    match deliver_to(scheduler, to, message.clone()) {
+        Some(_) => Value(message),
+        None => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:send(To, Message, Options)` as ERTS `send_3`
+/// (`bif.c:2697-2799`) does. The options come first: a proper list of
+/// `noconnect`, `nosuspend`, and `priority`. Each other element, and a tail
+/// that is not `[]`, raise `badarg`, and nothing is sent. Then the message
+/// goes to `to` as [`deliver_to`] gives it, and a `to` that it rejects
+/// raises `badarg`. The result is `noconnect` for `{Name, Node}` on another
+/// node with `noconnect`, and `ok` for each other send.
+///
+/// PBeam has no distribution and no ports, so `nosuspend` changes nothing.
+/// A `priority` message is an ordinary message unless its receiver gets it
+/// through a priority alias (`erl_proc_sig_queue.c:6021-6045`). Only
+/// `erlang:alias/1` makes a priority alias, so `priority` also changes
+/// nothing. ERTS gives the `badarg` of an option the `error_info` cause
+/// `badopt`, which PBeam does not model.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let noconnect = Term::List(vec![Term::static_atom("noconnect")]);
+/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// assert!(matches!(send3(scheduler, &remote, ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "noconnect"));
+/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok, &Term::static_atom("x")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn send3(
+    scheduler: &mut Scheduler,
+    to: &Term,
+    message: &Term,
+    options: &Term,
+) -> BifResult {
+    let Term::List(options) = options else {
+        return BifResult::badarg();
+    };
+    let mut connect = true;
+    for option in options {
+        match option {
+            Term::Atom(option) if option.name() == "noconnect" => connect = false,
+            Term::Atom(option) if matches!(option.name(), "nosuspend" | "priority") => {}
+            _ => return BifResult::badarg(),
+        }
+    }
+    match deliver_to(scheduler, to, message.clone()) {
+        Some(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
+        Some(_) => Value(Term::static_atom("ok")),
+        None => BifResult::badarg(),
+    }
+}
+
+/// The result of a send that does not raise, as ERTS `do_send`
+/// (`bif.c:2458-2695`) gives it to `erl_send` and `send_3`.
+enum Sent {
+    /// The message went to a local process, or a local send dropped it.
+    Local,
+    /// The message was to `{Name, Node}` on another node, and was dropped
+    /// (`SEND_NOCONNECT`).
+    NoConnect,
+}
+
+/// Give `message` to the process that `to` names, as ERTS `do_send`
+/// (`bif.c:2458-2695`) does. Return `None` for a `to` that `do_send`
+/// rejects with `SEND_BADARG`.
+///
+/// - A pid gets the message. ERTS drops a message to a process that does
+///   not exist.
+/// - A reference gives the message to the owner of its active alias, and
+///   drops it when the reference is not an active alias
+///   (`erl_proc_sig_queue.c:6026-6041`). A message through a
+///   `reply_demonitor` alias ends the alias (see
+///   [`Scheduler::alias_message_receiver`]).
+/// - An atom gives the message to its registered process. A name that no
+///   process has gives `None`. PBeam has no ports.
+/// - `{Name, Node}` with two atoms and the local node gives the message to
+///   the registered process, or drops it when no process has the name.
+///   Another node drops the message and gives [`Sent::NoConnect`], as ERTS
+///   does on a node that is not alive (`remote_send`, `bif.c:2397-2400`).
+///   Each other tuple gives `None`.
+/// - Each other term gives `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(deliver_to(scheduler, &Term::Pid(pid), ok.clone()), Some(Sent::Local)));
+/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// assert!(matches!(deliver_to(scheduler, &remote, ok.clone()), Some(Sent::NoConnect)));
+/// assert!(deliver_to(scheduler, &Term::static_atom("nobody"), ok).is_none());
+/// ```
+fn deliver_to(scheduler: &mut Scheduler, to: &Term, message: Term) -> Option<Sent> {
     let target = match to {
         Term::Pid(pid) => Some(*pid),
-        Term::Reference(_) => None,
-        Term::Atom(name) => match scheduler.whereis(name.name()) {
-            Some(pid) => Some(pid),
-            None => return BifResult::badarg(),
-        },
+        Term::Reference(reference) => scheduler.alias_message_receiver(*reference),
+        Term::Atom(name) => Some(scheduler.whereis(name.name())?),
         Term::Tuple(elements) => match elements.as_slice() {
             [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
                 scheduler.whereis(name.name())
             }
-            [Term::Atom(_), Term::Atom(_)] => None,
-            _ => return BifResult::badarg(),
+            [Term::Atom(_), Term::Atom(_)] => return Some(Sent::NoConnect),
+            _ => return None,
         },
-        _ => return BifResult::badarg(),
+        _ => return None,
     };
     if let Some(target) = target {
-        scheduler.deliver(target, message.clone());
+        scheduler.deliver(target, message);
     }
-    Value(message)
+    Some(Sent::Local)
 }
 
 /// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
@@ -624,11 +1379,14 @@ const IOVEC_COPY_LIMIT: usize = 512;
 /// Run `erlang:iolist_to_iovec/1` as ERTS `iolist_to_iovec_1` and
 /// `iolist_to_iovec_engine` (`erl_iolist.c`) do. Return `[]` for `[]` and
 /// `<<>>`, and `[Bin]` for a binary `Bin` that is not empty. For a list, walk
-/// the nested lists in order. Copy each byte and each binary of at most
+/// the nested lists in order. A binary tail of a list, as in `[97|<<"b">>]`,
+/// comes after the elements of that list (`generic_iolist_size`,
+/// `erl_iolist.c:153-236`). Copy each byte and each binary of at most
 /// [`IOVEC_COPY_LIMIT`] bytes into one merged binary. Each larger binary
 /// closes the current merged binary, if it is not empty, and is an element of
 /// the result itself. An empty merged binary is not in the result. An integer
-/// outside `0..=255` or another term that is not iodata raises `badarg`.
+/// outside `0..=255`, a tail that is not a binary, or another term that is
+/// not iodata raises `badarg`.
 ///
 /// ERTS also copies a sub-binary at a bit offset that is not a multiple of 8,
 /// whatever its size. PBeam binaries always start at a byte, so only the size
@@ -647,6 +1405,9 @@ const IOVEC_COPY_LIMIT: usize = 512;
 /// let large = Term::Binary(vec![0; 513]);
 /// let list = Term::List(vec![Term::Integer(1), large.clone()]);
 /// assert!(matches!(iolist_to_iovec(&list), BifResult::Value(Term::List(iovec)) if iovec == [Term::Binary(vec![1]), large]));
+/// // [97|<<"b">>] gives [<<"ab">>].
+/// let improper = Term::ImproperList(vec![Term::Integer(97)], Box::new(Term::Binary(b"b".to_vec())));
+/// assert!(matches!(iolist_to_iovec(&improper), BifResult::Value(Term::List(iovec)) if iovec == [Term::Binary(b"ab".to_vec())]));
 /// assert!(matches!(iolist_to_iovec(&Term::List(vec![Term::Integer(256)])), BifResult::Raise { .. }));
 /// assert!(matches!(iolist_to_iovec(&Term::static_atom("foo")), BifResult::Raise { .. }));
 /// ```
@@ -654,17 +1415,49 @@ pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
     match term {
         Term::Binary(bytes) if bytes.is_empty() => Value(Term::List(Vec::new())),
         Term::Binary(_) => Value(Term::List(vec![term.clone()])),
-        Term::List(elements) => {
-            iolist_iovec(elements).map_or_else(BifResult::badarg, |iovec| Value(Term::List(iovec)))
+        Term::List(_) | Term::ImproperList(..) => {
+            iolist_iovec(term).map_or_else(BifResult::badarg, |iovec| Value(Term::List(iovec)))
+        }
+        _ => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:iolist_size/1` as ERTS `iolist_size_1` and
+/// `iolist_size_dispatch` (`erl_iolist.c:1005-1068, 1084-1094`) do: return
+/// the byte count of a binary, or the byte count of each element and each
+/// binary tail of an iolist. The walk has the type rules of
+/// `generic_iolist_size` (`erl_iolist.c:153-236`), which
+/// `erlang:iolist_to_iovec/1` also uses, so [`walk_iolist`] gives the bytes
+/// to count without a copy. An integer outside `0..=255`, a tail that is not a
+/// binary or `[]`, or another term that is not iodata raises `badarg`. ERTS
+/// raises `system_limit` only for a size above 64 bignum words, which a
+/// PBeam term cannot have.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(iolist_size(&Term::Binary(b"abc".to_vec())), BifResult::Value(Term::Integer(3))));
+/// // [1, <<2,3>> | <<4>>] gives 4.
+/// let improper = Term::ImproperList(vec![Term::Integer(1), Term::Binary(vec![2, 3])], Box::new(Term::Binary(vec![4])));
+/// assert!(matches!(iolist_size(&improper), BifResult::Value(Term::Integer(4))));
+/// assert!(matches!(iolist_size(&Term::List(vec![Term::Integer(256)])), BifResult::Raise { .. }));
+/// assert!(matches!(iolist_size(&Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn iolist_size(term: &Term) -> BifResult {
+    let mut size = 0;
+    match term {
+        Term::Binary(_) | Term::List(_) | Term::ImproperList(..) => {
+            walk_iolist(term, |bytes| size += bytes.len())
+                .map_or_else(BifResult::badarg, |()| Value(Term::Integer(size as i64)))
         }
         _ => BifResult::badarg(),
     }
 }
 
 /// Return the bytes of iodata: the bytes of a binary, or the bytes of each
-/// element of an iolist in order, as `erts_iolist_to_buf` writes them.
-/// Return `None` for any other term and for an iolist with an element that
-/// is not iodata.
+/// element and each binary tail of an iolist in order, as
+/// `erts_iolist_to_buf` writes them. Return `None` for any other term and
+/// for an iolist with an element or a tail that is not iodata.
 ///
 /// # Examples
 ///
@@ -673,65 +1466,103 @@ pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
 /// // [$a, [<<"b">>]] gives <<"ab">>.
 /// let list = Term::List(vec![Term::Integer(97), Term::List(vec![Term::Binary(b"b".to_vec())])]);
 /// assert_eq!(iodata_bytes(&list), Some(b"ab".to_vec()));
+/// // [$a|<<"b">>] gives <<"ab">>, and [$a|x] is not iodata.
+/// let tail = |tail| Term::ImproperList(vec![Term::Integer(97)], Box::new(tail));
+/// assert_eq!(iodata_bytes(&tail(Term::Binary(b"b".to_vec()))), Some(b"ab".to_vec()));
+/// assert_eq!(iodata_bytes(&tail(Term::static_atom("x"))), None);
 /// assert_eq!(iodata_bytes(&Term::List(vec![Term::Integer(256)])), None);
 /// assert_eq!(iodata_bytes(&Term::static_atom("foo")), None);
 /// ```
 pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
     match term {
-        Term::Binary(bytes) => Some(bytes.clone()),
-        Term::List(elements) => {
-            let mut bytes = Vec::new();
-            // An iovec holds only binaries.
-            for binary in iolist_iovec(elements)? {
-                if let Term::Binary(part) = &binary {
-                    bytes.extend_from_slice(part);
-                }
-            }
+        Term::Binary(_) | Term::List(_) | Term::ImproperList(..) => {
+            walk_iolist(term, |part| bytes.extend_from_slice(part))?;
             Some(bytes)
         }
         _ => None,
     }
 }
 
-/// Convert the elements of an iolist to the iovec of
-/// `erlang:iolist_to_iovec/1`, or return `None` when an element is not
-/// iodata. Use a stack of list iterators, as the ERTS engine does, so that a
-/// deep nested list does not use the Rust call stack.
+/// Convert a proper or improper iolist to the iovec of
+/// `erlang:iolist_to_iovec/1`, or return `None` when an element or a tail is
+/// not iodata. [`walk_iolist`] gives the bytes in order.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let iolist = [Term::List(vec![]), Term::Binary(vec![]), Term::Integer(7)];
+/// let iolist = Term::List(vec![Term::List(vec![]), Term::Binary(vec![]), Term::Integer(7)]);
 /// assert_eq!(iolist_iovec(&iolist), Some(vec![Term::Binary(vec![7])]));
-/// assert_eq!(iolist_iovec(&[Term::Integer(-1)]), None);
+/// // [7|<<8>>] gives [<<7,8>>], and [7|8] is not iodata.
+/// let improper = |tail| Term::ImproperList(vec![Term::Integer(7)], Box::new(tail));
+/// assert_eq!(iolist_iovec(&improper(Term::Binary(vec![8]))), Some(vec![Term::Binary(vec![7, 8])]));
+/// assert_eq!(iolist_iovec(&improper(Term::Integer(8))), None);
+/// assert_eq!(iolist_iovec(&Term::List(vec![Term::Integer(-1)])), None);
 /// ```
-fn iolist_iovec(elements: &[Term]) -> Option<Vec<Term>> {
+fn iolist_iovec(list: &Term) -> Option<Vec<Term>> {
     let mut iovec = Vec::new();
     let mut merged = Vec::new();
-    let mut lists = vec![elements.iter()];
-    while let Some(list) = lists.last_mut() {
-        match list.next() {
-            None => {
-                lists.pop();
+    walk_iolist(list, |bytes| {
+        if bytes.len() <= IOVEC_COPY_LIMIT {
+            merged.extend_from_slice(bytes);
+        } else {
+            if !merged.is_empty() {
+                iovec.push(Term::Binary(std::mem::take(&mut merged)));
             }
-            Some(Term::List(inner)) => lists.push(inner.iter()),
-            Some(Term::Integer(byte)) => merged.push(u8::try_from(*byte).ok()?),
-            Some(Term::Binary(bytes)) if bytes.len() <= IOVEC_COPY_LIMIT => {
-                merged.extend_from_slice(bytes);
-            }
-            Some(binary @ Term::Binary(_)) => {
-                if !merged.is_empty() {
-                    iovec.push(Term::Binary(std::mem::take(&mut merged)));
-                }
-                iovec.push(binary.clone());
-            }
-            Some(_) => return None,
+            iovec.push(Term::Binary(bytes.to_vec()));
         }
-    }
+    })?;
     if !merged.is_empty() {
         iovec.push(Term::Binary(merged));
     }
     Some(iovec)
+}
+
+/// Walk iodata in order and give `sink` the bytes of each binary, and each
+/// byte integer as one byte, or return `None` when an element or a tail is
+/// not iodata. This is the one copy of the `generic_iolist_size` type rules
+/// (`erl_iolist.c:153-236`) that `erlang:iolist_to_iovec/1`,
+/// `erlang:iolist_size/1`, and [`iodata_bytes`] use. A binary tail of a list
+/// comes after the elements of that list. Each other tail gives `None`. The
+/// caller discards what `sink` got before a `None`, because ERTS walks the
+/// whole term before it builds the result. A top-level integer is a byte
+/// here, so each caller selects the top-level terms itself. Use a stack of
+/// list iterators, as the ERTS engine does, so that a deep nested list does
+/// not use the Rust call stack.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [1, [<<2,3>>] | <<4>>] gives [1], [2,3], and [4].
+/// let iolist = Term::ImproperList(
+///     vec![Term::Integer(1), Term::List(vec![Term::Binary(vec![2, 3])])],
+///     Box::new(Term::Binary(vec![4])),
+/// );
+/// let mut parts = Vec::new();
+/// assert_eq!(walk_iolist(&iolist, |bytes| parts.push(bytes.to_vec())), Some(()));
+/// assert_eq!(parts, [vec![1], vec![2, 3], vec![4]]);
+/// assert_eq!(walk_iolist(&Term::List(vec![Term::Integer(256)]), |_| ()), None);
+/// ```
+fn walk_iolist(term: &Term, mut sink: impl FnMut(&[u8])) -> Option<()> {
+    // Each level holds the elements of a list that the walk did not read
+    // yet, and its binary tail, which comes after them.
+    let mut lists = vec![(std::slice::from_ref(term).iter(), None)];
+    while let Some((elements, tail)) = lists.last_mut() {
+        let Some(element) = elements.next().or_else(|| tail.take()) else {
+            lists.pop();
+            continue;
+        };
+        match element {
+            Term::List(inner) => lists.push((inner.iter(), None)),
+            Term::ImproperList(inner, tail) if matches!(**tail, Term::Binary(_)) => {
+                lists.push((inner.iter(), Some(&**tail)));
+            }
+            Term::Integer(byte) => sink(&[u8::try_from(*byte).ok()?]),
+            Term::Binary(bytes) => sink(bytes),
+            _ => return None,
+        }
+    }
+    Some(())
 }
 
 /// The item atoms that `erlang:process_info/2` accepts (`pi_arg2ix` in
@@ -807,7 +1638,12 @@ fn is_process_info_item(item: &Term) -> bool {
 /// `undefined` for each valid item when the process is not alive
 /// (`erl_bif_info.c:1384-1386`). For a live process, return
 /// `{registered_name, Name}`, or `[]` when the process has no name, as
-/// `process_info_aux` does. For the calling process, return
+/// `process_info_aux` does. For a live process, return
+/// `{message_queue_len, N}`, where `N` counts the messages of the mailbox and
+/// no receive marker, as `sig_qs.mq_len` does (`erl_bif_info.c:1742-1754`).
+/// ERTS first moves the signal queue into the message queue
+/// (`erl_bif_info.c:1355-1356, 1405`), and PBeam puts each message into the
+/// mailbox at once. For the calling process, return
 /// `{current_stacktrace, []}`, because PBeam records no stack frames. The
 /// `current_stacktrace` of another process, a list of items, and any other
 /// item give a runtime error.
@@ -821,6 +1657,8 @@ fn is_process_info_item(item: &Term) -> bool {
 /// assert!(matches!(info, BifResult::Value(Term::Tuple(elements)) if elements[1] == Term::List(vec![])));
 /// let name = process_info(&mut context, &process, &Term::static_atom("registered_name"))?;
 /// assert!(matches!(name, BifResult::Value(Term::List(elements)) if elements.is_empty()));
+/// let length = process_info(&mut context, &process, &Term::static_atom("message_queue_len"))?;
+/// assert!(matches!(length, BifResult::Value(Term::Tuple(elements)) if elements[1] == Term::Integer(0)));
 /// let dead = process_info(&mut context, &Term::Pid(ProcessId(99)), &item)?;
 /// assert!(matches!(dead, BifResult::Value(Term::Atom(atom)) if atom.name() == "undefined"));
 /// let bogus = process_info(&mut context, &process, &Term::static_atom("bogus_item"))?;
@@ -854,6 +1692,10 @@ pub(super) fn process_info(
                 Term::Atom(registered.clone()),
             ])),
             ("registered_name", None) => Some(Term::List(Vec::new())),
+            ("message_queue_len", _) => Some(Term::Tuple(vec![
+                item.clone(),
+                Term::Integer(target.mailbox.message_count() as i64),
+            ])),
             _ => None,
         },
         _ => None,

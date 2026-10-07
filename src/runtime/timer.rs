@@ -8,12 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::time::MONOTONIC_BEGIN;
 use crate::term::{Atom, ProcessId, Reference, Term};
-
-/// The internal monotonic time at the run start, `ERTS_MONOTONIC_BEGIN`: one
-/// second in the native time unit of 1000000000 per second
-/// (`erl_time.h:235-236`).
-const MONOTONIC_BEGIN: i64 = 1_000_000_000;
 
 /// Native time units in one clock tick of 1 ms, as
 /// `ERTS_MONOTONIC_TO_CLKTCKS` divides with `SYS_CLOCK_RESOLUTION 1`

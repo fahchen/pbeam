@@ -11,7 +11,8 @@
 //!
 //! Any other term goes through `make_internal_hash`, a MurmurHash3 variant
 //! with two 64-bit states. It reads the term with a work stack, as ERTS does,
-//! so a deep term does not recurse. A reference hashes as an ERTS local
+//! so a deep term does not recurse. An improper list mixes its tail after its
+//! cells, as the ERTS cons cells give it. A reference hashes as an ERTS local
 //! reference that scheduler 1 made with the PBeam reference counter as its
 //! value (`erts_set_ref_numbers` in `erl_bif_unique.h`).
 //!
@@ -68,16 +69,6 @@ const STRING_CHUNK: u64 = 4;
 /// The binary block size: two 64-bit words, one for each state.
 const BINARY_BLOCK: usize = 16;
 
-/// The mask of the first reference number (`REF_MASK`, 18 bits).
-const REF_NUMBER_0_MASK: u64 = 0x3_FFFF;
-/// The mask of the counter bits in the second reference number
-/// (`ERTS_REF1_NUM_MASK__`).
-const REF_NUMBER_1_MASK: u64 = 0xFFFC_0000;
-/// The scheduler thread number of a PBeam reference. ERTS gives the first
-/// normal scheduler the number 1 (`init_scheduler_data` in
-/// `erl_process.c`).
-const REF_THREAD: u64 = 1;
-
 /// The shift of the module atom index in the export word of an external
 /// fun. An atom index is below `ATOM_LIMIT`, 2^20.
 const EXPORT_MODULE_SHIFT: u32 = 40;
@@ -105,15 +96,15 @@ pub(crate) fn internal_hash(term: &Term) -> u64 {
 enum Shape<'a> {
     /// The word of an atom, a small integer, `[]`, or a pid.
     Immediate(u64),
-    /// The cells of a list that is not empty.
-    List(&'a [Term]),
+    /// The cells of a list that is not empty, and the tail of an improper
+    /// list (`None` is `[]`).
+    List(&'a [Term], Option<&'a Term>),
     Tuple(&'a [Term]),
     Map(&'a Map),
     Binary(&'a [u8]),
     /// An integer outside the small-integer range.
     Bignum(i64),
-    /// The counter value of a reference.
-    Reference(u64),
+    Reference(Reference),
     Fun(&'a Fun),
 }
 
@@ -131,7 +122,8 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Atom(atom) => Shape::Immediate(atom_word(atom.index())),
         Term::Pid(ProcessId(number)) => Shape::Immediate((number << IMMED1_TAG_BITS) | PID_TAG),
         Term::List(cells) if cells.is_empty() => Shape::Immediate(NIL),
-        Term::List(cells) => Shape::List(cells),
+        Term::List(cells) => Shape::List(cells, None),
+        Term::ImproperList(cells, tail) => Shape::List(cells, Some(tail)),
         Term::Integer(value) => match term.small_integer() {
             Some(small) => {
                 Shape::Immediate(((small as u64) << IMMED1_TAG_BITS) | SMALL_INTEGER_TAG)
@@ -141,7 +133,7 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Tuple(elements) => Shape::Tuple(elements),
         Term::Map(map) => Shape::Map(map),
         Term::Binary(bytes) => Shape::Binary(bytes),
-        Term::Reference(Reference(value)) => Shape::Reference(*value),
+        Term::Reference(reference) => Shape::Reference(*reference),
         Term::Fun(fun) => Shape::Fun(fun),
     }
 }
@@ -421,7 +413,7 @@ impl State {
     fn mix_term<'a>(&mut self, stack: &mut Vec<Item<'a>>, term: &'a Term) -> Option<Item<'a>> {
         match shape(term) {
             Shape::Immediate(word) => self.mix_immediate(word),
-            Shape::List(cells) => return self.mix_cells(stack, cells, None),
+            Shape::List(cells, tail) => return self.mix_cells(stack, cells, tail),
             Shape::Tuple(elements) => {
                 self.mix_alpha(TYPE_TUPLE);
                 self.mix_beta(elements.len() as u64);
@@ -469,9 +461,10 @@ impl State {
                 self.mix_alpha(pair(sign, 1));
                 self.mix_beta(value.unsigned_abs());
             }
-            Shape::Reference(value) => {
-                self.mix_alpha(pair(TYPE_LOCAL_REF, value & REF_NUMBER_0_MASK));
-                self.mix_beta(pair((value & REF_NUMBER_1_MASK) | REF_THREAD, value >> 32));
+            Shape::Reference(reference) => {
+                let [number_0, number_1, number_2] = reference.numbers().map(u64::from);
+                self.mix_alpha(pair(TYPE_LOCAL_REF, number_0));
+                self.mix_beta(pair(number_1, number_2));
             }
             Shape::Fun(fun) => match fun.target() {
                 Target::Local(lambda) => {
@@ -617,8 +610,9 @@ impl State {
 }
 
 /// Follow a list tail into its cells while no cells are left, so the next
-/// cell is the next ERTS cons cell. A tail is a list only in the
-/// `[Key | Value]` cell of a collision node, when the value is a list.
+/// cell is the next ERTS cons cell. A tail is a list that is not empty only
+/// in the `[Key | Value]` cell of a collision node, when the value is such a
+/// list or an improper list. A tail `[]` stays, and mixes as an immediate.
 ///
 /// # Examples
 ///
@@ -626,15 +620,18 @@ impl State {
 /// let value = Term::List(vec![Term::Integer(120)]);
 /// let (cells, tail) = rest(&[], Some(&value));
 /// assert!(matches!((cells, tail), ([Term::Integer(120)], None)));
+/// let value = Term::ImproperList(vec![Term::Integer(120)], Box::new(Term::Integer(1)));
+/// let (cells, tail) = rest(&[], Some(&value));
+/// assert!(matches!((cells, tail), ([Term::Integer(120)], Some(Term::Integer(1)))));
 /// let tail = Term::Tuple(vec![]);
 /// assert!(matches!(rest(&[], Some(&tail)), ([], Some(Term::Tuple(_)))));
 /// ```
 fn rest<'a>(mut cells: &'a [Term], mut tail: Option<&'a Term>) -> (&'a [Term], Option<&'a Term>) {
     while cells.is_empty() {
-        match tail {
-            Some(Term::List(next)) => (cells, tail) = (next, None),
-            _ => break,
-        }
+        let Some(Shape::List(next, end)) = tail.map(shape) else {
+            break;
+        };
+        (cells, tail) = (next, end);
     }
     (cells, tail)
 }
@@ -654,6 +651,10 @@ mod tests {
 
     fn map(pairs: impl IntoIterator<Item = (Term, Term)>) -> Term {
         Term::Map(Map::from_pairs(pairs.into_iter().collect()).unwrap())
+    }
+
+    fn improper(cells: Vec<Term>, tail: Term) -> Term {
+        Term::ImproperList(cells, Box::new(tail))
     }
 
     #[test]
@@ -822,6 +823,54 @@ mod tests {
     }
 
     #[test]
+    fn hashes_improper_lists_as_pinned_erts() {
+        // Each value is erts_debug:get_internal_state({internal_hash, Term}) on ERTS 29.1.1.
+        let cases = [
+            (
+                improper(vec![Term::Integer(1)], Term::Integer(2)),
+                5915944085625558568,
+            ),
+            (
+                improper(vec![Term::Integer(97), Term::Integer(98)], atom("ok")),
+                6406651010506344343,
+            ),
+            (
+                improper(vec![Term::Tuple(vec![])], atom("ok")),
+                10451236899705497869,
+            ),
+            (
+                improper(vec![Term::Integer(1)], Term::Tuple(vec![])),
+                4641139002621691555,
+            ),
+            (
+                improper(
+                    vec![improper(vec![Term::Integer(1)], Term::Integer(2))],
+                    Term::Integer(3),
+                ),
+                6434836968081835632,
+            ),
+            (
+                improper(vec![integers(&[1])], Term::Binary(vec![])),
+                465555062996238064,
+            ),
+            (
+                improper(vec![atom("ok")], atom("true")),
+                12145861372843638597,
+            ),
+            (
+                improper(
+                    vec![Term::Integer(1), Term::Tuple(vec![])],
+                    Term::Integer(2),
+                ),
+                502573382164607531,
+            ),
+        ];
+        for (term, hash) in cases {
+            assert_eq!(internal_hash(&term), hash, "{term:?}");
+        }
+    }
+
+    #[test]
     fn hashes_collision_nodes_as_pinned_erts() {
         // The keys of each pair have the same internal hash on pinned ERTS
         // 29.1.1, so each map has one collision node (`erts_debug:map_info/1`
@@ -848,6 +897,17 @@ mod tests {
                 ),
                 9593933779384815641,
             ),
+            // An improper list value continues the [Key | Value] cell as more cells.
+            (
+                with(
+                    (
+                        a.clone(),
+                        improper(vec![Term::Integer(1)], Term::Integer(2)),
+                    ),
+                    (b.clone(), Term::Tuple(vec![])),
+                ),
+                243852246011044368,
+            ),
             (
                 with((a, integers(&[120, 121])), (b, Term::List(vec![]))),
                 2185849235149492526,
@@ -865,10 +925,11 @@ mod tests {
     #[test]
     fn hashes_a_deep_term_without_recursion() {
         let deep = |levels: usize| {
-            (0..levels).fold(Term::List(vec![]), |inner, level| match level % 4 {
+            (0..levels).fold(Term::List(vec![]), |inner, level| match level % 5 {
                 0 => Term::Tuple(vec![inner, Term::Binary(vec![])]),
                 1 => Term::List(vec![inner, Term::Integer(1)]),
                 2 => map([(atom("ok"), inner)]),
+                3 => improper(vec![inner], Term::Integer(1)),
                 _ => local(0, 7, 1, vec![inner, Term::Integer(1)]),
             })
         };

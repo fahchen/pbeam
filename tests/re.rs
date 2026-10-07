@@ -342,8 +342,11 @@ fn exports_compiled_patterns_as_pinned_erts() {
 #[test]
 fn reports_unsupported_chardata() {
     // ERTS raises `badarg` through `re:ucompile/2` for a `unicode` pattern
-    // that is not chardata. PBeam gives a runtime error. This is the
-    // "Regular expressions" row in `docs/erts-differences.md`.
+    // that is not chardata: it catches the `badarg` of
+    // `unicode:characters_to_binary/2` and raises it again with
+    // `erlang:error/2` and `erlang:raise/3` (`re.erl:1742-1751`). PBeam
+    // raises the same `badarg`, but it does not resolve `erlang:error/2`.
+    // This is the "Regular expressions" row in `docs/erts-differences.md`.
     let program = program();
     let error = program
         .execute(
@@ -355,7 +358,7 @@ fn reports_unsupported_chardata() {
     assert!(
         error
             .to_string()
-            .contains("unsupported chardata Atom(\"foo\")"),
+            .contains("unresolved external MFA erlang:error/2"),
         "got {error}"
     );
 }
