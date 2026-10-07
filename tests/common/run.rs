@@ -1,8 +1,10 @@
-//! A time limit for a test that runs a child process. A test that runs a
-//! binary includes this file with `#[path = "common/run.rs"] mod run;`. A
-//! function in `common/mod.rs` would be dead code in each other test crate.
+//! A time limit for a test that runs a child process, and a stdout that
+//! fails each write. A test that runs a binary includes this file with
+//! `#[path = "common/run.rs"] mod run;`. A function in `common/mod.rs` would
+//! be dead code in each other test crate.
 
 use std::{
+    io,
     process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
@@ -66,4 +68,19 @@ pub fn run_dumb_utf8(command: &mut Command, stdout: Stdio, limit: Duration) -> O
         stdout,
         limit,
     )
+}
+
+/// Return the write end of a new pipe whose read end is closed. A write to
+/// it fails with `EPIPE`. `std::io::pipe` makes both ends close-on-exec, so
+/// a child process that a parallel test starts does not keep the read end.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let output = run_dumb_utf8(&mut command, broken_pipe(), RUN_TIME_LIMIT);
+/// ```
+pub fn broken_pipe() -> Stdio {
+    let (reader, writer) = io::pipe().unwrap();
+    drop(reader);
+    writer.into()
 }

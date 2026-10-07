@@ -12,6 +12,7 @@ mod boot;
 mod common;
 #[path = "common/log_event.rs"]
 mod log_event;
+#[expect(dead_code, reason = "this test crate does not use a broken pipe")]
 #[path = "common/run.rs"]
 mod run;
 

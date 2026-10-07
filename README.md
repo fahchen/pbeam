@@ -3,8 +3,8 @@
 PBeam is a planned Rust runtime for executing existing Erlang/Elixir `.beam`
 artifacts without ERTS and packaging applications as single native executables.
 
-**Status: verified Elixir references, constant-return and bounded-call slices, and the compiled Elixir IO path through `:io.put_chars/2`.**
-The OTP IO protocol, host output path, and application build tooling are not implemented yet.
+**Status: verified Elixir references, constant-return and bounded-call slices, and the compiled Elixir and OTP IO path of Hello World through the host write.**
+The Hello World run uses the boot module `pbeam_boot` of `examples/hello_world` and the pinned Elixir and OTP modules. Application build tooling is not implemented yet.
 `mix pbeam.build` is a proposed command, not an available installation or build instruction.
 
 ## Design

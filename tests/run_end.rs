@@ -10,6 +10,7 @@ mod boot;
     reason = "this test crate gives BEAM paths, not bytes, to the binary"
 )]
 mod common;
+#[expect(dead_code, reason = "this test crate does not use a broken pipe")]
 #[path = "common/run.rs"]
 mod run;
 
