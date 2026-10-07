@@ -96,3 +96,8 @@ Run every required exit cleanup and notification stage before returning an error
 ## Invariant violations remain visible
 
 Treat a broken runtime invariant as an explicit failure. Do not skip missing entries when skipping would hide a defect or leave runtime state inconsistent.
+
+## Payload limits include fixed framing
+
+Calculate payload limits from the complete output, not from the total container limit.
+Subtract every fixed prefix and suffix before documenting the allowed payload size.
