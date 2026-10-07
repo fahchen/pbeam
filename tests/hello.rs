@@ -7,7 +7,7 @@ mod run;
 
 use std::{
     path::PathBuf,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     time::{Duration, Instant},
 };
 
@@ -182,6 +182,7 @@ fn elixir_io_beam() -> Vec<u8> {
 fn run_pbeam(arguments: &[&str]) -> Output {
     run_with_time_limit(
         Command::new(env!("CARGO_BIN_EXE_pbeam")).args(arguments),
+        Stdio::piped(),
         Duration::from_secs(5),
     )
 }

@@ -528,7 +528,7 @@ bifs! {
     math:sqrt/1 => unsupported,
     math:tan/1 => unsupported,
     math:tanh/1 => unsupported,
-    net_kernel:dflag_unicode_io/1 => unsupported,
+    net_kernel:dflag_unicode_io/1 => |_, [term]| Ok(match term { Term::Pid(_) => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     os:env/0 => unsupported,
     os:getenv/1 => |_, [name]| os::getenv(name),
     os:getpid/0 => unsupported,
@@ -569,5 +569,5 @@ bifs! {
     string:list_to_float/1 => unsupported,
     unicode:bin_is_7bit/1 => unsupported,
     unicode:characters_to_binary/2 => |_, [chardata, encoding]| unicode::characters_to_binary(chardata, encoding),
-    unicode:characters_to_list/2 => unsupported,
+    unicode:characters_to_list/2 => |_, [chardata, encoding]| Ok(unicode::characters_to_list(chardata, encoding)),
 }
