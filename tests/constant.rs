@@ -303,3 +303,41 @@ fn rejects_export_labels_outside_declared_range() {
             .contains("export label")
     );
 }
+
+#[test]
+fn checks_lambda_labels_against_the_code_label_count() {
+    let code = beam_chunks(constant_fixture())
+        .into_iter()
+        .find(|(id, _)| id == b"Code")
+        .unwrap()
+        .1;
+    // The label count is the fourth field of the code header.
+    let label_count = i32::from_be_bytes(code[12..16].try_into().unwrap());
+    let load = |lambdas: &[i32]| {
+        let mut chunks = beam_chunks(constant_fixture());
+        chunks.push((
+            *b"FunT",
+            lambdas
+                .iter()
+                .flat_map(|field| field.to_be_bytes())
+                .collect(),
+        ));
+        BeamModule::load(&assemble_chunks(chunks))
+    };
+    // A `FunT` chunk with a count of 1 and one entry: the function atom
+    // index, total arity, label, index, number of free variables, and old
+    // unique value.
+    let load_label = |label: i32| load(&[1, 1, 0, label, 0, 0, 0]);
+    assert!(load_label(1).is_ok());
+    assert!(load_label(label_count - 1).is_ok());
+    for label in [0, label_count, -1] {
+        assert!(
+            load_label(label)
+                .unwrap_err()
+                .to_string()
+                .starts_with("BEAM lambda label")
+        );
+    }
+    // An empty `FunT` chunk is no chunk, as in ERTS.
+    assert!(load(&[]).is_ok());
+}

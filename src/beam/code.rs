@@ -1035,7 +1035,7 @@ fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        atom_at, atom_chunk_name, parse, parse_atoms, parse_exports, parse_lambdas, parse_literals,
+        atom_at, atom_chunk_name, parse_atoms, parse_exports, parse_lambdas, parse_literals,
         read_literal, read_u32,
     };
     use crate::term::{AtomTable, Fun, Lambda, Map, Term};
@@ -1052,23 +1052,6 @@ mod tests {
     fn lambda_table(count: i32, entries: &[[i32; 6]]) -> Vec<u8> {
         let fields = std::iter::once(count).chain(entries.iter().flatten().copied());
         fields.flat_map(i32::to_be_bytes).collect()
-    }
-
-    /// Return `fixtures/beam/constant.beam` with a `FunT` chunk added.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(parse(&with_lambda_chunk(&lambda_table(0, &[])), &mut AtomTable::new()).is_ok());
-    /// ```
-    fn with_lambda_chunk(payload: &[u8]) -> Vec<u8> {
-        let mut beam = include_bytes!("../../fixtures/beam/constant.beam").to_vec();
-        beam.extend(b"FunT");
-        beam.extend((payload.len() as u32).to_be_bytes());
-        beam.extend(payload);
-        let size = (beam.len() - 8) as u32;
-        beam[4..8].copy_from_slice(&size.to_be_bytes());
-        beam
     }
 
     /// Return the atom term of a name that exists in a table.
@@ -1460,29 +1443,5 @@ mod tests {
                 "BEAM lambda has more free variables than arguments"
             );
         }
-    }
-
-    #[test]
-    fn checks_lambda_labels_against_the_code_label_count() {
-        let beam = include_bytes!("../../fixtures/beam/constant.beam");
-        let code = beam.windows(4).position(|id| id == b"Code").unwrap();
-        // The label count is the fourth field of the code header.
-        let label_count = read_u32(&beam[code + 20..]).unwrap() as i32;
-        let load = |label: i32| {
-            let table = lambda_table(1, &[[1, 0, label, 0, 0, 0]]);
-            parse(&with_lambda_chunk(&table), &mut AtomTable::new())
-        };
-        assert!(load(1).is_ok());
-        assert!(load(label_count - 1).is_ok());
-        for label in [0, label_count, -1] {
-            assert!(
-                load(label)
-                    .unwrap_err()
-                    .to_string()
-                    .starts_with("BEAM lambda label")
-            );
-        }
-        // An empty `FunT` chunk is no chunk, as in ERTS.
-        assert!(parse(&with_lambda_chunk(&[]), &mut AtomTable::new()).is_ok());
     }
 }
