@@ -1,6 +1,6 @@
 -module(exit_probe).
--export([exits/2, gcs/2]).
--export([exiter/5, watcher/3, relay/1, idle/0]).
+-export([exits/2, gcs/2, late_timer/0]).
+-export([exiter/5, watcher/3, relay/1, idle/0, late_exiter/1, late_starter/2]).
 
 %% The reductions of the later phases of a process exit on the pinned ERTS
 %% JIT: each BIF timer, link, monitor, and pending signal of the exiting
@@ -115,3 +115,23 @@ collect(Downs, Exits, Done, Acc) ->
 
 event(Kind, [{Kind, Count} | Acc]) -> [{Kind, Count + 1} | Acc];
 event(Kind, Acc) -> [{Kind, 1} | Acc].
+
+%% A BIF timer to a process whose exit switched out in its timer phase. The
+%% process a starts 100 timers, so its exit switches out in that phase. b,
+%% which a spawns in its exit turn, then starts a timer to a. ERTS gives no
+%% timer to an exiting process (erl_hl_timer.c:1833-1861), so
+%% cancel_timer/2 gives false.
+late_timer() ->
+    {A, Monitor} = spawn_opt(?MODULE, late_exiter, [self()], [monitor]),
+    receive {late, Result} -> ok end,
+    receive {'DOWN', Monitor, process, A, normal} -> Result end.
+
+late_exiter(Root) ->
+    times(100, fun() -> erlang:start_timer(100000000, self(), tick) end),
+    erlang:yield(),
+    spawn(?MODULE, late_starter, [Root, self()]),
+    ok.
+
+late_starter(Root, A) ->
+    Ref = erlang:start_timer(100000000, A, late),
+    Root ! {late, erlang:cancel_timer(Ref, [])}.

@@ -1941,8 +1941,10 @@ pub(super) fn function_exported(
 ///   overflow raise `badarg`.
 /// - Then a `Dest` that is not a pid or an atom raises `badarg`.
 /// - Then the BIF makes a new reference and returns it. A pid that is not
-///   alive gets no timer, and the timer of a pid goes into the timer tree
-///   of the process (`erl_hl_timer.c:1832-1858`).
+///   alive gets no timer, also a pid whose exit started, as
+///   `erts_pid2proc_opt` finds no exiting process
+///   (`erl_process_lock.c:970-984`). The timer of a pid goes into the timer
+///   tree of the process (`erl_hl_timer.c:1832-1858`).
 ///
 /// When the timer expires, `Dest` gets `{timeout, Reference, Msg}`.
 ///
@@ -1978,7 +1980,7 @@ pub(super) fn start_timer(
         _ => return Ok(BifResult::badarg()),
     };
     let reference = scheduler.make_ref()?;
-    if !matches!(receiver, Receiver::Process(id) if scheduler.process(id).is_none()) {
+    if !matches!(receiver, Receiver::Process(id) if scheduler.live_process(id).is_none()) {
         if let Receiver::Process(id) = receiver
             && let Some(process) = scheduler.process_mut(id)
         {

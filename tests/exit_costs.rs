@@ -162,3 +162,31 @@ fn charges_the_exit_items_as_pinned_erts_with_one_scheduler() {
         format!("{EXITS}\n")
     );
 }
+
+#[test]
+fn gives_no_bif_timer_to_a_process_whose_exit_switched_out() {
+    // `erts_pid2proc_opt` finds no exiting process (`erl_process_lock.c:970-984`),
+    // so `erlang:start_timer/3` destroys the timer (`erl_hl_timer.c:1833-1861`).
+    let program = BeamProgram::load(&[EXIT_PROBE]).unwrap();
+    let result = program.execute("exit_probe", "late_timer", &[]).unwrap();
+    assert_eq!(text(&result), "false");
+
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-pa",
+            "fixtures/preempt",
+            "-eval",
+            "{module, M} = code:ensure_loaded(exit_probe), \
+             io:format(\"~w~n\", [M:late_timer()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(String::from_utf8(reference.stdout).unwrap(), "false\n");
+}
