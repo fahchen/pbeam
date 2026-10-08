@@ -182,8 +182,7 @@ and `puts/2` through the `:io.put_chars/2` boundary. Task #55 executes the OTP I
 [Reference task #41](https://github.com/fahchen/pbeam/issues/41) captures the ERTS
 baseline and disassembles its compiler output as preparation. Existing constant-return
 and call-chain tasks remain small interpreter building blocks. Review tasks #51 and #48–#50
-independently. Keep the Hello World target open until [task #42](https://github.com/fahchen/pbeam/issues/42)
-executes the compiled path and its regression checks pass. Do not bypass the gate by
+independently. [Task #42](https://github.com/fahchen/pbeam/issues/42) (PR #194) executes the compiled path, and its regression checks pass. Task #42 and M2 ([tracker #33](https://github.com/fahchen/pbeam/issues/33)) are complete. Keep the regression checks. Do not bypass the gate by
 changing the program to a PBeam-only print operation.
 
 Lint and 100% application line coverage remain required. Adding the Elixir fixture
