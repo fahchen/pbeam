@@ -1675,9 +1675,11 @@ fn is_process_info_item(item: &Term) -> bool {
 /// `process_info_aux` does. For a live process, return
 /// `{message_queue_len, N}`, where `N` counts the messages of the mailbox and
 /// no receive marker, as `sig_qs.mq_len` does (`erl_bif_info.c:1742-1754`).
-/// As ERTS does first, fetch the messages that arrived, with no cost
-/// (`erl_bif_info.c:1237-1244` for the caller, `1398-1406` for another
-/// process). For the calling process, return
+/// For each item of a live process, first fetch the messages that arrived,
+/// with no cost. ERTS fetches the messages of the caller for each item
+/// (`erl_bif_info.c:1355-1356`, `1237-1244`). Another process with messages
+/// that it did not fetch gets a process-info signal, and it fetches them
+/// when it handles the signal (`erl_bif_info.c:1384-1390`). For the calling process, return
 /// `{current_stacktrace, []}`, because PBeam records no stack frames. The
 /// `current_stacktrace` of another process, a list of items, and any other
 /// item give a runtime error.
@@ -1715,6 +1717,7 @@ pub(super) fn process_info(
     let Some(target) = context.scheduler.process_mut(*id) else {
         return Ok(Value(Term::static_atom("undefined")));
     };
+    target.mailbox.fetch();
     let info = match item {
         Term::Atom(name) => match (name.name(), &target.registered_name) {
             // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
@@ -1726,13 +1729,10 @@ pub(super) fn process_info(
                 Term::Atom(registered.clone()),
             ])),
             ("registered_name", None) => Some(Term::List(Vec::new())),
-            ("message_queue_len", _) => {
-                target.mailbox.fetch();
-                Some(Term::Tuple(vec![
-                    item.clone(),
-                    Term::Integer(target.mailbox.message_count() as i64),
-                ]))
-            }
+            ("message_queue_len", _) => Some(Term::Tuple(vec![
+                item.clone(),
+                Term::Integer(target.mailbox.message_count() as i64),
+            ])),
             _ => None,
         },
         _ => None,

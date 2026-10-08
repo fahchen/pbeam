@@ -1,7 +1,7 @@
 -module(receive_probe).
 -export([receives/0, orders/0, gcs/0, start/3, traced/3]).
 -export([recv_fetch/3, recv_poll/3, recv_queued/3, recv_skip/3, recv_return/3]).
--export([observe/3, woken/2, queued/2, info/2, hibernated/2, witness/1]).
+-export([observe/3, woken/2, queued/2, info/2, named/2, hibernated/2, witness/1]).
 
 %% The receive costs of the pinned ERTS JIT. loop_rec costs 0 when a
 %% fetched message is next. At the end of the fetched messages, it fetches
@@ -96,13 +96,13 @@ nop() -> ok.
 %% after W. The witness sends q1, uses its budget, and sends q2 in its next
 %% turn. For each kind, W sends w in the turn of the receive with the first
 %% N, and in its next turn with the second N. For woken, queued, and
-%% hibernated, the two values give the exact cost of the receive. For info,
-%% the two values are 2 apart: process_info/2 also costs 1 for its item
-%% (erl_bif_info.c:1601), which PBeam does not charge yet.
+%% hibernated, the two values give the exact cost of the receive. For info
+%% and named, the two values are 2 apart: process_info/2 also costs 1 for
+%% its item (erl_bif_info.c:1601), which PBeam does not charge yet.
 orders() ->
     [{Kind, [order(Kind, N) || N <- Ns]}
      || {Kind, Ns} <- [{woken, [3992, 3993]}, {queued, [3979, 3980]}, {info, [3982, 3984]},
-                       {hibernated, [3984, 3985]}]].
+                       {named, [3982, 3984]}, {hibernated, [3984, 3985]}]].
 
 order(Kind, N) ->
     spawn(?MODULE, observe, [self(), Kind, N]),
@@ -161,6 +161,15 @@ queued(O, N) ->
 %% no receive fetches.
 info(O, N) ->
     {message_queue_len, 11} = process_info(self(), message_queue_len),
+    receive go -> ok end,
+    recv(10),
+    burn(N),
+    O ! w.
+
+%% As info/2, with registered_name. process_info/2 of the caller fetches for
+%% each item (erl_bif_info.c:1355-1356).
+named(O, N) ->
+    [] = process_info(self(), registered_name),
     receive go -> ok end,
     recv(10),
     burn(N),
