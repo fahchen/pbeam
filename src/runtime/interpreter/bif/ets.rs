@@ -238,8 +238,10 @@ pub(super) fn insert(
 /// `4 * count`. ERTS takes a table lock and inserts each object in step 3, and
 /// another process that uses the table helps to complete the insert. PBeam
 /// inserts all objects when it takes the table, so another process sees
-/// them at once. When the table goes away during step 3, a later call
-/// raises `badarg` (`erl_db.c:2215-2253`).
+/// them at once. When the owner exit deletes the table during step 3, a
+/// later call raises `badarg`, as ERTS does after it cancels the insert
+/// (`erl_db.c:2232-2248`, `5082-5086`). PBeam has no `ets:delete/1`, which
+/// in ERTS first completes the insert, so that the insert returns `true`.
 ///
 /// # Examples
 ///
