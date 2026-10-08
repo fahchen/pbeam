@@ -313,7 +313,7 @@ Each row is a BIF entry of `BIFS` that has a body.
 | `persistent_term:get/1` | `runtime.persistent_term` | `run` | `inline` | Gives the value of a key, or raises `badarg`. | `O(n)` | `src/runtime/persistent_term.rs` |
 | `persistent_term:get/2` | `runtime.persistent_term` | `run` | `inline` | Gives the value of a key, or the default. | `O(n)` | `src/runtime/persistent_term.rs` |
 | `persistent_term:put/2` | `runtime.persistent_term` | `run` | `inline` | Stores a copy of a value for the node until the run ends. | `O(n)` | `src/runtime/persistent_term.rs` |
-| `re:compile/2` | `runtime.resource` | `run` | `host-call`, `trap` | Compiles a pattern with the linked PCRE2 C code and keeps the code in `RegexCodes` until the run ends. A `unicode` pattern that is not a binary traps to `re:ucompile/2`. | `unknown` | `src/runtime/interpreter/bif/re.rs`, `src/runtime/pcre2.rs` |
+| `re:compile/2` | `runtime.resource` | `host` | `host-call`, `trap` | Compiles a pattern with the linked PCRE2 C code and keeps the code in `RegexCodes` until the run ends. A `unicode` pattern that is not a binary traps to `re:ucompile/2`. The result depends on the free stack of the scheduler thread: the PCRE2 stack guard rejects a deeply nested pattern on a small stack. | `unknown` | `src/runtime/interpreter/bif/re.rs`, `src/runtime/pcre2.rs` |
 | `unicode:characters_to_binary/2` | `none` | `pure` | `inline` | Converts chardata to a UTF-8 or Latin-1 binary. | `O(n)` | `src/runtime/interpreter/bif/unicode.rs`, `src/runtime/unicode.rs` |
 | `unicode:characters_to_list/2` | `none` | `pure` | `inline` | Converts chardata to a list of characters. | `O(n)` | `src/runtime/interpreter/bif/unicode.rs`, `src/runtime/unicode.rs` |
 
