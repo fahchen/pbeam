@@ -16,7 +16,7 @@ use std::collections::HashMap;
 mod bif;
 mod native;
 
-use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function, send};
+use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function, is_heavy_bif, send};
 
 /// The largest number of arguments of `erlang:apply/3`. ERTS `apply` copies
 /// at most `MAX_REG - 1` arguments to the X registers (`erl_vm.h:55`,
@@ -46,6 +46,10 @@ enum Outcome {
     /// The process called `erlang:hibernate/0`. It continues at its next
     /// instruction when the scheduler runs it again.
     Hibernate,
+    /// The process switches out at an ERTS switch point, for example at the
+    /// end of its reduction budget. It stays runnable and continues where
+    /// the switch point leaves its frame.
+    Yield,
     /// The process exited. `result` is the return value of a normal exit.
     Exit { reason: Term, result: Option<Term> },
 }
@@ -120,17 +124,20 @@ impl BeamProgram {
     }
 
     /// Run an exported function as the root process. Processes that it
-    /// spawns run on the same cooperative scheduler. A process runs until it
-    /// waits, calls `erlang:hibernate/0`, or exits. Before it takes the
-    /// next process, the scheduler reads the run clock and expires each due
-    /// timer, as ERTS bumps the timers in `check_activities_to_run`
-    /// (`erl_process.c:9797-9810`). When no process can run, it sleeps until
-    /// the first timer end, as `scheduler_wait` sleeps until the next
-    /// timeout (`erl_process.c:3452-3620`). The run ends at the next
-    /// scheduling step after the root process exits, also when another
-    /// process can run or a timer is active. A process that ends the root
-    /// process with an exit signal continues until it waits or exits. This
-    /// is as `halt()` after `-eval` stops the ERTS node
+    /// spawns run on the same scheduler. A process runs until it waits,
+    /// calls `erlang:hibernate/0`, exits, or switches out at an ERTS switch
+    /// point, for example at the end of its reduction budget of
+    /// `CONTEXT_REDS`. A process that switches out goes to the end of the
+    /// run queue. Before it takes the next process, the scheduler reads the
+    /// run clock and expires each due timer, as ERTS bumps the timers in
+    /// `check_activities_to_run` (`erl_process.c:9797-9810`). When no
+    /// process can run, it sleeps until the first timer end, as
+    /// `scheduler_wait` sleeps until the next timeout
+    /// (`erl_process.c:3452-3620`). The run ends at the next scheduling step
+    /// after the root process exits, also when another process can run or a
+    /// timer is active. A process that ends the root process with an exit
+    /// signal continues until it waits, exits, or switches out. This is as
+    /// `halt()` after `-eval` stops the ERTS node
     /// (`erlang.erl:3357-3358`) and as `init` halts after a boot process
     /// exit that is not `normal` (`init.erl:710-712`). A root process exit
     /// gives the error `root process exited with <Reason>`, with the reason
@@ -161,6 +168,7 @@ impl BeamProgram {
                 match self.run(&mut scheduler)? {
                     Outcome::Wait => scheduler.park_current(),
                     Outcome::Hibernate => scheduler.hibernate_current(),
+                    Outcome::Yield => scheduler.yield_current(),
                     Outcome::Exit { reason, result } => {
                         scheduler.finish_current(reason, result)?;
                     }
@@ -305,8 +313,11 @@ impl BeamProgram {
     }
 
     /// Run the current process until it waits for a message, calls
-    /// `erlang:hibernate/0`, or exits. A process with an undefined start
-    /// first calls `undefined_function` with its start MFA.
+    /// `erlang:hibernate/0`, exits, or switches out. A process with an
+    /// undefined start first calls `undefined_function` with its start MFA.
+    /// A process that switched out at the `return` of its last frame has no
+    /// frame. It exits now with the value in `x0`, as ERTS continues at the
+    /// normal exit (`beam_normal_exit`).
     ///
     /// # Examples
     ///
@@ -335,6 +346,10 @@ impl BeamProgram {
             if let Some(outcome) = outcome {
                 return Ok(outcome);
             }
+        }
+        let process = scheduler.current_process_mut();
+        if process.frames.is_empty() {
+            return normal_exit(process);
         }
         loop {
             let process = scheduler.current_process_mut();
@@ -967,9 +982,12 @@ impl BeamProgram {
                     write(process, destination, rest)?;
                 }
                 Instruction::Send => {
-                    // ERTS `send` calls `erl_send` and writes its result to
-                    // x0, or raises (`emu/bif_instrs.tab:425-454`; JIT
-                    // `emit_send` in `jit/arm/instr_bif.cpp:612-625`).
+                    // ERTS `send` calls `erl_send` as a light BIF and writes
+                    // its result to x0, or raises (`emu/bif_instrs.tab:425-454`;
+                    // JIT `emit_send` in `jit/arm/instr_bif.cpp:612-625`).
+                    if light_bif_switch(process) {
+                        return Ok(Outcome::Yield);
+                    }
                     let to = read(process, &Operand::X(0))?;
                     let message = read(process, &Operand::X(1))?;
                     let result = send(scheduler, &to, message);
@@ -1085,8 +1103,23 @@ impl BeamProgram {
                 // already holds it.
                 Instruction::BuildStacktrace => {}
                 Instruction::Noop | Instruction::Label(_) => {}
+                Instruction::TestYield => {
+                    // `emit_i_test_yield` (`jit/arm/instr_common.cpp:3097-3119`).
+                    process.fcalls -= 1;
+                    if process.fcalls <= 0 {
+                        return Ok(Outcome::Yield);
+                    }
+                }
                 Instruction::Return => {
-                    if let Some(outcome) = return_from_frame(process)? {
+                    // `emit_dispatch_return` (`jit/arm/instr_call.cpp:49-54`)
+                    // switches after the return, so the process continues at
+                    // the caller, or at the normal exit.
+                    process.fcalls -= 1;
+                    let exit = return_from_frame(process)?;
+                    if process.fcalls < 0 {
+                        return Ok(Outcome::Yield);
+                    }
+                    if let Some(outcome) = exit {
                         return Ok(outcome);
                     }
                 }
@@ -1115,13 +1148,22 @@ impl BeamProgram {
     /// `erlang:apply/2` or `erlang:apply/3` releases the Y registers before
     /// the apply, as the ERTS loader makes `i_apply_fun_last` and
     /// `i_apply_last` (`jit/arm/ops.tab:649-657`), so an exception of the
-    /// apply does not see the catch tags of the frame. A tail call of a BIF
-    /// keeps the frame until the BIF returns, as `call_light_bif`,
-    /// `deallocate`, and `return` do (`jit/arm/ops.tab:711-712`). A call of
-    /// `erlang:load_nif/2` runs as the `i_load_nif` instruction with the
-    /// module of the current frame, and a tail call keeps the frame until
-    /// the instruction finishes (`jit/arm/ops.tab:615-623`,
-    /// `emu/ops.tab:854-862`). Return the outcome when the process exits.
+    /// apply does not see the catch tags of the frame.
+    ///
+    /// A BIF runs as a body call also in a tail call, and the process then
+    /// continues at the `Deallocate` and the `Return` that the loader puts
+    /// after a tail call, as `call_light_bif Bif | deallocate D | return`
+    /// and `i_call_ext Bif | deallocate D | return` do
+    /// (`jit/arm/ops.tab:687-714`). A light BIF, which is not in
+    /// `HEAVY_BIFS`, first costs one reduction. When the budget is then 0
+    /// or less, the process switches out before the BIF and runs this
+    /// instruction again (`emit_call_light_bif_shared` in
+    /// `jit/arm/instr_bif.cpp:399-400`, `583-592`). A heavy BIF goes through
+    /// its export, which costs no reduction (`emit_call_bif_shared` in
+    /// `jit/arm/instr_bif.cpp:721-789`). A call of `erlang:load_nif/2` runs
+    /// as the `i_load_nif` instruction with the module of the current frame
+    /// (`jit/arm/ops.tab:615-623`, `emu/ops.tab:854-862`). Return the
+    /// outcome when the process stops.
     ///
     /// # Examples
     ///
@@ -1150,17 +1192,29 @@ impl BeamProgram {
         if (module, name, arity) == ("erlang", "load_nif", 2) {
             let caller = current_frame(process).module.clone();
             let result = native::load_nif(self, scheduler, &caller)?;
-            return self.finish_bif(scheduler.current_process_mut(), result, tail);
+            return self.finish_bif(scheduler.current_process_mut(), result, false);
+        }
+        if is_bif(module, name, arity) {
+            if !is_heavy_bif(module, name, arity) && light_bif_switch(process) {
+                return Ok(Some(Outcome::Yield));
+            }
+            let arguments = call_arguments(&process.registers, arity)?;
+            let result = self.bif(scheduler, module, name, arguments)?;
+            return self.finish_bif(scheduler.current_process_mut(), result, false);
         }
         self.call_mfa(scheduler, module, name, arity, tail)
     }
 
-    /// Call `module:name/arity` with the arguments in the X registers. The
-    /// calls of `erlang:apply/2` and `erlang:apply/3` run as the ERTS
-    /// `i_apply_fun` and `i_apply` instructions. A BIF runs before the module
-    /// code, as in ERTS. A function that a loaded module does not export
-    /// goes to `undefined_function`. Return the outcome when the process
-    /// exits.
+    /// Call `module:name/arity` through its export with the arguments in
+    /// the X registers, as `apply`, a fun call, and `call_ext` of Erlang
+    /// code do. The calls of `erlang:apply/2` and `erlang:apply/3` run as
+    /// the ERTS `i_apply_fun` and `i_apply` instructions. A BIF runs before
+    /// the module code, as in ERTS. Through its export, a BIF costs no
+    /// reduction, and a tail call of it returns to the caller with no
+    /// reduction (`emit_call_bif_mfa` and `emit_bif_nif_epilogue` in
+    /// `jit/arm/instr_bif.cpp:631-674`, `819-839`). A function that a loaded
+    /// module does not export goes to `undefined_function`. Return the
+    /// outcome when the process stops.
     ///
     /// # Examples
     ///
@@ -1449,10 +1503,12 @@ impl BeamProgram {
     /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
     /// does for BIFs and NIFs (`emu/bif_instrs.tab:604-636`; JIT
     /// `emit_bif_nif_epilogue` in `jit/arm/instr_bif.cpp:631-719`). A value
-    /// goes to x0, and a tail call then returns from the frame. An exception
-    /// goes to the error handler. A trap writes its arguments to the X
-    /// registers and enters the target function. An exit ends the process,
-    /// and no catch tag sees it. Return the outcome when the process exits.
+    /// goes to x0, and a tail call then returns from the frame with no
+    /// reduction. A yield return writes its value to x0, does the return
+    /// of a tail call, and switches out the process. An exception goes to
+    /// the error handler. A trap writes its arguments to the X registers and
+    /// enters the target function. An exit ends the process, and no catch
+    /// tag sees it. Return the outcome when the process stops.
     ///
     /// # Examples
     ///
@@ -1478,6 +1534,15 @@ impl BeamProgram {
                 } else {
                     Ok(None)
                 }
+            }
+            BifResult::YieldReturn(value) => {
+                write(process, &Operand::X(0), value)?;
+                if tail {
+                    // The process exits at its next run when it returned
+                    // from its last frame.
+                    return_from_frame(process)?;
+                }
+                Ok(Some(Outcome::Yield))
             }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
             BifResult::Trap {
@@ -1664,15 +1729,53 @@ fn release_frame(process: &mut ProcessState, deallocate: u32) -> Result<(), Beam
 /// assert!(return_from_frame(&mut process)?.is_some());
 /// ```
 fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, BeamError> {
-    let result = read(process, &Operand::X(0)).map_err(|_| error("return before setting x0"))?;
+    read(process, &Operand::X(0)).map_err(|_| error("return before setting x0"))?;
     process.frames.pop();
     if !process.frames.is_empty() {
         return Ok(None);
     }
-    Ok(Some(Outcome::Exit {
+    normal_exit(process).map(Some)
+}
+
+/// Return the normal exit of a process that returned from its last frame,
+/// with the value in `x0` as its result.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write(&mut process, &Operand::X(0), Term::static_atom("ok"))?;
+/// assert!(matches!(normal_exit(&process)?, Outcome::Exit { result: Some(_), .. }));
+/// ```
+fn normal_exit(process: &ProcessState) -> Result<Outcome, BeamError> {
+    let result = read_operand(&Operand::X(0), &process.registers, &[])
+        .map_err(|_| error("return before setting x0"))?;
+    Ok(Outcome::Exit {
         reason: Term::static_atom("normal"),
         result: Some(result),
-    }))
+    })
+}
+
+/// Use one reduction for a light BIF, as `emit_call_light_bif_shared` does
+/// before the BIF (`jit/arm/instr_bif.cpp:399-400`). Return true when the
+/// budget is then 0 or less: the process must switch out before the BIF,
+/// and it runs the instruction again when it runs again
+/// (`jit/arm/instr_bif.cpp:583-592`). The instruction then costs one
+/// reduction again.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 2;
+/// assert!(!light_bif_switch(&mut process));
+/// assert!(light_bif_switch(&mut process));
+/// ```
+fn light_bif_switch(process: &mut ProcessState) -> bool {
+    process.fcalls -= 1;
+    if process.fcalls > 0 {
+        return false;
+    }
+    current_frame(process).next_instruction -= 1;
+    true
 }
 
 /// Replace the value of each existing key of a map, as ERTS

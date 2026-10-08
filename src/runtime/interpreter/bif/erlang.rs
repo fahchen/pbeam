@@ -1214,8 +1214,10 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 
 /// Send `message` to `to` and return the message, as ERTS `erl_send`
 /// (`bif.c:2845-2908`) does for the `send` instruction and for
-/// `erlang:send/2` (`send_2`, `bif.c:2801-2804`). A `to` that
-/// [`deliver_to`] rejects raises `badarg`.
+/// `erlang:send/2` (`send_2`, `bif.c:2801-2804`). A local send then uses
+/// reductions, and can return the message after a switch (see
+/// [`local_send_result`]). A `to` that [`deliver_to`] rejects raises
+/// `badarg`.
 ///
 /// # Examples
 ///
@@ -1231,7 +1233,8 @@ pub(in crate::runtime::interpreter) fn send(
     message: Term,
 ) -> BifResult {
     match deliver_to(scheduler, to, message.clone()) {
-        Some(_) => Value(message),
+        Some(Sent::Local) => local_send_result(scheduler, message),
+        Some(Sent::NoConnect) => Value(message),
         None => BifResult::badarg(),
     }
 }
@@ -1242,7 +1245,9 @@ pub(in crate::runtime::interpreter) fn send(
 /// that is not `[]`, raise `badarg`, and nothing is sent. Then the message
 /// goes to `to` as [`deliver_to`] gives it, and a `to` that it rejects
 /// raises `badarg`. The result is `noconnect` for `{Name, Node}` on another
-/// node with `noconnect`, and `ok` for each other send.
+/// node with `noconnect`, and `ok` for each other send. A local send uses
+/// reductions, and can return `ok` after a switch (see
+/// [`local_send_result`]).
 ///
 /// PBeam has no distribution and no ports, so `nosuspend` changes nothing.
 /// A `priority` message is an ordinary message unless its receiver gets it
@@ -1278,9 +1283,38 @@ pub(super) fn send3(
         }
     }
     match deliver_to(scheduler, to, message.clone()) {
+        Some(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
         Some(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
-        Some(_) => Value(Term::static_atom("ok")),
+        Some(Sent::NoConnect) => Value(Term::static_atom("ok")),
         None => BifResult::badarg(),
+    }
+}
+
+/// The reductions of a local send: `erl_send` and `send_3` use them with
+/// `ERTS_VBUMP_REDS` after `do_send` gives a result that is 0 or more
+/// (`bif.c:2861-2866`, `2741-2746`). A send to another node gives
+/// `SEND_NOCONNECT` and uses none.
+const SEND_REDUCTIONS: i32 = 4;
+
+/// Use [`SEND_REDUCTIONS`] of the budget of the caller after a local send.
+/// Return `value`, or return it after a switch when the budget is then 0,
+/// as `ERTS_IS_PROC_OUT_OF_REDS` and `ERTS_BIF_PREP_YIELD_RETURN` do
+/// (`bif.c:2863-2864`, `2876-2879`; `bif.h:69`, `445-452`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// scheduler.current_process_mut().fcalls = 5;
+/// assert!(matches!(local_send_result(scheduler, ok.clone()), BifResult::Value(_)));
+/// assert!(matches!(local_send_result(scheduler, ok), BifResult::YieldReturn(_)));
+/// ```
+fn local_send_result(scheduler: &mut Scheduler, value: Term) -> BifResult {
+    let process = scheduler.current_process_mut();
+    process.vbump_reductions(SEND_REDUCTIONS);
+    if process.fcalls == 0 {
+        BifResult::YieldReturn(value)
+    } else {
+        Value(value)
     }
 }
 

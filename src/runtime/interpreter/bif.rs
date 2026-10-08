@@ -40,6 +40,11 @@ pub(super) enum BifResult {
         /// Arguments for the trap target, in `x0` onwards.
         arguments: Vec<Term>,
     },
+    /// The BIF returns this value after the calling process switches out,
+    /// as `ERTS_BIF_PREP_YIELD_RETURN` does (`bif.h:445-452`): the BIF
+    /// traps to `bif_return_trap`, which returns the value when the process
+    /// runs again.
+    YieldReturn(Term),
     /// The calling process exits with this reason, and no catch tag sees
     /// it, as `ERTS_BIF_EXITED` does. `erlang:exit/2` to the caller traps to
     /// the C function `erts_internal:await_exit/0`, which ends the process
@@ -233,6 +238,40 @@ impl BeamProgram {
 /// ```
 pub(super) fn is_bif(module: &str, name: &str, arity: u32) -> bool {
     BIFS.binary_search(&(module, name, arity)).is_ok()
+}
+
+/// The heavy BIFs: the `hbif` entries of the ERTS `bif.tab`
+/// (`bif.tab:64`, `74`, `131`, `132`, `134`, `180`, `470`). The ERTS loader
+/// turns a `call_ext` of a heavy BIF into `i_call_ext`, which calls the BIF
+/// through its export, not as a light BIF (`jit/arm/ops.tab:687-692`). Thus
+/// the call costs no reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(HEAVY_BIFS.contains(&("erlang", "put", 2)));
+/// ```
+const HEAVY_BIFS: [(&str, &str, u32); 7] = [
+    ("erlang", "erase", 1),
+    ("erlang", "hibernate", 3),
+    ("erlang", "process_info", 1),
+    ("erlang", "process_info", 2),
+    ("erlang", "put", 2),
+    ("erts_internal", "check_process_code", 1),
+    ("erts_internal", "garbage_collect", 1),
+];
+
+/// Return whether a BIF is a heavy BIF of [`HEAVY_BIFS`]. A `call_ext` of
+/// any other BIF calls it as a light BIF.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_heavy_bif("erlang", "put", 2));
+/// assert!(!is_heavy_bif("erlang", "whereis", 1));
+/// ```
+pub(super) fn is_heavy_bif(module: &str, name: &str, arity: u32) -> bool {
+    HEAVY_BIFS.contains(&(module, name, arity))
 }
 
 /// The `erlang` functions that ERTS runs as instructions, not as BIFs or BEAM

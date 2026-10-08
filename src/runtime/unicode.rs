@@ -119,8 +119,9 @@ pub(super) fn characters_to_utf8(chardata: &Term) -> Result<Option<Vec<u8>>, Bea
 /// list, so the walk reads such a binary as a tail.
 ///
 /// ERTS stops and continues in a trap when its reduction budget ends
-/// (`allowed_iterations`). PBeam has no reductions, so it converts the term
-/// in one call. The trap does not change the result.
+/// (`allowed_iterations`). PBeam does not read the budget here yet (#234),
+/// so it converts the term in one call. The trap does not change the
+/// result.
 ///
 /// # Examples
 ///

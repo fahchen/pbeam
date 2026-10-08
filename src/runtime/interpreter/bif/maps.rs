@@ -147,8 +147,8 @@ pub(super) fn is_key(key: &Term, map: &Term) -> BifResult {
 ///   list in order, and `Next` is `[Rest | Map]` or `none`.
 ///
 /// ERTS takes as many pairs as the reductions of the process permit. PBeam
-/// has no reductions, so it takes the pairs of a full budget
-/// (`CONTEXT_REDS`, `erl_vm.h:53`), as a new ERTS process does.
+/// does not read the budget here yet (#234), so it takes the pairs of a
+/// full budget (`CONTEXT_REDS`, `erl_vm.h:53`), as a new ERTS process does.
 ///
 /// A term that is not a map, a third argument that is not `iterator` or a
 /// list, a path that `Map::chunk` does not accept, a key that the map does

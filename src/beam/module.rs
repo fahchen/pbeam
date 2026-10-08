@@ -28,7 +28,8 @@ impl BeamModule {
         code::parse(bytes, &mut AtomTable::new())
     }
 
-    /// Run an exported function that returns a constant from `x0`.
+    /// Run an exported function that returns a constant from `x0`. It runs
+    /// no scheduler, so the `TestYield` of the entry does nothing.
     ///
     /// # Examples
     ///
@@ -56,7 +57,7 @@ impl BeamModule {
                     label_matches = false;
                 }
                 Instruction::Label(label) if active && label == entry => label_matches = true,
-                Instruction::Label(_) if active => {}
+                Instruction::Label(_) | Instruction::TestYield if active => {}
                 Instruction::Move(Operand::Value(term), Operand::X(X0_REGISTER))
                     if active && label_matches && value.is_none() =>
                 {
