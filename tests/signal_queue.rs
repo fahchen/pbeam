@@ -280,6 +280,14 @@ const LINK_EXITS: &[(&str, &str)] = &[
     // A member that runs a loop handles the signal at schedule-in.
     ("busy_linked", "[{down,c,boom},{exit,b,boom},{down,b,boom}]"),
     ("untrapped", "{died,boom}"),
+    // `link/1` to a process that does not exist raises `noproc` without
+    // `trap_exit`. With `trap_exit` the caller sends itself the link exit
+    // signal `noproc`, and it acts on it when it handles it
+    // (`bif.c:162-183`, `411-423`).
+    ("link_dead", "{error,noproc}"),
+    ("link_dead_trap", "noproc"),
+    ("link_dead_order", "[a,{'EXIT',noproc},b]"),
+    ("link_dead_untrap", "{died,noproc}"),
     // A target that did not handle its kill signal is not exiting, so the
     // link is made, and the target answers the link signal with `noproc`.
     ("link_exiting", "{died,noproc}"),

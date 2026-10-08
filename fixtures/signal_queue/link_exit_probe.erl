@@ -8,7 +8,8 @@ all() ->
 
 cases() ->
     [chain, chain_kill, chain_normal, exit_kill_links, busy_linked, untrapped,
-     link_exiting, link_exiting_trap, link_self].
+     link_dead, link_dead_trap, link_dead_order, link_dead_untrap, link_exiting,
+     link_exiting_trap, link_self].
 
 run(Case) ->
     Self = self(),
@@ -39,6 +40,10 @@ start(Name) ->
 connect({_, A}, {_, B}) ->
     A ! {link, B, self()},
     receive linked -> ok end.
+
+dead() ->
+    {P, R} = spawn_monitor(fun() -> ok end),
+    receive {'DOWN', R, process, P, _} -> P end.
 
 %% Read the messages of the case process until each member is down, in
 %% arrival order, with the names of the members.
@@ -107,6 +112,36 @@ untrapped() ->
     link(element(2, C)),
     element(2, C) ! {exit, boom},
     receive never -> ok end.
+
+link_dead() ->
+    P = dead(),
+    try link(P) catch Class:Reason -> {Class, Reason} end.
+
+%% With trap_exit, link/1 to a dead pid returns true, and the exit signal
+%% noproc comes after the messages that the caller sent before.
+link_dead_trap() ->
+    process_flag(trap_exit, true),
+    P = dead(),
+    true = link(P),
+    [{'EXIT', P, R}] = flush(),
+    R.
+
+link_dead_order() ->
+    process_flag(trap_exit, true),
+    P = dead(),
+    self() ! a,
+    true = link(P),
+    self() ! b,
+    [case M of {'EXIT', P, R} -> {'EXIT', R}; _ -> M end || M <- flush()].
+
+%% The caller handles the noproc signal after it stops to trap exits, so
+%% the signal ends it.
+link_dead_untrap() ->
+    process_flag(trap_exit, true),
+    P = dead(),
+    true = link(P),
+    process_flag(trap_exit, false),
+    flush().
 
 %% The target handles the kill signal after the link signal is sent, so
 %% link/1 returns true. The target answers the link signal with noproc at

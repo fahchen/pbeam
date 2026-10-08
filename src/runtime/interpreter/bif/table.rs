@@ -217,7 +217,7 @@ bifs! {
     erlang:is_reference/1 => unsupported,
     erlang:is_tuple/1 => unsupported,
     erlang:length/1 => |cx, [list]| Ok(erlang::length(cx.scheduler.current_process_mut(), list, 0)),
-    erlang:link/1 => |cx, [Term::Pid(target)]| Ok(Value(cx.scheduler.link(*target)?)),
+    erlang:link/1 => |cx, [Term::Pid(target)]| Ok(if cx.scheduler.link(*target) { Value(Term::static_atom("true")) } else { Raise { class: ExceptionClass::Error, reason: Term::static_atom("noproc") } }),
     erlang:link/2 => unsupported,
     erlang:list_to_atom/1 => |cx, [term]| erlang::list_to_atom(&mut cx.scheduler.atoms, term),
     erlang:list_to_binary/1 => unsupported,

@@ -787,41 +787,52 @@ impl Scheduler {
         Ok((id, reference))
     }
 
-    /// Link the current process with a live local process, as `link_opt`
-    /// (`bif.c:155-184`) does for `erlang:link/1`, and return `true`. A link
-    /// to the current process changes nothing. An active link sends no
-    /// signal. A new link, or an unlinking link that becomes active again,
-    /// sends a link signal to the target, which adds its side of the link
-    /// when it handles the signal.
+    /// Link the current process with the local process `target`, as
+    /// `link_opt` (`bif.c:136-186`) does for `erlang:link/1`. A link to the
+    /// current process changes nothing. An active link sends no signal. A
+    /// new link, or an unlinking link that becomes active again, sends a
+    /// link signal to the target, which adds its side of the link when it
+    /// handles the signal.
+    ///
+    /// A target that does not exist or exits (`erts_proc_lookup`) gives
+    /// `false` and no link when the current process does not trap exits:
+    /// the BIF then raises `noproc` (`bif.c:162-163`, `411-423`). With
+    /// `trap_exit` the link is made. A target that exits gets the link
+    /// signal and answers it with the link exit signal `noproc` at its exit
+    /// (see [`Scheduler::handle_exit_signals`]). For a target that does not
+    /// exist, the current process sends itself that signal with no sender
+    /// process (`bif.c:180-183`). Return true in each other case.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.link(child)?, Term::static_atom("true"));
+    /// assert!(scheduler.link(child));
+    /// assert!(!scheduler.link(dead));
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// A link to a process that does not exist or exits is not supported:
-    /// ERTS raises `noproc`, or with `trap_exit` sends the `noproc` exit
-    /// signal (`bif.c:162-163`, `410-424`).
-    pub(super) fn link(&mut self, target: ProcessId) -> Result<Term, BeamError> {
+    pub(super) fn link(&mut self, target: ProcessId) -> bool {
         let current = self.current_process_mut().id;
         if target == current {
-            return Ok(Term::static_atom("true"));
+            return true;
         }
-        if self.live_process(target).is_none() {
-            // ponytail: ERTS gives noproc for a missing target; #9 adds it.
-            return Err(error(format!(
-                "unsupported link to missing process {target:?}"
-            )));
+        if self.live_process(target).is_none() && !self.current_process_mut().trap_exit {
+            return false;
         }
         if self.current_process_mut().links.insert(target, 0) == Some(0) {
-            return Ok(Term::static_atom("true"));
+            return true;
         }
-        self.send_signal(Some(current), target, Signal::Link { from: current })
-            .expect("a live process gets the link signal");
-        Ok(Term::static_atom("true"))
+        let link = Signal::Link { from: current };
+        if self.send_signal(Some(current), target, link).is_err() {
+            let exit = Signal::Exit {
+                from: target,
+                reason: Term::static_atom("noproc"),
+                linked: true,
+                normal_kills: false,
+                alias: None,
+            };
+            self.send_signal(None, current, exit)
+                .expect("the current process gets the exit signal");
+        }
+        true
     }
 
     /// Unlink the current process from `target`, as `unlink_1`

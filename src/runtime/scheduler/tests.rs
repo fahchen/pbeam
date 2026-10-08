@@ -129,16 +129,16 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
     let (child, _) = scheduler
         .spawn(Start::Entry(frame()), vec![], false, false, false)
         .unwrap();
-    assert_eq!(scheduler.link(child).unwrap(), atom("true"));
-    assert_eq!(scheduler.link(child).unwrap(), atom("true"));
-    assert_eq!(scheduler.link(ProcessId(0)).unwrap(), atom("true"));
-    assert!(scheduler.link(ProcessId(99)).is_err());
+    assert!(scheduler.link(child));
+    assert!(scheduler.link(child));
+    assert!(scheduler.link(ProcessId(0)));
+    assert!(!scheduler.link(ProcessId(99)));
     scheduler.unlink(child);
     assert_ne!(scheduler.current_process_mut().links[&child], 0);
     scheduler.unlink(child);
     scheduler.unlink(ProcessId(99));
     scheduler.unlink(ProcessId(0));
-    assert_eq!(scheduler.link(child).unwrap(), atom("true"));
+    assert!(scheduler.link(child));
     assert_eq!(scheduler.current_process_mut().links[&child], 0);
     scheduler.park_current();
 
