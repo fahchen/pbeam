@@ -19,9 +19,7 @@ The Hello World run uses the boot module `pbeam_boot` of `examples/hello_world` 
 
 [Hello World](docs/hello-world-target.md) is the first target: PBeam executes the
 compiled Elixir entry, prints exactly `Hello, world!\n`, and exits successfully.
-The current task chain targets the compiled Elixir and OTP IO path through the
-group leader. PR #47 loads the pinned `Elixir.IO.beam` module. PR #52 executes the compiled Elixir path
-through the `:io.put_chars/2` boundary. Task #49 adds the cooperative process runtime. Task #55 executes the pinned OTP `io`, `group`, `user_drv`, and `prim_tty` BEAM path. Task #50 runs `prim_tty:write_nif/2` as a native binding. Task #79 starts the OTP IO servers and adds the TTY resource and the host write. Compilation and an ERTS smoke run alone do not meet this target.
+M2 is complete ([tracker #33](https://github.com/fahchen/pbeam/issues/33)). Task #42 runs both Hello World entries with the `pbeam` binary through the compiled Elixir and OTP IO path, and the boot module `pbeam_boot` starts the OTP IO servers. For the current work, see the M3 [tracker #34](https://github.com/fahchen/pbeam/issues/34).
 [Terra Counter](docs/terra-target.md) follows as a broader macOS arm64 PTY scenario. Full OTP
 compatibility, hot code upgrades, JIT/AOT, and traditional NIF ABI compatibility
 are outside the initial scope. Each executable targets a particular platform;
@@ -67,8 +65,8 @@ Work is managed in [GitHub Issues](https://github.com/fahchen/pbeam/issues),
 Each milestone has a dedicated tracking issue. Epics and tasks are assigned to
 the GitHub milestone; native sub-issue links express the hierarchy and native
 blocked-by links express dependencies. Milestone trackers and epics list their
-issues as linked bullets. Start with
-[the first milestone](https://github.com/fahchen/pbeam/issues/32).
+issues as linked bullets. For the current work, see
+[the M3 tracking issue #34](https://github.com/fahchen/pbeam/issues/34).
 
 Milestone titles use `[m1] Title`. Epic and task titles use `[m1-e1] Title`;
 GitHub issue numbers identify individual tasks.

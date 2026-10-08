@@ -170,6 +170,22 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the first consumer of `ets:give_away/3`, `ets:setopts/2`, or a live heir.
 - **Source:** #112.
 
+### Run `erlang:halt/0,1`
+
+- A call of `erlang:halt/0` or `erlang:halt/1` stops the `pbeam` run with `pbeam: unresolved external MFA erlang:halt/2` and status 1. The pinned `erlang:halt/0` calls `erlang:halt(0, [])`, and `erlang:halt/1` calls `erlang:halt(HaltType, [])` (erlang.erl:3357-3358, 3383-3388). The BIF table entry of `erlang:halt/2` is `unsupported` (`src/runtime/interpreter/bif/table.rs`). ERTS ends the run with the given status: `halt_2` reads the options, and for an integer status it calls `erts_halt` with the status (bif.c:4309-4365).
+- **Evidence:** a module `haltp` with `halt0() -> erlang:halt().` and `halt3() -> erlang:halt(3).`. On pinned ERTS, `erl -noshell -pa <dir> -eval 'haltp:halt0()'` exits with status 0, and `-eval 'haltp:halt3()'` exits with status 3. On the `pbeam` binary, `pbeam pbeam_boot start haltp halt0` and `pbeam pbeam_boot start haltp halt3`, with the BEAM files of `examples/hello_world/README.md`, both write `pbeam: unresolved external MFA erlang:halt/2` and exit with status 1. The "Run end" row of `docs/erts-differences.md` records that PBeam has no `erlang:halt/2`.
+- The work: `erlang:halt/2` with an integer status and the `flush` and `flush_timeout` options, and the run end at the halt with that status. "Halt the PBeam boot with the `init` crash text" also needs it.
+- **Trigger:** a consumer calls `erlang:halt/0,1`, for example `System.halt/1` as `elixir -e` does at the end of the run (kernel/cli.ex:58-71).
+- **Source:** M2 exit check (#220).
+
+### Keep the run alive after a root `exit(normal)` as ERTS does
+
+- When the root process calls `exit(normal)`, the `pbeam` binary writes `pbeam: root process exited with normal` and exits with status 1. On ERTS, `start_it/1` writes `Error! Failed to eval: <expression>` and raises the exit again (init.erl:1552-1567). The boot process exits `normal`, `init` goes to its main loop (init.erl:700-704), and the run does not end. The "Run end" row of `docs/erts-differences.md` records this.
+- **Evidence:** a module `haltp` with `exit_normal() -> exit(normal).`. On pinned ERTS, `timeout 10 erl -noshell -pa <dir> -eval 'haltp:exit_normal()'` writes `Error! Failed to eval: haltp:exit_normal()`, then `SIGTERM received - shutting down` at the timeout, and exits with status 124. On the `pbeam` binary, `pbeam pbeam_boot start haltp exit_normal`, with the BEAM files of `examples/hello_world/README.md`, writes `pbeam: root process exited with normal` and exits with status 1.
+- The work: an `init` process that links to the boot process and keeps the run alive after a `normal` exit, as "Halt the PBeam boot with the `init` crash text" needs for the other exits.
+- **Trigger:** a consumer needs the ERTS result of a root `exit(normal)`, for example a program that ends its root process and keeps its other processes alive.
+- **Source:** M2 exit check (#220).
+
 ## Exceptions
 
 ### `erlang:error/2` and the `throw` class
