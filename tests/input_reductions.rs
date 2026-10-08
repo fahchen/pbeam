@@ -5,9 +5,11 @@ use pbeam_runtime::{BeamProgram, Term};
 const INPUT_PROBE: &[u8] = include_bytes!("../fixtures/preempt/input_probe.beam");
 
 /// The spawn options of the measured processes in the ERTS reference run: a
-/// heap of 4,000,000 words, so that no measured process collects garbage.
-/// PBeam has no process heap and runs with `[]`.
-const ERTS_OPTIONS: &str = "[{min_heap_size,4000000}]";
+/// heap of 4,000,000 words and a binary heap of 40,000,000 words, so that no
+/// measured process collects garbage, also for a large off-heap binary of
+/// `erlang:iolist_to_iovec/1`. PBeam has no process heap and runs with
+/// `[]`.
+const ERTS_OPTIONS: &str = "[{min_heap_size,4000000},{min_bin_vheap_size,40000000}]";
 
 /// An input, as `io:format("~w")` prints it, and the reductions of the BIF
 /// for it.
@@ -112,6 +114,76 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("10000", 10000),
         ],
     ),
+    // One reduction for each 8 steps, rounded up, and at least 1: one step
+    // for each cell and for the end of each list (`erl_iolist.c:113-290`,
+    // `1004-1094`). A walk of more than 31975 steps traps, and the step of
+    // the trap runs again in the next turn.
+    (
+        "iolist_size",
+        &[
+            ("bin", 1),
+            ("nil", 1),
+            ("{ones,1}", 1),
+            ("{ones,7}", 1),
+            ("{ones,8}", 2),
+            ("{ones,15}", 2),
+            ("{ones,16}", 3),
+            ("nested", 2),
+            ("binaries", 1),
+            ("{ones,1000}", 126),
+            ("{ones,10000}", 1251),
+            ("{ones,31990}", 3999),
+            ("{ones,100000}", 12501),
+            ("bad", 1),
+            ("bad_tail", 1),
+            ("atom", 1),
+            ("{bad_after,40000}", 5001),
+            ("{tail_bin,15983}", 1998),
+        ],
+    ),
+    // A binary, a list of one binary, and `[]` cost nothing. Each other
+    // list walks for the size and then for the copy, and a copy uses one
+    // more step for each 32 bytes of a binary of at most 512 bytes
+    // (`erl_iolist.c:354-649`, `1121-1310`).
+    (
+        "iolist_to_iovec",
+        &[
+            ("bin", 0),
+            ("nil", 0),
+            ("empty_bin_list", 0),
+            ("one_bin", 0),
+            ("{ones,1}", 2),
+            ("{ones,8}", 4),
+            ("{ones,16}", 6),
+            ("nested", 4),
+            ("binaries", 2),
+            ("{ones,1000}", 252),
+            ("{ones,31970}", 7994),
+            ("{ones,31990}", 7998),
+            ("{ones,100000}", 25002),
+            ("bad", 1),
+            ("bad_tail", 1),
+            ("atom", 0),
+            ("{bins,1995}", 4241),
+            ("{tail_bin,15983}", 3998),
+        ],
+    ),
+    // Each item that PBeam supports costs 1 after the read, also for a
+    // process with 10000 messages (`erl_bif_info.c:1417-1424`, `1601`).
+    // `process_info/2` is a heavy BIF, so its call costs nothing.
+    (
+        "process_info",
+        &[
+            ("{self,registered_name}", 1),
+            ("{self,message_queue_len}", 1),
+            ("{self,reductions}", 1),
+            ("{self,current_stacktrace}", 1),
+            ("{idle,message_queue_len}", 1),
+            ("{idle,registered_name}", 1),
+            ("{idle,reductions}", 1),
+            ("{busy,message_queue_len}", 1),
+        ],
+    ),
 ];
 
 /// The runs of `input_probe:longs/1`, measured on the pinned ERTS with
@@ -155,6 +227,36 @@ const LONGS: &[(&str, &[(&str, i64)])] = &[
             ("b", 1334),
             ("a", 1),
             ("b", 331),
+        ],
+    ),
+    // 12501 reductions for each `iolist_size/1` of 100000 ones.
+    (
+        "iolist_size",
+        &[
+            ("b", 2001),
+            ("a", 1),
+            ("b", 2001),
+            ("a", 1),
+            ("b", 998),
+            ("a", 1),
+        ],
+    ),
+    // 25002 reductions for each `iolist_to_iovec/1` of 100000 ones.
+    (
+        "iolist_to_iovec",
+        &[("b", 4002), ("a", 1), ("b", 998), ("a", 2)],
+    ),
+    // 4241 reductions for each `iolist_to_iovec/1` of 1995 binaries.
+    (
+        "iolist_to_iovec",
+        &[
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 2999),
         ],
     ),
 ];
@@ -204,7 +306,11 @@ fn longs_text() -> String {
         .collect();
     // The owner of the table exits while the insert of 16000 objects traps
     // after the copy, so the insert raises `badarg` (`erl_db.c:2215-2253`).
-    format!("[{},{{ets_vanish,[badarg]}}]", bifs.join(","))
+    // The size of the iodata and of each binary of its iovec, for inputs
+    // whose copy traps or stops in a binary.
+    let sizes = "{iovec_sizes,[{binaries,1500,[800,100,600]},{{ones,100000},100000,[100000]},\
+                 {{bins,1995},997500,[997500]},{{tail_bin,15983},16483,[16483]}]}";
+    format!("[{},{{ets_vanish,[badarg]}},{sizes}]", bifs.join(","))
 }
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,

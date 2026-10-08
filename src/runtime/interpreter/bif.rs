@@ -9,6 +9,7 @@ use super::*;
 mod erlang;
 mod erts_internal;
 mod ets;
+mod iolist;
 mod lists;
 mod maps;
 mod os;
@@ -339,6 +340,42 @@ impl BeamProgram {
             ("persistent_term", "get_all_trap", [all, Term::Integer(entries)]) => Ok(
                 persistent_term::get_all_trap(process, all.clone(), *entries as usize),
             ),
+            (
+                "erts_internal",
+                "iolist_size_continue",
+                [term, Term::List(stack), Term::Integer(size)],
+            ) => Ok(iolist::iolist_size_continue(
+                process,
+                term,
+                stack,
+                *size as usize,
+            )),
+            (
+                "erts_internal",
+                "iolist_to_iovec_continue",
+                [Term::Atom(phase), arg, term, Term::List(stack)],
+            ) if phase.name() == "size" => Ok(iolist::iovec_size(process, arg, term, stack)),
+            (
+                "erts_internal",
+                "iolist_to_iovec_continue",
+                [
+                    _,
+                    term,
+                    Term::List(stack),
+                    Term::List(iovec),
+                    Term::Binary(merged),
+                ],
+            ) => {
+                let reds_left = process.bif_reductions_left() as i64;
+                Ok(iolist::iovec_copy(
+                    process,
+                    reds_left,
+                    term,
+                    stack,
+                    iovec.clone(),
+                    merged.clone(),
+                ))
+            }
             _ => self.bif(scheduler, module, function, arguments),
         }
     }

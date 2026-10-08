@@ -1,7 +1,7 @@
 -module(input_probe).
 -export([costs/1, longs/1, gcs/1]).
 -export([measure/3, start/4, long_loop/5, send_loop/3, traced/3, owner/2, vanish_insert/3,
-         vanish_stop/1]).
+         vanish_stop/1, idle/0]).
 
 %% The reductions of the BIFs whose ERTS cost depends on their input, on
 %% the pinned ERTS JIT. A BIF reads the budget of the process
@@ -16,6 +16,10 @@
 %% The reduction total of the calling process. element/2 is a guard BIF,
 %% so it costs no reduction.
 -define(REDS, element(2, process_info(self(), reductions))).
+
+%% 100 bytes, as a string, so that a binary of copies of it is a literal.
+-define(S100, "0123456789012345678901234567890123456789012345678901234567890123456789"
+              "012345678901234567890123456789").
 
 %% The inputs of each BIF for costs/1.
 inputs() ->
@@ -49,12 +53,28 @@ inputs() ->
        {protected, 40000}, {missing, 100}]},
      %% The number of persistent terms of the node. The numbers go up,
      %% because no BIF of PBeam erases a persistent term.
-     {persistent_term_get, [0, 1, 100, 1000, 4000, 10000]}].
+     {persistent_term_get, [0, 1, 100, 1000, 4000, 10000]},
+     %% Iodata: see iodata/1. A walk of more than 31975 steps traps.
+     {iolist_size,
+      [bin, nil, {ones, 1}, {ones, 7}, {ones, 8}, {ones, 15}, {ones, 16}, nested, binaries,
+       {ones, 1000}, {ones, 10000}, {ones, 31990}, {ones, 100000}, bad, bad_tail, atom,
+       {bad_after, 40000}, {tail_bin, 15983}]},
+     {iolist_to_iovec,
+      [bin, nil, empty_bin_list, one_bin, {ones, 1}, {ones, 8}, {ones, 16}, nested, binaries,
+       {ones, 1000}, {ones, 31970}, {ones, 31990}, {ones, 100000}, bad, bad_tail, atom,
+       {bins, 1995}, {tail_bin, 15983}]},
+     %% {Process, Item}: the caller, a process with no message, and a
+     %% process with 10000 messages that it did not receive.
+     {process_info,
+      [{self, registered_name}, {self, message_queue_len}, {self, reductions},
+       {self, current_stacktrace}, {idle, message_queue_len}, {idle, registered_name},
+       {idle, reductions}, {busy, message_queue_len}]}].
 
 %% The inputs of the BIFs that trap, for longs/1.
 long_inputs() ->
     [{maps_merge, {{1, 40000}, {20000, 60000}}}, {ets_insert, {list, 16000}},
-     {persistent_term_get, 10000}].
+     {persistent_term_get, 10000}, {iolist_size, {ones, 100000}},
+     {iolist_to_iovec, {ones, 100000}}, {iolist_to_iovec, {bins, 1995}}].
 
 %% Return the argument. A call through ?MODULE stops the compiler from
 %% folding a constant.
@@ -92,6 +112,14 @@ arg(map_next, {ordered, Size, Keys}) -> {keys(1, Keys), map({1, Size}), iterator
 arg(map_next, {Size, Path, Acc}) -> {Path, map({1, Size}), Acc};
 arg(ets_insert, Input) -> {table(Input), objects(Input)};
 arg(persistent_term_get, _) -> none;
+arg(iolist_size, Name) -> iodata(Name);
+arg(iolist_to_iovec, Name) -> iodata(Name);
+arg(process_info, {self, Item}) -> {self(), Item};
+arg(process_info, {idle, Item}) -> {spawn(?MODULE, idle, []), Item};
+arg(process_info, {busy, Item}) ->
+    Pid = spawn(?MODULE, idle, []),
+    send_n(Pid, 10000),
+    {Pid, Item};
 arg(none, _) -> none.
 
 %% A public table of the caller, or a protected table of another process.
@@ -115,6 +143,47 @@ objects({_, Count}) -> pairs(1, Count);
 objects(improper) -> pairs(1, 100) ++ x;
 objects(bad) -> pairs(1, 49) ++ [x | pairs(51, 100)].
 
+%% The iodata of the iolist BIFs. A cell and the end of each list use one
+%% step of the walk, and the copy of iolist_to_iovec/1 uses one more step
+%% for each 32 bytes of a binary of at most 512 bytes. {bins, N} has N
+%% binaries of 500 bytes, and the copy stops in a binary. {tail_bin, N} has
+%% N ones and a binary of 500 bytes as its tail, and the copy stops in the
+%% tail.
+iodata(bin) -> <<1, 2, 3>>;
+iodata(nil) -> [];
+iodata(empty_bin_list) -> [<<>>];
+iodata(one_bin) -> [<<1, 2, 3>>];
+iodata({ones, Count}) -> ones(Count);
+iodata(nested) -> [[1, 2], [3], [], [[]], <<4>>];
+iodata(binaries) ->
+    [<<?S100 ?S100 ?S100 ?S100 ?S100 ?S100 ?S100 ?S100>>, <<?S100>>,
+     <<?S100 ?S100 ?S100 ?S100 ?S100 ?S100>>];
+iodata(bad) -> [1, 2, a];
+iodata(bad_tail) -> [1, 2 | a];
+iodata(atom) -> a;
+iodata({bad_after, Count}) -> ones(Count - 1) ++ [a];
+iodata({bins, Count}) -> copies(Count, <<?S100 ?S100 ?S100 ?S100 ?S100>>);
+iodata({tail_bin, Count}) -> ones(Count) ++ <<?S100 ?S100 ?S100 ?S100 ?S100>>.
+
+%% Wait for stop.
+idle() ->
+    receive stop -> ok end.
+
+send_n(_, 0) -> ok;
+send_n(Pid, Count) ->
+    Pid ! x,
+    send_n(Pid, Count - 1).
+
+%% A list of Count ones, or of Count copies of Term. Each '++' joins two
+%% halves.
+ones(Count) -> copies(Count, 1).
+
+copies(0, _) -> [];
+copies(1, Term) -> [Term];
+copies(Count, Term) ->
+    Half = Count div 2,
+    copies(Half, Term) ++ copies(Count - Half, Term).
+
 %% Prepare the state of the node for an input. The caller puts the
 %% persistent terms, so that the measured process collects no garbage.
 prepare(persistent_term_get, Count) -> put_terms(Count);
@@ -137,9 +206,20 @@ run(ets_insert, {Table, Objects}) ->
      catch error:Reason -> Reason
      end];
 run(persistent_term_get, _) -> [persistent_term:get()];
+run(iolist_size, Iodata) ->
+    [try iolist_size(Iodata)
+     catch error:Reason -> Reason
+     end];
+run(iolist_to_iovec, Iodata) ->
+    [try erlang:iolist_to_iovec(Iodata)
+     catch error:Reason -> Reason
+     end];
+run(process_info, {Pid, Item}) -> [process_info(Pid, Item)];
 run(none, _) -> [].
 
-%% The cost of the call instruction: call_ext of a light BIF costs 1.
+%% The cost of the call instruction: call_ext of a light BIF costs 1, and
+%% of the heavy BIF process_info/2 0.
+call(process_info) -> 0;
 call(_) -> 1.
 
 %% For each BIF and input, the reductions of the BIF: the reductions of
@@ -172,7 +252,14 @@ measure(Collector, Bif, Input) ->
 %% traps of a.
 longs(Opts) ->
     [{Bif, long_race(Bif, Input, Opts)} || {Bif, Input} <- long_inputs()]
-    ++ [{ets_vanish, vanish(Opts)}].
+    ++ [{ets_vanish, vanish(Opts)}, {iovec_sizes, iovec_sizes()}].
+
+%% The size of the iodata and of each binary of its iovec, for the inputs
+%% whose copy traps or stops in a binary.
+iovec_sizes() ->
+    [{Name, iolist_size(iodata(Name)),
+      [iolist_size(Binary) || Binary <- erlang:iolist_to_iovec(iodata(Name))]}
+     || Name <- [binaries, {ones, 100000}, {bins, 1995}, {tail_bin, 15983}]].
 
 %% The caller builds the argument, so that the reductions of the build do
 %% not change the runs.
