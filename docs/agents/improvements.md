@@ -33,6 +33,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** <https://github.com/fahchen/pbeam/pull/176#issuecomment-6005160493>
 
+## 20261006: Separate BIF and BEAM instruction differences
+
+**Problem:** A difference record said that `raise` was not implemented after the `erlang:raise/3` BIF became supported.
+
+**Root Cause:** The record used the same short name for a BEAM instruction and a BIF without naming the operation type.
+
+**Fix:** State the exact unsupported BEAM instructions and identify the implemented BIF as a separate item.
+
+**Guardrail:** Name the operation type when a difference record contains a BIF and a BEAM instruction with the same name.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/177#discussion_r4188965048>
+
 ## 20261006: Verify task references in difference records
 
 **Problem:** A difference row named a prerequisite task as the owner of a follow-up that the task does not implement.
