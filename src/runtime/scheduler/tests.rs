@@ -134,12 +134,13 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
     assert!(scheduler.link(ProcessId(0)));
     assert!(!scheduler.link(ProcessId(99)));
     scheduler.unlink(child);
-    assert_ne!(scheduler.current_process_mut().links[&child], 0);
+    let unlinking = scheduler.current_process_mut().links.get(&child);
+    assert!(unlinking.is_some_and(|&id| id != 0));
     scheduler.unlink(child);
     scheduler.unlink(ProcessId(99));
     scheduler.unlink(ProcessId(0));
     assert!(scheduler.link(child));
-    assert_eq!(scheduler.current_process_mut().links[&child], 0);
+    assert_eq!(scheduler.current_process_mut().links.get(&child), Some(&0));
     scheduler.park_current();
 
     // The child handles the link, the unlink, and the link again.

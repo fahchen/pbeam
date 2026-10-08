@@ -847,7 +847,8 @@ impl Scheduler {
     /// ```rust,ignore
     /// scheduler.link(child)?;
     /// scheduler.unlink(child);
-    /// assert_ne!(scheduler.current_process_mut().links[&child], 0);
+    /// let unlinking = scheduler.current_process_mut().links.get(&child);
+    /// assert!(unlinking.is_some_and(|&id| id != 0));
     /// ```
     pub(super) fn unlink(&mut self, target: ProcessId) {
         let current = self.current_process_mut().id;
@@ -1114,11 +1115,12 @@ impl Scheduler {
     ///
     /// Only the current process exits, so the process is not in the run
     /// queue. The links and the monitors that the process holds go in the
-    /// order of their keys; ERTS goes through its trees in tree order. The
-    /// monitors of the process go in the order that it handled their
-    /// monitor signals, as ERTS goes through its list `ERTS_P_LT_MONITORS`
-    /// (`erl_proc_sig_queue.c:6555`; `erl_monitor_link.h:652-669`). The root
-    /// process records its result.
+    /// post-order of their red-black trees, as `foreach_delete_yielding`
+    /// destroys the ERTS trees (`erl_process.c:14545-14572`;
+    /// `erl_monitor_link.c:439-460`). The monitors of the process go in the
+    /// order that it handled their monitor signals, as ERTS goes through
+    /// its list `ERTS_P_LT_MONITORS` (`erl_proc_sig_queue.c:6555`;
+    /// `erl_monitor_link.h:652-669`). The root process records its result.
     ///
     /// # Examples
     ///
@@ -1148,7 +1150,7 @@ impl Scheduler {
             });
         }
         process.mailbox.fetch();
-        for (&linked, &unlinking) in &process.links {
+        for (&linked, &unlinking) in process.links.post_order() {
             if unlinking == 0 {
                 let exit = Signal::Exit {
                     from: id,
@@ -1161,7 +1163,7 @@ impl Scheduler {
                 let _ = self.send_signal(Some(id), linked, exit);
             }
         }
-        for (&reference, origin) in &process.monitors {
+        for (&reference, origin) in process.monitors.post_order() {
             if let Some(OriginMonitor {
                 kind: "process",
                 target: Some(target),
