@@ -19,9 +19,9 @@
 
 use std::cmp::Ordering;
 
-use super::{HAMT_MAX_LEVEL, SLOT_BITS, SLOT_MASK, map_hash};
+use super::{HAMT_MAX_LEVEL, SLOT_BITS, SLOT_MASK};
 use crate::error::BeamError;
-use crate::term::Term;
+use crate::term::{Term, hash::internal_hash};
 
 /// The size of an ERTS `hxnode_t` in bytes: the hash, `skip`, `i`, and
 /// `val` words (`erl_map.c:81-86`). The pivot hash reads the address of a
@@ -59,6 +59,11 @@ struct HxNode {
 ///    `hashmap_from_chunked_array`, when more than one key remains
 ///    (`erl_map.c:857-1158`).
 ///
+/// The hash of each key is the ERTS internal hash, as `erts_map_hash` gives
+/// it in a release build (`erl_term_hashing.c:2311-2319`). It also covers
+/// the keys that the PBeam hashmap does not support yet, so a list of more
+/// than 32 pairs of such a key that gives a flatmap has its ERTS cost.
+///
 /// `keys` are the keys of the pairs in list order. The check loop of
 /// `maps_from_list_1_helper` (`erl_map.c:332`) comes before these units,
 /// and the BIF adds it.
@@ -67,27 +72,25 @@ struct HxNode {
 ///
 /// ```rust,ignore
 /// let keys: Vec<Term> = (1..=40).map(Term::Integer).collect();
-/// let units = from_list_units(&keys.iter().collect::<Vec<_>>())?.unwrap();
+/// let units = from_list_units(&keys.iter().collect::<Vec<_>>())?;
 /// // 40 hash units come first.
 /// assert!(units[..40].iter().all(|&unit| unit == 1));
 /// ```
 ///
 /// # Errors
 ///
-/// Return `Ok(None)` for a key that a hashmap does not support yet, and a
-/// runtime error when two keys with equal hashes have no PBeam term order.
-pub(crate) fn from_list_units(keys: &[&Term]) -> Result<Option<Vec<u32>>, BeamError> {
-    let mut nodes = Vec::with_capacity(keys.len());
-    for (position, key) in keys.iter().enumerate() {
-        let Some(hash) = map_hash(key) else {
-            return Ok(None);
-        };
-        nodes.push(HxNode {
-            hx: swizzle(hash),
+/// Return a runtime error when two keys with equal hashes have no PBeam
+/// term order.
+pub(crate) fn from_list_units(keys: &[&Term]) -> Result<Vec<u32>, BeamError> {
+    let mut nodes: Vec<HxNode> = keys
+        .iter()
+        .enumerate()
+        .map(|(position, key)| HxNode {
+            hx: swizzle(internal_hash(key)),
             position,
             skip: 1,
-        });
-    }
+        })
+        .collect();
     let mut units = vec![1; keys.len()];
     // hxnodecmp: a higher hash comes first (`erl_map.c:1171-1182`).
     qsort_units(&mut nodes, 0, &mut units, &mut |a, b| Ok(b.hx.cmp(&a.hx)))?;
@@ -96,7 +99,7 @@ pub(crate) fn from_list_units(keys: &[&Term]) -> Result<Option<Vec<u32>>, BeamEr
         nodes.truncate(unique);
         sorted_unique_units(&mut nodes, &mut units);
     }
-    Ok(Some(units))
+    Ok(units)
 }
 
 /// Return the hash with its 4-bit slots in reverse order, as
@@ -632,12 +635,11 @@ mod tests {
         let units = |count| {
             let keys = vec![Term::Integer(1); count];
             let keys: Vec<&Term> = keys.iter().collect();
-            let units = from_list_units(&keys).unwrap().unwrap();
+            let units = from_list_units(&keys).unwrap();
             // The check loop of the BIF adds one unit for each pair.
             count + units.iter().map(|&unit| unit as usize).sum::<usize>()
         };
         assert_eq!(units(33) / 40, 8);
         assert_eq!(units(400) / 40, 99);
-        assert_eq!(from_list_units(&[&Term::Tuple(vec![])]).unwrap(), None);
     }
 }

@@ -21,10 +21,11 @@
 inputs() ->
     [%% [], lists of {1, 1} (one key, so the sort has no pivot to pick),
      %% 32 keys (a flatmap), a bad element or an improper tail after N
-     %% pairs, and an atom. {dups, 40000} traps.
+     %% pairs, and an atom. {dups, 40000} traps. {big_dups, 33} has one
+     %% bignum key, which a PBeam hashmap does not support yet.
      {maps_from_list,
-      [nil, {flat, 32}, {dups, 33}, {dups, 80}, {dups, 400}, {dups, 40000}, {bad, 400},
-       {improper, 400}, atom]},
+      [nil, {flat, 32}, {dups, 33}, {dups, 80}, {dups, 400}, {dups, 40000},
+       {big_dups, 33}, {bad, 400}, {improper, 400}, atom]},
      %% A map of the keys 1..N. {hash, 100000} traps.
      {maps_keys, [{flat, 32}, {hash, 33}, {hash, 100}, {hash, 10000}, {hash, 100000}]},
      %% Chardata: see chardata/1. Lists of 50000 characters, binaries of
@@ -73,6 +74,7 @@ arg(maps_from_list, nil) -> [];
 arg(maps_from_list, {flat, Count}) -> pairs(1, Count);
 arg(maps_from_list, {distinct, Count}) -> pairs(1, Count);
 arg(maps_from_list, {dups, Count}) -> copies(Count, {1, 1});
+arg(maps_from_list, {big_dups, Count}) -> copies(Count, {id(1 bsl 30) * (1 bsl 30), ok});
 arg(maps_from_list, {bad, Count}) -> copies(Count, {1, 1}) ++ [x];
 arg(maps_from_list, {improper, Count}) -> copies(Count, {1, 1}) ++ x;
 arg(maps_from_list, atom) -> id(x);

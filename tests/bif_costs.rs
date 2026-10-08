@@ -31,11 +31,12 @@ const PUT_TRAP: &str = "4000";
 ///   YCF units for each reduction. A list of one key uses 10 units for each
 ///   pair: the check, the hash, the sort, and the loops that remove the
 ///   pairs of a key that comes again, with 2 and 4 units in nested loops.
-///   `{dups, 40000}` traps two times. A `badarg` costs nothing.
+///   `{dups, 40000}` traps two times. The bignum key of `{big_dups, 33}`
+///   costs the same as a small key. A `badarg` costs nothing.
 /// - `maps:keys/1` (`erl_map.c:1207-1253`, `2801-2834`): 15 units for each
 ///   reduction, one unit for each key of a hashmap. `{hash, 100000}` traps.
 const COSTS: &str = "[{maps_from_list,[{nil,0},{{flat,32},0},{{dups,33},8},{{dups,80},19},\
-                     {{dups,400},99},{{dups,40000},9999},{{bad,400},0},{{improper,400},0},\
+                     {{dups,400},99},{{dups,40000},9999},{{big_dups,33},8},{{bad,400},0},{{improper,400},0},\
                      {atom,0}]},\
                      {maps_keys,[{{flat,32},0},{{hash,33},2},{{hash,100},6},\
                      {{hash,10000},666},{{hash,100000},6666}]},\

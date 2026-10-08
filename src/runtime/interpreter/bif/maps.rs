@@ -175,9 +175,7 @@ pub(super) fn from_list(
         && pairs.len() > SMALL_MAP_LIMIT
     {
         let keys: Vec<&Term> = pairs.iter().map(|(key, _)| *key).collect();
-        let build = from_list_units(&keys)?
-            .ok_or_else(|| error("unsupported maps:from_list/1 key: no PBeam map hash"))?;
-        units.extend(build);
+        units.extend(from_list_units(&keys)?);
     }
     match run_units(process, PER_REDUCTION, &units, done)? {
         YcfTurn::Yield(done) => Ok(BifResult::TrapBif {
