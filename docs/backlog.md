@@ -38,10 +38,23 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path loads such a literal.
 - **Source:** review of PR #160 (#138).
 
-### Run `erlang:'-'/1` and `is_eq` (was #128)
+### Add bignum terms
 
-- The measured M2 start path does not run them (pinned ERTS call trace and line counters). #110 removed them. The `is_float` test of the same task now has a consumer on the logger start and is task #167.
-- **Trigger:** a measured consumer, for example a `~e`, `~f`, or `~g` format, or `lists:usort/1` with three elements.
+- PBeam stores an integer as a 64-bit signed value. An arithmetic result outside this range, an instruction operand outside it, and `erlang:monotonic_time/1` or `os:system_time/1` with `perf_counter` return a runtime error. ERTS makes a bignum for each integer outside -(2^59) to 2^59 - 1. The "Integer range" row of `docs/erts-differences.md` records this. The entry "Load `SMALL_BIG_EXT` and `LARGE_BIG_EXT` literals that fit in 64 bits" covers only the literals that fit in 64 bits.
+- The work: a bignum `Term` variant with the ERTS term order, arithmetic, and internal hash, bignum literals and operands in the loader (`marshal_integer` in `beam_file.c:2132-2214`), and the bignum text in `print_term`.
+- **Trigger:** a measured path makes or loads an integer outside the 64-bit range, for example `erlang:monotonic_time(perf_counter)` or `net:shortest_matching_prefix/3`.
+- **Source:** "Integer range" row (#110, #154).
+
+### Load local fun literals and run the fun information BIFs
+
+- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2`, `erlang:fun_info_mfa/1`, and `erlang:fun_to_list/1` are `unsupported` BIF table entries (row "Unimplemented BIFs"). `io_lib` calls `erlang:fun_to_list/1` to write a fun (io_lib.erl:699, 826).
+- **Trigger:** a measured path loads a local fun literal, calls one of the three BIFs, or formats a fun.
+- **Source:** PR #120 (#109).
+
+### Run `erlang:'-'/1` (was #128)
+
+- The measured M2 paths do not run it (pinned ERTS call trace and line counters). #110 removed it. The `is_eq` test of the same task landed in PR #189 (#183), and the `is_float` test is task #167. A negation of a value that is not a literal, such as `-X`, compiles to a `gc_bif` call of `erlang:'-'/1` and returns `unresolved external MFA erlang:-/1` (row "Unimplemented BIFs").
+- **Trigger:** a measured consumer negates a value that is not a literal.
 - **Source:** review of PR #121 (#110).
 
 ## Runtime
@@ -51,6 +64,70 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - PBeam restores fd 0 when the owner of a TTY resource exits, but not at runtime exit as ERTS does (`erl_child_setup.c:563-576`, `sys.c:182-190`). The "Terminal mode at exit" row of `docs/erts-differences.md` records it.
 - **Trigger:** a PBeam program uses an input mode that leaves fd 0 raw.
 - **Source:** review of PR #133 (#115).
+
+### Write the output in a locale whose codeset is not UTF-8
+
+- In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1`, which matches `<<Char/utf8, T/binary>>` (prim_tty.erl:1309-1321). PBeam has no match context for a binary, so the run stops with `unsupported bs_start_match3 of a binary: needs a match context` and status 1 (`src/runtime/interpreter.rs`). ERTS writes the output with status 0. The "Boot" and "Binary matching" rows record this, and `stops_at_the_binary_match_of_a_locale_that_is_not_utf8` in `tests/hello.rs` checks it.
+- The work: a match context and the binary-match instructions that `is_usascii/1` and `binary_to_latin1/2` run.
+- **Trigger:** a supported run in a locale whose codeset is not UTF-8, for example a macOS shell with `LANG`, `LC_ALL`, and `LC_CTYPE` unset.
+- **Source:** "Boot" row (#139, #183).
+
+### Run the unsupported BIFs that OTP code calls
+
+- The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
+  - Timers: `erlang:start_timer/4`, `erlang:send_after/3,4`, `erlang:cancel_timer/1`, and `erlang:read_timer/1,2`. `erlang:start_timer/3` and `erlang:cancel_timer/2` already use the timer list of #150 (PR #172).
+  - Aliases: `erlang:alias/1`, which `erlang:alias/0` calls, and `erlang:unalias/1`.
+  - Equality: `erlang:'=='/2` and `erlang:'/='/2`. They give other results than `=:=` and `=/=` only for floats (see "Add float terms").
+  - Persistent terms: `persistent_term:erase/1`, `persistent_term:put_new/2`, and `persistent_term:info/0`.
+  - Signals: `erlang:exit/3`.
+  - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
+- **Trigger:** a measured path calls one of them. Add each group in its own task.
+- **Source:** audit of the BIF table at the M2 close.
+
+### Run the remaining test instructions for `io:format/2`
+
+- The loader accepts `is_ne`, `is_number`, `is_port`, `is_bitstr`, and `is_any_native_record`, but each one stops the run with `unsupported BEAM opcode N`. Under the PBeam boot, `io:format/2` with `~w` of a list, a tuple, or a map stops at `is_port` (io_lib.erl:820). `~p` of an integer stops at `is_bitstr`, and `~p` of a tuple stops at `is_any_native_record` (measured). The "Unimplemented instructions" row records these instructions and `bs_init_writable`, `gc_bif3`, `bs_create_bin`, `get_record_elements`, and `put_record`. A format without a term argument, `~w` of an integer, and `~s` of a string already work. PR #188 also named `net_kernel:dflag_unicode_io/1` and `erl_scan:reserved_word/1`. The first is a BIF that PBeam runs (PR #88), and the second is a function of `erl_scan.beam`, which a run gives with the other OTP modules.
+- **Trigger:** a consumer or a probe prints a compound term with `io:format/2`, for example to compare its output byte for byte through the `pbeam` binary.
+- **Source:** PR #188 (#179) and measured probes at the M2 close.
+
+### Turn on native bindings only after `erlang:load_nif/2`
+
+- The native bindings of `prim_tty` are active from module load, also before `erlang:load_nif/2` and after a failed load. ERTS replaces a stub body only after a successful load (`erl_nif.c:4990-5007`). The "NIF stubs" row records this. PR #132 proposed the task "[m2-e1] Turn on native bindings only after erlang:load_nif/2", but it was not filed.
+- **Trigger:** a path calls a `prim_tty` NIF before `erlang:load_nif/2` or after a failed load, or a second module gets native bindings.
+- **Source:** PR #132 (#127).
+
+### Poll fd 0 for the `prim_tty` reader
+
+- `prim_tty:tty_select/2` does not select fd 0, so the `{select, TTY, Ref, ready_input}` message never arrives, and the reader never calls `read_nif/3`. A process that waits for input waits without end. ERTS selects fd 0 for read (prim_tty_nif.c:1227). The "Input select" row records this.
+- The work: an IO poll in the scheduler, the select of `tty_select/2` with the reader pid, the stop of the select when the reader exits (prim_tty_nif.c:1242-1244), and `read_nif/3`.
+- **Trigger:** a PBeam program reads from standard input.
+- **Source:** PR #133 (#115).
+
+### Deliver host signals to `erl_signal_server`
+
+- For `handle`, `os:set_signal/2` installs a handler that does nothing, so `erl_signal_server` never gets a `{notify, Signal}` message. PBeam also sets no signal disposition at the start of a run. ERTS sends `{notify, Signal}` from its signal dispatcher thread (sys.c:589-607, 1106-1180). At emulator start, it installs handlers for `SIGINT`, `SIGQUIT`, `SIGTERM`, and `SIGUSR1`, and ignores `SIGCHLD` (sys.c:799-823). The "OS signals" row records this.
+- The work: an event source in the scheduler for host signals, and the start-time dispositions.
+- **Trigger:** a program handles a host signal, or a supported run must act on `SIGTERM` or `SIGINT` as ERTS does.
+- **Source:** PR #133 (#115).
+
+### Run `at_exit` callbacks and flush the logger before the root exit
+
+- The PBeam boot does not run `at_exit` callbacks and does not flush the logger before the root process returns. Thus a log event that is still in the queue of the async default handler at the root exit is lost. `elixir -e` runs the callbacks, then `Logger.flush()`, and then `System.halt/1` (kernel/cli.ex:58-71). The "Run end" row records this. `fixtures/io_fail` calls `logger_std_h:filesync(default)` so that its report is written before the root exit.
+- **Trigger:** a consumer logs an event just before it returns and needs the event, or a program registers `at_exit` callbacks.
+- **Source:** PR #182 (#169).
+
+### Compose decomposed UTF-8 native names on macOS
+
+- On macOS, `os:getenv/1` of a value that is valid UTF-8 and has one of the 61 ERTS composition candidates returns the runtime error `unsupported composition of the native name code point N on macOS`. ERTS composes the code points with `compose_tab` (`erl_unicode.c:1418-1428`, `1569-1630`; `erl_unicode_normalize.h:1523-1690`). This composition is not Unicode NFC. The "OS environment" row records this.
+- The work: the 1040 entries of `compose_tab` and the ERTS composition algorithm.
+- **Trigger:** a supported macOS path reads a decomposed native name, for example an environment value.
+- **Source:** PR #191 (#185).
+
+### Set the start variables and `init` flags of the `erl` script
+
+- PBeam has no `erl` script and no `erlexec`. Thus `os:getenv/1` gives the host value or `false` for `EMU`, `ROOTDIR`, `BINDIR`, and `PROGNAME`, and `PATH` has no `BINDIR` prefix. The `init` request process of `pbeam_boot` has only the flag `noshell`. The `erl` script exports the four variables (`erl.src.src:52-58`), `erlexec` puts `BINDIR` and `ROOTDIR/bin` at the front of `PATH` (`erlexec.c:553-621`), and the flags of `init` also have `root`, `bindir`, `progname`, and `home`. The "OS environment" and "Boot" rows record this.
+- **Trigger:** a consumer reads one of these variables or flags, for example `init:get_argument(root)`.
+- **Source:** PR #191 (#185).
 
 ### Supervise the boot IO servers as `kernel_sup` does
 
@@ -119,6 +196,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer needs the ERTS crash text byte for byte.
 - **Source:** design of #6.
 
+### Send the uncaught-exception report to `logger`
+
+- PBeam writes no report for an uncaught exception. For an uncaught `error` or `throw`, ERTS sends `{log, error, "Error in process ~p with exit value:~n~p~n", Args, Metadata}` to the registered `logger` process (beam_common.c:697-718, erl_trace.c:2812-2820). The "Error report" row records this. `pbeam_boot` starts `logger` (PR #188), so the receiver exists. PR #188 said that #73 tracks this work, but #73 is closed.
+- **Trigger:** a consumer needs the report of a process that crashes.
+- **Source:** PR #188 (#179).
+
 ### Keep the frames that `erlang:raise/3` receives
 
 - After #155 (PR #177), `erlang:raise/3` checks its stack trace argument but gives the exception `[]`. ERTS keeps the frames, at most `backtrace_depth` and at least one when the depth is 0. A frame with a location keeps its location, and an old frame without a location (`{Fun, Args}` or `{M, F, A}`) gets the location `[]` (`bif.c:1626-1681`). The "Exception stack trace" row of PR #177 records this.
@@ -152,3 +235,22 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Correct the stale "no gc_bif2" fixture comment
 
 - `fixtures/user_drv/user_drv_probe.erl` says PBeam has no `gc_bif2`, but the loader now decodes it.
+
+### Give the isolated boot tests a UTF-8 locale
+
+- `run_isolated` of `tests/boot.rs` starts the child test without `LC_ALL`. When `LANG`, `LC_ALL`, and `LC_CTYPE` are unset, as in a default macOS shell, the boot takes the latin1 path (see "Write the output in a locale whose codeset is not UTF-8"). Then `mise run check` fails: for example, `starts_the_logger_and_the_application_controller_as_pinned_erts` and `keeps_the_init_stop_request_in_the_mailbox_of_the_init_request_process` fail with `unsupported bs_start_match3 of a binary: needs a match context` (measured on macOS). The CI workflow sets no locale, and the `ubuntu-latest` runner image has a UTF-8 default locale. Until this is done, run `LANG=en_US.UTF-8 mise run check` on macOS.
+- The work: set `LC_ALL=C.UTF-8` in `run_isolated`, as `run_dumb_utf8` does.
+- **Trigger:** the next change to `tests/boot.rs`, or a contributor who runs `mise run check` without a locale.
+- **Source:** audit at the M2 close.
+
+### Use `INSTRUCTION_CALLS` in `erlang:function_exported/3`
+
+- `function_exported/3` in `src/runtime/interpreter/bif/erlang.rs` repeats the entries of `INSTRUCTION_CALLS` (`src/runtime/interpreter/bif.rs`) in a `matches!`. The two lists hold the same entries, so it can call `INSTRUCTION_CALLS.contains`.
+- **Trigger:** the next change to `INSTRUCTION_CALLS` or `function_exported/3`.
+- **Source:** PR #173 (#151).
+
+### Set `TERM` and `LC_ALL` of the test commands with one helper
+
+- `tests/boot.rs`, `tests/time.rs`, `tests/user_drv.rs`, and `tests/prim_tty.rs` set `TERM=dumb` and `LC_ALL=C.UTF-8` on the command, as `run_dumb_utf8` of `tests/common/run.rs` does. They do not use a time limit, and `tests/prim_tty.rs` reads only the exit status with its own stdin, stdout, and stderr. Thus each one can call `run_dumb_utf8`, or a helper that only sets the two variables.
+- **Trigger:** the next change to one of these test runners.
+- **Source:** PR #192 (#186).
