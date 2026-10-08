@@ -108,3 +108,7 @@ Make each documented command runnable with all required setup inputs. Reuse the 
 ## Instruction stream construction mixes ownership
 
 Choose one instruction-stream construction model for each opcode path. Either return the instruction for the outer loop to append, or append all required instructions in the path and continue. Do not mix both models.
+
+## Public values can violate documented canonical forms
+
+When a public type cannot enforce a canonical representation, document it as a runtime-produced form, not as a type invariant. State that callers must preserve the form when they pass values into runtime operations.
