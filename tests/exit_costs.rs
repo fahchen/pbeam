@@ -25,8 +25,8 @@ const CASES: &str = "[{timers,1,3766},{timers,1,3767},{timers,2,3816},{timers,2,
 /// - Timers: each BIF timer costs 80 (`erl_hl_timer.c:2404`). The walk
 ///   checks the budget before each timer and switches out at 0 or less,
 ///   and a walk that ends gives 1 when the budget is 0 or less
-///   (`erl_rbtree.h:1392-1436`). With 231 left, 1 timer leaves 51 after the
-///   50, so `DOWN` comes first. With 230 left, the exit switches out after
+///   (`erl_rbtree.h:1392-1436`). With 231 left, the bump and 1 timer leave
+///   51, and the 50 leaves 1, so `DOWN` comes first. With 230 left, the exit switches out after
 ///   the process table phase. With 180 left, the second timer finds 0, so
 ///   the exit switches out in the timer phase and `b` sees the name of
 ///   `a`. 100 timers at a full budget take three turns: 49, 50, and 1.
