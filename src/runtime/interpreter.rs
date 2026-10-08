@@ -1506,8 +1506,8 @@ impl BeamProgram {
     /// goes to x0, and a tail call then returns from the frame with no
     /// reduction. A yield return writes its value to x0, does the return
     /// of a tail call, and switches out the process. An exception goes to
-    /// the error handler. A trap writes its arguments to the X registers and
-    /// enters the target function. An exit ends the process, and no catch
+    /// the error handler. A trap writes its arguments to the X registers,
+    /// enters the target function, and switches out the process. An exit ends the process, and no catch
     /// tag sees it. Return the outcome when the process stops.
     ///
     /// # Examples
@@ -1556,7 +1556,11 @@ impl BeamProgram {
                     write(process, &Operand::X(index), argument)?;
                 }
                 enter_frame(process, self.mfa_frame(module, function, arity)?, tail);
-                Ok(None)
+                // A BIF trap always switches out the process
+                // (`context_switch_simplified` in `jit/arm/instr_bif.cpp:525-536`,
+                // `676-701`). The process enters the target when it runs
+                // again, so the entry costs one reduction of the next turn.
+                Ok(Some(Outcome::Yield))
             }
             BifResult::Exited(reason) => Ok(Some(Outcome::Exit {
                 reason,
