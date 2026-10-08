@@ -5,6 +5,7 @@
 //! `unicode` modules hold the BIF bodies that do not fit on one table line.
 
 use super::*;
+use crate::runtime::scheduler::Flushed;
 
 mod erlang;
 mod erts_internal;
@@ -61,9 +62,9 @@ pub(super) enum BifResult {
     /// runs again.
     YieldReturn(Term),
     /// The calling process exits with this reason, and no catch tag sees
-    /// it, as `ERTS_BIF_EXITED` does. `erlang:exit/2` to the caller traps to
-    /// the C function `erts_internal:await_exit/0`, which ends the process
-    /// before the BIF returns (`bif.c:1699-1716`).
+    /// it, as `ERTS_BIF_EXITED` does when a BIF that handles the signals of
+    /// its caller finds that a signal ended the caller (`bif.c:1708-1710`,
+    /// `5482-5483`).
     Exited(Term),
 }
 
@@ -272,7 +273,7 @@ impl BeamProgram {
     /// Run the export of a BIF trap with the arguments of the trap, as the
     /// process does when it runs again after [`BifResult::TrapBif`]. Most
     /// BIFs trap to their own export with new arguments, for example
-    /// `lists:member/2` with the rest of the list. Two exports are not
+    /// `lists:member/2` with the rest of the list. Four exports are not
     /// `bif.tab` entries, and no Erlang code can call them:
     ///
     /// - `erlang:length/2`, with the rest of the list and the count so far.
@@ -282,6 +283,15 @@ impl BeamProgram {
     /// - `erlang:'++'/3`, with the original lists and the number of elements
     ///   done. ERTS traps to `'++'/2` with a magic reference to the same state
     ///   (`erl_bif_lists.c:91-109`, `298-333`).
+    /// - `erlang:bif_handle_signals_return/2`, with the process that the BIF
+    ///   read and its result: it handles the signals of the caller up to a
+    ///   flush signal and returns the result (`bif.c:5452-5495`).
+    /// - `erts_internal:await_exit/0`: it handles the signals of the caller
+    ///   until the exit signal of `exit(self(), Reason)` ends the caller
+    ///   (`bif.c:1698-1716`).
+    ///
+    /// The last two run again after a switch when their reductions are used
+    /// up (`ERTS_BIF_YIELD2`, `ERTS_BIF_YIELD0`).
     ///
     /// # Examples
     ///
@@ -305,6 +315,25 @@ impl BeamProgram {
             ("erlang", "++", [left, right, Term::Integer(done)]) => {
                 Ok(erlang::append_chunk(process, left, right, *done))
             }
+            ("erlang", "bif_handle_signals_return", [_, value]) => {
+                Ok(match scheduler.flush_signals()? {
+                    Flushed::Done => BifResult::Value(value.clone()),
+                    Flushed::Exited(reason) => BifResult::Exited(reason),
+                    Flushed::Yield => BifResult::TrapBif {
+                        module: "erlang",
+                        function: "bif_handle_signals_return",
+                        arguments: arguments.clone(),
+                    },
+                })
+            }
+            ("erts_internal", "await_exit", []) => Ok(match scheduler.await_exit()? {
+                Some(reason) => BifResult::Exited(reason),
+                None => BifResult::TrapBif {
+                    module: "erts_internal",
+                    function: "await_exit",
+                    arguments: Vec::new(),
+                },
+            }),
             _ => self.bif(scheduler, module, function, arguments),
         }
     }

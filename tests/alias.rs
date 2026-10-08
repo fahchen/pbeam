@@ -287,18 +287,6 @@ fn returns_a_runtime_error_for_the_priority_monitor_option() {
 }
 
 #[test]
-fn returns_a_runtime_error_for_an_exit_signal_that_ends_the_caller_through_its_alias() {
-    // ERTS 29.1.1: `exit(OwnAlias, kill)` returns `true`, and the caller
-    // ends with `killed` when it next handles signals. PBeam has no signal
-    // queue (row "Exit signals").
-    let error = unsupported("own_alias");
-    assert!(
-        error.contains("unsupported exit signal through an alias of the caller"),
-        "{error}"
-    );
-}
-
-#[test]
 fn runs_erlang_send_2_and_send_3_as_pinned_erts() {
     // `sends/0`: `erlang:send/2` returns the message as `erl_send`
     // (bif.c:2845-2908). `erlang:send/3` reads its options first and raises
