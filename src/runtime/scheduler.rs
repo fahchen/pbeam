@@ -15,6 +15,11 @@ use crate::{
     term::{Atom, AtomTable, ProcessId, Reference, Term},
 };
 
+/// The reduction budget of a process for one turn, as ERTS `CONTEXT_REDS`
+/// (`erl_vm.h:53`). Each schedule-in gives the process this budget
+/// (`erl_process.c:10183`, `10435`).
+pub(super) const CONTEXT_REDS: i32 = 4000;
+
 /// The target of `erlang:monitor/2`, after the BIF checked the type and the
 /// target term as ERTS `monitor` does (`bif.c:758-981`).
 #[derive(Debug)]
@@ -70,7 +75,8 @@ struct Alias {
     mode: AliasMode,
 }
 
-/// A cooperative scheduler on one OS thread. It follows the ERTS model: the
+/// A scheduler on one OS thread. A process runs until it waits, exits, or
+/// switches out at an ERTS switch point. It follows the ERTS model: the
 /// process table holds every live process, `current_process` names the
 /// running process, and the run queue holds only processes that wait for a
 /// turn.
@@ -186,21 +192,25 @@ impl Scheduler {
     }
 
     /// Take the next process from the run queue and make it the current
-    /// process. A process whose receive timer expired continues at the
-    /// instruction after its `wait_timeout` with `F_TIMO`, also when a
-    /// message woke it first, as ERTS does before it runs the process
+    /// process with a budget of `CONTEXT_REDS` reductions, as ERTS sets
+    /// `p->fcalls` at schedule-in (`erl_process.c:10183`, `10435`). A
+    /// process whose receive timer expired continues at the instruction
+    /// after its `wait_timeout` with `F_TIMO`, also when a message woke it
+    /// first, as ERTS does before it runs the process
     /// (`erl_process.c:10451-10458`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+    /// assert_eq!(scheduler.current_process_mut().fcalls, CONTEXT_REDS);
     /// ```
     pub(super) fn schedule_next(&mut self) -> Option<ProcessId> {
         self.current_process = self.runnable.pop_front();
         let process = self
             .current_process
             .and_then(|id| self.processes.get_mut(&id))?;
+        process.fcalls = CONTEXT_REDS;
         if let ReceiveTimer::Expired { resume } = process.receive_timer
             && let Some(frame) = process.frames.last_mut()
         {
@@ -361,6 +371,26 @@ impl Scheduler {
             process.wait();
         }
         self.current_process = None;
+    }
+
+    /// Switch out the current process at the end of its budget, or at
+    /// another ERTS switch point. The process stays active and goes to the
+    /// end of the run queue, as `schedule_out_process` does
+    /// (`erl_process.c:6695-6851`). It keeps its execution state, so it
+    /// continues at its next instruction with a new budget.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.yield_current();
+    /// assert_eq!(scheduler.schedule_next(), Some(other));
+    /// ```
+    pub(super) fn yield_current(&mut self) {
+        let id = self
+            .current_process
+            .take()
+            .expect("the scheduler has a current process");
+        self.runnable.push_back(id);
     }
 
     /// Create the next process identifier.

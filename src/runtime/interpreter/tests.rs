@@ -339,7 +339,7 @@ fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
 #[test]
 fn returns_a_tail_called_bif_value_and_drops_messages_to_missing_processes() {
     assert!(matches!(
-        run_with_child(vec![erlang_call("make_ref", 0, true)]),
+        run_with_child(vec![erlang_call("make_ref", 0, true), Instruction::Return]),
         Ok(Term::Reference(_))
     ));
     assert_eq!(
@@ -728,6 +728,7 @@ fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
                 tail: true,
                 deallocate: 0,
             },
+            Instruction::Return,
         ],
         0,
     )
@@ -752,6 +753,7 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
                 tail: true,
                 deallocate: 0,
             },
+            Instruction::Return,
         ],
         0,
     )
@@ -775,6 +777,7 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
                     tail: true,
                     deallocate: 0,
                 },
+                Instruction::Return,
             ],
             0,
         )
@@ -820,6 +823,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
                 tail: true,
                 deallocate: 0,
             },
+            Instruction::Return,
         ],
         0,
     );
@@ -862,6 +866,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
                 tail: true,
                 deallocate: 0,
             },
+            Instruction::Return,
         ],
         0,
     );
@@ -939,6 +944,7 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
                     tail: true,
                     deallocate: 0,
                 },
+                Instruction::Return,
             ],
             0,
         )
@@ -1559,6 +1565,7 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
                 Operand::X(0),
             ),
             erlang_call("list_to_atom", 1, true),
+            Instruction::Return,
         ],
         0,
     );
@@ -1582,6 +1589,7 @@ fn returns_the_iovec_of_a_binary_and_of_a_list() {
             vec![
                 Instruction::Move(Operand::Value(argument), Operand::X(0)),
                 erlang_call("iolist_to_iovec", 1, true),
+                Instruction::Return,
             ],
             0,
         )
@@ -1790,6 +1798,7 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
                 Operand::X(1),
             ),
             erlang_call("demonitor", 2, true),
+            Instruction::Return,
         ],
         0,
     );
@@ -1834,6 +1843,7 @@ fn removes_an_active_monitor_without_a_trap() {
             Operand::X(1),
         ),
         erlang_call("demonitor", 2, true),
+        Instruction::Return,
     ]);
     assert_eq!(run_with_child(body).unwrap(), test_atom("true"));
 }
@@ -2103,6 +2113,7 @@ fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term,
         tail: true,
         deallocate: 0,
     });
+    body.push(Instruction::Return);
     make_program(body, 0).execute("fixture", "main", &[])
 }
 
@@ -2536,6 +2547,7 @@ fn rejects_the_current_stacktrace_of_another_process() {
         erlang_call("spawn", 3, false),
         Instruction::Move(atom("current_stacktrace"), Operand::X(1)),
         erlang_call("process_info", 2, true),
+        Instruction::Return,
     ])
     .unwrap_err();
     assert_eq!(
@@ -2629,4 +2641,88 @@ fn finds_exported_functions_as_pinned_erts() {
             BADARG_EXIT
         );
     }
+}
+
+#[test]
+fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
+    // `emit_dispatch_return` switches when the budget is below 0 after the
+    // return, and the process continues at the return address
+    // (`jit/arm/instr_call.cpp:30-54`). For the last frame, that is the
+    // normal exit. The child `burner` returns from `inner` and then from
+    // its last frame. The root gets the first message of its queue.
+    let first_message = |entries: usize| {
+        let body = vec![
+            Instruction::Move(atom("fixture"), Operand::X(0)),
+            Instruction::Move(atom("burner"), Operand::X(1)),
+            Instruction::Move(Operand::Value(Term::List(Vec::new())), Operand::X(2)),
+            Instruction::Move(
+                Operand::Value(Term::List(vec![test_atom("monitor")])),
+                Operand::X(3),
+            ),
+            erlang_call("spawn_opt", 4, false),
+            Instruction::Bif {
+                fail_label: 0,
+                module: "erlang".into(),
+                name: "self".into(),
+                arguments: Vec::new(),
+                destination: Operand::X(1),
+            },
+            Instruction::PutList {
+                head: Operand::X(1),
+                tail: Operand::Value(Term::List(Vec::new())),
+                destination: Operand::X(2),
+            },
+            Instruction::Move(atom("fixture"), Operand::X(0)),
+            Instruction::Move(atom("sender"), Operand::X(1)),
+            erlang_call("spawn", 3, false),
+        ];
+        let mut program = make_program([body, wait_forever()].concat(), 0);
+        let module = program.modules.get_mut("fixture").unwrap();
+        module.exports.insert(("burner".into(), 0), 21);
+        module.exports.insert(("sender".into(), 1), 25);
+        let function = |name: &str, arity, label| {
+            [
+                Instruction::FunctionInfo {
+                    module: "fixture".into(),
+                    name: name.into(),
+                    arity,
+                },
+                Instruction::Label(label),
+            ]
+        };
+        module.instructions.extend(function("burner", 0, 21));
+        module
+            .instructions
+            .extend(std::iter::repeat_n(Instruction::TestYield, entries));
+        module.instructions.extend([
+            Instruction::Call {
+                arity: 0,
+                label: 23,
+            },
+            Instruction::Return,
+        ]);
+        module.instructions.extend(function("inner", 0, 23));
+        module.instructions.extend([
+            Instruction::TestYield,
+            Instruction::Move(atom("ok"), Operand::X(0)),
+            Instruction::Return,
+        ]);
+        module.instructions.extend(function("sender", 1, 25));
+        module.instructions.extend([
+            Instruction::Move(atom("tag"), Operand::X(1)),
+            Instruction::Send,
+            Instruction::Return,
+        ]);
+        program.execute("fixture", "main", &[]).unwrap()
+    };
+    // 3998 entries, the entry of `inner`, and its return leave 0. The
+    // last return makes the budget -1: `burner` switches out, `sender`
+    // runs, and then `burner` exits.
+    assert_eq!(first_message(3998), test_atom("tag"));
+    // With 3997 entries, the last return leaves 0, and `burner` exits at
+    // once.
+    assert!(matches!(
+        first_message(3997),
+        Term::Tuple(ref elements) if elements.first() == Some(&test_atom("DOWN"))
+    ));
 }

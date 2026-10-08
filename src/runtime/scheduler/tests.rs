@@ -1,4 +1,4 @@
-use super::{MonitorOptions, MonitorTarget, Scheduler};
+use super::{CONTEXT_REDS, MonitorOptions, MonitorTarget, Scheduler};
 use crate::term::test_atom;
 use crate::{
     runtime::ets::{Access, Table},
@@ -44,6 +44,26 @@ fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
     assert_eq!(Vec::from(scheduler.runnable.clone()), vec![ProcessId(0)]);
     assert_eq!(first_message(&scheduler, 0, 0), atom("ping"));
     assert_eq!(first_message(&scheduler, 1, 0), atom("self"));
+}
+
+#[test]
+fn switches_out_to_the_end_of_the_run_queue_with_a_new_budget() {
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    scheduler.start(frame(), vec![]).unwrap();
+    assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+    scheduler
+        .spawn(Start::Entry(frame()), vec![], false, false, false)
+        .unwrap();
+    scheduler.current_process_mut().fcalls = -1;
+    scheduler.yield_current();
+    assert_eq!(
+        Vec::from(scheduler.runnable.clone()),
+        vec![ProcessId(1), ProcessId(0)]
+    );
+    assert_eq!(scheduler.schedule_next(), Some(ProcessId(1)));
+    scheduler.yield_current();
+    assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+    assert_eq!(scheduler.current_process_mut().fcalls, CONTEXT_REDS);
 }
 
 #[test]

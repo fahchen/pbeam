@@ -247,7 +247,9 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
     ));
     // ERTS loads `nif_start` after another instruction of the function,
     // and a NIF replaces the function from its entry. So the dispatch
-    // goes before the `move`, which does not run for a bound MFA.
+    // goes before the `move`, which does not run for a bound MFA. The
+    // `TestYield` of the entry comes first: a NIF call costs one reduction
+    // as `i_test_yield` does (`jit/arm/instr_bif.cpp:924-952`).
     let (instructions, _) = parse_code(
         &code(&[
             0x02, 0x12, 0x22, 0x20, // func_info prim_tty write_nif 2
@@ -266,6 +268,7 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         [
             Instruction::FunctionInfo { .. },
             Instruction::Label(1),
+            Instruction::TestYield,
             Instruction::NifStart { name, arity: 2 },
             Instruction::Move(..),
             Instruction::End,
@@ -1176,6 +1179,76 @@ fn turns_a_call_of_erlang_hibernate_into_the_erts_hibernate_instruction() {
             Instruction::End
         ]
     ));
+}
+
+#[test]
+fn puts_a_test_yield_after_the_entry_label_of_each_function() {
+    // `func_prologue` ends with `i_test_yield` (`jit/arm/ops.tab:929-938`).
+    // A label that does not follow `func_info` gets no `TestYield`.
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 11]);
+    code.push(3); // labels 1 and 2
+    code.extend([0; 3]);
+    code.push(1); // one function
+    code.extend([
+        0x02, 0x12, 0x22, 0x00, // func_info preempt_probe body 0
+        0x01, 0x10, // label 1
+        0x01, 0x20, // label 2
+        0x13, // return
+        0x03,
+    ]);
+    let mut table = AtomTable::new();
+    let atoms = ["preempt_probe", "body"].map(|name| table.put(name).unwrap());
+    let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::FunctionInfo { .. },
+            Instruction::Label(1),
+            Instruction::TestYield,
+            Instruction::Label(2),
+            Instruction::Return,
+            Instruction::End,
+        ]
+    ));
+}
+
+#[test]
+fn puts_the_deallocate_and_the_return_of_a_tail_call_after_call_ext() {
+    // A tail call of a BIF returns to `deallocate D | return`
+    // (`jit/arm/ops.tab:687-714`). A tail call of Erlang code replaces the
+    // frame and does not reach them.
+    let decode = |bytes: &[u8]| {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend_from_slice(bytes);
+        code.push(0x03);
+        let imports = [("erlang".to_owned(), "whereis".to_owned(), 1)];
+        parse_code(&code, &[], &imports, &[], &[]).unwrap().0
+    };
+    let whereis = |instruction: &Instruction, tail: bool, size: u32| {
+        matches!(
+            instruction,
+            Instruction::CallExternal { arity: 1, module, name, tail: found, deallocate }
+                if module == "erlang" && name == "whereis" && *found == tail && *deallocate == size
+        )
+    };
+    let call = decode(&[0x07, 0x10, 0x00]); // call_ext 1 import 0
+    assert!(whereis(&call[0], false, 0));
+    assert!(matches!(call[1..], [Instruction::End]));
+    let last = decode(&[0x08, 0x10, 0x00, 0x20]); // call_ext_last 1 import 0 2
+    assert!(whereis(&last[0], true, 2));
+    assert!(matches!(
+        last[1..],
+        [
+            Instruction::Deallocate { stack_size: 2 },
+            Instruction::Return,
+            Instruction::End
+        ]
+    ));
+    let only = decode(&[0x4E, 0x10, 0x00]); // call_ext_only 1 import 0
+    assert!(whereis(&only[0], true, 0));
+    assert!(matches!(only[1..], [Instruction::Return, Instruction::End]));
 }
 
 #[test]

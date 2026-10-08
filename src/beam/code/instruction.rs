@@ -214,6 +214,15 @@ pub(crate) enum Instruction {
     CallOnly { arity: u32, label: u32 },
     /// Calls an imported function. `tail` marks `call_ext_last` and
     /// `call_ext_only`; `deallocate` is the stack size to release first.
+    /// The loader puts `Deallocate { stack_size: deallocate }` after a
+    /// `call_ext_last` and `Return` after a `call_ext_last` or a
+    /// `call_ext_only`. A tail call of Erlang code replaces the frame and
+    /// never reaches them. A tail call of a BIF runs as a body call and then
+    /// runs them, as the ERTS loader turns it into `call_light_bif Bif |
+    /// deallocate D | return` or `i_call_ext Bif | deallocate D | return`
+    /// (`jit/arm/ops.tab:687-714`). Thus the `return` costs a reduction.
+    ///
+    /// Encoding: `[0x4E, 0x10, 0x00]` is `call_ext_only 1` of import 0.
     ///
     /// Erlang: `d(X) -> lists:reverse(X).` compiles to
     /// `{call_ext_only,1,{extfunc,lists,reverse,1}}`.
@@ -998,12 +1007,28 @@ pub(crate) enum Instruction {
     /// start with `nif_start`, then `{move,{atom,undef},{x,0}}` and
     /// `{call_ext_only,1,{extfunc,erlang,nif_error,1}}`.
     NifStart { name: String, arity: u32 },
+    /// Tests the reduction budget at the entry of a function, as the ERTS
+    /// `i_test_yield` instruction (`jit/arm/instr_common.cpp:3086-3119`).
+    /// It costs one reduction. When the budget is then 0 or less, the
+    /// process switches out and continues after this instruction. The
+    /// loader puts it directly after the entry label of each function, as
+    /// the ERTS loader puts it in `func_prologue` (`jit/arm/ops.tab:929-938`).
+    /// It has no BEAM opcode. A `nif_start` goes after it: a NIF call also
+    /// costs one reduction and switches out first when the budget is then 0
+    /// or less (`emit_call_nif_yield_helper` in
+    /// `jit/arm/instr_bif.cpp:924-952`).
+    ///
+    /// Erlang: `a() -> ok.` loads as `Label(2)`, `TestYield`, and the body.
+    TestYield,
     /// An instruction that has no runtime effect, such as `test_heap` or
     /// `init_yregs`.
     ///
     /// Erlang: `g(X) -> {X, X}.` compiles to `{test_heap,3,1}` first.
     Noop,
-    /// Returns the value in `x0` from the active function.
+    /// Returns the value in `x0` from the active function. It costs one
+    /// reduction, and the process switches out after the return when the
+    /// budget is then less than 0 (`emit_dispatch_return` in
+    /// `jit/arm/instr_call.cpp:49-54`).
     ///
     /// Encoding: `[0x13]`. Execution reports an error if the function has not
     /// set `x0`.
@@ -1148,12 +1173,15 @@ pub(super) fn parse_code(
                     )));
                 }
                 // The label directly after `func_info` is the function entry.
-                if let Some((_, _, entry)) = &mut function
-                    && *entry == instructions.len()
-                {
-                    *entry += 1;
+                // `TestYield` follows it, and a `nif_start` goes after that.
+                let entry_label =
+                    matches!(instructions.last(), Some(Instruction::FunctionInfo { .. }));
+                instructions.push(Instruction::Label(label));
+                if entry_label && let Some((_, _, entry)) = &mut function {
+                    instructions.push(Instruction::TestYield);
+                    *entry += 2;
                 }
-                Instruction::Label(label)
+                continue;
             }
             OPCODE_FUNCTION_INFO => {
                 function_info_count += 1;
@@ -1583,26 +1611,28 @@ pub(super) fn parse_code(
                 // `i_hibernate` returns to the next instruction, so a tail
                 // call hibernates first and returns after that
                 // (`jit/arm/ops.tab:669-673`; `emu/ops.tab:896-898`).
+                // A tail call of a BIF returns to the `deallocate` and the
+                // `return` after it (`jit/arm/ops.tab:687-714`).
                 if (module.as_str(), name.as_str(), arity) == ("erlang", "hibernate", 0) {
                     instructions.push(Instruction::Hibernate);
-                    if opcode == OPCODE_CALL_EXT_LAST {
-                        instructions.push(Instruction::Deallocate {
-                            stack_size: deallocate,
-                        });
-                    }
-                    if opcode != OPCODE_CALL_EXT {
-                        instructions.push(Instruction::Return);
-                    }
-                    continue;
                 } else {
-                    Instruction::CallExternal {
+                    instructions.push(Instruction::CallExternal {
                         arity,
                         module: module.clone(),
                         name: name.clone(),
                         tail: opcode != OPCODE_CALL_EXT,
                         deallocate,
-                    }
+                    });
                 }
+                if opcode == OPCODE_CALL_EXT_LAST {
+                    instructions.push(Instruction::Deallocate {
+                        stack_size: deallocate,
+                    });
+                }
+                if opcode != OPCODE_CALL_EXT {
+                    instructions.push(Instruction::Return);
+                }
+                continue;
             }
             OPCODE_APPLY | OPCODE_APPLY_LAST => {
                 let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;

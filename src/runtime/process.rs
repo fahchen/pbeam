@@ -122,6 +122,11 @@ pub(super) struct ProcessState {
     /// Name that `erlang:register/2` gave this process, as
     /// `common.u.alive.reg` in ERTS.
     pub(super) registered_name: Option<Atom>,
+    /// The reductions that remain in the current turn, as `p->fcalls` and
+    /// the JIT `FCALLS` register. `Scheduler::schedule_next` sets it to
+    /// `CONTEXT_REDS`. A cost point subtracts from it, and the process
+    /// switches out at the ERTS switch points. A `return` can make it -1.
+    pub(super) fcalls: i32,
 }
 
 impl ProcessState {
@@ -158,6 +163,7 @@ impl ProcessState {
             group_leader: id,
             dictionary: Vec::new(),
             registered_name: None,
+            fcalls: 0,
         }
     }
 
@@ -184,6 +190,25 @@ impl ProcessState {
     pub(super) fn receive(&mut self, term: Term) -> bool {
         self.mailbox.push(term);
         std::mem::take(&mut self.waiting)
+    }
+
+    /// Use `reductions` of the budget of the current turn, as
+    /// `ERTS_VBUMP_REDS` (`bif.h:85-96`) does: the budget goes down, but not
+    /// below 0. ERTS also adds the used amount to `virtual_reds`, which only
+    /// the reduction total of the process reads. PBeam keeps no reduction
+    /// total yet (#230).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.fcalls = 6;
+    /// process.vbump_reductions(4);
+    /// assert_eq!(process.fcalls, 2);
+    /// process.vbump_reductions(4);
+    /// assert_eq!(process.fcalls, 0);
+    /// ```
+    pub(super) fn vbump_reductions(&mut self, reductions: i32) {
+        self.fcalls = (self.fcalls - reductions).max(0);
     }
 
     /// Mark the receive timer as expired, as `proc_timeout_common`
@@ -247,6 +272,16 @@ pub(super) mod tests {
         assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
         assert!(!process.time_out());
         assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
+    }
+
+    #[test]
+    fn uses_reductions_down_to_zero_as_erts_vbump_reds() {
+        let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+        process.fcalls = 6;
+        process.vbump_reductions(4);
+        assert_eq!(process.fcalls, 2);
+        process.vbump_reductions(4);
+        assert_eq!(process.fcalls, 0);
     }
 
     #[test]
