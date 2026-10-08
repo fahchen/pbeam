@@ -494,7 +494,7 @@ impl Scheduler {
     ///   `erlang:exit/2` gives `killed`. A link exit signal keeps its
     ///   reason, also `kill`. This costs 1 more, and the handling stops.
     ///   The exit of the receiver then sends its own link exit signals
-    ///   (see [`Scheduler::exit_process`]).
+    ///   (see [`Scheduler::finish_current`]).
     ///
     /// An ignored signal costs 1 more again.
     ///

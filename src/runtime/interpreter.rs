@@ -1,7 +1,6 @@
 use super::{
     process::{Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::{Received, Scheduler, Turn},
-    unicode::{characters_to_code_points, characters_to_utf8},
 };
 use crate::{
     beam::{

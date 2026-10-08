@@ -17,6 +17,7 @@ mod os;
 mod persistent_term;
 mod re;
 mod unicode;
+mod ycf;
 
 pub(super) use erlang::{is_function, send};
 
@@ -288,9 +289,22 @@ impl BeamProgram {
     /// - `maps:merge_trap/2`, with the merged map and the steps that remain
     ///   ([`maps::merge_trap`]). ERTS traps to `maps:merge_trap/1` with a
     ///   magic reference to the walk state (`erl_map.c:134-136`).
+    /// - `maps:from_list_trap/2` and `maps:keys_trap/2`, with the argument
+    ///   and the YCF units done ([`maps::from_list`], [`maps::keys`]). ERTS
+    ///   traps to `maps:from_list/1` and `maps:keys/1` with a magic
+    ///   reference to the YCF state (`utils.c:3718-3731`).
     /// - `persistent_term:get_all_trap/2`, with the result and the number of
     ///   pairs that remain ([`persistent_term::get_all_trap`]). ERTS keeps
     ///   the table and the result so far (`erl_bif_persistent.c:263-265`).
+    /// - `erlang:characters_to_utf8_trap/2`, `erlang:characters_to_list_trap_1/4`,
+    ///   `_2/2`, `_3/3`, and `_4/2`, with the state of a chardata
+    ///   conversion ([`unicode`]). ERTS traps to the exports of the same
+    ///   names with other arguments: a magic reference to the state, or the
+    ///   result binary so far (`erl_unicode.c:83-101`).
+    /// - `persistent_term:put_common_trap/1`, with the slots of the table
+    ///   copy that remain ([`persistent_term::put_trap`]). ERTS traps to
+    ///   `persistent_term:put_common_trap/3` with a magic reference to the
+    ///   copy state (`erl_bif_persistent.c:176-177`, `650-651`).
     /// - `ets:insert/4`, with the table reference, the objects, the units
     ///   done, and the key position ([`ets::insert_list`]). ERTS traps to
     ///   `ets:insert/2` with a magic reference to the YCF state
@@ -347,9 +361,62 @@ impl BeamProgram {
             ("maps", "merge_trap", [merged, Term::Integer(steps)]) => {
                 maps::merge_trap(process, merged.clone(), *steps as usize)
             }
+            ("maps", "from_list_trap", [list, Term::Integer(done)]) => {
+                maps::from_list(process, list, *done as usize)
+            }
+            ("maps", "keys_trap", [map, Term::Integer(done)]) => {
+                maps::keys(process, map, *done as usize)
+            }
             ("persistent_term", "get_all_trap", [all, Term::Integer(entries)]) => Ok(
                 persistent_term::get_all_trap(process, all.clone(), *entries as usize),
             ),
+            ("erlang", "characters_to_utf8_trap", [Term::Binary(bytes), rest]) => {
+                unicode::utf8_trap(process, bytes.clone(), rest)
+            }
+            (
+                "erlang",
+                "characters_to_list_trap_1",
+                [
+                    Term::Binary(bytes),
+                    Term::Integer(characters),
+                    rest,
+                    Term::Atom(encoding),
+                ],
+            ) => unicode::list_trap(
+                process,
+                bytes.clone(),
+                *characters as usize,
+                rest,
+                encoding.name() == "latin1",
+            ),
+            ("erlang", "characters_to_list_trap_2", [result, Term::Integer(remaining)]) => {
+                unicode::finish_trap(
+                    process,
+                    result.clone(),
+                    *remaining as usize,
+                    "characters_to_list_trap_2",
+                )
+            }
+            (
+                "erlang",
+                "characters_to_list_trap_3",
+                [
+                    Term::Binary(bytes),
+                    Term::Integer(end),
+                    Term::Integer(characters),
+                ],
+            ) => unicode::analyze_turn(process, bytes, *end as usize, *characters as usize),
+            ("erlang", "characters_to_list_trap_4", [result, Term::Integer(remaining)]) => {
+                unicode::finish_trap(
+                    process,
+                    result.clone(),
+                    *remaining as usize,
+                    "characters_to_list_trap_4",
+                )
+            }
+            ("persistent_term", "put_common_trap", [Term::Integer(copied)]) => {
+                persistent_term::put_trap(process, *copied as usize)
+            }
             (
                 "erts_internal",
                 "iolist_size_continue",

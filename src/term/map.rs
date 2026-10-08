@@ -27,6 +27,10 @@ use std::cmp::Ordering;
 use super::{Term, hash::internal_hash};
 use crate::error::{BeamError, error};
 
+mod build;
+
+pub(crate) use build::from_list_units;
+
 /// The largest number of keys in a flatmap (`MAP_SMALL_MAP_LIMIT` in a
 /// release build of ERTS). A map with more keys is a hashmap.
 const SMALL_MAP_LIMIT: usize = 32;
@@ -197,6 +201,17 @@ impl Map {
             Repr::Flat(pairs) => pairs.len(),
             Repr::Hash(hamt) => hamt.size,
         }
+    }
+
+    /// Return true for a hashmap: a map of more than 32 keys.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!Map::new().is_hashmap());
+    /// ```
+    pub(crate) fn is_hashmap(&self) -> bool {
+        matches!(self.repr, Repr::Hash(_))
     }
 
     /// Return the flatmap pairs or the hashmap root, so that the ERTS

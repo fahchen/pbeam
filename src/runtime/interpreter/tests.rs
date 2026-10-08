@@ -2727,9 +2727,15 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
     // runs, and then `burner` exits.
     assert_eq!(first_message(3998), test_atom("tag"));
     // With 3997 entries, the last return leaves 0, and `burner` exits at
-    // once.
+    // once. The exit bumps 100 reductions and finds none left, so it
+    // switches out before the monitor (`erl_process.c:14229`, `14315`).
+    assert_eq!(first_message(3997), test_atom("tag"));
+    // The exit of a process with 150 reductions left uses 100 and 50, and
+    // switches out before the monitor (`erl_process.c:14475`, `14543`).
+    assert_eq!(first_message(3847), test_atom("tag"));
+    // With 151 reductions left, the exit sends the monitor signal at once.
     assert!(matches!(
-        first_message(3997),
+        first_message(3846),
         Term::Tuple(ref elements) if elements.first() == Some(&test_atom("DOWN"))
     ));
 }

@@ -7,7 +7,7 @@
 //! handles it later, in queue order, when it handles its signals: at
 //! schedule-in, in `loop_rec`, in a BIF that flushes the signals of the
 //! caller, or at its exit (see `Scheduler::handle_signals` and
-//! `Scheduler::exit_process`).
+//! `Scheduler::exit_links`).
 //!
 //! Each variant names its ERTS operation, the extra cost of its handling in
 //! the signal count of `erts_proc_sig_handle_incoming`, and its result when

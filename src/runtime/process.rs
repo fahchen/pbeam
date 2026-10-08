@@ -214,6 +214,11 @@ pub(super) struct ProcessState {
     /// `i_length` keeps them in the X registers above the live registers
     /// and runs the instruction again (`jit/arm/instr_bif.cpp:198-273`).
     pub(super) length_trap: Option<Vec<Term>>,
+    /// True when the exit of the process switched out after its timers,
+    /// as `p->u.terminate` holds the state of a continued exit
+    /// (`erl_process.c:14276-14290`). The exit then continues with the
+    /// process table phase, with no new bump.
+    pub(super) continue_exit: bool,
 }
 
 /// A BIF call that continues after a switch: the export of a BIF and the
@@ -275,6 +280,7 @@ impl ProcessState {
             reductions: 0,
             pending_bif: None,
             length_trap: None,
+            continue_exit: false,
         }
     }
 

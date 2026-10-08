@@ -1,6 +1,6 @@
 use super::{
-    COMPOSITION_CANDIDATES, FilenameEncoding, characters_to_code_points, characters_to_utf8,
-    filename_from_native, is_native_filename, native_filename,
+    COMPOSITION_CANDIDATES, FilenameEncoding, Utf8Output, Utf8State, analyze_utf8, build_utf8,
+    code_points, filename_from_native, is_native_filename, native_filename, utf8_need,
 };
 use crate::term::{Term, test_atom};
 
@@ -8,22 +8,42 @@ fn binary(bytes: &[u8]) -> Term {
     Term::Binary(bytes.to_vec())
 }
 
+/// Convert chardata with a budget that does not end, and return the bytes,
+/// the rest, whether the walk stopped at an error, and the bytes of an
+/// unfinished sequence.
+fn convert(chardata: &Term) -> (Vec<u8>, Term, bool, Vec<u8>) {
+    let mut output = Utf8Output::default();
+    let mut left = i64::MAX;
+    let (rest, error) = build_utf8(chardata, &mut left, false, &mut output);
+    (output.bytes, rest, error, output.leftover)
+}
+
+/// Convert valid chardata and return its bytes.
+fn valid(chardata: Term) -> Vec<u8> {
+    assert!(utf8_need(&chardata, false).is_some(), "{chardata:?}");
+    let (bytes, rest, error, leftover) = convert(&chardata);
+    assert_eq!(
+        (rest, error, leftover),
+        (Term::List(Vec::new()), false, Vec::new())
+    );
+    bytes
+}
+
 #[test]
 fn converts_binaries_code_points_and_nested_lists_as_erts() {
-    let convert = |chardata: Term| characters_to_utf8(&chardata).unwrap().unwrap();
     // Each expected value is the result of unicode:characters_to_binary/2
     // with the `unicode` encoding on ERTS 29.1.1.
-    assert_eq!(convert(binary(b"Hello, world!\n")), b"Hello, world!\n");
+    assert_eq!(valid(binary(b"Hello, world!\n")), b"Hello, world!\n");
     assert_eq!(
-        convert(Term::List(vec![
+        valid(Term::List(vec![
             binary(b"Hello, world!"),
             Term::Integer(10)
         ])),
         b"Hello, world!\n"
     );
-    assert_eq!(convert(Term::List(Vec::new())), b"");
+    assert_eq!(valid(Term::List(Vec::new())), b"");
     assert_eq!(
-        convert(Term::List(vec![
+        valid(Term::List(vec![
             Term::List(vec![binary(b""), Term::List(vec![Term::Integer(104)])]),
             Term::Integer(105),
         ])),
@@ -35,15 +55,12 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
         (128512, &[240, 159, 152, 128]),
         (1114111, &[244, 143, 191, 191]),
     ] {
-        assert_eq!(
-            convert(Term::List(vec![Term::Integer(code_point)])),
-            expected
-        );
+        assert_eq!(valid(Term::List(vec![Term::Integer(code_point)])), expected);
     }
     // A UTF-8 sequence can continue in the next binary, also across
     // nested and empty lists and empty binaries.
     assert_eq!(
-        convert(Term::List(vec![
+        valid(Term::List(vec![
             binary(&[226]),
             Term::List(vec![binary(&[130]), Term::List(Vec::new())]),
             binary(b""),
@@ -56,15 +73,23 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
     // [97|<<"b">>] and <<"é"/utf8>> for [[<<195>>|<<169>>]].
     let improper = |elements: Vec<Term>, tail: Term| Term::ImproperList(elements, Box::new(tail));
     assert_eq!(
-        convert(improper(vec![Term::Integer(97)], binary(b"b"))),
+        valid(improper(vec![Term::Integer(97)], binary(b"b"))),
         b"ab"
     );
     assert_eq!(
-        convert(Term::List(vec![improper(
+        valid(Term::List(vec![improper(
             vec![binary(&[195])],
             binary(&[169])
         )])),
         [195, 169]
+    );
+    assert_eq!(
+        code_points("aé€".as_bytes()),
+        Term::List(vec![
+            Term::Integer(97),
+            Term::Integer(233),
+            Term::Integer(8364)
+        ])
     );
 }
 
@@ -74,29 +99,18 @@ fn converts_deeply_nested_lists_without_recursion() {
     for _ in 0..100_000 {
         chardata = Term::List(vec![chardata]);
     }
-    assert_eq!(characters_to_utf8(&chardata).unwrap().unwrap(), b"a");
+    assert_eq!(utf8_need(&chardata, false), Some(1));
+    assert_eq!(valid(chardata), b"a");
 }
 
 #[test]
-fn converts_deeply_nested_lists_to_code_points_without_recursion() {
-    let mut chardata = Term::List(vec![Term::Integer(97)]);
-    for _ in 0..100_000 {
-        chardata = Term::List(vec![chardata]);
-    }
-    assert_eq!(
-        characters_to_code_points(&chardata, false),
-        Some(Term::List(vec![Term::Integer(97)]))
-    );
-}
-
-#[test]
-fn rejects_chardata_that_erts_does_not_convert() {
-    let error = |chardata: Term| characters_to_utf8(&chardata).unwrap_err().to_string();
+fn stops_at_chardata_that_erts_does_not_convert() {
     // ERTS 29.1.1 returns {error, <<>>, [Value]} for these code points.
     for code_point in [-1, 55296, 1114112, 1 << 60] {
+        let chardata = Term::List(vec![Term::Integer(code_point)]);
         assert_eq!(
-            error(Term::List(vec![Term::Integer(code_point)])),
-            format!("unsupported chardata: Integer({code_point}) is not a Unicode code point")
+            convert(&chardata),
+            (Vec::new(), chardata.clone(), true, Vec::new())
         );
     }
     // The walk of `utf8_need` stops at an integer outside the small
@@ -107,32 +121,117 @@ fn rejects_chardata_that_erts_does_not_convert() {
         Term::ImproperList(vec![big()], Box::new(test_atom("x"))),
         Term::List(vec![big(), test_atom("foo")]),
     ] {
+        assert_eq!(utf8_need(&chardata, false), Some(0));
         assert_eq!(
-            error(chardata),
-            format!(
-                "unsupported chardata: Integer({}) is not a Unicode code point",
-                1_i64 << 60
-            )
+            convert(&chardata),
+            (Vec::new(), chardata.clone(), true, Vec::new())
         );
     }
-    // ERTS 29.1.1 returns {error, <<>>, Rest} for invalid UTF-8 and
+    // ERTS 29.1.1 returns {error, <<>>, <<255>>} and
+    // {error, <<>>, [<<192,128>>]} for invalid UTF-8, and
     // {incomplete, <<>>, <<195>>} for an incomplete sequence at the end.
     assert_eq!(
-        error(binary(&[255])),
-        "unsupported chardata: binaries are not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 0"
+        convert(&binary(&[255])),
+        (Vec::new(), binary(&[255]), true, Vec::new())
+    );
+    let overlong = Term::List(vec![binary(&[192, 128])]);
+    assert_eq!(
+        convert(&overlong),
+        (Vec::new(), overlong.clone(), true, Vec::new())
+    );
+    let short = Term::List(vec![binary(&[195])]);
+    assert_eq!(
+        convert(&short),
+        (Vec::new(), Term::List(Vec::new()), false, vec![195])
+    );
+    // An integer after the start of a sequence stops the walk: ERTS
+    // returns {error, <<>>, [<<195>>, [97]]}.
+    let mixed = Term::List(vec![binary(&[195]), Term::Integer(97)]);
+    assert_eq!(
+        convert(&mixed),
+        (
+            Vec::new(),
+            Term::List(vec![Term::Integer(97)]),
+            true,
+            vec![195]
+        )
+    );
+}
+
+#[test]
+fn stops_the_walk_at_a_term_that_is_not_chardata() {
+    // `utf8_need` rejects these terms first, but the walk of
+    // `do_build_utf8` also stops at them with an error
+    // (`erl_unicode.c:597-600`, `713-716`, `722-733`).
+    let improper = Term::ImproperList(vec![Term::Integer(97)], Box::new(test_atom("x")));
+    assert_eq!(
+        convert(&improper),
+        (b"a".to_vec(), test_atom("x"), true, Vec::new())
+    );
+    let list = Term::List(vec![Term::Integer(97), test_atom("foo")]);
+    assert_eq!(
+        convert(&list),
+        (
+            b"a".to_vec(),
+            Term::List(vec![test_atom("foo")]),
+            true,
+            Vec::new()
+        )
     );
     assert_eq!(
-        error(Term::List(vec![binary(&[192, 128])])),
-        "unsupported chardata: binaries are not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 0"
+        convert(&test_atom("foo")),
+        (Vec::new(), test_atom("foo"), true, Vec::new())
+    );
+}
+
+#[test]
+fn splits_the_walk_where_the_steps_end() {
+    // A list that a step limit splits gives the rest of each entered list
+    // as a cell before the rest of the enclosing list.
+    let inner = Term::List(vec![Term::Integer(97), Term::Integer(98)]);
+    let chardata = Term::List(vec![inner, Term::Integer(99)]);
+    let mut output = Utf8Output::default();
+    let mut left = 1;
+    let (rest, error) = build_utf8(&chardata, &mut left, false, &mut output);
+    assert_eq!(
+        (rest, error, output.bytes),
+        (
+            Term::List(vec![Term::List(vec![Term::Integer(98)]), Term::Integer(99)]),
+            false,
+            b"a".to_vec()
+        )
+    );
+    // A binary splits at the next character boundary, so the steps can go
+    // past 0.
+    let mut output = Utf8Output::default();
+    let mut left = 1;
+    let (rest, error) = build_utf8(&binary("éa".as_bytes()), &mut left, false, &mut output);
+    assert_eq!((rest, error, left), (binary(b"a"), false, 0));
+    // With latin1, each byte is one character, and a binary splits at any byte.
+    let mut output = Utf8Output::default();
+    let mut left = 1;
+    let (rest, _) = build_utf8(&binary(&[233, 97]), &mut left, true, &mut output);
+    assert_eq!(
+        (rest, output.bytes),
+        (binary(&[97]), "é".as_bytes().to_vec())
+    );
+    // The analysis of a binary counts one step for each character.
+    let mut left = 2;
+    assert_eq!(
+        analyze_utf8(b"abc", 0, &mut left),
+        (Utf8State::AnalyzeMore, 2, 2)
+    );
+    let mut left = 3;
+    assert_eq!(analyze_utf8(b"abc", 0, &mut left), (Utf8State::Ok, 3, 3));
+    assert_eq!(left, 0);
+    let mut left = 10;
+    assert_eq!(
+        analyze_utf8(&[97, 195], 0, &mut left),
+        (Utf8State::Incomplete, 1, 1)
     );
     assert_eq!(
-        error(Term::List(vec![binary(&[195])])),
-        "unsupported chardata: binaries are not valid UTF-8: incomplete utf-8 byte sequence from index 0"
-    );
-    // An integer ends a run: ERTS returns {error, <<>>, [<<195>>, [97]]}.
-    assert_eq!(
-        error(Term::List(vec![binary(&[195]), Term::Integer(97)])),
-        "unsupported chardata: binaries are not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 0"
+        analyze_utf8(&[97, 255], 0, &mut left),
+        (Utf8State::Error, 1, 1)
     );
 }
 
@@ -159,8 +258,12 @@ fn finds_terms_that_are_not_chardata_before_the_conversion() {
             Term::Integer(97),
         ]),
     ] {
-        assert_eq!(characters_to_utf8(&chardata).unwrap(), None, "{chardata:?}");
+        assert_eq!(utf8_need(&chardata, false), None, "{chardata:?}");
     }
+    // A binary costs 1, or with latin1 the bytes of its UTF-8 form.
+    let list = Term::List(vec![Term::Integer(97), binary(&[233, 97])]);
+    assert_eq!(utf8_need(&list, false), Some(2));
+    assert_eq!(utf8_need(&list, true), Some(4));
 }
 
 #[test]

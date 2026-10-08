@@ -1,8 +1,12 @@
-//! Convert chardata to UTF-8, as the ERTS BIF `unicode:characters_to_binary/2`
-//! does with the `unicode` encoding, convert chardata to a list of code
-//! points, as the ERTS BIF `unicode:characters_to_list/2` does, check and
-//! convert file names to their native bytes, as ERTS does before it uses a
-//! name, and convert native bytes back to a name (`erl_unicode.c`).
+//! Convert chardata as the ERTS BIFs `unicode:characters_to_binary/2` and
+//! `unicode:characters_to_list/2` do, check and convert file names to their
+//! native bytes, as ERTS does before it uses a name, and convert native
+//! bytes back to a name (`erl_unicode.c`).
+//!
+//! The chardata functions are ports of the ERTS walks, which a BIF runs
+//! with a budget of loop steps (`left`) and continues in a trap. Each walk
+//! returns the steps that it used, so the BIF can charge the ERTS
+//! reductions.
 
 use super::host::FilenameEncoding;
 use crate::{
@@ -10,308 +14,413 @@ use crate::{
     term::Term,
 };
 
-/// Convert chardata to its UTF-8 bytes, or return `None` when the term is
-/// not chardata, for which ERTS raises `badarg` (`erl_unicode.c:963-965`).
-/// Chardata is a binary, or a list of integers, binaries, and nested lists
-/// of the same. A list can have a binary as its tail, which comes after the
-/// elements of that list. An integer is one Unicode code point. The bytes
-/// of each run of adjacent binaries, in list order, must be one valid UTF-8
-/// sequence, so a code point can start in one binary and end in the next
-/// one, as in ERTS. An integer between two binaries ends a run. The UTF-8
-/// encoding of an integer is a complete sequence that does not start with a
-/// continuation byte, so the output is valid UTF-8 exactly when each run is
-/// valid. Thus one check of the output after the walk checks each run.
-///
-/// [`is_chardata`] first checks the shape of the term, as `utf8_need` does
-/// before the conversion. The walks use an explicit work stack, as ERTS
-/// does with an `ESTACK`, so nested lists of any depth do not use the Rust
-/// stack.
-///
-/// Chardata that ERTS does not convert returns a runtime error: a code
-/// point that is not a Unicode scalar value, and a run of binaries that is
-/// not valid UTF-8. ERTS returns `{error, Converted, Rest}` or
-/// `{incomplete, Converted, Rest}` for them.
+/// The UTF-8 output of a chardata walk, as the target buffer of
+/// `do_build_utf8` keeps it (`erl_unicode.c:508-749`).
+#[derive(Debug, Default)]
+pub(super) struct Utf8Output {
+    /// The UTF-8 bytes of the characters so far.
+    pub(super) bytes: Vec<u8>,
+    /// The number of characters so far.
+    pub(super) characters: usize,
+    /// The first bytes of a UTF-8 sequence that a binary did not complete
+    /// (`leftover` and `num_leftovers`). The next binary completes it.
+    pub(super) leftover: Vec<u8>,
+}
+
+/// The state of an `analyze_utf8` walk over a binary
+/// (`erl_unicode.c:1177-1275`).
+#[derive(Debug, PartialEq)]
+pub(super) enum Utf8State {
+    /// Each byte is part of a valid sequence (`ERTS_UTF8_OK`).
+    Ok,
+    /// A sequence at the end is shorter than its first byte needs
+    /// (`ERTS_UTF8_INCOMPLETE`).
+    Incomplete,
+    /// A sequence is not valid (`ERTS_UTF8_ERROR`).
+    Error,
+    /// The budget ended before the end of the binary
+    /// (`ERTS_UTF8_ANALYZE_MORE`).
+    AnalyzeMore,
+}
+
+/// Return the loop steps of `utf8_need` for chardata, or `None` when the
+/// term is not chardata, for which ERTS raises `badarg`
+/// (`erl_unicode.c:342-505`). A small integer costs 1. A binary costs 1,
+/// or with `latin1` the bytes that its UTF-8 form needs. A walk stops with
+/// its steps at an integer outside the small range, without a check of the
+/// rest, because the conversion stops there (`is_big`). Each element must
+/// be a small integer, a binary, or a list of the same, and each tail must
+/// be `[]` or a binary. The walk uses an explicit stack, as ERTS does with
+/// an `ESTACK`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // The chardata of Elixir `IO.puts("Hello, world!")`.
-/// let chardata = Term::List(vec![Term::Binary(b"Hello, world!".to_vec()), Term::Integer(10)]);
-/// assert_eq!(characters_to_utf8(&chardata)?, Some(b"Hello, world!\n".to_vec()));
-/// // ERTS: unicode:characters_to_binary([[<<195>>], <<169>>, 8364], unicode) is <<"é€"/utf8>>.
-/// let split = Term::List(vec![
-///     Term::List(vec![Term::Binary(vec![195])]),
-///     Term::Binary(vec![169]),
-///     Term::Integer(8364),
-/// ]);
-/// assert_eq!(characters_to_utf8(&split)?, Some("é€".as_bytes().to_vec()));
-/// // ERTS: unicode:characters_to_binary([97|<<"b">>], unicode) is <<"ab">>.
-/// let improper = Term::ImproperList(vec![Term::Integer(97)], Box::new(Term::Binary(b"b".to_vec())));
-/// assert_eq!(characters_to_utf8(&improper)?, Some(b"ab".to_vec()));
-/// assert_eq!(characters_to_utf8(&Term::static_atom("foo"))?, None);
-/// assert!(characters_to_utf8(&Term::List(vec![Term::Integer(55296)])).is_err());
+/// let list = Term::List(vec![Term::Integer(97), Term::Binary(vec![195, 169])]);
+/// assert_eq!(utf8_need(&list, false), Some(2));
+/// assert_eq!(utf8_need(&list, true), Some(5));
+/// assert_eq!(utf8_need(&Term::static_atom("foo"), false), None);
+/// // [1 bsl 60 | x]: the walk stops at the big integer.
+/// assert_eq!(utf8_need(&Term::ImproperList(vec![Term::Integer(1 << 60)], Box::new(Term::static_atom("x"))), false), Some(0));
 /// ```
-pub(super) fn characters_to_utf8(chardata: &Term) -> Result<Option<Vec<u8>>, BeamError> {
-    if !is_chardata(chardata) {
-        return Ok(None);
-    }
-    let mut bytes = Vec::new();
-    let mut pending = vec![(std::slice::from_ref(chardata).iter(), None)];
-    while let Some((elements, tail)) = pending.last_mut() {
-        let Some(element) = elements.next().or_else(|| tail.take()) else {
-            pending.pop();
+pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
+    let binary_cost = |bytes: &[u8]| {
+        if latin1 {
+            bytes.len() + bytes.iter().filter(|&&byte| byte >= 0x80).count()
+        } else {
+            1
+        }
+    };
+    let mut frames = match chardata {
+        Term::Binary(bytes) => return Some(binary_cost(bytes)),
+        _ => vec![list_parts(chardata)?],
+    };
+    let mut cost = 0;
+    while let Some((elements, index, tail)) = frames.last_mut() {
+        let Some(element) = elements.get(*index) else {
+            match tail {
+                Some(Term::Binary(bytes)) => cost += binary_cost(bytes),
+                Some(_) => return None,
+                None => {}
+            }
+            frames.pop();
             continue;
         };
+        *index += 1;
         match element {
-            Term::Binary(binary) => bytes.extend_from_slice(binary),
-            Term::List(nested) => pending.push((nested.iter(), None)),
-            Term::ImproperList(nested, tail) => pending.push((nested.iter(), Some(&**tail))),
-            // `is_chardata` leaves only integers here: it stops only at an
-            // integer outside the small range, and this arm stops there too.
-            code_point => {
-                let character = code_point
-                    .small_integer()
-                    .and_then(|code_point| u32::try_from(code_point).ok())
-                    .and_then(char::from_u32)
-                    .ok_or_else(|| {
-                        error(format!(
-                            "unsupported chardata: {code_point:?} is not a Unicode code point"
-                        ))
-                    })?;
-                bytes.extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes());
-            }
+            Term::Integer(_) if element.small_integer().is_none() => return Some(cost),
+            Term::Integer(_) => cost += 1,
+            Term::Binary(bytes) => cost += binary_cost(bytes),
+            _ => frames.push(list_parts(element)?),
         }
     }
-    // Rust and ERTS both reject overlong forms, surrogates, code points
-    // above `0x10FFFF`, and an incomplete sequence.
-    std::str::from_utf8(&bytes).map_err(|reason| {
-        error(format!(
-            "unsupported chardata: binaries are not valid UTF-8: {reason}"
-        ))
-    })?;
-    Ok(Some(bytes))
+    Some(cost)
 }
 
-/// Convert chardata to its code points, as `unicode_characters_to_list_2`
-/// does (`erl_unicode.c:1122-1169`), or return `None` when [`is_chardata`]
-/// finds a term that is not chardata, for which ERTS raises `badarg`. With
-/// `latin1`, each byte of a binary is one code point, and an integer must be
-/// from 0 to 255. Else the bytes of each run of adjacent binaries are UTF-8,
-/// and an integer must be a Unicode scalar value.
+/// Convert chardata to UTF-8 with a budget of `left` loop steps, as
+/// `do_build_utf8` does (`erl_unicode.c:508-749`). Return the rest of the
+/// chardata, which is `[]` when the walk ended, and whether the walk stopped
+/// at an element that is not valid.
 ///
-/// The walk reads the term in order, as `do_build_utf8` does
-/// (`erl_unicode.c:508-749`), with an explicit work stack. When a UTF-8
-/// sequence continues after the end of a binary, the walk keeps its bytes
-/// and completes the sequence with the next binary (`copy_utf8_bin`,
-/// `erl_unicode.c:237-340`). At the first element that is not valid, the
-/// result is `{error, Converted, Rest}`. `Rest` starts at that element: the
-/// remaining part of its list, or of a binary from the first byte that is
-/// not valid. Each list that the walk entered puts `Rest` in front of its
-/// own remaining elements (the `done` label). Kept bytes go in front of
-/// `Rest` as a binary, in a list of two (`build_list_return`,
-/// `erl_unicode.c:1024-1084`). Kept bytes at the end give `{incomplete,
-/// Converted, Bytes}` when they can start a valid sequence, else `{error,
-/// Converted, Bytes}` (`check_leftovers`, `erl_unicode.c:751-771`).
-///
-/// ERTS converts a binary without a list in the `analyze_utf8` path
-/// (`erl_unicode.c:1176-1283, 1728-1848`). That path stops at the same byte
-/// and gives the same rest as the walk of a binary that is the tail of a
-/// list, so the walk reads such a binary as a tail.
-///
-/// ERTS stops and continues in a trap when its reduction budget ends
-/// (`allowed_iterations`). PBeam does not read the budget here yet (#234),
-/// so it converts the term in one call. The trap does not change the
-/// result.
+/// A small integer uses one step, and a binary one step for each byte. A
+/// walk stops when the steps end, and returns the rest as ERTS builds it:
+/// the rest of the current list, and for each list that the walk entered,
+/// a list cell of that rest and the rest of the enclosing list. A binary
+/// that is longer than the steps that remain splits after them, at the
+/// next character boundary with UTF-8, and the steps end. A code point
+/// that is not valid, an integer after the start of a UTF-8 sequence in a
+/// binary, and a binary that is not valid UTF-8 stop the walk with an
+/// error and the rest from that element. The bytes of such a binary use no
+/// steps.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let chardata = Term::List(vec![Term::Binary(vec![195]), Term::Binary(vec![169])]);
-/// assert_eq!(characters_to_code_points(&chardata, false), Some(Term::List(vec![Term::Integer(233)])));
-/// // ERTS: unicode:characters_to_list([97,-1], unicode) is {error,[97],[-1]}.
-/// let invalid = Term::List(vec![Term::Integer(97), Term::Integer(-1)]);
-/// assert_eq!(
-///     characters_to_code_points(&invalid, false),
-///     Some(Term::Tuple(vec![
-///         Term::static_atom("error"),
-///         Term::List(vec![Term::Integer(97)]),
-///         Term::List(vec![Term::Integer(-1)]),
-///     ]))
-/// );
-/// assert_eq!(characters_to_code_points(&Term::Binary(vec![233]), true), Some(Term::List(vec![Term::Integer(233)])));
-/// assert_eq!(characters_to_code_points(&Term::static_atom("foo"), false), None);
+/// let mut output = Utf8Output::default();
+/// let mut left = 2;
+/// let list = Term::List(vec![Term::Integer(97), Term::Integer(98), Term::Integer(99)]);
+/// let (rest, error) = build_utf8(&list, &mut left, false, &mut output);
+/// assert_eq!((rest, error, left), (Term::List(vec![Term::Integer(99)]), false, 0));
+/// assert_eq!(output.bytes, b"ab");
 /// ```
-pub(super) fn characters_to_code_points(chardata: &Term, latin1: bool) -> Option<Term> {
-    if !is_chardata(chardata) {
-        return None;
+pub(super) fn build_utf8(
+    chardata: &Term,
+    left: &mut i64,
+    latin1: bool,
+    output: &mut Utf8Output,
+) -> (Term, bool) {
+    let nil = || Term::List(Vec::new());
+    if *left <= 0 || *chardata == nil() {
+        return (chardata.clone(), false);
     }
-    let (elements, tail) = match chardata {
-        Term::List(elements) => (elements.as_slice(), None),
-        Term::ImproperList(elements, tail) => (elements.as_slice(), Some(&**tail)),
-        // `is_chardata` leaves only a binary here.
-        binary => (&[][..], Some(binary)),
+    let mut frames = match chardata {
+        Term::Binary(bytes) => return build_binary(bytes, left, latin1, output),
+        _ => match list_parts(chardata) {
+            Some(frame) => vec![frame],
+            None => return (chardata.clone(), true),
+        },
     };
-    let mut characters = Vec::new();
-    let mut kept = Vec::new();
-    let mut pending = vec![(elements.iter(), tail)];
-    while let Some((elements, tail)) = pending.last_mut() {
-        let (element, is_tail) = match elements.next() {
-            Some(element) => (element, false),
-            None => match tail.take() {
-                Some(tail) => (tail, true),
-                None => {
-                    pending.pop();
+    let rest_from = |(elements, index, tail): (&[Term], usize, Option<&Term>)| {
+        Term::list_with_tail(
+            elements[index..].to_vec(),
+            tail.cloned().unwrap_or_else(nil),
+        )
+    };
+    let (rest, error) = loop {
+        let top = frames.len() - 1;
+        let (elements, index, tail) = frames[top];
+        let Some(element) = elements.get(index) else {
+            match tail {
+                Some(Term::Binary(bytes)) => {
+                    let (rest, error) = build_binary(bytes, left, latin1, output);
+                    if error || *left == 0 {
+                        break (rest, error);
+                    }
+                }
+                Some(tail) => break (tail.clone(), true),
+                None => {}
+            }
+            frames.pop();
+            if frames.is_empty() {
+                return (nil(), false);
+            }
+            continue;
+        };
+        let after = (elements, index + 1, tail);
+        match element {
+            Term::Binary(bytes) => {
+                frames[top].1 += 1;
+                let (rest, error) = build_binary(bytes, left, latin1, output);
+                if error || rest != nil() {
+                    break (Term::list_with_tail(vec![rest], rest_from(after)), error);
+                }
+            }
+            Term::Integer(_) => {
+                let character = element
+                    .small_integer()
+                    .filter(|&value| output.leftover.is_empty() && (!latin1 || value <= 255))
+                    .and_then(|value| u32::try_from(value).ok())
+                    .and_then(char::from_u32);
+                let Some(character) = character else {
+                    break (rest_from(frames[top]), true);
+                };
+                frames[top].1 += 1;
+                output
+                    .bytes
+                    .extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes());
+                output.characters += 1;
+                *left -= 1;
+            }
+            _ => match list_parts(element) {
+                Some(frame) => {
+                    frames[top].1 += 1;
+                    frames.push(frame);
                     continue;
                 }
+                None => break (rest_from(frames[top]), true),
             },
-        };
-        let failed = match element {
-            Term::Binary(bytes) if latin1 => {
-                characters.extend(bytes.iter().map(|&byte| Term::Integer(byte.into())));
-                continue;
-            }
-            Term::Binary(bytes) => match copy_utf8(bytes, &mut kept, &mut characters) {
-                Some(position) => Term::Binary(bytes[position..].to_vec()),
-                None => continue,
-            },
-            Term::List(nested) => {
-                pending.push((nested.iter(), None));
-                continue;
-            }
-            Term::ImproperList(nested, tail) => {
-                pending.push((nested.iter(), Some(&**tail)));
-                continue;
-            }
-            // `is_chardata` leaves only integers here: it stops only at an
-            // integer outside the small range, and this arm stops there too.
-            // An integer after kept bytes is not valid.
-            code_point => {
-                let character = code_point
-                    .small_integer()
-                    .filter(|&code_point| kept.is_empty() && (!latin1 || code_point <= 255))
-                    .and_then(|code_point| u32::try_from(code_point).ok())
-                    .and_then(char::from_u32);
-                match character {
-                    Some(character) => {
-                        characters.push(Term::Integer(u32::from(character).into()));
-                        continue;
-                    }
-                    None => code_point.clone(),
-                }
-            }
-        };
-        let mut rest = if is_tail {
-            failed
-        } else {
-            Term::list_with_tail(vec![failed], list_rest(elements.as_slice(), *tail))
-        };
-        pending.pop();
-        for (elements, tail) in pending.iter().rev() {
-            rest = Term::list_with_tail(vec![rest], list_rest(elements.as_slice(), *tail));
         }
-        if !kept.is_empty() {
-            rest = Term::List(vec![Term::Binary(kept), rest]);
+        if *left == 0 {
+            break (rest_from(after), false);
         }
-        return Some(stopped_result("error", characters, rest));
-    }
-    if kept.is_empty() {
-        return Some(Term::List(characters));
-    }
-    // Kept bytes are fewer than their first byte needs, so they can start a
-    // valid sequence when each byte after the first is a continuation byte.
-    let reason = if kept[1..].iter().all(|&byte| byte & 0xC0 == 0x80) {
-        "incomplete"
-    } else {
-        "error"
     };
-    Some(stopped_result(reason, characters, Term::Binary(kept)))
+    frames.pop();
+    let rest = frames.into_iter().rev().fold(rest, |rest, frame| {
+        Term::list_with_tail(vec![rest], rest_from(frame))
+    });
+    (rest, error)
 }
 
-/// Return `{Reason, Converted, Rest}` for a conversion that stops before the
-/// end of the chardata (`finalize_list_to_list`, `erl_unicode.c:1637-1691`).
+/// Return the elements, the start position, and the tail of a list as a
+/// frame of a walk, or `None` for a term that is not a list.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = stopped_result("incomplete", vec![Term::Integer(97)], Term::Binary(vec![195]));
-/// assert_eq!(result, Term::Tuple(vec![Term::static_atom("incomplete"), Term::List(vec![Term::Integer(97)]), Term::Binary(vec![195])]));
+/// let list = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Binary(vec![])));
+/// assert!(matches!(list_parts(&list), Some(([Term::Integer(1)], 0, Some(Term::Binary(_))))));
+/// assert!(list_parts(&Term::Integer(1)).is_none());
 /// ```
-fn stopped_result(reason: &'static str, characters: Vec<Term>, rest: Term) -> Term {
-    Term::Tuple(vec![
-        Term::static_atom(reason),
-        Term::List(characters),
-        rest,
-    ])
+fn list_parts(list: &Term) -> Option<(&[Term], usize, Option<&Term>)> {
+    match list {
+        Term::List(elements) => Some((elements, 0, None)),
+        Term::ImproperList(elements, tail) => Some((elements, 0, Some(tail))),
+        _ => None,
+    }
 }
 
-/// Return the remaining part of a list: its remaining `elements`, followed by
-/// its `tail`, or by `[]` when the list is proper.
+/// Convert a binary with a budget of `left` loop steps, as the binary part
+/// of `do_build_utf8` does (`erl_unicode.c:521-596`). Return the part that
+/// the steps did not reach, or `[]`, and whether the binary is not valid
+/// UTF-8. With `latin1`, each byte is one character. Else the split moves to
+/// the next character boundary, and [`copy_utf8_bin`] converts the bytes. A
+/// binary that is not valid returns the rest from the first sequence that
+/// is not valid, and uses no steps.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let x = Term::Binary(b"x".to_vec());
-/// assert_eq!(list_rest(&[Term::Integer(1)], Some(&x)), Term::ImproperList(vec![Term::Integer(1)], Box::new(x.clone())));
-/// assert_eq!(list_rest(&[], None), Term::List(vec![]));
+/// let mut output = Utf8Output::default();
+/// let mut left = 1;
+/// let (rest, error) = build_binary(&[195, 169, 97], &mut left, false, &mut output);
+/// // The split moves past the continuation byte 169.
+/// assert_eq!((rest, error, left), (Term::Binary(vec![97]), false, 0));
 /// ```
-fn list_rest(elements: &[Term], tail: Option<&Term>) -> Term {
-    Term::list_with_tail(
-        elements.to_vec(),
-        tail.cloned().unwrap_or_else(|| Term::List(vec![])),
-    )
-}
-
-/// Convert the UTF-8 bytes of a binary to code points, as `copy_utf8_bin`
-/// with a leftover buffer does (`erl_unicode.c:237-340`). `kept` holds the
-/// bytes of a sequence that started in an earlier binary: the first bytes of
-/// `bytes` complete it, or all of `bytes` go to `kept` when they are too
-/// few. A sequence at the end of `bytes` that is shorter than its first byte
-/// needs goes to `kept`. Return the position of the first sequence that is
-/// not valid. A completed kept sequence that is not valid gives position 0,
-/// and `kept` keeps its bytes, as in ERTS.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let (mut kept, mut characters) = (Vec::new(), Vec::new());
-/// assert_eq!(copy_utf8(&[97, 195], &mut kept, &mut characters), None);
-/// assert_eq!((kept.as_slice(), characters.as_slice()), (&[195][..], &[Term::Integer(97)][..]));
-/// assert_eq!(copy_utf8(&[169, 255], &mut kept, &mut characters), Some(1));
-/// assert_eq!(characters, [Term::Integer(97), Term::Integer(233)]);
-/// ```
-fn copy_utf8(bytes: &[u8], kept: &mut Vec<u8>, characters: &mut Vec<Term>) -> Option<usize> {
-    let mut position = 0;
-    if !kept.is_empty() {
-        // A sequence has at most 4 bytes, so at most 3 complete it.
-        let mut sequence = kept.clone();
-        sequence.extend_from_slice(&bytes[..bytes.len().min(3)]);
-        match utf8_sequence(&sequence) {
-            Utf8Sequence::Character(character, length) => {
-                characters.push(Term::Integer(character.into()));
-                position = length - kept.len();
-                kept.clear();
-            }
-            Utf8Sequence::Short => {
-                *kept = sequence;
-                return None;
-            }
-            Utf8Sequence::Invalid => return Some(0),
+fn build_binary(
+    bytes: &[u8],
+    left: &mut i64,
+    latin1: bool,
+    output: &mut Utf8Output,
+) -> (Term, bool) {
+    let mut size = bytes.len();
+    if !latin1 {
+        while size as i64 > *left && bytes[*left as usize] & 0xC0 == 0x80 {
+            *left += 1;
         }
     }
-    while position < bytes.len() {
-        match utf8_sequence(&bytes[position..]) {
-            Utf8Sequence::Character(character, length) => {
-                characters.push(Term::Integer(character.into()));
+    let mut rest = Term::List(Vec::new());
+    if size as i64 > *left {
+        rest = Term::Binary(bytes[*left as usize..].to_vec());
+        size = *left as usize;
+    }
+    if latin1 {
+        for &byte in &bytes[..size] {
+            let character = char::from(byte);
+            output
+                .bytes
+                .extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes());
+            output.characters += 1;
+        }
+    } else if let Err(position) = copy_utf8_bin(&bytes[..size], output) {
+        return (Term::Binary(bytes[position..].to_vec()), true);
+    }
+    *left -= size as i64;
+    (rest, false)
+}
+
+/// Copy the UTF-8 sequences of a binary to the output, as `copy_utf8_bin`
+/// with a leftover buffer does (`erl_unicode.c:237-338`). The bytes in
+/// `leftover` start a sequence of an earlier binary: the first bytes of
+/// `source` complete it, or all of `source` goes to `leftover` when they are
+/// too few. A sequence at the end that is shorter than its first byte needs
+/// goes to `leftover`. Return the position of the first sequence that is
+/// not valid. A completed leftover sequence that is not valid gives
+/// position 0, and `leftover` keeps its first bytes, as in ERTS.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut output = Utf8Output::default();
+/// assert_eq!(copy_utf8_bin(&[97, 195], &mut output), Ok(()));
+/// assert_eq!((output.bytes.as_slice(), output.leftover.as_slice()), (&b"a"[..], &[195][..]));
+/// assert_eq!(copy_utf8_bin(&[169, 255], &mut output), Err(1));
+/// assert_eq!(output.characters, 2);
+/// ```
+fn copy_utf8_bin(source: &[u8], output: &mut Utf8Output) -> Result<(), usize> {
+    let mut position = 0;
+    if let Some(&first) = output.leftover.first() {
+        // A sequence has at most 4 bytes, so at most 3 complete it.
+        let needed =
+            sequence_length(first).expect("a leftover starts a sequence") - output.leftover.len();
+        if source.len() < needed {
+            output.leftover.extend_from_slice(source);
+            return Ok(());
+        }
+        let mut sequence = output.leftover.clone();
+        sequence.extend_from_slice(&source[..needed]);
+        if !matches!(utf8_sequence(&sequence), Utf8Sequence::Character(..)) {
+            return Err(0);
+        }
+        output.bytes.extend_from_slice(&sequence);
+        output.characters += 1;
+        output.leftover.clear();
+        position = needed;
+    }
+    while position < source.len() {
+        match utf8_sequence(&source[position..]) {
+            Utf8Sequence::Character(_, length) => {
+                output
+                    .bytes
+                    .extend_from_slice(&source[position..position + length]);
+                output.characters += 1;
                 position += length;
             }
             Utf8Sequence::Short => {
-                kept.extend_from_slice(&bytes[position..]);
+                output.leftover.extend_from_slice(&source[position..]);
                 break;
             }
-            Utf8Sequence::Invalid => return Some(position),
+            Utf8Sequence::Invalid => return Err(position),
         }
     }
-    None
+    Ok(())
+}
+
+/// Return true when the bytes that a binary did not complete can start a
+/// valid sequence, as `check_leftovers` returns 0 for them
+/// (`erl_unicode.c:751-770`): each byte after the first is a continuation
+/// byte.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_incomplete(&[226, 130]));
+/// assert!(!is_incomplete(&[226, 97]));
+/// ```
+pub(super) fn is_incomplete(leftover: &[u8]) -> bool {
+    leftover[1..].iter().all(|&byte| byte & 0xC0 == 0x80)
+}
+
+/// Read the UTF-8 sequences of a binary from `start` with a budget of `left`
+/// characters, as `analyze_utf8` does (`erl_unicode.c:1177-1275`). Return
+/// the state, the number of characters, and the position after the last
+/// valid sequence. Each character uses one step, and the walk stops with
+/// [`Utf8State::AnalyzeMore`] when the steps end before the end of the
+/// binary. The last character can make `left` 0 with [`Utf8State::Ok`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut left = 2;
+/// assert_eq!(analyze_utf8(b"abc", 0, &mut left), (Utf8State::AnalyzeMore, 2, 2));
+/// let mut left = 10;
+/// assert_eq!(analyze_utf8(&[97, 195], 0, &mut left), (Utf8State::Incomplete, 1, 1));
+/// ```
+pub(super) fn analyze_utf8(
+    bytes: &[u8],
+    start: usize,
+    left: &mut i64,
+) -> (Utf8State, usize, usize) {
+    let (mut position, mut characters) = (start, 0);
+    while position < bytes.len() {
+        match utf8_sequence(&bytes[position..]) {
+            Utf8Sequence::Character(_, length) => position += length,
+            Utf8Sequence::Short => return (Utf8State::Incomplete, characters, position),
+            Utf8Sequence::Invalid => return (Utf8State::Error, characters, position),
+        }
+        characters += 1;
+        *left -= 1;
+        if *left <= 0 && position < bytes.len() {
+            return (Utf8State::AnalyzeMore, characters, position);
+        }
+    }
+    (Utf8State::Ok, characters, position)
+}
+
+/// Return the code points of valid UTF-8 bytes as a list, as
+/// `erts_make_list_from_utf8_buf` builds it (`erl_unicode.c:1291-1337`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(code_points("aé".as_bytes()), Term::List(vec![Term::Integer(97), Term::Integer(233)]));
+/// ```
+pub(super) fn code_points(bytes: &[u8]) -> Term {
+    let text = std::str::from_utf8(bytes).expect("the walks write valid UTF-8");
+    Term::List(
+        text.chars()
+            .map(|character| Term::Integer(u32::from(character).into()))
+            .collect(),
+    )
+}
+
+/// Return the length of the UTF-8 sequence that a first byte starts, as
+/// `utf8_len` does (`erl_unicode.c:223-235`), or `None` for a byte that
+/// starts no sequence.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(sequence_length(0xE2), Some(3));
+/// assert_eq!(sequence_length(0x80), None);
+/// ```
+fn sequence_length(first: u8) -> Option<usize> {
+    match first {
+        0x00..=0x7F => Some(1),
+        0xC0..=0xDF => Some(2),
+        0xE0..=0xEF => Some(3),
+        0xF0..=0xF7 => Some(4),
+        _ => None,
+    }
 }
 
 /// The first UTF-8 sequence of a byte slice, as ERTS reads it.
@@ -327,8 +436,8 @@ enum Utf8Sequence {
 }
 
 /// Read the first UTF-8 sequence of a slice that is not empty, as
-/// `copy_utf8_bin` and `analyze_utf8` do (`erl_unicode.c:237-340,
-/// 1176-1283`). The first byte gives the length: `0xxxxxxx` 1, `110xxxxx` 2,
+/// `copy_utf8_bin` and `analyze_utf8` do (`erl_unicode.c:237-338,
+/// 1177-1275`). The first byte gives the length: `0xxxxxxx` 1, `110xxxxx` 2,
 /// `1110xxxx` 3, and `11110xxx` 4. Each other first byte is not valid. ERTS
 /// compares the length with the size of the slice before it checks the
 /// bytes. A complete sequence is valid when it is standard UTF-8: Rust and
@@ -344,12 +453,8 @@ enum Utf8Sequence {
 /// assert_eq!(utf8_sequence(&[128]), Utf8Sequence::Invalid);
 /// ```
 fn utf8_sequence(bytes: &[u8]) -> Utf8Sequence {
-    let length = match bytes[0] {
-        0x00..=0x7F => 1,
-        0xC0..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        0xF0..=0xF7 => 4,
-        _ => return Utf8Sequence::Invalid,
+    let Some(length) = sequence_length(bytes[0]) else {
+        return Utf8Sequence::Invalid;
     };
     let Some(sequence) = bytes.get(..length) else {
         return Utf8Sequence::Short;
@@ -360,51 +465,6 @@ fn utf8_sequence(bytes: &[u8]) -> Utf8Sequence {
         .map_or(Utf8Sequence::Invalid, |character| {
             Utf8Sequence::Character(character.into(), length)
         })
-}
-
-/// Return `true` when `chardata` has the shape of chardata, as `utf8_need`
-/// with the `unicode` encoding checks it (`erl_unicode.c:342-505`). A
-/// binary and a list are valid. In a list, each element must be a small
-/// integer, a binary, or a list of the same, and each tail must be `[]` or
-/// a binary. The walk reads the term in order and returns `true` at the
-/// first integer outside the small range, without a check of the rest,
-/// because the conversion stops at that integer (`is_big`). The value of a
-/// small integer is not checked here.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let improper = |tail| Term::ImproperList(vec![Term::Integer(-1)], Box::new(tail));
-/// assert!(is_chardata(&improper(Term::Binary(vec![]))));
-/// assert!(!is_chardata(&improper(Term::static_atom("x"))));
-/// // [1 bsl 60 | x]: the walk stops at the big integer.
-/// assert!(is_chardata(&Term::ImproperList(vec![Term::Integer(1 << 60)], Box::new(Term::static_atom("x")))));
-/// assert!(!is_chardata(&Term::Integer(97)));
-/// ```
-fn is_chardata(chardata: &Term) -> bool {
-    if !matches!(chardata, Term::List(_) | Term::ImproperList(..)) {
-        return matches!(chardata, Term::Binary(_));
-    }
-    let mut pending = vec![(std::slice::from_ref(chardata).iter(), None)];
-    while let Some((elements, tail)) = pending.last_mut() {
-        let Some(element) = elements.next() else {
-            // A tail is never a list, so only a binary is valid.
-            if tail.is_some_and(|tail: &Term| !matches!(tail, Term::Binary(_))) {
-                return false;
-            }
-            pending.pop();
-            continue;
-        };
-        match element {
-            Term::Binary(_) => {}
-            Term::List(nested) => pending.push((nested.iter(), None)),
-            Term::ImproperList(nested, tail) => pending.push((nested.iter(), Some(&**tail))),
-            Term::Integer(_) if element.small_integer().is_none() => return true,
-            Term::Integer(_) => {}
-            _ => return false,
-        }
-    }
-    true
 }
 
 /// Return `true` when ERTS accepts `name` as a file name in `encoding`, as
