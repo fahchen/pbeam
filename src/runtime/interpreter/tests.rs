@@ -240,7 +240,7 @@ fn exits_the_process_with_an_uncaught_badfun() {
 }
 
 #[test]
-fn reports_process_exits_and_unsupported_exit_signals() {
+fn reports_process_exits_and_link_exits() {
     let error = |body| run_with_child(body).unwrap_err().to_string();
     assert!(
         error(vec![
@@ -258,7 +258,8 @@ fn reports_process_exits_and_unsupported_exit_signals() {
     );
     let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
     body.extend(wait_forever());
-    assert!(error(body).contains("unsupported exit signal"));
+    // The link exit signal of the child ends the root process.
+    assert_eq!(error(body), "root process exited with 1");
     let mut body = spawn_link_child(Term::List(vec![test_atom("normal")]));
     body.extend(wait_forever());
     assert!(error(body).contains("waits for a message that cannot arrive"));
@@ -306,11 +307,11 @@ fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
         body.extend(wait_forever());
         run_with_child(body)
     };
-    assert!(
+    assert_eq!(
         wait_for_abnormal_child(vec![test_atom("link")])
             .unwrap_err()
-            .to_string()
-            .contains("unsupported exit signal")
+            .to_string(),
+        "root process exited with 1"
     );
     assert!(matches!(
         wait_for_abnormal_child(vec![test_atom("monitor")]),

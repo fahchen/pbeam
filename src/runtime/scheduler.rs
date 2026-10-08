@@ -290,8 +290,7 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// An abnormal exit signal through a link to a process that does not
-    /// trap exits is not supported (see [`Scheduler::handle_signals`]).
+    /// An error of [`Scheduler::handle_signals`].
     pub(super) fn schedule_next(&mut self) -> Result<Turn, BeamError> {
         let Some(id) = self.runnable.pop_front() else {
             return Ok(Turn::Idle);

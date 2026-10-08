@@ -161,7 +161,7 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
 }
 
 #[test]
-fn rejects_unsupported_exit_signals_and_counter_overflow() {
+fn ends_a_linked_process_and_rejects_counter_overflow() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
     scheduler.schedule_next().unwrap();
@@ -171,7 +171,10 @@ fn rejects_unsupported_exit_signals_and_counter_overflow() {
     scheduler.park_current();
     scheduler.schedule_next().unwrap();
     scheduler.finish_current(atom("boom"), None);
-    assert!(scheduler.schedule_next().is_err());
+    // The link exit signal ends the root process, which does not trap
+    // exits, with the reason of the child.
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    assert_eq!(scheduler.into_root_result(), Some(Err(atom("boom"))));
 
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();

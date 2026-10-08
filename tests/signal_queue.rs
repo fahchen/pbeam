@@ -253,3 +253,43 @@ fn uses_the_reductions_of_the_signal_handling_as_pinned_erts() {
     assert_eq!(pbeam_all("signal_reds_probe", SIGNAL_REDS_PROBE), expected);
     assert_eq!(erts_all("signal_reds_probe"), format!("{expected}\n"));
 }
+
+const LINK_EXIT_PROBE: &[u8] = include_bytes!("../fixtures/signal_queue/link_exit_probe.beam");
+
+/// The result of each case of `link_exit_probe:all/0` on pinned ERTS 29.1.1
+/// with one scheduler, as `io:format("~w")` prints it. The case process
+/// gets the messages of its members in arrival order.
+const LINK_EXITS: &[(&str, &str)] = &[
+    // An abnormal link exit signal ends a member that does not trap exits
+    // with the same reason, also `kill`, and its exit sends the reason
+    // through its links (`erl_proc_sig_queue.c:4758-4785`).
+    (
+        "chain",
+        "[{down,c,boom},{down,b,boom},{exit,a,boom},{down,a,boom}]",
+    ),
+    (
+        "chain_kill",
+        "[{down,c,kill},{down,b,kill},{exit,a,kill},{down,a,kill}]",
+    ),
+    ("chain_normal", "{normal,true,true,[]}"),
+    // `exit(B, kill)` ends B with `killed`, and B sends `killed`.
+    (
+        "exit_kill_links",
+        "[{exit,b,killed},{down,b,killed},{down,c,killed}]",
+    ),
+    // A member that runs a loop handles the signal at schedule-in.
+    ("busy_linked", "[{down,c,boom},{exit,b,boom},{down,b,boom}]"),
+    ("untrapped", "{died,boom}"),
+    // A target that did not handle its kill signal is not exiting, so the
+    // link is made, and the target answers the link signal with `noproc`.
+    ("link_exiting", "{died,noproc}"),
+    ("link_exiting_trap", "noproc"),
+    ("link_self", "{true,[]}"),
+];
+
+#[test]
+fn propagates_exit_signals_through_links_as_pinned_erts() {
+    let expected = expected(LINK_EXITS);
+    assert_eq!(pbeam_all("link_exit_probe", LINK_EXIT_PROBE), expected);
+    assert_eq!(erts_all("link_exit_probe"), format!("{expected}\n"));
+}
