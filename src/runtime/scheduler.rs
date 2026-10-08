@@ -122,7 +122,9 @@ pub(super) struct Scheduler {
     next_process_id: u64,
     /// Number for the next reference.
     next_reference: u64,
-    /// Return value or exit reason of the root process after it exits.
+    /// Return value or exit reason of the root process. The root process
+    /// records it when its exit starts, and the run ends only after the
+    /// exit completes ([`Self::root_exited`]).
     root_result: Option<Result<Term, Term>>,
     /// Registered names and their processes, as the ERTS `process_reg`
     /// table. An atom name is unique in one atom table, so its text
@@ -669,7 +671,12 @@ impl Scheduler {
         Ok(reference)
     }
 
-    /// Return whether the root process exited.
+    /// Return whether the exit of the root process completed: the root
+    /// process recorded its result, and it is not in the process table and
+    /// not in the freed processes. Thus each stage of the exit, also the
+    /// links, the monitors, and the TTY monitors ([`Self::exit_links`]), ran
+    /// before the run ends, also when the exit switched out at the end of
+    /// the budget ([`Self::finish_current`]).
     ///
     /// # Examples
     ///
@@ -681,7 +688,10 @@ impl Scheduler {
     /// assert!(scheduler.root_exited());
     /// ```
     pub(super) fn root_exited(&self) -> bool {
+        let root = ProcessId(0);
         self.root_result.is_some()
+            && !self.processes.contains_key(&root)
+            && !self.freed.contains_key(&root)
     }
 
     /// Return the root result. `None` means the root process did not exit.
