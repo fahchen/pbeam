@@ -9,7 +9,7 @@ use pbeam_runtime::{BeamProgram, Map, Term};
 mod boot;
 mod common;
 
-use boot::{BOOT_BEAM, BOOT_MODULES};
+use boot::{BOOT_MODULES, boot_beam};
 use common::{pinned_beam, pinned_beam_path};
 
 const BOOT_PROBE: &str = "fixtures/boot/boot_probe.beam";
@@ -52,7 +52,7 @@ fn boots_the_standard_io_servers_before_the_entry_of_the_pbeam_binary() {
             BOOT_PROBE,
         ])
         .args(&beams)
-        .arg(BOOT_BEAM);
+        .arg(boot_beam());
     for (name, command) in [("ERTS", &mut erts), ("PBeam", &mut pbeam)] {
         let output = command
             .env("TERM", "dumb")
@@ -197,7 +197,7 @@ fn boot_program(probe: &[u8]) -> BeamProgram {
         "run_isolated runs this test in a child process"
     );
     let beams = BOOT_MODULES.map(pinned_beam);
-    let boot = fs::read(BOOT_BEAM).unwrap();
+    let boot = fs::read(boot_beam()).unwrap();
     let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
     modules.extend([probe, boot.as_slice()]);
     BeamProgram::load(&modules).unwrap()
@@ -210,11 +210,14 @@ fn boot_program(probe: &[u8]) -> BeamProgram {
 /// `sigwinch` (prim_tty.erl:284-298, prim_tty_sighandler.erl:28-31). A
 /// disposition is the same for all threads of a process, so it would change
 /// the process of the other tests. The child inherits `LLVM_PROFILE_FILE`,
-/// so `cargo llvm-cov` measures it.
+/// so `cargo llvm-cov` measures it. `LC_ALL=C.UTF-8` gives the child a UTF-8
+/// codeset, as the other boot tests have, also in a shell with no locale
+/// variable.
 fn run_isolated(name: &str) {
     let child = Command::new(env::current_exe().unwrap())
         .args(["--exact", name, "--include-ignored", "--quiet"])
         .env(ISOLATED, "1")
+        .env("LC_ALL", "C.UTF-8")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -240,8 +243,8 @@ fn stops_the_boot_at_the_first_missing_otp_module() {
             "main",
             "--",
             BOOT_PROBE,
-            BOOT_BEAM,
         ])
+        .arg(boot_beam())
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -294,21 +297,4 @@ fn keeps_the_kernel_spec_of_the_pinned_start_clean_boot() {
         ),
         (&b"true\n"[..], &b""[..], Some(0))
     );
-}
-
-#[test]
-fn checks_in_the_deterministic_build_of_the_boot_module_source() {
-    let directory = env::temp_dir().join(format!("pbeam-boot-{}", std::process::id()));
-    fs::create_dir(&directory).unwrap();
-    let status = Command::new("erlc")
-        .args(["+deterministic", "-o"])
-        .arg(&directory)
-        .arg(BOOT_SOURCE)
-        .status()
-        .unwrap();
-    let compiled = fs::read(directory.join("pbeam_boot.beam")).unwrap();
-    fs::remove_dir_all(&directory).unwrap();
-
-    assert!(status.success());
-    assert_eq!(compiled, fs::read(BOOT_BEAM).unwrap());
 }

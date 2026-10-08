@@ -20,7 +20,7 @@ mod log_event;
 #[path = "common/run.rs"]
 mod run;
 
-use boot::{BOOT_BEAM, BOOT_MODULES};
+use boot::{BOOT_MODULES, boot_beam};
 use common::pinned_beam_path;
 use log_event::LOG_EVENT_MODULES;
 use run::{broken_pipe, run_dumb_utf8, run_with_time_limit};
@@ -358,7 +358,7 @@ fn beam_file(file: &str) -> PathBuf {
 
 /// Return the BEAM files of a booted Hello World run: the fixture module
 /// `module`, the pinned `Elixir.IO` module at `io`, and the pinned boot
-/// modules. `pbeam_boot` adds `BOOT_BEAM`.
+/// modules. `pbeam_boot` adds `boot_beam()`.
 ///
 /// # Examples
 ///
@@ -413,7 +413,7 @@ fn erl_eval(module: &str, function: &str, io: &Path) -> Command {
 }
 
 /// Return the `pbeam` command that boots with `pbeam_boot` and runs
-/// `module:function()` with the BEAM files `beams` and `BOOT_BEAM`. The
+/// `module:function()` with the BEAM files `beams` and `boot_beam()`. The
 /// command runs without `PATH`, so it cannot start `erl` or `elixir`. It
 /// keeps the other variables, because `cargo llvm-cov` gives
 /// `LLVM_PROFILE_FILE` to the child.
@@ -430,7 +430,7 @@ fn pbeam_boot(module: &str, function: &str, beams: &[PathBuf]) -> Command {
     command
         .args(["pbeam_boot", "start", module, function, "--"])
         .args(beams)
-        .arg(BOOT_BEAM)
+        .arg(boot_beam())
         .env_remove("PATH");
     command
 }

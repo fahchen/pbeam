@@ -16,7 +16,7 @@ mod log_event;
 #[path = "common/run.rs"]
 mod run;
 
-use boot::{BOOT_BEAM, BOOT_MODULES};
+use boot::{BOOT_MODULES, boot_beam};
 use common::pinned_beam_path;
 use log_event::{LOG_EVENT_MODULES, mask_time};
 use run::run_dumb_utf8;
@@ -61,7 +61,7 @@ fn writes_a_log_event_through_the_default_handler_after_the_boot() {
             .args(["pbeam_boot", "start", "log_probe", "main", "--", LOG_PROBE])
             .args(&beams)
             .args(&events)
-            .arg(BOOT_BEAM),
+            .arg(boot_beam()),
         Stdio::piped(),
         RUN_TIME_LIMIT,
     );

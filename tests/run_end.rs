@@ -14,7 +14,7 @@ mod common;
 #[path = "common/run.rs"]
 mod run;
 
-use boot::{BOOT_BEAM, BOOT_MODULES};
+use boot::{BOOT_MODULES, boot_beam};
 use common::pinned_beam_path;
 use run::run_dumb_utf8;
 
@@ -78,7 +78,7 @@ fn ends_the_run_at_the_root_exit_while_a_timer_stays_active() {
                     RUN_END_PROBE,
                 ])
                 .args(&beams)
-                .arg(BOOT_BEAM),
+                .arg(boot_beam()),
             Stdio::piped(),
             RUN_TIME_LIMIT,
         );

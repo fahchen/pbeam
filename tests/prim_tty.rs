@@ -17,7 +17,7 @@ use pbeam_runtime::{BeamProgram, Term};
 mod boot;
 mod common;
 
-use boot::{BOOT_BEAM, BOOT_MODULES};
+use boot::{BOOT_MODULES, boot_beam};
 use common::{pinned_beam, pinned_beam_path};
 
 const PRIM_TTY_PROBE: &[u8] = include_bytes!("../fixtures/prim_tty/prim_tty_probe.beam");
@@ -749,7 +749,7 @@ fn writes_hello_world_from_the_pbeam_binary_through_a_prim_tty_writer() {
                 HOST_WRITE_PROBE,
             ])
             .args(&beams)
-            .arg(BOOT_BEAM);
+            .arg(boot_beam());
         command
     };
     let commands: [(&str, &dyn Fn() -> Command); 2] =

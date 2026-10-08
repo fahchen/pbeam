@@ -12,7 +12,7 @@ mod log_event;
 #[path = "common/run.rs"]
 mod run;
 
-use boot::{BOOT_BEAM, BOOT_MODULES};
+use boot::{BOOT_MODULES, boot_beam};
 use common::pinned_beam_path;
 use log_event::{LOG_EVENT_MODULES, mask_time};
 use run::{broken_pipe, run_dumb_utf8};
@@ -70,7 +70,7 @@ fn raises_terminated_after_a_failed_stdout_write_through_user_drv() {
             ])
             .args(&beams)
             .args(&events)
-            .arg(BOOT_BEAM),
+            .arg(boot_beam()),
         broken_pipe(),
         RUN_TIME_LIMIT,
     );

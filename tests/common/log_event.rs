@@ -30,7 +30,7 @@ use std::ops::RangeInclusive;
 ///     .args(["pbeam_boot", "start", "log_probe", "main", "--", LOG_PROBE])
 ///     .args(&beams)
 ///     .args(&events)
-///     .arg(BOOT_BEAM);
+///     .arg(boot_beam());
 /// ```
 pub const LOG_EVENT_MODULES: [&str; 9] = [
     "logger_backend",
