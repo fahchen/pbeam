@@ -50,6 +50,13 @@ struct Marker {
 /// (`erl_proc_sig_queue.h`). Messages and receive markers are nodes of one
 /// linked list. The save pointer is the receive cursor: it is the `next`
 /// field that points to the current message.
+///
+/// The fetch boundary splits the list in two parts, as ERTS splits the
+/// inner message queue (`sig_qs`) and the outer signal queue (`sig_inq`).
+/// A message that arrives goes to the end of the list, after the boundary.
+/// A receive reads only the fetched messages before the boundary. A fetch
+/// (`erts_proc_sig_fetch`, `erl_proc_sig_queue.h:1996-2028`) moves the
+/// boundary to the end of the list. Receive markers are always fetched.
 #[derive(Debug)]
 pub(super) struct Mailbox {
     /// Node arena. A removed node goes to `free` for reuse.
@@ -60,6 +67,10 @@ pub(super) struct Mailbox {
     first: Option<NodeId>,
     /// The `next` field of the last node, where the next node goes.
     last: Link,
+    /// The fetch boundary: the `next` field of the last fetched node, as
+    /// `sig_qs.last` in ERTS. The nodes after it arrived but are not
+    /// fetched.
+    fetched: Link,
     /// The `next` field that points to the current message (`save` in ERTS).
     save: Link,
     /// Receive markers in allocation order. The first marker is the least
@@ -76,6 +87,7 @@ impl Default for Mailbox {
             free: Vec::new(),
             first: None,
             last: Link::First,
+            fetched: Link::First,
             save: Link::First,
             markers: VecDeque::new(),
             next_marker_id: FIRST_MARKER_ID,
@@ -94,6 +106,23 @@ impl Mailbox {
     /// ```
     pub(super) fn push(&mut self, term: Term) {
         self.append(Some(term));
+    }
+
+    /// Fetch the messages that arrived: move the fetch boundary to the end
+    /// of the queue, as `erts_proc_sig_fetch` moves the outer signal queue
+    /// into the inner message queue (`erl_proc_sig_queue.h:1996-2028`). A
+    /// fetch has no cost.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// mailbox.push(Term::Integer(1));
+    /// assert_eq!(mailbox.current(), None);
+    /// mailbox.fetch();
+    /// assert_eq!(mailbox.current(), Some(&Term::Integer(1)));
+    /// ```
+    pub(super) fn fetch(&mut self) {
+        self.fetched = self.last;
     }
 
     /// Return true when the queue holds a message. A receive marker is not a
@@ -139,7 +168,9 @@ impl Mailbox {
         count
     }
 
-    /// Return the message at the save pointer, as `loop_rec` reads it.
+    /// Return the fetched message at the save pointer, as `loop_rec` reads
+    /// it (`erts_msgq_peek_msg`). A message that arrived but is not fetched
+    /// is not a current message.
     ///
     /// # Examples
     ///
@@ -147,8 +178,23 @@ impl Mailbox {
     /// assert_eq!(Mailbox::default().current(), None);
     /// ```
     pub(super) fn current(&self) -> Option<&Term> {
-        self.target(self.save)
+        self.current_node()
             .and_then(|node| self.nodes[node].message.as_ref())
+    }
+
+    /// Return the node at the save pointer when it is before the fetch
+    /// boundary.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Mailbox::default().current_node(), None);
+    /// ```
+    fn current_node(&self) -> Option<NodeId> {
+        if self.save == self.fetched {
+            return None;
+        }
+        self.target(self.save)
     }
 
     /// Move the save pointer past the current message, as `loop_rec_end`
@@ -162,7 +208,7 @@ impl Mailbox {
     /// assert_eq!(mailbox.current(), None);
     /// ```
     pub(super) fn save_next(&mut self) -> bool {
-        let Some(node) = self.target(self.save) else {
+        let Some(node) = self.current_node() else {
             return false;
         };
         self.save = self.pass_markers(Link::After(node), false);
@@ -181,7 +227,7 @@ impl Mailbox {
     /// assert_eq!(mailbox.current(), None);
     /// ```
     pub(super) fn remove_current(&mut self) -> bool {
-        let Some(node) = self.target(self.save) else {
+        let Some(node) = self.current_node() else {
             return false;
         };
         self.unlink(node);
@@ -201,10 +247,12 @@ impl Mailbox {
         self.save = self.pass_markers(Link::First, true);
     }
 
-    /// Insert a receive marker at the end of the queue and return its
-    /// identifier, as `recv_marker_reserve` does. An empty queue gets no
-    /// marker and returns `undefined`. When all slots are in use, the least
-    /// recently allocated marker is used again, preferably a cleared one.
+    /// Fetch the messages that arrived, then insert a receive marker at the
+    /// end of the queue and return its identifier, as `recv_marker_reserve`
+    /// does (`erts_msgq_recv_marker_insert`,
+    /// `erl_proc_sig_queue.h:2225-2236`). An empty queue gets no marker and
+    /// returns `undefined`. When all slots are in use, the least recently
+    /// allocated marker is used again, preferably a cleared one.
     ///
     /// # Examples
     ///
@@ -228,6 +276,9 @@ impl Mailbox {
         self.next_marker_id += 1;
         let at_end = self.save == self.last;
         let node = self.append(None);
+        // ERTS fetches first and then inserts the marker at the end of the
+        // inner queue. A fetch after the insert gives the same queue.
+        self.fetch();
         let mut pass = 0;
         if at_end {
             // The save pointer now points to the marker; move it past.
@@ -365,8 +416,9 @@ impl Mailbox {
         node
     }
 
-    /// Remove a node from the queue. A save pointer at the `next` field of
-    /// the node moves to the `next` field that pointed to the node.
+    /// Remove a node from the queue. A save pointer or a fetch boundary at
+    /// the `next` field of the node moves to the `next` field that pointed
+    /// to the node.
     ///
     /// # Examples
     ///
@@ -383,6 +435,9 @@ impl Mailbox {
         }
         if self.save == Link::After(node) {
             self.save = prev;
+        }
+        if self.fetched == Link::After(node) {
+            self.fetched = prev;
         }
         self.free.push(node);
     }
@@ -445,6 +500,7 @@ mod tests {
         for value in values {
             mailbox.push(int(*value));
         }
+        mailbox.fetch();
         mailbox
     }
 
@@ -458,7 +514,12 @@ mod tests {
         assert_eq!(mailbox.current(), Some(&int(1)));
         assert!(mailbox.save_next() && mailbox.save_next());
         assert!(!mailbox.save_next() && !mailbox.remove_current());
+
+        // A message that arrives is not current before a fetch.
         mailbox.push(int(4));
+        assert_eq!(mailbox.current(), None);
+        assert!(!mailbox.save_next() && !mailbox.remove_current());
+        mailbox.fetch();
         assert_eq!(mailbox.current(), Some(&int(4)));
         assert!(mailbox.remove_current());
         assert_eq!(mailbox.messages(), vec![int(1), int(3)]);
@@ -495,6 +556,8 @@ mod tests {
         mailbox.use_marker(&Term::Reference(Reference(8)));
         assert_eq!(mailbox.current(), Some(&int(1)));
         mailbox.use_marker(&reference);
+        assert_eq!(mailbox.current(), None);
+        mailbox.fetch();
         assert_eq!(mailbox.current(), Some(&int(2)));
 
         assert!(mailbox.remove_current());
@@ -513,6 +576,7 @@ mod tests {
         assert!(mailbox.save_next());
         let marker = mailbox.reserve_marker();
         mailbox.push(int(2));
+        mailbox.fetch();
         assert_eq!(mailbox.current(), Some(&int(2)));
         mailbox.bind_marker(&marker, &test_atom("none"));
         assert!(mailbox.markers[0].id.is_none());
@@ -522,6 +586,30 @@ mod tests {
         assert!(mailbox.remove_current());
         assert!(mailbox.markers.is_empty());
         assert_eq!(mailbox.current(), Some(&int(2)));
+    }
+
+    #[test]
+    fn reserves_a_marker_after_the_messages_that_arrived() {
+        // `erts_msgq_recv_marker_insert` fetches before it inserts the
+        // marker (`erl_proc_sig_queue.h:2225-2236`).
+        let mut mailbox = mailbox(&[1]);
+        mailbox.push(int(2));
+        let marker = mailbox.reserve_marker();
+        let reference = Term::Reference(Reference(3));
+        mailbox.bind_marker(&marker, &reference);
+        mailbox.push(int(3));
+        mailbox.use_marker(&reference);
+        assert_eq!(mailbox.current(), None);
+        mailbox.fetch();
+        assert_eq!(mailbox.current(), Some(&int(3)));
+
+        // A removed node at the fetch boundary moves the boundary back.
+        mailbox.set_save_first();
+        assert!(mailbox.remove_current() && mailbox.remove_current());
+        assert!(mailbox.remove_current());
+        assert!(mailbox.markers.is_empty());
+        mailbox.push(int(4));
+        assert_eq!(mailbox.current(), None);
     }
 
     #[test]

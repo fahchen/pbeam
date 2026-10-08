@@ -335,6 +335,19 @@ impl Scheduler {
         self.processes.get(&id)
     }
 
+    /// Return the live process `id` for a change, as [`Scheduler::process`]
+    /// returns it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let process = scheduler.process_mut(ProcessId(0)).unwrap();
+    /// process.mailbox.fetch();
+    /// ```
+    pub(super) fn process_mut(&mut self, id: ProcessId) -> Option<&mut ProcessState> {
+        self.processes.get_mut(&id)
+    }
+
     /// Stop the current process until a message arrives. A delivery adds it
     /// to the run queue again.
     ///
@@ -348,9 +361,10 @@ impl Scheduler {
         self.current_process = None;
     }
 
-    /// Stop the current process after `erlang:hibernate/0`. A process with a
-    /// message in its queue stays active and goes to the end of the run
-    /// queue. Else it waits until a message arrives. ERTS `erts_hibernate`
+    /// Stop the current process after `erlang:hibernate/0`. The process
+    /// fetches the messages that arrived. A process with a message in its
+    /// queue stays active and goes to the end of the run queue. Else it
+    /// waits until a message arrives. ERTS `erts_hibernate` fetches and
     /// clears `ERTS_PSFLG_ACTIVE` only when the queue has no message
     /// (`beam_common.c:1568-1602`), `i_hibernate` always switches the
     /// context (`jit/arm/instr_call.cpp:30-36`), and `schedule_out_process`
@@ -364,6 +378,7 @@ impl Scheduler {
     /// ```
     pub(super) fn hibernate_current(&mut self) {
         let process = self.current_process_mut();
+        process.mailbox.fetch();
         if process.mailbox.has_messages() {
             let id = process.id;
             self.runnable.push_back(id);

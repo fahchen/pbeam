@@ -1000,10 +1000,18 @@ impl BeamProgram {
                 Instruction::LoopReceive {
                     fail_label,
                     destination,
-                } => match process.mailbox.current().cloned() {
-                    Some(term) => write(process, destination, term)?,
-                    None => jump(module, process, *fail_label)?,
-                },
+                } => {
+                    // At the end of the fetched messages, `loop_rec` fetches
+                    // the messages that arrived (`erts_proc_sig_receive_helper`,
+                    // `erl_proc_sig_queue.c:7771-7799`).
+                    if process.mailbox.current().is_none() {
+                        process.mailbox.fetch();
+                    }
+                    match process.mailbox.current().cloned() {
+                        Some(term) => write(process, destination, term)?,
+                        None => jump(module, process, *fail_label)?,
+                    }
+                }
                 Instruction::LoopReceiveEnd(label) => {
                     if !process.mailbox.save_next() {
                         return Err(error("loop_rec_end without a current message"));
