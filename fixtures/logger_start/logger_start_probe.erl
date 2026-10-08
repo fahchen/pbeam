@@ -3,7 +3,7 @@
          to_list/0, map_next/0, next/0, ordered/0, ordered_second_call_badarg/0,
          demonitor/0, unlink/0, hd/0, system_logger/0,
          message_queue_data/0, system_flag/0, process_flag/0, unsupported_flag/1, raise/0,
-         raise_throw/0, map_paths/0]).
+         raise_throw/0, map_paths/0, negative_budget/0]).
 
 %% `lists:reverse/2` (erl_bif_lists.c:1246-1263). logger_simple_h:replay_buffer/1
 %% (logger_simple_h.erl:150) calls it with the buffer and the drop message, and
@@ -180,6 +180,23 @@ map_next() ->
          catch_error(fun() -> erts_internal:map_next(16#ff, Big, []) end),
          catch_error(fun() -> erts_internal:map_next(-1, Big, iterator) end)]
     end).
+
+%% A direct `erts_internal:map_next/3` call that makes the reduction budget
+%% negative, and then the guard BIF length/1, which reads the budget before the
+%% next call or return. A hashmap call subtracts 4 for each pair with no lower
+%% limit (erl_map.c:4126), so a call that starts with a budget below 4 takes one
+%% pair and leaves a negative budget. After path 1, the map has more pairs than
+%% a full budget takes, so each other call leaves a budget from 0 to 3. The loop
+%% reaches such a call in a few turns. ERTS reads the negative budget as a large unsigned count in length/1
+%% (erl_bif_guard.c:280) and returns ok after 100 calls.
+negative_budget() ->
+    negative_budget(identity(lists:seq(1, 2000)), id([a]), 100).
+
+negative_budget(_, _, 0) -> ok;
+negative_budget(Map, List, N) ->
+    [_ | _] = erts_internal:map_next(1, Map, []),
+    1 = length(List),
+    negative_budget(Map, List, N - 1).
 
 %% `erts_internal:map_next/3` paths that reach a collision node and paths
 %% that are bignums. Lists A and B have equal map hashes, so they share a

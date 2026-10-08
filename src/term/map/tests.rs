@@ -648,3 +648,44 @@ fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
     elements.extend([1, 1]);
     assert!(encode_path(elements).is_err());
 }
+
+#[test]
+fn counts_the_steps_of_the_erts_hashmap_merge() {
+    let range = |first: i64, last: i64| integers(first..=last);
+    // No hashmap merge for two flatmaps, and for an empty flatmap.
+    assert_eq!(range(1, 10).merge_steps(&range(5, 20)), None);
+    assert_eq!(range(1, 0).merge_steps(&range(1, 40)), None);
+    assert_eq!(range(1, 40).merge_steps(&range(1, 0)), None);
+    // ERTS 29.1.1: `maps:merge/2` costs one reduction for each 8 steps.
+    let costs = [
+        ((1, 10), (100, 140), 2),
+        ((100, 140), (1, 10), 2),
+        ((1, 40), (41, 80), 4),
+        ((1, 40), (1, 40), 8),
+        ((1, 100), (50, 150), 16),
+        ((1, 1000), (500, 1500), 174),
+        ((1, 33), (2, 34), 6),
+    ];
+    for ((first, last), (other_first, other_last), cost) in costs {
+        let steps = range(first, last).merge_steps(&range(other_first, other_last));
+        assert_eq!(steps.map(|steps| steps / 8), Some(cost), "{first}..{last}");
+    }
+
+    // ERTS 29.1.1: these two lists have equal map hashes, so the walk
+    // reaches the collision level 16 for them.
+    let first = Term::List(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
+    let second = Term::List(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
+    let with = |key: &Term| {
+        let mut map = range(1, 32);
+        map.insert(key.clone(), Term::Integer(1)).unwrap();
+        map
+    };
+    let costs = [
+        (with(&first), with(&second), 10),
+        (with(&first), range(1, 33), 6),
+        (with(&first), with(&first), 7),
+    ];
+    for (map, other, cost) in costs {
+        assert_eq!(map.merge_steps(&other).map(|steps| steps / 8), Some(cost));
+    }
+}

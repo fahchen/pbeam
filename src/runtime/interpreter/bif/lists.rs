@@ -130,16 +130,25 @@ fn key_search(
 /// ```rust,ignore
 /// let x = Term::static_atom("x");
 /// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x.clone()));
-/// assert!(matches!(member(&mut process, &Term::Integer(1), &improper), BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(member(&mut process, &Term::Integer(2), &Term::List(vec![])), BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
-/// assert!(matches!(member(&mut process, &Term::Integer(2), &improper), BifResult::Raise { .. }));
-/// assert!(matches!(member(&mut process, &Term::Integer(2), &x), BifResult::Raise { .. }));
+/// assert!(matches!(member(&mut process, &Term::Integer(1), &improper)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(member(&mut process, &Term::Integer(2), &Term::List(vec![]))?, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(member(&mut process, &Term::Integer(2), &improper)?, BifResult::Raise { .. }));
+/// assert!(matches!(member(&mut process, &Term::Integer(2), &x)?, BifResult::Raise { .. }));
 /// ```
-pub(super) fn member(process: &mut ProcessState, element: &Term, list: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn member(
+    process: &mut ProcessState,
+    element: &Term,
+    list: &Term,
+) -> Result<BifResult, BeamError> {
     let Some((elements, tail)) = list_cells(list) else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
-    let reds_left = process.bif_reductions_left();
+    let reds_left = process.bif_reductions_left()?;
     let max_iter = 16 * reds_left;
     let chunk = &elements[..elements.len().min(max_iter)];
     // `BIF_RET2` and `BUMP_REDS` with `reds_left - max_iter / 16`, where
@@ -147,21 +156,21 @@ pub(super) fn member(process: &mut ProcessState, element: &Term, list: &Term) ->
     let cost = |compared: usize| (reds_left - (max_iter - compared) / 16) as i32;
     if let Some(index) = chunk.iter().position(|item| item == element) {
         process.bump_reductions(cost(index + 1));
-        return Value(Term::static_atom("true"));
+        return Ok(Value(Term::static_atom("true")));
     }
     if chunk.len() < elements.len() {
         process.bump_all_reductions();
-        return BifResult::TrapBif {
+        return Ok(BifResult::TrapBif {
             module: "lists",
             function: "member",
             arguments: vec![element.clone(), list_rest(&elements[max_iter..], tail)],
-        };
+        });
     }
     process.bump_reductions(cost(chunk.len()));
-    match tail {
+    Ok(match tail {
         Some(_) => BifResult::badarg(),
         None => Value(Term::static_atom("false")),
-    }
+    })
 }
 
 /// Run `lists:reverse/2`: return the elements of `list` in reverse order,
@@ -186,18 +195,27 @@ pub(super) fn member(process: &mut ProcessState, element: &Term, list: &Term) ->
 ///
 /// ```rust,ignore
 /// let x = Term::static_atom("x");
-/// assert!(matches!(reverse(&mut process, &Term::List(vec![]), &x), BifResult::Value(term) if term == x));
+/// assert!(matches!(reverse(&mut process, &Term::List(vec![]), &x)?, BifResult::Value(term) if term == x));
 /// let list = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
-/// let reversed = reverse(&mut process, &list, &Term::List(vec![Term::Integer(3)]));
+/// let reversed = reverse(&mut process, &list, &Term::List(vec![Term::Integer(3)]))?;
 /// assert!(matches!(reversed, BifResult::Value(Term::List(elements)) if elements == [2, 1, 3].map(Term::Integer)));
-/// assert!(matches!(reverse(&mut process, &list, &x), BifResult::Value(Term::ImproperList(..))));
-/// assert!(matches!(reverse(&mut process, &x, &Term::List(vec![])), BifResult::Raise { .. }));
+/// assert!(matches!(reverse(&mut process, &list, &x)?, BifResult::Value(Term::ImproperList(..))));
+/// assert!(matches!(reverse(&mut process, &x, &Term::List(vec![]))?, BifResult::Raise { .. }));
 /// ```
-pub(super) fn reverse(process: &mut ProcessState, list: &Term, tail: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn reverse(
+    process: &mut ProcessState,
+    list: &Term,
+    tail: &Term,
+) -> Result<BifResult, BeamError> {
     let Some((elements, list_tail)) = list_cells(list) else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
-    let max_cells = 60 * process.bif_reductions_left();
+    let max_cells = 60 * process.bif_reductions_left()?;
     let walked = elements.len().min(max_cells);
     process.bump_reductions((walked / 60) as i32);
     let reversed = Term::list_with_tail(
@@ -206,14 +224,14 @@ pub(super) fn reverse(process: &mut ProcessState, list: &Term, tail: &Term) -> B
     );
     if walked < elements.len() {
         process.bump_all_reductions();
-        return BifResult::TrapBif {
+        return Ok(BifResult::TrapBif {
             module: "lists",
             function: "reverse",
             arguments: vec![list_rest(&elements[walked..], list_tail), reversed],
-        };
+        });
     }
-    match list_tail {
+    Ok(match list_tail {
         Some(_) => BifResult::badarg(),
         None => Value(reversed),
-    }
+    })
 }
