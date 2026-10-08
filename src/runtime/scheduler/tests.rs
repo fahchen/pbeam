@@ -122,6 +122,38 @@ fn sends_down_and_exit_signals_and_records_the_root_result() {
 }
 
 #[test]
+fn ends_the_run_only_after_the_exit_of_the_root_process_completes() {
+    // With 100 or fewer reductions left, the exit switches out before it
+    // leaves the process table. With 150 or fewer, it switches out before
+    // its links (erl_process.c:14315-14316, 14541-14543). In both cases the
+    // root result is recorded, but the run continues until the next turn
+    // of the root process sends its link exit signal.
+    for fcalls in [100, 150] {
+        let mut scheduler = Scheduler::new(AtomTable::new());
+        scheduler.start(frame(), vec![]).unwrap();
+        scheduler.schedule_next().unwrap();
+        let (child, _) = scheduler
+            .spawn(Start::Entry(frame()), vec![], false, true, false)
+            .unwrap();
+        scheduler.current_process_mut().fcalls = fcalls;
+        scheduler.finish_current(atom("normal"), Some(atom("ok")));
+        assert!(!scheduler.root_exited());
+        let signals =
+            |scheduler: &Scheduler| scheduler.processes[&child].mailbox.has_control_signals();
+        assert!(!signals(&scheduler));
+
+        assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+        assert_eq!(current(&mut scheduler), child);
+        scheduler.yield_current();
+        assert!(!scheduler.root_exited());
+        assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+        assert!(scheduler.root_exited());
+        assert!(signals(&scheduler));
+        assert_eq!(scheduler.into_root_result(), Some(Ok(atom("ok"))));
+    }
+}
+
+#[test]
 fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();

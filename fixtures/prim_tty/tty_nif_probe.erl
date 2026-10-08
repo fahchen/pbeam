@@ -1,7 +1,7 @@
 -module(tty_nif_probe).
 -export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, init/0, monitor/0,
          owner/1, holder/3, select/0, encoding/0, select_monitor/0, selector/1, link/0,
-         linker/1, linked_owner/1, write/0, write_error/0]).
+         linker/1, linked_owner/1, root_exit/0, root_free/0, write/0, write_error/0]).
 
 isatty() ->
     [catch_error(fun() -> prim_tty:isatty(A) end)
@@ -119,6 +119,25 @@ linked_owner(Parent) ->
     {ok, Tty} = prim_tty:tty_create(stderr),
     Parent ! {owner, prim_tty:tty_init(Tty, #{input => raw})},
     exit(boom).
+
+%% PBeam only, as the root process of a run: on ERTS, the -eval process
+%% halts the node and runs no TTY monitor. The root process sets the raw
+%% mode on a stderr TTY, switches out, and uses all but Left reductions of
+%% its new budget before it returns. Its exit bumps 100 reductions
+%% (erl_process.c:14229). With 100 or fewer reductions left, the exit
+%% switches out before it leaves the process table, and with 150 or fewer,
+%% before its links and monitors (erl_process.c:14315-14316, 14475,
+%% 14541-14543). The TTY monitor runs in the next turn of the exit.
+root_exit() -> root_owner(50).
+
+root_free() -> root_owner(125).
+
+root_owner(Left) ->
+    {ok, Tty} = prim_tty:tty_create(stderr),
+    ok = prim_tty:tty_init(Tty, #{input => raw}),
+    erlang:yield(),
+    erlang:bump_reductions(4000 - Left - 2),
+    ok.
 
 %% A group has 1024 elements (MAXIOV, prim_tty_nif.c:71-77).
 write() ->

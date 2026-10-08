@@ -542,6 +542,33 @@ fn restores_fd_0_when_a_linked_tty_owner_exits_abnormally() {
 }
 
 #[test]
+fn restores_fd_0_when_the_exit_of_the_root_tty_owner_switches_out() {
+    // The root process sets the raw mode on a `stderr` resource and returns
+    // with few reductions left, so its exit switches out before it leaves
+    // the process table (`root_exit/0`) or before its links and monitors
+    // (`root_free/0`) (erl_process.c:14315-14316, 14541-14543). The run
+    // ends only after the next turn of the exit, whose TTY monitor sets fd
+    // 0 to the first mode of the stderr terminal (prim_tty_nif.c:1235-1241).
+    // A run that ends at the switch leaves fd 0 without `ECHO` and
+    // `ICANON`. ERTS has no root process exit: the `-eval` process halts
+    // the node, which runs no TTY monitor ("Run end" in
+    // docs/erts-differences.md).
+    for function in ["root_exit", "root_free"] {
+        let mut probe = isolated(
+            &format!("tty_nif_probe:{function}"),
+            &[TTY_NIF_PROBE, STAND_IN],
+        );
+        let (pbeam, pbeam_modes) = run_with_modes(&mut probe, MONITOR, &[]);
+        assert_eq!(pbeam, br#"Ok(Atom("ok"))"#, "{function}");
+        let [Some(stdin), None, Some(stderr)] = pbeam_modes else {
+            panic!("stdin and stderr are terminals");
+        };
+        assert_eq!(stdin.c_lflag & CANONICAL_ECHO, CANONICAL_ECHO, "{function}");
+        assert_raw(&stderr);
+    }
+}
+
+#[test]
 fn writes_the_iovec_of_a_tty_resource_with_writev() {
     // `tty_nif_probe:write/0` calls `prim_tty:write_nif/2` with a `stderr`
     // TTY resource and fourteen terms. The NIF reads the iovec in groups of
