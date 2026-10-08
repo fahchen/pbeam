@@ -60,9 +60,28 @@ const OPCODE_BS_GET_INTEGER2: u8 = 117;
 const OPCODE_GC_BIF3: u8 = 152;
 /// `is_any_native_record Fail Src` (genop.tab:724).
 const OPCODE_IS_ANY_NATIVE_RECORD: u8 = 186;
+/// `fmove Src Dst` (genop.tab:410). ERTS loads it as `fstore` or `fload`
+/// (emu ops.tab:1337-1338; JIT jit/arm/ops.tab:1124-1125).
+const OPCODE_FMOVE: u8 = 96;
+/// `fconv Src Dst` (genop.tab:411). ERTS loads it as `fconv` (emu
+/// ops.tab:1335, 1343; JIT jit/arm/ops.tab:1130).
+const OPCODE_FCONV: u8 = 97;
+/// `fadd Fail A B Dst` (genop.tab:412). ERTS loads it as `i_fadd` (emu
+/// ops.tab:1329; JIT jit/arm/ops.tab:1118).
+const OPCODE_FADD: u8 = 98;
+/// `fsub Fail A B Dst` (genop.tab:413). ERTS loads it as `i_fsub` (emu
+/// ops.tab:1330; JIT jit/arm/ops.tab:1119).
+const OPCODE_FSUB: u8 = 99;
+/// `fmul Fail A B Dst` (genop.tab:414). ERTS loads it as `i_fmul` (emu
+/// ops.tab:1331; JIT jit/arm/ops.tab:1120).
+const OPCODE_FMUL: u8 = 100;
+/// `fdiv Fail A B Dst` (genop.tab:415). ERTS loads it as `i_fdiv` (emu
+/// ops.tab:1332; JIT jit/arm/ops.tab:1121).
+const OPCODE_FDIV: u8 = 101;
 const OPCODE_GC_BIF1: u8 = 124;
 const OPCODE_GC_BIF2: u8 = 125;
 const OPCODE_BS_GET_TAIL: u8 = 165;
+/// `bs_start_match3 Fail Bin Live Dst` (genop.tab:597).
 const OPCODE_BS_START_MATCH3: u8 = 166;
 const OPCODE_BS_GET_POSITION: u8 = 167;
 const OPCODE_BS_SET_POSITION: u8 = 168;
@@ -684,6 +703,24 @@ pub(crate) enum Instruction {
         left: Operand,
         right: Operand,
     },
+    /// Jumps to `fail_label` when the operands are not equal in the ERTS
+    /// arithmetic order (`is_eq`, opcode 41). PBeam has no float term, so the
+    /// test gives the same result as exact equality.
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `compare_probe:eq/2` in
+    /// `fixtures/compare/compare_probe.beam` has `[0x29, 0x0D, 0x19, 0x03,
+    /// 0x13]`, which fails to label 25 unless `x0` equals `x1`.
+    ///
+    /// Erlang: the guard `CtrlSync==0` of `logger_h_common:handle_load/2`
+    /// (logger_h_common.erl:250) compiles to an `is_eq` test.
+    /// `eq(A, B) when A == B -> id(true);` compiles to
+    /// `{test,is_eq,{f,25},[{x,0},{x,1}]}`.
+    TestEqual {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
     /// Jumps to `fail_label` when the operands are exactly equal
     /// (`is_ne_exact`, opcode 44).
     ///
@@ -751,6 +788,34 @@ pub(crate) enum Instruction {
         arity: u32,
         tag: Term,
     },
+    /// Jumps to `fail_label` when `source` is not a binary
+    /// (`bs_start_match3`, opcode 166). For a binary, ERTS makes a match
+    /// context, which PBeam does not have, so the instruction returns a
+    /// runtime error.
+    ///
+    /// Encoding: opcode, fail label, source, unsigned live count, destination
+    /// register. The decoder skips the live count and the destination,
+    /// because PBeam makes no match context. Example: `binary_match_probe:kind/1`
+    /// in `fixtures/binary_match/binary_match_probe.beam` has `[0xA6, 0x55,
+    /// 0x03, 0x10, 0x03]`, which fails to label 5 unless `x0` is a binary.
+    ///
+    /// Erlang: `kind(<<_/utf8, _/binary>>) -> utf8;` compiles to
+    /// `{test,bs_start_match3,{f,5},1,[{x,0}],{x,0}}`, as
+    /// `unicode_util:cp/1` does for its argument.
+    BinaryMatchStart { fail_label: u32, source: Operand },
+    /// Converts `source` to a float in a float register (`fconv`, opcode
+    /// 97). ERTS raises `error:badarith` for a term that is not a number.
+    /// PBeam has no float register, so an integer source returns the runtime
+    /// error `unsupported BEAM opcode 97`.
+    ///
+    /// Encoding: opcode, source, float register (extended subtag 2). The
+    /// decoder skips the float register. Example: `float_test_probe:half/1`
+    /// in `fixtures/float_test/float_test_probe.beam` has `[0x61, 0x03, 0x27,
+    /// 0x00]`, which converts `x0` to `fr0`.
+    ///
+    /// Erlang: `half(X) -> X / 2.` compiles to `{fconv,{x,0},{fr,0}}`, as
+    /// the `/` operators of `string` and `erl_scan` do.
+    FloatConvert { source: Operand },
     /// Sends `x1` to the destination in `x0`, then writes the message to
     /// `x0`. The destination is a pid, a registered name, `{Name, Node}`, or
     /// a reference. A name that no process has, a tuple that is not two
@@ -1105,6 +1170,22 @@ pub(super) fn parse_code(
                     tag,
                 }
             }
+            OPCODE_FCONV => {
+                let source = read_move_operand(data, &mut cursor, atoms, literals)?;
+                skip_operands(data, &mut cursor, 1)?;
+                Instruction::FloatConvert { source }
+            }
+            OPCODE_BS_START_MATCH3 => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let source = read_move_operand(data, &mut cursor, atoms, literals)?;
+                skip_operands(data, &mut cursor, 2)?;
+                Instruction::BinaryMatchStart { fail_label, source }
+            }
+            OPCODE_TEST_EQ => Instruction::TestEqual {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
             OPCODE_TEST_EXACT_EQ => Instruction::TestExactEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -1643,7 +1724,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_GC_BIF3 => Some(7),
         // `is_any_native_record` is in `io_lib`.
         OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
-        OPCODE_BS_START_MATCH3 | OPCODE_BS_START_MATCH4 => Some(4),
+        OPCODE_BS_START_MATCH4 => Some(4),
         OPCODE_BS_GET_TAIL | OPCODE_BS_GET_POSITION => Some(3),
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
         OPCODE_BS_GET_UTF8 | OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
@@ -1655,7 +1736,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_EQ | OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
+        OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
         OPCODE_TEST_IS_NUMBER
         | OPCODE_TEST_IS_ATOM
@@ -1676,6 +1757,11 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_CREATE_BIN => Some(6),
         OPCODE_BS_INIT_WRITABLE => Some(0),
         OPCODE_BS_MATCH => Some(3),
+        // The float-register instructions are in `string` and `erl_scan`.
+        // PBeam has no float term, so each one stops the run. `fconv`
+        // decodes as `Instruction::FloatConvert`.
+        OPCODE_FMOVE => Some(2),
+        OPCODE_FADD | OPCODE_FSUB | OPCODE_FMUL | OPCODE_FDIV => Some(4),
         _ => None,
     }
 }
@@ -1956,12 +2042,14 @@ mod tests {
     use super::{
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_INTEGER2,
         OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH,
-        OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
-        OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
-        OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_EQ, OPCODE_TEST_HEAP,
-        OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
-        OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END,
-        parse_code, read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
+        OPCODE_BS_START_MATCH4, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
+        OPCODE_FSUB, OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL,
+        OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD,
+        OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
+        OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
+        OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
+        OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
+        read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
         skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
         test_kind, unsupported_opcode_operand_count,
     };
@@ -2437,6 +2525,87 @@ mod tests {
                     kind: TestKind::Boolean,
                     fail_label: 12,
                     value: Operand::X(0),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_is_eq_test_of_the_compare_probe_fixture() {
+        const COMPARE_PROBE: &[u8] = include_bytes!("../../../fixtures/compare/compare_probe.beam");
+        let is_eq = [0x29, 0x0D, 0x19, 0x03, 0x13]; // eq/2: is_eq f25 x0 x1
+        assert!(
+            COMPARE_PROBE
+                .windows(is_eq.len())
+                .any(|window| window == is_eq),
+            "{is_eq:02X?} is not in compare_probe.beam"
+        );
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&is_eq[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::TestEqual {
+                    fail_label: 25,
+                    left: Operand::X(0),
+                    right: Operand::X(1),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_bs_start_match3_test_of_the_binary_match_probe_fixture() {
+        const BINARY_MATCH_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/binary_match/binary_match_probe.beam");
+        // kind/1: bs_start_match3 f5 x0 1 x0
+        let bs_start_match3 = [0xA6, 0x55, 0x03, 0x10, 0x03];
+        assert!(
+            BINARY_MATCH_PROBE
+                .windows(bs_start_match3.len())
+                .any(|window| window == bs_start_match3),
+            "{bs_start_match3:02X?} is not in binary_match_probe.beam"
+        );
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&bs_start_match3[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::BinaryMatchStart {
+                    fail_label: 5,
+                    source: Operand::X(0),
+                },
+                Instruction::End,
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_the_fconv_instruction_of_the_float_test_probe_fixture() {
+        const FLOAT_TEST_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/float_test/float_test_probe.beam");
+        let fconv = [OPCODE_FCONV, 0x03, 0x27, 0x00]; // half/1: fconv x0 fr0
+        assert!(
+            FLOAT_TEST_PROBE
+                .windows(fconv.len())
+                .any(|window| window == fconv),
+            "{fconv:02X?} is not in float_test_probe.beam"
+        );
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend([&fconv[..], &[0x03]].concat());
+        let (instructions, _) = parse_code(&code, &[], &[], &[], &[]).unwrap();
+        assert!(matches!(
+            instructions.as_slice(),
+            [
+                Instruction::FloatConvert {
+                    source: Operand::X(0),
                 },
                 Instruction::End,
             ]
@@ -3080,7 +3249,7 @@ mod tests {
         for (opcode, count) in [
             (OPCODE_TEST_HEAP, 2),
             (OPCODE_BIF0, 2),
-            (OPCODE_TEST_EQ, 3),
+            (OPCODE_TEST_NE, 3),
             (OPCODE_TEST_TAGGED_TUPLE, 4),
             (OPCODE_TEST_IS_MAP, 2),
             (OPCODE_BADMATCH, 1),
@@ -3094,12 +3263,18 @@ mod tests {
             (OPCODE_BS_CREATE_BIN, 6),
             (OPCODE_BS_INIT_WRITABLE, 0),
             (OPCODE_BS_MATCH, 3),
+            (OPCODE_BS_START_MATCH4, 4),
             (OPCODE_RAW_RAISE, 0),
             (OPCODE_BS_GET_UTF16, 5),
             (OPCODE_BS_GET_UTF32, 5),
             (OPCODE_BS_GET_INTEGER2, 7),
             (OPCODE_GC_BIF3, 7),
             (OPCODE_IS_ANY_NATIVE_RECORD, 2),
+            (OPCODE_FMOVE, 2),
+            (OPCODE_FADD, 4),
+            (OPCODE_FSUB, 4),
+            (OPCODE_FMUL, 4),
+            (OPCODE_FDIV, 4),
         ] {
             assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
         }

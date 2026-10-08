@@ -1,7 +1,7 @@
 use super::{
     process::{Frame, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::Scheduler,
-    unicode::characters_to_utf8,
+    unicode::{characters_to_code_points, characters_to_utf8},
 };
 use crate::{
     beam::{
@@ -9,7 +9,7 @@ use crate::{
         code::{self, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::{Atom, AtomTable, Fun, Map, Target, Term},
+    term::{Atom, AtomTable, Fun, Map, Target, Term, print_term},
 };
 use std::collections::HashMap;
 
@@ -126,8 +126,17 @@ impl BeamProgram {
     /// timer, as ERTS bumps the timers in `check_activities_to_run`
     /// (`erl_process.c:9797-9810`). When no process can run, it sleeps until
     /// the first timer end, as `scheduler_wait` sleeps until the next
-    /// timeout (`erl_process.c:3452-3620`). The run ends when no process can
-    /// run and no timer is active.
+    /// timeout (`erl_process.c:3452-3620`). The run ends at the next
+    /// scheduling step after the root process exits, also when another
+    /// process can run or a timer is active. A process that ends the root
+    /// process with an exit signal continues until it waits or exits. This
+    /// is as `halt()` after `-eval` stops the ERTS node
+    /// (`erlang.erl:3357-3358`) and as `init` halts after a boot process
+    /// exit that is not `normal` (`init.erl:710-712`). A root process exit
+    /// gives the error `root process exited with <Reason>`, with the reason
+    /// as ERTS prints a term (`print_term`), for example
+    /// `root process exited with {badarg,[]}`. A root process that
+    /// waits when no process can run and no timer is active gives an error.
     ///
     /// # Examples
     ///
@@ -145,7 +154,7 @@ impl BeamProgram {
         let label = self.entry_label(module, function, arity)?;
         let mut scheduler = Scheduler::new(self.atoms.clone());
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
-        loop {
+        while !scheduler.root_exited() {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
             if scheduler.schedule_next().is_some() {
@@ -164,7 +173,12 @@ impl BeamProgram {
         }
         match scheduler.into_root_result() {
             Some(Ok(result)) => Ok(result),
-            Some(Err(reason)) => Err(error(format!("root process exited with {reason:?}"))),
+            Some(Err(reason)) => {
+                // `erlang:halt/1` writes each byte of the `%T` text as one code
+                // point (`bif.c:4372-4387`), so the text is valid UTF-8.
+                let text: String = print_term(&reason).into_iter().map(char::from).collect();
+                Err(error(format!("root process exited with {text}")))
+            }
             None => Err(error("root process waits for a message that cannot arrive")),
         }
     }
@@ -683,7 +697,20 @@ impl BeamProgram {
                     write(process, left, right_value)?;
                     write(process, right, left_value)?;
                 }
-                Instruction::TestExactEqual {
+                // ERTS `is_eq` (emu instrs.tab:1109-1113, JIT
+                // instr_common.cpp:2055-2079) runs `CMP_EQ_ACTION`
+                // (erl_utils.h:132-133). `EQ_SPEC` (erl_utils.h:137-147) and
+                // `erts_cmp_compound(A, B, 0, 1)` (utils.c:1658) compare in
+                // the arithmetic order, which differs from exact equality
+                // only for a float (`1 == 1.0` is true). PBeam has no float
+                // term, so exact equality gives the ERTS result. The
+                // float-term task must change this arm.
+                Instruction::TestEqual {
+                    fail_label,
+                    left,
+                    right,
+                }
+                | Instruction::TestExactEqual {
                     fail_label,
                     left,
                     right,
@@ -739,6 +766,40 @@ impl BeamProgram {
                     );
                     if !passed {
                         jump(module, process, *fail_label)?;
+                    }
+                }
+                // ERTS `i_bs_start_match3` jumps to `Fail` for each term
+                // that is not a bitstring, and makes or reuses a match
+                // context for a bitstring (emu bs_instrs.tab:1074-1110 and
+                // 1199-1238; JIT `emit_i_bs_start_match3` in
+                // jit/arm/instr_bs.cpp:134-189; `erts_bs_start_match_3` in
+                // erl_bits.c:81). A literal source loads as `jump Fail` (emu
+                // ops.tab:1266-1267; JIT jit/arm/ops.tab:1054-1055), which
+                // gives the same result. The compiler gives a real fail
+                // label (beam_ssa_codegen.erl:1666-1673), so the label is
+                // never 0. PBeam has no match context, so a binary stops the
+                // run.
+                Instruction::BinaryMatchStart { fail_label, source } => {
+                    if let Term::Binary(_) = read(process, source)? {
+                        return Err(error(
+                            "unsupported bs_start_match3 of a binary: needs a match context",
+                        ));
+                    }
+                    jump(module, process, *fail_label)?;
+                }
+                // ERTS `fconv` converts a small integer, a bignum, or a float
+                // to a float register, and raises `badarith` for each other
+                // term (emu float_instrs.tab:38-52; JIT `emit_fconv` and
+                // `emit_fconv_shared` in jit/arm/instr_float.cpp:96-135).
+                // PBeam has no float register and no float or bignum term,
+                // so an integer stops the run.
+                Instruction::FloatConvert { source } => {
+                    if let Term::Integer(_) = read(process, source)? {
+                        return Err(error("unsupported BEAM opcode 97"));
+                    }
+                    let badarith = Term::static_atom("badarith");
+                    if let Some(outcome) = raise(process, ExceptionClass::Error, badarith) {
+                        return Ok(outcome);
                     }
                 }
                 Instruction::SelectValue {
@@ -1968,7 +2029,7 @@ mod tests {
 
     /// The runtime error of a root process that exits with an uncaught
     /// `error:badarg`. PBeam gives the stack trace `[]`.
-    const BADARG_EXIT: &str = "root process exited with Tuple([Atom(\"badarg\"), List([])])";
+    const BADARG_EXIT: &str = "root process exited with {badarg,[]}";
 
     fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
         let mut instructions = vec![
@@ -2189,7 +2250,7 @@ mod tests {
                 .execute("fixture", "main", &[])
                 .unwrap_err()
                 .to_string(),
-            "root process exited with Tuple([Tuple([Atom(\"badfun\"), Atom(\"notfun\")]), List([])])"
+            "root process exited with {{badfun,notfun},[]}"
         );
     }
 
@@ -2201,14 +2262,14 @@ mod tests {
                 Instruction::Move(atom("boom"), Operand::X(0)),
                 erlang_call("exit", 1, false),
             ])
-            .contains("root process exited with Atom(\"boom\")")
+            .contains("root process exited with boom")
         );
         assert!(
             error(vec![
                 Instruction::Move(atom("undef"), Operand::X(0)),
                 erlang_call("nif_error", 1, false),
             ])
-            .contains("root process exited with Tuple([Atom(\"undef\"), List([])])")
+            .contains("root process exited with {undef,[]}")
         );
         let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
         body.extend(wait_forever());
@@ -2609,7 +2670,7 @@ mod tests {
         };
         assert_eq!(
             run(0, atom("foo")).unwrap_err().to_string(),
-            "root process exited with Tuple([Tuple([Atom(\"badmap\"), Atom(\"foo\")]), List([])])"
+            "root process exited with {{badmap,foo},[]}"
         );
         assert_eq!(run(3, atom("foo")).unwrap(), test_atom("failed"));
         // A key of a type that a PBeam map cannot hold is a missing key.
@@ -2633,7 +2694,7 @@ mod tests {
         };
         assert_eq!(
             tuple_key(0).unwrap_err().to_string(),
-            "root process exited with Tuple([Tuple([Atom(\"badkey\"), Tuple([])]), List([])])"
+            "root process exited with {{badkey,{}},[]}"
         );
         assert_eq!(tuple_key(3).unwrap(), test_atom("failed"));
         // Two different references have no PBeam order.
@@ -3214,7 +3275,7 @@ mod tests {
         assert_eq!(wait(Term::Integer(0)).unwrap(), test_atom("timeout"));
         assert_eq!(
             wait(test_atom("foo")).unwrap_err().to_string(),
-            "root process exited with Tuple([Atom(\"timeout_value\"), List([])])"
+            "root process exited with {timeout_value,[]}"
         );
     }
 
@@ -3591,7 +3652,7 @@ mod tests {
             run(body)
                 .unwrap_err()
                 .to_string()
-                .contains("root process exited with Tuple([Atom(\"undef\"), List([])])")
+                .contains("root process exited with {undef,[]}")
         );
     }
 
@@ -3982,19 +4043,15 @@ mod tests {
         for name in ["fixture", "missing"] {
             program.atoms.put(name).unwrap();
         }
-        let frame = Term::Tuple(vec![
-            test_atom("fixture"),
-            test_atom("missing"),
-            Term::List(vec![test_atom("x"); 1023]),
-            Term::List(Vec::new()),
-        ]);
-        let reason = Term::Tuple(vec![test_atom("undef"), Term::List(vec![frame])]);
         assert_eq!(
             program
                 .execute("fixture", "main", &[])
                 .unwrap_err()
                 .to_string(),
-            format!("root process exited with {reason:?}")
+            format!(
+                "root process exited with {{undef,[{{fixture,missing,[{}],[]}}]}}",
+                ["x"; 1023].join(",")
+            )
         );
         let mut body = apply_of(
             test_atom("fixture"),
@@ -4004,7 +4061,7 @@ mod tests {
         body.push(erlang_call("apply", 3, true));
         assert_eq!(
             run_with_apply_targets(body).unwrap_err().to_string(),
-            "root process exited with Tuple([Atom(\"system_limit\"), List([])])"
+            "root process exited with {system_limit,[]}"
         );
     }
 

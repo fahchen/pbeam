@@ -1,6 +1,6 @@
 # Portable BEAM runtime specification
 
-Status: architecture baseline reconstructed from the design conversation; constant-return and bounded-call slices are implemented. PR #47 merged as `265f173` and loads the pinned Elixir IO module. PR #52 merged as `5f94923` and executes its compiled IO path through the unresolved `:io.put_chars/2` boundary. Tasks #55, #50, and #79 remain before the Hello World command can write output.
+Status: architecture baseline reconstructed from the design conversation; constant-return and bounded-call slices are implemented. PR #47 merged as `265f173` and loads the pinned Elixir IO module. PR #52 merged as `5f94923` and executes its compiled IO path through `:io.put_chars/2`. Task #42 runs both Hello World entries with the `pbeam` binary and the boot module `pbeam_boot` of `examples/hello_world`, through the OTP IO servers to the host write. Their stdout, stderr, and exit status match ERTS in a locale whose codeset is UTF-8.
 
 Source: [Branch · Portable BEAM实现原理](chatgpt-conversation://6abe6693-526c-83ee-8922-0af41462fb49).
 
@@ -25,12 +25,17 @@ The [Hello World contract](hello-world-target.md) is the first target: PBeam exe
 | ERTS alignment | Follow the ERTS implementation model and observable behavior for processes, scheduling, messages, and BIFs. Record each intentional departure and its reason in the task, the PR, and [ERTS differences](erts-differences.md). |
 | Native extensions | Rust functions registered by module/function/arity (MFA), linked into the executable. |
 | OTP compatibility | Keep required OTP BEAM modules and replace their native/ERTS boundaries only where the selected application needs them. |
-| Platform access | System/Host boundary for platform services and asynchronous completion. |
+| Platform access | Capability Host boundary for authorization, trusted provider selection, platform services, and asynchronous completion. See the proposed [security design](capability-security-design.md). |
+| Security authority | Host-issued, process-scoped grants with distinct use and delegation authority. Protected requests and resource handles bind authority to runtime-authenticated identity. |
+| Native trust | All in-process native code and dependencies are part of the trusted computing base. Static linking and Rust type safety do not establish extension isolation. |
+| Security profiles | Trusted application and secure guest profiles use the same authorization path. Secure execution remains unavailable until its coverage and bypass acceptance gates pass. |
 | Code loading | Bundle-defined code loaded at startup; shared code remains effectively immutable afterward. |
 | Packaging | One application bundle embedded in a Rust launcher with `include_bytes!`. |
 | Validation order | Hello World, then Terra Counter. |
 
 Firefly is an architectural reference for separation of responsibilities, scheduler organization, and native integration. Its compiler pipeline is not part of this design, and the design does not require a Firefly dependency.
+
+The security additions are design requirements for implementation after M2 acceptance. The [capability security design](capability-security-design.md) defines their guarantees and limits. The [migration guide](capability-security-migration.md) defines the terminal-first implementation gates. They do not establish current security support or require unused provider domains and crates.
 
 ## 3. Scope and exclusions
 
@@ -63,10 +68,13 @@ The discussion proposes the following logical boundaries. They do not require cr
 | `pbeam-scheduler` | Runnable processes, reductions, scheduler threads, and work stealing. |
 | `pbeam-native` | Native registry, call context, arguments, results, and extension registration. |
 | `pbeam-native-otp` | Rust implementations for OTP NIFs required by the supported application slice. |
-| `pbeam-host` | Terminal, files, network, timers, clocks, and randomness used by the application. |
-| Bootstrap/CRT | Embedded bundle, runtime initialization, native registration, and entry process startup. |
+| Authorization | Runtime-authenticated subjects, scopes, grants, delegation, revocation, budgets, and protected request creation. Independent of concrete OS providers. |
+| `pbeam-host` | Capability routing and providers for terminal, files, network, timers, clocks, and randomness used by the application. Providers execute only authorized requests. |
+| Bootstrap/CRT | Embedded bundle, trusted policy/profile selection, initial grants, native registration, and entry process startup. |
 
 Keep platform-specific calls behind System/Host rather than spreading them through terms, instructions, and BIFs. Keep bootstrap distinct from execution without introducing unused alternative runtime implementations.
+
+Protected VM operations use the same authority model without going through an OS provider. Keep root policy issuance out of application native contexts. Add authorization modules within the existing crate when the first consumer needs them. A separate security crate is not a prerequisite.
 
 ## 5. Loading and interpretation
 
@@ -80,6 +88,8 @@ A process holds its registers, stack, mailbox, execution position, and reduction
 
 Unsupported bytecode, unresolved functions, and unsupported runtime operations must produce actionable failures rather than silently changing program behavior. The exact supported OTP/BEAM version and instruction/BIF inventory must be recorded before compatibility can be claimed.
 
+Secure execution also requires bounded loader input and a complete inventory of reachable BIF, opcode, native, and protected service paths. Equivalent operations must apply equivalent authorization. Unknown effectful operations fail closed. Import scanning assists review but does not prove coverage of dynamic calls or message protocols.
+
 ## 6. Terms and binary ownership
 
 The initial memory model uses shared immutable values backed by `Arc<Value>`, with immediate representations where appropriate. Processes may share immutable term storage; mutable execution state remains owned by the executing process.
@@ -87,6 +97,8 @@ The initial memory model uses shared immutable values backed by `Arc<Value>`, wi
 Binary handling has its own representation for binaries, sub-binaries, and bitstrings. Construction and matching must retain the distinctions between byte length, bit length, and slice offsets. A binary cannot be reduced to an undifferentiated general value wrapper.
 
 The design leaves room to change storage later, but v0 does not implement an arena, allocator framework, or configurable heap backend. Exact term layout and binary backing storage remain implementation decisions.
+
+Shared immutable storage does not grant resource authority. Protected resource handles are opaque, holder-bound values with rights, generation, and revocation checks. Term copying does not delegate them. Define explicit transfer semantics and retained-memory charging before claiming secure resource or memory limits.
 
 ## 7. Scheduling and asynchronous work
 
@@ -105,6 +117,12 @@ Host work that can block must not block a scheduler thread. The intended asynchr
 5. The scheduler makes the process runnable and resumes the call with its result.
 
 Tokio was an example executor in the discussion, not a finalized dependency requirement. Completion ownership, cancellation, process exit, and shutdown behavior must be defined when the first asynchronous operation is implemented. Late completion must not resume a dead process or resume the same call twice.
+
+A process owns its security context, including realm, subject incarnation, usable and delegable grants, and budget account. Migration carries that context. Spawn cannot exceed the parent's delegable authority or duplicate a budget. Supervisor restart uses a validated template and cannot restore revoked grants.
+
+Host intents become authorized requests only through runtime checks. Fix the subject, operation, parameters, resource identity, grant generation, incarnation, and budget reservation before submission. Recheck queued authority at a synchronized dispatch decision. Revocation before that decision prevents execution; later revocation cannot promise rollback. Completion must settle cost and release resources even when the original subject no longer exists.
+
+Privileged OTP services require an explicit authenticated request contract. Checking only the service process's grants is insufficient. Generic messages and caller PID fields do not carry trusted caller authority. The migration guide defines the first protected IO service contract while preserving the compiled OTP path.
 
 ## 8. Rust-native extensions
 
@@ -137,6 +155,10 @@ These API names are proposed contracts, not currently available libraries.
 ### Rust registration and dispatch
 
 A Rust extension exports a registration function. Registration maps an exact MFA such as `Elixir.MyApp.NativeHash:sha256/1` to a Rust implementation. The registry owns this mapping and rejects duplicate entries. A binding accepts BEAM terms and returns a BEAM term or a defined runtime exception. Host operations are available through a call context; platform details stay in `pbeam-host`.
+
+Registration is controlled by trusted build/startup code. Guest code cannot register or shadow protected runtime/security MFAs. Native entries declare operation authority, determinism, observability, execution class, and cost separately. The native context exposes checked operations and cannot issue root grants. An allowed native call does not authorize every effect inside the binding.
+
+All in-process native adapters remain trusted, including adapters that use only the checked context by convention. Effectful dependencies need reviewed transport/provider paths or a separate isolation boundary. Build scripts and procedural macros have a separate build-time trust boundary. Runtime grants do not restrict their build-time OS access.
 
 Resolve an imported MFA through the code server. Execute its BEAM implementation when one is available. Dispatch to a registered native implementation only when the target is explicitly declared as native or is a verified VM/NIF boundary. Native integration does not require a separate `PBeam.Native.call/3` instruction or BIF.
 
@@ -208,6 +230,8 @@ It performs these steps:
 
 The bundle contains identifying/version metadata, an entry MFA, compiler/OTP compatibility metadata, a module table, a resource table, and the module/resource payload. Compression was proposed, but its codec and necessity are not settled. The example `otp: 28` is illustrative, not a compatibility commitment.
 
+Capability manifest entries request authority; the trusted launcher grants only what host policy permits. Startup identifies the selected profile, policy, and executable build. Add manifest fields with their build consumer. A manifest signature does not grant authority. The current toolchain pin is OTP 29.1.1 in `mise.toml`; neither an example field nor a pin establishes general compatibility.
+
 Use one embedded bundle rather than generating a separate `include_bytes!` declaration for every module. Bundle parsing is independent of executable embedding so an external-bundle runner can be added later without changing the application representation.
 
 At startup the launcher loads and validates the embedded bundle, initializes atom/code/native tables, registers linked native modules, starts the scheduler pool, and spawns the entry MFA. Required initialization must finish before application code runs.
@@ -227,7 +251,7 @@ macOS system frameworks/libraries remain normal dependencies. Linux musl builds 
 These checks operationalize the design; expand them only as supported behavior grows.
 
 - [Implemented] Load checked-in BEAM fixtures; read `AtU8`, `Code`, `ExpT`, and required `ImpT` data; execute exported constants and a bounded local/external call chain with a small integer; reject malformed containers and unsupported instructions with diagnostics. This is a narrow fixture check, not general BEAM compatibility.
-- [In progress; #51, #48, and #49 merged; #55, #50, and #79 block #42] Run both compiled Hello World entries without ERTS through compiled Elixir IO and the OTP group-leader request/reply path. PR #52 verifies the compiled Elixir path through `:io.put_chars/2`; it does not execute the OTP protocol or write host output. Match reference stdout, stderr, and exit status before Terra acceptance work. Do not intercept `Elixir.IO:puts/1` or `:io.put_chars/2` with direct host output.
+- [Implemented by #42] Run both compiled Hello World entries without ERTS through compiled Elixir IO and the OTP group-leader request/reply path. PR #52 verifies the compiled Elixir path through `:io.put_chars/2`. Tasks #55, #50, and #79 execute the OTP path through `user`, `user_drv`, and `prim_tty:write_nif/2` to the host stdout, and `pbeam_boot` starts the OTP IO servers. `tests/hello.rs` runs both entries with the `pbeam` binary and matches the ERTS stdout, stderr, and exit status. This covers only the binary standard-output path in a locale whose codeset is UTF-8. The failures and their ERTS differences are in the "Failures" row of [Hello World target](hello-world-target.md). Do not intercept `Elixir.IO:puts/1` or `:io.put_chars/2` with direct host output.
 - Demonstrate process scheduling, reduction-based yielding, message wakeup, and work stealing with multiple schedulers. Verify exclusive process execution.
 - Exercise binary construction, sub-binary offsets, and non-byte-aligned matching wherever the selected application requires them.
 - Call the declared SHA-256 native example from Elixir and compare its result with a known digest. Verify bad arguments and missing registrations fail predictably.
@@ -237,6 +261,10 @@ These checks operationalize the design; expand them only as supported behavior g
 - Run the pinned Terra scenario and compare its observable behavior with the same scenario on ERTS. Record required modules, instructions, BIFs, host services, and known gaps.
 
 Passing small fixtures does not establish Terra compatibility or complete OTP compatibility.
+
+The post-M2 security gate uses the delivered terminal operation as its first consumer. Granted trusted-profile execution preserves the accepted OTP behavior. Denied guests cannot use native entry paths, direct service messages, forged handles, resource reuse, or delegated workers to bypass authority. Both the native terminal provider and a memory provider enforce the same policy. Secure guest execution remains disabled until all reachable operation paths and resource limits pass their specified checks. See the [migration acceptance gates](capability-security-migration.md).
+
+Security implementation starts after M2 acceptance and is proposed before M3. This documentation does not close milestones, change issue dependencies, or supply a second task tracker. Create and link focused implementation issues after design review. Later scheduler, native, bundle, async, and Terra tasks must preserve the accepted security contracts.
 
 ## 12. Unresolved details before implementation claims
 
