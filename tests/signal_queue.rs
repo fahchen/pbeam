@@ -301,3 +301,32 @@ fn propagates_exit_signals_through_links_as_pinned_erts() {
     assert_eq!(pbeam_all("link_exit_probe", LINK_EXIT_PROBE), expected);
     assert_eq!(erts_all("link_exit_probe"), format!("{expected}\n"));
 }
+
+const EXIT_ORDER_PROBE: &[u8] = include_bytes!("../fixtures/signal_queue/exit_order_probe.beam");
+
+/// The order of the signals that an exiting process sends through its
+/// links and monitors in each case of `exit_order_probe:all/0`, on pinned
+/// ERTS 29.1.1 with one scheduler, as `io:format("~w")` prints it. ERTS
+/// destroys its red-black link and monitor trees in post-order at exit
+/// (`erl_process.c:14545-14572`; `erl_rbtree.h:1342-1452`).
+const EXIT_ORDERS: &[(&str, &str)] = &[
+    ("links_ascending", "[1,3,5,7,6,4,2]"),
+    ("links_mixed", "[1,3,2,5,7,6,4]"),
+    // The unlink acknowledgments delete the links of 4, 2, and 6 with
+    // rebalancing, and 4 links again.
+    ("links_unlink", "[1,4,3,8,7,5]"),
+    // The link signal of 1 adds a node as `erlang:link/1` does.
+    ("link_signal", "[3,1]"),
+    ("unlink_signal", "[1,5,4,3]"),
+    // Member 1 has no monitor at the exit and runs after the members that
+    // got a demonitor signal.
+    ("monitors", "[2,1]"),
+    ("monitors_demonitor", "[3,2,1]"),
+];
+
+#[test]
+fn sends_exit_signals_of_links_and_monitors_in_the_erts_tree_order() {
+    let expected = expected(EXIT_ORDERS);
+    assert_eq!(pbeam_all("exit_order_probe", EXIT_ORDER_PROBE), expected);
+    assert_eq!(erts_all("exit_order_probe"), format!("{expected}\n"));
+}

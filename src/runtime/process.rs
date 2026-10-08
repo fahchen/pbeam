@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+mod tree;
+
+pub(super) use tree::MonitorLinkTree;
 
 use super::{mailbox::Mailbox, scheduler::AliasMode, timer::TimerKey};
 use crate::{
@@ -171,14 +173,15 @@ pub(super) struct ProcessState {
     /// (`FS_OFF_HEAP_MSGQ`), false for `on_heap`. PBeam has no process heap,
     /// so the flag does not change where the messages are kept.
     pub(super) off_heap_message_queue: bool,
-    /// Processes linked to this process, with the identifier of an unlink
-    /// that waits for its acknowledgment, or 0 for an active link
-    /// (`ErtsILink.unlinking`). A link that is unlinking sends no exit
-    /// signal (`erl_process.c:14068-14081`).
-    pub(super) links: BTreeMap<ProcessId, u64>,
+    /// The link tree (`ERTS_P_LINKS`): processes linked to this process, by
+    /// pid, with the identifier of an unlink that waits for its
+    /// acknowledgment, or 0 for an active link (`ErtsILink.unlinking`). A
+    /// link that is unlinking sends no exit signal
+    /// (`erl_process.c:14068-14081`).
+    pub(super) links: MonitorLinkTree<ProcessId, u64>,
     /// The monitor tree: the monitors that this process holds and its
     /// aliases, by reference (`ERTS_P_MONITORS`).
-    pub(super) monitors: BTreeMap<Reference, Origin>,
+    pub(super) monitors: MonitorLinkTree<Reference, Origin>,
     /// Monitors that send a monitor down signal when this process exits, in
     /// creation order (`ERTS_P_LT_MONITORS`).
     pub(super) monitored_by: Vec<Monitor>,
@@ -262,8 +265,8 @@ impl ProcessState {
             receive_timer: ReceiveTimer::None,
             trap_exit: false,
             off_heap_message_queue: false,
-            links: BTreeMap::new(),
-            monitors: BTreeMap::new(),
+            links: MonitorLinkTree::default(),
+            monitors: MonitorLinkTree::default(),
             monitored_by: Vec::new(),
             group_leader: id,
             dictionary: Vec::new(),

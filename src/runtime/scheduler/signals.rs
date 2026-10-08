@@ -387,7 +387,12 @@ impl Scheduler {
                 return Ok(Handled::Stop(0));
             }
             Signal::Link { from } => {
-                self.handled(id, node).links.entry(from).or_insert(0);
+                // A link that the receiver has keeps its node and its state
+                // (`erl_proc_sig_queue.c:6641`).
+                let links = &mut self.handled(id, node).links;
+                if links.get(&from).is_none() {
+                    links.insert(from, 0);
+                }
                 0
             }
             Signal::Unlink { from, id: unlink } => {
@@ -465,7 +470,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.handled(id, node).links.entry(from).or_insert(0);
+    /// scheduler.handled(id, node).links.insert(from, 0);
     /// ```
     fn handled(&mut self, id: ProcessId, node: NodeId) -> &mut ProcessState {
         let process = self.processes.get_mut(&id).expect("the process is alive");
