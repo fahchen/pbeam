@@ -273,3 +273,42 @@ fn runs_bump_reductions_and_reads_the_reduction_total_as_pinned_erts() {
         format!("{bumps}\n{reductions}\n")
     );
 }
+
+#[test]
+fn switches_the_process_at_each_bif_trap_to_erlang_code_as_pinned_erts() {
+    // `erlang:demonitor/2` with `flush` and no active monitor traps to
+    // `erts_internal:flush_monitor_messages/3` (`bif.c:640-649`). ERTS
+    // switches out the process at each `BIF_TRAP`, through `call_ext` and
+    // through the export (`jit/arm/instr_bif.cpp:525-536`, `676-701`). Thus
+    // each turn of `a` and `b` sends one tag. `preempt_probe:gcs/0` in the
+    // other test checks that these loops collect no garbage on ERTS.
+    const TRAPS: &[(&str, &[i64])] = &[("trap_ext", &[1; 30]), ("trap_apply", &[1; 30])];
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erts_internal, PREEMPT_PROBE]).unwrap();
+    assert_eq!(
+        program.execute("preempt_probe", "traps", &[]).unwrap(),
+        runs_term(&program, TRAPS)
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-pa",
+            "fixtures/preempt",
+            "-eval",
+            "jit = erlang:system_info(emu_flavor), \
+             io:format(\"~w~n\", [preempt_probe:traps()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{}\n", runs_text(TRAPS))
+    );
+}

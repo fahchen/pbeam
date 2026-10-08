@@ -1,10 +1,11 @@
 -module(preempt_probe).
--export([sends/0, calls/0, bumps/0, yields/0, reductions/0, exits/0, gcs/0, start/3, traced/3,
-         id/1]).
+-export([sends/0, calls/0, traps/0, bumps/0, yields/0, reductions/0, exits/0, gcs/0, start/3,
+         traced/3, id/1]).
 -export([send_op/3, send_ext/3, send_apply/3, send_fun/3, send_only/3, send_apply_only/3]).
 -export([observe/2, burn_return/1, send_tag/1]).
 -export([call_light/3, call_heavy/3, call_apply/3, call_fun/3, call_only/3,
          call_last/3, call_apply_only/3, call_heavy_only/3, call_guard/3]).
+-export([trap_ext/3, trap_apply/3]).
 -export([bump_loop/3, yield_op/3, yield_only/3, yield_last/3, yield_apply/3, measured/3, sink/0,
          bump_yield/0]).
 
@@ -36,6 +37,11 @@ calls() ->
     [{Loop, race(Loop, 2000)}
      || Loop <- [call_light, call_heavy, call_apply, call_fun, call_only, call_last,
                  call_apply_only, call_heavy_only, call_guard]].
+
+%% The loops that call a BIF that traps to Erlang code. ERTS switches the
+%% process at each trap, so each turn sends one tag.
+traps() ->
+    [{Loop, race(Loop, 30)} || Loop <- [trap_ext, trap_apply]].
 
 %% The loop with erlang:bump_reductions/1, and the results and the errors
 %% of erlang:bump_reductions/1.
@@ -218,6 +224,29 @@ call_guard(P, T, Tuple, N) ->
     P ! T,
     call_guard(P, T, Tuple, N - tuple_size(Tuple)).
 
+%% call_ext of erlang:demonitor/2 with flush. The reference is not a
+%% monitor, so the BIF traps to erts_internal:flush_monitor_messages/3
+%% (bif.c:640-649). The loop makes the reference once, so that it does not
+%% allocate.
+trap_ext(P, T, N) ->
+    trap_ext(P, T, make_ref(), N).
+
+trap_ext(_, _, _, 0) -> ok;
+trap_ext(P, T, Ref, N) ->
+    P ! T,
+    erlang:demonitor(Ref, [flush]),
+    trap_ext(P, T, Ref, N - 1).
+
+%% erlang:demonitor/2 with flush through apply/3 and its export.
+trap_apply(P, T, N) ->
+    trap_apply(P, T, id(erlang), id(demonitor), [make_ref(), [flush]], N).
+
+trap_apply(_, _, _, _, _, 0) -> ok;
+trap_apply(P, T, M, F, A, N) ->
+    P ! T,
+    apply(M, F, A),
+    trap_apply(P, T, M, F, A, N - 1).
+
 %% Entry 1, send 1 + 4, call_ext of erlang:bump_reductions/1 1 + 100.
 bump_loop(_, _, 0) -> ok;
 bump_loop(P, T, N) ->
@@ -357,8 +386,8 @@ gcs() ->
     [{Loop, gc_count(Loop)}
      || Loop <- [send_op, send_ext, send_apply, send_fun, send_only, send_apply_only,
                  call_light, call_heavy, call_apply, call_fun, call_only, call_last,
-                 call_apply_only, call_heavy_only, call_guard, bump_loop, yield_op, yield_only,
-                 yield_last, yield_apply]]
+                 call_apply_only, call_heavy_only, call_guard, trap_ext, trap_apply, bump_loop,
+                 yield_op, yield_only, yield_last, yield_apply]]
     ++ [{Op, gc_count(measured, Op)} || Op <- ?OPS].
 
 gc_count(Loop) ->
