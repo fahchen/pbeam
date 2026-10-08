@@ -16,7 +16,7 @@ use std::collections::HashMap;
 mod bif;
 mod native;
 
-use bif::{BifResult, INSTRUCTION_CALLS, is_bif, is_function, is_heavy_bif, send};
+use bif::{BifResult, is_bif, is_function, is_heavy_bif, send};
 
 /// The largest number of arguments of `erlang:apply/3`. ERTS `apply` copies
 /// at most `MAX_REG - 1` arguments to the X registers (`erl_vm.h:55`,
@@ -1119,6 +1119,14 @@ impl BeamProgram {
                     write(process, &Operand::X(0), Term::static_atom("ok"))?;
                     return Ok(Outcome::Hibernate);
                 }
+                Instruction::Yield => {
+                    // `emit_i_yield` writes `true` to `x0` and switches the
+                    // context with no reduction cost; the process keeps its
+                    // frame (`jit/arm/instr_common.cpp:3121-3124`;
+                    // `jit/arm/instr_call.cpp:30-36`).
+                    write(process, &Operand::X(0), Term::static_atom("true"))?;
+                    return Ok(Outcome::Yield);
+                }
                 // ERTS `build_stacktrace` changes the raw stack trace in
                 // `x0` to a list (emu `instrs.tab:1247-1251`; JIT
                 // `emit_build_stacktrace` in
@@ -1236,9 +1244,12 @@ impl BeamProgram {
     /// the module code, as in ERTS. Through its export, a BIF costs no
     /// reduction, and a tail call of it returns to the caller with no
     /// reduction (`emit_call_bif_mfa` and `emit_bif_nif_epilogue` in
-    /// `jit/arm/instr_bif.cpp:631-674`, `819-839`). A function that a loaded
-    /// module does not export goes to `undefined_function`. Return the
-    /// outcome when the process stops.
+    /// `jit/arm/instr_bif.cpp:631-674`, `819-839`). A call of
+    /// `erlang:yield/0` runs its body in `erlang.beam`, as in ERTS: the
+    /// loader turns the `call_ext_only` of that body into
+    /// `Instruction::Yield`. A function that a loaded module does not
+    /// export goes to `undefined_function`. Return the outcome when the
+    /// process stops.
     ///
     /// # Examples
     ///
@@ -1246,8 +1257,6 @@ impl BeamProgram {
     /// // `erlang:apply(erlang, self, [])` runs the `self/0` BIF.
     /// let outcome = program.call_mfa(&mut scheduler, "erlang", "apply", 3, false)?;
     /// assert!(outcome.is_none());
-    /// // `erlang:yield/0` runs as an instruction in ERTS.
-    /// assert!(program.call_mfa(&mut scheduler, "erlang", "yield", 0, false).is_err());
     /// ```
     fn call_mfa(
         &self,
@@ -1261,12 +1270,6 @@ impl BeamProgram {
             ("erlang", "apply", 2) => return self.apply_fun(scheduler, tail),
             ("erlang", "apply", 3) => return self.apply_mfa(scheduler, tail),
             _ => {}
-        }
-        if INSTRUCTION_CALLS.contains(&(module, name, arity)) {
-            // ponytail: ERTS runs these calls as instructions; see "Instruction calls" in docs/erts-differences.md.
-            return Err(error(format!(
-                "unsupported instruction call {module}:{name}/{arity}"
-            )));
         }
         let process = scheduler.current_process_mut();
         if is_bif(module, name, arity) {
@@ -1530,8 +1533,8 @@ impl BeamProgram {
     /// goes to x0, and a tail call then returns from the frame with no
     /// reduction. A yield return writes its value to x0, does the return
     /// of a tail call, and switches out the process. An exception goes to
-    /// the error handler. A trap writes its arguments to the X registers and
-    /// enters the target function. An exit ends the process, and no catch
+    /// the error handler. A trap writes its arguments to the X registers,
+    /// enters the target function, and switches out the process. An exit ends the process, and no catch
     /// tag sees it. Return the outcome when the process stops.
     ///
     /// # Examples
@@ -1580,7 +1583,11 @@ impl BeamProgram {
                     write(process, &Operand::X(index), argument)?;
                 }
                 enter_frame(process, self.mfa_frame(module, function, arity)?, tail);
-                Ok(None)
+                // A BIF trap always switches out the process
+                // (`context_switch_simplified` in `jit/arm/instr_bif.cpp:525-536`,
+                // `676-701`). The process enters the target when it runs
+                // again, so the entry costs one reduction of the next turn.
+                Ok(Some(Outcome::Yield))
             }
             BifResult::Exited(reason) => Ok(Some(Outcome::Exit {
                 reason,
