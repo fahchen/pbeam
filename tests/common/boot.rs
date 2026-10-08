@@ -12,10 +12,11 @@
 /// ```
 pub const BOOT_BEAM: &str = "examples/hello_world/pbeam_boot.beam";
 
-/// The pinned OTP modules that `pbeam_boot` calls when it starts
-/// `standard_error`, `erl_signal_server`, `user_sup`, and
-/// `erl_signal_handler`. Without one of them, the boot stops with
-/// `unresolved external MFA` of that module.
+/// The pinned OTP modules that `pbeam_boot` calls when it starts the
+/// `init` request process, `logger_server`, `application_controller`,
+/// `standard_error`, `erl_signal_server`, `user_sup`, `logger_sup`,
+/// `erl_signal_handler`, and the `default` logger handler. Without one of
+/// them, the boot stops with `unresolved external MFA` of that module.
 ///
 /// # Examples
 ///
@@ -25,7 +26,7 @@ pub const BOOT_BEAM: &str = "examples/hello_world/pbeam_boot.beam";
 ///     .args(["pbeam_boot", "start", "boot_probe", "main", "--", BOOT_BEAM, BOOT_PROBE])
 ///     .args(&beams);
 /// ```
-pub const BOOT_MODULES: [&str; 28] = [
+pub const BOOT_MODULES: [&str; 41] = [
     "erlang",
     "prim_tty",
     "proc_lib",
@@ -54,4 +55,17 @@ pub const BOOT_MODULES: [&str; 28] = [
     "logger_config",
     "edlin",
     "edlin_key",
+    "logger_server",
+    "logger_simple_h",
+    "logger_sup",
+    "supervisor",
+    "logger_std_h",
+    "logger_h_common",
+    "logger_olp",
+    "logger_proxy",
+    "logger_handler_watcher",
+    "logger_formatter",
+    "maps",
+    "init",
+    "erts_internal",
 ];

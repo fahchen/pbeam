@@ -36,7 +36,7 @@ fn raises_undef_for_a_local_function_that_calls_nif_error() {
     assert!(
         error
             .to_string()
-            .contains("root process exited with Tuple([Atom(\"undef\"), List([])])"),
+            .contains("root process exited with {undef,[]}"),
         "expected an undef exit reason with an empty stack trace, got {error}"
     );
 }

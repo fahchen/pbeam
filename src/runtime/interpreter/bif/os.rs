@@ -2,8 +2,45 @@
 
 use super::BifResult::Value;
 use super::*;
-use crate::runtime::host::clock;
 use crate::runtime::host::signal::{self, Disposition};
+use crate::runtime::host::{clock, environment, filename_encoding};
+use crate::runtime::unicode::{filename_from_native, native_filename};
+
+/// Run `os:getenv(Name)`: return the value of the environment variable
+/// `Name` as a list of characters, or `false` when the environment has no
+/// such variable, as `os_getenv_1` (`erl_bif_os.c:94-110`) does with
+/// `erts_osenv_get_term` (`erl_osenv.c:239-262`).
+///
+/// `convert_key_to_native` (`erl_osenv.c:103-165`) makes the native bytes
+/// of `Name` in the file name encoding of the host (see
+/// [`native_filename`]). `[]` and a flat or nested proper list of
+/// characters are valid. An atom, a binary (also in a list), an improper
+/// list, a character 0, a character that the encoding cannot hold, and a
+/// name with the byte `=` raise `badarg`. The empty name is valid, because
+/// the `length == 0` test of ERTS compares a pointer. The lookup and the
+/// value follow [`environment::variable`] and [`filename_from_native`],
+/// which on macOS returns a runtime error for a value that ERTS composes
+/// (see "OS environment" in `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // PBEAM_GETENV_ASCII=yes
+/// let name = Term::List(b"PBEAM_GETENV_ASCII".iter().map(|&byte| Term::Integer(byte.into())).collect());
+/// assert!(matches!(getenv(&name)?, BifResult::Value(Term::List(_))));
+/// assert!(matches!(getenv(&Term::static_atom("HOME"))?, BifResult::Raise { .. }));
+/// assert!(matches!(getenv(&Term::Binary(b"HOME".to_vec()))?, BifResult::Raise { .. }));
+/// ```
+pub(super) fn getenv(name: &Term) -> Result<BifResult, BeamError> {
+    let encoding = filename_encoding();
+    let Some(key) = native_filename(name, encoding).filter(|key| !key.contains(&b'=')) else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(match environment::variable(&key) {
+        Some(value) => filename_from_native(&value, encoding)?,
+        None => Term::static_atom("false"),
+    }))
+}
 
 /// Run `os:set_signal(Signal, Mode)`: set the host disposition of `Signal`
 /// to `SIG_IGN`, `SIG_DFL`, or a handler, and return `ok`, as
