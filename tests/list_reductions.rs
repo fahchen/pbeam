@@ -184,6 +184,20 @@ const LONGS: &[(&str, &[(&str, i64)])] = &[
             ("b", 998),
         ],
     ),
+    // The same runs for `lists:keymember/3`, which finds `{x}` after the
+    // 100,000 elements and returns `true` after its traps.
+    (
+        "keymember_ext",
+        &[
+            ("b", 1334),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 998),
+        ],
+    ),
 ];
 
 /// Return the runs of [`COSTS`] as `io:format("~w")` prints the result of

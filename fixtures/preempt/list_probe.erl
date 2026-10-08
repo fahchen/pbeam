@@ -47,9 +47,17 @@ iterations(10000) -> 30.
 %% chunks of a.
 longs(Opts) ->
     Long = ones(100000),
-    [{Loop, long_race(Loop, Long, Opts)}
-     || Loop <- [length_guard, length_body, length_apply, reverse_ext, reverse_apply_only,
-                 member_ext, keyfind_ext]].
+    [{Loop, long_race(Loop, long_list(Loop, Long), Opts)} || Loop <- long_loops()].
+
+long_loops() ->
+    [length_guard, length_body, length_apply, reverse_ext, reverse_apply_only,
+     member_ext, keyfind_ext, keymember_ext].
+
+%% lists:keymember/3 finds a tuple at the end of the list, so that its
+%% result shows that each trap continues lists:keymember/3, not
+%% lists:keyfind/3.
+long_list(keymember_ext, Long) -> Long ++ [{x}];
+long_list(_, Long) -> Long.
 
 %% Start a and b from a new process, so that the reductions of the caller
 %% do not change the order of the two spawns.
@@ -119,6 +127,9 @@ long_call(member_ext, L) ->
     ok;
 long_call(keyfind_ext, L) ->
     false = lists:keyfind(x, 1, L),
+    ok;
+long_call(keymember_ext, L) ->
+    true = lists:keymember(x, 1, L),
     ok.
 
 %% apply_last of lists:reverse/2: the BIF returns from this frame when it
@@ -137,9 +148,8 @@ gcs(Opts) ->
     [{Bif, N, gc_count(cost_loop, [Bif, ones(N), iterations(N)], Opts)}
      || Bif <- [member, reverse, append, append_nil, length, keyfind, keymember],
         N <- [0, 1, 10, 100, 1000, 10000]]
-    ++ [{Loop, gc_count(long_loop, [Loop, Long, 3], Opts)}
-        || Loop <- [length_guard, length_body, length_apply, reverse_ext, reverse_apply_only,
-                    member_ext, keyfind_ext]].
+    ++ [{Loop, gc_count(long_loop, [Loop, long_list(Loop, Long), 3], Opts)}
+        || Loop <- long_loops()].
 
 gc_count(Loop, Args, Opts) ->
     Self = self(),
