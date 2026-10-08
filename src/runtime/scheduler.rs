@@ -1103,9 +1103,12 @@ impl Scheduler {
     /// 7. Send the pending monitor signal of the process, when it has one.
     ///
     /// Only the current process exits, so the process is not in the run
-    /// queue. The links and the monitors go in the order of their keys;
-    /// ERTS goes through its trees in tree order. The root process records
-    /// its result.
+    /// queue. The links and the monitors that the process holds go in the
+    /// order of their keys; ERTS goes through its trees in tree order. The
+    /// monitors of the process go in the order that it handled their
+    /// monitor signals, as ERTS goes through its list `ERTS_P_LT_MONITORS`
+    /// (`erl_proc_sig_queue.c:6555`; `erl_monitor_link.h:652-669`). The root
+    /// process records its result.
     ///
     /// # Examples
     ///
