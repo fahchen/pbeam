@@ -57,6 +57,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** <https://github.com/fahchen/pbeam/pull/181#issuecomment-6005540768>
 
+## 20261006: Verify PR claims against the final diff
+
+**Problem:** A PR description said that no existing test changed, but the diff changed an existing test helper.
+
+**Root Cause:** The description was not checked against the final diff after the helper was refactored.
+
+**Fix:** Replace the stale statement with a precise statement that identifies the unchanged assertions and the changed helper.
+
+**Guardrail:** Check every change summary and verification claim against the final diff before publishing the PR.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/182#issuecomment-6005541337>
+
 ## 20261006: Verify task references in difference records
 
 **Problem:** A difference row named a prerequisite task as the owner of a follow-up that the task does not implement.
