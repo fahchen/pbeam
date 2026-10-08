@@ -233,15 +233,15 @@ Each row is a BIF entry of `BIFS` that has a body.
 | `erlang:demonitor/1` | `process.monitor`, `process.alias` | `run` | `inline` | Removes a monitor of the caller and ends its alias. | `O(p)` | `src/runtime/interpreter/bif/erlang.rs` |
 | `erlang:demonitor/2` | `process.monitor`, `process.alias`, `process.self` | `run` | `inline`, `trap` | As `erlang:demonitor/1`. With `flush` and no active monitor, it traps to `erts_internal:flush_monitor_messages/3`, which removes `DOWN` messages from the own mailbox. | `O(p)` | `src/runtime/interpreter/bif/erlang.rs` |
 | `erlang:div/2` | `none` | `pure` | `inline` | Gives the integer quotient, or raises `badarith`. | `O(1)` | `src/runtime/interpreter/bif/erlang.rs` |
-| `erlang:element/2` | `none` | `pure` | `inline` | Gives a tuple element, or raises `badarg`. | `O(1)` | `src/runtime/interpreter/bif/erlang.rs` |
-| `erlang:error/1` | `none` | `pure` | `inline` | Raises an exception of class `error`. | `O(1)` | `src/runtime/interpreter/bif/table.rs` |
-| `erlang:error/3` | `none` | `pure` | `inline` | Raises an exception of class `error`. | `O(1)` | `src/runtime/interpreter/bif/table.rs` |
-| `erlang:exit/1` | `none` | `pure` | `inline` | Raises an exception of class `exit`. | `O(1)` | `src/runtime/interpreter/bif/table.rs` |
+| `erlang:element/2` | `none` | `pure` | `inline` | Gives a copy of a tuple element, or raises `badarg`. | `O(n)` | `src/runtime/interpreter/bif/erlang.rs` |
+| `erlang:error/1` | `none` | `pure` | `inline` | Raises an exception of class `error` with a copy of the reason. | `O(n)` | `src/runtime/interpreter/bif/table.rs` |
+| `erlang:error/3` | `none` | `pure` | `inline` | Raises an exception of class `error` with a copy of the reason. | `O(n)` | `src/runtime/interpreter/bif/table.rs` |
+| `erlang:exit/1` | `none` | `pure` | `inline` | Raises an exception of class `exit` with a copy of the reason. | `O(n)` | `src/runtime/interpreter/bif/table.rs` |
 | `erlang:exit/2` | `process.exit`, `process.alias`, `terminal.raw` | `run` | `inline`, `host-call` | Sends an exit signal to a pid or through an alias. The signal can end the target with exit cleanup, give an `EXIT` message, or end the caller. Exit cleanup runs in the same call. When the target owns a TTY record, it calls `tcsetattr` on fd 0. | `O(p)` | `src/runtime/interpreter/bif/erlang.rs` |
 | `erlang:function_exported/3` | `runtime.code` | `run` | `inline` | Tells whether a loaded module exports the function or the function is a BIF. | `O(1)` | `src/runtime/interpreter/bif/erlang.rs` |
 | `erlang:get/1` | `process.self` | `run` | `inline` | Reads a value of the own dictionary. | `O(d)` | `src/runtime/interpreter/bif/erlang.rs` |
 | `erlang:group_leader/0` | `process.self` | `run` | `inline` | Gives the group leader of the caller. | `O(1)` | `src/runtime/interpreter/bif/table.rs` |
-| `erlang:hd/1` | `none` | `pure` | `inline` | Gives the head of a list, or raises `badarg`. | `O(1)` | `src/runtime/interpreter/bif/table.rs` |
+| `erlang:hd/1` | `none` | `pure` | `inline` | Gives a copy of the head of a list, or raises `badarg`. | `O(n)` | `src/runtime/interpreter/bif/table.rs` |
 | `erlang:integer_to_list/1` | `none` | `pure` | `inline` | Gives the decimal characters of an integer. | `O(1)` | `src/runtime/interpreter/bif/table.rs` |
 | `erlang:iolist_size/1` | `none` | `pure` | `inline` | Gives the byte size of iodata. | `O(n)` | `src/runtime/interpreter/bif/erlang.rs` |
 | `erlang:iolist_to_iovec/1` | `none` | `pure` | `inline` | Gives a list of binaries with copies of the bytes. | `O(n)` | `src/runtime/interpreter/bif/erlang.rs` |
@@ -260,7 +260,7 @@ Each row is a BIF entry of `BIFS` that has a body.
 | `erlang:monitor/2` | `process.monitor`, `process.name` | `run` | `inline` | Adds a monitor of a process or a name, or sends a `noproc` `DOWN` message to the caller. | `O(1)` | `src/runtime/interpreter/bif/erlang.rs`, `src/runtime/scheduler.rs` |
 | `erlang:monitor/3` | `process.monitor`, `process.name`, `process.alias` | `run` | `inline` | As `erlang:monitor/2`. The `alias` option makes an alias, and the `tag` option sets the `DOWN` tag. The `priority` option gives a runtime error. | `O(n)` | `src/runtime/interpreter/bif/erlang.rs`, `src/runtime/scheduler.rs` |
 | `erlang:monotonic_time/1` | `host.clock.monotonic` | `host` | `host-call` | Gives the run clock in a time unit. | `O(1)` | `src/runtime/interpreter/bif/erlang.rs`, `src/runtime/timer.rs` |
-| `erlang:nif_error/1` | `none` | `pure` | `inline` | Raises an exception of class `error`. | `O(1)` | `src/runtime/interpreter/bif/table.rs` |
+| `erlang:nif_error/1` | `none` | `pure` | `inline` | Raises an exception of class `error` with a copy of the reason. | `O(n)` | `src/runtime/interpreter/bif/table.rs` |
 | `erlang:node/0` | `runtime.info` | `pure` | `inline` | Gives `nonode@nohost`. | `O(1)` | `src/runtime/mod.rs` |
 | `erlang:node/1` | `runtime.info` | `pure` | `inline` | Gives `nonode@nohost` for a pid. Another term gives a runtime error. | `O(1)` | `src/runtime/interpreter/bif/erlang.rs` |
 | `erlang:not/1` | `none` | `pure` | `inline` | Gives the boolean negation, or raises `badarg`. | `O(1)` | `src/runtime/interpreter/bif/table.rs` |
