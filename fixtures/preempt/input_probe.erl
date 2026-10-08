@@ -1,6 +1,7 @@
 -module(input_probe).
 -export([costs/1, longs/1, gcs/1]).
--export([measure/3, start/4, long_loop/5, send_loop/3, traced/3]).
+-export([measure/3, start/4, long_loop/5, send_loop/3, traced/3, owner/2, vanish_insert/3,
+         vanish_stop/1]).
 
 %% The reductions of the BIFs whose ERTS cost depends on their input, on
 %% the pinned ERTS JIT. A BIF reads the budget of the process
@@ -36,11 +37,24 @@ inputs() ->
      %% 1..Keys.
      {map_next,
       [{10, 0, []}, {33, 0, []}, {33, 1, iterator}, {100, 1, []}, {1000, 1, []},
-       {10000, 1, iterator}, {ordered, 200, 1}, {ordered, 200, 124}, {ordered, 200, 125}]}].
+       {10000, 1, iterator}, {ordered, 200, 1}, {ordered, 200, 124}, {ordered, 200, 125}]},
+     %% One object, [], a list of one object, lists of N objects, an
+     %% improper list of 100 objects, a list of 100 objects with an atom at
+     %% position 50, lists for a table that the caller cannot write, and a
+     %% list for a table that does not exist. A list of 16000 or more
+     %% objects traps.
+     {ets_insert,
+      [object, nil, one, {list, 2}, {list, 3}, {list, 8}, {list, 100}, {list, 1000},
+       {list, 10000}, {list, 15000}, {list, 16000}, improper, bad, {protected, 100},
+       {protected, 40000}, {missing, 100}]},
+     %% The number of persistent terms of the node. The numbers go up,
+     %% because no BIF of PBeam erases a persistent term.
+     {persistent_term_get, [0, 1, 100, 1000, 4000, 10000]}].
 
 %% The inputs of the BIFs that trap, for longs/1.
 long_inputs() ->
-    [{maps_merge, {{1, 40000}, {20000, 60000}}}].
+    [{maps_merge, {{1, 40000}, {20000, 60000}}}, {ets_insert, {list, 16000}},
+     {persistent_term_get, 10000}].
 
 %% Return the argument. A call through ?MODULE stops the compiler from
 %% folding a constant.
@@ -76,13 +90,53 @@ arg(integer_to_list, Name) -> integer(Name);
 arg(maps_merge, {First, Second}) -> {map(First), map(Second)};
 arg(map_next, {ordered, Size, Keys}) -> {keys(1, Keys), map({1, Size}), iterator};
 arg(map_next, {Size, Path, Acc}) -> {Path, map({1, Size}), Acc};
+arg(ets_insert, Input) -> {table(Input), objects(Input)};
+arg(persistent_term_get, _) -> none;
 arg(none, _) -> none.
+
+%% A public table of the caller, or a protected table of another process.
+table({protected, _}) -> element(2, owned_table(protected));
+table({missing, _}) -> missing;
+table(_) -> ets:new(input, [public]).
+
+owned_table(Access) ->
+    Owner = spawn(?MODULE, owner, [self(), Access]),
+    receive {table, Owner, Table} -> {Owner, Table} end.
+
+%% Make a table, give it to the collector, and keep it until stop.
+owner(Collector, Access) ->
+    Collector ! {table, self(), ets:new(owned, [Access])},
+    receive stop -> ok end.
+
+objects(object) -> {1, 1};
+objects(nil) -> [];
+objects(one) -> [{1, 1}];
+objects({_, Count}) -> pairs(1, Count);
+objects(improper) -> pairs(1, 100) ++ x;
+objects(bad) -> pairs(1, 49) ++ [x | pairs(51, 100)].
+
+%% Prepare the state of the node for an input. The caller puts the
+%% persistent terms, so that the measured process collects no garbage.
+prepare(persistent_term_get, Count) -> put_terms(Count);
+prepare(_, _) -> ok.
+
+%% Put the persistent terms {k, N} for N in 1..Count. A key that has the
+%% same value already changes nothing.
+put_terms(0) -> ok;
+put_terms(Count) ->
+    persistent_term:put({k, Count}, Count),
+    put_terms(Count - 1).
 
 %% Call a BIF with its argument. The list keeps the result, so the
 %% compiler keeps the call, and the call is a body call_ext.
 run(integer_to_list, Value) -> [integer_to_list(Value)];
 run(maps_merge, {First, Second}) -> [maps:merge(First, Second)];
 run(map_next, {Path, Map, Acc}) -> [erts_internal:map_next(Path, Map, Acc)];
+run(ets_insert, {Table, Objects}) ->
+    [try ets:insert(Table, Objects)
+     catch error:Reason -> Reason
+     end];
+run(persistent_term_get, _) -> [persistent_term:get()];
 run(none, _) -> [].
 
 %% The cost of the call instruction: call_ext of a light BIF costs 1.
@@ -97,6 +151,7 @@ costs(Opts) ->
      || {Bif, Inputs} <- inputs()].
 
 delta(Bif, Input, Opts) ->
+    prepare(Bif, Input),
     Pid = spawn_opt(?MODULE, measure, [self(), Bif, Input], Opts),
     receive {Pid, Delta} -> Delta end.
 
@@ -116,11 +171,14 @@ measure(Collector, Bif, Input) ->
 %% scheduler, each run is one turn of a process, so b runs between the
 %% traps of a.
 longs(Opts) ->
-    [{Bif, long_race(Bif, arg(Bif, Input), Opts)} || {Bif, Input} <- long_inputs()].
+    [{Bif, long_race(Bif, Input, Opts)} || {Bif, Input} <- long_inputs()]
+    ++ [{ets_vanish, vanish(Opts)}].
 
 %% The caller builds the argument, so that the reductions of the build do
 %% not change the runs.
-long_race(Bif, Arg, Opts) ->
+long_race(Bif, Input, Opts) ->
+    prepare(Bif, Input),
+    Arg = arg(Bif, Input),
     spawn(?MODULE, start, [self(), {long_loop, [Bif, Arg, 3]}, {send_loop, [5000]}, Opts]),
     receive First -> collect(5002, First, 1) end.
 
@@ -143,6 +201,22 @@ long_loop(P, T, Bif, Arg, N) ->
     P ! T,
     long_loop(P, T, Bif, Arg, N - 1).
 
+%% A process inserts 16000 objects into the table of another process. In
+%% its first turn, it checks the objects and starts to copy them. Another
+%% process then sends stop to the owner. In its second turn, the insert
+%% puts the objects into the table, and traps. The owner then exits, and
+%% the insert raises badarg in its third turn.
+vanish(Opts) ->
+    {Owner, Table} = owned_table(public),
+    spawn_opt(?MODULE, vanish_insert, [self(), Table, pairs(1, 16000)], Opts),
+    spawn_opt(?MODULE, vanish_stop, [Owner], Opts),
+    receive {inserted, Result} -> Result end.
+
+vanish_insert(Collector, Table, Objects) ->
+    Collector ! {inserted, run(ets_insert, {Table, Objects})}.
+
+vanish_stop(Owner) -> Owner ! stop.
+
 send_loop(_, _, 0) -> ok;
 send_loop(P, T, N) ->
     P ! T,
@@ -152,12 +226,13 @@ send_loop(P, T, N) ->
 %% and of each process a. Each must give 0, else a collection changes the
 %% reductions on ERTS.
 gcs(Opts) ->
-    [{Bif, Input, gc_count(measure, [Bif, Input], Opts)}
+    [{Bif, Input, gc_count(Bif, Input, measure, [Bif, Input], Opts)}
      || {Bif, Inputs} <- [{none, [none]} | inputs()], Input <- Inputs]
-    ++ [{Bif, gc_count(long_loop, [a, Bif, arg(Bif, Input), 3], Opts)}
+    ++ [{Bif, gc_count(Bif, Input, long_loop, [a, Bif, arg(Bif, Input), 3], Opts)}
         || {Bif, Input} <- long_inputs()].
 
-gc_count(Loop, Args, Opts) ->
+gc_count(Bif, Input, Loop, Args, Opts) ->
+    prepare(Bif, Input),
     Self = self(),
     {Pid, Ref} = spawn_opt(?MODULE, traced, [Self, Loop, Args], [monitor | Opts]),
     erlang:trace(Pid, true, [garbage_collection, {tracer, Self}]),

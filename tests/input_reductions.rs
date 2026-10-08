@@ -69,6 +69,49 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("{ordered,200,125}", 3997),
         ],
     ),
+    // A list of at least two objects uses 8 units for each reduction: 1
+    // for each object of the check, then 2 for each object of the insert
+    // when the units that remain are at least the number of objects, else
+    // 1 for each object of a copy and 2 for each object of the insert, with
+    // traps (`erl_db.c:1812-1949`, `2002-2116`, `2152-2336`). The cost of
+    // 15000 objects is more than the budget, and stops at 0. A bad object
+    // stops the check, and a table that the caller cannot write stops the
+    // insert, after a removal of the copies with 1 unit for each object. A
+    // table that does not exist costs nothing.
+    (
+        "ets_insert",
+        &[
+            ("object", 0),
+            ("nil", 0),
+            ("one", 0),
+            ("{list,2}", 0),
+            ("{list,3}", 1),
+            ("{list,8}", 3),
+            ("{list,100}", 37),
+            ("{list,1000}", 375),
+            ("{list,10000}", 3750),
+            ("{list,15000}", 3997),
+            ("{list,16000}", 8000),
+            ("improper", 12),
+            ("bad", 6),
+            ("{protected,100}", 12),
+            ("{protected,40000}", 15000),
+            ("{missing,100}", 0),
+        ],
+    ),
+    // One reduction for each persistent term, and a trap at the end of the
+    // budget (`erl_bif_persistent.c:324-356`, `805-900`).
+    (
+        "persistent_term_get",
+        &[
+            ("0", 0),
+            ("1", 1),
+            ("100", 100),
+            ("1000", 1000),
+            ("4000", 4000),
+            ("10000", 10000),
+        ],
+    ),
 ];
 
 /// The runs of `input_probe:longs/1`, measured on the pinned ERTS with
@@ -86,6 +129,32 @@ const LONGS: &[(&str, &[(&str, i64)])] = &[
             ("b", 1334),
             ("a", 1),
             ("b", 1665),
+        ],
+    ),
+    // 8000 reductions for each `ets:insert/2` of 16000 objects.
+    (
+        "ets_insert",
+        &[
+            ("b", 1334),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 998),
+        ],
+    ),
+    // 10000 reductions for each `persistent_term:get/0` of 10000 terms.
+    (
+        "persistent_term_get",
+        &[
+            ("b", 1334),
+            ("a", 1),
+            ("b", 2001),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 331),
         ],
     ),
 ];
@@ -133,7 +202,9 @@ fn longs_text() -> String {
             format!("{{{bif},[{}]}}", runs.join(","))
         })
         .collect();
-    format!("[{}]", bifs.join(","))
+    // The owner of the table exits while the insert of 16000 objects traps
+    // after the copy, so the insert raises `badarg` (`erl_db.c:2215-2253`).
+    format!("[{},{{ets_vanish,[badarg]}}]", bifs.join(","))
 }
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
@@ -171,7 +242,9 @@ fn charges_and_traps_the_input_dependent_bifs_as_pinned_erts_with_one_scheduler(
     // The reference run checks that the pinned `erl` is the JIT flavor, and
     // that no measured process collects garbage: a collection costs
     // reductions on ERTS (`erl_gc.c:218-230`), and PBeam has no process
-    // heap.
+    // heap. It first erases the persistent terms of the boot, because a
+    // PBeam run starts with none. `gcs/1` runs last, because it puts the
+    // persistent terms again.
     let reference = Command::new("erl")
         .args([
             "+S",
@@ -181,9 +254,12 @@ fn charges_and_traps_the_input_dependent_bifs_as_pinned_erts_with_one_scheduler(
             "fixtures/preempt",
             "-eval",
             &format!(
-                "jit = erlang:system_info(emu_flavor), O = {ERTS_OPTIONS}, \
-                 [0] = lists:usort([element(tuple_size(G), G) || G <- input_probe:gcs(O)]), \
-                 io:format(\"~w~n~w~n\", [input_probe:costs(O), input_probe:longs(O)]), halt()."
+                "{{module, M}} = code:ensure_loaded(input_probe), \
+                 jit = erlang:system_info(emu_flavor), O = {ERTS_OPTIONS}, \
+                 true = erts_internal:erase_persistent_terms(), \
+                 C = M:costs(O), L = M:longs(O), \
+                 [0] = lists:usort([element(tuple_size(G), G) || G <- M:gcs(O)]), \
+                 io:format(\"~w~n~w~n\", [C, L]), halt()."
             ),
         ])
         .output()

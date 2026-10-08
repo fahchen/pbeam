@@ -12,6 +12,7 @@ mod ets;
 mod lists;
 mod maps;
 mod os;
+mod persistent_term;
 mod re;
 mod unicode;
 
@@ -272,7 +273,7 @@ impl BeamProgram {
     /// Run the export of a BIF trap with the arguments of the trap, as the
     /// process does when it runs again after [`BifResult::TrapBif`]. Most
     /// BIFs trap to their own export with new arguments, for example
-    /// `lists:member/2` with the rest of the list. Two exports are not
+    /// `lists:member/2` with the rest of the list. These exports are not
     /// `bif.tab` entries, and no Erlang code can call them:
     ///
     /// - `erlang:length/2`, with the rest of the list and the count so far.
@@ -282,6 +283,16 @@ impl BeamProgram {
     /// - `erlang:'++'/3`, with the original lists and the number of elements
     ///   done. ERTS traps to `'++'/2` with a magic reference to the same state
     ///   (`erl_bif_lists.c:91-109`, `298-333`).
+    /// - `maps:merge_trap/2`, with the merged map and the steps that remain
+    ///   ([`maps::merge_trap`]). ERTS traps to `maps:merge_trap/1` with a
+    ///   magic reference to the walk state (`erl_map.c:134-136`).
+    /// - `persistent_term:get_all_trap/2`, with the result and the number of
+    ///   pairs that remain ([`persistent_term::get_all_trap`]). ERTS keeps
+    ///   the table and the result so far (`erl_bif_persistent.c:263-265`).
+    /// - `ets:insert/4`, with the table reference, the objects, the units
+    ///   done, and the key position ([`ets::insert_list`]). ERTS traps to
+    ///   `ets:insert/2` with a magic reference to the YCF state
+    ///   (`erl_db.c:2297-2332`).
     ///
     /// # Examples
     ///
@@ -297,6 +308,23 @@ impl BeamProgram {
         function: &str,
         arguments: Vec<Term>,
     ) -> Result<BifResult, BeamError> {
+        if let (
+            "ets",
+            "insert",
+            [
+                Term::Reference(id),
+                objects,
+                Term::Integer(done),
+                Term::Integer(keypos),
+            ],
+        ) = (module, function, arguments.as_slice())
+        {
+            let mut context = BifContext {
+                program: self,
+                scheduler,
+            };
+            return ets::insert_list(&mut context, *id, objects, *done as usize, *keypos as i32);
+        }
         let process = scheduler.current_process_mut();
         match (module, function, arguments.as_slice()) {
             ("erlang", "length", [list, Term::Integer(count)]) => {
@@ -308,6 +336,9 @@ impl BeamProgram {
             ("maps", "merge_trap", [merged, Term::Integer(steps)]) => {
                 Ok(maps::merge_trap(process, merged.clone(), *steps as usize))
             }
+            ("persistent_term", "get_all_trap", [all, Term::Integer(entries)]) => Ok(
+                persistent_term::get_all_trap(process, all.clone(), *entries as usize),
+            ),
             _ => self.bif(scheduler, module, function, arguments),
         }
     }
