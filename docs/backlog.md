@@ -243,11 +243,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - A test runs `BeamProgram::load` on each pinned OTP 29.1.1 `ebin` module that loads today, so that a decode change that breaks a module fails a test. Today only targeted fixtures guard the loader.
 - **Source:** review of PR #121 (#110).
 
-### Move large unit test modules into their own files
-
-- For example `src/runtime/interpreter/tests.rs` with `#[cfg(test)] mod tests;`, with no behavior change.
-- **Source:** owner question on PR #119 (`test_atom`).
-
 ### Correct the stale "no gc_bif2" fixture comment
 
 - `fixtures/user_drv/user_drv_probe.erl` says PBeam has no `gc_bif2`, but the loader now decodes it.
