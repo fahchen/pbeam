@@ -93,6 +93,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** <https://github.com/fahchen/pbeam/pull/174#discussion_r4188917531>
 
+## 20261006: Label measured verification by revision
+
+**Problem:** A pull request described measurements from an older revision as if they applied to the current head and listed coverage totals without revision labels.
+
+**Root Cause:** The verification section was updated without tying each result to the revision that produced it.
+
+**Fix:** Name the tested revision for every measurement and identify the check that verifies the final head.
+
+**Guardrail:** Before publishing a pull request, match each verification result to its revision and mark the final-head result.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/187#issuecomment-6006626861>
+
 ## 20261006: Verify task references in difference records
 
 **Problem:** A difference row named a prerequisite task as the owner of a follow-up that the task does not implement.
