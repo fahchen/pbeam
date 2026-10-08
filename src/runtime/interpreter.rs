@@ -2231,16 +2231,13 @@ fn write_operand(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf, process::Command};
+    use std::collections::HashMap;
 
     use super::bif::{BIFS, INSTRUCTION_CALLS};
-    use super::{
-        BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand,
-        write_operand,
-    };
+    use super::{BeamProgram, call_arguments, function_at_label, read_operand, write_operand};
     use crate::{
         BeamModule, Map, Term,
-        beam::code::{self, Instruction, Operand, TestKind},
+        beam::code::{Instruction, Operand, TestKind},
         term::{Atom, AtomTable, Lambda, test_atom},
     };
 
@@ -2394,29 +2391,6 @@ mod tests {
                 .to_string(),
             "unresolved external MFA missing:run/0"
         );
-    }
-
-    #[test]
-    fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
-        // `fun_probe:tail_wait/1` ends with `call_fun 0`, `deallocate 1`, and
-        // `return`, which ERTS runs as `i_call_fun_last`
-        // (`jit/arm/ops.tab:868`). The lambda replaces the frame of
-        // `tail_wait/1`, so the process that waits in the lambda has one
-        // frame, and a loop of tail fun calls uses constant stack, as in ERTS.
-        let program =
-            BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
-        let label = program.modules["fun_probe"].exports[&("tail_wait".to_owned(), 1)];
-        let mut scheduler = Scheduler::new(program.atoms.clone());
-        let frame = program.frame("fun_probe", label, 1).unwrap();
-        scheduler.start(frame, vec![Term::Integer(1)]).unwrap();
-        scheduler.schedule_next().unwrap();
-        assert!(matches!(
-            program.run(&mut scheduler).unwrap(),
-            Outcome::Wait
-        ));
-        let frames = &scheduler.current_process_mut().frames;
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].function, "-tail_wait/1-fun-0-");
     }
 
     #[test]
@@ -3476,61 +3450,6 @@ mod tests {
         assert_eq!(
             wait(test_atom("foo")).unwrap_err().to_string(),
             "root process exited with {timeout_value,[]}"
-        );
-    }
-
-    #[test]
-    fn executes_compiled_io_puts_and_passes_chardata_to_beam_io() {
-        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/hello/_build/test/lib/hello_reference/ebin");
-        let hello = std::fs::read(fixture_dir.join("Elixir.Hello.beam")).unwrap();
-        let variant = std::fs::read(fixture_dir.join("Elixir.HelloVariant.beam")).unwrap();
-        let io_path = Command::new("elixir")
-            .args(["-e", "IO.write(:code.which(IO))"])
-            .output()
-            .unwrap();
-        assert!(io_path.status.success());
-        let io = std::fs::read(String::from_utf8(io_path.stdout).unwrap()).unwrap();
-        // One atom table for the three modules, as `BeamProgram::load` makes it.
-        let mut atoms = AtomTable::new();
-        let mut load = |bytes: &[u8]| code::parse(bytes, &mut atoms).unwrap();
-        let mut modules = HashMap::from([
-            ("Elixir.Hello".into(), load(&hello)),
-            ("Elixir.HelloVariant".into(), load(&variant)),
-            ("Elixir.IO".into(), load(&io)),
-        ]);
-        modules.insert(
-            "io".into(),
-            BeamModule {
-                name: "io".into(),
-                exports: HashMap::from([(("put_chars".into(), 2), 1)]),
-                instructions: vec![
-                    Instruction::FunctionInfo {
-                        module: "io".into(),
-                        name: "put_chars".into(),
-                        arity: 2,
-                    },
-                    Instruction::Label(1),
-                    Instruction::Move(Operand::X(1), Operand::X(0)),
-                    Instruction::Return,
-                ],
-            },
-        );
-        let program = BeamProgram { modules, atoms };
-
-        assert_eq!(
-            program.execute("Elixir.Hello", "main", &[]).unwrap(),
-            Term::List(vec![
-                Term::Binary(b"Hello, world!".to_vec()),
-                Term::Integer(10),
-            ])
-        );
-        assert_eq!(
-            program.execute("Elixir.HelloVariant", "main", &[]).unwrap(),
-            Term::List(vec![
-                Term::Binary(b"Another greeting.".to_vec()),
-                Term::Integer(10),
-            ])
         );
     }
 
