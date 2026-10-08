@@ -1,9 +1,10 @@
 -module(preempt_probe).
--export([sends/0, calls/0, exits/0, gcs/0, start/3, traced/3, id/1]).
+-export([sends/0, calls/0, yields/0, exits/0, gcs/0, start/3, traced/3, id/1]).
 -export([send_op/3, send_ext/3, send_apply/3, send_fun/3, send_only/3, send_apply_only/3]).
 -export([observe/2, burn_return/1, send_tag/1]).
 -export([call_light/3, call_heavy/3, call_apply/3, call_fun/3, call_only/3,
          call_last/3, call_apply_only/3, call_heavy_only/3, call_guard/3]).
+-export([yield_op/3, yield_only/3, yield_last/3, yield_apply/3]).
 
 %% Two processes a and b run the same busy loop. Each iteration sends the
 %% tag of the process to the collector. The collector returns the run
@@ -25,6 +26,11 @@ calls() ->
     [{Loop, race(Loop, 2000)}
      || Loop <- [call_light, call_heavy, call_apply, call_fun, call_only, call_last,
                  call_apply_only, call_heavy_only, call_guard]].
+
+%% The loops with erlang:yield/0 through call_ext, call_ext_only,
+%% call_ext_last, and apply/3.
+yields() ->
+    [{Loop, race(Loop, 30)} || Loop <- [yield_op, yield_only, yield_last, yield_apply]].
 
 %% Start a and b from a new process, so that the reductions of the caller do
 %% not change the order of the two spawns.
@@ -184,6 +190,43 @@ call_guard(P, T, Tuple, N) ->
     P ! T,
     call_guard(P, T, Tuple, N - tuple_size(Tuple)).
 
+%% call_ext of erlang:yield/0.
+yield_op(_, _, 0) -> ok;
+yield_op(P, T, N) ->
+    P ! T,
+    true = erlang:yield(),
+    yield_op(P, T, N - 1).
+
+%% call_ext_only of erlang:yield/0.
+yield_only(_, _, 0) -> ok;
+yield_only(P, T, N) ->
+    P ! T,
+    true = only_yield(),
+    yield_only(P, T, N - 1).
+
+only_yield() -> erlang:yield().
+
+%% call_ext_last of erlang:yield/0.
+yield_last(_, _, 0) -> ok;
+yield_last(P, T, N) ->
+    P ! T,
+    true = last_yield(),
+    yield_last(P, T, N - 1).
+
+last_yield() ->
+    body(),
+    erlang:yield().
+
+%% erlang:yield/0 through apply/3 runs yield/0 of the erlang module.
+yield_apply(P, T, N) ->
+    yield_apply(P, T, id(erlang), N).
+
+yield_apply(_, _, _, 0) -> ok;
+yield_apply(P, T, M, N) ->
+    P ! T,
+    true = apply(M, yield, []),
+    yield_apply(P, T, M, N - 1).
+
 %% The order of the 'DOWN' message of a process that returns from its
 %% last frame and a message that another process sends after it. With
 %% 3997, the return uses the last reduction of the budget: the process
@@ -220,7 +263,8 @@ gcs() ->
     [{Loop, gc_count(Loop)}
      || Loop <- [send_op, send_ext, send_apply, send_fun, send_only, send_apply_only,
                  call_light, call_heavy, call_apply, call_fun, call_only, call_last,
-                 call_apply_only, call_heavy_only, call_guard]].
+                 call_apply_only, call_heavy_only, call_guard, yield_op, yield_only, yield_last,
+                 yield_apply]].
 
 gc_count(Loop) ->
     Self = self(),

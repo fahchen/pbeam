@@ -1,5 +1,8 @@
+mod common;
+
 use std::process::Command;
 
+use common::pinned_beam;
 use pbeam_runtime::{BeamProgram, Term};
 
 const PREEMPT_PROBE: &[u8] = include_bytes!("../fixtures/preempt/preempt_probe.beam");
@@ -128,5 +131,87 @@ fn interleaves_two_busy_processes_as_pinned_erts_with_one_scheduler() {
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         format!("{}\n{}\n", runs_text(SENDS), runs_text(CALLS))
+    );
+}
+
+/// Return a term as `io:format("~w")` prints it, for the atoms, integers,
+/// lists, and tuples of the probe results.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(text(&Term::List(vec![Term::Integer(1)])), "[1]");
+/// ```
+fn text(term: &Term) -> String {
+    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+    match term {
+        Term::Atom(atom) => match atom.name() {
+            "fun" => "'fun'".to_owned(),
+            name => name.to_owned(),
+        },
+        Term::Integer(value) => value.to_string(),
+        Term::List(terms) => format!("[{}]", join(terms)),
+        Term::Tuple(terms) => format!("{{{}}}", join(terms)),
+        other => panic!("unexpected term {other:?}"),
+    }
+}
+
+/// Return the runs of a race whose runs of `a` and `b` all have the same
+/// lengths, as `~w` prints them.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(same_runs(&[(1, 2)]), "[{a,1},{b,1},{a,1},{b,1}]");
+/// ```
+fn same_runs(runs: &[(i64, usize)]) -> String {
+    let runs: Vec<String> = runs
+        .iter()
+        .flat_map(|&(length, count)| vec![format!("{{a,{length}}},{{b,{length}}}"); count])
+        .collect();
+    format!("[{}]", runs.join(","))
+}
+
+#[test]
+fn runs_erlang_yield_as_the_pinned_erts_instruction() {
+    // `i_yield` writes `true` and always switches out the process with no
+    // reduction cost (`jit/arm/ops.tab:664-666`;
+    // `jit/arm/instr_common.cpp:3121-3124`; `jit/arm/instr_call.cpp:30-36`).
+    // Through `apply/3`, `yield/0` of `erlang.beam` runs.
+    let yields = format!(
+        "[{}]",
+        ["yield_op", "yield_only", "yield_last", "yield_apply"]
+            .map(|name| format!("{{{name},{}}}", same_runs(&[(1, 30)])))
+            .join(",")
+    );
+
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PREEMPT_PROBE]).unwrap();
+    let run = |function| text(&program.execute("preempt_probe", function, &[]).unwrap());
+    assert_eq!(run("yields"), yields);
+
+    // The reference run checks that the pinned `erl` is the JIT flavor.
+    // `preempt_probe:gcs/0` in the test above checks that no loop collects
+    // garbage.
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-pa",
+            "fixtures/preempt",
+            "-eval",
+            "jit = erlang:system_info(emu_flavor), \
+             io:format(\"~w~n\", [preempt_probe:yields()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{yields}\n")
     );
 }
