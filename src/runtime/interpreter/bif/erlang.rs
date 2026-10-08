@@ -1700,12 +1700,14 @@ fn is_process_info_item(item: &Term) -> bool {
 /// `process_info_aux` does. For a live process, return
 /// `{message_queue_len, N}`, where `N` counts the messages of the mailbox and
 /// no receive marker, as `sig_qs.mq_len` does (`erl_bif_info.c:1742-1754`).
-/// ERTS first moves the signal queue into the message queue
-/// (`erl_bif_info.c:1355-1356, 1405`), and PBeam puts each message into the
-/// mailbox at once. For a live process, return `{reductions, N}`, where `N`
-/// is the reduction total of the process, and for the calling process also
-/// the reductions of its current turn, as `erl_bif_info.c:2114-2121` does.
-/// For the calling process, return
+/// For each item of a live process, first fetch the messages that arrived,
+/// with no cost. ERTS fetches the messages of the caller for each item
+/// (`erl_bif_info.c:1355-1356`, `1237-1244`). Another process with messages
+/// that it did not fetch gets a process-info signal, and it fetches them
+/// when it handles the signal (`erl_bif_info.c:1384-1390`). For a live
+/// process, return `{reductions, N}`, where `N` is the reduction total of
+/// the process, and for the calling process also the reductions of its
+/// current turn, as `erl_bif_info.c:2114-2121` does. For the calling process, return
 /// `{current_stacktrace, []}`, because PBeam records no stack frames. The
 /// `current_stacktrace` of another process, a list of items, and any other
 /// item give a runtime error. Each item of a live process costs the caller
@@ -1742,9 +1744,10 @@ pub(super) fn process_info(
     };
     let current = context.scheduler.current_process_mut().id;
     let current_reductions = context.scheduler.current_reductions();
-    let Some(target) = context.scheduler.process(*id) else {
+    let Some(target) = context.scheduler.process_mut(*id) else {
         return Ok(Value(Term::static_atom("undefined")));
     };
+    target.mailbox.fetch();
     let info = match item {
         Term::Atom(name) => match (name.name(), &target.registered_name) {
             // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.

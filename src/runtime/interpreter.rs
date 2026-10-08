@@ -29,6 +29,11 @@ const APPLY_MAX_ARGUMENTS: usize = 1023;
 /// raises `system_limit`.
 const APPLY_FUN_MAX_ARGUMENTS: usize = 1022;
 
+/// The reductions of a fetch that `loop_rec` does at the end of the fetched
+/// messages: `erts_proc_sig_receive_helper` uses 4 for each fetch
+/// (`erl_proc_sig_queue.c:7771-7799`).
+const RECEIVE_FETCH_REDUCTIONS: i32 = 4;
+
 #[derive(Debug)]
 pub struct BeamProgram {
     /// The loaded modules by name.
@@ -1000,14 +1005,33 @@ impl BeamProgram {
                 Instruction::LoopReceive {
                     fail_label,
                     destination,
-                } => match process.mailbox.current().cloned() {
-                    Some(term) => write(process, destination, term)?,
-                    None => jump(module, process, *fail_label)?,
-                },
+                } => {
+                    // `emit_i_loop_rec_shared` switches out before the peek
+                    // when the budget is 0 or less, and runs `loop_rec`
+                    // again (`jit/arm/instr_msg.cpp:120-127`, `186-197`).
+                    // At the end of the fetched messages, it fetches and
+                    // pays for the fetch, also when no message arrived
+                    // (`jit/arm/instr_msg.cpp:131-168`).
+                    if process.fcalls <= 0 {
+                        current_frame(process).next_instruction -= 1;
+                        return Ok(Outcome::Yield);
+                    }
+                    if process.mailbox.current().is_none() {
+                        process.fcalls -= RECEIVE_FETCH_REDUCTIONS;
+                        process.mailbox.fetch();
+                    }
+                    match process.mailbox.current().cloned() {
+                        Some(term) => write(process, destination, term)?,
+                        None => jump(module, process, *fail_label)?,
+                    }
+                }
                 Instruction::LoopReceiveEnd(label) => {
+                    // `emit_loop_rec_end` costs 1 and does not switch out
+                    // (`jit/arm/instr_msg.cpp:258-268`).
                     if !process.mailbox.save_next() {
                         return Err(error("loop_rec_end without a current message"));
                     }
+                    process.fcalls -= 1;
                     jump(module, process, *label)?;
                 }
                 Instruction::RemoveMessage => {
