@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use super::bif::{BIFS, INSTRUCTION_CALLS};
-use super::{BeamProgram, call_arguments, function_at_label, read_operand, write_operand};
+use super::{
+    BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand,
+    write_operand,
+};
 use crate::{
     BeamModule, Map, Term,
     beam::code::{Instruction, Operand, TestKind},
@@ -158,6 +161,31 @@ fn calls_an_external_fun_of_a_missing_function_as_call_ext() {
             .to_string(),
         "unresolved external MFA missing:run/0"
     );
+}
+
+#[test]
+fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
+    // `fun_probe:tail_wait/1` ends with `call_fun 0`, `deallocate 1`, and
+    // `return`, which ERTS runs as `i_call_fun_last`
+    // (`jit/arm/ops.tab:868`). The lambda replaces the frame of
+    // `tail_wait/1`, so the process that waits in the lambda has one
+    // frame, and a loop of tail fun calls uses constant stack, as in ERTS.
+    // This test loads a `.beam` file but stays a unit test: it reads the
+    // frames of the scheduler, which `tests/` cannot see.
+    let program =
+        BeamProgram::load(&[include_bytes!("../../../fixtures/funs/fun_probe.beam")]).unwrap();
+    let label = program.modules["fun_probe"].exports[&("tail_wait".to_owned(), 1)];
+    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let frame = program.frame("fun_probe", label, 1).unwrap();
+    scheduler.start(frame, vec![Term::Integer(1)]).unwrap();
+    scheduler.schedule_next().unwrap();
+    assert!(matches!(
+        program.run(&mut scheduler).unwrap(),
+        Outcome::Wait
+    ));
+    let frames = &scheduler.current_process_mut().frames;
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].function, "-tail_wait/1-fun-0-");
 }
 
 #[test]
