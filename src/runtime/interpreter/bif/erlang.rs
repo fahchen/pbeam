@@ -4,7 +4,9 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
 use crate::runtime::local_node;
-use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, MonitorOptions, MonitorTarget};
+use crate::runtime::process::Flush;
+use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
+use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use crate::term::{Fun, MAX_ATOM_CHARACTERS};
@@ -402,16 +404,20 @@ pub(super) fn raise(
 
 /// Run `erlang:exit(Id, Reason)`: send an exit signal to a local pid, as
 /// ERTS `send_exit_signal_bif` (`bif.c:1750-1772`) does, and return `true`.
-/// A signal that ends the caller gives [`BifResult::Exited`] instead.
+/// The receiver acts on the signal when it handles it (see
+/// [`Scheduler::handle_signals`]).
 ///
-/// A reference sends the signal to the owner of its active alias, with the
-/// caller as the sender (`erl_proc_sig_queue.c:1650-1658`). A reference that
-/// is not an active alias gives `true` and sends nothing: the owner ignores
-/// the signal (`erl_proc_sig_queue.c:4659-4672`). A reference is never
-/// `exit2_suicide`, so `normal` through the alias of the caller is ignored
-/// without `trap_exit`. The reference of a NIF resource also gives `true`:
-/// in ERTS it is a magic reference, and `is_internal_ref` is true for it
-/// (`erl_term.h:1064-1065`).
+/// A reference sends the signal to the owner of the alias, with the caller
+/// as the sender, and the owner ignores it when the alias is not active
+/// (`erl_proc_sig_queue.c:1650-1658`, `4659-4672`). A reference that no
+/// `erlang:monitor/3` made with an alias option sends nothing. The
+/// reference of a NIF resource also gives `true`: in ERTS it is a magic
+/// reference, and `is_internal_ref` is true for it (`erl_term.h:1064-1065`).
+///
+/// A signal to the caller with `kill`, or without `trap_exit`, ends the
+/// caller before `exit/2` returns (`exit2_suicide`): `normal` then also ends
+/// it. The caller fetches its signals and traps to `erts_internal:await_exit/0`,
+/// which handles them until the signal ends the caller (`bif.c:1698-1716`).
 ///
 /// Each other term raises `error:badarg` (`bif.c:1864-1866`). PBeam cannot
 /// represent a port or a remote pid.
@@ -419,49 +425,47 @@ pub(super) fn raise(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = exit(&mut context, &Term::Reference(reference), &boom)?;
+/// let result = exit(&mut context, &Term::Reference(reference), &boom);
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let result = exit(&mut context, &Term::Pid(caller), &kill)?;
-/// assert!(matches!(result, BifResult::Exited(Term::Atom(atom)) if atom.name() == "killed"));
-/// assert!(matches!(exit(&mut context, &foo, &boom)?, BifResult::Raise { .. }));
+/// let result = exit(&mut context, &Term::Pid(caller), &kill);
+/// assert!(matches!(result, BifResult::TrapBif { function: "await_exit", .. }));
+/// assert!(matches!(exit(&mut context, &foo, &boom), BifResult::Raise { .. }));
 /// ```
-///
-/// # Errors
-///
-/// An abnormal exit of the receiver to a linked process that does not trap
-/// exits is not supported. An exit signal through an alias of the caller
-/// that ends the caller is not supported: ERTS ends the caller only when
-/// it next handles signals, after `exit/2` returns `true`.
-pub(super) fn exit(
-    context: &mut BifContext<'_>,
-    id: &Term,
-    reason: &Term,
-) -> Result<BifResult, BeamError> {
-    let target = match id {
-        Term::Pid(target) => *target,
+pub(super) fn exit(context: &mut BifContext<'_>, id: &Term, reason: &Term) -> BifResult {
+    let scheduler = &mut *context.scheduler;
+    let caller = scheduler.current_process_mut();
+    let (caller_id, trap_exit) = (caller.id, caller.trap_exit);
+    let (target, alias) = match id {
+        Term::Pid(target) => (*target, None),
         Term::Reference(reference) => {
-            let Some(owner) = context.scheduler.alias_owner(*reference) else {
-                return Ok(Value(Term::static_atom("true")));
+            let Some(owner) = scheduler.alias_owner(*reference) else {
+                return Value(Term::static_atom("true"));
             };
-            let caller = context.scheduler.current_process_mut();
-            let trapped = caller.trap_exit && *reason != Term::static_atom("kill");
-            if owner == caller.id && !trapped {
-                if !caller.trap_exit && *reason == Term::static_atom("normal") {
-                    return Ok(Value(Term::static_atom("true")));
-                }
-                // ponytail: no signal queue yet (#10); ERTS ends the caller at its next signal handling.
-                return Err(error(
-                    "unsupported exit signal through an alias of the caller",
-                ));
-            }
-            owner
+            (owner, Some(*reference))
         }
-        _ => return Ok(BifResult::badarg()),
+        _ => return BifResult::badarg(),
     };
-    Ok(match context.scheduler.send_exit(target, reason.clone())? {
-        Some(reason) => BifResult::Exited(reason),
-        None => Value(Term::static_atom("true")),
-    })
+    let suicide = alias.is_none()
+        && target == caller_id
+        && (*reason == Term::static_atom("kill") || !trap_exit);
+    let exit = Signal::Exit {
+        from: caller_id,
+        reason: reason.clone(),
+        linked: false,
+        normal_kills: suicide,
+        alias,
+    };
+    // A receiver that does not exist drops the signal.
+    let _ = scheduler.send_signal(Some(caller_id), target, exit);
+    if !suicide {
+        return Value(Term::static_atom("true"));
+    }
+    scheduler.current_process_mut().mailbox.fetch();
+    BifResult::TrapBif {
+        module: "erts_internal",
+        function: "await_exit",
+        arguments: Vec::new(),
+    }
 }
 
 /// Run `erlang:demonitor(Reference, Options)` as ERTS `demonitor_2`
@@ -1462,13 +1466,13 @@ enum Sent {
 /// (`bif.c:2458-2695`) does. Return `None` for a `to` that `do_send`
 /// rejects with `SEND_BADARG`.
 ///
-/// - A pid gets the message. ERTS drops a message to a process that does
-///   not exist.
-/// - A reference gives the message to the owner of its active alias, and
-///   drops it when the reference is not an active alias
-///   (`erl_proc_sig_queue.c:6026-6041`). A message through a
-///   `reply_demonitor` alias ends the alias (see
-///   [`Scheduler::alias_message_receiver`]).
+/// - A pid gets the message from the caller (see
+///   [`Scheduler::send_message`]). ERTS drops a message to a process that
+///   does not exist or exits.
+/// - A reference sends the message as a signal to the owner of the alias,
+///   which drops it when the alias is not active
+///   (`erl_proc_sig_queue.c:6009-6075`; see
+///   [`Scheduler::send_alias_message`]).
 /// - An atom gives the message to its registered process. A name that no
 ///   process has gives `None`. PBeam has no ports.
 /// - `{Name, Node}` with two atoms and the local node gives the message to
@@ -1489,7 +1493,10 @@ enum Sent {
 fn deliver_to(scheduler: &mut Scheduler, to: &Term, message: Term) -> Option<Sent> {
     let target = match to {
         Term::Pid(pid) => Some(*pid),
-        Term::Reference(reference) => scheduler.alias_message_receiver(*reference),
+        Term::Reference(reference) => {
+            scheduler.send_alias_message(*reference, message);
+            return Some(Sent::Local);
+        }
         Term::Atom(name) => Some(scheduler.whereis(name.name())?),
         Term::Tuple(elements) => match elements.as_slice() {
             [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
@@ -1501,7 +1508,8 @@ fn deliver_to(scheduler: &mut Scheduler, to: &Term, message: Term) -> Option<Sen
         _ => return None,
     };
     if let Some(target) = target {
-        scheduler.deliver(target, message);
+        let caller = scheduler.current_process_mut().id;
+        scheduler.send_message(caller, target, message);
     }
     Some(Sent::Local)
 }
@@ -1796,45 +1804,47 @@ fn is_process_info_item(item: &Term) -> bool {
     }
 }
 
-/// Run `erlang:process_info/2`. As `process_info_bif` (`erl_bif_info.c`)
-/// does, first raise `badarg` when `item` is not an item or a proper list of
-/// items, then raise `badarg` when `process` is not a pid. Return
-/// `undefined` for each valid item when the process is not alive
-/// (`erl_bif_info.c:1384-1386`). For a live process, return
-/// `{registered_name, Name}`, or `[]` when the process has no name, as
-/// `process_info_aux` does. For a live process, return
-/// `{message_queue_len, N}`, where `N` counts the messages of the mailbox and
-/// no receive marker, as `sig_qs.mq_len` does (`erl_bif_info.c:1742-1754`).
-/// For each item of a live process, first fetch the messages that arrived,
-/// with no cost. ERTS fetches the messages of the caller for each item
-/// (`erl_bif_info.c:1355-1356`, `1237-1244`). Another process with messages
-/// that it did not fetch gets a process-info signal, and it fetches them
-/// when it handles the signal (`erl_bif_info.c:1384-1390`). For a live
-/// process, return `{reductions, N}`, where `N` is the reduction total of
-/// the process, and for the calling process also the reductions of its
-/// current turn, as `erl_bif_info.c:2114-2121` does. For the calling process, return
-/// `{current_stacktrace, []}`, because PBeam records no stack frames. The
-/// `current_stacktrace` of another process, a list of items, and any other
-/// item give a runtime error. Each item of a live process costs the caller
-/// one reduction after the read (`erl_bif_info.c:1424`, `1601`).
+/// Run `erlang:process_info/2` as `process_info_bif`
+/// (`erl_bif_info.c:1273-1502`) does. First raise `badarg` when `item` is
+/// not an item or a proper list of items, then raise `badarg` when
+/// `process` is not a pid. The items that PBeam supports are in
+/// [`ProcessState::info`].
+///
+/// - For the caller, first handle the signals that the caller may have sent
+///   to itself, up to a flush signal (`pi_maybe_flush_signals`,
+///   `erl_bif_info.c:1198-1268`); without such signals only fetch. The BIF
+///   runs again after a switch when its reductions are used up, and a
+///   signal can end the caller.
+/// - Another process that does not exist gives `undefined`
+///   (`erl_bif_info.c:1384-1386`). A process that exits, or that has
+///   signals or messages that it did not handle, gets a process-info
+///   request: the save pointer of the caller goes to the end of its queue
+///   (`erts_msgq_set_save_end`), and the BIF traps to
+///   `erts_internal:await_result/1` for the reply (`erl_bif_info.c:1478-1500`).
+/// - Else the BIF reads the item, and traps to
+///   `erlang:bif_handle_signals_return/2` when the caller has incoming
+///   signals (`erl_bif_info.c:1441-1443`).
+///
+/// A read of an item costs the caller one reduction after the read
+/// (`erl_bif_info.c:1424`, `1601`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let process = Term::Pid(context.scheduler.current_process_mut().id);
-/// let item = Term::static_atom("current_stacktrace");
-/// let info = process_info(&mut context, &process, &item)?;
-/// assert!(matches!(info, BifResult::Value(Term::Tuple(elements)) if elements[1] == Term::List(vec![])));
 /// let name = process_info(&mut context, &process, &Term::static_atom("registered_name"))?;
 /// assert!(matches!(name, BifResult::Value(Term::List(elements)) if elements.is_empty()));
-/// let length = process_info(&mut context, &process, &Term::static_atom("message_queue_len"))?;
-/// assert!(matches!(length, BifResult::Value(Term::Tuple(elements)) if elements[1] == Term::Integer(0)));
-/// let dead = process_info(&mut context, &Term::Pid(ProcessId(99)), &item)?;
+/// let dead = process_info(&mut context, &Term::Pid(ProcessId(99)), &name_item)?;
 /// assert!(matches!(dead, BifResult::Value(Term::Atom(atom)) if atom.name() == "undefined"));
 /// let bogus = process_info(&mut context, &process, &Term::static_atom("bogus_item"))?;
 /// assert!(matches!(bogus, BifResult::Raise { .. }));
 /// assert!(process_info(&mut context, &process, &Term::static_atom("status")).is_err());
 /// ```
+///
+/// # Errors
+///
+/// A list of items, another item, and the `current_stacktrace` of another
+/// process give a runtime error.
 pub(super) fn process_info(
     context: &mut BifContext<'_>,
     process: &Term,
@@ -1847,51 +1857,131 @@ pub(super) fn process_info(
     let (true, Term::Pid(id)) = (valid, process) else {
         return Ok(BifResult::badarg());
     };
-    let current = context.scheduler.current_process_mut().id;
-    let current_reductions = context.scheduler.current_reductions();
-    let Some(target) = context.scheduler.process_mut(*id) else {
-        return Ok(Value(Term::static_atom("undefined")));
-    };
-    target.mailbox.fetch();
-    let info = match item {
-        Term::Atom(name) => match (name.name(), &target.registered_name) {
-            // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
-            ("current_stacktrace", _) if *id == current => {
-                Some(Term::Tuple(vec![item.clone(), Term::List(Vec::new())]))
-            }
-            ("registered_name", Some(registered)) => Some(Term::Tuple(vec![
-                item.clone(),
-                Term::Atom(registered.clone()),
-            ])),
-            ("registered_name", None) => Some(Term::List(Vec::new())),
-            ("message_queue_len", _) => Some(Term::Tuple(vec![
-                item.clone(),
-                Term::Integer(target.mailbox.message_count() as i64),
-            ])),
-            ("reductions", _) => {
-                let current = if *id == current {
-                    current_reductions
-                } else {
-                    0
-                };
-                let total = i64::try_from(target.reductions + current)
-                    .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?;
-                Some(Term::Tuple(vec![item.clone(), Term::Integer(total)]))
-            }
-            _ => None,
-        },
-        _ => None,
-    };
-    // `process_info_aux` costs 1 for each item (`erl_bif_info.c:1601`), and
-    // `process_info_bif` uses the cost after it reads the items
-    // (`erl_bif_info.c:1417-1424`).
-    context.scheduler.current_process_mut().bump_reductions(1);
+    let scheduler = &mut *context.scheduler;
+    let caller = scheduler.current_process_mut();
     // ponytail: lists of items, other items, and the frames of another process need more state; see "BIF arguments" in docs/erts-differences.md.
-    info.map(Value).ok_or_else(|| {
+    let unsupported = || {
         error(format!(
             "unsupported erlang:process_info/2 arguments {process:?}, {item:?}"
         ))
-    })
+    };
+    if *id == caller.id {
+        if caller.flush == Flush::None && !caller.self_signals {
+            if caller.mailbox.has_outer_messages() {
+                caller.mailbox.fetch();
+            }
+        } else {
+            match scheduler.flush_signals()? {
+                Flushed::Done => {}
+                Flushed::Exited(reason) => return Ok(BifResult::Exited(reason)),
+                Flushed::Yield => {
+                    return Ok(BifResult::TrapBif {
+                        module: "erlang",
+                        function: "process_info",
+                        arguments: vec![process.clone(), item.clone()],
+                    });
+                }
+            }
+        }
+        let current = scheduler.current_reductions();
+        let caller = scheduler.current_process_mut();
+        let messages = caller.mailbox.message_count();
+        let info = caller
+            .info(item, current, messages, true)?
+            .ok_or_else(unsupported)?;
+        caller.bump_reductions(1);
+        return Ok(Value(info));
+    }
+    let Some(target) = scheduler.process(*id) else {
+        return Ok(Value(Term::static_atom("undefined")));
+    };
+    let messages = target.mailbox.message_count();
+    let info = target
+        .info(item, 0, messages, false)?
+        .ok_or_else(unsupported)?;
+    if target.exiting.is_some() || target.mailbox.has_incoming() {
+        let caller = scheduler.current_process_mut().id;
+        let reference = scheduler.make_ref()?;
+        scheduler.current_process_mut().mailbox.set_save_end();
+        let request = Signal::ProcessInfo {
+            requester: caller,
+            reference,
+            item: item.clone(),
+        };
+        scheduler
+            .send_signal(Some(caller), *id, request)
+            .expect("the process is in the process table");
+        return Ok(Trap {
+            module: "erts_internal",
+            function: "await_result",
+            arguments: vec![Term::Reference(reference)],
+        });
+    }
+    scheduler.current_process_mut().bump_reductions(1);
+    Ok(signals_return(scheduler, process, info))
+}
+
+/// Run `erlang:is_process_alive/1` as `is_process_alive_1`
+/// (`erl_bif_info.c:4060-4103`) does. The caller is alive. A pid that no
+/// process has gives `false`. A process that exits, or that has signals or
+/// messages that it did not handle, gets an is-alive request through
+/// `erts_internal:is_process_alive/1`, so that the answer comes after the
+/// signals that the caller sent before. Else the result is `true`. A
+/// result traps to `erlang:bif_handle_signals_return/2` when the caller has
+/// incoming signals. A term that is not a pid raises `badarg`. PBeam cannot
+/// represent a remote pid.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let alive = is_process_alive(&mut context, &Term::Pid(child));
+/// assert!(matches!(alive, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(is_process_alive(&mut context, &Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn is_process_alive(context: &mut BifContext<'_>, pid: &Term) -> BifResult {
+    let Term::Pid(id) = pid else {
+        return BifResult::badarg();
+    };
+    let scheduler = &mut *context.scheduler;
+    if *id == scheduler.current_process_mut().id {
+        return Value(Term::static_atom("true"));
+    }
+    let alive = match scheduler.process(*id) {
+        None => "false",
+        Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => {
+            return Trap {
+                module: "erts_internal",
+                function: "is_process_alive",
+                arguments: vec![pid.clone()],
+            };
+        }
+        Some(_) => "true",
+    };
+    signals_return(scheduler, pid, Term::static_atom(alive))
+}
+
+/// Return `value` as the result of a BIF that read the state of the process
+/// `from`, or, when the caller has incoming signals, trap to
+/// `erlang:bif_handle_signals_return/2`, which handles the signals of the
+/// caller up to a flush signal and then returns `value`
+/// (`ERTS_BIF_HANDLE_SIGNALS_FROM_RETURN`, `bif.h:527-532`). The signals
+/// that `from` sent to the caller before the read then come before the
+/// result.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = signals_return(scheduler, &Term::Pid(child), Term::static_atom("true"));
+/// ```
+pub(super) fn signals_return(scheduler: &mut Scheduler, from: &Term, value: Term) -> BifResult {
+    if scheduler.current_process_mut().mailbox.has_incoming() {
+        return BifResult::TrapBif {
+            module: "erlang",
+            function: "bif_handle_signals_return",
+            arguments: vec![from.clone(), value],
+        };
+    }
+    Value(value)
 }
 
 /// Run `erlang:function_exported/3`: return `true` when a loaded module

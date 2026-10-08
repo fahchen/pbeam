@@ -1,6 +1,6 @@
 use super::{
     process::{Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
-    scheduler::Scheduler,
+    scheduler::{Received, Scheduler, Turn},
     unicode::{characters_to_code_points, characters_to_utf8},
 };
 use crate::{
@@ -29,11 +29,6 @@ const APPLY_MAX_ARGUMENTS: usize = 1023;
 /// raises `system_limit`.
 const APPLY_FUN_MAX_ARGUMENTS: usize = 1022;
 
-/// The reductions of a fetch that `loop_rec` does at the end of the fetched
-/// messages: `erts_proc_sig_receive_helper` uses 4 for each fetch
-/// (`erl_proc_sig_queue.c:7771-7799`).
-const RECEIVE_FETCH_REDUCTIONS: i32 = 4;
-
 #[derive(Debug)]
 pub struct BeamProgram {
     /// The loaded modules by name.
@@ -53,7 +48,8 @@ enum Outcome {
     Hibernate,
     /// The process switches out at an ERTS switch point, for example at the
     /// end of its reduction budget. It stays runnable and continues where
-    /// the switch point leaves its frame.
+    /// the switch point leaves its frame. A process that a signal ended in
+    /// `loop_rec` also switches out this way, and it exits in its next turn.
     Yield,
     /// The process exited. `result` is the return value of a normal exit.
     Exit { reason: Term, result: Option<Term> },
@@ -169,19 +165,18 @@ impl BeamProgram {
         while !scheduler.root_exited() {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
-            if scheduler.schedule_next().is_some() {
-                match self.run(&mut scheduler)? {
+            match scheduler.schedule_next()? {
+                Turn::Run => match self.run(&mut scheduler)? {
                     Outcome::Wait => scheduler.park_current(),
                     Outcome::Hibernate => scheduler.hibernate_current(),
                     Outcome::Yield => scheduler.yield_current(),
-                    Outcome::Exit { reason, result } => {
-                        scheduler.finish_current(reason, result)?;
-                    }
-                }
-            } else if let Some(wait) = scheduler.timers.wait_time(scheduler.timers.now()) {
-                std::thread::sleep(wait);
-            } else {
-                break;
+                    Outcome::Exit { reason, result } => scheduler.finish_current(reason, result),
+                },
+                Turn::Done => {}
+                Turn::Idle => match scheduler.timers.wait_time(scheduler.timers.now()) {
+                    Some(wait) => std::thread::sleep(wait),
+                    None => break,
+                },
             }
         }
         match scheduler.into_root_result() {
@@ -1042,21 +1037,32 @@ impl BeamProgram {
                     // `emit_i_loop_rec_shared` switches out before the peek
                     // when the budget is 0 or less, and runs `loop_rec`
                     // again (`jit/arm/instr_msg.cpp:120-127`, `186-197`).
-                    // At the end of the fetched messages, it fetches and
-                    // pays for the fetch, also when no message arrived
-                    // (`jit/arm/instr_msg.cpp:131-168`).
+                    // At the end of the inner part, the receive helper
+                    // fetches or handles signals (`jit/arm/instr_msg.cpp:131-168`).
+                    // A process that the helper ends, or that used up its
+                    // budget, switches out (`jit/arm/instr_msg.cpp:186-197`).
                     if process.fcalls <= 0 {
                         current_frame(process).next_instruction -= 1;
                         return Ok(Outcome::Yield);
                     }
                     if process.mailbox.current().is_none() {
-                        process.fcalls -= RECEIVE_FETCH_REDUCTIONS;
-                        process.mailbox.fetch();
+                        match scheduler.receive_helper()? {
+                            Received::Message => {}
+                            Received::Empty => {
+                                jump(module, scheduler.current_process_mut(), *fail_label)?;
+                                continue;
+                            }
+                            Received::Yield => {
+                                current_frame(scheduler.current_process_mut()).next_instruction -=
+                                    1;
+                                return Ok(Outcome::Yield);
+                            }
+                            Received::Exited => return Ok(Outcome::Yield),
+                        }
                     }
-                    match process.mailbox.current().cloned() {
-                        Some(term) => write(process, destination, term)?,
-                        None => jump(module, process, *fail_label)?,
-                    }
+                    let process = scheduler.current_process_mut();
+                    let term = process.mailbox.current().cloned().expect("a message");
+                    write(process, destination, term)?;
                 }
                 Instruction::LoopReceiveEnd(label) => {
                     // `emit_loop_rec_end` costs 1 and does not switch out

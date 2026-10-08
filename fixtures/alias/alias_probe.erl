@@ -7,8 +7,8 @@ id(X) -> X.
 %% A process that waits for stop.
 idle() -> receive stop -> ok end.
 
-%% A process that sends messages for the caller, so that no process sends
-%% to its own alias (see the row "Signal queue" of docs/erts-differences.md).
+%% A process that sends messages for the caller, so that the messages come
+%% from another process than the owner of the alias.
 relay() ->
     receive
         {send, To, Messages, Caller} -> [To ! M || M <- Messages], Caller ! sent, relay();
@@ -234,7 +234,4 @@ call() ->
 
 %% Calls that PBeam does not support (see docs/erts-differences.md).
 unsupported(priority) -> erlang:monitor(process, spawn(?MODULE, idle, []), [priority]);
-unsupported(time_offset) -> erlang:monitor(time_offset, clock_service);
-unsupported(own_alias) ->
-    A = erlang:monitor(process, spawn(?MODULE, idle, []), [{alias, demonitor}]),
-    exit(A, kill).
+unsupported(time_offset) -> erlang:monitor(time_offset, clock_service).

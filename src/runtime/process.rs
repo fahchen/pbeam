@@ -1,7 +1,10 @@
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 
-use super::{mailbox::Mailbox, timer::TimerKey};
-use crate::term::{Atom, ProcessId, Reference, Term};
+use super::{mailbox::Mailbox, scheduler::AliasMode, timer::TimerKey};
+use crate::{
+    error::{BeamError, error},
+    term::{Atom, ProcessId, Reference, Term},
+};
 
 /// One active function call: its module, code position, and Y registers.
 #[derive(Debug)]
@@ -66,21 +69,58 @@ pub(super) enum ReceiveTimer {
     Expired { resume: usize },
 }
 
-/// A monitor of another process on this process, as the target part of an
-/// ERTS monitor (`ErtsMonitorData`, `erl_monitor_link.h`).
-#[derive(Debug)]
+/// A monitor of this process that another process holds: the target part
+/// of an ERTS monitor (`ERTS_P_LT_MONITORS`, `erl_monitor_link.h`). The
+/// watcher keeps the rest in its [`Origin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Monitor {
-    /// The process that gets the `DOWN` message.
+    /// The process that gets the monitor down signal.
     pub(super) watcher: ProcessId,
     /// The reference of the monitor.
     pub(super) reference: Reference,
-    /// The registered name of a monitor by name. The `DOWN` message then
-    /// gives `{Name, nonode@nohost}` as its item, not the pid
+}
+
+/// An entry of the monitor tree of a process (`ERTS_P_MONITORS`): the
+/// origin part of a monitor that this process holds, an alias, or both.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Origin {
+    /// The monitor, or `None` for an alias without a monitor
+    /// (`ERTS_MON_TYPE_ALIAS`): an `explicit_unalias` alias after its
+    /// monitor ended (`bif.c:470-482`, `erl_proc_sig_queue.c:6463-6480`).
+    pub(super) monitor: Option<OriginMonitor>,
+    /// The mode of the alias of the reference, or `None` when the
+    /// reference is not an active alias (`ERTS_ML_STATE_ALIAS_MASK`).
+    pub(super) alias: Option<AliasMode>,
+}
+
+/// The monitor of an [`Origin`]: what the watcher needs to make the
+/// `DOWN` message and to remove the monitor.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct OriginMonitor {
+    /// The third element of the `DOWN` message: `process` or `port`.
+    pub(super) kind: &'static str,
+    /// The monitored process, or `None` for a name that no process had and
+    /// for a port name (`other.item` is `undefined`).
+    pub(super) target: Option<ProcessId>,
+    /// The fourth element of the `DOWN` message: the pid, or
+    /// `{Name, nonode@nohost}` for a monitor by name
     /// (`erl_proc_sig_queue.c:4942-4955`).
-    pub(super) name: Option<Atom>,
+    pub(super) item: Term,
     /// The first element of the `DOWN` message: `'DOWN'`, or the `tag`
     /// option of `erlang:monitor/3` (`erl_proc_sig_queue.c:6417-6429`).
     pub(super) tag: Term,
+}
+
+/// The state of a BIF that handles the signals of its caller up to a flush
+/// signal (`FS_FLUSHING_SIGS` and `FS_FLUSHED_SIGS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Flush {
+    /// No flush runs.
+    None,
+    /// The flush signal is in the queue (`FS_FLUSHING_SIGS`).
+    Flushing,
+    /// The handling reached the flush signal (`FS_FLUSHED_SIGS`).
+    Flushed,
 }
 
 /// The execution state and mailbox of one process.
@@ -96,10 +136,33 @@ pub(super) struct ProcessState {
     pub(super) undefined_start: Option<(Atom, Atom)>,
     /// X registers. All frames of the process share them.
     pub(super) registers: Vec<Option<Term>>,
-    /// Messages and receive markers, with the receive save pointer.
+    /// The signal queue: messages, receive markers, and signals, with the
+    /// receive save pointer.
     pub(super) mailbox: Mailbox,
-    /// True while the process waits in `wait` for a new message.
-    waiting: bool,
+    /// True while the process has no Erlang work: it waits in `wait` for a
+    /// new message, or after `erlang:hibernate/0` (no `ERTS_PSFLG_ACTIVE`).
+    pub(super) waiting: bool,
+    /// True while the process is in the run queue (`ERTS_PSFLG_IN_RUNQ`). A
+    /// waiting process can be in the run queue to handle its signals.
+    pub(super) in_run_queue: bool,
+    /// The exit reason of a process that a signal ended
+    /// (`erts_set_self_exiting`, `erl_process.c:13485-13548`). A process
+    /// that does not exit at once exits when it runs next. Messages to it
+    /// are dropped.
+    pub(super) exiting: Option<Term>,
+    /// True when the process may have sent a message or a signal to itself
+    /// that it did not handle (`ERTS_PXSFLG_MAYBE_SELF_SIGS`). A handling
+    /// pass that leaves no incoming signal clears it
+    /// (`erl_proc_sig_queue.c:7117-7126`).
+    pub(super) self_signals: bool,
+    /// True after `erlang:hibernate/0` made the process wait
+    /// (`F_HIBERNATED`). A handling pass that leaves messages in the inner
+    /// part then makes it active (`erl_proc_sig_queue.c:7152-7154`). ERTS
+    /// clears the flag at the next garbage collection, and PBeam, which has
+    /// no garbage collection, when the process runs Erlang code again.
+    pub(super) hibernated: bool,
+    /// The state of a flush of the signals of the process.
+    pub(super) flush: Flush,
     /// The receive timeout state.
     pub(super) receive_timer: ReceiveTimer,
     /// True when exit signals from linked processes become `EXIT` messages.
@@ -108,9 +171,16 @@ pub(super) struct ProcessState {
     /// (`FS_OFF_HEAP_MSGQ`), false for `on_heap`. PBeam has no process heap,
     /// so the flag does not change where the messages are kept.
     pub(super) off_heap_message_queue: bool,
-    /// Processes linked to this process.
-    pub(super) links: HashSet<ProcessId>,
-    /// Monitors that send a `DOWN` message when this process exits.
+    /// Processes linked to this process, with the identifier of an unlink
+    /// that waits for its acknowledgment, or 0 for an active link
+    /// (`ErtsILink.unlinking`). A link that is unlinking sends no exit
+    /// signal (`erl_process.c:14068-14081`).
+    pub(super) links: BTreeMap<ProcessId, u64>,
+    /// The monitor tree: the monitors that this process holds and its
+    /// aliases, by reference (`ERTS_P_MONITORS`).
+    pub(super) monitors: BTreeMap<Reference, Origin>,
+    /// Monitors that send a monitor down signal when this process exits, in
+    /// creation order (`ERTS_P_LT_MONITORS`).
     pub(super) monitored_by: Vec<Monitor>,
     /// Group leader that receives the IO requests of this process. A new
     /// process starts as its own group leader, as `init` does in ERTS; a
@@ -184,10 +254,16 @@ impl ProcessState {
             registers: arguments.into_iter().map(Some).collect(),
             mailbox: Mailbox::default(),
             waiting: false,
+            in_run_queue: false,
+            exiting: None,
+            self_signals: false,
+            hibernated: false,
+            flush: Flush::None,
             receive_timer: ReceiveTimer::None,
             trap_exit: false,
             off_heap_message_queue: false,
-            links: HashSet::new(),
+            links: BTreeMap::new(),
+            monitors: BTreeMap::new(),
             monitored_by: Vec::new(),
             group_leader: id,
             dictionary: Vec::new(),
@@ -197,31 +273,6 @@ impl ProcessState {
             pending_bif: None,
             length_trap: None,
         }
-    }
-
-    /// Mark the process as waiting for a new message.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// process.wait();
-    /// assert!(process.receive(Term::static_atom("ok")));
-    /// ```
-    pub(super) fn wait(&mut self) {
-        self.waiting = true;
-    }
-
-    /// Add a message to the mailbox. Return true when the message wakes a
-    /// waiting process, so the scheduler must run it again.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(!process.receive(Term::static_atom("ok")));
-    /// ```
-    pub(super) fn receive(&mut self, term: Term) -> bool {
-        self.mailbox.push(term);
-        std::mem::take(&mut self.waiting)
     }
 
     /// Use `reductions` of the budget of the current turn, as `BUMP_REDS`
@@ -268,16 +319,65 @@ impl ProcessState {
         usize::try_from(self.fcalls).expect("a BIF runs with a budget of 0 or more")
     }
 
+    /// Return the result of `erlang:process_info/2` for the item `item` of
+    /// this process, as `process_info_aux` (`erl_bif_info.c`) gives it, or
+    /// `None` for an item that PBeam does not support:
+    ///
+    /// - `registered_name` gives `{registered_name, Name}`, or `[]` without a
+    ///   name.
+    /// - `message_queue_len` gives `{message_queue_len, Messages}`: the
+    ///   caller counts the messages as `mq_len` (`erl_bif_info.c:1742-1754`).
+    /// - `reductions` gives `{reductions, N}`: the reduction total and
+    ///   `current`, the reductions of the current turn when the process runs
+    ///   (`erl_bif_info.c:2114-2121`).
+    /// - `current_stacktrace` gives `{current_stacktrace, []}` for the
+    ///   calling process (`caller`), because PBeam records no stack frames.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let length = process.info(&Term::static_atom("message_queue_len"), 0, 2, false)?;
+    /// assert_eq!(length, Some(Term::Tuple(vec![Term::static_atom("message_queue_len"), Term::Integer(2)])));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A reduction total above the PBeam integer range is an error.
+    pub(super) fn info(
+        &self,
+        item: &Term,
+        current: u64,
+        messages: usize,
+        caller: bool,
+    ) -> Result<Option<Term>, BeamError> {
+        let Term::Atom(name) = item else {
+            return Ok(None);
+        };
+        let value = match (name.name(), &self.registered_name) {
+            // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
+            ("current_stacktrace", _) if caller => Term::List(Vec::new()),
+            ("registered_name", Some(registered)) => Term::Atom(registered.clone()),
+            ("registered_name", None) => return Ok(Some(Term::List(Vec::new()))),
+            ("message_queue_len", _) => Term::Integer(messages as i64),
+            ("reductions", _) => Term::Integer(
+                i64::try_from(self.reductions + current)
+                    .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?,
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(Term::Tuple(vec![item.clone(), value])))
+    }
+
     /// Mark the receive timer as expired, as `proc_timeout_common`
-    /// (`erl_hl_timer.c:692-706`) does. Return true when the process waited,
-    /// so the scheduler must run it again. A process that a message woke
-    /// stays in the run queue.
+    /// (`erl_hl_timer.c:692-706`) does. Return true when the process waited
+    /// and now has Erlang work, so the scheduler must run it. A process that
+    /// a message woke, or an exiting process, stays as it is.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// process.receive_timer = ReceiveTimer::Set { key: (1100, 0), resume: 7 };
-    /// process.wait();
+    /// process.waiting = true;
     /// assert!(process.time_out());
     /// assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
     /// ```
@@ -292,7 +392,6 @@ impl ProcessState {
 #[cfg(test)]
 pub(super) mod tests {
     use super::{Frame, ProcessState, ReceiveTimer, Start};
-    use crate::term::test_atom;
     use crate::term::{Atom, ProcessId, Term};
 
     pub(in crate::runtime) fn frame() -> Frame {
@@ -305,26 +404,13 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn wakes_only_a_waiting_process() {
-        let mut process =
-            ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![Term::Integer(1)]);
-        assert_eq!(process.registers, vec![Some(Term::Integer(1))]);
-        assert_eq!(process.frames.len(), 1);
-        assert_eq!(process.undefined_start, None);
-        assert!(!process.receive(test_atom("early")));
-        process.wait();
-        assert!(process.receive(test_atom("late")));
-        assert!(!process.receive(test_atom("later")));
-    }
-
-    #[test]
     fn expires_the_receive_timer_and_wakes_only_a_waiting_process() {
         let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
         process.receive_timer = ReceiveTimer::Set {
             key: (1100, 0),
             resume: 7,
         };
-        process.wait();
+        process.waiting = true;
         assert!(process.time_out());
         assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
         assert!(!process.time_out());

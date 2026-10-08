@@ -450,12 +450,16 @@ impl fmt::Debug for Term {
     }
 }
 
-/// An identifier for a process in this runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// An identifier for a process in this runtime. The order of identifiers
+/// is their creation order; the runtime uses it to visit the links of a
+/// process in one fixed order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessId(pub(crate) u64);
 
-/// An identifier for a reference in this runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// An identifier for a reference in this runtime. The order of identifiers
+/// is their creation order; the runtime uses it to visit the monitors of a
+/// process in one fixed order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Reference(pub(crate) u64);
 
 /// The mask of the first reference number (`REF_MASK`, 18 bits).

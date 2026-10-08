@@ -4,9 +4,10 @@ use super::{
     ets::EtsTables,
     local_node,
     persistent_term::PersistentTerms,
-    process::{Frame, Monitor, ProcessState, ReceiveTimer, Start},
+    process::{Flush, Frame, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer, Start},
     regex_code::RegexCodes,
     resources::Resources,
+    signal::Signal,
     timer::{Receiver, Timer, Timers},
     tty::Ttys,
 };
@@ -19,6 +20,16 @@ use crate::{
 /// (`erl_vm.h:53`). Each schedule-in gives the process this budget
 /// (`erl_process.c:10183`, `10435`).
 pub(super) const CONTEXT_REDS: i32 = 4000;
+
+/// The reductions that an active process uses at most to handle its
+/// signals at schedule-in and in `loop_rec`, as
+/// `ERTS_SIG_HANDLE_REDS_MAX_PREFERED` (`erl_proc_sig_queue.h:284`).
+const SIGNAL_HANDLING_REDUCTIONS: i32 = 100;
+
+/// The reductions of a fetch that `loop_rec` does at the end of the inner
+/// part: `erts_proc_sig_receive_helper` uses 4 for each fetch
+/// (`erl_proc_sig_queue.c:7771-7799`).
+const RECEIVE_FETCH_REDUCTIONS: i32 = 4;
 
 /// The target of `erlang:monitor/2`, after the BIF checked the type and the
 /// target term as ERTS `monitor` does (`bif.c:758-981`).
@@ -63,23 +74,25 @@ pub(super) enum AliasMode {
     ReplyDemonitor,
 }
 
-/// An active alias: the process that gets the messages and exit signals to
-/// the alias reference, and the mode of the alias. In ERTS the reference
-/// holds the pid of the owner (`erts_get_pid_of_ref`,
-/// `erl_bif_unique.h:279`), and the monitor of the owner holds the mode.
-#[derive(Debug)]
-struct Alias {
-    /// The process that made the alias.
-    owner: ProcessId,
-    /// The mode of the alias.
-    mode: AliasMode,
+/// What one scheduling step did, as one pass of `erts_schedule`
+/// (`erl_process.c:9607-10505`).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Turn {
+    /// The current process runs Erlang code now.
+    Run,
+    /// The step handled the signals of a process or ran its exit, and no
+    /// process runs Erlang code.
+    Done,
+    /// No process is in the run queue.
+    Idle,
 }
 
 /// A scheduler on one OS thread. A process runs until it waits, exits, or
 /// switches out at an ERTS switch point. It follows the ERTS model: the
-/// process table holds every live process, `current_process` names the
-/// running process, and the run queue holds only processes that wait for a
-/// turn.
+/// process table holds every live process, also an exiting one,
+/// `current_process` names the running process, and the run queue holds
+/// only processes that wait for a turn. A process can be in the run queue
+/// for Erlang work or only to handle its signals.
 #[derive(Debug)]
 pub(super) struct Scheduler {
     /// All live processes, including the current process.
@@ -121,9 +134,22 @@ pub(super) struct Scheduler {
     /// The timers of the run and the run clock. All processes of the run
     /// share them.
     pub(super) timers: Timers,
-    /// The active aliases of the run. An alias that ends, and each alias of
-    /// a process that exits, leaves the table.
-    aliases: HashMap<Reference, Alias>,
+    /// The owner of each reference that `erlang:monitor/3` made with an
+    /// alias option: an ERTS pid reference holds the pid of its owner
+    /// (`erts_get_pid_of_ref`, `erl_bif_unique.h:279`). The owner keeps the
+    /// state of the alias in its monitor tree, so a message or an exit
+    /// signal through the reference goes to the owner, which checks the
+    /// alias when it handles the signal. The entries of a process leave the
+    /// table when it exits.
+    alias_owners: HashMap<Reference, ProcessId>,
+    /// A monitor signal that the current process sent and that waits for
+    /// the switch out of the process, its next signal or message to the
+    /// same target, or the next monitor signal, as `esdp->pending_signal`
+    /// (`erl_proc_sig_queue.c:1101-1170`). The pid is the target.
+    pending_monitor: Option<(ProcessId, Monitor)>,
+    /// Number for the next unlink operation identifier
+    /// (`erts_proc_sig_new_unlink_id`). The values are not observable.
+    next_unlink_id: u64,
     /// The process that gets the error reports of the emulator: `logger`,
     /// `undefined`, or a pid, as `system_logger` in `erl_trace.c`. The start
     /// value is `logger` (`erl_trace.c:339`).
@@ -164,7 +190,9 @@ impl Scheduler {
             atoms,
             nif_libraries: HashSet::new(),
             timers: Timers::new(),
-            aliases: HashMap::new(),
+            alias_owners: HashMap::new(),
+            pending_monitor: None,
+            next_unlink_id: 1,
             system_logger: Term::static_atom("logger"),
             virtual_reductions: 0,
         }
@@ -185,7 +213,7 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Store a process and add it to the ready queue.
+    /// Store a process and add it to the end of the run queue.
     ///
     /// # Examples
     ///
@@ -193,45 +221,131 @@ impl Scheduler {
     /// scheduler.insert(ProcessState::new(ProcessId(1), Start::Entry(frame), vec![]));
     /// ```
     fn insert(&mut self, process: ProcessState) {
-        self.runnable.push_back(process.id);
-        self.processes.insert(process.id, process);
+        let id = process.id;
+        self.processes.insert(id, process);
+        self.enqueue(id);
     }
 
-    /// Take the next process from the run queue and make it the current
-    /// process with a budget of `CONTEXT_REDS` reductions, as ERTS sets
-    /// `p->fcalls` at schedule-in (`erl_process.c:10183`, `10435`). A
-    /// process whose receive timer expired continues at the instruction
-    /// after its `wait_timeout` with `F_TIMO`, also when a message woke it
-    /// first, as ERTS does before it runs the process
-    /// (`erl_process.c:10451-10458`).
+    /// Put the process `id` at the end of the run queue, unless it is in the
+    /// run queue or runs now: such a process keeps its place, as
+    /// `erts_schedule_process` and `erts_proc_sys_schedule` do
+    /// (`erl_proc_sig_queue.h:2063-2088`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+    /// scheduler.enqueue(child);
+    /// ```
+    fn enqueue(&mut self, id: ProcessId) {
+        let current = self.current_process == Some(id);
+        let process = self.processes.get_mut(&id).expect("the process is alive");
+        if !process.in_run_queue && !current {
+            process.in_run_queue = true;
+            self.runnable.push_back(id);
+        }
+    }
+
+    /// Give the process `id` Erlang work when it has none, as
+    /// `erts_proc_notify_new_message` (`erl_proc_sig_queue.h:2080-2088`)
+    /// does: a waiting process becomes active and goes to the run queue.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.activate(child);
+    /// ```
+    fn activate(&mut self, id: ProcessId) {
+        let process = self.processes.get_mut(&id).expect("the process is alive");
+        if std::mem::take(&mut process.waiting) {
+            self.enqueue(id);
+        }
+    }
+
+    /// Run one scheduling step, as `erts_schedule` does after it takes a
+    /// process from the run queue (`erl_process.c:10318-10460`). The process
+    /// becomes the current process with a budget of `CONTEXT_REDS`
+    /// reductions (`erl_process.c:10183`).
+    ///
+    /// - An exiting process runs its exit now.
+    /// - A process with signals to handle handles them first. An active
+    ///   process, which has Erlang work, uses at most
+    ///   `ERTS_SIG_HANDLE_REDS_MAX_PREFERED` (100) reductions for it, and a
+    ///   waiting process or a process in a flush uses its budget
+    ///   (`erl_process.c:10318-10352`). The handling uses reductions of the
+    ///   budget. A signal that ends the process makes it exit in this step.
+    /// - A process with no budget left, or with no Erlang work, switches out
+    ///   with no Erlang code (`erl_process.c:10375`, `10397`).
+    /// - A process whose receive timer expired continues at the instruction
+    ///   after its `wait_timeout` with `F_TIMO`, also when a message woke it
+    ///   first (`erl_process.c:10451-10458`).
+    ///
+    /// Return [`Turn::Run`] when the current process runs Erlang code now.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.schedule_next()?, Turn::Run);
     /// assert_eq!(scheduler.current_process_mut().fcalls, CONTEXT_REDS);
     /// ```
-    pub(super) fn schedule_next(&mut self) -> Option<ProcessId> {
-        self.current_process = self.runnable.pop_front();
-        let process = self
-            .current_process
-            .and_then(|id| self.processes.get_mut(&id))?;
+    ///
+    /// # Errors
+    ///
+    /// An abnormal exit signal through a link to a process that does not
+    /// trap exits is not supported (see [`Scheduler::handle_signals`]).
+    pub(super) fn schedule_next(&mut self) -> Result<Turn, BeamError> {
+        let Some(id) = self.runnable.pop_front() else {
+            return Ok(Turn::Idle);
+        };
+        self.current_process = Some(id);
+        let process = self.current_process_mut();
+        process.in_run_queue = false;
         process.fcalls = CONTEXT_REDS;
+        if let Some(reason) = process.exiting.clone() {
+            self.finish_current(reason, None);
+            return Ok(Turn::Done);
+        }
+        if process.mailbox.has_control_signals() {
+            let reds = if process.waiting || process.flush != Flush::None {
+                process.fcalls
+            } else {
+                SIGNAL_HANDLING_REDUCTIONS
+            };
+            let reductions = self.handle_signals(id, reds, reds, HandlingPoint::ScheduleIn)?;
+            let process = self.current_process_mut();
+            process.fcalls -= reductions;
+            if process.fcalls > 0
+                && let Some(reason) = process.exiting.clone()
+            {
+                self.finish_current(reason, None);
+                return Ok(Turn::Done);
+            }
+        }
+        let process = self.current_process_mut();
+        if process.fcalls <= 0 || process.waiting {
+            if process.waiting {
+                self.park_current();
+            } else {
+                self.yield_current();
+            }
+            return Ok(Turn::Done);
+        }
+        process.hibernated = false;
         if let ReceiveTimer::Expired { resume } = process.receive_timer
             && let Some(frame) = process.frames.last_mut()
         {
             frame.next_instruction = resume;
             process.receive_timer = ReceiveTimer::Timo;
         }
-        self.current_process
+        Ok(Turn::Run)
     }
 
     /// Expire each timer that is due at the time `now`, in end order. A
-    /// process whose receive timer expires goes to the end of the run queue
-    /// when it waits, and a process in the run queue stays there
-    /// (`proc_timeout_common`, `erl_hl_timer.c:692-706`). A BIF timer sends
-    /// its message to its pid, or to the process that has its name now, and
-    /// a name that no process has drops the message (`bif_timer_timeout`,
+    /// process whose receive timer expires gets Erlang work when it waits,
+    /// and goes to the end of the run queue when it is not there; a process
+    /// with Erlang work stays as it is (`proc_timeout_common`,
+    /// `erl_hl_timer.c:692-706`). A BIF timer sends its message to its pid,
+    /// or to the process that has its name now, and a name that no process
+    /// has drops the message (`bif_timer_timeout`,
     /// `erl_hl_timer.c:1146-1203`).
     ///
     /// # Examples
@@ -248,7 +362,7 @@ impl Scheduler {
                         .get_mut(&id)
                         .is_some_and(ProcessState::time_out)
                     {
-                        self.runnable.push_back(id);
+                        self.enqueue(id);
                     }
                 }
                 Timer::Bif {
@@ -326,19 +440,34 @@ impl Scheduler {
             .expect("the scheduler has a current process")
     }
 
-    /// Return the live process `id`, also the current process. Return `None`
-    /// when no live process has the pid, as `erts_try_lock_sig_free_proc`
-    /// (`erl_bif_info.c:1384-1386`) finds no process.
+    /// Return the process `id` of the process table, also the current
+    /// process and an exiting process, as `erts_proc_lookup_raw`
+    /// (`erl_process_lock.h:1135-1148`) finds it. Return `None` when no
+    /// process has the pid.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.schedule_next();
+    /// scheduler.schedule_next()?;
     /// assert_eq!(scheduler.process(ProcessId(0)).map(|process| process.id), Some(ProcessId(0)));
     /// assert!(scheduler.process(ProcessId(99)).is_none());
     /// ```
     pub(super) fn process(&self, id: ProcessId) -> Option<&ProcessState> {
         self.processes.get(&id)
+    }
+
+    /// Return the process `id` when it does not exit, as `erts_proc_lookup`
+    /// (`erl_process_lock.h:1151-1157`) finds it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.live_process(ProcessId(0)).is_some());
+    /// ```
+    pub(super) fn live_process(&self, id: ProcessId) -> Option<&ProcessState> {
+        self.processes
+            .get(&id)
+            .filter(|process| process.exiting.is_none())
     }
 
     /// Return the live process `id` for a change, as [`Scheduler::process`]
@@ -413,8 +542,32 @@ impl Scheduler {
         process
     }
 
-    /// Stop the current process until a message arrives. A delivery adds it
-    /// to the run queue again.
+    /// Switch out the current process when it does not exit: send the
+    /// pending monitor signal first (`erl_process.c:9665-9668`), then add
+    /// the reductions of the turn as [`Self::schedule_out`] does. A process
+    /// with Erlang work goes to the end of the run queue, and a process
+    /// with signals to handle too (`schedule_out_process`,
+    /// `erl_process.c:6695-6851`). `update` changes the state of the
+    /// process before the check.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.switch_out(|process| process.waiting = true);
+    /// ```
+    fn switch_out(&mut self, update: impl FnOnce(&mut ProcessState)) {
+        self.send_pending_monitor();
+        let process = self.schedule_out();
+        update(process);
+        if !process.waiting || process.mailbox.has_control_signals() {
+            let id = process.id;
+            self.enqueue(id);
+        }
+    }
+
+    /// Stop the current process until a message arrives: it has no Erlang
+    /// work. A message makes it active again, and a signal puts it in the
+    /// run queue to handle the signal.
     ///
     /// # Examples
     ///
@@ -422,18 +575,16 @@ impl Scheduler {
     /// scheduler.park_current();
     /// ```
     pub(super) fn park_current(&mut self) {
-        self.schedule_out().wait();
+        self.switch_out(|process| process.waiting = true);
     }
 
     /// Stop the current process after `erlang:hibernate/0`. The process
-    /// fetches the messages that arrived. A process with a message in its
-    /// queue stays active and goes to the end of the run queue. Else it
-    /// waits until a message arrives. ERTS `erts_hibernate` fetches and
-    /// clears `ERTS_PSFLG_ACTIVE` only when the queue has no message
-    /// (`beam_common.c:1568-1602`), `i_hibernate` always switches the
-    /// context (`jit/arm/instr_call.cpp:30-36`), and `schedule_out_process`
-    /// puts an active process at the end of the run queue
-    /// (`erl_process.c:6695`).
+    /// fetches the messages that arrived. A process with a message in the
+    /// inner part stays active and goes to the end of the run queue. Else
+    /// it waits until a message arrives. ERTS `erts_hibernate` fetches and
+    /// clears `ERTS_PSFLG_ACTIVE` only when the inner part has no message
+    /// (`beam_common.c:1568-1602`), and `i_hibernate` always switches the
+    /// context (`jit/arm/instr_call.cpp:30-36`).
     ///
     /// # Examples
     ///
@@ -441,14 +592,13 @@ impl Scheduler {
     /// scheduler.hibernate_current();
     /// ```
     pub(super) fn hibernate_current(&mut self) {
-        let process = self.schedule_out();
-        process.mailbox.fetch();
-        if process.mailbox.has_messages() {
-            let id = process.id;
-            self.runnable.push_back(id);
-        } else {
-            process.wait();
-        }
+        self.switch_out(|process| {
+            process.mailbox.fetch();
+            if !process.mailbox.has_messages() {
+                process.waiting = true;
+                process.hibernated = true;
+            }
+        });
     }
 
     /// Switch out the current process at the end of its budget, or at
@@ -463,11 +613,10 @@ impl Scheduler {
     ///
     /// ```rust,ignore
     /// scheduler.yield_current();
-    /// assert_eq!(scheduler.schedule_next(), Some(other));
+    /// assert_eq!(scheduler.schedule_next()?, Turn::Run);
     /// ```
     pub(super) fn yield_current(&mut self) {
-        let id = self.schedule_out().id;
-        self.runnable.push_back(id);
+        self.switch_out(|_| {});
     }
 
     /// Create the next process identifier.
@@ -526,9 +675,11 @@ impl Scheduler {
         self.root_result
     }
 
-    /// Deliver a message to a live process. Add the process to the run queue
-    /// when the message wakes it. A message to a process that does not exist
-    /// is dropped, as in ERTS.
+    /// Deliver a message that no process sends, such as a timer message or
+    /// a reply of a signal, as `erts_queue_message` (`erl_message.c:492-501`)
+    /// does. A message to a process that does not exist, or to an exiting
+    /// process, is dropped (`erl_message.c:412-426`). The message makes a
+    /// waiting process active.
     ///
     /// # Examples
     ///
@@ -539,15 +690,54 @@ impl Scheduler {
         let Some(process) = self.processes.get_mut(&target) else {
             return;
         };
-        if process.receive(term) {
-            self.runnable.push_back(target);
+        if process.exiting.is_some() {
+            return;
         }
+        process.mailbox.push(term);
+        self.activate(target);
+    }
+
+    /// Send a message from the process `from` to `target`, as
+    /// `erts_queue_proc_message` (`erl_message.c:531-545`) does. A pending
+    /// monitor signal of `from` to the same target goes first
+    /// (`prepend_pending_sig_maybe`, `erl_message.c:463-480`). A message to a
+    /// process that does not exist, or to an exiting process, is dropped,
+    /// and the pending signal waits on. A message to the sender itself marks
+    /// it as a process that may have signals from itself.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.send_message(caller, target, Term::static_atom("ok"));
+    /// ```
+    pub(super) fn send_message(&mut self, from: ProcessId, target: ProcessId, term: Term) {
+        let Some(process) = self.processes.get(&target) else {
+            return;
+        };
+        if process.exiting.is_some() {
+            return;
+        }
+        let pending = self.take_pending_monitor(target);
+        let process = self
+            .processes
+            .get_mut(&target)
+            .expect("the target is alive");
+        process.self_signals |= from == target;
+        if let Some(pending) = pending {
+            process
+                .mailbox
+                .push_signal(signals::monitor_signal(pending));
+        }
+        process.mailbox.push(term);
+        self.activate(target);
     }
 
     /// Spawn a child process for the current process and optionally monitor
     /// or link it. `start` gives its entry frame or its undefined start MFA.
     /// `off_heap_message_queue` sets the start value of its
-    /// `message_queue_data` flag.
+    /// `message_queue_data` flag. The link and the monitor go into both
+    /// processes at once, as `erl_create_process` does, so no signal goes
+    /// to the child.
     ///
     /// # Examples
     ///
@@ -572,24 +762,38 @@ impl Scheduler {
             child.monitored_by.push(Monitor {
                 watcher: parent,
                 reference,
-                name: None,
-                tag: Term::static_atom("DOWN"),
             });
+            let origin = Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: Some(child.id),
+                    item: Term::Pid(child.id),
+                    tag: Term::static_atom("DOWN"),
+                }),
+                alias: None,
+            };
+            self.current_process_mut()
+                .monitors
+                .insert(reference, origin);
             Some(reference)
         } else {
             None
         };
         if link {
-            self.current_process_mut().links.insert(child.id);
-            child.links.insert(parent);
+            self.current_process_mut().links.insert(child.id, 0);
+            child.links.insert(parent, 0);
         }
         let id = child.id;
         self.insert(child);
         Ok((id, reference))
     }
 
-    /// Link the current process with a live local process, as
-    /// `erlang:link/1` does. Return `true`, as ERTS does.
+    /// Link the current process with a live local process, as `link_opt`
+    /// (`bif.c:155-184`) does for `erlang:link/1`, and return `true`. A link
+    /// to the current process changes nothing. An active link sends no
+    /// signal. A new link, or an unlinking link that becomes active again,
+    /// sends a link signal to the target, which adds its side of the link
+    /// when it handles the signal.
     ///
     /// # Examples
     ///
@@ -599,55 +803,71 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// A link to a process that does not exist is not supported.
+    /// A link to a process that does not exist or exits is not supported:
+    /// ERTS raises `noproc`, or with `trap_exit` sends the `noproc` exit
+    /// signal (`bif.c:162-163`, `410-424`).
     pub(super) fn link(&mut self, target: ProcessId) -> Result<Term, BeamError> {
         let current = self.current_process_mut().id;
-        let Some(process) = self.processes.get_mut(&target) else {
-            // ponytail: ERTS sends noproc for a dead target; add it when a fixture links to one.
+        if target == current {
+            return Ok(Term::static_atom("true"));
+        }
+        if self.live_process(target).is_none() {
+            // ponytail: ERTS gives noproc for a missing target; #9 adds it.
             return Err(error(format!(
                 "unsupported link to missing process {target:?}"
             )));
-        };
-        process.links.insert(current);
-        self.current_process_mut().links.insert(target);
+        }
+        if self.current_process_mut().links.insert(target, 0) == Some(0) {
+            return Ok(Term::static_atom("true"));
+        }
+        self.send_signal(Some(current), target, Signal::Link { from: current })
+            .expect("a live process gets the link signal");
         Ok(Term::static_atom("true"))
     }
 
-    /// Remove the link between the current process and `target`, as
-    /// `erlang:unlink/1` (`bif.c:1236-1256`) does for a local pid. PBeam has
-    /// no signal queue, so both sides lose the link at once. A target
-    /// without a link, a target that does not exist, and the current process
-    /// itself change nothing. An `EXIT` message in the mailbox stays.
+    /// Unlink the current process from `target`, as `unlink_1`
+    /// (`bif.c:1231-1249`) does for a local pid. Only an active link sends an
+    /// unlink signal with a new identifier and becomes unlinking; the target
+    /// answers with an unlink acknowledgment, which removes the link. A link
+    /// to a process that does not exist goes at once. A target without a
+    /// link changes nothing. An `EXIT` message in the queue stays.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// scheduler.link(child)?;
     /// scheduler.unlink(child);
-    /// assert!(scheduler.current_process_mut().links.is_empty());
+    /// assert_ne!(scheduler.current_process_mut().links[&child], 0);
     /// ```
     pub(super) fn unlink(&mut self, target: ProcessId) {
         let current = self.current_process_mut().id;
-        if let Some(process) = self.processes.get_mut(&target) {
-            process.links.remove(&current);
+        if self.current_process_mut().links.get(&target) != Some(&0) {
+            return;
         }
-        self.current_process_mut().links.remove(&target);
+        let id = self.next_unlink_id;
+        self.next_unlink_id += 1;
+        let unlink = Signal::Unlink { from: current, id };
+        if self.send_signal(Some(current), target, unlink).is_ok() {
+            self.current_process_mut().links.insert(target, id);
+        } else {
+            self.current_process_mut().links.remove(&target);
+        }
     }
 
     /// Monitor a target for the current process, as ERTS `monitor`
     /// (`bif.c:758-981`) does after its checks. A process by name is the
     /// process that has the name now (`erts_whereis_name_to_id`). A monitor
     /// of the current process creates no monitor and no alias
-    /// (`bif.c:781-784`). A process that does not exist, a name that no
-    /// process has, and each port name give the message
-    /// `{Tag, Ref, Type, Item, noproc}` at once: PBeam has no ports, so the
-    /// port lookup always fails (`bif.c:910-914`). `Item` is the pid, or
-    /// `{Name, nonode@nohost}` for a name.
+    /// (`bif.c:781-784`). Else the monitor goes into the monitor tree of the
+    /// current process. A pid gets a monitor signal through the pending
+    /// signal slot (see [`Scheduler::send_monitor`]). A name that no process
+    /// has, and each port name, give a monitor down signal `noproc` to the
+    /// current process at once: PBeam has no ports, so the port lookup
+    /// always fails (`bif.c:907-914`). The `DOWN` message gives the pid as
+    /// its item, or `{Name, nonode@nohost}` for a name.
     ///
-    /// With an alias option, the reference is also an active alias of the
-    /// current process. The `noproc` `DOWN` message ends a `demonitor` or
-    /// `reply_demonitor` alias at once (`erl_proc_sig_queue.c:6463-6490`),
-    /// so only an `explicit_unalias` alias stays for it.
+    /// With an alias option, the reference is also an alias of the current
+    /// process, and the alias mode goes into the monitor tree.
     ///
     /// # Examples
     ///
@@ -667,13 +887,16 @@ impl Scheduler {
     ) -> Result<Reference, BeamError> {
         let reference = self.make_ref()?;
         let watcher = self.current_process_mut().id;
-        let (kind, id, item, name) = match target {
-            MonitorTarget::Process(id) => ("process", Some(id), Term::Pid(id), None),
+        if options.alias.is_some() {
+            self.alias_owners.insert(reference, watcher);
+        }
+        let (kind, id, item) = match target {
+            MonitorTarget::Process(id) => ("process", Some(id), Term::Pid(id)),
             MonitorTarget::ProcessName(name) => {
                 let id = self.whereis(name.name());
-                ("process", id, named_item(&name), Some(name))
+                ("process", id, named_item(&name))
             }
-            MonitorTarget::PortName(name) => ("port", None, named_item(&name), Some(name)),
+            MonitorTarget::PortName(name) => ("port", None, named_item(&name)),
         };
         if id == Some(watcher) {
             return Ok(reference);
@@ -682,41 +905,35 @@ impl Scheduler {
             // ponytail: no priority messages yet; add them when a measured path uses the option.
             return Err(error("unsupported monitor option priority"));
         }
-        let monitor = Monitor {
-            watcher,
-            reference,
-            name,
-            tag: options.tag,
+        let origin = Origin {
+            monitor: Some(OriginMonitor {
+                kind,
+                target: id,
+                item,
+                tag: options.tag,
+            }),
+            alias: options.alias,
         };
-        let mode = match id.and_then(|id| self.processes.get_mut(&id)) {
-            Some(process) => {
-                process.monitored_by.push(monitor);
-                options.alias
+        self.current_process_mut()
+            .monitors
+            .insert(reference, origin);
+        match id {
+            Some(id) if kind == "process" => {
+                self.send_monitor(id, Monitor { watcher, reference });
             }
-            None => {
-                let noproc = Term::static_atom("noproc");
-                let down = down_message(monitor.tag, reference, kind, item, noproc);
-                self.deliver(watcher, down);
-                options
-                    .alias
-                    .filter(|&mode| mode == AliasMode::ExplicitUnalias)
-            }
-        };
-        if let Some(mode) = mode {
-            let alias = Alias {
-                owner: watcher,
-                mode,
-            };
-            self.aliases.insert(reference, alias);
+            _ => self.send_monitor_down(None, watcher, reference, Term::static_atom("noproc")),
         }
         Ok(reference)
     }
 
     /// Remove a monitor that the current process holds, as the ERTS
-    /// `demonitor` function does. Return true when an active monitor was
-    /// removed, and false when it already fired or never existed. The
-    /// removal ends a `demonitor` or `reply_demonitor` alias of the
-    /// monitor, and keeps an `explicit_unalias` alias (`bif.c:470-492`).
+    /// `demonitor` function (`bif.c:436-541`) does. Return true when the
+    /// monitor tree had the monitor, and false for a reference that is not a
+    /// monitor of the current process, also an alias without a monitor. An
+    /// `explicit_unalias` alias stays without its monitor; another alias
+    /// ends with its monitor (`bif.c:470-492`). A monitor of a process sends
+    /// a demonitor signal to it (`bif.c:512-514`). A `DOWN` signal of the
+    /// monitor that comes later finds no monitor and is dropped.
     ///
     /// # Examples
     ///
@@ -726,62 +943,71 @@ impl Scheduler {
     /// assert!(!scheduler.demonitor(reference));
     /// ```
     pub(super) fn demonitor(&mut self, reference: Reference) -> bool {
-        let current = self.current_process_mut().id;
-        let removed = self.remove_monitor(current, reference);
-        if removed {
-            self.end_monitor_alias(reference);
+        let watcher = self.current_process_mut().id;
+        let Some(monitor) = self.remove_origin_monitor(watcher, reference) else {
+            return false;
+        };
+        if let (Some(target), "process") = (monitor.target, monitor.kind) {
+            let demonitor = Signal::Demonitor { watcher, reference };
+            // A target that does not exist drops the signal.
+            let _ = self.send_signal(Some(watcher), target, demonitor);
         }
-        removed
+        true
     }
 
-    /// Remove the monitor `reference` of `watcher` from its target. Return
-    /// true when the monitor was active.
+    /// Remove the monitor `reference` from the monitor tree of the process
+    /// `id` and return it. An `explicit_unalias` alias stays as an alias
+    /// without a monitor (`ERTS_ML_STATE_ALIAS_UNALIAS`); another alias ends
+    /// with the monitor. Return `None` when the tree has no such monitor.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(scheduler.remove_monitor(watcher, reference));
-    /// assert!(!scheduler.remove_monitor(watcher, reference));
+    /// assert!(scheduler.remove_origin_monitor(watcher, reference).is_some());
+    /// assert!(scheduler.remove_origin_monitor(watcher, reference).is_none());
     /// ```
-    fn remove_monitor(&mut self, watcher: ProcessId, reference: Reference) -> bool {
-        for process in self.processes.values_mut() {
-            if let Some(index) = process
-                .monitored_by
-                .iter()
-                .position(|monitor| monitor.watcher == watcher && monitor.reference == reference)
-            {
-                process.monitored_by.remove(index);
-                return true;
-            }
+    fn remove_origin_monitor(
+        &mut self,
+        id: ProcessId,
+        reference: Reference,
+    ) -> Option<OriginMonitor> {
+        let monitors = &mut self.processes.get_mut(&id)?.monitors;
+        let origin = monitors.get_mut(&reference)?;
+        let monitor = origin.monitor.take()?;
+        if origin.alias != Some(AliasMode::ExplicitUnalias) {
+            monitors.remove(&reference);
         }
-        false
+        Some(monitor)
     }
 
-    /// End the alias of the monitor `reference` when its monitor ends,
-    /// unless it is an `explicit_unalias` alias (`bif.c:470-492`,
-    /// `erl_proc_sig_queue.c:6463-6490`).
+    /// Send the message `message` from the current process through the
+    /// alias `alias`, as `erts_proc_sig_send_altact_msg`
+    /// (`erl_proc_sig_queue.c:2077-2290`) does: the message goes as a signal
+    /// to the owner of the alias, which checks the alias when it handles
+    /// the signal. A reference that no `erlang:monitor/3` made with an alias
+    /// option, and an owner that does not exist or exits, drop the message.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.end_monitor_alias(reference);
-    /// assert_eq!(scheduler.alias_owner(reference), None);
+    /// scheduler.send_alias_message(alias, Term::static_atom("ok"));
     /// ```
-    fn end_monitor_alias(&mut self, reference: Reference) {
-        if self
-            .aliases
-            .get(&reference)
-            .is_some_and(|alias| alias.mode != AliasMode::ExplicitUnalias)
-        {
-            self.aliases.remove(&reference);
+    pub(super) fn send_alias_message(&mut self, alias: Reference, message: Term) {
+        let sender = self.current_process_mut().id;
+        let Some(&owner) = self.alias_owners.get(&alias) else {
+            return;
+        };
+        if self.live_process(owner).is_some() {
+            let signal = Signal::AliasMessage { alias, message };
+            self.send_signal(Some(sender), owner, signal)
+                .expect("a live process gets the alias message");
         }
     }
 
-    /// Return the owner of the active alias `reference`, or `None` when the
-    /// reference is not an active alias. ERTS takes the pid from the
-    /// reference (`erts_get_pid_of_ref`, `erl_bif_unique.h:279`), and the
-    /// owner ignores a signal through an alias that is not active
-    /// (`erl_proc_sig_queue.c:4659-4672`, `6026-6041`).
+    /// Return the owner of the alias reference `reference`: the pid in an
+    /// ERTS pid reference (`erts_get_pid_of_ref`, `erl_bif_unique.h:279`).
+    /// Return `None` for a reference that no `erlang:monitor/3` made with an
+    /// alias option.
     ///
     /// # Examples
     ///
@@ -790,46 +1016,7 @@ impl Scheduler {
     /// assert_eq!(scheduler.alias_owner(plain_reference), None);
     /// ```
     pub(super) fn alias_owner(&self, reference: Reference) -> Option<ProcessId> {
-        self.aliases.get(&reference).map(|alias| alias.owner)
-    }
-
-    /// Return the receiver of a message to the reference `reference`: the
-    /// owner of the active alias, or `None` to drop the message. A message
-    /// through a `reply_demonitor` alias ends the alias and removes its
-    /// monitor (`erl_proc_sig_queue.c:6047-6070`).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(scheduler.alias_message_receiver(once), Some(owner));
-    /// assert_eq!(scheduler.alias_message_receiver(once), None);
-    /// ```
-    pub(super) fn alias_message_receiver(&mut self, reference: Reference) -> Option<ProcessId> {
-        let alias = self.aliases.get(&reference)?;
-        let owner = alias.owner;
-        if alias.mode == AliasMode::ReplyDemonitor {
-            self.aliases.remove(&reference);
-            self.remove_monitor(owner, reference);
-        }
-        Some(owner)
-    }
-
-    /// Set the group leader of a live local process, as
-    /// `erts_set_group_leader` does for `erts_internal:group_leader/2`.
-    /// Return `false` when the target does not exist.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(scheduler.set_group_leader(child, leader));
-    /// assert!(!scheduler.set_group_leader(ProcessId(99), leader));
-    /// ```
-    pub(super) fn set_group_leader(&mut self, target: ProcessId, leader: ProcessId) -> bool {
-        let Some(process) = self.processes.get_mut(&target) else {
-            return false;
-        };
-        process.group_leader = leader;
-        true
+        self.alias_owners.get(&reference).copied()
     }
 
     /// Give the name `name` to the live process `id`, as `erlang:register/2`
@@ -886,182 +1073,104 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.finish_current(Term::static_atom("normal"), Some(result))?;
+    /// scheduler.finish_current(Term::static_atom("normal"), Some(result));
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// An abnormal exit signal to a linked process that does not trap exits
-    /// is not supported. The error comes after all exit stages, so the TTY
-    /// resource monitors run on each exit, as `tty_monitor_down`
-    /// (`prim_tty_nif.c:1235-1241`) does in ERTS.
-    pub(super) fn finish_current(
-        &mut self,
-        reason: Term,
-        result: Option<Term>,
-    ) -> Result<(), BeamError> {
+    pub(super) fn finish_current(&mut self, reason: Term, result: Option<Term>) {
         let id = self.schedule_out().id;
-        self.exit_process(id, reason, result)
+        self.exit_process(id, reason, result);
     }
 
-    /// Send the exit signal of `erlang:exit(Target, Reason)` from the current
-    /// process to the local process `target`, and handle it in the receiver
-    /// at once, as the row "Signal queue" of `docs/erts-differences.md`
-    /// records. ERTS sends the signal in `send_exit_signal_bif`
-    /// (`bif.c:1759-1772`), and the receiver handles it in
-    /// `handle_exit_signal` (`erl_proc_sig_queue.c:4740-4770`):
+    /// Remove the process `id` after it exits, as `erts_continue_exit_process`
+    /// (`erl_process.c:14270-14833`) does in one turn:
     ///
-    /// - A receiver that does not exist drops the signal.
-    /// - A receiver that traps exits gets `{'EXIT', Caller, Reason}`, unless
-    ///   `Reason` is `kill`.
-    /// - Else `normal` is ignored, unless the caller sends it to itself:
-    ///   `exit2_suicide` sets `normal_kills` (`erl_proc_sig_queue.c:1807-1809`).
-    /// - Else the receiver exits with `Reason`, and `kill` gives `killed`.
+    /// 1. Stop its receive timer (`erl_process.c:14207-14210`) and the BIF
+    ///    timers to its pid (`erl_process.c:14300-14303`), delete its ETS
+    ///    tables (`ERTS_CONTINUE_EXIT_USING_DB`, `erl_process.c:14360-14368`),
+    ///    and free its registered name (`ERTS_CONTINUE_EXIT_FREE`). Then the
+    ///    process leaves the process table (`erl_process.c:14406-14466`).
+    /// 2. Fetch its signal queue (`erl_process.c:14537`).
+    /// 3. Send a link exit signal to each linked process, but not through a
+    ///    link that is unlinking (`erts_proc_exit_handle_link`,
+    ///    `erl_process.c:14068-14081`).
+    /// 4. Send a demonitor signal to the target of each monitor that it
+    ///    holds (`erl_process.c:13891-13898`).
+    /// 5. Run its TTY resource monitors, and send a monitor down signal to
+    ///    each process that monitors it (`erl_process.c:13806-13815`).
+    /// 6. Answer the signals that it did not handle (see
+    ///    [`Scheduler::handle_exit_signals`]).
+    /// 7. Send the pending monitor signal of the process, when it has one.
     ///
-    /// Return `Some(reason)` when the caller is the receiver and must exit
-    /// before `exit/2` returns. Another receiver exits here.
+    /// Only the current process exits, so the process is not in the run
+    /// queue. The links and the monitors go in the order of their keys;
+    /// ERTS goes through its trees in tree order. The root process records
+    /// its result.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.send_exit(child, Term::static_atom("kill"))?, None);
-    /// assert!(scheduler.process(child).is_none());
-    /// let caller = scheduler.current_process_mut().id;
-    /// assert_eq!(
-    ///     scheduler.send_exit(caller, Term::static_atom("kill"))?,
-    ///     Some(Term::static_atom("killed"))
-    /// );
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// An abnormal exit of the receiver to a linked process that does not
-    /// trap exits is not supported.
-    pub(super) fn send_exit(
-        &mut self,
-        target: ProcessId,
-        reason: Term,
-    ) -> Result<Option<Term>, BeamError> {
-        let caller = self.current_process_mut().id;
-        let Some(process) = self.processes.get(&target) else {
-            return Ok(None);
-        };
-        let kill = reason == Term::static_atom("kill");
-        if process.trap_exit && !kill {
-            let exit = Term::Tuple(vec![Term::static_atom("EXIT"), Term::Pid(caller), reason]);
-            self.deliver(target, exit);
-            return Ok(None);
-        }
-        if reason == Term::static_atom("normal") && target != caller {
-            return Ok(None);
-        }
-        let reason = if kill {
-            Term::static_atom("killed")
-        } else {
-            reason
-        };
-        if target == caller {
-            return Ok(Some(reason));
-        }
-        self.exit_process(target, reason, None)?;
-        Ok(None)
-    }
-
-    /// Remove the process `id` after it exits, and take it out of the run
-    /// queue. Stop its receive timer and the BIF timers to its pid. Delete
-    /// its ETS tables first, then free its registered name, then send `EXIT`
-    /// to linked processes that trap exits, then run its TTY resource
-    /// monitors and send `DOWN` to monitors. ERTS (`erl_process.c`)
-    /// deletes the tables in `ERTS_CONTINUE_EXIT_USING_DB`
-    /// (`erl_process.c:14360-14368`), unregisters the name in
-    /// `ERTS_CONTINUE_EXIT_FREE`, before `ERTS_CONTINUE_EXIT_LINKS` and
-    /// `ERTS_CONTINUE_EXIT_MONITORS`, and sends link exit signals before
-    /// monitor down signals. A process that traps exits also receives a
-    /// `normal` exit.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// scheduler.exit_process(child, Term::static_atom("killed"), None)?;
+    /// scheduler.exit_process(child, Term::static_atom("killed"), None);
     /// assert!(scheduler.process(child).is_none());
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// An abnormal exit signal to a linked process that does not trap exits
-    /// is not supported.
-    fn exit_process(
-        &mut self,
-        id: ProcessId,
-        reason: Term,
-        result: Option<Term>,
-    ) -> Result<(), BeamError> {
-        let process = self
+    fn exit_process(&mut self, id: ProcessId, reason: Term, result: Option<Term>) {
+        let mut process = self
             .processes
             .remove(&id)
             .expect("the exiting process is alive");
-        self.runnable.retain(|&runnable| runnable != id);
-        // ERTS cancels the receive timer first (`erl_process.c:14207-14210`),
-        // then the BIF timers to the pid (`erl_process.c:14300-14303`).
+        debug_assert!(!process.in_run_queue, "only the current process exits");
         if let ReceiveTimer::Set { key, .. } = process.receive_timer {
             self.timers.cancel(key);
         }
         self.timers.cancel_process(id);
-        self.ets.delete_owned(process.id);
+        self.ets.delete_owned(id);
         if let Some(name) = &process.registered_name {
             self.names.remove(name.name());
         }
-        let normal = reason == Term::static_atom("normal");
-        if process.id == ProcessId(0) {
+        if id == ProcessId(0) {
+            let normal = reason == Term::static_atom("normal");
             self.root_result = Some(match result {
                 Some(result) if normal => Ok(result),
                 _ => Err(reason.clone()),
             });
         }
-        let mut signals = Ok(());
-        for linked in process.links {
-            // A missing target counts as trapping; `deliver` then drops the message.
-            let trap_exit = self.processes.get_mut(&linked).is_none_or(|target| {
-                target.links.remove(&process.id);
-                target.trap_exit
-            });
-            if !trap_exit {
-                if !normal {
-                    // ponytail: no exit-signal propagation yet; add it when a task needs linked kills.
-                    // The other exit stages still run, so fd 0 gets its TTY mode back.
-                    signals = Err(error(format!(
-                        "unsupported exit signal {reason:?} to a process that does not trap exits"
-                    )));
-                }
-                continue;
+        process.mailbox.fetch();
+        for (&linked, &unlinking) in &process.links {
+            if unlinking == 0 {
+                let exit = Signal::Exit {
+                    from: id,
+                    reason: reason.clone(),
+                    linked: true,
+                    normal_kills: false,
+                    alias: None,
+                };
+                // A linked process that does not exist drops the signal.
+                let _ = self.send_signal(Some(id), linked, exit);
             }
-            let exit = Term::Tuple(vec![
-                Term::static_atom("EXIT"),
-                Term::Pid(process.id),
-                reason.clone(),
-            ]);
-            self.deliver(linked, exit);
+        }
+        for (&reference, origin) in &process.monitors {
+            if let Some(OriginMonitor {
+                kind: "process",
+                target: Some(target),
+                ..
+            }) = &origin.monitor
+            {
+                let target = *target;
+                let demonitor = Signal::Demonitor {
+                    watcher: id,
+                    reference,
+                };
+                // A target that does not exist drops the signal.
+                let _ = self.send_signal(Some(id), target, demonitor);
+            }
         }
         // ERTS runs the NIF resource monitors of the process in the monitor
         // stage too (`ERTS_CONTINUE_EXIT_LT_MONITORS`).
-        self.resources.borrow_mut::<Ttys>().process_down(process.id);
-        for monitor in process.monitored_by {
-            let item = monitor
-                .name
-                .as_ref()
-                .map_or(Term::Pid(process.id), named_item);
-            self.end_monitor_alias(monitor.reference);
-            let down = down_message(
-                monitor.tag,
-                monitor.reference,
-                "process",
-                item,
-                reason.clone(),
-            );
-            self.deliver(monitor.watcher, down);
+        self.resources.borrow_mut::<Ttys>().process_down(id);
+        for monitor in &process.monitored_by {
+            self.send_monitor_down(Some(id), monitor.watcher, monitor.reference, reason.clone());
         }
-        self.aliases.retain(|_, alias| alias.owner != process.id);
-        signals
+        self.handle_exit_signals(&mut process);
+        self.alias_owners.retain(|_, owner| *owner != id);
+        self.send_pending_monitor();
     }
 }
 
@@ -1077,23 +1186,9 @@ fn named_item(name: &Atom) -> Term {
     Term::Tuple(vec![Term::Atom(name.clone()), local_node()])
 }
 
-/// Return the message `{Tag, Reference, Type, Item, Reason}` of a monitor.
-/// `Tag` is `'DOWN'`, or the `tag` option of `erlang:monitor/3`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let down = down_message(Term::static_atom("DOWN"), reference, "process", Term::Pid(child), Term::static_atom("normal"));
-/// ```
-fn down_message(tag: Term, reference: Reference, kind: &str, item: Term, reason: Term) -> Term {
-    Term::Tuple(vec![
-        tag,
-        Term::Reference(reference),
-        Term::static_atom(kind),
-        item,
-        reason,
-    ])
-}
+mod signals;
+
+pub(super) use signals::{Flushed, HandlingPoint, Received};
 
 #[cfg(test)]
 mod tests;
