@@ -116,7 +116,7 @@ bifs! {
     erlang:bor/2 => unsupported,
     erlang:bsl/2 => unsupported,
     erlang:bsr/2 => unsupported,
-    erlang:bump_reductions/1 => unsupported,
+    erlang:bump_reductions/1 => |cx, [reductions]| Ok(erlang::bump_reductions(cx.scheduler, reductions)),
     erlang:bxor/2 => unsupported,
     erlang:byte_size/1 => unsupported,
     erlang:call_on_load_function/1 => unsupported,
