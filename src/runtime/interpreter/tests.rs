@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use super::bif::{BIFS, INSTRUCTION_CALLS};
 use super::{
-    BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand,
-    write_operand,
+    BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
