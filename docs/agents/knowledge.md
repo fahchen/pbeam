@@ -112,3 +112,7 @@ Choose one instruction-stream construction model for each opcode path. Either re
 ## Public values can violate documented canonical forms
 
 When a public type cannot enforce a canonical representation, document it as a runtime-produced form, not as a type invariant. State that callers must preserve the form when they pass values into runtime operations.
+
+## Trap continuations repeat completed work
+
+Preserve resumable work state across traps. Resume from saved state instead of rebuilding data already processed.
