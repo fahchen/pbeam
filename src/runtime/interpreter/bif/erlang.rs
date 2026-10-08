@@ -966,6 +966,82 @@ pub(super) fn tl(list: &Term) -> BifResult {
     Value(Term::list_with_tail(elements[1..].to_vec(), tail))
 }
 
+/// Run `erlang:integer_to_list/1`: return the decimal characters of an
+/// integer, as ERTS `integer_to_list_1` and `integer_to_list`
+/// (`bif.c:3266-3339`) do. A term that is not an integer raises `badarg`.
+///
+/// A small integer costs no reduction. A bignum costs one reduction for each
+/// 16 digits of [`big_integer_estimate`] (`bif.c:3283-3299`). In the PBeam
+/// integer range, a bignum is from 2^59 to 2^63 - 1 or from -2^63 to
+/// -2^59 - 1, and it costs 1.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// let list = integer_to_list(&mut process, &Term::Integer(-12))?;
+/// assert!(matches!(list, BifResult::Value(Term::List(codes)) if codes == [45, 49, 50].map(Term::Integer)));
+/// assert_eq!(process.fcalls, 10);
+/// integer_to_list(&mut process, &Term::Integer(1 << 59))?;
+/// assert_eq!(process.fcalls, 9);
+/// assert!(matches!(integer_to_list(&mut process, &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// process.fcalls = 0;
+/// assert!(integer_to_list(&mut process, &Term::Integer(1 << 59)).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for a bignum that costs more than the reductions
+/// left. ERTS then runs the BIF again on a dirty CPU scheduler
+/// (`bif.c:3289-3296`, `3323-3336`), and PBeam has no dirty scheduler.
+pub(super) fn integer_to_list(
+    process: &mut ProcessState,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    /// `DIGITS_PER_RED` (`bif.c:3283`).
+    const DIGITS_PER_RED: usize = 16;
+    let Term::Integer(value) = term else {
+        return Ok(BifResult::badarg());
+    };
+    if term.small_integer().is_none() {
+        let cost = big_integer_estimate(*value) / DIGITS_PER_RED;
+        if cost > process.bif_reductions_left() {
+            // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
+            return Err(error(format!(
+                "unsupported erlang:integer_to_list/1 of {value} with {} reductions left: ERTS runs it on a dirty CPU scheduler",
+                process.fcalls
+            )));
+        }
+        process.bump_reductions(cost as i32);
+    }
+    let digits = value.to_string();
+    let codes = digits.bytes().map(|byte| Term::Integer(i64::from(byte)));
+    Ok(Value(Term::List(codes.collect())))
+}
+
+/// Return the number of decimal digits that ERTS `big_integer_estimate`
+/// (`big.c:2589-2597`) gives for a bignum, with the sign and a null byte:
+/// `(lg + 1) / lg2(10) + 1`, rounded down, where `lg` is the index of the
+/// highest set bit of the magnitude (`I_lg`, `big.c:2226-2237`) and
+/// `lg2(10)` is 3.32193 (`lg2_lookup`, `big.c:4087-4092`), then one more
+/// for a negative sign and one for the null byte.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // 2^59: lg 59, 60 / 3.32193 + 1 = 19.06, then the null byte.
+/// assert_eq!(big_integer_estimate(1 << 59), 20);
+/// assert_eq!(big_integer_estimate(i64::MIN), 22);
+/// ```
+fn big_integer_estimate(value: i64) -> usize {
+    /// `lg2_lookup[10 - 2]` (`big.c:4088`), which ERTS rounds to 5 places.
+    #[allow(clippy::approx_constant, reason = "ERTS uses this rounded value")]
+    const LG2_10: f64 = 3.32193;
+    let lg = u64::BITS - 1 - value.unsigned_abs().leading_zeros();
+    let digits = (f64::from(lg + 1) / LG2_10 + 1.0) as usize;
+    digits + usize::from(value < 0) + 1
+}
+
 /// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
 /// name, as ERTS `atom_to_list_1` (`bif.c:3186-3210`) does. The atom `''`
 /// gives `[]`. A term that is not an atom raises `badarg`.

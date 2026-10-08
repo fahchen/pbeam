@@ -1,0 +1,199 @@
+use std::process::Command;
+
+use pbeam_runtime::{BeamProgram, Term};
+
+const INPUT_PROBE: &[u8] = include_bytes!("../fixtures/preempt/input_probe.beam");
+
+/// The spawn options of the measured processes in the ERTS reference run: a
+/// heap of 4,000,000 words, so that no measured process collects garbage.
+/// PBeam has no process heap and runs with `[]`.
+const ERTS_OPTIONS: &str = "[{min_heap_size,4000000}]";
+
+/// An input, as `io:format("~w")` prints it, and the reductions of the BIF
+/// for it.
+type Cost = (&'static str, i64);
+
+/// The reductions of each BIF for each input of `input_probe:costs/1`,
+/// measured on the pinned ERTS with `erl +S 1` (JIT). Each BIF runs with a
+/// budget of 3997 reductions.
+const COSTS: &[(&str, &[Cost])] = &[
+    // A bignum costs one reduction for each 16 digits of
+    // `big_integer_estimate` (`bif.c:3283-3299`), which is 1 in the 64-bit
+    // range. A small integer costs nothing.
+    (
+        "integer_to_list",
+        &[
+            ("small", 0),
+            ("max_small", 0),
+            ("min_big", 1),
+            ("min_small", 0),
+            ("max_negative_big", 1),
+            ("max_64", 1),
+            ("min_64", 1),
+        ],
+    ),
+    // Two flatmaps, and an empty flatmap with a hashmap, cost nothing. Each
+    // other pair costs one reduction for each 8 steps of `hashmap_merge`
+    // (`erl_map.c:1507`, `1736`, `1823`). The last pair traps.
+    (
+        "maps_merge",
+        &[
+            ("{{1,10},{5,20}}", 0),
+            ("{{1,0},{1,40}}", 0),
+            ("{{1,10},{100,140}}", 2),
+            ("{{100,140},{1,10}}", 2),
+            ("{{1,40},{41,80}}", 4),
+            ("{{1,40},{1,40}}", 8),
+            ("{{1,100},{50,150}}", 16),
+            ("{{1,1000},{500,1500}}", 174),
+            ("{{1,10000},{5000,15000}}", 1844),
+            ("{{1,40000},{20000,60000}}", 7034),
+        ],
+    ),
+    // A flatmap costs nothing. A hashmap call takes at most `3997 / 4`
+    // pairs, at most 32 at path 0, and costs 4 for each pair
+    // (`erl_map.c:3783-3800`, `4126`). An ordered iterator path takes at
+    // most `3997 / 32` keys and costs 32 for each key, or all reductions
+    // when keys remain (`erl_map.c:3662-3703`).
+    (
+        "map_next",
+        &[
+            ("{10,0,[]}", 0),
+            ("{33,0,[]}", 128),
+            ("{33,1,iterator}", 124),
+            ("{100,1,[]}", 384),
+            ("{1000,1,[]}", 3772),
+            ("{10000,1,iterator}", 3996),
+            ("{ordered,200,1}", 32),
+            ("{ordered,200,124}", 3968),
+            ("{ordered,200,125}", 3997),
+        ],
+    ),
+];
+
+/// The runs of `input_probe:longs/1`, measured on the pinned ERTS with
+/// `erl +S 1`: the tags of `a`, which calls a BIF that traps three times,
+/// and of `b`, which sends 667 tags in each turn.
+const LONGS: &[(&str, &[(&str, i64)])] = &[
+    // 7034 reductions for each `maps:merge/2` of two maps of 40000 keys.
+    (
+        "maps_merge",
+        &[
+            ("b", 667),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 1665),
+        ],
+    ),
+];
+
+/// Return [`COSTS`] as `io:format("~w")` prints the result of
+/// `input_probe:costs/1`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [{integer_to_list,[{small,0},...]},...]
+/// let text = costs_text();
+/// ```
+fn costs_text() -> String {
+    let bifs: Vec<String> = COSTS
+        .iter()
+        .map(|(bif, costs)| {
+            let costs: Vec<String> = costs
+                .iter()
+                .map(|(input, cost)| format!("{{{input},{cost}}}"))
+                .collect();
+            format!("{{{bif},[{}]}}", costs.join(","))
+        })
+        .collect();
+    format!("[{}]", bifs.join(","))
+}
+
+/// Return [`LONGS`] as `io:format("~w")` prints the result of
+/// `input_probe:longs/1`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [{maps_merge,[{b,667},{a,1},...]},...]
+/// let text = longs_text();
+/// ```
+fn longs_text() -> String {
+    let bifs: Vec<String> = LONGS
+        .iter()
+        .map(|(bif, runs)| {
+            let runs: Vec<String> = runs
+                .iter()
+                .map(|(tag, length)| format!("{{{tag},{length}}}"))
+                .collect();
+            format!("{{{bif},[{}]}}", runs.join(","))
+        })
+        .collect();
+    format!("[{}]", bifs.join(","))
+}
+
+/// Return a term as `io:format("~w")` prints it, for the atoms, integers,
+/// lists, and tuples of the probe results.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(text(&Term::List(vec![Term::Integer(1)])), "[1]");
+/// ```
+fn text(term: &Term) -> String {
+    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+    match term {
+        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Integer(value) => value.to_string(),
+        Term::List(terms) => format!("[{}]", join(terms)),
+        Term::Tuple(terms) => format!("{{{}}}", join(terms)),
+        other => panic!("unexpected term {other:?}"),
+    }
+}
+
+#[test]
+fn charges_and_traps_the_input_dependent_bifs_as_pinned_erts_with_one_scheduler() {
+    let program = BeamProgram::load(&[INPUT_PROBE]).unwrap();
+    let run = |function| {
+        text(
+            &program
+                .execute("input_probe", function, &[Term::List(vec![])])
+                .unwrap(),
+        )
+    };
+    assert_eq!(run("costs"), costs_text());
+    assert_eq!(run("longs"), longs_text());
+
+    // The reference run checks that the pinned `erl` is the JIT flavor, and
+    // that no measured process collects garbage: a collection costs
+    // reductions on ERTS (`erl_gc.c:218-230`), and PBeam has no process
+    // heap.
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-pa",
+            "fixtures/preempt",
+            "-eval",
+            &format!(
+                "jit = erlang:system_info(emu_flavor), O = {ERTS_OPTIONS}, \
+                 [0] = lists:usort([element(tuple_size(G), G) || G <- input_probe:gcs(O)]), \
+                 io:format(\"~w~n~w~n\", [input_probe:costs(O), input_probe:longs(O)]), halt()."
+            ),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{}\n{}\n", costs_text(), longs_text())
+    );
+}

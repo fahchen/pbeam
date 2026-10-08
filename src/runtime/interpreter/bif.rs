@@ -305,6 +305,9 @@ impl BeamProgram {
             ("erlang", "++", [left, right, Term::Integer(done)]) => {
                 Ok(erlang::append_chunk(process, left, right, *done))
             }
+            ("maps", "merge_trap", [merged, Term::Integer(steps)]) => {
+                Ok(maps::merge_trap(process, merged.clone(), *steps as usize))
+            }
             _ => self.bif(scheduler, module, function, arguments),
         }
     }

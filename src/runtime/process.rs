@@ -256,7 +256,10 @@ impl ProcessState {
     /// Return the reductions that a BIF can use, as `ERTS_BIF_REDS_LEFT`
     /// gives them in the JIT: the budget of the turn (`bif.h:66-67`,
     /// `218-219`). A BIF runs with a budget of 0 or more: a `return` that
-    /// makes the budget -1 switches out the process first.
+    /// makes the budget -1 switches out the process first. A hashmap call
+    /// of `erts_internal:map_next/3` can also make the budget negative, but
+    /// `maps.erl` calls it only before a call or a return, which switch out
+    /// the process first.
     ///
     /// # Examples
     ///

@@ -144,34 +144,44 @@ pub(super) fn is_key(key: &Term, map: &Term) -> BifResult {
 ///   remains.
 /// - Iterator mode with a list path: the ordered iterator of
 ///   `maps:iterator/2` (`maps.erl:1062-1072`). The BIF takes the keys of the
-///   list in order, and `Next` is `[Rest | Map]` or `none`.
+///   list in order, and `Next` is `[Rest | Map]` or `none`. See
+///   [`ordered_next`].
 ///
-/// ERTS takes as many pairs as the reductions of the process permit. PBeam
-/// does not read the budget here yet (#234), so it takes the pairs of a
-/// full budget (`CONTEXT_REDS`, `erl_vm.h:53`), as a new ERTS process does.
+/// A flatmap gives all its pairs with no cost. A hashmap call takes
+/// `FCALLS_ELEMS`, the budget divided by 4, but at least 1 pair
+/// (`erl_map.c:3783-3792`), and [`Map::chunk`] applies the other limits. The
+/// call then subtracts 4 for each pair that it counts from the budget, with
+/// no lower limit (`erl_map.c:4126`), so the budget can become negative.
+/// `maps.erl` calls the BIF only before a call or a return, which then
+/// switch out the process.
 ///
 /// A term that is not a map, a third argument that is not `iterator` or a
 /// list, a path that `Map::chunk` does not accept, a key that the map does
 /// not hold, and a list path with a tail that is not `[]` raise
-/// `error:badarg`.
+/// `error:badarg` with no cost.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), test_atom("a"))])?);
 /// let pair = Term::Tuple(vec![Term::Integer(1), test_atom("a")]);
-/// assert!(matches!(map_next(&Term::Integer(0), &map, &Term::List(vec![]))?, BifResult::Value(Term::List(pairs)) if pairs == [pair]));
-/// assert!(matches!(map_next(&Term::Integer(2), &map, &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// assert!(matches!(map_next(&mut process, &Term::Integer(0), &map, &Term::List(vec![]))?, BifResult::Value(Term::List(pairs)) if pairs == [pair]));
+/// assert!(matches!(map_next(&mut process, &Term::Integer(2), &map, &Term::List(vec![]))?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
 ///
 /// Return the runtime error of `Map::chunk` for a next path that PBeam
 /// cannot hold.
-pub(super) fn map_next(path: &Term, map: &Term, acc: &Term) -> Result<BifResult, BeamError> {
-    /// The pairs of a hashmap call with a full budget: `FCALLS_ELEMS` is
-    /// `CONTEXT_REDS / 4` (`erl_map.c:3727-3746`).
-    const HASHMAP_BUDGET: usize = 1000;
+pub(super) fn map_next(
+    process: &mut ProcessState,
+    path: &Term,
+    map: &Term,
+    acc: &Term,
+) -> Result<BifResult, BeamError> {
+    /// The reductions of each pair of a hashmap call (`FCALLS_ELEMS` and
+    /// `erl_map.c:4126`).
+    const PAIR_REDUCTIONS: usize = 4;
     let Term::Map(entries) = map else {
         return Ok(BifResult::badarg());
     };
@@ -182,16 +192,18 @@ pub(super) fn map_next(path: &Term, map: &Term, acc: &Term) -> Result<BifResult,
     };
     match (direction, path) {
         (Direction::Forward, Term::List(keys)) => {
-            return Ok(ordered_next(keys, None, entries, map));
+            return Ok(ordered_next(process, keys, None, entries, map));
         }
         (Direction::Forward, Term::ImproperList(keys, tail)) => {
-            return Ok(ordered_next(keys, Some(tail), entries, map));
+            return Ok(ordered_next(process, keys, Some(tail), entries, map));
         }
         _ => {}
     }
-    let Some(chunk) = entries.chunk(path, HASHMAP_BUDGET, direction)? else {
+    let budget = (process.bif_reductions_left() / PAIR_REDUCTIONS).max(1);
+    let Some(chunk) = entries.chunk(path, budget, direction)? else {
         return Ok(BifResult::badarg());
     };
+    process.fcalls -= (PAIR_REDUCTIONS * chunk.counted) as i32;
     let pairs = chunk.pairs.into_iter();
     let next = chunk.next.map(Term::Integer);
     Ok(Value(match direction {
@@ -213,25 +225,35 @@ pub(super) fn map_next(path: &Term, map: &Term, acc: &Term) -> Result<BifResult,
 }
 
 /// Run the ordered iterator of `erts_internal:map_next/3`
-/// (`erl_map.c:3653-3707`) for a list path of `keys` and the `tail` of an
-/// improper list path: take the keys in order, up to
-/// `MAX(1, reductions / 32)` keys. With a full budget, this is 125 keys. A
-/// key that the map does not hold, and a tail that is not `[]` after the
-/// last key, raise `error:badarg`.
+/// (`erl_map.c:3655-3707`) for a list path of `keys` and the `tail` of an
+/// improper list path: take the keys in order, up to `MAX(1, reductions /
+/// ORDERED_ITER_FACTOR)` keys, where the factor is 32. When the path ends
+/// in the chunk, the call costs 32 for each key. When keys remain, it uses
+/// all reductions. A key that the map does not hold, and a tail that is not
+/// `[]` after the last key, raise `error:badarg` with no cost.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), test_atom("a"))])?);
 /// let Term::Map(entries) = &map else { unreachable!() };
+/// process.fcalls = 40;
 /// let first = Term::Tuple(vec![Term::Integer(1), test_atom("a"), test_atom("none")]);
-/// assert!(matches!(ordered_next(&[Term::Integer(1)], None, entries, &map), BifResult::Value(value) if value == first));
-/// assert!(matches!(ordered_next(&[Term::Integer(2)], None, entries, &map), BifResult::Raise { .. }));
+/// assert!(matches!(ordered_next(&mut process, &[Term::Integer(1)], None, entries, &map), BifResult::Value(value) if value == first));
+/// assert_eq!(process.fcalls, 8);
+/// assert!(matches!(ordered_next(&mut process, &[Term::Integer(2)], None, entries, &map), BifResult::Raise { .. }));
 /// ```
-fn ordered_next(keys: &[Term], tail: Option<&Term>, entries: &Map, map: &Term) -> BifResult {
-    /// `CONTEXT_REDS / ORDERED_ITER_FACTOR` (`erl_vm.h:53`, `erl_map.c:3654-3660`).
-    const ORDERED_BUDGET: usize = 125;
-    let (taken, rest) = keys.split_at(keys.len().min(ORDERED_BUDGET));
+fn ordered_next(
+    process: &mut ProcessState,
+    keys: &[Term],
+    tail: Option<&Term>,
+    entries: &Map,
+    map: &Term,
+) -> BifResult {
+    /// `ORDERED_ITER_FACTOR` in a release build (`erl_map.c:3657-3661`).
+    const ORDERED_ITER_FACTOR: usize = 32;
+    let budget = (process.bif_reductions_left() / ORDERED_ITER_FACTOR).max(1);
+    let (taken, rest) = keys.split_at(keys.len().min(budget));
     let next = match (rest, tail) {
         ([], None) => Term::static_atom("none"),
         ([], Some(_)) => return BifResult::badarg(),
@@ -247,6 +269,11 @@ fn ordered_next(keys: &[Term], tail: Option<&Term>, entries: &Map, map: &Term) -
     let Some(pairs) = pairs.collect::<Option<Vec<_>>>() else {
         return BifResult::badarg();
     };
+    if rest.is_empty() {
+        process.bump_reductions((ORDERED_ITER_FACTOR * taken.len()) as i32);
+    } else {
+        process.bump_all_reductions();
+    }
     Value(iterator_pairs(pairs.into_iter(), next))
 }
 
@@ -275,13 +302,16 @@ fn iterator_pairs<'a>(
 /// not a map, raise `error:{badmap, First}`; else when the second argument
 /// is not a map, raise `error:{badmap, Second}`.
 ///
+/// Two flatmaps merge with no cost. Each other pair runs the steps of the
+/// ERTS hashmap merge ([`Map::merge_steps`]) through [`merge_trap`].
+///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let first = Term::Map(Map::from_pairs(vec![(test_atom("input"), test_atom("raw"))])?);
 /// let second = Term::Map(Map::from_pairs(vec![(test_atom("input"), test_atom("cooked"))])?);
-/// assert!(matches!(merge(&first, &second)?, BifResult::Value(merged) if merged == second));
-/// assert!(matches!(merge(&test_atom("foo"), &second)?, BifResult::Raise { .. }));
+/// assert!(matches!(merge(&mut process, &first, &second)?, BifResult::Value(merged) if merged == second));
+/// assert!(matches!(merge(&mut process, &test_atom("foo"), &second)?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -289,18 +319,66 @@ fn iterator_pairs<'a>(
 /// Return a runtime error when the merged map gets a key that the map form
 /// does not support yet, for example an integer outside the small-integer
 /// range in a map of more than 32 keys.
-pub(super) fn merge(first: &Term, second: &Term) -> Result<BifResult, BeamError> {
+pub(super) fn merge(
+    process: &mut ProcessState,
+    first: &Term,
+    second: &Term,
+) -> Result<BifResult, BeamError> {
     match (first, second) {
         (Term::Map(first), Term::Map(second)) => {
             let pairs = first.iter().chain(second.iter());
             let pairs = pairs.map(|(key, value)| (key.clone(), value.clone()));
             let merged = Map::from_pairs(pairs.collect())
                 .map_err(|key| error(format!("unsupported map key {key:?}")))?;
-            Ok(Value(Term::Map(merged)))
+            let merged = Term::Map(merged);
+            Ok(match first.merge_steps(second) {
+                Some(steps) => merge_trap(process, merged, steps),
+                None => Value(merged),
+            })
         }
         (Term::Map(_), _) => Ok(error_with("badmap", second)),
         _ => Ok(error_with("badmap", first)),
     }
+}
+
+/// Use the reductions of the hashmap merge that gave `merged`, of which
+/// `steps` remain, as ERTS `hashmap_merge` does (`erl_map.c:1558-1851`), and
+/// return `merged`. The call can take `MAP_MERGE_LOOP_FACTOR` (8) steps for
+/// each reduction of the budget (`erl_map.c:1507`, `1569`). When the merge
+/// ends before the budget ends, it bumps one reduction for each 8 steps,
+/// rounded down (`erl_map.c:1823`). Else the step that uses the last of the
+/// budget, or the first step for a budget of 0, traps: the BIF uses all
+/// reductions and continues in the export `maps:merge_trap` with the rest
+/// of the steps (`erl_map.c:1736-1739`, `1826-1850`). ERTS keeps the walk
+/// state in a magic reference and traps to `maps:merge_trap/1`
+/// (`erl_map.c:134-136`, `1498-1505`). PBeam merges the maps in the first
+/// call, so the trap keeps the result and the steps that remain.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// assert!(matches!(merge_trap(&mut process, map.clone(), 79), BifResult::Value(_)));
+/// assert_eq!(process.fcalls, 1);
+/// process.fcalls = 10;
+/// let trap = merge_trap(&mut process, map, 81);
+/// assert!(matches!(trap, BifResult::TrapBif { function: "merge_trap", arguments, .. } if arguments[1] == Term::Integer(1)));
+/// assert_eq!(process.fcalls, 0);
+/// ```
+pub(super) fn merge_trap(process: &mut ProcessState, merged: Term, steps: usize) -> BifResult {
+    /// `MAP_MERGE_LOOP_FACTOR` (`erl_map.c:1507`).
+    const LOOP_FACTOR: usize = 8;
+    let budget = (LOOP_FACTOR * process.bif_reductions_left()).max(1);
+    if steps >= budget {
+        process.bump_all_reductions();
+        return BifResult::TrapBif {
+            module: "maps",
+            function: "merge_trap",
+            arguments: vec![merged, Term::Integer((steps - budget) as i64)],
+        };
+    }
+    process.bump_reductions((steps / LOOP_FACTOR) as i32);
+    Value(merged)
 }
 
 /// Run `maps:remove/2`: return the map without the key, as ERTS

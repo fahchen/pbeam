@@ -64,6 +64,10 @@ pub(crate) struct Chunk<'a> {
     /// The path of the first pair that the chunk does not hold, or `None`
     /// when the chunk ends the walk.
     pub(crate) next: Option<i64>,
+    /// The pairs that the call counts for its cost: `orig_elems - elems`
+    /// (`erl_map.c:4126`). A chunk that takes a whole collision node with
+    /// more pairs than the limit counts the limit. A flatmap chunk counts 0.
+    pub(crate) counted: usize,
 }
 
 /// The entries of one ERTS hashmap node, as the walk of
@@ -511,6 +515,7 @@ impl Map {
                 return Ok(path.filter(|path| *path <= size).map(|_| Chunk {
                     pairs: pairs.iter().map(|(key, value)| (key, value)).collect(),
                     next: None,
+                    counted: 0,
                 }));
             }
             Repr::Hash(hamt) => hamt,
@@ -532,6 +537,97 @@ impl Map {
         limit = limit.min(budget).min(hamt.size);
         hamt.chunk(path, limit, direction)
     }
+
+    /// Return the number of steps of the ERTS hashmap merge for
+    /// `maps:merge(self, other)`, or `None` when ERTS does not run it
+    /// (`maps_merge_2`, `erl_map.c:1257-1284`). Two flatmaps merge with
+    /// `flatmap_merge`, and an empty flatmap with a hashmap gives the
+    /// hashmap (`erl_map.c:1440`). Each other pair runs `hashmap_merge`
+    /// (`erl_map.c:1558-1851`), after the flatmap of a pair becomes a tree
+    /// of its keys (`map_merge_mixed`, `erl_map.c:1425-1466`). See
+    /// [`merge_walk`] for the steps.
+    ///
+    /// The caller must merge the two maps first: each key of a merge that
+    /// gives a hashmap then has a map hash.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = |keys: std::ops::Range<i64>| Map::from_pairs(keys.map(|key| (Term::Integer(key), Term::Integer(key))).collect());
+    /// assert_eq!(map(0..10)?.merge_steps(&map(5..20)?), None);
+    /// assert_eq!(map(0..0)?.merge_steps(&map(0..40)?), None);
+    /// // ERTS 29.1.1: maps:merge/2 of two maps of the keys 1..40 costs 8.
+    /// assert_eq!(map(1..41)?.merge_steps(&map(1..41)?).map(|steps| steps / 8), Some(8));
+    /// ```
+    pub(crate) fn merge_steps(&self, other: &Map) -> Option<usize> {
+        let both_flat = matches!((&self.repr, &other.repr), (Repr::Flat(_), Repr::Flat(_)));
+        if both_flat || self.len() == 0 || other.len() == 0 {
+            return None;
+        }
+        fn hashes(map: &Map) -> Vec<(u64, &Term)> {
+            map.iter()
+                .map(|(key, _)| {
+                    (
+                        map_hash(key).expect("a key of a merged hashmap has a hash"),
+                        key,
+                    )
+                })
+                .collect()
+        }
+        Some(merge_walk(&hashes(self), &hashes(other), 0))
+    }
+}
+
+/// Return the steps that ERTS `hashmap_merge` uses below a slot path that
+/// both maps use, at `level`. `first` and `second` hold the hash and the key
+/// of each key of the two maps under the path. The walk uses one step
+/// (`--reds`, `erl_map.c:1736`) when it starts to build a node, and one step
+/// when a merged child returns to its node (`erl_map.c:1706-1727`). A HAMT
+/// node has a child in a slot when a key hash has that slot path, so the
+/// steps depend only on the key hashes:
+///
+/// - At the collision level 16, the walk merges the collision nodes with no
+///   step (`erl_map.c:1728-1734`).
+/// - One key in each map, and the two keys are equal: the child of the
+///   second map is the result, with no step (`erl_map.c:1617-1629`).
+/// - Else the build costs 1, and each slot that both maps use one level down
+///   costs 1 for the return of its child and the steps of that child
+///   (`erl_map.c:1742-1766`).
+///
+/// ERTS also takes a subtree that both maps share in memory with no step
+/// (`erl_map.c:1608-1612`). PBeam terms share no memory, so PBeam walks such
+/// a subtree.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (one, two) = (Term::Integer(1), Term::Integer(2));
+/// assert_eq!(merge_walk(&[(7, &one)], &[(7, &one)], 1), 0);
+/// // The root, and the return of slot 7, and the build at level 1.
+/// assert_eq!(merge_walk(&[(7, &one)], &[(0x17, &two)], 0), 3);
+/// assert_eq!(merge_walk(&[(7, &one)], &[(7, &two)], 16), 0);
+/// ```
+fn merge_walk(first: &[(u64, &Term)], second: &[(u64, &Term)], level: u32) -> usize {
+    if level == HAMT_MAX_LEVEL {
+        return 0;
+    }
+    if let ([(_, first)], [(_, second)]) = (first, second)
+        && first == second
+    {
+        return 0;
+    }
+    fn slots<'a>(keys: &[(u64, &'a Term)], level: u32) -> [Vec<(u64, &'a Term)>; 16] {
+        let mut slots: [Vec<(u64, &Term)>; 16] = Default::default();
+        for &(hash, key) in keys {
+            slots[slot(hash, level) as usize].push((hash, key));
+        }
+        slots
+    }
+    let children = slots(first, level).into_iter().zip(slots(second, level));
+    let shared = children.filter(|(first, second)| !first.is_empty() && !second.is_empty());
+    1 + shared
+        .map(|(first, second)| 1 + merge_walk(&first, &second, level + 1))
+        .sum::<usize>()
 }
 
 impl Hamt {
@@ -605,7 +701,13 @@ impl Hamt {
         if direction == Direction::Backward {
             pairs.reverse();
         }
-        Ok(Some(Chunk { pairs, next }))
+        // A whole collision node above the limit leaves `remaining` at 0.
+        let counted = limit - remaining;
+        Ok(Some(Chunk {
+            pairs,
+            next,
+            counted,
+        }))
     }
 }
 
