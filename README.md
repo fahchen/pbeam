@@ -14,6 +14,7 @@ The Hello World run uses the boot module `pbeam_boot` of `examples/hello_world` 
 - Run multiple scheduler threads with reductions and work stealing.
 - Link Rust-native functions by module/function/arity into the executable.
 - Isolate platform services behind System/Host boundaries.
+- Authorize protected VM operations and host effects through the proposed Capability Host boundary. Select providers through trusted host configuration.
 - Embed one application bundle in a Rust launcher.
 
 [Hello World](docs/hello-world-target.md) is the first target: PBeam executes the
@@ -28,6 +29,8 @@ system libraries may still be required.
 
 See the [runtime specification](docs/portable-beam-spec.md) for architecture,
 acceptance criteria, and unresolved decisions.
+
+The [capability security design](docs/capability-security-design.md) records the proposed authority, provider, and native trust contracts. The separate [migration and implementation guide](docs/capability-security-migration.md) starts with the delivered M2 terminal IO path after M2 acceptance. These documents do not claim an implemented sandbox or change the current M2 acceptance gate.
 
 Development toolchains are pinned in [mise.toml](mise.toml). Use `mise install`
 to install them; see the [target contract](docs/terra-target.md#toolchain-baseline)
