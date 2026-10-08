@@ -69,6 +69,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** <https://github.com/fahchen/pbeam/pull/182#issuecomment-6005541337>
 
+## 20261007: Verify acceptance references against the current issue
+
+**Problem:** A PR description cited an obsolete acceptance criterion and assigned it a requirement that the current issue does not contain.
+
+**Root Cause:** The description reused an older issue interpretation without checking the current acceptance items.
+
+**Fix:** Check the current issue and cite only the acceptance items that support the recorded decision.
+
+**Guardrail:** Before merging a PR description, compare every acceptance reference and requirement claim with the current issue text.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/191#issuecomment-6008923646>
+
 ## 20261006: Verify task references in difference records
 
 **Problem:** A difference row named a prerequisite task as the owner of a follow-up that the task does not implement.
