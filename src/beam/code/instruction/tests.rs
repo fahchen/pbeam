@@ -1182,6 +1182,37 @@ fn turns_a_call_of_erlang_hibernate_into_the_erts_hibernate_instruction() {
 }
 
 #[test]
+fn turns_a_call_of_erlang_yield_into_the_erts_yield_instruction() {
+    // `call_ext`, `call_ext_last`, and `call_ext_only` of `erlang:yield/0`
+    // (`jit/arm/ops.tab:664-666`).
+    let decode = |bytes: &[u8]| {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend_from_slice(bytes);
+        code.push(0x03);
+        let imports = [("erlang".to_owned(), "yield".to_owned(), 0)];
+        parse_code(&code, &[], &imports, &[], &[]).unwrap().0
+    };
+    assert!(matches!(
+        decode(&[0x07, 0x00, 0x00]).as_slice(), // call_ext 0 import 0
+        [Instruction::Yield, Instruction::End]
+    ));
+    assert!(matches!(
+        decode(&[0x08, 0x00, 0x00, 0x20]).as_slice(), // call_ext_last 0 import 0 2
+        [
+            Instruction::Yield,
+            Instruction::Deallocate { stack_size: 2 },
+            Instruction::Return,
+            Instruction::End
+        ]
+    ));
+    assert!(matches!(
+        decode(&[0x4E, 0x00, 0x00]).as_slice(), // call_ext_only 0 import 0
+        [Instruction::Yield, Instruction::Return, Instruction::End]
+    ));
+}
+
+#[test]
 fn puts_a_test_yield_after_the_entry_label_of_each_function() {
     // `func_prologue` ends with `i_test_yield` (`jit/arm/ops.tab:929-938`).
     // A label that does not follow `func_info` gets no `TestYield`.

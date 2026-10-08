@@ -249,6 +249,22 @@ pub(crate) enum Instruction {
     /// and `erlang.beam` compiles `hibernate() -> erlang:hibernate().` to
     /// `{call_ext_only,0,{extfunc,erlang,hibernate,0}}`.
     Hibernate,
+    /// Runs `erlang:yield/0` as the ERTS `i_yield` instruction: it writes
+    /// `true` to `x0`, keeps the frame, and switches out the process with no
+    /// reduction cost (`jit/arm/instr_common.cpp:3121-3124`;
+    /// `jit/arm/instr_call.cpp:30-36`). The loader turns
+    /// `call_ext 0 erlang:yield/0` into `Yield`,
+    /// `call_ext_last 0 erlang:yield/0 D` into `Yield`,
+    /// `Deallocate { stack_size: D }`, `Return`, and
+    /// `call_ext_only 0 erlang:yield/0` into `Yield`, `Return`
+    /// (`jit/arm/ops.tab:664-666`).
+    ///
+    /// Encoding: `[0x07, 0x00, 0x00]` is `call_ext 0` of import 0, where
+    /// import 0 is `erlang:yield/0`.
+    ///
+    /// Erlang: `erlang.beam` compiles `yield() -> erlang:yield().` to
+    /// `{call_ext_only,0,{extfunc,erlang,yield,0}}`.
+    Yield,
     /// Calls the function whose module is in `x(arity)` and whose name is in
     /// `x(arity + 1)`, with the arguments in `x0` to `x(arity - 1)`. `apply`
     /// (opcode 112) continues after the call. `apply_last` (opcode 113) sets
@@ -1608,22 +1624,23 @@ pub(super) fn parse_code(
                 } else {
                     0
                 };
-                // `i_hibernate` returns to the next instruction, so a tail
-                // call hibernates first and returns after that
-                // (`jit/arm/ops.tab:669-673`; `emu/ops.tab:896-898`).
-                // A tail call of a BIF returns to the `deallocate` and the
-                // `return` after it (`jit/arm/ops.tab:687-714`).
-                if (module.as_str(), name.as_str(), arity) == ("erlang", "hibernate", 0) {
-                    instructions.push(Instruction::Hibernate);
-                } else {
-                    instructions.push(Instruction::CallExternal {
+                // `i_hibernate` and `i_yield` return to the next
+                // instruction, so a tail call hibernates or yields first and
+                // returns after that (`jit/arm/ops.tab:664-673`;
+                // `emu/ops.tab:896-898`). A tail call of a BIF returns to
+                // the `deallocate` and the `return` after it
+                // (`jit/arm/ops.tab:687-714`).
+                instructions.push(match (module.as_str(), name.as_str(), arity) {
+                    ("erlang", "hibernate", 0) => Instruction::Hibernate,
+                    ("erlang", "yield", 0) => Instruction::Yield,
+                    _ => Instruction::CallExternal {
                         arity,
                         module: module.clone(),
                         name: name.clone(),
                         tail: opcode != OPCODE_CALL_EXT,
                         deallocate,
-                    });
-                }
+                    },
+                });
                 if opcode == OPCODE_CALL_EXT_LAST {
                     instructions.push(Instruction::Deallocate {
                         stack_size: deallocate,

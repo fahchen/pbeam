@@ -4,7 +4,7 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
 use crate::runtime::local_node;
-use crate::runtime::scheduler::{AliasMode, MonitorOptions, MonitorTarget};
+use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, MonitorOptions, MonitorTarget};
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use crate::term::{Fun, MAX_ATOM_CHARACTERS};
@@ -1414,12 +1414,37 @@ const SEND_REDUCTIONS: i32 = 4;
 /// assert!(matches!(local_send_result(scheduler, ok), BifResult::YieldReturn(_)));
 /// ```
 fn local_send_result(scheduler: &mut Scheduler, value: Term) -> BifResult {
-    let process = scheduler.current_process_mut();
-    process.vbump_reductions(SEND_REDUCTIONS);
-    if process.fcalls == 0 {
+    scheduler.vbump_reductions(SEND_REDUCTIONS);
+    if scheduler.current_process_mut().fcalls == 0 {
         BifResult::YieldReturn(value)
     } else {
         Value(value)
+    }
+}
+
+/// Run `erlang:bump_reductions/1`: use `reductions` of the budget of the
+/// caller, but not more than `CONTEXT_REDS`, and return `true`, as
+/// `bump_reductions_1` (`bif.c:5403-5415`) does with `BIF_RET2`
+/// (`bif.h:71-78`, `221-224`). The budget does not go below 0, and the
+/// process switches out at the next cost point. A value that is not a small
+/// integer, or a negative value, raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// scheduler.current_process_mut().fcalls = 4000;
+/// assert!(matches!(bump_reductions(scheduler, &Term::Integer(10)), BifResult::Value(_)));
+/// assert_eq!(scheduler.current_process_mut().fcalls, 3990);
+/// assert!(matches!(bump_reductions(scheduler, &Term::Integer(-1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn bump_reductions(scheduler: &mut Scheduler, reductions: &Term) -> BifResult {
+    match reductions.small_integer() {
+        Some(value) if value >= 0 => {
+            let value = value.min(i64::from(CONTEXT_REDS)) as i32;
+            scheduler.current_process_mut().bump_reductions(value);
+            Value(Term::static_atom("true"))
+        }
+        _ => BifResult::badarg(),
     }
 }
 
@@ -1780,12 +1805,18 @@ fn is_process_info_item(item: &Term) -> bool {
 /// `process_info_aux` does. For a live process, return
 /// `{message_queue_len, N}`, where `N` counts the messages of the mailbox and
 /// no receive marker, as `sig_qs.mq_len` does (`erl_bif_info.c:1742-1754`).
-/// ERTS first moves the signal queue into the message queue
-/// (`erl_bif_info.c:1355-1356, 1405`), and PBeam puts each message into the
-/// mailbox at once. For the calling process, return
+/// For each item of a live process, first fetch the messages that arrived,
+/// with no cost. ERTS fetches the messages of the caller for each item
+/// (`erl_bif_info.c:1355-1356`, `1237-1244`). Another process with messages
+/// that it did not fetch gets a process-info signal, and it fetches them
+/// when it handles the signal (`erl_bif_info.c:1384-1390`). For a live
+/// process, return `{reductions, N}`, where `N` is the reduction total of
+/// the process, and for the calling process also the reductions of its
+/// current turn, as `erl_bif_info.c:2114-2121` does. For the calling process, return
 /// `{current_stacktrace, []}`, because PBeam records no stack frames. The
 /// `current_stacktrace` of another process, a list of items, and any other
-/// item give a runtime error.
+/// item give a runtime error. Each item of a live process costs the caller
+/// one reduction after the read (`erl_bif_info.c:1424`, `1601`).
 ///
 /// # Examples
 ///
@@ -1817,9 +1848,11 @@ pub(super) fn process_info(
         return Ok(BifResult::badarg());
     };
     let current = context.scheduler.current_process_mut().id;
-    let Some(target) = context.scheduler.process(*id) else {
+    let current_reductions = context.scheduler.current_reductions();
+    let Some(target) = context.scheduler.process_mut(*id) else {
         return Ok(Value(Term::static_atom("undefined")));
     };
+    target.mailbox.fetch();
     let info = match item {
         Term::Atom(name) => match (name.name(), &target.registered_name) {
             // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
@@ -1835,10 +1868,24 @@ pub(super) fn process_info(
                 item.clone(),
                 Term::Integer(target.mailbox.message_count() as i64),
             ])),
+            ("reductions", _) => {
+                let current = if *id == current {
+                    current_reductions
+                } else {
+                    0
+                };
+                let total = i64::try_from(target.reductions + current)
+                    .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?;
+                Some(Term::Tuple(vec![item.clone(), Term::Integer(total)]))
+            }
             _ => None,
         },
         _ => None,
     };
+    // `process_info_aux` costs 1 for each item (`erl_bif_info.c:1601`), and
+    // `process_info_bif` uses the cost after it reads the items
+    // (`erl_bif_info.c:1417-1424`).
+    context.scheduler.current_process_mut().bump_reductions(1);
     // ponytail: lists of items, other items, and the frames of another process need more state; see "BIF arguments" in docs/erts-differences.md.
     info.map(Value).ok_or_else(|| {
         error(format!(

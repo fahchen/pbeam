@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::bif::{BIFS, INSTRUCTION_CALLS};
+use super::bif::BIFS;
 use super::{
     BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand, write_operand,
 };
@@ -273,11 +273,12 @@ fn reports_process_exits_and_unsupported_exit_signals() {
         error(vec![erlang_call("is_alive", 0, false)])
             .contains("unresolved external MFA erlang:is_alive/0")
     );
-    // The ERTS loader turns this call into an instruction. Its body in
-    // `erlang.beam` calls itself, so it must not run.
+    // An external call of `erlang:yield/0` that the loader did not turn
+    // into `Instruction::Yield`, as through `apply`, runs the code of the
+    // `erlang` module, as in ERTS.
     assert!(
         error(vec![erlang_call("yield", 0, false)])
-            .contains("unsupported instruction call erlang:yield/0")
+            .contains("unresolved external MFA erlang:yield/0")
     );
 }
 
@@ -912,6 +913,11 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
 /// `i_apply_fun`, `i_apply`, and `i_yield` instructions (`ops.tab`).
 #[test]
 fn bif_table_equals_erts_is_builtin() {
+    const INSTRUCTION_CALLS: [(&str, &str, u32); 3] = [
+        ("erlang", "apply", 2),
+        ("erlang", "apply", 3),
+        ("erlang", "yield", 0),
+    ];
     let mut builtin: Vec<(&str, &str, u32)> = include_str!("../../../fixtures/bifs/is_builtin.txt")
         .lines()
         .map(|line| {
