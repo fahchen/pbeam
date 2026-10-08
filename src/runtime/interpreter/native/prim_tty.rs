@@ -619,7 +619,7 @@ mod tests {
         // succeeds, and `tcsetattr` of the same fd then succeeds.
         let mut scheduler = Scheduler::new(AtomTable::new());
         scheduler.start(frame(), vec![]).unwrap();
-        scheduler.schedule_next();
+        scheduler.schedule_next().unwrap();
         let reference = scheduler.make_ref().unwrap();
         scheduler.resources.borrow_mut::<Ttys>().insert(
             reference,

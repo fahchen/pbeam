@@ -1,4 +1,4 @@
-use super::{CONTEXT_REDS, MonitorOptions, MonitorTarget, Scheduler};
+use super::{CONTEXT_REDS, MonitorOptions, MonitorTarget, Scheduler, Turn};
 use crate::term::test_atom;
 use crate::{
     runtime::ets::{Access, Table},
@@ -19,15 +19,20 @@ fn atom(name: &str) -> Term {
     test_atom(name)
 }
 
-fn first_message(scheduler: &Scheduler, id: u64, index: usize) -> Term {
-    scheduler.processes[&ProcessId(id)].mailbox.messages()[index].clone()
+fn messages(scheduler: &Scheduler, id: u64) -> Vec<Term> {
+    scheduler.processes[&ProcessId(id)].mailbox.messages()
+}
+
+fn current(scheduler: &mut Scheduler) -> ProcessId {
+    scheduler.current_process_mut().id
 }
 
 #[test]
 fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(current(&mut scheduler), ProcessId(0));
     assert!(scheduler.processes.contains_key(&ProcessId(0)));
     let (child, monitor) = scheduler
         .spawn(Start::Entry(frame()), vec![], false, false, false)
@@ -35,22 +40,29 @@ fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
     assert_eq!((child, monitor), (ProcessId(1), None));
 
     scheduler.park_current();
-    assert_eq!(scheduler.schedule_next(), Some(ProcessId(1)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(current(&mut scheduler), ProcessId(1));
     assert!(scheduler.runnable.is_empty());
     scheduler.deliver(ProcessId(0), atom("ping"));
     scheduler.deliver(ProcessId(1), atom("self"));
     scheduler.deliver(ProcessId(9), atom("lost"));
 
     assert_eq!(Vec::from(scheduler.runnable.clone()), vec![ProcessId(0)]);
-    assert_eq!(first_message(&scheduler, 0, 0), atom("ping"));
-    assert_eq!(first_message(&scheduler, 1, 0), atom("self"));
+    assert_eq!(messages(&scheduler, 0), [atom("ping")]);
+    assert_eq!(messages(&scheduler, 1), [atom("self")]);
+    scheduler.yield_current();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.park_current();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.park_current();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
 }
 
 #[test]
 fn switches_out_to_the_end_of_the_run_queue_with_a_new_budget() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler
         .spawn(Start::Entry(frame()), vec![], false, false, false)
         .unwrap();
@@ -60,17 +72,18 @@ fn switches_out_to_the_end_of_the_run_queue_with_a_new_budget() {
         Vec::from(scheduler.runnable.clone()),
         vec![ProcessId(1), ProcessId(0)]
     );
-    assert_eq!(scheduler.schedule_next(), Some(ProcessId(1)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(current(&mut scheduler), ProcessId(1));
     scheduler.yield_current();
-    assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(scheduler.current_process_mut().fcalls, CONTEXT_REDS);
 }
 
 #[test]
-fn sends_down_and_exit_messages_and_records_the_root_result() {
+fn sends_down_and_exit_signals_and_records_the_root_result() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     scheduler.current_process_mut().trap_exit = true;
     let (monitored, monitor) = scheduler
         .spawn(Start::Entry(frame()), vec![], true, false, false)
@@ -80,18 +93,18 @@ fn sends_down_and_exit_messages_and_records_the_root_result() {
         .unwrap();
     scheduler.park_current();
 
-    scheduler.schedule_next();
-    scheduler.finish_current(atom("normal"), None).unwrap();
-    scheduler.schedule_next();
-    scheduler.finish_current(atom("boom"), None).unwrap();
+    scheduler.schedule_next().unwrap();
+    scheduler.finish_current(atom("normal"), None);
+    scheduler.schedule_next().unwrap();
+    scheduler.finish_current(atom("boom"), None);
 
-    assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+    // The root process waits, so it handles both signals at schedule-in,
+    // and the messages give it Erlang work.
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(current(&mut scheduler), ProcessId(0));
     assert!(scheduler.current_process_mut().links.is_empty());
     assert_eq!(
-        [
-            first_message(&scheduler, 0, 0),
-            first_message(&scheduler, 0, 1)
-        ],
+        messages(&scheduler, 0),
         [
             Term::Tuple(vec![
                 atom("DOWN"),
@@ -103,9 +116,7 @@ fn sends_down_and_exit_messages_and_records_the_root_result() {
             Term::Tuple(vec![atom("EXIT"), Term::Pid(linked), atom("boom")]),
         ]
     );
-    scheduler
-        .finish_current(atom("normal"), Some(atom("ok")))
-        .unwrap();
+    scheduler.finish_current(atom("normal"), Some(atom("ok")));
     assert!(scheduler.processes.is_empty());
     assert_eq!(scheduler.into_root_result(), Some(Ok(atom("ok"))));
 }
@@ -114,30 +125,36 @@ fn sends_down_and_exit_messages_and_records_the_root_result() {
 fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
         .spawn(Start::Entry(frame()), vec![], false, false, false)
         .unwrap();
     assert_eq!(scheduler.link(child).unwrap(), atom("true"));
+    assert_eq!(scheduler.link(child).unwrap(), atom("true"));
+    assert_eq!(scheduler.link(ProcessId(0)).unwrap(), atom("true"));
     assert!(scheduler.link(ProcessId(99)).is_err());
     scheduler.unlink(child);
-    assert!(scheduler.current_process_mut().links.is_empty());
-    assert!(scheduler.processes[&child].links.is_empty());
+    assert_ne!(scheduler.current_process_mut().links[&child], 0);
+    scheduler.unlink(child);
     scheduler.unlink(ProcessId(99));
     scheduler.unlink(ProcessId(0));
     assert_eq!(scheduler.link(child).unwrap(), atom("true"));
+    assert_eq!(scheduler.current_process_mut().links[&child], 0);
     scheduler.park_current();
 
-    scheduler.schedule_next();
-    assert!(
-        scheduler
-            .current_process_mut()
-            .links
-            .contains(&ProcessId(0))
+    // The child handles the link, the unlink, and the link again.
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(
+        scheduler.current_process_mut().links.get(&ProcessId(0)),
+        Some(&0)
     );
-    scheduler.finish_current(atom("normal"), None).unwrap();
+    scheduler.finish_current(atom("normal"), None);
 
-    assert_eq!(scheduler.schedule_next(), None);
+    // The root process handles the acknowledgment of the old unlink,
+    // which leaves the new link, and then the normal exit signal, which
+    // removes the link. It still waits.
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
     let root = &scheduler.processes[&ProcessId(0)];
     assert!(root.links.is_empty());
     assert!(root.mailbox.messages().is_empty());
@@ -147,20 +164,19 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
 fn rejects_unsupported_exit_signals_and_counter_overflow() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     scheduler
         .spawn(Start::Entry(frame()), vec![], false, true, false)
         .unwrap();
     scheduler.park_current();
-    scheduler.schedule_next();
-    assert!(scheduler.finish_current(atom("boom"), None).is_err());
+    scheduler.schedule_next().unwrap();
+    scheduler.finish_current(atom("boom"), None);
+    assert!(scheduler.schedule_next().is_err());
 
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
-    scheduler
-        .finish_current(atom("boom"), Some(atom("ok")))
-        .unwrap();
+    scheduler.schedule_next().unwrap();
+    scheduler.finish_current(atom("boom"), Some(atom("ok")));
     assert_eq!(scheduler.into_root_result(), Some(Err(atom("boom"))));
 
     let mut scheduler = Scheduler {
@@ -173,38 +189,40 @@ fn rejects_unsupported_exit_signals_and_counter_overflow() {
 }
 
 #[test]
-fn removes_active_monitors_and_sets_group_leaders() {
+fn sends_the_pending_monitor_signal_before_a_demonitor_signal() {
+    // `proc_queue_signal` sends the pending monitor signal first when the
+    // next signal goes to the same target (`erl_proc_sig_queue.c:1146-1170`).
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
         .spawn(Start::Entry(frame()), vec![], false, false, false)
         .unwrap();
-    assert_eq!(scheduler.processes[&child].group_leader, ProcessId(0));
-    assert!(scheduler.set_group_leader(child, child));
-    assert_eq!(scheduler.processes[&child].group_leader, child);
-    assert!(!scheduler.set_group_leader(ProcessId(99), child));
-
     let reference = scheduler
         .monitor(MonitorTarget::Process(child), no_options())
         .unwrap();
-    assert_eq!(scheduler.processes[&child].monitored_by.len(), 1);
+    assert!(!scheduler.processes[&child].mailbox.has_incoming());
     assert!(scheduler.demonitor(reference));
-    assert!(scheduler.processes[&child].monitored_by.is_empty());
     assert!(!scheduler.demonitor(reference));
+    scheduler.park_current();
+
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert!(scheduler.current_process_mut().monitored_by.is_empty());
 }
 
 #[test]
 fn creates_no_monitor_of_the_caller_and_sends_noproc_for_a_missing_target() {
     // ERTS 29.1.1: `monitor(process, self())` creates no monitor
-    // (`bif.c:781-784`), and a missing target gets the noproc message.
+    // (`bif.c:781-784`). A port name gives the noproc signal at once, and a
+    // pid that no process has gives it when the pending signal goes, at the
+    // switch out.
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     let own = scheduler
         .monitor(MonitorTarget::Process(ProcessId(0)), no_options())
         .unwrap();
-    assert!(scheduler.processes[&ProcessId(0)].monitored_by.is_empty());
+    assert!(scheduler.processes[&ProcessId(0)].monitors.is_empty());
     assert!(!scheduler.demonitor(own));
     let gone = scheduler
         .monitor(MonitorTarget::Process(ProcessId(9)), no_options())
@@ -213,22 +231,24 @@ fn creates_no_monitor_of_the_caller_and_sends_noproc_for_a_missing_target() {
     let port = scheduler
         .monitor(MonitorTarget::PortName(name), no_options())
         .unwrap();
+    scheduler.park_current();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     let named = Term::Tuple(vec![atom("undefined"), atom("nonode@nohost")]);
     assert_eq!(
-        scheduler.processes[&ProcessId(0)].mailbox.messages(),
+        messages(&scheduler, 0),
         [
-            Term::Tuple(vec![
-                atom("DOWN"),
-                Term::Reference(gone),
-                atom("process"),
-                Term::Pid(ProcessId(9)),
-                atom("noproc"),
-            ]),
             Term::Tuple(vec![
                 atom("DOWN"),
                 Term::Reference(port),
                 atom("port"),
                 named,
+                atom("noproc"),
+            ]),
+            Term::Tuple(vec![
+                atom("DOWN"),
+                Term::Reference(gone),
+                atom("process"),
+                Term::Pid(ProcessId(9)),
                 atom("noproc"),
             ]),
         ]
@@ -241,7 +261,7 @@ fn frees_the_name_of_a_process_when_it_exits() {
     // in another process is true.
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
         .spawn(Start::Entry(frame()), vec![], false, false, false)
         .unwrap();
@@ -252,8 +272,8 @@ fn frees_the_name_of_a_process_when_it_exits() {
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(child));
     scheduler.park_current();
 
-    scheduler.schedule_next();
-    scheduler.finish_current(atom("normal"), None).unwrap();
+    scheduler.schedule_next().unwrap();
+    scheduler.finish_current(atom("normal"), None);
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
     assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
@@ -273,13 +293,13 @@ fn deletes_the_tables_of_a_process_when_it_exits() {
     // message arrives (erl_process.c:14360-14368).
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     let (child, monitor) = scheduler
         .spawn(Start::Entry(frame()), vec![], true, false, false)
         .unwrap();
     scheduler.park_current();
 
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     let table = scheduler.make_ref().unwrap();
     scheduler.ets.create(
         table,
@@ -287,18 +307,19 @@ fn deletes_the_tables_of_a_process_when_it_exits() {
         Table::new(child, Access::Protected, 1),
     );
     assert!(scheduler.ets.name_in_use("ets_probe_owned"));
-    scheduler.finish_current(atom("normal"), None).unwrap();
+    scheduler.finish_current(atom("normal"), None);
 
     assert!(!scheduler.ets.name_in_use("ets_probe_owned"));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(
-        first_message(&scheduler, 0, 0),
-        Term::Tuple(vec![
+        messages(&scheduler, 0),
+        [Term::Tuple(vec![
             atom("DOWN"),
             Term::Reference(monitor.unwrap()),
             atom("process"),
             Term::Pid(child),
             atom("normal"),
-        ])
+        ])]
     );
 }
 
@@ -310,7 +331,7 @@ fn resumes_after_wait_timeout_when_the_timer_expires_after_a_message() {
     // (`erl_hl_timer.c:692-706`, `erl_process.c:10451-10458`).
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(100), 7));
     scheduler.park_current();
     scheduler.deliver(ProcessId(0), atom("early"));
@@ -326,7 +347,7 @@ fn resumes_after_wait_timeout_when_the_timer_expires_after_a_message() {
         ReceiveTimer::Expired { resume: 7 }
     );
 
-    assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     let process = scheduler.current_process_mut();
     assert_eq!(process.frames[0].next_instruction, 7);
     assert_eq!(process.receive_timer, ReceiveTimer::Timo);
@@ -341,17 +362,17 @@ fn resumes_after_wait_timeout_when_the_timer_expires_after_a_message() {
 fn wakes_a_waiting_process_and_stops_receive_timers_at_cancel_and_exit() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
     scheduler.park_current();
     scheduler.expire_timers(1_001_000_000);
-    assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
 
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
     scheduler.cancel_receive_timer();
     assert_eq!(scheduler.timers.wait_time(1_000_000_000), None);
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
-    scheduler.finish_current(atom("normal"), None).unwrap();
+    scheduler.finish_current(atom("normal"), None);
     assert_eq!(scheduler.timers.wait_time(1_000_000_000), None);
 }
 
@@ -362,7 +383,7 @@ fn rejects_receive_timeouts_as_erts_set_proc_timer_term() {
     // `ERTS_MONOTONIC_END`.
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.start(frame(), vec![]).unwrap();
-    scheduler.schedule_next();
+    scheduler.schedule_next().unwrap();
     for timeout in [Term::Integer(-1), Term::Integer(4_294_967_296), atom("foo")] {
         assert!(!scheduler.set_receive_timer(1_000_000_000, &timeout, 0));
     }

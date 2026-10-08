@@ -5,6 +5,7 @@
 //! `unicode` modules hold the BIF bodies that do not fit on one table line.
 
 use super::*;
+use crate::runtime::scheduler::Flushed;
 
 mod erlang;
 mod erts_internal;
@@ -63,9 +64,9 @@ pub(super) enum BifResult {
     /// runs again.
     YieldReturn(Term),
     /// The calling process exits with this reason, and no catch tag sees
-    /// it, as `ERTS_BIF_EXITED` does. `erlang:exit/2` to the caller traps to
-    /// the C function `erts_internal:await_exit/0`, which ends the process
-    /// before the BIF returns (`bif.c:1699-1716`).
+    /// it, as `ERTS_BIF_EXITED` does when a BIF that handles the signals of
+    /// its caller finds that a signal ended the caller (`bif.c:1708-1710`,
+    /// `5482-5483`).
     Exited(Term),
 }
 
@@ -294,6 +295,15 @@ impl BeamProgram {
     ///   done, and the key position ([`ets::insert_list`]). ERTS traps to
     ///   `ets:insert/2` with a magic reference to the YCF state
     ///   (`erl_db.c:2297-2332`).
+    /// - `erlang:bif_handle_signals_return/2`, with the process that the BIF
+    ///   read and its result: it handles the signals of the caller up to a
+    ///   flush signal and returns the result (`bif.c:5452-5495`).
+    /// - `erts_internal:await_exit/0`: it handles the signals of the caller
+    ///   until the exit signal of `exit(self(), Reason)` ends the caller
+    ///   (`bif.c:1698-1716`).
+    ///
+    /// The last two run again after a switch when their reductions are used
+    /// up (`ERTS_BIF_YIELD2`, `ERTS_BIF_YIELD0`).
     ///
     /// # Examples
     ///
@@ -371,6 +381,25 @@ impl BeamProgram {
                     merged.clone(),
                 ))
             }
+            ("erlang", "bif_handle_signals_return", [_, value]) => {
+                Ok(match scheduler.flush_signals()? {
+                    Flushed::Done => BifResult::Value(value.clone()),
+                    Flushed::Exited(reason) => BifResult::Exited(reason),
+                    Flushed::Yield => BifResult::TrapBif {
+                        module: "erlang",
+                        function: "bif_handle_signals_return",
+                        arguments: arguments.clone(),
+                    },
+                })
+            }
+            ("erts_internal", "await_exit", []) => Ok(match scheduler.await_exit()? {
+                Some(reason) => BifResult::Exited(reason),
+                None => BifResult::TrapBif {
+                    module: "erts_internal",
+                    function: "await_exit",
+                    arguments: Vec::new(),
+                },
+            }),
             _ => self.bif(scheduler, module, function, arguments),
         }
     }

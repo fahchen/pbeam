@@ -1,5 +1,8 @@
+mod common;
+
 use std::process::Command;
 
+use common::pinned_beam;
 use pbeam_runtime::{BeamProgram, Term};
 
 const EVENT_BIF_PROBE: &[u8] = include_bytes!("../fixtures/event_bif/event_bif_probe.beam");
@@ -217,8 +220,12 @@ fn counts_queued_messages_as_pinned_erts() {
     // item `message_queue_len`, as `logger_olp:flush/2` and
     // `logger_olp:check_load/1` do, for the caller and for a process that
     // waits for another message. The count holds each message that is still
-    // in the queue (`erl_bif_info.c:1742-1754`).
-    let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
+    // in the queue (`erl_bif_info.c:1742-1754`). The other process has
+    // messages that it did not fetch, so it gets a process-info request,
+    // and the caller waits for the reply in `erts_internal:await_result/1`
+    // (`erl_bif_info.c:1478-1500`).
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erts_internal, EVENT_BIF_PROBE]).unwrap();
     let item = Term::Atom(program.atom("message_queue_len").unwrap());
     let expected = [0, 2, 1, 2].map(|count| Term::Tuple(vec![item.clone(), Term::Integer(count)]));
     assert_eq!(
