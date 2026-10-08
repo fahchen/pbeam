@@ -1,5 +1,5 @@
 use super::{
-    process::{Frame, ProcessState, ReceiveTimer, StackSlot, Start},
+    process::{Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::Scheduler,
     unicode::{characters_to_code_points, characters_to_utf8},
 };
@@ -320,6 +320,8 @@ impl BeamProgram {
     /// Run the current process until it waits for a message, calls
     /// `erlang:hibernate/0`, exits, or switches out. A process with an
     /// undefined start first calls `undefined_function` with its start MFA.
+    /// A process with a pending BIF first finishes the BIF call through its
+    /// export (see [`PendingBif`]).
     /// A process that switched out at the `return` of its last frame has no
     /// frame. It exits now with the value in `x0`, as ERTS continues at the
     /// normal exit (`beam_normal_exit`).
@@ -349,6 +351,20 @@ impl BeamProgram {
                 self.undefined_function(scheduler, module.name(), function.name(), arity, false)?
             };
             if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+        }
+        // A BIF that trapped to a BIF export continues through the export,
+        // and then the process continues after the call.
+        if let Some(PendingBif {
+            module,
+            function,
+            arguments,
+            tail,
+        }) = scheduler.current_process_mut().pending_bif.take()
+        {
+            let result = self.bif_trap(scheduler, module, function, arguments)?;
+            if let Some(outcome) = self.finish_bif(scheduler.current_process_mut(), result, tail)? {
                 return Ok(outcome);
             }
         }
@@ -547,10 +563,27 @@ impl BeamProgram {
                     // (`bif_instrs.tab`). Another fail label jumps to the
                     // label and raises nothing (`$FAIL($Fail)` in
                     // `i_bif.call`).
-                    let result = self.bif(scheduler, bif_module, name, values)?;
+                    //
+                    // The guard BIF `length/1` runs as `i_length`
+                    // (`jit/arm/ops.tab:1329-1333`). At a trap, it keeps
+                    // its trap state, switches out, and runs again when the
+                    // process runs again (`jit/arm/instr_bif.cpp:253-272`).
+                    let result = match scheduler.current_process_mut().length_trap.take() {
+                        Some(state) => self.bif_trap(scheduler, "erlang", "length", state)?,
+                        None => self.bif(scheduler, bif_module, name, values)?,
+                    };
                     let process = scheduler.current_process_mut();
                     match result {
                         BifResult::Value(value) => write(process, destination, value)?,
+                        BifResult::TrapBif {
+                            module: "erlang",
+                            function: "length",
+                            arguments,
+                        } => {
+                            process.length_trap = Some(arguments);
+                            current_frame(process).next_instruction -= 1;
+                            return Ok(Outcome::Yield);
+                        }
                         BifResult::Raise { .. } if *fail_label != 0 => {
                             jump(module, process, *fail_label)?
                         }
@@ -1535,7 +1568,10 @@ impl BeamProgram {
     /// of a tail call, and switches out the process. An exception goes to
     /// the error handler. A trap writes its arguments to the X registers,
     /// enters the target function, and switches out the process. An exit ends the process, and no catch
-    /// tag sees it. Return the outcome when the process stops.
+    /// tag sees it. A trap to a BIF export keeps the export, its arguments,
+    /// and `tail` in the process, and switches out the process: `run` then
+    /// finishes the call through the export. Return the outcome when the
+    /// process stops.
     ///
     /// # Examples
     ///
@@ -1587,6 +1623,19 @@ impl BeamProgram {
                 // (`context_switch_simplified` in `jit/arm/instr_bif.cpp:525-536`,
                 // `676-701`). The process enters the target when it runs
                 // again, so the entry costs one reduction of the next turn.
+                Ok(Some(Outcome::Yield))
+            }
+            BifResult::TrapBif {
+                module,
+                function,
+                arguments,
+            } => {
+                process.pending_bif = Some(PendingBif {
+                    module,
+                    function,
+                    arguments,
+                    tail,
+                });
                 Ok(Some(Outcome::Yield))
             }
             BifResult::Exited(reason) => Ok(Some(Outcome::Exit {

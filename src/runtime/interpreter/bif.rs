@@ -40,6 +40,21 @@ pub(super) enum BifResult {
         /// Arguments for the trap target, in `x0` onwards.
         arguments: Vec<Term>,
     },
+    /// The BIF continues in the export of a BIF after the calling process
+    /// switches out, as `BIF_TRAP` to a BIF export does: the process
+    /// switches out at once (`context_switch_simplified` in
+    /// `jit/arm/instr_bif.cpp:525-536`, `676-701`), and the export runs with
+    /// these arguments when the process runs again. The export costs no
+    /// reduction (`jit/arm/instr_bif.cpp:721-789`). Its value is the value of
+    /// the BIF call. See [`BeamProgram::bif_trap`] for the exports.
+    TrapBif {
+        /// Module of the BIF export, for example `lists`.
+        module: &'static str,
+        /// Function of the BIF export, for example `member`.
+        function: &'static str,
+        /// Arguments of the BIF export, in `x0` onwards.
+        arguments: Vec<Term>,
+    },
     /// The BIF returns this value after the calling process switches out,
     /// as `ERTS_BIF_PREP_YIELD_RETURN` does (`bif.h:445-452`): the BIF
     /// traps to `bif_return_trap`, which returns the value when the process
@@ -83,6 +98,40 @@ impl BifResult {
             reason: Term::static_atom("badarith"),
         }
     }
+}
+
+/// Split a list into its elements and the tail of an improper list. `[]`
+/// gives no elements and no tail. A term that is not a list gives `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x")));
+/// assert!(matches!(list_cells(&improper), Some(([Term::Integer(1)], Some(Term::Atom(_))))));
+/// assert!(matches!(list_cells(&Term::List(vec![])), Some(([], None))));
+/// assert!(list_cells(&Term::Integer(1)).is_none());
+/// ```
+fn list_cells(list: &Term) -> Option<(&[Term], Option<&Term>)> {
+    match list {
+        Term::List(elements) => Some((elements, None)),
+        Term::ImproperList(elements, tail) => Some((elements, Some(tail))),
+        _ => None,
+    }
+}
+
+/// Return the list of `elements` and then `tail`, or `[]` when `tail` is
+/// `None`: the rest of a list from [`list_cells`], which a BIF trap gives to
+/// the export.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(list_rest(&[Term::Integer(2)], None), Term::List(vec![Term::Integer(2)]));
+/// ```
+fn list_rest(elements: &[Term], tail: Option<&Term>) -> Term {
+    // ponytail: the rest is a copy, O(n) with the `Vec` list model of #71.
+    let tail = tail.cloned().unwrap_or_else(|| Term::List(Vec::new()));
+    Term::list_with_tail(elements.to_vec(), tail)
 }
 
 /// The state that a BIF body can use.
@@ -218,6 +267,46 @@ impl BeamProgram {
             scheduler,
         };
         table::dispatch(&mut context, module, name, &arguments)
+    }
+
+    /// Run the export of a BIF trap with the arguments of the trap, as the
+    /// process does when it runs again after [`BifResult::TrapBif`]. Most
+    /// BIFs trap to their own export with new arguments, for example
+    /// `lists:member/2` with the rest of the list. Two exports are not
+    /// `bif.tab` entries, and no Erlang code can call them:
+    ///
+    /// - `erlang:length/2`, with the rest of the list and the count so far.
+    ///   ERTS traps to `erlang:length/3`, which also keeps the original list
+    ///   for the stack trace of an error (`erl_bif_guard.c:48-55`, `226-247`).
+    ///   PBeam gives a BIF error the stack trace `[]`.
+    /// - `erlang:'++'/3`, with the original lists and the number of elements
+    ///   done. ERTS traps to `'++'/2` with a magic reference to the same state
+    ///   (`erl_bif_lists.c:91-109`, `298-333`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let rest = Term::List(vec![Term::Integer(1)]);
+    /// let result = program.bif_trap(&mut scheduler, "erlang", "length", vec![rest, Term::Integer(64000)])?;
+    /// assert!(matches!(result, BifResult::Value(Term::Integer(64001))));
+    /// ```
+    pub(super) fn bif_trap(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        function: &str,
+        arguments: Vec<Term>,
+    ) -> Result<BifResult, BeamError> {
+        let process = scheduler.current_process_mut();
+        match (module, function, arguments.as_slice()) {
+            ("erlang", "length", [list, Term::Integer(count)]) => {
+                Ok(erlang::length(process, list, *count))
+            }
+            ("erlang", "++", [left, right, Term::Integer(done)]) => {
+                Ok(erlang::append_chunk(process, left, right, *done))
+            }
+            _ => self.bif(scheduler, module, function, arguments),
+        }
     }
 }
 
