@@ -643,10 +643,10 @@ impl Scheduler {
     /// ```
     pub(super) fn make_ref(&mut self) -> Result<Reference, BeamError> {
         let value = self.next_reference;
-        self.next_reference = value
-            .checked_add(1)
-            .ok_or_else(|| error("process reference overflow"))?;
-        Ok(Reference(value))
+        let reference =
+            Reference::ordinary(value).ok_or_else(|| error("process reference overflow"))?;
+        self.next_reference = value + 1;
+        Ok(reference)
     }
 
     /// Return whether the root process exited.
@@ -885,9 +885,11 @@ impl Scheduler {
         target: MonitorTarget,
         options: MonitorOptions,
     ) -> Result<Reference, BeamError> {
-        let reference = self.make_ref()?;
+        let mut reference = self.make_ref()?;
         let watcher = self.current_process_mut().id;
         if options.alias.is_some() {
+            // ERTS makes a pid reference for an alias option (`bif.c:765-767`).
+            reference = reference.pid_reference();
             self.alias_owners.insert(reference, watcher);
         }
         let (kind, id, item) = match target {

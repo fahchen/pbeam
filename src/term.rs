@@ -456,11 +456,20 @@ impl fmt::Debug for Term {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessId(pub(crate) u64);
 
-/// An identifier for a reference in this runtime. The order of identifiers
-/// is their creation order; the runtime uses it to visit the monitors of a
-/// process in one fixed order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// An identifier for a reference in this runtime: a counter value, and the
+/// pid reference marker in its high bit. The order of identifiers is their
+/// creation order; the runtime uses it to visit the monitors of a process in
+/// one fixed order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Reference(pub(crate) u64);
+
+/// The bit of a reference value that marks a pid reference: the reference
+/// that `erlang:monitor/3` makes for an alias option. ERTS marks the
+/// reference numbers of a pid reference with `ERTS_REF1_PID_MARKER_BIT__`
+/// (`erl_bif_unique.h:106-109`, `146-149`), and the mark stays when the
+/// owner exits. The reference counter stays below this bit. The bit shows
+/// in the number `N2` of [`Reference::numbers`].
+const PID_REFERENCE_MARKER: u64 = 1 << 63;
 
 /// The mask of the first reference number (`REF_MASK`, 18 bits).
 const REF_NUMBER_0_MASK: u64 = 0x3_FFFF;
@@ -473,6 +482,43 @@ const REF_NUMBER_1_MASK: u64 = 0xFFFC_0000;
 const REF_THREAD: u64 = 1;
 
 impl Reference {
+    /// Return the ordinary reference with the counter value `value`, or
+    /// `None` when `value` has the pid reference marker bit.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Reference::ordinary(0), Some(Reference(0)));
+    /// assert_eq!(Reference::ordinary(u64::MAX), None);
+    /// ```
+    pub(crate) fn ordinary(value: u64) -> Option<Self> {
+        (value & PID_REFERENCE_MARKER == 0).then_some(Reference(value))
+    }
+
+    /// Return the pid reference with the counter value of the ordinary
+    /// reference `self`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Reference(0).pid_reference().is_pid_reference());
+    /// ```
+    pub(crate) fn pid_reference(self) -> Self {
+        Reference(self.0 | PID_REFERENCE_MARKER)
+    }
+
+    /// Return true for a pid reference, as `erts_is_pid_ref_numbers`
+    /// (`erl_bif_unique.h:145-149`) does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!Reference(0).is_pid_reference());
+    /// ```
+    pub(crate) fn is_pid_reference(self) -> bool {
+        self.0 & PID_REFERENCE_MARKER != 0
+    }
+
     /// Return the three ERTS reference numbers `[N0, N1, N2]` of the
     /// reference. ERTS makes them from a 64-bit counter value of a
     /// scheduler (`erts_set_ref_numbers`, `erl_bif_unique.h:117-131`): `N0` is the
@@ -497,6 +543,20 @@ impl Reference {
             ((value & REF_NUMBER_1_MASK) | REF_THREAD) as u32,
             (value >> 32) as u32,
         ]
+    }
+}
+
+impl Ord for Reference {
+    /// Compare the counter values, so that the order is the creation order
+    /// also for a pid reference.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.0 & !PID_REFERENCE_MARKER).cmp(&(other.0 & !PID_REFERENCE_MARKER))
+    }
+}
+
+impl PartialOrd for Reference {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -748,5 +808,14 @@ mod tests {
             [33174, 1537736705, 4116665985]
         );
         assert_eq!(Reference(0).numbers(), [0, 1, 0]);
+    }
+
+    #[test]
+    fn keeps_the_creation_order_and_the_pid_reference_marker() {
+        let alias = Reference(1).pid_reference();
+        assert!(alias.is_pid_reference() && !Reference(1).is_pid_reference());
+        assert!(Reference(0) < alias && alias < Reference(2));
+        assert_eq!(Reference::ordinary(1), Some(Reference(1)));
+        assert_eq!(Reference::ordinary(alias.0), None);
     }
 }

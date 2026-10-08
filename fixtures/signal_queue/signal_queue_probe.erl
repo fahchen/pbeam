@@ -621,7 +621,9 @@ alias_to_dead_owner() ->
     wait_down(M),
     A ! dropped,
     T ! stop,
-    {is_process_alive(O), flush()}.
+    %% The alias stays a pid reference after its owner exits.
+    R = try erts_internal:is_process_alive(O, A) catch error:Reason -> Reason end,
+    {is_process_alive(O), R, flush()}.
 
 %% process_info/2 of a busy process from a caller with signals in its
 %% middle queue part: the save pointer passes the queue through a marker.

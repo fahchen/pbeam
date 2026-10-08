@@ -90,7 +90,7 @@ const CASES: &[(&str, &str)] = &[
     ("unlink_unhandled_exit", "{true,[]}"),
     ("hibernate_signals", "m"),
     ("pending_replace", "{noproc,normal}"),
-    ("alias_to_dead_owner", "{false,[]}"),
+    ("alias_to_dead_owner", "{false,badarg,[]}"),
     ("info_request_backlog", "{message_queue_len,1}"),
     ("marker_exit", "{died,killed}"),
     ("flush_exit", "{died,killed}"),

@@ -104,7 +104,8 @@ pub(super) fn group_leader_request(
 /// `erl_proc_sig_queue.c:3027-3073`), and then the result traps to
 /// `erlang:bif_handle_signals_return/2` when the caller has incoming
 /// signals. A term that is not a pid, and a term that is not a reference
-/// or is an alias, raise `badarg`.
+/// or is an alias (a pid reference), also of an owner that exited, raise
+/// `badarg`.
 ///
 /// # Examples
 ///
@@ -120,10 +121,10 @@ pub(super) fn is_process_alive(
     let (Term::Pid(target), Term::Reference(reference)) = (pid, reference) else {
         return BifResult::badarg();
     };
-    let scheduler = &mut *context.scheduler;
-    if scheduler.alias_owner(*reference).is_some() {
+    if reference.is_pid_reference() {
         return BifResult::badarg();
     }
+    let scheduler = &mut *context.scheduler;
     let caller = scheduler.current_process_mut().id;
     let request = Signal::IsAlive {
         requester: caller,
