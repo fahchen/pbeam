@@ -778,10 +778,13 @@ impl BeamProgram {
                 // jit/arm/ops.tab:1054-1055), which gives the same result.
                 // The compiler gives a real fail label
                 // (beam_ssa_codegen.erl:1666-1673), so the label is never 0.
-                // A reused match context in PBeam is a copy that shares the
-                // binary but not the position (row "Binary matching" of
-                // docs/erts-differences.md). `prim_tty:is_usascii/1` reuses
-                // the match context in `x0` with the destination `x0`.
+                // ERTS writes a reused match context to the destination, so
+                // the two registers share one position. PBeam keeps the
+                // position in each register, so it reuses a match context
+                // only in its own register and else stops (row "Binary
+                // matching" of docs/erts-differences.md).
+                // `prim_tty:is_usascii/1` reuses the match context in `x0`
+                // with the destination `x0`.
                 Instruction::BinaryMatchStart {
                     fail_label,
                     source,
@@ -791,8 +794,16 @@ impl BeamProgram {
                         let context = Term::MatchContext(MatchContext::new(bytes));
                         write(process, destination, context)?;
                     }
-                    context @ Term::MatchContext(_) => {
-                        write(process, destination, context.clone())?;
+                    Term::MatchContext(_) => {
+                        if !matches!(
+                            (source, destination),
+                            (Operand::X(from), Operand::X(to)) | (Operand::Y(from), Operand::Y(to))
+                                if from == to
+                        ) {
+                            return Err(error(format!(
+                                "unsupported bs_start_match3 that copies the match context in {source:?} to {destination:?}"
+                            )));
+                        }
                     }
                     _ => jump(module, process, *fail_label)?,
                 },
@@ -3725,6 +3736,15 @@ mod tests {
                 deallocate: 0,
             }]),
             escape
+        );
+        // A reuse in another register would share the position in ERTS.
+        assert_eq!(
+            run(vec![Instruction::BinaryMatchStart {
+                fail_label: 1,
+                source: Operand::X(0),
+                destination: Operand::X(1),
+            }]),
+            "unsupported bs_start_match3 that copies the match context in X(0) to X(1)"
         );
         assert_eq!(
             run(vec![Instruction::BinarySetPosition {
