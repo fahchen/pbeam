@@ -46,7 +46,17 @@ options(none) ->
     [no_line_info];
 options(Committed) ->
     {ok, {_Module, [{compile_info, Info}]}} = beam_lib:chunks(Committed, [compile_info]),
-    proplists:get_value(options, Info).
+    case lists:keyfind(options, 1, Info) of
+        {options, Options} -> Options;
+        false -> debug_info_options(Committed)
+    end.
+
+%% The deterministic option removes options from CInf (OTP-29.1.1 lib/compiler/src/compile.erl:2762-2766).
+%% Dbgi keeps the options that change code generation, deterministic included (compile.erl:2636-2653, compile.erl:2667-2693).
+debug_info_options(Committed) ->
+    {ok, {_Module, [{debug_info, {debug_info_v1, erl_abstract_code, {_Abstract, Options}}}]}} =
+        beam_lib:chunks(Committed, [debug_info]),
+    Options.
 
 %% CInf holds the absolute source path (OTP-29.1.1 lib/compiler/src/compile.erl:2756-2758).
 %% Dbgi holds the {cwd, _} build directory that erlc adds (compile.erl:2639, compile.erl:2677-2678, compile.erl:3169).
