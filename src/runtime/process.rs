@@ -267,8 +267,19 @@ impl ProcessState {
     /// process.fcalls = 6;
     /// assert_eq!(process.bif_reductions_left(), 6);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panic when the budget is negative: code that calls
+    /// `erts_internal:map_next/3` directly and then calls a BIF that reads
+    /// the budget before the next call or return. Each ERTS BIF reads a
+    /// negative budget in its own way, and PBeam does not implement this
+    /// yet (row "Map iteration" in `docs/erts-differences.md`).
     pub(super) fn bif_reductions_left(&self) -> usize {
-        usize::try_from(self.fcalls).expect("a BIF runs with a budget of 0 or more")
+        usize::try_from(self.fcalls).expect(
+            "unsupported negative reduction budget in a BIF after erts_internal:map_next/3 \
+             (see \"Map iteration\" in docs/erts-differences.md)",
+        )
     }
 
     /// Mark the receive timer as expired, as `proc_timeout_common`
@@ -342,6 +353,14 @@ pub(super) mod tests {
         assert_eq!(process.fcalls, 2);
         process.bump_reductions(4);
         assert_eq!(process.fcalls, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported negative reduction budget in a BIF")]
+    fn names_the_unsupported_negative_budget_of_a_bif() {
+        let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+        process.fcalls = -1;
+        process.bif_reductions_left();
     }
 
     #[test]
