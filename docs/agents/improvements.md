@@ -21,6 +21,66 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261006: Verify OTP hardware assumptions against source behavior
+
+**Problem:** The clock documentation and test rationale assumed that ERTS returns the host TSC frequency when RDTSCP is available.
+
+**Root Cause:** The implementation inferred ERTS behavior from hardware terminology instead of checking the pinned OTP source and running the reference on the target hosts.
+
+**Fix:** Correct the documentation and keep the fixed test value only after confirming the pinned ERTS result on the supported hosts.
+
+**Guardrail:** Before documenting host-dependent behavior, inspect the pinned OTP feature detection and compare the exact reference output on each supported host.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/176#issuecomment-6005160493>
+
+## 20261006: Separate BIF and BEAM instruction differences
+
+**Problem:** A difference record said that `raise` was not implemented after the `erlang:raise/3` BIF became supported.
+
+**Root Cause:** The record used the same short name for a BEAM instruction and a BIF without naming the operation type.
+
+**Fix:** State the exact unsupported BEAM instructions and identify the implemented BIF as a separate item.
+
+**Guardrail:** Name the operation type when a difference record contains a BIF and a BEAM instruction with the same name.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/177#discussion_r4188965048>
+
+## 20261006: Verify documented error behavior against the active dispatch path
+
+**Problem:** The PR description named an unsupported BIF error, but the active dispatch path returned an unresolved external MFA error.
+
+**Root Cause:** The documentation used an evidence location that did not handle the operation.
+
+**Fix:** Run a compiled probe through the current runtime and document the observed error.
+
+**Guardrail:** Trace each documented error from the operation's dispatch entry to its fallback before writing the claim.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/181#issuecomment-6005540768>
+
+## 20261006: Verify PR claims against the final diff
+
+**Problem:** A PR description said that no existing test changed, but the diff changed an existing test helper.
+
+**Root Cause:** The description was not checked against the final diff after the helper was refactored.
+
+**Fix:** Replace the stale statement with a precise statement that identifies the unchanged assertions and the changed helper.
+
+**Guardrail:** Check every change summary and verification claim against the final diff before publishing the PR.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/182#issuecomment-6005541337>
+
+## 20261007: Verify acceptance references against the current issue
+
+**Problem:** A PR description cited an obsolete acceptance criterion and assigned it a requirement that the current issue does not contain.
+
+**Root Cause:** The description reused an older issue interpretation without checking the current acceptance items.
+
+**Fix:** Check the current issue and cite only the acceptance items that support the recorded decision.
+
+**Guardrail:** Before merging a PR description, compare every acceptance reference and requirement claim with the current issue text.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/191#issuecomment-6008923646>
+
 ## 20261006: Verify task references in difference records
 
 **Problem:** A difference row named a prerequisite task as the owner of a follow-up that the task does not implement.
