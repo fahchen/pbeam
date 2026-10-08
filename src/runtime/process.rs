@@ -1,6 +1,6 @@
 mod tree;
 
-pub(super) use tree::{MonitorLinkTree, TimerReference};
+pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 
 use super::{mailbox::Mailbox, scheduler::AliasMode, timer::TimerKey};
 use crate::{

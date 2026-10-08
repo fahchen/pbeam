@@ -6,7 +6,7 @@ use super::{
     persistent_term::PersistentTerms,
     process::{
         Flush, Frame, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer, Start,
-        TimerReference,
+        TimerReference, WalkPosition,
     },
     regex_code::RegexCodes,
     resources::Resources,
@@ -105,15 +105,16 @@ pub(super) enum Turn {
 
 /// A phase of an exit after the process left the process table, as the
 /// phases `ERTS_CONTINUE_EXIT_LINKS` to `ERTS_CONTINUE_EXIT_HANDLE_PROC_SIG`
-/// of `erts_continue_exit_process` (`erl_process.c:14234-14251`). A phase
-/// that walks entries keeps the number of entries that the exit handled, as
-/// the ERTS yield state keeps the next entry.
+/// of `erts_continue_exit_process` (`erl_process.c:14234-14251`). A tree
+/// phase keeps the position of its next entry, or `None` before its first
+/// entry, and the list phase keeps the number of entries that it handled,
+/// as the ERTS yield state keeps the next entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExitPhase {
     /// The link tree of the process, in post-order.
-    Links(usize),
+    Links(Option<WalkPosition>),
     /// The monitor tree of the process, in post-order.
-    Monitors(usize),
+    Monitors(Option<WalkPosition>),
     /// The monitors of other processes and resources on the process
     /// (`ERTS_P_LT_MONITORS`): the TTY resource monitors, then the entries
     /// of `monitored_by` from the index.
@@ -1277,10 +1278,10 @@ impl Scheduler {
         process.mailbox.fetch();
         process.exiting = Some(reason);
         if reds <= 0 {
-            self.switch_out_freed(process, ExitPhase::Links(0));
+            self.switch_out_freed(process, ExitPhase::Links(None));
             return;
         }
-        self.exit_links(process, ExitPhase::Links(0), reds);
+        self.exit_links(process, ExitPhase::Links(None), reds);
     }
 
     /// Switch out the freed process `process`, whose exit continues at
@@ -1291,7 +1292,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.switch_out_freed(process, ExitPhase::Links(0));
+    /// scheduler.switch_out_freed(process, ExitPhase::Links(None));
     /// ```
     fn switch_out_freed(&mut self, process: ProcessState, phase: ExitPhase) {
         self.send_pending_monitor();
@@ -1336,7 +1337,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.exit_links(process, ExitPhase::Links(0), 3850);
+    /// scheduler.exit_links(process, ExitPhase::Links(None), 3850);
     /// ```
     fn exit_links(&mut self, mut process: ProcessState, mut phase: ExitPhase, mut reds: i32) {
         let id = process.id;
@@ -1346,14 +1347,18 @@ impl Scheduler {
             .expect("a process that left the process table has an exit reason");
         loop {
             phase = match phase {
-                ExitPhase::Links(done) => {
-                    let mut stop = None;
-                    for (index, (&linked, &unlinking)) in
-                        process.links.post_order().enumerate().skip(done)
-                    {
-                        if reds <= 0 {
-                            stop = Some(index);
+                ExitPhase::Links(position) => {
+                    let mut walk = match position {
+                        Some(position) => process.links.post_order_from(position),
+                        None => process.links.post_order(),
+                    };
+                    loop {
+                        let position = walk.position();
+                        let Some((&linked, &unlinking)) = walk.next() else {
                             break;
+                        };
+                        if reds <= 0 {
+                            return self.switch_out_freed(process, ExitPhase::Links(position));
                         }
                         if unlinking == 0 {
                             let exit = Signal::Exit {
@@ -1369,19 +1374,20 @@ impl Scheduler {
                         }
                         reds -= 1;
                     }
-                    if let Some(index) = stop {
-                        return self.switch_out_freed(process, ExitPhase::Links(index));
-                    }
-                    ExitPhase::Monitors(0)
+                    ExitPhase::Monitors(None)
                 }
-                ExitPhase::Monitors(done) => {
-                    let mut stop = None;
-                    for (index, (&reference, origin)) in
-                        process.monitors.post_order().enumerate().skip(done)
-                    {
-                        if reds <= 0 {
-                            stop = Some(index);
+                ExitPhase::Monitors(position) => {
+                    let mut walk = match position {
+                        Some(position) => process.monitors.post_order_from(position),
+                        None => process.monitors.post_order(),
+                    };
+                    loop {
+                        let position = walk.position();
+                        let Some((&reference, origin)) = walk.next() else {
                             break;
+                        };
+                        if reds <= 0 {
+                            return self.switch_out_freed(process, ExitPhase::Monitors(position));
                         }
                         if let Some(OriginMonitor {
                             kind: "process",
@@ -1397,9 +1403,6 @@ impl Scheduler {
                             let _ = self.send_signal(Some(id), *target, demonitor);
                         }
                         reds -= 1;
-                    }
-                    if let Some(index) = stop {
-                        return self.switch_out_freed(process, ExitPhase::Monitors(index));
                     }
                     ExitPhase::TargetMonitors(0)
                 }

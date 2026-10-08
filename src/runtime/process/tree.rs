@@ -312,6 +312,29 @@ impl<K: TreeKey, V> MonitorLinkTree<K, V> {
         }
     }
 
+    /// Return the post-order walk that continues at `position`, as a
+    /// yielding ERTS walk continues at the node in its yield state
+    /// (`erl_rbtree.h:1392-1396`). The tree must not change after the walk
+    /// gave `position`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut walk = tree.post_order();
+    /// walk.next();
+    /// let position = walk.position().unwrap();
+    /// assert!(tree.post_order_from(position).eq(walk));
+    /// ```
+    pub(in crate::runtime) fn post_order_from(
+        &self,
+        position: WalkPosition,
+    ) -> PostOrder<'_, K, V> {
+        PostOrder {
+            tree: self,
+            next: Some(position.0),
+        }
+    }
+
     /// Return the node of `key`, or `None`.
     ///
     /// # Examples
@@ -605,6 +628,26 @@ pub(in crate::runtime) struct PostOrder<'a, K, V> {
     tree: &'a MonitorLinkTree<K, V>,
     /// The node that the walk gives next, or `None` at the end.
     next: Option<usize>,
+}
+
+/// The node where a post-order walk continues, as the node in the yield
+/// state of a yielding ERTS walk (`erl_rbtree.h:1392-1396`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) struct WalkPosition(usize);
+
+impl<K, V> PostOrder<'_, K, V> {
+    /// Return the position of the entry that the walk gives next, or `None`
+    /// at the end. [`MonitorLinkTree::post_order_from`] continues the walk
+    /// there.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(MonitorLinkTree::<ProcessId, u64>::default().post_order().position(), None);
+    /// ```
+    pub(in crate::runtime) fn position(&self) -> Option<WalkPosition> {
+        self.next.map(WalkPosition)
+    }
 }
 
 impl<'a, K: TreeKey, V> Iterator for PostOrder<'a, K, V> {
