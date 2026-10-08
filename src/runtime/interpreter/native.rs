@@ -264,7 +264,91 @@ pub(super) fn load_nif_error(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{LIBRARIES, binding};
+    use crate::runtime::interpreter::bif::BIFS;
+
+    /// The effect inventory of transition 1 of
+    /// `docs/capability-security-migration.md`.
+    const INVENTORY: &str = include_str!("../../../docs/effect-inventory.md");
+
+    /// The source of the BIF table, which marks each BIF that PBeam does not
+    /// implement with `=> unsupported`.
+    const BIF_TABLE: &str = include_str!("bif/table.rs");
+
+    /// Return the entry keys of the section `## {section}` of the effect
+    /// inventory: the first code span of each table row, and each
+    /// `module:name/arity` of a list line ``- `module`: `name/arity`, ...``.
+    fn inventory_entries(section: &str) -> BTreeSet<String> {
+        let heading = format!("## {section}");
+        let mut entries = BTreeSet::new();
+        let lines = INVENTORY
+            .lines()
+            .skip_while(|line| *line != heading)
+            .skip(1)
+            .take_while(|line| !line.starts_with("## "));
+        for line in lines {
+            if let Some(row) = line.strip_prefix("| `") {
+                entries.insert(row[..row.find('`').unwrap()].to_owned());
+            } else if let Some(item) = line.strip_prefix("- `") {
+                let (module, functions) = item.split_once("`: ").unwrap();
+                for function in functions.split(", ") {
+                    entries.insert(format!("{module}:{}", function.trim_matches('`')));
+                }
+            }
+        }
+        entries
+    }
+
+    /// Assert that the section `## {section}` of the effect inventory lists
+    /// exactly the entries of `expected`.
+    fn assert_section(section: &str, expected: &BTreeSet<String>) {
+        let listed = inventory_entries(section);
+        let missing: Vec<_> = expected.difference(&listed).collect();
+        let extra: Vec<_> = listed.difference(expected).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "docs/effect-inventory.md section {section}: missing {missing:?}, not in the code {extra:?}"
+        );
+    }
+
+    /// The effect inventory has an entry for each BIF of `BIFS` and each
+    /// function of a static NIF library, in the section of its kind: a BIF
+    /// with a body, an `unsupported` BIF, a native binding, or a library
+    /// function without a binding. No section lists an entry that the code
+    /// does not have.
+    #[test]
+    fn effect_inventory_lists_each_bif_and_native_function() {
+        let bifs: BTreeSet<String> = BIFS
+            .iter()
+            .map(|(module, name, arity)| format!("{module}:{name}/{arity}"))
+            .collect();
+        let unsupported: BTreeSet<String> = BIF_TABLE
+            .lines()
+            .filter_map(|line| line.trim().strip_suffix(" => unsupported,"))
+            .map(|mfa| mfa.replace('"', ""))
+            .collect();
+        assert!(unsupported.is_subset(&bifs), "{unsupported:?}");
+        let implemented = bifs.difference(&unsupported).cloned().collect();
+        assert_section("BIFs", &implemented);
+        assert_section("Unsupported BIFs", &unsupported);
+
+        let mut bound = BTreeSet::new();
+        let mut unbound = BTreeSet::new();
+        for library in LIBRARIES {
+            for &(name, arity) in library.functions {
+                let key = format!("{}:{name}/{arity}", library.module);
+                if binding(library.module, name, arity).is_some() {
+                    bound.insert(key);
+                } else {
+                    unbound.insert(key);
+                }
+            }
+        }
+        assert_section("Native bindings", &bound);
+        assert_section("Native functions without a binding", &unbound);
+    }
 
     /// `library` and `binding` find an entry with binary searches, so the
     /// libraries and the bindings of each library are strictly increasing:

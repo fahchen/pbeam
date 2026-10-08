@@ -33,7 +33,7 @@ A reference can locate a runtime record without proving permission to use that r
 
 First refactor the existing native and host path without changing its accepted behavior. Trace all callers before moving an operation. Keep OTP argument validation, result conversion, exception behavior, and side effects at their current verified boundaries.
 
-List each executed BIF, native MFA, instruction fast path, VM operation, and host operation. For each entry, record authority requirements, determinism, execution class, observable effects, and cost. A pure declaration is reviewed metadata, not a proof about Rust or C code.
+List each executed BIF, native MFA, instruction fast path, VM operation, and host operation. For each entry, record authority requirements, determinism, execution class, observable effects, and cost. A pure declaration is reviewed metadata, not a proof about Rust or C code. The [effect inventory](effect-inventory.md) holds this list.
 
 Include existing operations beyond terminal writes:
 
