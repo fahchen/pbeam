@@ -2661,19 +2661,12 @@ mod tests {
 
     #[test]
     fn decodes_the_is_lt_is_integer_and_is_boolean_tests_of_the_compare_probe_fixture() {
-        const COMPARE_PROBE: &[u8] = include_bytes!("../../../fixtures/compare/compare_probe.beam");
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/compare/compare_probe.beam` has these bytes.
         let next = [0x27, 0x75, 0x01, 0x57, 0x13, 0x10]; // next/1: is_lt f7 0 {tr,x1,1}
         let width = [0x27, 0xF5, 0x03, 0x01]; // width/1: is_lt f15 x0 0
         let is_integer = [0x2D, 0xB5, 0x03]; // kind/1: is_integer f11 x0
         let is_boolean = [0x72, 0xC5, 0x03]; // kind/1: is_boolean f12 x0
-        for bytes in [&next[..], &width, &is_integer, &is_boolean] {
-            assert!(
-                COMPARE_PROBE
-                    .windows(bytes.len())
-                    .any(|window| window == bytes),
-                "{bytes:02X?} is not in compare_probe.beam"
-            );
-        }
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([&next[..], &width, &is_integer, &is_boolean, &[0x03]].concat());
@@ -2708,14 +2701,9 @@ mod tests {
 
     #[test]
     fn decodes_the_is_eq_test_of_the_compare_probe_fixture() {
-        const COMPARE_PROBE: &[u8] = include_bytes!("../../../fixtures/compare/compare_probe.beam");
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/compare/compare_probe.beam` has these bytes.
         let is_eq = [0x29, 0x0D, 0x19, 0x03, 0x13]; // eq/2: is_eq f25 x0 x1
-        assert!(
-            COMPARE_PROBE
-                .windows(is_eq.len())
-                .any(|window| window == is_eq),
-            "{is_eq:02X?} is not in compare_probe.beam"
-        );
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([&is_eq[..], &[0x03]].concat());
@@ -2735,16 +2723,10 @@ mod tests {
 
     #[test]
     fn decodes_the_bs_start_match3_test_of_the_binary_match_probe_fixture() {
-        const BINARY_MATCH_PROBE: &[u8] =
-            include_bytes!("../../../fixtures/binary_match/binary_match_probe.beam");
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/binary_match/binary_match_probe.beam` has these bytes.
         // kind/1: bs_start_match3 f5 x0 1 x0
         let bs_start_match3 = [0xA6, 0x55, 0x03, 0x10, 0x03];
-        assert!(
-            BINARY_MATCH_PROBE
-                .windows(bs_start_match3.len())
-                .any(|window| window == bs_start_match3),
-            "{bs_start_match3:02X?} is not in binary_match_probe.beam"
-        );
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([&bs_start_match3[..], &[0x03]].concat());
@@ -2764,8 +2746,8 @@ mod tests {
 
     #[test]
     fn decodes_the_binary_match_instructions_of_is_usascii() {
-        const BINARY_MATCH_PROBE: &[u8] =
-            include_bytes!("../../../fixtures/binary_match/binary_match_probe.beam");
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/binary_match/binary_match_probe.beam` has these bytes.
         // is_usascii/1 has the instructions of prim_tty:is_usascii/1.
         let parts: [&[u8]; 6] = [
             // bs_start_match3 f17 x0 1 x0
@@ -2781,14 +2763,6 @@ mod tests {
             // bs_match f17 x0 {list,[ensure_exactly,0]}
             &[0xB6, 0x0D, 0x11, 0x03, 0x17, 0x20, 0xF2, 0x00],
         ];
-        for part in parts {
-            assert!(
-                BINARY_MATCH_PROBE
-                    .windows(part.len())
-                    .any(|window| window == part),
-                "{part:02X?} is not in binary_match_probe.beam"
-            );
-        }
         // Atom 8 is `ensure_at_least` and atom 15 is `ensure_exactly`.
         let mut table = AtomTable::new();
         let atoms: Vec<Atom> = (1..=15)
@@ -2909,15 +2883,9 @@ mod tests {
 
     #[test]
     fn decodes_the_fconv_instruction_of_the_float_test_probe_fixture() {
-        const FLOAT_TEST_PROBE: &[u8] =
-            include_bytes!("../../../fixtures/float_test/float_test_probe.beam");
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/float_test/float_test_probe.beam` has these bytes.
         let fconv = [OPCODE_FCONV, 0x03, 0x27, 0x00]; // half/1: fconv x0 fr0
-        assert!(
-            FLOAT_TEST_PROBE
-                .windows(fconv.len())
-                .any(|window| window == fconv),
-            "{fconv:02X?} is not in float_test_probe.beam"
-        );
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([&fconv[..], &[0x03]].concat());
@@ -2935,15 +2903,9 @@ mod tests {
 
     #[test]
     fn decodes_the_is_float_test_of_the_float_test_probe_fixture() {
-        const FLOAT_TEST_PROBE: &[u8] =
-            include_bytes!("../../../fixtures/float_test/float_test_probe.beam");
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/float_test/float_test_probe.beam` has these bytes.
         let is_float = [0x2E, 0x55, 0x03]; // kind/1: is_float f5 x0
-        assert!(
-            FLOAT_TEST_PROBE
-                .windows(is_float.len())
-                .any(|window| window == is_float),
-            "{is_float:02X?} is not in float_test_probe.beam"
-        );
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([&is_float[..], &[0x03]].concat());
@@ -2963,15 +2925,9 @@ mod tests {
 
     #[test]
     fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
-        const IO_START_PROBE: &[u8] =
-            include_bytes!("../../../fixtures/io_start/io_start_probe.beam");
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/io_start/io_start_probe.beam` has these bytes.
         let get_tl = [OPCODE_GET_TL, 0x03, 0x03]; // rest/1: {get_tl,{x,0},{x,0}}
-        assert!(
-            IO_START_PROBE
-                .windows(get_tl.len())
-                .any(|window| window == get_tl),
-            "{get_tl:02X?} is not in io_start_probe.beam"
-        );
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([&get_tl[..], &[0x03]].concat());
@@ -2990,8 +2946,8 @@ mod tests {
 
     #[test]
     fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
-        const IO_START_PROBE: &[u8] =
-            include_bytes!("../../../fixtures/io_start/io_start_probe.beam");
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/io_start/io_start_probe.beam` has these bytes.
         // update_guard/1: {put_map_exact,{f,38},{x,0},{x,0},1,
         // {list,[{atom,output},{atom,cooked}]}}, with output as atom 18 and
         // cooked as atom 19 of the module.
@@ -3009,12 +2965,6 @@ mod tests {
             0x0A,
             0x13,
         ];
-        assert!(
-            IO_START_PROBE
-                .windows(put_map_exact.len())
-                .any(|window| window == put_map_exact),
-            "{put_map_exact:02X?} is not in io_start_probe.beam"
-        );
         let mut table = AtomTable::new();
         let atoms: Vec<Atom> = (1..=17)
             .map(|index| format!("atom{index}"))
@@ -3045,7 +2995,8 @@ mod tests {
 
     #[test]
     fn decodes_the_has_map_fields_tests_of_the_map_probe_fixture() {
-        const MAP_PROBE: &[u8] = include_bytes!("../../../fixtures/map/map_probe.beam");
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/map/map_probe.beam` has these bytes.
         // pair/1: {test,has_map_fields,{f,17},{x,0},{list,[{atom,input},{atom,output}]}},
         // with output as atom 4 and input as atom 17 of the module.
         let pair = [
@@ -3061,12 +3012,6 @@ mod tests {
         ];
         // key/2: {test,has_map_fields,{f,20},{x,1},{list,[{x,0}]}}.
         let key = [OPCODE_HAS_MAP_FIELDS, 0x0D, 0x14, 0x13, 0x17, 0x10, 0x03];
-        for bytes in [&pair[..], &key[..]] {
-            assert!(
-                MAP_PROBE.windows(bytes.len()).any(|window| window == bytes),
-                "{bytes:02X?} is not in map_probe.beam"
-            );
-        }
         let mut table = AtomTable::new();
         let atoms: Vec<Atom> = (1..=17)
             .map(|index| match index {
@@ -3225,7 +3170,8 @@ mod tests {
 
     #[test]
     fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction() {
-        const ARITH_PROBE: &[u8] = include_bytes!("../../../fixtures/arith/arith_probe.beam");
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/arith/arith_probe.beam` has these bytes.
         // up/1: gc_bif2 f58 live 1 '+'/2 {tr,x0,1} 1 x0
         let up = [0x7D, 0x0D, 0x3A, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03];
         // minus_overflow/0: gc_bif2 f0 live 1 '-'/2 {tr,y0,1} {tr,x0,1} x0
@@ -3234,14 +3180,6 @@ mod tests {
         ];
         // neg/1: gc_bif1 f55 live 1 '-'/1 x0 x0
         let neg = [0x7C, 0x0D, 0x37, 0x10, 0x50, 0x03, 0x03];
-        for bytes in [&up[..], &minus, &neg] {
-            assert!(
-                ARITH_PROBE
-                    .windows(bytes.len())
-                    .any(|window| window == bytes),
-                "{bytes:02X?} is not in arith_probe.beam"
-            );
-        }
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([&up[..], &minus, &neg, &[0x03]].concat());
@@ -3297,22 +3235,6 @@ mod tests {
         assert!(parse_code(&code, &[], &imports, &[], &[]).is_err());
     }
 
-    /// Assert that `bytes` occur in `fixtures/funs/fun_probe.beam`, so a test
-    /// that takes its bytes from the fixture fails when the fixture changes.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_in_fun_probe(&[0x4B, 0x00]); // call_fun 0
-    /// ```
-    fn assert_in_fun_probe(bytes: &[u8]) {
-        const FUN_PROBE: &[u8] = include_bytes!("../../../fixtures/funs/fun_probe.beam");
-        assert!(
-            FUN_PROBE.windows(bytes.len()).any(|window| window == bytes),
-            "{bytes:02X?} is not in fun_probe.beam"
-        );
-    }
-
     #[test]
     fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
         let code = |instructions: &[u8]| {
@@ -3337,13 +3259,12 @@ mod tests {
         ];
         let parse =
             |instructions: &[u8]| parse_code(&code(instructions), &atoms, &[], &[], &lambdas);
+        // `tests/fixture_opcodes.rs` checks that
+        // `fixtures/funs/fun_probe.beam` has these bytes.
         let make_pair = [0xAB, 0x40, 0x03, 0x17, 0x10, 0x03]; // make_pair/1: make_fun3 4 x0 [x0]
         let make_const = [0xAB, 0x10, 0xA4, 0x17, 0x00]; // locals/0: make_fun3 1 y10 []
         let call_fun = [0x4B, 0x00]; // locals/0: call_fun 0
         let tail_call = [0xB2, 0x00, 0x10, 0x57, 0x13, 0x20]; // tail_call/1: call_fun2 0 1 x1
-        for bytes in [&make_pair[..], &make_const, &call_fun, &tail_call] {
-            assert_in_fun_probe(bytes);
-        }
         // The fixture bytes, then a `call_fun2` with the atom tag `safe` and
         // the fun in `y0`.
         let (instructions, _) = parse(
@@ -3480,11 +3401,10 @@ mod tests {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         // Bytes of `fun_probe:kind/1` in `fixtures/funs/fun_probe.beam`, then
-        // an `is_function2` with the arity in `x1`.
+        // an `is_function2` with the arity in `x1`. `tests/fixture_opcodes.rs`
+        // checks that the fixture has these bytes.
         let is_function2 = [0x73, 0x0D, 0x64, 0x57, 0x03, 0x40, 0x11]; // is_function2 f100 x0 1
         let is_function = [0x4D, 0x0D, 0x65, 0x57, 0x03, 0x40]; // is_function f101 x0
-        assert_in_fun_probe(&is_function2);
-        assert_in_fun_probe(&is_function);
         code.extend(is_function2);
         code.extend(is_function);
         code.extend([
