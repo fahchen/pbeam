@@ -97,6 +97,14 @@ Run every required exit cleanup and notification stage before returning an error
 
 Treat a broken runtime invariant as an explicit failure. Do not skip missing entries when skipping would hide a defect or leave runtime state inconsistent.
 
+## Test process failures preserve diagnostics
+
+Include the process status, standard output, and standard error in test failure messages. Display non-UTF-8 output without dropping the bytes needed to diagnose the failure.
+
+## Documented commands omit required setup
+
+Make each documented command runnable with all required setup inputs. Reuse the same setup shown by the validated command or fixture.
+
 ## Instruction stream construction mixes ownership
 
 Choose one instruction-stream construction model for each opcode path. Either return the instruction for the outer loop to append, or append all required instructions in the path and continue. Do not mix both models.
