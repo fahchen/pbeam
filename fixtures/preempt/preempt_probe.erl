@@ -1,10 +1,20 @@
 -module(preempt_probe).
--export([sends/0, calls/0, yields/0, exits/0, gcs/0, start/3, traced/3, id/1]).
+-export([sends/0, calls/0, bumps/0, yields/0, reductions/0, exits/0, gcs/0, start/3, traced/3,
+         id/1]).
 -export([send_op/3, send_ext/3, send_apply/3, send_fun/3, send_only/3, send_apply_only/3]).
 -export([observe/2, burn_return/1, send_tag/1]).
 -export([call_light/3, call_heavy/3, call_apply/3, call_fun/3, call_only/3,
          call_last/3, call_apply_only/3, call_heavy_only/3, call_guard/3]).
--export([yield_op/3, yield_only/3, yield_last/3, yield_apply/3]).
+-export([bump_loop/3, yield_op/3, yield_only/3, yield_last/3, yield_apply/3, measured/3, sink/0,
+         bump_yield/0]).
+
+%% The reduction total of the calling process. element/2 is a guard BIF,
+%% so it costs no reduction.
+-define(REDS, element(2, process_info(self(), reductions))).
+
+%% The operations of measured/3.
+-define(OPS, [empty, body, light, heavy, send, bump, clamp, yield, yield_apply, apply, 'fun',
+              guard]).
 
 %% Two processes a and b run the same busy loop. Each iteration sends the
 %% tag of the process to the collector. The collector returns the run
@@ -27,10 +37,28 @@ calls() ->
      || Loop <- [call_light, call_heavy, call_apply, call_fun, call_only, call_last,
                  call_apply_only, call_heavy_only, call_guard]].
 
+%% The loop with erlang:bump_reductions/1, and the results and the errors
+%% of erlang:bump_reductions/1.
+bumps() ->
+    [{bump_loop, race(bump_loop, 300)},
+     {values, [erlang:bump_reductions(id(0)), erlang:bump_reductions(id(1 bsl 59 - 1))]},
+     {errors, [bump_error(-1), bump_error(foo), bump_error(1 bsl 59),
+               bump_error(-(1 bsl 59) - 1)]}].
+
+bump_error(V) ->
+    try erlang:bump_reductions(id(V))
+    catch Class:Reason -> {Class, Reason}
+    end.
+
 %% The loops with erlang:yield/0 through call_ext, call_ext_only,
 %% call_ext_last, and apply/3.
 yields() ->
     [{Loop, race(Loop, 30)} || Loop <- [yield_op, yield_only, yield_last, yield_apply]].
+
+%% The reductions that process_info(self(), reductions) shows for 100
+%% iterations of each operation, and for a read of another process.
+reductions() ->
+    [{Op, measure(Op)} || Op <- ?OPS] ++ [{other, other()}].
 
 %% Start a and b from a new process, so that the reductions of the caller do
 %% not change the order of the two spawns.
@@ -190,6 +218,13 @@ call_guard(P, T, Tuple, N) ->
     P ! T,
     call_guard(P, T, Tuple, N - tuple_size(Tuple)).
 
+%% Entry 1, send 1 + 4, call_ext of erlang:bump_reductions/1 1 + 100.
+bump_loop(_, _, 0) -> ok;
+bump_loop(P, T, N) ->
+    P ! T,
+    erlang:bump_reductions(100),
+    bump_loop(P, T, N - 1).
+
 %% call_ext of erlang:yield/0.
 yield_op(_, _, 0) -> ok;
 yield_op(P, T, N) ->
@@ -227,6 +262,65 @@ yield_apply(P, T, M, N) ->
     true = apply(M, yield, []),
     yield_apply(P, T, M, N - 1).
 
+%% Run measured/3 in a new process, so that each window starts in a new
+%% process.
+measure(Op) ->
+    spawn(?MODULE, measured, [self(), Op, 100]),
+    receive {Op, Reds} -> Reds end.
+
+%% Send {Op, Reds} to P, where Reds is the change of the reduction total
+%% over N iterations of the operation Op.
+measured(P, Op, N) ->
+    X = argument(Op),
+    Before = ?REDS,
+    operation(Op, N, X),
+    P ! {Op, ?REDS - Before}.
+
+%% The argument of the operation. The sends go to a process that keeps
+%% them, so the caller sends no signal to itself, and the collector gets
+%% only the results.
+argument(send) -> spawn(?MODULE, sink, []);
+argument(yield_apply) -> id(erlang);
+argument(apply) -> id(erlang);
+argument('fun') -> id(fun erlang:whereis/1);
+argument(guard) -> id({ok});
+argument(_) -> none.
+
+sink() ->
+    receive stop -> ok end.
+
+operation(_, 0, _) -> ok;
+operation(Op, N, X) ->
+    case Op of
+        empty -> ok;
+        body -> body();
+        light -> erlang:whereis(nobody);
+        heavy -> put(key, N);
+        send -> X ! Op;
+        bump -> erlang:bump_reductions(10);
+        clamp -> erlang:bump_reductions(5000);
+        yield -> erlang:yield();
+        yield_apply -> apply(X, yield, []);
+        apply -> apply(X, whereis, [nobody]);
+        'fun' -> X(nobody);
+        guard -> _ = tuple_size(X)
+    end,
+    operation(Op, N - 1, X).
+
+%% The reduction total of another process, and the change of the total of
+%% the caller over this read. The new process runs in the yield of the
+%% caller and switches out in its own yield.
+other() ->
+    Pid = spawn(?MODULE, bump_yield, []),
+    erlang:yield(),
+    Before = ?REDS,
+    {reductions, Reds} = process_info(Pid, reductions),
+    [Reds, ?REDS - Before].
+
+bump_yield() ->
+    erlang:bump_reductions(100),
+    erlang:yield().
+
 %% The order of the 'DOWN' message of a process that returns from its
 %% last frame and a message that another process sends after it. With
 %% 3997, the return uses the last reduction of the budget: the process
@@ -263,19 +357,23 @@ gcs() ->
     [{Loop, gc_count(Loop)}
      || Loop <- [send_op, send_ext, send_apply, send_fun, send_only, send_apply_only,
                  call_light, call_heavy, call_apply, call_fun, call_only, call_last,
-                 call_apply_only, call_heavy_only, call_guard, yield_op, yield_only, yield_last,
-                 yield_apply]].
+                 call_apply_only, call_heavy_only, call_guard, bump_loop, yield_op, yield_only,
+                 yield_last, yield_apply]]
+    ++ [{Op, gc_count(measured, Op)} || Op <- ?OPS].
 
 gc_count(Loop) ->
+    gc_count(Loop, a).
+
+gc_count(Loop, Tag) ->
     Self = self(),
-    {Pid, Ref} = spawn_monitor(?MODULE, traced, [Self, Loop, 2000]),
+    {Pid, Ref} = spawn_monitor(?MODULE, traced, [Self, Loop, Tag]),
     erlang:trace(Pid, true, [garbage_collection, {tracer, Self}]),
     Pid ! go,
     gc_events(Ref, 0).
 
-traced(Collector, Loop, N) ->
+traced(Collector, Loop, Tag) ->
     receive go -> ok end,
-    ?MODULE:Loop(Collector, a, N).
+    ?MODULE:Loop(Collector, Tag, 2000).
 
 gc_events(Ref, Count) ->
     receive

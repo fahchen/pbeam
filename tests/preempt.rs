@@ -215,3 +215,61 @@ fn runs_erlang_yield_as_the_pinned_erts_instruction() {
         format!("{yields}\n")
     );
 }
+
+#[test]
+fn runs_bump_reductions_and_reads_the_reduction_total_as_pinned_erts() {
+    // `bump_reductions/1` is a light BIF: `call_ext` costs 1, and the BIF
+    // uses `min(N, CONTEXT_REDS)` down to 0 (`bif.c:5403-5415`;
+    // `bif.h:71-78`, `221-224`). Each iteration of `bump_loop` costs entry
+    // 1, send 1 + 4, and 1 + 100.
+    let bumps = format!(
+        "[{{bump_loop,{}}},{{values,[true,true]}},{{errors,[{}]}}]",
+        same_runs(&[(38, 7), (34, 1)]),
+        ["{error,badarg}"; 4].join(",")
+    );
+    // The change of `process_info(self(), reductions)` over 100 iterations:
+    // 101 entries, 1 return, and 1 for the first read
+    // (`erl_bif_info.c:1424`, `1601`), plus the cost of 100 operations.
+    // The total is `p->reds` plus `REDS_IN - fcalls - virtual_reds` for the
+    // caller (`erl_bif_info.c:2114-2121`; `beam_common.c:2393-2409`), so a
+    // send shows 1 and not its 4 virtual reductions (`bif.h:85-96`), and
+    // each switch out adds the turn (`erl_process.c:9678-9700`). With
+    // `bump_reductions(5000)`, each turn ends at the entry with a budget of
+    // -1 and uses 4001. Another process shows only its `p->reds`: entry 1,
+    // `call_ext` 1, and 100.
+    let reductions = "[{empty,103},{body,303},{light,203},{heavy,103},{send,203},{bump,1203},\
+                      {clamp,400098},{yield,103},{yield_apply,303},{apply,103},{'fun',103},\
+                      {guard,103},{other,[102,2]}]";
+
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PREEMPT_PROBE]).unwrap();
+    let run = |function| text(&program.execute("preempt_probe", function, &[]).unwrap());
+    assert_eq!(run("bumps"), bumps);
+    assert_eq!(run("reductions"), reductions);
+
+    // The reference run checks that the pinned `erl` is the JIT flavor.
+    // `preempt_probe:gcs/0` in the first test checks that no loop and no
+    // measured window collects garbage.
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-pa",
+            "fixtures/preempt",
+            "-eval",
+            "jit = erlang:system_info(emu_flavor), \
+             io:format(\"~w~n~w~n\", [preempt_probe:bumps(), preempt_probe:reductions()]), \
+             halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{bumps}\n{reductions}\n")
+    );
+}

@@ -127,6 +127,10 @@ pub(super) struct ProcessState {
     /// `CONTEXT_REDS`. A cost point subtracts from it, and the process
     /// switches out at the ERTS switch points. A `return` can make it -1.
     pub(super) fcalls: i32,
+    /// The reductions of the turns that ended, as `p->reds`. Each switch
+    /// out adds the reductions of the turn, except the virtual reductions
+    /// (`erl_process.c:9678-9700`).
+    pub(super) reductions: u64,
 }
 
 impl ProcessState {
@@ -164,6 +168,7 @@ impl ProcessState {
             dictionary: Vec::new(),
             registered_name: None,
             fcalls: 0,
+            reductions: 0,
         }
     }
 
@@ -192,22 +197,19 @@ impl ProcessState {
         std::mem::take(&mut self.waiting)
     }
 
-    /// Use `reductions` of the budget of the current turn, as
-    /// `ERTS_VBUMP_REDS` (`bif.h:85-96`) does: the budget goes down, but not
-    /// below 0. ERTS also adds the used amount to `virtual_reds`, which only
-    /// the reduction total of the process reads. PBeam keeps no reduction
-    /// total yet (#230).
+    /// Use `reductions` of the budget of the current turn, as `BUMP_REDS`
+    /// (`bif.h:71-78`) does: the budget goes down, but not below 0.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// process.fcalls = 6;
-    /// process.vbump_reductions(4);
+    /// process.bump_reductions(4);
     /// assert_eq!(process.fcalls, 2);
-    /// process.vbump_reductions(4);
+    /// process.bump_reductions(4);
     /// assert_eq!(process.fcalls, 0);
     /// ```
-    pub(super) fn vbump_reductions(&mut self, reductions: i32) {
+    pub(super) fn bump_reductions(&mut self, reductions: i32) {
         self.fcalls = (self.fcalls - reductions).max(0);
     }
 
@@ -275,12 +277,12 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn uses_reductions_down_to_zero_as_erts_vbump_reds() {
+    fn uses_reductions_down_to_zero_as_erts_bump_reds() {
         let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
         process.fcalls = 6;
-        process.vbump_reductions(4);
+        process.bump_reductions(4);
         assert_eq!(process.fcalls, 2);
-        process.vbump_reductions(4);
+        process.bump_reductions(4);
         assert_eq!(process.fcalls, 0);
     }
 

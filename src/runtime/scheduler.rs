@@ -128,6 +128,11 @@ pub(super) struct Scheduler {
     /// `undefined`, or a pid, as `system_logger` in `erl_trace.c`. The start
     /// value is `logger` (`erl_trace.c:339`).
     pub(super) system_logger: Term,
+    /// The virtual reductions of the current turn, as `esdp->virtual_reds`.
+    /// They use the budget, but the reduction total does not count them
+    /// (`bif.h:85-96`). Each switch out sets them to 0
+    /// (`erl_process.c:9688`).
+    virtual_reductions: i32,
 }
 
 impl Scheduler {
@@ -161,6 +166,7 @@ impl Scheduler {
             timers: Timers::new(),
             aliases: HashMap::new(),
             system_logger: Term::static_atom("logger"),
+            virtual_reductions: 0,
         }
     }
 
@@ -335,6 +341,65 @@ impl Scheduler {
         self.processes.get(&id)
     }
 
+    /// Use `reductions` of the budget of the current process as virtual
+    /// reductions, as `ERTS_VBUMP_REDS` (`bif.h:85-96`) does: the budget
+    /// goes down, but not below 0, and the virtual reductions get the used
+    /// amount.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.current_process_mut().fcalls = 6;
+    /// scheduler.vbump_reductions(4);
+    /// scheduler.vbump_reductions(4);
+    /// assert_eq!(scheduler.current_process_mut().fcalls, 0);
+    /// assert_eq!(scheduler.current_reductions(), CONTEXT_REDS as u64 - 6);
+    /// ```
+    pub(super) fn vbump_reductions(&mut self, reductions: i32) {
+        let process = self.current_process_mut();
+        let used = reductions.min(process.fcalls.max(0));
+        process.fcalls = (process.fcalls - reductions).max(0);
+        self.virtual_reductions += used;
+    }
+
+    /// Return the reductions that the current process used in its turn, as
+    /// `erts_current_reductions` gives them for the calling process
+    /// (`beam_common.c:2393-2409`): `REDS_IN - fcalls - virtual_reds`.
+    /// `REDS_IN` is always `CONTEXT_REDS` in PBeam.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.schedule_next();
+    /// scheduler.current_process_mut().fcalls = -1;
+    /// assert_eq!(scheduler.current_reductions(), 4001);
+    /// ```
+    pub(super) fn current_reductions(&mut self) -> u64 {
+        let used = CONTEXT_REDS - self.virtual_reductions - self.current_process_mut().fcalls;
+        u64::try_from(used).expect("a turn uses 0 or more reductions")
+    }
+
+    /// Switch out the current process: add the reductions of its turn to
+    /// its total and set the virtual reductions to 0, as `schedule` does
+    /// (`erl_process.c:9678-9700`). Return the process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let process = scheduler.schedule_out();
+    /// ```
+    fn schedule_out(&mut self) -> &mut ProcessState {
+        let used = self.current_reductions();
+        self.virtual_reductions = 0;
+        let id = self
+            .current_process
+            .take()
+            .expect("the scheduler has a current process");
+        let process = self.processes.get_mut(&id).expect("the process is alive");
+        process.reductions += used;
+        process
+    }
+
     /// Stop the current process until a message arrives. A delivery adds it
     /// to the run queue again.
     ///
@@ -344,8 +409,7 @@ impl Scheduler {
     /// scheduler.park_current();
     /// ```
     pub(super) fn park_current(&mut self) {
-        self.current_process_mut().wait();
-        self.current_process = None;
+        self.schedule_out().wait();
     }
 
     /// Stop the current process after `erlang:hibernate/0`. A process with a
@@ -363,21 +427,22 @@ impl Scheduler {
     /// scheduler.hibernate_current();
     /// ```
     pub(super) fn hibernate_current(&mut self) {
-        let process = self.current_process_mut();
+        let process = self.schedule_out();
         if process.mailbox.has_messages() {
             let id = process.id;
             self.runnable.push_back(id);
         } else {
             process.wait();
         }
-        self.current_process = None;
     }
 
     /// Switch out the current process at the end of its budget, or at
     /// another ERTS switch point. The process stays active and goes to the
     /// end of the run queue, as `schedule_out_process` does
     /// (`erl_process.c:6695-6851`). It keeps its execution state, so it
-    /// continues at its next instruction with a new budget.
+    /// continues at its next instruction with a new budget. Its reduction
+    /// total gets the reductions of the turn, as [`Self::schedule_out`]
+    /// adds them.
     ///
     /// # Examples
     ///
@@ -386,10 +451,7 @@ impl Scheduler {
     /// assert_eq!(scheduler.schedule_next(), Some(other));
     /// ```
     pub(super) fn yield_current(&mut self) {
-        let id = self
-            .current_process
-            .take()
-            .expect("the scheduler has a current process");
+        let id = self.schedule_out().id;
         self.runnable.push_back(id);
     }
 
@@ -803,8 +865,8 @@ impl Scheduler {
         self.names.get(name).copied()
     }
 
-    /// Remove the current process after it exits, as [`Self::exit_process`]
-    /// does.
+    /// Switch out the current process after it exits, and remove it as
+    /// [`Self::exit_process`] does.
     ///
     /// # Examples
     ///
@@ -823,10 +885,7 @@ impl Scheduler {
         reason: Term,
         result: Option<Term>,
     ) -> Result<(), BeamError> {
-        let id = self
-            .current_process
-            .take()
-            .expect("the scheduler has a current process");
+        let id = self.schedule_out().id;
         self.exit_process(id, reason, result)
     }
 
