@@ -14,7 +14,7 @@ mise exec -- erlc +deterministic -o examples/hello_world examples/hello_world/pb
 
 ## Run
 
-The boot calls 41 pinned OTP modules. Give their BEAM files to the `pbeam` binary. Without one of them, the run stops with `unresolved external MFA` of that module and status 1. Run the command in a locale whose codeset is UTF-8, such as `LC_ALL=C.UTF-8`.
+The boot calls 41 pinned OTP modules. Give their BEAM files to the `pbeam` binary. Without one of them, the run stops with `unresolved external MFA` of that module and status 1. In a locale whose codeset is not UTF-8, such as `LC_ALL=C`, only ASCII output is supported. Output that is not ASCII stops the run with `unsupported BEAM opcode 177` and status 1 (see "Boot" in [ERTS Differences](../../docs/erts-differences.md)). Run the command in a locale whose codeset is UTF-8, such as `LC_ALL=C.UTF-8`, to write any output.
 
 From the repository root, these commands compile the Elixir fixture, find the BEAM files of the boot modules and of `Elixir.IO` in the pinned OTP and Elixir, and run `pbeam_boot:start('Elixir.Hello', main)`. The run prints `Hello, world!` and exits with status 0:
 
