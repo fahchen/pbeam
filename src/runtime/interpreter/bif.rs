@@ -17,6 +17,7 @@ mod os;
 mod persistent_term;
 mod re;
 mod unicode;
+mod ycf;
 
 pub(super) use erlang::{is_function, send};
 
@@ -288,6 +289,10 @@ impl BeamProgram {
     /// - `maps:merge_trap/2`, with the merged map and the steps that remain
     ///   ([`maps::merge_trap`]). ERTS traps to `maps:merge_trap/1` with a
     ///   magic reference to the walk state (`erl_map.c:134-136`).
+    /// - `maps:from_list_trap/2` and `maps:keys_trap/2`, with the argument
+    ///   and the YCF units done ([`maps::from_list`], [`maps::keys`]). ERTS
+    ///   traps to `maps:from_list/1` and `maps:keys/1` with a magic
+    ///   reference to the YCF state (`utils.c:3718-3731`).
     /// - `persistent_term:get_all_trap/2`, with the result and the number of
     ///   pairs that remain ([`persistent_term::get_all_trap`]). ERTS keeps
     ///   the table and the result so far (`erl_bif_persistent.c:263-265`).
@@ -346,6 +351,12 @@ impl BeamProgram {
             }
             ("maps", "merge_trap", [merged, Term::Integer(steps)]) => {
                 maps::merge_trap(process, merged.clone(), *steps as usize)
+            }
+            ("maps", "from_list_trap", [list, Term::Integer(done)]) => {
+                maps::from_list(process, list, *done as usize)
+            }
+            ("maps", "keys_trap", [map, Term::Integer(done)]) => {
+                maps::keys(process, map, *done as usize)
             }
             ("persistent_term", "get_all_trap", [all, Term::Integer(entries)]) => Ok(
                 persistent_term::get_all_trap(process, all.clone(), *entries as usize),
