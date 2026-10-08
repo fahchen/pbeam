@@ -186,47 +186,20 @@ impl Timers {
     }
 
     /// Remove the BIF timer with the reference `reference`. Return its end
-    /// tick, or `None` when no BIF timer with the reference is active, as
-    /// `access_btm` (`erl_hl_timer.c:1922-1971`) finds no active timer.
+    /// tick and the timer, or `None` when no BIF timer with the reference is
+    /// active, as `access_btm` (`erl_hl_timer.c:1922-1971`) finds no active
+    /// timer.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// timers.start(1100, Timer::Bif { reference, receiver, message });
-    /// assert_eq!(timers.cancel_bif(reference), Some(1100));
+    /// assert!(matches!(timers.cancel_bif(reference), Some((1100, Timer::Bif { .. }))));
     /// assert_eq!(timers.cancel_bif(reference), None);
     /// ```
-    pub(super) fn cancel_bif(&mut self, reference: Reference) -> Option<i64> {
+    pub(super) fn cancel_bif(&mut self, reference: Reference) -> Option<(i64, Timer)> {
         let key = *self.bif_timers.get(&reference)?;
-        self.remove(key);
-        Some(key.0)
-    }
-
-    /// Remove each BIF timer whose receiver is the pid `id`, as
-    /// `erts_cancel_bif_timers` does when the process exits
-    /// (`erl_process.c:14300-14303`). A BIF timer to a registered name
-    /// stays.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// timers.start(1100, Timer::Bif { reference, receiver: Receiver::Process(id), message });
-    /// timers.cancel_process(id);
-    /// assert_eq!(timers.cancel_bif(reference), None);
-    /// ```
-    pub(super) fn cancel_process(&mut self, id: ProcessId) {
-        let bif_timers = &mut self.bif_timers;
-        self.queue.retain(|_, timer| match timer {
-            Timer::Bif {
-                reference,
-                receiver: Receiver::Process(receiver),
-                ..
-            } if *receiver == id => {
-                bif_timers.remove(reference);
-                false
-            }
-            _ => true,
-        });
+        self.remove(key).map(|timer| (key.0, timer))
     }
 
     /// Remove and return the timer with the key `key`. Keep the BIF timer
@@ -289,7 +262,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{MONOTONIC_END_TICKS, Receiver, Timer, Timers};
-    use crate::term::{AtomTable, ProcessId, Reference, test_atom};
+    use crate::term::{ProcessId, Reference, test_atom};
 
     fn bif(reference: u64, receiver: Receiver) -> Timer {
         Timer::Bif {
@@ -363,7 +336,10 @@ mod tests {
         let canceled = timers.start(1200, bif(2, Receiver::Process(ProcessId(0))));
         timers.cancel(canceled);
         assert_eq!(timers.cancel_bif(Reference(2)), None);
-        assert_eq!(timers.cancel_bif(Reference(1)), Some(1100));
+        assert_eq!(
+            timers.cancel_bif(Reference(1)),
+            Some((1100, bif(1, Receiver::Process(ProcessId(0)))))
+        );
         assert_eq!(timers.cancel_bif(Reference(1)), None);
         assert_eq!(
             timers.pop_due(1_100_000_000),
@@ -372,32 +348,6 @@ mod tests {
         assert_eq!(timers.cancel_bif(Reference(0)), None);
         assert!(timers.bif_timers.is_empty());
         assert_eq!(timers.wait_time(1_000_000_000), None);
-    }
-
-    #[test]
-    fn cancels_the_bif_timers_of_an_exiting_pid_and_keeps_name_timers() {
-        // `erts_cancel_bif_timers` (`erl_process.c:14300-14303`) cancels only
-        // the timers in the `bif_timers` tree of the process.
-        let mut timers = Timers::new();
-        let name = AtomTable::new().put("name").unwrap();
-        timers.start(1100, bif(0, Receiver::Process(ProcessId(0))));
-        timers.start(1100, bif(1, Receiver::Name(name.clone())));
-        timers.start(1100, bif(2, Receiver::Process(ProcessId(1))));
-        timers.start(1100, Timer::Receive(ProcessId(0)));
-        timers.cancel_process(ProcessId(0));
-        assert_eq!(timers.cancel_bif(Reference(0)), None);
-        assert_eq!(
-            timers.pop_due(1_100_000_000),
-            Some(bif(1, Receiver::Name(name)))
-        );
-        assert_eq!(
-            timers.pop_due(1_100_000_000),
-            Some(bif(2, Receiver::Process(ProcessId(1))))
-        );
-        assert_eq!(
-            timers.pop_due(1_100_000_000),
-            Some(Timer::Receive(ProcessId(0)))
-        );
     }
 
     #[test]

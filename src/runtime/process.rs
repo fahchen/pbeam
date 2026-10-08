@@ -1,6 +1,6 @@
 mod tree;
 
-pub(super) use tree::MonitorLinkTree;
+pub(super) use tree::{MonitorLinkTree, TimerReference};
 
 use super::{mailbox::Mailbox, scheduler::AliasMode, timer::TimerKey};
 use crate::{
@@ -214,11 +214,19 @@ pub(super) struct ProcessState {
     /// `i_length` keeps them in the X registers above the live registers
     /// and runs the instruction again (`jit/arm/instr_bif.cpp:198-273`).
     pub(super) length_trap: Option<Vec<Term>>,
-    /// True when the exit of the process switched out after its timers,
-    /// as `p->u.terminate` holds the state of a continued exit
-    /// (`erl_process.c:14276-14290`). The exit then continues with the
-    /// process table phase, with no new bump.
-    pub(super) continue_exit: bool,
+    /// The BIF timers to this process, as the ERTS tree `p->bif_timers`
+    /// (`erl_hl_timer.c:579-617`). `erlang:start_timer/3` to the pid adds a
+    /// timer, and a timer that expires or that `erlang:cancel_timer/2`
+    /// cancels leaves the tree when the process does not exit
+    /// (`erl_hl_timer.c:1180-1190`, `1832-1858`, `1895-1915`). The exit
+    /// cancels the timers in the post-order of the tree.
+    pub(super) bif_timers: MonitorLinkTree<TimerReference, ()>,
+    /// The state of an exit that switched out before it left the process
+    /// table, as `p->u.terminate` holds the state of a continued exit
+    /// (`erl_process.c:14276-14290`): the BIF timers that the exit did not
+    /// cancel yet, the next timer last. `None` until the exit switches out.
+    /// The exit then continues with no new bump.
+    pub(super) continue_exit: Option<Vec<TimerReference>>,
 }
 
 /// A BIF call that continues after a switch: the export of a BIF and the
@@ -280,7 +288,8 @@ impl ProcessState {
             reductions: 0,
             pending_bif: None,
             length_trap: None,
-            continue_exit: false,
+            bif_timers: MonitorLinkTree::default(),
+            continue_exit: None,
         }
     }
 

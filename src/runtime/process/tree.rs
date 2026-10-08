@@ -4,7 +4,9 @@
 //! its exit comes from the shape of this tree, and the shape comes from
 //! the full sequence of inserts and deletes. Thus the tree does the ERTS
 //! insert and delete with the same rebalancing, and gives the ERTS
-//! post-order walk.
+//! post-order walk. The same tree keeps the BIF timers to a process, as
+//! the ERTS `proc_btm` tree (`erl_hl_timer.c:579-617`), which `erl_rbtree.h`
+//! also makes.
 
 use std::cmp::Ordering;
 
@@ -53,6 +55,28 @@ impl TreeKey for Reference {
     /// ```
     fn compare(self, other: Self) -> Ordering {
         memory_bytes(self).cmp(&memory_bytes(other))
+    }
+}
+
+/// The reference of a BIF timer, as the key of the ERTS `proc_btm` tree of
+/// the BIF timers to a process (`erl_hl_timer.c:579-617`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) struct TimerReference(pub(in crate::runtime) Reference);
+
+impl TreeKey for TimerReference {
+    /// ERTS compares the reference numbers `N2`, then `N1`, then `N0`
+    /// (`refn_is_lt`, `erl_hl_timer.c:319-331`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let less = TimerReference(Reference(255)).compare(TimerReference(Reference(256)));
+    /// assert_eq!(less, Ordering::Less);
+    /// ```
+    fn compare(self, other: Self) -> Ordering {
+        let [low, middle, high] = self.0.numbers();
+        let [other_low, other_middle, other_high] = other.0.numbers();
+        (high, middle, low).cmp(&(other_high, other_middle, other_low))
     }
 }
 

@@ -111,30 +111,49 @@ impl Ttys {
         self.monitors.push((pid, reference));
     }
 
-    /// Run the TTY monitors of the process `pid` after it exits, in the
-    /// order of the monitors, and remove them. As `tty_monitor_down`
-    /// (`prim_tty_nif.c:1235-1241`) does, a monitor of a TTY resource whose
-    /// owner is still `pid` sets fd 0 to the first mode of the resource,
-    /// and the result of `tcsetattr` is ignored.
+    /// Return the number of TTY monitors of the process `pid`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// ttys.monitor(ProcessId(1), Reference(0));
+    /// assert_eq!(ttys.monitor_count(ProcessId(1)), 1);
+    /// ```
+    pub(super) fn monitor_count(&self, pid: ProcessId) -> usize {
+        self.monitors
+            .iter()
+            .filter(|&&(monitor, _)| monitor == pid)
+            .count()
+    }
+
+    /// Run the first TTY monitor of the process `pid` after it exits, and
+    /// remove it. Return false when the process has no TTY monitor. As
+    /// `tty_monitor_down` (`prim_tty_nif.c:1235-1241`) does, a monitor of a
+    /// TTY resource whose owner is still `pid` sets fd 0 to the first mode
+    /// of the resource, and the result of `tcsetattr` is ignored.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// ttys.monitor(ProcessId(1), Reference(0));
     /// // fd 0 gets the first mode of the TTY resource `Reference(0)`.
-    /// ttys.process_down(ProcessId(1));
+    /// assert!(ttys.monitor_down(ProcessId(1)));
+    /// assert!(!ttys.monitor_down(ProcessId(1)));
     /// ```
-    pub(super) fn process_down(&mut self, pid: ProcessId) {
-        let (down, kept) = std::mem::take(&mut self.monitors)
-            .into_iter()
-            .partition(|&(monitor, _)| monitor == pid);
-        self.monitors = kept;
-        for (_, reference) in down {
-            let tty = &self.by_reference[&reference];
-            if tty.owner == Some(pid) {
-                // ERTS ignores the result (prim_tty_nif.c:1239).
-                let _ = terminal::set_mode(libc::STDIN_FILENO, &tty.first_mode);
-            }
+    pub(super) fn monitor_down(&mut self, pid: ProcessId) -> bool {
+        let Some(index) = self
+            .monitors
+            .iter()
+            .position(|&(monitor, _)| monitor == pid)
+        else {
+            return false;
+        };
+        let (_, reference) = self.monitors.remove(index);
+        let tty = &self.by_reference[&reference];
+        if tty.owner == Some(pid) {
+            // ERTS ignores the result (prim_tty_nif.c:1239).
+            let _ = terminal::set_mode(libc::STDIN_FILENO, &tty.first_mode);
         }
+        true
     }
 }
