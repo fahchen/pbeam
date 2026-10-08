@@ -210,11 +210,14 @@ fn boot_program(probe: &[u8]) -> BeamProgram {
 /// `sigwinch` (prim_tty.erl:284-298, prim_tty_sighandler.erl:28-31). A
 /// disposition is the same for all threads of a process, so it would change
 /// the process of the other tests. The child inherits `LLVM_PROFILE_FILE`,
-/// so `cargo llvm-cov` measures it.
+/// so `cargo llvm-cov` measures it. `LC_ALL=C.UTF-8` gives the child a UTF-8
+/// codeset, as the other boot tests have, also in a shell with no locale
+/// variable.
 fn run_isolated(name: &str) {
     let child = Command::new(env::current_exe().unwrap())
         .args(["--exact", name, "--include-ignored", "--quiet"])
         .env(ISOLATED, "1")
+        .env("LC_ALL", "C.UTF-8")
         .stdin(Stdio::null())
         .output()
         .unwrap();

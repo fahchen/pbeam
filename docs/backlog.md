@@ -236,13 +236,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 - `fixtures/user_drv/user_drv_probe.erl` says PBeam has no `gc_bif2`, but the loader now decodes it.
 
-### Give the isolated boot tests a UTF-8 locale
-
-- `run_isolated` of `tests/boot.rs` starts the child test without `LC_ALL`. When `LANG`, `LC_ALL`, and `LC_CTYPE` are unset, as in a default macOS shell, the boot takes the latin1 path (see "Write the output in a locale whose codeset is not UTF-8"). Then `mise run check` fails: for example, `starts_the_logger_and_the_application_controller_as_pinned_erts` and `keeps_the_init_stop_request_in_the_mailbox_of_the_init_request_process` fail with `unsupported bs_start_match3 of a binary: needs a match context` (measured on macOS). The CI workflow sets no locale, and the `ubuntu-latest` runner image has a UTF-8 default locale. Until this is done, run `LANG=en_US.UTF-8 mise run check` on macOS.
-- The work: set `LC_ALL=C.UTF-8` in `run_isolated`, as `run_dumb_utf8` does.
-- **Trigger:** the next change to `tests/boot.rs`, or a contributor who runs `mise run check` without a locale.
-- **Source:** audit at the M2 close.
-
 ### Use `INSTRUCTION_CALLS` in `erlang:function_exported/3`
 
 - `function_exported/3` in `src/runtime/interpreter/bif/erlang.rs` repeats the entries of `INSTRUCTION_CALLS` (`src/runtime/interpreter/bif.rs`) in a `matches!`. The two lists hold the same entries, so it can call `INSTRUCTION_CALLS.contains`.
