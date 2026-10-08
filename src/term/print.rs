@@ -21,7 +21,7 @@
 //! | pid | `<0.Number.Serial>` |
 //! | reference | `#Ref<0.N2.N1.N0>` |
 
-use super::{Fun, Target, Term};
+use super::{Fun, Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
 
 /// The number of low bits of the pid data that ERTS prints as the pid
 /// number (`_PID_NUM_SIZE`, `erl_term.h:646-656`). The higher bits are the
@@ -159,6 +159,7 @@ pub(crate) fn print_term(term: &Term) -> Vec<u8> {
                 let [n0, n1, n2] = reference.numbers();
                 text.extend_from_slice(format!("#Ref<0.{n2}.{n1}.{n0}>").as_bytes());
             }
+            Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
         }
     }
     text
@@ -308,7 +309,15 @@ fn print_atom(name: &str, text: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::print_term;
-    use crate::term::{ProcessId, Reference, Term};
+    use crate::term::{MatchContext, ProcessId, Reference, Term};
+
+    #[test]
+    #[should_panic(expected = "a match context reached a term operation")]
+    fn panics_for_a_match_context() {
+        // The interpreter gives a runtime error before a match context can
+        // reach a term operation.
+        print_term(&Term::MatchContext(MatchContext::new(b"a")));
+    }
 
     #[test]
     fn prints_a_deep_term_without_recursion() {

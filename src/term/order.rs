@@ -35,7 +35,7 @@
 
 use std::cmp::Ordering;
 
-use super::Term;
+use super::{Term, match_context::MATCH_CONTEXT_ESCAPE};
 use crate::error::{BeamError, error};
 
 /// The rank of `[]` in the ERTS term order (`NIL_DEF`).
@@ -253,6 +253,7 @@ fn type_rank(term: &Term) -> u8 {
         Term::List(elements) if elements.is_empty() => NIL_RANK,
         Term::List(_) | Term::ImproperList(..) => LIST_RANK,
         Term::Binary(_) => 9,
+        Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
     }
 }
 
@@ -261,8 +262,17 @@ mod tests {
     use std::cmp::Ordering::{Equal, Greater, Less};
 
     use super::super::{
-        Atom, AtomTable, Fun, Lambda, Map, ProcessId, Reference, Term, test_atom as atom,
+        Atom, AtomTable, Fun, Lambda, Map, MatchContext, ProcessId, Reference, Term,
+        test_atom as atom,
     };
+
+    #[test]
+    #[should_panic(expected = "a match context reached a term operation")]
+    fn panics_for_a_match_context() {
+        // The interpreter gives a runtime error before a match context can
+        // reach a term operation.
+        let _ = Term::MatchContext(MatchContext::new(b"a")).compare(&Term::Integer(1));
+    }
 
     fn map(pairs: Vec<(Term, Term)>) -> Term {
         Term::Map(Map::from_pairs(pairs).unwrap())

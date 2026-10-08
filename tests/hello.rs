@@ -193,12 +193,13 @@ fn fails_visibly_for_a_missing_entry_through_the_boot() {
 }
 
 #[test]
-fn stops_at_the_binary_match_of_a_locale_that_is_not_utf8() {
+fn prints_the_greeting_in_a_locale_that_is_not_utf8() {
     // With `LC_ALL=C`, the `prim_tty` writer converts the output with
     // `to_latin1/2`, which calls `is_usascii/1`. `is_usascii/1` matches
-    // `<<Char/utf8, T/binary>>` (prim_tty.erl:1309-1321). PBeam has no
-    // match context for a binary, so the run stops at `bs_start_match3`
-    // (rows "Boot" and "Binary matching").
+    // `<<Char/utf8, T/binary>>` (prim_tty.erl:1309-1321). The greeting is
+    // ASCII, so `to_latin1/2` gives the binary, as in ERTS. Output that is
+    // not ASCII needs `binary_to_latin1/2` (rows "Boot" and "Binary
+    // matching").
     let io = elixir_io_path();
     let beams = hello_beams("Elixir.Hello", &io);
     let erts = run_with_time_limit(
@@ -217,15 +218,7 @@ fn stops_at_the_binary_match_of_a_locale_that_is_not_utf8() {
     );
 
     assert_run("ERTS", &erts, ("Hello, world!\n", "", Some(0)));
-    assert_run(
-        "PBeam",
-        &pbeam,
-        (
-            "",
-            "pbeam: unsupported bs_start_match3 of a binary: needs a match context\n",
-            Some(1),
-        ),
-    );
+    assert_run("PBeam", &pbeam, ("Hello, world!\n", "", Some(0)));
 }
 
 #[test]

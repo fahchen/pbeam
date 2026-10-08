@@ -2,6 +2,7 @@ mod atom;
 mod fun;
 mod hash;
 mod map;
+mod match_context;
 mod order;
 mod print;
 
@@ -14,6 +15,7 @@ pub(crate) use fun::{Lambda, Target};
 pub(crate) use hash::internal_hash;
 pub(crate) use map::Direction;
 pub use map::Map;
+pub use match_context::MatchContext;
 pub(crate) use print::print_term;
 
 use std::fmt;
@@ -57,6 +59,11 @@ pub enum Term {
     /// A fun: the fun entry of a lambda and its free variables for a local
     /// fun, or the module, function, and arity for an external fun.
     Fun(Fun),
+    /// A binary match context that `bs_start_match3` makes in a register.
+    /// Only the binary-match instructions read it, and a local call keeps
+    /// it in its argument register. Each other instruction that gets a
+    /// match context gives a runtime invariant error.
+    MatchContext(MatchContext),
 }
 
 /// The kind of a term that contains other terms. A fun keeps the entry of
@@ -221,6 +228,7 @@ impl Term {
             Term::Integer(value) => Ok(Term::Integer(*value)),
             Term::Pid(pid) => Ok(Term::Pid(*pid)),
             Term::Reference(reference) => Ok(Term::Reference(*reference)),
+            Term::MatchContext(context) => Ok(Term::MatchContext(context.clone())),
         }
     }
 
@@ -351,6 +359,7 @@ impl PartialEq for Term {
                 (Term::Integer(left), Term::Integer(right)) => left == right,
                 (Term::Pid(left), Term::Pid(right)) => left == right,
                 (Term::Reference(left), Term::Reference(right)) => left == right,
+                (Term::MatchContext(left), Term::MatchContext(right)) => left == right,
                 _ => false,
             };
             if !equal {
@@ -395,6 +404,7 @@ impl fmt::Debug for Term {
                 Term::Integer(value) => write!(formatter, "Integer({value:?})")?,
                 Term::Pid(pid) => write!(formatter, "Pid({pid:?})")?,
                 Term::Reference(reference) => write!(formatter, "Reference({reference:?})")?,
+                Term::MatchContext(context) => write!(formatter, "MatchContext({context:?})")?,
                 Term::List(elements)
                 | Term::ImproperList(elements, _)
                 | Term::Tuple(elements)
@@ -488,7 +498,9 @@ impl Reference {
 
 #[cfg(test)]
 mod tests {
-    use super::{AtomTable, Fun, Lambda, Map, ProcessId, Reference, Term, test_atom as atom};
+    use super::{
+        AtomTable, Fun, Lambda, Map, MatchContext, ProcessId, Reference, Term, test_atom as atom,
+    };
 
     fn map(pairs: Vec<(Term, Term)>) -> Term {
         Term::Map(Map::from_pairs(pairs).unwrap())
@@ -654,12 +666,14 @@ mod tests {
             Term::Integer(-3),
             Term::Pid(ProcessId(4)),
             Term::Reference(Reference(5)),
+            Term::MatchContext(MatchContext::new(&[6])),
         ];
         let term = Term::Tuple(vec![Term::List(leaves.to_vec()), Term::List(vec![])]);
         assert_eq!(
             format!("{term:?}"),
             "Tuple([List([Atom(\"ok\"), Binary([1, 2]), Integer(-3), Pid(ProcessId(4)), \
-             Reference(Reference(5))]), List([])])"
+             Reference(Reference(5)), MatchContext(MatchContext { bytes: [6], position: 0 })]), \
+             List([])])"
         );
         for (index, leaf) in leaves.iter().enumerate() {
             assert_eq!(leaf, &leaf.clone());
