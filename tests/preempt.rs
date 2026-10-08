@@ -130,3 +130,129 @@ fn interleaves_two_busy_processes_as_pinned_erts_with_one_scheduler() {
         format!("{}\n{}\n", runs_text(SENDS), runs_text(CALLS))
     );
 }
+
+const RECEIVE_PROBE: &[u8] = include_bytes!("../fixtures/preempt/receive_probe.beam");
+
+/// The run lengths of each loop of `receive_probe:receives/0`, measured on
+/// the pinned ERTS with `erl +S 1` (JIT), as [`SENDS`].
+const RECEIVES: &[(&str, &[i64])] = &[
+    // Entry 1, send to self 1 + 4, a fetch that finds the message 4, send
+    // 1 + 4.
+    ("recv_fetch", &[266, 267, 267, 266, 267, 267, 266, 134]),
+    // Entry 1, a fetch that finds no message 4, send 1 + 4.
+    ("recv_poll", &[400, 400, 400, 400, 400]),
+    // Entry 1, a fetched message 0, send 1 + 4.
+    ("recv_queued", &[667, 667, 666]),
+    // Entry 1, a fetched message 0, `loop_rec_end` 1, send 1 + 4.
+    ("recv_skip", &[571, 571, 572, 286]),
+    // Entries 3, send to self 1 + 4, returns 2, fetch 4, send 1 + 4. A
+    // return can leave a budget of 0: `loop_rec` then switches out before
+    // the fetch, which costs 4 in the next turn.
+    (
+        "recv_return",
+        &[210, 211, 210, 211, 211, 210, 211, 210, 211, 105],
+    ),
+];
+
+/// The result of `receive_probe:orders/0`, measured on the pinned ERTS with
+/// `erl +S 1`: for each kind of receive, the order of the messages for the
+/// two values of N.
+const ORDERS: &[(&str, [[&str; 3]; 2])] = &[
+    ("woken", [["w", "q1", "q2"], ["q1", "w", "q2"]]),
+    ("queued", [["w", "q1", "q2"], ["q1", "w", "q2"]]),
+    ("info", [["w", "q1", "q2"], ["q1", "w", "q2"]]),
+    ("hibernated", [["q1", "w", "q2"], ["q1", "q2", "w"]]),
+];
+
+/// Return [`ORDERS`] as a term: `[{Kind, [[w, q1, q2], ...]}, ...]`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [{woken, [[w, q1, q2], [q1, w, q2]]}, ...]
+/// let term = orders_term(&program);
+/// ```
+fn orders_term(program: &BeamProgram) -> Term {
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let order = |names: &[&str; 3]| Term::List(names.iter().map(|name| atom(name)).collect());
+    Term::List(
+        ORDERS
+            .iter()
+            .map(|(kind, orders)| {
+                Term::Tuple(vec![
+                    atom(kind),
+                    Term::List(orders.iter().map(order).collect()),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// Return [`ORDERS`] as `io:format("~w")` prints it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(orders_text().starts_with("[{woken,[[w,q1,q2],[q1,w,q2]]},"));
+/// ```
+fn orders_text() -> String {
+    let kinds: Vec<String> = ORDERS
+        .iter()
+        .map(|(kind, orders)| {
+            let orders: Vec<String> = orders
+                .iter()
+                .map(|names| format!("[{}]", names.join(",")))
+                .collect();
+            format!("{{{kind},[{}]}}", orders.join(","))
+        })
+        .collect();
+    format!("[{}]", kinds.join(","))
+}
+
+#[test]
+fn charges_the_receive_reductions_as_pinned_erts_with_one_scheduler() {
+    // `loop_rec` costs 0 for a fetched message. At the end of the fetched
+    // messages it fetches for 4 reductions, also when no message arrived
+    // (`erl_proc_sig_queue.c:7771-7799`). `loop_rec_end` costs 1, and
+    // `loop_rec` switches out before the peek when the budget is 0 or less
+    // (`jit/arm/instr_msg.cpp:123-127`, `258-268`). `process_info/2` with
+    // `message_queue_len` fetches with no cost (`erl_bif_info.c:1237-1244`).
+    //
+    // In `orders/0`, the first value of N lets the receiving process send
+    // `w` in the turn of the receive, and the next value does not. Woken: a
+    // fetch of 4 in the new turn, N + 1 entries, a return, and a send.
+    // Queued: entry 1, one fetch of 4 for 11 messages, 11 entries and a
+    // return of `recv/1`, N + 1 entries, a return, and a send. Info: as
+    // queued, with no fetch. Its two values are 2 apart, because ERTS also
+    // charges 1 for the `process_info/2` item (`erl_bif_info.c:1601`), which
+    // #234 adds. Hibernated: `erlang:hibernate/0` fetches
+    // (`beam_common.c:1586-1587`), so the next turn has no fetch.
+    let program = BeamProgram::load(&[RECEIVE_PROBE]).unwrap();
+    let run = |function| program.execute("receive_probe", function, &[]).unwrap();
+    assert_eq!(run("receives"), runs_term(&program, RECEIVES));
+    assert_eq!(run("orders"), orders_term(&program));
+
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-pa",
+            "fixtures/preempt",
+            "-eval",
+            "jit = erlang:system_info(emu_flavor), \
+             [0] = lists:usort([N || {_, N} <- receive_probe:gcs()]), \
+             io:format(\"~w~n~w~n\", [receive_probe:receives(), receive_probe:orders()]), \
+             halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{}\n{}\n", runs_text(RECEIVES), orders_text())
+    );
+}
