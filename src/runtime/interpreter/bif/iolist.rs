@@ -205,10 +205,15 @@ fn walk_cost(init: i64, steps: i64) -> i32 {
 ///
 /// ```rust,ignore
 /// process.fcalls = 10;
-/// assert!(matches!(iolist_size(&mut process, &Term::Binary(b"abc".to_vec())), BifResult::Value(Term::Integer(3))));
+/// assert!(matches!(iolist_size(&mut process, &Term::Binary(b"abc".to_vec()))?, BifResult::Value(Term::Integer(3))));
 /// assert_eq!(process.fcalls, 9);
 /// ```
-pub(super) fn iolist_size(process: &mut ProcessState, term: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn iolist_size(process: &mut ProcessState, term: &Term) -> Result<BifResult, BeamError> {
     iolist_size_continue(process, term, &[], 0)
 }
 
@@ -231,17 +236,22 @@ pub(super) fn iolist_size(process: &mut ProcessState, term: &Term) -> BifResult 
 /// ```rust,ignore
 /// process.fcalls = 1;
 /// let ones = Term::List(vec![Term::Integer(1); 8]);
-/// let trap = iolist_size_continue(&mut process, &ones, &[], 0);
+/// let trap = iolist_size_continue(&mut process, &ones, &[], 0)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "iolist_size_continue", .. }));
 /// assert_eq!(process.fcalls, 0);
 /// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
 pub(super) fn iolist_size_continue(
     process: &mut ProcessState,
     term: &Term,
     stack: &[Term],
     mut size: usize,
-) -> BifResult {
-    let init = STEPS_PER_RED * process.bif_reductions_left() as i64;
+) -> Result<BifResult, BeamError> {
+    let init = STEPS_PER_RED * process.bif_reductions_left()? as i64;
     let mut steps = init;
     let mut walk = Walk::new(term, stack);
     let step = walk.run(&mut steps, |leaf, _, _| {
@@ -254,17 +264,17 @@ pub(super) fn iolist_size_continue(
     if step == Step::Yield {
         process.bump_all_reductions();
         let (term, stack) = walk.term();
-        return BifResult::TrapBif {
+        return Ok(BifResult::TrapBif {
             module: "erts_internal",
             function: "iolist_size_continue",
             arguments: vec![term, stack, Term::Integer(size as i64)],
-        };
+        });
     }
     process.bump_reductions(walk_cost(init, steps));
-    match step {
+    Ok(match step {
         Step::Done => Value(Term::Integer(size as i64)),
         _ => BifResult::badarg(),
-    }
+    })
 }
 
 /// Run `erlang:iolist_to_iovec/1` as ERTS `iolist_to_iovec_1` does
@@ -277,21 +287,29 @@ pub(super) fn iolist_size_continue(
 ///
 /// ```rust,ignore
 /// let hello = Term::Binary(b"Hello".to_vec());
-/// assert!(matches!(iolist_to_iovec(&mut process, &hello), BifResult::Value(Term::List(iovec)) if iovec == [hello]));
-/// assert!(matches!(iolist_to_iovec(&mut process, &Term::static_atom("foo")), BifResult::Raise { .. }));
+/// assert!(matches!(iolist_to_iovec(&mut process, &hello)?, BifResult::Value(Term::List(iovec)) if iovec == [hello]));
+/// assert!(matches!(iolist_to_iovec(&mut process, &Term::static_atom("foo"))?, BifResult::Raise { .. }));
 /// ```
-pub(super) fn iolist_to_iovec(process: &mut ProcessState, term: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn iolist_to_iovec(
+    process: &mut ProcessState,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
     match term {
-        Term::Binary(bytes) if bytes.is_empty() => Value(Term::List(Vec::new())),
-        Term::Binary(_) => Value(Term::List(vec![term.clone()])),
+        Term::Binary(bytes) if bytes.is_empty() => Ok(Value(Term::List(Vec::new()))),
+        Term::Binary(_) => Ok(Value(Term::List(vec![term.clone()]))),
         Term::List(elements) => match elements.as_slice() {
-            [] => Value(Term::List(Vec::new())),
-            [Term::Binary(bytes)] if bytes.is_empty() => Value(Term::List(Vec::new())),
-            [Term::Binary(_)] => Value(term.clone()),
+            [] => Ok(Value(Term::List(Vec::new()))),
+            [Term::Binary(bytes)] if bytes.is_empty() => Ok(Value(Term::List(Vec::new()))),
+            [Term::Binary(_)] => Ok(Value(term.clone())),
             _ => iovec_size(process, term, term, &[]),
         },
         Term::ImproperList(..) => iovec_size(process, term, term, &[]),
-        _ => BifResult::badarg(),
+        _ => Ok(BifResult::badarg()),
     }
 }
 
@@ -312,17 +330,22 @@ pub(super) fn iolist_to_iovec(process: &mut ProcessState, term: &Term) -> BifRes
 /// ```rust,ignore
 /// process.fcalls = 10;
 /// let list = Term::List(vec![Term::Integer(1)]);
-/// let iovec = iovec_size(&mut process, &list, &list, &[]);
+/// let iovec = iovec_size(&mut process, &list, &list, &[])?;
 /// assert!(matches!(iovec, BifResult::Value(Term::List(binaries)) if binaries == [Term::Binary(vec![1])]));
 /// assert_eq!(process.fcalls, 8);
 /// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
 pub(super) fn iovec_size(
     process: &mut ProcessState,
     arg: &Term,
     term: &Term,
     stack: &[Term],
-) -> BifResult {
-    let reds_left = process.bif_reductions_left() as i64;
+) -> Result<BifResult, BeamError> {
+    let reds_left = process.bif_reductions_left()? as i64;
     let init = STEPS_PER_RED * reds_left;
     let mut steps = init;
     let mut walk = Walk::new(term, stack);
@@ -330,20 +353,32 @@ pub(super) fn iovec_size(
     if step == Step::Yield {
         process.bump_all_reductions();
         let (term, stack) = walk.term();
-        return iovec_trap(vec![Term::static_atom("size"), arg.clone(), term, stack]);
+        return Ok(iovec_trap(vec![
+            Term::static_atom("size"),
+            arg.clone(),
+            term,
+            stack,
+        ]));
     }
     let cost = walk_cost(init, steps);
     process.bump_reductions(cost);
     if step == Step::BadArg {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     }
     let reds_left = reds_left - i64::from(cost);
     if reds_left <= 0 {
         process.bump_all_reductions();
         let start = copy_state(arg, Term::List(Vec::new()), Vec::new(), Vec::new());
-        return iovec_trap(start);
+        return Ok(iovec_trap(start));
     }
-    iovec_copy(process, reds_left, arg, &[], Vec::new(), Vec::new())
+    Ok(iovec_copy(
+        process,
+        reds_left,
+        arg,
+        &[],
+        Vec::new(),
+        Vec::new(),
+    ))
 }
 
 /// Continue the copy walk of `erlang:iolist_to_iovec/1` at `term`, with the

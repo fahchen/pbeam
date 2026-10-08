@@ -825,16 +825,25 @@ pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
 ///
 /// ```rust,ignore
 /// let x = Term::static_atom("x");
-/// assert!(matches!(append(&mut process, &Term::List(vec![]), &x), BifResult::Value(term) if term == x));
-/// let list = append(&mut process, &Term::List(vec![Term::Integer(1)]), &x);
+/// assert!(matches!(append(&mut process, &Term::List(vec![]), &x)?, BifResult::Value(term) if term == x));
+/// let list = append(&mut process, &Term::List(vec![Term::Integer(1)]), &x)?;
 /// assert!(matches!(list, BifResult::Value(Term::ImproperList(elements, _)) if elements.len() == 1));
-/// assert!(matches!(append(&mut process, &x, &Term::List(vec![])), BifResult::Raise { .. }));
+/// assert!(matches!(append(&mut process, &x, &Term::List(vec![]))?, BifResult::Raise { .. }));
 /// ```
-pub(super) fn append(process: &mut ProcessState, left: &Term, right: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn append(
+    process: &mut ProcessState,
+    left: &Term,
+    right: &Term,
+) -> Result<BifResult, BeamError> {
     match left {
-        Term::List(elements) if elements.is_empty() => Value(right.clone()),
+        Term::List(elements) if elements.is_empty() => Ok(Value(right.clone())),
         Term::List(_) | Term::ImproperList(..) => append_chunk(process, left, right, 0),
-        _ => BifResult::badarg(),
+        _ => Ok(BifResult::badarg()),
     }
 }
 
@@ -860,28 +869,33 @@ pub(super) fn append(process: &mut ProcessState, left: &Term, right: &Term) -> B
 /// ```rust,ignore
 /// process.fcalls = 1;
 /// let left = Term::List((0..61).map(Term::Integer).collect());
-/// let trap = append_chunk(&mut process, &left, &Term::List(vec![Term::Integer(61)]), 0);
+/// let trap = append_chunk(&mut process, &left, &Term::List(vec![Term::Integer(61)]), 0)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "++", .. }));
 /// assert_eq!(process.fcalls, 0);
 /// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
 pub(super) fn append_chunk(
     process: &mut ProcessState,
     left: &Term,
     right: &Term,
     done: i64,
-) -> BifResult {
+) -> Result<BifResult, BeamError> {
     let (elements, tail) = list_cells(left).expect("'++' appends to a nonempty list");
     let done = usize::try_from(done).expect("'++' counts the elements that it copied");
     let per_reduction = match right {
         Term::List(right) if right.is_empty() => 32,
         _ => 60,
     };
-    let budget = per_reduction * process.bif_reductions_left();
+    let budget = per_reduction * process.bif_reductions_left()?;
     let rest = elements.len() - done;
     let walked = rest.min(budget);
     process.bump_reductions((walked / per_reduction) as i32);
     if walked < rest {
-        return BifResult::TrapBif {
+        return Ok(BifResult::TrapBif {
             module: "erlang",
             function: "++",
             arguments: vec![
@@ -889,12 +903,12 @@ pub(super) fn append_chunk(
                 right.clone(),
                 Term::Integer((done + walked) as i64),
             ],
-        };
+        });
     }
-    match tail {
+    Ok(match tail {
         Some(_) => BifResult::badarg(),
         None => Value(Term::list_with_tail(elements.to_vec(), right.clone())),
-    }
+    })
 }
 
 /// Count the elements of `list` and add `count`, as ERTS
@@ -912,33 +926,42 @@ pub(super) fn append_chunk(
 /// ```rust,ignore
 /// process.fcalls = 10;
 /// let list = Term::List((0..32).map(Term::Integer).collect());
-/// assert!(matches!(length(&mut process, &list, 0), BifResult::Value(Term::Integer(32))));
+/// assert!(matches!(length(&mut process, &list, 0)?, BifResult::Value(Term::Integer(32))));
 /// assert_eq!(process.fcalls, 8);
 /// process.fcalls = 1;
-/// let trap = length(&mut process, &list, 0);
+/// let trap = length(&mut process, &list, 0)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "length", .. }));
 /// ```
-pub(super) fn length(process: &mut ProcessState, list: &Term, count: i64) -> BifResult {
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn length(
+    process: &mut ProcessState,
+    list: &Term,
+    count: i64,
+) -> Result<BifResult, BeamError> {
     let Some((elements, tail)) = list_cells(list) else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
-    let max_iter = 16 * process.bif_reductions_left();
+    let max_iter = 16 * process.bif_reductions_left()?;
     if elements.len() > max_iter {
         process.bump_all_reductions();
-        return BifResult::TrapBif {
+        return Ok(BifResult::TrapBif {
             module: "erlang",
             function: "length",
             arguments: vec![
                 list_rest(&elements[max_iter..], tail),
                 Term::Integer(count + max_iter as i64),
             ],
-        };
+        });
     }
     if tail.is_some() {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     }
     process.bump_reductions((elements.len() / 16) as i32);
-    Value(Term::Integer(count + elements.len() as i64))
+    Ok(Value(Term::Integer(count + elements.len() as i64)))
 }
 
 /// Run `erlang:tl/1`: return the tail of the first cons cell of a nonempty
@@ -993,7 +1016,8 @@ pub(super) fn tl(list: &Term) -> BifResult {
 ///
 /// Return a runtime error for a bignum that costs more than the reductions
 /// left. ERTS then runs the BIF again on a dirty CPU scheduler
-/// (`bif.c:3289-3296`, `3323-3336`), and PBeam has no dirty scheduler.
+/// (`bif.c:3289-3296`, `3323-3336`), and PBeam has no dirty scheduler. Also return the runtime error of
+/// [`ProcessState::bif_reductions_left`] for a negative budget.
 pub(super) fn integer_to_list(
     process: &mut ProcessState,
     term: &Term,
@@ -1005,7 +1029,7 @@ pub(super) fn integer_to_list(
     };
     if term.small_integer().is_none() {
         let cost = big_integer_estimate(*value) / DIGITS_PER_RED;
-        if cost > process.bif_reductions_left() {
+        if cost > process.bif_reductions_left()? {
             // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
             return Err(error(format!(
                 "unsupported erlang:integer_to_list/1 of {value} with {} reductions left: ERTS runs it on a dirty CPU scheduler",

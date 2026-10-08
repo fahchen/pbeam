@@ -172,7 +172,8 @@ pub(super) fn new(
 /// # Errors
 ///
 /// Return a runtime error for a tuple in a table with the key position 0:
-/// ERTS aborts the emulator there (`Invalid tag in make_internal_hash`).
+/// ERTS aborts the emulator there (`Invalid tag in make_internal_hash`). Also return the runtime error of
+/// [`ProcessState::bif_reductions_left`] for a negative budget.
 pub(super) fn insert(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -256,7 +257,8 @@ pub(super) fn insert(
 /// # Errors
 ///
 /// Return a runtime error for a table with the key position 0: ERTS aborts
-/// the emulator there (`Invalid tag in make_internal_hash`).
+/// the emulator there (`Invalid tag in make_internal_hash`). Also return the runtime error of
+/// [`ProcessState::bif_reductions_left`] for a negative budget.
 pub(super) fn insert_list(
     context: &mut BifContext<'_>,
     id: Reference,
@@ -275,7 +277,7 @@ pub(super) fn insert_list(
     }
     let process = context.scheduler.current_process_mut();
     let caller = process.id;
-    let budget = ITERATIONS_PER_RED * process.bif_reductions_left() as i64;
+    let budget = ITERATIONS_PER_RED * process.bif_reductions_left()? as i64;
     let mut units = Units { left: budget };
     let tuples = valid_objects(elements, keypos).filter(|_| tail.is_none());
     // After a failed copy, the units of the removal of the copies follow

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use super::{mailbox::Mailbox, timer::TimerKey};
+use crate::error::{BeamError, error};
 use crate::term::{Atom, ProcessId, Reference, Term};
 
 /// One active function call: its module, code position, and Y registers.
@@ -265,21 +266,23 @@ impl ProcessState {
     ///
     /// ```rust,ignore
     /// process.fcalls = 6;
-    /// assert_eq!(process.bif_reductions_left(), 6);
+    /// assert_eq!(process.bif_reductions_left()?, 6);
     /// ```
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panic when the budget is negative: code that calls
+    /// Return a runtime error when the budget is negative: code that calls
     /// `erts_internal:map_next/3` directly and then calls a BIF that reads
     /// the budget before the next call or return. Each ERTS BIF reads a
     /// negative budget in its own way, and PBeam does not implement this
     /// yet (row "Map iteration" in `docs/erts-differences.md`).
-    pub(super) fn bif_reductions_left(&self) -> usize {
-        usize::try_from(self.fcalls).expect(
-            "unsupported negative reduction budget in a BIF after erts_internal:map_next/3 \
-             (see \"Map iteration\" in docs/erts-differences.md)",
-        )
+    pub(super) fn bif_reductions_left(&self) -> Result<usize, BeamError> {
+        usize::try_from(self.fcalls).map_err(|_| {
+            error(
+                "unsupported negative reduction budget in a BIF after erts_internal:map_next/3 \
+                 (see \"Map iteration\" in docs/erts-differences.md)",
+            )
+        })
     }
 
     /// Mark the receive timer as expired, as `proc_timeout_common`
@@ -356,11 +359,14 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unsupported negative reduction budget in a BIF")]
-    fn names_the_unsupported_negative_budget_of_a_bif() {
+    fn returns_a_runtime_error_for_the_negative_budget_of_a_bif() {
         let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+        process.fcalls = 0;
+        assert_eq!(process.bif_reductions_left(), Ok(0));
         process.fcalls = -1;
-        process.bif_reductions_left();
+        let failure = process.bif_reductions_left().unwrap_err().to_string();
+        assert!(failure.starts_with("unsupported negative reduction budget in a BIF"));
+        assert!(failure.contains("\"Map iteration\""));
     }
 
     #[test]

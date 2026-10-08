@@ -172,7 +172,8 @@ pub(super) fn is_key(key: &Term, map: &Term) -> BifResult {
 /// # Errors
 ///
 /// Return the runtime error of `Map::chunk` for a next path that PBeam
-/// cannot hold.
+/// cannot hold. Also return the runtime error of
+/// [`ProcessState::bif_reductions_left`] for a negative budget.
 pub(super) fn map_next(
     process: &mut ProcessState,
     path: &Term,
@@ -192,14 +193,14 @@ pub(super) fn map_next(
     };
     match (direction, path) {
         (Direction::Forward, Term::List(keys)) => {
-            return Ok(ordered_next(process, keys, None, entries, map));
+            return ordered_next(process, keys, None, entries, map);
         }
         (Direction::Forward, Term::ImproperList(keys, tail)) => {
-            return Ok(ordered_next(process, keys, Some(tail), entries, map));
+            return ordered_next(process, keys, Some(tail), entries, map);
         }
         _ => {}
     }
-    let budget = (process.bif_reductions_left() / PAIR_REDUCTIONS).max(1);
+    let budget = (process.bif_reductions_left()? / PAIR_REDUCTIONS).max(1);
     let Some(chunk) = entries.chunk(path, budget, direction)? else {
         return Ok(BifResult::badarg());
     };
@@ -239,24 +240,29 @@ pub(super) fn map_next(
 /// let Term::Map(entries) = &map else { unreachable!() };
 /// process.fcalls = 40;
 /// let first = Term::Tuple(vec![Term::Integer(1), test_atom("a"), test_atom("none")]);
-/// assert!(matches!(ordered_next(&mut process, &[Term::Integer(1)], None, entries, &map), BifResult::Value(value) if value == first));
+/// assert!(matches!(ordered_next(&mut process, &[Term::Integer(1)], None, entries, &map)?, BifResult::Value(value) if value == first));
 /// assert_eq!(process.fcalls, 8);
-/// assert!(matches!(ordered_next(&mut process, &[Term::Integer(2)], None, entries, &map), BifResult::Raise { .. }));
+/// assert!(matches!(ordered_next(&mut process, &[Term::Integer(2)], None, entries, &map)?, BifResult::Raise { .. }));
 /// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
 fn ordered_next(
     process: &mut ProcessState,
     keys: &[Term],
     tail: Option<&Term>,
     entries: &Map,
     map: &Term,
-) -> BifResult {
+) -> Result<BifResult, BeamError> {
     /// `ORDERED_ITER_FACTOR` in a release build (`erl_map.c:3657-3661`).
     const ORDERED_ITER_FACTOR: usize = 32;
-    let budget = (process.bif_reductions_left() / ORDERED_ITER_FACTOR).max(1);
+    let budget = (process.bif_reductions_left()? / ORDERED_ITER_FACTOR).max(1);
     let (taken, rest) = keys.split_at(keys.len().min(budget));
     let next = match (rest, tail) {
         ([], None) => Term::static_atom("none"),
-        ([], Some(_)) => return BifResult::badarg(),
+        ([], Some(_)) => return Ok(BifResult::badarg()),
         (rest, tail) => {
             let tail = tail.cloned().unwrap_or(Term::List(Vec::new()));
             let rest = Term::list_with_tail(rest.to_vec(), tail);
@@ -267,14 +273,14 @@ fn ordered_next(
         .iter()
         .map(|key| entries.get(key).map(|value| (key, value)));
     let Some(pairs) = pairs.collect::<Option<Vec<_>>>() else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     if rest.is_empty() {
         process.bump_reductions((ORDERED_ITER_FACTOR * taken.len()) as i32);
     } else {
         process.bump_all_reductions();
     }
-    Value(iterator_pairs(pairs.into_iter(), next))
+    Ok(Value(iterator_pairs(pairs.into_iter(), next)))
 }
 
 /// Build the iterator result `{K1, V1, {K2, V2, Next}}` of pairs, or `Next`
@@ -318,7 +324,8 @@ fn iterator_pairs<'a>(
 ///
 /// Return a runtime error when the merged map gets a key that the map form
 /// does not support yet, for example an integer outside the small-integer
-/// range in a map of more than 32 keys.
+/// range in a map of more than 32 keys. Also return the runtime error of
+/// [`ProcessState::bif_reductions_left`] for a negative budget.
 pub(super) fn merge(
     process: &mut ProcessState,
     first: &Term,
@@ -331,10 +338,10 @@ pub(super) fn merge(
             let merged = Map::from_pairs(pairs.collect())
                 .map_err(|key| error(format!("unsupported map key {key:?}")))?;
             let merged = Term::Map(merged);
-            Ok(match first.merge_steps(second) {
+            match first.merge_steps(second) {
                 Some(steps) => merge_trap(process, merged, steps),
-                None => Value(merged),
-            })
+                None => Ok(Value(merged)),
+            }
         }
         (Term::Map(_), _) => Ok(error_with("badmap", second)),
         _ => Ok(error_with("badmap", first)),
@@ -358,27 +365,36 @@ pub(super) fn merge(
 ///
 /// ```rust,ignore
 /// process.fcalls = 10;
-/// assert!(matches!(merge_trap(&mut process, map.clone(), 79), BifResult::Value(_)));
+/// assert!(matches!(merge_trap(&mut process, map.clone(), 79)?, BifResult::Value(_)));
 /// assert_eq!(process.fcalls, 1);
 /// process.fcalls = 10;
-/// let trap = merge_trap(&mut process, map, 81);
+/// let trap = merge_trap(&mut process, map, 81)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "merge_trap", arguments, .. } if arguments[1] == Term::Integer(1)));
 /// assert_eq!(process.fcalls, 0);
 /// ```
-pub(super) fn merge_trap(process: &mut ProcessState, merged: Term, steps: usize) -> BifResult {
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn merge_trap(
+    process: &mut ProcessState,
+    merged: Term,
+    steps: usize,
+) -> Result<BifResult, BeamError> {
     /// `MAP_MERGE_LOOP_FACTOR` (`erl_map.c:1507`).
     const LOOP_FACTOR: usize = 8;
-    let budget = (LOOP_FACTOR * process.bif_reductions_left()).max(1);
+    let budget = (LOOP_FACTOR * process.bif_reductions_left()?).max(1);
     if steps >= budget {
         process.bump_all_reductions();
-        return BifResult::TrapBif {
+        return Ok(BifResult::TrapBif {
             module: "maps",
             function: "merge_trap",
             arguments: vec![merged, Term::Integer((steps - budget) as i64)],
-        };
+        });
     }
     process.bump_reductions((steps / LOOP_FACTOR) as i32);
-    Value(merged)
+    Ok(Value(merged))
 }
 
 /// Run `maps:remove/2`: return the map without the key, as ERTS

@@ -329,13 +329,13 @@ impl BeamProgram {
         let process = scheduler.current_process_mut();
         match (module, function, arguments.as_slice()) {
             ("erlang", "length", [list, Term::Integer(count)]) => {
-                Ok(erlang::length(process, list, *count))
+                erlang::length(process, list, *count)
             }
             ("erlang", "++", [left, right, Term::Integer(done)]) => {
-                Ok(erlang::append_chunk(process, left, right, *done))
+                erlang::append_chunk(process, left, right, *done)
             }
             ("maps", "merge_trap", [merged, Term::Integer(steps)]) => {
-                Ok(maps::merge_trap(process, merged.clone(), *steps as usize))
+                maps::merge_trap(process, merged.clone(), *steps as usize)
             }
             ("persistent_term", "get_all_trap", [all, Term::Integer(entries)]) => Ok(
                 persistent_term::get_all_trap(process, all.clone(), *entries as usize),
@@ -344,17 +344,12 @@ impl BeamProgram {
                 "erts_internal",
                 "iolist_size_continue",
                 [term, Term::List(stack), Term::Integer(size)],
-            ) => Ok(iolist::iolist_size_continue(
-                process,
-                term,
-                stack,
-                *size as usize,
-            )),
+            ) => iolist::iolist_size_continue(process, term, stack, *size as usize),
             (
                 "erts_internal",
                 "iolist_to_iovec_continue",
                 [Term::Atom(phase), arg, term, Term::List(stack)],
-            ) if phase.name() == "size" => Ok(iolist::iovec_size(process, arg, term, stack)),
+            ) if phase.name() == "size" => iolist::iovec_size(process, arg, term, stack),
             (
                 "erts_internal",
                 "iolist_to_iovec_continue",
@@ -366,7 +361,7 @@ impl BeamProgram {
                     Term::Binary(merged),
                 ],
             ) => {
-                let reds_left = process.bif_reductions_left() as i64;
+                let reds_left = process.bif_reductions_left()? as i64;
                 Ok(iolist::iovec_copy(
                     process,
                     reds_left,
