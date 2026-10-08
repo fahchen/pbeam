@@ -228,9 +228,8 @@ fn charges_the_receive_reductions_as_pinned_erts_with_one_scheduler() {
     // fetch of 4 in the new turn, N + 1 entries, a return, and a send.
     // Queued: entry 1, one fetch of 4 for 11 messages, 11 entries and a
     // return of `recv/1`, N + 1 entries, a return, and a send. Info: as
-    // queued, with no fetch. Its two values are 2 apart, because ERTS also
-    // charges 1 for the `process_info/2` item (`erl_bif_info.c:1601`), which
-    // #234 adds. Named: as info, with `registered_name`. Hibernated:
+    // queued, with no fetch, and with 1 for the `process_info/2` item
+    // (`erl_bif_info.c:1601`). Named: as info, with `registered_name`. Hibernated:
     // `erlang:hibernate/0` fetches (`beam_common.c:1586-1587`), so the next
     // turn has no fetch.
     let program = BeamProgram::load(&[RECEIVE_PROBE]).unwrap();

@@ -95,14 +95,13 @@ nop() -> ok.
 %% N reductions, and the messages q1 and q2 of a witness process that runs
 %% after W. The witness sends q1, uses its budget, and sends q2 in its next
 %% turn. For each kind, W sends w in the turn of the receive with the first
-%% N, and in its next turn with the second N. For woken, queued, and
-%% hibernated, the two values give the exact cost of the receive. For info
-%% and named, the two values are 2 apart: process_info/2 also costs 1 for
-%% its item (erl_bif_info.c:1601), which PBeam does not charge yet.
+%% N, and in its next turn with the second N. Thus the two values give the
+%% exact cost of the receive. For info and named, the cost includes the 1
+%% of the process_info/2 item (erl_bif_info.c:1601).
 orders() ->
     [{Kind, [order(Kind, N) || N <- Ns]}
-     || {Kind, Ns} <- [{woken, [3992, 3993]}, {queued, [3979, 3980]}, {info, [3982, 3984]},
-                       {named, [3982, 3984]}, {hibernated, [3984, 3985]}]].
+     || {Kind, Ns} <- [{woken, [3992, 3993]}, {queued, [3979, 3980]}, {info, [3982, 3983]},
+                       {named, [3982, 3983]}, {hibernated, [3984, 3985]}]].
 
 order(Kind, N) ->
     spawn(?MODULE, observe, [self(), Kind, N]),
