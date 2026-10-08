@@ -137,11 +137,7 @@ impl EtsTables {
         caller: ProcessId,
         operation: Operation,
     ) -> Option<&mut Table> {
-        let id = match id {
-            Term::Atom(name) => *self.names.get(name.name())?,
-            Term::Reference(id) => *id,
-            _ => return None,
-        };
+        let (id, _) = self.find(id)?;
         let table = self.tables.get_mut(&id)?;
         let allowed = table.owner == caller
             || matches!(
@@ -149,6 +145,30 @@ impl EtsTables {
                 (Access::Public, _) | (Access::Protected, Operation::Read)
             );
         allowed.then_some(table)
+    }
+
+    /// Return the table reference and the table that `id` identifies, with
+    /// no access check, as `db_get_table` with `DB_READ_TBL_STRUCT` does for
+    /// a list insert (`erl_db.c:845-857`; `erl_db_util.h:452`). An atom finds
+    /// a named table, and a reference finds its table. Return `None` for each
+    /// other term, a free name, and a deleted table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tables = EtsTables::default();
+    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Private, 1));
+    /// assert!(tables.find(&Term::static_atom("ac_tab")).is_some_and(|(id, _)| id == Reference(0)));
+    /// assert!(tables.find(&Term::Reference(Reference(1))).is_none());
+    /// assert!(tables.find(&Term::Integer(1)).is_none());
+    /// ```
+    pub(super) fn find(&self, id: &Term) -> Option<(Reference, &Table)> {
+        let id = match id {
+            Term::Atom(name) => *self.names.get(name.name())?,
+            Term::Reference(id) => *id,
+            _ => return None,
+        };
+        self.tables.get(&id).map(|table| (id, table))
     }
 
     /// Delete each table that the process `owner` owns, and free the names

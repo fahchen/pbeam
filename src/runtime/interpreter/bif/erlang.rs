@@ -829,16 +829,25 @@ pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
 ///
 /// ```rust,ignore
 /// let x = Term::static_atom("x");
-/// assert!(matches!(append(&mut process, &Term::List(vec![]), &x), BifResult::Value(term) if term == x));
-/// let list = append(&mut process, &Term::List(vec![Term::Integer(1)]), &x);
+/// assert!(matches!(append(&mut process, &Term::List(vec![]), &x)?, BifResult::Value(term) if term == x));
+/// let list = append(&mut process, &Term::List(vec![Term::Integer(1)]), &x)?;
 /// assert!(matches!(list, BifResult::Value(Term::ImproperList(elements, _)) if elements.len() == 1));
-/// assert!(matches!(append(&mut process, &x, &Term::List(vec![])), BifResult::Raise { .. }));
+/// assert!(matches!(append(&mut process, &x, &Term::List(vec![]))?, BifResult::Raise { .. }));
 /// ```
-pub(super) fn append(process: &mut ProcessState, left: &Term, right: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn append(
+    process: &mut ProcessState,
+    left: &Term,
+    right: &Term,
+) -> Result<BifResult, BeamError> {
     match left {
-        Term::List(elements) if elements.is_empty() => Value(right.clone()),
+        Term::List(elements) if elements.is_empty() => Ok(Value(right.clone())),
         Term::List(_) | Term::ImproperList(..) => append_chunk(process, left, right, 0),
-        _ => BifResult::badarg(),
+        _ => Ok(BifResult::badarg()),
     }
 }
 
@@ -864,28 +873,33 @@ pub(super) fn append(process: &mut ProcessState, left: &Term, right: &Term) -> B
 /// ```rust,ignore
 /// process.fcalls = 1;
 /// let left = Term::List((0..61).map(Term::Integer).collect());
-/// let trap = append_chunk(&mut process, &left, &Term::List(vec![Term::Integer(61)]), 0);
+/// let trap = append_chunk(&mut process, &left, &Term::List(vec![Term::Integer(61)]), 0)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "++", .. }));
 /// assert_eq!(process.fcalls, 0);
 /// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
 pub(super) fn append_chunk(
     process: &mut ProcessState,
     left: &Term,
     right: &Term,
     done: i64,
-) -> BifResult {
+) -> Result<BifResult, BeamError> {
     let (elements, tail) = list_cells(left).expect("'++' appends to a nonempty list");
     let done = usize::try_from(done).expect("'++' counts the elements that it copied");
     let per_reduction = match right {
         Term::List(right) if right.is_empty() => 32,
         _ => 60,
     };
-    let budget = per_reduction * process.bif_reductions_left();
+    let budget = per_reduction * process.bif_reductions_left()?;
     let rest = elements.len() - done;
     let walked = rest.min(budget);
     process.bump_reductions((walked / per_reduction) as i32);
     if walked < rest {
-        return BifResult::TrapBif {
+        return Ok(BifResult::TrapBif {
             module: "erlang",
             function: "++",
             arguments: vec![
@@ -893,12 +907,12 @@ pub(super) fn append_chunk(
                 right.clone(),
                 Term::Integer((done + walked) as i64),
             ],
-        };
+        });
     }
-    match tail {
+    Ok(match tail {
         Some(_) => BifResult::badarg(),
         None => Value(Term::list_with_tail(elements.to_vec(), right.clone())),
-    }
+    })
 }
 
 /// Count the elements of `list` and add `count`, as ERTS
@@ -916,33 +930,42 @@ pub(super) fn append_chunk(
 /// ```rust,ignore
 /// process.fcalls = 10;
 /// let list = Term::List((0..32).map(Term::Integer).collect());
-/// assert!(matches!(length(&mut process, &list, 0), BifResult::Value(Term::Integer(32))));
+/// assert!(matches!(length(&mut process, &list, 0)?, BifResult::Value(Term::Integer(32))));
 /// assert_eq!(process.fcalls, 8);
 /// process.fcalls = 1;
-/// let trap = length(&mut process, &list, 0);
+/// let trap = length(&mut process, &list, 0)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "length", .. }));
 /// ```
-pub(super) fn length(process: &mut ProcessState, list: &Term, count: i64) -> BifResult {
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn length(
+    process: &mut ProcessState,
+    list: &Term,
+    count: i64,
+) -> Result<BifResult, BeamError> {
     let Some((elements, tail)) = list_cells(list) else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
-    let max_iter = 16 * process.bif_reductions_left();
+    let max_iter = 16 * process.bif_reductions_left()?;
     if elements.len() > max_iter {
         process.bump_all_reductions();
-        return BifResult::TrapBif {
+        return Ok(BifResult::TrapBif {
             module: "erlang",
             function: "length",
             arguments: vec![
                 list_rest(&elements[max_iter..], tail),
                 Term::Integer(count + max_iter as i64),
             ],
-        };
+        });
     }
     if tail.is_some() {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     }
     process.bump_reductions((elements.len() / 16) as i32);
-    Value(Term::Integer(count + elements.len() as i64))
+    Ok(Value(Term::Integer(count + elements.len() as i64)))
 }
 
 /// Run `erlang:tl/1`: return the tail of the first cons cell of a nonempty
@@ -968,6 +991,83 @@ pub(super) fn tl(list: &Term) -> BifResult {
     };
     // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
     Value(Term::list_with_tail(elements[1..].to_vec(), tail))
+}
+
+/// Run `erlang:integer_to_list/1`: return the decimal characters of an
+/// integer, as ERTS `integer_to_list_1` and `integer_to_list`
+/// (`bif.c:3266-3339`) do. A term that is not an integer raises `badarg`.
+///
+/// A small integer costs no reduction. A bignum costs one reduction for each
+/// 16 digits of [`big_integer_estimate`] (`bif.c:3283-3299`). In the PBeam
+/// integer range, a bignum is from 2^59 to 2^63 - 1 or from -2^63 to
+/// -2^59 - 1, and it costs 1.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// let list = integer_to_list(&mut process, &Term::Integer(-12))?;
+/// assert!(matches!(list, BifResult::Value(Term::List(codes)) if codes == [45, 49, 50].map(Term::Integer)));
+/// assert_eq!(process.fcalls, 10);
+/// integer_to_list(&mut process, &Term::Integer(1 << 59))?;
+/// assert_eq!(process.fcalls, 9);
+/// assert!(matches!(integer_to_list(&mut process, &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// process.fcalls = 0;
+/// assert!(integer_to_list(&mut process, &Term::Integer(1 << 59)).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for a bignum that costs more than the reductions
+/// left. ERTS then runs the BIF again on a dirty CPU scheduler
+/// (`bif.c:3289-3296`, `3323-3336`), and PBeam has no dirty scheduler. Also return the runtime error of
+/// [`ProcessState::bif_reductions_left`] for a negative budget.
+pub(super) fn integer_to_list(
+    process: &mut ProcessState,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    /// `DIGITS_PER_RED` (`bif.c:3283`).
+    const DIGITS_PER_RED: usize = 16;
+    let Term::Integer(value) = term else {
+        return Ok(BifResult::badarg());
+    };
+    if term.small_integer().is_none() {
+        let cost = big_integer_estimate(*value) / DIGITS_PER_RED;
+        if cost > process.bif_reductions_left()? {
+            // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
+            return Err(error(format!(
+                "unsupported erlang:integer_to_list/1 of {value} with {} reductions left: ERTS runs it on a dirty CPU scheduler",
+                process.fcalls
+            )));
+        }
+        process.bump_reductions(cost as i32);
+    }
+    let digits = value.to_string();
+    let codes = digits.bytes().map(|byte| Term::Integer(i64::from(byte)));
+    Ok(Value(Term::List(codes.collect())))
+}
+
+/// Return the number of decimal digits that ERTS `big_integer_estimate`
+/// (`big.c:2589-2597`) gives for a bignum, with the sign and a null byte:
+/// `(lg + 1) / lg2(10) + 1`, rounded down, where `lg` is the index of the
+/// highest set bit of the magnitude (`I_lg`, `big.c:2226-2237`) and
+/// `lg2(10)` is 3.32193 (`lg2_lookup`, `big.c:4087-4092`), then one more
+/// for a negative sign and one for the null byte.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // 2^59: lg 59, 60 / 3.32193 + 1 = 19.06, then the null byte.
+/// assert_eq!(big_integer_estimate(1 << 59), 20);
+/// assert_eq!(big_integer_estimate(i64::MIN), 22);
+/// ```
+fn big_integer_estimate(value: i64) -> usize {
+    /// `lg2_lookup[10 - 2]` (`big.c:4088`), which ERTS rounds to 5 places.
+    #[allow(clippy::approx_constant, reason = "ERTS uses this rounded value")]
+    const LG2_10: f64 = 3.32193;
+    let lg = u64::BITS - 1 - value.unsigned_abs().leading_zeros();
+    let digits = (f64::from(lg + 1) / LG2_10 + 1.0) as usize;
+    digits + usize::from(value < 0) + 1
 }
 
 /// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
@@ -1539,202 +1639,6 @@ pub(super) fn make_fun(module: &Term, function: &Term, arity: &Term) -> BifResul
         )),
         _ => BifResult::badarg(),
     }
-}
-
-/// The largest binary, in bytes, that `erlang:iolist_to_iovec/1` copies into
-/// the merged binary of its result. ERTS `IOL2V_COPY_THRESHOLD`
-/// (`erl_iolist.c`) is `ERL_ONHEAP_BITS_LIMIT * 8` bits, and
-/// `ERL_ONHEAP_BITS_LIMIT` (`erl_bits.h`) is `64 * 8` bits, so the limit is
-/// 4096 bits, or 512 bytes. A larger binary is an element of the result.
-const IOVEC_COPY_LIMIT: usize = 512;
-
-/// Run `erlang:iolist_to_iovec/1` as ERTS `iolist_to_iovec_1` and
-/// `iolist_to_iovec_engine` (`erl_iolist.c`) do. Return `[]` for `[]` and
-/// `<<>>`, and `[Bin]` for a binary `Bin` that is not empty. For a list, walk
-/// the nested lists in order. A binary tail of a list, as in `[97|<<"b">>]`,
-/// comes after the elements of that list (`generic_iolist_size`,
-/// `erl_iolist.c:153-236`). Copy each byte and each binary of at most
-/// [`IOVEC_COPY_LIMIT`] bytes into one merged binary. Each larger binary
-/// closes the current merged binary, if it is not empty, and is an element of
-/// the result itself. An empty merged binary is not in the result. An integer
-/// outside `0..=255`, a tail that is not a binary, or another term that is
-/// not iodata raises `badarg`.
-///
-/// ERTS also copies a sub-binary at a bit offset that is not a multiple of 8,
-/// whatever its size. PBeam binaries always start at a byte, so only the size
-/// selects the rule.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let hello = Term::Binary(b"Hello".to_vec());
-/// assert!(matches!(iolist_to_iovec(&hello), BifResult::Value(Term::List(iovec)) if iovec == [hello]));
-/// assert!(matches!(iolist_to_iovec(&Term::Binary(Vec::new())), BifResult::Value(Term::List(iovec)) if iovec.is_empty()));
-/// // [1, [<<2>>]] gives [<<1,2>>].
-/// let list = Term::List(vec![Term::Integer(1), Term::List(vec![Term::Binary(vec![2])])]);
-/// assert!(matches!(iolist_to_iovec(&list), BifResult::Value(Term::List(iovec)) if iovec == [Term::Binary(vec![1, 2])]));
-/// // [1, <<0:513/unit:8>>] gives [<<1>>, <<0:513/unit:8>>].
-/// let large = Term::Binary(vec![0; 513]);
-/// let list = Term::List(vec![Term::Integer(1), large.clone()]);
-/// assert!(matches!(iolist_to_iovec(&list), BifResult::Value(Term::List(iovec)) if iovec == [Term::Binary(vec![1]), large]));
-/// // [97|<<"b">>] gives [<<"ab">>].
-/// let improper = Term::ImproperList(vec![Term::Integer(97)], Box::new(Term::Binary(b"b".to_vec())));
-/// assert!(matches!(iolist_to_iovec(&improper), BifResult::Value(Term::List(iovec)) if iovec == [Term::Binary(b"ab".to_vec())]));
-/// assert!(matches!(iolist_to_iovec(&Term::List(vec![Term::Integer(256)])), BifResult::Raise { .. }));
-/// assert!(matches!(iolist_to_iovec(&Term::static_atom("foo")), BifResult::Raise { .. }));
-/// ```
-pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
-    match term {
-        Term::Binary(bytes) if bytes.is_empty() => Value(Term::List(Vec::new())),
-        Term::Binary(_) => Value(Term::List(vec![term.clone()])),
-        Term::List(_) | Term::ImproperList(..) => {
-            iolist_iovec(term).map_or_else(BifResult::badarg, |iovec| Value(Term::List(iovec)))
-        }
-        _ => BifResult::badarg(),
-    }
-}
-
-/// Run `erlang:iolist_size/1` as ERTS `iolist_size_1` and
-/// `iolist_size_dispatch` (`erl_iolist.c:1005-1068, 1084-1094`) do: return
-/// the byte count of a binary, or the byte count of each element and each
-/// binary tail of an iolist. The walk has the type rules of
-/// `generic_iolist_size` (`erl_iolist.c:153-236`), which
-/// `erlang:iolist_to_iovec/1` also uses, so [`walk_iolist`] gives the bytes
-/// to count without a copy. An integer outside `0..=255`, a tail that is not a
-/// binary or `[]`, or another term that is not iodata raises `badarg`. ERTS
-/// raises `system_limit` only for a size above 64 bignum words, which a
-/// PBeam term cannot have.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(matches!(iolist_size(&Term::Binary(b"abc".to_vec())), BifResult::Value(Term::Integer(3))));
-/// // [1, <<2,3>> | <<4>>] gives 4.
-/// let improper = Term::ImproperList(vec![Term::Integer(1), Term::Binary(vec![2, 3])], Box::new(Term::Binary(vec![4])));
-/// assert!(matches!(iolist_size(&improper), BifResult::Value(Term::Integer(4))));
-/// assert!(matches!(iolist_size(&Term::List(vec![Term::Integer(256)])), BifResult::Raise { .. }));
-/// assert!(matches!(iolist_size(&Term::Integer(1)), BifResult::Raise { .. }));
-/// ```
-pub(super) fn iolist_size(term: &Term) -> BifResult {
-    let mut size = 0;
-    match term {
-        Term::Binary(_) | Term::List(_) | Term::ImproperList(..) => {
-            walk_iolist(term, |bytes| size += bytes.len())
-                .map_or_else(BifResult::badarg, |()| Value(Term::Integer(size as i64)))
-        }
-        _ => BifResult::badarg(),
-    }
-}
-
-/// Return the bytes of iodata: the bytes of a binary, or the bytes of each
-/// element and each binary tail of an iolist in order, as
-/// `erts_iolist_to_buf` writes them. Return `None` for any other term and
-/// for an iolist with an element or a tail that is not iodata.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(iodata_bytes(&Term::Binary(b"ab".to_vec())), Some(b"ab".to_vec()));
-/// // [$a, [<<"b">>]] gives <<"ab">>.
-/// let list = Term::List(vec![Term::Integer(97), Term::List(vec![Term::Binary(b"b".to_vec())])]);
-/// assert_eq!(iodata_bytes(&list), Some(b"ab".to_vec()));
-/// // [$a|<<"b">>] gives <<"ab">>, and [$a|x] is not iodata.
-/// let tail = |tail| Term::ImproperList(vec![Term::Integer(97)], Box::new(tail));
-/// assert_eq!(iodata_bytes(&tail(Term::Binary(b"b".to_vec()))), Some(b"ab".to_vec()));
-/// assert_eq!(iodata_bytes(&tail(Term::static_atom("x"))), None);
-/// assert_eq!(iodata_bytes(&Term::List(vec![Term::Integer(256)])), None);
-/// assert_eq!(iodata_bytes(&Term::static_atom("foo")), None);
-/// ```
-pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
-    match term {
-        Term::Binary(_) | Term::List(_) | Term::ImproperList(..) => {
-            walk_iolist(term, |part| bytes.extend_from_slice(part))?;
-            Some(bytes)
-        }
-        _ => None,
-    }
-}
-
-/// Convert a proper or improper iolist to the iovec of
-/// `erlang:iolist_to_iovec/1`, or return `None` when an element or a tail is
-/// not iodata. [`walk_iolist`] gives the bytes in order.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let iolist = Term::List(vec![Term::List(vec![]), Term::Binary(vec![]), Term::Integer(7)]);
-/// assert_eq!(iolist_iovec(&iolist), Some(vec![Term::Binary(vec![7])]));
-/// // [7|<<8>>] gives [<<7,8>>], and [7|8] is not iodata.
-/// let improper = |tail| Term::ImproperList(vec![Term::Integer(7)], Box::new(tail));
-/// assert_eq!(iolist_iovec(&improper(Term::Binary(vec![8]))), Some(vec![Term::Binary(vec![7, 8])]));
-/// assert_eq!(iolist_iovec(&improper(Term::Integer(8))), None);
-/// assert_eq!(iolist_iovec(&Term::List(vec![Term::Integer(-1)])), None);
-/// ```
-fn iolist_iovec(list: &Term) -> Option<Vec<Term>> {
-    let mut iovec = Vec::new();
-    let mut merged = Vec::new();
-    walk_iolist(list, |bytes| {
-        if bytes.len() <= IOVEC_COPY_LIMIT {
-            merged.extend_from_slice(bytes);
-        } else {
-            if !merged.is_empty() {
-                iovec.push(Term::Binary(std::mem::take(&mut merged)));
-            }
-            iovec.push(Term::Binary(bytes.to_vec()));
-        }
-    })?;
-    if !merged.is_empty() {
-        iovec.push(Term::Binary(merged));
-    }
-    Some(iovec)
-}
-
-/// Walk iodata in order and give `sink` the bytes of each binary, and each
-/// byte integer as one byte, or return `None` when an element or a tail is
-/// not iodata. This is the one copy of the `generic_iolist_size` type rules
-/// (`erl_iolist.c:153-236`) that `erlang:iolist_to_iovec/1`,
-/// `erlang:iolist_size/1`, and [`iodata_bytes`] use. A binary tail of a list
-/// comes after the elements of that list. Each other tail gives `None`. The
-/// caller discards what `sink` got before a `None`, because ERTS walks the
-/// whole term before it builds the result. A top-level integer is a byte
-/// here, so each caller selects the top-level terms itself. Use a stack of
-/// list iterators, as the ERTS engine does, so that a deep nested list does
-/// not use the Rust call stack.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// // [1, [<<2,3>>] | <<4>>] gives [1], [2,3], and [4].
-/// let iolist = Term::ImproperList(
-///     vec![Term::Integer(1), Term::List(vec![Term::Binary(vec![2, 3])])],
-///     Box::new(Term::Binary(vec![4])),
-/// );
-/// let mut parts = Vec::new();
-/// assert_eq!(walk_iolist(&iolist, |bytes| parts.push(bytes.to_vec())), Some(()));
-/// assert_eq!(parts, [vec![1], vec![2, 3], vec![4]]);
-/// assert_eq!(walk_iolist(&Term::List(vec![Term::Integer(256)]), |_| ()), None);
-/// ```
-fn walk_iolist(term: &Term, mut sink: impl FnMut(&[u8])) -> Option<()> {
-    // Each level holds the elements of a list that the walk did not read
-    // yet, and its binary tail, which comes after them.
-    let mut lists = vec![(std::slice::from_ref(term).iter(), None)];
-    while let Some((elements, tail)) = lists.last_mut() {
-        let Some(element) = elements.next().or_else(|| tail.take()) else {
-            lists.pop();
-            continue;
-        };
-        match element {
-            Term::List(inner) => lists.push((inner.iter(), None)),
-            Term::ImproperList(inner, tail) if matches!(**tail, Term::Binary(_)) => {
-                lists.push((inner.iter(), Some(&**tail)));
-            }
-            Term::Integer(byte) => sink(&[u8::try_from(*byte).ok()?]),
-            Term::Binary(bytes) => sink(bytes),
-            _ => return None,
-        }
-    }
-    Some(())
 }
 
 /// The item atoms that `erlang:process_info/2` accepts (`pi_arg2ix` in

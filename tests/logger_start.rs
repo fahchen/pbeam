@@ -598,6 +598,27 @@ fn returns_badarg_for_an_ordered_path_that_crashes_pinned_erts() {
 }
 
 #[test]
+fn stops_with_a_runtime_error_for_a_negative_budget_after_map_next() {
+    // `logger_start_probe:negative_budget/0` calls `erts_internal:map_next/3`
+    // directly until a call makes the reduction budget negative
+    // (`erl_map.c:4126`), and the guard BIF `length/1` then reads the budget
+    // before the next call or return. The pinned ERTS reads it as a large
+    // unsigned count (`erl_bif_guard.c:280`) and returns `ok`. PBeam does not
+    // implement this yet: it stops the run with a runtime error that names the
+    // row "Map iteration" in `docs/erts-differences.md`, not with a panic.
+    let failure = load()
+        .execute("logger_start_probe", "negative_budget", &[])
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        failure,
+        "unsupported negative reduction budget in a BIF after erts_internal:map_next/3 \
+         (see \"Map iteration\" in docs/erts-differences.md)"
+    );
+    assert_eq!(reference("negative_budget"), b"ok\n");
+}
+
+#[test]
 fn removes_monitors_as_pinned_erts() {
     // `logger_start_probe:demonitor/0` runs `erlang:demonitor/1`
     // (`bif.c:598-611`), as `logger_simple_h:adding_handler/1`

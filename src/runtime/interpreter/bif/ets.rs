@@ -3,6 +3,7 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::ets::{Access, Operation, Table};
+use crate::term::Reference;
 
 /// The fewest and the most locks that the hidden option
 /// `{write_concurrency, {debug_hash_fixed_number_of_locks, N}}` accepts
@@ -150,13 +151,13 @@ pub(super) fn new(
 /// of an object in the table replaces that object, also an earlier object of
 /// the same list (`erl_db_hash.c:1387-1402`).
 ///
-/// A table that does not exist or that the caller cannot write raises
-/// `badarg` (`erl_db.c:769-798`), also for `[]`. A term that is not a tuple,
-/// and a tuple with fewer elements than the key position, raise `badarg`,
-/// and a list with such an element adds no object
-/// (`ets_insert_2_list_check`, `erl_db.c:1812-1827`). ERTS compares the
-/// unsigned size with the C `int` key position, so a negative key position
-/// makes each object bad.
+/// One tuple, `[]`, and a list of one tuple cost no reduction in a `set`
+/// table (`erl_db.c:2349-2380`). A table that does not exist or that the
+/// caller cannot write raises `badarg` (`erl_db.c:769-798`). A term that is
+/// not a tuple, and a tuple with fewer elements than the key position, raise
+/// `badarg`. ERTS compares the unsigned size with the C `int` key position,
+/// so a negative key position makes each object bad. Each other list,
+/// also an improper list, runs [`insert_list`].
 ///
 /// # Examples
 ///
@@ -171,12 +172,22 @@ pub(super) fn new(
 /// # Errors
 ///
 /// Return a runtime error for a tuple in a table with the key position 0:
-/// ERTS aborts the emulator there (`Invalid tag in make_internal_hash`).
+/// ERTS aborts the emulator there (`Invalid tag in make_internal_hash`). Also return the runtime error of
+/// [`ProcessState::bif_reductions_left`] for a negative budget.
 pub(super) fn insert(
     context: &mut BifContext<'_>,
     table: &Term,
     objects: &Term,
 ) -> Result<BifResult, BeamError> {
+    if matches!(objects, Term::List(list) if list.len() > 1)
+        || matches!(objects, Term::ImproperList(..))
+    {
+        let Some((id, found)) = context.scheduler.ets.find(table) else {
+            return Ok(BifResult::badarg());
+        };
+        let keypos = found.keypos();
+        return insert_list(context, id, objects, 0, keypos);
+    }
     let caller = context.scheduler.current_process_mut().id;
     let Some(table) = context.scheduler.ets.table(table, caller, Operation::Write) else {
         return Ok(BifResult::badarg());
@@ -185,15 +196,216 @@ pub(super) fn insert(
         Term::List(objects) => objects.as_slice(),
         object => std::slice::from_ref(object),
     };
-    // A C `int` compares with the unsigned arity as a 64-bit unsigned value.
-    let keypos = i64::from(table.keypos()) as u64;
-    let mut tuples = Vec::with_capacity(objects.len());
-    for object in objects {
-        match object {
-            Term::Tuple(elements) if elements.len() as u64 >= keypos => tuples.push(elements),
-            _ => return Ok(BifResult::badarg()),
-        }
+    let keypos = table.keypos();
+    let Some(tuples) = valid_objects(objects, keypos) else {
+        return Ok(BifResult::badarg());
+    };
+    put_objects(table, &tuples, keypos)?;
+    Ok(Value(Term::static_atom("true")))
+}
+
+/// Run `ets:insert/2` with a list of at least two objects, or an improper
+/// list, from `done` units of its work, as the YCF code of
+/// `ets_insert_2_list` does (`erl_db.c:2017-2116`, `2152-2336`). The table
+/// `id` has the key position `keypos` at the first call. The work has
+/// units, and a unit uses one of the `ITERATIONS_PER_RED` (8) units that
+/// each reduction of the budget gives:
+///
+/// 1. The check: one unit for each object up to the first bad object
+///    (`ets_insert_2_list_check`, `erl_db.c:1812-1827`). A bad object, or a
+///    tail that is not `[]` after the last object, raises `badarg`.
+/// 2. When the units that remain are at least the number of objects
+///    (`can_insert_without_yield`, `erl_db.c:2002-2014`), the caller must
+///    be able to write the table, and the objects go into it with two units
+///    for each object and no trap (`erl_db.c:1845-1859`, `2050-2071`). The
+///    cost can then be more than the budget, and `BUMP_REDS` stops at 0.
+/// 3. Else a copy of each object, one unit for each object
+///    (`erl_db.c:1876-1907`). Then the caller must be able to write the
+///    table, and the objects go into it with two units for each object
+///    (`erl_db.c:1927-1949`, `2072-2107`). When the caller cannot write the
+///    table, or the table went away, the copies go away with one unit for
+///    each object, and the call raises `badarg` (`erl_db.c:1863-1873`,
+///    `2077-2089`).
+///
+/// The call bumps one reduction for each 8 units that it used
+/// (`erl_db.c:2197`, `2306`). When the unit that uses the last of the
+/// budget, or the first unit for a budget of 0, is not the last unit, the
+/// call uses all reductions and traps to its export with `done` after that
+/// unit (`erl_db.c:2297-2332`). ERTS traps to `ets:insert/2` with a magic
+/// reference to the YCF state, and PBeam traps to the internal export
+/// `ets:insert/4` with the table reference, the objects, `done`, and the key
+/// position. `done` counts the units of the check, the copy, and the
+/// insert, and after a failed copy the units of the removal from
+/// `4 * count`. ERTS takes a table lock and inserts each object in step 3, and
+/// another process that uses the table helps to complete the insert. PBeam
+/// inserts all objects when it takes the table, so another process sees
+/// them at once. When the owner exit deletes the table during step 3, a
+/// later call raises `badarg`, as ERTS does after it cancels the insert
+/// (`erl_db.c:2232-2248`, `5082-5086`). PBeam has no `ets:delete/1`, which
+/// in ERTS first completes the insert, so that the insert returns `true`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// let objects = Term::List(vec![Term::Tuple(vec![test_atom("k")]); 8]);
+/// // 8 units of the check and 16 units of the insert: 3 reductions.
+/// assert!(matches!(insert_list(&mut context, id, &objects, 0, 1)?, BifResult::Value(_)));
+/// assert_eq!(context.scheduler.current_process_mut().fcalls, 7);
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for a table with the key position 0: ERTS aborts
+/// the emulator there (`Invalid tag in make_internal_hash`). Also return the runtime error of
+/// [`ProcessState::bif_reductions_left`] for a negative budget.
+pub(super) fn insert_list(
+    context: &mut BifContext<'_>,
+    id: Reference,
+    objects: &Term,
+    mut done: usize,
+    keypos: i32,
+) -> Result<BifResult, BeamError> {
+    /// `ITERATIONS_PER_RED` (`erl_db.c:2152`).
+    const ITERATIONS_PER_RED: i64 = 8;
+    let (elements, tail) = list_cells(objects).expect("a list insert has a list");
+    let count = elements.len();
+    let table = Term::Reference(id);
+    let insert_phase = 2 * count < done && done <= 4 * count;
+    if insert_phase && context.scheduler.ets.find(&table).is_none() {
+        return Ok(BifResult::badarg());
     }
+    let process = context.scheduler.current_process_mut();
+    let caller = process.id;
+    let budget = ITERATIONS_PER_RED * process.bif_reductions_left()? as i64;
+    let mut units = Units { left: budget };
+    let tuples = valid_objects(elements, keypos).filter(|_| tail.is_none());
+    // After a failed copy, the units of the removal of the copies follow
+    // `4 * count`, and a removal that yields leaves `done` above it.
+    let mut removal = done > 4 * count;
+    // `None` when the call yields, else the result of the call.
+    let result = 'work: {
+        if done <= count {
+            let check_end = match &tuples {
+                Some(_) => count,
+                None => (elements.iter())
+                    .position(|object| {
+                        valid_objects(std::slice::from_ref(object), keypos).is_none()
+                    })
+                    .map_or(count, |index| index + 1),
+            };
+            if !units.run(&mut done, check_end) {
+                break 'work None;
+            }
+            let Some(tuples) = &tuples else {
+                break 'work Some(BifResult::badarg());
+            };
+            if count as i64 <= units.left {
+                let Some(table) = context
+                    .scheduler
+                    .ets
+                    .table(&table, caller, Operation::Write)
+                else {
+                    break 'work Some(BifResult::badarg());
+                };
+                put_objects(table, tuples, keypos)?;
+                units.left -= 2 * count as i64;
+                break 'work Some(Value(Term::static_atom("true")));
+            }
+        }
+        if done <= 2 * count {
+            if !units.run(&mut done, 2 * count) {
+                break 'work None;
+            }
+            match context
+                .scheduler
+                .ets
+                .table(&table, caller, Operation::Write)
+            {
+                Some(table) => {
+                    let tuples = tuples.expect("the check of a copied list found no bad object");
+                    put_objects(table, &tuples, keypos)?;
+                }
+                None => (removal, done) = (true, 4 * count),
+            }
+        }
+        if !removal {
+            if !units.run(&mut done, 4 * count) {
+                break 'work None;
+            }
+            break 'work Some(Value(Term::static_atom("true")));
+        }
+        if !units.run(&mut done, 5 * count) {
+            break 'work None;
+        }
+        Some(BifResult::badarg())
+    };
+    let process = context.scheduler.current_process_mut();
+    process.bump_reductions(((budget - units.left) / ITERATIONS_PER_RED) as i32);
+    Ok(result.unwrap_or_else(|| BifResult::TrapBif {
+        module: "ets",
+        function: "insert",
+        arguments: vec![
+            table,
+            objects.clone(),
+            Term::Integer(done as i64),
+            Term::Integer(i64::from(keypos)),
+        ],
+    }))
+}
+
+/// The YCF reduction counter of a call (`YCF_NR_OF_REDS_LEFT`): the units
+/// that remain in the turn.
+struct Units {
+    /// The units that remain. It can be 0 or less after the last unit.
+    left: i64,
+}
+
+impl Units {
+    /// Use the units from `done` to `end`, and return true. When a unit
+    /// makes the counter 0 or less before `end`, as `YCF_CONSUME_REDS` and
+    /// the YCF loop step do, stop after that unit, set `done` to it, and
+    /// return false: the call yields there. A counter of 0 or less yields
+    /// after the first unit.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (mut units, mut done) = (Units { left: 3 }, 0);
+    /// assert!(units.run(&mut done, 2));
+    /// assert!(!units.run(&mut done, 5));
+    /// assert_eq!((done, units.left), (3, 0));
+    /// ```
+    fn run(&mut self, done: &mut usize, end: usize) -> bool {
+        let units = (end - *done) as i64;
+        let limit = self.left.max(1);
+        if units >= limit {
+            *done += limit as usize;
+            self.left -= limit;
+            return false;
+        }
+        *done = end;
+        self.left -= units;
+        true
+    }
+}
+
+/// Put each object of `tuples` into `table`, which has the key position
+/// `keypos`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let object = vec![test_atom("k")];
+/// put_objects(&mut table, &[&object], 1)?;
+/// assert!(table.object(&test_atom("k")).is_some());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for an object in a table with the key position
+/// 0: ERTS aborts the emulator there (`Invalid tag in make_internal_hash`).
+fn put_objects(table: &mut Table, tuples: &[&Vec<Term>], keypos: i32) -> Result<(), BeamError> {
     if keypos == 0 && !tuples.is_empty() {
         // ponytail: ERTS aborts here; see "ETS tables" in docs/erts-differences.md.
         return Err(error(
@@ -201,9 +413,33 @@ pub(super) fn insert(
         ));
     }
     for elements in tuples {
-        table.insert(elements.clone());
+        table.insert((*elements).clone());
     }
-    Ok(Value(Term::static_atom("true")))
+    Ok(())
+}
+
+/// Return the tuples of `objects` when each one has at least `keypos`
+/// elements, as `ets_insert_2_list_check` (`erl_db.c:1812-1827`) checks
+/// them. A C `int` key position compares with the unsigned arity as a
+/// 64-bit unsigned value, so a negative key position makes each object bad.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let object = Term::Tuple(vec![test_atom("k")]);
+/// assert!(valid_objects(&[object.clone()], 1).is_some());
+/// assert!(valid_objects(&[object.clone()], 2).is_none());
+/// assert!(valid_objects(&[object], -1).is_none());
+/// ```
+fn valid_objects(objects: &[Term], keypos: i32) -> Option<Vec<&Vec<Term>>> {
+    let keypos = i64::from(keypos) as u64;
+    objects
+        .iter()
+        .map(|object| match object {
+            Term::Tuple(elements) if elements.len() as u64 >= keypos => Some(elements),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Run `ets:lookup_element(Table, Key, Index, Default)` on a `set` table, as

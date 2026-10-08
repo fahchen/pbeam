@@ -163,7 +163,7 @@ pub(super) fn compile(
             arguments: vec![pattern.clone(), options.clone()],
         });
     }
-    let Some(bytes) = erlang::iodata_bytes(pattern) else {
+    let Some(bytes) = iolist::iodata_bytes(pattern) else {
         return Ok(BifResult::badarg());
     };
     let code = match pcre2::compile(&bytes, parsed.compile, parsed.newline, parsed.bsr) {

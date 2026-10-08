@@ -90,8 +90,8 @@ impl PersistentTerms {
         self.num_entries += 1;
     }
 
-    /// Return all stored pairs as the list `[{Key, Value}]`, in descending
-    /// slot order. `do_get_all` of `persistent_term_get_0` in
+    /// Return all stored pairs as the elements `{Key, Value}` of a list, in
+    /// descending slot order. `do_get_all` of `persistent_term_get_0` in
     /// `erl_bif_persistent.c` reads the slots from slot 0 and puts each pair
     /// at the head of the list. A trap continues the same list, so the order
     /// does not change. `persistent_term:get/0` never raises.
@@ -105,21 +105,19 @@ impl PersistentTerms {
     /// terms.put(&Term::Integer(7), &Term::Integer(4));
     /// assert_eq!(
     ///     terms.get_all(),
-    ///     Term::List(vec![
+    ///     [
     ///         Term::Tuple(vec![Term::static_atom("true"), Term::Integer(1)]),
     ///         Term::Tuple(vec![Term::Integer(7), Term::Integer(4)]),
-    ///     ])
+    ///     ]
     /// );
     /// ```
-    pub(super) fn get_all(&self) -> Term {
-        Term::List(
-            self.buckets
-                .iter()
-                .rev()
-                .flatten()
-                .map(|(key, value)| Term::Tuple(vec![key.clone(), value.clone()]))
-                .collect(),
-        )
+    pub(super) fn get_all(&self) -> Vec<Term> {
+        self.buckets
+            .iter()
+            .rev()
+            .flatten()
+            .map(|(key, value)| Term::Tuple(vec![key.clone(), value.clone()]))
+            .collect()
     }
 
     /// Return the slot of `key`: the slot that holds an exactly equal key,
