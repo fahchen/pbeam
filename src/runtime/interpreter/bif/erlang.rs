@@ -977,17 +977,20 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
     }
 }
 
-/// Run `erlang:'+'/2`, `erlang:'-'/2`, `erlang:'*'/2`, or `erlang:'div'/2`
-/// with `operation`, the checked `i64` sum, difference, product, or
-/// quotient, as ERTS `erts_mixed_plus`, `erts_mixed_minus`, `stimes_2`, and
-/// `intdiv_2` (`erl_arith.c:370-389`, `erl_arith.c:585-602`,
-/// `erl_arith.c:117-143`) do for two integers. The JIT runs `*` with
-/// `emit_i_mul_add` and `div` with `emit_i_int_div` and `emit_div_rem`
-/// (`jit/arm/instr_arith.cpp:542`, `jit/arm/instr_arith.cpp:968`,
-/// `jit/arm/instr_arith.cpp:1067`) with the same results. An operand that is
+/// Run `erlang:'+'/2`, `erlang:'-'/2`, `erlang:'*'/2`, `erlang:'div'/2`, or
+/// `erlang:'rem'/2` with `operation`, the checked `i64` sum, difference,
+/// product, or quotient, or the remainder, as ERTS `erts_mixed_plus`,
+/// `erts_mixed_minus`, `stimes_2`, `intdiv_2`, and `rem_2`
+/// (`erl_arith.c:370-389`, `erl_arith.c:585-602`, `erl_arith.c:117-143`,
+/// `erl_arith.c:145-161`) do for two integers. The JIT runs `*` with
+/// `emit_i_mul_add`, `div` with `emit_i_int_div` and `emit_div_rem`, and
+/// `rem` with `emit_i_rem` (`jit/arm/instr_arith.cpp:542`,
+/// `jit/arm/instr_arith.cpp:968`, `jit/arm/instr_arith.cpp:1067`,
+/// `jit/arm/instr_arith.cpp:1078`) with the same results. An operand that is
 /// not a number raises `badarith`. PBeam has no float term, so each number
 /// is an integer. A result outside the `i64` range gives a runtime error,
-/// where ERTS makes a bignum.
+/// where ERTS makes a bignum. The `rem` operation never returns `None`, so
+/// `rem` never gives this error (see [`int_rem`]).
 ///
 /// # Examples
 ///
@@ -1037,6 +1040,33 @@ pub(super) fn int_div(left: &Term, right: &Term) -> Result<BifResult, BeamError>
         return Ok(BifResult::badarith());
     }
     arith("div", left, right, i64::checked_div)
+}
+
+/// Run `erlang:'rem'/2`: return the integer remainder of `left` and `right`,
+/// with the sign of `left`, as ERTS `rem_2` (`erl_arith.c:145-161`) and the
+/// JIT `emit_i_rem` (`jit/arm/instr_arith.cpp:1078-1087`) do. A `right` of
+/// `0` raises `badarith` before the operand types are checked
+/// (`erl_arith.c:149-151`), so `a rem 0` raises `badarith` too. Each other
+/// case runs as [`arith`]. `i64::MIN rem -1` gives `0`, as the bignum path
+/// `erts_int_div_rem` (`erl_arith.c:1172`) does, so no result leaves the
+/// `i64` range.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let remainder = int_rem(&Term::Integer(-7), &Term::Integer(3))?;
+/// assert!(matches!(remainder, BifResult::Value(Term::Integer(-1))));
+/// let remainder = int_rem(&Term::Integer(i64::MIN), &Term::Integer(-1))?;
+/// assert!(matches!(remainder, BifResult::Value(Term::Integer(0))));
+/// assert!(matches!(int_rem(&Term::static_atom("a"), &Term::Integer(0))?, BifResult::Raise { .. }));
+/// ```
+pub(super) fn int_rem(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
+    if *right == Term::Integer(0) {
+        return Ok(BifResult::badarith());
+    }
+    arith("rem", left, right, |left, right| {
+        Some(left.wrapping_rem(right))
+    })
 }
 
 /// Convert `value`, a time in the native unit, to `unit` with
@@ -1392,6 +1422,38 @@ pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
     }
 }
 
+/// Run `erlang:iolist_size/1` as ERTS `iolist_size_1` and
+/// `iolist_size_dispatch` (`erl_iolist.c:1005-1068, 1084-1094`) do: return
+/// the byte count of a binary, or the byte count of each element and each
+/// binary tail of an iolist. The walk has the type rules of
+/// `generic_iolist_size` (`erl_iolist.c:153-236`), which
+/// `erlang:iolist_to_iovec/1` also uses, so [`walk_iolist`] gives the bytes
+/// to count without a copy. An integer outside `0..=255`, a tail that is not a
+/// binary or `[]`, or another term that is not iodata raises `badarg`. ERTS
+/// raises `system_limit` only for a size above 64 bignum words, which a
+/// PBeam term cannot have.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(iolist_size(&Term::Binary(b"abc".to_vec())), BifResult::Value(Term::Integer(3))));
+/// // [1, <<2,3>> | <<4>>] gives 4.
+/// let improper = Term::ImproperList(vec![Term::Integer(1), Term::Binary(vec![2, 3])], Box::new(Term::Binary(vec![4])));
+/// assert!(matches!(iolist_size(&improper), BifResult::Value(Term::Integer(4))));
+/// assert!(matches!(iolist_size(&Term::List(vec![Term::Integer(256)])), BifResult::Raise { .. }));
+/// assert!(matches!(iolist_size(&Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn iolist_size(term: &Term) -> BifResult {
+    let mut size = 0;
+    match term {
+        Term::Binary(_) | Term::List(_) | Term::ImproperList(..) => {
+            walk_iolist(term, |bytes| size += bytes.len())
+                .map_or_else(BifResult::badarg, |()| Value(Term::Integer(size as i64)))
+        }
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Return the bytes of iodata: the bytes of a binary, or the bytes of each
 /// element and each binary tail of an iolist in order, as
 /// `erts_iolist_to_buf` writes them. Return `None` for any other term and
@@ -1412,16 +1474,10 @@ pub(super) fn iolist_to_iovec(term: &Term) -> BifResult {
 /// assert_eq!(iodata_bytes(&Term::static_atom("foo")), None);
 /// ```
 pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
     match term {
-        Term::Binary(bytes) => Some(bytes.clone()),
-        Term::List(_) | Term::ImproperList(..) => {
-            let mut bytes = Vec::new();
-            // An iovec holds only binaries.
-            for binary in iolist_iovec(term)? {
-                if let Term::Binary(part) = &binary {
-                    bytes.extend_from_slice(part);
-                }
-            }
+        Term::Binary(_) | Term::List(_) | Term::ImproperList(..) => {
+            walk_iolist(term, |part| bytes.extend_from_slice(part))?;
             Some(bytes)
         }
         _ => None,
@@ -1430,12 +1486,7 @@ pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
 
 /// Convert a proper or improper iolist to the iovec of
 /// `erlang:iolist_to_iovec/1`, or return `None` when an element or a tail is
-/// not iodata. A binary tail of a list comes after the elements of that
-/// list. Each other tail gives `None`, whatever comes before it, because
-/// ERTS walks the whole term before it builds the result
-/// (`generic_iolist_size`, `erl_iolist.c:153-236`). Use a stack of list
-/// iterators, as the ERTS engine does, so that a deep nested list does not
-/// use the Rust call stack.
+/// not iodata. [`walk_iolist`] gives the bytes in order.
 ///
 /// # Examples
 ///
@@ -1451,9 +1502,51 @@ pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
 fn iolist_iovec(list: &Term) -> Option<Vec<Term>> {
     let mut iovec = Vec::new();
     let mut merged = Vec::new();
+    walk_iolist(list, |bytes| {
+        if bytes.len() <= IOVEC_COPY_LIMIT {
+            merged.extend_from_slice(bytes);
+        } else {
+            if !merged.is_empty() {
+                iovec.push(Term::Binary(std::mem::take(&mut merged)));
+            }
+            iovec.push(Term::Binary(bytes.to_vec()));
+        }
+    })?;
+    if !merged.is_empty() {
+        iovec.push(Term::Binary(merged));
+    }
+    Some(iovec)
+}
+
+/// Walk iodata in order and give `sink` the bytes of each binary, and each
+/// byte integer as one byte, or return `None` when an element or a tail is
+/// not iodata. This is the one copy of the `generic_iolist_size` type rules
+/// (`erl_iolist.c:153-236`) that `erlang:iolist_to_iovec/1`,
+/// `erlang:iolist_size/1`, and [`iodata_bytes`] use. A binary tail of a list
+/// comes after the elements of that list. Each other tail gives `None`. The
+/// caller discards what `sink` got before a `None`, because ERTS walks the
+/// whole term before it builds the result. A top-level integer is a byte
+/// here, so each caller selects the top-level terms itself. Use a stack of
+/// list iterators, as the ERTS engine does, so that a deep nested list does
+/// not use the Rust call stack.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [1, [<<2,3>>] | <<4>>] gives [1], [2,3], and [4].
+/// let iolist = Term::ImproperList(
+///     vec![Term::Integer(1), Term::List(vec![Term::Binary(vec![2, 3])])],
+///     Box::new(Term::Binary(vec![4])),
+/// );
+/// let mut parts = Vec::new();
+/// assert_eq!(walk_iolist(&iolist, |bytes| parts.push(bytes.to_vec())), Some(()));
+/// assert_eq!(parts, [vec![1], vec![2, 3], vec![4]]);
+/// assert_eq!(walk_iolist(&Term::List(vec![Term::Integer(256)]), |_| ()), None);
+/// ```
+fn walk_iolist(term: &Term, mut sink: impl FnMut(&[u8])) -> Option<()> {
     // Each level holds the elements of a list that the walk did not read
     // yet, and its binary tail, which comes after them.
-    let mut lists = vec![(std::slice::from_ref(list).iter(), None)];
+    let mut lists = vec![(std::slice::from_ref(term).iter(), None)];
     while let Some((elements, tail)) = lists.last_mut() {
         let Some(element) = elements.next().or_else(|| tail.take()) else {
             lists.pop();
@@ -1464,23 +1557,12 @@ fn iolist_iovec(list: &Term) -> Option<Vec<Term>> {
             Term::ImproperList(inner, tail) if matches!(**tail, Term::Binary(_)) => {
                 lists.push((inner.iter(), Some(&**tail)));
             }
-            Term::Integer(byte) => merged.push(u8::try_from(*byte).ok()?),
-            Term::Binary(bytes) if bytes.len() <= IOVEC_COPY_LIMIT => {
-                merged.extend_from_slice(bytes);
-            }
-            binary @ Term::Binary(_) => {
-                if !merged.is_empty() {
-                    iovec.push(Term::Binary(std::mem::take(&mut merged)));
-                }
-                iovec.push(binary.clone());
-            }
+            Term::Integer(byte) => sink(&[u8::try_from(*byte).ok()?]),
+            Term::Binary(bytes) => sink(bytes),
             _ => return None,
         }
     }
-    if !merged.is_empty() {
-        iovec.push(Term::Binary(merged));
-    }
-    Some(iovec)
+    Some(())
 }
 
 /// The item atoms that `erlang:process_info/2` accepts (`pi_arg2ix` in
@@ -1556,7 +1638,12 @@ fn is_process_info_item(item: &Term) -> bool {
 /// `undefined` for each valid item when the process is not alive
 /// (`erl_bif_info.c:1384-1386`). For a live process, return
 /// `{registered_name, Name}`, or `[]` when the process has no name, as
-/// `process_info_aux` does. For the calling process, return
+/// `process_info_aux` does. For a live process, return
+/// `{message_queue_len, N}`, where `N` counts the messages of the mailbox and
+/// no receive marker, as `sig_qs.mq_len` does (`erl_bif_info.c:1742-1754`).
+/// ERTS first moves the signal queue into the message queue
+/// (`erl_bif_info.c:1355-1356, 1405`), and PBeam puts each message into the
+/// mailbox at once. For the calling process, return
 /// `{current_stacktrace, []}`, because PBeam records no stack frames. The
 /// `current_stacktrace` of another process, a list of items, and any other
 /// item give a runtime error.
@@ -1570,6 +1657,8 @@ fn is_process_info_item(item: &Term) -> bool {
 /// assert!(matches!(info, BifResult::Value(Term::Tuple(elements)) if elements[1] == Term::List(vec![])));
 /// let name = process_info(&mut context, &process, &Term::static_atom("registered_name"))?;
 /// assert!(matches!(name, BifResult::Value(Term::List(elements)) if elements.is_empty()));
+/// let length = process_info(&mut context, &process, &Term::static_atom("message_queue_len"))?;
+/// assert!(matches!(length, BifResult::Value(Term::Tuple(elements)) if elements[1] == Term::Integer(0)));
 /// let dead = process_info(&mut context, &Term::Pid(ProcessId(99)), &item)?;
 /// assert!(matches!(dead, BifResult::Value(Term::Atom(atom)) if atom.name() == "undefined"));
 /// let bogus = process_info(&mut context, &process, &Term::static_atom("bogus_item"))?;
@@ -1603,6 +1692,10 @@ pub(super) fn process_info(
                 Term::Atom(registered.clone()),
             ])),
             ("registered_name", None) => Some(Term::List(Vec::new())),
+            ("message_queue_len", _) => Some(Term::Tuple(vec![
+                item.clone(),
+                Term::Integer(target.mailbox.message_count() as i64),
+            ])),
             _ => None,
         },
         _ => None,

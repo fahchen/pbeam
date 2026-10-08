@@ -150,9 +150,7 @@ fn takes_the_badmap_path_when_add_gets_a_non_map() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains(
-            "root process exited with Tuple([Tuple([Atom(\"badmap\"), Integer(1)]), List([])])"
-        ),
+        error.contains("root process exited with {{badmap,1},[]}"),
         "{error}"
     );
 

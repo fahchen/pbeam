@@ -1,30 +1,34 @@
-//! A time limit for a test that runs a child process. A test that runs a
-//! binary includes this file with `#[path = "common/run.rs"] mod run;`. A
-//! function in `common/mod.rs` would be dead code in each other test crate.
+//! A time limit for a test that runs a child process, and a stdout that
+//! fails each write. A test that runs a binary includes this file with
+//! `#[path = "common/run.rs"] mod run;`. A function in `common/mod.rs` would
+//! be dead code in each other test crate.
 
 use std::{
+    io,
     process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
-/// Run a command with stdin `/dev/null` and return its output. Kill it and
-/// panic with its stdout when it does not end in `limit`. The caller sets
-/// the arguments and the environment.
+/// Run a command with stdin `/dev/null` and stdout `stdout`, and return its
+/// output. With `Stdio::piped()`, the output has the stdout of the command.
+/// Kill the command and panic with its stdout when it does not end in
+/// `limit`. The caller sets the arguments and the environment.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let output = run_with_time_limit(
 ///     Command::new("erl").args(["-noshell", "-eval", "halt()."]),
+///     Stdio::piped(),
 ///     Duration::from_secs(10),
 /// );
 /// assert_eq!(output.status.code(), Some(0));
 /// ```
-pub fn run_with_time_limit(command: &mut Command, limit: Duration) -> Output {
+pub fn run_with_time_limit(command: &mut Command, stdout: Stdio, limit: Duration) -> Output {
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -42,4 +46,41 @@ pub fn run_with_time_limit(command: &mut Command, limit: Duration) -> Output {
         thread::sleep(Duration::from_millis(10));
     }
     child.wait_with_output().unwrap()
+}
+
+/// Run a command with `TERM=dumb` and `LC_ALL=C.UTF-8` through
+/// `run_with_time_limit`, and return its output. The two variables give the
+/// same terminal and encoding to ERTS and to PBeam.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let output = run_dumb_utf8(
+///     Command::new("erl").args(["-noshell", "-eval", "halt()."]),
+///     Stdio::piped(),
+///     Duration::from_secs(10),
+/// );
+/// assert_eq!(output.status.code(), Some(0));
+/// ```
+pub fn run_dumb_utf8(command: &mut Command, stdout: Stdio, limit: Duration) -> Output {
+    run_with_time_limit(
+        command.env("TERM", "dumb").env("LC_ALL", "C.UTF-8"),
+        stdout,
+        limit,
+    )
+}
+
+/// Return the write end of a new pipe whose read end is closed. A write to
+/// it fails with `EPIPE`. `std::io::pipe` makes both ends close-on-exec, so
+/// a child process that a parallel test starts does not keep the read end.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let output = run_dumb_utf8(&mut command, broken_pipe(), RUN_TIME_LIMIT);
+/// ```
+pub fn broken_pipe() -> Stdio {
+    let (reader, writer) = io::pipe().unwrap();
+    drop(reader);
+    writer.into()
 }
