@@ -56,7 +56,7 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
         let error = program.execute("otp_io_calls", function, &[]).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "root process exited with Tuple([Atom(\"badarg\"), List([])])",
+            "root process exited with {badarg,[]}",
             "{function}"
         );
     }

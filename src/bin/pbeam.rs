@@ -25,8 +25,19 @@ struct Cli {
     beam_files: Vec<PathBuf>,
 }
 
-/// Run the command line. Print an error to stderr and exit with status 1
-/// when loading or execution fails.
+/// Run the command line and exit with one of these statuses:
+///
+/// - 0: the root process returns. The binary writes nothing to stderr.
+/// - 1: the root process exits. The binary writes the one stderr line
+///   `pbeam: root process exited with <Reason>`, with `<Reason>` in the ERTS
+///   term text (`print_term`, erl_printf_term.c:352-811). ERTS also exits
+///   with status 1 when a boot process exit halts the runtime.
+/// - 1: a runtime error, a file that cannot be read, a BEAM file that does
+///   not load, or an argument that is not an atom of the loaded modules. The
+///   binary writes the one stderr line `pbeam: <message>`.
+/// - 2: a usage error. `clap` writes the usage text to stderr.
+///
+/// A Rust panic (status 101) is a PBeam defect, not a BEAM result.
 ///
 /// # Examples
 ///

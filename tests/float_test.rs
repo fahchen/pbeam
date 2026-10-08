@@ -106,7 +106,7 @@ fn raises_badarith_when_fconv_gets_a_term_that_is_not_a_number() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("root process exited with Tuple([Atom(\"badarith\"), List([])])"),
+        error.contains("root process exited with {badarith,[]}"),
         "{error}"
     );
     let reference = Command::new("erl")
