@@ -525,17 +525,12 @@ fn restores_fd_0_when_a_linked_tty_owner_exits_abnormally() {
     // resource and exits with the reason `boom`. ERTS runs the TTY monitor
     // of the owner on each exit (prim_tty_nif.c:1235-1241), so fd 0 gets
     // the first mode of the stderr terminal. The linker does not trap
-    // exits, so ERTS also ends it with `boom`. PBeam does not propagate
-    // this exit signal yet and returns a runtime error, but it must
-    // restore fd 0 before it returns the error.
+    // exits, so the link exit signal also ends it with `boom`.
     let (erts, erts_modes) = run_with_modes(&mut erts_nif_probe("link"), MONITOR, &[]);
     assert_eq!(erts, b"{ok,boom}\n");
-    let probe = || isolated("tty_nif_probe:link", &[TTY_NIF_PROBE, STAND_IN]);
-    let (pbeam, pbeam_modes) = run_with_modes(&mut probe(), MONITOR, &[]);
-    assert_eq!(
-        String::from_utf8(pbeam).unwrap(),
-        "Err(BeamError(\"unsupported exit signal Atom(\\\"boom\\\") to a process that does not trap exits\"))"
-    );
+    let mut probe = isolated("tty_nif_probe:link", &[TTY_NIF_PROBE, STAND_IN]);
+    let (pbeam, pbeam_modes) = run_with_modes(&mut probe, MONITOR, &[]);
+    assert_eq!(pbeam, br#"Ok(Tuple([Atom("ok"), Atom("boom")]))"#);
     assert_same_modes(&erts_modes, &pbeam_modes);
     let [Some(stdin), None, Some(stderr)] = pbeam_modes else {
         panic!("stdin and stderr are terminals");
