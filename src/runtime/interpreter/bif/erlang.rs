@@ -816,24 +816,129 @@ pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
 }
 
 /// Run `erlang:'++'/2`: append `right` to the proper list `left`, as ERTS
-/// `append` (`erl_bif_lists.c:262-338`) does. `right` can be any term, so
+/// `append` (`erl_bif_lists.c:266-338`) does. `right` can be any term, so
 /// `[1] ++ x` gives the improper list `[1|x]`, and an empty `left` gives
-/// `right` itself. A `left` that is not a proper list raises `badarg`.
+/// `right` itself with no cost. A `left` that is not a list raises
+/// `badarg`. A nonempty `left` goes to [`append_chunk`], which can trap.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let x = Term::static_atom("x");
-/// assert!(matches!(append(&Term::List(vec![]), &x), BifResult::Value(term) if term == x));
-/// let list = append(&Term::List(vec![Term::Integer(1)]), &x);
+/// assert!(matches!(append(&mut process, &Term::List(vec![]), &x), BifResult::Value(term) if term == x));
+/// let list = append(&mut process, &Term::List(vec![Term::Integer(1)]), &x);
 /// assert!(matches!(list, BifResult::Value(Term::ImproperList(elements, _)) if elements.len() == 1));
-/// assert!(matches!(append(&x, &Term::List(vec![])), BifResult::Raise { .. }));
+/// assert!(matches!(append(&mut process, &x, &Term::List(vec![])), BifResult::Raise { .. }));
 /// ```
-pub(super) fn append(left: &Term, right: &Term) -> BifResult {
+pub(super) fn append(process: &mut ProcessState, left: &Term, right: &Term) -> BifResult {
     match left {
-        Term::List(left) => Value(Term::list_with_tail(left.clone(), right.clone())),
+        Term::List(elements) if elements.is_empty() => Value(right.clone()),
+        Term::List(_) | Term::ImproperList(..) => append_chunk(process, left, right, 0),
         _ => BifResult::badarg(),
     }
+}
+
+/// Copy the next chunk of `left` after its first `done` elements, as ERTS
+/// `append_continue` does (`erl_bif_lists.c:237-251`). For a `right` of `[]`,
+/// `append_empty_rhs` only walks the list, 32 elements for each reduction
+/// (`erl_bif_lists.c:61-89`). Else `lists_append_onheap` copies 60 elements
+/// for each reduction (`erl_bif_lists.c:176-235`). Each chunk takes as many
+/// elements as the budget permits, and bumps the reductions for the
+/// elements that it took. When elements remain, the BIF traps to its export
+/// with the number of elements done (`erl_bif_lists.c:282-289`, `316-320`).
+/// At the end, an improper `left` raises `badarg`.
+///
+/// ERTS copies on the heap only while the heap has free words. When the
+/// heap is full, it continues in `lists_append_alloc` with 40 elements for
+/// each reduction (`erl_bif_lists.c:111-174`, `219-221`), and a garbage
+/// collection can follow. PBeam has no process heap and always uses the
+/// cost of the heap copy (see "Garbage collection reductions" in
+/// `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 1;
+/// let left = Term::List((0..61).map(Term::Integer).collect());
+/// let trap = append_chunk(&mut process, &left, &Term::List(vec![Term::Integer(61)]), 0);
+/// assert!(matches!(trap, BifResult::TrapBif { function: "++", .. }));
+/// assert_eq!(process.fcalls, 0);
+/// ```
+pub(super) fn append_chunk(
+    process: &mut ProcessState,
+    left: &Term,
+    right: &Term,
+    done: i64,
+) -> BifResult {
+    let (elements, tail) = list_cells(left).expect("'++' appends to a nonempty list");
+    let done = usize::try_from(done).expect("'++' counts the elements that it copied");
+    let per_reduction = match right {
+        Term::List(right) if right.is_empty() => 32,
+        _ => 60,
+    };
+    let budget = per_reduction * process.bif_reductions_left();
+    let rest = elements.len() - done;
+    let walked = rest.min(budget);
+    process.bump_reductions((walked / per_reduction) as i32);
+    if walked < rest {
+        return BifResult::TrapBif {
+            module: "erlang",
+            function: "++",
+            arguments: vec![
+                left.clone(),
+                right.clone(),
+                Term::Integer((done + walked) as i64),
+            ],
+        };
+    }
+    match tail {
+        Some(_) => BifResult::badarg(),
+        None => Value(Term::list_with_tail(elements.to_vec(), right.clone())),
+    }
+}
+
+/// Count the elements of `list` and add `count`, as ERTS
+/// `erts_trapping_length_1` does (`erl_bif_guard.c:270-313`) for
+/// `erlang:length/1` (`erl_bif_guard.c:210-247`) and for the `i_length`
+/// instruction of the guard BIF. A chunk takes at most 16 elements for each
+/// reduction of the budget. When the list ends in the chunk, the BIF bumps
+/// one reduction for each 16 elements and returns the count. Else it uses
+/// all reductions and traps to its export with the rest of the list and the
+/// count so far. A list that does not end in `[]` raises `badarg` with no
+/// cost.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// let list = Term::List((0..32).map(Term::Integer).collect());
+/// assert!(matches!(length(&mut process, &list, 0), BifResult::Value(Term::Integer(32))));
+/// assert_eq!(process.fcalls, 8);
+/// process.fcalls = 1;
+/// let trap = length(&mut process, &list, 0);
+/// assert!(matches!(trap, BifResult::TrapBif { function: "length", .. }));
+/// ```
+pub(super) fn length(process: &mut ProcessState, list: &Term, count: i64) -> BifResult {
+    let Some((elements, tail)) = list_cells(list) else {
+        return BifResult::badarg();
+    };
+    let max_iter = 16 * process.bif_reductions_left();
+    if elements.len() > max_iter {
+        process.bump_all_reductions();
+        return BifResult::TrapBif {
+            module: "erlang",
+            function: "length",
+            arguments: vec![
+                list_rest(&elements[max_iter..], tail),
+                Term::Integer(count + max_iter as i64),
+            ],
+        };
+    }
+    if tail.is_some() {
+        return BifResult::badarg();
+    }
+    process.bump_reductions((elements.len() / 16) as i32);
+    Value(Term::Integer(count + elements.len() as i64))
 }
 
 /// Run `erlang:tl/1`: return the tail of the first cons cell of a nonempty

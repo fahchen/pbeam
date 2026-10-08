@@ -127,6 +127,31 @@ pub(super) struct ProcessState {
     /// `CONTEXT_REDS`. A cost point subtracts from it, and the process
     /// switches out at the ERTS switch points. A `return` can make it -1.
     pub(super) fcalls: i32,
+    /// A BIF call that continues when the process runs again, as the ERTS
+    /// `BIF_TRAP` to the export of a BIF sets `c_p->i` to the export
+    /// (`jit/arm/instr_bif.cpp:525-536`, `676-701`). `BeamProgram::run` runs
+    /// it first.
+    pub(super) pending_bif: Option<PendingBif>,
+    /// The trap state of the guard BIF `length/1`: the arguments of its
+    /// trap export, the rest of the list and the count so far. ERTS
+    /// `i_length` keeps them in the X registers above the live registers
+    /// and runs the instruction again (`jit/arm/instr_bif.cpp:198-273`).
+    pub(super) length_trap: Option<Vec<Term>>,
+}
+
+/// A BIF call that continues after a switch: the export of a BIF and the
+/// arguments that the BIF trap gives it.
+#[derive(Debug)]
+pub(super) struct PendingBif {
+    /// Module of the BIF export, for example `lists`.
+    pub(super) module: &'static str,
+    /// Function of the BIF export, for example `member`.
+    pub(super) function: &'static str,
+    /// Arguments of the BIF export, in `x0` onwards.
+    pub(super) arguments: Vec<Term>,
+    /// True when the BIF call was a tail call through the export: its
+    /// value then returns from the frame with no reduction.
+    pub(super) tail: bool,
 }
 
 impl ProcessState {
@@ -164,6 +189,8 @@ impl ProcessState {
             dictionary: Vec::new(),
             registered_name: None,
             fcalls: 0,
+            pending_bif: None,
+            length_trap: None,
         }
     }
 
@@ -209,6 +236,50 @@ impl ProcessState {
     /// ```
     pub(super) fn vbump_reductions(&mut self, reductions: i32) {
         self.fcalls = (self.fcalls - reductions).max(0);
+    }
+
+    /// Use `reductions` of the budget of the current turn, as `BUMP_REDS`
+    /// (`bif.h:71-78`) does: the budget goes down, but not below 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.fcalls = 6;
+    /// process.bump_reductions(4);
+    /// assert_eq!(process.fcalls, 2);
+    /// process.bump_reductions(4);
+    /// assert_eq!(process.fcalls, 0);
+    /// ```
+    pub(super) fn bump_reductions(&mut self, reductions: i32) {
+        self.fcalls = (self.fcalls - reductions).max(0);
+    }
+
+    /// Use all reductions of the budget of the current turn, as
+    /// `BUMP_ALL_REDS` (`bif.h:80-83`) does before a BIF traps to its export.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.bump_all_reductions();
+    /// assert_eq!(process.fcalls, 0);
+    /// ```
+    pub(super) fn bump_all_reductions(&mut self) {
+        self.fcalls = 0;
+    }
+
+    /// Return the reductions that a BIF can use, as `ERTS_BIF_REDS_LEFT`
+    /// gives them in the JIT: the budget of the turn (`bif.h:66-67`,
+    /// `218-219`). A BIF runs with a budget of 0 or more: a `return` that
+    /// makes the budget -1 switches out the process first.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.fcalls = 6;
+    /// assert_eq!(process.bif_reductions_left(), 6);
+    /// ```
+    pub(super) fn bif_reductions_left(&self) -> usize {
+        usize::try_from(self.fcalls).expect("a BIF runs with a budget of 0 or more")
     }
 
     /// Mark the receive timer as expired, as `proc_timeout_common`
