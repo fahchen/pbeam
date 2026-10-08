@@ -296,6 +296,10 @@ impl BeamProgram {
     /// - `persistent_term:get_all_trap/2`, with the result and the number of
     ///   pairs that remain ([`persistent_term::get_all_trap`]). ERTS keeps
     ///   the table and the result so far (`erl_bif_persistent.c:263-265`).
+    /// - `persistent_term:put_common_trap/1`, with the slots of the table
+    ///   copy that remain ([`persistent_term::put_trap`]). ERTS traps to
+    ///   `persistent_term:put_common_trap/3` with a magic reference to the
+    ///   copy state (`erl_bif_persistent.c:176-177`, `650-651`).
     /// - `ets:insert/4`, with the table reference, the objects, the units
     ///   done, and the key position ([`ets::insert_list`]). ERTS traps to
     ///   `ets:insert/2` with a magic reference to the YCF state
@@ -361,6 +365,9 @@ impl BeamProgram {
             ("persistent_term", "get_all_trap", [all, Term::Integer(entries)]) => Ok(
                 persistent_term::get_all_trap(process, all.clone(), *entries as usize),
             ),
+            ("persistent_term", "put_common_trap", [Term::Integer(copied)]) => {
+                persistent_term::put_trap(process, *copied as usize)
+            }
             (
                 "erts_internal",
                 "iolist_size_continue",

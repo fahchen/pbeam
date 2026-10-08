@@ -10,6 +10,21 @@ const BIF_COST_PROBE: &[u8] = include_bytes!("../fixtures/preempt/bif_cost_probe
 /// with `[]`.
 const ERTS_OPTIONS: &str = "[{min_heap_size,4000000},{min_bin_vheap_size,40000000}]";
 
+/// `bif_cost_probe:puts/1` on the pinned ERTS with `erl +S 1`: the cost of
+/// `persistent_term:put/2` for the new keys of `put_keys/0` in an empty
+/// table, then for the same value and for a new value. A put that grows the
+/// table costs one reduction for each 32 slots of the old and the new table
+/// (`erl_bif_persistent.c:708-718`, `1034-1139`).
+const PUTS: &str =
+    "{[{1,0},{2,0},{4,0},{5,0},{8,0},{9,1},{10,0},{17,3},{33,6},{34,0},{65,12}],0,0}";
+
+/// `bif_cost_probe:put_trap/0` on the pinned ERTS with `erl +S 1`: the
+/// reductions of a put that grows a table of 16 slots with 1 reduction
+/// left. The put uses all reductions and traps, and the copy of the other
+/// 16 slots costs nothing in the next turn: 1 for `process_info/2`, 3997 for
+/// `bump_reductions/1`, 1 for the call of the put, and 1 for the trap.
+const PUT_TRAP: &str = "4000";
+
 /// `bif_cost_probe:costs/1` on the pinned ERTS with `erl +S 1`.
 ///
 /// - `maps:from_list/1` (`erl_map.c:321-1182`; `utils.c:3499-3819`): 40
@@ -102,6 +117,8 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
         )
     };
     let options = [Term::List(vec![])];
+    assert_eq!(run("puts", &options), PUTS);
+    assert_eq!(run("put_trap", &[]), PUT_TRAP);
     assert_eq!(run("costs", &options), COSTS);
     assert_eq!(run("sorts", &options), sorts_text());
     assert_eq!(run("longs", &options), LONGS);
@@ -110,7 +127,8 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     // The reference run checks that the pinned `erl` is the JIT flavor, and
     // that no measured process collects garbage: a collection costs
     // reductions on ERTS (`erl_gc.c:218-230`), and PBeam has no process
-    // heap.
+    // heap. It first erases the persistent terms of the boot, because a
+    // PBeam run starts with none.
     let tolerances: Vec<String> = SORTS
         .iter()
         .map(|(input, cost)| format!("{{{input},{}}}", cost / 10))
@@ -126,12 +144,14 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
             &format!(
                 "{{module, M}} = code:ensure_loaded(bif_cost_probe), \
                  jit = erlang:system_info(emu_flavor), O = {ERTS_OPTIONS}, \
-                 C = M:costs(O), L = M:longs(O), E = M:exits(), \
+                 true = erts_internal:erase_persistent_terms(), \
+                 P = M:puts(O), C = M:costs(O), L = M:longs(O), E = M:exits(), \
+                 true = erts_internal:erase_persistent_terms(), T = M:put_trap(), \
                  [true = abs(Cost - Expected) =< Tolerance \
                   || {{{{Input, Cost}}, {{Input, Expected}}, {{Input, Tolerance}}}} \
                   <- lists:zip3(M:sorts(O), {sorts}, [{tolerances}])], \
                  [0] = lists:usort([element(tuple_size(G), G) || G <- M:gcs(O)]), \
-                 io:format(\"~w~n~w~n~w~n\", [C, L, E]), halt().",
+                 io:format(\"~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, T]), halt().",
                 sorts = sorts_text(),
                 tolerances = tolerances.join(","),
             ),
@@ -144,7 +164,7 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     );
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
-        format!("{COSTS}\n{LONGS}\n{EXITS}\n")
+        format!("{PUTS}\n{COSTS}\n{LONGS}\n{EXITS}\n{PUT_TRAP}\n")
     );
 }
 
@@ -158,5 +178,20 @@ fn stops_maps_from_list_that_finds_a_bad_element_after_a_trap() {
     assert!(
         failure.contains("maps:from_list/1 finds a bad element after a trap"),
         "{failure}"
+    );
+}
+
+#[test]
+fn switches_out_at_each_persistent_term_put() {
+    let program = BeamProgram::load(&[BIF_COST_PROBE]).unwrap();
+    let runs = program.execute("bif_cost_probe", "put_race", &[]).unwrap();
+    // Each put of a new value switches out `a` (`ERTS_BIF_YIELD_RETURN`,
+    // `erl_bif_persistent.c:782-783`). ERTS also suspends `a` until thread
+    // progress, so `b` runs more turns, for example
+    // [{b,1334},{a,1},{b,1334},{a,1},{b,667},{a,1},{b,1665}] (row "Persistent terms" in
+    // docs/erts-differences.md).
+    assert_eq!(
+        text(&runs),
+        "[{b,667},{a,1},{b,667},{a,1},{b,667},{a,1},{b,2999}]"
     );
 }

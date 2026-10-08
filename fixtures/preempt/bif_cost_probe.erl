@@ -1,6 +1,7 @@
 -module(bif_cost_probe).
--export([costs/1, sorts/1, longs/1, exits/0, bad_long/0, gcs/1]).
--export([measure/3, exiter/2, watcher/3, traced/3, start/4, long_loop/5,
+-export([costs/1, sorts/1, longs/1, puts/1, put_trap/0, put_race/0, exits/0, bad_long/0,
+         gcs/1]).
+-export([measure/3, put_loop/2, exiter/2, watcher/3, traced/3, start/4, long_loop/5,
          send_loop/3]).
 
 %% The reductions of the BIFs whose ERTS cost depends on their input and
@@ -62,6 +63,7 @@ arg(maps_from_list, {bad, Count}) -> copies(Count, {1, 1}) ++ [x];
 arg(maps_from_list, {improper, Count}) -> copies(Count, {1, 1}) ++ x;
 arg(maps_from_list, atom) -> id(x);
 arg(maps_keys, {_, Count}) -> maps:from_list(pairs(1, Count));
+arg(persistent_term_put, Key) -> Key;
 arg(none, _) -> none.
 
 %% Call a BIF with its argument. The list keeps the result, so the
@@ -72,6 +74,7 @@ run(maps_from_list, List) ->
      catch error:Reason -> Reason
      end];
 run(maps_keys, Map) -> [maps:keys(Map)];
+run(persistent_term_put, Key) -> [persistent_term:put(Key, make_ref())];
 run(none, _) -> [].
 
 %% For each BIF and input, the reductions of the BIF: the reductions of
@@ -150,6 +153,60 @@ send_loop(P, T, N) ->
     P ! T,
     send_loop(P, T, N - 1).
 
+%% The reductions of a put that grows the table with 1 reduction left. The
+%% table of 16 slots holds 8 keys, so the copy goes through 48 slots, more
+%% than the 32 of the budget. The put uses all reductions and traps, and
+%% the copy ends in the next turn (erl_bif_persistent.c:275-293). The
+%% caller must erase the persistent terms first.
+put_trap() ->
+    [persistent_term:put({t, Key}, Key) || Key <- keys(1, 8)],
+    erlang:yield(),
+    Before = ?REDS,
+    erlang:bump_reductions(3996),
+    persistent_term:put({t, 9}, 9),
+    ?REDS - Before.
+
+%% The runs of a process a that puts a new value three times, and of b. On
+%% PBeam, a switches out at each put. ERTS suspends a until thread progress
+%% makes the new table visible, so b runs more turns (row "Persistent
+%% terms" in docs/erts-differences.md).
+put_race() ->
+    long_race(persistent_term_put, race, []).
+
+%% The reductions of persistent_term:put/2 for the keys {p, 1} to
+%% {p, Count} in an empty table, then for the same value again and for a
+%% new value. The table grows at 5, 9, 17, 33, and 65 keys, and the copy
+%% costs one reduction for each 32 slots of the old and the new table
+%% (erl_bif_persistent.c:46, 708-718, 1034-1139). The result keeps the
+%% costs of the keys in put_keys/0: on ERTS, the caller sometimes uses 2
+%% to 4 more reductions after it continues from the suspension of a put
+%% (row "Persistent terms" in docs/erts-differences.md).
+puts(Opts) ->
+    Pid = spawn_opt(?MODULE, put_loop, [self(), 70], Opts),
+    receive {Pid, Costs} -> Costs end.
+
+put_keys() -> [1, 2, 4, 5, 8, 9, 10, 17, 33, 34, 65].
+
+put_loop(Collector, Count) ->
+    New = [put_cost({p, Key}, Key) || Key <- keys(1, Count)],
+    Same = put_cost({p, 1}, 1),
+    Changed = put_cost({p, 1}, 2),
+    Kept = [{Key, nth(Key, New)} || Key <- put_keys()],
+    Collector ! {self(), {Kept, Same, Changed}}.
+
+nth(1, [Head | _]) -> Head;
+nth(N, [_ | Tail]) -> nth(N - 1, Tail).
+
+keys(First, Last) when First > Last -> [];
+keys(First, Last) -> [First | keys(First + 1, Last)].
+
+%% The cost of one put, without the call_ext of the light BIF and the
+%% process_info/2 after it.
+put_cost(Key, Value) ->
+    Before = ?REDS,
+    persistent_term:put(Key, Value),
+    ?REDS - Before - 2.
+
 %% For each budget K, a process a that exits after it uses all but
 %% 3996 - K reductions, and a process b that sends whether a has its name
 %% and then 1000 tags. The exit bumps 100 reductions (erl_process.c:14229).
@@ -197,6 +254,7 @@ gcs(Opts) ->
     [{Bif, Input, gc_count(measure, [Bif, Input], Opts)}
      || {Bif, Inputs} <- [{none, [none]}, {maps_from_list, sort_inputs()} | inputs()],
         Input <- Inputs]
+    ++ [{puts, gc_count(put_loop, [70], Opts)}]
     ++ [{Bif, gc_count(long_loop, [a, Bif, arg(Bif, Input), 3], Opts)}
         || {Bif, Input} <- long_inputs()].
 

@@ -67,27 +67,40 @@ impl PersistentTerms {
     /// `persistent_term_put_2` in `erl_bif_persistent.c`, which accepts any
     /// key and any value.
     ///
+    /// Return `None` when the key has exactly this value already, for which
+    /// ERTS changes nothing (`erl_bif_persistent.c:726-729`). Else return
+    /// the number of slots that the copy of a doubled table goes through:
+    /// the slots of the new table, then of the old table
+    /// (`copy_table`, `erl_bif_persistent.c:1082-1126`), or 0.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut terms = PersistentTerms::default();
-    /// terms.put(&Term::static_atom("key"), &Term::Integer(1));
-    /// terms.put(&Term::static_atom("key"), &Term::Integer(2));
+    /// assert_eq!(terms.put(&Term::static_atom("key"), &Term::Integer(1)), Some(0));
+    /// assert_eq!(terms.put(&Term::static_atom("key"), &Term::Integer(1)), None);
+    /// assert_eq!(terms.put(&Term::static_atom("key"), &Term::Integer(2)), Some(0));
     /// assert_eq!(terms.get(&Term::static_atom("key")), Some(&Term::Integer(2)));
     /// ```
-    pub(super) fn put(&mut self, key: &Term, value: &Term) {
+    pub(super) fn put(&mut self, key: &Term, value: &Term) -> Option<usize> {
         let mut slot = self.lookup(key);
         if let Some((_, existing)) = &mut self.buckets[slot] {
+            if existing == value {
+                return None;
+            }
             *existing = value.clone();
-            return;
+            return Some(0);
         }
+        let mut copied = 0;
         // MUST_GROW: 100 * num_entries >= LOAD_FACTOR * allocated.
         if 100 * self.num_entries >= LOAD_FACTOR * self.buckets.len() {
+            copied = 3 * self.buckets.len();
             self.grow();
             slot = self.lookup(key);
         }
         self.buckets[slot] = Some((key.clone(), value.clone()));
         self.num_entries += 1;
+        Some(copied)
     }
 
     /// Return all stored pairs as the elements `{Key, Value}` of a list, in
@@ -195,8 +208,13 @@ mod tests {
         assert_eq!(terms.get(&logger_config("other")), Some(&Term::Integer(2)));
         assert_eq!(terms.get(&Term::Integer(1)), Some(&Term::Integer(3)));
         assert_eq!(terms.get(&Term::Tuple(vec![atom("logger_config")])), None);
-        // An equal key replaces the value and adds no key.
-        terms.put(&logger_config("default"), &Term::List(vec![]));
+        // An equal key replaces the value and adds no key. The same value
+        // changes nothing.
+        assert_eq!(terms.put(&logger_config("other"), &Term::Integer(2)), None);
+        assert_eq!(
+            terms.put(&logger_config("default"), &Term::List(vec![])),
+            Some(0)
+        );
         assert_eq!(
             terms.get(&logger_config("default")),
             Some(&Term::List(vec![]))
@@ -230,8 +248,9 @@ mod tests {
 
         // The fifth key finds the table half full and doubles it. The old keys go
         // again in old slot order: 39, ok, 7, true. {ok} and true both hash to slot 7.
+        // The copy goes through the 16 new and the 8 old slots.
         let ok_tuple = Term::Tuple(vec![ok.clone()]);
-        terms.put(&ok_tuple, &Term::Integer(5));
+        assert_eq!(terms.put(&ok_tuple, &Term::Integer(5)), Some(24));
         assert_eq!(terms.buckets.len(), 16);
         assert_eq!(
             slots(&terms),

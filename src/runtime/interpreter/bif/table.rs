@@ -544,7 +544,7 @@ bifs! {
     persistent_term:get/1 => |cx, [key]| Ok(cx.scheduler.persistent_terms.get(key).map_or_else(BifResult::badarg, |value| Value(value.clone()))),
     persistent_term:get/2 => |cx, [key, default]| Ok(Value(cx.scheduler.persistent_terms.get(key).unwrap_or(default).clone())),
     persistent_term:info/0 => unsupported,
-    persistent_term:put/2 => |cx, [key, value]| { cx.scheduler.persistent_terms.put(key, value); Ok(Value(Term::static_atom("ok"))) },
+    persistent_term:put/2 => |cx, [key, value]| persistent_term::put(cx, key, value),
     persistent_term:put_new/2 => unsupported,
     prim_file:internal_name2native/1 => unsupported,
     prim_file:internal_native2name/1 => unsupported,

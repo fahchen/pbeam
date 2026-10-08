@@ -61,3 +61,82 @@ pub(super) fn get_all_trap(process: &mut ProcessState, all: Term, entries: usize
     process.bump_reductions(entries as i32);
     Value(all)
 }
+
+/// Run `persistent_term:put/2`: store `value` for `key`, as ERTS
+/// `put_common` does (`erl_bif_persistent.c:642-784`). A key that has
+/// exactly this value already returns `ok` with no cost. Else the copy of a
+/// doubled table goes through its slots ([`put_trap`]), and the BIF
+/// returns `ok` after the process switches out (`ERTS_BIF_YIELD_RETURN`).
+///
+/// ERTS suspends the caller until thread progress makes the new table
+/// visible (`suspend_updater`, `erl_bif_persistent.c:774-779`), so other
+/// processes can run more than one turn first. PBeam switches the process
+/// out, and the new value is visible at once (row "Persistent terms" in
+/// `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = put(&mut context, &Term::static_atom("key"), &Term::Integer(1))?;
+/// assert!(matches!(result, BifResult::YieldReturn(_)));
+/// let same = put(&mut context, &Term::static_atom("key"), &Term::Integer(1))?;
+/// assert!(matches!(same, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn put(
+    context: &mut BifContext<'_>,
+    key: &Term,
+    value: &Term,
+) -> Result<BifResult, BeamError> {
+    match context.scheduler.persistent_terms.put(key, value) {
+        None => Ok(Value(Term::static_atom("ok"))),
+        Some(copied) => put_trap(context.scheduler.current_process_mut(), copied),
+    }
+}
+
+/// Use the reductions of the table copy of `persistent_term:put/2`, of
+/// which `copied` slots remain, as `TRAPPING_COPY_TABLE` does
+/// (`erl_bif_persistent.c:275-293`, `1034-1139`). A call goes through at
+/// most 32 slots for each reduction of the budget, but at least 1. When the
+/// copy ends, the BIF bumps one reduction for each 32 slots of the call,
+/// and returns `ok` after the process switches out
+/// (`erl_bif_persistent.c:782-783`). Else it uses all reductions and traps
+/// to the export `persistent_term:put_common_trap/1`, which continues with
+/// no cost in the next turn. ERTS traps to `put_common_trap/3` with a magic
+/// reference to the copy state. PBeam puts the pair in the first call, so
+/// the trap keeps the number of slots that remain.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 2;
+/// assert!(matches!(put_trap(&mut process, 64)?, BifResult::YieldReturn(_)));
+/// assert_eq!(process.fcalls, 0);
+/// process.fcalls = 2;
+/// let trap = put_trap(&mut process, 65)?;
+/// assert!(matches!(trap, BifResult::TrapBif { function: "put_common_trap", arguments, .. } if arguments[0] == Term::Integer(1)));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn put_trap(process: &mut ProcessState, copied: usize) -> Result<BifResult, BeamError> {
+    /// `ITERATIONS_PER_RED` of `put_common` (`erl_bif_persistent.c:644`).
+    const ITERATIONS_PER_RED: usize = 32;
+    let budget = (ITERATIONS_PER_RED * process.bif_reductions_left()?).max(1);
+    if copied > budget {
+        process.bump_all_reductions();
+        return Ok(BifResult::TrapBif {
+            module: "persistent_term",
+            function: "put_common_trap",
+            arguments: vec![Term::Integer((copied - budget) as i64)],
+        });
+    }
+    process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
+    Ok(BifResult::YieldReturn(Term::static_atom("ok")))
+}
