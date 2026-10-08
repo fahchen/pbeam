@@ -9,7 +9,7 @@ use pbeam_runtime::{BeamProgram, Map, Term};
 mod boot;
 mod common;
 
-use boot::{BOOT_BEAM, BOOT_MODULES};
+use boot::{BOOT_MODULES, boot_beam};
 use common::{pinned_beam, pinned_beam_path};
 
 const BOOT_PROBE: &str = "fixtures/boot/boot_probe.beam";
@@ -52,7 +52,7 @@ fn boots_the_standard_io_servers_before_the_entry_of_the_pbeam_binary() {
             BOOT_PROBE,
         ])
         .args(&beams)
-        .arg(BOOT_BEAM);
+        .arg(boot_beam());
     for (name, command) in [("ERTS", &mut erts), ("PBeam", &mut pbeam)] {
         let output = command
             .env("TERM", "dumb")
@@ -197,7 +197,7 @@ fn boot_program(probe: &[u8]) -> BeamProgram {
         "run_isolated runs this test in a child process"
     );
     let beams = BOOT_MODULES.map(pinned_beam);
-    let boot = fs::read(BOOT_BEAM).unwrap();
+    let boot = fs::read(boot_beam()).unwrap();
     let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
     modules.extend([probe, boot.as_slice()]);
     BeamProgram::load(&modules).unwrap()
@@ -243,8 +243,8 @@ fn stops_the_boot_at_the_first_missing_otp_module() {
             "main",
             "--",
             BOOT_PROBE,
-            BOOT_BEAM,
         ])
+        .arg(boot_beam())
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -297,21 +297,4 @@ fn keeps_the_kernel_spec_of_the_pinned_start_clean_boot() {
         ),
         (&b"true\n"[..], &b""[..], Some(0))
     );
-}
-
-#[test]
-fn checks_in_the_deterministic_build_of_the_boot_module_source() {
-    let directory = env::temp_dir().join(format!("pbeam-boot-{}", std::process::id()));
-    fs::create_dir(&directory).unwrap();
-    let status = Command::new("erlc")
-        .args(["+deterministic", "-o"])
-        .arg(&directory)
-        .arg(BOOT_SOURCE)
-        .status()
-        .unwrap();
-    let compiled = fs::read(directory.join("pbeam_boot.beam")).unwrap();
-    fs::remove_dir_all(&directory).unwrap();
-
-    assert!(status.success());
-    assert_eq!(compiled, fs::read(BOOT_BEAM).unwrap());
 }
