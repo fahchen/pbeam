@@ -6,10 +6,10 @@ use super::{
 use crate::{
     beam::{
         BeamModule,
-        code::{self, Instruction, Operand, TestKind},
+        code::{self, BinaryMatchCommand, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::{Atom, AtomTable, Fun, Map, Target, Term, print_term},
+    term::{Atom, AtomTable, Fun, Map, MatchContext, Target, Term, print_term},
 };
 use std::collections::HashMap;
 
@@ -372,12 +372,12 @@ impl BeamProgram {
                     stack.drain(..*count as usize);
                 }
                 Instruction::Call { arity, label } => {
-                    call_arguments(&process.registers, *arity)?;
+                    check_local_call_arguments(&process.registers, *arity)?;
                     let frame = self.frame(&module.name, *label, *arity)?;
                     process.frames.push(frame);
                 }
                 Instruction::CallOnly { arity, label } => {
-                    call_arguments(&process.registers, *arity)?;
+                    check_local_call_arguments(&process.registers, *arity)?;
                     *current_frame(process) = self.frame(&module.name, *label, *arity)?;
                 }
                 Instruction::CallLast {
@@ -388,7 +388,7 @@ impl BeamProgram {
                     if *deallocate as usize != current_frame(process).stack.len() {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
-                    call_arguments(&process.registers, *arity)?;
+                    check_local_call_arguments(&process.registers, *arity)?;
                     *current_frame(process) = self.frame(&module.name, *label, *arity)?;
                 }
                 Instruction::TestArity {
@@ -769,23 +769,96 @@ impl BeamProgram {
                     }
                 }
                 // ERTS `i_bs_start_match3` jumps to `Fail` for each term
-                // that is not a bitstring, and makes or reuses a match
-                // context for a bitstring (emu bs_instrs.tab:1074-1110 and
-                // 1199-1238; JIT `emit_i_bs_start_match3` in
-                // jit/arm/instr_bs.cpp:134-189; `erts_bs_start_match_3` in
-                // erl_bits.c:81). A literal source loads as `jump Fail` (emu
-                // ops.tab:1266-1267; JIT jit/arm/ops.tab:1054-1055), which
-                // gives the same result. The compiler gives a real fail
-                // label (beam_ssa_codegen.erl:1666-1673), so the label is
-                // never 0. PBeam has no match context, so a binary stops the
-                // run.
-                Instruction::BinaryMatchStart { fail_label, source } => {
-                    if let Term::Binary(_) = read(process, source)? {
-                        return Err(error(
-                            "unsupported bs_start_match3 of a binary: needs a match context",
-                        ));
+                // that is not a bitstring. It reuses a match context, and
+                // makes one for another bitstring, and writes it to `Dst`
+                // (emu bs_instrs.tab:1074-1118 and 1199-1238; JIT
+                // `emit_i_bs_start_match3` in jit/arm/instr_bs.cpp:134-189;
+                // `erts_bs_start_match_3` in erl_bits.c:81-105). A literal
+                // source loads as `jump Fail` (emu ops.tab:1266-1267; JIT
+                // jit/arm/ops.tab:1054-1055), which gives the same result.
+                // The compiler gives a real fail label
+                // (beam_ssa_codegen.erl:1666-1673), so the label is never 0.
+                // ERTS writes a reused match context to the destination, so
+                // the two registers share one position. PBeam keeps the
+                // position in each register, so it reuses a match context
+                // only in its own register and else stops (row "Binary
+                // matching" of docs/erts-differences.md).
+                // `prim_tty:is_usascii/1` reuses the match context in `x0`
+                // with the destination `x0`.
+                Instruction::BinaryMatchStart {
+                    fail_label,
+                    source,
+                    destination,
+                } => match &read_any(process, source)? {
+                    Term::Binary(bytes) => {
+                        let context = Term::MatchContext(MatchContext::new(bytes));
+                        write(process, destination, context)?;
                     }
-                    jump(module, process, *fail_label)?;
+                    Term::MatchContext(_) => {
+                        if !matches!(
+                            (source, destination),
+                            (Operand::X(from), Operand::X(to)) | (Operand::Y(from), Operand::Y(to))
+                                if from == to
+                        ) {
+                            return Err(error(format!(
+                                "unsupported bs_start_match3 that copies the match context in {source:?} to {destination:?}"
+                            )));
+                        }
+                    }
+                    _ => jump(module, process, *fail_label)?,
+                },
+                // ERTS `i_bs_get_position` writes `sb->start` as a small
+                // integer (emu ops.tab:1274-1277, bs_instrs.tab:1125-1129).
+                Instruction::BinaryGetPosition {
+                    context,
+                    destination,
+                } => {
+                    let position = match_context(process, context)?.position();
+                    write(process, destination, Term::Integer(position as i64))?;
+                }
+                // ERTS `bs_set_position` sets `sb->start` to the unsigned
+                // value of the position (emu bs_instrs.tab:1120-1123). The
+                // compiler gives it a position that `bs_get_position` made.
+                Instruction::BinarySetPosition { context, position } => {
+                    let mut state = match_context(process, context)?;
+                    match read(process, position)? {
+                        Term::Integer(value) if let Ok(value) = usize::try_from(value) => {
+                            state.set_position(value);
+                        }
+                        other => {
+                            return Err(error(format!(
+                                "invariant error: bs_set_position position {other:?} is not a position"
+                            )));
+                        }
+                    }
+                    write(process, context, Term::MatchContext(state))?;
+                }
+                // ERTS `i_bs_get_utf8` reads a byte below 128 directly and
+                // else calls `erts_bs_get_utf8`, which fails for each
+                // invalid form (emu ops.tab:1286-1287, bs_instrs.tab:958-981;
+                // erl_bits.c:2128-2221). Both paths give the same result.
+                Instruction::BinaryGetUtf8 {
+                    fail_label,
+                    context,
+                    destination,
+                } => {
+                    let mut state = match_context(process, context)?;
+                    match state.get_utf8() {
+                        Some(code_point) => {
+                            write(process, context, Term::MatchContext(state))?;
+                            write(process, destination, Term::Integer(code_point.into()))?;
+                        }
+                        None => jump(module, process, *fail_label)?,
+                    }
+                }
+                Instruction::BinaryMatch {
+                    fail_label,
+                    context,
+                    commands,
+                } => {
+                    if !binary_match(&match_context(process, context)?, commands)? {
+                        jump(module, process, *fail_label)?;
+                    }
                 }
                 // ERTS `fconv` converts a small integer, a bignum, or a float
                 // to a float register, and raises `badarith` for each other
@@ -1125,6 +1198,7 @@ impl BeamProgram {
         }
         match self.export_frame(module, name, arity)? {
             Some(frame) => {
+                check_remote_call_arguments(&process.registers, arity)?;
                 enter_frame(process, frame, tail);
                 Ok(None)
             }
@@ -1833,7 +1907,9 @@ fn label_index(module: &BeamModule, label: u32) -> Result<usize, BeamError> {
         .ok_or_else(|| error(format!("missing BEAM label {label}")))
 }
 
-/// Read an operand from the process registers or the active frame.
+/// Read an operand from the process registers or the active frame. A
+/// match context is a runtime invariant error: only the binary-match
+/// instructions read it, with `read_any` or `match_context`.
 ///
 /// # Examples
 ///
@@ -1841,8 +1917,44 @@ fn label_index(module: &BeamModule, label: u32) -> Result<usize, BeamError> {
 /// assert_eq!(read(&process, &Operand::Value(Term::Integer(1)))?, Term::Integer(1));
 /// ```
 fn read(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
+    match read_any(process, operand)? {
+        Term::MatchContext(_) => Err(match_context_escape(operand)),
+        value => Ok(value),
+    }
+}
+
+/// Read an operand from the process registers or the active frame, also
+/// when it is a match context.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write(&mut process, &Operand::X(0), Term::MatchContext(MatchContext::new(b"a")))?;
+/// assert!(matches!(read_any(&process, &Operand::X(0))?, Term::MatchContext(_)));
+/// ```
+fn read_any(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
     let stack = process.frames.last().map_or(&[][..], |frame| &frame.stack);
     read_operand(operand, &process.registers, stack)
+}
+
+/// Read the match context of a binary-match instruction. Each other term
+/// is a runtime invariant error: the BEAM validator gives these
+/// instructions only a match context.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write(&mut process, &Operand::X(0), Term::MatchContext(MatchContext::new(b"a")))?;
+/// assert_eq!(match_context(&process, &Operand::X(0))?.position(), 0);
+/// assert!(match_context(&process, &Operand::Value(Term::Integer(1))).is_err());
+/// ```
+fn match_context(process: &ProcessState, operand: &Operand) -> Result<MatchContext, BeamError> {
+    match &read_any(process, operand)? {
+        Term::MatchContext(context) => Ok(context.clone()),
+        other => Err(error(format!(
+            "invariant error: {operand:?} holds {other:?}, not a match context"
+        ))),
+    }
 }
 
 /// Write a value to an X register or a Y register of the active frame.
@@ -1923,13 +2035,118 @@ fn function_at_label(module: &BeamModule, target: u32) -> Result<Function<'_>, B
 /// ```
 fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, BeamError> {
     (0..arity)
-        .map(|index| {
-            registers
-                .get(index as usize)
-                .and_then(Clone::clone)
-                .ok_or_else(|| error(format!("call argument x{index} is unset")))
-        })
+        .map(
+            |index| match registers.get(index as usize).and_then(Clone::clone) {
+                Some(Term::MatchContext(_)) => Err(match_context_escape(&Operand::X(index))),
+                Some(value) => Ok(value),
+                None => Err(error(format!("call argument x{index} is unset"))),
+            },
+        )
         .collect()
+}
+
+/// Check that the X registers of the arguments of a local call are set. A
+/// local call keeps each argument in its register. Thus a match context
+/// can go to the callee, as the `call_only` of `prim_tty:is_usascii/1`
+/// gives its match context in `x0` to the next `bs_start_match3`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let registers = vec![Some(Term::MatchContext(MatchContext::new(b"a")))];
+/// assert!(check_local_call_arguments(&registers, 1).is_ok());
+/// assert!(check_local_call_arguments(&registers, 2).is_err());
+/// ```
+fn check_local_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<(), BeamError> {
+    match (0..arity).find(|&index| !matches!(registers.get(index as usize), Some(Some(_)))) {
+        Some(index) => Err(error(format!("call argument x{index} is unset"))),
+        None => Ok(()),
+    }
+}
+
+/// Check that the X registers of the arguments of an external call to a
+/// loaded function are set and hold no match context. The BEAM validator
+/// gives an external call no match context (`verify_remote_args_1` and
+/// `get_term_type`, beam_validator.erl:1944-1951, 2903-2908).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let registers = vec![Some(Term::MatchContext(MatchContext::new(b"a")))];
+/// assert!(check_remote_call_arguments(&registers, 1).is_err());
+/// assert!(check_remote_call_arguments(&[Some(Term::Integer(1))], 1).is_ok());
+/// ```
+fn check_remote_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<(), BeamError> {
+    check_local_call_arguments(registers, arity)?;
+    match (0..arity).find(|&index| matches!(registers[index as usize], Some(Term::MatchContext(_))))
+    {
+        Some(index) => Err(match_context_escape(&Operand::X(index))),
+        None => Ok(()),
+    }
+}
+
+/// Return the runtime invariant error of a match context in `operand` at an
+/// instruction that is not a binary match or a local call. The BEAM
+/// validator also lets `move` and `swap` copy a match context
+/// (beam_validator.erl:403-407, 2690-2693), which PBeam does not implement
+/// yet (row "Binary matching" of docs/erts-differences.md).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(
+///     match_context_escape(&Operand::X(0)).to_string(),
+///     "invariant error: the match context in X(0) reached an instruction that is not a binary match"
+/// );
+/// ```
+fn match_context_escape(operand: &Operand) -> BeamError {
+    error(format!(
+        "invariant error: the match context in {operand:?} reached an instruction that is not a binary match"
+    ))
+}
+
+/// Run the commands of a `bs_match` instruction in order on a match
+/// context, as the instructions that the ERTS loader makes from them do
+/// (`gen.bs_match`, emu generators.tab:1102-1430). Return `false` at the
+/// first command that fails. `ensure_at_least` loads as `i_bs_ensure_bits`,
+/// `i_bs_ensure_bits_unit`, `i_bs_test_unit8`, or `i_bs_test_unit`
+/// (generators.tab:1164-1209; bs_instrs.tab:760-772, 1260-1293), which all
+/// test that `Size` bits remain and that the bits after them are a multiple
+/// of `Unit`. `ensure_exactly` loads as `bs_test_tail2` (generators.tab:
+/// 1210-1220; ops.tab:1220-1222; bs_instrs.tab:746-758), which tests that
+/// exactly `Size` bits remain. Each other command gives a runtime error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let context = MatchContext::new(b"a");
+/// let unit = NonZeroU64::new(8).unwrap();
+/// assert!(binary_match(&context, &[BinaryMatchCommand::EnsureAtLeast { size: 0, unit }])?);
+/// assert!(!binary_match(&context, &[BinaryMatchCommand::EnsureExactly { size: 0 }])?);
+/// ```
+fn binary_match(
+    context: &MatchContext,
+    commands: &[BinaryMatchCommand],
+) -> Result<bool, BeamError> {
+    let remaining = context.remaining_bits() as u64;
+    for command in commands {
+        let passed = match command {
+            BinaryMatchCommand::EnsureAtLeast { size, unit } => {
+                remaining >= *size && (remaining - size).is_multiple_of(unit.get())
+            }
+            BinaryMatchCommand::EnsureExactly { size } => remaining == *size,
+            BinaryMatchCommand::Unsupported(name) => {
+                return Err(error(format!(
+                    "unsupported bs_match command {}",
+                    name.name()
+                )));
+            }
+        };
+        if !passed {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Read a literal, an X register, or a Y register.
@@ -3465,6 +3682,84 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("not found")
+        );
+    }
+
+    /// PBeam lets a match context reach only the binary-match instructions
+    /// and local calls. It gives a runtime invariant error for each other
+    /// use, and for a binary-match instruction that gets another term.
+    #[test]
+    fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
+        let run = |rest: Vec<Instruction>| {
+            let mut body = vec![
+                Instruction::Move(Operand::Value(Term::Binary(b"a".to_vec())), Operand::X(0)),
+                Instruction::BinaryMatchStart {
+                    fail_label: 1,
+                    source: Operand::X(0),
+                    destination: Operand::X(0),
+                },
+            ];
+            body.extend(rest);
+            // `child/1` does not read its argument.
+            let mut program = make_program(body, 0);
+            let module = program.modules.get_mut("fixture").unwrap();
+            module.exports.insert(("child".into(), 1), 11);
+            module.instructions.extend([
+                Instruction::FunctionInfo {
+                    module: "fixture".into(),
+                    name: "child".into(),
+                    arity: 1,
+                },
+                Instruction::Label(11),
+                Instruction::Move(atom("ok"), Operand::X(0)),
+                Instruction::Return,
+            ]);
+            program
+                .execute("fixture", "main", &[])
+                .unwrap_err()
+                .to_string()
+        };
+        let escape = "invariant error: the match context in X(0) reached an instruction that \
+                      is not a binary match";
+        assert_eq!(
+            run(vec![Instruction::Move(Operand::X(0), Operand::X(1))]),
+            escape
+        );
+        assert_eq!(run(vec![erlang_call("hd", 1, false)]), escape);
+        // An external call to a loaded function also checks its arguments.
+        assert_eq!(
+            run(vec![Instruction::CallExternal {
+                arity: 1,
+                module: "fixture".into(),
+                name: "child".into(),
+                tail: false,
+                deallocate: 0,
+            }]),
+            escape
+        );
+        // A reuse in another register would share the position in ERTS.
+        assert_eq!(
+            run(vec![Instruction::BinaryMatchStart {
+                fail_label: 1,
+                source: Operand::X(0),
+                destination: Operand::X(1),
+            }]),
+            "unsupported bs_start_match3 that copies the match context in X(0) to X(1)"
+        );
+        assert_eq!(
+            run(vec![Instruction::BinarySetPosition {
+                context: Operand::X(0),
+                position: atom("a"),
+            }]),
+            "invariant error: bs_set_position position Atom(\"a\") is not a position"
+        );
+        assert_eq!(
+            run(vec![Instruction::BinaryGetUtf8 {
+                fail_label: 1,
+                context: atom("a"),
+                destination: Operand::X(1),
+            }]),
+            "invariant error: Value(Atom(\"a\")) holds Atom(\"a\"), not a match context"
         );
     }
 

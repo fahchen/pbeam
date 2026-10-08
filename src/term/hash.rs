@@ -25,6 +25,7 @@
 use super::{
     Fun, Map, ProcessId, Reference, Target, Term,
     map::{Child, Form, Node},
+    match_context::MATCH_CONTEXT_ESCAPE,
 };
 
 /// The width of the tag of an ERTS small integer or pid word
@@ -135,6 +136,7 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Binary(bytes) => Shape::Binary(bytes),
         Term::Reference(reference) => Shape::Reference(*reference),
         Term::Fun(fun) => Shape::Fun(fun),
+        Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
     }
 }
 
@@ -639,7 +641,15 @@ fn rest<'a>(mut cells: &'a [Term], mut tail: Option<&'a Term>) -> (&'a [Term], O
 #[cfg(test)]
 mod tests {
     use super::{internal_hash, mix64};
-    use crate::term::{Atom, Fun, Lambda, Map, ProcessId, Reference, Term};
+    use crate::term::{Atom, Fun, Lambda, Map, MatchContext, ProcessId, Reference, Term};
+
+    #[test]
+    #[should_panic(expected = "a match context reached a term operation")]
+    fn panics_for_a_match_context() {
+        // The interpreter gives a runtime error before a match context can
+        // reach a term operation.
+        internal_hash(&Term::MatchContext(MatchContext::new(b"a")));
+    }
 
     fn atom(name: &str) -> Term {
         Term::static_atom(name)

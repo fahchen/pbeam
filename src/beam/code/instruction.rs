@@ -8,6 +8,7 @@ use super::{
 };
 use crate::error::{BeamError, error};
 use crate::term::{Atom, Lambda, Term};
+use std::num::NonZeroU64;
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
 /// The first byte of an integer operand with 9 or more payload bytes: size
@@ -83,9 +84,12 @@ const OPCODE_GC_BIF2: u8 = 125;
 const OPCODE_BS_GET_TAIL: u8 = 165;
 /// `bs_start_match3 Fail Bin Live Dst` (genop.tab:597).
 const OPCODE_BS_START_MATCH3: u8 = 166;
+/// `bs_get_position Ctx Dst Live` (genop.tab:599-601).
 const OPCODE_BS_GET_POSITION: u8 = 167;
+/// `bs_set_position Ctx Pos` (genop.tab:603-605).
 const OPCODE_BS_SET_POSITION: u8 = 168;
 const OPCODE_BS_START_MATCH4: u8 = 170;
+/// `bs_get_utf8 Fail Ctx Live Flags Dst` (genop.tab:501).
 const OPCODE_BS_GET_UTF8: u8 = 138;
 const OPCODE_BS_SKIP_UTF8: u8 = 139;
 const OPCODE_BS_GET_UTF16: u8 = 140;
@@ -147,6 +151,7 @@ const OPCODE_HAS_MAP_FIELDS: u8 = 157;
 const OPCODE_GET_RECORD_ELEMENTS: u8 = 188;
 const OPCODE_PUT_RECORD: u8 = 189;
 const OPCODE_MAKE_FUN3: u8 = 171;
+/// `bs_match Fail Ctx {commands,Commands}` (genop.tab:685-696).
 const OPCODE_BS_MATCH: u8 = 182;
 const OPCODE_UPDATE_RECORD: u8 = 181;
 const OPCODE_RECV_MARKER_BIND: u8 = 173;
@@ -788,21 +793,87 @@ pub(crate) enum Instruction {
         arity: u32,
         tag: Term,
     },
-    /// Jumps to `fail_label` when `source` is not a binary
-    /// (`bs_start_match3`, opcode 166). For a binary, ERTS makes a match
-    /// context, which PBeam does not have, so the instruction returns a
-    /// runtime error.
+    /// Jumps to `fail_label` when `source` is not a binary or a match
+    /// context (`bs_start_match3`, opcode 166). Else writes a match context
+    /// to `destination`: a new one at the start of a binary, or the same
+    /// match context.
     ///
     /// Encoding: opcode, fail label, source, unsigned live count, destination
-    /// register. The decoder skips the live count and the destination,
-    /// because PBeam makes no match context. Example: `binary_match_probe:kind/1`
-    /// in `fixtures/binary_match/binary_match_probe.beam` has `[0xA6, 0x55,
-    /// 0x03, 0x10, 0x03]`, which fails to label 5 unless `x0` is a binary.
+    /// register. The decoder skips the live count, because PBeam has no
+    /// process heap to collect. Example: `binary_match_probe:kind/1` in
+    /// `fixtures/binary_match/binary_match_probe.beam` has `[0xA6, 0x55,
+    /// 0x03, 0x10, 0x03]`, which fails to label 5 unless `x0` is a binary,
+    /// and else writes the match context to `x0`.
     ///
     /// Erlang: `kind(<<_/utf8, _/binary>>) -> utf8;` compiles to
     /// `{test,bs_start_match3,{f,5},1,[{x,0}],{x,0}}`, as
     /// `unicode_util:cp/1` does for its argument.
-    BinaryMatchStart { fail_label: u32, source: Operand },
+    BinaryMatchStart {
+        fail_label: u32,
+        source: Operand,
+        destination: Operand,
+    },
+    /// Writes the bit position of the match context in `context` to
+    /// `destination` as an integer (`bs_get_position`, opcode 167).
+    ///
+    /// Encoding: opcode, context, destination register, unsigned live
+    /// count. The decoder skips the live count. Example:
+    /// `binary_match_probe:is_usascii/1` has `[0xA7, 0x03, 0x13, 0x10]`,
+    /// which writes the position of the match context in `x0` to `x1`.
+    ///
+    /// Erlang: a function with two clauses that match a binary, such as
+    /// `prim_tty:is_usascii/1`, compiles to `{bs_get_position,{x,0},{x,1},1}`
+    /// before the first clause.
+    BinaryGetPosition {
+        context: Operand,
+        destination: Operand,
+    },
+    /// Sets the bit position of the match context in `context` to the
+    /// integer in `position` (`bs_set_position`, opcode 168).
+    ///
+    /// Encoding: opcode, context, position. Example:
+    /// `binary_match_probe:is_usascii/1` has `[0xA8, 0x03, 0x13]`, which
+    /// sets the position of the match context in `x0` to the integer in
+    /// `x1`.
+    ///
+    /// Erlang: the second clause of `prim_tty:is_usascii/1` starts with
+    /// `{bs_set_position,{x,0},{x,1}}`.
+    BinarySetPosition { context: Operand, position: Operand },
+    /// Reads one UTF-8 character from the match context in `context` and
+    /// writes its code point to `destination`, or jumps to `fail_label`
+    /// (`bs_get_utf8`, opcode 138).
+    ///
+    /// Encoding: opcode, fail label, context, unsigned live count, unsigned
+    /// flags, destination register. The decoder skips the live count and
+    /// the flags, as the ERTS loader does (emu `ops.tab:1286`). Example:
+    /// `binary_match_probe:is_usascii/1` has `[0x8A, 0x0D, 0x10, 0x57,
+    /// 0x03, 0x10, 0x20, 0x00, 0x23]`, which reads a character from the
+    /// typed register `x0` to `x2` or fails to label 16.
+    ///
+    /// Erlang: `<<Char/utf8, T/binary>>` compiles to
+    /// `{test,bs_get_utf8,{f,16},[{tr,{x,0},...},2,{field_flags,[]},{x,2}]}`.
+    BinaryGetUtf8 {
+        fail_label: u32,
+        context: Operand,
+        destination: Operand,
+    },
+    /// Runs the commands of `bs_match` (opcode 182) in order on the match
+    /// context in `context`. A command that fails jumps to `fail_label`.
+    ///
+    /// Encoding: opcode, fail label, context, then an extended list with
+    /// each command name atom and its operands. Example:
+    /// `binary_match_probe:is_usascii/1` has `[0xB6, 0x0D, 0x10, 0x03,
+    /// 0x17, 0x30, 0x82, 0x00, 0x80]`: the list has 3 items, the atom 8
+    /// (`ensure_at_least`), and the unsigned integers 0 and 8.
+    ///
+    /// Erlang: `<<Char/utf8, T/binary>>` compiles to
+    /// `{bs_match,{f,16},{x,0},{commands,[{ensure_at_least,0,8}]}}` after
+    /// `bs_get_utf8`.
+    BinaryMatch {
+        fail_label: u32,
+        context: Operand,
+        commands: Vec<BinaryMatchCommand>,
+    },
     /// Converts `source` to a float in a float register (`fconv`, opcode
     /// 97). ERTS raises `error:badarith` for a term that is not a number.
     /// PBeam has no float register, so an integer source returns the runtime
@@ -994,6 +1065,24 @@ pub(crate) enum TestKind {
     Boolean,
 }
 
+/// One command of `bs_match` (genop.tab:685-696).
+#[derive(Debug, Clone)]
+pub(crate) enum BinaryMatchCommand {
+    /// `{ensure_at_least,Size,Unit}`: at least `size` bits remain, and the
+    /// bits after them are a multiple of `unit`. Example: `[0x82, 0x00,
+    /// 0x80]` is `{ensure_at_least,0,8}` when atom 8 is `ensure_at_least`.
+    EnsureAtLeast { size: u64, unit: NonZeroU64 },
+    /// `{ensure_exactly,Size}`: exactly `size` bits remain. Example:
+    /// `[0xF2, 0x00]` is `{ensure_exactly,0}` when atom 15 is
+    /// `ensure_exactly`.
+    EnsureExactly { size: u64 },
+    /// A command that PBeam does not run yet: `binary`, `integer`, `skip`,
+    /// `get_tail`, or `=:=`. It holds the command name. Example: `[0x0A,
+    /// 0x13, 0x10, 0x02, 0x80, 0x10, 0x13]` is `{integer,1,[],8,1,{x,1}}`
+    /// when atom 19 is `integer`.
+    Unsupported(Atom),
+}
+
 /// A source or destination in the supported `move` instruction.
 ///
 /// `Value` holds a supported immediate term. `X` uses compact register tag 3,
@@ -1178,9 +1267,42 @@ pub(super) fn parse_code(
             OPCODE_BS_START_MATCH3 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let source = read_move_operand(data, &mut cursor, atoms, literals)?;
-                skip_operands(data, &mut cursor, 2)?;
-                Instruction::BinaryMatchStart { fail_label, source }
+                skip_live_registers(data, &mut cursor)?;
+                Instruction::BinaryMatchStart {
+                    fail_label,
+                    source,
+                    destination: read_register(data, &mut cursor)?,
+                }
             }
+            OPCODE_BS_GET_POSITION => {
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let destination = read_register(data, &mut cursor)?;
+                skip_live_registers(data, &mut cursor)?;
+                Instruction::BinaryGetPosition {
+                    context,
+                    destination,
+                }
+            }
+            OPCODE_BS_SET_POSITION => Instruction::BinarySetPosition {
+                context: read_move_operand(data, &mut cursor, atoms, literals)?,
+                position: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_BS_GET_UTF8 => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                skip_live_registers(data, &mut cursor)?;
+                let _flags = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                Instruction::BinaryGetUtf8 {
+                    fail_label,
+                    context,
+                    destination: read_register(data, &mut cursor)?,
+                }
+            }
+            OPCODE_BS_MATCH => Instruction::BinaryMatch {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                context: read_move_operand(data, &mut cursor, atoms, literals)?,
+                commands: read_binary_match_commands(data, &mut cursor, atoms)?,
+            },
             OPCODE_TEST_EQ => Instruction::TestEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -1647,6 +1769,62 @@ fn read_operand_pairs(
     Ok(pairs)
 }
 
+/// Read the command list of `bs_match`: each command is a name atom and
+/// its operands (genop.tab:685-696). The command names and operand counts
+/// are those of the ERTS loader (`gen.bs_match` in emu
+/// `generators.tab:1102-1430`), which fails to load a module with another
+/// command name.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {list,[ensure_at_least,0,8]} with atom 8 `ensure_at_least`
+/// let commands = read_binary_match_commands(&[0x17, 0x30, 0x82, 0x00, 0x80], &mut 0, &atoms)?;
+/// assert!(matches!(commands.as_slice(), [BinaryMatchCommand::EnsureAtLeast { size: 0, .. }]));
+/// ```
+fn read_binary_match_commands(
+    data: &[u8],
+    cursor: &mut usize,
+    atoms: &[Atom],
+) -> Result<Vec<BinaryMatchCommand>, BeamError> {
+    let item_count = read_list_count(data, cursor)?;
+    let mut commands = Vec::new();
+    let mut items = 0;
+    while items < item_count {
+        let name = atom_at(atoms, read_operand(data, cursor, TAG_ATOM)? as usize)?;
+        let (command, operand_count) = match name.name() {
+            "ensure_at_least" => {
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let unit = NonZeroU64::new(read_operand(data, cursor, TAG_UNSIGNED)?)
+                    .ok_or_else(|| error("BEAM bs_match ensure_at_least has unit 0"))?;
+                (BinaryMatchCommand::EnsureAtLeast { size, unit }, 2)
+            }
+            "ensure_exactly" => {
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+                (BinaryMatchCommand::EnsureExactly { size }, 1)
+            }
+            other => {
+                let operand_count = match other {
+                    "binary" | "integer" => 5,
+                    "get_tail" | "=:=" => 3,
+                    "skip" => 1,
+                    _ => return Err(error(format!("unsupported BEAM bs_match command {other}"))),
+                };
+                skip_operands(data, cursor, operand_count)?;
+                (BinaryMatchCommand::Unsupported(name.clone()), operand_count)
+            }
+        };
+        commands.push(command);
+        items += 1 + operand_count;
+    }
+    if items != item_count {
+        return Err(error(
+            "BEAM bs_match command list has an incomplete command",
+        ));
+    }
+    Ok(commands)
+}
+
 /// Read the extended list of `update_record`: an unsigned 1-based position
 /// and a value operand for each update.
 ///
@@ -1698,7 +1876,6 @@ fn skip_unsupported_instruction(
             | OPCODE_PUT_TUPLE2
             | OPCODE_INIT_YREGS
             | OPCODE_BS_CREATE_BIN
-            | OPCODE_BS_MATCH
     ) {
         skip_counted_operands(data, cursor)?;
     }
@@ -1725,11 +1902,10 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         // `is_any_native_record` is in `io_lib`.
         OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
         OPCODE_BS_START_MATCH4 => Some(4),
-        OPCODE_BS_GET_TAIL | OPCODE_BS_GET_POSITION => Some(3),
+        OPCODE_BS_GET_TAIL => Some(3),
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
-        OPCODE_BS_GET_UTF8 | OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
+        OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
         OPCODE_BS_SKIP_UTF8 => Some(4),
-        OPCODE_BS_SET_POSITION => Some(2),
         OPCODE_BADRECORD => Some(1),
         OPCODE_IF_END => Some(0),
         // `raw_raise` is in `gen_statem:call/3`.
@@ -1756,7 +1932,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_INIT_YREGS => Some(1),
         OPCODE_BS_CREATE_BIN => Some(6),
         OPCODE_BS_INIT_WRITABLE => Some(0),
-        OPCODE_BS_MATCH => Some(3),
         // The float-register instructions are in `string` and `erl_scan`.
         // PBeam has no float term, so each one stops the run. `fconv`
         // decodes as `Instruction::FloatConvert`.
@@ -2041,20 +2216,20 @@ mod tests {
     use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
     use super::{
         OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_CREATE_BIN, OPCODE_BS_GET_INTEGER2,
-        OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_MATCH,
-        OPCODE_BS_START_MATCH4, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
-        OPCODE_FSUB, OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL,
-        OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD,
-        OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
-        OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
-        OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
-        OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
-        read_move_operand, read_operand_pairs, read_pair_count, read_record_updates,
-        skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
-        test_kind, unsupported_opcode_operand_count,
+        OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32, OPCODE_BS_INIT_WRITABLE, OPCODE_BS_START_MATCH4,
+        OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FSUB,
+        OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
+        OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
+        OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP,
+        OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
+        OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE,
+        OPCODE_TRY_CASE_END, parse_code, read_binary_match_commands, read_move_operand,
+        read_operand_pairs, read_pair_count, read_record_updates, skip_counted_operands,
+        skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
+        unsupported_opcode_operand_count,
     };
     use crate::{
-        beam::code::{Instruction, Operand, TestKind},
+        beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind},
         term::{Atom, AtomTable, Lambda, Term},
     };
 
@@ -2580,10 +2755,156 @@ mod tests {
                 Instruction::BinaryMatchStart {
                     fail_label: 5,
                     source: Operand::X(0),
+                    destination: Operand::X(0),
                 },
                 Instruction::End,
             ]
         ));
+    }
+
+    #[test]
+    fn decodes_the_binary_match_instructions_of_is_usascii() {
+        const BINARY_MATCH_PROBE: &[u8] =
+            include_bytes!("../../../fixtures/binary_match/binary_match_probe.beam");
+        // is_usascii/1 has the instructions of prim_tty:is_usascii/1.
+        let parts: [&[u8]; 6] = [
+            // bs_start_match3 f17 x0 1 x0
+            &[0xA6, 0x0D, 0x11, 0x03, 0x10, 0x03],
+            // bs_get_position x0 x1 1
+            &[0xA7, 0x03, 0x13, 0x10],
+            // bs_get_utf8 f16 {tr,x0,1} 2 0 x2
+            &[0x8A, 0x0D, 0x10, 0x57, 0x03, 0x10, 0x20, 0x00, 0x23],
+            // bs_match f16 x0 {list,[ensure_at_least,0,8]}
+            &[0xB6, 0x0D, 0x10, 0x03, 0x17, 0x30, 0x82, 0x00, 0x80],
+            // bs_set_position x0 x1
+            &[0xA8, 0x03, 0x13],
+            // bs_match f17 x0 {list,[ensure_exactly,0]}
+            &[0xB6, 0x0D, 0x11, 0x03, 0x17, 0x20, 0xF2, 0x00],
+        ];
+        for part in parts {
+            assert!(
+                BINARY_MATCH_PROBE
+                    .windows(part.len())
+                    .any(|window| window == part),
+                "{part:02X?} is not in binary_match_probe.beam"
+            );
+        }
+        // Atom 8 is `ensure_at_least` and atom 15 is `ensure_exactly`.
+        let mut table = AtomTable::new();
+        let atoms: Vec<Atom> = (1..=15)
+            .map(|index| match index {
+                8 => table.put("ensure_at_least").unwrap(),
+                15 => table.put("ensure_exactly").unwrap(),
+                _ => table.put(&format!("atom{index}")).unwrap(),
+            })
+            .collect();
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend(parts.concat());
+        code.push(0x03);
+        let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[]).unwrap();
+        assert!(
+            matches!(
+                instructions.as_slice(),
+                [
+                    Instruction::BinaryMatchStart {
+                        fail_label: 17,
+                        source: Operand::X(0),
+                        destination: Operand::X(0),
+                    },
+                    Instruction::BinaryGetPosition {
+                        context: Operand::X(0),
+                        destination: Operand::X(1),
+                    },
+                    Instruction::BinaryGetUtf8 {
+                        fail_label: 16,
+                        context: Operand::X(0),
+                        destination: Operand::X(2),
+                    },
+                    Instruction::BinaryMatch {
+                        fail_label: 16,
+                        context: Operand::X(0),
+                        commands: at_least,
+                    },
+                    Instruction::BinarySetPosition {
+                        context: Operand::X(0),
+                        position: Operand::X(1),
+                    },
+                    Instruction::BinaryMatch {
+                        fail_label: 17,
+                        context: Operand::X(0),
+                        commands: exactly,
+                    },
+                    Instruction::End,
+                ] if matches!(
+                    at_least.as_slice(),
+                    [BinaryMatchCommand::EnsureAtLeast { size: 0, unit }] if unit.get() == 8
+                ) && matches!(
+                    exactly.as_slice(),
+                    [BinaryMatchCommand::EnsureExactly { size: 0 }]
+                )
+            ),
+            "{instructions:?}"
+        );
+    }
+
+    #[test]
+    fn reads_each_bs_match_command_and_rejects_bad_command_lists() {
+        let mut table = AtomTable::new();
+        let names = [
+            "ensure_at_least",
+            "ensure_exactly",
+            "binary",
+            "integer",
+            "get_tail",
+            "=:=",
+            "skip",
+            "other",
+        ];
+        let atoms: Vec<Atom> = names.iter().map(|name| table.put(name).unwrap()).collect();
+        // {list,[binary,1,[],8,1,{x,1}, integer,1,[],8,1,{x,1},
+        // get_tail,1,8,{x,1}, '=:=',1,8,0, skip,8]}: 22 items.
+        let list = [
+            0x17, 0x08, 0x16, 0x32, 0x10, 0x02, 0x80, 0x10, 0x13, 0x42, 0x10, 0x02, 0x80, 0x10,
+            0x13, 0x52, 0x10, 0x80, 0x13, 0x62, 0x10, 0x80, 0x00, 0x72, 0x80,
+        ];
+        let mut cursor = 0;
+        let commands = read_binary_match_commands(&list, &mut cursor, &atoms).unwrap();
+        assert_eq!(cursor, list.len());
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [
+                    BinaryMatchCommand::Unsupported(binary),
+                    BinaryMatchCommand::Unsupported(integer),
+                    BinaryMatchCommand::Unsupported(get_tail),
+                    BinaryMatchCommand::Unsupported(equal),
+                    BinaryMatchCommand::Unsupported(skip),
+                ] if [binary, integer, get_tail, equal, skip].map(Atom::name)
+                    == ["binary", "integer", "get_tail", "=:=", "skip"]
+            ),
+            "{commands:?}"
+        );
+        let failure = |list: &[u8]| {
+            read_binary_match_commands(list, &mut 0, &atoms)
+                .unwrap_err()
+                .to_string()
+        };
+        // {ensure_at_least,0,0}
+        assert_eq!(
+            failure(&[0x17, 0x30, 0x12, 0x00, 0x00]),
+            "BEAM bs_match ensure_at_least has unit 0"
+        );
+        // {other,0}: the ERTS loader also refuses it (`bad_bs_match`).
+        assert_eq!(
+            failure(&[0x17, 0x20, 0x82, 0x00]),
+            "unsupported BEAM bs_match command other"
+        );
+        // A list of 2 items with `{ensure_at_least,0,8}`.
+        assert_eq!(
+            failure(&[0x17, 0x20, 0x12, 0x00, 0x80]),
+            "BEAM bs_match command list has an incomplete command"
+        );
     }
 
     #[test]
@@ -3262,7 +3583,6 @@ mod tests {
             (OPCODE_INIT_YREGS, 1),
             (OPCODE_BS_CREATE_BIN, 6),
             (OPCODE_BS_INIT_WRITABLE, 0),
-            (OPCODE_BS_MATCH, 3),
             (OPCODE_BS_START_MATCH4, 4),
             (OPCODE_RAW_RAISE, 0),
             (OPCODE_BS_GET_UTF16, 5),
