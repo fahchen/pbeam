@@ -568,6 +568,6 @@ bifs! {
     records:update/4 => unsupported,
     string:list_to_float/1 => unsupported,
     unicode:bin_is_7bit/1 => unsupported,
-    unicode:characters_to_binary/2 => |_, [chardata, encoding]| unicode::characters_to_binary(chardata, encoding),
-    unicode:characters_to_list/2 => |_, [chardata, encoding]| Ok(unicode::characters_to_list(chardata, encoding)),
+    unicode:characters_to_binary/2 => |cx, [chardata, encoding]| unicode::characters_to_binary(cx.scheduler.current_process_mut(), chardata, encoding),
+    unicode:characters_to_list/2 => |cx, [chardata, encoding]| unicode::characters_to_list(cx.scheduler.current_process_mut(), chardata, encoding),
 }

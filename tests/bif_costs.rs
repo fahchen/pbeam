@@ -38,13 +38,41 @@ const COSTS: &str = "[{maps_from_list,[{nil,0},{{flat,32},0},{{dups,33},8},{{dup
                      {{dups,400},99},{{dups,40000},9999},{{bad,400},0},{{improper,400},0},\
                      {atom,0}]},\
                      {maps_keys,[{{flat,32},0},{{hash,33},2},{{hash,100},6},\
-                     {{hash,10000},666},{{hash,100000},6666}]}]";
+                     {{hash,10000},666},{{hash,100000},6666}]},\
+                     {characters_to_binary,[{{list,3},0},{{list,10},1},{{list,49},4},\
+                     {{list,50},6},{{list,100},12},{{list,10000},1200},{{list,50000},7000},\
+                     {{bin,3},0},{{bin,10000},0},{{one_bin,10000},0},{{bins,100},1002},\
+                     {nested,0},{{list_bin,50000},7010},{{split,39990},5598},\
+                     {{split_bin,39990},3999},{leftover_trap,3997}]},\
+                     {characters_to_list,[{{list,3},0},{{list,10},2},{{list,100},22},\
+                     {{list,10000},2200},{{list,50000},12000},{{bin,3},0},{{bin,10000},2000},\
+                     {{bin,39999},7999},{{bin,40000},8000},{{bin,50000},10000},\
+                     {{bin,100000},20000},{{one_bin,10000},2000},{{bins,100},2002},{nested,0},\
+                     {{list_bin,50000},12020},{bad_code,0},{bad_bin,0},{short_bin,0},\
+                     {short_list,0},{{bad_after,50000},12000},{leftover_trap,6852}]},\
+                     {characters_to_list_latin1,[{{list,3},0},{{list,100},22},\
+                     {{list,10000},2200},{{bin,3},0},{{bin,10000},2200},{{high_bin,10000},2400},\
+                     {{list,50000},12000},{{bin,50000},12000}]}]";
 
 /// `bif_cost_probe:longs/1` on the pinned ERTS with `erl +S 1`: the runs of
 /// `a`, which calls a BIF that traps three times, and of `b`, which sends
 /// 667 tags in each turn. `a` switches out at each trap.
 const LONGS: &str = "[{maps_from_list,[{b,1334},{a,1},{b,2001},{a,1},{b,1334},{a,1},{b,331}]},\
-                     {maps_keys,[{b,667},{a,1},{b,1334},{a,1},{b,1334},{a,1},{b,1665}]}]";
+                     {maps_keys,[{b,667},{a,1},{b,1334},{a,1},{b,1334},{a,1},{b,1665}]},\
+                     {characters_to_binary,[{b,667},{a,1},{b,1334},{a,1},{b,1334},{a,1},\
+                     {b,1665}]},\
+                     {characters_to_list,[{b,3335},{a,1},{b,1665},{a,2}]},\
+                     {characters_to_list,[{b,2001},{a,1},{b,2001},{a,1},{b,998},{a,1}]}]";
+
+/// `bif_cost_probe:results/0` on the pinned ERTS: the results of
+/// `unicode:characters_to_list/2` with `unicode` and `latin1` for nested
+/// chardata and for chardata that gives an error or an incomplete result.
+const RESULTS: &str = "[[97,98,99,100,101,102,103],[97,98,99,100,101,102,103],\
+                       {error,[97,98],[[-1],99]},{error,[97,98],[[-1],99]},\
+                       {error,[97],[<<255,98>>,99]},[97,255,98,99],\
+                       {incomplete,[97],<<226,130>>},[97,226,130],\
+                       {incomplete,[97],<<226,130>>},[97,226,130],\
+                       {error,[97,97,97],[-1]},{error,[97,97,97],[-1]}]";
 
 /// `bif_cost_probe:sorts/1` on PBeam: the cost of `maps:from_list/1` for the
 /// keys 1..N. ERTS picks the pivots of its sort from addresses, so its cost
@@ -102,6 +130,10 @@ fn text(term: &Term) -> String {
         Term::Integer(value) => value.to_string(),
         Term::List(terms) => format!("[{}]", join(terms)),
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
+        Term::Binary(bytes) => {
+            let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
+            format!("<<{}>>", bytes.join(","))
+        }
         other => panic!("unexpected term {other:?}"),
     }
 }
@@ -123,6 +155,7 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     assert_eq!(run("sorts", &options), sorts_text());
     assert_eq!(run("longs", &options), LONGS);
     assert_eq!(run("exits", &[]), EXITS);
+    assert_eq!(run("results", &[]), RESULTS);
 
     // The reference run checks that the pinned `erl` is the JIT flavor, and
     // that no measured process collects garbage: a collection costs
@@ -146,12 +179,13 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
                  jit = erlang:system_info(emu_flavor), O = {ERTS_OPTIONS}, \
                  true = erts_internal:erase_persistent_terms(), \
                  P = M:puts(O), C = M:costs(O), L = M:longs(O), E = M:exits(), \
-                 true = erts_internal:erase_persistent_terms(), T = M:put_trap(), \
+                 R = M:results(), true = erts_internal:erase_persistent_terms(), \
+                 T = M:put_trap(), \
                  [true = abs(Cost - Expected) =< Tolerance \
                   || {{{{Input, Cost}}, {{Input, Expected}}, {{Input, Tolerance}}}} \
                   <- lists:zip3(M:sorts(O), {sorts}, [{tolerances}])], \
                  [0] = lists:usort([element(tuple_size(G), G) || G <- M:gcs(O)]), \
-                 io:format(\"~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, T]), halt().",
+                 io:format(\"~w~n~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, R, T]), halt().",
                 sorts = sorts_text(),
                 tolerances = tolerances.join(","),
             ),
@@ -164,7 +198,7 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     );
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
-        format!("{PUTS}\n{COSTS}\n{LONGS}\n{EXITS}\n{PUT_TRAP}\n")
+        format!("{PUTS}\n{COSTS}\n{LONGS}\n{EXITS}\n{RESULTS}\n{PUT_TRAP}\n")
     );
 }
 
@@ -193,5 +227,19 @@ fn switches_out_at_each_persistent_term_put() {
     assert_eq!(
         text(&runs),
         "[{b,667},{a,1},{b,667},{a,1},{b,667},{a,1},{b,2999}]"
+    );
+}
+
+#[test]
+fn stops_characters_to_binary_with_an_error_result() {
+    let program = BeamProgram::load(&[BIF_COST_PROBE]).unwrap();
+    let failure = program
+        .execute("bif_cost_probe", "bad_binary", &[])
+        .unwrap_err()
+        .to_string();
+    // ERTS returns {error, <<>>, <<255>>} (row "Chardata conversion").
+    assert!(
+        failure.contains("unsupported unicode:characters_to_binary/2 result"),
+        "{failure}"
     );
 }

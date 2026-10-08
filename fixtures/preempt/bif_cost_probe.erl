@@ -1,6 +1,6 @@
 -module(bif_cost_probe).
 -export([costs/1, sorts/1, longs/1, puts/1, put_trap/0, put_race/0, exits/0, bad_long/0,
-         gcs/1]).
+         bad_binary/0, results/0, gcs/1]).
 -export([measure/3, put_loop/2, exiter/2, watcher/3, traced/3, start/4, long_loop/5,
          send_loop/3]).
 
@@ -26,7 +26,21 @@ inputs() ->
       [nil, {flat, 32}, {dups, 33}, {dups, 80}, {dups, 400}, {dups, 40000}, {bad, 400},
        {improper, 400}, atom]},
      %% A map of the keys 1..N. {hash, 100000} traps.
-     {maps_keys, [{flat, 32}, {hash, 33}, {hash, 100}, {hash, 10000}, {hash, 100000}]}].
+     {maps_keys, [{flat, 32}, {hash, 33}, {hash, 100}, {hash, 10000}, {hash, 100000}]},
+     %% Chardata: see chardata/1. Lists of 50000 characters, binaries of
+     %% 50000 bytes, and a long binary after a list trap.
+     {characters_to_binary,
+      [{list, 3}, {list, 10}, {list, 49}, {list, 50}, {list, 100}, {list, 10000},
+       {list, 50000}, {bin, 3}, {bin, 10000}, {one_bin, 10000}, {bins, 100}, nested,
+       {list_bin, 50000}, {split, 39990}, {split_bin, 39990}, leftover_trap]},
+     {characters_to_list,
+      [{list, 3}, {list, 10}, {list, 100}, {list, 10000}, {list, 50000}, {bin, 3},
+       {bin, 10000}, {bin, 39999}, {bin, 40000}, {bin, 50000}, {bin, 100000},
+       {one_bin, 10000}, {bins, 100}, nested, {list_bin, 50000}, bad_code, bad_bin,
+       short_bin, short_list, {bad_after, 50000}, leftover_trap]},
+     {characters_to_list_latin1,
+      [{list, 3}, {list, 100}, {list, 10000}, {bin, 3}, {bin, 10000}, {high_bin, 10000},
+       {list, 50000}, {bin, 50000}]}].
 
 %% The inputs of maps:from_list/1 whose ERTS cost changes between runs:
 %% the pivots of the sort come from addresses (utils.c:3522-3526).
@@ -63,6 +77,9 @@ arg(maps_from_list, {bad, Count}) -> copies(Count, {1, 1}) ++ [x];
 arg(maps_from_list, {improper, Count}) -> copies(Count, {1, 1}) ++ x;
 arg(maps_from_list, atom) -> id(x);
 arg(maps_keys, {_, Count}) -> maps:from_list(pairs(1, Count));
+arg(characters_to_binary, Input) -> chardata(Input);
+arg(characters_to_list, Input) -> chardata(Input);
+arg(characters_to_list_latin1, Input) -> chardata(Input);
 arg(persistent_term_put, Key) -> Key;
 arg(none, _) -> none.
 
@@ -74,8 +91,51 @@ run(maps_from_list, List) ->
      catch error:Reason -> Reason
      end];
 run(maps_keys, Map) -> [maps:keys(Map)];
+run(characters_to_binary, Chardata) -> [unicode:characters_to_binary(Chardata, unicode)];
+run(characters_to_list, Chardata) -> [unicode:characters_to_list(Chardata, unicode)];
+run(characters_to_list_latin1, Chardata) -> [unicode:characters_to_list(Chardata, latin1)];
 run(persistent_term_put, Key) -> [persistent_term:put(Key, make_ref())];
 run(none, _) -> [].
+
+%% The chardata of the unicode BIFs. {list, N} has N times $a, {bin, N}
+%% is a binary of N bytes, {one_bin, N} a list of one such binary, and
+%% {bins, N} a list of N binaries of 100 bytes. {list_bin, N} has N
+%% characters and then a binary of 100 bytes. {split, N} has N characters
+%% and a binary of a two-byte character, and {split_bin, N} a binary of N
+%% bytes and then that binary. bad_code, bad_bin, short_bin, and short_list
+%% give an error or incomplete result, and {bad_after, N} has an invalid
+%% code point after N characters.
+chardata({list, Count}) -> copies(Count, $a);
+chardata({bin, Count}) -> bytes(Count, $a);
+chardata({high_bin, Count}) -> bytes(Count, 233);
+chardata({one_bin, Count}) -> [bytes(Count, $a)];
+chardata({bins, Count}) -> copies(Count, bytes(100, $b));
+chardata(nested) -> [[$a, [$b, <<"cd">>], []], [[[$e]]], <<"f">> | <<"g">>];
+chardata({list_bin, Count}) -> [copies(Count, $a), bytes(100, $b)];
+chardata({split, Count}) -> [copies(Count, $a), <<"é"/utf8>>];
+chardata({split_bin, Count}) -> [bytes(Count, $a), <<"é"/utf8>>];
+chardata(bad_code) -> [$a, [$b, -1], $c];
+chardata(bad_bin) -> [<<97, 255, 98>>, $c];
+chardata(short_bin) -> <<97, 226, 130>>;
+chardata(short_list) -> [$a, <<226>>, [<<130>>]];
+chardata({bad_after, Count}) -> copies(Count, $a) ++ [-1];
+%% The steps end after <<226>>, which starts a sequence that the next
+%% binary completes: the conversion traps with the bytes of the sequence
+%% before the rest.
+chardata(leftover_trap) -> [copies(28547, $a), <<"bb">>, <<226>>, <<130, 172>>].
+
+%% A binary of Count copies of Byte. erlang:iolist_to_iovec/1 puts the
+%% bytes of a list into one binary.
+bytes(Count, Byte) ->
+    [Binary] = erlang:iolist_to_iovec(copies(Count, Byte)),
+    Binary.
+
+%% The results of unicode:characters_to_list/2 for the chardata that
+%% gives an error or an incomplete result, and for the nested chardata.
+results() ->
+    [unicode:characters_to_list(chardata(Input), Encoding)
+     || Input <- [nested, bad_code, bad_bin, short_bin, short_list, {bad_after, 3}],
+        Encoding <- [unicode, latin1]].
 
 %% For each BIF and input, the reductions of the BIF: the reductions of
 %% run/2 in a new process, without the reductions of run(none, _) and of
@@ -114,7 +174,9 @@ bad_long() ->
 
 %% The inputs of the BIFs that trap, for longs/1.
 long_inputs() ->
-    [{maps_from_list, {dups, 40000}}, {maps_keys, {hash, 100000}}].
+    [{maps_from_list, {dups, 40000}}, {maps_keys, {hash, 100000}},
+     {characters_to_binary, {list, 50000}}, {characters_to_list, {bin, 100000}},
+     {characters_to_list, {list, 50000}}].
 
 %% For each BIF that traps, two processes a and b. Process a calls the BIF
 %% three times and sends its tag after each call. Process b sends its tag
@@ -165,6 +227,12 @@ put_trap() ->
     erlang:bump_reductions(3996),
     persistent_term:put({t, 9}, 9),
     ?REDS - Before.
+
+%% unicode:characters_to_binary/2 of invalid UTF-8. ERTS returns
+%% {error, <<>>, <<255>>}, and PBeam returns a runtime error (row
+%% "Chardata conversion" in docs/erts-differences.md).
+bad_binary() ->
+    unicode:characters_to_binary([<<255>>], unicode).
 
 %% The runs of a process a that puts a new value three times, and of b. On
 %% PBeam, a switches out at each put. ERTS suspends a until thread progress
