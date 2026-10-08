@@ -1187,6 +1187,7 @@ impl BeamProgram {
         }
         match self.export_frame(module, name, arity)? {
             Some(frame) => {
+                check_remote_call_arguments(&process.registers, arity)?;
                 enter_frame(process, frame, tail);
                 Ok(None)
             }
@@ -2048,6 +2049,27 @@ fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, B
 fn check_local_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<(), BeamError> {
     match (0..arity).find(|&index| !matches!(registers.get(index as usize), Some(Some(_)))) {
         Some(index) => Err(error(format!("call argument x{index} is unset"))),
+        None => Ok(()),
+    }
+}
+
+/// Check that the X registers of the arguments of an external call to a
+/// loaded function are set and hold no match context. The BEAM validator
+/// gives an external call no match context (`verify_remote_args_1` and
+/// `get_term_type`, beam_validator.erl:1944-1951, 2903-2908).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let registers = vec![Some(Term::MatchContext(MatchContext::new(b"a")))];
+/// assert!(check_remote_call_arguments(&registers, 1).is_err());
+/// assert!(check_remote_call_arguments(&[Some(Term::Integer(1))], 1).is_ok());
+/// ```
+fn check_remote_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<(), BeamError> {
+    check_local_call_arguments(registers, arity)?;
+    match (0..arity).find(|&index| matches!(registers[index as usize], Some(Term::MatchContext(_))))
+    {
+        Some(index) => Err(match_context_escape(&Operand::X(index))),
         None => Ok(()),
     }
 }
@@ -3667,7 +3689,21 @@ mod tests {
                 },
             ];
             body.extend(rest);
-            make_program(body, 0)
+            // `child/1` does not read its argument.
+            let mut program = make_program(body, 0);
+            let module = program.modules.get_mut("fixture").unwrap();
+            module.exports.insert(("child".into(), 1), 11);
+            module.instructions.extend([
+                Instruction::FunctionInfo {
+                    module: "fixture".into(),
+                    name: "child".into(),
+                    arity: 1,
+                },
+                Instruction::Label(11),
+                Instruction::Move(atom("ok"), Operand::X(0)),
+                Instruction::Return,
+            ]);
+            program
                 .execute("fixture", "main", &[])
                 .unwrap_err()
                 .to_string()
@@ -3679,6 +3715,17 @@ mod tests {
             escape
         );
         assert_eq!(run(vec![erlang_call("hd", 1, false)]), escape);
+        // An external call to a loaded function also checks its arguments.
+        assert_eq!(
+            run(vec![Instruction::CallExternal {
+                arity: 1,
+                module: "fixture".into(),
+                name: "child".into(),
+                tail: false,
+                deallocate: 0,
+            }]),
+            escape
+        );
         assert_eq!(
             run(vec![Instruction::BinarySetPosition {
                 context: Operand::X(0),
