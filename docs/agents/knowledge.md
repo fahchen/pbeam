@@ -100,3 +100,7 @@ Treat a broken runtime invariant as an explicit failure. Do not skip missing ent
 ## Test process failures preserve diagnostics
 
 Include the process status, standard output, and standard error in test failure messages. Display non-UTF-8 output without dropping the bytes needed to diagnose the failure.
+
+## Documented commands omit required setup
+
+Make each documented command runnable with all required setup inputs. Reuse the same setup shown by the validated command or fixture.
