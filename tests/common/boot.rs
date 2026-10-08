@@ -4,9 +4,9 @@
 //! `common/mod.rs` would be dead code in each other test crate.
 
 use std::{
-    fs::{self, File},
+    fs,
     path::Path,
-    process::Command,
+    process::{self, Command},
     sync::OnceLock,
 };
 
@@ -18,10 +18,13 @@ const BOOT_DIRECTORY: &str = "target/examples/hello_world";
 
 /// Compile `pbeam_boot.erl` with `erlc +deterministic` from `PATH` into
 /// `target/examples/hello_world/` once for each test process, and return
-/// the path of `pbeam_boot.beam`. A lock on `pbeam_boot.lock` in that
-/// directory serializes the compilation across processes, because `erlc`
-/// writes each output through the same temporary file `pbeam_boot.bea#`
-/// (compile.erl `save_binary_1/2`) and a test can run in a child process.
+/// the path of `pbeam_boot.beam`. `erlc` compiles into a directory of this
+/// process, and a rename then replaces the shared file atomically. A test
+/// can run in a child process, and `erlc` first deletes its output file
+/// (compile.erl `remove_file/2`) and writes through the fixed temporary
+/// file `pbeam_boot.bea#` (compile.erl `save_binary_1/2`). Thus a
+/// compilation into the shared directory could remove the file while
+/// another process reads it, or collide with another compilation.
 ///
 /// # Examples
 ///
@@ -34,11 +37,10 @@ const BOOT_DIRECTORY: &str = "target/examples/hello_world";
 pub fn boot_beam() -> &'static Path {
     static BOOT_BEAM: OnceLock<&'static Path> = OnceLock::new();
     BOOT_BEAM.get_or_init(|| {
-        fs::create_dir_all(BOOT_DIRECTORY).unwrap();
-        let lock = File::create(Path::new(BOOT_DIRECTORY).join("pbeam_boot.lock")).unwrap();
-        lock.lock().unwrap();
+        let directory = format!("{BOOT_DIRECTORY}/erlc-{}", process::id());
+        fs::create_dir_all(&directory).unwrap();
         let output = Command::new("erlc")
-            .args(["+deterministic", "-o", BOOT_DIRECTORY, BOOT_SOURCE])
+            .args(["+deterministic", "-o", &directory, BOOT_SOURCE])
             .output()
             .unwrap();
         assert!(
@@ -48,7 +50,10 @@ pub fn boot_beam() -> &'static Path {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        Path::new("target/examples/hello_world/pbeam_boot.beam")
+        let beam = Path::new("target/examples/hello_world/pbeam_boot.beam");
+        fs::rename(Path::new(&directory).join("pbeam_boot.beam"), beam).unwrap();
+        fs::remove_dir(&directory).unwrap();
+        beam
     })
 }
 
