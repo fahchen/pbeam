@@ -11,7 +11,7 @@ use super::{
     Flush, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, SIGNAL_HANDLING_REDUCTIONS, Scheduler,
 };
 use crate::{
-    error::{BeamError, error},
+    error::BeamError,
     runtime::{
         mailbox::{NodeId, Step, Walk},
         scheduler::AliasMode,
@@ -271,8 +271,8 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// An abnormal exit signal through a link to a process that does not
-    /// trap exits is not supported (see [`Scheduler::handle_exit_signal`]).
+    /// A process-info request whose reduction total is above the PBeam
+    /// integer range is an error (see `ProcessState::info`).
     pub(in crate::runtime) fn handle_signals(
         &mut self,
         id: ProcessId,
@@ -374,7 +374,7 @@ impl Scheduler {
                     normal_kills,
                     alias,
                 };
-                return self.handle_exit_signal(id, walk, node, exit);
+                return Ok(self.handle_exit_signal(id, walk, node, exit));
             }
             Signal::MonitorDown { reference, reason } => {
                 self.handle_monitor_down(id, walk, node, reference, reason)
@@ -387,7 +387,12 @@ impl Scheduler {
                 return Ok(Handled::Stop(0));
             }
             Signal::Link { from } => {
-                self.handled(id, node).links.entry(from).or_insert(0);
+                // A link that the receiver has keeps its node and its state
+                // (`erl_proc_sig_queue.c:6641`).
+                let links = &mut self.handled(id, node).links;
+                if links.get(&from).is_none() {
+                    links.insert(from, 0);
+                }
                 0
             }
             Signal::Unlink { from, id: unlink } => {
@@ -465,7 +470,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.handled(id, node).links.entry(from).or_insert(0);
+    /// scheduler.handled(id, node).links.insert(from, 0);
     /// ```
     fn handled(&mut self, id: ProcessId, node: NodeId) -> &mut ProcessState {
         let process = self.processes.get_mut(&id).expect("the process is alive");
@@ -486,28 +491,25 @@ impl Scheduler {
     ///   reason `kill`.
     /// - Else `normal` is ignored, unless `normal_kills` is set.
     /// - Else the receiver exits with the reason, and `kill` of
-    ///   `erlang:exit/2` gives `killed`. This costs 1 more, and the
-    ///   handling stops.
+    ///   `erlang:exit/2` gives `killed`. A link exit signal keeps its
+    ///   reason, also `kill`. This costs 1 more, and the handling stops.
+    ///   The exit of the receiver then sends its own link exit signals
+    ///   (see [`Scheduler::finish_current`]).
     ///
     /// An ignored signal costs 1 more again.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let handled = scheduler.handle_exit_signal(id, &mut walk, node, exit)?;
+    /// let handled = scheduler.handle_exit_signal(id, &mut walk, node, exit);
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// An abnormal link exit signal to a process that does not trap exits
-    /// is not supported. ERTS ends the receiver (#9).
     fn handle_exit_signal(
         &mut self,
         id: ProcessId,
         walk: &mut Walk,
         node: NodeId,
         exit: ExitSignal,
-    ) -> Result<Handled, BeamError> {
+    ) -> Handled {
         let ExitSignal {
             from,
             reason,
@@ -528,17 +530,11 @@ impl Scheduler {
             let message = Term::Tuple(vec![Term::static_atom("EXIT"), Term::Pid(from), reason]);
             process.mailbox.convert(walk, node, message);
             self.activate(id);
-            return Ok(Handled::Continue(1));
+            return Handled::Continue(1);
         }
         process.mailbox.remove(node);
         if !active || (reason == Term::static_atom("normal") && !normal_kills) {
-            return Ok(Handled::Continue(2));
-        }
-        if linked {
-            // ponytail: #9 ends the linked process here.
-            return Err(error(format!(
-                "unsupported exit signal {reason:?} to a process that does not trap exits"
-            )));
+            return Handled::Continue(2);
         }
         process.exiting = Some(if kill {
             Term::static_atom("killed")
@@ -546,7 +542,7 @@ impl Scheduler {
             reason
         });
         process.waiting = false;
-        Ok(Handled::Stop(2))
+        Handled::Stop(2)
     }
 
     /// Handle a monitor down signal of the watcher `id`. With an origin

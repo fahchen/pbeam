@@ -253,3 +253,80 @@ fn uses_the_reductions_of_the_signal_handling_as_pinned_erts() {
     assert_eq!(pbeam_all("signal_reds_probe", SIGNAL_REDS_PROBE), expected);
     assert_eq!(erts_all("signal_reds_probe"), format!("{expected}\n"));
 }
+
+const LINK_EXIT_PROBE: &[u8] = include_bytes!("../fixtures/signal_queue/link_exit_probe.beam");
+
+/// The result of each case of `link_exit_probe:all/0` on pinned ERTS 29.1.1
+/// with one scheduler, as `io:format("~w")` prints it. The case process
+/// gets the messages of its members in arrival order.
+const LINK_EXITS: &[(&str, &str)] = &[
+    // An abnormal link exit signal ends a member that does not trap exits
+    // with the same reason, also `kill`, and its exit sends the reason
+    // through its links (`erl_proc_sig_queue.c:4758-4785`).
+    (
+        "chain",
+        "[{down,c,boom},{down,b,boom},{exit,a,boom},{down,a,boom}]",
+    ),
+    (
+        "chain_kill",
+        "[{down,c,kill},{down,b,kill},{exit,a,kill},{down,a,kill}]",
+    ),
+    ("chain_normal", "{normal,true,true,[]}"),
+    // `exit(B, kill)` ends B with `killed`, and B sends `killed`.
+    (
+        "exit_kill_links",
+        "[{exit,b,killed},{down,b,killed},{down,c,killed}]",
+    ),
+    // A member that runs a loop handles the signal at schedule-in.
+    ("busy_linked", "[{down,c,boom},{exit,b,boom},{down,b,boom}]"),
+    ("untrapped", "{died,boom}"),
+    // `link/1` to a process that does not exist raises `noproc` without
+    // `trap_exit`. With `trap_exit` the caller sends itself the link exit
+    // signal `noproc`, and it acts on it when it handles it
+    // (`bif.c:162-183`, `411-423`).
+    ("link_dead", "{error,noproc}"),
+    ("link_dead_trap", "noproc"),
+    ("link_dead_order", "[a,{'EXIT',noproc},b]"),
+    ("link_dead_untrap", "{died,noproc}"),
+    // A target that did not handle its kill signal is not exiting, so the
+    // link is made, and the target answers the link signal with `noproc`.
+    ("link_exiting", "{died,noproc}"),
+    ("link_exiting_trap", "noproc"),
+    ("link_self", "{true,[]}"),
+];
+
+#[test]
+fn propagates_exit_signals_through_links_as_pinned_erts() {
+    let expected = expected(LINK_EXITS);
+    assert_eq!(pbeam_all("link_exit_probe", LINK_EXIT_PROBE), expected);
+    assert_eq!(erts_all("link_exit_probe"), format!("{expected}\n"));
+}
+
+const EXIT_ORDER_PROBE: &[u8] = include_bytes!("../fixtures/signal_queue/exit_order_probe.beam");
+
+/// The order of the signals that an exiting process sends through its
+/// links and monitors in each case of `exit_order_probe:all/0`, on pinned
+/// ERTS 29.1.1 with one scheduler, as `io:format("~w")` prints it. ERTS
+/// destroys its red-black link and monitor trees in post-order at exit
+/// (`erl_process.c:14545-14572`; `erl_rbtree.h:1342-1452`).
+const EXIT_ORDERS: &[(&str, &str)] = &[
+    ("links_ascending", "[1,3,5,7,6,4,2]"),
+    ("links_mixed", "[1,3,2,5,7,6,4]"),
+    // The unlink acknowledgments delete the links of 4, 2, and 6 with
+    // rebalancing, and 4 links again.
+    ("links_unlink", "[1,4,3,8,7,5]"),
+    // The link signal of 1 adds a node as `erlang:link/1` does.
+    ("link_signal", "[3,1]"),
+    ("unlink_signal", "[1,5,4,3]"),
+    // Member 1 has no monitor at the exit and runs after the members that
+    // got a demonitor signal.
+    ("monitors", "[2,1]"),
+    ("monitors_demonitor", "[3,2,1]"),
+];
+
+#[test]
+fn sends_exit_signals_of_links_and_monitors_in_the_erts_tree_order() {
+    let expected = expected(EXIT_ORDERS);
+    assert_eq!(pbeam_all("exit_order_probe", EXIT_ORDER_PROBE), expected);
+    assert_eq!(erts_all("exit_order_probe"), format!("{expected}\n"));
+}
