@@ -111,14 +111,19 @@ fn run_with_full_stdout(mut command: Command, name: &str) -> (Vec<u8>, String, O
             fail(child, name, &text);
         }
     }
-    let reading = thread::spawn(move || {
+    // Threads read the rest of the output, so the time limit of the exit
+    // also stops a run that stops writing. The kill in `fail` closes the
+    // pipes, and the threads then end.
+    let reading_stderr = thread::spawn(move || {
         let mut rest = Vec::new();
         stderr.read_to_end(&mut rest).unwrap();
         rest
     });
-    let mut written = first.to_vec();
-    stdout.read_to_end(&mut written).unwrap();
-    let rest = reading.join().unwrap();
+    let reading_stdout = thread::spawn(move || {
+        let mut written = first.to_vec();
+        stdout.read_to_end(&mut written).unwrap();
+        written
+    });
     let start = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -129,6 +134,8 @@ fn run_with_full_stdout(mut command: Command, name: &str) -> (Vec<u8>, String, O
         }
         thread::sleep(Duration::from_millis(10));
     };
+    let written = reading_stdout.join().unwrap();
+    let rest = reading_stderr.join().unwrap();
     let stderr = String::from_utf8([before, after, rest].concat()).unwrap();
     (written, stderr, status.code())
 }
