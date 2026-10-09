@@ -31,6 +31,7 @@ fn full_pipe() -> (PipeReader, PipeWriter) {
         0
     );
     while writer.write(&[0; 4096]).is_ok() {}
+    while writer.write(&[0]).is_ok() {}
     // SAFETY: as above.
     assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
     (reader, writer)
@@ -66,15 +67,17 @@ fn runs_a_call_on_a_dirty_io_thread_and_wakes_the_scheduler() {
     };
     dirty_io.submit(ProcessId(4), 8, failed);
     assert!(dirty_io.running());
-    let mut completions = Vec::new();
-    while completions.len() < 2 {
+    // A thread writes its wake byte after it sends its completion, so the
+    // inbox has both completions after the second byte.
+    let mut wakes = 0;
+    while wakes < 2 {
         assert_eq!(
             wait_readable(&wake, Some(COMPLETION_LIMIT)),
             Readiness::Ready(wake.to_vec())
         );
-        dirty_io.clear_wake();
-        completions.extend(std::iter::from_fn(|| dirty_io.take_completion()));
+        wakes += (&dirty_io.wake.0).read(&mut [0; 2]).unwrap();
     }
+    let mut completions: Vec<_> = std::iter::from_fn(|| dirty_io.take_completion()).collect();
     completions.sort_by_key(|completion| completion.call);
     assert_eq!(
         completions,
