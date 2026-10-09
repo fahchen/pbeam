@@ -2,7 +2,10 @@ mod tree;
 
 pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 
-use super::{host::output::IovecWritten, mailbox::Mailbox, scheduler::AliasMode, timer::TimerKey};
+use super::{
+    dirty_io::Claim, host::output::IovecWritten, mailbox::Mailbox, scheduler::AliasMode,
+    timer::TimerKey,
+};
 use crate::{
     error::{BeamError, error},
     term::{Atom, PortId, ProcessId, Reference, Term},
@@ -255,10 +258,12 @@ pub(super) struct ProcessState {
     /// it first.
     pub(super) pending_bif: Option<PendingBif>,
     /// The dirty IO call of the process, from the switch out at the call
-    /// until `BeamProgram::run` returns its result. ERTS runs the process
-    /// on a dirty IO scheduler for this time (`erl_nif.c:426-543`). While
-    /// the call runs, the process is not in the run queue and does not
-    /// handle its signals.
+    /// until `BeamProgram::run` returns its result, or until a signal ends
+    /// the process. ERTS runs the process on a dirty IO scheduler for this
+    /// time (`erl_nif.c:426-543`). While the call runs, the process does not
+    /// run Erlang code, and the scheduler handles its signals for it, as
+    /// `erts_dirty_process_signal_handler` does
+    /// (`erts_dirty_process_signal_handler.erl:52-89`).
     pub(super) dirty_write: Option<DirtyWrite>,
     /// The trap state of the guard BIF `length/1`: the arguments of its
     /// trap export, the rest of the list and the count so far. ERTS
@@ -308,6 +313,11 @@ pub(super) struct DirtyWrite {
     pub(super) tail: bool,
     /// The result of the host write, or `None` while the call runs.
     pub(super) written: Option<IovecWritten>,
+    /// The claim of the process on the call. A dirty IO thread runs the
+    /// call only while the claim exists. The claim goes when this record
+    /// goes: at the result, at the start of the exit, or at the end of the
+    /// run.
+    pub(super) claim: Claim,
 }
 
 impl ProcessState {
@@ -467,6 +477,20 @@ impl ProcessState {
             _ => return Ok(None),
         };
         Ok(Some(Term::Tuple(vec![item.clone(), value])))
+    }
+
+    /// Return true while the dirty IO call of the process runs: the
+    /// process waits for its completion and does not run Erlang code.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!process.dirty_running());
+    /// ```
+    pub(super) fn dirty_running(&self) -> bool {
+        self.dirty_write
+            .as_ref()
+            .is_some_and(|write| write.written.is_none())
     }
 
     /// Mark the receive timer as expired, as `proc_timeout_common`

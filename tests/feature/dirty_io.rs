@@ -21,6 +21,7 @@ use boot::{BOOT_MODULES, boot_beam};
 use common::pinned_beam_path;
 
 const DIRTY_IO_PROBE: &str = "fixtures/boot/dirty_io_probe.beam";
+const DIRTY_EXIT_PROBE: &str = "fixtures/boot/dirty_exit_probe.beam";
 
 /// The time that a run has to write each output that the test waits for,
 /// and to end.
@@ -53,7 +54,11 @@ fn runs_other_processes_while_a_write_waits_for_a_full_pipe() {
     // processes, each stderr byte came before the stdout byte, so no new
     // tick arrives, and the test fails after `RUN_TIME_LIMIT`. Only the
     // failure uses a time limit.
-    for (name, command) in [("ERTS", erts()), ("PBeam", pbeam())] {
+    let runs = [
+        ("ERTS", erts("dirty_io_probe", "main")),
+        ("PBeam", pbeam(DIRTY_IO_PROBE, "dirty_io_probe", "main")),
+    ];
+    for (name, command) in runs {
         let (stdout, stderr, status) = run_with_full_stdout(command, name);
         assert!(stdout == *WRITTEN, "{name} wrote {} bytes", stdout.len());
         let ticks = stderr
@@ -64,6 +69,157 @@ fn runs_other_processes_while_a_write_waits_for_a_full_pipe() {
             "{name} stderr: {stderr:?}"
         );
         assert_eq!(status, Some(0), "{name}");
+    }
+}
+
+#[test]
+fn handles_the_signals_of_a_writer_whose_write_waits_and_ends_the_run_without_the_write() {
+    // `dirty_exit_probe:signals/0` starts a `prim_tty` writer that writes
+    // 1 MiB to stdout, which the test does not read until the run ends. While
+    // the write waits, the probe asks for the message queue length of the
+    // writer, sends it a message, links a second process to it, sends it the
+    // exit signal `normal`, asks whether it is alive, and kills it. ERTS
+    // handles these signals with `erts_dirty_process_signal_handler`
+    // (erts_dirty_process_signal_handler.erl:52-89), and a normal scheduler
+    // runs the exit while the write waits (erl_process.c:10092-10110). The
+    // link gives the exit reason `killed` to the second process. The run
+    // then ends without the end of the write: ERTS `halt` does not wait for
+    // a dirty NIF of `prim_tty` (erl_nif.c:470-497). If the run waited for
+    // the write or for a signal reply, the test fails after
+    // `RUN_TIME_LIMIT`.
+    let runs = [
+        ("ERTS", erts("dirty_exit_probe", "signals")),
+        (
+            "PBeam",
+            pbeam(DIRTY_EXIT_PROBE, "dirty_exit_probe", "signals"),
+        ),
+    ];
+    for (name, command) in runs {
+        let mut child = spawn_with_pipes(command);
+        let mut stderr = child.stderr.take().unwrap();
+        let reading_stderr = thread::spawn(move || {
+            let mut text = String::new();
+            stderr.read_to_string(&mut text).unwrap();
+            text
+        });
+        let status = wait_exit(&mut child, name);
+        let mut stdout = Vec::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_end(&mut stdout)
+            .unwrap();
+        assert_eq!(
+            reading_stderr.join().unwrap(),
+            "0 1 true killed killed\n",
+            "{name}"
+        );
+        assert_eq!(status, Some(0), "{name}");
+        assert!(
+            stdout.len() < 1 << 20 && stdout.iter().all(|&byte| byte == b'a'),
+            "{name} wrote {} bytes",
+            stdout.len()
+        );
+    }
+}
+
+#[test]
+fn does_not_run_the_queued_write_of_a_killed_writer() {
+    // `dirty_exit_probe:cancel/0` starts 10 `prim_tty` writers, which write
+    // 256 KiB of the bytes `0` to `9` to stdout, and an 11th writer, which
+    // writes 256 KiB of `X`. The test does not read stdout, so the 10 writes
+    // wait and use the 10 dirty IO schedulers (erl_init.c:867), and the 11th
+    // write waits in the queue. The probe kills the 11th writer, and a shell
+    // then writes "killed" to stderr without a dirty IO scheduler. The test
+    // then reads stdout: the 10 writes complete, and the probe writes
+    // "done". A dirty IO scheduler does not call the NIF of an exiting
+    // process (erl_process.c:10252-10258), so no `X` arrives.
+    let runs = [
+        ("ERTS", erts("dirty_exit_probe", "cancel")),
+        (
+            "PBeam",
+            pbeam(DIRTY_EXIT_PROBE, "dirty_exit_probe", "cancel"),
+        ),
+    ];
+    for (name, command) in runs {
+        let mut child = spawn_with_pipes(command);
+        let mut stderr = child.stderr.take().unwrap();
+        let mut killed = Vec::new();
+        let start = Instant::now();
+        while !killed.ends_with(b"killed\n") {
+            let left = RUN_TIME_LIMIT.saturating_sub(start.elapsed());
+            if !(wait_readable(&stderr, left) && read_some(&mut stderr, &mut killed)) {
+                let text = String::from_utf8_lossy(&killed);
+                fail(child, name, &format!("no killed line; stderr: {text:?}"));
+            }
+        }
+        let mut stdout = child.stdout.take().unwrap();
+        let reading_stdout = thread::spawn(move || {
+            let mut written = Vec::new();
+            stdout.read_to_end(&mut written).unwrap();
+            written
+        });
+        let reading_stderr = thread::spawn(move || {
+            let mut rest = Vec::new();
+            stderr.read_to_end(&mut rest).unwrap();
+            rest
+        });
+        let status = wait_exit(&mut child, name);
+        let written = reading_stdout.join().unwrap();
+        let stderr = [killed, reading_stderr.join().unwrap()].concat();
+        assert_eq!(String::from_utf8_lossy(&stderr), "killed\ndone\n", "{name}");
+        assert_eq!(status, Some(0), "{name}");
+        let mut counts = [0; 256];
+        for &byte in &written {
+            counts[usize::from(byte)] += 1;
+        }
+        for byte in u8::MIN..=u8::MAX {
+            let expected = if byte.is_ascii_digit() { 256 * 1024 } else { 0 };
+            let count = counts[usize::from(byte)];
+            assert_eq!(count, expected, "{name}: count of byte {byte}");
+        }
+    }
+}
+
+/// Spawn `command` with stdin `/dev/null`, and stdout and stderr pipes.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let child = spawn_with_pipes(pbeam(DIRTY_EXIT_PROBE, "dirty_exit_probe", "cancel"));
+/// ```
+fn spawn_with_pipes(mut command: Command) -> Child {
+    command
+        .env("TERM", "dumb")
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// Wait until `child` exits, and return its exit status code. Kill the
+/// child and panic when it does not exit in `RUN_TIME_LIMIT`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(wait_exit(&mut child, "PBeam"), Some(0));
+/// ```
+fn wait_exit(child: &mut Child, name: &str) -> Option<i32> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status.code();
+        }
+        if start.elapsed() >= RUN_TIME_LIMIT {
+            child.kill().unwrap();
+            let status = child.wait().unwrap();
+            panic!("{name}: the run did not end; status: {status}");
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -190,47 +346,34 @@ fn fail(mut child: Child, name: &str, text: &str) -> ! {
     panic!("{name}: {text}; status: {}", output.status);
 }
 
-/// Return the pinned `erl` command that runs `dirty_io_probe:main()` on one
-/// scheduler, then `halt()`.
+/// Return the pinned `erl` command that runs `module:function()` of
+/// `fixtures/boot` on one scheduler, then `halt()`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let child = erts().spawn()?;
+/// let child = erts("dirty_io_probe", "main").spawn()?;
 /// ```
-fn erts() -> Command {
+fn erts(module: &str, function: &str) -> Command {
     let mut command = Command::new("erl");
-    command.args([
-        "+S",
-        "1",
-        "-noshell",
-        "-pa",
-        "fixtures/boot",
-        "-eval",
-        "dirty_io_probe:main(), halt().",
-    ]);
+    command
+        .args(["+S", "1", "-noshell", "-pa", "fixtures/boot", "-eval"])
+        .arg(format!("{module}:{function}(), halt()."));
     command
 }
 
 /// Return the `pbeam` command that boots with `pbeam_boot` and runs
-/// `dirty_io_probe:main()`.
+/// `module:function()` of `beam`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let child = pbeam().spawn()?;
+/// let child = pbeam(DIRTY_IO_PROBE, "dirty_io_probe", "main").spawn()?;
 /// ```
-fn pbeam() -> Command {
+fn pbeam(beam: &str, module: &str, function: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
-        .args([
-            "pbeam_boot",
-            "start",
-            "dirty_io_probe",
-            "main",
-            "--",
-            DIRTY_IO_PROBE,
-        ])
+        .args(["pbeam_boot", "start", module, function, "--", beam])
         .args(BOOT_PATHS.iter())
         .arg(boot_beam());
     command

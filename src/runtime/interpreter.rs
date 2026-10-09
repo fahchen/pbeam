@@ -163,9 +163,11 @@ impl BeamProgram {
     /// `root process exited with {badarg,[]}`. A root process that
     /// waits when no process can run, no timer is active, fd 0 has no read
     /// select, no port waits for a pipe, no dirty IO call runs, and no
-    /// signal handler is installed gives an error. The run does not wait for a dirty IO call that runs
-    /// when it ends. A call of `erlang:halt/2` with a status code ends the
-    /// run at once with the error [`BeamError::Halt`]. At the end of the
+    /// signal handler is installed gives an error. When the run ends, it
+    /// does not wait for a dirty IO call that runs, and a call in the queue
+    /// does not run (see `DirtyIo`). A call of `erlang:halt/2` with a
+    /// status code ends the run at once with the error
+    /// [`BeamError::Halt`]. At the end of the
     /// run, also after an error, fd 0 gets its mode at the start of the run
     /// again when fds 0 and 1 are terminals, as at the exit of the ERTS
     /// emulator (see `InitialMode::reset`).

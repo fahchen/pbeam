@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{
-    dirty_io::{Completion, DirtyIo},
+    dirty_io::{Claim, Completion, DirtyIo},
     ets::EtsTables,
     host::{
         input::{self, Readiness},
@@ -289,8 +289,12 @@ impl Scheduler {
     /// run queue or runs now: such a process keeps its place, as
     /// `erts_schedule_process` and `erts_proc_sys_schedule` do
     /// (`erl_proc_sig_queue.h:2063-2088`). A process whose dirty IO call
-    /// runs also stays out of the run queue: it goes there when the call
-    /// completes ([`Self::complete_dirty_writes`]).
+    /// runs goes to the run queue only when it has signals to handle: its
+    /// turn then handles them for it, as ERTS sends its pid to
+    /// `erts_dirty_process_signal_handler` (`erts_proc_notify_new_sig`,
+    /// `erl_proc_sig_queue.h:2062-2089`; `erl_proc_sig_queue.c:979-1008`).
+    /// It goes there to run when the call completes
+    /// ([`Self::complete_dirty_writes`]).
     ///
     /// # Examples
     ///
@@ -300,11 +304,8 @@ impl Scheduler {
     fn enqueue(&mut self, id: ProcessId) {
         let current = self.current_process == Some(id);
         let process = self.processes.get_mut(&id).expect("the process is alive");
-        let dirty = process
-            .dirty_write
-            .as_ref()
-            .is_some_and(|write| write.written.is_none());
-        if !process.in_run_queue && !current && !dirty {
+        let idle_dirty = process.dirty_running() && !process.mailbox.has_control_signals();
+        if !process.in_run_queue && !current && !idle_dirty {
             process.in_run_queue = true;
             self.runnable.push_back(id);
         }
@@ -333,6 +334,8 @@ impl Scheduler {
     ///
     /// - An exiting process runs its exit now. A freed process continues its
     ///   exit at its phase ([`Self::finish_current`]).
+    /// - A process whose dirty IO call runs does not run. Its turn handles
+    ///   its signals ([`Self::handle_dirty_signals`]).
     /// - A process with signals to handle handles them first. An active
     ///   process, which has Erlang work, uses at most
     ///   `ERTS_SIG_HANDLE_REDS_MAX_PREFERED` (100) reductions for it, and a
@@ -363,6 +366,10 @@ impl Scheduler {
         };
         if let Some((process, phase)) = self.freed.remove(&id) {
             self.exit_links(process, phase, CONTEXT_REDS);
+            return Ok(Turn::Done);
+        }
+        if self.processes[&id].dirty_running() {
+            self.handle_dirty_signals(id)?;
             return Ok(Turn::Done);
         }
         self.current_process = Some(id);
@@ -604,17 +611,69 @@ impl Scheduler {
     /// assert_eq!(scheduler.schedule_next()?, Turn::Idle);
     /// ```
     pub(super) fn start_dirty_write(&mut self, write: IovecWrite, tail: bool) {
-        let id = self.current_process_mut().id;
         let call = self.dirty_io.next_call();
-        self.current_process_mut().dirty_write = Some(DirtyWrite {
+        let id = self
+            .current_process
+            .expect("the scheduler has a current process");
+        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let record = process.dirty_write.insert(DirtyWrite {
             call,
             tail,
             written: None,
+            claim: Claim::default(),
         });
-        self.dirty_io.submit(id, call, write);
+        self.dirty_io.submit(id, call, &record.claim, write);
         // `enqueue` keeps the process out of the run queue while the call
-        // runs.
+        // runs, unless it has signals to handle (`erl_process.c:9762-9771`).
         self.switch_out(|_| {});
+    }
+
+    /// Handle the signals of the process `id`, whose dirty IO call runs, as
+    /// `erts_dirty_process_signal_handler` handles them for a process that
+    /// runs dirty (`erts_dirty_process_signal_handler.erl:52-89`;
+    /// `erts_internal_dirty_process_handle_signals_1`,
+    /// `erl_proc_sig_queue.c:8892-8963`). The process does not become the
+    /// current process, and its reduction total does not change: ERTS gives
+    /// the reductions of the handling to the handler process.
+    ///
+    /// - A signal that ends the process drops the claim on the call, so a
+    ///   call in the queue does not run, and the scheduler drops the result
+    ///   of a call that runs. The process goes to the end of the run queue
+    ///   and exits in its next turn while the call runs, as
+    ///   `set_self_exiting` puts it in a normal run queue
+    ///   (`erl_process.c:13484-13548`) and a normal scheduler runs the exit
+    ///   of a process that runs dirty (`erl_process.c:10092-10110`).
+    /// - A process with signals left goes to the end of the run queue, as
+    ///   the handler sends the pid to itself again
+    ///   (`erts_dirty_process_signal_handler.erl:83-89`).
+    ///
+    /// The handling uses at most `CONTEXT_REDS` reductions, about the
+    /// budget left to the handler process in its call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.handle_dirty_signals(writer)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An error of [`Scheduler::handle_signals`].
+    fn handle_dirty_signals(&mut self, id: ProcessId) -> Result<(), BeamError> {
+        // `enqueue` puts a process whose call runs in the run queue only
+        // when it has signals to handle, and only its turn handles them.
+        self.processes
+            .get_mut(&id)
+            .expect("the process is alive")
+            .in_run_queue = false;
+        self.handle_signals(id, CONTEXT_REDS, CONTEXT_REDS, HandlingPoint::ScheduleIn)?;
+        let process = self.processes.get_mut(&id).expect("the process is alive");
+        if process.exiting.is_some() {
+            process.dirty_write = None;
+        }
+        // `enqueue` takes the process when it exits or has signals left.
+        self.enqueue(id);
+        Ok(())
     }
 
     /// Take each completion from the dirty IO inbox: the process of the
@@ -624,6 +683,12 @@ impl Scheduler {
     /// (`dirty_nif_finalizer`, `erl_nif.c:3386-3408`) or raises the
     /// exception of the call (`dirty_nif_exception`, `erl_nif.c:3410-3435`).
     ///
+    /// The completion of a process that exits or exited is dropped, as
+    /// `erts_call_dirty_nif` drops the result of an exiting process
+    /// (`erl_nif.c:507-509`, `542`). Process identifiers and call
+    /// identifiers are not used again in a run, so a late completion does
+    /// not find a new process or a new call.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -632,9 +697,9 @@ impl Scheduler {
     ///
     /// # Panics
     ///
-    /// A completion does not match the running call of a live process. A
-    /// process does not handle its signals while its call runs, so it does
-    /// not exit, and each call completes once.
+    /// A completion of a process that does not exit does not match its
+    /// running call, or has no result. Such a process holds the claim on
+    /// its call until the completion, and each call completes once.
     pub(super) fn complete_dirty_writes(&mut self) {
         while let Some(Completion {
             process,
@@ -642,13 +707,20 @@ impl Scheduler {
             written,
         }) = self.dirty_io.take_completion()
         {
-            let dirty_write = self
+            let Some(caller) = self
                 .processes
                 .get_mut(&process)
-                .and_then(|process| process.dirty_write.as_mut())
+                .filter(|caller| caller.exiting.is_none())
+            else {
+                continue;
+            };
+            let dirty_write = caller
+                .dirty_write
+                .as_mut()
                 .filter(|write| write.call == call && write.written.is_none())
-                .expect("a completion resumes a running call of a live process");
-            dirty_write.written = Some(written);
+                .expect("a completion resumes the running call of its live process");
+            dirty_write.written =
+                Some(written.expect("a call runs while its live process holds the claim"));
             self.enqueue(process);
         }
     }
