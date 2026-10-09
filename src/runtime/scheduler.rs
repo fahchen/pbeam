@@ -1415,12 +1415,15 @@ impl Scheduler {
                 ExitPhase::TargetMonitors(mut done) => {
                     // ERTS runs the NIF resource monitors of the process in
                     // this phase too.
-                    let ttys = self.resources.borrow_mut::<Ttys>().monitor_count(id);
+                    let mut ttys = self.resources.borrow_mut::<Ttys>().monitor_count(id);
                     for _ in 0..ttys + process.monitored_by.len() - done {
                         if reds <= 0 {
                             return self.switch_out_freed(process, ExitPhase::TargetMonitors(done));
                         }
-                        if !self.resources.borrow_mut::<Ttys>().monitor_down(id) {
+                        if ttys > 0 {
+                            self.resources.borrow_mut::<Ttys>().monitor_down(id);
+                            ttys -= 1;
+                        } else {
                             let monitor = &process.monitored_by[done];
                             self.send_monitor_down(
                                 Some(id),
