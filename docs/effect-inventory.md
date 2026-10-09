@@ -8,7 +8,7 @@ A classification in this document is reviewed metadata. It is not a proof about 
 
 ## Maintenance
 
-Update this inventory in the PR that adds, removes, or changes an entry. The unit test `effect_inventory_lists_each_bif_and_native_function` in `src/runtime/interpreter/native.rs` reads this file. The test fails in these conditions:
+Update this inventory in the PR that adds, removes, or changes an entry. The unit test `effect_inventory_lists_each_bif_and_native_function` in `tests/runtime/interpreter/native.rs` reads this file. The test fails in these conditions:
 
 - A BIF that has a body in `BIFS` (`src/runtime/interpreter/bif/table.rs`) has no row in the section "BIFs".
 - An `unsupported` entry of `BIFS` is not in the section "Unsupported BIFs".
