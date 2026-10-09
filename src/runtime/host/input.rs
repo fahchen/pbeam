@@ -53,14 +53,16 @@ pub(crate) fn read(fd: c_int, size: usize) -> Result<Vec<u8>, c_int> {
 ///
 /// # Panics
 ///
-/// An fd is negative or not below `FD_SETSIZE`, which `select` cannot
-/// hold.
+/// An fd is negative or not below `FD_SETSIZE` (1024), which `select`
+/// cannot hold, for example `select cannot hold fd 1024: FD_SETSIZE is
+/// 1024`. The wake socket of the dirty IO threads gets such an fd when
+/// almost all fds below 1024 are open at the start of the run. ERTS waits with
+/// `kqueue` or `epoll`, which have no such limit (`erl_poll.h:100-135`).
 pub(crate) fn wait_readable(fds: &[c_int], timeout: Option<Duration>) -> Option<Vec<c_int>> {
     let fd_set_size = c_int::try_from(libc::FD_SETSIZE).expect("FD_SETSIZE fits in c_int");
-    assert!(
-        fds.iter().all(|fd| (0..fd_set_size).contains(fd)),
-        "select holds each fd"
-    );
+    if let Some(fd) = fds.iter().find(|fd| !(0..fd_set_size).contains(*fd)) {
+        panic!("select cannot hold fd {fd}: FD_SETSIZE is {fd_set_size}");
+    }
     // SAFETY: `fd_set` is a C struct of integers, so all zeros is a valid
     // value. `FD_ZERO` and `FD_SET` write only into `set`, and each fd is
     // below `FD_SETSIZE`.

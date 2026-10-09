@@ -66,7 +66,7 @@ fn gives_each_ready_fd_of_the_set_in_request_order() {
 }
 
 #[test]
-#[should_panic(expected = "select holds each fd")]
+#[should_panic(expected = "select cannot hold fd 1024: FD_SETSIZE is 1024")]
 fn refuses_an_fd_that_select_cannot_hold() {
     let fd = libc::c_int::try_from(libc::FD_SETSIZE).unwrap();
     wait_readable(&[fd], Some(Duration::ZERO));
