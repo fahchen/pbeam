@@ -206,16 +206,17 @@ impl InitialMode {
     /// closes its socket, also after `SIGKILL` (`sys_drivers.c:1670-1690`,
     /// `erl_child_setup.c:563-576`).
     ///
-    /// `input_selected` tells whether fd 0 has a read select. ERTS keeps
-    /// such an fd in its kernel poll set, `kqueue` on macOS. A change that
-    /// turns `ICANON` on sets `PENDIN` in the macOS kernel, which then
-    /// checks the read filter of each registration of the terminal. The
-    /// check reads the input count with `ttnread`, which clears `PENDIN`
-    /// again (XNU `bsd/kern/tty.c`: `ttioctl_locked`, `ttnread`, and
-    /// `filt_tty_common`). Thus `PENDIN` does not stay set while fd 0 has a
-    /// read select. PBeam selects fd 0 only while the scheduler waits for
-    /// input, so after the reset it checks fd 0 once with a `select` of
-    /// timeout 0, which also calls `ttnread`.
+    /// `input_selected` tells whether fd 0 has a read select. A change that
+    /// turns `ICANON` on sets `PENDIN` in the macOS kernel and wakes each
+    /// `select` of the terminal. A `select` reads the input count with
+    /// `ttnread`, which clears `PENDIN` again (XNU `bsd/kern/tty.c`:
+    /// `ttioctl_locked`, `ttyselect`, `ttnread`). On macOS, ERTS keeps a
+    /// terminal fd 0 with a read select in the `select` set of its poll
+    /// thread, and the emulator exits at once after the reset
+    /// (`erl_init.c:2730-2742`). Thus `PENDIN` stays set on ERTS only when
+    /// the poll thread does not run between the reset and the exit. PBeam
+    /// gives the end state in which the poll thread runs first: after the
+    /// reset, it checks fd 0 once with a `select` of timeout 0.
     /// Linux does not use `PENDIN`.
     ///
     /// # Examples
