@@ -133,6 +133,38 @@ fn removes_map_keys_as_pinned_erts() {
 }
 
 #[test]
+fn takes_map_keys_as_pinned_erts() {
+    // `logger_start_probe:take/0` runs `maps:take/2`
+    // (`erl_map.c:1910-1925`), which gives the value and the map that
+    // `maps:remove/2` gives, or `error` for a key that the map does not
+    // hold. A hashmap that keeps 32 keys becomes a flatmap. A term that is
+    // not a map raises `{badmap, Map}`.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs).unwrap());
+    let expected = vec![
+        Term::Tuple(vec![
+            atom("one"),
+            map(vec![(Term::Integer(2), atom("two"))]),
+        ]),
+        atom("error"),
+        Term::Tuple(vec![Term::Integer(1), map(vec![])]),
+        Term::List((1..=32).map(Term::Integer).collect()),
+        Term::Tuple(vec![atom("badmap"), atom("foo")]),
+    ];
+    assert_eq!(
+        program.execute("logger_start_probe", "take", &[]).unwrap(),
+        Term::List(expected)
+    );
+    assert_eq!(
+        reference("take"),
+        b"[{one,#{2 => two}},error,{1,#{}},\
+          [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32],\
+          {badmap,foo}]\n"
+    );
+}
+
+#[test]
 fn removes_map_keys_through_maps_without() {
     // `logger_start_probe:without/0` runs the pinned `maps:without/2`
     // (`maps.erl:1139-1140`), which folds `fun maps:remove/2` over the keys

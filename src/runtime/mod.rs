@@ -15,6 +15,7 @@ mod timer;
 mod tty;
 mod unicode;
 
+pub use host::signal::install_start_dispositions;
 pub use interpreter::BeamProgram;
 
 use crate::term::Term;

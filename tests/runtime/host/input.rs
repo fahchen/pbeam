@@ -23,13 +23,16 @@ fn waits_until_a_pipe_has_input_or_its_end_of_file() {
     let fd = reader.as_raw_fd();
     assert_eq!(
         wait_readable(&[fd], Some(Duration::from_millis(1))),
-        Some(vec![])
+        Readiness::Pending
     );
     writer.write_all(b"x").unwrap();
-    assert_eq!(wait_readable(&[fd], None), Some(vec![fd]));
+    assert_eq!(wait_readable(&[fd], None), Readiness::Ready(vec![fd]));
     assert_eq!(read(fd, 1024), Ok(b"x".to_vec()));
     drop(writer);
-    assert_eq!(wait_readable(&[fd], Some(Duration::ZERO)), Some(vec![fd]));
+    assert_eq!(
+        wait_readable(&[fd], Some(Duration::ZERO)),
+        Readiness::Ready(vec![fd])
+    );
 }
 
 #[test]
@@ -41,7 +44,7 @@ fn waits_until_the_timeout_ends() {
             &[reader.as_raw_fd()],
             Some(Duration::from_nanos(20_000_001))
         ),
-        Some(vec![])
+        Readiness::Pending
     );
     assert!(start.elapsed() >= Duration::from_millis(20));
 }
@@ -51,7 +54,22 @@ fn finds_an_fd_that_is_not_open() {
     let (reader, _writer) = std::io::pipe().unwrap();
     let fd = reader.as_raw_fd();
     drop(reader);
-    assert_eq!(wait_readable(&[fd], Some(Duration::ZERO)), None);
+    assert_eq!(
+        wait_readable(&[fd], Some(Duration::ZERO)),
+        Readiness::Invalid
+    );
+}
+
+#[test]
+fn gives_each_fd_that_has_input() {
+    let (first, _first_writer) = std::io::pipe().unwrap();
+    let (second, mut second_writer) = std::io::pipe().unwrap();
+    let fds = [first.as_raw_fd(), second.as_raw_fd()];
+    second_writer.write_all(b"x").unwrap();
+    assert_eq!(
+        wait_readable(&fds, None),
+        Readiness::Ready(vec![second.as_raw_fd()])
+    );
 }
 
 #[test]
@@ -60,14 +78,38 @@ fn gives_each_ready_fd_of_the_set_in_request_order() {
     let (second, mut second_writer) = std::io::pipe().unwrap();
     let fds = [second.as_raw_fd(), first.as_raw_fd()];
     first_writer.write_all(b"x").unwrap();
-    assert_eq!(wait_readable(&fds, None), Some(vec![fds[1]]));
+    assert_eq!(wait_readable(&fds, None), Readiness::Ready(vec![fds[1]]));
     second_writer.write_all(b"y").unwrap();
-    assert_eq!(wait_readable(&fds, None), Some(fds.to_vec()));
+    assert_eq!(wait_readable(&fds, None), Readiness::Ready(fds.to_vec()));
 }
 
 #[test]
-#[should_panic(expected = "select cannot hold fd 1024: FD_SETSIZE is 1024")]
-fn refuses_an_fd_that_select_cannot_hold() {
-    let fd = libc::c_int::try_from(libc::FD_SETSIZE).unwrap();
-    wait_readable(&[fd], Some(Duration::ZERO));
+fn waits_for_an_fd_at_or_above_fd_setsize() {
+    // nextest runs each test in its own process, so the raised soft limit
+    // of open fds reaches no other test.
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` and `setrlimit` read and write only `limit`.
+    unsafe {
+        assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit), 0);
+        limit.rlim_cur = limit.rlim_cur.max(2048).min(limit.rlim_max);
+        assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit), 0);
+    }
+    let (low, _low_writer) = std::io::pipe().unwrap();
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let setsize = c_int::try_from(libc::FD_SETSIZE).unwrap();
+    // SAFETY: `fcntl` makes a new fd of `reader` at or above `FD_SETSIZE`.
+    let high = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_DUPFD_CLOEXEC, setsize) };
+    assert!(high >= setsize, "{high}");
+    let fds = [low.as_raw_fd(), high];
+    assert_eq!(
+        wait_readable(&fds, Some(Duration::ZERO)),
+        Readiness::Pending
+    );
+    writer.write_all(b"x").unwrap();
+    assert_eq!(wait_readable(&fds, None), Readiness::Ready(vec![high]));
+    // SAFETY: `high` is an fd of this test, which no other code uses.
+    unsafe { libc::close(high) };
 }

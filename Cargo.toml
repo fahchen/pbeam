@@ -41,6 +41,10 @@ name = "hello"
 path = "tests/feature/hello.rs"
 
 [[test]]
+name = "host_signal"
+path = "tests/feature/host_signal.rs"
+
+[[test]]
 name = "io_fail"
 path = "tests/feature/io_fail.rs"
 
@@ -152,6 +156,10 @@ path = "tests/integration/getenv.rs"
 [[test]]
 name = "group"
 path = "tests/integration/group.rs"
+
+[[test]]
+name = "halt"
+path = "tests/integration/halt.rs"
 
 [[test]]
 name = "hibernate"

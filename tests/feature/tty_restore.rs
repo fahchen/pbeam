@@ -56,16 +56,13 @@ fn sets_fd_0_to_its_first_mode_at_the_run_end_as_pinned_erts() {
     // `erlang:halt/0`, and `crash/0` exits with the reason `boom`. At the
     // emulator exit, ERTS sets fd 0 to its mode at the emulator start
     // (`sys_tty_reset`, sys.c:182-190; erl_child_setup.c:563-576). PBeam
-    // does the same at the end of the run, also when the run ends with a
-    // runtime error: PBeam has no `erlang:halt/2` (see "Run end" in
+    // does the same at the end of the run, also when `erlang:halt/2` or a
+    // runtime error ends the run (see "Run end" in
     // docs/erts-differences.md). The reader of `prim_tty` has a read select
     // of fd 0 at the end. On macOS, the kernel check of that select clears
     // `PENDIN`, which the change back to `ICANON` sets.
-    for (function, erts_status, pbeam_status) in [("main", 0, 0), ("halt", 0, 1), ("crash", 1, 1)] {
-        for (name, command, status) in [
-            ("ERTS", erts(function), erts_status),
-            ("PBeam", pbeam(function), pbeam_status),
-        ] {
+    for (function, status) in [("main", 0), ("halt", 0), ("crash", 1)] {
+        for (name, command) in [("ERTS", erts(function)), ("PBeam", pbeam(function))] {
             let modes = run_in_terminal(command, true);
             assert_ne!(modes.raw, modes.first, "{name} {function}: {modes:?}");
             assert_eq!(

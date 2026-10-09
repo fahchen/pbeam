@@ -7,6 +7,18 @@ use std::{ffi::c_int, time::Duration};
 
 use super::errno::errno;
 
+/// What [`wait_readable`] found on its fds.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    /// A `read` of each of these fds does not block: the fd has input, its
+    /// end of file, or an error.
+    Ready(Vec<c_int>),
+    /// The timeout ended, or a signal stopped the wait.
+    Pending,
+    /// An fd is not open, as `ERTS_POLL_EV_NVAL`.
+    Invalid,
+}
+
 /// Read at most `size` bytes from `fd` with one `read`, as `tty_read_nif`
 /// (`prim_tty_nif.c:646-657`) does. Return the bytes, which are empty at
 /// the end of file and when `size` is 0, or the `errno` of a failed
@@ -30,50 +42,29 @@ pub(crate) fn read(fd: c_int, size: usize) -> Result<Vec<u8>, c_int> {
 }
 
 /// Wait until a `read` of one of `fds` does not block, for at most
-/// `timeout`, or without end for `None`, with `select`. Return the fds
-/// that a `read` does not block, in the order of `fds`: each one has
-/// input, its end of file, or an error. Return no fd when the timeout ends
-/// or a signal stops the wait. Return `None` when an fd is not open, as
-/// `ERTS_POLL_EV_NVAL`. The ERTS poll thread
+/// `timeout`, or without end for `None`, with `select`. The ERTS poll thread
 /// waits for the read select of a NIF in the same way (`erl_process.c:3372`,
 /// `erl_check_io.c:2121-2152`), and its poll set also holds the read end of
-/// its wake pipe (`erl_poll.c:489-525`). ERTS uses `kqueue` on macOS and
-/// `epoll` on Linux, with a `select` or `poll` set for each fd that the
-/// kernel poll does not accept (`erl_poll.h:100-135`, `214-225`). `select`
-/// reads each fd type on both hosts. The macOS `poll` gives `POLLNVAL` for a
-/// character device such as `/dev/null`.
+/// its wake pipe (`erl_poll.c:489-525`). ERTS uses `kqueue` on macOS and `epoll` on
+/// Linux, with a `select` or `poll` set for each fd that the kernel poll
+/// does not accept (`erl_poll.h:100-135`, `214-225`). `select` reads each fd
+/// type on both hosts. The macOS `poll` gives `POLLNVAL` for a character
+/// device such as `/dev/null`. An fd can be at or above `FD_SETSIZE`, as in
+/// the ERTS poll: the sets grow with the largest fd (see [`FdSets`]).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // stdin is `/dev/null`.
-/// assert_eq!(wait_readable(&[libc::STDIN_FILENO], None), Some(vec![libc::STDIN_FILENO]));
-/// assert_eq!(wait_readable(&[1000], Some(Duration::ZERO)), None);
+/// assert_eq!(wait_readable(&[libc::STDIN_FILENO], None), Readiness::Ready(vec![0]));
+/// assert_eq!(wait_readable(&[1000], Some(Duration::ZERO)), Readiness::Invalid);
 /// ```
-///
-/// # Panics
-///
-/// An fd is negative or not below `FD_SETSIZE` (1024), which `select`
-/// cannot hold, for example `select cannot hold fd 1024: FD_SETSIZE is
-/// 1024`. The wake socket of the dirty IO threads gets such an fd when
-/// almost all fds below 1024 are open at the start of the run. ERTS waits with
-/// `kqueue` or `epoll`, which have no such limit (`erl_poll.h:100-135`).
-pub(crate) fn wait_readable(fds: &[c_int], timeout: Option<Duration>) -> Option<Vec<c_int>> {
-    let fd_set_size = c_int::try_from(libc::FD_SETSIZE).expect("FD_SETSIZE fits in c_int");
-    if let Some(fd) = fds.iter().find(|fd| !(0..fd_set_size).contains(*fd)) {
-        panic!("select cannot hold fd {fd}: FD_SETSIZE is {fd_set_size}");
+pub(crate) fn wait_readable(fds: &[c_int], timeout: Option<Duration>) -> Readiness {
+    let limit = fds.iter().max().map_or(0, |fd| fd + 1);
+    let mut sets = FdSets::new(limit);
+    for &fd in fds {
+        sets.set(fd);
     }
-    // SAFETY: `fd_set` is a C struct of integers, so all zeros is a valid
-    // value. `FD_ZERO` and `FD_SET` write only into `set`, and each fd is
-    // below `FD_SETSIZE`.
-    let mut set = unsafe {
-        let mut set: libc::fd_set = std::mem::zeroed();
-        libc::FD_ZERO(&raw mut set);
-        for &fd in fds {
-            libc::FD_SET(fd, &raw mut set);
-        }
-        set
-    };
     // `select` takes microseconds; round up, so the wait does not end
     // before a timer end.
     let mut time = timeout.map(|timeout| {
@@ -86,30 +77,100 @@ pub(crate) fn wait_readable(fds: &[c_int], timeout: Option<Duration>) -> Option<
     let time = time
         .as_mut()
         .map_or(std::ptr::null_mut(), |time| &raw mut *time);
-    let count = fds.iter().max().map_or(0, |fd| fd + 1);
-    // SAFETY: `select` reads and writes `set` and reads `time`, which is
-    // null or points to `timeval`, and it reads no other set.
+    // SAFETY: `select` reads and writes the bits of the fds below `limit`
+    // in `sets`, which holds them, and reads `time`, which is null or points
+    // to `timeval`. It reads no other set.
     let count = unsafe {
-        libc::select(
-            count,
-            &raw mut set,
+        select(
+            limit,
+            sets.0.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             time,
         )
     };
     match count {
-        // SAFETY: `FD_ISSET` reads only `set`, and each fd is below
-        // `FD_SETSIZE`.
-        1.. => Some(
-            fds.iter()
-                .copied()
-                .filter(|&fd| unsafe { libc::FD_ISSET(fd, &raw const set) })
-                .collect(),
-        ),
-        0 => Some(Vec::new()),
-        _ if errno() == libc::EINTR => Some(Vec::new()),
-        _ => None,
+        1.. => Readiness::Ready(fds.iter().copied().filter(|&fd| sets.is_set(fd)).collect()),
+        0 => Readiness::Pending,
+        _ if errno() == libc::EINTR => Readiness::Pending,
+        _ => Readiness::Invalid,
+    }
+}
+
+unsafe extern "C" {
+    /// The `select` of the host. On macOS, it is the variant of
+    /// `_DARWIN_UNLIMITED_SELECT`, as ERTS uses (`erl_poll.c:69-74`): the
+    /// other variant gives `EINVAL` for `nfds` above `FD_SETSIZE`. The Linux
+    /// `select` reads `nfds` bits of each set.
+    #[cfg_attr(target_os = "macos", link_name = "select$DARWIN_EXTSN")]
+    fn select(
+        nfds: c_int,
+        readfds: *mut libc::fd_set,
+        writefds: *mut libc::fd_set,
+        errorfds: *mut libc::fd_set,
+        timeout: *mut libc::timeval,
+    ) -> c_int;
+}
+
+/// A read set of `select` for the fds below a limit, also above
+/// `FD_SETSIZE`, as `ERTS_fd_set` (`erl_poll.c:148-196`). The sets are
+/// consecutive `fd_set` values, so their bits are one bit array: fd `n` is
+/// bit `n % FD_SETSIZE` of set `n / FD_SETSIZE`.
+struct FdSets(Vec<libc::fd_set>);
+
+impl FdSets {
+    /// Make an empty set for the fds below `limit`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let sets = FdSets::new(2000);
+    /// assert!(!sets.is_set(1999));
+    /// ```
+    fn new(limit: c_int) -> Self {
+        let size = usize::try_from(limit)
+            .unwrap_or(0)
+            .div_ceil(libc::FD_SETSIZE);
+        // SAFETY: `fd_set` is a C struct of integers, so all zeros is a
+        // valid value and an empty set.
+        Self(vec![unsafe { std::mem::zeroed() }; size.max(1)])
+    }
+
+    /// Add `fd`, a non-negative fd below the limit, to the set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut sets = FdSets::new(2000);
+    /// sets.set(1999);
+    /// assert!(sets.is_set(1999));
+    /// ```
+    fn set(&mut self, fd: c_int) {
+        let (set, bit) = Self::position(fd);
+        // SAFETY: `FD_SET` writes only bit `bit` of `set`, and `bit` is
+        // below `FD_SETSIZE`.
+        unsafe { libc::FD_SET(bit, &raw mut self.0[set]) };
+    }
+
+    /// Return whether `fd`, a non-negative fd below the limit, is in the set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!FdSets::new(1).is_set(0));
+    /// ```
+    fn is_set(&self, fd: c_int) -> bool {
+        let (set, bit) = Self::position(fd);
+        // SAFETY: `FD_ISSET` reads only bit `bit` of `set`, and `bit` is
+        // below `FD_SETSIZE`.
+        unsafe { libc::FD_ISSET(bit, &raw const self.0[set]) }
+    }
+
+    /// Return the index of the set and the bit in it for `fd`.
+    fn position(fd: c_int) -> (usize, c_int) {
+        let fd = usize::try_from(fd).expect("a non-negative fd");
+        let bit = c_int::try_from(fd % libc::FD_SETSIZE).expect("below FD_SETSIZE");
+        (fd / libc::FD_SETSIZE, bit)
     }
 }
 

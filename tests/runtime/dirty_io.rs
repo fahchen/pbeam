@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::host::input::wait_readable;
+use crate::runtime::host::input::{Readiness, wait_readable};
 use std::{
     io::{PipeReader, PipeWriter},
     time::Duration,
@@ -39,7 +39,7 @@ fn full_pipe() -> (PipeReader, PipeWriter) {
 /// Read all bytes that are in `reader` now.
 fn drain(reader: &mut PipeReader) {
     let mut bytes = [0; 4096];
-    while wait_readable(&[reader.as_raw_fd()], Some(Duration::ZERO)) != Some(vec![]) {
+    while wait_readable(&[reader.as_raw_fd()], Some(Duration::ZERO)) != Readiness::Pending {
         assert!(reader.read(&mut bytes).unwrap() > 0);
     }
 }
@@ -70,7 +70,7 @@ fn runs_a_call_on_a_dirty_io_thread_and_wakes_the_scheduler() {
     while completions.len() < 2 {
         assert_eq!(
             wait_readable(&wake, Some(COMPLETION_LIMIT)),
-            Some(wake.to_vec())
+            Readiness::Ready(wake.to_vec())
         );
         dirty_io.clear_wake();
         completions.extend(std::iter::from_fn(|| dirty_io.take_completion()));
@@ -93,7 +93,10 @@ fn runs_a_call_on_a_dirty_io_thread_and_wakes_the_scheduler() {
     );
     assert!(!dirty_io.running());
     assert_eq!(dirty_io.take_completion(), None);
-    assert_eq!(wait_readable(&wake, Some(Duration::ZERO)), Some(vec![]));
+    assert_eq!(
+        wait_readable(&wake, Some(Duration::ZERO)),
+        Readiness::Pending
+    );
     drop(writer);
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes).unwrap();
@@ -109,14 +112,14 @@ fn completes_a_later_call_while_a_call_waits_for_a_full_pipe() {
     dirty_io.submit(ProcessId(0), 0, write_to(&full_writer, &[1; 4096]));
     assert_eq!(
         wait_readable(&wake, Some(Duration::from_millis(20))),
-        Some(vec![])
+        Readiness::Pending
     );
     assert_eq!(dirty_io.take_completion(), None);
     // The second call runs on another thread while the first one waits.
     dirty_io.submit(ProcessId(1), 1, write_to(&other_writer, b"next"));
     assert_eq!(
         wait_readable(&wake, Some(COMPLETION_LIMIT)),
-        Some(wake.to_vec())
+        Readiness::Ready(wake.to_vec())
     );
     dirty_io.clear_wake();
     let second = Completion {
@@ -130,7 +133,7 @@ fn completes_a_later_call_while_a_call_waits_for_a_full_pipe() {
     drain(&mut full);
     assert_eq!(
         wait_readable(&wake, Some(COMPLETION_LIMIT)),
-        Some(wake.to_vec())
+        Readiness::Ready(wake.to_vec())
     );
     let first = Completion {
         process: ProcessId(0),

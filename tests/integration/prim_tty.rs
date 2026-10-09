@@ -1088,7 +1088,7 @@ fn returns_a_runtime_error_for_a_module_without_bindings() {
             "load_nif_probe:other",
             &[LOAD_NIF_PROBE, STAND_IN]
         ),
-        br#"Err(BeamError("erlang:load_nif/2 from load_nif_probe is not supported: PBeam has no native bindings for the module"))"#
+        br#"Err(Runtime("erlang:load_nif/2 from load_nif_probe is not supported: PBeam has no native bindings for the module"))"#
     );
 }
 

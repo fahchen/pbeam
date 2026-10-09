@@ -1,5 +1,5 @@
 -module(logger_start_probe).
--export([reverse/0, remove/0, without/0, ets/0, ets_access/0, find/0, from_list/0, is_key/0,
+-export([reverse/0, remove/0, take/0, without/0, ets/0, ets_access/0, find/0, from_list/0, is_key/0,
          to_list/0, map_next/0, next/0, ordered/0, ordered_second_call_badarg/0,
          demonitor/0, unlink/0, hd/0, system_logger/0,
          message_queue_data/0, system_flag/0, process_flag/0, unsupported_flag/1, raise/0,
@@ -37,6 +37,18 @@ remove() ->
      maps:keys(drop(1, 30, id(big(64)))),
      try maps:remove(a, id(foo)) catch error:R1 -> R1 end,
      try maps:remove(a, id([])) catch error:R2 -> R2 end].
+
+%% `maps:take/2` (erl_map.c:1910-1925). logger_h_common:cancel_repeated_filesync/1
+%% (logger_h_common.erl:461-475) takes the timer reference at the handler
+%% stop. A key that the map does not hold gives error, and a term that is
+%% not a map raises {badmap, Map}.
+take() ->
+    M = id(#{1 => one, 2 => two}),
+    [maps:take(1, M),
+     maps:take(3, M),
+     maps:take(one, id(#{one => 1})),
+     maps:keys(element(2, maps:take(33, id(big(33))))),
+     try maps:take(a, id(foo)) catch error:R1 -> R1 end].
 
 %% maps:without/2 (maps.erl:1139-1140) folds `fun maps:remove/2` over the
 %% keys. logger_h_common:adding_handler/1 (logger_h_common.erl:71) removes

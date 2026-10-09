@@ -2194,3 +2194,114 @@ fn timer_options(options: &Term) -> Option<(bool, bool)> {
     }
     Some((asynchronous, info))
 }
+
+/// The exit status of a halt whose flush timeout ends, as
+/// `ERTS_HALT_FLUSH_TIMEOUT_EXIT_CODE` (`erl_init.c:75`).
+const HALT_FLUSH_TIMEOUT_STATUS: i32 = 255;
+
+/// Run `erlang:halt(Status, Options)`, as `halt_2` (`bif.c:4309-4398`)
+/// does. `erlang:halt/0` and `erlang:halt/1` call it with the options `[]`
+/// (`erlang.erl:3357-3358`, `3383-3388`).
+///
+/// The options are checked first. Each element of a proper list must be
+/// `{flush, true | false}` or `{flush_timeout, T}`, else the call raises
+/// `badarg` (`bif.c:4316-4343`). `T` is a non-negative small integer, which
+/// `term_to_Uint32` truncates to 32 bits (`big.c:3648-3663`). The last
+/// option of each kind holds. ERTS gives this `badarg` the `error_info`
+/// cause `badopt`, which PBeam does not model.
+///
+/// A non-negative integer `Status` stops the run with the status code
+/// `Status` masked to `INT_MAX` (`bif.c:4346-4362`, `big.c:3545-3565`), as
+/// the error [`BeamError::Halt`]. Each other process stops at once, as in a
+/// halting ERTS scheduler (`erl_process.c:15220-15255`). PBeam writes each
+/// output with a host call before the call returns, so a flush has no port
+/// output to wait for. With a flush and a timeout of 0, the ERTS flush
+/// timer ends before the flush, and the node exits with status 255
+/// (`erl_process.c:15244-15248`, `erl_init.c:2771-2774`; measured 5 of 5).
+///
+/// `abort` (a core dump) and a slogan `Status` (a crash dump with the
+/// string as its slogan, see [`is_slogan`]) give a runtime error: PBeam
+/// writes no core dump and no crash dump. Each other `Status` raises
+/// `badarg` (`bif.c:4379`, `4388-4393`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(halt(&Term::Integer(259), &Term::List(vec![])), Err(BeamError::Halt(259)));
+/// assert!(matches!(halt(&Term::Integer(-1), &Term::List(vec![])), Ok(BifResult::Raise { .. })));
+/// assert!(halt(&Term::static_atom("abort"), &Term::List(vec![])).is_err());
+/// ```
+pub(super) fn halt(status: &Term, options: &Term) -> Result<BifResult, BeamError> {
+    let Term::List(options) = options else {
+        return Ok(BifResult::badarg());
+    };
+    let mut flush = true;
+    let mut timeout = None;
+    for option in options {
+        match option {
+            Term::Tuple(pair) => match pair.as_slice() {
+                [Term::Atom(name), Term::Atom(value)]
+                    if name.name() == "flush" && matches!(value.name(), "true" | "false") =>
+                {
+                    flush = value.name() == "true";
+                }
+                [Term::Atom(name), value] if name.name() == "flush_timeout" => {
+                    match value.small_integer() {
+                        Some(value @ 0..) => timeout = Some(value & i64::from(u32::MAX)),
+                        _ => return Ok(BifResult::badarg()),
+                    }
+                }
+                _ => return Ok(BifResult::badarg()),
+            },
+            _ => return Ok(BifResult::badarg()),
+        }
+    }
+    match status {
+        Term::Integer(code) if *code >= 0 => {
+            if flush && timeout == Some(0) {
+                return Err(BeamError::Halt(HALT_FLUSH_TIMEOUT_STATUS));
+            }
+            let code = i32::try_from(code & i64::from(i32::MAX)).expect("masked to INT_MAX");
+            Err(BeamError::Halt(code))
+        }
+        Term::Atom(abort) if abort.name() == "abort" => Err(error(
+            "unsupported erlang:halt/2 with abort: PBeam writes no core dump",
+        )),
+        _ if is_slogan(status) => Err(error(
+            "unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump",
+        )),
+        _ => Ok(BifResult::badarg()),
+    }
+}
+
+/// The most characters of a crash dump slogan, as `HALT_MSG_SIZE`
+/// (`bif.c:4373`).
+const HALT_MSG_SIZE: usize = 1023;
+
+/// Return whether `status` is a crash dump slogan of `erlang:halt/2`: a list
+/// for which `erts_unicode_list_to_buf` with at most `HALT_MSG_SIZE`
+/// characters does not give a type error (`bif.c:4372-4380`,
+/// `utils.c:2862-2942`). Each of the first 1023 elements must be a code
+/// point outside `0xD800..=0xDFFF`. The tail must be `[]`, unless the list
+/// has more than 1023 elements: ERTS cuts the slogan before it reads the
+/// tail.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_slogan(&Term::List(vec![Term::Integer(65)])));
+/// assert!(!is_slogan(&Term::List(vec![Term::static_atom("foo")])));
+/// assert!(!is_slogan(&Term::ImproperList(vec![Term::Integer(65)], Box::new(Term::static_atom("foo")))));
+/// ```
+fn is_slogan(status: &Term) -> bool {
+    let (elements, proper) = match status {
+        Term::List(elements) => (elements, true),
+        Term::ImproperList(elements, _) => (elements, false),
+        _ => return false,
+    };
+    let characters = elements.iter().take(HALT_MSG_SIZE).all(|element| {
+        matches!(element, Term::Integer(code)
+            if u32::try_from(*code).ok().and_then(char::from_u32).is_some())
+    });
+    characters && (proper || elements.len() > HALT_MSG_SIZE)
+}
