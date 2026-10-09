@@ -187,7 +187,7 @@ bifs! {
     erlang:hd/1 => |_, [list]| Ok(match list { Term::List(elements) | Term::ImproperList(elements, _) if !elements.is_empty() => Value(elements[0].clone()), _ => BifResult::badarg() }),
     erlang:hibernate/3 => unsupported,
     erlang:insert_element/3 => unsupported,
-    erlang:integer_to_binary/1 => unsupported,
+    erlang:integer_to_binary/1 => |cx, [term]| erlang::integer_to_binary(cx.scheduler.current_process_mut(), term),
     erlang:integer_to_binary/2 => unsupported,
     erlang:integer_to_list/1 => |cx, [term]| erlang::integer_to_list(cx.scheduler.current_process_mut(), term),
     erlang:integer_to_list/2 => unsupported,

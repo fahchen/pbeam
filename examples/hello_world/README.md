@@ -14,7 +14,7 @@ From the repository root, this command builds the example and runs it with the `
 mise run example hello_world
 ```
 
-Add `--erts` to run the same entry on the pinned ERTS with `erl -noshell`:
+Add `--erts` to run the same entry on the pinned ERTS with `erl +S 1 -noshell`. The `+S 1` flag gives ERTS one scheduler, as the `pbeam` binary has one scheduler thread:
 
 ```sh
 mise run example hello_world --erts
@@ -37,7 +37,7 @@ LC_ALL=C.UTF-8 cargo run --bin pbeam -- pbeam_boot start Elixir.HelloWorld main 
 With `--erts`, the task runs the same entry on the pinned ERTS after the compile commands:
 
 ```sh
-mise exec -- erl -noshell -pa target/examples/hello_world -pa "$(dirname "$elixir_io")" -eval "'Elixir.HelloWorld':main(), halt()."
+mise exec -- erl +S 1 -noshell -pa target/examples/hello_world -pa "$(dirname "$elixir_io")" -eval "'Elixir.HelloWorld':main(), halt()."
 ```
 
 The arguments after the module and function name are atoms. The arguments after `--` are the BEAM files to load. Run `cargo run --bin pbeam -- --help` to print the command options.

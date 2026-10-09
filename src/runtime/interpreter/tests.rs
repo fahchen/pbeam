@@ -2741,28 +2741,33 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
 }
 
 #[test]
-fn rejects_integer_to_list_of_a_bignum_with_no_reductions_left() {
+fn rejects_integer_conversions_of_a_bignum_with_no_reductions_left() {
     // `bump_reductions(4000)` leaves no reductions, and a `bif` instruction
-    // has no reduction test. ERTS then runs `integer_to_list/1` of a bignum
-    // on a dirty CPU scheduler (`bif.c:3289-3296`).
-    let body = vec![
-        Instruction::Move(Operand::Value(Term::Integer(4000)), Operand::X(0)),
-        erlang_call("bump_reductions", 1, false),
-        Instruction::Bif {
-            fail_label: 0,
-            module: "erlang".into(),
-            name: "integer_to_list".into(),
-            arguments: vec![Operand::Value(Term::Integer(1 << 59))],
-            destination: Operand::X(0),
-        },
-        Instruction::Return,
-    ];
-    let error = make_program(body, 0)
-        .execute("fixture", "main", &[])
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "unsupported erlang:integer_to_list/1 of 576460752303423488 with 0 reductions left: \
-         ERTS runs it on a dirty CPU scheduler"
-    );
+    // has no reduction test. ERTS then runs `integer_to_list/1` and
+    // `integer_to_binary/1` of a bignum on a dirty CPU scheduler
+    // (`bif.c:3289-3296`, `binary.c:98-105`).
+    for name in ["integer_to_list", "integer_to_binary"] {
+        let body = vec![
+            Instruction::Move(Operand::Value(Term::Integer(4000)), Operand::X(0)),
+            erlang_call("bump_reductions", 1, false),
+            Instruction::Bif {
+                fail_label: 0,
+                module: "erlang".into(),
+                name: name.into(),
+                arguments: vec![Operand::Value(Term::Integer(1 << 59))],
+                destination: Operand::X(0),
+            },
+            Instruction::Return,
+        ];
+        let error = make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "unsupported erlang:{name}/1 of 576460752303423488 with 0 reductions left: \
+                 ERTS runs it on a dirty CPU scheduler"
+            )
+        );
+    }
 }
