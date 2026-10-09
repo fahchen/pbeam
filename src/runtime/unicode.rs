@@ -612,4 +612,5 @@ pub(super) fn filename_from_native(
 }
 
 #[cfg(test)]
+#[path = "../../tests/runtime/unicode.rs"]
 mod tests;

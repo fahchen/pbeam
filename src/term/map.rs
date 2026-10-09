@@ -1117,4 +1117,5 @@ fn map_hash(key: &Term) -> Option<u64> {
 }
 
 #[cfg(test)]
+#[path = "../../tests/term/map.rs"]
 mod tests;

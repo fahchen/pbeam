@@ -1,7 +1,7 @@
 //! The pinned OTP modules that a log event of `?LOG_ERROR` calls after the
 //! boot, and the time mask of a legacy `logger_formatter` header. A test
 //! that runs a log event with the `pbeam` binary includes this file with
-//! `#[path = "common/log_event.rs"] mod log_event;`. A constant in
+//! `#[path = "../common/log_event.rs"] mod log_event;`. A constant in
 //! `common/mod.rs` would be dead code in each other test crate.
 
 use std::ops::RangeInclusive;
