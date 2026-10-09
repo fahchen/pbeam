@@ -40,6 +40,43 @@ fn runs_hello_world_with_one_command_as_pinned_erts() {
     }
 }
 
+#[test]
+fn runs_fairness_as_pinned_erts_with_one_scheduler() {
+    // `examples/fairness` spawns the busy processes `a` and `b`. Each one
+    // counts to 20000 with no receive and reports each 10 steps. On one
+    // scheduler, each turn of a process ends when it has used its 4000
+    // reductions, and then the other process runs. The ERTS run uses
+    // `erl +S 1`; with more schedulers, the runs change from one start to
+    // the next.
+    let expected: String = [
+        "a 10..2660",
+        "b 10..2660",
+        "a 2670..5330",
+        "b 2670..5330",
+        "a 5340..8000",
+        "b 5340..8000",
+        "a 8010..10660",
+        "b 8010..10660",
+        "a 10670..13330",
+        "b 10670..13330",
+        "a 13340..16000",
+        "b 13340..16000",
+        "a 16010..18660",
+        "b 16010..18660",
+        "a 18670..20000",
+        "b 18670..20000",
+    ]
+    .iter()
+    .map(|line| format!("{line}\\n"))
+    .collect();
+
+    let erts = run_example(&["fairness", "--erts"], None);
+    let pbeam = run_example(&["fairness"], None);
+
+    assert_eq!(parts(&erts), (expected, String::new(), Some(0)), "ERTS");
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+}
+
 /// Run `mise run example` with `arguments`, with no locale variable except
 /// `LC_ALL=locale`. `PBEAM_BIN` gives the `pbeam` binary of this test
 /// build, which `cargo llvm-cov` measures, so the task does not start
