@@ -69,8 +69,9 @@ pub(super) struct Completion {
 #[derive(Debug)]
 pub(super) struct DirtyIo {
     /// The send end of the call queue. `None` until the first call starts
-    /// the threads. When the run drops it, each thread stops after its
-    /// current call.
+    /// the threads. When the run drops it, the threads still run the calls
+    /// in the queue, and each thread stops when the queue is empty. The
+    /// end of the run with calls that run or wait is task #20.
     jobs: Option<Sender<Job>>,
     /// The send end of the scheduler inbox. Each thread holds a copy.
     completion_sender: Sender<Completion>,
@@ -234,10 +235,10 @@ impl DirtyIo {
     }
 }
 
-/// Run the calls of the queue until the run drops the queue: write each
-/// call, send its completion to the scheduler inbox, then write one byte to
-/// the wake socket, as `wake_poller` writes to the ERTS wake pipe
-/// (`erl_poll.c:429-462`). A full wake socket already wakes the scheduler,
+/// Run the calls of the queue until the run drops the queue and the queue
+/// is empty: write each call, send its completion to the scheduler inbox,
+/// then write one byte to the wake socket, as `wake_poller` writes to the
+/// ERTS wake pipe (`erl_poll.c:429-462`). A full wake socket already wakes the scheduler,
 /// so the thread ignores a write that fails with `WouldBlock`.
 ///
 /// # Examples
@@ -263,7 +264,8 @@ fn run_jobs(jobs: &Mutex<Receiver<Job>>, completions: &Sender<Completion>, wake:
             written,
         };
         // The send fails only after the run dropped the inbox. The run then
-        // also dropped the queue, so the next receive ends the thread.
+        // also dropped the queue, so a receive ends the thread when the
+        // queue is empty.
         _ = completions.send(completion);
         _ = (&*wake).write(&[0]);
     }
