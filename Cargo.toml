@@ -10,3 +10,8 @@ libc = "0.2"
 
 [build-dependencies]
 cc = "1"
+
+# The tests interpret BEAM code; opt-level 1 makes the instrumented test run about two times faster.
+# The clippy lint build keeps the dev profile.
+[profile.test]
+opt-level = 1
