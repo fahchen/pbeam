@@ -85,6 +85,27 @@ pub(super) fn get(key: &Term, map: &Term) -> BifResult {
         .map_or_else(|| error_with("badkey", key), |value| Value(value.clone()))
 }
 
+/// Run `erlang:map_size/1`: return the number of pairs of a flatmap or a
+/// hashmap, as ERTS `map_size_1` does (`erl_map.c:146-179`). A term that is
+/// not a map raises `error:{badmap, Term}`. The pinned compiler emits the
+/// guard BIF as `gc_bif`. In a guard, the instruction goes to its fail label
+/// instead, as `emit_bif_map_size` does
+/// (`jit/arm/instr_guard_bifs.cpp:947-991`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(test_atom("a"), Term::Integer(1))])?);
+/// assert!(matches!(size(&map), BifResult::Value(Term::Integer(1))));
+/// assert!(matches!(size(&test_atom("foo")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn size(map: &Term) -> BifResult {
+    let Term::Map(entries) = map else {
+        return error_with("badmap", map);
+    };
+    Value(Term::Integer(entries.len() as i64))
+}
+
 /// Run `maps:find/2`: return `{ok, Value}` for a key that the map holds and
 /// `error` for another key, as ERTS `maps_find_2` does
 /// (`erl_map.c:225-243`). A term that is not a map raises
