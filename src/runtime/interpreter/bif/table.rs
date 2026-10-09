@@ -95,7 +95,7 @@ bifs! {
     erlang:adler32/2 => unsupported,
     erlang:adler32_combine/3 => unsupported,
     erlang:alias/1 => unsupported,
-    erlang:and/2 => unsupported,
+    erlang:and/2 => |_, [left, right]| Ok(match (left, right) { (Term::Atom(left), Term::Atom(right)) if matches!(left.name(), "true" | "false") && matches!(right.name(), "true" | "false") => Value(Term::static_atom(if left.name() == "true" && right.name() == "true" { "true" } else { "false" })), _ => BifResult::badarg() }),
     erlang:append/2 => unsupported,
     erlang:append_element/2 => unsupported,
     erlang:atom_to_binary/2 => |_, [term, encoding]| Ok(erlang::atom_to_binary(term, encoding)),

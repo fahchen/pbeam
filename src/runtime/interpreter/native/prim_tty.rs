@@ -6,11 +6,11 @@ use super::*;
 use crate::runtime::{
     host::{
         errno::errno_id,
-        output,
+        input, output,
         terminal::{self, TerminalCheck},
     },
     signal::Signal,
-    tty::{TtyResource, TtyState, Ttys},
+    tty::{InputSelect, TtyResource, TtyState, Ttys},
 };
 use crate::term::Reference;
 
@@ -62,6 +62,13 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, arguments| isatty(&mut scheduler.atoms, &arguments[0]),
     },
     Binding {
+        name: "read_nif",
+        arity: 3,
+        run: |scheduler, arguments| {
+            read_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
+        },
+    },
+    Binding {
         name: "setlocale",
         arity: 1,
         run: |_, _| Ok(setlocale()),
@@ -89,7 +96,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "tty_select",
         arity: 2,
-        run: |scheduler, arguments| Ok(tty_select(scheduler, &arguments[0])),
+        run: |scheduler, arguments| Ok(tty_select(scheduler, &arguments[0], &arguments[1])),
     },
     Binding {
         name: "tty_window_size",
@@ -212,6 +219,7 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
             first_mode,
             set_mode: first_mode,
             owner: None,
+            reader: None,
         },
     );
     Ok(BifResult::Value(Term::Tuple(vec![
@@ -348,37 +356,141 @@ fn monitor_caller(scheduler: &mut Scheduler, tty: Reference) {
 /// Run `prim_tty:tty_select(TTY, Ref)`, as the ERTS NIF `tty_select_nif`
 /// (`prim_tty_nif.c:1213-1233`) does on Unix. A term that is not a TTY
 /// resource raises `error:badarg` (`prim_tty_nif.c:1220-1221`). Else the
-/// resource monitors the caller (`prim_tty_nif.c:1229-1230`; see
-/// [`monitor_caller`]), and the result is `ok`.
-///
-/// ERTS also selects fd 0 for read with `Ref` as the message reference
-/// (`prim_tty_nif.c:1227`), and makes the caller the reader, which
-/// `tty_monitor_down` reads only to stop that select
-/// (`prim_tty_nif.c:1242-1244`). PBeam has no IO poll, so the binding does
-/// not read `Ref` and keeps no reader. The monitor is still observable:
-/// when the caller exits and is the owner of the resource, the monitor sets
+/// binding selects fd 0, the input fd of the resource, for read with `Ref`
+/// as the message reference and the caller as the recipient
+/// (`prim_tty_nif.c:1227`; see [`select_input`]). The caller becomes the
+/// reader of the resource, the resource monitors it
+/// (`prim_tty_nif.c:1229-1230`; see [`monitor_caller`]), and the result is
+/// `ok`. When the reader exits, its monitor removes the select of fd 0
+/// (`prim_tty_nif.c:1242-1244`), and when it is also the owner, it sets
 /// fd 0 to the first mode of the resource (`prim_tty_nif.c:1238-1239`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(tty_select(&mut scheduler, &tty), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
-/// assert!(matches!(tty_select(&mut scheduler, &Term::static_atom("ok")), BifResult::Raise { .. }));
+/// let reference = Term::Reference(scheduler.make_ref()?);
+/// assert!(matches!(tty_select(&mut scheduler, &tty, &reference), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(tty_select(&mut scheduler, &Term::static_atom("ok"), &reference), BifResult::Raise { .. }));
 /// ```
-fn tty_select(scheduler: &mut Scheduler, tty: &Term) -> BifResult {
-    let Term::Reference(reference) = tty else {
+fn tty_select(scheduler: &mut Scheduler, tty: &Term, reference: &Term) -> BifResult {
+    let Term::Reference(tty) = tty else {
         return BifResult::badarg();
     };
-    if scheduler
+    let caller = scheduler.current_process_mut().id;
+    let Some(resource) = scheduler.resources.borrow_mut::<Ttys>().get_mut(*tty) else {
+        return BifResult::badarg();
+    };
+    resource.reader = Some(caller);
+    select_input(scheduler, *tty, reference);
+    monitor_caller(scheduler, *tty);
+    BifResult::Value(Term::static_atom("ok"))
+}
+
+/// Select fd 0 for read for the TTY resource `tty`, with the caller as the
+/// recipient and `reference` as the message reference, as
+/// `enif_select(env, tty->ifd, ERL_NIF_SELECT_READ, tty, NULL, Ref)`
+/// does (`erl_check_io.c:1236-1465`). When fd 0 has input, the caller gets
+/// `{select, TTY, Ref, ready_input}` (see `Scheduler::wait_input`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// select_input(&mut scheduler, tty, &Term::static_atom("undefined"));
+/// ```
+fn select_input(scheduler: &mut Scheduler, tty: Reference, reference: &Term) {
+    let recipient = scheduler.current_process_mut().id;
+    scheduler
         .resources
         .borrow_mut::<Ttys>()
-        .get(*reference)
-        .is_none()
-    {
-        return BifResult::badarg();
+        .select_input(InputSelect {
+            tty,
+            recipient,
+            reference: reference.clone(),
+        });
+}
+
+/// The most bytes of one `read_nif/3` (`prim_tty_nif.c:449`).
+const READ_LIMIT: u64 = 1024;
+
+/// Run `prim_tty:read_nif(TTY, Ref, N)`, as the ERTS NIF `tty_read_nif`
+/// (`prim_tty_nif.c:429-675`) does on Unix. A term that is not a TTY
+/// resource, then an `N` that is not an integer from 0 to 2^64 - 1, raises
+/// `error:badarg` (`prim_tty_nif.c:443-447`). PBeam holds an integer only
+/// up to 2^63 - 1 (see the "Integer range" row of
+/// `docs/erts-differences.md`), so an `N` from 2^63 to 2^64 - 1 does not
+/// get to the binding.
+///
+/// Else the binding reads at most `N` bytes, and at most 1024, from fd 0
+/// with one `read` (`prim_tty_nif.c:449`, `646-657`):
+///
+/// - A `read` that gives 0 bytes, at the end of file or for an `N` of 0,
+///   gives `{error, closed}`.
+/// - A `read` that fails with `EAGAIN` or `EINTR` gives `{ok, <<>>}`.
+/// - A `read` that fails with each other errno gives
+///   `{error, {read, Errno}}` with the `erl_errno_id` atom.
+/// - Else the result is `{ok, Bytes}`.
+///
+/// For `{ok, _}`, the binding first selects fd 0 for read again with `Ref`
+/// and the caller as the recipient (`prim_tty_nif.c:660`; see
+/// [`select_input`]).
+///
+/// ERTS runs this NIF on a dirty IO scheduler (`prim_tty_nif.c:163`). PBeam
+/// has one scheduler thread, so a `read` that blocks stops all processes
+/// until it returns. The `prim_tty` reader calls `read_nif/3` only after
+/// its select message (prim_tty.erl:467-476), and then fd 0 has input.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // stdin is a pipe that holds "hi\n".
+/// // {ok, <<"hi\n">>}
+/// assert!(matches!(read_nif(&mut scheduler, &tty, &reference, &Term::Integer(1024))?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(read_nif(&mut scheduler, &tty, &reference, &Term::Integer(-1))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A new errno atom or the atom `read` in a full atom table gives the
+/// error of `AtomTable::put`.
+fn read_nif(
+    scheduler: &mut Scheduler,
+    tty: &Term,
+    reference: &Term,
+    size: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Reference(tty) = tty else {
+        return Ok(BifResult::badarg());
+    };
+    if scheduler.resources.borrow_mut::<Ttys>().get(*tty).is_none() {
+        return Ok(BifResult::badarg());
     }
-    monitor_caller(scheduler, *reference);
-    BifResult::Value(Term::static_atom("ok"))
+    let Term::Integer(size) = size else {
+        return Ok(BifResult::badarg());
+    };
+    let Ok(size) = u64::try_from(*size) else {
+        return Ok(BifResult::badarg());
+    };
+    let size = usize::try_from(size.min(READ_LIMIT)).expect("1024 fits in usize");
+    let bytes = match input::read(libc::STDIN_FILENO, size) {
+        Ok(bytes) if bytes.is_empty() => {
+            let closed = Term::Tuple(vec![
+                Term::static_atom("error"),
+                Term::static_atom("closed"),
+            ]);
+            return Ok(BifResult::Value(closed));
+        }
+        Ok(bytes) => bytes,
+        Err(libc::EAGAIN | libc::EINTR) => Vec::new(),
+        Err(errno) => {
+            let error = errno_error(&mut scheduler.atoms, "read", errno)?;
+            return Ok(BifResult::Value(error));
+        }
+    };
+    select_input(scheduler, *tty, reference);
+    Ok(BifResult::Value(Term::Tuple(vec![
+        Term::static_atom("ok"),
+        Term::Binary(bytes),
+    ])))
 }
 
 /// Run `prim_tty:tty_encoding(TTY)`, as the ERTS NIF `tty_encoding_nif`
