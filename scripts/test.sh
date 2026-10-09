@@ -17,6 +17,13 @@ else
   # state of the crate. --no-clean keeps it, so rustc reuses the unchanged codegen units.
   # The profraw files of the last run must go, or their counts would cover lines that no test runs now.
   cargo llvm-cov clean --profraw-only
+  # A change of the profile or the features gives the test executables new file names, and the old
+  # executables stay. cargo-llvm-cov reports each executable whose name matches a target, so the old
+  # ones would add uncovered lines. rustc links the executables again from the incremental state.
+  deps=target/llvm-cov-target/debug/deps
+  if [[ -d "$deps" ]]; then
+    find "$deps" -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+  fi
   cargo llvm-cov nextest --locked --workspace --all-features --no-clean \
     --status-level slow --final-status-level slow --no-fail-fast \
     --cobertura --output-path target/coverage.xml
