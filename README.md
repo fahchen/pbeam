@@ -64,6 +64,8 @@ line coverage. The constant-return BEAM fixture is checked in at
 World entry instructions and imports.
 See the [evidence table](docs/hello-world-target.md).
 
+In CI, a pull request that changes only Markdown files runs `mise run lint` instead of `mise run check`. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.sh` lists these files. A push to `main` always runs `mise run check`.
+
 ## Delivery
 
 Work is managed in [GitHub Issues](https://github.com/fahchen/pbeam/issues),
