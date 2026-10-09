@@ -1,9 +1,9 @@
 -module(exit_owned_probe).
--export([tables/2, table_gcs/2]).
--export([table_exiter/4, watcher/4]).
+-export([tables/2, table_gcs/2, ttys/2, tty_gcs/2]).
+-export([table_exiter/4, tty_exiter/4, watcher/4]).
 
-%% The ETS tables of an exiting process on the pinned ERTS JIT
-%% (erts_continue_exit_process, erl_process.c:14270-14833).
+%% The ETS tables and the TTY resource monitors of an exiting process on
+%% the pinned ERTS JIT (erts_continue_exit_process, erl_process.c:14270-14833).
 %%
 %% Each case races a process a, which exits after it uses all but
 %% 3997 - K reductions of a turn, with a process b, which a spawns in that
@@ -30,6 +30,18 @@ tables(Cases, Opts) ->
 table_gcs(Cases, Opts) ->
     [{Case, gc_count(table_race(Case, Opts, true))} || Case <- Cases].
 
+%% Case {Before, After, Late, K}: the collector monitors a Before times, a
+%% calls prim_tty:tty_select/2, and the collector then monitors a After
+%% times. With Late =:= true, a calls prim_tty:tty_select/2 again in its
+%% exit turn, so that the monitor signal of that call is still in its queue
+%% at the exit.
+ttys(Cases, Opts) ->
+    [{Case, tty_race(Case, Opts, false)} || Case <- Cases].
+
+%% ERTS only: the number of garbage collections of a and b in each case.
+tty_gcs(Cases, Opts) ->
+    [{Case, gc_count(tty_race(Case, Opts, true))} || Case <- Cases].
+
 gc_count(Runs) ->
     lists:sum([Count || {gc, Count} <- Runs]).
 
@@ -39,9 +51,24 @@ table_race({Sizes, K}, Opts, Trace) ->
     trace(Trace, A, Root),
     collect(1, false, []).
 
+tty_race({Before, After, Late, K}, Opts, Trace) ->
+    Root = self(),
+    {A, _} = spawn_opt(?MODULE, tty_exiter, [Root, Late, K, Opts], [monitor | Opts]),
+    trace(Trace, A, Root),
+    monitor_times(Before, A),
+    receive {ready, A} -> ok end,
+    monitor_times(After, A),
+    A ! go,
+    collect(1 + Before + After, false, []).
+
 trace(false, _, _) -> false;
 trace(true, A, Root) ->
     erlang:trace(A, true, [garbage_collection, set_on_spawn, {tracer, Root}]).
+
+monitor_times(0, _) -> ok;
+monitor_times(N, A) ->
+    monitor(process, A),
+    monitor_times(N - 1, A).
 
 %% a registers its name, makes its tables, and switches out. In its next
 %% turn it spawns b and exits: spawn_opt/4 1, bump_reductions/1 1 + K,
@@ -81,6 +108,26 @@ delete(_, 0) -> ok;
 delete(Name, N) ->
     true = ets:delete(Name, N),
     delete(Name, N - 1).
+
+%% a handles the monitor signals of the first monitors, calls
+%% tty_select/2, and handles its monitor signal in the receive of go. The
+%% collector monitors a again before it sends go. a then switches out, and
+%% in its next turn it spawns b and exits.
+tty_exiter(Root, Late, K, Opts) ->
+    register(exiter, self()),
+    {ok, TTY} = prim_tty:tty_create(stdout),
+    ok = prim_tty:tty_select(TTY, make_ref()),
+    Root ! {ready, self()},
+    receive go -> ok end,
+    erlang:yield(),
+    erlang:yield(),
+    spawn_opt(?MODULE, watcher, [Root, exiter, [], 2000], Opts),
+    late(Late, TTY),
+    erlang:bump_reductions(K),
+    ok.
+
+late(false, _) -> ok;
+late(true, TTY) -> prim_tty:tty_select(TTY, make_ref()).
 
 watcher(Collector, _, _, 0) ->
     Collector ! done;

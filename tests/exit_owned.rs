@@ -4,6 +4,10 @@ use pbeam_runtime::{BeamProgram, Term};
 
 const EXIT_OWNED_PROBE: &[u8] = include_bytes!("../fixtures/preempt/exit_owned_probe.beam");
 
+/// The stand-in `prim_tty` with the NIF stubs of the pinned module. It is in
+/// a subdirectory, so `-pa` does not load it at boot.
+const STAND_IN: &[u8] = include_bytes!("../fixtures/prim_tty/nif/prim_tty.beam");
+
 /// The spawn options of the measured processes in the ERTS reference run: a
 /// heap of 4,000,000 words and a binary heap of 40,000,000 words, so that no
 /// measured process collects garbage. PBeam has no process heap and runs
@@ -69,6 +73,37 @@ const TABLES: &str = "[{{[10],3854},[{{b,false,0},363},{{down,normal},1},{\
                       {down,normal},1},{{b,true,0},1},{{b,false,0},5406}]},{{[{atoms,3000},{\
                       atoms,3000}],3368},[{{b,true,1},286},{{b,true,0},307},{\
                       {down,normal},1},{{b,true,0},1},{{b,false,0},5406}]}]";
+
+/// The cases of `exit_owned_probe:ttys/2`: `{Before, After, Late, K}`. The
+/// monitor list of `a` has the monitor of `spawn_opt/4`, the `Before`
+/// monitors, the TTY monitor of `tty_select/2`, and the `After` monitors.
+const TTY_CASES: &str = "[{10,10,false,3842},{10,10,false,3830},{10,10,true,3842},{\
+                         10,10,true,3600}]";
+
+/// `exit_owned_probe:ttys/2` with [`TTY_CASES`] on the pinned ERTS with
+/// `erl +S 1`. `enif_monitor_process` sends a monitor signal, so the TTY
+/// monitor is in the list at the point where `a` handled the signal
+/// (`erl_nif.c:3985-3989`; `erl_proc_sig_queue.c:6544-6562`). Each entry
+/// uses 1 (`erl_process.c:13797-13833`).
+///
+/// - `{10, 10, false, 3842}`: 3 reductions are left for the list, so the
+///   first turn sends 3 `DOWN` messages. A TTY monitor at the start of the
+///   list would give 2.
+/// - `{10, 10, false, 3830}`: 15 are left: 14 `DOWN` messages and the TTY
+///   monitor.
+/// - `{10, 10, true, 3842}`: the late `tty_select/2` uses 1 more, so 2
+///   `DOWN` messages. Its monitor signal is still in the queue, and the
+///   signal phase runs the TTY monitor (`erl_proc_sig_queue.c:7347-7355`).
+///   Two TTY monitors at the start of the list would give no `DOWN`
+///   message.
+/// - `{10, 10, true, 3600}`: the exit ends in its first turn.
+const TTYS: &str = "[{{10,10,false,3842},[{{down,normal},3},{{b,false,0},444},{\
+                    {down,normal},18},{{b,false,0},1556}]},{\
+                    {10,10,false,3830},[{{down,normal},14},{{b,false,0},444},{\
+                    {down,normal},7},{{b,false,0},1556}]},{\
+                    {10,10,true,3842},[{{down,normal},2},{{b,false,0},444},{\
+                    {down,normal},19},{{b,false,0},1556}]},{\
+                    {10,10,true,3600},[{{down,normal},21},{{b,false,0},2000}]}]";
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// lists, and tuples of the probe results.
@@ -172,5 +207,50 @@ fn deletes_the_owned_tables_as_pinned_erts_with_one_scheduler() {
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         format!("{TABLES}\n")
+    );
+}
+
+#[test]
+fn runs_the_tty_monitors_in_the_order_of_pinned_erts() {
+    let program = BeamProgram::load(&[EXIT_OWNED_PROBE, STAND_IN]).unwrap();
+    let ttys = program
+        .execute(
+            "exit_owned_probe",
+            "ttys",
+            &[parse(&program, TTY_CASES), Term::List(vec![])],
+        )
+        .unwrap();
+    assert_eq!(text(&ttys), TTYS);
+
+    // The stand-in replaces the `prim_tty` of the boot, so the reference
+    // prints with `erlang:display/1`, which needs no IO server and ends the
+    // line with `\r\n`.
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noinput",
+            "-nostick",
+            "-pa",
+            "fixtures/preempt",
+            "-eval",
+            &format!(
+                "{{module, prim_tty}} = code:load_abs(\"fixtures/prim_tty/nif/prim_tty\"), \
+                 ok = prim_tty:load(\"prim_tty\"), \
+                 {{module, M}} = code:ensure_loaded(exit_owned_probe), \
+                 jit = erlang:system_info(emu_flavor), O = {ERTS_OPTIONS}, C = {TTY_CASES}, \
+                 E = M:ttys(C, O), [0] = lists:usort([G || {{_, G}} <- M:tty_gcs(C, O)]), \
+                 erlang:display(E), halt()."
+            ),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{TTYS}\r\n")
     );
 }

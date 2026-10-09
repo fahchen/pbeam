@@ -6,7 +6,7 @@ use super::{
     persistent_term::PersistentTerms,
     process::{
         Flush, Frame, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer, Start,
-        TimerReference, WalkPosition,
+        TargetMonitor, TimerReference, WalkPosition,
     },
     regex_code::RegexCodes,
     resources::Resources,
@@ -116,8 +116,7 @@ enum ExitPhase {
     /// The monitor tree of the process, in post-order.
     Monitors(Option<WalkPosition>),
     /// The monitors of other processes and resources on the process
-    /// (`ERTS_P_LT_MONITORS`): the TTY resource monitors, then the entries
-    /// of `monitored_by` from the index.
+    /// (`ERTS_P_LT_MONITORS`): the entries of `monitored_by` from the index.
     TargetMonitors(usize),
     /// The signals in the queue of the process.
     Signals,
@@ -859,10 +858,10 @@ impl Scheduler {
         child.group_leader = self.current_process_mut().group_leader;
         let reference = if monitor {
             let reference = self.make_ref()?;
-            child.monitored_by.push(Monitor {
+            child.monitored_by.push(TargetMonitor::Process(Monitor {
                 watcher: parent,
                 reference,
-            });
+            }));
             let origin = Origin {
                 monitor: Some(OriginMonitor {
                     kind: "process",
@@ -1330,8 +1329,9 @@ impl Scheduler {
     ///    `erl_process.c:14068-14165`).
     /// 2. Send a demonitor signal to the target of each monitor that it
     ///    holds, and end each alias (`erl_process.c:13891-13977`).
-    /// 3. Run its TTY resource monitors, and send a monitor down signal to
-    ///    each process that monitors it (`erl_process.c:13806-13815`).
+    /// 3. Send a monitor down signal to each process that monitors it, and
+    ///    run each monitor of a TTY resource on it
+    ///    (`erl_process.c:13806-13833`).
     /// 4. Answer the signals that it did not handle (see
     ///    [`Scheduler::handle_exit_signals`]).
     /// 5. Send the pending monitor signal, when there is one.
@@ -1348,10 +1348,10 @@ impl Scheduler {
     /// The links and the monitors that the process holds go in the
     /// post-order of their red-black trees, as `foreach_delete_yielding`
     /// destroys the ERTS trees (`erl_process.c:14545-14572`;
-    /// `erl_monitor_link.c:439-460`). The monitors of the process go in the
-    /// order that it handled their monitor signals, as ERTS goes through
-    /// its list `ERTS_P_LT_MONITORS` (`erl_proc_sig_queue.c:6555`;
-    /// `erl_monitor_link.h:652-669`).
+    /// `erl_monitor_link.c:439-460`). The monitors on the process, of
+    /// processes and of TTY resources, go in the order that it handled their
+    /// monitor signals, as ERTS goes through its list `ERTS_P_LT_MONITORS`
+    /// (`erl_proc_sig_queue.c:6555`; `erl_monitor_link.h:652-669`).
     ///
     /// # Examples
     ///
@@ -1426,26 +1426,22 @@ impl Scheduler {
                     ExitPhase::TargetMonitors(0)
                 }
                 ExitPhase::TargetMonitors(mut done) => {
-                    // ERTS runs the NIF resource monitors of the process in
-                    // this phase too.
-                    let mut ttys = self.resources.borrow_mut::<Ttys>().monitor_count(id);
-                    for _ in 0..ttys + process.monitored_by.len() - done {
+                    while let Some(&monitor) = process.monitored_by.get(done) {
                         if reds <= 0 {
                             return self.switch_out_freed(process, ExitPhase::TargetMonitors(done));
                         }
-                        if ttys > 0 {
-                            self.resources.borrow_mut::<Ttys>().monitor_down(id);
-                            ttys -= 1;
-                        } else {
-                            let monitor = &process.monitored_by[done];
-                            self.send_monitor_down(
+                        match monitor {
+                            TargetMonitor::Process(monitor) => self.send_monitor_down(
                                 Some(id),
                                 monitor.watcher,
                                 monitor.reference,
                                 reason.clone(),
-                            );
-                            done += 1;
+                            ),
+                            TargetMonitor::Tty(tty) => {
+                                self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
+                            }
                         }
+                        done += 1;
                         reds -= 1;
                     }
                     ExitPhase::Signals
