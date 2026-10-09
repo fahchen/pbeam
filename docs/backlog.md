@@ -87,7 +87,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - `persistent_term:put/2` of a new value switches out the caller in PBeam, and the new value is visible at once. ERTS makes the new table visible after thread progress, and suspends the caller until then (`erl_bif_persistent.c:774-779`). With `erl +S 1`, other processes then run 2 to 5 turns before the caller continues.
 - While `persistent_term:get/0` traps, ERTS keeps the update permission until its last chunk, and `persistent_term:put/2` of another process suspends until ERTS releases the permission, and then tries again (`erl_bif_persistent.c:333-345`, `692-694`, `1311-1335`, `1353-1357`). PBeam changes the table at once, and the trapped call returns the table of its first call.
 - The "Persistent terms" row of `docs/erts-differences.md` records the two suspensions, and this entry owns them. Thread progress depends on all managed threads of the node, so PBeam on one scheduler does not model it.
-- **Trigger:** multiple schedulers (M4, #27), or a consumer that needs the exact interleaving around `persistent_term:put/2`, also a put while `persistent_term:get/0` traps.
+- **Trigger:** multiple schedulers (M10, #27), or a consumer that needs the exact interleaving around `persistent_term:put/2`, also a put while `persistent_term:get/0` traps.
 - **Source:** #234 (PR #243), #245 (PR #249), and #258.
 
 ### Complete a trapped `ets:insert/2` in the process that uses the table
