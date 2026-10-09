@@ -123,6 +123,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path matches a binary with one of these commands or instructions. Add only the commands and instructions that the path needs.
 - **Source:** #219 (PR #227).
 
+### Set raw mode through `shell:start_interactive({noshell, raw})`
+
+- `shell:start_interactive({noshell, raw})` calls `user_drv:start_shell/1` (shell.erl:149-150). `user_drv` calls `prim_tty:reinit/2` with the input `raw` (user_drv.erl:387-411), and `prim_tty` reads the terminfo values `co` and `xn` with `tigetnum_nif/1` and `tigetflag_nif/1` (prim_tty.erl:333-345, 1405-1408). These NIFs have no PBeam binding, so the stub raises `error:undef` (see "Native functions without a binding" in `docs/effect-inventory.md`). `user_drv` catches only `error:enotsup` (user_drv.erl:412) and raises the exception again with the `raise` instruction (opcode 108), which stops the run with `unsupported BEAM opcode 108`. Thus a PBeam program cannot set fd 0 to raw mode yet. The test of #300 sets raw mode with `stty` while the program waits.
+- **Evidence:** `ok = user_drv:start_shell(#{initial_shell => noshell, input => raw})` in a probe run by `pbeam_boot` in a pseudo-terminal stops with `pbeam: unsupported BEAM opcode 108` and status 1. On pinned ERTS, the call returns `ok`, and the next output has no carriage return, because raw mode turns `OPOST` off.
+- The work: the `tigetnum_nif/1` and `tigetflag_nif/1` bindings and the `raise` instruction, and then the other NIFs that the raw path of `prim_tty` and `user_drv` calls.
+- **Trigger:** a program sets raw mode, for example the Terra reference run (#3).
+- **Source:** PR for #300.
+
 ### Write the output in a locale whose codeset is not UTF-8
 
 - In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1` (prim_tty.erl:1309-1321), which PBeam runs as ERTS does. Thus PBeam writes ASCII output as ERTS does. Output that is not ASCII calls `binary_to_latin1/2`, which builds each character with `char_to_latin1/2` (prim_tty.erl:1323-1330). #269 runs the `string` and `binary` segments of `bs_create_bin`. `char_to_latin1/2` also needs the `integer` segment of `bs_create_bin` (prim_tty.erl:1329-1330) and `erlang:integer_to_binary/2` (prim_tty.erl:1325-1328). PBeam stops with `unsupported bs_create_bin segment integer` and status 1 (measured with `IO.puts/1` of the UTF-8 binary of `é`). ERTS writes the Latin-1 output with status 0. The "Boot" row records this.
