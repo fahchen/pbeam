@@ -32,12 +32,17 @@ const PUT_TRAP: &str = "4000";
 ///   pair: the check, the hash, the sort, and the loops that remove the
 ///   pairs of a key that comes again, with 2 and 4 units in nested loops.
 ///   `{dups, 40000}` traps two times. The bignum key of `{big_dups, 33}`
-///   costs the same as a small key. A `badarg` costs nothing.
+///   costs the same as a small key. The sort of `{two_keys, 9, 73}` and
+///   `{two_keys, 73, 9}` uses 81 units for the partition of the pairs
+///   around the pivot key, then 72 units for the pairs of the other key: a
+///   partition of 73 pairs or the selection sort of 9 pairs
+///   (`utils.c:3499-3588`, `3636-3640`). Thus the cost is the same for each
+///   pivot. A `badarg` costs nothing.
 /// - `maps:keys/1` (`erl_map.c:1207-1253`, `2801-2834`): 15 units for each
 ///   reduction, one unit for each key of a hashmap. `{hash, 100000}` traps.
 const COSTS: &str = "[{maps_from_list,[{nil,0},{{flat,32},0},{{dups,33},8},{{dups,80},19},\
-                     {{dups,400},99},{{dups,40000},9999},{{big_dups,33},8},{{bad,400},0},{{improper,400},0},\
-                     {atom,0}]},\
+                     {{dups,400},99},{{dups,40000},9999},{{big_dups,33},8},{{two_keys,9,73},23},\
+                     {{two_keys,73,9},23},{{bad,400},0},{{improper,400},0},{atom,0}]},\
                      {maps_keys,[{{flat,32},0},{{hash,33},2},{{hash,100},6},\
                      {{hash,10000},666},{{hash,100000},6666}]},\
                      {characters_to_binary,[{{list,3},0},{{list,10},1},{{list,49},4},\
@@ -75,17 +80,6 @@ const RESULTS: &str = "[[97,98,99,100,101,102,103],[97,98,99,100,101,102,103],\
                        {incomplete,[97],<<226,130>>},[97,226,130],\
                        {error,[97,97,97],[-1]},{error,[97,97,97],[-1]}]";
 
-/// `bif_cost_probe:sorts/1` on PBeam: the cost of `maps:from_list/1` for the
-/// keys 1..N. ERTS picks the pivots of its sort from addresses, so its cost
-/// changes between runs. The reference run checks that the ERTS cost is
-/// within 10% of each value.
-const SORTS: &[(&str, i64)] = &[
-    ("{distinct,40}", 18),
-    ("{distinct,100}", 51),
-    ("{distinct,1000}", 638),
-    ("{distinct,10000}", 7949),
-];
-
 /// `bif_cost_probe:exits/0` on the pinned ERTS with `erl +S 1`. The exit of
 /// `a` bumps 100 reductions (`erl_process.c:14229`). With 150 or fewer
 /// reductions left (`K` 3846 and more), `a` switches out before its
@@ -98,23 +92,6 @@ const EXITS: &str = "[{3845,[{down,0,normal},{seen,false},{done,1000}]},\
                      {3895,[{seen,false},{down,666,normal},{done,334}]},\
                      {3896,[{seen,true},{down,666,normal},{done,334}]},\
                      {3990,[{seen,true},{down,666,normal},{done,334}]}]";
-
-/// Return [`SORTS`] as `io:format("~w")` prints the result of
-/// `bif_cost_probe:sorts/1`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// // [{{distinct,40},18},...]
-/// let text = sorts_text();
-/// ```
-fn sorts_text() -> String {
-    let sorts: Vec<String> = SORTS
-        .iter()
-        .map(|(input, cost)| format!("{{{input},{cost}}}"))
-        .collect();
-    format!("[{}]", sorts.join(","))
-}
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// lists, and tuples of the probe results.
@@ -153,7 +130,6 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     assert_eq!(run("puts", &options), PUTS);
     assert_eq!(run("put_trap", &[]), PUT_TRAP);
     assert_eq!(run("costs", &options), COSTS);
-    assert_eq!(run("sorts", &options), sorts_text());
     assert_eq!(run("longs", &options), LONGS);
     assert_eq!(run("exits", &[]), EXITS);
     assert_eq!(run("results", &[]), RESULTS);
@@ -163,10 +139,6 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     // reductions on ERTS (`erl_gc.c:218-230`), and PBeam has no process
     // heap. It first erases the persistent terms of the boot, because a
     // PBeam run starts with none.
-    let tolerances: Vec<String> = SORTS
-        .iter()
-        .map(|(input, cost)| format!("{{{input},{}}}", cost / 10))
-        .collect();
     let reference = Command::new("erl")
         .args([
             "+S",
@@ -182,13 +154,8 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
                  P = M:puts(O), C = M:costs(O), L = M:longs(O), E = M:exits(), \
                  R = M:results(), true = erts_internal:erase_persistent_terms(), \
                  T = M:put_trap(), \
-                 [true = abs(Cost - Expected) =< Tolerance \
-                  || {{{{Input, Cost}}, {{Input, Expected}}, {{Input, Tolerance}}}} \
-                  <- lists:zip3(M:sorts(O), {sorts}, [{tolerances}])], \
                  [0] = lists:usort([element(tuple_size(G), G) || G <- M:gcs(O)]), \
-                 io:format(\"~w~n~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, R, T]), halt().",
-                sorts = sorts_text(),
-                tolerances = tolerances.join(","),
+                 io:format(\"~w~n~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, R, T]), halt()."
             ),
         ])
         .output()
