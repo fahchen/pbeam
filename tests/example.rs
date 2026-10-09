@@ -24,7 +24,7 @@ fn runs_hello_world_with_one_command_as_pinned_erts() {
     // `mise run example hello_world` compiles `examples/hello_world/*.ex`
     // and `pbeam_boot.erl`, and runs `pbeam_boot:start('Elixir.HelloWorld',
     // main)` with the `pbeam` binary. With `--erts`, it runs
-    // `'Elixir.HelloWorld':main(), halt().` with `erl -noshell`. Each
+    // `'Elixir.HelloWorld':main(), halt().` with `erl +S 1 -noshell`. Each
     // runtime runs without a locale variable, which gives the C locale, and
     // with `LC_ALL=C.UTF-8`.
     for locale in [None, Some("C.UTF-8")] {
