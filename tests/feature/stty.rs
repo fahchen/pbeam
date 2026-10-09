@@ -173,7 +173,11 @@ fn run_in_terminal(command: &mut Command) -> Vec<u8> {
     // `setsid` and `ioctl`, which are async-signal-safe.
     unsafe {
         command.pre_exec(|| {
-            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY.into(), 0) < 0 {
+            // `TIOCSCTTY` is a `c_uint` on macOS and has the request type
+            // of `ioctl` on Linux, so the conversion does nothing there.
+            #[allow(clippy::useless_conversion)]
+            let request = libc::TIOCSCTTY.into();
+            if libc::setsid() < 0 || libc::ioctl(0, request, 0) < 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
