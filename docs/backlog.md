@@ -160,12 +160,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a path calls a `prim_tty` NIF before `erlang:load_nif/2` or after a failed load, or a second module gets native bindings.
 - **Source:** PR #132 (#127).
 
-### Poll fd 0 for the `prim_tty` reader
+### Poll fd 0 while processes run
 
-- `prim_tty:tty_select/2` does not select fd 0, so the `{select, TTY, Ref, ready_input}` message never arrives, and the reader never calls `read_nif/3`. A process that waits for input waits without end. ERTS selects fd 0 for read (prim_tty_nif.c:1227). The "Input select" row records this.
-- The work: an IO poll in the scheduler, the select of `tty_select/2` with the reader pid, the stop of the select when the reader exits (prim_tty_nif.c:1242-1244), and `read_nif/3`.
-- **Trigger:** a PBeam program reads from standard input.
-- **Source:** PR #133 (#115).
+- PBeam waits for the read select of fd 0 only when no process can run (#299). ERTS also waits for it in a poll thread while processes run (erl_process.c:3339-3372), so input arrives while other processes run. Thus in PBeam, a run in which a process can always run never gets the `{select, TTY, Ref, ready_input}` message. The "Input select" row of `docs/erts-differences.md` records this.
+- The work: a poll of fd 0 with no timeout at a scheduler switch point, for example after a number of reductions, as an ERTS scheduler checks its own poll set (erl_process.c:9946-9960).
+- **Trigger:** a program reads standard input while one of its processes can always run, for example a busy worker.
+- **Source:** PR for #299.
 
 ### Deliver host signals to `erl_signal_server`
 

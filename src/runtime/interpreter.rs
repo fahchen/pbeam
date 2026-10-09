@@ -137,17 +137,20 @@ impl BeamProgram {
     /// `check_activities_to_run` (`erl_process.c:9797-9810`). When no
     /// process can run, it sleeps until the first timer end, as
     /// `scheduler_wait` sleeps until the next timeout
-    /// (`erl_process.c:3452-3620`). The run ends at the next scheduling step
-    /// after the root process exits, also when another process can run or a
-    /// timer is active. A process that ends the root process with an exit
-    /// signal continues until it waits, exits, or switches out. This is as
+    /// (`erl_process.c:3452-3620`). When fd 0 has a read select, it waits
+    /// for fd 0 until then (see `Scheduler::wait_input`). The run ends at
+    /// the next scheduling step after the root process exits, also when
+    /// another process can run or a timer is active. A process that ends
+    /// the root process with an exit signal continues until it waits,
+    /// exits, or switches out. This is as
     /// `halt()` after `-eval` stops the ERTS node
     /// (`erlang.erl:3357-3358`) and as `init` halts after a boot process
     /// exit that is not `normal` (`init.erl:710-712`). A root process exit
     /// gives the error `root process exited with <Reason>`, with the reason
     /// as ERTS prints a term (`print_term`), for example
     /// `root process exited with {badarg,[]}`. A root process that
-    /// waits when no process can run and no timer is active gives an error.
+    /// waits when no process can run, no timer is active, and fd 0 has no
+    /// read select gives an error.
     ///
     /// # Examples
     ///
@@ -176,10 +179,15 @@ impl BeamProgram {
                     Outcome::Exit { reason, result } => scheduler.finish_current(reason, result),
                 },
                 Turn::Done => {}
-                Turn::Idle => match scheduler.timers.wait_time(scheduler.timers.now()) {
-                    Some(wait) => std::thread::sleep(wait),
-                    None => break,
-                },
+                Turn::Idle => {
+                    let wait = scheduler.timers.wait_time(scheduler.timers.now());
+                    if !scheduler.wait_input(wait) {
+                        match wait {
+                            Some(wait) => std::thread::sleep(wait),
+                            None => break,
+                        }
+                    }
+                }
             }
         }
         match scheduler.into_root_result() {

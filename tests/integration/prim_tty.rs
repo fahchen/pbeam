@@ -2,6 +2,7 @@ use std::{
     env,
     ffi::OsStr,
     fs,
+    io::{PipeReader, PipeWriter, Write},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::process::CommandExt,
@@ -71,6 +72,13 @@ enum Stream {
     BrokenPipe,
     /// A closed fd.
     Closed,
+    /// The read end of a pipe that holds these bytes and has no writer.
+    Input(&'static [u8]),
+    /// The non-blocking read end of an empty pipe whose write end is the
+    /// `LoopOutput` stream of the layout.
+    LoopInput,
+    /// The write end of the pipe of the `LoopInput` stream of the layout.
+    LoopOutput,
 }
 
 /// Layout F: stdin `/dev/null`, stdout and stderr files.
@@ -461,10 +469,9 @@ fn selects_stdin_and_reads_the_encoding() {
     // resource with a `make_ref/0` reference, `foo`, and `undefined` as the
     // select reference: each gives `ok`. An atom, a `make_ref/0` reference,
     // and a `re_pattern` reference are not TTY resources, so they raise
-    // `badarg` (prim_tty_nif.c:1220-1221). On ERTS the caller also gets one
+    // `badarg` (prim_tty_nif.c:1220-1221). The caller also gets one
     // `{select, Out, undefined, ready_input}` message, which the probe does
-    // not read; PBeam has no IO poll ("Input select" in
-    // docs/erts-differences.md). `encoding/0` calls
+    // not read. `encoding/0` calls
     // `prim_tty:tty_encoding/1` with a resource, an atom, an integer, and a
     // reference: Unix gives `utf8` for each term (prim_tty_nif.c:287-297).
     for (function, erts, pbeam) in [
@@ -490,6 +497,89 @@ fn selects_stdin_and_reads_the_encoding() {
             pbeam.as_bytes()
         );
     }
+}
+
+#[test]
+fn reads_fd_0_with_read_nif_and_selects_it_again() {
+    // `tty_nif_probe:read/0` runs with stdin a pipe that holds
+    // "hello\nworld\n" and has no writer. A term that is not a TTY
+    // resource, then a size that is not an integer from 0 to 2^64 - 1,
+    // raises `badarg` (prim_tty_nif.c:443-447). The select of
+    // `tty_select/2` sends `{select, Out, first, ready_input}`
+    // (prim_tty_nif.c:1227). `read_nif/3` reads at most 1024 bytes with one
+    // `read`, and each `{ok, _}` selects fd 0 again with its reference
+    // (prim_tty_nif.c:449, 646-660); the probe waits for that message
+    // before the next read. A size of 0 and the end of file give
+    // `{error, closed}` and select nothing (prim_tty_nif.c:654-657), so no
+    // other message arrives. PBeam waits for fd 0 when no process can run.
+    let layout = [Stream::Input(b"hello\nworld\n"), Stream::File, Stream::File];
+    assert_eq!(
+        String::from_utf8(run_erts_nif_probe(layout, &[], "read")).unwrap(),
+        "[[badarg,badarg,badarg,badarg,badarg,badarg,badarg],[ready,{{ok,<<104,101,108>>},ready},{error,closed},{{ok,<<108,111,10,119,111,114,108,100,10>>},ready},{error,closed}],none]\n"
+    );
+    assert_eq!(
+        String::from_utf8(run_isolated(
+            layout,
+            &[],
+            "tty_nif_probe:read",
+            &[TTY_NIF_PROBE, STAND_IN]
+        ))
+        .unwrap(),
+        r#"Ok(List([List([Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg"), Atom("badarg")]), List([Atom("ready"), Tuple([Tuple([Atom("ok"), Binary([104, 101, 108])]), Atom("ready")]), Tuple([Atom("error"), Atom("closed")]), Tuple([Tuple([Atom("ok"), Binary([108, 111, 10, 119, 111, 114, 108, 100, 10])]), Atom("ready")]), Tuple([Atom("error"), Atom("closed")])]), Atom("none")]))"#
+    );
+}
+
+#[test]
+fn gives_the_errno_of_a_failed_read_and_selects_nothing() {
+    // `tty_nif_probe:read_error/0` runs with stdin the write end of a pipe,
+    // so `read` fails with `EBADF`. `read_nif/3` gives
+    // `{error, {read, ebadf}}` and does not select fd 0
+    // (prim_tty_nif.c:648-652), so no message arrives.
+    let layout = [Stream::BrokenPipe, Stream::File, Stream::File];
+    assert_eq!(
+        run_erts_nif_probe(layout, &[], "read_error"),
+        b"[{error,{read,ebadf}},none]\n"
+    );
+    assert_eq!(
+        String::from_utf8(run_isolated(
+            layout,
+            &[],
+            "tty_nif_probe:read_error",
+            &[TTY_NIF_PROBE, STAND_IN]
+        ))
+        .unwrap(),
+        r#"Ok(List([Tuple([Atom("error"), Tuple([Atom("read"), Atom("ebadf")])]), Atom("none")]))"#
+    );
+}
+
+#[test]
+fn stops_the_select_of_fd_0_when_the_reader_exits() {
+    // `tty_nif_probe:loop/0` runs with stdin the non-blocking read end of
+    // an empty pipe and stderr its write end, so `write_nif/2` writes the
+    // input of the probe. A read of the empty pipe fails with `EAGAIN`, so
+    // `read_nif/3` gives `{ok, <<>>}` and selects fd 0 again
+    // (prim_tty_nif.c:648-653, 660): the input "x" then sends the select
+    // message. A reader process calls `tty_select/2`, which makes it the
+    // reader of the TTY (prim_tty_nif.c:1229). The probe then selects fd 0
+    // for itself with `read_nif/3`, which does not change the reader. When
+    // the reader exits, its TTY monitor stops the select of fd 0
+    // (prim_tty_nif.c:1242-1244), so the input "y" sends no message. Without
+    // the stop, `Stopped` is `ready`.
+    let layout = [Stream::LoopInput, Stream::File, Stream::LoopOutput];
+    assert_eq!(
+        run_erts_nif_probe(layout, &[], "loop"),
+        b"[{ok,<<>>},ready,{ok,<<120>>},{ok,<<>>},none,{ok,<<121>>}]\n"
+    );
+    assert_eq!(
+        String::from_utf8(run_isolated(
+            layout,
+            &[],
+            "tty_nif_probe:loop",
+            &[TTY_NIF_PROBE, STAND_IN]
+        ))
+        .unwrap(),
+        r#"Ok(List([Tuple([Atom("ok"), Binary([])]), Atom("ready"), Tuple([Atom("ok"), Binary([120])]), Tuple([Atom("ok"), Binary([])]), Atom("none"), Tuple([Atom("ok"), Binary([121])])]))"#
+    );
 }
 
 #[test]
@@ -862,10 +952,10 @@ fn starts_the_cooked_reader_and_the_signal_handler_with_prim_tty_init() {
     }
 
     // `cooked_probe:read/0` calls `prim_tty:read/1` and waits for the data
-    // of the reader. On ERTS the reader gets the select message of fd 0 and
-    // reads `eof` from `/dev/null` (prim_tty.erl:470-490). PBeam has no IO
-    // poll, so the message never arrives and the run ends with a runtime
-    // error ("Input select" in docs/erts-differences.md).
+    // of the reader. The reader gets the select message of fd 0 and reads
+    // `eof` from `/dev/null` (prim_tty.erl:467-490). PBeam waits for fd 0
+    // when no process can run, as an idle ERTS scheduler waits in its poll
+    // (erl_process.c:3536-3567).
     let outputs = run_with_outputs(&mut erts_cooked_probe("read"), FILES, &[]);
     assert_eq!(outputs.files[1].as_deref(), Some(&b""[..]));
     assert_eq!(outputs.files[2].as_deref(), Some(&b"eof\n"[..]));
@@ -876,7 +966,7 @@ fn starts_the_cooked_reader_and_the_signal_handler_with_prim_tty_init() {
             &[]
         ))
         .unwrap(),
-        r#"Err(BeamError("root process waits for a message that cannot arrive"))"#
+        r#"Ok(Atom("eof"))"#
     );
 }
 
@@ -1188,7 +1278,9 @@ const CANONICAL_ECHO: libc::tcflag_t = libc::ICANON | libc::ECHO;
 /// clears it when a reader or a poll of the terminal processes the pending
 /// input. After `tty_select/2`, the ERTS poll thread watches fd 0, so the
 /// final `PENDIN` of fd 0 in ERTS depends on the thread timing (measured:
-/// unset in 2 of 30 ERTS runs under CPU load, set in each PBeam run).
+/// unset in 2 of 30 ERTS runs under CPU load). PBeam waits for fd 0 only
+/// when no process can run, so its final `PENDIN` depends on when its
+/// processes wait.
 ///
 /// # Examples
 ///
@@ -1452,8 +1544,10 @@ fn run_with_outputs(
     fs::create_dir(&directory).unwrap();
     let paths: [_; 3] = std::array::from_fn(|fd| directory.join(format!("fd{fd}")));
     let mut terminals: [Option<(OwnedFd, OwnedFd)>; 3] = Default::default();
-    let [stdin, stdout, stderr] =
-        std::array::from_fn(|fd| open_stream(layout[fd], &paths[fd], &mut terminals[fd]));
+    let mut looped = loop_pipe();
+    let [stdin, stdout, stderr] = std::array::from_fn(|fd| {
+        open_stream(layout[fd], &paths[fd], &mut terminals[fd], &mut looped)
+    });
     let result = directory.join("result");
     let closed = layout.map(|stream| matches!(stream, Stream::Closed));
     if closed.contains(&true) {
@@ -1501,16 +1595,22 @@ fn run_with_outputs(
 /// Open one standard stream for a child. A file stream creates `path`. A
 /// terminal stream keeps the master of its pseudo-terminal and a copy of
 /// its slave in `terminal`, so the pseudo-terminal stays open and its mode
-/// can be read after the child exits.
+/// can be read after the child exits. A `LoopInput` or `LoopOutput` stream
+/// takes its end of the pipe from `looped`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let mut terminal = None;
-/// let stdout = open_stream(Stream::Terminal { columns: 100, rows: 30 }, &path, &mut terminal);
+/// let stdout = open_stream(Stream::Terminal { columns: 100, rows: 30 }, &path, &mut terminal, &mut loop_pipe());
 /// assert!(terminal.is_some());
 /// ```
-fn open_stream(stream: Stream, path: &Path, terminal: &mut Option<(OwnedFd, OwnedFd)>) -> Stdio {
+fn open_stream(
+    stream: Stream,
+    path: &Path,
+    terminal: &mut Option<(OwnedFd, OwnedFd)>,
+    looped: &mut (Option<PipeReader>, Option<PipeWriter>),
+) -> Stdio {
     let (master, slave) = match stream {
         // `run_with_outputs` closes the fd of a `Closed` stream in the child.
         Stream::Null | Stream::Closed => return Stdio::null(),
@@ -1518,6 +1618,13 @@ fn open_stream(stream: Stream, path: &Path, terminal: &mut Option<(OwnedFd, Owne
         // `std::io::pipe` makes both ends close-on-exec, so a child of a
         // parallel test does not keep the read end open.
         Stream::BrokenPipe => return std::io::pipe().unwrap().1.into(),
+        Stream::Input(bytes) => {
+            let (reader, mut writer) = std::io::pipe().unwrap();
+            writer.write_all(bytes).unwrap();
+            return reader.into();
+        }
+        Stream::LoopInput => return looped.0.take().unwrap().into(),
+        Stream::LoopOutput => return looped.1.take().unwrap().into(),
         Stream::Terminal { columns, rows } => open_terminal(columns, rows),
         Stream::QuietTerminal { columns, rows } => {
             let (master, slave) = open_terminal(columns, rows);
@@ -1534,6 +1641,28 @@ fn open_stream(stream: Stream, path: &Path, terminal: &mut Option<(OwnedFd, Owne
     let child = slave.try_clone().unwrap();
     *terminal = Some((master, slave));
     child.into()
+}
+
+/// Return the two ends of the pipe of the `LoopInput` and `LoopOutput`
+/// streams. The read end is non-blocking, so a read of the empty pipe fails
+/// with `EAGAIN`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (Some(reader), Some(writer)) = loop_pipe() else { unreachable!() };
+/// ```
+fn loop_pipe() -> (Option<PipeReader>, Option<PipeWriter>) {
+    let (reader, writer) = std::io::pipe().unwrap();
+    // SAFETY: `fcntl` changes only the status flags of an open fd.
+    unsafe {
+        let flags = libc::fcntl(reader.as_raw_fd(), libc::F_GETFL);
+        assert_eq!(
+            libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK),
+            0
+        );
+    }
+    (Some(reader), Some(writer))
 }
 
 /// Read the mode of the terminal `fd` with `tcgetattr`.
