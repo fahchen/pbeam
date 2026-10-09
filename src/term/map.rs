@@ -8,9 +8,10 @@
 //!
 //! Supported keys:
 //!
-//! - hashmap: an atom, an integer in the ERTS small-integer range, `[]`,
-//!   a list whose elements are such keys, and an improper list whose
-//!   elements are such keys and whose tail is an atom or a small integer;
+//! - hashmap: a binary, an atom, an integer in the ERTS small-integer
+//!   range, `[]`, a list whose elements are such keys other than binaries,
+//!   and an improper list whose elements are such list elements and whose
+//!   tail is an atom or a small integer;
 //! - flatmap: each hashmap key, and any integer.
 //!
 //! As in ERTS, a flatmap orders two atom keys by their atom index and each
@@ -19,8 +20,9 @@
 //! its atom word `(index << 6) | 0xB`. Thus the pair order of a map is the
 //! ERTS order, which BEAM code sees through operations such as
 //! `maps:keys/1`. Other key types need the hashmap insertion of bignums,
-//! tuples, binaries, maps, funs, pids, and references, which PBeam does not
-//! have yet. So does an improper list with such a tail, for example `[1|{}]`.
+//! tuples, maps, funs, pids, and references, which PBeam does not have yet.
+//! So do a list with a binary element and an improper list with such a
+//! tail, for example `[<<>>]` and `[1|{}]`.
 
 use std::cmp::Ordering;
 
@@ -1076,7 +1078,9 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// map hash is the ERTS internal hash, so an atom hashes as its word
 /// `(index << 6) | 0xB`, a small integer as its word `(value << 4) | 0xF`, and
 /// a list key that is not empty with the list path of `make_internal_hash`,
-/// also an improper list whose tail is an atom or a small integer.
+/// also an improper list whose tail is an atom or a small integer. A binary
+/// key hashes with the binary path of `make_internal_hash`. A binary in a
+/// list key is not supported yet.
 ///
 /// # Examples
 ///
@@ -1088,11 +1092,16 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert!(map_hash(&Term::List(vec![Term::Integer(97)])).is_some());
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
 /// assert_eq!(map_hash(&Term::Tuple(vec![])), None);
+/// assert_eq!(map_hash(&Term::Binary(vec![])), Some(10873612744977862784));
+/// assert_eq!(map_hash(&Term::List(vec![Term::Binary(vec![])])), None);
 /// let improper = |tail| Term::ImproperList(vec![Term::Integer(1)], Box::new(tail));
 /// assert!(map_hash(&improper(Term::Integer(2))).is_some());
 /// assert_eq!(map_hash(&improper(Term::Tuple(vec![]))), None);
 /// ```
 fn map_hash(key: &Term) -> Option<u64> {
+    if let Term::Binary(_) = key {
+        return Some(internal_hash(key));
+    }
     let mut pending = vec![key];
     while let Some(term) = pending.pop() {
         match term {
