@@ -1,5 +1,8 @@
-//! Run the examples of `examples/` with the mise task `example` on the
-//! `pbeam` binary and on the pinned ERTS.
+//! Run the examples of `examples/` with `scripts/example.sh`, the script of
+//! the mise task `example`, on the `pbeam` binary and on the pinned ERTS.
+//! The tests run the script without a `mise` process. Parallel `mise`
+//! processes can write `mise WARN failed to parse cache file` to stderr
+//! when mise writes its cache, and stderr must be the same as ERTS.
 
 use std::{
     process::{Command, Output, Stdio},
@@ -8,20 +11,20 @@ use std::{
 
 #[expect(
     dead_code,
-    reason = "this test crate keeps the locale and the stdout of the task"
+    reason = "this test crate keeps the locale and the stdout of the script"
 )]
 #[path = "../common/run.rs"]
 mod run;
 
 use run::run_with_time_limit;
 
-/// The task compiles the example and `pbeam_boot`, and starts `elixir`,
+/// The script compiles the example and `pbeam_boot`, and starts `elixir`,
 /// `erl`, and the runtime of the example.
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(60);
 
 #[test]
 fn runs_hello_world_with_one_command_as_pinned_erts() {
-    // `mise run example hello_world` compiles `examples/hello_world/*.ex`
+    // `bash scripts/example.sh hello_world` compiles `examples/hello_world/*.ex`
     // and `pbeam_boot.erl`, and runs `pbeam_boot:start('Elixir.HelloWorld',
     // main)` with the `pbeam` binary. With `--erts`, it runs
     // `'Elixir.HelloWorld':main(), halt().` with `erl +S 1 -noshell`. Each
@@ -131,10 +134,11 @@ fn restarts_a_crashed_worker_as_pinned_erts() {
     assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
 }
 
-/// Run `mise run example` with `arguments`, with no locale variable except
+/// Run `scripts/example.sh` with `arguments`, with no locale variable except
 /// `LC_ALL=locale`. `PBEAM_BIN` gives the `pbeam` binary of this test
-/// build, which `cargo llvm-cov` measures, so the task does not start
-/// `cargo run`.
+/// build, which `cargo llvm-cov` measures, so the script does not start
+/// `cargo run`. The script finds `elixirc`, `erlc`, `elixir`, and `erl` in
+/// `PATH`, as the other tests find `erl`.
 ///
 /// # Examples
 ///
@@ -143,9 +147,9 @@ fn restarts_a_crashed_worker_as_pinned_erts() {
 /// assert_eq!(output.status.code(), Some(0));
 /// ```
 fn run_example(arguments: &[&str], locale: Option<&str>) -> Output {
-    let mut command = Command::new("mise");
+    let mut command = Command::new("bash");
     command
-        .args(["run", "example"])
+        .arg("scripts/example.sh")
         .args(arguments)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("PBEAM_BIN", env!("CARGO_BIN_EXE_pbeam"))
