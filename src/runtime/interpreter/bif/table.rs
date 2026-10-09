@@ -98,7 +98,7 @@ bifs! {
     erlang:and/2 => unsupported,
     erlang:append/2 => unsupported,
     erlang:append_element/2 => unsupported,
-    erlang:atom_to_binary/2 => unsupported,
+    erlang:atom_to_binary/2 => |_, [term, encoding]| Ok(erlang::atom_to_binary(term, encoding)),
     erlang:atom_to_list/1 => |_, [term]| Ok(erlang::atom_to_list(term)),
     erlang:band/2 => unsupported,
     erlang:binary_part/2 => unsupported,

@@ -1156,6 +1156,39 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
     }
 }
 
+/// Run `erlang:atom_to_binary/2`: return the text of an atom as a binary,
+/// as ERTS `atom_to_binary_2` (`erl_unicode.c:1928-1960`) does. With
+/// `utf8` or `unicode`, the binary holds the UTF-8 bytes of the name. With
+/// `latin1`, it holds one byte for each character. A term that is not an
+/// atom, an encoding that is not `latin1`, `utf8`, or `unicode`, and
+/// `latin1` for a name with a character above 255 raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let pi = Term::Atom(atoms.put("\u{3c0}")?);
+/// assert!(matches!(atom_to_binary(&pi, &Term::static_atom("utf8")), BifResult::Value(Term::Binary(bytes)) if bytes == [207, 128]));
+/// assert!(matches!(atom_to_binary(&pi, &Term::static_atom("latin1")), BifResult::Raise { .. }));
+/// let e_acute = Term::Atom(atoms.put("\u{e9}")?);
+/// assert!(matches!(atom_to_binary(&e_acute, &Term::static_atom("latin1")), BifResult::Value(Term::Binary(bytes)) if bytes == [233]));
+/// assert!(matches!(atom_to_binary(&Term::static_atom("ok"), &Term::static_atom("foo")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn atom_to_binary(term: &Term, encoding: &Term) -> BifResult {
+    let (Term::Atom(atom), Term::Atom(encoding)) = (term, encoding) else {
+        return BifResult::badarg();
+    };
+    match encoding.name() {
+        "utf8" | "unicode" => Value(Term::Binary(atom.name().as_bytes().to_vec())),
+        "latin1" => atom
+            .name()
+            .chars()
+            .map(|character| u8::try_from(u32::from(character)).ok())
+            .collect::<Option<Vec<u8>>>()
+            .map_or_else(BifResult::badarg, |bytes| Value(Term::Binary(bytes))),
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `erlang:list_to_atom/1`: return the atom whose name has the code
 /// points of a list, and put a new atom into the atom table of the run, as
 /// ERTS `list_to_atom_1` (`bif.c:3217-3236`) does with
