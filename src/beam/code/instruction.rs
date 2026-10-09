@@ -2388,4 +2388,5 @@ fn read_move_operand(
 }
 
 #[cfg(test)]
+#[path = "../../../tests/beam/code/instruction.rs"]
 mod tests;
