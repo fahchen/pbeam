@@ -112,3 +112,15 @@ Choose one instruction-stream construction model for each opcode path. Either re
 ## Public values can violate documented canonical forms
 
 When a public type cannot enforce a canonical representation, document it as a runtime-produced form, not as a type invariant. State that callers must preserve the form when they pass values into runtime operations.
+
+## Budget cleanup before expensive traversal
+
+Check the remaining reduction budget before each cleanup unit that can
+traverse or release many entries. Preserve the traversal state across turns
+so the process does not perform uncharged O(N) work before yielding.
+
+## Cleanup indexes follow resource ownership
+
+Store cleanup state with the resource owner and remove entries without
+scanning unrelated global collections. Stop querying a cleanup index after
+that resource's cleanup phase is complete.
