@@ -9,6 +9,7 @@
 
 use super::{
     Flush, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, SIGNAL_HANDLING_REDUCTIONS, Scheduler,
+    TargetMonitor, Ttys,
 };
 use crate::{
     error::BeamError,
@@ -412,12 +413,18 @@ impl Scheduler {
                 4 * i32::from(removed)
             }
             Signal::Monitor { watcher, reference } => {
-                let monitor = Monitor { watcher, reference };
+                let monitor = TargetMonitor::Process(Monitor { watcher, reference });
                 self.handled(id, node).monitored_by.push(monitor);
                 2
             }
+            Signal::TtyMonitor { tty } => {
+                self.handled(id, node)
+                    .monitored_by
+                    .push(TargetMonitor::Tty(tty));
+                2
+            }
             Signal::Demonitor { watcher, reference } => {
-                let monitor = Monitor { watcher, reference };
+                let monitor = TargetMonitor::Process(Monitor { watcher, reference });
                 let monitors = &mut self.handled(id, node).monitored_by;
                 let before = monitors.len();
                 monitors.retain(|target| *target != monitor);
@@ -638,7 +645,8 @@ impl Scheduler {
     /// to its watcher, a link signal gives a link exit signal `noproc` to
     /// its sender, an unlink signal gives an unlink acknowledgment, and the
     /// group-leader, is-alive, and process-info requests reply `badarg`,
-    /// `false`, and `undefined`. Each other signal is dropped. Each signal
+    /// `false`, and `undefined`. A TTY monitor signal runs its TTY monitor.
+    /// Each other signal is dropped. Each signal
     /// and receive marker counts 1, and a monitor signal 4 more
     /// (`erl_proc_sig_queue.c:7307`, `7352`). The handling stops when the
     /// count is more than `reds` times 4 (`erl_proc_sig_queue.c:7273-7274`,
@@ -672,6 +680,10 @@ impl Scheduler {
                     count += 4;
                     let noproc = Term::static_atom("noproc");
                     self.send_monitor_down(Some(id), watcher, reference, noproc);
+                }
+                Signal::TtyMonitor { tty } => {
+                    count += 4;
+                    self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
                 }
                 Signal::Link { from } => {
                     let exit = Signal::Exit {

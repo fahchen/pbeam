@@ -82,6 +82,18 @@ pub(super) struct Monitor {
     pub(super) reference: Reference,
 }
 
+/// An entry of the target monitor list of a process (`ERTS_P_LT_MONITORS`,
+/// `erl_monitor_link.h`): a monitor on the process that another process or
+/// a resource holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TargetMonitor {
+    /// A monitor that another process holds (`ERTS_MON_TYPE_PROC`).
+    Process(Monitor),
+    /// A monitor that the TTY resource with this reference holds
+    /// (`ERTS_MON_TYPE_RESOURCE`, `erl_nif.c:3957-3989`).
+    Tty(Reference),
+}
+
 /// An entry of the monitor tree of a process (`ERTS_P_MONITORS`): the
 /// origin part of a monitor that this process holds, an alias, or both.
 #[derive(Debug, Clone, PartialEq)]
@@ -182,9 +194,12 @@ pub(super) struct ProcessState {
     /// The monitor tree: the monitors that this process holds and its
     /// aliases, by reference (`ERTS_P_MONITORS`).
     pub(super) monitors: MonitorLinkTree<Reference, Origin>,
-    /// Monitors that send a monitor down signal when this process exits, in
-    /// creation order (`ERTS_P_LT_MONITORS`).
-    pub(super) monitored_by: Vec<Monitor>,
+    /// The monitors on this process, in the order that the process handled
+    /// their monitor signals (`ERTS_P_LT_MONITORS`,
+    /// `erl_proc_sig_queue.c:6544-6562`). The exit of the process sends a
+    /// monitor down signal for each process monitor and runs each TTY
+    /// monitor, in this order.
+    pub(super) monitored_by: Vec<TargetMonitor>,
     /// Group leader that receives the IO requests of this process. A new
     /// process starts as its own group leader, as `init` does in ERTS; a
     /// spawned process gets the group leader of its parent.
