@@ -5,12 +5,12 @@ use super::{
 use crate::{
     beam::{
         BeamModule,
-        code::{self, BinaryMatchCommand, Instruction, Operand, TestKind},
+        code::{self, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
     term::{Atom, AtomTable, Fun, Map, MatchContext, Target, Term, print_term},
 };
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 mod bif;
 mod native;
@@ -27,6 +27,10 @@ const APPLY_MAX_ARGUMENTS: usize = 1023;
 /// (`erl_vm.h:55`, `jit/arm/instr_fun.cpp:290-297`), so a longer list
 /// raises `system_limit`.
 const APPLY_FUN_MAX_ARGUMENTS: usize = 1022;
+
+/// The bits that ERTS copies for one reduction when it puts a binary in a
+/// new binary (`ERL_BITS_PER_REDUCTION`, erl_bits.h:41).
+const BITS_PER_REDUCTION: usize = 8 * 1024;
 
 #[derive(Debug)]
 pub struct BeamProgram {
@@ -907,6 +911,31 @@ impl BeamProgram {
                         jump(module, process, *fail_label)?;
                     }
                 }
+                // The ERTS JIT `i_bs_create_bin` first checks that the term
+                // of each `binary` segment of size `all` is a bitstring, in
+                // segment order, and then builds the binary (JIT
+                // `emit_i_bs_create_bin` in jit/arm/instr_bs.cpp:1442-1663,
+                // 2000-2084). A failed check jumps to `Fail`, or with `Fail`
+                // 0 raises `badarg` with the `error_info` cause
+                // `{Segment, binary, type, Value}` (`emit_bs_create_bin_error_shared`
+                // in jit/arm/instr_bs.cpp:1002-1019;
+                // `beam_jit_bs_construct_fail_info` in
+                // jit/beam_jit_common.cpp:911-1010).
+                Instruction::BinaryCreate {
+                    fail_label,
+                    destination,
+                    segments,
+                } => match create_binary(process, segments)? {
+                    Ok(bytes) => write(process, destination, Term::Binary(bytes))?,
+                    Err(_) if *fail_label != 0 => jump(module, process, *fail_label)?,
+                    Err((segment, value)) => {
+                        if let Some(outcome) =
+                            raise_binary_badarg(scheduler, module, segment, value)?
+                        {
+                            return Ok(outcome);
+                        }
+                    }
+                },
                 // ERTS `fconv` converts a small integer, a bignum, or a float
                 // to a float register, and raises `badarith` for each other
                 // term (emu float_instrs.tab:38-52; JIT `emit_fconv` and
@@ -2335,6 +2364,154 @@ fn binary_match(
         }
     }
     Ok(true)
+}
+
+/// Build the binary of the segments of a `bs_create_bin` instruction, as
+/// the ERTS JIT `i_bs_create_bin` does (JIT `emit_i_bs_create_bin` in
+/// jit/arm/instr_bs.cpp:1442-2300). First read the term of each `binary`
+/// segment in order. A term that is not a binary gives the segment number
+/// and the term, and the instruction then fails. Then join the bytes of
+/// the segments. A `string` segment copies its bytes (`erts_bs_put_string`,
+/// erl_bits.c:1641-1654). A `binary` segment copies its binary and uses one
+/// reduction for each 8192 bits (`erts_bs_put_binary_all`,
+/// erl_bits.c:1311-1332; `beam_jit_bs_put_binary_all`,
+/// jit/beam_jit_common.cpp:1043-1057). PBeam has no bitstring that is not
+/// a binary, so the unit 8 test of `erts_bs_put_binary_all` always passes.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write(&mut process, &Operand::X(0), Term::Binary(b"3".to_vec()))?;
+/// let segments = [
+///     BinarySegment::String(b"count: ".to_vec()),
+///     BinarySegment::BinaryAll { segment: 2, source: Operand::X(0) },
+/// ];
+/// assert_eq!(create_binary(&mut process, &segments)?, Ok(b"count: 3".to_vec()));
+/// write(&mut process, &Operand::X(0), Term::static_atom("a"))?;
+/// assert_eq!(create_binary(&mut process, &segments)?, Err((2, Term::static_atom("a"))));
+/// ```
+///
+/// # Errors
+///
+/// A segment of a type, size, or unit that PBeam does not run yet is a
+/// runtime error. A match context in a `binary` segment is a runtime
+/// invariant error.
+fn create_binary(
+    process: &mut ProcessState,
+    segments: &[BinarySegment],
+) -> Result<Result<Vec<u8>, (u64, Term)>, BeamError> {
+    let mut parts = Vec::with_capacity(segments.len());
+    for segment in segments {
+        parts.push(match segment {
+            BinarySegment::String(text) => (Cow::Borrowed(text.as_slice()), 0),
+            BinarySegment::BinaryAll { segment, source } => {
+                let mut value = read(process, source)?;
+                let Term::Binary(bytes) = &mut value else {
+                    return Ok(Err((*segment, value)));
+                };
+                let reductions = bytes.len() * 8 / BITS_PER_REDUCTION;
+                (Cow::Owned(std::mem::take(bytes)), reductions)
+            }
+            BinarySegment::Unsupported(kind) => {
+                return Err(error(format!(
+                    "unsupported bs_create_bin segment {}",
+                    kind.name()
+                )));
+            }
+        });
+    }
+    let mut bytes = Vec::new();
+    for (part, reductions) in parts {
+        bytes.extend_from_slice(&part);
+        process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+    }
+    Ok(Ok(bytes))
+}
+
+/// Raise the `badarg` of a `bs_create_bin` `binary` segment with a term
+/// that is not a binary in the current process, as ERTS
+/// `emit_bs_create_bin_error_shared` does (jit/arm/instr_bs.cpp:1002-1019).
+/// The stack trace is the frame of the function that holds the instruction,
+/// with the ERTS `error_info` (`beam_jit_bs_construct_fail_info` in
+/// jit/beam_jit_common.cpp:911-1010). PBeam keeps no line table and no
+/// caller frames, so the frame has no `file` or `line` and is the only
+/// frame (row "Exception stack trace" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // `prefix(X) -> <<"count: ", X/binary>>.` with `X = a` and no catch
+/// // exits with {badarg, [{bs_create_bin_probe, prefix, 1, [{error_info,
+/// // #{cause => {2, binary, type, a}, function => format_bs_fail,
+/// // module => erl_erts_errors}}]}]}.
+/// let outcome = raise_binary_badarg(scheduler, &module, 2, Term::static_atom("a"))?;
+/// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
+/// ```
+///
+/// # Errors
+///
+/// An instruction with no `func_info` before it, or a module or function
+/// name that the atom table does not hold, is a runtime invariant error.
+fn raise_binary_badarg(
+    scheduler: &mut Scheduler,
+    module: &BeamModule,
+    segment: u64,
+    value: Term,
+) -> Result<Option<Outcome>, BeamError> {
+    let index = current_frame(scheduler.current_process_mut()).next_instruction - 1;
+    let (module_name, name, arity) = module.instructions[..index]
+        .iter()
+        .rev()
+        .find_map(|instruction| match instruction {
+            Instruction::FunctionInfo {
+                module,
+                name,
+                arity,
+            } => Some((module, name, *arity)),
+            _ => None,
+        })
+        .ok_or_else(|| error("invariant error: bs_create_bin has no func_info before it"))?;
+    let atom = |name: &str| {
+        scheduler
+            .atoms
+            .get(name)
+            .map(Term::Atom)
+            .ok_or_else(|| error(format!("invariant error: atom table does not hold {name}")))
+    };
+    let (module_atom, function_atom) = (atom(module_name)?, atom(name)?);
+    let cause = Term::Tuple(vec![
+        Term::Integer(segment as i64),
+        Term::static_atom("binary"),
+        Term::static_atom("type"),
+        value,
+    ]);
+    // ponytail: each map form holds atom keys, so `from_pairs` cannot fail.
+    let error_info = Map::from_pairs(vec![
+        (Term::static_atom("cause"), cause),
+        (
+            Term::static_atom("function"),
+            Term::static_atom("format_bs_fail"),
+        ),
+        (
+            Term::static_atom("module"),
+            Term::static_atom("erl_erts_errors"),
+        ),
+    ])
+    .expect("atom keys fit each map form");
+    let location = Term::Tuple(vec![Term::static_atom("error_info"), Term::Map(error_info)]);
+    let frame = Term::Tuple(vec![
+        module_atom,
+        function_atom,
+        Term::Integer(arity.into()),
+        Term::List(vec![location]),
+    ]);
+    let badarg = Term::static_atom("badarg");
+    Ok(raise_with_stacktrace(
+        scheduler.current_process_mut(),
+        ExceptionClass::Error,
+        badarg,
+        Term::List(vec![frame]),
+    ))
 }
 
 /// Read a literal, an X register, or a Y register.

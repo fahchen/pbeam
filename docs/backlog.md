@@ -131,10 +131,10 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Write the output in a locale whose codeset is not UTF-8
 
-- In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1` (prim_tty.erl:1309-1321), which PBeam runs as ERTS does. Thus PBeam writes ASCII output as ERTS does. Output that is not ASCII calls `binary_to_latin1/2`, which builds each character with `char_to_latin1/2` (prim_tty.erl:1323-1330). This needs `bs_create_bin` and `erlang:integer_to_binary/2`. PBeam stops with `unsupported BEAM opcode 177` and status 1 (measured with `io:put_chars/1` of the UTF-8 binary of `é`). ERTS writes the Latin-1 output with status 0. The "Boot" row records this.
-- The work: `bs_create_bin` and `erlang:integer_to_binary/2` for `char_to_latin1/2`.
+- In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1` (prim_tty.erl:1309-1321), which PBeam runs as ERTS does. Thus PBeam writes ASCII output as ERTS does. Output that is not ASCII calls `binary_to_latin1/2`, which builds each character with `char_to_latin1/2` (prim_tty.erl:1323-1330). #269 runs the `string` and `binary` segments of `bs_create_bin`. `char_to_latin1/2` also needs the `integer` segment of `bs_create_bin` (prim_tty.erl:1329-1330) and `erlang:integer_to_binary/2` (prim_tty.erl:1325-1328). PBeam stops with `unsupported bs_create_bin segment integer` and status 1 (measured with `IO.puts/1` of the UTF-8 binary of `é`). ERTS writes the Latin-1 output with status 0. The "Boot" row records this.
+- The work: the `integer` segment of `bs_create_bin` and `erlang:integer_to_binary/2` for `char_to_latin1/2`.
 - **Trigger:** a supported run that writes output that is not ASCII in a locale whose codeset is not UTF-8, for example a macOS shell with `LANG`, `LC_ALL`, and `LC_CTYPE` unset.
-- **Source:** "Boot" row (#139, #183, #219).
+- **Source:** "Boot" row (#139, #183, #219, #269).
 
 ### Run the unsupported BIFs that OTP code calls
 
