@@ -2,8 +2,8 @@
 -export([main/0]).
 
 %% Monitor init and call init:stop/0, which sends {stop, stop} to init
-%% (init.erl:536). Give 'stopped' when init exits in 10 ms, and 'running'
-%% when it does not.
+%% (init.erl:536). init halts with status 0 (init.erl:924-945) before the
+%% probe gives 'stopped' (init exits in 10 ms) or 'running'.
 main() ->
     Ref = monitor(process, whereis(init)),
     ok = init:stop(),
