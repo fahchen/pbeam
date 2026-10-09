@@ -31,11 +31,5 @@ pub(crate) fn error(message: impl Into<String>) -> BeamError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::error;
-
-    #[test]
-    fn formats_runtime_errors() {
-        assert_eq!(error("bad module").to_string(), "bad module");
-    }
-}
+#[path = "../tests/error.rs"]
+mod tests;

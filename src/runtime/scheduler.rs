@@ -1478,4 +1478,5 @@ mod signals;
 pub(super) use signals::{Flushed, HandlingPoint, Received};
 
 #[cfg(test)]
+#[path = "../../tests/runtime/scheduler.rs"]
 mod tests;

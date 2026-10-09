@@ -1,6 +1,6 @@
 //! A time limit for a test that runs a child process, and a stdout that
 //! fails each write. A test that runs a binary includes this file with
-//! `#[path = "common/run.rs"] mod run;`. A function in `common/mod.rs` would
+//! `#[path = "../common/run.rs"] mod run;`. A function in `common/mod.rs` would
 //! be dead code in each other test crate.
 
 use std::{

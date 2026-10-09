@@ -639,4 +639,5 @@ fn rest<'a>(mut cells: &'a [Term], mut tail: Option<&'a Term>) -> (&'a [Term], O
 }
 
 #[cfg(test)]
+#[path = "../../tests/term/hash.rs"]
 mod tests;

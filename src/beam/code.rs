@@ -1034,4 +1034,5 @@ fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
 }
 
 #[cfg(test)]
+#[path = "../../tests/beam/code.rs"]
 mod tests;
