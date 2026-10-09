@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
 
 use super::{MonitorLinkTree, TreeKey};
-use crate::term::{ProcessId, Reference};
+use crate::runtime::process::LinkId;
+use crate::term::{PortId, ProcessId, Reference};
 
 /// Link sequences of a process on pinned ERTS 29.1.1 with one scheduler,
 /// and the order of the link exit signals at its exit. A positive number
@@ -167,4 +168,16 @@ fn compares_references_as_erts_memory_bytes() {
     );
     assert_eq!(pid.compare(Reference(1 << 32)), Ordering::Greater);
     assert_eq!(pid.compare(Reference(1 << 18)), Ordering::Less);
+}
+
+#[test]
+fn orders_link_ids_as_erts_words() {
+    // A local pid word is the pid data above the tag 0x3, and a local port
+    // word is the port data above the tag 0x7 (erl_term.h:81-82).
+    let pid = |number| LinkId::Process(ProcessId(number));
+    let port = |number| LinkId::Port(PortId(number));
+    assert_eq!(pid(2).compare(port(2)), Ordering::Less);
+    assert_eq!(port(2).compare(pid(3)), Ordering::Less);
+    assert_eq!(port(2).compare(pid(1)), Ordering::Greater);
+    assert_eq!(port(2).compare(port(2)), Ordering::Equal);
 }

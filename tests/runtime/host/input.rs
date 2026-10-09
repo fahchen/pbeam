@@ -113,3 +113,14 @@ fn waits_for_an_fd_at_or_above_fd_setsize() {
     // SAFETY: `high` is an fd of this test, which no other code uses.
     unsafe { libc::close(high) };
 }
+
+#[test]
+fn tells_whether_the_wait_ended_for_an_fd() {
+    assert!(Readiness::Ready(vec![0, 5]).ended(5));
+    assert!(!Readiness::Ready(vec![5]).ended(0));
+    assert!(!Readiness::Pending.ended(0));
+    assert!(Readiness::Invalid.ended(0));
+    assert_eq!(Readiness::Ready(vec![5]).into_ready(), vec![5]);
+    assert!(Readiness::Pending.into_ready().is_empty());
+    assert!(Readiness::Invalid.into_ready().is_empty());
+}

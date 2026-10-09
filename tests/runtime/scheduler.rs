@@ -1,4 +1,4 @@
-use super::{CONTEXT_REDS, MonitorOptions, MonitorTarget, Scheduler, Turn};
+use super::{CONTEXT_REDS, LinkId, MonitorOptions, MonitorTarget, Scheduler, Turn};
 use crate::runtime::host::output::{IovecWrite, IovecWritten};
 use crate::term::test_atom;
 use crate::{
@@ -173,19 +173,31 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
     assert!(scheduler.link(ProcessId(0)));
     assert!(!scheduler.link(ProcessId(99)));
     scheduler.unlink(child);
-    let unlinking = scheduler.current_process_mut().links.get(&child);
+    let unlinking = scheduler
+        .current_process_mut()
+        .links
+        .get(&LinkId::Process(child));
     assert!(unlinking.is_some_and(|&id| id != 0));
     scheduler.unlink(child);
     scheduler.unlink(ProcessId(99));
     scheduler.unlink(ProcessId(0));
     assert!(scheduler.link(child));
-    assert_eq!(scheduler.current_process_mut().links.get(&child), Some(&0));
+    assert_eq!(
+        scheduler
+            .current_process_mut()
+            .links
+            .get(&LinkId::Process(child)),
+        Some(&0)
+    );
     scheduler.park_current();
 
     // The child handles the link, the unlink, and the link again.
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(
-        scheduler.current_process_mut().links.get(&ProcessId(0)),
+        scheduler
+            .current_process_mut()
+            .links
+            .get(&LinkId::Process(ProcessId(0))),
         Some(&0)
     );
     scheduler.finish_current(atom("normal"), None);
@@ -502,7 +514,11 @@ fn dirty_write(fd: i32, bytes: &[u8]) -> IovecWrite {
 
 /// Wait until a dirty IO call completes, then take the completions.
 fn wait_completion(scheduler: &mut Scheduler) {
-    assert!(scheduler.wait_events(Some(Duration::from_secs(10))));
+    assert!(
+        scheduler
+            .wait_events(Some(Duration::from_secs(10)))
+            .unwrap()
+    );
     scheduler.complete_dirty_writes();
 }
 
@@ -541,7 +557,7 @@ fn resumes_a_dirty_write_once_when_it_completes_before_the_next_poll() {
     // The inbox is empty, and the wait does not wait for the call.
     scheduler.complete_dirty_writes();
     assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(0)]);
-    assert!(!scheduler.wait_events(None));
+    assert!(!scheduler.wait_events(None).unwrap());
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
 }
 
@@ -572,7 +588,11 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
     scheduler.deliver(ProcessId(0), atom("ping"));
     scheduler.park_current();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
-    assert!(scheduler.wait_events(Some(Duration::from_millis(20))));
+    assert!(
+        scheduler
+            .wait_events(Some(Duration::from_millis(20)))
+            .unwrap()
+    );
     scheduler.complete_dirty_writes();
     assert!(scheduler.runnable.is_empty());
     let reading = std::thread::spawn(move || {

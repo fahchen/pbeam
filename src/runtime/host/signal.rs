@@ -70,8 +70,12 @@ pub(crate) fn set_signal(name: &str, disposition: Disposition) -> bool {
 /// Set the dispositions of the emulator start, as `erts_sys_init_float`
 /// (sys_float.c:31-37), `init_break_handler` (sys.c:799-803), and
 /// `erts_sys_unix_later_init` (sys.c:812-823) do: `SIG_IGN` for `SIGFPE`,
-/// handlers for `SIGINT`, `SIGQUIT`, `SIGTERM`, and `SIGUSR1`, and
-/// `SIG_IGN` for `SIGCHLD`. ERTS installs `request_break` for `SIGINT`,
+/// and handlers for `SIGINT`, `SIGQUIT`, `SIGTERM`, and `SIGUSR1`. ERTS
+/// also sets `SIG_IGN` for `SIGCHLD`, because `erl_child_setup`, a
+/// separate process, reaps its port programs (erl_child_setup.c:396-420).
+/// PBeam keeps `SIG_DFL`: a thread of this process reaps each port program
+/// (see `host::spawn`), and with `SIG_IGN` the host reaps the program
+/// first, so the exit status of the port is lost. ERTS installs `request_break` for `SIGINT`,
 /// which writes to the notify pipe as the other handler does
 /// (sys.c:626-629). The Rust runtime already sets `SIGPIPE` to `SIG_IGN`,
 /// as `erl_sys_late_init` does (sys_drivers.c:175). The `pbeam` binary
@@ -88,7 +92,6 @@ pub fn install_start_dispositions() {
     for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGUSR1] {
         set_disposition(signal, Disposition::Handle);
     }
-    set_disposition(libc::SIGCHLD, Disposition::Ignore);
 }
 
 /// Set the disposition of the host signal `signal` with `sigaction`, as

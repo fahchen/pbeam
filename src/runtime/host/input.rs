@@ -19,6 +19,42 @@ pub(crate) enum Readiness {
     Invalid,
 }
 
+impl Readiness {
+    /// Return `true` when the wait ended for `fd`: `fd` is ready, or an fd
+    /// is not open.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Readiness::Ready(vec![0]).ended(0));
+    /// assert!(Readiness::Invalid.ended(0));
+    /// assert!(!Readiness::Pending.ended(0));
+    /// ```
+    pub(crate) fn ended(&self, fd: c_int) -> bool {
+        match self {
+            Readiness::Ready(fds) => fds.contains(&fd),
+            Readiness::Pending => false,
+            Readiness::Invalid => true,
+        }
+    }
+
+    /// Return the ready fds: none when the timeout ended or an fd is not
+    /// open.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Readiness::Ready(vec![5]).into_ready(), vec![5]);
+    /// assert!(Readiness::Invalid.into_ready().is_empty());
+    /// ```
+    pub(crate) fn into_ready(self) -> Vec<c_int> {
+        match self {
+            Readiness::Ready(fds) => fds,
+            Readiness::Pending | Readiness::Invalid => Vec::new(),
+        }
+    }
+}
+
 /// Read at most `size` bytes from `fd` with one `read`, as `tty_read_nif`
 /// (`prim_tty_nif.c:646-657`) does. Return the bytes, which are empty at
 /// the end of file and when `size` is 0, or the `errno` of a failed
@@ -42,13 +78,14 @@ pub(crate) fn read(fd: c_int, size: usize) -> Result<Vec<u8>, c_int> {
 }
 
 /// Wait until a `read` of one of `fds` does not block, for at most
-/// `timeout`, or without end for `None`, with `select`. The ERTS poll thread
-/// waits for the read select of a NIF in the same way (`erl_process.c:3372`,
-/// `erl_check_io.c:2121-2152`), and its poll set also holds the read end of
-/// its wake pipe (`erl_poll.c:489-525`). ERTS uses `kqueue` on macOS and `epoll` on
-/// Linux, with a `select` or `poll` set for each fd that the kernel poll
-/// does not accept (`erl_poll.h:100-135`, `214-225`). `select` reads each fd
-/// type on both hosts. The macOS `poll` gives `POLLNVAL` for a character
+/// `timeout`, or without end for `None`, with `select`. The ERTS poll
+/// thread waits for the read select of a NIF and for the input of a port in
+/// the same way (`erl_process.c:3372`, `erl_check_io.c:2121-2152`), and its
+/// poll set also holds the read end of its wake pipe (`erl_poll.c:489-525`).
+/// ERTS uses `kqueue` on macOS and `epoll` on Linux, with a `select` or
+/// `poll` set for each fd that the kernel poll does not accept
+/// (`erl_poll.h:100-135`, `214-225`). `select` reads each fd type on both
+/// hosts. The macOS `poll` gives `POLLNVAL` for a character
 /// device such as `/dev/null`. An fd can be at or above `FD_SETSIZE`, as in
 /// the ERTS poll: the sets grow with the largest fd (see [`FdSets`]).
 ///

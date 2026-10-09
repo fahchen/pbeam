@@ -152,7 +152,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Run the remaining test instructions for `io:format/2`
 
-- The loader accepts `is_ne`, `is_number`, `is_port`, `is_bitstr`, and `is_any_native_record`, but each one stops the run with `unsupported BEAM opcode N`. Under the PBeam boot, `io:format/2` with `~w` of a list, a tuple, or a map stops at `is_port` (io_lib.erl:820). `~p` of an integer stops at `is_bitstr`, and `~p` of a tuple stops at `is_any_native_record` (measured). The "Unimplemented instructions" row records these instructions and `bs_init_writable`, `gc_bif3`, `bs_create_bin`, `get_record_elements`, and `put_record`. A format without a term argument, `~w` of an integer, and `~s` of a string already work. PR #188 also named `net_kernel:dflag_unicode_io/1` and `erl_scan:reserved_word/1`. The first is a BIF that PBeam runs (PR #88), and the second is a function of `erl_scan.beam`, which a run gives with the other OTP modules.
+- The loader accepts `is_ne`, `is_number`, `is_bitstr`, and `is_any_native_record`, but each one stops the run with `unsupported BEAM opcode N`. Under the PBeam boot, `io:format/2` with `~w` of a list, a tuple, or a map stops at `is_bitstr` (io_lib.erl:823); #302 added `is_port`, which stopped it before (io_lib.erl:820). `~p` of an integer stops at `is_bitstr`, and `~p` of a tuple stops at `is_any_native_record` (measured). The "Unimplemented instructions" row records these instructions and `bs_init_writable`, `gc_bif3`, `bs_create_bin`, `get_record_elements`, and `put_record`. A format without a term argument, `~w` of an integer, and `~s` of a string already work. PR #188 also named `net_kernel:dflag_unicode_io/1` and `erl_scan:reserved_word/1`. The first is a BIF that PBeam runs (PR #88), and the second is a function of `erl_scan.beam`, which a run gives with the other OTP modules.
 - **Trigger:** a consumer or a probe prints a compound term with `io:format/2`, for example to compare its output byte for byte through the `pbeam` binary.
 - **Source:** PR #188 (#179) and measured probes at the M2 close.
 
@@ -164,10 +164,17 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Poll fd 0 while processes run
 
-- PBeam waits for the read select of fd 0 only when no process can run (#299). ERTS also waits for it in a poll thread while processes run (erl_process.c:3339-3372), so input arrives while other processes run. Thus in PBeam, a run in which a process can always run never gets the `{select, TTY, Ref, ready_input}` message. The "Input select" row of `docs/erts-differences.md` records this.
+- PBeam waits for the read select of fd 0 and for the pipes of the ports only when no process can run (#299, #302). ERTS also waits for it in a poll thread while processes run (erl_process.c:3339-3372), so input arrives while other processes run. Thus in PBeam, a run in which a process can always run never gets the `{select, TTY, Ref, ready_input}` message. The "Input select" row of `docs/erts-differences.md` records this.
 - The work: a poll of fd 0 with no timeout at a scheduler switch point, for example after a number of reductions, as an ERTS scheduler checks its own poll set (erl_process.c:9946-9960).
-- **Trigger:** a program reads standard input while one of its processes can always run, for example a busy worker.
+- **Trigger:** a program reads standard input or the output of a port program while one of its processes can always run, for example a busy worker.
 - **Source:** PR for #299.
+
+### Run the other port options and port kinds
+
+- `open_port/2` runs only `{spawn_executable, Name}` with `binary`, `exit_status`, `use_stdio`, `nouse_stdio`, `stderr_to_stdout`, and `{args, Args}` (#302). Each other option, the list data mode, the port kinds `spawn`, `spawn_driver`, and `fd`, the port BIFs other than `port_command/2`, `port_close/1`, and `port_info/1`, and a message, link, monitor, exit signal, or name of a port give a runtime error (row "Ports" of `docs/erts-differences.md`).
+- `port_command/2` writes with a blocking write; ERTS queues the data that does not fit in the pipe and marks the port busy (sys_drivers.c:1140-1203). A port program keeps each fd of PBeam that is not close-on-exec. After `os:set_signal(sigchld, ignore)`, the host reaps each program, and a port with `exit_status` returns a runtime error; ERTS reaps its programs in `erl_child_setup` (erl_child_setup.c:396-420). For the same reason, the `pbeam` binary keeps `SIG_DFL` for `SIGCHLD` at the start, where ERTS sets `SIG_IGN` (row "OS signals"). A reaper process as `erl_child_setup` would remove both differences.
+- **Trigger:** a consumer uses another option, port kind, or port BIF, for example `{line, L}` or `Port ! {self(), {command, Data}}`, or writes more data than the pipe holds to a program that writes back, or reads the exit status of a port after `os:set_signal(sigchld, ignore)`.
+- **Source:** PR for #302.
 
 ### Run the break menu and the crash dump of `SIGINT` and `SIGUSR1`
 

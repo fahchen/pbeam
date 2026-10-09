@@ -2,7 +2,8 @@
 //! (`sys/unix/sys.c`, `sys/common/erl_sys_common_misc.c`), the host
 //! terminal that the `prim_tty` NIFs use, read, and write to, the host signal
 //! dispositions that `os:set_signal/2` sets, the host clocks that the
-//! time BIFs read, and the OS environment that `os:getenv/1` reads.
+//! time BIFs read, the OS environment that `os:getenv/1` reads, and the
+//! external programs that `open_port/2` starts.
 
 use std::{ffi::CStr, sync::OnceLock};
 
@@ -12,6 +13,7 @@ pub(crate) mod errno;
 pub(crate) mod input;
 pub(crate) mod output;
 pub(crate) mod signal;
+pub(crate) mod spawn;
 pub(crate) mod terminal;
 
 /// Return the OS flavor of the host: the `uname` system name with each

@@ -110,6 +110,23 @@ impl BifResult {
     }
 }
 
+/// Return the runtime error of a BIF that ERTS runs with a port argument
+/// and that PBeam does not run with a port yet: `erlang:exit/2`,
+/// `erlang:monitor/2,3` with the type `port`, `erlang:register/2`,
+/// `erlang:send/2,3`, the `send` instruction, and `erlang:unlink/1`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let error = unsupported_port("erlang:unlink/1");
+/// assert!(error.to_string().starts_with("unsupported erlang:unlink/1 with a port"));
+/// ```
+fn unsupported_port(bif: &str) -> BeamError {
+    error(format!(
+        "unsupported {bif} with a port: see \"Ports\" in docs/erts-differences.md"
+    ))
+}
+
 /// Split a list into its elements and the tail of an improper list. `[]`
 /// gives no elements and no tail. A term that is not a list gives `None`.
 ///

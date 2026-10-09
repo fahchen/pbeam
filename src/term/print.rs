@@ -155,6 +155,7 @@ pub(crate) fn print_term(term: &Term) -> Vec<u8> {
                         .as_bytes(),
                 );
             }
+            Term::Port(port) => text.extend_from_slice(format!("#Port<0.{}>", port.0).as_bytes()),
             Term::Reference(reference) => {
                 let [n0, n1, n2] = reference.numbers();
                 text.extend_from_slice(format!("#Ref<0.{n2}.{n1}.{n0}>").as_bytes());

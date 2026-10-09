@@ -142,10 +142,11 @@ impl BeamProgram {
     /// `check_activities_to_run` (`erl_process.c:9797-9810`). When no
     /// process can run, it sleeps until the first timer end, as
     /// `scheduler_wait` sleeps until the next timeout
-    /// (`erl_process.c:3452-3620`). When fd 0 has a read select, a dirty IO
-    /// call runs, or a signal handler is installed, it waits for fd 0, for
-    /// the completion of the call, and for the handled host signals until
-    /// then (see `Scheduler::wait_events`). Before each scheduling step, it
+    /// (`erl_process.c:3452-3620`). When fd 0 has a read select, a port
+    /// waits for a pipe, a dirty IO call runs, or a signal handler is
+    /// installed, it waits for fd 0, for the pipes, for the completion of the
+    /// call, and for the handled host signals until then (see
+    /// `Scheduler::wait_events`). Before each scheduling step, it
     /// sends `{notify, Signal}` to `erl_signal_server` for each handled
     /// signal that arrived (see `Scheduler::check_signals`), and a process
     /// whose dirty IO call completed goes to the run queue (see
@@ -161,8 +162,8 @@ impl BeamProgram {
     /// as ERTS prints a term (`print_term`), for example
     /// `root process exited with {badarg,[]}`. A root process that
     /// waits when no process can run, no timer is active, fd 0 has no read
-    /// select, no dirty IO call runs, and no signal handler is installed
-    /// gives an error. The run does not wait for a dirty IO call that runs
+    /// select, no port waits for a pipe, no dirty IO call runs, and no
+    /// signal handler is installed gives an error. The run does not wait for a dirty IO call that runs
     /// when it ends. A call of `erlang:halt/2` with a status code ends the
     /// run at once with the error [`BeamError::Halt`]. At the end of the
     /// run, also after an error, fd 0 gets its mode at the start of the run
@@ -239,7 +240,7 @@ impl BeamProgram {
                 Turn::Done => {}
                 Turn::Idle => {
                     let wait = scheduler.timers.wait_time(scheduler.timers.now());
-                    if !scheduler.wait_events(wait) {
+                    if !scheduler.wait_events(wait)? {
                         match wait {
                             Some(wait) => std::thread::sleep(wait),
                             None => break,
@@ -714,6 +715,7 @@ impl BeamProgram {
                     let passed = match kind {
                         TestKind::Atom => matches!(value, Term::Atom(_)),
                         TestKind::Pid => matches!(value, Term::Pid(_)),
+                        TestKind::Port => matches!(value, Term::Port(_)),
                         TestKind::Reference => matches!(value, Term::Reference(_)),
                         TestKind::Tuple => matches!(value, Term::Tuple(_)),
                         // `is_list` and `is_nonempty_list` test the cons tag, so an
@@ -1122,7 +1124,7 @@ impl BeamProgram {
                     }
                     let to = read(process, &Operand::X(0))?;
                     let message = read(process, &Operand::X(1))?;
-                    let result = send(scheduler, &to, message);
+                    let result = send(scheduler, &to, message)?;
                     if let Some(outcome) =
                         self.finish_bif(scheduler.current_process_mut(), result, false)?
                     {

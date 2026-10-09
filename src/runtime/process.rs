@@ -5,8 +5,38 @@ pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 use super::{host::output::IovecWritten, mailbox::Mailbox, scheduler::AliasMode, timer::TimerKey};
 use crate::{
     error::{BeamError, error},
-    term::{Atom, ProcessId, Reference, Term},
+    term::{Atom, PortId, ProcessId, Reference, Term},
 };
+
+/// The other end of a link: a process or a port, as the `other.item` of an
+/// ERTS link, which is a pid or a port (`erl_monitor_link.h`). A link tree
+/// orders its entries by the `Eterm` word of the item (see the `TreeKey`
+/// implementation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LinkId {
+    /// A local process.
+    Process(ProcessId),
+    /// A local port.
+    Port(PortId),
+}
+
+impl LinkId {
+    /// Return the term of the identifier: the pid or the port, as the
+    /// second element of an `EXIT` message.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(LinkId::Process(ProcessId(1)).term(), Term::Pid(ProcessId(1)));
+    /// assert_eq!(LinkId::Port(PortId(2)).term(), Term::Port(PortId(2)));
+    /// ```
+    pub(super) fn term(self) -> Term {
+        match self {
+            LinkId::Process(id) => Term::Pid(id),
+            LinkId::Port(id) => Term::Port(id),
+        }
+    }
+}
 
 /// One active function call: its module, code position, and Y registers.
 #[derive(Debug)]
@@ -185,12 +215,12 @@ pub(super) struct ProcessState {
     /// (`FS_OFF_HEAP_MSGQ`), false for `on_heap`. PBeam has no process heap,
     /// so the flag does not change where the messages are kept.
     pub(super) off_heap_message_queue: bool,
-    /// The link tree (`ERTS_P_LINKS`): processes linked to this process, by
-    /// pid, with the identifier of an unlink that waits for its
+    /// The link tree (`ERTS_P_LINKS`): processes and ports linked to this
+    /// process, by pid or port, with the identifier of an unlink that waits for its
     /// acknowledgment, or 0 for an active link (`ErtsILink.unlinking`). A
     /// link that is unlinking sends no exit signal
     /// (`erl_process.c:14068-14081`).
-    pub(super) links: MonitorLinkTree<ProcessId, u64>,
+    pub(super) links: MonitorLinkTree<LinkId, u64>,
     /// The monitor tree: the monitors that this process holds and its
     /// aliases, by reference (`ERTS_P_MONITORS`).
     pub(super) monitors: MonitorLinkTree<Reference, Origin>,

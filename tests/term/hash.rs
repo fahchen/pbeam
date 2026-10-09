@@ -1,5 +1,5 @@
 use super::{internal_hash, mix64};
-use crate::term::{Atom, Fun, Lambda, Map, MatchContext, ProcessId, Reference, Term};
+use crate::term::{Atom, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term};
 
 #[test]
 #[should_panic(expected = "a match context reached a term operation")]
@@ -304,4 +304,13 @@ fn hashes_a_deep_term_without_recursion() {
     let hash = internal_hash(&deep(1_000_000));
     assert_eq!(hash, internal_hash(&deep(1_000_000)));
     assert_ne!(hash, internal_hash(&deep(999_999)));
+}
+
+#[test]
+fn hashes_a_port_as_pinned_erts() {
+    // ERTS: erts_debug:get_internal_state({internal_hash, list_to_port("#Port<0.5>")})
+    // after erts_debug:set_internal_state(available_internal_state, true).
+    // The port has the port data 0x28, which `port_info/1` gives as its id
+    // 40, so its word is 0x287.
+    assert_eq!(internal_hash(&Term::Port(PortId(0x28))), 589508649189025146);
 }

@@ -163,8 +163,11 @@ fn sets_the_dispositions_of_the_erts_emulator_start() {
     // installs `request_break` for SIGINT and its generic handler for
     // SIGQUIT (`init_break_handler`, sys.c:799-803), its generic handler
     // for SIGTERM and SIGUSR1, and ignores SIGCHLD
-    // (`erts_sys_unix_later_init`, sys.c:812-823). The `pbeam` binary calls
-    // `install_start_dispositions` before it loads the BEAM files.
+    // (`erts_sys_unix_later_init`, sys.c:812-823). PBeam keeps SIGCHLD at
+    // its default, because a thread of the PBeam process reaps each port
+    // program (row "OS signals" in docs/erts-differences.md). The `pbeam`
+    // binary calls `install_start_dispositions` before it loads the BEAM
+    // files.
     let directory = env::temp_dir().join(format!("pbeam-start-signal-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     let result = directory.join("result");
@@ -184,7 +187,7 @@ fn sets_the_dispositions_of_the_erts_emulator_start() {
     assert!(child.status.success(), "child exited with {}", child.status);
     assert_eq!(
         written.unwrap(),
-        "sigfpe=ignore sigint=handle sigquit=handle sigterm=handle sigusr1=handle sigchld=ignore"
+        "sigfpe=ignore sigint=handle sigquit=handle sigterm=handle sigusr1=handle sigchld=default"
     );
 }
 

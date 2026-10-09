@@ -4,6 +4,7 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
 use crate::runtime::local_node;
+use crate::runtime::process::LinkId;
 use crate::runtime::process::{Flush, TimerReference};
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
 use crate::runtime::signal::Signal;
@@ -449,7 +450,7 @@ pub(super) fn exit(context: &mut BifContext<'_>, id: &Term, reason: &Term) -> Bi
         && target == caller_id
         && (*reason == Term::static_atom("kill") || !trap_exit);
     let exit = Signal::Exit {
-        from: caller_id,
+        from: LinkId::Process(caller_id),
         reason: reason.clone(),
         linked: false,
         normal_kills: suicide,
@@ -545,7 +546,7 @@ pub(super) fn demonitor(
 /// `badarg` (`bif.c:881-882`). Each other target, and each other type,
 /// raises `badarg`. A monitor of the caller creates no monitor and no
 /// alias, and each port name gives the `noproc` `DOWN` message (see
-/// [`Scheduler::monitor`]).
+/// [`Scheduler::monitor`]). PBeam registers no port.
 ///
 /// # Examples
 ///
@@ -559,8 +560,9 @@ pub(super) fn demonitor(
 ///
 /// # Errors
 ///
-/// A `time_offset` monitor of `clock_service`, and the `priority` option
-/// of a monitor that is not of the caller, are not supported.
+/// A `time_offset` monitor of `clock_service`, a monitor of the type `port`
+/// with a port, and the `priority` option of a monitor that is not of the
+/// caller, are not supported.
 pub(super) fn monitor(
     context: &mut BifContext<'_>,
     kind: &Term,
@@ -576,6 +578,7 @@ pub(super) fn monitor(
     let target = match (kind.name(), target) {
         ("process", Term::Pid(id)) => Some(MonitorTarget::Process(*id)),
         ("process", target) => local_name(target).map(MonitorTarget::ProcessName),
+        ("port", Term::Port(_)) => return Err(unsupported_port("erlang:monitor/2,3")),
         ("port", target) => local_name(target).map(MonitorTarget::PortName),
         ("time_offset", Term::Atom(service)) if service.name() == "clock_service" => {
             // ponytail: no time offset service yet; add it when a measured path monitors it.
@@ -1526,21 +1529,29 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(send(scheduler, &Term::Pid(pid), ok.clone()), BifResult::Value(value) if value == ok));
-/// assert!(matches!(send(scheduler, &Term::static_atom("nobody"), ok.clone()), BifResult::Raise { .. }));
+/// assert!(matches!(send(scheduler, &Term::Pid(pid), ok.clone())?, BifResult::Value(value) if value == ok));
+/// assert!(matches!(send(scheduler, &Term::static_atom("nobody"), ok.clone())?, BifResult::Raise { .. }));
 /// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
-/// assert!(matches!(send(scheduler, &remote, ok.clone()), BifResult::Value(_)));
+/// assert!(matches!(send(scheduler, &remote, ok.clone())?, BifResult::Value(_)));
 /// ```
+///
+/// # Errors
+///
+/// A port as `to` returns a runtime error: ERTS runs the port command of
+/// the message (`erl_send`, `bif.c:2872-2899`).
 pub(in crate::runtime::interpreter) fn send(
     scheduler: &mut Scheduler,
     to: &Term,
     message: Term,
-) -> BifResult {
-    match deliver_to(scheduler, to, message.clone()) {
+) -> Result<BifResult, BeamError> {
+    if let Term::Port(_) = to {
+        return Err(unsupported_port("erlang:send/2"));
+    }
+    Ok(match deliver_to(scheduler, to, message.clone()) {
         Some(Sent::Local) => local_send_result(scheduler, message),
         Some(Sent::NoConnect) => Value(message),
         None => BifResult::badarg(),
-    }
+    })
 }
 
 /// Run `erlang:send(To, Message, Options)` as ERTS `send_3`
@@ -1553,7 +1564,8 @@ pub(in crate::runtime::interpreter) fn send(
 /// reductions, and can return `ok` after a switch (see
 /// [`local_send_result`]).
 ///
-/// PBeam has no distribution and no ports, so `nosuspend` changes nothing.
+/// PBeam has no distribution and sends no message to a port, so
+/// `nosuspend` changes nothing.
 /// A `priority` message is an ordinary message unless its receiver gets it
 /// through a priority alias (`erl_proc_sig_queue.c:6021-6045`). Only
 /// `erlang:alias/1` makes a priority alias, so `priority` also changes
@@ -1567,31 +1579,39 @@ pub(in crate::runtime::interpreter) fn send(
 /// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
 /// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
 /// assert!(matches!(send3(scheduler, &remote, ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "noconnect"));
-/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok, &Term::static_atom("x")), BifResult::Raise { .. }));
+/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok, &Term::static_atom("x"))?, BifResult::Raise { .. }));
 /// ```
+///
+/// # Errors
+///
+/// A port as `to` after valid options returns a runtime error: ERTS runs
+/// the port command of the message (`send_3`, `bif.c:2733-2739`).
 pub(super) fn send3(
     scheduler: &mut Scheduler,
     to: &Term,
     message: &Term,
     options: &Term,
-) -> BifResult {
+) -> Result<BifResult, BeamError> {
     let Term::List(options) = options else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     let mut connect = true;
     for option in options {
         match option {
             Term::Atom(option) if option.name() == "noconnect" => connect = false,
             Term::Atom(option) if matches!(option.name(), "nosuspend" | "priority") => {}
-            _ => return BifResult::badarg(),
+            _ => return Ok(BifResult::badarg()),
         }
     }
-    match deliver_to(scheduler, to, message.clone()) {
+    if let Term::Port(_) = to {
+        return Err(unsupported_port("erlang:send/3"));
+    }
+    Ok(match deliver_to(scheduler, to, message.clone()) {
         Some(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
         Some(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
         Some(Sent::NoConnect) => Value(Term::static_atom("ok")),
         None => BifResult::badarg(),
-    }
+    })
 }
 
 /// The reductions of a local send: `erl_send` and `send_3` use them with
@@ -1669,7 +1689,7 @@ enum Sent {
 ///   (`erl_proc_sig_queue.c:6009-6075`; see
 ///   [`Scheduler::send_alias_message`]).
 /// - An atom gives the message to its registered process. A name that no
-///   process has gives `None`. PBeam has no ports.
+///   process has gives `None`. PBeam registers no port.
 /// - `{Name, Node}` with two atoms and the local node gives the message to
 ///   the registered process, or drops it when no process has the name.
 ///   Another node drops the message and gives [`Sent::NoConnect`], as ERTS

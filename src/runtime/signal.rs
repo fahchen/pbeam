@@ -15,6 +15,7 @@
 //! (`erts_proc_sig_handle_exit`, `erl_proc_sig_queue.c:7259-7473`). Each
 //! handled signal also costs 1 (`erl_proc_sig_queue.c:6968`).
 
+use super::process::LinkId;
 use crate::term::{ProcessId, Reference, Term};
 
 /// A non-message signal in the signal queue of a process.
@@ -26,8 +27,9 @@ pub(super) enum Signal {
     /// more when the signal ends the receiver, and 1 more when the receiver
     /// ignores it (`erl_proc_sig_queue.c:4632-4815`). At exit it is dropped.
     Exit {
-        /// The sender, the second element of the `EXIT` message.
-        from: ProcessId,
+        /// The sender, the second element of the `EXIT` message: a process,
+        /// or a port for the link exit signal of a port.
+        from: LinkId,
         /// The exit reason.
         reason: Term,
         /// True for `ERTS_SIG_Q_OP_EXIT_LINKED`: the receiver acts only when
