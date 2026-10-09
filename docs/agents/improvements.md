@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261009: Check complete follow-up coverage
+
+**Problem:** The PR description omitted two follow-up tasks for discovered gaps and kept an incomplete owner action.
+
+**Root Cause:** The follow-up list was not compared with the complete gap inventory before the PR was published.
+
+**Fix:** Create a task for each discovered gap, link existing tasks, and update the PR description with the complete set.
+
+**Guardrail:** Before publishing a PR, compare every discovered gap with its task or explicit owner decision and verify that the description lists no stale action.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/270#issuecomment-6078067360>
+
 ## 20261006: Verify OTP hardware assumptions against source behavior
 
 **Problem:** The clock documentation and test rationale assumed that ERTS returns the host TSC frequency when RDTSCP is available.
