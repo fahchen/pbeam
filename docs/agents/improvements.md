@@ -21,6 +21,30 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261009: Preserve child exit status when guest signals change
+
+**Problem:** A child process that exited with status 7 was reported as successful after the guest ignored `SIGCHLD`.
+
+**Root Cause:** The host wait path treated `ECHILD` as an unchanged success status after automatic child reaping.
+
+**Fix:** Isolate child reaping from guest signal changes and handle failed waits explicitly.
+
+**Guardrail:** Test child exit statuses after each guest signal mode and never convert a failed wait into status 0.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/322#issuecomment-6084149434>
+
+## 20261009: Store the normalized program path
+
+**Problem:** Port information returned bytes after a NUL even though the spawned program used only the prefix.
+
+**Root Cause:** The launch path normalized the program name, but the stored port name kept the original binary.
+
+**Fix:** Normalize the program path once and use the same NUL-truncated value for launch and port information.
+
+**Guardrail:** Test program names with a NUL and trailing bytes and compare every reported name with the launched path.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/322#issuecomment-6084149434>
+
 ## 20261006: Verify OTP hardware assumptions against source behavior
 
 **Problem:** The clock documentation and test rationale assumed that ERTS returns the host TSC frequency when RDTSCP is available.
@@ -131,8 +155,7 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 ## 20261005: Keep explicit exception raise sites separate
 
-**Problem:** An explicit exception raise site was grouped with BIFs that raise
-`badarg`, although it raises the class `error` with its first argument as the reason.
+**Problem:** An explicit exception raise site was grouped with BIFs that raise `badarg`, although it raises the class `error` with its first argument as the reason.
 
 **Root Cause:** The documentation grouped operations by a similar failure shape instead of recording each operation's exact exception class and reason.
 
