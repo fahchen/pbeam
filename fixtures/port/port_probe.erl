@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         unsupported/1, terminal/0, fd_limit/0, costs/1, measure/2]).
+         nul_name/0, unsupported/1, terminal/0, fd_limit/0, costs/1, measure/2]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -203,6 +203,13 @@ errors() ->
     Data = catch_error(fun() -> port_command(Port, foo) end),
     port_close(Port),
     [Open, Internal, Bifs, Data].
+
+%% The port name of a binary path ends at its first byte 0.
+nul_name() ->
+    Port = open_port({spawn_executable, <<"/bin/sh", 0, "junk">>}, [binary, {args, ["-c", "cat"]}]),
+    {name, Name} = lists:keyfind(name, 1, erlang:port_info(Port)),
+    port_close(Port),
+    Name.
 
 %% The reductions of each port BIF in a new process, without the
 %% reductions of the measure itself. Opts are the spawn options: the ERTS

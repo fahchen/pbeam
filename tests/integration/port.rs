@@ -149,6 +149,13 @@ fn gives_the_errors_of_the_port_bifs_as_pinned_erts() {
 }
 
 #[test]
+fn gives_the_port_name_before_the_first_byte_0_as_pinned_erts() {
+    // ERTS copies a binary name into a C string, and the port name is that
+    // C string (erl_unicode.c:2107-2108, io.c:323, 366-367).
+    assert_runs("nul_name()", "[47,98,105,110,47,115,104]");
+}
+
+#[test]
 fn stops_the_run_for_each_port_part_that_is_not_implemented() {
     let program = load();
     for (case, message) in [

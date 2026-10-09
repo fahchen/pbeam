@@ -410,14 +410,17 @@ fn spawn_executable(name: &Term) -> Result<Option<Vec<u8>>, BeamError> {
 
 /// Return the native bytes of a file name, as
 /// `erts_convert_filename_to_encoding` with `allow_atom` does
-/// (`erl_unicode.c:2057-2119`): a binary gives its bytes, an atom gives the
-/// bytes of its characters, and a list gives the bytes of
+/// (`erl_unicode.c:2057-2119`): a binary gives its bytes before its first
+/// byte 0, because ERTS copies the bytes into a C string, and the port name
+/// is that C string (`erl_unicode.c:2107-2108`, `io.c:323`, `366-367`). An
+/// atom gives the bytes of its characters, and a list gives the bytes of
 /// [`native_filename`]. `[]` is a name only with `allow_empty`. Return
 /// `None` for each other term.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
+/// assert_eq!(native_name(&Term::Binary(b"/bin/sh\0x".to_vec()), false), Some(b"/bin/sh".to_vec()));
 /// assert_eq!(native_name(&Term::static_atom("ok"), false), Some(b"ok".to_vec()));
 /// assert_eq!(native_name(&Term::List(vec![]), false), None);
 /// assert_eq!(native_name(&Term::List(vec![]), true), Some(Vec::new()));
@@ -425,7 +428,10 @@ fn spawn_executable(name: &Term) -> Result<Option<Vec<u8>>, BeamError> {
 fn native_name(name: &Term, allow_empty: bool) -> Option<Vec<u8>> {
     let characters;
     let name = match name {
-        Term::Binary(bytes) => return Some(bytes.clone()),
+        Term::Binary(bytes) => {
+            let end = bytes.iter().position(|&byte| byte == 0);
+            return Some(bytes[..end.unwrap_or(bytes.len())].to_vec());
+        }
         Term::Atom(atom) => {
             let text = atom.name().chars();
             characters = Term::List(text.map(|c| Term::Integer(u32::from(c).into())).collect());
