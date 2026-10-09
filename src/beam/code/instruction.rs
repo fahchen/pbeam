@@ -1404,7 +1404,7 @@ pub(super) fn parse_code(
             },
             OPCODE_BS_CREATE_BIN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
-                let _alloc = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                skip_allocation(data, &mut cursor)?;
                 skip_live_registers(data, &mut cursor)?;
                 let _unit = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
                 Instruction::BinaryCreate {
@@ -2153,6 +2153,75 @@ fn skip_counted_operands(data: &[u8], cursor: &mut usize) -> Result<(), BeamErro
 /// ```
 fn skip_live_registers(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
     read_operand(data, cursor, TAG_UNSIGNED).map(|_live_registers| ())
+}
+
+/// Skip the `Alloc` operand of `bs_create_bin`: a `u` heap word count or an
+/// allocation list (extended subtag 3).
+///
+/// ERTS gives `Alloc` the operand type `u` (`jit/arm/ops.tab:1104`). Its
+/// loader changes an allocation list into a `u` operand with the sum of the
+/// heap words (`beam_file.c:2384-2395`). `marshal_allocation_list`
+/// (`beam_file.c:2234-2280`) rejects a list of more than three items, an
+/// item that is not two `u` operands, a number larger than `i32::MAX / 3`,
+/// a kind other than words (0), floats (1), and funs (2), and a sum larger
+/// than `i32::MAX`. A float uses `FLOAT_SIZE_OBJECT` words and a fun uses
+/// `ERL_FUN_SIZE` words, both 2 on a 64-bit ERTS (`erl_term.h:526`,
+/// `erl_fun.h:99`). PBeam has no process heap, so this function does not
+/// keep the sum. It applies the same checks and moves the cursor past the
+/// operand. An operand of another tag is a load error, as in ERTS.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {alloc,[{words,1},{floats,0},{funs,1}]}
+/// let mut cursor = 0;
+/// skip_allocation(&[0x37, 0x30, 0x00, 0x10, 0x10, 0x00, 0x20, 0x10], &mut cursor)?;
+/// assert_eq!(cursor, 8);
+/// skip_allocation(&[0x70], &mut 0)?; // 7
+/// assert!(skip_allocation(&[0x37, 0x10, 0x30, 0x10], &mut 0).is_err()); // kind 3
+/// ```
+fn skip_allocation(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
+    const ALLOCATION_LIST_SUBTAG: i128 = 3;
+    const MAX_ALLOCATION_ITEMS: u64 = 3;
+    const MAX_HEAP_WORDS: u64 = i32::MAX as u64;
+    /// `FLOAT_SIZE_OBJECT` on a 64-bit ERTS: a header and one data word.
+    const FLOAT_WORDS: u64 = 2;
+    /// `ERL_FUN_SIZE` on a 64-bit ERTS: a header and one entry pointer.
+    const FUN_WORDS: u64 = 2;
+    /// `MAX(FLOAT_SIZE_OBJECT, ERL_FUN_SIZE + 1)`, which is 3, divides the limit.
+    const MAX_ITEM_NUMBER: u64 = MAX_HEAP_WORDS / (FUN_WORDS + 1);
+    let first_byte = *data
+        .get(*cursor)
+        .ok_or_else(|| error("truncated BEAM operand"))?;
+    if first_byte & COMPACT_TAG_MASK != TAG_LITERAL {
+        return read_operand(data, cursor, TAG_UNSIGNED).map(|_heap_words| ());
+    }
+    if read_integer(data, cursor, TAG_LITERAL)? != ALLOCATION_LIST_SUBTAG {
+        return Err(error("unsupported BEAM allocation operand"));
+    }
+    let item_count = read_operand(data, cursor, TAG_UNSIGNED)?;
+    if item_count > MAX_ALLOCATION_ITEMS {
+        return Err(error("BEAM allocation list has more than three items"));
+    }
+    let mut heap_words = 0;
+    for _ in 0..item_count {
+        let kind = read_operand(data, cursor, TAG_UNSIGNED)?;
+        let number = read_operand(data, cursor, TAG_UNSIGNED)?;
+        if number > MAX_ITEM_NUMBER {
+            return Err(error("BEAM allocation number is too large"));
+        }
+        let words_per_item = match kind {
+            0 => 1,
+            1 => FLOAT_WORDS,
+            2 => FUN_WORDS,
+            _ => return Err(error(format!("invalid BEAM allocation kind {kind}"))),
+        };
+        heap_words += words_per_item * number;
+        if heap_words > MAX_HEAP_WORDS {
+            return Err(error("BEAM allocation list exceeds the heap word limit"));
+        }
+    }
+    Ok(())
 }
 
 /// Skip a fixed number of compact operands.

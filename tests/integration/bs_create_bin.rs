@@ -4,6 +4,10 @@ use pbeam_runtime::{BeamProgram, Map, Term};
 
 const BS_CREATE_BIN_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_probe.beam");
+const BS_CREATE_BIN_ALLOC_PROBE: &[u8] =
+    include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_alloc_probe.beam");
+const BS_CREATE_BIN_ALLOC_LIMIT: &[u8] =
+    include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_alloc_limit.beam");
 
 /// Evaluate an expression on the pinned ERTS with `bs_create_bin_probe` in
 /// the code path and return its `~w` output.
@@ -208,4 +212,54 @@ fn stops_at_a_segment_type_that_is_not_implemented() {
         "unsupported bs_create_bin segment integer"
     );
     assert_eq!(reference("bs_create_bin_probe:byte(7)"), "<<98,7>>\n");
+}
+
+#[test]
+fn loads_an_allocation_list_as_the_alloc_operand() {
+    // `wrap/1` builds a fun after the binary, so erlc gives its
+    // `bs_create_bin` the `Alloc` operand {alloc,[{words,1},{floats,0},
+    // {funs,1}]}, as `Elixir.Code.Formatter:binary_op_to_algebra/8` has.
+    // `run/1` calls the fun.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_ALLOC_PROBE]).unwrap();
+    let run = |bytes: &[u8]| {
+        program
+            .execute(
+                "bs_create_bin_alloc_probe",
+                "run",
+                &[Term::Binary(bytes.to_vec())],
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        [run(b"bc"), run(b"")],
+        [Term::Binary(b"abc".to_vec()), Term::Binary(b"a".to_vec())]
+    );
+    assert_eq!(
+        reference(
+            "[bs_create_bin_alloc_probe:run(<<\"bc\">>), bs_create_bin_alloc_probe:run(<<>>)]"
+        ),
+        "[<<97,98,99>>,<<97>>]\n"
+    );
+}
+
+#[test]
+fn rejects_an_allocation_list_that_erts_rejects() {
+    // `fixtures/bs_create_bin/bs_create_bin_alloc_limit.asm` gives
+    // `bs_create_bin` an allocation list of 2147483648 heap words. ERTS
+    // rejects a sum larger than `i32::MAX` (`beam_file.c:2268-2270`). The
+    // logger level `none` keeps the ERTS load error report out of the
+    // output.
+    assert_eq!(
+        BeamProgram::load(&[BS_CREATE_BIN_ALLOC_LIMIT])
+            .unwrap_err()
+            .to_string(),
+        "BEAM allocation list exceeds the heap word limit"
+    );
+    assert_eq!(
+        reference(
+            "begin logger:set_primary_config(level, none), \
+             code:ensure_loaded(bs_create_bin_alloc_limit) end"
+        ),
+        "{error,badfile}\n"
+    );
 }

@@ -9,8 +9,9 @@ use super::{
     OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
     OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
     read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
-    read_pair_count, read_record_updates, skip_counted_operands, skip_integer_payload,
-    skip_operand, skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
+    read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
+    skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
+    unsupported_opcode_operand_count,
 };
 use crate::{
     beam::code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
@@ -1441,6 +1442,62 @@ fn skips_extended_operands_and_reports_invalid_or_truncated_forms() {
     assert!(skip_integer_payload(&[0], &mut cursor, 0xf8).is_err());
     assert!(skip_integer_payload(&[0, 0], &mut 0, 0x19).is_ok());
     assert!(read_integer_after_first(&[0], &mut 0, 0xf9).is_err());
+}
+
+#[test]
+fn skips_bs_create_bin_allocations_that_erts_loads() {
+    // Each operand loads on the pinned ERTS in bs_create_bin_alloc_probe
+    // (beam_asm:module/4): 7, {alloc,[{words,1},{floats,0},{funs,1}]},
+    // {alloc,[]}, {alloc,[{words,715827882}]}, and
+    // {alloc,[{words,715827881},{floats,715827882},{funs,1}]}, with a sum
+    // of i32::MAX - 2 words.
+    let skip = |bytes: &[u8]| {
+        let mut cursor = 0;
+        skip_allocation(bytes, &mut cursor).map(|()| cursor)
+    };
+    assert_eq!(skip(&[0x70]).unwrap(), 1);
+    assert_eq!(
+        skip(&[0x37, 0x30, 0x00, 0x10, 0x10, 0x00, 0x20, 0x10]).unwrap(),
+        8
+    );
+    assert_eq!(skip(&[0x37, 0x00]).unwrap(), 2);
+    assert_eq!(
+        skip(&[0x37, 0x10, 0x00, 0x58, 0x2A, 0xAA, 0xAA, 0xAA]).unwrap(),
+        8
+    );
+    assert_eq!(
+        skip(&[
+            0x37, 0x30, 0x00, 0x58, 0x2A, 0xAA, 0xAA, 0xA9, 0x10, 0x58, 0x2A, 0xAA, 0xAA, 0xAA,
+            0x20, 0x10,
+        ])
+        .unwrap(),
+        16
+    );
+}
+
+#[test]
+fn rejects_bs_create_bin_allocations_that_erts_rejects() {
+    // The pinned ERTS gives {error,badfile} for each of these operands of
+    // bs_create_bin_alloc_probe: four items, a number of 715827883 words,
+    // floats, or funs, a sum over i32::MAX, {atom,foo}, and {x,0}. The
+    // assembler cannot write kind 3, which marshal_allocation_list rejects
+    // (beam_file.c:2272-2273), or another extended operand.
+    let reject = |bytes: &[u8]| skip_allocation(bytes, &mut 0).is_err();
+    assert!(reject(&[]));
+    assert!(reject(&[
+        0x37, 0x40, 0x00, 0x10, 0x00, 0x00, 0x10, 0x00, 0x20, 0x10
+    ]));
+    for kind in [0x00, 0x10, 0x20] {
+        assert!(reject(&[0x37, 0x10, kind, 0x58, 0x2A, 0xAA, 0xAA, 0xAB]));
+    }
+    assert!(reject(&[
+        0x37, 0x30, 0x00, 0x58, 0x2A, 0xAA, 0xAA, 0xAA, 0x10, 0x58, 0x2A, 0xAA, 0xAA, 0xAA, 0x20,
+        0x10,
+    ]));
+    assert!(reject(&[0x37, 0x10, 0x30, 0x10]));
+    assert!(reject(&[0x12]));
+    assert!(reject(&[0x03]));
+    assert!(reject(&[0x17, 0x00]));
 }
 
 #[test]
