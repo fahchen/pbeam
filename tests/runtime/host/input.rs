@@ -22,14 +22,17 @@ fn waits_until_a_pipe_has_input_or_its_end_of_file() {
     let (reader, mut writer) = std::io::pipe().unwrap();
     let fd = reader.as_raw_fd();
     assert_eq!(
-        wait_readable(fd, Some(Duration::from_millis(1))),
+        wait_readable(&[fd], Some(Duration::from_millis(1))),
         Readiness::Pending
     );
     writer.write_all(b"x").unwrap();
-    assert_eq!(wait_readable(fd, None), Readiness::Ready);
+    assert_eq!(wait_readable(&[fd], None), Readiness::Ready(vec![fd]));
     assert_eq!(read(fd, 1024), Ok(b"x".to_vec()));
     drop(writer);
-    assert_eq!(wait_readable(fd, Some(Duration::ZERO)), Readiness::Ready);
+    assert_eq!(
+        wait_readable(&[fd], Some(Duration::ZERO)),
+        Readiness::Ready(vec![fd])
+    );
 }
 
 #[test]
@@ -37,7 +40,10 @@ fn waits_until_the_timeout_ends() {
     let (reader, _writer) = std::io::pipe().unwrap();
     let start = std::time::Instant::now();
     assert_eq!(
-        wait_readable(reader.as_raw_fd(), Some(Duration::from_nanos(20_000_001))),
+        wait_readable(
+            &[reader.as_raw_fd()],
+            Some(Duration::from_nanos(20_000_001))
+        ),
         Readiness::Pending
     );
     assert!(start.elapsed() >= Duration::from_millis(20));
@@ -48,5 +54,20 @@ fn finds_an_fd_that_is_not_open() {
     let (reader, _writer) = std::io::pipe().unwrap();
     let fd = reader.as_raw_fd();
     drop(reader);
-    assert_eq!(wait_readable(fd, Some(Duration::ZERO)), Readiness::Invalid);
+    assert_eq!(
+        wait_readable(&[fd], Some(Duration::ZERO)),
+        Readiness::Invalid
+    );
+}
+
+#[test]
+fn gives_each_fd_that_has_input() {
+    let (first, _first_writer) = std::io::pipe().unwrap();
+    let (second, mut second_writer) = std::io::pipe().unwrap();
+    let fds = [first.as_raw_fd(), second.as_raw_fd()];
+    second_writer.write_all(b"x").unwrap();
+    assert_eq!(
+        wait_readable(&fds, None),
+        Readiness::Ready(vec![second.as_raw_fd()])
+    );
 }

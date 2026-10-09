@@ -6,7 +6,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use pbeam_runtime::BeamProgram;
+use pbeam_runtime::{BeamProgram, install_start_dispositions};
 
 const SIGNAL_PROBE: &str = "fixtures/signal/signal_probe.beam";
 
@@ -155,6 +155,60 @@ fn disposition(signal: c_int) -> &'static str {
         libc::SIG_DFL => "default",
         _ => "handle",
     }
+}
+
+#[test]
+fn sets_the_dispositions_of_the_erts_emulator_start() {
+    // ERTS ignores SIGFPE (`erts_sys_init_float`, sys_float.c:31-37),
+    // installs `request_break` for SIGINT and its generic handler for
+    // SIGQUIT (`init_break_handler`, sys.c:799-803), its generic handler
+    // for SIGTERM and SIGUSR1, and ignores SIGCHLD
+    // (`erts_sys_unix_later_init`, sys.c:812-823). The `pbeam` binary calls
+    // `install_start_dispositions` before it loads the BEAM files.
+    let directory = env::temp_dir().join(format!("pbeam-start-signal-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    let result = directory.join("result");
+    let child = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "isolated_start_dispositions",
+            "--include-ignored",
+            "--quiet",
+        ])
+        .env(RESULT, &result)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let written = fs::read_to_string(&result);
+    fs::remove_dir_all(&directory).unwrap();
+    assert!(child.status.success(), "child exited with {}", child.status);
+    assert_eq!(
+        written.unwrap(),
+        "sigfpe=ignore sigint=handle sigquit=handle sigterm=handle sigusr1=handle sigchld=ignore"
+    );
+}
+
+/// The child side of `sets_the_dispositions_of_the_erts_emulator_start`:
+/// write the dispositions of the start signals after
+/// `install_start_dispositions` to the result file. The exec of the child
+/// resets each handler, so a handler comes only from the install.
+#[test]
+#[ignore = "sets_the_dispositions_of_the_erts_emulator_start runs it in a child process"]
+fn isolated_start_dispositions() {
+    let signals = [
+        ("sigfpe", libc::SIGFPE),
+        ("sigint", libc::SIGINT),
+        ("sigquit", libc::SIGQUIT),
+        ("sigterm", libc::SIGTERM),
+        ("sigusr1", libc::SIGUSR1),
+        ("sigchld", libc::SIGCHLD),
+    ];
+    install_start_dispositions();
+    let dispositions: Vec<String> = signals
+        .iter()
+        .map(|(name, signal)| format!("{name}={}", disposition(*signal)))
+        .collect();
+    fs::write(env::var_os(RESULT).unwrap(), dispositions.join(" ")).unwrap();
 }
 
 #[test]

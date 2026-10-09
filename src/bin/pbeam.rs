@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
-use pbeam_runtime::{BeamError, BeamProgram, Term};
+use pbeam_runtime::{BeamError, BeamProgram, Term, install_start_dispositions};
 
 #[derive(Parser)]
 #[command(
@@ -80,8 +80,8 @@ impl From<String> for Exit {
     }
 }
 
-/// Read and load the BEAM files, and run `Module:Function(Atoms...)` as the
-/// root process.
+/// Set the signal dispositions of the ERTS emulator start, read and load
+/// the BEAM files, and run `Module:Function(Atoms...)` as the root process.
 ///
 /// # Examples
 ///
@@ -96,6 +96,7 @@ impl From<String> for Exit {
 /// that is not an atom of the loaded modules, and the errors of
 /// [`BeamProgram::execute`]. A halt of the run gives [`Exit::Halt`].
 fn run(arguments: Cli) -> Result<(), Exit> {
+    install_start_dispositions();
     let mut modules = Vec::with_capacity(arguments.beam_files.len());
     for path in arguments.beam_files {
         let bytes = fs::read(&path).map_err(|read_error| {

@@ -167,12 +167,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a program reads standard input while one of its processes can always run, for example a busy worker.
 - **Source:** PR for #299.
 
-### Deliver host signals to `erl_signal_server`
+### Run the break menu and the crash dump of `SIGINT` and `SIGUSR1`
 
-- For `handle`, `os:set_signal/2` installs a handler that does nothing, so `erl_signal_server` never gets a `{notify, Signal}` message. PBeam also sets no signal disposition at the start of a run. ERTS sends `{notify, Signal}` from its signal dispatcher thread (sys.c:589-607, 1106-1180). At emulator start, it installs handlers for `SIGINT`, `SIGQUIT`, `SIGTERM`, and `SIGUSR1`, and ignores `SIGCHLD` (sys.c:799-823). The "OS signals" row records this.
-- The work: an event source in the scheduler for host signals, and the start-time dispositions.
-- **Trigger:** a program handles a host signal, or a supported run must act on `SIGTERM` or `SIGINT` as ERTS does.
-- **Source:** PR #133 (#115).
+- After #301, `SIGINT` stops a `pbeam` run with `pbeam: unsupported break of SIGINT: PBeam has no break handler` and status 1, and `SIGUSR1` stops it with `pbeam: unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump` and status 1. ERTS writes the break menu and reads a key from fd 0 (break.c:571-687), and for `SIGUSR1` writes `Received SIGUSR1` and `erl_crash.dump` and exits with status 1 (erl_signal_handler.erl:39-41, bif.c:4370-4387). The "OS signals" row records this.
+- **Evidence:** `tests/feature/host_signal.rs` (`gives_a_runtime_error_for_a_crash_dump_and_a_break`): with stdin `/dev/null`, ERTS writes the break menu and exits with status 0 at the end of file of fd 0.
+- The work: the break menu with its keys, which needs the process, port, and table information that ERTS prints, and a crash dump writer.
+- **Trigger:** a consumer needs the break menu at `^C` or a crash dump.
+- **Source:** PR for #301.
 
 ### Run `at_exit` callbacks and flush the logger before the root exit
 

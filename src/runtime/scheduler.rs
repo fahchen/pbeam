@@ -5,7 +5,10 @@ use std::{
 
 use super::{
     ets::EtsTables,
-    host::input::{self, Readiness},
+    host::{
+        input::{self, Readiness},
+        signal,
+    },
     local_node,
     persistent_term::PersistentTerms,
     process::{
@@ -437,10 +440,13 @@ impl Scheduler {
     }
 
     /// Wait for at most `timeout`, or without end for `None`, until fd 0
-    /// has input, when fd 0 has a read select. ERTS waits for the select in
-    /// its poll thread (`erl_process.c:3372`), and an idle scheduler sleeps
-    /// in its poll until the next timer end (`erl_process.c:3536-3567`).
-    /// PBeam has one thread, so it waits only when no process can run.
+    /// has input, when fd 0 has a read select, or until a handled host
+    /// signal arrives, when a handler is installed. ERTS waits for the
+    /// select in its poll thread (`erl_process.c:3372`), and an idle
+    /// scheduler sleeps in its poll until the next timer end
+    /// (`erl_process.c:3536-3567`). PBeam has one thread, so it waits only
+    /// when no process can run. A signal stops the wait with `EINTR`, or
+    /// makes the notify pipe readable when it arrives before the wait.
     ///
     /// When fd 0 has input, its end of file, or an error, the select ends,
     /// and its recipient gets `{select, TTY, Reference, ready_input}`
@@ -448,38 +454,103 @@ impl Scheduler {
     /// `erl_check_io.c:699-760`). A message to a process that does not exist
     /// is dropped (`erl_check_io.c:851-856`). When fd 0 is not open, the
     /// select ends without a message, as a select that `erts_poll_control`
-    /// cannot add (`erl_check_io.c:1422-1434`).
+    /// cannot add (`erl_check_io.c:1422-1434`). The next scheduling step
+    /// reads the signals in the notify pipe (see [`Self::check_signals`]).
     ///
-    /// Return `false` when fd 0 has no select, and the function does not
-    /// wait.
+    /// Return `false` when fd 0 has no select and no handler is installed,
+    /// and the function does not wait.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // stdin is `/dev/null`: the reader gets its message at once.
-    /// assert!(scheduler.wait_input(None));
-    /// assert!(!scheduler.wait_input(None));
+    /// assert!(scheduler.wait_events(None));
+    /// assert!(!scheduler.wait_events(None));
     /// ```
-    pub(super) fn wait_input(&mut self, timeout: Option<Duration>) -> bool {
-        let ttys = self.resources.borrow_mut::<Ttys>();
-        if !ttys.input_selected() {
+    pub(super) fn wait_events(&mut self, timeout: Option<Duration>) -> bool {
+        let selected = self.resources.borrow_mut::<Ttys>().input_selected();
+        let fds: Vec<_> = selected
+            .then_some(libc::STDIN_FILENO)
+            .into_iter()
+            .chain(signal::notify_fd())
+            .collect();
+        if fds.is_empty() {
             return false;
         }
-        let readiness = input::wait_readable(libc::STDIN_FILENO, timeout);
-        if readiness == Readiness::Pending {
-            return true;
-        }
-        let select = ttys.take_input_select().expect("fd 0 has a select");
-        if readiness == Readiness::Ready {
-            let message = Term::Tuple(vec![
-                Term::static_atom("select"),
-                Term::Reference(select.tty),
-                select.reference,
-                Term::static_atom("ready_input"),
-            ]);
-            self.deliver(select.recipient, message);
+        let readiness = input::wait_readable(&fds, timeout);
+        let input_ready =
+            matches!(&readiness, Readiness::Ready(ready) if ready.contains(&libc::STDIN_FILENO));
+        // Only fd 0 can be closed: the notify pipe stays open.
+        if input_ready || readiness == Readiness::Invalid {
+            let ttys = self.resources.borrow_mut::<Ttys>();
+            let select = ttys.take_input_select().expect("fd 0 has a select");
+            if input_ready {
+                let message = Term::Tuple(vec![
+                    Term::static_atom("select"),
+                    Term::Reference(select.tty),
+                    select.reference,
+                    Term::static_atom("ready_input"),
+                ]);
+                self.deliver(select.recipient, message);
+            }
         }
         true
+    }
+
+    /// Pass each handled host signal that arrived since the last scheduling
+    /// step to [`Self::notify_signals`]. The check reads one flag and makes
+    /// no system call when no signal arrived. ERTS passes a signal at once
+    /// from its signal dispatcher thread (`sys.c:1122-1180`); PBeam passes
+    /// it at the next scheduling step.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.check_signals()?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::notify_signals`].
+    pub(super) fn check_signals(&mut self) -> Result<(), BeamError> {
+        self.notify_signals(&signal::take_notified())
+    }
+
+    /// Do the action of each handled host signal, in the order of arrival,
+    /// as the ERTS signal dispatcher thread does (`sys.c:1163-1176`). For a
+    /// signal of `signum_to_signalterm`, the process registered as
+    /// `erl_signal_server` gets `{notify, Signal}`, and nothing happens when
+    /// no process has the name (`signal_notify_requested` at
+    /// `sys.c:589-607`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.notify_signals(&[libc::SIGTERM])?;
+    /// // erl_signal_server has the message {notify, sigterm}.
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// `SIGINT` gives a runtime error: ERTS runs its break handler
+    /// (`break_requested` at `sys.c:611-624`, `do_break` at
+    /// `break.c:571-687`), which PBeam does not have.
+    fn notify_signals(&mut self, signals: &[libc::c_int]) -> Result<(), BeamError> {
+        for &number in signals {
+            if number == libc::SIGINT {
+                return Err(error(
+                    "unsupported break of SIGINT: PBeam has no break handler",
+                ));
+            }
+            let name =
+                signal::signal_name(number).expect("a handler is set only for a named signal");
+            if let Some(server) = self.whereis("erl_signal_server") {
+                let message =
+                    Term::Tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
+                self.deliver(server, message);
+            }
+        }
+        Ok(())
     }
 
     /// Cancel the BIF timer `reference`, as `cancel_bif_timer` does

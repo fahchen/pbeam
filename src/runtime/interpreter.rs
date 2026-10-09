@@ -137,8 +137,11 @@ impl BeamProgram {
     /// `check_activities_to_run` (`erl_process.c:9797-9810`). When no
     /// process can run, it sleeps until the first timer end, as
     /// `scheduler_wait` sleeps until the next timeout
-    /// (`erl_process.c:3452-3620`). When fd 0 has a read select, it waits
-    /// for fd 0 until then (see `Scheduler::wait_input`). The run ends at
+    /// (`erl_process.c:3452-3620`). When fd 0 has a read select or a signal
+    /// handler is installed, it waits for fd 0 and the handled host signals
+    /// until then (see `Scheduler::wait_events`). Before each scheduling
+    /// step, it sends `{notify, Signal}` to `erl_signal_server` for each
+    /// handled signal that arrived (see `Scheduler::check_signals`). The run ends at
     /// the next scheduling step after the root process exits, also when
     /// another process can run or a timer is active. A process that ends
     /// the root process with an exit signal continues until it waits,
@@ -149,8 +152,8 @@ impl BeamProgram {
     /// gives the error `root process exited with <Reason>`, with the reason
     /// as ERTS prints a term (`print_term`), for example
     /// `root process exited with {badarg,[]}`. A root process that
-    /// waits when no process can run, no timer is active, and fd 0 has no
-    /// read select gives an error. A call of `erlang:halt/2` with a status
+    /// waits when no process can run, no timer is active, fd 0 has no read
+    /// select, and no signal handler is installed gives an error. A call of `erlang:halt/2` with a status
     /// code ends the run at once with the error [`BeamError::Halt`].
     ///
     /// # Examples
@@ -172,6 +175,7 @@ impl BeamProgram {
         while !scheduler.root_exited() {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
+            scheduler.check_signals()?;
             match scheduler.schedule_next()? {
                 Turn::Run => match self.run(&mut scheduler)? {
                     Outcome::Wait => scheduler.park_current(),
@@ -182,7 +186,7 @@ impl BeamProgram {
                 Turn::Done => {}
                 Turn::Idle => {
                     let wait = scheduler.timers.wait_time(scheduler.timers.now());
-                    if !scheduler.wait_input(wait) {
+                    if !scheduler.wait_events(wait) {
                         match wait {
                             Some(wait) => std::thread::sleep(wait),
                             None => break,

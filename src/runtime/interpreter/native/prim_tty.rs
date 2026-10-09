@@ -390,7 +390,7 @@ fn tty_select(scheduler: &mut Scheduler, tty: &Term, reference: &Term) -> BifRes
 /// recipient and `reference` as the message reference, as
 /// `enif_select(env, tty->ifd, ERL_NIF_SELECT_READ, tty, NULL, Ref)`
 /// does (`erl_check_io.c:1236-1465`). When fd 0 has input, the caller gets
-/// `{select, TTY, Ref, ready_input}` (see `Scheduler::wait_input`).
+/// `{select, TTY, Ref, ready_input}` (see `Scheduler::wait_events`).
 ///
 /// # Examples
 ///
