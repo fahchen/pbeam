@@ -147,18 +147,44 @@ owner_exit(Reason) ->
 
 %% A write to a program that closed its input closes the port with epipe:
 %% the owner gets the EXIT message with trap_exit, and exits without it.
+%% ERTS does not stop the program when the port closes
+%% (sys_drivers.c:1039-1055), so the probe stops each program at the end.
+%% Else the program keeps the stderr of the run until its sleep ends.
 epipe() ->
-    {Pid, Ref} = spawn_monitor(fun() -> exit({result, write_closed()}) end),
+    Parent = self(),
+    {Pid, Ref} = spawn_monitor(fun() ->
+                                       Port = closed_input(),
+                                       Parent ! {program, os_pid(Port)},
+                                       exit({result, write(Port)})
+                               end),
     Down = receive {'DOWN', Ref, process, Pid, Reason} -> Reason end,
+    First = receive {program, OsPid} -> OsPid end,
     process_flag(trap_exit, true),
-    [write_closed(), Down].
+    Port = closed_input(),
+    Second = os_pid(Port),
+    Result = [write(Port), Down],
+    stop(First, Second),
+    Result.
 
-write_closed() ->
-    Port = open_port({spawn_executable, sh()},
-                     [binary, {args, ["-c", "exec 0<&-; printf ready; sleep 1"]}]),
+closed_input() ->
+    open_port({spawn_executable, sh()},
+              [binary, {args, ["-c", "exec 0<&-; printf ready; exec sleep 1"]}]).
+
+os_pid(Port) ->
+    {os_pid, OsPid} = lists:keyfind(os_pid, 1, erlang:port_info(Port)),
+    OsPid.
+
+write(Port) ->
     receive {Port, {data, <<"ready">>}} -> ok end,
     Sent = port_command(Port, <<"x">>),
     [Sent, flush(), erlang:port_info(Port)].
+
+%% Send SIGTERM to the two programs, and wait until kill ends. The program
+%% runs sleep with exec, so its OS pid is the pid of sleep.
+stop(First, Second) ->
+    Command = "kill " ++ integer_to_list(First) ++ " " ++ integer_to_list(Second),
+    Kill = open_port({spawn_executable, sh()}, [binary, exit_status, {args, ["-c", Command]}]),
+    receive {Kill, {exit_status, _}} -> ok end.
 
 %% The open_port/2 errors and the errors of the port BIFs.
 errors() ->
