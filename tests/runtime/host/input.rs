@@ -64,14 +64,54 @@ fn finds_an_fd_that_is_not_open() {
 fn gives_each_fd_that_has_input() {
     let (first, _first_writer) = std::io::pipe().unwrap();
     let (second, mut second_writer) = std::io::pipe().unwrap();
-    let (third, mut third_writer) = std::io::pipe().unwrap();
+    let fds = [first.as_raw_fd(), second.as_raw_fd()];
     second_writer.write_all(b"x").unwrap();
-    third_writer.write_all(b"y").unwrap();
-    let fds = [third.as_raw_fd(), first.as_raw_fd(), second.as_raw_fd()];
     assert_eq!(
         wait_readable(&fds, None),
-        Readiness::Ready(vec![third.as_raw_fd(), second.as_raw_fd()])
+        Readiness::Ready(vec![second.as_raw_fd()])
     );
+}
+
+#[test]
+fn gives_each_ready_fd_of_the_set_in_request_order() {
+    let (first, mut first_writer) = std::io::pipe().unwrap();
+    let (second, mut second_writer) = std::io::pipe().unwrap();
+    let fds = [second.as_raw_fd(), first.as_raw_fd()];
+    first_writer.write_all(b"x").unwrap();
+    assert_eq!(wait_readable(&fds, None), Readiness::Ready(vec![fds[1]]));
+    second_writer.write_all(b"y").unwrap();
+    assert_eq!(wait_readable(&fds, None), Readiness::Ready(fds.to_vec()));
+}
+
+#[test]
+fn waits_for_an_fd_at_or_above_fd_setsize() {
+    // nextest runs each test in its own process, so the raised soft limit
+    // of open fds reaches no other test.
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` and `setrlimit` read and write only `limit`.
+    unsafe {
+        assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit), 0);
+        limit.rlim_cur = limit.rlim_cur.max(2048).min(limit.rlim_max);
+        assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit), 0);
+    }
+    let (low, _low_writer) = std::io::pipe().unwrap();
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let setsize = c_int::try_from(libc::FD_SETSIZE).unwrap();
+    // SAFETY: `fcntl` makes a new fd of `reader` at or above `FD_SETSIZE`.
+    let high = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_DUPFD_CLOEXEC, setsize) };
+    assert!(high >= setsize, "{high}");
+    let fds = [low.as_raw_fd(), high];
+    assert_eq!(
+        wait_readable(&fds, Some(Duration::ZERO)),
+        Readiness::Pending
+    );
+    writer.write_all(b"x").unwrap();
+    assert_eq!(wait_readable(&fds, None), Readiness::Ready(vec![high]));
+    // SAFETY: `high` is an fd of this test, which no other code uses.
+    unsafe { libc::close(high) };
 }
 
 #[test]

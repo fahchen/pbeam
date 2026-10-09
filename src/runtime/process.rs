@@ -2,7 +2,7 @@ mod tree;
 
 pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 
-use super::{mailbox::Mailbox, scheduler::AliasMode, timer::TimerKey};
+use super::{host::output::IovecWritten, mailbox::Mailbox, scheduler::AliasMode, timer::TimerKey};
 use crate::{
     error::{BeamError, error},
     term::{Atom, PortId, ProcessId, Reference, Term},
@@ -254,6 +254,12 @@ pub(super) struct ProcessState {
     /// (`jit/arm/instr_bif.cpp:525-536`, `676-701`). `BeamProgram::run` runs
     /// it first.
     pub(super) pending_bif: Option<PendingBif>,
+    /// The dirty IO call of the process, from the switch out at the call
+    /// until `BeamProgram::run` returns its result. ERTS runs the process
+    /// on a dirty IO scheduler for this time (`erl_nif.c:426-543`). While
+    /// the call runs, the process is not in the run queue and does not
+    /// handle its signals.
+    pub(super) dirty_write: Option<DirtyWrite>,
     /// The trap state of the guard BIF `length/1`: the arguments of its
     /// trap export, the rest of the list and the count so far. ERTS
     /// `i_length` keeps them in the X registers above the live registers
@@ -289,6 +295,19 @@ pub(super) struct PendingBif {
     /// True when the BIF call was a tail call through the export: its
     /// value then returns from the frame with no reduction.
     pub(super) tail: bool,
+}
+
+/// A `prim_tty:write_nif/2` call that runs on a dirty IO thread.
+#[derive(Debug)]
+pub(super) struct DirtyWrite {
+    /// The identifier of the call in the run. The completion of the call
+    /// gives the same identifier.
+    pub(super) call: u64,
+    /// True when the NIF call was a tail call: its value then returns from
+    /// the frame.
+    pub(super) tail: bool,
+    /// The result of the host write, or `None` while the call runs.
+    pub(super) written: Option<IovecWritten>,
 }
 
 impl ProcessState {
@@ -334,6 +353,7 @@ impl ProcessState {
             fcalls: 0,
             reductions: 0,
             pending_bif: None,
+            dirty_write: None,
             length_trap: None,
             bif_timers: MonitorLinkTree::default(),
             continue_exit: None,

@@ -205,7 +205,7 @@ fn reads_the_os_environment_with_os_getenv_as_erts() {
         // returns a runtime error (see "OS environment" in
         // docs/erts-differences.md).
         let decomposed = if cfg!(target_os = "macos") {
-            "Err(BeamError(\"unsupported composition of the native name code point 769 on macOS: see \\\"OS environment\\\" in docs/erts-differences.md\"))".to_owned()
+            "Err(Runtime(\"unsupported composition of the native name code point 769 on macOS: see \\\"OS environment\\\" in docs/erts-differences.md\"))".to_owned()
         } else {
             format!("Ok({})", decomposed.pbeam())
         };

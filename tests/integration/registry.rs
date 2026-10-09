@@ -44,6 +44,48 @@ fn looks_up_registered_names_as_pinned_erts() {
 }
 
 #[test]
+fn unregisters_names_as_pinned_erts() {
+    // `registry_probe:unregister/0` removes a name with
+    // `erlang:unregister/1` (`bif.c:2324-2335`, `register.c:429-541`): the
+    // name is free, and the process has no name and can take a new one. A
+    // free name and a term that is not an atom raise `error:badarg`.
+    let program = BeamProgram::load(&[REGISTRY_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("registry_probe", "unregister", &[])
+            .unwrap(),
+        Term::List(vec![
+            atom("true"),
+            atom("undefined"),
+            Term::List(vec![]),
+            atom("badarg"),
+            atom("badarg"),
+            atom("badarg"),
+            atom("true"),
+            atom("true"),
+        ])
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/registry",
+            "-eval",
+            "io:format(\"~w~n\", [registry_probe:unregister()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        reference.stdout,
+        b"[true,undefined,[],badarg,badarg,badarg,true,true]\n"
+    );
+}
+
+#[test]
 fn reads_the_registered_name_of_another_process_as_pinned_erts() {
     // `registry_probe:info/0` reads `registered_name` of a named and of an
     // unnamed live process, as the `prim_tty` writer reads it of its parent

@@ -17,6 +17,7 @@ start(Module, Function) ->
                          application_controller, start, [kernel_app()]),
     Kernel = spawn(?MODULE, kernel, [self()]),
     receive {Kernel, started} -> ok end,
+    Init ! {self(), kernel, Kernel},
     group_leader(whereis(user), self()),
     Module:Function().
 
@@ -32,23 +33,43 @@ start_in_kernel(Init, Server, Mod, Fun, Args) ->
 
 %% The init request process. It traps exits (init.erl:588), links to each
 %% kernel process that starts with {ok, Pid} (init.erl:768-772), and answers
-%% get_arguments and {get_argument, Arg} (init.erl:816-819). It keeps other
-%% messages in its mailbox.
+%% get_arguments and {get_argument, Arg} (init.erl:816-819). For init:stop/0
+%% it stops the kernel process and halts with status 0 (init.erl:536,
+%% 788-789, 924-945). It keeps other messages in its mailbox.
 init(Boot, Flags) ->
     process_flag(trap_exit, true),
-    init_loop(Boot, Flags).
+    init_loop(Boot, Flags, undefined).
 
-init_loop(Boot, Flags) ->
+init_loop(Boot, Flags, Kernel) ->
     receive
         {Boot, started, {_Server, {ok, Pid}}} when is_pid(Pid) ->
             link(Pid),
-            Boot ! {self(), ok, Pid};
+            Boot ! {self(), ok, Pid},
+            init_loop(Boot, Flags, Kernel);
+        {Boot, kernel, Pid} ->
+            init_loop(Boot, Flags, Pid);
         {From, get_arguments} ->
-            From ! {init, Flags};
+            From ! {init, Flags},
+            init_loop(Boot, Flags, Kernel);
         {From, {get_argument, Arg}} ->
-            From ! {init, get_argument(Arg, Flags)}
-    end,
-    init_loop(Boot, Flags).
+            From ! {init, get_argument(Arg, Flags)},
+            init_loop(Boot, Flags, Kernel);
+        {stop, stop} ->
+            stop(Kernel)
+    end.
+
+%% Stop the kernel process as the stop of the kernel application stops
+%% kernel_sup, then halt() (init.erl:943-945). init shuts down
+%% application_controller, which stops the running applications
+%% (init.erl:955-962). The PBeam boot does not start the kernel application
+%% (see "Boot" in docs/erts-differences.md), so the kernel process stands in
+%% for it. A boot that has not started its kernel process yet halts at once.
+stop(undefined) ->
+    halt();
+stop(Kernel) ->
+    Ref = monitor(process, Kernel),
+    Kernel ! {self(), stop},
+    receive {'DOWN', Ref, process, Kernel, _} -> halt() end.
 
 %% init.erl:1808-1819. The flag values are already strings.
 get_argument(Arg, Flags) ->
@@ -70,17 +91,39 @@ get_argument1(_, []) -> [].
 %% erl_signal_handler:start/0 and logger:add_handlers(kernel)
 %% (kernel.erl:41-42). Trap exits, as a supervisor does
 %% (supervisor.erl:950), and stay alive as the link parent of the servers.
+%% At a stop request of init, shut down the children in the reverse order
+%% with their kernel_sup shutdown times (kernel.erl:124-168), as a
+%% supervisor stops its children (supervisor.erl:1574-1597), and exit.
 kernel(Boot) ->
     process_flag(trap_exit, true),
     ok = logger:internal_init_logger(),
-    {ok, _} = standard_error:start_link(),
-    {ok, _} = gen_event:start_link({local, erl_signal_server}),
-    {ok, _} = user_sup:start(),
-    {ok, _} = logger_sup:start_link(),
+    {ok, StdError} = standard_error:start_link(),
+    {ok, SigSrv} = gen_event:start_link({local, erl_signal_server}),
+    {ok, User} = user_sup:start(),
+    {ok, LoggerSup} = logger_sup:start_link(),
     ok = erl_signal_handler:start(),
     ok = logger:add_handlers(kernel),
     Boot ! {self(), started},
-    receive after infinity -> ok end.
+    receive
+        {_Init, stop} ->
+            [shutdown(Pid, Time)
+             || {Pid, Time} <- [{LoggerSup, infinity}, {User, 2000}, {SigSrv, 2000},
+                                {StdError, 2000}]]
+    end.
+
+%% Shut down a child as supervisor:shutdown/1 does (supervisor.erl:1627-1656):
+%% send the exit signal shutdown, kill the child when it does not exit in
+%% Time ms, and then remove the link. It writes no shutdown_error report.
+shutdown(Pid, Time) ->
+    Ref = monitor(process, Pid),
+    exit(Pid, shutdown),
+    receive
+        {'DOWN', Ref, process, Pid, _} -> ok
+    after Time ->
+        exit(Pid, kill),
+        receive {'DOWN', Ref, process, Pid, _} -> ok end
+    end,
+    unlink(Pid).
 
 %% The kernel application spec of the pinned start_clean.boot.
 kernel_app() ->

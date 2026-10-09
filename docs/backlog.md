@@ -123,11 +123,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path matches a binary with one of these commands or instructions. Add only the commands and instructions that the path needs.
 - **Source:** #219 (PR #227).
 
-### Restore the terminal mode of fd 0 at runtime exit (was #136)
+### Set raw mode through `shell:start_interactive({noshell, raw})`
 
-- PBeam restores fd 0 when the owner of a TTY resource exits, but not at runtime exit as ERTS does (`erl_child_setup.c:563-576`, `sys.c:182-190`). The "Terminal mode at exit" row of `docs/erts-differences.md` records it.
-- **Trigger:** a PBeam program uses an input mode that leaves fd 0 raw.
-- **Source:** review of PR #133 (#115).
+- `shell:start_interactive({noshell, raw})` calls `user_drv:start_shell/1` (shell.erl:149-150). `user_drv` calls `prim_tty:reinit/2` with the input `raw` (user_drv.erl:387-411), and `prim_tty` reads the terminfo values `co` and `xn` with `tigetnum_nif/1` and `tigetflag_nif/1` (prim_tty.erl:333-345, 1405-1408). These NIFs have no PBeam binding, so the stub raises `error:undef` (see "Native functions without a binding" in `docs/effect-inventory.md`). `user_drv` catches only `error:enotsup` (user_drv.erl:412) and raises the exception again with the `raise` instruction (opcode 108), which stops the run with `unsupported BEAM opcode 108`. Thus a PBeam program cannot set fd 0 to raw mode yet. The test of #300 sets raw mode with `stty` while the program waits.
+- **Evidence:** `ok = user_drv:start_shell(#{initial_shell => noshell, input => raw})` in a probe run by `pbeam_boot` in a pseudo-terminal stops with `pbeam: unsupported BEAM opcode 108` and status 1. On pinned ERTS, the call returns `ok`, and the next output has no carriage return, because raw mode turns `OPOST` off.
+- The work: the `tigetnum_nif/1` and `tigetflag_nif/1` bindings and the `raise` instruction, and then the other NIFs that the raw path of `prim_tty` and `user_drv` calls.
+- **Trigger:** a program sets raw mode, for example the Terra reference run (#3).
+- **Source:** PR for #300.
 
 ### Write the output in a locale whose codeset is not UTF-8
 
@@ -170,16 +172,17 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Run the other port options and port kinds
 
 - `open_port/2` runs only `{spawn_executable, Name}` with `binary`, `exit_status`, `use_stdio`, `nouse_stdio`, `stderr_to_stdout`, and `{args, Args}` (#302). Each other option, the list data mode, the port kinds `spawn`, `spawn_driver`, and `fd`, the port BIFs other than `port_command/2`, `port_close/1`, and `port_info/1`, and a message, link, monitor, exit signal, or name of a port give a runtime error (row "Ports" of `docs/erts-differences.md`).
-- `port_command/2` writes with a blocking write; ERTS queues the data that does not fit in the pipe and marks the port busy (sys_drivers.c:1140-1203). A port program does not get the ERTS signal dispositions (`SIGFPE` ignored), and it keeps each fd of PBeam that is not close-on-exec. After `os:set_signal(sigchld, ignore)`, the host reaps each program, and a port with `exit_status` returns a runtime error; ERTS reaps its programs in `erl_child_setup` (erl_child_setup.c:396-420).
+- `port_command/2` writes with a blocking write; ERTS queues the data that does not fit in the pipe and marks the port busy (sys_drivers.c:1140-1203). A port program keeps each fd of PBeam that is not close-on-exec. After `os:set_signal(sigchld, ignore)`, the host reaps each program, and a port with `exit_status` returns a runtime error; ERTS reaps its programs in `erl_child_setup` (erl_child_setup.c:396-420). For the same reason, the `pbeam` binary keeps `SIG_DFL` for `SIGCHLD` at the start, where ERTS sets `SIG_IGN` (row "OS signals"). A reaper process as `erl_child_setup` would remove both differences.
 - **Trigger:** a consumer uses another option, port kind, or port BIF, for example `{line, L}` or `Port ! {self(), {command, Data}}`, or writes more data than the pipe holds to a program that writes back, or reads the exit status of a port after `os:set_signal(sigchld, ignore)`.
 - **Source:** PR for #302.
 
-### Deliver host signals to `erl_signal_server`
+### Run the break menu and the crash dump of `SIGINT` and `SIGUSR1`
 
-- For `handle`, `os:set_signal/2` installs a handler that does nothing, so `erl_signal_server` never gets a `{notify, Signal}` message. PBeam also sets no signal disposition at the start of a run. ERTS sends `{notify, Signal}` from its signal dispatcher thread (sys.c:589-607, 1106-1180). At emulator start, it installs handlers for `SIGINT`, `SIGQUIT`, `SIGTERM`, and `SIGUSR1`, and ignores `SIGCHLD` (sys.c:799-823). The "OS signals" row records this.
-- The work: an event source in the scheduler for host signals, and the start-time dispositions.
-- **Trigger:** a program handles a host signal, or a supported run must act on `SIGTERM` or `SIGINT` as ERTS does.
-- **Source:** PR #133 (#115).
+- After #301, `SIGINT` stops a `pbeam` run with `pbeam: unsupported break of SIGINT: PBeam has no break handler` and status 1, and `SIGUSR1` stops it with `pbeam: unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump` and status 1. ERTS writes the break menu and reads a key from fd 0 (break.c:571-687), and for `SIGUSR1` writes `Received SIGUSR1` and `erl_crash.dump` and exits with status 1 (erl_signal_handler.erl:39-41, bif.c:4370-4387). The "OS signals" row records this.
+- **Evidence:** `tests/feature/host_signal.rs` (`gives_a_runtime_error_for_a_crash_dump_and_a_break`): with stdin `/dev/null`, ERTS writes the break menu and exits with status 0 at the end of file of fd 0.
+- The work: the break menu with its keys, which needs the process, port, and table information that ERTS prints, and a crash dump writer.
+- **Trigger:** a consumer needs the break menu at `^C` or a crash dump.
+- **Source:** PR for #301.
 
 ### Run `at_exit` callbacks and flush the logger before the root exit
 
@@ -241,14 +244,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the first consumer of `ets:give_away/3`, `ets:setopts/2`, or a live heir.
 - **Source:** #112.
 
-### Run `erlang:halt/0,1`
-
-- A call of `erlang:halt/0` or `erlang:halt/1` stops the `pbeam` run with `pbeam: unresolved external MFA erlang:halt/2` and status 1. The pinned `erlang:halt/0` calls `erlang:halt(0, [])`, and `erlang:halt/1` calls `erlang:halt(HaltType, [])` (erlang.erl:3357-3358, 3383-3388). The BIF table entry of `erlang:halt/2` is `unsupported` (`src/runtime/interpreter/bif/table.rs`). ERTS ends the run with the given status: `halt_2` reads the options, and for an integer status it calls `erts_halt` with the status (bif.c:4309-4365).
-- **Evidence:** a module `haltp` with `halt0() -> erlang:halt().` and `halt3() -> erlang:halt(3).`. On pinned ERTS, `erl -noshell -pa <dir> -eval 'haltp:halt0()'` exits with status 0, and `-eval 'haltp:halt3()'` exits with status 3. On the `pbeam` binary, `pbeam pbeam_boot start haltp halt0` and `pbeam pbeam_boot start haltp halt3`, with the BEAM files of `examples/hello_world/README.md`, both write `pbeam: unresolved external MFA erlang:halt/2` and exit with status 1. The "Run end" row of `docs/erts-differences.md` records that PBeam has no `erlang:halt/2`.
-- The work: `erlang:halt/2` with an integer status and the `flush` and `flush_timeout` options, and the run end at the halt with that status. "Halt the PBeam boot with the `init` crash text" also needs it.
-- **Trigger:** a consumer calls `erlang:halt/0,1`, for example `System.halt/1` as `elixir -e` does at the end of the run (kernel/cli.ex:58-71).
-- **Source:** M2 exit check (#220).
-
 ### Keep the run alive after a root `exit(normal)` as ERTS does
 
 - When the root process calls `exit(normal)`, the `pbeam` binary writes `pbeam: root process exited with normal` and exits with status 1. On ERTS, `start_it/1` writes `Error! Failed to eval: <expression>` and raises the exit again (init.erl:1552-1567). The boot process exits `normal`, `init` goes to its main loop (init.erl:700-704), and the run does not end. The "Run end" row of `docs/erts-differences.md` records this.
@@ -279,7 +274,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Halt the PBeam boot with the `init` crash text
 
-- After #6 (PR #195), the `pbeam` binary writes `pbeam: root process exited with <Reason>` for a root exit. Under `erl -noshell -eval`, ERTS writes `Error! Failed to eval: ...` and then `Runtime terminating during boot (<Reason>)` through `init:crash/2` and `erlang:halt/1` (init.erl:665-679, 1552-1567). Doing the same needs `erlang:halt/1,2` with the run end at the halt, `erts_internal:term_to_string/2` (it can use the `print_term` of #6), and an `init` process that watches the boot process.
+- After #6 (PR #195), the `pbeam` binary writes `pbeam: root process exited with <Reason>` for a root exit. Under `erl -noshell -eval`, ERTS writes `Error! Failed to eval: ...` and then `Runtime terminating during boot (<Reason>)` through `init:crash/2` and `erlang:halt/1` (init.erl:665-679, 1552-1567). Doing the same needs `erlang:halt/1` with a string, which writes the slogan and a crash dump (`erlang:halt/2` with an integer status runs since #301), `erts_internal:term_to_string/2` (it can use the `print_term` of #6), and an `init` process that watches the boot process.
 - **Trigger:** a consumer needs the ERTS crash text byte for byte.
 - **Source:** design of #6.
 

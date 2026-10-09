@@ -47,6 +47,67 @@ pub(crate) fn write_all(fd: c_int, mut buffers: &mut [IoSlice<'_>]) -> Result<()
     }
 }
 
+/// The writes of one `prim_tty:write_nif/2` call: the groups of its iovec
+/// that `tty_write_nif` writes, in order, and whether a bad group follows
+/// them (`prim_tty_nif.c:366-426`). Each group holds the binaries of at
+/// most `MAXIOV` iovec elements that are not empty. The bytes are copies,
+/// so a dirty IO thread owns them while it writes.
+#[derive(Debug)]
+pub(crate) struct IovecWrite {
+    /// The output fd of the TTY resource, or -1 when the term is not a TTY
+    /// resource and the call writes nothing.
+    pub(crate) fd: c_int,
+    /// The groups to write, each one with one `writev` loop.
+    pub(crate) groups: Vec<Vec<Vec<u8>>>,
+    /// True when the call raises `badarg` after it writes `groups`: the TTY
+    /// term or the iovec is not valid, or a later group has an element that
+    /// is not a binary or the tail of an improper list
+    /// (`examine_iovec_term`, `erl_nif.c:4092-4150`).
+    pub(crate) bad_group: bool,
+}
+
+/// The end of an [`IovecWrite`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IovecWritten {
+    /// All groups are written, and no bad group follows.
+    All,
+    /// The write of a group failed with this `errno`. The later groups are
+    /// not written.
+    Failed(c_int),
+    /// All groups are written, and a bad group follows.
+    BadGroup,
+}
+
+impl IovecWrite {
+    /// Write each group to `fd` with [`write_all`], in order, as
+    /// `tty_write_nif` (`prim_tty_nif.c:366-426`) does. Stop at the first
+    /// failed write. This call can wait without end for a full fd, so a
+    /// dirty IO thread runs it, not the scheduler thread.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let write = IovecWrite { fd: libc::STDOUT_FILENO, groups: vec![vec![b"hi\n".to_vec()]], bad_group: false };
+    /// assert_eq!(write.run(), IovecWritten::All);
+    /// let write = IovecWrite { fd: -1, groups: vec![vec![b"x".to_vec()]], bad_group: true };
+    /// assert_eq!(write.run(), IovecWritten::Failed(libc::EBADF));
+    /// ```
+    pub(crate) fn run(&self) -> IovecWritten {
+        for group in &self.groups {
+            let mut buffers: Vec<IoSlice<'_>> =
+                group.iter().map(|bytes| IoSlice::new(bytes)).collect();
+            if let Err(errno) = write_all(self.fd, &mut buffers) {
+                return IovecWritten::Failed(errno);
+            }
+        }
+        if self.bad_group {
+            IovecWritten::BadGroup
+        } else {
+            IovecWritten::All
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "../../../tests/runtime/host/output.rs"]
 mod tests;

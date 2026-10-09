@@ -34,3 +34,44 @@ fn writes_the_remaining_bytes_after_a_partial_write_and_eagain() {
 fn gives_the_errno_of_a_failed_write() {
     assert_eq!(write_all(-1, &mut [IoSlice::new(b"x")]), Err(libc::EBADF));
 }
+
+#[test]
+fn writes_each_group_in_order_until_a_failed_write() {
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let fd = writer.as_raw_fd();
+    let groups = vec![
+        vec![b"Hello, ".to_vec(), b"world".to_vec()],
+        vec![],
+        vec![b"!\n".to_vec()],
+    ];
+    let mut write = IovecWrite {
+        fd,
+        groups: vec![groups[0].clone(), groups[2].clone()],
+        bad_group: false,
+    };
+    assert_eq!(write.run(), IovecWritten::All);
+    write.bad_group = true;
+    assert_eq!(write.run(), IovecWritten::BadGroup);
+    write.groups.clear();
+    assert_eq!(write.run(), IovecWritten::BadGroup);
+    // `writev` with a count of 0: `EINVAL` on macOS, 0 bytes on Linux.
+    write.groups = groups;
+    write.bad_group = false;
+    let expected = if cfg!(target_os = "macos") {
+        IovecWritten::Failed(libc::EINVAL)
+    } else {
+        IovecWritten::All
+    };
+    assert_eq!(write.run(), expected);
+    write.fd = -1;
+    assert_eq!(write.run(), IovecWritten::Failed(libc::EBADF));
+    drop(writer);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).unwrap();
+    let written = if cfg!(target_os = "macos") {
+        "Hello, world!\nHello, world!\nHello, world"
+    } else {
+        "Hello, world!\nHello, world!\nHello, world!\n"
+    };
+    assert_eq!(String::from_utf8(bytes).unwrap(), written);
+}

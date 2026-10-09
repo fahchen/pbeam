@@ -97,3 +97,30 @@ fn ends_the_run_at_the_root_exit_while_a_timer_stays_active() {
         }
     }
 }
+
+#[test]
+fn exits_with_the_low_8_bits_of_the_halt_status_code() {
+    // `halt_probe:status/0` calls `halt(259)`. ERTS exits with the status
+    // code through the C `exit` (bif.c:4346-4362), so the host status is
+    // 3, and nothing is written (tests/integration/halt.rs).
+    let output = run_dumb_utf8(
+        Command::new(env!("CARGO_BIN_EXE_pbeam"))
+            .args([
+                "halt_probe",
+                "status",
+                "--",
+                "fixtures/halt/halt_probe.beam",
+            ])
+            .arg(pinned_beam_path("erlang")),
+        Stdio::piped(),
+        RUN_TIME_LIMIT,
+    );
+    assert_eq!(
+        (
+            output.status.code(),
+            output.stdout.as_slice(),
+            output.stderr.as_slice()
+        ),
+        (Some(3), &b""[..], &b""[..])
+    );
+}
