@@ -1213,6 +1213,34 @@ impl Scheduler {
         }
     }
 
+    /// Remove the registered name `name` from its process, as
+    /// `erlang:unregister/1` does with `erts_unregister_name`
+    /// (`bif.c:2324-2335`, `register.c:429-541`). Return `false` and change
+    /// nothing when `name` is not an atom or no process has the name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
+    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert!(scheduler.unregister(&name));
+    /// assert!(!scheduler.unregister(&name));
+    /// ```
+    pub(super) fn unregister(&mut self, name: &Term) -> bool {
+        let Term::Atom(name) = name else {
+            return false;
+        };
+        let Some(id) = self.names.remove(name.name()) else {
+            return false;
+        };
+        let process = self
+            .processes
+            .get_mut(&id)
+            .expect("a name belongs to a live process");
+        process.registered_name = None;
+        true
+    }
+
     /// Return the process that has the registered name `name`, as ERTS
     /// `erts_whereis_name_to_id` (`register.c:276-300`) finds it in the
     /// `process_reg` table. Return `None` when no live process has the name.
