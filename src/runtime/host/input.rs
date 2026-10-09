@@ -48,7 +48,8 @@ pub(crate) fn read(fd: c_int, size: usize) -> Result<Vec<u8>, c_int> {
 /// Linux, with a `select` or `poll` set for each fd that the kernel poll
 /// does not accept (`erl_poll.h:100-135`, `214-225`). `select` reads each fd
 /// type on both hosts. The macOS `poll` gives `POLLNVAL` for a character
-/// device such as `/dev/null`.
+/// device such as `/dev/null`. An fd can be at or above `FD_SETSIZE`, as in
+/// the ERTS poll: the sets grow with the largest fd (see [`FdSets`]).
 ///
 /// # Examples
 ///
@@ -58,17 +59,11 @@ pub(crate) fn read(fd: c_int, size: usize) -> Result<Vec<u8>, c_int> {
 /// assert_eq!(wait_readable(&[1000], Some(Duration::ZERO)), Readiness::Invalid);
 /// ```
 pub(crate) fn wait_readable(fds: &[c_int], timeout: Option<Duration>) -> Readiness {
-    // SAFETY: `fd_set` is a C struct of integers, so all zeros is a valid
-    // value. `FD_ZERO` and `FD_SET` write only into `set`, and each fd is a
-    // standard fd or a runtime pipe fd, below `FD_SETSIZE`.
-    let mut set = unsafe {
-        let mut set: libc::fd_set = std::mem::zeroed();
-        libc::FD_ZERO(&raw mut set);
-        for &fd in fds {
-            libc::FD_SET(fd, &raw mut set);
-        }
-        set
-    };
+    let limit = fds.iter().max().map_or(0, |fd| fd + 1);
+    let mut sets = FdSets::new(limit);
+    for &fd in fds {
+        sets.set(fd);
+    }
     // `select` takes microseconds; round up, so the wait does not end
     // before a timer end.
     let mut time = timeout.map(|timeout| {
@@ -81,29 +76,100 @@ pub(crate) fn wait_readable(fds: &[c_int], timeout: Option<Duration>) -> Readine
     let time = time
         .as_mut()
         .map_or(std::ptr::null_mut(), |time| &raw mut *time);
-    let limit = fds.iter().max().map_or(0, |fd| fd + 1);
-    // SAFETY: `select` reads and writes `set` and reads `time`, which is
-    // null or points to `timeval`, and it reads no other set.
+    // SAFETY: `select` reads and writes the bits of the fds below `limit`
+    // in `sets`, which holds them, and reads `time`, which is null or points
+    // to `timeval`. It reads no other set.
     let count = unsafe {
-        libc::select(
+        select(
             limit,
-            &raw mut set,
+            sets.0.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             time,
         )
     };
     match count {
-        // SAFETY: `FD_ISSET` only reads `set`.
-        1.. => Readiness::Ready(
-            fds.iter()
-                .copied()
-                .filter(|&fd| unsafe { libc::FD_ISSET(fd, &raw const set) })
-                .collect(),
-        ),
+        1.. => Readiness::Ready(fds.iter().copied().filter(|&fd| sets.is_set(fd)).collect()),
         0 => Readiness::Pending,
         _ if errno() == libc::EINTR => Readiness::Pending,
         _ => Readiness::Invalid,
+    }
+}
+
+unsafe extern "C" {
+    /// The `select` of the host. On macOS, it is the variant of
+    /// `_DARWIN_UNLIMITED_SELECT`, as ERTS uses (`erl_poll.c:69-74`): the
+    /// other variant gives `EINVAL` for `nfds` above `FD_SETSIZE`. The Linux
+    /// `select` reads `nfds` bits of each set.
+    #[cfg_attr(target_os = "macos", link_name = "select$DARWIN_EXTSN")]
+    fn select(
+        nfds: c_int,
+        readfds: *mut libc::fd_set,
+        writefds: *mut libc::fd_set,
+        errorfds: *mut libc::fd_set,
+        timeout: *mut libc::timeval,
+    ) -> c_int;
+}
+
+/// A read set of `select` for the fds below a limit, also above
+/// `FD_SETSIZE`, as `ERTS_fd_set` (`erl_poll.c:148-196`). The sets are
+/// consecutive `fd_set` values, so their bits are one bit array: fd `n` is
+/// bit `n % FD_SETSIZE` of set `n / FD_SETSIZE`.
+struct FdSets(Vec<libc::fd_set>);
+
+impl FdSets {
+    /// Make an empty set for the fds below `limit`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let sets = FdSets::new(2000);
+    /// assert!(!sets.is_set(1999));
+    /// ```
+    fn new(limit: c_int) -> Self {
+        let size = usize::try_from(limit)
+            .unwrap_or(0)
+            .div_ceil(libc::FD_SETSIZE);
+        // SAFETY: `fd_set` is a C struct of integers, so all zeros is a
+        // valid value and an empty set.
+        Self(vec![unsafe { std::mem::zeroed() }; size.max(1)])
+    }
+
+    /// Add `fd`, a non-negative fd below the limit, to the set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut sets = FdSets::new(2000);
+    /// sets.set(1999);
+    /// assert!(sets.is_set(1999));
+    /// ```
+    fn set(&mut self, fd: c_int) {
+        let (set, bit) = Self::position(fd);
+        // SAFETY: `FD_SET` writes only bit `bit` of `set`, and `bit` is
+        // below `FD_SETSIZE`.
+        unsafe { libc::FD_SET(bit, &raw mut self.0[set]) };
+    }
+
+    /// Return whether `fd`, a non-negative fd below the limit, is in the set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!FdSets::new(1).is_set(0));
+    /// ```
+    fn is_set(&self, fd: c_int) -> bool {
+        let (set, bit) = Self::position(fd);
+        // SAFETY: `FD_ISSET` reads only bit `bit` of `set`, and `bit` is
+        // below `FD_SETSIZE`.
+        unsafe { libc::FD_ISSET(bit, &raw const self.0[set]) }
+    }
+
+    /// Return the index of the set and the bit in it for `fd`.
+    fn position(fd: c_int) -> (usize, c_int) {
+        let fd = usize::try_from(fd).expect("a non-negative fd");
+        let bit = c_int::try_from(fd % libc::FD_SETSIZE).expect("below FD_SETSIZE");
+        (fd / libc::FD_SETSIZE, bit)
     }
 }
 
