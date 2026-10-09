@@ -5,7 +5,7 @@
 //! `unicode` modules hold the BIF bodies that do not fit on one table line.
 
 use super::*;
-use crate::runtime::scheduler::Flushed;
+use crate::runtime::{host::output::IovecWrite, scheduler::Flushed};
 
 mod erlang;
 mod erts_internal;
@@ -64,6 +64,12 @@ pub(super) enum BifResult {
     /// traps to `bif_return_trap`, which returns the value when the process
     /// runs again.
     YieldReturn(Term),
+    /// The NIF continues on a dirty IO thread with this host work, as a NIF
+    /// with the `ERL_NIF_DIRTY_JOB_IO_BOUND` flag does
+    /// (`static_schedule_dirty_nif`, `erl_nif.c:3437-3477`). The calling
+    /// process switches out, and it gets the result of the call when the
+    /// work completes.
+    DirtyWrite(IovecWrite),
     /// The calling process exits with this reason, and no catch tag sees
     /// it, as `ERTS_BIF_EXITED` does when a BIF that handles the signals of
     /// its caller finds that a signal ended the caller (`bif.c:1708-1710`,

@@ -4,16 +4,18 @@ use std::{
 };
 
 use super::{
+    dirty_io::{Completion, DirtyIo},
     ets::EtsTables,
     host::{
         input::{self, Readiness},
+        output::IovecWrite,
         signal,
     },
     local_node,
     persistent_term::PersistentTerms,
     process::{
-        Flush, Frame, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer, Start,
-        TargetMonitor, TimerReference, WalkPosition,
+        DirtyWrite, Flush, Frame, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer,
+        Start, TargetMonitor, TimerReference, WalkPosition,
     },
     regex_code::RegexCodes,
     resources::Resources,
@@ -210,6 +212,8 @@ pub(super) struct Scheduler {
     /// (`bif.h:85-96`). Each switch out sets them to 0
     /// (`erl_process.c:9688`).
     virtual_reductions: i32,
+    /// The dirty IO threads of the run and the inbox of their completions.
+    dirty_io: DirtyIo,
 }
 
 impl Scheduler {
@@ -247,6 +251,7 @@ impl Scheduler {
             next_unlink_id: 1,
             system_logger: Term::static_atom("logger"),
             virtual_reductions: 0,
+            dirty_io: DirtyIo::new(),
         }
     }
 
@@ -281,7 +286,9 @@ impl Scheduler {
     /// Put the process `id` at the end of the run queue, unless it is in the
     /// run queue or runs now: such a process keeps its place, as
     /// `erts_schedule_process` and `erts_proc_sys_schedule` do
-    /// (`erl_proc_sig_queue.h:2063-2088`).
+    /// (`erl_proc_sig_queue.h:2063-2088`). A process whose dirty IO call
+    /// runs also stays out of the run queue: it goes there when the call
+    /// completes ([`Self::complete_dirty_writes`]).
     ///
     /// # Examples
     ///
@@ -291,7 +298,11 @@ impl Scheduler {
     fn enqueue(&mut self, id: ProcessId) {
         let current = self.current_process == Some(id);
         let process = self.processes.get_mut(&id).expect("the process is alive");
-        if !process.in_run_queue && !current {
+        let dirty = process
+            .dirty_write
+            .as_ref()
+            .is_some_and(|write| write.written.is_none());
+        if !process.in_run_queue && !current && !dirty {
             process.in_run_queue = true;
             self.runnable.push_back(id);
         }
@@ -440,13 +451,14 @@ impl Scheduler {
     }
 
     /// Wait for at most `timeout`, or without end for `None`, until fd 0
-    /// has input, when fd 0 has a read select, or until a handled host
-    /// signal arrives, when a handler is installed. ERTS waits for the
-    /// select in its poll thread (`erl_process.c:3372`), and an idle
-    /// scheduler sleeps in its poll until the next timer end
-    /// (`erl_process.c:3536-3567`). PBeam has one thread, so it waits only
-    /// when no process can run. A signal stops the wait with `EINTR`, or
-    /// makes the notify pipe readable when it arrives before the wait.
+    /// has input, when fd 0 has a read select, until a dirty IO call
+    /// completes, when a call runs, or until a handled host signal arrives,
+    /// when a handler is installed. ERTS waits for the select in its poll
+    /// thread (`erl_process.c:3372`), and an idle scheduler sleeps in its
+    /// poll until the next timer end (`erl_process.c:3536-3567`). PBeam has
+    /// one thread, so it waits only when no process can run. A signal stops
+    /// the wait with `EINTR`, or makes the notify pipe readable when it
+    /// arrives before the wait.
     ///
     /// When fd 0 has input, its end of file, or an error, the select ends,
     /// and its recipient gets `{select, TTY, Reference, ready_input}`
@@ -454,11 +466,13 @@ impl Scheduler {
     /// `erl_check_io.c:699-760`). A message to a process that does not exist
     /// is dropped (`erl_check_io.c:851-856`). When fd 0 is not open, the
     /// select ends without a message, as a select that `erts_poll_control`
-    /// cannot add (`erl_check_io.c:1422-1434`). The next scheduling step
-    /// reads the signals in the notify pipe (see [`Self::check_signals`]).
+    /// cannot add (`erl_check_io.c:1422-1434`). A completion only wakes the
+    /// scheduler; [`Self::complete_dirty_writes`] takes it. The next
+    /// scheduling step reads the signals in the notify pipe (see
+    /// [`Self::check_signals`]).
     ///
-    /// Return `false` when fd 0 has no select and no handler is installed,
-    /// and the function does not wait.
+    /// Return `false` when fd 0 has no select, no dirty IO call runs, and no
+    /// handler is installed, and the function does not wait.
     ///
     /// # Examples
     ///
@@ -469,18 +483,29 @@ impl Scheduler {
     /// ```
     pub(super) fn wait_events(&mut self, timeout: Option<Duration>) -> bool {
         let selected = self.resources.borrow_mut::<Ttys>().input_selected();
-        let fds: Vec<_> = selected
-            .then_some(libc::STDIN_FILENO)
-            .into_iter()
-            .chain(signal::notify_fd())
-            .collect();
+        let dirty = self.dirty_io.running();
+        let fds: Vec<_> = [
+            selected.then_some(libc::STDIN_FILENO),
+            dirty.then(|| self.dirty_io.wake_fd()),
+            signal::notify_fd(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if fds.is_empty() {
             return false;
         }
         let readiness = input::wait_readable(&fds, timeout);
-        let input_ready =
-            matches!(&readiness, Readiness::Ready(ready) if ready.contains(&libc::STDIN_FILENO));
-        // Only fd 0 can be closed: the notify pipe stays open.
+        if dirty
+            && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&self.dirty_io.wake_fd()))
+        {
+            self.dirty_io.clear_wake();
+        }
+        let input_ready = selected
+            && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&libc::STDIN_FILENO));
+        // Only fd 0 can be closed: the notify pipe and the wake socket stay
+        // open until the run ends. The select of fd 0 ends when fd 0 is
+        // ready or not open.
         if input_ready || readiness == Readiness::Invalid {
             let ttys = self.resources.borrow_mut::<Ttys>();
             let select = ttys.take_input_select().expect("fd 0 has a select");
@@ -551,6 +576,71 @@ impl Scheduler {
             }
         }
         Ok(())
+    }
+
+    /// Run the `prim_tty:write_nif/2` call of the current process on a
+    /// dirty IO thread, and switch the process out until the call
+    /// completes. The process records the call before the thread gets it,
+    /// so the completion always finds the call. ERTS moves the process to a
+    /// dirty IO scheduler in the same way (`static_schedule_dirty_nif`,
+    /// `erl_nif.c:3437-3477`; `erl_process.c:10244-10262`). The other
+    /// processes run while the call runs. `tail` tells whether the NIF call
+    /// was a tail call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.start_dirty_write(write, true);
+    /// assert_eq!(scheduler.schedule_next()?, Turn::Idle);
+    /// ```
+    pub(super) fn start_dirty_write(&mut self, write: IovecWrite, tail: bool) {
+        let id = self.current_process_mut().id;
+        let call = self.dirty_io.next_call();
+        self.current_process_mut().dirty_write = Some(DirtyWrite {
+            call,
+            tail,
+            written: None,
+        });
+        self.dirty_io.submit(id, call, write);
+        // `enqueue` keeps the process out of the run queue while the call
+        // runs.
+        self.switch_out(|_| {});
+    }
+
+    /// Take each completion from the dirty IO inbox: the process of the
+    /// call gets the result and goes to the end of the run queue, as the
+    /// end of a dirty NIF call moves the process back to a normal run queue
+    /// (`erl_nif.c:462-463`, `507-532`). Its next turn returns the result
+    /// (`dirty_nif_finalizer`, `erl_nif.c:3386-3408`) or raises the
+    /// exception of the call (`dirty_nif_exception`, `erl_nif.c:3410-3435`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.complete_dirty_writes();
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// A completion does not match the running call of a live process. A
+    /// process does not handle its signals while its call runs, so it does
+    /// not exit, and each call completes once.
+    pub(super) fn complete_dirty_writes(&mut self) {
+        while let Some(Completion {
+            process,
+            call,
+            written,
+        }) = self.dirty_io.take_completion()
+        {
+            let dirty_write = self
+                .processes
+                .get_mut(&process)
+                .and_then(|process| process.dirty_write.as_mut())
+                .filter(|write| write.call == call && write.written.is_none())
+                .expect("a completion resumes a running call of a live process");
+            dirty_write.written = Some(written);
+            self.enqueue(process);
+        }
     }
 
     /// Cancel the BIF timer `reference`, as `cancel_bif_timer` does

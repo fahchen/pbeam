@@ -123,11 +123,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path matches a binary with one of these commands or instructions. Add only the commands and instructions that the path needs.
 - **Source:** #219 (PR #227).
 
-### Restore the terminal mode of fd 0 at runtime exit (was #136)
+### Set raw mode through `shell:start_interactive({noshell, raw})`
 
-- PBeam restores fd 0 when the owner of a TTY resource exits, but not at runtime exit as ERTS does (`erl_child_setup.c:563-576`, `sys.c:182-190`). The "Terminal mode at exit" row of `docs/erts-differences.md` records it.
-- **Trigger:** a PBeam program uses an input mode that leaves fd 0 raw.
-- **Source:** review of PR #133 (#115).
+- `shell:start_interactive({noshell, raw})` calls `user_drv:start_shell/1` (shell.erl:149-150). `user_drv` calls `prim_tty:reinit/2` with the input `raw` (user_drv.erl:387-411), and `prim_tty` reads the terminfo values `co` and `xn` with `tigetnum_nif/1` and `tigetflag_nif/1` (prim_tty.erl:333-345, 1405-1408). These NIFs have no PBeam binding, so the stub raises `error:undef` (see "Native functions without a binding" in `docs/effect-inventory.md`). `user_drv` catches only `error:enotsup` (user_drv.erl:412) and raises the exception again with the `raise` instruction (opcode 108), which stops the run with `unsupported BEAM opcode 108`. Thus a PBeam program cannot set fd 0 to raw mode yet. The test of #300 sets raw mode with `stty` while the program waits.
+- **Evidence:** `ok = user_drv:start_shell(#{initial_shell => noshell, input => raw})` in a probe run by `pbeam_boot` in a pseudo-terminal stops with `pbeam: unsupported BEAM opcode 108` and status 1. On pinned ERTS, the call returns `ok`, and the next output has no carriage return, because raw mode turns `OPOST` off.
+- The work: the `tigetnum_nif/1` and `tigetflag_nif/1` bindings and the `raise` instruction, and then the other NIFs that the raw path of `prim_tty` and `user_drv` calls.
+- **Trigger:** a program sets raw mode, for example the Terra reference run (#3).
+- **Source:** PR for #300.
 
 ### Write the output in a locale whose codeset is not UTF-8
 

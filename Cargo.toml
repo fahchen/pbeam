@@ -25,6 +25,10 @@ name = "boot"
 path = "tests/feature/boot.rs"
 
 [[test]]
+name = "dirty_io"
+path = "tests/feature/dirty_io.rs"
+
+[[test]]
 name = "example"
 path = "tests/feature/example.rs"
 
@@ -51,6 +55,10 @@ path = "tests/feature/log.rs"
 [[test]]
 name = "run_end"
 path = "tests/feature/run_end.rs"
+
+[[test]]
+name = "tty_restore"
+path = "tests/feature/tty_restore.rs"
 
 # Integration tests drive the library API with compiled fixtures.
 [[test]]

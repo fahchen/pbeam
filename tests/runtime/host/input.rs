@@ -73,6 +73,17 @@ fn gives_each_fd_that_has_input() {
 }
 
 #[test]
+fn gives_each_ready_fd_of_the_set_in_request_order() {
+    let (first, mut first_writer) = std::io::pipe().unwrap();
+    let (second, mut second_writer) = std::io::pipe().unwrap();
+    let fds = [second.as_raw_fd(), first.as_raw_fd()];
+    first_writer.write_all(b"x").unwrap();
+    assert_eq!(wait_readable(&fds, None), Readiness::Ready(vec![fds[1]]));
+    second_writer.write_all(b"y").unwrap();
+    assert_eq!(wait_readable(&fds, None), Readiness::Ready(fds.to_vec()));
+}
+
+#[test]
 fn waits_for_an_fd_at_or_above_fd_setsize() {
     // nextest runs each test in its own process, so the raised soft limit
     // of open fds reaches no other test.

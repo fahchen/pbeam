@@ -1,10 +1,16 @@
 use super::{CONTEXT_REDS, MonitorOptions, MonitorTarget, Scheduler, Turn};
+use crate::runtime::host::output::{IovecWrite, IovecWritten};
 use crate::term::test_atom;
 use crate::{
     runtime::ets::{Access, Table},
     runtime::process::{ReceiveTimer, Start, TimerReference, tests::frame},
     runtime::timer::{Receiver, Timer},
     term::{Atom, AtomTable, ProcessId, Term},
+};
+use std::{
+    io::{Read, Write},
+    os::fd::AsRawFd,
+    time::Duration,
 };
 
 /// Return the options of `erlang:monitor/2`.
@@ -483,4 +489,102 @@ fn rejects_receive_timeouts_as_erts_set_proc_timer_term() {
             resume: 0
         }
     );
+}
+
+/// Return a write of `bytes` to `fd` in one group.
+fn dirty_write(fd: i32, bytes: &[u8]) -> IovecWrite {
+    IovecWrite {
+        fd,
+        groups: vec![vec![bytes.to_vec()]],
+        bad_group: false,
+    }
+}
+
+/// Wait until a dirty IO call completes, then take the completions.
+fn wait_completion(scheduler: &mut Scheduler) {
+    assert!(scheduler.wait_events(Some(Duration::from_secs(10))));
+    scheduler.complete_dirty_writes();
+}
+
+#[test]
+fn resumes_a_dirty_write_once_when_it_completes_before_the_next_poll() {
+    // The scheduler records the call on the process before the dirty IO
+    // thread gets it. The completion is in the inbox before the scheduler
+    // takes it; the scheduler resumes the process once.
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    scheduler.start(frame(), vec![]).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.start_dirty_write(dirty_write(writer.as_raw_fd(), b"hi\n"), true);
+    let process = &scheduler.processes[&ProcessId(0)];
+    assert_eq!(
+        process
+            .dirty_write
+            .as_ref()
+            .map(|write| (write.call, write.tail, &write.written)),
+        Some((0, true, &None))
+    );
+    assert!(!process.in_run_queue && !process.waiting);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
+    let mut bytes = [0; 3];
+    reader.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"hi\n");
+    wait_completion(&mut scheduler);
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(0)]);
+    assert_eq!(
+        scheduler.processes[&ProcessId(0)]
+            .dirty_write
+            .as_ref()
+            .map(|write| &write.written),
+        Some(&Some(IovecWritten::All))
+    );
+    // The inbox is empty, and the wait does not wait for the call.
+    scheduler.complete_dirty_writes();
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(0)]);
+    assert!(!scheduler.wait_events(None));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+}
+
+#[test]
+fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
+    // The completion comes after the scheduler took the inbox and ran
+    // another process. A message to the waiting process does not put it
+    // in the run queue, and it gets the message after the call.
+    let (reader, writer) = std::io::pipe().unwrap();
+    let fd = writer.as_raw_fd();
+    // SAFETY: `fcntl` changes only the status flags of an open fd.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as above.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    while (&writer).write(&[0; 4096]).is_ok() {}
+    // SAFETY: as above.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    scheduler.start(frame(), vec![]).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler
+        .spawn(Start::Entry(frame()), vec![], false, false, false)
+        .unwrap();
+    scheduler.start_dirty_write(dirty_write(fd, b"later"), true);
+    scheduler.complete_dirty_writes();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(current(&mut scheduler), ProcessId(1));
+    scheduler.deliver(ProcessId(0), atom("ping"));
+    scheduler.park_current();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
+    assert!(scheduler.wait_events(Some(Duration::from_millis(20))));
+    scheduler.complete_dirty_writes();
+    assert!(scheduler.runnable.is_empty());
+    let reading = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        (&reader).read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    wait_completion(&mut scheduler);
+    drop(writer);
+    assert!(reading.join().unwrap().ends_with(b"later"));
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(0)]);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(current(&mut scheduler), ProcessId(0));
+    assert_eq!(messages(&scheduler, 0), [atom("ping")]);
 }

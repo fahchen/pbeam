@@ -2,11 +2,15 @@
 //! `prim_tty_nif.c` and their magic references (`erl_binary.h`). The
 //! scheduler keeps them as the `Ttys` value of its `Resources`, and all
 //! processes of a run share them. Each process keeps the monitors of these
-//! resources on it in its target monitor list.
+//! resources on it in its target monitor list. The module also keeps the
+//! mode of fd 0 at the start of a run, which the run sets again at its end.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
-use super::host::terminal;
+use super::host::{
+    input,
+    terminal::{self, TerminalCheck},
+};
 use crate::term::{ProcessId, Reference, Term};
 
 /// The TTY resources of the node. ERTS frees a TTY resource and its
@@ -173,5 +177,68 @@ impl Ttys {
     /// ```
     pub(super) fn take_input_select(&mut self) -> Option<InputSelect> {
         self.input_select.take()
+    }
+}
+
+/// The mode of fd 0 at the start of a run, as the `erl_sys_initial_tty_mode`
+/// that `erl_sys_init` reads when fd 0 is a terminal (`sys.c:428-432`).
+/// `None` when fd 0 is not a terminal.
+#[derive(Debug)]
+pub(super) struct InitialMode(Option<libc::termios>);
+
+impl InitialMode {
+    /// Read the mode of fd 0 with `tcgetattr`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // fd 0 is a pipe.
+    /// assert!(InitialMode::read().0.is_none());
+    /// ```
+    pub(super) fn read() -> Self {
+        Self(terminal::get_mode(libc::STDIN_FILENO))
+    }
+
+    /// Set fd 0 to the mode at the start of the run when fds 0 and 1 are
+    /// terminals, and ignore the result of `tcsetattr`. ERTS does this at
+    /// each emulator exit in `sys_tty_reset` (`erl_init.c:2730`,
+    /// `sys.c:182-190`), and `erl_child_setup` does it when the emulator
+    /// closes its socket, also after `SIGKILL` (`sys_drivers.c:1670-1690`,
+    /// `erl_child_setup.c:563-576`).
+    ///
+    /// `input_selected` tells whether fd 0 has a read select. ERTS keeps
+    /// such an fd in its kernel poll set, `kqueue` on macOS. A change that
+    /// turns `ICANON` on sets `PENDIN` in the macOS kernel, which then
+    /// checks the read filter of each registration of the terminal. The
+    /// check reads the input count with `ttnread`, which clears `PENDIN`
+    /// again (XNU `bsd/kern/tty.c`: `ttioctl_locked`, `ttnread`, and
+    /// `filt_tty_common`). Thus `PENDIN` does not stay set while fd 0 has a
+    /// read select. PBeam selects fd 0 only while the scheduler waits for
+    /// input, so after the reset it checks fd 0 once with a `select` of
+    /// timeout 0, which also calls `ttnread`.
+    /// Linux does not use `PENDIN`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let initial_mode = InitialMode::read();
+    /// // A process sets fd 0 to raw mode, and the reader selects fd 0.
+    /// initial_mode.reset(true);
+    /// // fd 0 has its first mode again, without `PENDIN`.
+    /// ```
+    pub(super) fn reset(&self, input_selected: bool) {
+        let Some(mode) = &self.0 else {
+            return;
+        };
+        if terminal::check(libc::STDIN_FILENO) != TerminalCheck::Terminal
+            || terminal::check(libc::STDOUT_FILENO) != TerminalCheck::Terminal
+        {
+            return;
+        }
+        // ERTS ignores the result (sys.c:188, erl_child_setup.c:566, 575).
+        let _ = terminal::set_mode(libc::STDIN_FILENO, mode);
+        if input_selected {
+            input::wait_readable(&[libc::STDIN_FILENO], Some(Duration::ZERO));
+        }
     }
 }
