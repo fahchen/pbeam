@@ -12,6 +12,7 @@ const MAP_ORDER_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_order_prob
 const ATOM_MAP_PROBE: &[u8] = include_bytes!("../../fixtures/map/atom_map_probe.beam");
 const MAP_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_key_probe.beam");
 const BINARY_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/binary_key_probe.beam");
+const MAP_SIZE_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_size_probe.beam");
 
 /// The numbers `N` of the binary keys `<<"kNN">>`, 1 to 33, in the order of a hashmap of these 33
 /// keys under the pinned ERTS.
@@ -534,5 +535,40 @@ fn puts_binary_keys_into_maps_like_erts() {
             "[[{{<<97>>,0}},{{<<97,98>>,1}},{{<<98>>,0}}],[{{<<97>>,2}},{{<<97,98>>,1}},{{<<98>>,0}}],\
              [{grown}],1,33]\n"
         )
+    );
+}
+
+#[test]
+fn gives_the_map_size_like_erts() {
+    // The pinned compiler emits each `map_size/1` call of the fixture as `gc_bif`: with the fail
+    // label 0 in `main/0` and `body/1`, and with a fail label in the guard of `guard/1`.
+    let program = BeamProgram::load(&[MAP_SIZE_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let int = Term::Integer;
+    let badmap =
+        |term: Term| Term::Tuple(vec![atom("error"), Term::Tuple(vec![atom("badmap"), term])]);
+    assert_eq!(
+        program.execute("map_size_probe", "main", &[]).unwrap(),
+        Term::List(vec![
+            int(2),
+            int(2),
+            int(0),
+            int(33),
+            int(34),
+            atom("small"),
+            atom("big"),
+            atom("small"),
+            atom("other"),
+            atom("other"),
+            badmap(atom("foo")),
+            badmap(Term::List(vec![int(1)])),
+            badmap(Term::Binary(b"ab".to_vec())),
+        ])
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [map_size_probe:main()])"),
+        b"[2,2,0,33,34,small,big,small,other,other,{error,{badmap,foo}},{error,{badmap,[1]}},\
+          {error,{badmap,<<97,98>>}}]\n"
     );
 }

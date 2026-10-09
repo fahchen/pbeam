@@ -87,7 +87,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - `persistent_term:put/2` of a new value switches out the caller in PBeam, and the new value is visible at once. ERTS makes the new table visible after thread progress, and suspends the caller until then (`erl_bif_persistent.c:774-779`). With `erl +S 1`, other processes then run 2 to 5 turns before the caller continues.
 - While `persistent_term:get/0` traps, ERTS keeps the update permission until its last chunk, and `persistent_term:put/2` of another process suspends until ERTS releases the permission, and then tries again (`erl_bif_persistent.c:333-345`, `692-694`, `1311-1335`, `1353-1357`). PBeam changes the table at once, and the trapped call returns the table of its first call.
 - The "Persistent terms" row of `docs/erts-differences.md` records the two suspensions, and this entry owns them. Thread progress depends on all managed threads of the node, so PBeam on one scheduler does not model it.
-- **Trigger:** multiple schedulers (M4, #27), or a consumer that needs the exact interleaving around `persistent_term:put/2`, also a put while `persistent_term:get/0` traps.
+- **Trigger:** multiple schedulers (M10, #27), or a consumer that needs the exact interleaving around `persistent_term:put/2`, also a put while `persistent_term:get/0` traps.
 - **Source:** #234 (PR #243), #245 (PR #249), and #258.
 
 ### Complete a trapped `ets:insert/2` in the process that uses the table
@@ -322,3 +322,10 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - `tests/feature/boot.rs`, `tests/integration/time.rs`, `tests/integration/user_drv.rs`, and `tests/integration/prim_tty.rs` set `TERM=dumb` and `LC_ALL=C.UTF-8` on the command, as `run_dumb_utf8` of `tests/common/run.rs` does. They do not use a time limit, and `tests/integration/prim_tty.rs` reads only the exit status with its own stdin, stdout, and stderr. Thus each one can call `run_dumb_utf8`, or a helper that only sets the two variables.
 - **Trigger:** the next change to one of these test runners.
 - **Source:** PR #192 (#186).
+
+### Cache the Rust build in CI
+
+- PR #294 (#292) measured a cache of `target/` with `CARGO_INCREMENTAL=1`. Without a cache, the test build of main run 37929970799 took 68s. With the default `cargo llvm-cov` clean, which removes the incremental state of `pbeam-runtime`, warm builds took 60s and 75s, so the cache gave no gain. A dependency-only cache gives the same result. With `--no-clean`, warm builds took 19s to 30s, but the restore took 23s to 26s and the save 8s to 13s. Against the 68s main baseline, the net change was from 1s slower to 18s faster per run, which is smaller than the run-to-run variation of the test time (244s to 412s). Each entry is about 600 MB, and the repository cache limit is 10 GB.
+- `--no-clean` needs a removal of old `*.profraw` files and of old test executables before each coverage run; without it, the coverage gate reported 9533/10116 after one profile change. The gain does not justify this risk to the merge gate.
+- **Trigger:** the test build becomes much longer than the cache transfer (for example, more crates or a larger dependency tree), or `cargo llvm-cov` keeps the incremental state by itself.
+- **Source:** PR #294 (#292).
