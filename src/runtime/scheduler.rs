@@ -1201,15 +1201,18 @@ impl Scheduler {
     ///    reductions left gives 1 (`erl_rbtree.h:1392-1436`). With no
     ///    reductions left after this phase, the process switches out
     ///    (`erl_process.c:14314-14316`). Until it leaves the process table,
-    ///    a process that switched out keeps its registered name and its ETS
-    ///    tables.
+    ///    a process that switched out keeps its registered name.
     /// 3. Delete its ETS tables (`ERTS_CONTINUE_EXIT_USING_DB`,
-    ///    `erl_process.c:14360-14368`), free its registered name, and leave
-    ///    the process table (`ERTS_CONTINUE_EXIT_FREE`,
-    ///    `erl_process.c:14406-14476`), which uses 50 reductions. Fetch its
-    ///    signal queue (`erl_process.c:14537`). With no reductions left, the
-    ///    process switches out (`erl_process.c:14541-14543`).
-    /// 4. Send the signals of its links and monitors, and answer its pending
+    ///    `erl_process.c:14360-14368`; see [`EtsTables::delete_owned`]). The
+    ///    deletion counts from the reductions left in the turn, which the
+    ///    timer walk did not change, and the exit switches out when the
+    ///    deletion uses them.
+    /// 4. Free its registered name, and leave the process table
+    ///    (`ERTS_CONTINUE_EXIT_FREE`, `erl_process.c:14406-14476`), which
+    ///    uses 50 reductions of the count of the exit. Fetch its signal queue
+    ///    (`erl_process.c:14537`). With no reductions left, the process
+    ///    switches out (`erl_process.c:14541-14543`).
+    /// 5. Send the signals of its links and monitors, and answer its pending
     ///    signals ([`Self::exit_links`]).
     ///
     /// # Examples
@@ -1256,7 +1259,18 @@ impl Scheduler {
         if walked && timers.is_empty() {
             reds = reds.max(1);
         }
-        if reds <= 0 {
+        // The table deletion counts from the reductions left in the turn,
+        // not from the count of the exit, and its bump does not change that
+        // count (`erl_db.c:5044-5045`, `5118`; `erl_process.c:14360-14366`).
+        let deleted = reds > 0 && {
+            let left = self.current_process_mut().fcalls;
+            let rest = self.ets.delete_owned(id, left);
+            if let Some(rest) = rest {
+                self.current_process_mut().bump_reductions(left - rest);
+            }
+            rest.is_some()
+        };
+        if !deleted {
             let process = self.current_process_mut();
             process.exiting = Some(reason);
             process.continue_exit = Some(timers);
@@ -1271,7 +1285,6 @@ impl Scheduler {
             .remove(&id)
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
-        self.ets.delete_owned(id);
         if let Some(name) = &process.registered_name {
             self.names.remove(name.name());
         }
