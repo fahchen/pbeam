@@ -223,10 +223,12 @@ pub(super) struct ProcessState {
     pub(super) bif_timers: MonitorLinkTree<TimerReference, ()>,
     /// The state of an exit that switched out before it left the process
     /// table, as `p->u.terminate` holds the state of a continued exit
-    /// (`erl_process.c:14276-14290`): the BIF timers that the exit did not
-    /// cancel yet, the next timer last. `None` until the exit switches out.
-    /// The exit then continues with no new bump.
-    pub(super) continue_exit: Option<Vec<TimerReference>>,
+    /// (`erl_process.c:14276-14290`): the position of the next BIF timer
+    /// in the post-order walk of `bif_timers`, or `None` after the last
+    /// timer, as the yield state of the ERTS walk keeps the next node
+    /// (`erl_rbtree.h:1392-1396`). `None` until the exit switches out. The
+    /// exit then continues with no new bump.
+    pub(super) continue_exit: Option<Option<WalkPosition>>,
 }
 
 /// A BIF call that continues after a switch: the export of a BIF and the

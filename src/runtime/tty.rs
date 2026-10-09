@@ -127,7 +127,8 @@ impl Ttys {
     }
 
     /// Run the first TTY monitor of the process `pid` after it exits, and
-    /// remove it. Return false when the process has no TTY monitor. As
+    /// remove it. The process must have a TTY monitor
+    /// ([`Self::monitor_count`]). As
     /// `tty_monitor_down` (`prim_tty_nif.c:1235-1241`) does, a monitor of a
     /// TTY resource whose owner is still `pid` sets fd 0 to the first mode
     /// of the resource, and the result of `tcsetattr` is ignored.
@@ -137,23 +138,20 @@ impl Ttys {
     /// ```rust,ignore
     /// ttys.monitor(ProcessId(1), Reference(0));
     /// // fd 0 gets the first mode of the TTY resource `Reference(0)`.
-    /// assert!(ttys.monitor_down(ProcessId(1)));
-    /// assert!(!ttys.monitor_down(ProcessId(1)));
+    /// ttys.monitor_down(ProcessId(1));
+    /// assert_eq!(ttys.monitor_count(ProcessId(1)), 0);
     /// ```
-    pub(super) fn monitor_down(&mut self, pid: ProcessId) -> bool {
-        let Some(index) = self
+    pub(super) fn monitor_down(&mut self, pid: ProcessId) {
+        let index = self
             .monitors
             .iter()
             .position(|&(monitor, _)| monitor == pid)
-        else {
-            return false;
-        };
+            .expect("the process has a TTY monitor");
         let (_, reference) = self.monitors.remove(index);
         let tty = &self.by_reference[&reference];
         if tty.owner == Some(pid) {
             // ERTS ignores the result (prim_tty_nif.c:1239).
             let _ = terminal::set_mode(libc::STDIN_FILENO, &tty.first_mode);
         }
-        true
     }
 }

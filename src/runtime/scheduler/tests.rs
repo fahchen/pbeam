@@ -2,7 +2,8 @@ use super::{CONTEXT_REDS, MonitorOptions, MonitorTarget, Scheduler, Turn};
 use crate::term::test_atom;
 use crate::{
     runtime::ets::{Access, Table},
-    runtime::process::{ReceiveTimer, Start, tests::frame},
+    runtime::process::{ReceiveTimer, Start, TimerReference, tests::frame},
+    runtime::timer::{Receiver, Timer},
     term::{Atom, AtomTable, ProcessId, Term},
 };
 
@@ -410,6 +411,55 @@ fn wakes_a_waiting_process_and_stops_receive_timers_at_cancel_and_exit() {
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
     scheduler.finish_current(atom("normal"), None);
     assert_eq!(scheduler.timers.wait_time(1_000_000_000), None);
+}
+
+#[test]
+fn continues_the_exit_timer_walk_at_its_next_timer() {
+    // Each turn cancels the timers that its reductions pay for and keeps
+    // the position of the next timer (erl_rbtree.h:1392-1396). A turn that
+    // walked the tree again from its start would cancel no new timer for
+    // the reductions of each timer that an earlier turn cancelled.
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    scheduler.start(frame(), vec![]).unwrap();
+    scheduler.schedule_next().unwrap();
+    for _ in 0..60 {
+        let reference = scheduler.make_ref().unwrap();
+        scheduler.timers.start(
+            1100,
+            Timer::Bif {
+                reference,
+                receiver: Receiver::Process(ProcessId(0)),
+                message: atom("timeout"),
+            },
+        );
+        let process = scheduler.current_process_mut();
+        process.bif_timers.insert(TimerReference(reference), ());
+    }
+    let process = scheduler.current_process_mut();
+    let order: Vec<TimerReference> = process.bif_timers.post_order().map(|(&t, _)| t).collect();
+    // Check that the exit cancelled the first `done` timers in post-order,
+    // and keeps the position of the next timer.
+    let check = |scheduler: &mut Scheduler, done: usize| {
+        let process = &scheduler.processes[&ProcessId(0)];
+        let mut walk = process.bif_timers.post_order();
+        walk.by_ref().take(done).for_each(drop);
+        assert_eq!(process.continue_exit, Some(walk.position()), "{done}");
+        for timer in &order[..done] {
+            assert_eq!(scheduler.timers.cancel_bif(timer.0), None, "{done}");
+        }
+    };
+    // 100 reductions for the exit and 80 for each of two timers.
+    process.fcalls = 260;
+    scheduler.finish_current(atom("normal"), None);
+    check(&mut scheduler, 2);
+    // A new turn has 4000 reductions, which pay for 50 timers.
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    check(&mut scheduler, 52);
+    for timer in &order[52..] {
+        assert!(scheduler.timers.cancel_bif(timer.0).is_some());
+    }
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    assert!(scheduler.processes.is_empty());
 }
 
 #[test]
