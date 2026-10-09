@@ -1,5 +1,5 @@
 -module(bif_cost_probe).
--export([costs/1, sorts/1, longs/1, puts/1, put_trap/0, put_race/0, exits/0, bad_long/0,
+-export([costs/1, longs/1, puts/1, put_trap/0, put_race/0, exits/0, bad_long/0,
          bad_binary/0, results/0, gcs/1]).
 -export([measure/3, put_loop/2, exiter/2, watcher/3, traced/3, start/4, long_loop/5,
          send_loop/3]).
@@ -23,9 +23,17 @@ inputs() ->
      %% 32 keys (a flatmap), a bad element or an improper tail after N
      %% pairs, and an atom. {dups, 40000} traps. {big_dups, 33} has one
      %% bignum key, which a PBeam hashmap does not support yet.
+     %% {two_keys, A, B} has A pairs {1, 1} and then B pairs {2, 2}. The
+     %% sort pivots one of the keys and then sorts the pairs of the other
+     %% key: 73 pairs with a partition of 72 steps, or 9 pairs with the
+     %% selection sort of 9 * 4 * 2 = 72 units (utils.c:3499-3588,
+     %% 3636-3640). Thus the cost does not change with the pivot. PBeam
+     %% pivots index 3 of 82, so it sorts the 73 pairs in the first input
+     %% and the 9 pairs in the second.
      {maps_from_list,
       [nil, {flat, 32}, {dups, 33}, {dups, 80}, {dups, 400}, {dups, 40000},
-       {big_dups, 33}, {bad, 400}, {improper, 400}, atom]},
+       {big_dups, 33}, {two_keys, 9, 73}, {two_keys, 73, 9}, {bad, 400},
+       {improper, 400}, atom]},
      %% A map of the keys 1..N. {hash, 100000} traps.
      {maps_keys, [{flat, 32}, {hash, 33}, {hash, 100}, {hash, 10000}, {hash, 100000}]},
      %% Chardata: see chardata/1. Lists of 50000 characters, binaries of
@@ -42,11 +50,6 @@ inputs() ->
      {characters_to_list_latin1,
       [{list, 3}, {list, 100}, {list, 10000}, {bin, 3}, {bin, 10000}, {high_bin, 10000},
        {list, 50000}, {bin, 50000}]}].
-
-%% The inputs of maps:from_list/1 whose ERTS cost changes between runs:
-%% the pivots of the sort come from addresses (utils.c:3522-3526).
-sort_inputs() ->
-    [{distinct, 40}, {distinct, 100}, {distinct, 1000}, {distinct, 10000}].
 
 %% Return the argument. A call through ?MODULE stops the compiler from
 %% folding a constant.
@@ -72,9 +75,10 @@ copies(Count, Term) ->
 %% measures the BIF.
 arg(maps_from_list, nil) -> [];
 arg(maps_from_list, {flat, Count}) -> pairs(1, Count);
-arg(maps_from_list, {distinct, Count}) -> pairs(1, Count);
 arg(maps_from_list, {dups, Count}) -> copies(Count, {1, 1});
 arg(maps_from_list, {big_dups, Count}) -> copies(Count, {id(1 bsl 30) * (1 bsl 30), ok});
+arg(maps_from_list, {two_keys, First, Second}) ->
+    copies(First, {1, 1}) ++ copies(Second, {2, 2});
 arg(maps_from_list, {bad, Count}) -> copies(Count, {1, 1}) ++ [x];
 arg(maps_from_list, {improper, Count}) -> copies(Count, {1, 1}) ++ x;
 arg(maps_from_list, atom) -> id(x);
@@ -146,12 +150,6 @@ costs(Opts) ->
     Base = delta(none, none, Opts),
     [{Bif, [{Input, delta(Bif, Input, Opts) - Base - 1} || Input <- Inputs]}
      || {Bif, Inputs} <- inputs()].
-
-%% The costs of maps:from_list/1 for the inputs whose ERTS cost changes
-%% between runs.
-sorts(Opts) ->
-    Base = delta(none, none, Opts),
-    [{Input, delta(maps_from_list, Input, Opts) - Base - 1} || Input <- sort_inputs()].
 
 delta(Bif, Input, Opts) ->
     Pid = spawn_opt(?MODULE, measure, [self(), Bif, Input], Opts),
@@ -322,7 +320,7 @@ reverse([Head | Tail], Acc) -> reverse(Tail, [Head | Acc]).
 %% Each must give 0, else a collection changes the reductions on ERTS.
 gcs(Opts) ->
     [{Bif, Input, gc_count(measure, [Bif, Input], Opts)}
-     || {Bif, Inputs} <- [{none, [none]}, {maps_from_list, sort_inputs()} | inputs()],
+     || {Bif, Inputs} <- [{none, [none]} | inputs()],
         Input <- Inputs]
     ++ [{puts, gc_count(put_loop, [70], Opts)}]
     ++ [{Bif, gc_count(long_loop, [a, Bif, arg(Bif, Input), 3], Opts)}

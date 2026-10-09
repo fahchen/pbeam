@@ -9,6 +9,7 @@
 
 use super::{
     Flush, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, SIGNAL_HANDLING_REDUCTIONS, Scheduler,
+    TargetMonitor, Ttys,
 };
 use crate::{
     error::BeamError,
@@ -412,12 +413,18 @@ impl Scheduler {
                 4 * i32::from(removed)
             }
             Signal::Monitor { watcher, reference } => {
-                let monitor = Monitor { watcher, reference };
+                let monitor = TargetMonitor::Process(Monitor { watcher, reference });
                 self.handled(id, node).monitored_by.push(monitor);
                 2
             }
+            Signal::TtyMonitor { tty } => {
+                self.handled(id, node)
+                    .monitored_by
+                    .push(TargetMonitor::Tty(tty));
+                2
+            }
             Signal::Demonitor { watcher, reference } => {
-                let monitor = Monitor { watcher, reference };
+                let monitor = TargetMonitor::Process(Monitor { watcher, reference });
                 let monitors = &mut self.handled(id, node).monitored_by;
                 let before = monitors.len();
                 monitors.retain(|target| *target != monitor);
@@ -632,31 +639,51 @@ impl Scheduler {
 
     /// Answer the signals that the exiting process `process` did not
     /// handle, in queue order, as `erts_proc_sig_handle_exit`
-    /// (`erl_proc_sig_queue.c:7259-7473`) does. The process is out of the
+    /// (`erl_proc_sig_queue.c:7259-7473`) does with `reds` reductions left.
+    /// Return true when no signal is left. The process is out of the
     /// process table. A monitor signal gives a monitor down signal `noproc`
     /// to its watcher, a link signal gives a link exit signal `noproc` to
     /// its sender, an unlink signal gives an unlink acknowledgment, and the
     /// group-leader, is-alive, and process-info requests reply `badarg`,
-    /// `false`, and `undefined`. Each other signal is dropped. PBeam
-    /// answers all signals in the exit turn; ERTS can yield between them.
+    /// `false`, and `undefined`. A TTY monitor signal runs its TTY monitor.
+    /// Each other signal is dropped. Each signal
+    /// and receive marker counts 1, and a monitor signal 4 more
+    /// (`erl_proc_sig_queue.c:7307`, `7352`). The handling stops when the
+    /// count is more than `reds` times 4 (`erl_proc_sig_queue.c:7273-7274`,
+    /// `7462`), and the exit then switches out and continues here in its
+    /// next turn.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.handle_exit_signals(&mut process);
+    /// assert!(scheduler.handle_exit_signals(&mut process, 3850));
     /// ```
-    pub(in crate::runtime) fn handle_exit_signals(&mut self, process: &mut ProcessState) {
+    pub(in crate::runtime) fn handle_exit_signals(
+        &mut self,
+        process: &mut ProcessState,
+        reds: i32,
+    ) -> bool {
         let id = process.id;
+        let limit = SIGNAL_COUNT_FACTOR * reds;
+        let mut count = 0;
         let mut walk = process.mailbox.walk();
-        while let Some(step) = process.mailbox.next_signal(&mut walk) {
+        while count <= limit
+            && let Some(step) = process.mailbox.next_signal(&mut walk)
+        {
+            count += 1;
             let Step::Signal(node, signal) = step else {
                 continue;
             };
             process.mailbox.remove(node);
             match signal {
                 Signal::Monitor { watcher, reference } => {
+                    count += 4;
                     let noproc = Term::static_atom("noproc");
                     self.send_monitor_down(Some(id), watcher, reference, noproc);
+                }
+                Signal::TtyMonitor { tty } => {
+                    count += 4;
+                    self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
                 }
                 Signal::Link { from } => {
                     let exit = Signal::Exit {
@@ -697,6 +724,8 @@ impl Scheduler {
                 _ => {}
             }
         }
+        process.mailbox.end_walk(walk);
+        !process.mailbox.has_middle()
     }
 
     /// Make messages ready for `loop_rec` of the current process at the end

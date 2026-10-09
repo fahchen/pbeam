@@ -4,7 +4,10 @@ use super::{
     ets::EtsTables,
     local_node,
     persistent_term::PersistentTerms,
-    process::{Flush, Frame, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer, Start},
+    process::{
+        Flush, Frame, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer, Start,
+        TargetMonitor, TimerReference, WalkPosition,
+    },
     regex_code::RegexCodes,
     resources::Resources,
     signal::Signal,
@@ -29,6 +32,10 @@ const EXIT_REDUCTIONS: i32 = 100;
 /// after it removes the process from the process table
 /// (`erl_process.c:14475`).
 const FREE_REDUCTIONS: i32 = 50;
+
+/// The reductions that an exit uses to cancel each BIF timer to the
+/// process, as `ERTS_BTM_CANCEL_REDS` (`erl_hl_timer.c:2404`).
+const TIMER_CANCEL_REDUCTIONS: i32 = 80;
 
 /// The reductions that an active process uses at most to handle its
 /// signals at schedule-in and in `loop_rec`, as
@@ -96,6 +103,25 @@ pub(super) enum Turn {
     Idle,
 }
 
+/// A phase of an exit after the process left the process table, as the
+/// phases `ERTS_CONTINUE_EXIT_LINKS` to `ERTS_CONTINUE_EXIT_HANDLE_PROC_SIG`
+/// of `erts_continue_exit_process` (`erl_process.c:14234-14251`). A tree
+/// phase keeps the position of its next entry, or `None` before its first
+/// entry, and the list phase keeps the number of entries that it handled,
+/// as the ERTS yield state keeps the next entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitPhase {
+    /// The link tree of the process, in post-order.
+    Links(Option<WalkPosition>),
+    /// The monitor tree of the process, in post-order.
+    Monitors(Option<WalkPosition>),
+    /// The monitors of other processes and resources on the process
+    /// (`ERTS_P_LT_MONITORS`): the entries of `monitored_by` from the index.
+    TargetMonitors(usize),
+    /// The signals in the queue of the process.
+    Signals,
+}
+
 /// A scheduler on one OS thread. A process runs until it waits, exits, or
 /// switches out at an ERTS switch point. It follows the ERTS model: the
 /// process table holds every live process, also an exiting one,
@@ -107,11 +133,12 @@ pub(super) struct Scheduler {
     /// All live processes, including the current process.
     processes: HashMap<ProcessId, ProcessState>,
     /// The processes that left the process table in their exit and switched
-    /// out before their links and monitors, as ERTS keeps a process in the
-    /// `ERTS_PSFLG_FREE` state (`erl_process.c:14469`, `14814-14816`). No
-    /// pid lookup finds them. The run queue holds their pids, and each
-    /// continues its exit in its next turn.
-    freed: HashMap<ProcessId, ProcessState>,
+    /// out before the end of their exit, as ERTS keeps a process in the
+    /// `ERTS_PSFLG_FREE` state (`erl_process.c:14469`, `14814-14816`), with
+    /// the phase where each exit continues. No pid lookup finds them. The
+    /// run queue holds their pids, and each continues its exit in its next
+    /// turn.
+    freed: HashMap<ProcessId, (ProcessState, ExitPhase)>,
     /// Processes that wait for a turn, in run order. The current process is
     /// not in this queue, as in ERTS.
     runnable: VecDeque<ProcessId>,
@@ -285,7 +312,7 @@ impl Scheduler {
     /// reductions (`erl_process.c:10183`).
     ///
     /// - An exiting process runs its exit now. A freed process continues its
-    ///   exit at its links ([`Self::finish_current`]).
+    ///   exit at its phase ([`Self::finish_current`]).
     /// - A process with signals to handle handles them first. An active
     ///   process, which has Erlang work, uses at most
     ///   `ERTS_SIG_HANDLE_REDS_MAX_PREFERED` (100) reductions for it, and a
@@ -314,8 +341,8 @@ impl Scheduler {
         let Some(id) = self.runnable.pop_front() else {
             return Ok(Turn::Idle);
         };
-        if let Some(process) = self.freed.remove(&id) {
-            self.exit_links(process);
+        if let Some((process, phase)) = self.freed.remove(&id) {
+            self.exit_links(process, phase, CONTEXT_REDS);
             return Ok(Turn::Done);
         }
         self.current_process = Some(id);
@@ -388,8 +415,11 @@ impl Scheduler {
                     }
                 }
                 Timer::Bif {
-                    receiver, message, ..
+                    reference,
+                    receiver,
+                    message,
                 } => {
+                    self.forget_bif_timer(&receiver, reference);
                     let target = match receiver {
                         Receiver::Process(id) => Some(id),
                         Receiver::Name(name) => self.whereis(name.name()),
@@ -399,6 +429,45 @@ impl Scheduler {
                     }
                 }
             }
+        }
+    }
+
+    /// Cancel the BIF timer `reference`, as `cancel_bif_timer` does
+    /// (`erl_hl_timer.c:1895-1971`). Return its end tick, or `None` when no
+    /// BIF timer with the reference is active. The timer leaves the timer
+    /// tree of its receiver (see [`Self::forget_bif_timer`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.cancel_bif_timer(reference), Some(1100));
+    /// assert_eq!(scheduler.cancel_bif_timer(reference), None);
+    /// ```
+    pub(super) fn cancel_bif_timer(&mut self, reference: Reference) -> Option<i64> {
+        let (end, timer) = self.timers.cancel_bif(reference)?;
+        if let Timer::Bif { receiver, .. } = timer {
+            self.forget_bif_timer(&receiver, reference);
+        }
+        Some(end)
+    }
+
+    /// Remove the BIF timer `reference` from the timer tree of the process
+    /// `receiver` when the process does not exit, as `bif_timer_timeout` and
+    /// `cancel_bif_timer` do (`erl_hl_timer.c:1180-1190`, `1904-1911`). An
+    /// exiting process keeps the timer in its tree, and its exit uses the
+    /// reductions of the timer.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.forget_bif_timer(&Receiver::Process(id), reference);
+    /// ```
+    fn forget_bif_timer(&mut self, receiver: &Receiver, reference: Reference) {
+        if let Receiver::Process(id) = receiver
+            && let Some(process) = self.processes.get_mut(id)
+            && process.exiting.is_none()
+        {
+            process.bif_timers.remove(&TimerReference(reference));
         }
     }
 
@@ -789,10 +858,10 @@ impl Scheduler {
         child.group_leader = self.current_process_mut().group_leader;
         let reference = if monitor {
             let reference = self.make_ref()?;
-            child.monitored_by.push(Monitor {
+            child.monitored_by.push(TargetMonitor::Process(Monitor {
                 watcher: parent,
                 reference,
-            });
+            }));
             let origin = Origin {
                 monitor: Some(OriginMonitor {
                     kind: "process",
@@ -1113,30 +1182,37 @@ impl Scheduler {
 
     /// Run the exit of the current process, as `erts_do_exit_process` and
     /// `erts_continue_exit_process` do (`erl_process.c:14170-14833`). The
-    /// exit uses the budget of the turn and switches out when the budget
-    /// ends at one of the two checks that a process without BIF timers,
-    /// links to ports, or distribution can reach:
+    /// exit counts its reductions from the reductions left in the turn, and
+    /// switches out when they end at one of the checks that a process
+    /// without links to ports, distribution, or scheduler blocks can reach.
+    /// A switch out uses all reductions of the turn (`BUMP_ALL_REDS`,
+    /// `erl_process.c:14832`), and the next turn continues the exit with a
+    /// new count and no new bump:
     ///
     /// 1. Bump 100 reductions (`erl_process.c:14229`). Stop the receive
-    ///    timer (`erl_process.c:14207-14210`) and the BIF timers to the pid
-    ///    (`ERTS_CONTINUE_EXIT_TIMERS`, `erl_process.c:14300-14313`). The
-    ///    root process records its result. With no reductions left, the
-    ///    process switches out as an exiting process, which keeps its
-    ///    registered name and its ETS tables, and continues here in its
-    ///    next turn with no new bump (`erl_process.c:14315-14316`,
-    ///    `14795-14833`).
-    /// 2. Delete its ETS tables (`ERTS_CONTINUE_EXIT_USING_DB`,
-    ///    `erl_process.c:14360-14368`), free its registered name, and leave
-    ///    the process table (`ERTS_CONTINUE_EXIT_FREE`,
-    ///    `erl_process.c:14406-14476`), which uses 50 reductions. Fetch its
-    ///    signal queue (`erl_process.c:14537`). With no reductions left, the
-    ///    process switches out, and its next turn continues at its links
-    ///    (`erl_process.c:14541-14543`).
-    /// 3. Send the signals of its links and monitors ([`Self::exit_links`]).
-    ///
-    /// ERTS also uses reductions for each BIF timer, link, monitor, and
-    /// handled signal, and switches out when they use the budget. PBeam does
-    /// not count them (row "Scheduling" in `docs/erts-differences.md`).
+    ///    timer (`erl_process.c:14207-14210`). The root process records its
+    ///    result.
+    /// 2. Cancel each BIF timer to the pid in the post-order of the timer
+    ///    tree of the process (`ERTS_CONTINUE_EXIT_TIMERS`,
+    ///    `erl_process.c:14300-14305`). Each timer uses 80 reductions
+    ///    (`erl_hl_timer.c:2401-2446`). The walk switches out before a timer
+    ///    when no reductions are left, and a walk that ends with no
+    ///    reductions left gives 1 (`erl_rbtree.h:1392-1436`). With no
+    ///    reductions left after this phase, the process switches out
+    ///    (`erl_process.c:14314-14316`). Until it leaves the process table,
+    ///    a process that switched out keeps its registered name.
+    /// 3. Delete its ETS tables (`ERTS_CONTINUE_EXIT_USING_DB`,
+    ///    `erl_process.c:14360-14368`; see [`EtsTables::delete_owned`]). The
+    ///    deletion counts from the reductions left in the turn, which the
+    ///    timer walk did not change, and the exit switches out when the
+    ///    deletion uses them.
+    /// 4. Free its registered name, and leave the process table
+    ///    (`ERTS_CONTINUE_EXIT_FREE`, `erl_process.c:14406-14476`), which
+    ///    uses 50 reductions of the count of the exit. Fetch its signal queue
+    ///    (`erl_process.c:14537`). With no reductions left, the process
+    ///    switches out (`erl_process.c:14541-14543`).
+    /// 5. Send the signals of its links and monitors, and answer its pending
+    ///    signals ([`Self::exit_links`]).
     ///
     /// # Examples
     ///
@@ -1146,119 +1222,240 @@ impl Scheduler {
     pub(super) fn finish_current(&mut self, reason: Term, result: Option<Term>) {
         let process = self.current_process_mut();
         let id = process.id;
-        if !process.continue_exit {
-            process.bump_reductions(EXIT_REDUCTIONS);
-            if let ReceiveTimer::Set { key, .. } = process.receive_timer {
-                self.timers.cancel(key);
+        let mut next = match process.continue_exit.take() {
+            Some(next) => next,
+            None => {
+                process.bump_reductions(EXIT_REDUCTIONS);
+                if let ReceiveTimer::Set { key, .. } = process.receive_timer {
+                    self.timers.cancel(key);
+                }
+                if id == ProcessId(0) {
+                    let normal = reason == Term::static_atom("normal");
+                    self.root_result = Some(match result {
+                        Some(result) if normal => Ok(result),
+                        _ => Err(reason.clone()),
+                    });
+                }
+                self.current_process_mut()
+                    .bif_timers
+                    .post_order()
+                    .position()
             }
-            self.timers.cancel_process(id);
-            if id == ProcessId(0) {
-                let normal = reason == Term::static_atom("normal");
-                self.root_result = Some(match result {
-                    Some(result) if normal => Ok(result),
-                    _ => Err(reason.clone()),
-                });
+        };
+        let process = self.current_process_mut();
+        let mut reds = process.fcalls;
+        // The tree does not change during the exit: an exiting process
+        // keeps each timer that expires or that a BIF cancels, and gets no
+        // new timer. Thus the position stays valid across turns.
+        let tree = std::mem::take(&mut process.bif_timers);
+        let walked = next.is_some();
+        while let Some(position) = next {
+            if reds <= 0 {
+                break;
             }
-            let process = self.current_process_mut();
-            if process.fcalls <= 0 {
-                process.exiting = Some(reason);
-                process.continue_exit = true;
-                self.yield_current();
-                return;
-            }
+            let mut walk = tree.post_order_from(position);
+            let (&timer, ()) = walk.next().expect("a walk position has an entry");
+            next = walk.position();
+            // The receiver exits, so the timer has no tree entry to remove.
+            let _ = self.timers.cancel_bif(timer.0);
+            reds -= TIMER_CANCEL_REDUCTIONS;
         }
-        let reductions = self.current_process_mut().fcalls - FREE_REDUCTIONS;
+        if walked && next.is_none() {
+            reds = reds.max(1);
+        }
+        // The table deletion counts from the reductions left in the turn,
+        // not from the count of the exit, and its bump does not change that
+        // count (`erl_db.c:5044-5045`, `5118`; `erl_process.c:14360-14366`).
+        let deleted = reds > 0 && {
+            let left = self.current_process_mut().fcalls;
+            let rest = self.ets.delete_owned(id, left);
+            if let Some(rest) = rest {
+                self.current_process_mut().bump_reductions(left - rest);
+            }
+            rest.is_some()
+        };
+        if !deleted {
+            let process = self.current_process_mut();
+            process.exiting = Some(reason);
+            process.bif_timers = tree;
+            process.continue_exit = Some(next);
+            process.fcalls = 0;
+            self.yield_current();
+            return;
+        }
+        reds -= FREE_REDUCTIONS;
         self.schedule_out();
         let mut process = self
             .processes
             .remove(&id)
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
-        self.ets.delete_owned(id);
         if let Some(name) = &process.registered_name {
             self.names.remove(name.name());
         }
         process.mailbox.fetch();
         process.exiting = Some(reason);
-        if reductions <= 0 {
-            self.send_pending_monitor();
-            self.freed.insert(id, process);
-            self.runnable.push_back(id);
+        if reds <= 0 {
+            self.switch_out_freed(process, ExitPhase::Links(None));
             return;
         }
-        self.exit_links(process);
+        self.exit_links(process, ExitPhase::Links(None), reds);
     }
 
-    /// Send the exit signals of the process that left the process table, as
-    /// the phases after `ERTS_CONTINUE_EXIT_FREE` of
-    /// `erts_continue_exit_process` do (`erl_process.c:14541-14599`):
-    ///
-    /// 1. Send a link exit signal to each linked process, but not through a
-    ///    link that is unlinking (`erts_proc_exit_handle_link`,
-    ///    `erl_process.c:14068-14081`).
-    /// 2. Send a demonitor signal to the target of each monitor that it
-    ///    holds (`erl_process.c:13891-13898`).
-    /// 3. Run its TTY resource monitors, and send a monitor down signal to
-    ///    each process that monitors it (`erl_process.c:13806-13815`).
-    /// 4. Answer the signals that it did not handle (see
-    ///    [`Scheduler::handle_exit_signals`]).
-    /// 5. Send the pending monitor signal, when there is one.
-    ///
-    /// The links and the monitors that the process holds go in the
-    /// post-order of their red-black trees, as `foreach_delete_yielding`
-    /// destroys the ERTS trees (`erl_process.c:14545-14572`;
-    /// `erl_monitor_link.c:439-460`). The monitors of the process go in the
-    /// order that it handled their monitor signals, as ERTS goes through
-    /// its list `ERTS_P_LT_MONITORS` (`erl_proc_sig_queue.c:6555`;
-    /// `erl_monitor_link.h:652-669`).
+    /// Switch out the freed process `process`, whose exit continues at
+    /// `phase` in its next turn (`erl_process.c:14795-14833`). Send the
+    /// pending monitor signal first, as each switch out does
+    /// (`erl_process.c:9665-9668`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.exit_links(process);
+    /// scheduler.switch_out_freed(process, ExitPhase::Links(None));
     /// ```
-    fn exit_links(&mut self, mut process: ProcessState) {
+    fn switch_out_freed(&mut self, process: ProcessState, phase: ExitPhase) {
+        self.send_pending_monitor();
+        let id = process.id;
+        self.freed.insert(id, (process, phase));
+        self.runnable.push_back(id);
+    }
+
+    /// Continue the exit of the process that left the process table at
+    /// `phase`, with `reds` reductions left, as the phases after
+    /// `ERTS_CONTINUE_EXIT_FREE` of `erts_continue_exit_process` do
+    /// (`erl_process.c:14545-14599`):
+    ///
+    /// 1. Send a link exit signal to each linked process, but not through a
+    ///    link that is unlinking (`erts_proc_exit_handle_link`,
+    ///    `erl_process.c:14068-14165`).
+    /// 2. Send a demonitor signal to the target of each monitor that it
+    ///    holds, and end each alias (`erl_process.c:13891-13977`).
+    /// 3. Send a monitor down signal to each process that monitors it, and
+    ///    run each monitor of a TTY resource on it
+    ///    (`erl_process.c:13806-13833`).
+    /// 4. Answer the signals that it did not handle (see
+    ///    [`Scheduler::handle_exit_signals`]).
+    /// 5. Send the pending monitor signal, when there is one.
+    ///
+    /// Each entry of the first three phases uses 1 reduction
+    /// (`erl_process.c:13804`, `14165`). A phase switches out the process
+    /// before an entry when no reductions are left, and a phase that ends
+    /// with no reductions left gives 1 (`erl_rbtree.h:1392-1436`;
+    /// `erl_monitor_link.c:517-548`). The exit enters each phase with
+    /// reductions left, so the check after each list entry in ERTS is the
+    /// same check. The signal phase switches out when its signal count
+    /// reaches its limit.
+    ///
+    /// The links and the monitors that the process holds go in the
+    /// post-order of their red-black trees, as `foreach_delete_yielding`
+    /// destroys the ERTS trees (`erl_process.c:14545-14572`;
+    /// `erl_monitor_link.c:439-460`). The monitors on the process, of
+    /// processes and of TTY resources, go in the order that it handled their
+    /// monitor signals, as ERTS goes through its list `ERTS_P_LT_MONITORS`
+    /// (`erl_proc_sig_queue.c:6555`; `erl_monitor_link.h:652-669`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.exit_links(process, ExitPhase::Links(None), 3850);
+    /// ```
+    fn exit_links(&mut self, mut process: ProcessState, mut phase: ExitPhase, mut reds: i32) {
         let id = process.id;
         let reason = process
             .exiting
             .clone()
             .expect("a process that left the process table has an exit reason");
-        for (&linked, &unlinking) in process.links.post_order() {
-            if unlinking == 0 {
-                let exit = Signal::Exit {
-                    from: id,
-                    reason: reason.clone(),
-                    linked: true,
-                    normal_kills: false,
-                    alias: None,
-                };
-                // A linked process that does not exist drops the signal.
-                let _ = self.send_signal(Some(id), linked, exit);
-            }
+        loop {
+            phase = match phase {
+                ExitPhase::Links(position) => {
+                    let mut walk = match position {
+                        Some(position) => process.links.post_order_from(position),
+                        None => process.links.post_order(),
+                    };
+                    loop {
+                        let position = walk.position();
+                        let Some((&linked, &unlinking)) = walk.next() else {
+                            break;
+                        };
+                        if reds <= 0 {
+                            return self.switch_out_freed(process, ExitPhase::Links(position));
+                        }
+                        if unlinking == 0 {
+                            let exit = Signal::Exit {
+                                from: id,
+                                reason: reason.clone(),
+                                linked: true,
+                                normal_kills: false,
+                                alias: None,
+                            };
+                            // A linked process that does not exist drops the
+                            // signal.
+                            let _ = self.send_signal(Some(id), linked, exit);
+                        }
+                        reds -= 1;
+                    }
+                    ExitPhase::Monitors(None)
+                }
+                ExitPhase::Monitors(position) => {
+                    let mut walk = match position {
+                        Some(position) => process.monitors.post_order_from(position),
+                        None => process.monitors.post_order(),
+                    };
+                    loop {
+                        let position = walk.position();
+                        let Some((&reference, origin)) = walk.next() else {
+                            break;
+                        };
+                        if reds <= 0 {
+                            return self.switch_out_freed(process, ExitPhase::Monitors(position));
+                        }
+                        if let Some(OriginMonitor {
+                            kind: "process",
+                            target: Some(target),
+                            ..
+                        }) = &origin.monitor
+                        {
+                            let demonitor = Signal::Demonitor {
+                                watcher: id,
+                                reference,
+                            };
+                            // A target that does not exist drops the signal.
+                            let _ = self.send_signal(Some(id), *target, demonitor);
+                        }
+                        reds -= 1;
+                    }
+                    ExitPhase::TargetMonitors(0)
+                }
+                ExitPhase::TargetMonitors(mut done) => {
+                    while let Some(&monitor) = process.monitored_by.get(done) {
+                        if reds <= 0 {
+                            return self.switch_out_freed(process, ExitPhase::TargetMonitors(done));
+                        }
+                        match monitor {
+                            TargetMonitor::Process(monitor) => self.send_monitor_down(
+                                Some(id),
+                                monitor.watcher,
+                                monitor.reference,
+                                reason.clone(),
+                            ),
+                            TargetMonitor::Tty(tty) => {
+                                self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
+                            }
+                        }
+                        done += 1;
+                        reds -= 1;
+                    }
+                    ExitPhase::Signals
+                }
+                ExitPhase::Signals => {
+                    if !self.handle_exit_signals(&mut process, reds) {
+                        return self.switch_out_freed(process, ExitPhase::Signals);
+                    }
+                    break;
+                }
+            };
+            // A walk that ends gives 1 when no reductions are left.
+            reds = reds.max(1);
         }
-        for (&reference, origin) in process.monitors.post_order() {
-            if let Some(OriginMonitor {
-                kind: "process",
-                target: Some(target),
-                ..
-            }) = &origin.monitor
-            {
-                let target = *target;
-                let demonitor = Signal::Demonitor {
-                    watcher: id,
-                    reference,
-                };
-                // A target that does not exist drops the signal.
-                let _ = self.send_signal(Some(id), target, demonitor);
-            }
-        }
-        // ERTS runs the NIF resource monitors of the process in the monitor
-        // stage too (`ERTS_CONTINUE_EXIT_LT_MONITORS`).
-        self.resources.borrow_mut::<Ttys>().process_down(id);
-        for monitor in &process.monitored_by {
-            self.send_monitor_down(Some(id), monitor.watcher, monitor.reference, reason.clone());
-        }
-        self.handle_exit_signals(&mut process);
         self.alias_owners.retain(|_, owner| *owner != id);
         self.send_pending_monitor();
     }

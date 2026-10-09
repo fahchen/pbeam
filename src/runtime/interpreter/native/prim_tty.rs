@@ -9,8 +9,10 @@ use crate::runtime::{
         output,
         terminal::{self, TerminalCheck},
     },
+    signal::Signal,
     tty::{TtyResource, TtyState, Ttys},
 };
+use crate::term::Reference;
 
 /// The functions of the ERTS `prim_tty` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`prim_tty_nif.c:153-174`). `erlang:load_nif/2`
@@ -267,7 +269,7 @@ fn tty_window_size(scheduler: &mut Scheduler, tty: &Term) -> Result<BifResult, B
 /// raw form for `enabled`. A failure of `tcsetattr` gives
 /// `{error, {tcsetattr, Errno}}` (`prim_tty_nif.c:1099-1134`). Last, the
 /// caller becomes the owner, and the resource monitors it
-/// (`prim_tty_nif.c:1162-1165`).
+/// (`prim_tty_nif.c:1162-1165`; see [`monitor_caller`]).
 ///
 /// # Examples
 ///
@@ -322,15 +324,32 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
         }
     }
     tty.owner = Some(caller);
-    ttys.monitor(caller, *reference);
+    monitor_caller(scheduler, *reference);
     Ok(BifResult::Value(Term::static_atom("ok")))
+}
+
+/// Monitor the calling process for the TTY resource `tty`, as
+/// `enif_monitor_process` (`erl_nif.c:3957-3989`) does: send a monitor
+/// signal with no sender process to the caller. The caller adds the monitor
+/// to the end of its target monitor list when it handles the signal.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// monitor_caller(&mut scheduler, tty);
+/// ```
+fn monitor_caller(scheduler: &mut Scheduler, tty: Reference) {
+    let caller = scheduler.current_process_mut().id;
+    scheduler
+        .send_signal(None, caller, Signal::TtyMonitor { tty })
+        .expect("the caller is alive");
 }
 
 /// Run `prim_tty:tty_select(TTY, Ref)`, as the ERTS NIF `tty_select_nif`
 /// (`prim_tty_nif.c:1213-1233`) does on Unix. A term that is not a TTY
 /// resource raises `error:badarg` (`prim_tty_nif.c:1220-1221`). Else the
-/// resource monitors the caller (`prim_tty_nif.c:1229-1230`), and the
-/// result is `ok`.
+/// resource monitors the caller (`prim_tty_nif.c:1229-1230`; see
+/// [`monitor_caller`]), and the result is `ok`.
 ///
 /// ERTS also selects fd 0 for read with `Ref` as the message reference
 /// (`prim_tty_nif.c:1227`), and makes the caller the reader, which
@@ -350,12 +369,15 @@ fn tty_select(scheduler: &mut Scheduler, tty: &Term) -> BifResult {
     let Term::Reference(reference) = tty else {
         return BifResult::badarg();
     };
-    let caller = scheduler.current_process_mut().id;
-    let ttys = scheduler.resources.borrow_mut::<Ttys>();
-    if ttys.get(*reference).is_none() {
+    if scheduler
+        .resources
+        .borrow_mut::<Ttys>()
+        .get(*reference)
+        .is_none()
+    {
         return BifResult::badarg();
     }
-    ttys.monitor(caller, *reference);
+    monitor_caller(scheduler, *reference);
     BifResult::Value(Term::static_atom("ok"))
 }
 

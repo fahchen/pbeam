@@ -80,6 +80,16 @@ pub(super) enum Signal {
         /// The reference of the monitor.
         reference: Reference,
     },
+    /// `ERTS_SIG_Q_OP_MONITOR` of a resource monitor: `enif_monitor_process`
+    /// (`erl_nif.c:3957-3989`) in `prim_tty:tty_init/2` or
+    /// `prim_tty:tty_select/2` monitors the caller for the TTY resource. The
+    /// receiver adds the target monitor for 2 (`erl_proc_sig_queue.c:6544-6562`).
+    /// At exit it runs the TTY monitor (`erl_proc_sig_queue.c:7347-7355`;
+    /// `erl_process.c:13827-13833`).
+    TtyMonitor {
+        /// The reference of the TTY resource.
+        tty: Reference,
+    },
     /// `ERTS_SIG_Q_OP_DEMONITOR`: the watcher removed its monitor of the
     /// receiver. The receiver removes the target monitor; the cost is 1, and
     /// 1 more when the monitor was there (`erl_proc_sig_queue.c:6564-6633`).

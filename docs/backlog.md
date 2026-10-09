@@ -61,9 +61,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Model the process heap for GC reductions and the message copy cost
 
-- PBeam has no process heap, and its terms keep no sharing and no literal origin. Thus PBeam charges no garbage collection reductions and no message copy cost. The "Garbage collection reductions" and "Scheduling" rows of `docs/erts-differences.md` record these differences, and this entry owns them.
-- **Evidence:** a garbage collection costs the process at least 1 reduction, more for a large heap (`erl_gc.c:218-230`). A local send of a message of more than 64 heap words bumps one reduction for each 64 copied words (`erl_message.c:881-886`), and an alias send does the same (`erl_proc_sig_queue.c:2284-2290`). The copy counts each shared subterm once and no literal (`SHCOPY_SEND`). Measured: a send of a list of 10000 integers costs 313 reductions on pinned ERTS and 1 on PBeam. During #233, `lists:reverse/2` and `erlang:'++'/2` copy 60 elements for each reduction only while the heap has free words, and then 40 elements for each reduction to a heap fragment (`erl_bif_lists.c:111-174`, `1144-1192`). Measured: `lists:reverse/2` of 10000 elements costs 166 with a heap of 2000000 words and 2386 with the default heap.
-- The work: a process heap with its size, garbage collection with the ERTS reductions, the heap-fragment fallback of the list BIFs, and the shared and literal parts of a term for the send copy.
+- PBeam has no process heap, and its terms keep no sharing and no literal origin. Thus PBeam charges no garbage collection reductions and no message copy cost, and `maps:merge/2` counts the steps of a subtree that both maps share. A change of the `message_queue_data` process flag does not move the messages and sends no adjust signal. The "Garbage collection reductions", "Scheduling", and "Process flags" rows of `docs/erts-differences.md` record these differences, and this entry owns them.
+- **Evidence:** a garbage collection costs the process at least 1 reduction, more for a large heap (`erl_gc.c:218-230`). A local send of a message of more than 64 heap words bumps one reduction for each 64 copied words (`erl_message.c:881-886`), and an alias send does the same (`erl_proc_sig_queue.c:2284-2290`). The copy counts each shared subterm once and no literal (`SHCOPY_SEND`). Measured: a send of a list of 10000 integers costs 313 reductions on pinned ERTS and 1 on PBeam. During #233, `lists:reverse/2` and `erlang:'++'/2` copy 60 elements for each reduction only while the heap has free words, and then 40 elements for each reduction to a heap fragment (`erl_bif_lists.c:111-174`, `1144-1192`). Measured: `lists:reverse/2` of 10000 elements costs 166 with a heap of 2000000 words and 2386 with the default heap. `maps:merge/2` takes a subtree that both maps share in memory, and two equal arguments, with no step (`erl_map.c:1258-1263`, `1608-1612`). A change of `message_queue_data` to `off_heap` sends an adjust signal to the process after thread progress (`erl_message.c:1008-1019`, `1022-1135`; `erl_proc_sig_queue.c:3487-3518`).
+- The work: a process heap with its size, garbage collection with the ERTS reductions, the heap-fragment fallback of the list BIFs, the shared and literal parts of a term for the send copy and for `maps:merge/2`, and the message place and the adjust signal of `message_queue_data`.
 - **Trigger:** a consumer that needs exact interleaving with large messages or with processes that allocate much, or a task that adds a heap-size limit (row "Heap limit").
 - **Source:** owner decision on PR #249 (#245).
 
@@ -73,6 +73,55 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Evidence:** on a release build, `maps:from_list/1` of 5000, 10000, and 20000 pairs takes 3, 9, and 28 ms, and the tail-recursive build of the same lists takes 1058, 4125, and 16799 ms (measured on the head of PR #249). A list of n pairs traps about n / 16000 times.
 - **Trigger:** a measured path converts inputs large enough that the host time of these BIFs matters, for example after a list term change makes the list build fast.
 - **Source:** Codex review of PR #249 (#245).
+
+### Follow the endless trap of `maps:from_list/1` at each OTP pin change
+
+- On pinned ERTS, `maps:from_list/1` that finds a bad element or a bad tail after a trap never returns. `BIF_ERROR` in the YCF code returns before YCF clears its trap state, so the trap driver traps again from the last yield without end (`utils.c:3757-3773`). PBeam returns the runtime error `unsupported maps:from_list/1 call: maps:from_list/1 finds a bad element after a trap, and ERTS then traps again forever` (`src/runtime/interpreter/bif/maps.rs`). The "Scheduling" row of `docs/erts-differences.md` records this, and this entry owns it.
+- **Evidence:** on `erl +S 1`, `maps:from_list/1` of 170000 pairs and then the atom `bad` did not return in 20 seconds. The same call with 100 pairs and `bad` raises `badarg`, because it does not trap.
+- **Option:** report the endless trap to OTP, and follow the report.
+- **Trigger:** a change of the pinned OTP version. Run the probe again on the new ERTS. If the call returns, give the same result in PBeam and change the row.
+- **Source:** #245 (PR #249) and #258.
+
+### Suspend `persistent_term:put/2` as ERTS does
+
+- `persistent_term:put/2` of a new value switches out the caller in PBeam, and the new value is visible at once. ERTS makes the new table visible after thread progress, and suspends the caller until then (`erl_bif_persistent.c:774-779`). With `erl +S 1`, other processes then run 2 to 5 turns before the caller continues.
+- While `persistent_term:get/0` traps, ERTS keeps the update permission until its last chunk, and `persistent_term:put/2` of another process suspends until ERTS releases the permission, and then tries again (`erl_bif_persistent.c:333-345`, `692-694`, `1311-1335`, `1353-1357`). PBeam changes the table at once, and the trapped call returns the table of its first call.
+- The "Persistent terms" row of `docs/erts-differences.md` records the two suspensions, and this entry owns them. Thread progress depends on all managed threads of the node, so PBeam on one scheduler does not model it.
+- **Trigger:** multiple schedulers (M4, #27), or a consumer that needs the exact interleaving around `persistent_term:put/2`, also a put while `persistent_term:get/0` traps.
+- **Source:** #234 (PR #243), #245 (PR #249), and #258.
+
+### Complete a trapped `ets:insert/2` in the process that uses the table
+
+- PBeam puts all objects of a list insert into the table before the insert traps after its copy. Another process that then uses the table sees all objects with no cost, and the insert still uses its units. On ERTS, the table is busy while the insert traps, and the first process that uses it completes the insert with its own reductions. The inserting process then returns `true` with no cost (`handle_lacking_permission`, `erl_db.c:769-798`; `erl_db.c:2223-2244`). The objects are the same, and only the reductions and the turns are different. The "ETS tables" row of `docs/erts-differences.md` records this, and this entry owns it.
+- `ets:delete/1` takes the busy table in the same way, so it completes the insert first, and the insert then returns `true` (`erl_db.c:2232-2244`, `3021-3029`).
+- **Trigger:** a consumer uses a table while a long list insert traps, or the task that adds `ets:delete/1`.
+- **Source:** #234 (PR #243).
+
+### Read a negative reduction budget in each BIF as ERTS does
+
+- A hashmap call of `erts_internal:map_next/3` subtracts 4 for each pair with no lower limit, so the budget can be negative (`erl_map.c:4126`). Each ERTS BIF reads a negative budget in its own way: `lists:member/2` traps at once, and `erlang:length/1` and `lists:reverse/2` read it as a large unsigned count (`erl_bif_lists.c:1114-1130`, `1207`; `erl_bif_guard.c:280`). When a BIF reads a negative budget, through `apply` or as a guard BIF before the next call or return, PBeam stops the run with `unsupported negative reduction budget in a BIF after erts_internal:map_next/3` (`bif_reductions_left` in `src/runtime/process.rs`). `maps.erl` calls `erts_internal:map_next/3` only before a call or a return (`maps.erl:525-542`, `1104-1111`), so the `maps` functions do not get this error. The "Map iteration" row of `docs/erts-differences.md` records this, and this entry owns it.
+- **Evidence:** `logger_start_probe:negative_budget/0` makes the budget negative before `length/1`. ERTS returns `ok`, and PBeam returns the runtime error (`tests/logger_start.rs`).
+- **Trigger:** a measured path calls `erts_internal:map_next/3` directly and then a BIF that reads the budget.
+- **Source:** #234 (PR #243).
+
+### Run `integer_to_list/1` of a large integer with no reductions left
+
+- When the digits of a bignum divided by 16 are more than the reductions left, ERTS runs `integer_to_list/1` again on a dirty CPU scheduler (`bif.c:3283-3299`). PBeam has no dirty scheduler. For an integer from 2^59 to 2^63 - 1 with no reductions left, it returns the runtime error `unsupported erlang:integer_to_list/1 of N with 0 reductions left: ERTS runs it on a dirty CPU scheduler`. The "Scheduling" row of `docs/erts-differences.md` records this, and this entry owns it.
+- **Trigger:** a measured path converts such an integer at the end of a budget, or a task adds dirty schedulers.
+- **Source:** #234 (PR #243).
+
+### Read the clock after `ERTS_CHECK_TIME_REDS` reductions
+
+- PBeam reads the run clock and expires each due timer before it takes the next process. An ERTS scheduler reads the clock only when its processes used `ERTS_CHECK_TIME_REDS` (`CONTEXT_REDS`, 4000) reductions after the last read, and before it sleeps. Between two reads, it expires the timers on the last time that it read (`erl_process.c:59`, `9797-9810`; `erl_process.h:528-535`; `erl_time_sup.c:280`). Thus on ERTS a due timer can expire some turns later than on PBeam. The "Timers" row of `docs/erts-differences.md` records this, and this entry owns it.
+- **Trigger:** a measured path depends on the turn in which a timer expires while other processes run.
+- **Source:** #229 (PR #236).
+
+### Run the other binary-match instructions and `bs_match` commands
+
+- PBeam runs `bs_start_match3`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, and `bs_match` with the commands `ensure_at_least` and `ensure_exactly`. The other `bs_match` commands (`binary`, `integer`, `skip`, `get_tail`, and `=:=`) stop the run with `unsupported bs_match command <Name>`. `bs_start_match3` that copies a match context to another register stops the run with `unsupported bs_start_match3 that copies the match context in <Source> to <Destination>`. Each other binary-match instruction, such as `bs_start_match4`, `bs_get_tail`, `bs_skip_utf8`, and `bs_get_binary2`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it.
+- **Evidence:** `binary_match_probe:byte(<<7,8>>)` stops with `unsupported bs_match command integer`.
+- **Trigger:** a measured path matches a binary with one of these commands or instructions. Add only the commands and instructions that the path needs.
+- **Source:** #219 (PR #227).
 
 ### Restore the terminal mode of fd 0 at runtime exit (was #136)
 
@@ -211,7 +260,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Run `error_handler.beam` for an undefined function
 
-- After #166 (PR #180), PBeam gives the result of `error_handler:undefined_function/3` in Rust for a loaded module: it calls `'$handle_undefined_function'/2` or raises `undef` with the first frame. ERTS runs `error_handler.beam` from the export entry (`beam_common.c:1294-1342`). Running the BEAM module needs caller frames in the stack trace (`crash/1` calls `tl/1` on it), `erlang:raise/3` that keeps its frames, and `ensure_loaded/1` through `code_server` or `init` (`error_handler.erl:165-198`). The "Undefined functions" row records the difference.
+- After #166 (PR #180), PBeam gives the result of `error_handler:undefined_function/3` in Rust for a loaded module: it calls `'$handle_undefined_function'/2` or raises `undef` with the first frame. ERTS runs `error_handler.beam` from the export entry (`beam_common.c:1294-1342`). Running the BEAM module needs caller frames in the stack trace (`crash/1` calls `tl/1` on it), `erlang:raise/3` that keeps its frames, and `ensure_loaded/1` through `code_server` or `init` (`error_handler.erl:165-198`). The "Undefined functions" row records the difference. The `error_handler` code also costs reductions: on `erl +S 1`, a call that goes to `'$handle_undefined_function'/2` costs 11 and a caught `undef` costs 13. PBeam charges only the entry and the `return` of the handler, and nothing for an `undef` (owner decision in #7).
 - **Trigger:** the stack-trace work gives caller frames and `raise/3` frames, or a consumer sets `process_flag(error_handler, Module)`.
 - **Source:** review of #166.
 
