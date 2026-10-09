@@ -264,7 +264,7 @@ Passing small fixtures does not establish Terra compatibility or complete OTP co
 
 The post-M2 security gate uses the delivered terminal operation as its first consumer. Granted trusted-profile execution preserves the accepted OTP behavior. Denied guests cannot use native entry paths, direct service messages, forged handles, resource reuse, or delegated workers to bypass authority. Both the native terminal provider and a memory provider enforce the same policy. Secure guest execution remains disabled until all reachable operation paths and resource limits pass their specified checks. See the [migration acceptance gates](capability-security-migration.md).
 
-Security implementation starts after M2 acceptance and is proposed before M3. This documentation does not close milestones, change issue dependencies, or supply a second task tracker. Create and link focused implementation issues after design review. Later scheduler, native, bundle, async, and Terra tasks must preserve the accepted security contracts.
+Security implementation is milestone M6 in the milestone order of 2026-10-09. It runs in parallel with M5 Interactive host I/O. This documentation does not close milestones, change issue dependencies, or supply a second task tracker. Create and link focused implementation issues after design review. The asynchronous dispatch transition follows the M5 async tasks. Later native, bundle, Terra, and scheduler tasks (M7–M10) must preserve the accepted security contracts.
 
 ## 12. Unresolved details before implementation claims
 
