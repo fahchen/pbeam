@@ -237,7 +237,7 @@ bifs! {
     erlang:make_tuple/2 => unsupported,
     erlang:make_tuple/3 => unsupported,
     erlang:map_get/2 => |_, [key, map]| Ok(maps::get(key, map)),
-    erlang:map_size/1 => unsupported,
+    erlang:map_size/1 => |_, [map]| Ok(maps::size(map)),
     erlang:match_spec_test/3 => unsupported,
     erlang:max/2 => unsupported,
     erlang:md5/1 => unsupported,
