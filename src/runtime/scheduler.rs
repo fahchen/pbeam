@@ -6,7 +6,7 @@ use super::{
     persistent_term::PersistentTerms,
     process::{
         Flush, Frame, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer, Start,
-        TimerReference, WalkPosition,
+        TargetMonitor, TimerReference, WalkPosition,
     },
     regex_code::RegexCodes,
     resources::Resources,
@@ -116,8 +116,7 @@ enum ExitPhase {
     /// The monitor tree of the process, in post-order.
     Monitors(Option<WalkPosition>),
     /// The monitors of other processes and resources on the process
-    /// (`ERTS_P_LT_MONITORS`): the TTY resource monitors, then the entries
-    /// of `monitored_by` from the index.
+    /// (`ERTS_P_LT_MONITORS`): the entries of `monitored_by` from the index.
     TargetMonitors(usize),
     /// The signals in the queue of the process.
     Signals,
@@ -859,10 +858,10 @@ impl Scheduler {
         child.group_leader = self.current_process_mut().group_leader;
         let reference = if monitor {
             let reference = self.make_ref()?;
-            child.monitored_by.push(Monitor {
+            child.monitored_by.push(TargetMonitor::Process(Monitor {
                 watcher: parent,
                 reference,
-            });
+            }));
             let origin = Origin {
                 monitor: Some(OriginMonitor {
                     kind: "process",
@@ -1201,15 +1200,18 @@ impl Scheduler {
     ///    reductions left gives 1 (`erl_rbtree.h:1392-1436`). With no
     ///    reductions left after this phase, the process switches out
     ///    (`erl_process.c:14314-14316`). Until it leaves the process table,
-    ///    a process that switched out keeps its registered name and its ETS
-    ///    tables.
+    ///    a process that switched out keeps its registered name.
     /// 3. Delete its ETS tables (`ERTS_CONTINUE_EXIT_USING_DB`,
-    ///    `erl_process.c:14360-14368`), free its registered name, and leave
-    ///    the process table (`ERTS_CONTINUE_EXIT_FREE`,
-    ///    `erl_process.c:14406-14476`), which uses 50 reductions. Fetch its
-    ///    signal queue (`erl_process.c:14537`). With no reductions left, the
-    ///    process switches out (`erl_process.c:14541-14543`).
-    /// 4. Send the signals of its links and monitors, and answer its pending
+    ///    `erl_process.c:14360-14368`; see [`EtsTables::delete_owned`]). The
+    ///    deletion counts from the reductions left in the turn, which the
+    ///    timer walk did not change, and the exit switches out when the
+    ///    deletion uses them.
+    /// 4. Free its registered name, and leave the process table
+    ///    (`ERTS_CONTINUE_EXIT_FREE`, `erl_process.c:14406-14476`), which
+    ///    uses 50 reductions of the count of the exit. Fetch its signal queue
+    ///    (`erl_process.c:14537`). With no reductions left, the process
+    ///    switches out (`erl_process.c:14541-14543`).
+    /// 5. Send the signals of its links and monitors, and answer its pending
     ///    signals ([`Self::exit_links`]).
     ///
     /// # Examples
@@ -1261,7 +1263,18 @@ impl Scheduler {
         if walked && next.is_none() {
             reds = reds.max(1);
         }
-        if reds <= 0 {
+        // The table deletion counts from the reductions left in the turn,
+        // not from the count of the exit, and its bump does not change that
+        // count (`erl_db.c:5044-5045`, `5118`; `erl_process.c:14360-14366`).
+        let deleted = reds > 0 && {
+            let left = self.current_process_mut().fcalls;
+            let rest = self.ets.delete_owned(id, left);
+            if let Some(rest) = rest {
+                self.current_process_mut().bump_reductions(left - rest);
+            }
+            rest.is_some()
+        };
+        if !deleted {
             let process = self.current_process_mut();
             process.exiting = Some(reason);
             process.bif_timers = tree;
@@ -1277,7 +1290,6 @@ impl Scheduler {
             .remove(&id)
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
-        self.ets.delete_owned(id);
         if let Some(name) = &process.registered_name {
             self.names.remove(name.name());
         }
@@ -1317,8 +1329,9 @@ impl Scheduler {
     ///    `erl_process.c:14068-14165`).
     /// 2. Send a demonitor signal to the target of each monitor that it
     ///    holds, and end each alias (`erl_process.c:13891-13977`).
-    /// 3. Run its TTY resource monitors, and send a monitor down signal to
-    ///    each process that monitors it (`erl_process.c:13806-13815`).
+    /// 3. Send a monitor down signal to each process that monitors it, and
+    ///    run each monitor of a TTY resource on it
+    ///    (`erl_process.c:13806-13833`).
     /// 4. Answer the signals that it did not handle (see
     ///    [`Scheduler::handle_exit_signals`]).
     /// 5. Send the pending monitor signal, when there is one.
@@ -1335,10 +1348,10 @@ impl Scheduler {
     /// The links and the monitors that the process holds go in the
     /// post-order of their red-black trees, as `foreach_delete_yielding`
     /// destroys the ERTS trees (`erl_process.c:14545-14572`;
-    /// `erl_monitor_link.c:439-460`). The monitors of the process go in the
-    /// order that it handled their monitor signals, as ERTS goes through
-    /// its list `ERTS_P_LT_MONITORS` (`erl_proc_sig_queue.c:6555`;
-    /// `erl_monitor_link.h:652-669`).
+    /// `erl_monitor_link.c:439-460`). The monitors on the process, of
+    /// processes and of TTY resources, go in the order that it handled their
+    /// monitor signals, as ERTS goes through its list `ERTS_P_LT_MONITORS`
+    /// (`erl_proc_sig_queue.c:6555`; `erl_monitor_link.h:652-669`).
     ///
     /// # Examples
     ///
@@ -1413,26 +1426,22 @@ impl Scheduler {
                     ExitPhase::TargetMonitors(0)
                 }
                 ExitPhase::TargetMonitors(mut done) => {
-                    // ERTS runs the NIF resource monitors of the process in
-                    // this phase too.
-                    let mut ttys = self.resources.borrow_mut::<Ttys>().monitor_count(id);
-                    for _ in 0..ttys + process.monitored_by.len() - done {
+                    while let Some(&monitor) = process.monitored_by.get(done) {
                         if reds <= 0 {
                             return self.switch_out_freed(process, ExitPhase::TargetMonitors(done));
                         }
-                        if ttys > 0 {
-                            self.resources.borrow_mut::<Ttys>().monitor_down(id);
-                            ttys -= 1;
-                        } else {
-                            let monitor = &process.monitored_by[done];
-                            self.send_monitor_down(
+                        match monitor {
+                            TargetMonitor::Process(monitor) => self.send_monitor_down(
                                 Some(id),
                                 monitor.watcher,
                                 monitor.reference,
                                 reason.clone(),
-                            );
-                            done += 1;
+                            ),
+                            TargetMonitor::Tty(tty) => {
+                                self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
+                            }
                         }
+                        done += 1;
                         reds -= 1;
                     }
                     ExitPhase::Signals
