@@ -1,5 +1,6 @@
 use super::{
-    process::{Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
+    host::output::IovecWrite,
+    process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::{Received, Scheduler, Turn},
     tty::{InitialMode, Ttys},
 };
@@ -57,6 +58,9 @@ enum Outcome {
     Yield,
     /// The process exited. `result` is the return value of a normal exit.
     Exit { reason: Term, result: Option<Term> },
+    /// The process waits for its NIF call `write` on a dirty IO thread.
+    /// `tail` tells whether the NIF call was a tail call.
+    DirtyWrite { write: IovecWrite, tail: bool },
 }
 
 /// The class of an exception. The `throw` class is not implemented yet.
@@ -138,8 +142,11 @@ impl BeamProgram {
     /// `check_activities_to_run` (`erl_process.c:9797-9810`). When no
     /// process can run, it sleeps until the first timer end, as
     /// `scheduler_wait` sleeps until the next timeout
-    /// (`erl_process.c:3452-3620`). When fd 0 has a read select, it waits
-    /// for fd 0 until then (see `Scheduler::wait_input`). The run ends at
+    /// (`erl_process.c:3452-3620`). When fd 0 has a read select or a dirty
+    /// IO call runs, it waits for fd 0 and for the completion of the call
+    /// until then (see `Scheduler::wait_events`). Before each scheduling
+    /// step, a process whose dirty IO call completed goes to the run queue
+    /// (see `Scheduler::complete_dirty_writes`). The run ends at
     /// the next scheduling step after the root process exits, also when
     /// another process can run or a timer is active. A process that ends
     /// the root process with an exit signal continues until it waits,
@@ -150,11 +157,12 @@ impl BeamProgram {
     /// gives the error `root process exited with <Reason>`, with the reason
     /// as ERTS prints a term (`print_term`), for example
     /// `root process exited with {badarg,[]}`. A root process that
-    /// waits when no process can run, no timer is active, and fd 0 has no
-    /// read select gives an error. At the end of the run, also after an
-    /// error, fd 0 gets its mode at the start of the run again when fds 0
-    /// and 1 are terminals, as at the exit of the ERTS emulator (see
-    /// `InitialMode::reset`).
+    /// waits when no process can run, no timer is active, fd 0 has no read
+    /// select, and no dirty IO call runs gives an error. The run does not
+    /// wait for a dirty IO call that runs when it ends. At the end of the
+    /// run, also after an error, fd 0 gets its mode at the start of the run
+    /// again when fds 0 and 1 are terminals, as at the exit of the ERTS
+    /// emulator (see `InitialMode::reset`).
     ///
     /// # Examples
     ///
@@ -213,17 +221,19 @@ impl BeamProgram {
         while !scheduler.root_exited() {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
+            scheduler.complete_dirty_writes();
             match scheduler.schedule_next()? {
                 Turn::Run => match self.run(scheduler)? {
                     Outcome::Wait => scheduler.park_current(),
                     Outcome::Hibernate => scheduler.hibernate_current(),
                     Outcome::Yield => scheduler.yield_current(),
                     Outcome::Exit { reason, result } => scheduler.finish_current(reason, result),
+                    Outcome::DirtyWrite { write, tail } => scheduler.start_dirty_write(write, tail),
                 },
                 Turn::Done => {}
                 Turn::Idle => {
                     let wait = scheduler.timers.wait_time(scheduler.timers.now());
-                    if !scheduler.wait_input(wait) {
+                    if !scheduler.wait_events(wait) {
                         match wait {
                             Some(wait) => std::thread::sleep(wait),
                             None => break,
@@ -390,6 +400,20 @@ impl BeamProgram {
                 self.undefined_function(scheduler, module.name(), function.name(), arity, false)?
             };
             if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+        }
+        // A NIF call that ran on a dirty IO thread returns its result or
+        // raises its exception, as `dirty_nif_finalizer` and
+        // `dirty_nif_exception` do (`erl_nif.c:3386-3435`).
+        if let Some(DirtyWrite {
+            tail,
+            written: Some(written),
+            ..
+        }) = scheduler.current_process_mut().dirty_write.take()
+        {
+            let result = native::dirty_write_result(&mut scheduler.atoms, written)?;
+            if let Some(outcome) = self.finish_bif(scheduler.current_process_mut(), result, tail)? {
                 return Ok(outcome);
             }
         }
@@ -1717,6 +1741,7 @@ impl BeamProgram {
                 reason,
                 result: None,
             })),
+            BifResult::DirtyWrite(write) => Ok(Some(Outcome::DirtyWrite { write, tail })),
         }
     }
 }

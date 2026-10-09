@@ -1,3 +1,4 @@
+mod dirty_io;
 mod ets;
 mod host;
 mod interpreter;

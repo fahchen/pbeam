@@ -238,7 +238,7 @@ impl InitialMode {
         // ERTS ignores the result (sys.c:188, erl_child_setup.c:566, 575).
         let _ = terminal::set_mode(libc::STDIN_FILENO, mode);
         if input_selected {
-            input::wait_readable(libc::STDIN_FILENO, Some(Duration::ZERO));
+            input::wait_readable(&[libc::STDIN_FILENO], Some(Duration::ZERO));
         }
     }
 }
