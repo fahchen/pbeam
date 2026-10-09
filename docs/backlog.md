@@ -104,11 +104,11 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path calls `erts_internal:map_next/3` directly and then a BIF that reads the budget.
 - **Source:** #234 (PR #243).
 
-### Run `integer_to_list/1` of a large integer with no reductions left
+### Run `integer_to_list/1` and `integer_to_binary/1` of a large integer with no reductions left
 
-- When the digits of a bignum divided by 16 are more than the reductions left, ERTS runs `integer_to_list/1` again on a dirty CPU scheduler (`bif.c:3283-3299`). PBeam has no dirty scheduler. For an integer from 2^59 to 2^63 - 1 with no reductions left, it returns the runtime error `unsupported erlang:integer_to_list/1 of N with 0 reductions left: ERTS runs it on a dirty CPU scheduler`. The "Scheduling" row of `docs/erts-differences.md` records this, and this entry owns it.
+- When the digits of a bignum divided by 16 are more than the reductions left, ERTS runs `integer_to_list/1` or `integer_to_binary/1` again on a dirty CPU scheduler (`bif.c:3283-3299`; `binary.c:92-108`). PBeam has no dirty scheduler. For an integer from 2^59 to 2^63 - 1 with no reductions left, it returns the runtime error `unsupported erlang:integer_to_list/1 of N with 0 reductions left: ERTS runs it on a dirty CPU scheduler`, or the same error for `erlang:integer_to_binary/1`. The "Scheduling" row of `docs/erts-differences.md` records this, and this entry owns it.
 - **Trigger:** a measured path converts such an integer at the end of a budget, or a task adds dirty schedulers.
-- **Source:** #234 (PR #243).
+- **Source:** #234 (PR #243), #268.
 
 ### Read the clock after `ERTS_CHECK_TIME_REDS` reductions
 
