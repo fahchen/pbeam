@@ -2595,4 +2595,5 @@ fn write_operand(
 }
 
 #[cfg(test)]
+#[path = "../../tests/runtime/interpreter.rs"]
 mod tests;

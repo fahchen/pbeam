@@ -172,7 +172,7 @@ fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
     // This test loads a `.beam` file but stays a unit test: it reads the
     // frames of the scheduler, which `tests/` cannot see.
     let program =
-        BeamProgram::load(&[include_bytes!("../../../fixtures/funs/fun_probe.beam")]).unwrap();
+        BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
     let label = program.modules["fun_probe"].exports[&("tail_wait".to_owned(), 1)];
     let mut scheduler = Scheduler::new(program.atoms.clone());
     let frame = program.frame("fun_probe", label, 1).unwrap();
@@ -919,7 +919,7 @@ fn bif_table_equals_erts_is_builtin() {
         ("erlang", "apply", 3),
         ("erlang", "yield", 0),
     ];
-    let mut builtin: Vec<(&str, &str, u32)> = include_str!("../../../fixtures/bifs/is_builtin.txt")
+    let mut builtin: Vec<(&str, &str, u32)> = include_str!("../../fixtures/bifs/is_builtin.txt")
         .lines()
         .map(|line| {
             let mut field = line.split('\t');
