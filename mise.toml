@@ -99,7 +99,7 @@ run = 'bash scripts/otp_src.sh "$usage_path" "$usage_start" "$usage_end"'
 description = "Build an example of examples/ and run it on the pbeam binary, or on the pinned ERTS with --erts"
 quiet = true
 usage = '''
-flag "--erts" help="Run the example with erl -noshell on the pinned ERTS"
+flag "--erts" help="Run the example with erl +S 1 -noshell on the pinned ERTS"
 arg "<name>" help="The directory of the example in examples/, such as hello_world"
 '''
 run = 'bash scripts/example.sh "$usage_name" ${usage_erts:+--erts}'
