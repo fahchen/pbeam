@@ -2,10 +2,22 @@ use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Map, Term};
 
+mod common;
+
+use common::pinned_beam;
+
 const MAP_PROBE: &[u8] = include_bytes!("../fixtures/map/map_probe.beam");
 const MAP_ORDER_PROBE: &[u8] = include_bytes!("../fixtures/map/map_order_probe.beam");
 const ATOM_MAP_PROBE: &[u8] = include_bytes!("../fixtures/map/atom_map_probe.beam");
 const MAP_KEY_PROBE: &[u8] = include_bytes!("../fixtures/map/map_key_probe.beam");
+const BINARY_KEY_PROBE: &[u8] = include_bytes!("../fixtures/map/binary_key_probe.beam");
+
+/// The numbers `N` of the binary keys `<<"kNN">>`, 1 to 33, in the order of a hashmap of these 33
+/// keys under the pinned ERTS.
+const BINARY_HASH_ORDER: [i64; 33] = [
+    17, 26, 23, 5, 31, 28, 20, 29, 12, 25, 21, 3, 11, 7, 15, 16, 30, 1, 6, 9, 14, 10, 22, 27, 13,
+    18, 32, 2, 24, 33, 19, 8, 4,
+];
 
 /// Return the atom term of a name that the program holds.
 fn atom(program: &BeamProgram, name: &str) -> Term {
@@ -432,5 +444,94 @@ fn keeps_keys_with_equal_hashes_in_a_collision_node_like_erts() {
         b"[[18,4,12,19,29,13,2,[161,92,65,50,231,24,153,137],[246,157,203,77,19,254,19,93],7,31,\
           8,10,23,9,15,32,1,25,28,20,6,11,17,24,14,3,16,30,21,5,27,26,22],a,b,b,true,c,d,\
           [[161,92,65,50,231,24,153,137],[246,157,203,77,19,254,19,93]]]\n"
+    );
+}
+
+#[test]
+fn loads_map_literals_with_binary_keys_like_erts() {
+    let program = BeamProgram::load(&[BINARY_KEY_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let int = Term::Integer;
+    let binary = |text: &str| Term::Binary(text.as_bytes().to_vec());
+    // A flatmap orders binary keys in the term order, after the numbers, atoms, and lists. A
+    // hashmap orders them by the ERTS internal hash of each binary.
+    let hash_keys = BINARY_HASH_ORDER.map(|key| binary(&format!("k{key:02}")));
+    assert_eq!(
+        program.execute("binary_key_probe", "main", &[]).unwrap(),
+        Term::List(vec![
+            Term::List(vec![binary("a"), binary("b")]),
+            Term::List(vec![
+                int(1),
+                atom("a"),
+                string("s"),
+                binary(""),
+                binary("a"),
+                binary("ab"),
+                binary("b"),
+            ]),
+            Term::List(hash_keys.to_vec()),
+            int(0),
+            int(0),
+            int(7),
+            int(17),
+        ])
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [binary_key_probe:main()])"),
+        b"[[<<97>>,<<98>>],[1,a,[115],<<>>,<<97>>,<<97,98>>,<<98>>],[<<107,49,55>>,<<107,50,54>>,\
+          <<107,50,51>>,<<107,48,53>>,<<107,51,49>>,<<107,50,56>>,<<107,50,48>>,<<107,50,57>>,\
+          <<107,49,50>>,<<107,50,53>>,<<107,50,49>>,<<107,48,51>>,<<107,49,49>>,<<107,48,55>>,\
+          <<107,49,53>>,<<107,49,54>>,<<107,51,48>>,<<107,48,49>>,<<107,48,54>>,<<107,48,57>>,\
+          <<107,49,52>>,<<107,49,48>>,<<107,50,50>>,<<107,50,55>>,<<107,49,51>>,<<107,49,56>>,\
+          <<107,51,50>>,<<107,48,50>>,<<107,50,52>>,<<107,51,51>>,<<107,49,57>>,<<107,48,56>>,\
+          <<107,48,52>>],0,0,7,17]\n"
+    );
+}
+
+#[test]
+fn puts_binary_keys_into_maps_like_erts() {
+    let maps = pinned_beam("maps");
+    let program = BeamProgram::load(&[&maps, BINARY_KEY_PROBE]).unwrap();
+    let int = Term::Integer;
+    let binary = |text: &str| Term::Binary(text.as_bytes().to_vec());
+    let pairs = |pairs: &[(&str, i64)]| {
+        Term::List(
+            pairs
+                .iter()
+                .map(|(key, value)| Term::Tuple(vec![binary(key), int(*value)]))
+                .collect(),
+        )
+    };
+    // `maps:put/3` puts `<<"ab">>` between `<<"a">>` and `<<"b">>` of a flatmap, and the 33rd key
+    // changes a flatmap to a hashmap in the hash order.
+    let grown = Term::List(
+        BINARY_HASH_ORDER
+            .map(|key| Term::Tuple(vec![binary(&format!("k{key:02}")), int(key)]))
+            .to_vec(),
+    );
+    assert_eq!(
+        program.execute("binary_key_probe", "update", &[]).unwrap(),
+        Term::List(vec![
+            pairs(&[("a", 0), ("ab", 1), ("b", 0)]),
+            pairs(&[("a", 2), ("ab", 1), ("b", 0)]),
+            grown,
+            int(1),
+            int(33),
+        ])
+    );
+
+    let grown = BINARY_HASH_ORDER
+        .map(|key| format!("{{<<107,{},{}>>,{key}}}", 48 + key / 10, 48 + key % 10))
+        .join(",");
+    assert_eq!(
+        String::from_utf8(erl_reference(
+            "io:format(\"~w~n\", [binary_key_probe:update()])"
+        ))
+        .unwrap(),
+        format!(
+            "[[{{<<97>>,0}},{{<<97,98>>,1}},{{<<98>>,0}}],[{{<<97>>,2}},{{<<97,98>>,1}},{{<<98>>,0}}],\
+             [{grown}],1,33]\n"
+        )
     );
 }
