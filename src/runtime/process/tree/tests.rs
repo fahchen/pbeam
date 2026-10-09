@@ -111,6 +111,32 @@ fn walks_seven_ascending_links_as_erts() {
 }
 
 #[test]
+fn continues_a_walk_at_its_position() {
+    let mut tree = MonitorLinkTree::default();
+    for key in 1..=7 {
+        tree.insert(ProcessId(key), 0);
+    }
+    for done in 0..7 {
+        let mut walk = tree.post_order();
+        walk.by_ref().take(done).for_each(drop);
+        let rest: Vec<u64> = tree
+            .post_order_from(walk.position().unwrap())
+            .map(|(key, _)| key.0)
+            .collect();
+        assert_eq!(rest, [1, 3, 5, 7, 6, 4, 2][done..], "{done}");
+    }
+    let mut walk = tree.post_order();
+    walk.by_ref().for_each(drop);
+    assert_eq!(walk.position(), None);
+    assert_eq!(
+        MonitorLinkTree::<ProcessId, u64>::default()
+            .post_order()
+            .position(),
+        None
+    );
+}
+
+#[test]
 fn keeps_the_node_of_a_key_that_it_has() {
     let mut tree = MonitorLinkTree::default();
     assert!(tree.is_empty());
