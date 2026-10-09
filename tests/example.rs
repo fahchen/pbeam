@@ -77,6 +77,26 @@ fn runs_fairness_as_pinned_erts_with_one_scheduler() {
     assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
 }
 
+#[test]
+fn runs_ping_pong_as_pinned_erts() {
+    // `PingPong.main/0` spawns a ping and a pong process with `spawn/1`.
+    // They exchange `{:ping, from}` and `{:pong, from}` three times, and the
+    // root process prints the round-trip order and the count.
+    let erts = run_example(&["ping_pong", "--erts"], None);
+    let pbeam = run_example(&["ping_pong"], None);
+
+    assert_eq!(
+        parts(&erts),
+        (
+            "ping 1\\npong 1\\nping 2\\npong 2\\nping 3\\npong 3\\ncount: 3\\n".to_owned(),
+            String::new(),
+            Some(0)
+        ),
+        "ERTS"
+    );
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+}
+
 /// Run `mise run example` with `arguments`, with no locale variable except
 /// `LC_ALL=locale`. `PBEAM_BIN` gives the `pbeam` binary of this test
 /// build, which `cargo llvm-cov` measures, so the task does not start
