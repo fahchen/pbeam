@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels the run of the earlier push. Each push to main gets its own group, so that no push to main is cancelled or replaced while it waits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   checks:
     name: checks
@@ -21,6 +26,28 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
+        with:
+          # The next step compares the base and head commits of a pull request, so it needs their history.
+          fetch-depth: 0
+
+      # The job always runs, so that the required `checks` status is always reported. A pull request that changes only documentation runs the lint checks only.
+      - name: Select the checks
+        id: select
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          task=check
+          if [[ $EVENT == pull_request ]]; then
+            # Without --no-renames, a file moved to a Markdown path shows only its new path.
+            paths=$(git diff --no-renames --name-only "$BASE...$HEAD")
+            printf 'Changed files:\n%s\n' "$paths"
+            task=$(bash scripts/ci_task.sh <<<"$paths")
+          fi
+          echo "Task: $task"
+          echo "task=$task" >>"$GITHUB_OUTPUT"
 
       - name: Set up mise
         uses: jdx/mise-action@v5.0.1
@@ -47,7 +74,9 @@ jobs:
             ${{ runner.os }}-target-${{ hashFiles('Cargo.lock', 'mise.toml') }}-refs/heads/main-
 
       - name: Run repository checks
-        run: mise run check
+        env:
+          TASK: ${{ steps.select.outputs.task }}
+        run: mise run "$TASK"
 
       # An exact key hit is a re-run of the same commit, so the build did not change.
       - name: Save Rust build cache

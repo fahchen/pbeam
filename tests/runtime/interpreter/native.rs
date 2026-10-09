@@ -4,7 +4,8 @@ use super::{LIBRARIES, binding};
 use crate::runtime::interpreter::bif::BIFS;
 
 /// The effect inventory of transition 1 of
-/// `docs/capability-security-migration.md`.
+/// `docs/capability-security-migration.md`. `scripts/ci_task.sh` lists this
+/// file, so that CI runs the full check for a change to it.
 const INVENTORY: &str = include_str!("../../../docs/effect-inventory.md");
 
 /// The source of the BIF table, which marks each BIF that PBeam does not

@@ -13,6 +13,11 @@ fail() {
   exit 2
 }
 
+# Print a key step to stderr only when stderr is a terminal. A run with stderr in a pipe, as in the tests, keeps the stderr of the program byte-identical with ERTS.
+step() {
+  if [[ -t 2 ]]; then echo "==> $1" >&2; fi
+}
+
 [[ $# -ge 1 && $# -le 2 ]] || fail 'usage: example <name> [--erts]'
 name=$1
 erts=false
@@ -38,8 +43,10 @@ output=target/examples/$name
 mkdir -p "$output"
 work=$(mktemp -d "$output/compile.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+step "Compile ${sources[*]}"
 elixirc --warnings-as-errors -o "$work" "${sources[@]}"
 [[ -f $work/$entry.beam ]] || fail "examples/$name defines no module ${entry#Elixir.}"
+step "Compile examples/hello_world/pbeam_boot.erl"
 erlc +deterministic -o "$work" examples/hello_world/pbeam_boot.erl
 examples=()
 for beam in "$work"/*.beam; do
@@ -51,6 +58,7 @@ rm -rf "$work"
 trap - EXIT
 
 # A command substitution, not a process substitution, so that set -e stops the run when the command fails.
+step "Find the Elixir modules that the example calls"
 elixir_list=$(elixir scripts/example_beams.exs "${examples[@]}")
 elixir_beams=()
 while IFS= read -r beam; do
@@ -65,10 +73,12 @@ if [[ $erts == true ]]; then
       *) paths+=(-pa "${beam%/*}") ;;
     esac
   done
+  step "Run ${entry#Elixir.}.main/0 on the pinned ERTS (erl +S 1)"
   exec erl +S 1 -noshell "${paths[@]}" -eval "'$entry':main(), halt()."
 fi
 
 boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal"
+step "Find the BEAM files of the OTP boot modules"
 # shellcheck disable=SC2086 # Each module name is one argument.
 boot_list=$(erl -noshell -eval '[io:format("~ts~n", [case code:which(list_to_atom(M)) of preloaded -> filename:join([code:lib_dir(erts), "ebin", M ++ ".beam"]); Path -> Path end]) || M <- init:get_plain_arguments()], halt().' -extra $boot_modules)
 boot_beams=()
@@ -78,6 +88,8 @@ done <<<"$boot_list"
 
 beams=("${examples[@]}" ${elixir_beams[@]+"${elixir_beams[@]}"} "${boot_beams[@]}" "$output/pbeam_boot.beam")
 if [[ -n ${PBEAM_BIN:-} ]]; then
+  step "Run ${entry#Elixir.}.main/0 on $PBEAM_BIN with ${#beams[@]} BEAM files"
   exec "$PBEAM_BIN" pbeam_boot start "$entry" main -- "${beams[@]}"
 fi
+step "Build pbeam and run ${entry#Elixir.}.main/0 with ${#beams[@]} BEAM files"
 exec cargo run --quiet --locked --bin pbeam -- pbeam_boot start "$entry" main -- "${beams[@]}"

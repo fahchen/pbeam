@@ -44,7 +44,7 @@ Each directory in [examples](examples) holds one example program. From the repos
 mise run example hello_world
 ```
 
-Add `--erts` to run the same entry on the pinned ERTS with `erl +S 1 -noshell`. The `+S 1` flag gives ERTS one scheduler, as the `pbeam` binary has one scheduler thread. Run `mise run example --help` to print the arguments. The task compiles the Elixir sources `examples/<name>/*.ex` and the boot module `examples/hello_world/pbeam_boot.erl` into `target/examples/<name>/`. It then runs `main/0` of the module whose name is the camel-case name of the directory, for example `HelloWorld` for `hello_world`. The `pbeam` binary loads the example modules, the pinned Elixir modules that the example modules call directly, the 41 pinned OTP modules of the boot, and `pbeam_boot`. The variable `PBEAM_BIN` selects the `pbeam` binary. Without it, the task uses `cargo run`. The [Hello World example](examples/hello_world/README.md) shows the commands that the task runs.
+Add `--erts` to run the same entry on the pinned ERTS with `erl +S 1 -noshell`. The `+S 1` flag gives ERTS one scheduler, as the `pbeam` binary has one scheduler thread. Run `mise run example --help` to print the arguments. The task compiles the Elixir sources `examples/<name>/*.ex` and the boot module `examples/hello_world/pbeam_boot.erl` into `target/examples/<name>/`. It then runs `main/0` of the module whose name is the camel-case name of the directory, for example `HelloWorld` for `hello_world`. The `pbeam` binary loads the example modules, the pinned Elixir modules that the example modules call, directly or through other Elixir modules, the 41 pinned OTP modules of the boot, and `pbeam_boot`. The variable `PBEAM_BIN` selects the `pbeam` binary. Without it, the task uses `cargo run`. The [Hello World example](examples/hello_world/README.md) shows the commands that the task runs.
 
 ## Checks
 
@@ -63,6 +63,8 @@ line coverage. The constant-return BEAM fixture is checked in at
 `mise run reference` for the ERTS checks, and `mise run inventory` for the compiled Hello
 World entry instructions and imports.
 See the [evidence table](docs/hello-world-target.md).
+
+In CI, a pull request that changes only Markdown files runs `mise run lint` instead of `mise run check`. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.sh` lists these files. A push to `main` always runs `mise run check`.
 
 ## Delivery
 
