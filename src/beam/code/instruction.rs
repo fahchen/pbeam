@@ -106,7 +106,12 @@ const OPCODE_GET_HD: u8 = 162;
 const OPCODE_PUT_TUPLE2: u8 = 164;
 const OPCODE_SWAP: u8 = 169;
 const OPCODE_INIT_YREGS: u8 = 172;
+/// `bs_create_bin Fail Alloc Live Unit Dst OpList` (genop.tab:649-651).
 const OPCODE_BS_CREATE_BIN: u8 = 177;
+/// The number of list items of one `bs_create_bin` segment: `Type`,
+/// `Segment`, `Unit`, `Flags`, `Src`, and `Size` (JIT
+/// jit/arm/generators.tab:456-465; emu generators.tab:889-937).
+const BINARY_SEGMENT_ITEMS: usize = 6;
 const OPCODE_BS_INIT_WRITABLE: u8 = 133;
 const OPCODE_SEND: u8 = 20;
 const OPCODE_REMOVE_MESSAGE: u8 = 21;
@@ -899,6 +904,33 @@ pub(crate) enum Instruction {
         context: Operand,
         commands: Vec<BinaryMatchCommand>,
     },
+    /// Builds a binary from `segments` in order and writes it to
+    /// `destination` (`bs_create_bin`, opcode 177). A `binary` segment with
+    /// a term that is not a binary jumps to `fail_label`, or raises
+    /// `error:badarg` when `fail_label` is 0.
+    ///
+    /// Encoding: opcode, fail label, unsigned `Alloc`, `Live`, and `Unit`,
+    /// destination register, then an extended list with six items for each
+    /// segment. The decoder skips `Alloc`, `Live`, and `Unit`: PBeam has no
+    /// process heap, and the ERTS JIT loader drops `Unit` (JIT
+    /// jit/arm/generators.tab:441-454). Example: `bs_create_bin_probe:prefix/1`
+    /// in `fixtures/bs_create_bin/bs_create_bin_probe.beam` has `[0xB1,
+    /// 0x05, 0x00, 0x10, 0x80, 0x03, 0x17, 0xC0, 0x32, 0x00, 0x80, 0x02,
+    /// 0x00, 0x71, 0x42, 0x20, 0x80, 0x02, 0x03, 0x52]`: fail label 0,
+    /// `Alloc` 0, `Live` 1, `Unit` 8, destination `x0`, and a list of 12
+    /// items. The first segment is atom 3 (`string`), segment 0, unit 8,
+    /// `nil` flags, offset 0 in the `StrT` chunk, and the integer length 7.
+    /// The second segment is atom 4 (`binary`), segment 2, unit 8, `nil`
+    /// flags, `x0`, and atom 5 (`all`).
+    ///
+    /// Erlang: `prefix(X) -> <<"count: ", X/binary>>.`, and the Elixir
+    /// expression `"count: " <> X`, compile to
+    /// `{bs_create_bin,{f,0},0,1,8,{x,0},{list,[{atom,string},0,8,nil,{string,<<"count: ">>},{integer,7},{atom,binary},2,8,nil,{x,0},{atom,all}]}}`.
+    BinaryCreate {
+        fail_label: u32,
+        destination: Operand,
+        segments: Vec<BinarySegment>,
+    },
     /// Converts `source` to a float in a float register (`fconv`, opcode
     /// 97). ERTS raises `error:badarith` for a term that is not a number.
     /// PBeam has no float register, so an integer source returns the runtime
@@ -1124,6 +1156,28 @@ pub(crate) enum BinaryMatchCommand {
     Unsupported(Atom),
 }
 
+/// One segment of `bs_create_bin` (genop.tab:649-651).
+#[derive(Debug, Clone)]
+pub(crate) enum BinarySegment {
+    /// A `string` segment: the bytes at its offset in the `StrT` chunk.
+    /// Example: `[0x32, 0x00, 0x80, 0x02, 0x00, 0x71]` is
+    /// `{atom,string},0,8,nil,{string,<<"count: ">>},{integer,7}` when atom
+    /// 3 is `string` and `StrT` starts with `count: `.
+    String(Vec<u8>),
+    /// A `binary` segment of size `all` and unit 8: the binary in `source`.
+    /// `segment` is the segment number of the compiler, which the ERTS
+    /// `error_info` gives. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x52]`
+    /// is `{atom,binary},2,8,nil,{x,0},{atom,all}` when atom 4 is `binary`
+    /// and atom 5 is `all`.
+    BinaryAll { segment: u64, source: Operand },
+    /// A segment that PBeam does not run yet: an `integer`, `float`,
+    /// `utf8`, `utf16`, `utf32`, `append`, or `private_append` segment, or
+    /// a `binary` segment with another size or unit. It holds the segment
+    /// type. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x81]` is
+    /// `{atom,binary},2,8,nil,{x,0},{integer,8}` when atom 4 is `binary`.
+    Unsupported(Atom),
+}
+
 /// A source or destination in the supported `move` instruction.
 ///
 /// `Value` holds a supported immediate term. `X` uses compact register tag 3,
@@ -1150,7 +1204,7 @@ pub(crate) enum Operand {
 /// let mut code = vec![0, 0, 0, 16]; // sub-size
 /// code.extend_from_slice(&[0; 16]); // instruction set, opcode max, labels, functions
 /// code.push(0x03); // end
-/// let (instructions, labels) = parse_code(&code, &[], &[], &[], &[])?;
+/// let (instructions, labels) = parse_code(&code, &[], &[], &[], &[], &[])?;
 /// assert_eq!(labels, 0);
 /// assert!(matches!(instructions.as_slice(), [Instruction::End]));
 /// ```
@@ -1160,6 +1214,7 @@ pub(super) fn parse_code(
     imports: &[(String, String, u32)],
     literals: &[Option<Term>],
     lambdas: &[(Lambda, usize)],
+    strings: &[u8],
 ) -> Result<(Vec<Instruction>, u32), BeamError> {
     if data.len() < CODE_HEADER_SIZE
         || read_u32(&data[..WORD_SIZE])? != CODE_HEADER_SUB_SIZE
@@ -1347,6 +1402,17 @@ pub(super) fn parse_code(
                 context: read_move_operand(data, &mut cursor, atoms, literals)?,
                 commands: read_binary_match_commands(data, &mut cursor, atoms)?,
             },
+            OPCODE_BS_CREATE_BIN => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let _alloc = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                skip_live_registers(data, &mut cursor)?;
+                let _unit = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                Instruction::BinaryCreate {
+                    fail_label,
+                    destination: read_register(data, &mut cursor)?,
+                    segments: read_binary_segments(data, &mut cursor, atoms, literals, strings)?,
+                }
+            }
             OPCODE_TEST_EQ => Instruction::TestEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -1872,6 +1938,71 @@ fn read_binary_match_commands(
     Ok(commands)
 }
 
+/// Read the segment list of `bs_create_bin`: `Type Segment Unit Flags Src
+/// Size` for each segment (genop.tab:649-651; JIT `gen.create_bin` in
+/// jit/arm/generators.tab:441-465). `Type` is an atom, `Segment` and `Unit`
+/// are unsigned, and `Flags` is `nil` or a literal list. The `Src` of a
+/// `string` segment is an unsigned offset in the `StrT` chunk, and its
+/// `Size` is the integer length in bytes (beam_asm.erl:768-770). Each
+/// other `Src` and `Size` is a move operand.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {list,[{atom,string},0,8,nil,{string,<<"count: ">>},{integer,7},
+/// //        {atom,binary},2,8,nil,{x,0},{atom,all}]}
+/// let bytes = [0x17, 0xC0, 0x32, 0x00, 0x80, 0x02, 0x00, 0x71, 0x42, 0x20, 0x80, 0x02, 0x03, 0x52];
+/// let segments = read_binary_segments(&bytes, &mut 0, &atoms, &[], b"count: ")?;
+/// assert!(matches!(segments.as_slice(), [BinarySegment::String(text), BinarySegment::BinaryAll { segment: 2, source: Operand::X(0) }] if text == b"count: "));
+/// ```
+///
+/// # Errors
+///
+/// A list with an incomplete segment, an operand with an unexpected tag,
+/// and a string outside the `StrT` chunk are errors.
+fn read_binary_segments(
+    data: &[u8],
+    cursor: &mut usize,
+    atoms: &[Atom],
+    literals: &[Option<Term>],
+    strings: &[u8],
+) -> Result<Vec<BinarySegment>, BeamError> {
+    let item_count = read_list_count(data, cursor)?;
+    if item_count % BINARY_SEGMENT_ITEMS != 0 {
+        return Err(error(
+            "BEAM bs_create_bin segment list has an incomplete segment",
+        ));
+    }
+    (0..item_count / BINARY_SEGMENT_ITEMS)
+        .map(|_| {
+            let kind = atom_at(atoms, read_operand(data, cursor, TAG_ATOM)? as usize)?.clone();
+            let segment = read_operand(data, cursor, TAG_UNSIGNED)?;
+            let unit = read_operand(data, cursor, TAG_UNSIGNED)?;
+            let _flags = read_move_operand(data, cursor, atoms, literals)?;
+            if kind.name() == "string" {
+                let offset = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let length = read_operand(data, cursor, TAG_INTEGER)?;
+                return usize::try_from(offset)
+                    .ok()
+                    .zip(usize::try_from(length).ok())
+                    .and_then(|(offset, length)| strings.get(offset..offset.checked_add(length)?))
+                    .map(|text| BinarySegment::String(text.to_vec()))
+                    .ok_or_else(|| error("BEAM bs_create_bin string is outside the StrT chunk"));
+            }
+            let source = read_move_operand(data, cursor, atoms, literals)?;
+            let size = read_move_operand(data, cursor, atoms, literals)?;
+            Ok(match &size {
+                Operand::Value(Term::Atom(size))
+                    if kind.name() == "binary" && unit == 8 && size.name() == "all" =>
+                {
+                    BinarySegment::BinaryAll { segment, source }
+                }
+                _ => BinarySegment::Unsupported(kind),
+            })
+        })
+        .collect()
+}
+
 /// Read the extended list of `update_record`: an unsigned 1-based position
 /// and a value operand for each update.
 ///
@@ -1922,7 +2053,6 @@ fn skip_unsupported_instruction(
             | OPCODE_PUT_RECORD
             | OPCODE_PUT_TUPLE2
             | OPCODE_INIT_YREGS
-            | OPCODE_BS_CREATE_BIN
     ) {
         skip_counted_operands(data, cursor)?;
     }
@@ -1977,7 +2107,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_PUT_RECORD => Some(6),
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
-        OPCODE_BS_CREATE_BIN => Some(6),
         OPCODE_BS_INIT_WRITABLE => Some(0),
         // The float-register instructions are in `string` and `erl_scan`.
         // PBeam has no float term, so each one stops the run. `fconv`

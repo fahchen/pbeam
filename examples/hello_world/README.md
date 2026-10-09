@@ -14,13 +14,13 @@ From the repository root, this command builds the example and runs it with the `
 mise run example hello_world
 ```
 
-Add `--erts` to run the same entry on the pinned ERTS with `erl -noshell`:
+Add `--erts` to run the same entry on the pinned ERTS with `erl +S 1 -noshell`. The `+S 1` flag gives ERTS one scheduler, as the `pbeam` binary has one scheduler thread:
 
 ```sh
 mise run example hello_world --erts
 ```
 
-The boot calls 41 pinned OTP modules. Give their BEAM files to the `pbeam` binary. Without one of them, the run stops with `unresolved external MFA` of that module and status 1. In a locale whose codeset is not UTF-8, such as `LC_ALL=C`, only ASCII output is supported. Output that is not ASCII stops the run with `unsupported BEAM opcode 177` and status 1 (see "Boot" in [ERTS Differences](../../docs/erts-differences.md)). Run the command in a locale whose codeset is UTF-8, such as `LC_ALL=C.UTF-8`, to write any output.
+The boot calls 41 pinned OTP modules. Give their BEAM files to the `pbeam` binary. Without one of them, the run stops with `unresolved external MFA` of that module and status 1. In a locale whose codeset is not UTF-8, such as `LC_ALL=C`, only ASCII output is supported. Output that is not ASCII stops the run with a runtime error, for example `unsupported bs_create_bin segment integer` for `é`, and status 1 (see "Boot" in [ERTS Differences](../../docs/erts-differences.md)). Run the command in a locale whose codeset is UTF-8, such as `LC_ALL=C.UTF-8`, to write any output.
 
 The task runs the commands that follow, with the `mise` tools on `PATH`. The task also gives the BEAM files of the 85 pinned Elixir modules that `Elixir.IO` calls, directly or through other Elixir modules (`scripts/example_beams.exs`). Hello World does not call them, so the commands give only `Elixir.IO`. It does not set `LC_ALL`, so the run uses the locale of the shell. Run them in `sh` or `bash` from the repository root to do the same steps by hand. They compile `hello_world.ex` with the Elixir version and `pbeam_boot.erl` with the OTP version in `mise.toml` into `target/examples/hello_world/`, find the BEAM files of the boot modules and of `Elixir.IO` in the pinned OTP and Elixir, and run `pbeam_boot:start('Elixir.HelloWorld', main)`. The run prints `Hello, world!` and exits with status 0:
 
@@ -37,7 +37,7 @@ LC_ALL=C.UTF-8 cargo run --bin pbeam -- pbeam_boot start Elixir.HelloWorld main 
 With `--erts`, the task runs the same entry on the pinned ERTS after the compile commands:
 
 ```sh
-mise exec -- erl -noshell -pa target/examples/hello_world -pa "$(dirname "$elixir_io")" -eval "'Elixir.HelloWorld':main(), halt()."
+mise exec -- erl +S 1 -noshell -pa target/examples/hello_world -pa "$(dirname "$elixir_io")" -eval "'Elixir.HelloWorld':main(), halt()."
 ```
 
 The arguments after the module and function name are atoms. The arguments after `--` are the BEAM files to load. Run `cargo run --bin pbeam -- --help` to print the command options.

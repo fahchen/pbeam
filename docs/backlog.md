@@ -104,11 +104,11 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path calls `erts_internal:map_next/3` directly and then a BIF that reads the budget.
 - **Source:** #234 (PR #243).
 
-### Run `integer_to_list/1` of a large integer with no reductions left
+### Run `integer_to_list/1` and `integer_to_binary/1` of a large integer with no reductions left
 
-- When the digits of a bignum divided by 16 are more than the reductions left, ERTS runs `integer_to_list/1` again on a dirty CPU scheduler (`bif.c:3283-3299`). PBeam has no dirty scheduler. For an integer from 2^59 to 2^63 - 1 with no reductions left, it returns the runtime error `unsupported erlang:integer_to_list/1 of N with 0 reductions left: ERTS runs it on a dirty CPU scheduler`. The "Scheduling" row of `docs/erts-differences.md` records this, and this entry owns it.
+- When the digits of a bignum divided by 16 are more than the reductions left, ERTS runs `integer_to_list/1` or `integer_to_binary/1` again on a dirty CPU scheduler (`bif.c:3283-3299`; `binary.c:92-108`). PBeam has no dirty scheduler. For an integer from 2^59 to 2^63 - 1 with no reductions left, it returns the runtime error `unsupported erlang:integer_to_list/1 of N with 0 reductions left: ERTS runs it on a dirty CPU scheduler`, or the same error for `erlang:integer_to_binary/1`. The "Scheduling" row of `docs/erts-differences.md` records this, and this entry owns it.
 - **Trigger:** a measured path converts such an integer at the end of a budget, or a task adds dirty schedulers.
-- **Source:** #234 (PR #243).
+- **Source:** #234 (PR #243), #268.
 
 ### Read the clock after `ERTS_CHECK_TIME_REDS` reductions
 
@@ -131,10 +131,10 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Write the output in a locale whose codeset is not UTF-8
 
-- In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1` (prim_tty.erl:1309-1321), which PBeam runs as ERTS does. Thus PBeam writes ASCII output as ERTS does. Output that is not ASCII calls `binary_to_latin1/2`, which builds each character with `char_to_latin1/2` (prim_tty.erl:1323-1330). This needs `bs_create_bin` and `erlang:integer_to_binary/2`. PBeam stops with `unsupported BEAM opcode 177` and status 1 (measured with `io:put_chars/1` of the UTF-8 binary of `é`). ERTS writes the Latin-1 output with status 0. The "Boot" row records this.
-- The work: `bs_create_bin` and `erlang:integer_to_binary/2` for `char_to_latin1/2`.
+- In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1` (prim_tty.erl:1309-1321), which PBeam runs as ERTS does. Thus PBeam writes ASCII output as ERTS does. Output that is not ASCII calls `binary_to_latin1/2`, which builds each character with `char_to_latin1/2` (prim_tty.erl:1323-1330). #269 runs the `string` and `binary` segments of `bs_create_bin`. `char_to_latin1/2` also needs the `integer` segment of `bs_create_bin` (prim_tty.erl:1329-1330) and `erlang:integer_to_binary/2` (prim_tty.erl:1325-1328). PBeam stops with `unsupported bs_create_bin segment integer` and status 1 (measured with `IO.puts/1` of the UTF-8 binary of `é`). ERTS writes the Latin-1 output with status 0. The "Boot" row records this.
+- The work: the `integer` segment of `bs_create_bin` and `erlang:integer_to_binary/2` for `char_to_latin1/2`.
 - **Trigger:** a supported run that writes output that is not ASCII in a locale whose codeset is not UTF-8, for example a macOS shell with `LANG`, `LC_ALL`, and `LC_CTYPE` unset.
-- **Source:** "Boot" row (#139, #183, #219).
+- **Source:** "Boot" row (#139, #183, #219, #269).
 
 ### Run the unsupported BIFs that OTP code calls
 

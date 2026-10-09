@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build and run the example examples/<name> on the pbeam binary, or on the pinned ERTS with --erts.
+# The ERTS run uses one scheduler (+S 1), because the pbeam binary runs all processes on one scheduler thread. With more schedulers, ERTS can run two busy processes at the same time, and the order of their output changes from run to run.
 # Usage: bash scripts/example.sh <name> [--erts]
 # The example is the Elixir sources examples/<name>/*.ex. The entry is main/0 of the module with the camel-case name of the example, for example HelloWorld for hello_world.
 # The compiled example modules and pbeam_boot.beam go into target/examples/<name>/.
@@ -64,7 +65,7 @@ if [[ $erts == true ]]; then
       *) paths+=(-pa "${beam%/*}") ;;
     esac
   done
-  exec erl -noshell "${paths[@]}" -eval "'$entry':main(), halt()."
+  exec erl +S 1 -noshell "${paths[@]}" -eval "'$entry':main(), halt()."
 fi
 
 boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal"

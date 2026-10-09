@@ -34,6 +34,20 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("min_64", 1),
         ],
     ),
+    // `integer_to_binary/1` has the same cost as `integer_to_list/1`
+    // (`binary.c:92-108`).
+    (
+        "integer_to_binary",
+        &[
+            ("small", 0),
+            ("max_small", 0),
+            ("min_big", 1),
+            ("min_small", 0),
+            ("max_negative_big", 1),
+            ("max_64", 1),
+            ("min_64", 1),
+        ],
+    ),
     // Two flatmaps, and an empty flatmap with a hashmap, cost nothing. Each
     // other pair costs one reduction for each 8 steps of `hashmap_merge`
     // (`erl_map.c:1507`, `1736`, `1823`). The last pair traps.
