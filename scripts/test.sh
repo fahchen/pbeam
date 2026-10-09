@@ -13,7 +13,11 @@ else
   # nextest runs each test in its own process, in parallel across the test binaries.
   # The slow status level prints only slow and failed tests, not a line for each passed test.
   # --no-fail-fast runs all tests after a failure, so the output shows each failure.
-  cargo llvm-cov nextest --locked --workspace --all-features \
+  # By default cargo-llvm-cov runs `cargo clean -p pbeam-runtime`, which removes the incremental
+  # state of the crate. --no-clean keeps it, so rustc reuses the unchanged codegen units.
+  # The profraw files of the last run must go, or their counts would cover lines that no test runs now.
+  cargo llvm-cov clean --profraw-only
+  cargo llvm-cov nextest --locked --workspace --all-features --no-clean \
     --status-level slow --final-status-level slow --no-fail-fast \
     --cobertura --output-path target/coverage.xml
   mise exec -- elixir scripts/check_coverage.exs target/coverage.xml
