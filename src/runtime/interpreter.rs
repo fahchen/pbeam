@@ -181,7 +181,7 @@ impl BeamProgram {
                 Turn::Done => {}
                 Turn::Idle => {
                     let wait = scheduler.timers.wait_time(scheduler.timers.now());
-                    if !scheduler.wait_input(wait) {
+                    if !scheduler.wait_input(wait)? {
                         match wait {
                             Some(wait) => std::thread::sleep(wait),
                             None => break,

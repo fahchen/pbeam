@@ -59,8 +59,9 @@ pub(super) enum PortEvent {
     Data(Vec<u8>),
     /// The output pipe gave its end of file.
     EndOfFile,
-    /// The child exited with this exit status.
-    ExitStatus(i32),
+    /// The child exited with this exit status, or `None` when the host
+    /// reaped the child (see [`Child::read_status`]).
+    ExitStatus(Option<i32>),
 }
 
 impl Ports {

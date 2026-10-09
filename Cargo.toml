@@ -226,6 +226,10 @@ name = "port_fd_limit"
 path = "tests/integration/port_fd_limit.rs"
 
 [[test]]
+name = "port_sigchld"
+path = "tests/integration/port_sigchld.rs"
+
+[[test]]
 name = "preempt"
 path = "tests/integration/preempt.rs"
 

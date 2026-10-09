@@ -458,24 +458,28 @@ impl Scheduler {
     /// Return `false` when fd 0 has no select and no port waits for a pipe,
     /// and the function does not wait.
     ///
+    /// # Errors
+    ///
+    /// A ready pipe of a port returns the error of [`Self::port_ready`].
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // stdin is `/dev/null`: the reader gets its message at once.
-    /// assert!(scheduler.wait_input(None));
-    /// assert!(!scheduler.wait_input(None));
+    /// assert!(scheduler.wait_input(None)?);
+    /// assert!(!scheduler.wait_input(None)?);
     /// ```
-    pub(super) fn wait_input(&mut self, timeout: Option<Duration>) -> bool {
+    pub(super) fn wait_input(&mut self, timeout: Option<Duration>) -> Result<bool, BeamError> {
         let mut fds = self.resources.borrow_mut::<Ports>().wait_fds();
         if self.resources.borrow_mut::<Ttys>().input_selected() {
             fds.insert(0, libc::STDIN_FILENO);
         }
         if fds.is_empty() {
-            return false;
+            return Ok(false);
         }
         let readiness = input::wait_readable(&fds, timeout);
         if readiness == Readiness::Pending {
-            return true;
+            return Ok(true);
         }
         let ttys = self.resources.borrow_mut::<Ttys>();
         if ttys.input_selected() && readiness.ended(libc::STDIN_FILENO) {
@@ -491,9 +495,9 @@ impl Scheduler {
             }
         }
         for fd in readiness.into_ready() {
-            self.port_ready(fd);
+            self.port_ready(fd)?;
         }
-        true
+        Ok(true)
     }
 
     /// Cancel the BIF timer `reference`, as `cancel_bif_timer` does

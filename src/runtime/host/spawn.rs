@@ -192,30 +192,35 @@ impl Child {
     /// Read the exit status of the child after the status pipe has input,
     /// as `port_inp_failure` makes it from the wait status
     /// (`sys_drivers.c:1242-1250`): `128 + Signal` when a signal ended the
-    /// child, else its exit code.
+    /// child, else its exit code. Return `None` when the waiter thread got
+    /// no wait status: the host reaped the child, because the disposition
+    /// of `SIGCHLD` is `SIG_IGN` after `os:set_signal(sigchld, ignore)`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // The child ran `exit 3`.
-    /// assert_eq!(child.read_status(), 3);
+    /// assert_eq!(child.read_status(), Some(3));
     /// // The child ran `kill -9 $$`.
-    /// assert_eq!(child.read_status(), 137);
+    /// assert_eq!(child.read_status(), Some(137));
     /// ```
     ///
     /// # Panics
     ///
-    /// Panic when the status pipe holds no wait status. The waiter thread
-    /// writes the 4 bytes of the status with one `write` before it closes
-    /// the pipe.
-    pub(crate) fn read_status(&self) -> i32 {
+    /// Panic when the status pipe holds a part of a wait status. The waiter
+    /// thread writes the 4 bytes of the status with one `write` before it
+    /// closes the pipe.
+    pub(crate) fn read_status(&self) -> Option<i32> {
         let bytes = input::read(self.status_fd(), 4).expect("the status pipe is open");
+        if bytes.is_empty() {
+            return None;
+        }
         let status = c_int::from_ne_bytes(bytes.try_into().expect("the waiter writes 4 bytes"));
-        if libc::WIFSIGNALED(status) {
+        Some(if libc::WIFSIGNALED(status) {
             128 + libc::WTERMSIG(status)
         } else {
             libc::WEXITSTATUS(status)
-        }
+        })
     }
 
     /// Write all bytes of `bytes` to the input of the child, as `output`
@@ -352,7 +357,11 @@ fn posix_spawn(
 /// Wait until the child `pid` exits, and write its wait status to
 /// `status`, as `erl_child_setup` reports the exit of a child
 /// (`erl_child_setup.c:396-420`). The thread reaps the child, so it does
-/// not stay a zombie.
+/// not stay a zombie. When `waitpid` fails, the thread writes nothing, and
+/// the status pipe gives its end of file: with the disposition `SIG_IGN`
+/// for `SIGCHLD`, the host reaps the child and `waitpid` fails with
+/// `ECHILD`. ERTS reaps its children in `erl_child_setup`, a separate
+/// program that the disposition of the BEAM process does not change.
 ///
 /// # Examples
 ///
@@ -362,7 +371,11 @@ fn posix_spawn(
 fn wait(pid: libc::pid_t, mut status: File) {
     let mut wait_status = 0;
     // SAFETY: `waitpid` writes only to `wait_status`.
-    while unsafe { libc::waitpid(pid, &raw mut wait_status, 0) } < 0 && errno() == libc::EINTR {}
-    // The port can close the read end before the child exits.
-    let _ = status.write_all(&wait_status.to_ne_bytes());
+    let waited = std::iter::repeat_with(|| unsafe { libc::waitpid(pid, &raw mut wait_status, 0) })
+        .find(|&result| result >= 0 || errno() != libc::EINTR)
+        .is_some_and(|result| result >= 0);
+    if waited {
+        // The port can close the read end before the child exits.
+        let _ = status.write_all(&wait_status.to_ne_bytes());
+    }
 }

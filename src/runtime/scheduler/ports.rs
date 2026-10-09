@@ -10,7 +10,7 @@
 
 use super::{LinkId, Scheduler};
 use crate::{
-    error::BeamError,
+    error::{BeamError, error},
     runtime::{
         host::spawn::Child,
         port::{Port, PortEvent, Ports},
@@ -72,12 +72,18 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.port_ready(child.output_fd());
+    /// scheduler.port_ready(child.output_fd())?;
     /// ```
-    pub(in crate::runtime) fn port_ready(&mut self, fd: libc::c_int) {
+    ///
+    /// # Errors
+    ///
+    /// A port with `exit_status` whose child the host reaped returns a
+    /// runtime error: PBeam has no exit status for it after
+    /// `os:set_signal(sigchld, ignore)`.
+    pub(in crate::runtime) fn port_ready(&mut self, fd: libc::c_int) -> Result<(), BeamError> {
         let ports = self.resources.borrow_mut::<Ports>();
         let Some((id, event)) = ports.read(fd) else {
-            return;
+            return Ok(());
         };
         let port = ports.get_mut(id).expect("the port of a read is open");
         let owner = port.owner;
@@ -88,12 +94,18 @@ impl Scheduler {
             }
             PortEvent::EndOfFile if port.exit_status => port.end_of_file = true,
             PortEvent::EndOfFile => self.close_port(id, Term::static_atom("normal")),
-            PortEvent::ExitStatus(status) => {
+            PortEvent::ExitStatus(Some(status)) => {
                 let status = Term::Integer(status.into());
                 self.deliver(owner, port_message(id, "exit_status", status));
                 self.close_port(id, Term::static_atom("normal"));
             }
+            PortEvent::ExitStatus(None) => {
+                return Err(error(
+                    "unsupported exit status of a port program after os:set_signal(sigchld, ignore): see \"Ports\" in docs/erts-differences.md",
+                ));
+            }
         }
+        Ok(())
     }
 
     /// Close the open port `id` with the exit reason `reason`, as
