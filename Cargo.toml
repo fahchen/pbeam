@@ -146,6 +146,10 @@ name = "group"
 path = "tests/integration/group.rs"
 
 [[test]]
+name = "halt"
+path = "tests/integration/halt.rs"
+
+[[test]]
 name = "hibernate"
 path = "tests/integration/hibernate.rs"
 

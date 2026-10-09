@@ -150,7 +150,8 @@ impl BeamProgram {
     /// as ERTS prints a term (`print_term`), for example
     /// `root process exited with {badarg,[]}`. A root process that
     /// waits when no process can run, no timer is active, and fd 0 has no
-    /// read select gives an error.
+    /// read select gives an error. A call of `erlang:halt/2` with a status
+    /// code ends the run at once with the error [`BeamError::Halt`].
     ///
     /// # Examples
     ///
