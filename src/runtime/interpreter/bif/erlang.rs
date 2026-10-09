@@ -2219,10 +2219,10 @@ const HALT_FLUSH_TIMEOUT_STATUS: i32 = 255;
 /// timer ends before the flush, and the node exits with status 255
 /// (`erl_process.c:15244-15248`, `erl_init.c:2771-2774`; measured 5 of 5).
 ///
-/// `abort` (a core dump) and a string `Status` (a crash dump with the
-/// string as its slogan) give a runtime error: PBeam writes no core dump
-/// and no crash dump. Each other `Status` raises `badarg`
-/// (`bif.c:4390-4391`).
+/// `abort` (a core dump) and a slogan `Status` (a crash dump with the
+/// string as its slogan, see [`is_slogan`]) give a runtime error: PBeam
+/// writes no core dump and no crash dump. Each other `Status` raises
+/// `badarg` (`bif.c:4379`, `4388-4393`).
 ///
 /// # Examples
 ///
@@ -2267,9 +2267,41 @@ pub(super) fn halt(status: &Term, options: &Term) -> Result<BifResult, BeamError
         Term::Atom(abort) if abort.name() == "abort" => Err(error(
             "unsupported erlang:halt/2 with abort: PBeam writes no core dump",
         )),
-        Term::List(_) | Term::ImproperList(..) => Err(error(
+        _ if is_slogan(status) => Err(error(
             "unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump",
         )),
         _ => Ok(BifResult::badarg()),
     }
+}
+
+/// The most characters of a crash dump slogan, as `HALT_MSG_SIZE`
+/// (`bif.c:4373`).
+const HALT_MSG_SIZE: usize = 1023;
+
+/// Return whether `status` is a crash dump slogan of `erlang:halt/2`: a list
+/// for which `erts_unicode_list_to_buf` with at most `HALT_MSG_SIZE`
+/// characters does not give a type error (`bif.c:4372-4380`,
+/// `utils.c:2862-2942`). Each of the first 1023 elements must be a code
+/// point outside `0xD800..=0xDFFF`. The tail must be `[]`, unless the list
+/// has more than 1023 elements: ERTS cuts the slogan before it reads the
+/// tail.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_slogan(&Term::List(vec![Term::Integer(65)])));
+/// assert!(!is_slogan(&Term::List(vec![Term::static_atom("foo")])));
+/// assert!(!is_slogan(&Term::ImproperList(vec![Term::Integer(65)], Box::new(Term::static_atom("foo")))));
+/// ```
+fn is_slogan(status: &Term) -> bool {
+    let (elements, proper) = match status {
+        Term::List(elements) => (elements, true),
+        Term::ImproperList(elements, _) => (elements, false),
+        _ => return false,
+    };
+    let characters = elements.iter().take(HALT_MSG_SIZE).all(|element| {
+        matches!(element, Term::Integer(code)
+            if u32::try_from(*code).ok().and_then(char::from_u32).is_some())
+    });
+    characters && (proper || elements.len() > HALT_MSG_SIZE)
 }
