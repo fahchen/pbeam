@@ -24,6 +24,7 @@ fi
 
 echo "check: FAIL (exit $status; full log: $log)"
 # mise prints `[task] $ <command>` before each step and `[task] ERROR task failed` after a failed task.
+# Drop the nextest PASS and START lines (a status level above slow shows them) and the libtest progress lines, which nextest indents in the output of a failed test.
 for task in $(clean <"$log" | sed -n 's/^\[\([^]]*\)\] ERROR task failed$/\1/p'); do
   clean <"$log" | awk -v prefix="[$task] " '
     index($0, prefix) == 1 {
@@ -32,7 +33,7 @@ for task in $(clean <"$log" | sed -n 's/^\[\([^]]*\)\] ERROR task failed$/\1/p')
       step[++n] = line
     }
     END { for (i = 1; i <= n; i++) print step[i] }' |
-    grep -Ev '^[[:space:]]*$|^[[:space:]]*(Compiling|Checking|Running) |^running [0-9]+ tests?$|^test .* \.\.\. ok$|^test result: ok\.|^ERROR task failed$' |
+    grep -Ev '^[[:space:]]*$|^[[:space:]]*(Compiling|Checking|Running) |^[[:space:]]*(PASS|START) |^[[:space:]]*running [0-9]+ tests?$|^[[:space:]]*test .* \.\.\. ok$|^[[:space:]]*test result: ok\.|^ERROR task failed$' |
     head -n 60
 done
 
