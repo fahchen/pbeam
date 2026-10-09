@@ -906,7 +906,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
 /// The BIF table holds the BIFs of the pinned ERTS.
 /// `fixtures/bifs/is_builtin.txt` lists each exported function of the
 /// OTP 29.1.1 installation for which `erlang:is_builtin/3` returns
-/// `true`, and `tests/bifs.rs` checks this list on the pinned ERTS. The
+/// `true`, and `tests/integration/bifs.rs` checks this list on the pinned ERTS. The
 /// list has each table entry and no other function, except
 /// `erlang:apply/2`, `erlang:apply/3`, and `erlang:yield/0`.
 /// `erts_is_builtin` (`beam_common.c`) marks these three, but they are

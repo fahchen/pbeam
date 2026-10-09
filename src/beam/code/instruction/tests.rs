@@ -453,7 +453,7 @@ fn decodes_is_ge_with_a_typed_register() {
 
 #[test]
 fn decodes_the_is_lt_is_integer_and_is_boolean_tests_of_the_compare_probe_fixture() {
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/compare/compare_probe.beam` has these bytes.
     let next = [0x27, 0x75, 0x01, 0x57, 0x13, 0x10]; // next/1: is_lt f7 0 {tr,x1,1}
     let width = [0x27, 0xF5, 0x03, 0x01]; // width/1: is_lt f15 x0 0
@@ -493,7 +493,7 @@ fn decodes_the_is_lt_is_integer_and_is_boolean_tests_of_the_compare_probe_fixtur
 
 #[test]
 fn decodes_the_is_eq_test_of_the_compare_probe_fixture() {
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/compare/compare_probe.beam` has these bytes.
     let is_eq = [0x29, 0x0D, 0x19, 0x03, 0x13]; // eq/2: is_eq f25 x0 x1
     let mut code = vec![0, 0, 0, 16];
@@ -515,7 +515,7 @@ fn decodes_the_is_eq_test_of_the_compare_probe_fixture() {
 
 #[test]
 fn decodes_the_bs_start_match3_test_of_the_binary_match_probe_fixture() {
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/binary_match/binary_match_probe.beam` has these bytes.
     // kind/1: bs_start_match3 f5 x0 1 x0
     let bs_start_match3 = [0xA6, 0x55, 0x03, 0x10, 0x03];
@@ -538,7 +538,7 @@ fn decodes_the_bs_start_match3_test_of_the_binary_match_probe_fixture() {
 
 #[test]
 fn decodes_the_binary_match_instructions_of_is_usascii() {
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/binary_match/binary_match_probe.beam` has these bytes.
     // is_usascii/1 has the instructions of prim_tty:is_usascii/1.
     let parts: [&[u8]; 6] = [
@@ -675,7 +675,7 @@ fn reads_each_bs_match_command_and_rejects_bad_command_lists() {
 
 #[test]
 fn decodes_the_fconv_instruction_of_the_float_test_probe_fixture() {
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/float_test/float_test_probe.beam` has these bytes.
     let fconv = [OPCODE_FCONV, 0x03, 0x27, 0x00]; // half/1: fconv x0 fr0
     let mut code = vec![0, 0, 0, 16];
@@ -695,7 +695,7 @@ fn decodes_the_fconv_instruction_of_the_float_test_probe_fixture() {
 
 #[test]
 fn decodes_the_is_float_test_of_the_float_test_probe_fixture() {
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/float_test/float_test_probe.beam` has these bytes.
     let is_float = [0x2E, 0x55, 0x03]; // kind/1: is_float f5 x0
     let mut code = vec![0, 0, 0, 16];
@@ -717,7 +717,7 @@ fn decodes_the_is_float_test_of_the_float_test_probe_fixture() {
 
 #[test]
 fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/io_start/io_start_probe.beam` has these bytes.
     let get_tl = [OPCODE_GET_TL, 0x03, 0x03]; // rest/1: {get_tl,{x,0},{x,0}}
     let mut code = vec![0, 0, 0, 16];
@@ -738,7 +738,7 @@ fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
 
 #[test]
 fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/io_start/io_start_probe.beam` has these bytes.
     // update_guard/1: {put_map_exact,{f,38},{x,0},{x,0},1,
     // {list,[{atom,output},{atom,cooked}]}}, with output as atom 18 and
@@ -787,7 +787,7 @@ fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
 
 #[test]
 fn decodes_the_has_map_fields_tests_of_the_map_probe_fixture() {
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/map/map_probe.beam` has these bytes.
     // pair/1: {test,has_map_fields,{f,17},{x,0},{list,[{atom,input},{atom,output}]}},
     // with output as atom 4 and input as atom 17 of the module.
@@ -962,7 +962,7 @@ fn decodes_the_apply_instructions_of_pinned_gen_statem() {
 
 #[test]
 fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction() {
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/arith/arith_probe.beam` has these bytes.
     // up/1: gc_bif2 f58 live 1 '+'/2 {tr,x0,1} 1 x0
     let up = [0x7D, 0x0D, 0x3A, 0x10, 0x00, 0x57, 0x03, 0x10, 0x11, 0x03];
@@ -1050,7 +1050,7 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
     ];
     let parse =
         |instructions: &[u8]| parse_code(&code(instructions), &atoms, &[], &[], &lambdas, &[]);
-    // `tests/fixture_opcodes.rs` checks that
+    // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/funs/fun_probe.beam` has these bytes.
     let make_pair = [0xAB, 0x40, 0x03, 0x17, 0x10, 0x03]; // make_pair/1: make_fun3 4 x0 [x0]
     let make_const = [0xAB, 0x10, 0xA4, 0x17, 0x00]; // locals/0: make_fun3 1 y10 []
@@ -1293,7 +1293,7 @@ fn decodes_the_is_function_tests_of_the_fun_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     // Bytes of `fun_probe:kind/1` in `fixtures/funs/fun_probe.beam`, then
-    // an `is_function2` with the arity in `x1`. `tests/fixture_opcodes.rs`
+    // an `is_function2` with the arity in `x1`. `tests/integration/fixture_opcodes.rs`
     // checks that the fixture has these bytes.
     let is_function2 = [0x73, 0x0D, 0x64, 0x57, 0x03, 0x40, 0x11]; // is_function2 f100 x0 1
     let is_function = [0x4D, 0x0D, 0x65, 0x57, 0x03, 0x40]; // is_function f101 x0
