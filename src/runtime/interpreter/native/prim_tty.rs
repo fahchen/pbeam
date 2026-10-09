@@ -415,7 +415,10 @@ const READ_LIMIT: u64 = 1024;
 /// Run `prim_tty:read_nif(TTY, Ref, N)`, as the ERTS NIF `tty_read_nif`
 /// (`prim_tty_nif.c:429-675`) does on Unix. A term that is not a TTY
 /// resource, then an `N` that is not an integer from 0 to 2^64 - 1, raises
-/// `error:badarg` (`prim_tty_nif.c:443-447`).
+/// `error:badarg` (`prim_tty_nif.c:443-447`). PBeam holds an integer only
+/// up to 2^63 - 1 (see the "Integer range" row of
+/// `docs/erts-differences.md`), so an `N` from 2^63 to 2^64 - 1 does not
+/// get to the binding.
 ///
 /// Else the binding reads at most `N` bytes, and at most 1024, from fd 0
 /// with one `read` (`prim_tty_nif.c:449`, `646-657`):
