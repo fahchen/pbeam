@@ -7,18 +7,6 @@ use std::{ffi::c_int, time::Duration};
 
 use super::errno::errno;
 
-/// What [`wait_readable`] found on an fd.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Readiness {
-    /// A `read` does not block: the fd has input, its end of file, or an
-    /// error.
-    Ready,
-    /// The timeout ended, or a signal stopped the wait.
-    Pending,
-    /// The fd is not open, as `ERTS_POLL_EV_NVAL`.
-    Invalid,
-}
-
 /// Read at most `size` bytes from `fd` with one `read`, as `tty_read_nif`
 /// (`prim_tty_nif.c:646-657`) does. Return the bytes, which are empty at
 /// the end of file and when `size` is 0, or the `errno` of a failed
@@ -41,30 +29,47 @@ pub(crate) fn read(fd: c_int, size: usize) -> Result<Vec<u8>, c_int> {
     Ok(bytes)
 }
 
-/// Wait until a `read` of `fd` does not block, for at most `timeout`, or
-/// without end for `None`, with `select`. The ERTS poll thread waits for the
-/// read select of a NIF in the same way (`erl_process.c:3372`,
-/// `erl_check_io.c:2121-2152`). ERTS uses `kqueue` on macOS and `epoll` on
-/// Linux, with a `select` or `poll` set for each fd that the kernel poll
-/// does not accept (`erl_poll.h:100-135`, `214-225`). `select` reads each fd
-/// type on both hosts. The macOS `poll` gives `POLLNVAL` for a character
-/// device such as `/dev/null`.
+/// Wait until a `read` of one of `fds` does not block, for at most
+/// `timeout`, or without end for `None`, with `select`. Return the fds
+/// that a `read` does not block, in the order of `fds`: each one has
+/// input, its end of file, or an error. Return no fd when the timeout ends
+/// or a signal stops the wait. Return `None` when an fd is not open, as
+/// `ERTS_POLL_EV_NVAL`. The ERTS poll thread
+/// waits for the read select of a NIF in the same way (`erl_process.c:3372`,
+/// `erl_check_io.c:2121-2152`), and its poll set also holds the read end of
+/// its wake pipe (`erl_poll.c:489-525`). ERTS uses `kqueue` on macOS and
+/// `epoll` on Linux, with a `select` or `poll` set for each fd that the
+/// kernel poll does not accept (`erl_poll.h:100-135`, `214-225`). `select`
+/// reads each fd type on both hosts. The macOS `poll` gives `POLLNVAL` for a
+/// character device such as `/dev/null`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // stdin is `/dev/null`.
-/// assert_eq!(wait_readable(libc::STDIN_FILENO, None), Readiness::Ready);
-/// assert_eq!(wait_readable(1000, Some(Duration::ZERO)), Readiness::Invalid);
+/// assert_eq!(wait_readable(&[libc::STDIN_FILENO], None), Some(vec![libc::STDIN_FILENO]));
+/// assert_eq!(wait_readable(&[1000], Some(Duration::ZERO)), None);
 /// ```
-pub(crate) fn wait_readable(fd: c_int, timeout: Option<Duration>) -> Readiness {
+///
+/// # Panics
+///
+/// An fd is negative or not below `FD_SETSIZE`, which `select` cannot
+/// hold.
+pub(crate) fn wait_readable(fds: &[c_int], timeout: Option<Duration>) -> Option<Vec<c_int>> {
+    let fd_set_size = c_int::try_from(libc::FD_SETSIZE).expect("FD_SETSIZE fits in c_int");
+    assert!(
+        fds.iter().all(|fd| (0..fd_set_size).contains(fd)),
+        "select holds each fd"
+    );
     // SAFETY: `fd_set` is a C struct of integers, so all zeros is a valid
-    // value. `FD_ZERO` and `FD_SET` write only into `set`, and `fd` is a
-    // standard fd, below `FD_SETSIZE`.
+    // value. `FD_ZERO` and `FD_SET` write only into `set`, and each fd is
+    // below `FD_SETSIZE`.
     let mut set = unsafe {
         let mut set: libc::fd_set = std::mem::zeroed();
         libc::FD_ZERO(&raw mut set);
-        libc::FD_SET(fd, &raw mut set);
+        for &fd in fds {
+            libc::FD_SET(fd, &raw mut set);
+        }
         set
     };
     // `select` takes microseconds; round up, so the wait does not end
@@ -79,11 +84,12 @@ pub(crate) fn wait_readable(fd: c_int, timeout: Option<Duration>) -> Readiness {
     let time = time
         .as_mut()
         .map_or(std::ptr::null_mut(), |time| &raw mut *time);
+    let count = fds.iter().max().map_or(0, |fd| fd + 1);
     // SAFETY: `select` reads and writes `set` and reads `time`, which is
     // null or points to `timeval`, and it reads no other set.
     let count = unsafe {
         libc::select(
-            fd + 1,
+            count,
             &raw mut set,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -91,10 +97,17 @@ pub(crate) fn wait_readable(fd: c_int, timeout: Option<Duration>) -> Readiness {
         )
     };
     match count {
-        1.. => Readiness::Ready,
-        0 => Readiness::Pending,
-        _ if errno() == libc::EINTR => Readiness::Pending,
-        _ => Readiness::Invalid,
+        // SAFETY: `FD_ISSET` reads only `set`, and each fd is below
+        // `FD_SETSIZE`.
+        1.. => Some(
+            fds.iter()
+                .copied()
+                .filter(|&fd| unsafe { libc::FD_ISSET(fd, &raw const set) })
+                .collect(),
+        ),
+        0 => Some(Vec::new()),
+        _ if errno() == libc::EINTR => Some(Vec::new()),
+        _ => None,
     }
 }
 

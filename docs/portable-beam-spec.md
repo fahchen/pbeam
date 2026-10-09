@@ -118,6 +118,8 @@ Host work that can block must not block a scheduler thread. The intended asynchr
 
 Tokio was an example executor in the discussion, not a finalized dependency requirement. Completion ownership, cancellation, process exit, and shutdown behavior must be defined when the first asynchronous operation is implemented. Late completion must not resume a dead process or resume the same call twice.
 
+The first asynchronous operation is `prim_tty:write_nif/2`, which ERTS runs on a dirty IO scheduler. Task #19 runs it on 10 dirty IO threads of the standard library, as the 10 ERTS dirty IO schedulers, with no other executor. The scheduler records the call on the process before a thread gets it, and the completion identifies the process and the call. Row "Dirty IO" of `docs/erts-differences.md` records the behavior. Task #20 defines cancellation, process exit, and shutdown.
+
 A process owns its security context, including realm, subject incarnation, usable and delegable grants, and budget account. Migration carries that context. Spawn cannot exceed the parent's delegable authority or duplicate a budget. Supervisor restart uses a validated template and cannot restore revoked grants.
 
 Host intents become authorized requests only through runtime checks. Fix the subject, operation, parameters, resource identity, grant generation, incarnation, and budget reservation before submission. Recheck queued authority at a synchronized dispatch decision. Revocation before that decision prevents execution; later revocation cannot promise rollback. Completion must settle cost and release resources even when the original subject no longer exists.
@@ -274,6 +276,6 @@ Security implementation is milestone M6 in the milestone order of 2026-10-09. It
 - Required process semantics, including selective receive, timers, links, monitors, and exception behavior for the chosen slice.
 - Native registry conflict policy, validation timing, call-path coverage, errors, resource ownership, and async cancellation.
 - Bundle encoding/versioning, validation limits, resource lookup semantics, and whether compression is needed.
-- Scheduler count policy and host executor for the initial macOS arm64 target.
+- Scheduler count policy for the initial macOS arm64 target.
 
 Resolve each detail when its first implementation slice requires it. Add only the foundations that slice consumes; do not interpret the logical architecture or future platform matrix as a request to scaffold unused components.

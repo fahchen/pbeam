@@ -25,6 +25,10 @@ name = "boot"
 path = "tests/feature/boot.rs"
 
 [[test]]
+name = "dirty_io"
+path = "tests/feature/dirty_io.rs"
+
+[[test]]
 name = "example"
 path = "tests/feature/example.rs"
 
