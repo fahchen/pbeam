@@ -40,6 +40,40 @@ fn runs_hello_world_with_one_command_as_pinned_erts() {
     }
 }
 
+#[test]
+fn restarts_a_crashed_worker_as_pinned_erts() {
+    // `CrashRestart.main/0` traps exits, links a worker with `spawn_link/1`,
+    // and restarts it each time it raises, three times. Each run sets the
+    // primary log level `none`, so ERTS writes no error report.
+    let erts = run_example(&["crash_restart", "--erts"], Some("C.UTF-8"));
+    let pbeam = run_example(&["crash_restart"], Some("C.UTF-8"));
+
+    assert_eq!(
+        parts(&erts),
+        (
+            concat!(
+                "start worker 1\\n",
+                "exit: worker 1 crashed\\n",
+                "restart\\n",
+                "start worker 2\\n",
+                "exit: worker 2 crashed\\n",
+                "restart\\n",
+                "start worker 3\\n",
+                "exit: worker 3 crashed\\n",
+                "restart\\n",
+                "start worker 4\\n",
+                "exit: worker 4 crashed\\n",
+                "stop after 4 crashes\\n",
+            )
+            .to_owned(),
+            String::new(),
+            Some(0)
+        ),
+        "ERTS"
+    );
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+}
+
 /// Run `mise run example` with `arguments`, with no locale variable except
 /// `LC_ALL=locale`. `PBEAM_BIN` gives the `pbeam` binary of this test
 /// build, which `cargo llvm-cov` measures, so the task does not start
