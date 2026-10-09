@@ -996,11 +996,7 @@ pub(super) fn tl(list: &Term) -> BifResult {
 /// Run `erlang:integer_to_list/1`: return the decimal characters of an
 /// integer, as ERTS `integer_to_list_1` and `integer_to_list`
 /// (`bif.c:3266-3339`) do. A term that is not an integer raises `badarg`.
-///
-/// A small integer costs no reduction. A bignum costs one reduction for each
-/// 16 digits of [`big_integer_estimate`] (`bif.c:3283-3299`). In the PBeam
-/// integer range, a bignum is from 2^59 to 2^63 - 1 or from -2^63 to
-/// -2^59 - 1, and it costs 1.
+/// [`decimal_digits`] gives the digits and charges a bignum.
 ///
 /// # Examples
 ///
@@ -1018,33 +1014,99 @@ pub(super) fn tl(list: &Term) -> BifResult {
 ///
 /// # Errors
 ///
-/// Return a runtime error for a bignum that costs more than the reductions
-/// left. ERTS then runs the BIF again on a dirty CPU scheduler
-/// (`bif.c:3289-3296`, `3323-3336`), and PBeam has no dirty scheduler. Also return the runtime error of
-/// [`ProcessState::bif_reductions_left`] for a negative budget.
+/// Return the runtime error of [`decimal_digits`].
 pub(super) fn integer_to_list(
     process: &mut ProcessState,
     term: &Term,
 ) -> Result<BifResult, BeamError> {
-    /// `DIGITS_PER_RED` (`bif.c:3283`).
+    let Some(digits) = decimal_digits(process, term, "integer_to_list")? else {
+        return Ok(BifResult::badarg());
+    };
+    let codes = digits.bytes().map(|byte| Term::Integer(i64::from(byte)));
+    Ok(Value(Term::List(codes.collect())))
+}
+
+/// Run `erlang:integer_to_binary/1`: return the decimal characters of an
+/// integer as a binary, as ERTS `integer_to_binary_1` and
+/// `integer_to_binary` (`binary.c:80-145`) do. A term that is not an
+/// integer raises `badarg`. [`decimal_digits`] gives the digits and charges
+/// a bignum.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// let binary = integer_to_binary(&mut process, &Term::Integer(-12))?;
+/// assert!(matches!(binary, BifResult::Value(Term::Binary(bytes)) if bytes == b"-12"));
+/// assert_eq!(process.fcalls, 10);
+/// integer_to_binary(&mut process, &Term::Integer(1 << 59))?;
+/// assert_eq!(process.fcalls, 9);
+/// assert!(matches!(integer_to_binary(&mut process, &Term::static_atom("a"))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`decimal_digits`].
+pub(super) fn integer_to_binary(
+    process: &mut ProcessState,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(digits) = decimal_digits(process, term, "integer_to_binary")? else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(Term::Binary(digits.into_bytes())))
+}
+
+/// Return the decimal characters of an integer for the BIF `erlang:Name/1`,
+/// or `None` for a term that is not an integer. ERTS `integer_to_list`
+/// (`bif.c:3266-3311`) and `integer_to_binary` (`binary.c:80-117`) charge
+/// the same cost.
+///
+/// A small integer costs no reduction. A bignum costs one reduction for each
+/// 16 digits of [`big_integer_estimate`] (`bif.c:3283-3299`,
+/// `binary.c:92-108`). In the PBeam integer range, a bignum is from 2^59 to
+/// 2^63 - 1 or from -2^63 to -2^59 - 1, and it costs 1.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// assert_eq!(decimal_digits(&mut process, &Term::Integer(-12), "integer_to_list")?.as_deref(), Some("-12"));
+/// assert_eq!(process.fcalls, 10);
+/// decimal_digits(&mut process, &Term::Integer(1 << 59), "integer_to_list")?;
+/// assert_eq!(process.fcalls, 9);
+/// assert_eq!(decimal_digits(&mut process, &Term::List(vec![]), "integer_to_list")?, None);
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for a bignum that costs more than the reductions
+/// left. ERTS then runs the BIF again on a dirty CPU scheduler
+/// (`bif.c:3289-3296`, `3323-3336`; `binary.c:98-105`, `129-142`), and
+/// PBeam has no dirty scheduler. Also return the runtime error of
+/// [`ProcessState::bif_reductions_left`] for a negative budget.
+fn decimal_digits(
+    process: &mut ProcessState,
+    term: &Term,
+    name: &str,
+) -> Result<Option<String>, BeamError> {
+    /// `DIGITS_PER_RED` (`bif.c:3283`, `binary.c:92`).
     const DIGITS_PER_RED: usize = 16;
     let Term::Integer(value) = term else {
-        return Ok(BifResult::badarg());
+        return Ok(None);
     };
     if term.small_integer().is_none() {
         let cost = big_integer_estimate(*value) / DIGITS_PER_RED;
         if cost > process.bif_reductions_left()? {
             // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
             return Err(error(format!(
-                "unsupported erlang:integer_to_list/1 of {value} with {} reductions left: ERTS runs it on a dirty CPU scheduler",
+                "unsupported erlang:{name}/1 of {value} with {} reductions left: ERTS runs it on a dirty CPU scheduler",
                 process.fcalls
             )));
         }
         process.bump_reductions(cost as i32);
     }
-    let digits = value.to_string();
-    let codes = digits.bytes().map(|byte| Term::Integer(i64::from(byte)));
-    Ok(Value(Term::List(codes.collect())))
+    Ok(Some(value.to_string()))
 }
 
 /// Return the number of decimal digits that ERTS `big_integer_estimate`
