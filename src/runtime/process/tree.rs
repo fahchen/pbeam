@@ -669,4 +669,5 @@ impl<'a, K: TreeKey, V> Iterator for PostOrder<'a, K, V> {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/runtime/process/tree.rs"]
 mod tests;

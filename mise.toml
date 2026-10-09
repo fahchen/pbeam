@@ -56,7 +56,7 @@ run = "bash scripts/check_brief.sh"
 [tasks.test-focus]
 description = "Run selected Rust tests and print only the results and failures"
 quiet = true
-usage = 'arg "[args]..." help="Arguments for cargo test, such as --test group, a test name filter, or -- --exact" var=#true double_dash="preserve"'
+usage = 'arg "[args]..." help="Arguments for cargo test, such as --test group for one target of tests/feature/ or tests/integration/, --lib for the unit tests, a test name filter, or -- --exact" var=#true double_dash="preserve"'
 run = 'eval "set -- ${usage_args:-}"; bash scripts/test_focus.sh "$@"'
 
 [tasks.erts-eval]

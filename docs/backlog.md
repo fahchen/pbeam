@@ -100,7 +100,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Read a negative reduction budget in each BIF as ERTS does
 
 - A hashmap call of `erts_internal:map_next/3` subtracts 4 for each pair with no lower limit, so the budget can be negative (`erl_map.c:4126`). Each ERTS BIF reads a negative budget in its own way: `lists:member/2` traps at once, and `erlang:length/1` and `lists:reverse/2` read it as a large unsigned count (`erl_bif_lists.c:1114-1130`, `1207`; `erl_bif_guard.c:280`). When a BIF reads a negative budget, through `apply` or as a guard BIF before the next call or return, PBeam stops the run with `unsupported negative reduction budget in a BIF after erts_internal:map_next/3` (`bif_reductions_left` in `src/runtime/process.rs`). `maps.erl` calls `erts_internal:map_next/3` only before a call or a return (`maps.erl:525-542`, `1104-1111`), so the `maps` functions do not get this error. The "Map iteration" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Evidence:** `logger_start_probe:negative_budget/0` makes the budget negative before `length/1`. ERTS returns `ok`, and PBeam returns the runtime error (`tests/logger_start.rs`).
+- **Evidence:** `logger_start_probe:negative_budget/0` makes the budget negative before `length/1`. ERTS returns `ok`, and PBeam returns the runtime error (`tests/integration/logger_start.rs`).
 - **Trigger:** a measured path calls `erts_internal:map_next/3` directly and then a BIF that reads the budget.
 - **Source:** #234 (PR #243).
 
@@ -296,7 +296,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Check the ordered map iterator crash of ERTS at each OTP pin change
 
-- Pinned ERTS 29.1.1 crashes with SIGSEGV in `erts_internal:map_next/3` when an ordered iterator path holds a key that the map does not hold, or ends with a tail that is not `[]`. It crashes in about one run in four, and in every run with `MallocScribble=1`. The BIF raises `badarg` with a half-built tuple left in its heap fragment, and the GC after the BIF reads the unset element (`erl_map.c:3670-3707`). OTP master has the same code. The "Map iteration" row of `docs/erts-differences.md` records it (PR #177). `tests/logger_start.rs` checks this input on PBeam only (`returns_badarg_for_an_ordered_path_that_crashes_pinned_erts`), and the live `erl` reference run leaves it out. The owner decided not to report it to OTP.
+- Pinned ERTS 29.1.1 crashes with SIGSEGV in `erts_internal:map_next/3` when an ordered iterator path holds a key that the map does not hold, or ends with a tail that is not `[]`. It crashes in about one run in four, and in every run with `MallocScribble=1`. The BIF raises `badarg` with a half-built tuple left in its heap fragment, and the GC after the BIF reads the unset element (`erl_map.c:3670-3707`). OTP master has the same code. The "Map iteration" row of `docs/erts-differences.md` records it (PR #177). `tests/integration/logger_start.rs` checks this input on PBeam only (`returns_badarg_for_an_ordered_path_that_crashes_pinned_erts`), and the live `erl` reference run leaves it out. The owner decided not to report it to OTP.
 - **Trigger:** a change of the pinned OTP version. Run the reproduction again. If ERTS raises `badarg`, put the input back into the live reference run of `logger_start_probe:ordered/0`, remove the PBeam-only test, and change the row.
 - **Source:** investigation of a flaky reference test in the review of #155.
 
@@ -319,6 +319,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Set `TERM` and `LC_ALL` of the test commands with one helper
 
-- `tests/boot.rs`, `tests/time.rs`, `tests/user_drv.rs`, and `tests/prim_tty.rs` set `TERM=dumb` and `LC_ALL=C.UTF-8` on the command, as `run_dumb_utf8` of `tests/common/run.rs` does. They do not use a time limit, and `tests/prim_tty.rs` reads only the exit status with its own stdin, stdout, and stderr. Thus each one can call `run_dumb_utf8`, or a helper that only sets the two variables.
+- `tests/feature/boot.rs`, `tests/integration/time.rs`, `tests/integration/user_drv.rs`, and `tests/integration/prim_tty.rs` set `TERM=dumb` and `LC_ALL=C.UTF-8` on the command, as `run_dumb_utf8` of `tests/common/run.rs` does. They do not use a time limit, and `tests/integration/prim_tty.rs` reads only the exit status with its own stdin, stdout, and stderr. Thus each one can call `run_dumb_utf8`, or a helper that only sets the two variables.
 - **Trigger:** the next change to one of these test runners.
 - **Source:** PR #192 (#186).

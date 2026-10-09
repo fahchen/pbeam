@@ -929,4 +929,5 @@ impl Mailbox {
 }
 
 #[cfg(test)]
+#[path = "../../tests/runtime/mailbox.rs"]
 mod tests;

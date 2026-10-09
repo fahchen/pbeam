@@ -3,6 +3,9 @@ name = "pbeam-runtime"
 version = "0.1.0"
 edition = "2024"
 publish = false
+# List each test target, so that a file of tests/ that is not a target, such as
+# a shared helper or a unit test module of src/, is not a test crate.
+autotests = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -15,3 +18,245 @@ cc = "1"
 # The clippy lint build keeps the dev profile.
 [profile.test]
 opt-level = 1
+
+# Feature tests run the pbeam binary or a mise task.
+[[test]]
+name = "boot"
+path = "tests/feature/boot.rs"
+
+[[test]]
+name = "example"
+path = "tests/feature/example.rs"
+
+[[test]]
+name = "hello"
+path = "tests/feature/hello.rs"
+
+[[test]]
+name = "io_fail"
+path = "tests/feature/io_fail.rs"
+
+[[test]]
+name = "log"
+path = "tests/feature/log.rs"
+
+[[test]]
+name = "run_end"
+path = "tests/feature/run_end.rs"
+
+# Integration tests drive the library API with compiled fixtures.
+[[test]]
+name = "alias"
+path = "tests/integration/alias.rs"
+
+[[test]]
+name = "arith"
+path = "tests/integration/arith.rs"
+
+[[test]]
+name = "atom_to_binary"
+path = "tests/integration/atom_to_binary.rs"
+
+[[test]]
+name = "badarg"
+path = "tests/integration/badarg.rs"
+
+[[test]]
+name = "bif_audit"
+path = "tests/integration/bif_audit.rs"
+
+[[test]]
+name = "bif_costs"
+path = "tests/integration/bif_costs.rs"
+
+[[test]]
+name = "bifs"
+path = "tests/integration/bifs.rs"
+
+[[test]]
+name = "binary_match"
+path = "tests/integration/binary_match.rs"
+
+[[test]]
+name = "bs_create_bin"
+path = "tests/integration/bs_create_bin.rs"
+
+[[test]]
+name = "calls"
+path = "tests/integration/calls.rs"
+
+[[test]]
+name = "compare"
+path = "tests/integration/compare.rs"
+
+[[test]]
+name = "constant"
+path = "tests/integration/constant.rs"
+
+[[test]]
+name = "demonitor"
+path = "tests/integration/demonitor.rs"
+
+[[test]]
+name = "ets"
+path = "tests/integration/ets.rs"
+
+[[test]]
+name = "event_bif"
+path = "tests/integration/event_bif.rs"
+
+[[test]]
+name = "exception"
+path = "tests/integration/exception.rs"
+
+[[test]]
+name = "exit_costs"
+path = "tests/integration/exit_costs.rs"
+
+[[test]]
+name = "exit_owned"
+path = "tests/integration/exit_owned.rs"
+
+[[test]]
+name = "exit_signal"
+path = "tests/integration/exit_signal.rs"
+
+[[test]]
+name = "fixture_opcodes"
+path = "tests/integration/fixture_opcodes.rs"
+
+[[test]]
+name = "float_test"
+path = "tests/integration/float_test.rs"
+
+[[test]]
+name = "funs"
+path = "tests/integration/funs.rs"
+
+[[test]]
+name = "getenv"
+path = "tests/integration/getenv.rs"
+
+[[test]]
+name = "group"
+path = "tests/integration/group.rs"
+
+[[test]]
+name = "hibernate"
+path = "tests/integration/hibernate.rs"
+
+[[test]]
+name = "improper"
+path = "tests/integration/improper.rs"
+
+[[test]]
+name = "input_reductions"
+path = "tests/integration/input_reductions.rs"
+
+[[test]]
+name = "integer_to_binary"
+path = "tests/integration/integer_to_binary.rs"
+
+[[test]]
+name = "io_client"
+path = "tests/integration/io_client.rs"
+
+[[test]]
+name = "io_error"
+path = "tests/integration/io_error.rs"
+
+[[test]]
+name = "io_fail_bif"
+path = "tests/integration/io_fail_bif.rs"
+
+[[test]]
+name = "io_path"
+path = "tests/integration/io_path.rs"
+
+[[test]]
+name = "io_start"
+path = "tests/integration/io_start.rs"
+
+[[test]]
+name = "list_reductions"
+path = "tests/integration/list_reductions.rs"
+
+[[test]]
+name = "literal"
+path = "tests/integration/literal.rs"
+
+[[test]]
+name = "logger_start"
+path = "tests/integration/logger_start.rs"
+
+[[test]]
+name = "map"
+path = "tests/integration/map.rs"
+
+[[test]]
+name = "nif_error"
+path = "tests/integration/nif_error.rs"
+
+[[test]]
+name = "order"
+path = "tests/integration/order.rs"
+
+[[test]]
+name = "otp_io"
+path = "tests/integration/otp_io.rs"
+
+[[test]]
+name = "persistent_term"
+path = "tests/integration/persistent_term.rs"
+
+[[test]]
+name = "preempt"
+path = "tests/integration/preempt.rs"
+
+[[test]]
+name = "prim_tty"
+path = "tests/integration/prim_tty.rs"
+
+[[test]]
+name = "process"
+path = "tests/integration/process.rs"
+
+[[test]]
+name = "re"
+path = "tests/integration/re.rs"
+
+[[test]]
+name = "registry"
+path = "tests/integration/registry.rs"
+
+[[test]]
+name = "root_exit"
+path = "tests/integration/root_exit.rs"
+
+[[test]]
+name = "signal"
+path = "tests/integration/signal.rs"
+
+[[test]]
+name = "signal_queue"
+path = "tests/integration/signal_queue.rs"
+
+[[test]]
+name = "statem"
+path = "tests/integration/statem.rs"
+
+[[test]]
+name = "time"
+path = "tests/integration/time.rs"
+
+[[test]]
+name = "timer"
+path = "tests/integration/timer.rs"
+
+[[test]]
+name = "undef"
+path = "tests/integration/undef.rs"
+
+[[test]]
+name = "user_drv"
+path = "tests/integration/user_drv.rs"
