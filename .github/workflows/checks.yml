@@ -16,6 +16,8 @@ jobs:
     timeout-minutes: 15
     env:
       MISE_AUTO_INSTALL: "0"
+      # A restored target/ is useful only when rustc reuses the unchanged codegen units of pbeam-runtime.
+      CARGO_INCREMENTAL: "1"
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
@@ -29,5 +31,31 @@ jobs:
       - name: Install Rust check components
         run: mise run setup
 
+      # Each run saves its own entry. A run restores the newest entry of its branch, else the newest entry of main.
+      # Cargo fingerprints still rebuild each changed crate, so a restored entry cannot hide a compile error.
+      - name: Restore Rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: |
+            target
+            !target/llvm-cov-target/*.profraw
+            !target/llvm-cov-target/*.profdata
+          key: ${{ runner.os }}-target-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-target-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.ref }}-
+            ${{ runner.os }}-target-${{ hashFiles('Cargo.lock', 'mise.toml') }}-refs/heads/main-
+
       - name: Run repository checks
         run: mise run check
+
+      # An exact key hit is a re-run of the same commit, so the build did not change.
+      - name: Save Rust build cache
+        if: ${{ !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: |
+            target
+            !target/llvm-cov-target/*.profraw
+            !target/llvm-cov-target/*.profdata
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
