@@ -41,7 +41,11 @@ fn text(term: &Term) -> String {
 }
 
 /// Run `port_probe:Call` on the pinned ERTS with one scheduler, and on
-/// PBeam, and check that both give `expected` as `~w` text.
+/// PBeam, and check that both give `expected` as `~w` text. The ERTS run
+/// logs nothing: a `port_command/2` with data that is not iodata sends the
+/// report `Bad value on output port` to the logger (io.c:1267-1271), which
+/// PBeam does not write, and the logger prints it before or after the
+/// result.
 ///
 /// # Examples
 ///
@@ -54,6 +58,9 @@ fn assert_runs(call: &str, expected: &str) {
             "+S",
             "1",
             "-noshell",
+            "-kernel",
+            "logger_level",
+            "none",
             "-pa",
             "fixtures/port",
             "-eval",
