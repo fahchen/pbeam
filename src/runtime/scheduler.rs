@@ -8,8 +8,9 @@ use super::{
     host::input::{self, Readiness},
     local_node,
     persistent_term::PersistentTerms,
+    port::Ports,
     process::{
-        Flush, Frame, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer, Start,
+        Flush, Frame, LinkId, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer, Start,
         TargetMonitor, TimerReference, WalkPosition,
     },
     regex_code::RegexCodes,
@@ -224,6 +225,7 @@ impl Scheduler {
         let mut resources = Resources::default();
         resources.put(RegexCodes::default());
         resources.put(Ttys::default());
+        resources.put(Ports::default());
         Scheduler {
             processes: HashMap::new(),
             freed: HashMap::new(),
@@ -437,10 +439,11 @@ impl Scheduler {
     }
 
     /// Wait for at most `timeout`, or without end for `None`, until fd 0
-    /// has input, when fd 0 has a read select. ERTS waits for the select in
-    /// its poll thread (`erl_process.c:3372`), and an idle scheduler sleeps
-    /// in its poll until the next timer end (`erl_process.c:3536-3567`).
-    /// PBeam has one thread, so it waits only when no process can run.
+    /// has input, when fd 0 has a read select, or until a pipe of a port
+    /// has input. ERTS waits for these fds in its poll thread
+    /// (`erl_process.c:3372`), and an idle scheduler sleeps in its poll
+    /// until the next timer end (`erl_process.c:3536-3567`). PBeam has one
+    /// thread, so it waits only when no process can run.
     ///
     /// When fd 0 has input, its end of file, or an error, the select ends,
     /// and its recipient gets `{select, TTY, Reference, ready_input}`
@@ -448,10 +451,12 @@ impl Scheduler {
     /// `erl_check_io.c:699-760`). A message to a process that does not exist
     /// is dropped (`erl_check_io.c:851-856`). When fd 0 is not open, the
     /// select ends without a message, as a select that `erts_poll_control`
-    /// cannot add (`erl_check_io.c:1422-1434`).
+    /// cannot add (`erl_check_io.c:1422-1434`). Each ready pipe of a port
+    /// goes to [`Self::port_ready`]. The pipes of a port are always open, so
+    /// only fd 0 can be not open.
     ///
-    /// Return `false` when fd 0 has no select, and the function does not
-    /// wait.
+    /// Return `false` when fd 0 has no select and no port waits for a pipe,
+    /// and the function does not wait.
     ///
     /// # Examples
     ///
@@ -461,23 +466,32 @@ impl Scheduler {
     /// assert!(!scheduler.wait_input(None));
     /// ```
     pub(super) fn wait_input(&mut self, timeout: Option<Duration>) -> bool {
-        let ttys = self.resources.borrow_mut::<Ttys>();
-        if !ttys.input_selected() {
+        let mut fds = self.resources.borrow_mut::<Ports>().wait_fds();
+        if self.resources.borrow_mut::<Ttys>().input_selected() {
+            fds.insert(0, libc::STDIN_FILENO);
+        }
+        if fds.is_empty() {
             return false;
         }
-        let readiness = input::wait_readable(libc::STDIN_FILENO, timeout);
+        let readiness = input::wait_readable(&fds, timeout);
         if readiness == Readiness::Pending {
             return true;
         }
-        let select = ttys.take_input_select().expect("fd 0 has a select");
-        if readiness == Readiness::Ready {
-            let message = Term::Tuple(vec![
-                Term::static_atom("select"),
-                Term::Reference(select.tty),
-                select.reference,
-                Term::static_atom("ready_input"),
-            ]);
-            self.deliver(select.recipient, message);
+        let ttys = self.resources.borrow_mut::<Ttys>();
+        if ttys.input_selected() && readiness.ended(libc::STDIN_FILENO) {
+            let select = ttys.take_input_select().expect("fd 0 has a select");
+            if readiness != Readiness::Invalid {
+                let message = Term::Tuple(vec![
+                    Term::static_atom("select"),
+                    Term::Reference(select.tty),
+                    select.reference,
+                    Term::static_atom("ready_input"),
+                ]);
+                self.deliver(select.recipient, message);
+            }
+        }
+        for fd in readiness.into_ready() {
+            self.port_ready(fd);
         }
         true
     }
@@ -929,8 +943,10 @@ impl Scheduler {
             None
         };
         if link {
-            self.current_process_mut().links.insert(child.id, 0);
-            child.links.insert(parent, 0);
+            self.current_process_mut()
+                .links
+                .insert(LinkId::Process(child.id), 0);
+            child.links.insert(LinkId::Process(parent), 0);
         }
         let id = child.id;
         self.insert(child);
@@ -967,13 +983,14 @@ impl Scheduler {
         if self.live_process(target).is_none() && !self.current_process_mut().trap_exit {
             return false;
         }
-        if self.current_process_mut().links.insert(target, 0) == Some(0) {
+        let linked = LinkId::Process(target);
+        if self.current_process_mut().links.insert(linked, 0) == Some(0) {
             return true;
         }
         let link = Signal::Link { from: current };
         if self.send_signal(Some(current), target, link).is_err() {
             let exit = Signal::Exit {
-                from: target,
+                from: linked,
                 reason: Term::static_atom("noproc"),
                 linked: true,
                 normal_kills: false,
@@ -1002,16 +1019,17 @@ impl Scheduler {
     /// ```
     pub(super) fn unlink(&mut self, target: ProcessId) {
         let current = self.current_process_mut().id;
-        if self.current_process_mut().links.get(&target) != Some(&0) {
+        let link = LinkId::Process(target);
+        if self.current_process_mut().links.get(&link) != Some(&0) {
             return;
         }
         let id = self.next_unlink_id;
         self.next_unlink_id += 1;
         let unlink = Signal::Unlink { from: current, id };
         if self.send_signal(Some(current), target, unlink).is_ok() {
-            self.current_process_mut().links.insert(target, id);
+            self.current_process_mut().links.insert(link, id);
         } else {
-            self.current_process_mut().links.remove(&target);
+            self.current_process_mut().links.remove(&link);
         }
     }
 
@@ -1023,7 +1041,7 @@ impl Scheduler {
     /// current process. A pid gets a monitor signal through the pending
     /// signal slot (see [`Scheduler::send_monitor`]). A name that no process
     /// has, and each port name, give a monitor down signal `noproc` to the
-    /// current process at once: PBeam has no ports, so the port lookup
+    /// current process at once: PBeam registers no port, so the port lookup
     /// always fails (`bif.c:907-914`). The `DOWN` message gives the pid as
     /// its item, or `{Name, nonode@nohost}` for a name.
     ///
@@ -1216,7 +1234,7 @@ impl Scheduler {
     /// Return the process that has the registered name `name`, as ERTS
     /// `erts_whereis_name_to_id` (`register.c:276-300`) finds it in the
     /// `process_reg` table. Return `None` when no live process has the name.
-    /// PBeam has no ports, so a name never gives a port.
+    /// PBeam registers no port, so a name never gives a port.
     ///
     /// # Examples
     ///
@@ -1429,17 +1447,21 @@ impl Scheduler {
                         if reds <= 0 {
                             return self.switch_out_freed(process, ExitPhase::Links(position));
                         }
-                        if unlinking == 0 {
-                            let exit = Signal::Exit {
-                                from: id,
-                                reason: reason.clone(),
-                                linked: true,
-                                normal_kills: false,
-                                alias: None,
-                            };
-                            // A linked process that does not exist drops the
-                            // signal.
-                            let _ = self.send_signal(Some(id), linked, exit);
+                        match linked {
+                            LinkId::Process(linked) if unlinking == 0 => {
+                                let exit = Signal::Exit {
+                                    from: LinkId::Process(id),
+                                    reason: reason.clone(),
+                                    linked: true,
+                                    normal_kills: false,
+                                    alias: None,
+                                };
+                                // A linked process that does not exist drops
+                                // the signal.
+                                let _ = self.send_signal(Some(id), linked, exit);
+                            }
+                            LinkId::Process(_) => {}
+                            LinkId::Port(port) => self.port_link_exit(port, id),
                         }
                         reds -= 1;
                     }
@@ -1523,6 +1545,7 @@ fn named_item(name: &Atom) -> Term {
     Term::Tuple(vec![Term::Atom(name.clone()), local_node()])
 }
 
+mod ports;
 mod signals;
 
 pub(super) use signals::{Flushed, HandlingPoint, Received};

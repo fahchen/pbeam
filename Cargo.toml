@@ -48,6 +48,10 @@ path = "tests/feature/log.rs"
 name = "run_end"
 path = "tests/feature/run_end.rs"
 
+[[test]]
+name = "stty"
+path = "tests/feature/stty.rs"
+
 # Integration tests drive the library API with compiled fixtures.
 [[test]]
 name = "alias"
@@ -212,6 +216,14 @@ path = "tests/integration/otp_io.rs"
 [[test]]
 name = "persistent_term"
 path = "tests/integration/persistent_term.rs"
+
+[[test]]
+name = "port"
+path = "tests/integration/port.rs"
+
+[[test]]
+name = "port_fd_limit"
+path = "tests/integration/port_fd_limit.rs"
 
 [[test]]
 name = "preempt"

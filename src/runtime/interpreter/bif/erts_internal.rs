@@ -3,7 +3,17 @@
 use super::BifResult::Value;
 use super::erlang::signals_return;
 use super::*;
-use crate::runtime::signal::Signal;
+use crate::runtime::{
+    host::{
+        errno::errno_id,
+        filename_encoding,
+        spawn::{self, SpawnError, Streams},
+    },
+    port::Ports,
+    signal::Signal,
+    unicode::native_filename,
+};
+use crate::term::PortId;
 
 /// Run `erts_internal:group_leader(Leader, Target)`, which
 /// `erlang:group_leader/2` in `erlang.beam` calls, as
@@ -142,4 +152,451 @@ pub(super) fn is_process_alive(
     ]);
     scheduler.deliver(caller, reply);
     signals_return(scheduler, pid, Term::static_atom("ok"))
+}
+
+/// The reductions of a port operation that ERTS runs at once: the output
+/// of `port_command/2`, the exit of `port_close/1`, and the info of
+/// `port_info/1`, each `CONTEXT_REDS/100` (`erl_port.h:369-370`, `380`;
+/// `io.c:2071`, `2282`, `4906`).
+const PORT_REDUCTIONS: i32 = 40;
+
+/// The tuple options of `open_port/2` that ERTS accepts and PBeam does not
+/// support (`erl_bif_port.c:849-976`).
+const UNSUPPORTED_TUPLE_OPTIONS: [&str; 8] = [
+    "packet",
+    "line",
+    "env",
+    "arg0",
+    "cd",
+    "parallelism",
+    "busy_limits_port",
+    "busy_limits_msgq",
+];
+
+/// The atom options of `open_port/2` that ERTS accepts and PBeam does not
+/// support (`erl_bif_port.c:979-1009`).
+const UNSUPPORTED_ATOM_OPTIONS: [&str; 7] = [
+    "stream",
+    "line",
+    "in",
+    "out",
+    "eof",
+    "hide",
+    "overlapped_io",
+];
+
+/// The options of `open_port/2` that PBeam supports, as the fields of the
+/// ERTS `SysDriverOpts` and the port flags that `open_port` sets
+/// (`erl_bif_port.c:812-834`).
+#[derive(Debug)]
+struct PortSettings {
+    /// `use_stdio` (the default) or `nouse_stdio`, and `stderr_to_stdout`.
+    streams: Streams,
+    /// `binary`: the data of a message is a binary.
+    binary: bool,
+    /// `exit_status`.
+    exit_status: bool,
+    /// The native bytes of the strings of `{args, Args}`, or no bytes
+    /// without it.
+    args: Vec<Vec<u8>>,
+}
+
+/// Run `erts_internal:open_port(PortName, PortSettings)`, which
+/// `erlang:open_port/2` calls, as `erts_internal_open_port_2` and
+/// `open_port` do (`erl_bif_port.c:60-130`, `795-1171`) for
+/// `{spawn_executable, Name}`:
+///
+/// 1. Read the settings in order (see [`port_settings`]). A list that is
+///    not proper, an element that ERTS does not accept, and
+///    `stderr_to_stdout` with `nouse_stdio` give the atom `badopt`.
+/// 2. Read the name. A term that is not `{spawn_executable, Name}`, or a
+///    `Name` that is not a file name (see [`native_name`]), gives the atom
+///    `badarg`.
+/// 3. Start the program (see [`spawn::spawn`]). A pipe, the fd limit, and
+///    the access check give the `erl_errno_id` atom of their failure, for
+///    example `enoent`.
+/// 4. Open the port, owned by and linked to the caller, and return a new
+///    reference. The caller gets `{Reference, Port}`, as the init ack of a
+///    driver with `ERL_DRV_FLAG_USE_INIT_ACK` sends it
+///    (`sys_drivers.c:251`, `1332`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = open_port(&mut context, &name, &settings)?;
+/// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
+/// ```
+///
+/// # Errors
+///
+/// An option that ERTS accepts and PBeam does not support, the port kinds
+/// `spawn`, `spawn_driver`, and `fd`, a port without `binary`, and a failed
+/// `posix_spawn` return a runtime error.
+pub(super) fn open_port(
+    context: &mut BifContext<'_>,
+    name: &Term,
+    settings: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(settings) = port_settings(settings)? else {
+        return Ok(Value(Term::static_atom("badopt")));
+    };
+    let Some(path) = spawn_executable(name)? else {
+        return Ok(Value(Term::static_atom("badarg")));
+    };
+    if !settings.binary {
+        return Err(error(
+            "unsupported open_port/2 without the binary option: see \"Ports\" in docs/erts-differences.md",
+        ));
+    }
+    let scheduler = &mut *context.scheduler;
+    let child = match spawn::spawn(&path, &settings.args, settings.streams) {
+        Ok(child) => child,
+        Err(SpawnError::Open(errno)) => {
+            return Ok(Value(Term::Atom(scheduler.atoms.put(&errno_id(errno))?)));
+        }
+        Err(SpawnError::Start(errno)) => {
+            return Err(error(format!(
+                "unsupported open_port/2 of a program that posix_spawn does not start: {}: see \"Ports\" in docs/erts-differences.md",
+                errno_id(errno)
+            )));
+        }
+    };
+    let port = scheduler.open_port(path, settings.exit_status, child)?;
+    let reference = scheduler.make_ref()?;
+    let caller = scheduler.current_process_mut().id;
+    let ack = Term::Tuple(vec![Term::Reference(reference), Term::Port(port)]);
+    scheduler.deliver(caller, ack);
+    Ok(Value(Term::Reference(reference)))
+}
+
+/// Read the settings of `open_port/2` in order, as `open_port` does
+/// (`erl_bif_port.c:834-1022`). Return `None` for the `badopt` of ERTS: a
+/// term that is not a proper list, an element that is not an option of
+/// ERTS, an `{args, Args}` whose `Args` is not a proper list of file names
+/// (`convert_args`, `erl_bif_port.c:1214-1246`), and `stderr_to_stdout`
+/// with `nouse_stdio`. A later option replaces an earlier one.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let settings = port_settings(&list)?.unwrap();
+/// assert!(settings.binary);
+/// assert!(port_settings(&Term::static_atom("foo"))?.is_none());
+/// ```
+///
+/// # Errors
+///
+/// An option that ERTS accepts and PBeam does not support returns a runtime
+/// error, also when a later element is not valid.
+fn port_settings(settings: &Term) -> Result<Option<PortSettings>, BeamError> {
+    let Some((elements, None)) = list_cells(settings) else {
+        return Ok(None);
+    };
+    let mut result = PortSettings {
+        streams: Streams {
+            use_stdio: true,
+            stderr_to_stdout: false,
+        },
+        binary: false,
+        exit_status: false,
+        args: Vec::new(),
+    };
+    for element in elements {
+        let option = match element {
+            Term::Tuple(pair) if pair.len() == 2 => {
+                let Term::Atom(option) = &pair[0] else {
+                    return Ok(None);
+                };
+                match option.name() {
+                    "args" => {
+                        let Some(args) = port_args(&pair[1]) else {
+                            return Ok(None);
+                        };
+                        result.args = args;
+                        continue;
+                    }
+                    name if UNSUPPORTED_TUPLE_OPTIONS.contains(&name) => option,
+                    _ => return Ok(None),
+                }
+            }
+            Term::Atom(option) => {
+                match option.name() {
+                    "use_stdio" => result.streams.use_stdio = true,
+                    "nouse_stdio" => result.streams.use_stdio = false,
+                    "stderr_to_stdout" => result.streams.stderr_to_stdout = true,
+                    "binary" => result.binary = true,
+                    "exit_status" => result.exit_status = true,
+                    name if UNSUPPORTED_ATOM_OPTIONS.contains(&name) => {
+                        return Err(unsupported_option(name));
+                    }
+                    _ => return Ok(None),
+                }
+                continue;
+            }
+            _ => return Ok(None),
+        };
+        return Err(unsupported_option(option.name()));
+    }
+    if result.streams.stderr_to_stdout && !result.streams.use_stdio {
+        return Ok(None);
+    }
+    Ok(Some(result))
+}
+
+/// Return the runtime error of an option of `open_port/2` that ERTS accepts
+/// and PBeam does not support.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(unsupported_option("line").to_string().starts_with("unsupported open_port/2 option line"));
+/// ```
+fn unsupported_option(name: &str) -> BeamError {
+    error(format!(
+        "unsupported open_port/2 option {name}: see \"Ports\" in docs/erts-differences.md"
+    ))
+}
+
+/// Return the native bytes of each file name of the proper list `args`, as
+/// `convert_args` does (`erl_bif_port.c:1214-1246`), or `None` when `args`
+/// is not a proper list or an element is not a file name (see
+/// [`native_name`]). `[]` is an empty name here.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let args = Term::List(vec![Term::Binary(b"-c".to_vec()), Term::List(vec![])]);
+/// assert_eq!(port_args(&args), Some(vec![b"-c".to_vec(), Vec::new()]));
+/// ```
+fn port_args(args: &Term) -> Option<Vec<Vec<u8>>> {
+    let (elements, None) = list_cells(args)? else {
+        return None;
+    };
+    elements.iter().map(|arg| native_name(arg, true)).collect()
+}
+
+/// Return the native bytes of the program of `{spawn_executable, Name}`,
+/// or `None` for the `badarg` of ERTS: a term that is not a tuple with a
+/// first element that ERTS accepts, a tuple of another size, and a name
+/// that is not a file name without `[]` (`erl_bif_port.c:1033-1067`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let name = Term::Tuple(vec![Term::static_atom("spawn_executable"), Term::Binary(b"/bin/sh".to_vec())]);
+/// assert_eq!(spawn_executable(&name)?, Some(b"/bin/sh".to_vec()));
+/// ```
+///
+/// # Errors
+///
+/// The port kinds `spawn`, `spawn_driver`, and `fd` return a runtime error.
+fn spawn_executable(name: &Term) -> Result<Option<Vec<u8>>, BeamError> {
+    let Term::Tuple(elements) = name else {
+        return Ok(None);
+    };
+    match elements.as_slice() {
+        [Term::Atom(kind), name] if kind.name() == "spawn_executable" => {
+            Ok(native_name(name, false))
+        }
+        [Term::Atom(kind), ..] if matches!(kind.name(), "spawn" | "spawn_driver" | "fd") => {
+            Err(error(format!(
+                "unsupported open_port/2 port kind {}: see \"Ports\" in docs/erts-differences.md",
+                kind.name()
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Return the native bytes of a file name, as
+/// `erts_convert_filename_to_encoding` with `allow_atom` does
+/// (`erl_unicode.c:2057-2119`): a binary gives its bytes, an atom gives the
+/// bytes of its characters, and a list gives the bytes of
+/// [`native_filename`]. `[]` is a name only with `allow_empty`. Return
+/// `None` for each other term.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(native_name(&Term::static_atom("ok"), false), Some(b"ok".to_vec()));
+/// assert_eq!(native_name(&Term::List(vec![]), false), None);
+/// assert_eq!(native_name(&Term::List(vec![]), true), Some(Vec::new()));
+/// ```
+fn native_name(name: &Term, allow_empty: bool) -> Option<Vec<u8>> {
+    let characters;
+    let name = match name {
+        Term::Binary(bytes) => return Some(bytes.clone()),
+        Term::Atom(atom) => {
+            let text = atom.name().chars();
+            characters = Term::List(text.map(|c| Term::Integer(u32::from(c).into())).collect());
+            &characters
+        }
+        Term::List(elements) if elements.is_empty() && !allow_empty => return None,
+        name => name,
+    };
+    native_filename(name, filename_encoding())
+}
+
+/// Return the open port of `port`, as `sig_lookup_port` finds it
+/// (`erl_bif_port.c:133-147`), or `None` for a term that is not a port of
+/// an open port. An atom names no port, because PBeam registers no port.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(open_port_id(scheduler, &Term::Port(port)), Some(port));
+/// assert_eq!(open_port_id(scheduler, &Term::static_atom("foo")), None);
+/// ```
+fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
+    let Term::Port(id) = port else {
+        return None;
+    };
+    scheduler
+        .resources
+        .borrow_mut::<Ports>()
+        .get(*id)
+        .map(|_| *id)
+}
+
+/// Run `erts_internal:port_command(Port, Data, OptionList)`, which
+/// `erlang:port_command/2` calls with `[]`, as
+/// `erts_internal_port_command_3` and `erts_port_output` do
+/// (`erl_bif_port.c:168-261`, `io.c:1715-2088`): write the bytes of the
+/// iodata `Data` to the input of the program of `Port`, add them to the
+/// output count, use 40 reductions, and return `true`. A failed write
+/// closes the port with the `erl_errno_id` atom of the failure as its
+/// reason, for example `epipe`, as `driver_failure_posix` does
+/// (`sys_drivers.c:1180-1184`). A term that is not an open port, or `Data`
+/// that is not iodata, gives the atom `badarg`. The result traps to
+/// `erlang:bif_handle_signals_return/2` when the caller has incoming
+/// signals.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = port_command(&mut context, &Term::Port(port), &Term::Binary(b"hi".to_vec()), &Term::List(vec![]))?;
+/// ```
+///
+/// # Errors
+///
+/// An `OptionList` other than `[]` returns a runtime error.
+pub(super) fn port_command(
+    context: &mut BifContext<'_>,
+    port: &Term,
+    data: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    if *options != Term::List(vec![]) {
+        return Err(error(
+            "unsupported erlang:port_command/3 options: see \"Ports\" in docs/erts-differences.md",
+        ));
+    }
+    let scheduler = &mut *context.scheduler;
+    let (Some(id), Some(bytes)) = (open_port_id(scheduler, port), iolist::iodata_bytes(data))
+    else {
+        return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
+    };
+    scheduler
+        .current_process_mut()
+        .bump_reductions(PORT_REDUCTIONS);
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    let port_state = ports.get_mut(id).expect("the port is open");
+    match port_state.child.write_input(&bytes) {
+        Ok(()) => port_state.output += bytes.len() as u64,
+        Err(errno) => {
+            let reason = Term::Atom(scheduler.atoms.put(&errno_id(errno))?);
+            scheduler.close_port(id, reason);
+        }
+    }
+    Ok(signals_return(scheduler, port, Term::static_atom("true")))
+}
+
+/// Run `erts_internal:port_close(Port)`, which `erlang:port_close/1` calls,
+/// as `erts_internal_port_close_1` and `erts_port_exit` do
+/// (`erl_bif_port.c:384-432`, `io.c:2241-2300`): close the port with the
+/// reason `normal` from any process, use 40 reductions, and return `true`.
+/// The owner then gets the link exit signal `normal` of the port. A term
+/// that is not an open port gives the atom `badarg`. The result traps to
+/// `erlang:bif_handle_signals_return/2` when the caller has incoming
+/// signals, as the `EXIT` signal of the port to its owner.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = port_close(&mut context, &Term::Port(port));
+/// ```
+pub(super) fn port_close(context: &mut BifContext<'_>, port: &Term) -> BifResult {
+    let scheduler = &mut *context.scheduler;
+    let Some(id) = open_port_id(scheduler, port) else {
+        return signals_return(scheduler, port, Term::static_atom("badarg"));
+    };
+    scheduler
+        .current_process_mut()
+        .bump_reductions(PORT_REDUCTIONS);
+    scheduler.close_port(id, Term::static_atom("normal"));
+    signals_return(scheduler, port, Term::static_atom("true"))
+}
+
+/// Run `erts_internal:port_info(Port)`, which `erlang:port_info/1` calls, as
+/// `erts_internal_port_info_1` and `erts_port_info` do
+/// (`erl_bif_port.c:486-535`, `erl_bif_info.c:3654-3830`): for an open
+/// port, use 40 reductions and return `[{name, Name}, {links, Links},
+/// {id, Number}, {connected, Owner}, {input, Bytes}, {output, Bytes},
+/// {os_pid, OsPid}]` (`ERTS_PORT_INFO_1_ITEMS`, `erl_port.h:100-108`). The
+/// name is the list of the bytes of the program path, `links` holds the
+/// owner, and `id` is the port number. A port
+/// that closed and an atom give `undefined`; each other term gives the atom
+/// `badarg`. The result traps to `erlang:bif_handle_signals_return/2` when
+/// the caller has incoming signals.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = port_info(&mut context, &Term::Port(port));
+/// ```
+pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> BifResult {
+    let scheduler = &mut *context.scheduler;
+    let info = match (port, open_port_id(scheduler, port)) {
+        (_, Some(id)) => {
+            scheduler
+                .current_process_mut()
+                .bump_reductions(PORT_REDUCTIONS);
+            let port = scheduler
+                .resources
+                .borrow_mut::<Ports>()
+                .get(id)
+                .expect("the port is open");
+            let item = |name, value| Term::Tuple(vec![Term::static_atom(name), value]);
+            let links = vec![Term::Pid(port.owner)];
+            Term::List(vec![
+                item(
+                    "name",
+                    Term::List(
+                        port.name
+                            .iter()
+                            .map(|&byte| Term::Integer(byte.into()))
+                            .collect(),
+                    ),
+                ),
+                item("links", Term::List(links)),
+                item(
+                    "id",
+                    Term::Integer(id.0.try_into().expect("a port number below 2^63")),
+                ),
+                item("connected", Term::Pid(port.owner)),
+                item(
+                    "input",
+                    Term::Integer(port.input.try_into().expect("an input count below 2^63")),
+                ),
+                item(
+                    "output",
+                    Term::Integer(port.output.try_into().expect("an output count below 2^63")),
+                ),
+                item("os_pid", Term::Integer(port.child.os_pid.into())),
+            ])
+        }
+        (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
+        (_, None) => Term::static_atom("badarg"),
+    };
+    signals_return(scheduler, port, info)
 }

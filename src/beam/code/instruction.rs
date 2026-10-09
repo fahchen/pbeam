@@ -1094,6 +1094,11 @@ pub(crate) enum Instruction {
 pub(crate) enum TestKind {
     Atom,
     Pid,
+    /// `is_port`, opcode 51. Example: `[0x33, 0x55, 0x03]` fails to label 5
+    /// unless `x0` is a port. Erlang: `Port when erlang:is_port(Port) ->
+    /// Port;` in `erlang:open_port/2` (erlang.erl:7990) compiles to
+    /// `{test,is_port,{f,5},[{x,0}]}`.
+    Port,
     /// `is_reference`, opcode 50. Example: `[0x32, 0x35, 0x13]` fails to label 3
     /// unless `x1` is a reference. Erlang: `when is_reference(R)` in
     /// `fixtures/io_client/io_client_probe.erl`.
@@ -1629,6 +1634,7 @@ pub(super) fn parse_code(
             ),
             OPCODE_TEST_IS_ATOM
             | OPCODE_TEST_IS_PID
+            | OPCODE_TEST_IS_PORT
             | OPCODE_TEST_IS_REFERENCE
             | OPCODE_TEST_IS_TUPLE
             | OPCODE_TEST_IS_LIST
@@ -1834,6 +1840,7 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
     match opcode {
         OPCODE_TEST_IS_ATOM => Ok(TestKind::Atom),
         OPCODE_TEST_IS_PID => Ok(TestKind::Pid),
+        OPCODE_TEST_IS_PORT => Ok(TestKind::Port),
         OPCODE_TEST_IS_REFERENCE => Ok(TestKind::Reference),
         OPCODE_TEST_IS_TUPLE => Ok(TestKind::Tuple),
         OPCODE_TEST_IS_LIST => Ok(TestKind::List),
@@ -2098,8 +2105,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_TEST_IS_LIST
         | OPCODE_TEST_IS_MAP
         | OPCODE_TEST_IS_BITSTR => Some(2),
-        // `is_port Fail Src` is in `erlang:is_port/1` and `erlang:open_port/2`.
-        OPCODE_TEST_IS_PORT => Some(2),
         // `try_case_end Src` is in `erlang:processes_next/1`.
         OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_TRY_CASE_END => Some(1),
         OPCODE_PUT_MAP_ASSOC => Some(5),

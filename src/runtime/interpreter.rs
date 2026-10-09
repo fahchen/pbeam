@@ -651,6 +651,7 @@ impl BeamProgram {
                     let passed = match kind {
                         TestKind::Atom => matches!(value, Term::Atom(_)),
                         TestKind::Pid => matches!(value, Term::Pid(_)),
+                        TestKind::Port => matches!(value, Term::Port(_)),
                         TestKind::Reference => matches!(value, Term::Reference(_)),
                         TestKind::Tuple => matches!(value, Term::Tuple(_)),
                         // `is_list` and `is_nonempty_list` test the cons tag, so an
@@ -1059,7 +1060,7 @@ impl BeamProgram {
                     }
                     let to = read(process, &Operand::X(0))?;
                     let message = read(process, &Operand::X(1))?;
-                    let result = send(scheduler, &to, message);
+                    let result = send(scheduler, &to, message)?;
                     if let Some(outcome) =
                         self.finish_bif(scheduler.current_process_mut(), result, false)?
                     {

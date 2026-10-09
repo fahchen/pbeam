@@ -4,6 +4,7 @@ mod interpreter;
 mod mailbox;
 mod pcre2;
 mod persistent_term;
+mod port;
 mod process;
 mod regex_code;
 mod resources;

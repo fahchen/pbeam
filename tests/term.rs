@@ -1,5 +1,6 @@
 use super::{
-    AtomTable, Fun, Lambda, Map, MatchContext, ProcessId, Reference, Term, test_atom as atom,
+    AtomTable, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
+    test_atom as atom,
 };
 
 fn map(pairs: Vec<(Term, Term)>) -> Term {
@@ -253,4 +254,13 @@ fn keeps_the_creation_order_and_the_pid_reference_marker() {
     assert!(Reference(0) < alias && alias < Reference(2));
     assert_eq!(Reference::ordinary(1), Some(Reference(1)));
     assert_eq!(Reference::ordinary(alias.0), None);
+}
+
+#[test]
+fn clones_compares_and_formats_ports() {
+    let port = Term::Tuple(vec![Term::Port(PortId(5))]);
+    assert_eq!(port.clone(), port);
+    assert_ne!(Term::Port(PortId(5)), Term::Port(PortId(6)));
+    assert_ne!(Term::Port(PortId(5)), Term::Pid(ProcessId(5)));
+    assert_eq!(format!("{port:?}"), "Tuple([Port(PortId(5))])");
 }
