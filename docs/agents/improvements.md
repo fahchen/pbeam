@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261009: Trace ERTS policy claims to source behavior
+
+**Problem:** Documentation attributed an observed fallback to terminal support, but ERTS applies a file-descriptor policy before it calls the platform polling operation.
+
+**Root Cause:** The explanation inferred platform behavior from the result instead of checking the pinned OTP source and the complete dispatch path.
+
+**Fix:** State the ERTS policy that causes the fallback and cite the pinned source that implements it.
+
+**Guardrail:** Before documenting an ERTS explanation, inspect the pinned OTP source and verify each claimed policy step against the active path.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/332#issuecomment-6089418666>
+
 ## 20261006: Verify OTP hardware assumptions against source behavior
 
 **Problem:** The clock documentation and test rationale assumed that ERTS returns the host TSC frequency when RDTSCP is available.
