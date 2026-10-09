@@ -36,6 +36,16 @@ for versions and verification limits. There is no PBeam build command yet.
 
 The Rust build compiles the PCRE2 10.47 sources of OTP 29.1.1 in `vendor/pcre2` with the host C compiler, under the licence in [vendor/pcre2/LICENCE](vendor/pcre2/LICENCE).
 
+## Examples
+
+Each directory in [examples](examples) holds one example program. From the repository root, this command builds the Hello World example and runs it with the `pbeam` binary. It prints `Hello, world!` and exits with status 0:
+
+```sh
+mise run example hello_world
+```
+
+Add `--erts` to run the same entry on the pinned ERTS with `erl -noshell`. Run `mise run example --help` to print the arguments. The task compiles the Elixir sources `examples/<name>/*.ex` and the boot module `examples/hello_world/pbeam_boot.erl` into `target/examples/<name>/`. It then runs `main/0` of the module whose name is the camel-case name of the directory, for example `HelloWorld` for `hello_world`. The `pbeam` binary loads the example modules, the pinned Elixir modules that the example modules call directly, the 41 pinned OTP modules of the boot, and `pbeam_boot`. The variable `PBEAM_BIN` selects the `pbeam` binary. Without it, the task uses `cargo run`. The [Hello World example](examples/hello_world/README.md) shows the commands that the task runs.
+
 ## Checks
 
 After installing the mise tools, install the Rust checking components and run:

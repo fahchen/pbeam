@@ -20,6 +20,7 @@ run = [
   "actionlint",
   "shellcheck scripts/*.sh",
   "cd fixtures/hello && mix format --check-formatted && mix compile --warnings-as-errors",
+  "mix format --check-formatted 'examples/*/*.ex'",
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
 ]
@@ -93,6 +94,15 @@ arg "<start>" help="The first line"
 arg "<end>" help="The last line"
 '''
 run = 'bash scripts/otp_src.sh "$usage_path" "$usage_start" "$usage_end"'
+
+[tasks.example]
+description = "Build an example of examples/ and run it on the pbeam binary, or on the pinned ERTS with --erts"
+quiet = true
+usage = '''
+flag "--erts" help="Run the example with erl -noshell on the pinned ERTS"
+arg "<name>" help="The directory of the example in examples/, such as hello_world"
+'''
+run = 'bash scripts/example.sh "$usage_name" ${usage_erts:+--erts}'
 
 [tasks.issue]
 description = "Print the title, labels, milestone, and named body sections of an issue"
