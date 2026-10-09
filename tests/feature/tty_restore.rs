@@ -26,6 +26,12 @@ const TTY_RESTORE_PROBE: &str = "fixtures/tty_restore/tty_restore_probe.beam";
 /// types its line.
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
 
+/// The `stty` arguments that set raw mode, with `ICANON` off.
+const RAW: &[&str] = &["raw", "-echo"];
+
+/// The `stty` arguments that set raw mode, but keep `ICANON` on.
+const RAW_CANONICAL: &[&str] = &["raw", "-echo", "icanon"];
+
 /// The paths of the pinned `BOOT_MODULES`. Each `pinned_beam_path` call
 /// starts `erl`, so the tests of this crate find the paths only once.
 static BOOT_PATHS: LazyLock<[PathBuf; BOOT_MODULES.len()]> =
@@ -51,19 +57,20 @@ struct Modes {
 fn sets_fd_0_to_its_first_mode_at_the_run_end_as_pinned_erts() {
     // Stdin, stdout, and stderr are one pseudo-terminal. Each function of
     // `tty_restore_probe` waits in `io:get_line/2` for a line. While it
-    // waits, the test sets the terminal to raw mode with `stty raw -echo`
-    // and types the line. Then `main/0` returns, `halt/0` calls
+    // waits, the test sets the terminal to raw mode with `ICANON` on and
+    // types the line. Then `main/0` returns, `halt/0` calls
     // `erlang:halt/0`, and `crash/0` exits with the reason `boom`. At the
     // emulator exit, ERTS sets fd 0 to its mode at the emulator start
     // (`sys_tty_reset`, sys.c:182-190; erl_child_setup.c:563-576). PBeam
     // does the same at the end of the run, also when `erlang:halt/2` or a
     // runtime error ends the run (see "Run end" in
-    // docs/erts-differences.md). The reader of `prim_tty` has a read select
-    // of fd 0 at the end. On macOS, the kernel check of that select clears
-    // `PENDIN`, which the change back to `ICANON` sets.
+    // docs/erts-differences.md). `ICANON` stays on, so that the reset does
+    // not set `PENDIN` on macOS, which the ERTS poll thread clears only
+    // when it runs before the emulator exit (see
+    // `clears_pendin_after_the_reset_turns_icanon_on`).
     for (function, status) in [("main", 0), ("halt", 0), ("crash", 1)] {
         for (name, command) in [("ERTS", erts(function)), ("PBeam", pbeam(function))] {
-            let modes = run_in_terminal(command, true);
+            let modes = run_in_terminal(command, RAW_CANONICAL, true);
             assert_ne!(modes.raw, modes.first, "{name} {function}: {modes:?}");
             assert_eq!(
                 (modes.last.as_str(), modes.status),
@@ -76,12 +83,37 @@ fn sets_fd_0_to_its_first_mode_at_the_run_end_as_pinned_erts() {
 }
 
 #[test]
+fn clears_pendin_after_the_reset_turns_icanon_on() {
+    // As in `sets_fd_0_to_its_first_mode_at_the_run_end_as_pinned_erts`,
+    // but the raw mode has `ICANON` off. On macOS, the reset at the run
+    // end then sets `PENDIN`, and the next `select` of fd 0 clears it (XNU
+    // `bsd/kern/tty.c`: `ttioctl_locked`, `ttyselect`, `ttnread`). ERTS
+    // keeps fd 0 in the `select` set of its poll thread, and the emulator
+    // exits at once after the reset (erl_init.c:2730-2742). Thus `PENDIN`
+    // stays on ERTS when the poll thread does not run between the reset
+    // and the exit, which depends on the load of the host. PBeam gives the
+    // end state of the ERTS run in which the poll thread runs first (see
+    // "Terminal mode at exit" in docs/erts-differences.md). Linux does not
+    // use `PENDIN`.
+    for (function, status) in [("main", 0), ("halt", 0), ("crash", 1)] {
+        let modes = run_in_terminal(pbeam(function), RAW, true);
+        assert_ne!(modes.raw, modes.first, "{function}: {modes:?}");
+        assert_eq!(
+            (modes.last.as_str(), modes.status),
+            (modes.first.as_str(), Some(status)),
+            "{function}: {:?}",
+            modes.output
+        );
+    }
+}
+
+#[test]
 fn keeps_the_mode_of_fd_0_when_stdout_is_not_a_terminal() {
     // Stdin is a pseudo-terminal, and stdout and stderr are a pipe. ERTS
     // sets fd 0 to its first mode only when fds 0 and 1 are terminals
     // (sys.c:187, erl_child_setup.c:565, 574), so the raw mode stays.
     for (name, command) in [("ERTS", erts("main")), ("PBeam", pbeam("main"))] {
-        let modes = run_in_terminal(command, false);
+        let modes = run_in_terminal(command, RAW, false);
         assert_ne!(modes.raw, modes.first, "{name}: {modes:?}");
         assert_eq!(
             (modes.last.as_str(), modes.status),
@@ -142,7 +174,8 @@ fn pbeam(function: &str) -> Command {
 /// Run `command` with `TERM=dumb` and `LC_ALL=C.UTF-8`, and with a new
 /// pseudo-terminal as its stdin. Its stdout and stderr are the terminal
 /// when `terminal_output` is `true`, or else one pipe. When the output has
-/// the prompt "ready> ", set the terminal to raw mode and type "go\n".
+/// the prompt "ready> ", set the terminal mode with `stty` and
+/// `raw_mode`, and type "go\n".
 /// Return the modes before the run, after the change to raw mode, and after
 /// the run, with the exit status. Panic when the prompt or the exit does
 /// not come in `RUN_TIME_LIMIT`.
@@ -150,10 +183,10 @@ fn pbeam(function: &str) -> Command {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let modes = run_in_terminal(erts("main"), true);
+/// let modes = run_in_terminal(erts("main"), RAW, true);
 /// assert_eq!(modes.last, modes.first);
 /// ```
-fn run_in_terminal(mut command: Command, terminal_output: bool) -> Modes {
+fn run_in_terminal(mut command: Command, raw_mode: &[&str], terminal_output: bool) -> Modes {
     let (master, slave) = open_terminal();
     let first = stty(&slave, &["-g"]);
     let (output_reader, output_writer) = if terminal_output {
@@ -203,7 +236,7 @@ fn run_in_terminal(mut command: Command, terminal_output: bool) -> Modes {
         }
         thread::sleep(Duration::from_millis(10));
     }
-    stty(&slave, &["raw", "-echo"]);
+    stty(&slave, raw_mode);
     let raw = stty(&slave, &["-g"]);
     // The master stays open until the end of the run. Its close would hang
     // up the terminal.
