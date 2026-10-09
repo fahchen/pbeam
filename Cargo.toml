@@ -52,6 +52,10 @@ path = "tests/feature/log.rs"
 name = "run_end"
 path = "tests/feature/run_end.rs"
 
+[[test]]
+name = "tty_restore"
+path = "tests/feature/tty_restore.rs"
+
 # Integration tests drive the library API with compiled fixtures.
 [[test]]
 name = "alias"

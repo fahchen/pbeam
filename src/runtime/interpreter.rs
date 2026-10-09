@@ -2,6 +2,7 @@ use super::{
     host::output::IovecWrite,
     process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::{Received, Scheduler, Turn},
+    tty::{InitialMode, Ttys},
 };
 use crate::{
     beam::{
@@ -158,7 +159,10 @@ impl BeamProgram {
     /// `root process exited with {badarg,[]}`. A root process that
     /// waits when no process can run, no timer is active, fd 0 has no read
     /// select, and no dirty IO call runs gives an error. The run does not
-    /// wait for a dirty IO call that runs when it ends.
+    /// wait for a dirty IO call that runs when it ends. At the end of the
+    /// run, also after an error, fd 0 gets its mode at the start of the run
+    /// again when fds 0 and 1 are terminals, as at the exit of the ERTS
+    /// emulator (see `InitialMode::reset`).
     ///
     /// # Examples
     ///
@@ -171,17 +175,55 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
     ) -> Result<Term, BeamError> {
+        let initial_mode = InitialMode::read();
+        let mut scheduler = Scheduler::new(self.atoms.clone());
+        let run = self.run_root(&mut scheduler, module, function, arguments);
+        initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
+        run?;
+        match scheduler.into_root_result() {
+            Some(Ok(result)) => Ok(result),
+            Some(Err(reason)) => {
+                // `erlang:halt/1` writes each byte of the `%T` text as one code
+                // point (`bif.c:4372-4387`), so the text is valid UTF-8.
+                let text: String = print_term(&reason).into_iter().map(char::from).collect();
+                Err(error(format!("root process exited with {text}")))
+            }
+            None => Err(error("root process waits for a message that cannot arrive")),
+        }
+    }
+
+    /// Run `Module:Function(Arguments...)` as the root process on
+    /// `scheduler` until the run ends, as `BeamProgram::execute` describes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut scheduler = Scheduler::new(program.atoms.clone());
+    /// program.run_root(&mut scheduler, "process_probe", "main", &[])?;
+    /// assert!(scheduler.into_root_result().is_some());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of `BeamProgram::execute`, except the root process
+    /// results.
+    fn run_root(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        function: &str,
+        arguments: &[Term],
+    ) -> Result<(), BeamError> {
         let arity =
             u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
         let label = self.entry_label(module, function, arity)?;
-        let mut scheduler = Scheduler::new(self.atoms.clone());
         scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
         while !scheduler.root_exited() {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
             scheduler.complete_dirty_writes();
             match scheduler.schedule_next()? {
-                Turn::Run => match self.run(&mut scheduler)? {
+                Turn::Run => match self.run(scheduler)? {
                     Outcome::Wait => scheduler.park_current(),
                     Outcome::Hibernate => scheduler.hibernate_current(),
                     Outcome::Yield => scheduler.yield_current(),
@@ -200,16 +242,7 @@ impl BeamProgram {
                 }
             }
         }
-        match scheduler.into_root_result() {
-            Some(Ok(result)) => Ok(result),
-            Some(Err(reason)) => {
-                // `erlang:halt/1` writes each byte of the `%T` text as one code
-                // point (`bif.c:4372-4387`), so the text is valid UTF-8.
-                let text: String = print_term(&reason).into_iter().map(char::from).collect();
-                Err(error(format!("root process exited with {text}")))
-            }
-            None => Err(error("root process waits for a message that cannot arrive")),
-        }
+        Ok(())
     }
 
     /// Return the entry label of an exported function that a run starts
