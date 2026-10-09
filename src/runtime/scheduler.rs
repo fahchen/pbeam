@@ -1220,18 +1220,13 @@ impl Scheduler {
     pub(super) fn finish_current(&mut self, reason: Term, result: Option<Term>) {
         let process = self.current_process_mut();
         let id = process.id;
-        let mut timers = match process.continue_exit.take() {
-            Some(timers) => timers,
+        let mut next = match process.continue_exit.take() {
+            Some(next) => next,
             None => {
                 process.bump_reductions(EXIT_REDUCTIONS);
                 if let ReceiveTimer::Set { key, .. } = process.receive_timer {
                     self.timers.cancel(key);
                 }
-                let process = self.current_process_mut();
-                let tree = std::mem::take(&mut process.bif_timers);
-                let mut timers: Vec<TimerReference> =
-                    tree.post_order().map(|(&timer, _)| timer).collect();
-                timers.reverse();
                 if id == ProcessId(0) {
                     let normal = reason == Term::static_atom("normal");
                     self.root_result = Some(match result {
@@ -1239,27 +1234,38 @@ impl Scheduler {
                         _ => Err(reason.clone()),
                     });
                 }
-                timers
+                self.current_process_mut()
+                    .bif_timers
+                    .post_order()
+                    .position()
             }
         };
-        let mut reds = self.current_process_mut().fcalls;
-        let walked = !timers.is_empty();
-        while let Some(&timer) = timers.last() {
+        let process = self.current_process_mut();
+        let mut reds = process.fcalls;
+        // The tree does not change during the exit: an exiting process
+        // keeps each timer that expires or that a BIF cancels, and gets no
+        // new timer. Thus the position stays valid across turns.
+        let tree = std::mem::take(&mut process.bif_timers);
+        let walked = next.is_some();
+        while let Some(position) = next {
             if reds <= 0 {
                 break;
             }
+            let mut walk = tree.post_order_from(position);
+            let (&timer, ()) = walk.next().expect("a walk position has an entry");
+            next = walk.position();
             // The receiver exits, so the timer has no tree entry to remove.
             let _ = self.timers.cancel_bif(timer.0);
-            timers.pop();
             reds -= TIMER_CANCEL_REDUCTIONS;
         }
-        if walked && timers.is_empty() {
+        if walked && next.is_none() {
             reds = reds.max(1);
         }
         if reds <= 0 {
             let process = self.current_process_mut();
             process.exiting = Some(reason);
-            process.continue_exit = Some(timers);
+            process.bif_timers = tree;
+            process.continue_exit = Some(next);
             process.fcalls = 0;
             self.yield_current();
             return;
