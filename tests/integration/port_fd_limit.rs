@@ -1,6 +1,6 @@
 use std::os::fd::{FromRawFd, OwnedFd};
 
-use pbeam_runtime::BeamProgram;
+use pbeam_runtime::{BeamProgram, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -9,18 +9,17 @@ use common::pinned_beam;
 
 const PORT_PROBE: &[u8] = include_bytes!("../../fixtures/port/port_probe.beam");
 
-/// The first fd that `select` cannot wait for.
+/// The first fd that one `fd_set` cannot hold.
 const FD_SETSIZE: i32 = libc::FD_SETSIZE as i32;
 
 #[test]
-fn gives_emfile_when_a_pipe_fd_is_not_below_fd_setsize() {
+fn runs_a_port_whose_pipes_are_at_or_above_fd_setsize() {
     // This test is the only test of its crate, because it fills the fd
-    // table of the test process. The scheduler waits for the pipes of a
-    // port with `select`, so the parent end of the output pipe must be
-    // below `FD_SETSIZE`. ERTS fails with `EMFILE` for a pipe fd at or
-    // above its maximum number of files (sys_drivers.c:486-495); PBeam
-    // takes `FD_SETSIZE` as that maximum (row "Ports" in
-    // docs/erts-differences.md).
+    // table of the test process. ERTS fails with `EMFILE` only for a pipe
+    // fd at or above its maximum number of files (sys_drivers.c:486-495),
+    // and its poll has no `FD_SETSIZE` limit (erl_poll.c:148-196). The
+    // scheduler waits for the pipes with `select` sets that grow with the
+    // largest fd, so a port with such pipes runs.
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[PORT_PROBE, &erlang]).unwrap();
     let mut limit = libc::rlimit {
@@ -49,11 +48,10 @@ fn gives_emfile_when_a_pipe_fd_is_not_below_fd_setsize() {
             break;
         }
     }
-    let result = program.execute("port_probe", "fd_limit", &[]);
+    let result = program.execute("port_probe", "high_fd", &[]);
     drop(fds);
-    // `emfile` is a new atom of the run, so the program has no atom for it.
     assert_eq!(
-        format!("{:?}", result.unwrap()),
-        "Tuple([Atom(\"error\"), Atom(\"emfile\")])"
+        result.unwrap(),
+        Term::Tuple(vec![Term::Binary(b"hi".to_vec()), Term::Integer(5)])
     );
 }

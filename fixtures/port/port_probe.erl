@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, sigchld_ignored/0, unsupported/1, terminal/0, fd_limit/0, costs/1, measure/2]).
+         nul_name/0, sigchld_ignored/0, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -260,10 +260,12 @@ cost_call(Bif, Port) when Bif =:= info; Bif =:= info_closed -> [erts_internal:po
 cost_call(Bif, Port) when Bif =:= close; Bif =:= close_other -> [erts_internal:port_close(Port)];
 cost_call(none, _) -> [].
 
-%% open_port/2 when the pipes of the port get no fd that select can wait
-%% for.
-fd_limit() ->
-    catch_error(fun() -> open_port({spawn_executable, sh()}, [binary]) end).
+%% The output and the exit status of a port whose pipes get fds at or
+%% above FD_SETSIZE.
+high_fd() ->
+    Port = open_port({spawn_executable, sh()}, [binary, exit_status,
+                                                {args, ["-c", "printf hi; exit 5"]}]),
+    collect(Port, []).
 
 %% Each call stops the PBeam run with a runtime error.
 unsupported(line) ->

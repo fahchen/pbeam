@@ -94,10 +94,9 @@ pub(crate) struct Child {
 /// `erl_child_setup` do for `spawn_executable`:
 ///
 /// 1. Make the output pipe and the input pipe (`sys_drivers.c:484-495`).
-///    The parent end of the output pipe must be below `FD_SETSIZE`, because
-///    the scheduler waits for it with `select`; else the start fails with
-///    `EMFILE`, as ERTS fails for an fd at or above its maximum number of
-///    files (`sys_drivers.c:486-495`).
+///    ERTS fails with `EMFILE` for a pipe fd at or above its maximum number
+///    of files (`sys_drivers.c:486-495`), the fd limit of the process, which
+///    `pipe` also gives.
 /// 2. Check that the path is executable with `access(X_OK)`
 ///    (`sys_drivers.c:518-526`).
 /// 3. Start the child with `posix_spawn`: the pipes as its fds 0 and 1, or
@@ -155,7 +154,7 @@ impl Child {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(child.output_fd() < libc::FD_SETSIZE as c_int);
+    /// assert!(child.output_fd() >= FIRST_PIPE_FD);
     /// ```
     pub(crate) fn output_fd(&self) -> RawFd {
         self.output.as_raw_fd()
@@ -167,7 +166,7 @@ impl Child {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(child.status_fd() < libc::FD_SETSIZE as c_int);
+    /// assert!(child.status_fd() >= FIRST_PIPE_FD);
     /// ```
     pub(crate) fn status_fd(&self) -> RawFd {
         self.status.as_raw_fd()
@@ -240,11 +239,7 @@ impl Child {
 }
 
 /// Make a pipe and return its read end and its write end. Each end is
-/// close-on-exec and at least `FIRST_PIPE_FD`. The read end must be below
-/// `FD_SETSIZE`, else the result is `EMFILE`. The scheduler waits with
-/// `select` for the read ends of the output pipe and the status pipe; the
-/// check also covers the read end of the input pipe, which only the child
-/// reads.
+/// close-on-exec and at least `FIRST_PIPE_FD`.
 ///
 /// # Examples
 ///
@@ -256,10 +251,6 @@ fn pipe() -> Result<(OwnedFd, OwnedFd), c_int> {
     let (reader, writer) = std::io::pipe().map_err(|error| error.raw_os_error().unwrap_or(0))?;
     let reader = above_child_fds(&OwnedFd::from(reader))?;
     let writer = above_child_fds(&OwnedFd::from(writer))?;
-    let limit = c_int::try_from(libc::FD_SETSIZE).expect("FD_SETSIZE fits in an fd");
-    if reader.as_raw_fd() >= limit {
-        return Err(libc::EMFILE);
-    }
     Ok((reader, writer))
 }
 
