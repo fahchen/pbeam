@@ -434,7 +434,16 @@ system_flag() ->
      catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([{cpu, 0, 0, -1, 0, 0, 0} | x])) end),
      catch_error(fun() -> erlang:system_flag(erts_alloc, id(foo)) end),
      catch_error(fun() -> erlang:system_flag(erts_alloc, id({a, b})) end),
-     catch_error(fun() -> erlang:system_flag(erts_alloc, id({a, b, c})) end)].
+     catch_error(fun() -> erlang:system_flag(erts_alloc, id({a, b, c})) end),
+     catch_error(fun() -> erlang:system_flag(max_heap_size, id(foo)) end),
+     catch_error(fun() -> erlang:system_flag(max_heap_size, id(-1)) end),
+     catch_error(fun() -> erlang:system_flag(max_heap_size, id(232)) end),
+     catch_error(fun() -> erlang:system_flag(max_heap_size, id(1 bsl 59)) end),
+     catch_error(fun() -> erlang:system_flag(max_heap_size, id(#{})) end),
+     catch_error(fun() -> erlang:system_flag(max_heap_size, id(#{size => a})) end),
+     catch_error(fun() -> erlang:system_flag(max_heap_size, id(#{size => 0, kill => x})) end),
+     catch_error(fun() -> erlang:system_flag(max_heap_size, id(#{size => 0, error_logger => 1})) end),
+     catch_error(fun() -> erlang:system_flag(max_heap_size, id(#{size => 0, include_shared_binaries => 2})) end)].
 
 %% `process_flag(message_queue_data, Value)` (bif.c:2167-2172,
 %% erl_message.c:1022-1100). logger_olp:init/1 (logger_olp.erl:172) sets
@@ -498,14 +507,17 @@ process_flag() ->
 
 %% A flag that needs a subsystem that PBeam does not have: the stack trace
 %% depth, the time offset, the trace control word, the sequential tracer,
-%% sequential trace tokens, process priorities, saved calls, the heap size,
-%% and node monitors. ERTS gives 8, volatile, 0, false, true, normal, 0, 233,
-%% and 0.
+%% sequential trace tokens, the heap limit, process priorities, saved calls,
+%% the heap size, and node monitors. ERTS gives 8, volatile, 0, false, true,
+%% the old heap limit map twice, normal, 0, 233, and 0.
 unsupported_flag(backtrace_depth) -> erlang:system_flag(backtrace_depth, 8);
 unsupported_flag(time_offset) -> erlang:system_flag(time_offset, finalize);
 unsupported_flag(trace_control_word) -> erlang:system_flag(trace_control_word, 0);
 unsupported_flag(sequential_tracer) -> erlang:system_flag(sequential_tracer, self());
 unsupported_flag(reset_seq_trace) -> erlang:system_flag(reset_seq_trace, foo);
+unsupported_flag(max_heap_size) ->
+    erlang:system_flag(max_heap_size, #{size => 233, kill => false, other => 1});
+unsupported_flag(max_heap_size_zero) -> erlang:system_flag(max_heap_size, 0);
 unsupported_flag(priority) -> process_flag(priority, normal);
 unsupported_flag(save_calls) -> process_flag(save_calls, 0);
 unsupported_flag(min_heap_size) -> process_flag(min_heap_size, 233);

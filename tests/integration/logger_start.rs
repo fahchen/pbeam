@@ -761,7 +761,7 @@ fn rejects_system_flag_items_as_pinned_erts() {
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = vec![badarg.clone(); 3];
     expected.push(atom("true"));
-    expected.extend(vec![badarg; 29]);
+    expected.extend(vec![badarg; 38]);
     assert_eq!(
         program
             .execute("logger_start_probe", "system_flag", &[])
@@ -773,7 +773,7 @@ fn rejects_system_flag_items_as_pinned_erts() {
         format!(
             "[{},true,{}]\n",
             ["{error,badarg}"; 3].join(","),
-            ["{error,badarg}"; 29].join(",")
+            ["{error,badarg}"; 38].join(",")
         )
     );
 }
@@ -842,7 +842,7 @@ fn rejects_process_flags_as_pinned_erts() {
 fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
     // `logger_start_probe:unsupported_flag/1`: ERTS gives a value for each
     // flag (`bif.c:5108-5115`, `bif.c:5203-5224`, `bif.c:5116-5172`,
-    // `bif.c:2052-2057`, `bif.c:1907-1915`, `bif.c:2114-2130`,
+    // `bif.c:5081-5106`, `bif.c:2052-2057`, `bif.c:1907-1915`, `bif.c:2114-2130`,
     // `bif.c:2212-2226`). PBeam has no stack traces, time offset service,
     // tracing, priorities, saved calls, garbage collector, or distribution
     // (rows "System flags" and "Process flags" in
@@ -873,6 +873,16 @@ fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
             "reset_seq_trace",
             "unsupported erlang:system_flag/2 item reset_seq_trace",
             "true",
+        ),
+        (
+            "max_heap_size",
+            "unsupported erlang:system_flag/2 item max_heap_size",
+            "#{error_logger => true,include_shared_binaries => false,kill => true,size => 0}",
+        ),
+        (
+            "max_heap_size_zero",
+            "unsupported erlang:system_flag/2 item max_heap_size",
+            "#{error_logger => true,include_shared_binaries => false,kill => true,size => 0}",
         ),
         (
             "priority",

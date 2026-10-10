@@ -180,6 +180,12 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
     "erts_alloc",
 ];
 
+/// The minimum heap size in words, `H_MIN_SIZE` of ERTS. ERTS starts it at
+/// `H_DEFAULT_SIZE` (`erl_vm.h:66`, `erl_init.c:808`). Only the emulator
+/// flag `+hms` and the item `min_heap_size` change it, and PBeam has
+/// neither, so the value stays 233.
+const MIN_HEAP_SIZE: i64 = 233;
+
 /// Run `erlang:system_flag(Item, Value)` as ERTS `system_flag_2`
 /// (`bif.c:4972-5304`) does for the items `system_logger` and
 /// `debug_flags`. `system_logger` takes `logger`, `undefined`, or a local
@@ -195,7 +201,9 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// After the check of the item and the value, the caller needs a `runtime`
 /// capability that permits `system_flag`, else the call raises
 /// `error:capability_denied` and sets nothing. The check covers each item
-/// that ERTS accepts, also `debug_flags`.
+/// that ERTS accepts, also `debug_flags`. A value that only the missing
+/// subsystem rejects, such as a scheduler count above the host count, gives
+/// `capability_denied` to a denied caller where ERTS raises `badarg`.
 ///
 /// PBeam writes no error report (row "Error report" in
 /// `docs/erts-differences.md`), so the system logger value has no other
@@ -293,13 +301,17 @@ pub(super) fn system_flag(
 ///   (`erts_set_cpu_topology`, `erl_cpu_topology.c:1348-1400`).
 /// - `erts_alloc` takes `{Allocator, Parameter, Value}` with two atoms and
 ///   an integer (`erts_alloc_set_dyn_param`, `erl_alloc.c:3445-3462`).
+/// - `max_heap_size` takes a small integer `Size`, or a map with a small
+///   integer `size` key and the optional boolean keys `kill`,
+///   `error_logger`, and `include_shared_binaries` (`erts_max_heap_size`,
+///   `erl_gc.c:3824-3872`). `Size` is 0 or at least the minimum heap size
+///   (`bif.c:5089-5090`).
 ///
-/// `max_heap_size`, `reset_seq_trace`, `cpu_topology`, and
-/// `scheduler_bind_type` accept each value here. ERTS also rejects a value
-/// that this check accepts when the value needs the state of the missing
-/// subsystem: the scheduler count, the tracer module, the allocator names,
-/// the CPU topology checks, the minimum heap size, and the CPU binding
-/// support of the host.
+/// `reset_seq_trace`, `cpu_topology`, and `scheduler_bind_type` accept each
+/// value here. ERTS also rejects a value that this check accepts when the
+/// value needs the state of the missing subsystem: the scheduler count, the
+/// tracer module, the allocator names, the CPU topology checks, and the CPU
+/// binding support of the host.
 ///
 /// # Examples
 ///
@@ -358,6 +370,27 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
             ),
             _ => false,
         },
+        "max_heap_size" => {
+            let size = match value {
+                Term::Map(map) => {
+                    let flag = |key| {
+                        map.get(&Term::static_atom(key)).is_none_or(
+                            |flag| matches!(flag, Term::Atom(flag) if matches!(flag.name(), "true" | "false")),
+                        )
+                    };
+                    if !["kill", "error_logger", "include_shared_binaries"]
+                        .into_iter()
+                        .all(flag)
+                    {
+                        return false;
+                    }
+                    map.get(&Term::static_atom("size"))
+                        .and_then(Term::small_integer)
+                }
+                _ => small,
+            };
+            size.is_some_and(|size| size == 0 || size >= MIN_HEAP_SIZE)
+        }
         _ => true,
     }
 }
