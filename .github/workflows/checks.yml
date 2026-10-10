@@ -21,6 +21,7 @@ jobs:
     timeout-minutes: 15
     env:
       MISE_AUTO_INSTALL: "0"
+      # Measurement for #354: setup (2), the target/ cache with incremental compilation.
       # A restored target/ is useful only when rustc reuses the unchanged code of pbeam-runtime. The value is explicit, so that no default of the runner or the profile can disable it.
       CARGO_INCREMENTAL: "1"
     steps:
