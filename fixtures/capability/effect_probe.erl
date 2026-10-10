@@ -345,8 +345,8 @@ inspect_names() ->
         in_child(#{port => #{executables => ["/bin/sh"]}, process => #{}}, Info)
     ].
 
-%% One call of each ambient entry, which has no capability check. A process
-%% with no capability gets the same result as on ERTS. Each value that
+%% One call of each ambient and later entry, which has no capability check. A
+%% process with no capability gets the same result as on ERTS. Each value that
 %% depends on the host or on the run is reduced to a stable sign.
 ambient() ->
     Self = self(),
