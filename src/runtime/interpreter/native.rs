@@ -15,8 +15,13 @@
 //! bindings in `BINDINGS`, and `LIBRARIES` registers each such list under
 //! its module.
 
+use super::bif::denial;
 use super::*;
-use crate::runtime::{host::filename_encoding, unicode::is_native_filename};
+use crate::runtime::{
+    capability::{CapabilityKind, Operation},
+    host::filename_encoding,
+    unicode::is_native_filename,
+};
 
 mod prim_tty;
 
@@ -143,24 +148,28 @@ pub(super) fn call(
 /// Run `erlang:load_nif(Path, LoadInfo)` from code of the module `caller`,
 /// with the arguments in `x0` and `x1`, as the ERTS `i_load_nif`
 /// instruction does with `erts_load_nif` (`beam/erl_nif.c:4708-5039`). The
-/// steps are in the ERTS order:
+/// steps are in the ERTS order, with the PBeam capability check as step 2:
 ///
 /// 1. A `Path` that ERTS does not accept as a file name raises
 ///    `error:badarg` (`beam/erl_nif.c:4730-4741`,
 ///    `beam_jit_common.cpp:679-704`). `is_native_filename` gives the check
 ///    with the file name encoding of the host.
-/// 2. A module without PBeam bindings gives a runtime error. ERTS opens the
+/// 2. The caller needs a `runtime` capability that permits `load_nif`,
+///    else the call raises `error:capability_denied` and loads nothing.
+///    The check comes after the argument check and before the library
+///    state, so a denied call gives the same result for each library.
+/// 3. A module without PBeam bindings gives a runtime error. ERTS opens the
 ///    library with `dlopen` (`beam/erl_nif.c:4778-4787`).
-/// 3. When the library of the module is loaded, the result is
+/// 4. When the library of the module is loaded, the result is
 ///    `{error, {reload, Text}}` (`beam/erl_nif.c:4774-4777`).
-/// 4. In the order of the library functions, a function that the module
+/// 5. In the order of the library functions, a function that the module
 ///    does not define gives `{error, {bad_lib, "Function not found
 ///    M:F/A"}}`. When the module has a `-nifs` list, a function that is not
 ///    in it gives `{error, {bad_lib, "Function not declared as nif
 ///    M:F/A"}}` (`beam/erl_nif.c:4845-4866`). The loader keeps the `-nifs`
 ///    list only when a function of the module starts with `nif_start`
 ///    (`jit/asm_load.c:651-661`, `beam/erl_nif.c:4700-4704`).
-/// 5. Else the library is loaded, and the result is `ok`. The load callback
+/// 6. Else the library is loaded, and the result is `ok`. The load callback
 ///    of `prim_tty` always returns 0 (`prim_tty_nif.c:1274-1279`).
 ///
 /// An error does not load the library, so the next call gives the same
@@ -182,8 +191,8 @@ pub(super) fn call(
 /// # Errors
 ///
 /// A module without PBeam bindings gives a runtime error that names the
-/// module. A new error atom in a full atom table gives the error of
-/// `AtomTable::put`.
+/// module. A new error atom or a new `capability_denied` atom in a full
+/// atom table gives the error of `AtomTable::put`.
 pub(super) fn load_nif(
     program: &BeamProgram,
     scheduler: &mut Scheduler,
@@ -192,6 +201,9 @@ pub(super) fn load_nif(
     let arguments = call_arguments(&scheduler.current_process_mut().registers, 2)?;
     if !is_native_filename(&arguments[0], filename_encoding()) {
         return Ok(BifResult::badarg());
+    }
+    if let Some(denied) = denial(scheduler, CapabilityKind::Runtime, Operation::LoadNif, None)? {
+        return Ok(denied);
     }
     let Some(library) = library(caller) else {
         // ponytail: PBeam opens no NIF library; see "NIF stubs" in docs/erts-differences.md.

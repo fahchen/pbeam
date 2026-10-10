@@ -182,7 +182,7 @@ bifs! {
     erlang:get_module_info/1 => unsupported,
     erlang:get_module_info/2 => unsupported,
     erlang:group_leader/0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().group_leader))),
-    erlang:halt/2 => |_, [status, options]| erlang::halt(status, options),
+    erlang:halt/2 => |cx, [status, options]| erlang::halt(cx.scheduler, status, options),
     erlang:has_prepared_code_on_load/1 => unsupported,
     erlang:hd/1 => |_, [list]| Ok(match list { Term::List(elements) | Term::ImproperList(elements, _) if !elements.is_empty() => Value(elements[0].clone()), _ => BifResult::badarg() }),
     erlang:hibernate/3 => unsupported,

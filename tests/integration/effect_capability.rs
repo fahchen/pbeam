@@ -8,7 +8,8 @@
 use std::{collections::BTreeSet, process::Command};
 
 use pbeam_runtime::{
-    AllowAll, BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy, Term,
+    AllowAll, BeamError, BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy,
+    Term,
 };
 
 #[path = "../common/mod.rs"]
@@ -30,13 +31,16 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 17] = [
+const PROBES: [(&str, &str, &str); 20] = [
     ("erlang:spawn/3", "process:spawn", "spawn"),
     ("erlang:spawn_link/3", "process:spawn", "spawn_link"),
     ("erlang:spawn_link/3", "process:link", "spawn_link"),
     ("erlang:spawn_opt/4", "process:spawn", "spawn_opt"),
     ("erlang:spawn_opt/4", "process:link", "spawn_opt_link"),
     ("erlang:spawn_opt/4", "process:monitor", "spawn_opt_monitor"),
+    ("erlang:halt/2", "runtime:halt", "halt_run"),
+    ("erlang:load_nif/2", "runtime:load_nif", "load_nif"),
+    ("erlang:system_flag/2", "runtime:system_flag", "system_flag"),
     ("erts_internal:open_port/2", "port:spawn", "open_port"),
     (
         "erts_internal:port_command/3",
@@ -69,7 +73,7 @@ impl Policy for Grants {
 
 /// The kind and the operation of each `kind:operation` name of the
 /// inventory.
-const OPERATIONS: [(&str, CapabilityKind, Operation); 15] = [
+const OPERATIONS: [(&str, CapabilityKind, Operation); 18] = [
     ("process:spawn", CapabilityKind::Process, Operation::Spawn),
     ("process:link", CapabilityKind::Process, Operation::Link),
     (
@@ -101,6 +105,17 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 15] = [
     ("env:write", CapabilityKind::Env, Operation::Write),
     ("signal:handle", CapabilityKind::Signal, Operation::Handle),
     ("signal:ignore", CapabilityKind::Signal, Operation::Ignore),
+    ("runtime:halt", CapabilityKind::Runtime, Operation::Halt),
+    (
+        "runtime:system_flag",
+        CapabilityKind::Runtime,
+        Operation::SystemFlag,
+    ),
+    (
+        "runtime:load_nif",
+        CapabilityKind::Runtime,
+        Operation::LoadNif,
+    ),
 ];
 
 /// Return the kind and the operation of `kind:operation`.
@@ -113,12 +128,13 @@ fn operation(name: &str) -> (CapabilityKind, Operation) {
 }
 
 /// The capability kinds.
-const KINDS: [CapabilityKind; 5] = [
+const KINDS: [CapabilityKind; 6] = [
     CapabilityKind::Process,
     CapabilityKind::Terminal,
     CapabilityKind::Port,
     CapabilityKind::Env,
     CapabilityKind::Signal,
+    CapabilityKind::Runtime,
 ];
 
 /// Return a policy with a delegable capability of each kind: one of `kind`
@@ -316,5 +332,123 @@ fn needs_both_signal_operations_for_the_default_disposition() {
     assert_eq!(
         run(&program, "signals", &policy),
         atoms(&program, &["ok", "denied"])
+    );
+}
+
+/// Return the `~w` text of `effect_probe:Function()` on the pinned ERTS
+/// with the stand-in `prim_tty`. The load of the stand-in stops the
+/// standard output of ERTS, so the result goes through a file.
+fn erts_with_stand_in(function: &str) -> String {
+    let root = std::env::current_dir().unwrap();
+    let result = std::env::temp_dir().join(format!(
+        "effect_probe_{function}_{}.txt",
+        std::process::id()
+    ));
+    let output = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noinput",
+            "-nostick",
+            "-pa",
+            root.join("fixtures/capability").to_str().unwrap(),
+            "-eval",
+            &format!(
+                "{{module, prim_tty}} = code:load_abs(\"{}\"), \
+                 ok = file:write_file(\"{}\", io_lib:format(\"~w~n\", [effect_probe:{function}()])), \
+                 halt().",
+                root.join("fixtures/prim_tty/nif/prim_tty").display(),
+                result.display()
+            ),
+        ])
+        .current_dir(std::env::temp_dir())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = std::fs::read_to_string(&result).unwrap();
+    std::fs::remove_file(&result).unwrap();
+    text
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_runtime_operations() {
+    let program = program();
+    let policy = grants(
+        CapabilityKind::Runtime,
+        &[Operation::SystemFlag, Operation::LoadNif],
+        Constraint::Any,
+    );
+    let reload = b"NIF library already loaded (reload disallowed since OTP 20).";
+    let expected = Term::List(vec![
+        atom(&program, "undefined"),
+        atom(&program, "true"),
+        atom(&program, "ok"),
+        Term::Tuple(vec![
+            atom(&program, "error"),
+            Term::Tuple(vec![
+                atom(&program, "reload"),
+                Term::List(
+                    reload
+                        .iter()
+                        .map(|&byte| Term::Integer(byte.into()))
+                        .collect(),
+                ),
+            ]),
+        ]),
+    ]);
+    assert_eq!(run(&program, "runtime_permitted", &policy), expected);
+    let bytes: Vec<_> = reload.iter().map(u8::to_string).collect();
+    assert_eq!(
+        erts_with_stand_in("runtime_permitted"),
+        format!(
+            "[undefined,true,ok,{{error,{{reload,[{}]}}}}]\n",
+            bytes.join(",")
+        )
+    );
+    let policy = grants(CapabilityKind::Runtime, &[Operation::Halt], Constraint::Any);
+    assert_eq!(
+        program.execute_with_policy("effect_probe", "halt_run", &[], &policy),
+        Err(BeamError::Halt(3))
+    );
+    let status = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noinput",
+            "-pa",
+            "fixtures/capability",
+            "-eval",
+            "effect_probe:halt_run().",
+        ])
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(3));
+}
+
+#[test]
+fn checks_the_runtime_arguments_before_the_capability() {
+    let program = program();
+    let policy = grants(CapabilityKind::Runtime, &[], Constraint::Any);
+    let badargs = Term::List(vec![atom(&program, "badarg"); 5]);
+    assert_eq!(run(&program, "runtime_badargs", &policy), badargs);
+    assert_eq!(
+        erts_with_stand_in("runtime_badargs"),
+        "[badarg,badarg,badarg,badarg,badarg]\n"
+    );
+}
+
+#[test]
+fn keeps_the_runtime_state_after_a_denied_call() {
+    // A child with `#{runtime => #{operations => []}}` tries the call. The
+    // parent then sees the start system logger and loads the library once.
+    let program = program();
+    let denied = atom(&program, "denied");
+    assert_eq!(
+        run(&program, "system_flag_kept", &AllowAll),
+        Term::Tuple(vec![denied.clone(), atom(&program, "logger")])
+    );
+    assert_eq!(
+        run(&program, "load_nif_kept", &AllowAll),
+        Term::Tuple(vec![denied, atom(&program, "ok")])
     );
 }

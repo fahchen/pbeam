@@ -192,6 +192,11 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// value as ERTS does (`unsupported_system_flag_value`), and raises
 /// `badarg` for a value that is not valid.
 ///
+/// After the check of the item and the value, the caller needs a `runtime`
+/// capability that permits `system_flag`, else the call raises
+/// `error:capability_denied` and sets nothing. The check covers each item
+/// that ERTS accepts, also `debug_flags`.
+///
 /// PBeam writes no error report (row "Error report" in
 /// `docs/erts-differences.md`), so the system logger value has no other
 /// effect.
@@ -210,7 +215,9 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// # Errors
 ///
 /// Each item of `UNSUPPORTED_SYSTEM_FLAGS` with a value that passes the
-/// check, and `time_offset` with `finalize`, give a runtime error.
+/// check, and `time_offset` with `finalize`, give a runtime error. A new
+/// `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
 pub(super) fn system_flag(
     context: &mut BifContext<'_>,
     item: &Term,
@@ -224,24 +231,39 @@ pub(super) fn system_flag(
         Term::Atom(logger) => matches!(logger.name(), "logger" | "undefined"),
         _ => false,
     };
-    Ok(match (item.name(), value) {
-        ("system_logger", _) if logger => Value(std::mem::replace(
-            &mut context.scheduler.system_logger,
+    let valid = match (item.name(), value) {
+        ("system_logger", _) => logger,
+        ("debug_flags", _) => true,
+        ("time_offset", Term::Atom(finalize)) => finalize.name() == "finalize",
+        (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
+            unsupported_system_flag_value(name, value)
+        }
+        _ => false,
+    };
+    if !valid {
+        return Ok(BifResult::badarg());
+    }
+    let scheduler = &mut *context.scheduler;
+    let check = denial(
+        scheduler,
+        CapabilityKind::Runtime,
+        Operation::SystemFlag,
+        None,
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    Ok(match item.name() {
+        "system_logger" => Value(std::mem::replace(
+            &mut scheduler.system_logger,
             value.clone(),
         )),
-        ("debug_flags", _) => Value(Term::static_atom("true")),
-        ("time_offset", Term::Atom(finalize)) if finalize.name() == "finalize" => {
-            return Err(error("unsupported erlang:system_flag/2 item time_offset"));
-        }
-        (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
-            if !unsupported_system_flag_value(name, value) {
-                return Ok(BifResult::badarg());
-            }
+        "debug_flags" => Value(Term::static_atom("true")),
+        name => {
             return Err(error(format!(
                 "unsupported erlang:system_flag/2 item {name}"
             )));
         }
-        _ => BifResult::badarg(),
     })
 }
 
@@ -2255,14 +2277,29 @@ const HALT_FLUSH_TIMEOUT_STATUS: i32 = 255;
 /// writes no core dump and no crash dump. Each other `Status` raises
 /// `badarg` (`bif.c:4379`, `4388-4393`).
 ///
+/// After the checks of the options and of `Status`, the caller needs a
+/// `runtime` capability that permits `halt`, else the call raises
+/// `error:capability_denied` and the run goes on. ERTS checks the same
+/// arguments before it stops (`bif.c:4316-4389`).
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(halt(&Term::Integer(259), &Term::List(vec![])), Err(BeamError::Halt(259)));
-/// assert!(matches!(halt(&Term::Integer(-1), &Term::List(vec![])), Ok(BifResult::Raise { .. })));
-/// assert!(halt(&Term::static_atom("abort"), &Term::List(vec![])).is_err());
+/// assert_eq!(halt(&mut scheduler, &Term::Integer(259), &Term::List(vec![])), Err(BeamError::Halt(259)));
+/// assert!(matches!(halt(&mut scheduler, &Term::Integer(-1), &Term::List(vec![])), Ok(BifResult::Raise { .. })));
+/// assert!(halt(&mut scheduler, &Term::static_atom("abort"), &Term::List(vec![])).is_err());
 /// ```
-pub(super) fn halt(status: &Term, options: &Term) -> Result<BifResult, BeamError> {
+///
+/// # Errors
+///
+/// A halt gives [`BeamError::Halt`]. `abort` and a slogan give a runtime
+/// error. A new `capability_denied` atom in a full atom table gives the
+/// error of `AtomTable::put`.
+pub(super) fn halt(
+    scheduler: &mut Scheduler,
+    status: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
     let Term::List(options) = options else {
         return Ok(BifResult::badarg());
     };
@@ -2287,22 +2324,27 @@ pub(super) fn halt(status: &Term, options: &Term) -> Result<BifResult, BeamError
             _ => return Ok(BifResult::badarg()),
         }
     }
-    match status {
+    let stop = match status {
         Term::Integer(code) if *code >= 0 => {
             if flush && timeout == Some(0) {
-                return Err(BeamError::Halt(HALT_FLUSH_TIMEOUT_STATUS));
+                BeamError::Halt(HALT_FLUSH_TIMEOUT_STATUS)
+            } else {
+                let code = i32::try_from(code & i64::from(i32::MAX)).expect("masked to INT_MAX");
+                BeamError::Halt(code)
             }
-            let code = i32::try_from(code & i64::from(i32::MAX)).expect("masked to INT_MAX");
-            Err(BeamError::Halt(code))
         }
-        Term::Atom(abort) if abort.name() == "abort" => Err(error(
-            "unsupported erlang:halt/2 with abort: PBeam writes no core dump",
-        )),
-        _ if is_slogan(status) => Err(error(
-            "unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump",
-        )),
-        _ => Ok(BifResult::badarg()),
+        Term::Atom(abort) if abort.name() == "abort" => {
+            error("unsupported erlang:halt/2 with abort: PBeam writes no core dump")
+        }
+        _ if is_slogan(status) => {
+            error("unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump")
+        }
+        _ => return Ok(BifResult::badarg()),
+    };
+    if let Some(denied) = denial(scheduler, CapabilityKind::Runtime, Operation::Halt, None)? {
+        return Ok(denied);
     }
+    Err(stop)
 }
 
 /// The most characters of a crash dump slogan, as `HALT_MSG_SIZE`

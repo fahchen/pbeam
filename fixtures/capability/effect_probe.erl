@@ -17,7 +17,15 @@
     tty_select/0,
     tty_init/0,
     tty_window_size/0,
+    halt_run/0,
+    system_flag/0,
+    load_nif/0,
     permitted/0,
+    runtime_permitted/0,
+    runtime_badargs/0,
+    system_flag_kept/0,
+    load_nif_kept/0,
+    child/2,
     names/0,
     executables/0,
     signals/0,
@@ -79,6 +87,15 @@ tty_window_size() ->
     {ok, TTY} = prim_tty:tty_create(stdout),
     attempt(fun() -> prim_tty:tty_window_size(TTY) end).
 
+%% A permitted halt stops the run with the status 3.
+halt_run() -> attempt(fun() -> erlang:halt(3, []) end).
+
+%% `logger` is the start value of the system logger in PBeam.
+system_flag() -> attempt(fun() -> erlang:system_flag(system_logger, logger) end).
+
+%% The stand-in `prim_tty` calls erlang:load_nif/2 from its own code.
+load_nif() -> attempt(fun() -> prim_tty:load("prim_tty") end).
+
 %% Permitted calls that give the same result on ERTS. The variable
 %% PBEAM_EFFECT_PROBE is not set.
 permitted() ->
@@ -94,6 +111,48 @@ permitted() ->
         badarg(fun() -> erlang:port_close(Port) end),
         badarg(fun() -> os:set_signal(sigint, handle) end)
     ].
+
+%% Permitted runtime calls that give the same result on ERTS with the
+%% stand-in `prim_tty`. The first call makes the system logger the same:
+%% its start value on ERTS is the pid of the logger proxy.
+runtime_permitted() ->
+    erlang:system_flag(system_logger, undefined),
+    [
+        erlang:system_flag(system_logger, logger),
+        erlang:system_flag(debug_flags, 1),
+        prim_tty:load("prim_tty"),
+        prim_tty:load("prim_tty")
+    ].
+
+%% The argument checks come before the runtime capability check.
+runtime_badargs() ->
+    [
+        badarg(fun() -> erlang:halt(-1, []) end),
+        badarg(fun() -> erlang:halt(3, [foo]) end),
+        badarg(fun() -> erlang:system_flag(foo, 1) end),
+        badarg(fun() -> erlang:system_flag(system_logger, 1) end),
+        badarg(fun() -> prim_tty:load(foo) end)
+    ].
+
+%% A child with a runtime capability of no operation tries the call. A
+%% denied call has no effect, so the next call of the parent sees the
+%% start state.
+system_flag_kept() ->
+    Denied = restricted(fun() -> erlang:system_flag(system_logger, undefined) end),
+    {Denied, erlang:system_flag(system_logger, logger)}.
+
+load_nif_kept() ->
+    Denied = restricted(fun() -> prim_tty:load("prim_tty") end),
+    {Denied, prim_tty:load("prim_tty")}.
+
+restricted(Call) ->
+    Capabilities = #{runtime => #{operations => []}, process => #{}},
+    erlang:spawn_opt(?MODULE, child, [self(), Call], [{capabilities, Capabilities}]),
+    receive
+        {child, Result} -> Result
+    end.
+
+child(Parent, Call) -> Parent ! {child, attempt(Call)}.
 
 %% The `names` constraint of `env` compares the native bytes of the name,
 %% also of a nested list.
