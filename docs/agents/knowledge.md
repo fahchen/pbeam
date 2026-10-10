@@ -120,11 +120,3 @@ Check the reduction budget before each unit of work that can grow with the input
 ## Published claims lack evidence checks
 
 Verify every acceptance, measurement, and comparison claim against its cited source before publishing it. Name the baseline and record decisions that differ from the cited requirement.
-
-## Composite operations hide permission effects
-
-Check every permission effect that a composite operation performs. Require each permission before the operation creates that effect.
-
-## Related security contracts drift apart
-
-Keep every document that defines the same security contract synchronized. Compare contract terms and guarantees after each design decision.
