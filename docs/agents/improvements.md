@@ -21,6 +21,30 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261010: Check runtime paths and test names in documentation
+
+**Problem:** Documentation described a capability requirement that the boot path did not use and named a test that did not exist.
+
+**Root Cause:** The final documentation was not checked against the active boot path and current test names.
+
+**Fix:** Trace each claim through the runtime path and replace each test reference with the exact current test name.
+
+**Guardrail:** Before publishing documentation, verify behavior claims against the active path and resolve every referenced test name.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/422#issuecomment-6100634869>
+
+## 20261010: Check tail-call stack frames for indirect fun calls
+
+**Problem:** An indirect tail fun call to `erlang:error/2` reported the tail-called function in the first stack frame instead of the surviving caller.
+
+**Root Cause:** The implementation selected the active function without modelling the ERTS step that removes the tail-call frame before dispatch.
+
+**Fix:** Pass the call context to `error_2` and select the surviving caller for an indirect tail call. Add compiled coverage for tail fun calls, tail applies, and a tail fun call at process start.
+
+**Guardrail:** Compare stack-frame results for direct calls, tail applies, and indirect tail fun calls with pinned ERTS output before accepting error-frame logic.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/415#issuecomment-6100194687>
+
 ## 20261010: Include hidden work in complexity claims
 
 **Problem:** A PR description and effect inventory stated an `O(r)` policy revocation cost but omitted the sort of the matching copies.
