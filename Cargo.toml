@@ -106,6 +106,10 @@ name = "binary_part"
 path = "tests/integration/binary_part.rs"
 
 [[test]]
+name = "binary_find"
+path = "tests/integration/binary_find.rs"
+
+[[test]]
 name = "bitstr"
 path = "tests/integration/bitstr.rs"
 

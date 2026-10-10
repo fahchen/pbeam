@@ -37,7 +37,7 @@ bifs! {
     binary:list_to_bin/1 => unsupported,
     binary:longest_common_prefix/1 => unsupported,
     binary:longest_common_suffix/1 => unsupported,
-    binary:match/2 => unsupported,
+    binary:match/2 => |cx, [subject, pattern]| binary::match_2(cx.scheduler.current_process_mut(), subject, pattern),
     binary:match/3 => unsupported,
     binary:matches/2 => unsupported,
     binary:matches/3 => unsupported,
