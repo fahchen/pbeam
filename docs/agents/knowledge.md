@@ -115,7 +115,7 @@ When a public type cannot enforce a canonical representation, document it as a r
 
 ## Resumable work repeats or skips its budget
 
-Check the reduction budget before each unit of work that can grow with the input, and keep the position of the work across turns and traps. Do not rebuild completed work after a trap, and do not do uncharged O(N) work before a yield.
+Check the reduction budget before each unit of work that can grow with the input and on every switch-out and completion path. Keep the position of the work across turns and traps. Do not rebuild completed work after a trap, and do not do uncharged O(N) work before a yield.
 
 ## Published claims lack evidence checks
 
