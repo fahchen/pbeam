@@ -1,3 +1,5 @@
+use std::{cell::RefCell, rc::Rc};
+
 use super::{internal_hash, mix64};
 use crate::term::{Atom, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term};
 
@@ -6,7 +8,9 @@ use crate::term::{Atom, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Refer
 fn panics_for_a_match_context() {
     // The interpreter gives a runtime error before a match context can
     // reach a term operation.
-    internal_hash(&Term::MatchContext(MatchContext::new(b"a")));
+    internal_hash(&Term::MatchContext(Rc::new(RefCell::new(
+        MatchContext::new(b"a"),
+    ))));
 }
 
 fn atom(name: &str) -> Term {

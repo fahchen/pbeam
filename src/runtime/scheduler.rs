@@ -282,8 +282,9 @@ impl Scheduler {
     /// Return a scheduler as [`Self::new`] does, for a run that skips each
     /// capability check: the run of a launcher with no policy. Each check
     /// passes, no process gets a capability copy, a `{capabilities, Map}`
-    /// spawn option does not reduce the child, and `pbeam_cap:revoke/2` and
-    /// `pbeam_cap:request/2` have no effect.
+    /// spawn option does not reduce the child, and `pbeam_cap:revoke/2`,
+    /// `pbeam_cap:policy_revoke/2`, and `pbeam_cap:request/2` have no
+    /// effect.
     ///
     /// # Examples
     ///

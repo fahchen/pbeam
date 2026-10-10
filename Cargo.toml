@@ -45,6 +45,10 @@ name = "host_signal"
 path = "tests/feature/host_signal.rs"
 
 [[test]]
+name = "io_device"
+path = "tests/feature/io_device.rs"
+
+[[test]]
 name = "io_fail"
 path = "tests/feature/io_fail.rs"
 
@@ -106,6 +110,10 @@ name = "binary_part"
 path = "tests/integration/binary_part.rs"
 
 [[test]]
+name = "binary_find"
+path = "tests/integration/binary_find.rs"
+
+[[test]]
 name = "bitstr"
 path = "tests/integration/bitstr.rs"
 
@@ -150,6 +158,10 @@ name = "effect_capability"
 path = "tests/integration/effect_capability.rs"
 
 [[test]]
+name = "error_path"
+path = "tests/integration/error_path.rs"
+
+[[test]]
 name = "ets"
 path = "tests/integration/ets.rs"
 
@@ -176,6 +188,10 @@ path = "tests/integration/exit_signal.rs"
 [[test]]
 name = "fixture_opcodes"
 path = "tests/integration/fixture_opcodes.rs"
+
+[[test]]
+name = "find_executable"
+path = "tests/integration/find_executable.rs"
 
 [[test]]
 name = "float_test"
@@ -208,6 +224,14 @@ path = "tests/integration/improper.rs"
 [[test]]
 name = "input_reductions"
 path = "tests/integration/input_reductions.rs"
+
+[[test]]
+name = "iolist_split"
+path = "tests/integration/iolist_split.rs"
+
+[[test]]
+name = "inspect_bif"
+path = "tests/integration/inspect_bif.rs"
 
 [[test]]
 name = "integer_to_binary"
