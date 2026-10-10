@@ -45,6 +45,10 @@ name = "host_signal"
 path = "tests/feature/host_signal.rs"
 
 [[test]]
+name = "io_device"
+path = "tests/feature/io_device.rs"
+
+[[test]]
 name = "io_fail"
 path = "tests/feature/io_fail.rs"
 
@@ -224,6 +228,10 @@ path = "tests/integration/input_reductions.rs"
 [[test]]
 name = "iolist_split"
 path = "tests/integration/iolist_split.rs"
+
+[[test]]
+name = "inspect_bif"
+path = "tests/integration/inspect_bif.rs"
 
 [[test]]
 name = "integer_to_binary"

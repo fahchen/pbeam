@@ -171,7 +171,7 @@ fn error_path_probe_has_the_error_path_instruction_bytes() {
 }
 
 #[test]
-fn compare_probe_has_the_is_lt_is_eq_is_integer_and_is_boolean_bytes() {
+fn compare_probe_has_the_is_lt_is_eq_is_ne_is_integer_and_is_boolean_bytes() {
     assert_in_fixture(
         "fixtures/compare/compare_probe.beam",
         &[
@@ -185,6 +185,8 @@ fn compare_probe_has_the_is_lt_is_eq_is_integer_and_is_boolean_bytes() {
             &[0x72, 0xC5, 0x03],
             // eq/2: is_eq f25 x0 x1
             &[0x29, 0x0D, 0x19, 0x03, 0x13],
+            // ne/2: is_ne f30 x0 x1
+            &[0x2A, 0x0D, 0x1E, 0x03, 0x13],
         ],
     );
 }

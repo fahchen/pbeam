@@ -4,9 +4,9 @@ use super::{
     OPCODE_BS_INIT_WRITABLE, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
     OPCODE_FSUB, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
     OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
-    OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
-    OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
-    OPCODE_TEST_IS_PORT, OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, parse_code,
+    OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP,
+    OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
+    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, parse_code,
     read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
     read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
     skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
@@ -576,6 +576,28 @@ fn decodes_the_is_eq_test_of_the_compare_probe_fixture() {
         [
             Instruction::TestEqual {
                 fail_label: 25,
+                left: Operand::X(0),
+                right: Operand::X(1),
+            },
+            Instruction::End,
+        ]
+    ));
+}
+
+#[test]
+fn decodes_the_is_ne_test_of_the_compare_probe_fixture() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/compare/compare_probe.beam` has these bytes.
+    let is_ne = [0x2A, 0x0D, 0x1E, 0x03, 0x13]; // ne/2: is_ne f30 x0 x1
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([&is_ne[..], &[0x03]].concat());
+    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::TestNotEqual {
+                fail_label: 30,
                 left: Operand::X(0),
                 right: Operand::X(1),
             },
@@ -1735,7 +1757,7 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
     for (opcode, count) in [
         (OPCODE_TEST_HEAP, 2),
         (OPCODE_BIF0, 2),
-        (OPCODE_TEST_NE, 3),
+        (OPCODE_TEST_EXACT_EQ, 3),
         (OPCODE_TEST_TAGGED_TUPLE, 4),
         (OPCODE_TEST_IS_MAP, 2),
         (OPCODE_PUT_MAP_ASSOC, 5),

@@ -1242,10 +1242,35 @@ pub(super) fn tl(list: &Term) -> BifResult {
     Value(Term::list_with_tail(elements[1..].to_vec(), tail))
 }
 
+/// Run `erlang:split_binary/2`: return `{Left, Right}`, the bytes of a
+/// binary before and from `position`, as ERTS `split_binary_2` does
+/// (`binary.c:476-517`). A term that is not a binary, and a position that is
+/// not an integer from 0 to the byte size, raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let pair = split_binary(&Term::Binary(b"abc".to_vec()), &Term::Integer(1));
+/// assert!(matches!(pair, BifResult::Value(Term::Tuple(parts)) if parts == [Term::Binary(b"a".to_vec()), Term::Binary(b"bc".to_vec())]));
+/// assert!(matches!(split_binary(&Term::Binary(vec![]), &Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn split_binary(binary: &Term, position: &Term) -> BifResult {
+    match (binary, position) {
+        (Term::Binary(bytes), Term::Integer(at)) if (0..=bytes.len() as i64).contains(at) => {
+            let (left, right) = bytes.split_at(*at as usize);
+            Value(Term::Tuple(vec![
+                Term::Binary(left.to_vec()),
+                Term::Binary(right.to_vec()),
+            ]))
+        }
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `erlang:integer_to_list/1`: return the decimal characters of an
 /// integer, as ERTS `integer_to_list_1` and `integer_to_list`
 /// (`bif.c:3266-3339`) do. A term that is not an integer raises `badarg`.
-/// [`decimal_digits`] gives the digits and charges a bignum.
+/// [`integer_digits`] gives the digits and charges a bignum.
 ///
 /// # Examples
 ///
@@ -1263,12 +1288,12 @@ pub(super) fn tl(list: &Term) -> BifResult {
 ///
 /// # Errors
 ///
-/// Return the runtime error of [`decimal_digits`].
+/// Return the runtime error of [`integer_digits`].
 pub(super) fn integer_to_list(
     process: &mut ProcessState,
     term: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(digits) = decimal_digits(process, term, "integer_to_list")? else {
+    let Some(digits) = integer_digits(process, term, 10, "integer_to_list/1")? else {
         return Ok(BifResult::badarg());
     };
     let codes = digits.bytes().map(|byte| Term::Integer(i64::from(byte)));
@@ -1278,7 +1303,7 @@ pub(super) fn integer_to_list(
 /// Run `erlang:integer_to_binary/1`: return the decimal characters of an
 /// integer as a binary, as ERTS `integer_to_binary_1` and
 /// `integer_to_binary` (`binary.c:80-145`) do. A term that is not an
-/// integer raises `badarg`. [`decimal_digits`] gives the digits and charges
+/// integer raises `badarg`. [`integer_digits`] gives the digits and charges
 /// a bignum.
 ///
 /// # Examples
@@ -1295,48 +1320,92 @@ pub(super) fn integer_to_list(
 ///
 /// # Errors
 ///
-/// Return the runtime error of [`decimal_digits`].
+/// Return the runtime error of [`integer_digits`].
 pub(super) fn integer_to_binary(
     process: &mut ProcessState,
     term: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(digits) = decimal_digits(process, term, "integer_to_binary")? else {
+    let Some(digits) = integer_digits(process, term, 10, "integer_to_binary/1")? else {
         return Ok(BifResult::badarg());
     };
     Ok(Value(Term::Binary(digits.into_bytes())))
 }
 
-/// Return the decimal characters of an integer for the BIF `erlang:Name/1`,
-/// or `None` for a term that is not an integer. ERTS `integer_to_list`
-/// (`bif.c:3266-3311`) and `integer_to_binary` (`binary.c:80-117`) charge
-/// the same cost.
+/// Run `erlang:integer_to_binary/2`: return the characters of an integer in
+/// `base` as a binary, as ERTS `integer_to_binary_2` and
+/// `integer_to_binary` (`binary.c:80-117`, `147-182`) do. A digit above 9
+/// is an upper-case letter (`Sint_to_buf`, `utils.c:2994-3030`). A first
+/// argument that is not an integer, and a base that is not a small integer
+/// from 2 to 36, raise `badarg`. [`integer_digits`] gives the digits and
+/// charges a bignum.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let binary = integer_to_binary_2(&mut process, &Term::Integer(-255), &Term::Integer(16))?;
+/// assert!(matches!(binary, BifResult::Value(Term::Binary(bytes)) if bytes == b"-FF"));
+/// assert!(matches!(integer_to_binary_2(&mut process, &Term::Integer(1), &Term::Integer(37))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`integer_digits`].
+pub(super) fn integer_to_binary_2(
+    process: &mut ProcessState,
+    term: &Term,
+    base: &Term,
+) -> Result<BifResult, BeamError> {
+    // ERTS checks both arguments before the work (`binary.c:152-159`). Each
+    // failed check raises `badarg` with no other effect, so the order of the
+    // checks does not change the result.
+    let Some(base) = base
+        .small_integer()
+        .and_then(|base| u32::try_from(base).ok())
+        .filter(|base| (2..=36).contains(base))
+    else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(digits) = integer_digits(process, term, base, "integer_to_binary/2")? else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(Term::Binary(digits.into_bytes())))
+}
+
+/// Return the characters of an integer in `base`, from 2 to 36, for the BIF
+/// `erlang:Name`, or `None` for a term that is not an integer. A digit
+/// above 9 is an upper-case letter, as `Sint_to_buf` (`utils.c:2994-3030`)
+/// writes it. ERTS `integer_to_list` (`bif.c:3266-3311`) and
+/// `integer_to_binary` (`binary.c:80-117`) charge the same cost.
 ///
 /// A small integer costs no reduction. A bignum costs one reduction for each
 /// 16 digits of [`big_integer_estimate`] (`bif.c:3283-3299`,
 /// `binary.c:92-108`). In the PBeam integer range, a bignum is from 2^59 to
-/// 2^63 - 1 or from -2^63 to -2^59 - 1, and it costs 1.
+/// 2^63 - 1 or from -2^63 to -2^59 - 1. It costs 1 in base 10 and 4 in
+/// base 2.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// process.fcalls = 10;
-/// assert_eq!(decimal_digits(&mut process, &Term::Integer(-12), "integer_to_list")?.as_deref(), Some("-12"));
+/// assert_eq!(integer_digits(&mut process, &Term::Integer(-12), 10, "integer_to_list/1")?.as_deref(), Some("-12"));
+/// assert_eq!(integer_digits(&mut process, &Term::Integer(255), 16, "integer_to_binary/2")?.as_deref(), Some("FF"));
 /// assert_eq!(process.fcalls, 10);
-/// decimal_digits(&mut process, &Term::Integer(1 << 59), "integer_to_list")?;
+/// integer_digits(&mut process, &Term::Integer(1 << 59), 10, "integer_to_list/1")?;
 /// assert_eq!(process.fcalls, 9);
-/// assert_eq!(decimal_digits(&mut process, &Term::List(vec![]), "integer_to_list")?, None);
+/// assert_eq!(integer_digits(&mut process, &Term::List(vec![]), 10, "integer_to_list/1")?, None);
 /// ```
 ///
 /// # Errors
 ///
 /// Return a runtime error for a bignum that costs more than the reductions
 /// left. ERTS then runs the BIF again on a dirty CPU scheduler
-/// (`bif.c:3289-3296`, `3323-3336`; `binary.c:98-105`, `129-142`), and
-/// PBeam has no dirty scheduler. Also return the runtime error of
-/// [`ProcessState::bif_reductions_left`] for a negative budget.
-fn decimal_digits(
+/// (`bif.c:3289-3296`, `3323-3336`; `binary.c:98-105`, `129-142`,
+/// `163-178`), and PBeam has no dirty scheduler. Also return the runtime
+/// error of [`ProcessState::bif_reductions_left`] for a negative budget.
+fn integer_digits(
     process: &mut ProcessState,
     term: &Term,
+    base: u32,
     name: &str,
 ) -> Result<Option<String>, BeamError> {
     /// `DIGITS_PER_RED` (`bif.c:3283`, `binary.c:92`).
@@ -1345,39 +1414,60 @@ fn decimal_digits(
         return Ok(None);
     };
     if term.small_integer().is_none() {
-        let cost = big_integer_estimate(*value) / DIGITS_PER_RED;
+        let cost = big_integer_estimate(*value, base) / DIGITS_PER_RED;
         if cost > process.bif_reductions_left()? {
             // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
             return Err(error(format!(
-                "unsupported erlang:{name}/1 of {value} with {} reductions left: ERTS runs it on a dirty CPU scheduler",
+                "unsupported erlang:{name} of {value} with {} reductions left: ERTS runs it on a dirty CPU scheduler",
                 process.fcalls
             )));
         }
         process.bump_reductions(cost as i32);
     }
-    Ok(Some(value.to_string()))
+    let mut magnitude = value.unsigned_abs();
+    let mut digits = Vec::new();
+    loop {
+        let digit = (magnitude % u64::from(base)) as u32;
+        digits.push(char::from_digit(digit, base).map_or('0', |digit| digit.to_ascii_uppercase()));
+        magnitude /= u64::from(base);
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if *value < 0 {
+        digits.push('-');
+    }
+    Ok(Some(digits.iter().rev().collect()))
 }
 
-/// Return the number of decimal digits that ERTS `big_integer_estimate`
+/// Return the number of digits in `base` that ERTS `big_integer_estimate`
 /// (`big.c:2589-2597`) gives for a bignum, with the sign and a null byte:
-/// `(lg + 1) / lg2(10) + 1`, rounded down, where `lg` is the index of the
+/// `(lg + 1) / lg2(base) + 1`, rounded down, where `lg` is the index of the
 /// highest set bit of the magnitude (`I_lg`, `big.c:2226-2237`) and
-/// `lg2(10)` is 3.32193 (`lg2_lookup`, `big.c:4087-4092`), then one more
-/// for a negative sign and one for the null byte.
+/// `lg2(base)` is the rounded value of `lg2_lookup` (`big.c:4087-4092`),
+/// then one more for a negative sign and one for the null byte.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // 2^59: lg 59, 60 / 3.32193 + 1 = 19.06, then the null byte.
-/// assert_eq!(big_integer_estimate(1 << 59), 20);
-/// assert_eq!(big_integer_estimate(i64::MIN), 22);
+/// assert_eq!(big_integer_estimate(1 << 59, 10), 20);
+/// assert_eq!(big_integer_estimate(i64::MIN, 10), 22);
+/// // 2^63 - 1 in base 2: lg 62, 63 / 1.0 + 1 = 64, then the null byte.
+/// assert_eq!(big_integer_estimate(i64::MAX, 2), 65);
 /// ```
-fn big_integer_estimate(value: i64) -> usize {
-    /// `lg2_lookup[10 - 2]` (`big.c:4088`), which ERTS rounds to 5 places.
-    #[allow(clippy::approx_constant, reason = "ERTS uses this rounded value")]
-    const LG2_10: f64 = 3.32193;
+fn big_integer_estimate(value: i64, base: u32) -> usize {
+    /// `lg2_lookup` (`big.c:4087-4092`): the rounded `log2` of each base
+    /// from 2 to 36.
+    #[allow(clippy::approx_constant, reason = "ERTS uses these rounded values")]
+    const LG2_LOOKUP: [f64; 35] = [
+        1.0, 1.58496, 2.0, 2.32193, 2.58496, 2.80735, 3.0, 3.16993, 3.32193, 3.45943, 3.58496,
+        3.70044, 3.80735, 3.90689, 4.0, 4.08746, 4.16993, 4.24793, 4.32193, 4.39232, 4.45943,
+        4.52356, 4.58496, 4.64386, 4.70044, 4.75489, 4.80735, 4.85798, 4.90689, 4.9542, 5.0,
+        5.04439, 5.08746, 5.12928, 5.16993,
+    ];
     let lg = u64::BITS - 1 - value.unsigned_abs().leading_zeros();
-    let digits = (f64::from(lg + 1) / LG2_10 + 1.0) as usize;
+    let digits = (f64::from(lg + 1) / LG2_LOOKUP[base as usize - 2] + 1.0) as usize;
     digits + usize::from(value < 0) + 1
 }
 
@@ -1750,6 +1840,26 @@ pub(super) fn list_to_tuple(list: &Term) -> BifResult {
         Term::List(elements) if elements.len() <= MAX_TUPLE_SIZE => {
             Value(Term::Tuple(elements.clone()))
         }
+        _ => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:tuple_to_list(Tuple)`: return a proper list with the
+/// elements of `Tuple` in order, as `tuple_to_list_1` (`bif.c:3762-3783`)
+/// does. `{}` gives `[]`. A term that is not a tuple raises `badarg`. The
+/// BIF uses no reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let tuple = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
+/// assert!(matches!(tuple_to_list(&tuple), BifResult::Value(Term::List(elements)) if elements.len() == 2));
+/// assert!(matches!(tuple_to_list(&Term::Tuple(vec![])), BifResult::Value(Term::List(elements)) if elements.is_empty()));
+/// assert!(matches!(tuple_to_list(&Term::List(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn tuple_to_list(tuple: &Term) -> BifResult {
+    match tuple {
+        Term::Tuple(elements) => Value(Term::List(elements.clone())),
         _ => BifResult::badarg(),
     }
 }
