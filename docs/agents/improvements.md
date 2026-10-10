@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261010: Replace verification placeholders before publishing
+
+**Problem:** A PR description kept a placeholder in the Verification section after an earlier edit did not apply.
+
+**Root Cause:** The final PR description was not checked in the repository context after the edit command ran outside the repository.
+
+**Fix:** Replace every placeholder with the final run link and result before publishing the PR.
+
+**Guardrail:** Read the final PR description from the repository context and check that no placeholder remains before publishing it.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/356#issuecomment-6099017860>
+
 ## 20261010: Record deferred wake limits with triggers
 
 **Problem:** A cross-thread revocation could remain queued while the scheduler waited on an idle host event source.
