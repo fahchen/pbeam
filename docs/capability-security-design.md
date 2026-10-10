@@ -38,11 +38,11 @@ Policy configuration can use names or path patterns. Runtime authorization uses 
 
 ## Identity and ownership
 
-Each process owns a security context with a subject, usable grants, delegable grants, and budget account reference. A subject contains a realm, process identity, and process incarnation. The runtime authenticates these values. Guest arguments cannot select an issuer or subject.
+Each process owns a security context with its usable and delegable capabilities. The subject is the process. A realm, a process incarnation, and a budget account reference come with their first consumers (see [Transition 2 decisions](capability-security-migration.md#transition-2-decisions)). The runtime authenticates these values. Guest arguments cannot select an issuer or subject.
 
-Scheduler migration transfers this context with process ownership. Neither OS thread-local state nor a worker's current PID supplies asynchronous request identity. A restart has a new incarnation and uses a validated child security template. It cannot recover revoked authority by rereading guest configuration.
+Scheduler migration transfers this context with process ownership. Neither OS thread-local state nor a worker's current PID supplies asynchronous request identity. A restart is a new process with the capabilities that its spawner can delegate at that time. It cannot recover authority that was revoked from its spawner, also by rereading guest configuration.
 
-Lease expiry uses a trusted monotonic host clock. A virtual guest clock cannot extend a grant. Root policy and grant issuance are not available through an application native context.
+Transition 2 has no lease. When a lease comes, its expiry uses a trusted monotonic host clock. A virtual guest clock cannot extend a grant. Root policy and grant issuance are not available through an application native context.
 
 ## Protected VM operations
 
