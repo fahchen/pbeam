@@ -6,12 +6,27 @@ const IOLIST_SPLIT_PROBE: &[u8] =
     include_bytes!("../../fixtures/iolist_split/iolist_split_probe.beam");
 
 /// `iolist_split_probe:main/0` on the pinned ERTS, as `io:format("~w")`
-/// prints it: the results of `erlang:iolist_to_binary/1` for each input
-/// shape and error, and the checks of the long inputs whose walk traps.
+/// prints it: the results of `erlang:iolist_to_binary/1` and
+/// `binary:split/2,3` for each input shape, option, and error, and the
+/// checks of the long inputs whose walk, search, or result build traps.
 const EXPECTED: &str = "[{iolist_to_binary,[<<1,2,3>>,<<>>,<<>>,<<>>,<<97,98,99>>,<<1,2,3>>,<<1,2,3,4,5>>,<<1,\
     2>>,<<>>,<<97,98,99,100,101,102,103>>,<<0,255>>,{error,badarg},{error,badarg},{error,\
     badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
-    {error,badarg}]},{iolist_to_binary_long,[true,true,true,true]}]";
+    {error,badarg}]},{iolist_to_binary_long,[true,true,true,true]},{split2,[[<<97>>,<<98,44,\
+    99>>],[<<97,98,99>>],[<<>>],[<<>>,<<>>],[<<97,98>>,<<>>],[<<>>,<<100,97,98,99,97,98>>],\
+    [<<98,98>>,<<>>],[<<120,120>>,<<120,121,97,98>>],[<<98>>,<<97,110,97>>],[<<>>,<<>>],\
+    [<<97>>,<<>>],{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+    {error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]},{split3,\
+    [[<<>>,<<97,44,98,44,44,99,44,44>>],[<<>>,<<97>>,<<98>>,<<>>,<<99>>,<<>>,<<>>],[<<>>,\
+    <<97,44,98,44,44,99,44,44>>],[<<>>,<<97>>,<<98>>,<<>>,<<99>>],[<<97,44,98,44,44,99,44,\
+    44>>],[<<97>>,<<98>>,<<99>>],[<<97>>,<<98>>,<<99>>],[<<97>>,<<98>>],[<<97,98>>],[],[<<97,\
+    98>>],[],[],[],[<<>>],[<<98,97,110>>,<<110,97>>],[<<98,97,110>>,<<110,97>>],[<<97>>,\
+    <<99>>],[<<97,98,99>>],[<<97,98,99>>],[<<>>,<<100>>,<<>>],[<<>>,<<>>,<<>>],[<<98,98>>,\
+    <<98>>,<<>>],[<<120,121,122>>],[<<120,120>>,<<>>,<<>>,<<>>,<<>>],[<<98>>,<<>>,<<>>,<<>>],\
+    [],[<<97>>,<<98>>,<<>>],{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+    {error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,\
+    badarg},{error,badarg},{error,badarg},{error,badarg}]},{split_long,[true,true,true,true,\
+    true,true,true,true]}]";
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// binaries, lists, and tuples of the probe result.
@@ -37,10 +52,10 @@ fn text(term: &Term) -> String {
 }
 
 #[test]
-fn converts_iodata_as_pinned_erts() {
+fn converts_iodata_and_splits_binaries_as_pinned_erts() {
     // Each call is a body `call_ext`. The probe catches only the class and
     // the reason of an error, because PBeam gives a BIF error the stack
-    // trace `[]` (`erl_iolist.c:857-928`).
+    // trace `[]` (`erl_iolist.c:857-928`, `erl_bif_binary.c:1346-1645`).
     let program = BeamProgram::load(&[IOLIST_SPLIT_PROBE]).unwrap();
     let result = program.execute("iolist_split_probe", "main", &[]).unwrap();
     assert_eq!(text(&result), EXPECTED);

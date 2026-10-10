@@ -264,6 +264,8 @@ Each row is a BIF entry of `BIFS` that has a body.
 
 | Entry | Authority | Capability | Determinism | Execution | Effects | Cost | Owner |
 | --- | --- | --- | --- | --- | --- | --- | --- |
+| `binary:split/2` | `process.self` | `none` | `run` | `inline`, `trap` | As `binary:split/3` with the options `[]`. | `O(n)` | `src/runtime/interpreter/bif/binary.rs` |
+| `binary:split/3` | `process.self` | `none` | `run` | `inline`, `trap` | Gives the parts of a binary around the first match, or around each match with `global`, of a binary pattern or a list of binary patterns, as copies. Reads the options `global`, `trim`, `trim_all`, and `{scope, {Pos, Len}}`. Uses one reduction of the budget of the caller for each 10 search steps of the ERTS Boyer-Moore or Aho-Corasick search and of the result build. At the end of the budget, it traps to an internal export and continues in the next turn. A compiled pattern tuple raises `badarg`, because PBeam does not run `binary:compile_pattern/1`. | `O(n)` | `src/runtime/interpreter/bif/binary.rs` |
 | `erlang:*/2` | `none` | `none` | `pure` | `inline` | Gives the product, or raises `badarith`. An `i64` overflow gives a runtime error. | `O(1)` | `src/runtime/interpreter/bif/erlang.rs` |
 | `erlang:+/2` | `none` | `none` | `pure` | `inline` | Gives the sum, or raises `badarith`. An `i64` overflow gives a runtime error. | `O(1)` | `src/runtime/interpreter/bif/erlang.rs` |
 | `erlang:++/2` | `process.self` | `none` | `run` | `inline`, `trap` | Appends two lists. Uses one reduction of the budget of the caller for each 60 elements of the left list, or for each 32 when the right list is `[]`. At the end of the budget, it traps to its export and continues in the next turn. | `O(n)` | `src/runtime/interpreter/bif/erlang.rs` |
@@ -382,7 +384,7 @@ Each row is a BIF entry of `BIFS` that has a body.
 Each entry is a BIF entry of `BIFS` with the form `unsupported`. A call gives the runtime error `unresolved external MFA`, and the run stops. The BEAM stub of the entry never runs. These entries have no effect. Authority: `none`. Determinism: `pure`. Execution: `inline`. Cost: `O(1)`. Owner: `src/runtime/interpreter/bif/table.rs`. A PR that implements one of these BIFs moves it to the section "BIFs".
 
 - `atomics`: `add/3`, `add_get/3`, `compare_exchange/4`, `exchange/3`, `get/2`, `info/1`, `put/3`
-- `binary`: `at/2`, `compile_pattern/1`, `copy/1`, `copy/2`, `decode_unsigned/1`, `decode_unsigned/2`, `encode_unsigned/1`, `encode_unsigned/2`, `first/1`, `last/1`, `list_to_bin/1`, `longest_common_prefix/1`, `longest_common_suffix/1`, `match/2`, `match/3`, `matches/2`, `matches/3`, `part/2`, `part/3`, `referenced_byte_size/1`, `split/2`, `split/3`
+- `binary`: `at/2`, `compile_pattern/1`, `copy/1`, `copy/2`, `decode_unsigned/1`, `decode_unsigned/2`, `encode_unsigned/1`, `encode_unsigned/2`, `first/1`, `last/1`, `list_to_bin/1`, `longest_common_prefix/1`, `longest_common_suffix/1`, `match/2`, `match/3`, `matches/2`, `matches/3`, `part/2`, `part/3`, `referenced_byte_size/1`
 - `code`: `coverage_support/0`, `get_coverage/2`, `get_coverage_mode/0`, `get_coverage_mode/1`, `get_debug_info/1`, `reset_coverage/1`, `set_coverage_mode/1`
 - `erl_ddll`: `demonitor/1`, `format_error_int/1`, `info/2`, `loaded_drivers/0`, `monitor/2`, `try_load/3`, `try_unload/2`
 - `erl_debugger`: `breakpoint/3`, `breakpoints/1`, `breakpoints/3`, `instrumentations/0`, `peek_stack_frame_slot/4`, `peek_xreg/3`, `register/1`, `stack_frames/2`, `supported/0`, `toggle_instrumentations/1`, `unregister/2`, `whereis/0`, `xregs_count/1`

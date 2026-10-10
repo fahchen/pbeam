@@ -224,6 +224,40 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("{3500,{ones,8000}}", 4999),
         ],
     ),
+    // One reduction for each 10 search steps: one step for each byte of
+    // an Aho-Corasick search, for each comparison of a Boyer-Moore search,
+    // for each 8 bytes of its memchr skip, and for each part of a global
+    // result. A search that does not end in its turn traps, and the trap
+    // export bumps only the steps of its last turn
+    // (`erl_bif_binary.c:637-994`, `1433-1645`, `1835-1952`).
+    (
+        "binary_split",
+        &[
+            ("first", 0),
+            ("global", 0),
+            ("none", 0),
+            ("long_needle", 0),
+            ("ac_first", 0),
+            ("ac_global", 0),
+            ("trim", 1),
+            ("bad", 0),
+            ("{commas,10}", 2),
+            ("{commas,1000}", 200),
+            ("{commas,20000}", 4000),
+            ("{commas,50000}", 6000),
+            ("{plain,1000}", 12),
+            ("{plain,100000}", 1250),
+            ("{plain,400000}", 5000),
+            ("{plain_global,100000}", 1250),
+            ("{plain_ac,1000}", 100),
+            ("{plain_ac,100000}", 6000),
+            ("{mixed,1000}", 600),
+            ("{mixed,30000}", 6000),
+            ("{wrap,319700}", 3996),
+            ("{wrap,319745}", 3997),
+            ("{wrap,319760}", 3997),
+        ],
+    ),
     // Each item that PBeam supports costs 1 after the read, also for a
     // process with 10000 messages (`erl_bif_info.c:1417-1424`, `1601`).
     // `process_info/2` is a heavy BIF, so its call costs nothing.
@@ -346,6 +380,25 @@ const LONGS: &[(&str, &[(&str, i64)])] = &[
             ("a", 1),
             ("b", 2999),
         ],
+    ),
+    // A global `binary:split/3` with 50000 matches: its search and its
+    // result build trap.
+    (
+        "binary_split",
+        &[
+            ("b", 1334),
+            ("a", 1),
+            ("b", 2001),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 331),
+        ],
+    ),
+    // An Aho-Corasick search of 200000 bytes with no match.
+    (
+        "binary_split",
+        &[("b", 3335), ("a", 1), ("b", 1665), ("a", 2)],
     ),
 ];
 

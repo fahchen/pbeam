@@ -1,8 +1,8 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `erlang`, `erts_internal`, `ets`, `iolist`, `lists`, `maps`, `os`,
-//! `re`, and `unicode` modules hold the BIF bodies that do not
+//! The `binary`, `erlang`, `erts_internal`, `ets`, `iolist`, `lists`,
+//! `maps`, `os`, `re`, and `unicode` modules hold the BIF bodies that do not
 //! fit on one table line.
 //! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
 //! in `bif.tab`.
@@ -14,6 +14,7 @@ use crate::runtime::{
     scheduler::Flushed,
 };
 
+mod binary;
 mod erlang;
 mod erts_internal;
 mod ets;
@@ -412,6 +413,10 @@ impl BeamProgram {
     ///   [`iolist::l2b_copy`]). ERTS traps to
     ///   `erts_internal:list_to_bitstring_continue/1` with a magic reference
     ///   to the walk state (`erl_iolist.c:53-55`, `764-835`).
+    /// - `erlang:binary_find_trap/3`, with the subject, the search state, and
+    ///   the pattern of `binary:split/2,3` ([`binary::find_trap`]). ERTS
+    ///   traps to the same export with magic references to the search state
+    ///   and to the compiled pattern (`erl_bif_binary.c:75-77`, `1935-1952`).
     /// - `erlang:bif_handle_signals_return/2`, with the process that the BIF
     ///   read and its result: it handles the signals of the caller up to a
     ///   flush signal and returns the result (`bif.c:5452-5495`).
@@ -596,6 +601,11 @@ impl BeamProgram {
                     bytes.clone(),
                 ))
             }
+            (
+                "erlang",
+                "binary_find_trap",
+                [subject @ Term::Binary(bytes), Term::Tuple(state), pattern],
+            ) => binary::find_trap(process, subject, bytes, state, pattern),
             ("erlang", "bif_handle_signals_return", [_, value]) => {
                 Ok(match scheduler.flush_signals()? {
                     Flushed::Done => BifResult::Value(value.clone()),
