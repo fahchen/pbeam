@@ -5,6 +5,7 @@
 //! when mise writes its cache, and stderr must be the same as ERTS.
 
 use std::{
+    path::Path,
     process::{Command, Output, Stdio},
     time::Duration,
 };
@@ -132,6 +133,95 @@ fn restarts_a_crashed_worker_as_pinned_erts() {
         "ERTS"
     );
     assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+}
+
+#[test]
+fn stops_terra_counter_when_the_local_terra_repository_is_not_at_the_pinned_commit() {
+    // `scripts/terra.sh` gives the Terra sources to `terra_counter`. With
+    // `PBEAM_TERRA_SRC`, it uses that local repository only when it is a git
+    // repository whose HEAD is the pinned commit. Otherwise the script stops
+    // with status 2 before it compiles a file, so no Terra code runs.
+    let directory = std::env::temp_dir().join(format!("pbeam-terra-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(directory.join("lib")).unwrap();
+    let not_git = run_terra_counter(&directory);
+    assert_eq!(
+        parts(&not_git),
+        (
+            String::new(),
+            format!(
+                "terra: PBEAM_TERRA_SRC {} is not the top directory of a git repository\\n",
+                directory.display()
+            ),
+            Some(2)
+        ),
+        "a directory that is not a git repository"
+    );
+
+    std::fs::write(directory.join("lib/terra.ex"), "defmodule Terra do\nend\n").unwrap();
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["add", "lib/terra.ex"],
+        &[
+            "-c",
+            "user.name=pbeam",
+            "-c",
+            "user.email=pbeam@example.com",
+            "commit",
+            "--quiet",
+            "--message",
+            "stub",
+        ],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&directory)
+            .args(arguments)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {arguments:?}: {status}");
+    }
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&directory)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let head = String::from_utf8(head.stdout).unwrap();
+    let other_commit = run_terra_counter(&directory);
+    std::fs::remove_dir_all(&directory).unwrap();
+
+    assert_eq!(
+        parts(&other_commit),
+        (
+            String::new(),
+            format!(
+                "terra: {} is at {}, not at the pinned commit 30dea5667d7e4ae5777aa3df77acb36c4aac6967\\n",
+                directory.display(),
+                head.trim_end()
+            ),
+            Some(2)
+        ),
+        "a git repository at another commit"
+    );
+}
+
+/// Run `scripts/example.sh terra_counter --erts` with the local Terra
+/// repository `terra` in `PBEAM_TERRA_SRC`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let output = run_terra_counter(Path::new("/tmp/terra"));
+/// assert_eq!(output.status.code(), Some(2));
+/// ```
+fn run_terra_counter(terra: &Path) -> Output {
+    let mut command = Command::new("bash");
+    command
+        .args(["scripts/example.sh", "terra_counter", "--erts"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("PBEAM_TERRA_SRC", terra);
+    run_with_time_limit(&mut command, Stdio::piped(), RUN_TIME_LIMIT)
 }
 
 /// Run `scripts/example.sh` with `arguments`, with no locale variable except
