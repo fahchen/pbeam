@@ -402,6 +402,9 @@ impl BeamProgram {
             ("pbeam_cap", "request", [kind, request]) => {
                 return pbeam_cap::request(scheduler, kind, request);
             }
+            ("pbeam_cap", "policy_revoke", [holder, kind]) => {
+                return pbeam_cap::policy_revoke(scheduler, holder, kind);
+            }
             _ => {}
         }
         let mut context = BifContext {
@@ -672,8 +675,11 @@ impl BeamProgram {
 
 /// The PBeam BIFs: functions of PBeam modules that ERTS does not have. They
 /// are not `bif.tab` entries, and no BEAM module defines them.
-const PBEAM_BIFS: [(&str, &str, u32); 2] =
-    [("pbeam_cap", "request", 2), ("pbeam_cap", "revoke", 2)];
+const PBEAM_BIFS: [(&str, &str, u32); 3] = [
+    ("pbeam_cap", "policy_revoke", 2),
+    ("pbeam_cap", "request", 2),
+    ("pbeam_cap", "revoke", 2),
+];
 
 /// Return whether an external call or a `bif` instruction goes to a BIF: the
 /// MFA is an entry of `BIFS`, the `bif.tab` entries, so it runs before the

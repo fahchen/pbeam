@@ -388,13 +388,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the first check that reads policy data, for example an audit rule of #338 or the opt-in check-time extension.
 - **Source:** implementation of #337.
 
-### Revoke a capability from the policy process
+### Revoke a grant that the holder did not handle yet
 
-- After #337, the launcher (`Policy::revocations`) and a delegating process (`pbeam_cap:revoke/2`) can revoke. The design of #310 names the policy process as a third revoker, for example of a capability that it granted at run time.
-- **Option:** a PBeam BIF that only the policy process can call, which revokes the copies of a kind of a process that have the source `policy` or that came from the launcher.
-- **Reason:** no policy module and no test revokes yet.
-- **Trigger:** a policy that must take back a run-time grant, for example an audit rule of #338.
-- **Source:** implementation of #337.
+- After #378, `pbeam_cap:policy_revoke/2` revokes the copies of a kind that have a delegation record when it runs (`Scheduler::policy_revoke` in `src/runtime/scheduler/policy.rs`). A copy of a grant gets its record when the requester handles the grant signal (`Signal::Grant` in `src/runtime/scheduler/signals.rs`). Thus a revocation in a later call of the policy code does not revoke a grant that the requester did not handle yet, and the requester then holds the copy.
+- **Evidence:** with one scheduler, the grant signal puts the requester in the run queue before the next call of the policy process (`Scheduler::queue_signal` and `Scheduler::begin_policy_call`). The requester handles the signal in its turn when its signal queue does not hold more signals than the turn can handle.
+- **Option:** give the copy its identifier and its record when the policy process sends the grant signal, and release the record when the requester exits before it handles the signal. Then the revocation signal comes after the grant signal in the queue of the requester.
+- **Reason:** no policy revokes a grant in the call after the grant, and no consumer fills the signal queue of a requester that waits for its grant.
+- **Trigger:** the multiple schedulers of M10, or a policy that revokes a grant in the call after the grant, for example an audit rule of #338.
+- **Source:** implementation of #378.
 
 ### Limit the targets of `process` `send`
 

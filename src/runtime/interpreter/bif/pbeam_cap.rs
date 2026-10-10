@@ -51,6 +51,51 @@ pub(super) fn revoke(
     }
 }
 
+/// Run `pbeam_cap:policy_revoke(Pid, Kind)`: revoke the copies of the
+/// capability kind `Kind` of the process `Pid`, whatever their source, and
+/// return `ok`. Only the policy process can call it, in a call of the
+/// policy code. Each copy gets a revocation signal from the policy process,
+/// and its holder sends the revocation on to the copies that it gave, when
+/// it handles the signal. After the exit of `Pid`, the revocation goes
+/// through its released records to the copies below them (see
+/// `Scheduler::policy_revoke`). The call does not wait for the signals and
+/// does not end a holder.
+///
+/// A `Pid` that is not a pid, and a `Kind` that is not the atom of a
+/// capability kind, raise `error:badarg`. Another caller than the policy
+/// process raises `error:capability_denied`. A `Pid` with no copy of `Kind`
+/// returns `ok` with no effect. In a run that skips the checks, the call
+/// returns `ok` after the argument checks and has no effect.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The current process is the policy process.
+/// let result = policy_revoke(&mut scheduler, &Term::Pid(worker), &Term::static_atom("env"))?;
+/// assert!(matches!(result, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for the atom `capability_denied` in a
+/// full atom table.
+pub(super) fn policy_revoke(
+    scheduler: &mut Scheduler,
+    holder: &Term,
+    kind: &Term,
+) -> Result<BifResult, BeamError> {
+    let (Term::Pid(holder), Term::Atom(kind)) = (holder, kind) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(kind) = CapabilityKind::named(kind.name()) else {
+        return Ok(BifResult::badarg());
+    };
+    match scheduler.policy_revoke(*holder, kind) {
+        Ok(()) => Ok(Value(Term::static_atom("ok"))),
+        Err(Denied) => BifResult::capability_denied(&mut scheduler.atoms),
+    }
+}
+
 /// Run `pbeam_cap:request(Kind, Request)`: ask the policy process for a
 /// capability of the kind `Kind`. The policy process calls
 /// `grant(Kind, Request, Requester)` of the policy module, and the caller
