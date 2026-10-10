@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261010: Record deferred wake limits with triggers
+
+**Problem:** A cross-thread revocation could remain queued while the scheduler waited on an idle host event source.
+
+**Root Cause:** The implementation had no wake handle, and the review did not find a current consumer that required one.
+
+**Fix:** Remove the incorrect synchronization claim, document the observable wake limit, and record the wake mechanism as backlog work with its trigger.
+
+**Guardrail:** When concurrency work is deferred, document its observable limit and the condition that requires the follow-up mechanism.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/357#issuecomment-6097751596>
+
 ## 20261010: Preserve descendant revocation after holder exit
 
 **Problem:** A delegation chain could lose the record needed to revoke a surviving descendant when an intermediate holder exited.
@@ -95,11 +107,11 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Problem:** The clock documentation and test rationale assumed that ERTS returns the host TSC frequency when RDTSCP is available.
 
-**Root Cause:** The implementation inferred ERTS behavior from hardware terminology instead of checking the pinned OTP source and running the reference on the target hosts.
+**Root Cause:** The implementation inferred ERTS behavior from hardware terminology instead of checking the pinned ERTS source and running the reference on the target hosts.
 
 **Fix:** Correct the documentation and keep the fixed test value only after confirming the pinned ERTS result on the supported hosts.
 
-**Guardrail:** Before documenting host-dependent behavior, inspect the pinned OTP feature detection and compare the exact reference output on each supported host.
+**Guardrail:** Before documenting host-dependent behavior, inspect the pinned ERTS feature detection and compare the exact reference output on each supported host.
 
 **Reference:** <https://github.com/fahchen/pbeam/pull/176#issuecomment-6005160493>
 
