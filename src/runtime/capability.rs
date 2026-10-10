@@ -478,8 +478,12 @@ pub(super) struct CapabilityId(u64);
 /// (section "Capability kinds" of `docs/capability-security-migration.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Source {
-    /// The launcher issued the copy to the root process.
+    /// The launcher issued the copy to the root process or to the policy
+    /// process.
     Launcher,
+    /// The policy process granted the copy at run time, with `grant/3` of
+    /// the policy module.
+    Policy,
     /// A parent gave the copy to its child at spawn, from its own copy with
     /// this identifier.
     Copy(CapabilityId),
@@ -594,6 +598,19 @@ impl SecurityContext {
             .filter(|held| held.capability.kind == kind)
             .map(|held| held.id)
             .collect()
+    }
+
+    /// Add the copies of `granted`, a context that [`Delegations::hold`]
+    /// made for the same process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let granted = delegations.hold(id, [(Source::Policy, capability)]);
+    /// context.add(granted);
+    /// ```
+    pub(super) fn add(&mut self, granted: SecurityContext) {
+        self.capabilities.extend(granted.capabilities);
     }
 
     /// Delete the copy `id`, when the context has it.
@@ -892,13 +909,31 @@ fn restriction(spec: &KindSpec, fields: &Term) -> Option<Restriction> {
     let Term::Map(fields) = fields else {
         return None;
     };
+    restriction_fields(spec, fields.iter())
+}
+
+/// Read the `(field, value)` pairs of a restriction map of the kind of
+/// `spec`, as [`restrictions`] describes. Return `None` for a pair that is
+/// not valid.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // #{operations => [write]}
+/// let restriction = restriction_fields(CapabilityKind::Terminal.spec(), fields.iter());
+/// assert_eq!(restriction.and_then(|restriction| restriction.delegable), None);
+/// ```
+fn restriction_fields<'a>(
+    spec: &KindSpec,
+    fields: impl Iterator<Item = (&'a Term, &'a Term)>,
+) -> Option<Restriction> {
     let mut restriction = Restriction {
         kind: spec.kind,
         operations: None,
         constraint: None,
         delegable: None,
     };
-    for (field, value) in fields.iter() {
+    for (field, value) in fields {
         let Term::Atom(field) = field else {
             return None;
         };
@@ -934,6 +969,42 @@ fn restriction(spec: &KindSpec, fields: &Term) -> Option<Restriction> {
         }
     }
     Some(restriction)
+}
+
+/// Read a capability that the code of the policy module gives: a map with
+/// the key `kind`, a kind atom, and the keys `operations`, `delegable`, and
+/// the constraint field of the kind, each with a value that [`restrictions`]
+/// reads. A kind with no constraint field has no such key. Return `None` for
+/// each other term, also for a map that has no such key or another key.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // #{kind => env, operations => [read], delegable => false, names => ["HOME"]}
+/// assert!(capability(&home).is_some());
+/// // #{kind => env, operations => [read], delegable => false}
+/// assert!(capability(&no_names).is_none());
+/// ```
+pub(super) fn capability(term: &Term) -> Option<Capability> {
+    let Term::Map(fields) = term else {
+        return None;
+    };
+    let is_kind = |field: &Term| matches!(field, Term::Atom(field) if field.name() == "kind");
+    let (_, Term::Atom(kind)) = fields.iter().find(|(field, _)| is_kind(field))? else {
+        return None;
+    };
+    let spec = CapabilityKind::named(kind.name())?.spec();
+    let fields = restriction_fields(spec, fields.iter().filter(|(field, _)| !is_kind(field)))?;
+    let constraint = match spec.constraint {
+        Some(_) => fields.constraint?,
+        None => Constraint::Any,
+    };
+    Some(Capability {
+        kind: spec.kind,
+        operations: fields.operations?,
+        constraint,
+        delegable: fields.delegable?,
+    })
 }
 
 /// Read a constraint value: `any`, or a proper list of names in `form`.

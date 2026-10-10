@@ -1,7 +1,6 @@
 use std::{
     io::Read,
     os::fd::{AsFd, AsRawFd},
-    path::PathBuf,
     process::{Child, Command, Stdio},
     sync::LazyLock,
     thread,
@@ -32,11 +31,6 @@ const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
 static WRITTEN: LazyLock<Vec<u8>> = LazyLock::new(|| {
     b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n".repeat(16 * 1024)
 });
-
-/// The paths of the pinned `BOOT_MODULES`. Each `pinned_beam_path` call
-/// starts `erl`, so the tests of this crate find the paths only once.
-static BOOT_PATHS: LazyLock<[PathBuf; BOOT_MODULES.len()]> =
-    LazyLock::new(|| BOOT_MODULES.map(pinned_beam_path));
 
 #[test]
 fn runs_other_processes_while_a_write_waits_for_a_full_pipe() {
@@ -374,7 +368,7 @@ fn pbeam(beam: &str, module: &str, function: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
         .args(["pbeam_boot", "start", module, function, "--", beam])
-        .args(BOOT_PATHS.iter())
+        .args(BOOT_MODULES.map(pinned_beam_path))
         .arg(boot_beam());
     command
 }
