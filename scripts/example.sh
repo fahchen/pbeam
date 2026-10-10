@@ -4,6 +4,7 @@
 # Usage: bash scripts/example.sh <name> [--erts]
 # The example is the Elixir sources examples/<name>/*.ex. The entry is main/0 of the module with the camel-case name of the example, for example HelloWorld for hello_world.
 # The compiled example modules and pbeam_boot.beam go into target/examples/<name>/.
+# The terra_counter example also compiles the Terra sources of the pinned commit, which scripts/terra.sh downloads or finds in PBEAM_TERRA_SRC.
 # PBEAM_BIN selects the pbeam binary. Without it, the script runs the binary with cargo run.
 # The commands are those of the Run section of examples/hello_world/README.md.
 set -euo pipefail
@@ -43,8 +44,19 @@ output=target/examples/$name
 mkdir -p "$output"
 work=$(mktemp -d "$output/compile.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+# The terra_counter example calls the Terra library and its Counter application. The repository has no Terra source, so compile them from the pinned Terra commit (scripts/terra.sh) first. The Elixir compiler runs the macros of the Terra sources. The Terra sources do not get --warnings-as-errors, because they are third-party code.
+if [[ $name == terra_counter ]]; then
+  terra=$(bash scripts/terra.sh)
+  terra_list=$(find "$terra/lib" -name '*.ex' | LC_ALL=C sort)
+  terra_sources=()
+  while IFS= read -r source; do
+    terra_sources+=("$source")
+  done <<<"$terra_list"
+  step "Compile the Terra sources of $terra"
+  elixirc -o "$work" "${terra_sources[@]}" "$terra/examples/counter_app.exs"
+fi
 step "Compile ${sources[*]}"
-elixirc --warnings-as-errors -o "$work" "${sources[@]}"
+elixirc --warnings-as-errors -o "$work" -pa "$work" "${sources[@]}"
 [[ -f $work/$entry.beam ]] || fail "examples/$name defines no module ${entry#Elixir.}"
 step "Compile examples/hello_world/pbeam_boot.erl"
 erlc +deterministic -o "$work" examples/hello_world/pbeam_boot.erl
