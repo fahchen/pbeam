@@ -33,6 +33,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** <https://github.com/fahchen/pbeam/pull/270#issuecomment-6078067360>
 
+## 20261009: Qualify stream-specific behavior in user-facing claims
+
+**Problem:** A PR description said that piping the output hides the progress steps, but steps remain visible when only stdout is redirected and stderr remains a terminal.
+
+**Root Cause:** The statement treated all piping and redirection as one output path without naming the stream that controls the behavior.
+
+**Fix:** State that redirecting or piping stderr suppresses the steps.
+
+**Guardrail:** When documenting terminal output behavior, identify the relevant stream and qualify each redirection case.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/296#issuecomment-6081107031>
+
 ## 20261006: Verify OTP hardware assumptions against source behavior
 
 **Problem:** The clock documentation and test rationale assumed that ERTS returns the host TSC frequency when RDTSCP is available.
@@ -143,8 +155,7 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 ## 20261005: Keep explicit exception raise sites separate
 
-**Problem:** An explicit exception raise site was grouped with BIFs that raise
-`badarg`, although it raises the class `error` with its first argument as the reason.
+**Problem:** An explicit exception raise site was grouped with BIFs that raise `badarg`, although it raises the class `error` with its first argument as the reason.
 
 **Root Cause:** The documentation grouped operations by a similar failure shape instead of recording each operation's exact exception class and reason.
 
