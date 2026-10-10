@@ -1,8 +1,9 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `erlang`, `erts_internal`, `ets`, `lists`, `maps`, `os`, `re`, and
-//! `unicode` modules hold the BIF bodies that do not fit on one table line.
+//! The `binary`, `erlang`, `erts_internal`, `ets`, `iolist`, `lists`,
+//! `maps`, `os`, `re`, and `unicode` modules hold the BIF bodies that do not
+//! fit on one table line.
 //! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
 //! in `bif.tab`.
 
@@ -13,6 +14,7 @@ use crate::runtime::{
     scheduler::Flushed,
 };
 
+mod binary;
 mod erlang;
 mod erts_internal;
 mod ets;
@@ -414,6 +416,15 @@ impl BeamProgram {
     ///   done, and the key position ([`ets::insert_list`]). ERTS traps to
     ///   `ets:insert/2` with a magic reference to the YCF state
     ///   (`erl_db.c:2297-2332`).
+    /// - `erts_internal:list_to_bitstring_continue/5`, with the phase and the
+    ///   walk state of `erlang:iolist_to_binary/1` ([`iolist::l2b_size`],
+    ///   [`iolist::l2b_copy`]). ERTS traps to
+    ///   `erts_internal:list_to_bitstring_continue/1` with a magic reference
+    ///   to the walk state (`erl_iolist.c:53-55`, `764-835`).
+    /// - `erlang:binary_find_trap/3`, with the subject, the search state, and
+    ///   the pattern of `binary:split/2,3` ([`binary::find_trap`]). ERTS
+    ///   traps to the same export with magic references to the search state
+    ///   and to the compiled pattern (`erl_bif_binary.c:75-77`, `1935-1952`).
     /// - `erlang:bif_handle_signals_return/2`, with the process that the BIF
     ///   read and its result: it handles the signals of the caller up to a
     ///   flush signal and returns the result (`bif.c:5452-5495`).
@@ -556,6 +567,53 @@ impl BeamProgram {
                     merged.clone(),
                 ))
             }
+            (
+                "erts_internal",
+                "list_to_bitstring_continue",
+                [
+                    Term::Atom(phase),
+                    arg,
+                    term,
+                    Term::List(stack),
+                    Term::Integer(size),
+                ],
+            ) if phase.name() == "size" => {
+                let reds_left = process.bif_reductions_left()? as i64;
+                Ok(iolist::l2b_size(
+                    process,
+                    reds_left,
+                    arg,
+                    term,
+                    stack,
+                    *size as usize,
+                ))
+            }
+            (
+                "erts_internal",
+                "list_to_bitstring_continue",
+                [
+                    _,
+                    term,
+                    Term::List(stack),
+                    Term::Integer(size),
+                    Term::Binary(bytes),
+                ],
+            ) => {
+                let reds_left = process.bif_reductions_left()? as i64;
+                Ok(iolist::l2b_copy(
+                    process,
+                    reds_left,
+                    term,
+                    stack,
+                    *size as usize,
+                    bytes.clone(),
+                ))
+            }
+            (
+                "erlang",
+                "binary_find_trap",
+                [subject @ Term::Binary(bytes), Term::Tuple(state), pattern],
+            ) => binary::find_trap(process, subject, bytes, state, pattern),
             ("erlang", "bif_handle_signals_return", [_, value]) => {
                 Ok(match scheduler.flush_signals()? {
                     Flushed::Done => BifResult::Value(value.clone()),
