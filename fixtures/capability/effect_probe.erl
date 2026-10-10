@@ -8,6 +8,7 @@
     open_port/0,
     port_command/0,
     port_close/0,
+    port_info/0,
     getenv/0,
     handle_signal/0,
     ignore_signal/0,
@@ -53,6 +54,9 @@
     persistent_term_kept/0,
     terminal_permitted/0,
     terminal_badargs/0,
+    inspect_permitted/0,
+    inspect_closed/0,
+    inspect_names/0,
     child/2,
     names/0,
     executables/0,
@@ -86,6 +90,10 @@ port_command() ->
 port_close() ->
     Port = cat(),
     attempt(fun() -> erlang:port_close(Port) end).
+
+port_info() ->
+    Port = cat(),
+    attempt(fun() -> erlang:port_info(Port) end).
 
 getenv() -> attempt(fun() -> os:getenv("PBEAM_EFFECT_PROBE") end).
 
@@ -266,6 +274,37 @@ terminal_badargs() ->
         badarg(fun() -> prim_tty:tty_create(foo) end)
     ].
 
+%% A permitted port_info/1 of an open port. The id and the OS pid change
+%% from run to run, so the probe gives only their keys.
+inspect_permitted() ->
+    Port = cat(),
+    Info = erlang:port_info(Port),
+    Self = self(),
+    [
+        [Key || {Key, _} <- Info],
+        lists:keyfind(name, 1, Info),
+        lists:keyfind(links, 1, Info) =:= {links, [Self]},
+        lists:keyfind(connected, 1, Info) =:= {connected, Self},
+        lists:keyfind(input, 1, Info),
+        lists:keyfind(output, 1, Info)
+    ].
+
+%% A closed port and an atom give undefined with no check.
+inspect_closed() ->
+    Port = cat(),
+    true = erlang:port_close(Port),
+    [erlang:port_info(Port), erlang:port_info(effect_probe_nobody)].
+
+%% The `executables` constraint of `port` compares the program name of the
+%% port for port_info/1, also for a port of another process.
+inspect_names() ->
+    Port = cat(),
+    Info = fun() -> erlang:port_info(Port) end,
+    [
+        in_child(#{port => #{executables => ["/bin/cat"]}, process => #{}}, Info),
+        in_child(#{port => #{executables => ["/bin/sh"]}, process => #{}}, Info)
+    ].
+
 %% Permitted process calls that give the same result on ERTS.
 process_permitted() ->
     [link_kept(), monitor_kept(), exit_kept(), exit_self(), send_kept(), timer_kept()].
@@ -379,7 +418,10 @@ reference(_) -> other.
 
 %% Run Call in a child whose capability of Kind permits no operation.
 restricted(Kind, Call) ->
-    Capabilities = #{Kind => #{operations => []}, process => #{}},
+    in_child(#{Kind => #{operations => []}, process => #{}}, Call).
+
+%% Run Call in a child with the capabilities option Capabilities.
+in_child(Capabilities, Call) ->
     erlang:spawn_opt(?MODULE, child, [self(), Call], [{capabilities, Capabilities}]),
     receive
         {child, Result} -> Result

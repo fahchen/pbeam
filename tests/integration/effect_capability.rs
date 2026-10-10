@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 35] = [
+const PROBES: [(&str, &str, &str); 36] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -59,6 +59,7 @@ const PROBES: [(&str, &str, &str); 35] = [
         "port_command",
     ),
     ("erts_internal:port_close/1", "port:close", "port_close"),
+    ("erts_internal:port_info/1", "port:inspect", "port_info"),
     ("os:getenv/1", "env:read", "getenv"),
     ("os:set_signal/2", "signal:handle", "handle_signal"),
     ("os:set_signal/2", "signal:ignore", "ignore_signal"),
@@ -92,7 +93,7 @@ impl Policy for Grants {
 
 /// The kind and the operation of each `kind:operation` name of the
 /// inventory.
-const OPERATIONS: [(&str, CapabilityKind, Operation); 23] = [
+const OPERATIONS: [(&str, CapabilityKind, Operation); 24] = [
     ("process:spawn", CapabilityKind::Process, Operation::Spawn),
     ("process:link", CapabilityKind::Process, Operation::Link),
     (
@@ -123,6 +124,7 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 23] = [
     ("port:spawn", CapabilityKind::Port, Operation::Spawn),
     ("port:command", CapabilityKind::Port, Operation::Command),
     ("port:close", CapabilityKind::Port, Operation::Close),
+    ("port:inspect", CapabilityKind::Port, Operation::Inspect),
     ("env:read", CapabilityKind::Env, Operation::Read),
     ("env:write", CapabilityKind::Env, Operation::Write),
     ("signal:handle", CapabilityKind::Signal, Operation::Handle),
@@ -730,4 +732,72 @@ fn keeps_the_locale_after_a_denied_setlocale() {
         atom(&program, "denied")
     );
     assert_eq!(ctype_locale(), "C");
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_port_information() {
+    let program = program();
+    let atom = |name| atom(&program, name);
+    let item = |key, value| tuple(&[atom(key), value]);
+    let expected = Term::List(vec![
+        atoms(
+            &program,
+            &[
+                "name",
+                "links",
+                "id",
+                "connected",
+                "input",
+                "output",
+                "os_pid",
+            ],
+        ),
+        item(
+            "name",
+            Term::List(
+                b"/bin/cat"
+                    .iter()
+                    .map(|&byte| Term::Integer(byte.into()))
+                    .collect(),
+            ),
+        ),
+        atom("true"),
+        atom("true"),
+        item("input", Term::Integer(0)),
+        item("output", Term::Integer(0)),
+    ]);
+    let policy = grants(
+        CapabilityKind::Port,
+        &[Operation::Spawn, Operation::Inspect],
+        only(&["/bin/cat"]),
+    );
+    assert_eq!(run(&program, "inspect_permitted", &policy), expected);
+    assert_eq!(
+        erts_with_stand_in("inspect_permitted"),
+        "[[name,links,id,connected,input,output,os_pid],\
+         {name,[47,98,105,110,47,99,97,116]},true,true,{input,0},{output,0}]\n"
+    );
+}
+
+#[test]
+fn gives_undefined_for_a_closed_port_without_inspect() {
+    let program = program();
+    let policy = without((CapabilityKind::Port, Operation::Inspect));
+    assert_eq!(
+        run(&program, "inspect_closed", &policy),
+        atoms(&program, &["undefined", "undefined"])
+    );
+    assert_eq!(
+        erts_with_stand_in("inspect_closed"),
+        "[undefined,undefined]\n"
+    );
+}
+
+#[test]
+fn compares_the_program_name_of_a_port_for_its_information() {
+    let program = program();
+    assert_eq!(
+        run(&program, "inspect_names", &AllowAll),
+        atoms(&program, &["ok", "denied"])
+    );
 }

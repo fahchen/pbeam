@@ -30,7 +30,8 @@ pub enum CapabilityKind {
     /// The terminal: writes, reads, raw mode, the window size, the setup,
     /// and the queries.
     Terminal,
-    /// Ports: the start of an external program, its commands, and its close.
+    /// Ports: the start of an external program, its commands, its close,
+    /// and its information.
     Port,
     /// The OS environment variables.
     Env,
@@ -77,6 +78,8 @@ pub enum Operation {
     Command,
     /// `port`: close a port.
     Close,
+    /// `port`: read the information of a port.
+    Inspect,
     /// `signal`: handle a host signal.
     Handle,
     /// `signal`: ignore a host signal.
@@ -143,7 +146,12 @@ const KINDS: [KindSpec; 7] = [
     KindSpec {
         kind: CapabilityKind::Port,
         name: "port",
-        operations: &[Operation::Spawn, Operation::Command, Operation::Close],
+        operations: &[
+            Operation::Spawn,
+            Operation::Command,
+            Operation::Close,
+            Operation::Inspect,
+        ],
         constraint: Some(("executables", NameForm::String)),
     },
     KindSpec {
@@ -173,7 +181,7 @@ const KINDS: [KindSpec; 7] = [
 ];
 
 /// The atom of each operation in the `{capabilities, Map}` option.
-const OPERATION_NAMES: [(Operation, &str); 18] = [
+const OPERATION_NAMES: [(Operation, &str); 19] = [
     (Operation::Spawn, "spawn"),
     (Operation::Link, "link"),
     (Operation::Monitor, "monitor"),
@@ -187,6 +195,7 @@ const OPERATION_NAMES: [(Operation, &str); 18] = [
     (Operation::Query, "query"),
     (Operation::Command, "command"),
     (Operation::Close, "close"),
+    (Operation::Inspect, "inspect"),
     (Operation::Handle, "handle"),
     (Operation::Ignore, "ignore"),
     (Operation::Halt, "halt"),
