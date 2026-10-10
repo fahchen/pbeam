@@ -1195,6 +1195,31 @@ pub(super) fn tl(list: &Term) -> BifResult {
     Value(Term::list_with_tail(elements[1..].to_vec(), tail))
 }
 
+/// Run `erlang:split_binary/2`: return `{Left, Right}`, the bytes of a
+/// binary before and from `position`, as ERTS `split_binary_2` does
+/// (`binary.c:476-517`). A term that is not a binary, and a position that is
+/// not an integer from 0 to the byte size, raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let pair = split_binary(&Term::Binary(b"abc".to_vec()), &Term::Integer(1));
+/// assert!(matches!(pair, BifResult::Value(Term::Tuple(parts)) if parts == [Term::Binary(b"a".to_vec()), Term::Binary(b"bc".to_vec())]));
+/// assert!(matches!(split_binary(&Term::Binary(vec![]), &Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn split_binary(binary: &Term, position: &Term) -> BifResult {
+    match (binary, position) {
+        (Term::Binary(bytes), Term::Integer(at)) if (0..=bytes.len() as i64).contains(at) => {
+            let (left, right) = bytes.split_at(*at as usize);
+            Value(Term::Tuple(vec![
+                Term::Binary(left.to_vec()),
+                Term::Binary(right.to_vec()),
+            ]))
+        }
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `erlang:integer_to_list/1`: return the decimal characters of an
 /// integer, as ERTS `integer_to_list_1` and `integer_to_list`
 /// (`bif.c:3266-3339`) do. A term that is not an integer raises `badarg`.

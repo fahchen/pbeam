@@ -394,7 +394,7 @@ impl BeamProgram {
     /// - `persistent_term:get_all_trap/2`, with the result and the number of
     ///   pairs that remain ([`persistent_term::get_all_trap`]). ERTS keeps
     ///   the table and the result so far (`erl_bif_persistent.c:263-265`).
-    /// - `erlang:characters_to_utf8_trap/2`, `erlang:characters_to_list_trap_1/4`,
+    /// - `erlang:characters_to_utf8_trap/3`, `erlang:characters_to_list_trap_1/4`,
     ///   `_2/2`, `_3/3`, and `_4/2`, with the state of a chardata
     ///   conversion ([`unicode`]). ERTS traps to the exports of the same
     ///   names with other arguments: a magic reference to the state, or the
@@ -407,6 +407,11 @@ impl BeamProgram {
     ///   done, and the key position ([`ets::insert_list`]). ERTS traps to
     ///   `ets:insert/2` with a magic reference to the YCF state
     ///   (`erl_db.c:2297-2332`).
+    /// - `erts_internal:list_to_bitstring_continue/5`, with the phase and the
+    ///   walk state of `erlang:list_to_binary/1` ([`iolist::l2b_size`],
+    ///   [`iolist::l2b_copy`]). ERTS traps to
+    ///   `erts_internal:list_to_bitstring_continue/1` with a magic reference
+    ///   to the walk state (`erl_iolist.c:53-55`, `764-835`).
     /// - `erlang:bif_handle_signals_return/2`, with the process that the BIF
     ///   read and its result: it handles the signals of the caller up to a
     ///   flush signal and returns the result (`bif.c:5452-5495`).
@@ -471,8 +476,8 @@ impl BeamProgram {
             ("persistent_term", "get_all_trap", [all, Term::Integer(entries)]) => Ok(
                 persistent_term::get_all_trap(process, all.clone(), *entries as usize),
             ),
-            ("erlang", "characters_to_utf8_trap", [Term::Binary(bytes), rest]) => {
-                unicode::utf8_trap(process, bytes.clone(), rest)
+            ("erlang", "characters_to_utf8_trap", [Term::Binary(bytes), rest, encoding]) => {
+                unicode::utf8_trap(process, bytes.clone(), rest, encoding)
             }
             (
                 "erlang",
@@ -547,6 +552,48 @@ impl BeamProgram {
                     stack,
                     iovec.clone(),
                     merged.clone(),
+                ))
+            }
+            (
+                "erts_internal",
+                "list_to_bitstring_continue",
+                [
+                    Term::Atom(phase),
+                    arg,
+                    term,
+                    Term::List(stack),
+                    Term::Integer(size),
+                ],
+            ) if phase.name() == "size" => {
+                let reds_left = process.bif_reductions_left()? as i64;
+                Ok(iolist::l2b_size(
+                    process,
+                    reds_left,
+                    arg,
+                    term,
+                    stack,
+                    *size as usize,
+                ))
+            }
+            (
+                "erts_internal",
+                "list_to_bitstring_continue",
+                [
+                    _,
+                    term,
+                    Term::List(stack),
+                    Term::Integer(size),
+                    Term::Binary(bytes),
+                ],
+            ) => {
+                let reds_left = process.bif_reductions_left()? as i64;
+                Ok(iolist::l2b_copy(
+                    process,
+                    reds_left,
+                    term,
+                    stack,
+                    *size as usize,
+                    bytes.clone(),
                 ))
             }
             ("erlang", "bif_handle_signals_return", [_, value]) => {

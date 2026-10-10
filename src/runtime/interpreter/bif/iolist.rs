@@ -1,6 +1,7 @@
-//! The iodata BIFs `erlang:iolist_size/1` and `erlang:iolist_to_iovec/1`,
-//! and the iodata walk of ERTS `generic_iolist_size` and
-//! `generic_iolist_copy` (`erl_iolist.c:113-649`) that they share.
+//! The iodata BIFs `erlang:iolist_size/1`, `erlang:iolist_to_iovec/1`, and
+//! `erlang:list_to_binary/1`, and the iodata walk of ERTS
+//! `generic_iolist_size` and `generic_iolist_copy` (`erl_iolist.c:113-649`)
+//! that they share.
 
 use super::BifResult::Value;
 use super::*;
@@ -20,6 +21,16 @@ const STEPS_PER_RED: i64 = 8;
 /// The bytes of a copy for each step of the walk
 /// (`ERTS_IOLIST_COPY_BITS_PER_YIELD_COUNT`, `erl_iolist.c:305`, in bits).
 const COPY_BYTES_PER_STEP: i64 = 32;
+
+/// The smallest budget with which `erlang:list_to_binary/1` walks a list:
+/// `IOL2B_MIN_EXEC_REDS` (`erl_iolist.c:34`), `CONTEXT_REDS / 4`. A caller
+/// with fewer reductions walks with this budget.
+const L2B_MIN_REDS: i64 = 1000;
+
+/// The budget at or below which `erlang:list_to_binary/1` switches out the
+/// caller before it reads its argument: `IOL2B_RESCHED_REDS`
+/// (`erl_iolist.c:35`), `CONTEXT_REDS / 40`.
+const L2B_RESCHED_REDS: i64 = 100;
 
 /// How a walk of [`Walk::run`] ends.
 #[derive(Debug, PartialEq)]
@@ -418,17 +429,7 @@ pub(super) fn iovec_copy(
             None
         }
         Term::Binary(bytes) if bytes.len() <= IOVEC_COPY_LIMIT => {
-            let rest = &bytes[offset..];
-            let taken = rest
-                .len()
-                .min(((*steps + 1) * COPY_BYTES_PER_STEP) as usize);
-            merged.extend_from_slice(&rest[..taken]);
-            if taken < rest.len() {
-                *steps = 0;
-                return Some(taken);
-            }
-            *steps -= taken as i64 / COPY_BYTES_PER_STEP;
-            None
+            copy_bytes(&mut merged, &bytes[offset..], steps)
         }
         large => {
             if !merged.is_empty() {
@@ -482,6 +483,232 @@ fn iovec_trap(arguments: Vec<Term>) -> BifResult {
     BifResult::TrapBif {
         module: "erts_internal",
         function: "iolist_to_iovec_continue",
+        arguments,
+    }
+}
+
+/// Copy the bytes `rest` of a binary after `bytes`, as
+/// `generic_iolist_copy_bitstring` does with `YieldSupport`
+/// (`erl_iolist.c:354-417`): a copy takes at most 32 bytes for each step
+/// that remains, and one more step. When the copy takes all bytes, it uses
+/// one step for each 32 bytes and returns `None`. Else it uses all steps
+/// and returns the bytes that it took, so that the rest comes first in the
+/// next turn.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (mut bytes, mut steps) = (Vec::new(), 1);
+/// assert_eq!(copy_bytes(&mut bytes, &[0; 100], &mut steps), Some(64));
+/// assert_eq!((bytes.len(), steps), (64, 0));
+/// ```
+fn copy_bytes(bytes: &mut Vec<u8>, rest: &[u8], steps: &mut i64) -> Option<usize> {
+    let taken = rest
+        .len()
+        .min(((*steps + 1) * COPY_BYTES_PER_STEP) as usize);
+    bytes.extend_from_slice(&rest[..taken]);
+    if taken < rest.len() {
+        *steps = 0;
+        return Some(taken);
+    }
+    *steps -= taken as i64 / COPY_BYTES_PER_STEP;
+    None
+}
+
+/// Run `erlang:list_to_binary/1` as ERTS `list_to_binary_1` and
+/// `list_to_bitstring_bif` do (`erl_iolist.c:857-914`). A caller with at
+/// most 100 reductions switches out first: the call uses the rest of its
+/// budget as virtual reductions and runs again from the start in the next
+/// turn (`ERTS_BIF_YIELD1`, `bif.h:501-505`). A caller with fewer than 1000
+/// reductions walks with a budget of 1000, so that its budget can become 0.
+/// Then `[]` gives `<<>>`, a list of one binary gives the binary, and a term
+/// that is not a list raises `badarg`, all with no cost. Each other list
+/// goes to [`l2b_size`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// scheduler.current_process_mut().fcalls = 4000;
+/// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![2])]);
+/// assert!(matches!(list_to_binary(&mut scheduler, &list)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
+/// assert!(matches!(list_to_binary(&mut scheduler, &Term::Binary(vec![1]))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn list_to_binary(
+    scheduler: &mut Scheduler,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    let process = scheduler.current_process_mut();
+    let reds_left = process.bif_reductions_left()? as i64;
+    if reds_left <= L2B_RESCHED_REDS {
+        let fcalls = process.fcalls;
+        scheduler.vbump_reductions(fcalls);
+        return Ok(BifResult::TrapBif {
+            module: "erlang",
+            function: "list_to_binary",
+            arguments: vec![term.clone()],
+        });
+    }
+    let reds_left = reds_left.max(L2B_MIN_REDS);
+    let process = scheduler.current_process_mut();
+    Ok(match term {
+        Term::List(elements) => match elements.as_slice() {
+            [] => Value(Term::Binary(Vec::new())),
+            [binary @ Term::Binary(_)] => Value(binary.clone()),
+            _ => l2b_size(process, reds_left, term, term, &[], 0),
+        },
+        Term::ImproperList(..) => l2b_size(process, reds_left, term, term, &[], 0),
+        _ => BifResult::badarg(),
+    })
+}
+
+/// Continue the size walk of `erlang:list_to_binary/1` for the argument
+/// `arg` at `term`, with the tails of `stack` above it, the byte count
+/// `size` so far, and the budget `reds_left`, as `list_to_bitstring_engine`
+/// does before it copies (`erl_iolist.c:710-753`, `837-840`). The walk of
+/// [`Walk::run`] has 8 steps for each reduction of the budget, and the call
+/// raises `badarg` for a term that is not iodata (`erl_iolist.c:802-818`).
+/// An empty result gives `<<>>` with no copy. When the walk ends with
+/// reductions left, the copy walk of [`l2b_copy`] starts in the same call
+/// with the reductions that remain. When no reduction remains, the call
+/// uses all reductions and traps, and the copy starts in the next turn.
+/// When the steps of the size walk end first, the call uses all reductions
+/// and traps to the export `erts_internal:list_to_bitstring_continue`,
+/// which continues with the budget of the next turn
+/// (`erl_iolist.c:764-835`). ERTS keeps the walk state in a magic
+/// reference, and PBeam keeps the phase, the argument, the walk state, and
+/// the count as terms. ERTS raises `system_limit` only for a size above
+/// `2^64 - 1` bits, which a PBeam term cannot have.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 4000;
+/// let list = Term::List(vec![Term::Integer(1)]);
+/// let binary = l2b_size(&mut process, 4000, &list, &list, &[], 0);
+/// assert!(matches!(binary, BifResult::Value(Term::Binary(bytes)) if bytes == [1]));
+/// assert_eq!(process.fcalls, 3998);
+/// ```
+pub(super) fn l2b_size(
+    process: &mut ProcessState,
+    reds_left: i64,
+    arg: &Term,
+    term: &Term,
+    stack: &[Term],
+    mut size: usize,
+) -> BifResult {
+    let init = STEPS_PER_RED * reds_left;
+    let mut steps = init;
+    let mut walk = Walk::new(term, stack);
+    let step = walk.run(&mut steps, |leaf, _, _| {
+        size += match leaf {
+            Term::Binary(bytes) => bytes.len(),
+            _ => 1,
+        };
+        None
+    });
+    if step == Step::Yield {
+        process.bump_all_reductions();
+        let (term, stack) = walk.term();
+        return l2b_trap(vec![
+            Term::static_atom("size"),
+            arg.clone(),
+            term,
+            stack,
+            Term::Integer(size as i64),
+        ]);
+    }
+    let cost = walk_cost(init, steps);
+    process.bump_reductions(cost);
+    if step == Step::BadArg {
+        return BifResult::badarg();
+    }
+    if size == 0 {
+        return Value(Term::Binary(Vec::new()));
+    }
+    let reds_left = reds_left - i64::from(cost);
+    if reds_left <= 0 {
+        process.bump_all_reductions();
+        return l2b_trap(vec![
+            Term::static_atom("copy"),
+            arg.clone(),
+            Term::List(Vec::new()),
+            Term::Integer(size as i64),
+            Term::Binary(Vec::new()),
+        ]);
+    }
+    l2b_copy(process, reds_left, arg, &[], size, Vec::new())
+}
+
+/// Continue the copy walk of `erlang:list_to_binary/1` at `term`, with the
+/// tails of `stack` above it, `reds_left` reductions, the result size
+/// `size`, and the bytes `bytes` that the walk copied, as
+/// `generic_iolist_copy` does for a binary result (`erl_iolist.c:424-649`,
+/// `842-845`). Each byte and each binary goes into the result, and a copy
+/// uses one more step for each 32 bytes ([`copy_bytes`]). When the steps
+/// end after the last byte, the walk ends: the size walk checked the rest
+/// (`erl_iolist.c:627-641`). When the walk ends, the call bumps its
+/// reductions and returns the binary. Else it uses all reductions and
+/// traps.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![0; 600])]);
+/// let binary = l2b_copy(&mut process, 10, &list, &[], 601, Vec::new());
+/// assert!(matches!(binary, BifResult::Value(Term::Binary(bytes)) if bytes.len() == 601));
+/// ```
+pub(super) fn l2b_copy(
+    process: &mut ProcessState,
+    reds_left: i64,
+    term: &Term,
+    stack: &[Term],
+    size: usize,
+    mut bytes: Vec<u8>,
+) -> BifResult {
+    let init = STEPS_PER_RED * reds_left;
+    let mut steps = init;
+    let mut walk = Walk::new(term, stack);
+    let step = walk.run(&mut steps, |leaf, offset, steps| match leaf {
+        Term::Binary(binary) => copy_bytes(&mut bytes, &binary[offset..], steps),
+        byte => {
+            if let Term::Integer(byte) = byte {
+                bytes.push(*byte as u8);
+            }
+            None
+        }
+    });
+    if step == Step::Yield && bytes.len() < size {
+        process.bump_all_reductions();
+        let (term, stack) = walk.term();
+        return l2b_trap(vec![
+            Term::static_atom("copy"),
+            term,
+            stack,
+            Term::Integer(size as i64),
+            Term::Binary(bytes),
+        ]);
+    }
+    process.bump_reductions(walk_cost(init, steps));
+    Value(Term::Binary(bytes))
+}
+
+/// Return the trap of `erlang:list_to_binary/1` to the export
+/// `erts_internal:list_to_bitstring_continue` with `arguments`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(l2b_trap(vec![]), BifResult::TrapBif { function: "list_to_bitstring_continue", .. }));
+/// ```
+fn l2b_trap(arguments: Vec<Term>) -> BifResult {
+    BifResult::TrapBif {
+        module: "erts_internal",
+        function: "list_to_bitstring_continue",
         arguments,
     }
 }

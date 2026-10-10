@@ -1000,9 +1000,20 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
         convert(chardata(), "utf8").unwrap(),
         Term::Binary(b"Hello\n".to_vec())
     );
+    // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], latin1)
+    // is <<"Hello\n">>, and unicode:characters_to_binary([<<233>>], latin1)
+    // is <<195,169>>.
     assert_eq!(
-        convert(chardata(), "latin1").unwrap_err().to_string(),
-        "unsupported unicode:characters_to_binary/2 encoding Atom(\"latin1\")"
+        convert(chardata(), "latin1").unwrap(),
+        Term::Binary(b"Hello\n".to_vec())
+    );
+    assert_eq!(
+        convert(Term::List(vec![Term::Binary(vec![233])]), "latin1").unwrap(),
+        Term::Binary(vec![195, 169])
+    );
+    assert_eq!(
+        convert(chardata(), "utf16").unwrap_err().to_string(),
+        "unsupported unicode:characters_to_binary/2 encoding Atom(\"utf16\")"
     );
 }
 
