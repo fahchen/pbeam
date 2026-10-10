@@ -106,6 +106,10 @@ name = "bitstr"
 path = "tests/integration/bitstr.rs"
 
 [[test]]
+name = "body_bif"
+path = "tests/integration/body_bif.rs"
+
+[[test]]
 name = "bs_create_bin"
 path = "tests/integration/bs_create_bin.rs"
 
