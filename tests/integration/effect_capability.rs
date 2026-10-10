@@ -591,6 +591,25 @@ fn keeps_the_runtime_state_after_a_denied_call() {
 }
 
 #[test]
+fn skips_each_effect_check_in_a_run_with_no_policy() {
+    // A child with `#{Kind => #{operations => []}}` makes the call. With no
+    // policy, the run skips each check, so the call has its effect, as on
+    // ERTS: the parent then sees the changed state.
+    let program = program();
+    let unchecked = |function| program.execute("effect_probe", function, &[]).unwrap();
+    let ok = atom(&program, "ok");
+    assert_eq!(
+        unchecked("system_flag_kept"),
+        tuple(&[ok.clone(), atom(&program, "undefined")])
+    );
+    let stored = |value| tuple(&[ok.clone(), Term::Integer(value)]);
+    assert_eq!(
+        unchecked("persistent_term_kept"),
+        Term::List(vec![stored(1), stored(2)])
+    );
+}
+
+#[test]
 fn gives_the_erts_results_of_the_permitted_process_operations() {
     let program = program();
     let atom = |name| atom(&program, name);

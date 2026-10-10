@@ -19,7 +19,8 @@ use crate::runtime::capability::{CapabilityKind, Denied};
 /// capability kind, raise `error:badarg`. When the caller gave `Pid` no
 /// copy of `Kind` that still has a delegation record, the call raises
 /// `error:capability_denied`: a process can revoke only a capability that
-/// it gave.
+/// it gave. In a run that skips the checks, the call returns `ok` after the
+/// argument checks and has no effect.
 ///
 /// # Examples
 ///
@@ -61,7 +62,9 @@ pub(super) fn revoke(
 /// `Request` can be any term. A run with a Rust policy has no policy
 /// process, so the call raises `error:capability_denied` at once, and so
 /// does a call after the policy process exited and a call of the policy
-/// process itself.
+/// process itself. In a run that skips the checks, the call returns `ok`
+/// after the check of `Kind`: it calls no policy code and adds no
+/// capability.
 ///
 /// # Examples
 ///
@@ -80,6 +83,9 @@ pub(super) fn request(
 ) -> Result<BifResult, BeamError> {
     if !matches!(kind, Term::Atom(kind) if CapabilityKind::named(kind.name()).is_some()) {
         return Ok(BifResult::badarg());
+    }
+    if scheduler.skips_checks() {
+        return Ok(Value(Term::static_atom("ok")));
     }
     match scheduler.request_grant(kind.clone(), request.clone())? {
         Ok(()) => Ok(BifResult::AwaitGrant),
