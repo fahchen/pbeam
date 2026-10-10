@@ -59,6 +59,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Runtime
 
+### Run `code:ensure_loaded/1` as ERTS does
+
+- `code:ensure_loaded/1` is not implemented: a call stops the run with `unresolved external MFA code:ensure_loaded/1`. Elixir calls it for each dispatch of a protocol that is not consolidated. PBeam has no code server and no code path, so it cannot load a module on demand. An implementation must give the pinned ERTS result, including the code-path search and the load of a module that is not loaded yet; it needs code-loading support first. Until then the call stays a clear runtime error.
+- #349 plans to consolidate the protocols of the Terra Counter example at build time, as `mix run` does, so that the example does not call `code:ensure_loaded/1`.
+- **Trigger:** a supported program calls `code:ensure_loaded/1`, or a program needs protocols that are not consolidated.
+- **Source:** the owner PBeam run of `mise run example terra_counter` on 2026-10-10 (#339).
+
 ### Model the process heap for GC reductions and the message copy cost
 
 - PBeam has no process heap, and its terms keep no sharing and no literal origin. Thus PBeam charges no garbage collection reductions and no message copy cost, and `maps:merge/2` counts the steps of a subtree that both maps share. A change of the `message_queue_data` process flag does not move the messages and sends no adjust signal. The "Garbage collection reductions", "Scheduling", and "Process flags" rows of `docs/erts-differences.md` record these differences, and this entry owns them.
