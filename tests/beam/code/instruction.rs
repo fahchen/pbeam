@@ -1,16 +1,16 @@
 use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
 use super::{
     OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
-    OPCODE_BS_INIT_WRITABLE, OPCODE_BS_START_MATCH4, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV,
-    OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FSUB, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL,
-    OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC,
-    OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP,
-    OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
-    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE,
-    OPCODE_TRY_CASE_END, parse_code, read_binary_match_commands, read_binary_segments,
-    read_move_operand, read_operand_pairs, read_pair_count, read_record_updates, skip_allocation,
-    skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
-    test_kind, unsupported_opcode_operand_count,
+    OPCODE_BS_INIT_WRITABLE, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
+    OPCODE_FSUB, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
+    OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
+    OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
+    OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
+    OPCODE_TEST_IS_PORT, OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
+    read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
+    read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
+    skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
+    unsupported_opcode_operand_count,
 };
 use crate::{
     beam::code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
@@ -706,6 +706,94 @@ fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
             )
         ),
         "{instructions:?}"
+    );
+}
+
+#[test]
+fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs_get_probe() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/binary_match/bs_get_probe.beam` has the first four parts.
+    let parts: [&[u8]; 6] = [
+        // split/2: bs_start_match4 no_fail 2 x0 x0
+        &[0xAA, 0x32, 0x20, 0x03, 0x03],
+        // split/2: bs_get_binary2 f3 {tr,x0,1} 2 x1 8 0 x1
+        &[0x77, 0x35, 0x57, 0x03, 0x10, 0x20, 0x13, 0x80, 0x00, 0x13],
+        // split/2: bs_get_tail x0 x0 2
+        &[0xA5, 0x03, 0x03, 0x20],
+        // nibbles/2: bs_start_match4 resume 2 x0 x0
+        &[0xAA, 0xB2, 0x20, 0x03, 0x03],
+        // bs_start_match4 f5 2 x0 x1, which the ERTS loader also accepts
+        &[0xAA, 0x55, 0x20, 0x03, 0x13],
+        // bs_get_binary2 f3 x0 2 all 8 0 x1
+        &[0x77, 0x35, 0x03, 0x20, 0x42, 0x80, 0x00, 0x13],
+    ];
+    // Atom 3 is `no_fail`, 4 is `all`, and 11 is `resume`.
+    let mut table = AtomTable::new();
+    let atoms: Vec<Atom> = (1..=11)
+        .map(|index| match index {
+            3 => table.put("no_fail").unwrap(),
+            4 => table.put("all").unwrap(),
+            11 => table.put("resume").unwrap(),
+            _ => table.put(&format!("atom{index}")).unwrap(),
+        })
+        .collect();
+    let code = |parts: &[&[u8]]| {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend(parts.concat());
+        code.push(0x03);
+        code
+    };
+    let (instructions, _) = parse_code(&code(&parts), &atoms, &[], &[], &[], &[]).unwrap();
+    assert!(
+        matches!(
+            instructions.as_slice(),
+            [
+                Instruction::BinaryMatchStart {
+                    fail_label: 0,
+                    source: Operand::X(0),
+                    destination: Operand::X(0),
+                },
+                Instruction::BinaryGetBinary {
+                    fail_label: 3,
+                    context: Operand::X(0),
+                    size: Operand::X(1),
+                    unit: 8,
+                    destination: Operand::X(1),
+                },
+                Instruction::BinaryGetTail {
+                    context: Operand::X(0),
+                    destination: Operand::X(0),
+                },
+                Instruction::BinaryMatchResume {
+                    source: Operand::X(0),
+                    destination: Operand::X(0),
+                },
+                Instruction::BinaryMatchStart {
+                    fail_label: 5,
+                    source: Operand::X(0),
+                    destination: Operand::X(1),
+                },
+                Instruction::Unsupported(119),
+                Instruction::End,
+            ]
+        ),
+        "{instructions:?}"
+    );
+    // The ERTS loader has no form of `bs_start_match4` with another atom
+    // (jit/arm/ops.tab:1036-1052).
+    assert_eq!(
+        parse_code(
+            &code(&[&[0xAA, 0x12, 0x20, 0x03, 0x03]]),
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[]
+        )
+        .unwrap_err()
+        .to_string(),
+        "unsupported BEAM bs_start_match4 fail operand atom1"
     );
 }
 
@@ -1612,7 +1700,6 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_PUT_TUPLE2, 2),
         (OPCODE_INIT_YREGS, 1),
         (OPCODE_BS_INIT_WRITABLE, 0),
-        (OPCODE_BS_START_MATCH4, 4),
         (OPCODE_RAW_RAISE, 0),
         (OPCODE_BS_GET_UTF16, 5),
         (OPCODE_BS_GET_UTF32, 5),
