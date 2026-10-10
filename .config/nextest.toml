@@ -1,3 +1,0 @@
-# Temporary: print the time of each test that runs 5 s or more, so that the CI log of this pull request shows the slowest tests.
-[profile.default]
-slow-timeout = "5s"
