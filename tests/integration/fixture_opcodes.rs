@@ -41,6 +41,21 @@ fn arith_probe_has_the_gc_bif1_and_gc_bif2_bytes() {
 }
 
 #[test]
+fn binary_part_probe_has_the_gc_bif3_bytes() {
+    assert_in_fixture(
+        "fixtures/binary_part/binary_part_probe.beam",
+        &[
+            // guard/3: gc_bif3 f13 live 3 binary_part/3 x0 x1 x2 x0
+            &[0x98, 0xD5, 0x30, 0x00, 0x03, 0x13, 0x23, 0x03],
+            // main/0: gc_bif3 f0 live 1 binary_part/3 y23 y22 x0 y22
+            &[
+                0x98, 0x05, 0x10, 0x00, 0x0C, 0x17, 0x0C, 0x16, 0x03, 0x0C, 0x16,
+            ],
+        ],
+    );
+}
+
+#[test]
 fn binary_match_probe_has_the_binary_match_bytes() {
     assert_in_fixture(
         "fixtures/binary_match/binary_match_probe.beam",
@@ -60,6 +75,31 @@ fn binary_match_probe_has_the_binary_match_bytes() {
             &[0xA8, 0x03, 0x13],
             // bs_match f17 x0 {list,[ensure_exactly,0]}
             &[0xB6, 0x0D, 0x11, 0x03, 0x17, 0x20, 0xF2, 0x00],
+        ],
+    );
+}
+
+#[test]
+fn bs_match_probe_has_the_bs_match_command_bytes() {
+    assert_in_fixture(
+        "fixtures/binary_match/bs_match_probe.beam",
+        &[
+            // tail/1: bs_match f28 x0 {list,[ensure_at_least,8,8,skip,8,
+            // get_tail,1,8,{x,0}]}
+            &[
+                0xB6, 0x0D, 0x1C, 0x03, 0x17, 0x90, 0x92, 0x80, 0x80, 0x0A, 0x11, 0x80, 0xB2, 0x10,
+                0x80, 0x03,
+            ],
+            // prefix/1: bs_match f15 x0 {list,[ensure_at_least,32,1,
+            // '=:=',nil,31,850802231,'=:=',nil,1,1]}
+            &[
+                0xB6, 0xF5, 0x03, 0x17, 0xB0, 0x92, 0x08, 0x20, 0x10, 0xA2, 0x02, 0x08, 0x1F, 0x58,
+                0x32, 0xB6, 0x36, 0x37, 0xA2, 0x02, 0x10, 0x10,
+            ],
+            // flagged/1: {integer,1,{literal,[little]},16,1,{x,1}}
+            &[0x42, 0x10, 0x47, 0x00, 0x08, 0x10, 0x10, 0x13],
+            // binaries/1: {binary,1,{literal,[]},2,8,{x,1}}
+            &[0x0A, 0x13, 0x10, 0x02, 0x20, 0x80, 0x13],
         ],
     );
 }

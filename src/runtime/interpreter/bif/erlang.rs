@@ -1097,6 +1097,57 @@ pub(super) fn length(
     Ok(Value(Term::Integer(count + elements.len() as i64)))
 }
 
+/// Run `erlang:binary_part/3`: return the `length` bytes of a binary from
+/// byte `start`, as ERTS `binary_part_3` (`erl_bif_guard.c:455-458`) and
+/// `erts_binary_part` (`erl_bif_binary.c:1954-2012`) do. A negative length
+/// takes the bytes before `start`. A term that is not a bitstring, a start
+/// that is not a non-negative integer, a length that is not an integer,
+/// and a part that is not in the binary raise `badarg`. ERTS raises
+/// `badarg` for the length `-2^63` because its negation does not fit in a
+/// signed word (`erl_bif_binary.c:1974-1977`); PBeam gives the same result
+/// because 2^63 is more than each start. In a guard, the `gc_bif3`
+/// instruction goes to its fail label instead. ERTS returns a sub-binary of
+/// the argument; PBeam returns a copy of the bytes. PBeam has no bitstring
+/// that is not a binary and no bignum, so these ERTS `badarg` inputs cannot
+/// occur (rows "Bitstring terms" and "Integer range" of
+/// `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let hello = Term::Binary(b"hello".to_vec());
+/// let part = binary_part(&hello, &Term::Integer(5), &Term::Integer(-2));
+/// assert!(matches!(part, BifResult::Value(Term::Binary(bytes)) if bytes == b"lo"));
+/// let past = binary_part(&hello, &Term::Integer(1), &Term::Integer(5));
+/// assert!(matches!(past, BifResult::Raise { .. }));
+/// ```
+pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResult {
+    let (Term::Binary(bytes), Term::Integer(start), Term::Integer(length)) =
+        (binary, start, length)
+    else {
+        return BifResult::badarg();
+    };
+    let Ok(start) = u64::try_from(*start) else {
+        return BifResult::badarg();
+    };
+    let (start, length) = if *length < 0 {
+        let length = length.unsigned_abs();
+        let Some(start) = start.checked_sub(length) else {
+            return BifResult::badarg();
+        };
+        (start, length)
+    } else {
+        (start, *length as u64)
+    };
+    // The start is below 2^63 and the length is at most 2^63, so the sum
+    // does not overflow.
+    let end = start + length;
+    if end > bytes.len() as u64 {
+        return BifResult::badarg();
+    }
+    Value(Term::Binary(bytes[start as usize..end as usize].to_vec()))
+}
+
 /// Run `erlang:byte_size/1`: return the number of bytes of a binary, as
 /// ERTS `byte_size_1` (`erl_bif_guard.c:376-393`) and the JIT
 /// `emit_bif_byte_size` (`jit/arm/instr_guard_bifs.cpp:438-509`) do. A
@@ -1522,6 +1573,83 @@ pub(super) fn int_rem(left: &Term, right: &Term) -> Result<BifResult, BeamError>
     arith("rem", left, right, |left, right| {
         Some(left.wrapping_rem(right))
     })
+}
+
+/// The reductions that ERTS `bump_reds_linear` (`erl_arith.c:56-72`) uses
+/// for a bignum operation in the PBeam integer range: a bignum of one
+/// 64-bit digit needs fewer than `ERTS_ARITH_WORDS_PER_REDUCTION` (16,
+/// `global.h:1041`) heap words, so it costs `0 / 16 + 1`.
+const BIGNUM_OPERATION_REDUCTIONS: i32 = 1;
+
+/// Run `erlang:'-'/1`: return the negation of an integer, as ERTS
+/// `sminus_1` and `erts_unary_minus` (`erl_arith.c:107-110`,
+/// `erl_arith.c:509-567`) do. The JIT `gc_bif` `-`/1 calls the same
+/// `erts_unary_minus` for each operand that it does not negate inline
+/// (`jit/arm/instr_arith.cpp:224`, `280`). A small integer costs no
+/// reduction, also when its negation is the bignum 2^59. A bignum operand
+/// costs 1 reduction (`erl_arith.c:537-551`). An operand that is not a
+/// number raises `badarith`. PBeam has no float term.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// assert!(matches!(negate(&mut process, &Term::Integer(5))?, BifResult::Value(Term::Integer(-5))));
+/// assert_eq!(process.fcalls, 10);
+/// negate(&mut process, &Term::Integer(1 << 59))?;
+/// assert_eq!(process.fcalls, 9);
+/// assert!(matches!(negate(&mut process, &Term::static_atom("a"))?, BifResult::Raise { .. }));
+/// assert!(negate(&mut process, &Term::Integer(i64::MIN)).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for `-(2^63)`, whose negation is outside the
+/// `i64` range, where ERTS makes a bignum.
+pub(super) fn negate(process: &mut ProcessState, term: &Term) -> Result<BifResult, BeamError> {
+    let Term::Integer(value) = term else {
+        return Ok(BifResult::badarith());
+    };
+    // ponytail: a result outside i64 needs a bignum term; see "Integer range" in docs/erts-differences.md.
+    let result = value.checked_neg().ok_or_else(|| {
+        error(format!(
+            "unsupported erlang:-/1 result of {value}: needs a bignum"
+        ))
+    })?;
+    if term.small_integer().is_none() {
+        process.bump_reductions(BIGNUM_OPERATION_REDUCTIONS);
+    }
+    Ok(Value(Term::Integer(result)))
+}
+
+/// Run `erlang:'band'/2`: return the bitwise and of two integers, as ERTS
+/// `band_2` and `erts_band` (`erl_arith.c:164-170`,
+/// `erl_arith.c:1252-1278`) do. The JIT `gc_bif` `band` calls the same
+/// `erts_band` for operands that are not both small integers
+/// (`jit/arm/instr_arith.cpp:1168`, `1236`). Two small integers cost no
+/// reduction. A bignum operand costs 1 reduction, also when the result is
+/// a small integer (`erl_arith.c:1276`). An operand that is not an integer
+/// raises `badarith`. The result of two `i64` values is an `i64` value.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// let result = band(&mut process, &Term::Integer(12), &Term::Integer(10));
+/// assert!(matches!(result, BifResult::Value(Term::Integer(8))));
+/// assert_eq!(process.fcalls, 10);
+/// band(&mut process, &Term::Integer(1 << 59), &Term::Integer(-1));
+/// assert_eq!(process.fcalls, 9);
+/// assert!(matches!(band(&mut process, &Term::Integer(1), &Term::static_atom("a")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn band(process: &mut ProcessState, left: &Term, right: &Term) -> BifResult {
+    let (Term::Integer(left_value), Term::Integer(right_value)) = (left, right) else {
+        return BifResult::badarith();
+    };
+    if left.small_integer().is_none() || right.small_integer().is_none() {
+        process.bump_reductions(BIGNUM_OPERATION_REDUCTIONS);
+    }
+    Value(Term::Integer(left_value & right_value))
 }
 
 /// Convert `value`, a time in the native unit, to `unit` with

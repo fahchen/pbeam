@@ -72,8 +72,8 @@ pub enum Operation {
     /// `terminal`: set up the terminal: read the terminfo entry, or set the
     /// locale of the OS process.
     Setup,
-    /// `terminal`: ask if a standard fd is a terminal, or make a TTY
-    /// resource.
+    /// `terminal`: ask if a standard fd is a terminal, make a TTY resource,
+    /// or read a capability of the terminfo entry.
     Query,
     /// `port`: send a command to a port.
     Command,
