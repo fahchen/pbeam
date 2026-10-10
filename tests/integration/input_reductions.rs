@@ -48,6 +48,22 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("min_64", 1),
         ],
     ),
+    // `integer_to_binary/2` estimates the digits of a bignum in its base
+    // with `lg2_lookup` (`big.c:2589-2597`, `4087-4092`): 2^63 - 1 has 64
+    // digits and costs 4 in base 2, and 13 digits and costs 0 in base 36.
+    (
+        "integer_to_binary_2",
+        &[
+            ("{small,2}", 0),
+            ("{max_small,2}", 0),
+            ("{min_big,2}", 3),
+            ("{max_negative_big,2}", 3),
+            ("{max_64,2}", 4),
+            ("{min_64,2}", 4),
+            ("{max_64,10}", 1),
+            ("{max_64,36}", 0),
+        ],
+    ),
     // Two flatmaps, and an empty flatmap with a hashmap, cost nothing. Each
     // other pair costs one reduction for each 8 steps of `hashmap_merge`
     // (`erl_map.c:1507`, `1736`, `1823`). The last pair traps.

@@ -243,7 +243,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 24] = [
+const AMBIENT: [&str; 27] = [
     "erlang:cancel_timer/2",
     "erlang:demonitor/1",
     "erlang:demonitor/2",
@@ -266,7 +266,10 @@ const AMBIENT: [&str; 24] = [
     "ets:member/2",
     "ets:new/2",
     "ets:whereis/1",
+    "file:native_name_encoding/0",
     "os:system_time/1",
+    "prim_file:internal_name2native/1",
+    "prim_file:read_info_nif/2",
     "re:compile/2",
 ];
 
@@ -318,12 +321,14 @@ fn inventory_ambient() -> BTreeSet<&'static str> {
         .collect()
 }
 
-/// Load the probe, the stand-in `prim_tty`, and the pinned `erlang.beam`,
-/// which has `erlang:open_port/2`, `erlang:port_command/2`,
-/// `erlang:port_close/1`, and `erlang:port_info/1`.
+/// Load the probe, the stand-in `prim_tty`, the pinned `erlang.beam`, which
+/// has `erlang:open_port/2`, `erlang:port_command/2`, `erlang:port_close/1`,
+/// and `erlang:port_info/1`, and the pinned `prim_file.beam`, whose
+/// `read_file_info/1` calls `prim_file:read_info_nif/2`.
 fn program() -> BeamProgram {
     let erlang = pinned_beam("erlang");
-    BeamProgram::load(&[&erlang, PRIM_TTY, EFFECT_PROBE]).unwrap()
+    let prim_file = pinned_beam("prim_file");
+    BeamProgram::load(&[&erlang, &prim_file, PRIM_TTY, EFFECT_PROBE]).unwrap()
 }
 
 /// Run `effect_probe:Function()` with `policy`.
@@ -375,7 +380,7 @@ fn calls_each_ambient_entry_with_no_capability() {
     let program = program();
     let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
                     nonode@nohost,nonode@nohost,true,true,false,effect_probe_ambient_atom,ok,\
-                    effect_probe_ambient,true,[{key,value}],value,true,true,reference]";
+                    effect_probe_ambient,true,[{key,value}],value,true,true,reference,atom,2,ok]";
     assert_eq!(text(&run(&program, "ambient", &Grants(vec![]))), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }

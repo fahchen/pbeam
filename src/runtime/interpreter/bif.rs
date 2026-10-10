@@ -1,9 +1,9 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `binary`, `erlang`, `erts_internal`, `ets`, `iolist`, `lists`,
-//! `maps`, `os`, `re`, and `unicode` modules hold the BIF bodies that do not
-//! fit on one table line.
+//! The `binary`, `erlang`, `erts_internal`, `ets`, `file`, `iolist`,
+//! `lists`, `maps`, `os`, `re`, and `unicode` modules hold the BIF bodies
+//! that do not fit on one table line.
 //! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
 //! in `bif.tab`.
 
@@ -19,6 +19,7 @@ mod binary;
 mod erlang;
 mod erts_internal;
 mod ets;
+mod file;
 mod iolist;
 mod lists;
 mod maps;
@@ -43,6 +44,15 @@ pub(super) enum BifResult {
         class: ExceptionClass,
         /// Reason of the exception, without a stack trace.
         reason: Term,
+    },
+    /// The BIF raises an exception of class `error` with this stack trace
+    /// in the calling process, as `erlang:error/2` does with the frame of
+    /// its caller (`EXC_ERROR_2`, `beam_common.c:478-495`).
+    ErrorWithStacktrace {
+        /// Reason of the exception.
+        reason: Term,
+        /// Stack trace of the exception.
+        stacktrace: Term,
     },
     /// The BIF continues in BEAM code, as `BIF_TRAP` does in ERTS: the call
     /// becomes a call to this exported function, and its return value is the
@@ -436,7 +446,7 @@ impl BeamProgram {
     /// - `persistent_term:get_all_trap/2`, with the result and the number of
     ///   pairs that remain ([`persistent_term::get_all_trap`]). ERTS keeps
     ///   the table and the result so far (`erl_bif_persistent.c:263-265`).
-    /// - `erlang:characters_to_utf8_trap/2`, `erlang:characters_to_list_trap_1/4`,
+    /// - `erlang:characters_to_utf8_trap/3`, `erlang:characters_to_list_trap_1/4`,
     ///   `_2/2`, `_3/3`, and `_4/2`, with the state of a chardata
     ///   conversion ([`unicode`]). ERTS traps to the exports of the same
     ///   names with other arguments: a magic reference to the state, or the
@@ -450,13 +460,13 @@ impl BeamProgram {
     ///   `ets:insert/2` with a magic reference to the YCF state
     ///   (`erl_db.c:2297-2332`).
     /// - `erts_internal:list_to_bitstring_continue/5`, with the phase and the
-    ///   walk state of `erlang:iolist_to_binary/1` ([`iolist::l2b_size`],
-    ///   [`iolist::l2b_copy`]). ERTS traps to
+    ///   walk state of `erlang:iolist_to_binary/1` and `erlang:list_to_binary/1`
+    ///   ([`iolist::l2b_size`], [`iolist::l2b_copy`]). ERTS traps to
     ///   `erts_internal:list_to_bitstring_continue/1` with a magic reference
     ///   to the walk state (`erl_iolist.c:53-55`, `764-835`).
     /// - `erlang:binary_find_trap/3`, with the subject, the search state, and
-    ///   the pattern of `binary:split/2,3` ([`binary::find_trap`]). ERTS
-    ///   traps to the same export with magic references to the search state
+    ///   the pattern of `binary:match/2` or `binary:split/2,3`
+    ///   ([`binary::find_trap`]). ERTS traps to the same export with magic references to the search state
     ///   and to the compiled pattern (`erl_bif_binary.c:75-77`, `1935-1952`).
     /// - `erlang:bif_handle_signals_return/2`, with the process that the BIF
     ///   read and its result: it handles the signals of the caller up to a
@@ -483,7 +493,7 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         module: &str,
         function: &str,
-        arguments: Vec<Term>,
+        mut arguments: Vec<Term>,
     ) -> Result<BifResult, BeamError> {
         if let (
             "ets",
@@ -501,6 +511,31 @@ impl BeamProgram {
                 scheduler,
             };
             return ets::insert_list(&mut context, *id, objects, *done as usize, *keypos as i32);
+        }
+        // The copy phase takes the result bytes out of the owned trap
+        // arguments, so that no turn copies them again.
+        if let (
+            "erts_internal",
+            "list_to_bitstring_continue",
+            [
+                _,
+                term,
+                Term::List(stack),
+                Term::Integer(size),
+                Term::Binary(bytes),
+            ],
+        ) = (module, function, arguments.as_mut_slice())
+        {
+            let process = scheduler.current_process_mut();
+            let reds_left = process.bif_reductions_left()? as i64;
+            return Ok(iolist::l2b_copy(
+                process,
+                reds_left,
+                term,
+                stack,
+                *size as usize,
+                std::mem::take(bytes),
+            ));
         }
         let process = scheduler.current_process_mut();
         match (module, function, arguments.as_slice()) {
@@ -522,8 +557,8 @@ impl BeamProgram {
             ("persistent_term", "get_all_trap", [all, Term::Integer(entries)]) => Ok(
                 persistent_term::get_all_trap(process, all.clone(), *entries as usize),
             ),
-            ("erlang", "characters_to_utf8_trap", [Term::Binary(bytes), rest]) => {
-                unicode::utf8_trap(process, bytes.clone(), rest)
+            ("erlang", "characters_to_utf8_trap", [Term::Binary(bytes), rest, encoding]) => {
+                unicode::utf8_trap(process, bytes.clone(), rest, encoding)
             }
             (
                 "erlang",
@@ -619,27 +654,6 @@ impl BeamProgram {
                     term,
                     stack,
                     *size as usize,
-                ))
-            }
-            (
-                "erts_internal",
-                "list_to_bitstring_continue",
-                [
-                    _,
-                    term,
-                    Term::List(stack),
-                    Term::Integer(size),
-                    Term::Binary(bytes),
-                ],
-            ) => {
-                let reds_left = process.bif_reductions_left()? as i64;
-                Ok(iolist::l2b_copy(
-                    process,
-                    reds_left,
-                    term,
-                    stack,
-                    *size as usize,
-                    bytes.clone(),
                 ))
             }
             (
