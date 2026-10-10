@@ -1,7 +1,9 @@
 //! Native bindings of the `prim_tty` NIFs (`erts/emulator/nifs/common/prim_tty_nif.c`).
 
+use super::bif::denial;
 use super::*;
 use crate::runtime::{
+    capability::{CapabilityKind, Operation},
     host::{
         errno::errno_id,
         input,
@@ -95,7 +97,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "tty_select",
         arity: 2,
-        run: |scheduler, arguments| Ok(tty_select(scheduler, &arguments[0], &arguments[1])),
+        run: |scheduler, arguments| tty_select(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "tty_window_size",
@@ -105,7 +107,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "write_nif",
         arity: 2,
-        run: |scheduler, arguments| Ok(write_nif(scheduler, &arguments[0], &arguments[1])),
+        run: |scheduler, arguments| write_nif(scheduler, &arguments[0], &arguments[1]),
     },
 ];
 
@@ -231,7 +233,9 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
 /// `tty_window_size_nif` (`prim_tty_nif.c:1171-1211`) does on Unix. The
 /// result is `{ok, {Cols, Rows}}` from `terminal::window_size`, where -1 is
 /// an unknown count, or `{error, enotsup}` when both counts are unknown. A
-/// term that is not a TTY resource raises `error:badarg`.
+/// term that is not a TTY resource raises `error:badarg`. Then a caller
+/// without a `terminal` capability with `window_size` gets
+/// `error:capability_denied`, and the binding reads no window size.
 ///
 /// # Examples
 ///
@@ -243,13 +247,24 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
 ///
 /// # Errors
 ///
-/// The atom `enotsup` in a full atom table gives the error of
-/// `AtomTable::put`.
+/// The atom `enotsup` or `capability_denied` in a full atom table gives the
+/// error of `AtomTable::put`.
 fn tty_window_size(scheduler: &mut Scheduler, tty: &Term) -> Result<BifResult, BeamError> {
-    let Some(tty) = tty_resource(scheduler.resources.borrow_mut::<Ttys>(), tty) else {
+    let Some(&TtyResource { ofd, .. }) =
+        tty_resource(scheduler.resources.borrow_mut::<Ttys>(), tty)
+    else {
         return Ok(BifResult::badarg());
     };
-    let result = match terminal::window_size(tty.ofd) {
+    let check = denial(
+        scheduler,
+        CapabilityKind::Terminal,
+        Operation::WindowSize,
+        None,
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    let result = match terminal::window_size(ofd) {
         (-1, -1) => enotsup(&mut scheduler.atoms)?,
         (columns, rows) => Term::Tuple(vec![
             Term::static_atom("ok"),
@@ -266,7 +281,9 @@ fn tty_window_size(scheduler: &mut Scheduler, tty: &Term) -> Result<BifResult, B
 /// (`prim_tty_nif.c:1074-1169`) does on Unix with `HAVE_TERMCAP`. It
 /// raises `error:badarg` when `Options` is not a map, then when `TTY` is
 /// not a TTY resource, then when `Options` has no `input` key
-/// (`prim_tty_nif.c:1081-1089`). An `unavailable` resource gives
+/// (`prim_tty_nif.c:1081-1089`). Then a caller without a `terminal`
+/// capability with `raw_mode` gets `error:capability_denied`, for each
+/// input mode, and the binding changes nothing. An `unavailable` resource gives
 /// `{error, enotsup}` for the input `raw` and `ok` for each other input
 /// (`prim_tty_nif.c:1091-1095`).
 ///
@@ -298,13 +315,28 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
     let Term::Reference(reference) = tty else {
         return Ok(BifResult::badarg());
     };
-    let ttys = scheduler.resources.borrow_mut::<Ttys>();
-    let Some(tty) = ttys.get_mut(*reference) else {
+    if scheduler
+        .resources
+        .borrow_mut::<Ttys>()
+        .get(*reference)
+        .is_none()
+    {
         return Ok(BifResult::badarg());
-    };
+    }
     let Some(input) = options.get(&Term::static_atom("input")) else {
         return Ok(BifResult::badarg());
     };
+    let check = denial(
+        scheduler,
+        CapabilityKind::Terminal,
+        Operation::RawMode,
+        None,
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    let ttys = scheduler.resources.borrow_mut::<Ttys>();
+    let tty = ttys.get_mut(*reference).expect("the TTY resource exists");
     let raw = *input == Term::static_atom("raw");
     if tty.state == TtyState::Unavailable {
         let result = if raw {
@@ -354,7 +386,9 @@ fn monitor_caller(scheduler: &mut Scheduler, tty: Reference) {
 
 /// Run `prim_tty:tty_select(TTY, Ref)`, as the ERTS NIF `tty_select_nif`
 /// (`prim_tty_nif.c:1213-1233`) does on Unix. A term that is not a TTY
-/// resource raises `error:badarg` (`prim_tty_nif.c:1220-1221`). Else the
+/// resource raises `error:badarg` (`prim_tty_nif.c:1220-1221`). Then a
+/// caller without a `terminal` capability with `read` gets
+/// `error:capability_denied`, and the binding selects nothing. Else the
 /// binding selects fd 0, the input fd of the resource, for read with `Ref`
 /// as the message reference and the caller as the recipient
 /// (`prim_tty_nif.c:1227`; see [`select_input`]). The caller becomes the
@@ -368,21 +402,34 @@ fn monitor_caller(scheduler: &mut Scheduler, tty: Reference) {
 ///
 /// ```rust,ignore
 /// let reference = Term::Reference(scheduler.make_ref()?);
-/// assert!(matches!(tty_select(&mut scheduler, &tty, &reference), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
-/// assert!(matches!(tty_select(&mut scheduler, &Term::static_atom("ok"), &reference), BifResult::Raise { .. }));
+/// assert!(matches!(tty_select(&mut scheduler, &tty, &reference)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(tty_select(&mut scheduler, &Term::static_atom("ok"), &reference)?, BifResult::Raise { .. }));
 /// ```
-fn tty_select(scheduler: &mut Scheduler, tty: &Term, reference: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table gives the error of
+/// `AtomTable::put`.
+fn tty_select(
+    scheduler: &mut Scheduler,
+    tty: &Term,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
     let Term::Reference(tty) = tty else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
+    if scheduler.resources.borrow_mut::<Ttys>().get(*tty).is_none() {
+        return Ok(BifResult::badarg());
+    }
+    if let Some(denied) = denial(scheduler, CapabilityKind::Terminal, Operation::Read, None)? {
+        return Ok(denied);
+    }
     let caller = scheduler.current_process_mut().id;
-    let Some(resource) = scheduler.resources.borrow_mut::<Ttys>().get_mut(*tty) else {
-        return BifResult::badarg();
-    };
-    resource.reader = Some(caller);
+    let resource = scheduler.resources.borrow_mut::<Ttys>().get_mut(*tty);
+    resource.expect("the TTY resource exists").reader = Some(caller);
     select_input(scheduler, *tty, reference);
     monitor_caller(scheduler, *tty);
-    BifResult::Value(Term::static_atom("ok"))
+    Ok(BifResult::Value(Term::static_atom("ok")))
 }
 
 /// Select fd 0 for read for the TTY resource `tty`, with the caller as the
@@ -419,6 +466,9 @@ const READ_LIMIT: u64 = 1024;
 /// `docs/erts-differences.md`), so an `N` from 2^63 to 2^64 - 1 does not
 /// get to the binding.
 ///
+/// Then a caller without a `terminal` capability with `read` gets
+/// `error:capability_denied`, and the binding reads nothing.
+///
 /// Else the binding reads at most `N` bytes, and at most 1024, from fd 0
 /// with one `read` (`prim_tty_nif.c:449`, `646-657`):
 ///
@@ -449,8 +499,8 @@ const READ_LIMIT: u64 = 1024;
 ///
 /// # Errors
 ///
-/// A new errno atom or the atom `read` in a full atom table gives the
-/// error of `AtomTable::put`.
+/// A new errno atom or the atom `read` or `capability_denied` in a full
+/// atom table gives the error of `AtomTable::put`.
 fn read_nif(
     scheduler: &mut Scheduler,
     tty: &Term,
@@ -469,6 +519,9 @@ fn read_nif(
     let Ok(size) = u64::try_from(*size) else {
         return Ok(BifResult::badarg());
     };
+    if let Some(denied) = denial(scheduler, CapabilityKind::Terminal, Operation::Read, None)? {
+        return Ok(denied);
+    }
     let size = usize::try_from(size.min(READ_LIMIT)).expect("1024 fits in usize");
     let bytes = match input::read(libc::STDIN_FILENO, size) {
         Ok(bytes) if bytes.is_empty() => {
@@ -655,17 +708,27 @@ const MAXIOV: usize = libc::UIO_MAXIOV as usize;
 /// `erl_errno_id` atom (`prim_tty_nif.c:403-406`). Else the result is `ok`,
 /// also for `[]`, which writes nothing.
 ///
+/// After the TTY check and before it reads `IOVec`, the binding checks the
+/// capabilities of the caller: without a `terminal` capability with
+/// `write`, it raises `error:capability_denied` at once, with no dirty IO
+/// call and no write.
+///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let iovec = Term::List(vec![Term::Binary(b"Hello, ".to_vec()), Term::Binary(b"world!\n".to_vec())]);
 /// // Writes "Hello, world!\n" to the output fd of the TTY.
-/// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec), BifResult::DirtyWrite(_)));
+/// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec)?, BifResult::DirtyWrite(_)));
 /// // [<<"h">> | <<"i">>] writes nothing, then raises badarg.
 /// let improper = Term::ImproperList(vec![Term::Binary(b"h".to_vec())], Box::new(Term::Binary(b"i".to_vec())));
-/// assert!(matches!(write_nif(&mut scheduler, &tty, &improper), BifResult::DirtyWrite(_)));
+/// assert!(matches!(write_nif(&mut scheduler, &tty, &improper)?, BifResult::DirtyWrite(_)));
 /// ```
-fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table gives the error of
+/// `AtomTable::put`.
+fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifResult, BeamError> {
     let mut write = IovecWrite {
         fd: -1,
         groups: Vec::new(),
@@ -674,32 +737,35 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> BifResult {
     let Some(&TtyResource { ofd, .. }) =
         tty_resource(scheduler.resources.borrow_mut::<Ttys>(), tty)
     else {
-        return BifResult::DirtyWrite(write);
+        return Ok(BifResult::DirtyWrite(write));
     };
+    if let Some(denied) = denial(scheduler, CapabilityKind::Terminal, Operation::Write, None)? {
+        return Ok(denied);
+    }
     write.fd = ofd;
     let (elements, improper) = match iovec {
         Term::List(elements) => (elements, false),
         Term::ImproperList(elements, _) => (elements, true),
-        _ => return BifResult::DirtyWrite(write),
+        _ => return Ok(BifResult::DirtyWrite(write)),
     };
     let mut groups = elements.chunks(MAXIOV).peekable();
     while let Some(group) = groups.next() {
         // The group of the last element reads the tail after it.
         if improper && groups.peek().is_none() {
-            return BifResult::DirtyWrite(write);
+            return Ok(BifResult::DirtyWrite(write));
         }
         let mut buffers = Vec::with_capacity(group.len());
         for element in group {
             match element {
                 Term::Binary(bytes) if bytes.is_empty() => {}
                 Term::Binary(bytes) => buffers.push(bytes.clone()),
-                _ => return BifResult::DirtyWrite(write),
+                _ => return Ok(BifResult::DirtyWrite(write)),
             }
         }
         write.groups.push(buffers);
     }
     write.bad_group = false;
-    BifResult::DirtyWrite(write)
+    Ok(BifResult::DirtyWrite(write))
 }
 
 /// Return the result of a `prim_tty:write_nif/2` call from the end of its

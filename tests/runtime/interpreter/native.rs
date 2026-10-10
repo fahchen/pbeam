@@ -85,6 +85,55 @@ fn effect_inventory_lists_each_bif_and_native_function() {
     assert_section("Native functions without a binding", &unbound);
 }
 
+/// The authority labels of an entry that has no effect outside its own
+/// process.
+const NO_EFFECT: [&str; 2] = ["`none`", "`process.self`"];
+
+/// Each row of the sections "BIFs" and "Native bindings" of the effect
+/// inventory names the capability that its entry checks, in its column
+/// "Capability". An entry whose authority is only `none` or `process.self`
+/// has no effect, and its cell is `none`. Each other entry is an effect
+/// entry: its cell lists each `kind:operation` that it checks, or is
+/// `later` while a later batch of #335 adds its check. The integration test
+/// `effect_capability` calls each listed entry without its operation and
+/// gets `error:capability_denied`.
+#[test]
+fn effect_inventory_names_the_capability_of_each_effect_entry() {
+    let mut rows = 0;
+    for section in ["BIFs", "Native bindings"] {
+        let heading = format!("## {section}");
+        let lines = INVENTORY
+            .lines()
+            .skip_while(|line| *line != heading)
+            .skip(1)
+            .take_while(|line| !line.starts_with("## "));
+        for row in lines.filter(|line| line.starts_with("| `")) {
+            rows += 1;
+            let cells: Vec<_> = row.split(" | ").collect();
+            let effect = cells[1]
+                .split(", ")
+                .any(|label| !NO_EFFECT.contains(&label));
+            let capabilities: Vec<_> = cells[2].split(", ").collect();
+            let named = capabilities.iter().all(|capability| {
+                let name = capability.trim_matches('`');
+                capability.len() == name.len() + 2
+                    && name
+                        .split_once(':')
+                        .is_some_and(|(kind, operation)| !kind.is_empty() && !operation.is_empty())
+            });
+            let valid = match capabilities.as_slice() {
+                ["`none`"] => !effect,
+                ["`later`"] => effect,
+                _ => effect && named,
+            };
+            assert!(valid, "docs/effect-inventory.md: {row}");
+        }
+    }
+    // `effect_inventory_lists_each_bif_and_native_function` checks that
+    // the sections hold a row for each entry.
+    assert!(rows > 0);
+}
+
 /// `library` and `binding` find an entry with binary searches, so the
 /// libraries and the bindings of each library are strictly increasing:
 /// sorted, with no duplicate entry. Each binding is a function of its
