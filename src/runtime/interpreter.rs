@@ -192,10 +192,11 @@ impl BeamProgram {
 
     /// Run an exported function as the root process, as
     /// [`BeamProgram::execute`] does, with the initial capabilities that
-    /// `policy` gives the root process. A process can then do only the
-    /// operations that its capabilities permit: a denied operation raises
-    /// `error:capability_denied` before it has an effect (row "Capability
-    /// checks" of `docs/erts-differences.md`).
+    /// `policy` gives the root process. Only the spawn BIFs check
+    /// capabilities now: a spawn that the capabilities of the caller do not
+    /// permit raises `error:capability_denied` before it has an effect (row
+    /// "Capability checks" of `docs/erts-differences.md`). The other effects
+    /// have no check yet (#335).
     ///
     /// # Examples
     ///
