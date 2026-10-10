@@ -1,7 +1,6 @@
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
-    sync::LazyLock,
     time::{Duration, Instant},
 };
 
@@ -27,11 +26,6 @@ use log_event::LOG_EVENT_MODULES;
 use run::{broken_pipe, run_dumb_utf8, run_with_time_limit};
 
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
-
-/// The paths of the pinned `BOOT_MODULES`. Each `pinned_beam_path` call
-/// starts `erl`, so the tests of this crate find the paths only once.
-static BOOT_PATHS: LazyLock<[PathBuf; BOOT_MODULES.len()]> =
-    LazyLock::new(|| BOOT_MODULES.map(pinned_beam_path));
 
 #[test]
 fn loads_compiled_elixir_greetings() {
@@ -331,7 +325,10 @@ fn prints_help_and_exits_successfully() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Load BEAM files and run a function as the root process."));
     assert!(stdout.contains("Each argument is an atom that the loaded modules hold"));
-    assert!(stdout.contains("Usage: pbeam <MODULE> <FUNCTION> [ATOM]... -- <BEAM_FILE>..."));
+    assert!(
+        stdout.contains("Usage: pbeam [OPTIONS] <MODULE> <FUNCTION> [ATOM]... -- <BEAM_FILE>...")
+    );
+    assert!(stdout.contains("--policy <MODULE>"));
     assert!(stdout.contains("-h, --help"));
     assert!(output.stderr.is_empty());
 }
@@ -369,7 +366,7 @@ fn beam_file(file: &str) -> PathBuf {
 /// ```
 fn hello_beams(module: &str, io: &Path) -> Vec<PathBuf> {
     let mut beams = vec![beam_file(&format!("{module}.beam")), io.to_path_buf()];
-    beams.extend(BOOT_PATHS.iter().cloned());
+    beams.extend(BOOT_MODULES.map(pinned_beam_path));
     beams
 }
 

@@ -4,9 +4,7 @@ use std::{
         fd::{FromRawFd, OwnedFd},
         unix::process::CommandExt,
     },
-    path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::LazyLock,
     thread,
     time::{Duration, Instant},
 };
@@ -27,11 +25,6 @@ const PORT_PROBE: &str = "fixtures/port/port_probe.beam";
 
 /// The time that a run has to end.
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
-
-/// The paths of the pinned `BOOT_MODULES`. Each `pinned_beam_path` call
-/// starts `erl`, so the tests of this crate find the paths only once.
-static BOOT_PATHS: LazyLock<[PathBuf; BOOT_MODULES.len()]> =
-    LazyLock::new(|| BOOT_MODULES.map(pinned_beam_path));
 
 #[test]
 fn sets_the_terminal_mode_with_stty_through_a_port_as_pinned_erts() {
@@ -118,7 +111,7 @@ fn pbeam() -> Command {
             "--",
             PORT_PROBE,
         ])
-        .args(BOOT_PATHS.iter())
+        .args(BOOT_MODULES.map(pinned_beam_path))
         .arg(boot_beam());
     command
 }

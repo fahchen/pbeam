@@ -1,9 +1,8 @@
 use std::{
     io::{self, Read, Write},
     os::fd::{FromRawFd, OwnedFd},
-    path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -25,11 +24,6 @@ const GET_LINE_PROBE: &str = "fixtures/boot/get_line_probe.beam";
 /// The time that a run has to end, and that a terminal run has to write
 /// each output that the test waits for.
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(10);
-
-/// The paths of the pinned `BOOT_MODULES`. Each `pinned_beam_path` call
-/// starts `erl`, so the tests of this crate find the paths only once.
-static BOOT_PATHS: LazyLock<[PathBuf; BOOT_MODULES.len()]> =
-    LazyLock::new(|| BOOT_MODULES.map(pinned_beam_path));
 
 #[test]
 fn reads_lines_from_a_pipe_as_pinned_erts() {
@@ -161,7 +155,7 @@ fn pbeam(function: &str) -> Command {
             "--",
             GET_LINE_PROBE,
         ])
-        .args(BOOT_PATHS.iter())
+        .args(BOOT_MODULES.map(pinned_beam_path))
         .arg(boot_beam());
     command
 }

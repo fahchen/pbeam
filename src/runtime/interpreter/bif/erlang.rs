@@ -1117,6 +1117,28 @@ pub(super) fn length(
     Ok(Value(Term::Integer(count + elements.len() as i64)))
 }
 
+/// Run `erlang:byte_size/1`: return the number of bytes of a binary, as
+/// ERTS `byte_size_1` (`erl_bif_guard.c:376-393`) and the JIT
+/// `emit_bif_byte_size` (`jit/arm/instr_guard_bifs.cpp:438-509`) do. A
+/// term that is not a bitstring raises `badarg`. In a guard, the `gc_bif`
+/// instruction goes to its fail label instead. ERTS rounds the size of a
+/// bitstring up to the next byte. PBeam has no bitstring that is not a
+/// binary (row "Bitstring terms" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let hello = Term::Binary(b"hello".to_vec());
+/// assert!(matches!(byte_size(&hello), BifResult::Value(Term::Integer(5))));
+/// assert!(matches!(byte_size(&Term::static_atom("foo")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn byte_size(term: &Term) -> BifResult {
+    match term {
+        Term::Binary(bytes) => Value(Term::Integer(bytes.len() as i64)),
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `erlang:tl/1`: return the tail of the first cons cell of a nonempty
 /// list, as ERTS `tl_1` (`bif.c:2931-2938`) does. The tail of a proper list
 /// is a proper list, and the tail of `[1|x]` is `x`. `[]` and a term that is
@@ -2262,6 +2284,28 @@ pub(super) fn function_exported(
             )
     });
     Value(Term::static_atom(if exported { "true" } else { "false" }))
+}
+
+/// Run `erlang:module_loaded/1`, as ERTS `module_loaded_1`
+/// (`beam_bif_load.c:738-755`) does: return `true` when `module` has current
+/// code and no `-on_load` function waits to run, and `false` for an atom
+/// that names no loaded module. A `module` that is not an atom raises
+/// `badarg`. The PBeam loader does not load a module that has an `on_load`
+/// instruction (`unsupported BEAM opcode 149`), so each loaded module counts.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let loaded = module_loaded(&program, &Term::static_atom("erlang"));
+/// assert!(matches!(loaded, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(module_loaded(&program, &Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn module_loaded(program: &BeamProgram, module: &Term) -> BifResult {
+    let Term::Atom(module) = module else {
+        return BifResult::badarg();
+    };
+    let loaded = program.modules.contains_key(module.name());
+    Value(Term::static_atom(if loaded { "true" } else { "false" }))
 }
 
 /// Run `erlang:start_timer(Time, Dest, Msg)`, as ERTS `start_timer_3` and
