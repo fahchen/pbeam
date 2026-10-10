@@ -213,9 +213,9 @@ impl BeamProgram {
     /// effect entry were `ambient`, and each process can do each operation,
     /// as on ERTS. No process gets a capability copy. The `{capabilities,
     /// Map}` spawn option still raises `badarg` for a `Map` that is not
-    /// valid, but it does not reduce the child. `pbeam_cap:revoke/2` and
-    /// `pbeam_cap:request/2` return `ok` after their argument checks and
-    /// have no effect. The option is fixed for the run: no BIF can change
+    /// valid, but it does not reduce the child. `pbeam_cap:revoke/2`,
+    /// `pbeam_cap:policy_revoke/2`, and `pbeam_cap:request/2` return `ok`
+    /// after their argument checks and have no effect. The option is fixed for the run: no BIF can change
     /// it. Use [`BeamProgram::execute_with_policy`] or
     /// [`BeamProgram::execute_with_policy_module`] for a run with checks.
     ///

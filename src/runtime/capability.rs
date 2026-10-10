@@ -237,7 +237,8 @@ impl CapabilityKind {
     }
 
     /// Return the kind whose atom is `name`, as the `{capabilities, Map}`
-    /// option and `pbeam_cap:revoke/2` name it, or `None` for another name.
+    /// option, `pbeam_cap:revoke/2`, and `pbeam_cap:policy_revoke/2` name
+    /// it, or `None` for another name.
     ///
     /// # Examples
     ///
@@ -672,6 +673,8 @@ impl SecurityContext {
 struct Record {
     /// The process that got the copy.
     holder: ProcessId,
+    /// The kind of the capability of the copy.
+    kind: CapabilityKind,
     /// The source of the copy.
     source: Source,
     /// The copies that went from this copy to children, in the order of
@@ -727,6 +730,7 @@ impl Delegations {
                 }
                 let record = Record {
                     holder,
+                    kind: capability.kind,
                     source,
                     receivers: BTreeSet::new(),
                     released: false,
@@ -753,6 +757,26 @@ impl Delegations {
             .filter(|receiver| self.records[receiver].holder == holder)
             .copied()
             .collect()
+    }
+
+    /// Return the copies of `kind` that the process `holder` holds, or held
+    /// before its exit and that keep a released record, in the order of
+    /// their identifiers. The walk reads each record of the run.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(delegations.held(worker, CapabilityKind::Env), vec![id]);
+    /// ```
+    pub(super) fn held(&self, holder: ProcessId, kind: CapabilityKind) -> Vec<CapabilityId> {
+        let mut held: Vec<_> = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.holder == holder && record.kind == kind)
+            .map(|(&id, _)| id)
+            .collect();
+        held.sort_unstable();
+        held
     }
 
     /// Start the revocation of the copy `id`, which a process holds or
