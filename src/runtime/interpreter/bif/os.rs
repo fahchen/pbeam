@@ -2,6 +2,7 @@
 
 use super::BifResult::Value;
 use super::*;
+use crate::runtime::capability::{CapabilityKind, Operation};
 use crate::runtime::host::signal::{self, Disposition};
 use crate::runtime::host::{clock, environment, filename_encoding};
 use crate::runtime::unicode::{filename_from_native, native_filename};
@@ -17,7 +18,10 @@ use crate::runtime::unicode::{filename_from_native, native_filename};
 /// characters are valid. An atom, a binary (also in a list), an improper
 /// list, a character 0, a character that the encoding cannot hold, and a
 /// name with the byte `=` raise `badarg`. The empty name is valid, because
-/// the `length == 0` test of ERTS compares a pointer. The lookup and the
+/// the `length == 0` test of ERTS compares a pointer. After these checks,
+/// a caller without an `env` capability with `read` that permits the
+/// native bytes of `Name` gets `error:capability_denied`, and the binding
+/// does not read the environment. The lookup and the
 /// value follow [`environment::variable`] and [`filename_from_native`],
 /// which on macOS returns a runtime error for a value that ERTS composes
 /// (see "OS environment" in `docs/erts-differences.md`).
@@ -27,15 +31,23 @@ use crate::runtime::unicode::{filename_from_native, native_filename};
 /// ```rust,ignore
 /// // PBEAM_GETENV_ASCII=yes
 /// let name = Term::List(b"PBEAM_GETENV_ASCII".iter().map(|&byte| Term::Integer(byte.into())).collect());
-/// assert!(matches!(getenv(&name)?, BifResult::Value(Term::List(_))));
-/// assert!(matches!(getenv(&Term::static_atom("HOME"))?, BifResult::Raise { .. }));
-/// assert!(matches!(getenv(&Term::Binary(b"HOME".to_vec()))?, BifResult::Raise { .. }));
+/// assert!(matches!(getenv(&mut scheduler, &name)?, BifResult::Value(Term::List(_))));
+/// assert!(matches!(getenv(&mut scheduler, &Term::static_atom("HOME"))?, BifResult::Raise { .. }));
+/// assert!(matches!(getenv(&mut scheduler, &Term::Binary(b"HOME".to_vec()))?, BifResult::Raise { .. }));
 /// ```
-pub(super) fn getenv(name: &Term) -> Result<BifResult, BeamError> {
+///
+/// # Errors
+///
+/// A value that PBeam cannot give (see [`filename_from_native`]), and the
+/// atom `capability_denied` in a full atom table.
+pub(super) fn getenv(scheduler: &mut Scheduler, name: &Term) -> Result<BifResult, BeamError> {
     let encoding = filename_encoding();
     let Some(key) = native_filename(name, encoding).filter(|key| !key.contains(&b'=')) else {
         return Ok(BifResult::badarg());
     };
+    if let Some(denied) = denial(scheduler, CapabilityKind::Env, Operation::Read, Some(&key))? {
+        return Ok(denied);
+    }
     Ok(Value(match environment::variable(&key) {
         Some(value) => filename_from_native(&value, encoding)?,
         None => Term::static_atom("false"),
@@ -49,6 +61,11 @@ pub(super) fn getenv(name: &Term) -> Result<BifResult, BeamError> {
 /// that is not an atom of `signalterm_to_signum` (sys.c:697-722) raises
 /// `badarg`, for example `sigint`, `sigkill`, or `sigsegv`.
 ///
+/// After these checks, the caller needs a `signal` capability that permits
+/// the name of `Signal`, with `ignore` for `ignore`, with `handle` for
+/// `handle`, and with both operations for `default`. Else the binding
+/// raises `error:capability_denied` and does not change the disposition.
+///
 /// ERTS gives the `badarg` of a `Mode` that is not valid the `error_info`
 /// cause `badopt`, which PBeam does not model. After `handle`, the
 /// scheduler sends `{notify, Signal}` to `erl_signal_server` for each
@@ -57,24 +74,43 @@ pub(super) fn getenv(name: &Term) -> Result<BifResult, BeamError> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = set_signal(&Term::static_atom("sighup"), &Term::static_atom("ignore"));
+/// let result = set_signal(&mut scheduler, &Term::static_atom("sighup"), &Term::static_atom("ignore"))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
-/// let result = set_signal(&Term::static_atom("sigint"), &Term::static_atom("ignore"));
+/// let result = set_signal(&mut scheduler, &Term::static_atom("sigint"), &Term::static_atom("ignore"))?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
-pub(super) fn set_signal(signal: &Term, mode: &Term) -> BifResult {
-    let disposition = match mode {
-        Term::Atom(mode) if mode.name() == "ignore" => Disposition::Ignore,
-        Term::Atom(mode) if mode.name() == "default" => Disposition::Default,
-        Term::Atom(mode) if mode.name() == "handle" => Disposition::Handle,
-        _ => return BifResult::badarg(),
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+pub(super) fn set_signal(
+    scheduler: &mut Scheduler,
+    signal: &Term,
+    mode: &Term,
+) -> Result<BifResult, BeamError> {
+    let (disposition, operations): (_, &[Operation]) = match mode {
+        Term::Atom(mode) if mode.name() == "ignore" => (Disposition::Ignore, &[Operation::Ignore]),
+        Term::Atom(mode) if mode.name() == "default" => (
+            Disposition::Default,
+            &[Operation::Handle, Operation::Ignore],
+        ),
+        Term::Atom(mode) if mode.name() == "handle" => (Disposition::Handle, &[Operation::Handle]),
+        _ => return Ok(BifResult::badarg()),
     };
-    match signal {
-        Term::Atom(signal) if signal::set_signal(signal.name(), disposition) => {
-            Value(Term::static_atom("ok"))
+    let Term::Atom(signal) = signal else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(number) = signal::signal_number(signal.name()) else {
+        return Ok(BifResult::badarg());
+    };
+    for &operation in operations {
+        let name = Some(signal.name().as_bytes());
+        if let Some(denied) = denial(scheduler, CapabilityKind::Signal, operation, name)? {
+            return Ok(denied);
         }
-        _ => BifResult::badarg(),
     }
+    signal::set_disposition(number, disposition);
+    Ok(Value(Term::static_atom("ok")))
 }
 
 /// Run `os:system_time(Unit)`: convert the host `CLOCK_REALTIME` in

@@ -1168,14 +1168,14 @@ impl Scheduler {
             Start::Undefined { module, .. } => module.name(),
         };
         let parent = &self.current_process_mut().security;
-        let check = |needed: bool, operation: Operation, name: Option<&str>| {
+        let check = |needed: bool, operation: Operation, name: Option<&[u8]>| {
             if needed {
                 parent.check(CapabilityKind::Process, operation, name)
             } else {
                 Ok(())
             }
         };
-        let security = check(true, Operation::Spawn, Some(module))
+        let security = check(true, Operation::Spawn, Some(module.as_bytes()))
             .and_then(|()| check(link, Operation::Link, None))
             .and_then(|()| check(monitor, Operation::Monitor, None))
             .and_then(|()| parent.delegate(restrictions));

@@ -5,7 +5,11 @@
 //! `unicode` modules hold the BIF bodies that do not fit on one table line.
 
 use super::*;
-use crate::runtime::{host::output::IovecWrite, scheduler::Flushed};
+use crate::runtime::{
+    capability::{CapabilityKind, Operation},
+    host::output::IovecWrite,
+    scheduler::Flushed,
+};
 
 mod erlang;
 mod erts_internal;
@@ -130,6 +134,36 @@ impl BifResult {
             reason: Term::Atom(atoms.put("capability_denied")?),
         })
     }
+}
+
+/// Return the `error:capability_denied` exception when no capability of the
+/// current process permits `operation` of `kind`, and, when `name` is given,
+/// permits `name` in its constraint (see `SecurityContext::check`). Else
+/// return `None`. An effect entry calls this after its argument checks and
+/// before its first effect, so a denied call has no effect (row "Capability
+/// checks" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The default policy permits each operation.
+/// assert!(denial(&mut scheduler, CapabilityKind::Env, Operation::Read, Some(b"HOME"))?.is_none());
+/// ```
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for a full atom table.
+pub(super) fn denial(
+    scheduler: &mut Scheduler,
+    kind: CapabilityKind,
+    operation: Operation,
+    name: Option<&[u8]>,
+) -> Result<Option<BifResult>, BeamError> {
+    let security = &scheduler.current_process_mut().security;
+    if security.check(kind, operation, name).is_ok() {
+        return Ok(None);
+    }
+    BifResult::capability_denied(&mut scheduler.atoms).map(Some)
 }
 
 /// Return the runtime error of a BIF that ERTS runs with a port argument
