@@ -57,6 +57,7 @@
     inspect_permitted/0,
     inspect_closed/0,
     inspect_names/0,
+    ambient/0,
     child/2,
     names/0,
     executables/0,
@@ -304,6 +305,45 @@ inspect_names() ->
         in_child(#{port => #{executables => ["/bin/cat"]}, process => #{}}, Info),
         in_child(#{port => #{executables => ["/bin/sh"]}, process => #{}}, Info)
     ].
+
+%% One call of each ambient entry, which has no capability check. A process
+%% with no capability gets the same result as on ERTS. Each value that
+%% depends on the host or on the run is reduced to a stable sign.
+ambient() ->
+    Self = self(),
+    Name = effect_probe_ambient,
+    Table = ets:new(Name, [named_table]),
+    [
+        erlang:unlink(Self),
+        erlang:demonitor(make_ref()),
+        erlang:demonitor(make_ref(), [info]),
+        erlang:register(Name, Self),
+        erlang:whereis(Name) =:= Self,
+        erlang:unregister(Name),
+        integer(erlang:monotonic_time(nanosecond)),
+        integer(os:system_time(second)),
+        date_time(erlang:universaltime_to_localtime({{2026, 10, 11}, {12, 0, 0}})),
+        element(1, erlang:system_info(os_type)),
+        erlang:node(),
+        erlang:node(Self),
+        erlang:function_exported(?MODULE, ambient, 0),
+        erlang:list_to_atom("effect_probe_ambient_atom"),
+        element(1, re:compile("a", [])),
+        Table,
+        ets:insert(Name, {key, value}),
+        ets:lookup(Name, key),
+        ets:lookup_element(Name, key, 2, none),
+        ets:member(Name, key),
+        ets:delete(Name, key),
+        reference(ets:whereis(Name))
+    ].
+
+%% Guard tests, so the compiler does not call a BIF.
+integer(Term) when is_integer(Term) -> integer;
+integer(_) -> other.
+
+date_time({{_, _, _}, {_, _, _}}) -> date_time;
+date_time(_) -> other.
 
 %% Permitted process calls that give the same result on ERTS.
 process_permitted() ->
