@@ -19,9 +19,9 @@ defmodule ExampleBeams do
   end
 
   # Consolidate each protocol of the Elixir paths with the implementations of all paths. Return a map of each protocol to its consolidated BEAM file and its implementation modules.
-  def consolidate(output, example_path, elixir_paths) do
+  def consolidate(output, example_files, elixir_paths) do
     File.mkdir_p!(output)
-    paths = [example_path | elixir_paths]
+    paths = [example_files | elixir_paths]
 
     for protocol <- Protocol.extract_protocols(elixir_paths), into: %{} do
       impls = Protocol.extract_impls(protocol, paths)
@@ -55,11 +55,13 @@ end
 
 [output | examples] = System.argv()
 own = Map.new(examples, &{&1 |> Path.basename(".beam") |> String.to_atom(), &1})
-example_path = examples |> hd() |> Path.dirname() |> String.to_charlist()
+# The example directory keeps the BEAM files of earlier builds, so give Protocol.extract_impls/2 the files of this build only, as a directory with its list of files.
+example_dir = examples |> hd() |> Path.dirname() |> String.to_charlist()
+example_files = {example_dir, Enum.map(examples, &(&1 |> Path.basename() |> String.to_charlist()))}
 # The Elixir paths are the paths of the code path that are not in OTP, as Mix.Compilers.Protocol.consolidation_paths/0 selects them. The current directory is the repository root, which has no BEAM file.
 otp = :code.lib_dir()
 elixir_paths = for path <- :code.get_path(), not :lists.prefix(otp, path), do: path
-consolidated = ExampleBeams.consolidate(output, example_path, elixir_paths)
+consolidated = ExampleBeams.consolidate(output, example_files, elixir_paths)
 
 examples
 |> Enum.flat_map(&ExampleBeams.called(String.to_charlist(&1)))
