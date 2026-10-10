@@ -349,6 +349,15 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a host that revokes from another thread or at a set time, for example the launcher and manifest work (M8).
 - **Source:** Codex review of PR #357 (#336).
 
+### Bound the work of one revocation
+
+- After #336, one revocation signal, and one `pbeam_cap:revoke/2` call, go through all the released records below the copy and send a signal to each live downstream copy in one step (`Delegations::revoke` in `src/runtime/capability.rs`). The signal counts 1 and the BIF counts 1 reduction, and neither yields. The cost row of `docs/effect-inventory.md` is `O(r)`, as the design of #310 accepts ("The cost of a revocation increases with the number of holders").
+- **Evidence:** ERTS counts more than 1 for a signal that does more work (for example `cnt += 4` for a NIF select, `erl_proc_sig_queue.c:6955` at `OTP-29.1.1`), and an exiting process sends its link signals in parts with a reduction budget (`ERTS_CONTINUE_EXIT_LINKS`, `erl_process.c:14545-14554`). ERTS has no revocation, so no ERTS count applies.
+- **Option:** a count for each record that the revocation reads, or a walk that yields and continues in the next turn.
+- **Reason:** a delegation tree with many released records or many live copies below one copy has no consumer yet. With one scheduler, the other processes wait only for the time of the walk.
+- **Trigger:** a consumer with large delegation trees, or the multiple schedulers of M10.
+- **Source:** Codex review of PR #357 (#336).
+
 ## Tests and tooling
 
 ### Load-check every pinned OTP module that loads today
