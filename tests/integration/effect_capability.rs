@@ -458,11 +458,11 @@ fn gives_the_erts_results_of_the_permitted_runtime_operations() {
 fn checks_the_runtime_arguments_before_the_capability() {
     let program = program();
     let policy = grants(CapabilityKind::Runtime, &[], Constraint::Any);
-    let badargs = Term::List(vec![atom(&program, "badarg"); 5]);
+    let badargs = Term::List(vec![atom(&program, "badarg"); 6]);
     assert_eq!(run(&program, "runtime_badargs", &policy), badargs);
     assert_eq!(
         erts_with_stand_in("runtime_badargs"),
-        "[badarg,badarg,badarg,badarg,badarg]\n"
+        "[badarg,badarg,badarg,badarg,badarg,badarg]\n"
     );
 }
 

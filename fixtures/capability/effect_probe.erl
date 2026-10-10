@@ -171,6 +171,7 @@ runtime_badargs() ->
         badarg(fun() -> erlang:halt(3, [foo]) end),
         badarg(fun() -> erlang:system_flag(foo, 1) end),
         badarg(fun() -> erlang:system_flag(system_logger, 1) end),
+        badarg(fun() -> erlang:system_flag(max_heap_size, -1) end),
         badarg(fun() -> prim_tty:load(foo) end)
     ].
 
