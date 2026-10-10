@@ -124,3 +124,7 @@ Verify every acceptance, measurement, and comparison claim against its cited sou
 ## Concurrent cache initialization races
 
 Serialize cache creation before moving a downloaded or generated directory into its shared cache path. Check the destination again inside the serialization boundary before the move.
+
+## Persistent build outputs contaminate discovery
+
+Discover generated inputs from the current build set, not from a persistent output directory. Remove stale artifacts or isolate each build before scanning.
