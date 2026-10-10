@@ -21,9 +21,9 @@ jobs:
     timeout-minutes: 15
     env:
       MISE_AUTO_INSTALL: "0"
-      # Measurement for #354: setup (3), a dependency cache without incremental compilation.
+      # Measurement for #354: setup (2b), the target/ cache with incremental compilation, without the test executables.
       # A restored target/ is useful only when rustc reuses the unchanged code of pbeam-runtime. The value is explicit, so that no default of the runner or the profile can disable it.
-      CARGO_INCREMENTAL: "0"
+      CARGO_INCREMENTAL: "1"
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
@@ -70,10 +70,10 @@ jobs:
             !target/llvm-cov-target/*.profraw
             !target/llvm-cov-target/*.profdata
             !target/llvm-cov-target/debug/deps/*-????????????????
-          key: ${{ runner.os }}-deps-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.ref }}-${{ github.sha }}
+          key: ${{ runner.os }}-target-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.ref }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-deps-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.ref }}-
-            ${{ runner.os }}-deps-${{ hashFiles('Cargo.lock', 'mise.toml') }}-refs/heads/main-
+            ${{ runner.os }}-target-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.ref }}-
+            ${{ runner.os }}-target-${{ hashFiles('Cargo.lock', 'mise.toml') }}-refs/heads/main-
 
       - name: Run repository checks
         env:
