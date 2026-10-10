@@ -8,8 +8,8 @@
 //! the one place that applies a signal to its receiver.
 
 use super::{
-    Flush, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, SIGNAL_HANDLING_REDUCTIONS, Scheduler,
-    TargetMonitor, Ttys,
+    Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, SIGNAL_HANDLING_REDUCTIONS,
+    Scheduler, TargetMonitor, Ttys,
 };
 use crate::{
     error::BeamError,
@@ -87,10 +87,10 @@ impl Scheduler {
     /// `erl_proc_sig_queue.h:2063-2075`). `sender` is the sending process,
     /// or `None` for the runtime; a signal of a process to itself marks it.
     ///
-    /// Return the signal when no process has the pid `target`: the caller
-    /// then gives the ERTS result of a failed send of this kind. A pending
-    /// monitor signal to such a target gives a monitor down signal `noproc`
-    /// to its watcher (`erl_proc_sig_queue.c:1146-1170`).
+    /// Return the signal, in a box, when no process has the pid `target`:
+    /// the caller then gives the ERTS result of a failed send of this kind.
+    /// A pending monitor signal to such a target gives a monitor down signal
+    /// `noproc` to its watcher (`erl_proc_sig_queue.c:1146-1170`).
     ///
     /// # Examples
     ///
@@ -102,16 +102,16 @@ impl Scheduler {
         sender: Option<ProcessId>,
         target: ProcessId,
         signal: Signal,
-    ) -> Result<(), Signal> {
+    ) -> Result<(), Box<Signal>> {
         if let Some(pending) = self.take_pending_monitor(target) {
             if !self.processes.contains_key(&target) {
                 self.pending_monitor_failed(sender, pending);
-                return Err(signal);
+                return Err(Box::new(signal));
             }
             self.queue_signal(sender, target, monitor_signal(pending));
         }
         if !self.processes.contains_key(&target) {
-            return Err(signal);
+            return Err(Box::new(signal));
         }
         self.queue_signal(sender, target, signal);
         Ok(())
@@ -391,6 +391,7 @@ impl Scheduler {
                 // A link that the receiver has keeps its node and its state
                 // (`erl_proc_sig_queue.c:6641`).
                 let links = &mut self.handled(id, node).links;
+                let from = LinkId::Process(from);
                 if links.get(&from).is_none() {
                     links.insert(from, 0);
                 }
@@ -398,7 +399,8 @@ impl Scheduler {
             }
             Signal::Unlink { from, id: unlink } => {
                 let links = &mut self.handled(id, node).links;
-                let removed = links.get(&from) == Some(&0) && links.remove(&from).is_some();
+                let link = LinkId::Process(from);
+                let removed = links.get(&link) == Some(&0) && links.remove(&link).is_some();
                 let ack = Signal::UnlinkAck {
                     from: id,
                     id: unlink,
@@ -409,6 +411,7 @@ impl Scheduler {
             }
             Signal::UnlinkAck { from, id: unlink } => {
                 let links = &mut self.handled(id, node).links;
+                let from = LinkId::Process(from);
                 let removed = links.get(&from) == Some(&unlink) && links.remove(&from).is_some();
                 4 * i32::from(removed)
             }
@@ -534,7 +537,7 @@ impl Scheduler {
         };
         let kill = !linked && reason == Term::static_atom("kill");
         if active && !kill && process.trap_exit {
-            let message = Term::Tuple(vec![Term::static_atom("EXIT"), Term::Pid(from), reason]);
+            let message = Term::Tuple(vec![Term::static_atom("EXIT"), from.term(), reason]);
             process.mailbox.convert(walk, node, message);
             self.activate(id);
             return Handled::Continue(1);
@@ -687,7 +690,7 @@ impl Scheduler {
                 }
                 Signal::Link { from } => {
                     let exit = Signal::Exit {
-                        from: id,
+                        from: LinkId::Process(id),
                         reason: Term::static_atom("noproc"),
                         linked: true,
                         normal_kills: false,
@@ -855,7 +858,7 @@ impl Scheduler {
 /// The fields of [`Signal::Exit`].
 struct ExitSignal {
     /// The sender.
-    from: ProcessId,
+    from: LinkId,
     /// The exit reason.
     reason: Term,
     /// True for a link exit signal.

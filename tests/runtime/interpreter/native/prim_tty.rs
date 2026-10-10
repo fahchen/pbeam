@@ -35,6 +35,7 @@ fn gives_the_tcsetattr_errno_and_keeps_no_owner() {
             first_mode: terminal::EMPTY_MODE,
             set_mode: terminal::EMPTY_MODE,
             owner: None,
+            reader: None,
         },
     );
     let options = Term::Map(

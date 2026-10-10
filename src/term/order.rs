@@ -6,8 +6,8 @@
 //!
 //! `number < atom < reference < fun < port < pid < tuple < map < [] < list < bitstring`
 //!
-//! PBeam has no float or port term, so a number is an integer and integers
-//! compare by value. Terms of one type compare as follows:
+//! PBeam has no float term, so a number is an integer and integers compare
+//! by value. Terms of one type compare as follows:
 //!
 //! - atom: by the bytes of the UTF-8 name, as `erts_cmp_atoms` does, not by
 //!   the atom index;
@@ -16,6 +16,8 @@
 //!   entry, then by the number of free variables, then free variable by
 //!   free variable (`utils.c:2157-2187`). External funs compare by the
 //!   module name, the function name, and the arity (`utils.c:2189-2207`);
+//! - port: by the port number, which is the ERTS port data
+//!   (`utils.c:1751-1755`);
 //! - pid: by the process counter, which gives the order of creation, as the
 //!   ERTS pid data does until the process table uses a slot again;
 //! - tuple: by size, then element by element;
@@ -39,9 +41,9 @@ use super::{Term, match_context::MATCH_CONTEXT_ESCAPE};
 use crate::error::{BeamError, error};
 
 /// The rank of `[]` in the ERTS term order (`NIL_DEF`).
-const NIL_RANK: u8 = 7;
+const NIL_RANK: u8 = 8;
 /// The rank of a list that is not empty in the ERTS term order (`LIST_DEF`).
-const LIST_RANK: u8 = 8;
+const LIST_RANK: u8 = 9;
 
 /// One step of a comparison on the work stack.
 enum Step<'a> {
@@ -123,6 +125,7 @@ fn compare_pair<'a>(
         (Term::Atom(left), Term::Atom(right)) => left.name().cmp(right.name()),
         (Term::Binary(left), Term::Binary(right)) => left.cmp(right),
         (Term::Pid(left), Term::Pid(right)) => left.0.cmp(&right.0),
+        (Term::Port(left), Term::Port(right)) => left.0.cmp(&right.0),
         (Term::Reference(left), Term::Reference(right)) if left == right => Ordering::Equal,
         (Term::Reference(_), Term::Reference(_)) => {
             return Err(error(format!(
@@ -247,12 +250,13 @@ fn type_rank(term: &Term) -> u8 {
         Term::Atom(_) => 1,
         Term::Reference(_) => 2,
         Term::Fun(_) => 3,
-        Term::Pid(_) => 4,
-        Term::Tuple(_) => 5,
-        Term::Map(_) => 6,
+        Term::Port(_) => 4,
+        Term::Pid(_) => 5,
+        Term::Tuple(_) => 6,
+        Term::Map(_) => 7,
         Term::List(elements) if elements.is_empty() => NIL_RANK,
         Term::List(_) | Term::ImproperList(..) => LIST_RANK,
-        Term::Binary(_) => 9,
+        Term::Binary(_) => 10,
         Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
     }
 }

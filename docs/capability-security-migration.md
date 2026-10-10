@@ -6,7 +6,7 @@ GitHub Issues and their native dependencies define task ownership, order, and st
 
 ## Baseline and sequence
 
-Start implementation only after M2 acceptance. Put the security acceptance gate before dependent M3 implementation. Preserve the existing milestone numbers. Record the order with native issue dependencies when the implementation tasks are approved.
+Start implementation only after M2 acceptance. The owner decision of 2026-10-09 sets the milestone order: M4 Tooling and examples, M5 Interactive host I/O, M6 Capability security, M7 Linked native calls, M8 Embedded application, M9 Pinned Terra scenario, and M10 Multiple schedulers. This security work is M6. It runs in parallel with M5. Issues #7–#23 keep their numbers, and their titles use the new milestone tags. Record the order with native issue dependencies when the implementation tasks are approved.
 
 The current toolchain pins OTP 29.1.1 in `mise.toml`. The discussion's OTP 28 example is not the implementation baseline. Recheck the pinned version before implementation. Capture M2's accepted command, output, errors, native entry paths, module set, and platform evidence as the migration baseline.
 
@@ -155,14 +155,14 @@ Use security-specific negative tests as the authorization oracle. Use the pinned
 
 ## Later consumers and constraints
 
-Carry these contracts into the existing M3–M8 work. Read the current issues before editing their scope. The links below identify downstream integration points, not completed issue updates.
+Carry these contracts into the M3, M5, and M7–M10 work. Read the current issues before editing their scope. The links below identify downstream integration points, not completed issue updates.
 
 - M3 [#7–#9](https://github.com/fahchen/pbeam/issues/7) cover fairness, mailbox behavior, and exit. Preserve subjects, delegated spawn authority, shared budgets, and protected IPC.
-- M4 [#10–#11](https://github.com/fahchen/pbeam/issues/10) cover cross-thread process ownership and work stealing. Move the security context with the process. Preserve exclusive execution and account for retained shared storage without using `Arc` sharing as authorization.
-- M5 [#12–#14](https://github.com/fahchen/pbeam/issues/12) cover linked native registration, declarations, and SHA. Classify native entries, reserve protected MFAs, and retain the native TCB boundary.
-- M6 [#15–#18](https://github.com/fahchen/pbeam/issues/15) cover bundles, manual launchers, Mix collection, and generated launchers. Treat manifests as requests and record launcher policy, profile, and code or native build identity.
-- M7 [#19–#20](https://github.com/fahchen/pbeam/issues/19) cover suspension, cancellation, and late completion. Implement dispatch ordering, incarnation checks, cancellation cleanup, and budget settlement.
-- M8 [#21–#23](https://github.com/fahchen/pbeam/issues/21) cover Terra discovery, compatibility gaps, and release acceptance. Grant the terminal operations that the scenario uses and verify cleanup and protected IO forwarding.
+- M5 [#19–#20](https://github.com/fahchen/pbeam/issues/19) cover suspension, cancellation, and late completion. Transition 6 follows these tasks and adds dispatch ordering, incarnation checks, cancellation cleanup, and budget settlement.
+- M7 [#12–#14](https://github.com/fahchen/pbeam/issues/12) cover linked native registration, declarations, and SHA. Classify native entries, reserve protected MFAs, and retain the native TCB boundary.
+- M8 [#15–#18](https://github.com/fahchen/pbeam/issues/15) cover bundles, manual launchers, Mix collection, and generated launchers. Treat manifests as requests and record launcher policy, profile, and code or native build identity.
+- M9 [#21–#23](https://github.com/fahchen/pbeam/issues/21) cover Terra discovery, compatibility gaps, and release acceptance. Grant the terminal operations that the scenario uses and verify cleanup and protected IO forwarding.
+- M10 [#10–#11](https://github.com/fahchen/pbeam/issues/10) cover cross-thread process ownership and work stealing. Move the security context with the process. Preserve exclusive execution and account for retained shared storage without using `Arc` sharing as authorization.
 
 The existing downstream task range is [#7](https://github.com/fahchen/pbeam/issues/7) through [#23](https://github.com/fahchen/pbeam/issues/23). GitHub issue bodies and dependencies remain the source of their exact scope and order.
 

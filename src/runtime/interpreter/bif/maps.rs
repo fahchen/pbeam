@@ -85,6 +85,27 @@ pub(super) fn get(key: &Term, map: &Term) -> BifResult {
         .map_or_else(|| error_with("badkey", key), |value| Value(value.clone()))
 }
 
+/// Run `erlang:map_size/1`: return the number of pairs of a flatmap or a
+/// hashmap, as ERTS `map_size_1` does (`erl_map.c:146-179`). A term that is
+/// not a map raises `error:{badmap, Term}`. The pinned compiler emits the
+/// guard BIF as `gc_bif`. In a guard, the instruction goes to its fail label
+/// instead, as `emit_bif_map_size` does
+/// (`jit/arm/instr_guard_bifs.cpp:947-991`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(test_atom("a"), Term::Integer(1))])?);
+/// assert!(matches!(size(&map), BifResult::Value(Term::Integer(1))));
+/// assert!(matches!(size(&test_atom("foo")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn size(map: &Term) -> BifResult {
+    let Term::Map(entries) = map else {
+        return error_with("badmap", map);
+    };
+    Value(Term::Integer(entries.len() as i64))
+}
+
 /// Run `maps:find/2`: return `{ok, Value}` for a key that the map holds and
 /// `error` for another key, as ERTS `maps_find_2` does
 /// (`erl_map.c:225-243`). A term that is not a map raises
@@ -515,11 +536,48 @@ pub(super) fn remove(key: &Term, map: &Term) -> BifResult {
     if entries.get(key).is_none() {
         return Value(map.clone());
     }
+    Value(without(entries, key))
+}
+
+/// Return the map `entries` without the key `key`, which it holds, as
+/// `erts_maps_take` builds it (`erl_map.c:1943-2034`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Map::from_pairs(vec![(test_atom("a"), Term::Integer(1))])?;
+/// assert!(matches!(without(&map, &test_atom("a")), Term::Map(empty) if empty.len() == 0));
+/// ```
+fn without(entries: &Map, key: &Term) -> Term {
     let pairs = entries.iter().filter(|(existing, _)| *existing != key);
     let pairs = pairs.map(|(key, value)| (key.clone(), value.clone()));
     // Each key of the rest is a key of the map, so the map form supports it.
     let rest = Map::from_pairs(pairs.collect()).expect("the keys of a map are valid map keys");
-    Value(Term::Map(rest))
+    Term::Map(rest)
+}
+
+/// Run `maps:take/2`: return `{Value, Rest}`, the value of the key and the
+/// map without the key, or `error` for a key that the map does not hold, as
+/// ERTS `maps_take_2` does with `erts_maps_take` (`erl_map.c:1910-1925`,
+/// `1943-2034`). `Rest` is the map that [`remove`] gives. A term that is
+/// not a map raises `error:{badmap, Map}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(test_atom("a"), Term::Integer(1))])?);
+/// assert!(matches!(take(&test_atom("a"), &map), BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(take(&test_atom("b"), &map), BifResult::Value(Term::Atom(_))));
+/// assert!(matches!(take(&test_atom("a"), &test_atom("foo")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn take(key: &Term, map: &Term) -> BifResult {
+    let Term::Map(entries) = map else {
+        return error_with("badmap", map);
+    };
+    let Some(value) = entries.get(key) else {
+        return Value(Term::static_atom("error"));
+    };
+    Value(Term::Tuple(vec![value.clone(), without(entries, key)]))
 }
 
 /// Return the `error:{Tag, Term}` exception, as ERTS `BIF_ERROR` with

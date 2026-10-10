@@ -20,6 +20,8 @@ use crate::runtime::{host::filename_encoding, unicode::is_native_filename};
 
 mod prim_tty;
 
+pub(super) use prim_tty::dirty_write_result;
+
 /// The native binding of one NIF of a module. ERTS finds a NIF of a library
 /// by its exact name and arity (`beam/erl_nif.c:4845-4866`).
 ///
