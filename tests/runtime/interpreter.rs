@@ -1324,6 +1324,56 @@ fn raises_class_error_for_the_raw_stack_trace_nil() {
 }
 
 #[test]
+fn exits_with_the_error_of_an_error_path_instruction_with_no_catch() {
+    // With no catch tag, the exception of `badmatch` and `if_end` ends the
+    // process with `{Reason, Stacktrace}` (`beam_common.c:684-692`).
+    let exit = |instruction: Instruction| {
+        make_program(vec![instruction], 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(
+        exit(Instruction::TaggedError {
+            tag: "badmatch",
+            value: atom("r"),
+        }),
+        "root process exited with {{badmatch,r},[]}"
+    );
+    assert_eq!(
+        exit(Instruction::IfEnd),
+        "root process exited with {if_clause,[]}"
+    );
+}
+
+#[test]
+fn raw_raise_writes_badarg_for_a_class_that_is_not_valid() {
+    // ERTS `raw_raise` writes `badarg` to `x0` and continues for a class
+    // that is not `error`, `exit`, or `throw` (emu `instrs.tab:1253-1263`,
+    // `beam_common.c:1148-1179`). The compiler writes `badarg` to `x0` after
+    // `raw_raise` too, so a compiled fixture does not show this write.
+    let raw_raise = |class: &str| {
+        make_program(
+            vec![
+                Instruction::Move(atom(class), Operand::X(0)),
+                Instruction::Move(atom("r"), Operand::X(1)),
+                Instruction::Move(Operand::Value(Term::List(Vec::new())), Operand::X(2)),
+                Instruction::RawRaise,
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+    };
+    assert_eq!(raw_raise("foo").unwrap(), Term::static_atom("badarg"));
+    // The raw stack trace `[]` keeps the class of `x0`.
+    assert_eq!(
+        raw_raise("exit").unwrap_err().to_string(),
+        "root process exited with r"
+    );
+}
+
+#[test]
 fn rejects_call_stack_and_return_errors() {
     assert!(
         make_program(

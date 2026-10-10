@@ -395,6 +395,53 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
     }
 }
 
+/// Run `erlang:error(Reason, Args)` as ERTS `error_2` (`bif.c:1448-1454`)
+/// does: raise an exception of class `error` with `Reason`. ERTS puts
+/// `Args` in the first frame of the stack trace, the frame of the function
+/// that calls the BIF (`beam_common.c:478-495`, `903-911`, `1011-1027`). The
+/// frame is `{Module, Function, Args, Location}` when `Args` is a list, and
+/// `{Module, Function, Arity, Location}` for each other term
+/// (`erts_build_mfa_item`, `utils.c:3448-3455`).
+///
+/// PBeam keeps no line table and no caller frames (row "Exception stack
+/// trace" in `docs/erts-differences.md`), so the stack trace is only this
+/// frame, with the location `[]`. OTP code such as `re:ucompile/2` and
+/// `unicode:fake_stacktrace/3` matches this first frame.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // In `tail/1`: erlang:error(r, [a]) and erlang:error(r, none).
+/// let result = error_2(context, &Term::static_atom("r"), &args)?;
+/// // The stack trace is [{Module, tail, [a], []}] or [{Module, tail, 1, []}].
+/// assert!(matches!(result, BifResult::ErrorWithStacktrace { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A caller instruction with no `func_info` before it is a runtime
+/// invariant error.
+pub(super) fn error_2(
+    context: &mut BifContext<'_>,
+    reason: &Term,
+    args: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = current_frame(context.scheduler.current_process_mut())
+        .module
+        .clone();
+    let (module, function, arity) =
+        current_function(context.scheduler, context.program.module(&caller)?)?;
+    let args = match args {
+        Term::List(_) | Term::ImproperList(..) => args.clone(),
+        _ => Term::Integer(arity.into()),
+    };
+    let frame = Term::Tuple(vec![module, function, args, Term::List(Vec::new())]);
+    Ok(BifResult::ErrorWithStacktrace {
+        reason: reason.clone(),
+        stacktrace: Term::List(vec![frame]),
+    })
+}
+
 /// Run `erlang:raise(Class, Reason, Stacktrace)` as ERTS `raise_3`
 /// (`bif.c:1549-1692`) does: raise an exception of class `error`, `exit`,
 /// or `throw` with `Reason`. A class that is not `error`, `exit`, or

@@ -83,7 +83,7 @@ enum ExceptionClass {
     Error,
     /// Class `exit`, as `erlang:exit/1` raises.
     Exit,
-    /// Class `throw`, as `erlang:raise(throw, Reason, [])` raises.
+    /// Class `throw`, as `erlang:throw/1` raises.
     Throw,
 }
 
@@ -1489,6 +1489,45 @@ impl BeamProgram {
                         return Ok(outcome);
                     }
                 }
+                // ERTS `badmatch`, `case_end`, `try_case_end`, and
+                // `badrecord` raise class `error` with the reason
+                // `{Tag, Value}` (emu `instrs.tab:1137-1162`, `1229-1234`;
+                // `expand_error_value` in `beam_common.c:754-768`).
+                Instruction::TaggedError { tag, value } => {
+                    let reason = Term::Tuple(vec![Term::static_atom(tag), read(process, value)?]);
+                    if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                        return Ok(outcome);
+                    }
+                }
+                // ERTS `if_end` raises class `error` with the reason
+                // `if_clause` (emu `instrs.tab:1151-1155`;
+                // `expand_error_value` in `beam_common.c:769-772`).
+                Instruction::IfEnd => {
+                    let reason = Term::static_atom("if_clause");
+                    if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                        return Ok(outcome);
+                    }
+                }
+                // ERTS `raw_raise` raises `x1` with the class in `x0` and the
+                // stack trace of the raw stack trace in `x2`. For a class
+                // that is not `error`, `exit`, or `throw`, it writes
+                // `badarg` to `x0` and continues (emu `instrs.tab:1253-1263`;
+                // `raw_raise` in `beam_common.c:1148-1179`).
+                Instruction::RawRaise => {
+                    let (_, stack) = raw_stacktrace(&read(process, &Operand::X(2))?)?;
+                    let class = read(process, &Operand::X(0))?;
+                    let value = read(process, &Operand::X(1))?;
+                    match ExceptionClass::from_term(&class) {
+                        Some(class) => {
+                            if let Some(outcome) =
+                                raise_with_stacktrace(process, class, value, stack)
+                            {
+                                return Ok(outcome);
+                            }
+                        }
+                        None => write(process, &Operand::X(0), Term::static_atom("badarg"))?,
+                    }
+                }
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::TestYield => {
                     // `emit_i_test_yield` (`jit/arm/instr_common.cpp:3097-3119`).
@@ -1930,6 +1969,12 @@ impl BeamProgram {
                 Ok(Some(Outcome::Yield))
             }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
+            BifResult::ErrorWithStacktrace { reason, stacktrace } => Ok(raise_with_stacktrace(
+                process,
+                ExceptionClass::Error,
+                reason,
+                stacktrace,
+            )),
             BifResult::Trap {
                 module,
                 function,

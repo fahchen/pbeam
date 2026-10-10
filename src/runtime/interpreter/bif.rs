@@ -41,6 +41,15 @@ pub(super) enum BifResult {
         /// Reason of the exception, without a stack trace.
         reason: Term,
     },
+    /// The BIF raises an exception of class `error` with this stack trace
+    /// in the calling process, as `erlang:error/2` does with the frame of
+    /// its caller (`EXC_ERROR_2`, `beam_common.c:478-495`).
+    ErrorWithStacktrace {
+        /// Reason of the exception.
+        reason: Term,
+        /// Stack trace of the exception.
+        stacktrace: Term,
+    },
     /// The BIF continues in BEAM code, as `BIF_TRAP` does in ERTS: the call
     /// becomes a call to this exported function, and its return value is the
     /// value of the BIF call.

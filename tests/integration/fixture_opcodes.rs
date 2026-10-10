@@ -112,6 +112,29 @@ fn raise_probe_has_the_raise_bytes() {
 }
 
 #[test]
+fn error_path_probe_has_the_error_path_instruction_bytes() {
+    assert_in_fixture(
+        "fixtures/error_path/error_path_probe.beam",
+        &[
+            // badmatch/1: label 13, badmatch x0
+            &[0x01, 0xD0, 0x48, 0x03],
+            // badmatch_y/1: call 1 id/1, badmatch y0
+            &[0xB5, 0x48, 0x04],
+            // case_end/1: label 18, case_end x0
+            &[0x01, 0x08, 0x12, 0x4A, 0x03],
+            // if_end/1: label 21, if_end
+            &[0x01, 0x08, 0x15, 0x49],
+            // try_case_end/1: label 25, try_case_end x0
+            &[0x01, 0x08, 0x19, 0x6B, 0x03],
+            // badrecord/1: label 27, badrecord x0
+            &[0x01, 0x08, 0x1B, 0xB4, 0x03],
+            // raw_raise/1: move y0 x0, raw_raise
+            &[0x40, 0x04, 0x03, 0xA1],
+        ],
+    );
+}
+
+#[test]
 fn compare_probe_has_the_is_lt_is_eq_is_integer_and_is_boolean_bytes() {
     assert_in_fixture(
         "fixtures/compare/compare_probe.beam",

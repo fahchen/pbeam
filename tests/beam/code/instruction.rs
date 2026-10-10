@@ -1,17 +1,16 @@
 use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
 use super::{
-    OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
+    OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
     OPCODE_BS_INIT_WRITABLE, OPCODE_BS_START_MATCH4, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV,
     OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FSUB, OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS,
     OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD,
     OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
-    OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
-    OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
-    OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
-    read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
-    read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
-    skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
-    unsupported_opcode_operand_count,
+    OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
+    OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_NE,
+    OPCODE_TEST_TAGGED_TUPLE, parse_code, read_binary_match_commands, read_binary_segments,
+    read_move_operand, read_operand_pairs, read_pair_count, read_record_updates, skip_allocation,
+    skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
+    test_kind, unsupported_opcode_operand_count,
 };
 use crate::{
     beam::code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
@@ -178,6 +177,52 @@ fn decodes_raise_with_a_raw_stack_trace_and_a_reason() {
             },
             Instruction::Raise {
                 trace: Operand::Y(0),
+                value: Operand::Value(Term::List(values)),
+            },
+            Instruction::End,
+        ] if values.is_empty()
+    ));
+}
+
+#[test]
+fn decodes_the_error_path_instructions() {
+    // Bytes of `fixtures/error_path/error_path_probe.beam`: `badmatch x0`,
+    // `badmatch y0`, `case_end x0`, `if_end`, `try_case_end x0`,
+    // `badrecord x0`, and `raw_raise`. ERTS also loads a literal source,
+    // such as `case_end nil` (`emu/ops.tab:273-282`).
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([
+        0x48, 0x03, 0x48, 0x04, 0x4A, 0x03, 0x49, 0x6B, 0x03, 0xB4, 0x03, 0xA1, 0x4A, 0x02, 0x03,
+    ]);
+    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::TaggedError {
+                tag: "badmatch",
+                value: Operand::X(0),
+            },
+            Instruction::TaggedError {
+                tag: "badmatch",
+                value: Operand::Y(0),
+            },
+            Instruction::TaggedError {
+                tag: "case_clause",
+                value: Operand::X(0),
+            },
+            Instruction::IfEnd,
+            Instruction::TaggedError {
+                tag: "try_clause",
+                value: Operand::X(0),
+            },
+            Instruction::TaggedError {
+                tag: "badrecord",
+                value: Operand::X(0),
+            },
+            Instruction::RawRaise,
+            Instruction::TaggedError {
+                tag: "case_clause",
                 value: Operand::Value(Term::List(values)),
             },
             Instruction::End,
@@ -1079,7 +1124,7 @@ fn decodes_the_list_record_and_receive_wait_instructions_of_pinned_gen_statem() 
                 label: 204,
                 source: Operand::Y(0),
             },
-            Instruction::Unsupported(OPCODE_RAW_RAISE),
+            Instruction::RawRaise,
             Instruction::End,
         ] if matches!(copy.as_slice(), [(5, Operand::Y(2))])
             && matches!(
@@ -1554,8 +1599,6 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_TEST_NE, 3),
         (OPCODE_TEST_TAGGED_TUPLE, 4),
         (OPCODE_TEST_IS_MAP, 2),
-        (OPCODE_BADMATCH, 1),
-        (OPCODE_TRY_CASE_END, 1),
         (OPCODE_PUT_MAP_ASSOC, 5),
         (OPCODE_GET_RECORD_ELEMENTS, 3),
         (OPCODE_PUT_RECORD, 6),
@@ -1563,7 +1606,6 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_INIT_YREGS, 1),
         (OPCODE_BS_INIT_WRITABLE, 0),
         (OPCODE_BS_START_MATCH4, 4),
-        (OPCODE_RAW_RAISE, 0),
         (OPCODE_BS_GET_UTF16, 5),
         (OPCODE_BS_GET_UTF32, 5),
         (OPCODE_BS_GET_INTEGER2, 7),

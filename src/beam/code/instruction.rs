@@ -466,6 +466,42 @@ pub(crate) enum Instruction {
         /// The reason that the handler of the `try` got in `x1`.
         value: Operand,
     },
+    /// Raises class `error` with the reason `{Tag, Value}`, where `Tag` is
+    /// `badmatch`, `case_clause`, `try_clause`, or `badrecord`. `badmatch`,
+    /// `case_end`, `try_case_end`, and `badrecord` map here.
+    ///
+    /// Encoding: opcode, value. Examples: `[0x48, 0x04]` is `badmatch y0`,
+    /// `[0x4A, 0x03]` is `case_end x0`, `[0x6B, 0x03]` is
+    /// `try_case_end x0`, and `[0xB4, 0x03]` is `badrecord x0`.
+    ///
+    /// Erlang: `{ok, _} = X` compiles to `{badmatch,{x,0}}`, `case X of a ->
+    /// ok end` to `{case_end,{x,0}}`, `try f() of a -> ok catch _ -> e end`
+    /// to `{try_case_end,{x,0}}`, and `X#r.a` to `{badrecord,{x,0}}` when no
+    /// clause matches.
+    TaggedError {
+        /// The atom of the reason tuple: `badmatch`, `case_clause`,
+        /// `try_clause`, or `badrecord`.
+        tag: &'static str,
+        /// The term that did not match.
+        value: Operand,
+    },
+    /// Raises class `error` with the reason `if_clause`.
+    ///
+    /// Encoding: `[0x49]`.
+    ///
+    /// Erlang: `if X =:= a -> ok end` compiles to `if_end` after the
+    /// guard.
+    IfEnd,
+    /// Raises the reason in `x1` with the class in `x0` and the stack trace
+    /// of the raw stack trace in `x2`. A class that is not `error`, `exit`,
+    /// or `throw` writes `badarg` to `x0` and continues.
+    ///
+    /// Encoding: `[0xA1]`.
+    ///
+    /// Erlang: `try f() catch _:R:St -> erlang:raise(C, R, St) end` compiles
+    /// to `{move,{y,0},{x,0}}` and `raw_raise` after `try_case`, when the
+    /// handler uses `St` only in `erlang:raise/3`.
+    RawRaise,
     /// Changes the raw stack trace in `x0` to its stack trace, a list. The
     /// compiler moves the raw stack trace from `x2` to `x0` first.
     ///
@@ -1526,6 +1562,24 @@ pub(super) fn parse_code(
                 trace: read_move_operand(data, &mut cursor, atoms, literals)?,
                 value: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
+            OPCODE_BADMATCH => Instruction::TaggedError {
+                tag: "badmatch",
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_CASE_END => Instruction::TaggedError {
+                tag: "case_clause",
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_TRY_CASE_END => Instruction::TaggedError {
+                tag: "try_clause",
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_BADRECORD => Instruction::TaggedError {
+                tag: "badrecord",
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_IF_END => Instruction::IfEnd,
+            OPCODE_RAW_RAISE => Instruction::RawRaise,
             OPCODE_BUILD_STACKTRACE => Instruction::BuildStacktrace,
             OPCODE_SEND => Instruction::Send,
             OPCODE_REMOVE_MESSAGE => Instruction::RemoveMessage,
@@ -2220,10 +2274,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
         OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
         OPCODE_BS_SKIP_UTF8 => Some(4),
-        OPCODE_BADRECORD => Some(1),
-        OPCODE_IF_END => Some(0),
-        // `raw_raise` is in `gen_statem:call/3`.
-        OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
         OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
@@ -2234,8 +2284,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_TEST_IS_BINARY
         | OPCODE_TEST_IS_LIST
         | OPCODE_TEST_IS_MAP => Some(2),
-        // `try_case_end Src` is in `erlang:processes_next/1`.
-        OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_TRY_CASE_END => Some(1),
         OPCODE_PUT_MAP_ASSOC => Some(5),
         OPCODE_GET_MAP_ELEMENTS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),

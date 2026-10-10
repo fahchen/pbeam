@@ -341,13 +341,15 @@ fn exports_compiled_patterns_as_pinned_erts() {
 }
 
 #[test]
-fn reports_unsupported_chardata() {
+fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
     // ERTS raises `badarg` through `re:ucompile/2` for a `unicode` pattern
     // that is not chardata: it catches the `badarg` of
-    // `unicode:characters_to_binary/2` and raises it again with
-    // `erlang:error/2` and `erlang:raise/3` (`re.erl:1742-1751`). PBeam
-    // raises the same `badarg`, but it does not resolve `erlang:error/2`.
-    // This is the "Regular expressions" row in `docs/erts-differences.md`.
+    // `unicode:characters_to_binary/2`, takes the first frame of
+    // `erlang:error(new_stacktrace, [RE, Options])`, and raises `badarg`
+    // again with `erlang:raise/3` (`re.erl:1742-1751`). PBeam gives
+    // `erlang:error/2` this first frame, so the match succeeds. The
+    // exception has the stack trace `[]`, as each `erlang:raise/3` in PBeam
+    // (row "Exception stack trace" in `docs/erts-differences.md`).
     let program = program();
     let error = program
         .execute(
@@ -356,10 +358,9 @@ fn reports_unsupported_chardata() {
             &[Term::Atom(program.atom("chardata").unwrap())],
         )
         .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unresolved external MFA erlang:error/2"),
-        "got {error}"
+    assert_eq!(error.to_string(), "root process exited with {badarg,[]}");
+    assert_eq!(
+        reference_of("try re_probe:unsupported(chardata) catch error:R -> R end"),
+        "badarg\n"
     );
 }
