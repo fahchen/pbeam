@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 41] = [
+const PROBES: [(&str, &str, &str); 43] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -92,6 +92,8 @@ const PROBES: [(&str, &str, &str); 41] = [
     ("prim_tty:read_nif/3", "terminal:read", "read_nif"),
     ("prim_tty:setlocale/1", "terminal:setup", "setlocale"),
     ("prim_tty:setupterm_nif/0", "terminal:setup", "setupterm"),
+    ("prim_tty:tigetflag_nif/1", "terminal:query", "tigetflag"),
+    ("prim_tty:tigetnum_nif/1", "terminal:query", "tigetnum"),
     ("prim_tty:tty_create/1", "terminal:query", "tty_create"),
     ("prim_tty:tty_init/2", "terminal:raw_mode", "tty_init"),
     ("prim_tty:tty_select/2", "terminal:read", "tty_select"),
@@ -843,8 +845,8 @@ fn keeps_the_persistent_terms_after_a_denied_put() {
     );
 }
 
-/// Return a term as `io:format("~w")` prints it, for the atoms and the
-/// tuples of the terminal probe results.
+/// Return a term as `io:format("~w")` prints it, for the atoms, the
+/// integers, and the tuples of the terminal probe results.
 ///
 /// # Examples
 ///
@@ -864,9 +866,9 @@ fn text(term: &Term) -> String {
 
 #[test]
 fn gives_the_erts_results_of_the_permitted_terminal_setup_and_queries() {
-    // The results of `isatty/1` and `setupterm_nif/0` depend on the
-    // standard streams and on `TERM`, so ERTS runs with the streams and the
-    // environment of this test process.
+    // The results of `isatty/1`, `setupterm_nif/0`, `tigetnum_nif/1`, and
+    // `tigetflag_nif/1` depend on the standard streams and on `TERM`, so
+    // ERTS runs with the streams and the environment of this test process.
     let program = program();
     let policy = grants(
         CapabilityKind::Terminal,
@@ -882,14 +884,14 @@ fn gives_the_erts_results_of_the_permitted_terminal_setup_and_queries() {
 }
 
 #[test]
-fn checks_the_terminal_fds_before_the_capability() {
+fn checks_the_terminal_fds_and_codes_before_the_capability() {
     let program = program();
     let policy = grants(CapabilityKind::Terminal, &[], Constraint::Any);
-    let badargs = Term::List(vec![atom(&program, "badarg"); 3]);
+    let badargs = Term::List(vec![atom(&program, "badarg"); 5]);
     assert_eq!(run(&program, "terminal_badargs", &policy), badargs);
     assert_eq!(
         erts_with_stand_in("terminal_badargs"),
-        "[badarg,badarg,badarg]\n"
+        "[badarg,badarg,badarg,badarg,badarg]\n"
     );
 }
 

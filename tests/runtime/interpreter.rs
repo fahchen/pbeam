@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     BeamModule, Map, Term,
-    beam::code::{Instruction, Operand, TestKind},
+    beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind},
     term::{Atom, AtomTable, Lambda, test_atom},
 };
 
@@ -580,11 +580,11 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             map: map(vec![]),
             destination: Operand::X(0),
             pairs: vec![(
-                Operand::Value(Term::Tuple(vec![])),
+                Operand::Value(Term::Map(Map::new())),
                 Operand::Value(Term::Integer(1))
             )],
         }])
-        .contains("unsupported map key Tuple([])")
+        .contains("unsupported map key Map([])")
     );
 }
 
@@ -745,8 +745,8 @@ fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
 
 #[test]
 fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
-    // ERTS accepts a tuple key; a PBeam map does not hold one yet.
-    let pair = Term::Tuple(vec![Term::Tuple(vec![]), Term::Integer(0)]);
+    // ERTS accepts a map key; a PBeam map does not hold one yet.
+    let pair = Term::Tuple(vec![Term::Map(Map::new()), Term::Integer(0)]);
     let from_list = make_program(
         vec![
             Instruction::Move(Operand::Value(Term::List(vec![pair])), Operand::X(0)),
@@ -764,8 +764,31 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
     .execute("fixture", "main", &[]);
     assert_eq!(
         from_list.unwrap_err().to_string(),
-        "unsupported map key Tuple([])"
+        "unsupported map key Map([])"
     );
+}
+
+#[test]
+fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
+    // ERTS accepts a map key; a PBeam map does not hold one yet.
+    let put = make_program(
+        vec![
+            Instruction::Move(Operand::Value(Term::Map(Map::new())), Operand::X(0)),
+            Instruction::Move(Operand::Value(Term::Integer(0)), Operand::X(1)),
+            Instruction::Move(Operand::Value(Term::Map(Map::new())), Operand::X(2)),
+            Instruction::CallExternal {
+                arity: 3,
+                module: "maps".into(),
+                name: "put".into(),
+                tail: true,
+                deallocate: 0,
+            },
+            Instruction::Return,
+        ],
+        0,
+    )
+    .execute("fixture", "main", &[]);
+    assert_eq!(put.unwrap_err().to_string(), "unsupported map key Map([])");
 }
 
 #[test]
@@ -1510,6 +1533,163 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         }]),
         "invariant error: Value(Atom(\"a\")) holds Atom(\"a\"), not a match context"
     );
+}
+
+/// Run `bs_match` with `commands` on a match context of `bytes` in `x0`,
+/// then the instructions of `then`. The fail label 3 returns `failed`.
+fn run_binary_match(
+    bytes: &[u8],
+    commands: Vec<BinaryMatchCommand>,
+    then: Vec<Instruction>,
+) -> Result<Term, String> {
+    let mut body = vec![
+        Instruction::Move(Operand::Value(Term::Binary(bytes.to_vec())), Operand::X(0)),
+        Instruction::BinaryMatchStart {
+            fail_label: 1,
+            source: Operand::X(0),
+            destination: Operand::X(0),
+        },
+        Instruction::BinaryMatch {
+            fail_label: 3,
+            context: Operand::X(0),
+            commands,
+        },
+    ];
+    body.extend(then);
+    body.extend([
+        Instruction::Label(3),
+        Instruction::Move(atom("failed"), Operand::X(0)),
+        Instruction::Return,
+    ]);
+    make_program(body, 0)
+        .execute("fixture", "main", &[])
+        .map_err(|error| error.to_string())
+}
+
+/// A failed `=:=` command of `bs_match` leaves the position unknown until
+/// `bs_set_position`. ERTS has it at the end of the read of the command
+/// (jit/arm/instr_bs.cpp:2995-3045), which PBeam does not model.
+#[test]
+fn gives_a_runtime_error_for_a_read_after_a_failed_equal_command() {
+    let unit = std::num::NonZeroU64::new(8).unwrap();
+    let skip = BinaryMatchCommand::Skip { size: 8 };
+    let byte = |destination| BinaryMatchCommand::Integer {
+        size: 8,
+        little: false,
+        signed: false,
+        destination,
+    };
+    // `bs_get_position` x0 x1 before the match, and `bs_set_position` x0
+    // x1 at the fail label, as the compiler restores the position.
+    let restore = |rest: Vec<Instruction>| {
+        let mut body = vec![
+            Instruction::Move(Operand::Value(Term::Binary(vec![7, 8])), Operand::X(0)),
+            Instruction::BinaryMatchStart {
+                fail_label: 1,
+                source: Operand::X(0),
+                destination: Operand::X(0),
+            },
+            Instruction::BinaryGetPosition {
+                context: Operand::X(0),
+                destination: Operand::X(1),
+            },
+            Instruction::BinaryMatch {
+                fail_label: 3,
+                context: Operand::X(0),
+                commands: vec![
+                    BinaryMatchCommand::EnsureAtLeast { size: 16, unit },
+                    BinaryMatchCommand::Equal { size: 8, value: 1 },
+                ],
+            },
+            Instruction::Move(atom("matched"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+        ];
+        body.extend(rest);
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .map_err(|error| error.to_string())
+    };
+    assert_eq!(
+        restore(vec![
+            Instruction::BinarySetPosition {
+                context: Operand::X(0),
+                position: Operand::X(1),
+            },
+            Instruction::BinaryMatch {
+                fail_label: 1,
+                context: Operand::X(0),
+                commands: vec![byte(Operand::X(0))],
+            },
+            Instruction::Return,
+        ]),
+        Ok(Term::Integer(7))
+    );
+    assert_eq!(
+        restore(vec![Instruction::BinaryMatch {
+            fail_label: 1,
+            context: Operand::X(0),
+            commands: vec![skip],
+        }]),
+        Err(
+            "unsupported read of the match context in X(0) after a failed bs_match =:= command"
+                .into()
+        )
+    );
+    // A successful `=:=` moves the position, and an ensure command that
+    // fails jumps to the fail label.
+    assert_eq!(
+        run_binary_match(
+            &[1, 2],
+            vec![
+                BinaryMatchCommand::Equal { size: 8, value: 1 },
+                byte(Operand::X(0))
+            ],
+            vec![Instruction::Return]
+        ),
+        Ok(Term::Integer(2))
+    );
+    assert_eq!(
+        run_binary_match(
+            &[1],
+            vec![BinaryMatchCommand::EnsureAtLeast { size: 16, unit }],
+            vec![Instruction::Return]
+        ),
+        Ok(test_atom("failed"))
+    );
+}
+
+/// The compiler puts an ensure command before each command that reads
+/// bits, so a read past the end is a runtime invariant error.
+#[test]
+fn gives_an_invariant_error_for_a_bs_match_read_past_the_end() {
+    let past_end = |command| run_binary_match(&[1], vec![command], vec![Instruction::Return]);
+    let error = |size: u64| {
+        Err(format!(
+            "invariant error: a bs_match command needs {size} bits, but 8 bits remain"
+        ))
+    };
+    assert_eq!(
+        past_end(BinaryMatchCommand::Integer {
+            size: 16,
+            little: false,
+            signed: false,
+            destination: Operand::X(1),
+        }),
+        error(16)
+    );
+    assert_eq!(
+        past_end(BinaryMatchCommand::Binary {
+            size: 16,
+            destination: Operand::X(1),
+        }),
+        error(16)
+    );
+    assert_eq!(
+        past_end(BinaryMatchCommand::Equal { size: 9, value: 0 }),
+        error(9)
+    );
+    assert_eq!(past_end(BinaryMatchCommand::Skip { size: 9 }), error(9));
 }
 
 #[test]
