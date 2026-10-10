@@ -230,6 +230,10 @@ name = "iolist_split"
 path = "tests/integration/iolist_split.rs"
 
 [[test]]
+name = "inspect_bif"
+path = "tests/integration/inspect_bif.rs"
+
+[[test]]
 name = "integer_to_binary"
 path = "tests/integration/integer_to_binary.rs"
 
