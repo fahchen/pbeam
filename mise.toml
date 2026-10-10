@@ -106,6 +106,10 @@ arg "<name>" help="The directory of the example in examples/, such as hello_worl
 '''
 run = 'bash scripts/example.sh "$usage_name" ${usage_erts:+--erts} ${usage_policy:+--policy "$usage_policy"}'
 
+[tasks.terra-reference]
+description = "Run the Terra Counter example on the pinned ERTS in a pseudo-terminal, check each screen and the terminal restore, and write the call inventory (macOS)"
+run = "bash scripts/terra_reference.sh"
+
 [tasks.issue]
 description = "Print the title, labels, milestone, and named body sections of an issue"
 quiet = true

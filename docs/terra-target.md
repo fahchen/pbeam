@@ -1,10 +1,6 @@
 # First Terra compatibility target
 
-This contract defines the Terra application scenario after the
-[Hello World checkpoint](hello-world-target.md). Source inspection
-supports the expectations below; neither an ERTS reference run on these toolchains
-nor a PBeam execution has been verified. [Task #3](https://github.com/fahchen/pbeam/issues/3)
-owns the reproducible reference run and compatibility inventory.
+This contract defines the Terra application scenario after the [Hello World checkpoint](hello-world-target.md). [Task #3](https://github.com/fahchen/pbeam/issues/3) records the ERTS reference run of this scenario and the compatibility inventory in [Terra reference](terra-reference.md). The reference run on the pinned toolchains gives the expected screens, `{:ok, 1}`, exit status 0, and the first terminal mode after the run.
 
 ## Source and environment
 
@@ -60,6 +56,8 @@ The upstream entry command, run in the pinned Terra checkout under the PTY, is:
 mix run examples/counter.exs
 ```
 
+The reference run does not use this command. Mix needs the Hex package manager and the development dependency `ex_doc` to read `mix.exs`, and `mise.toml` pins neither. The reference compiles the sources with `elixirc` and calls `Terra.run(Counter)` from a compiled entry (see [Terra reference](terra-reference.md)).
+
 [The entry script](https://github.com/uminocelo/terra/blob/30dea5667d7e4ae5777aa3df77acb36c4aac6967/examples/counter.exs)
 loads `counter_app.exs` and calls `Terra.run(Counter)`.
 [Counter's source](https://github.com/uminocelo/terra/blob/30dea5667d7e4ae5777aa3df77acb36c4aac6967/examples/counter_app.exs)
@@ -80,8 +78,7 @@ PIDs, reference values, timing, and redraw chunk boundaries are not assertions.
 On normal quit, verify cooked input mode and signal handling are restored, the cursor
 is visible, attributes are reset, and the alternate screen is left. Record the
 original PTY settings and compare relevant restored settings. Capture the reference
-launcher's exit status in task #3; the current source review does not establish its
-exact shell exit result. A crash, unexpected final count, missing frame, or failure
+launcher's exit status in task #3; the [reference run](terra-reference.md#reference-result) gives exit status 0. A crash, unexpected final count, missing frame, or failure
 to restore terminal state fails the scenario. The reference harness must use a bounded
 timeout and preserve output/mode diagnostics; a timeout is a failure, not a passing
 or skipped result. Exact timing thresholds belong to that harness.

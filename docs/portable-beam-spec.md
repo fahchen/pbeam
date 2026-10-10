@@ -270,7 +270,6 @@ Security implementation is milestone M6 in the milestone order of 2026-10-09. It
 
 ## 12. Unresolved details before implementation claims
 
-- Reproducible ERTS results and dependency/operation inventory for the pinned [Terra scenario](terra-target.md).
 - BEAM opcode/BIF subset and runtime compatibility with the pinned mise toolchains; selecting versions is not a support claim.
 - Application startup semantics, dependency initialization, entry arguments, exit status, and shutdown policy.
 - Required process semantics, including selective receive, timers, links, monitors, and exception behavior for the chosen slice.
