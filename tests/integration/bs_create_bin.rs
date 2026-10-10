@@ -672,6 +672,11 @@ fn builds_integer_and_utf8_segments_as_pinned_erts() {
             vec![1, 2, 3],
         ),
         ("append", vec![Term::Binary(Vec::new()), int(300)], vec![44]),
+        (
+            "append_sized",
+            vec![Term::Binary(vec![1, 2]), int(5), int(0)],
+            vec![1, 2],
+        ),
         ("code", vec![int(0)], vec![0]),
         ("code", vec![int(0x7F)], vec![0x7F]),
         ("code", vec![int(0x80)], vec![0xC2, 0x80]),
@@ -972,6 +977,15 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
             "integer",
             "type",
             one.clone(),
+        ),
+        (
+            "append_sized",
+            vec![Term::Binary(vec![1]), other.clone(), int(0)],
+            "badarg",
+            2,
+            "integer",
+            "type",
+            other.clone(),
         ),
         ("code", vec![int(-1)], "badarg", 1, "utf8", "type", int(-1)),
         (

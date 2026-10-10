@@ -2937,7 +2937,8 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 /// reason `type`, and a binary whose size in bits is not a multiple of a
 /// unit larger than 1 fails with the reason `unit`. When the other
 /// segments add no bits, the result is the binary of the `append` segment
-/// and the append uses no reduction. Else the result starts with a copy of
+/// and the append uses no reduction, but the construct pass still checks
+/// the term of each `integer` segment of size 0. Else the result starts with a copy of
 /// that binary, which uses one reduction for each 8192 bits, as the ERTS
 /// path for a binary that is not writable does (erl_bits.c:1855-1924).
 /// PBeam has no writable binary (row "Binary construction" of
@@ -3079,6 +3080,11 @@ fn create_binary(
             )));
         }
         if !parts.iter().any(BinaryPart::has_bits) {
+            // The construct pass still checks the term of each `integer`
+            // segment of size 0 (erl_bits.c:934-936).
+            if let Some(index) = parts.iter().position(|part| part.type_failure().is_some()) {
+                return Ok(Err(integer_type_failure(&parts, index)));
+            }
             return Ok(Ok(std::mem::take(start)));
         }
         let reductions = start.len() * 8 / BITS_PER_REDUCTION;

@@ -1,5 +1,5 @@
 -module(bs_create_bin_integer_probe).
--export([byte/1, big16/1, little16/1, native16/1, wide/1, wide_little/1, nibbles/2, little12/2, odd/2, sized/2, bytes/2, little_bytes/2, zero/1, pair/2, little_pair/2, before_binary/2, append/2, code/1, code_tail/1, code_append/2, sized_code/3, nibble/1, guard/1, code_guard/1, catch_call/2, cost/2]).
+-export([byte/1, big16/1, little16/1, native16/1, wide/1, wide_little/1, nibbles/2, little12/2, odd/2, sized/2, bytes/2, little_bytes/2, zero/1, pair/2, little_pair/2, before_binary/2, append/2, append_sized/3, code/1, code_tail/1, code_append/2, sized_code/3, nibble/1, guard/1, code_guard/1, catch_call/2, cost/2]).
 
 %% An integer segment of 8 bits, as `<<X>>`.
 byte(X) -> <<X>>.
@@ -35,6 +35,9 @@ before_binary(X, B) -> <<X:8, B/binary>>.
 
 %% An append segment and an integer segment.
 append(A, X) -> <<A/binary, X:8>>.
+
+%% An append segment and an integer segment with a size in a register.
+append_sized(A, X, N) -> <<A/binary, X:N>>.
 
 %% utf8 segments.
 code(C) -> <<C/utf8>>.
