@@ -1183,10 +1183,24 @@ pub(crate) enum BinarySegment {
     /// is `{atom,binary},2,8,nil,{x,0},{atom,all}` when atom 4 is `binary`
     /// and atom 5 is `all`.
     BinaryAll { segment: u64, source: Operand },
+    /// An `append` segment of size `all` as the first segment: the binary
+    /// in `source` is the start of the result. The compiler writes it for
+    /// `<<A/binary, ...>>`, and the ERTS JIT runs it only as the first
+    /// segment (`emit_i_bs_create_bin`, jit/arm/instr_bs.cpp:1811-1864).
+    /// `unit` is the segment unit, which the size of the binary must be a
+    /// multiple of. Example: `[0x62, 0x10, 0x80, 0x02, 0x03, 0x52]` is
+    /// `{atom,append},1,8,nil,{x,0},{atom,all}` when atom 6 is `append`
+    /// and atom 5 is `all`.
+    Append {
+        segment: u64,
+        unit: u64,
+        source: Operand,
+    },
     /// A segment that PBeam does not run yet: an `integer`, `float`,
-    /// `utf8`, `utf16`, `utf32`, `append`, or `private_append` segment, or
-    /// a `binary` segment with another size or unit. It holds the segment
-    /// type. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x81]` is
+    /// `utf8`, `utf16`, `utf32`, or `private_append` segment, an `append`
+    /// segment that is not the first segment or has a size other than
+    /// `all`, or a `binary` segment with another size or unit. It holds
+    /// the segment type. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x81]` is
     /// `{atom,binary},2,8,nil,{x,0},{integer,8}` when atom 4 is `binary`.
     Unsupported(Atom),
 }
@@ -1991,7 +2005,7 @@ fn read_binary_segments(
         ));
     }
     (0..item_count / BINARY_SEGMENT_ITEMS)
-        .map(|_| {
+        .map(|index| {
             let kind = atom_at(atoms, read_operand(data, cursor, TAG_ATOM)? as usize)?.clone();
             let segment = read_operand(data, cursor, TAG_UNSIGNED)?;
             let unit = read_operand(data, cursor, TAG_UNSIGNED)?;
@@ -2013,6 +2027,15 @@ fn read_binary_segments(
                     if kind.name() == "binary" && unit == 8 && size.name() == "all" =>
                 {
                     BinarySegment::BinaryAll { segment, source }
+                }
+                Operand::Value(Term::Atom(size))
+                    if kind.name() == "append" && index == 0 && size.name() == "all" =>
+                {
+                    BinarySegment::Append {
+                        segment,
+                        unit,
+                        source,
+                    }
                 }
                 _ => BinarySegment::Unsupported(kind),
             })
