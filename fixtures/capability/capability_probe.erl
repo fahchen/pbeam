@@ -10,7 +10,7 @@
     widen/0,
     malformed/0,
     done/0,
-    report/2
+    report/1
 ]).
 
 %% Each spawn BIF, with and without a link or a monitor.
@@ -96,20 +96,22 @@ malformed() ->
 with(Options) ->
     attempt(fun() -> spawn_opt(?MODULE, done, [], Options) end).
 
-%% Run Function in a child that spawn_opt/4 starts with Options, and
-%% return its result.
+%% Run Function in a child that spawn_opt/4 starts with Options and a
+%% monitor, and return its result. The child gives the result as its exit
+%% reason, so a child without the process capability can give it.
 in_child(Options, Function) ->
-    case attempt(fun() -> spawn_opt(?MODULE, report, [self(), Function], Options) end) of
-        ok ->
+    try spawn_opt(?MODULE, report, [Function], [monitor | Options]) of
+        {_, Monitor} ->
             receive
-                {result, Result} -> Result
-            end;
-        Failure ->
-            Failure
+                {'DOWN', Monitor, process, _, {result, Result}} -> Result
+            end
+    catch
+        error:capability_denied -> denied;
+        Class:Reason -> {Class, Reason}
     end.
 
-report(Parent, Function) ->
-    Parent ! {result, ?MODULE:Function()}.
+report(Function) ->
+    exit({result, ?MODULE:Function()}).
 
 attempt(Spawn) ->
     try Spawn() of
