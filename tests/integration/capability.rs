@@ -147,7 +147,7 @@ fn denies_a_monitored_spawn_without_the_monitor_operation() {
 fn checks_the_module_of_the_spawn_mfa() {
     let program = program();
     let ops = CapabilityKind::Process.operations();
-    // `erlang:spawn/1` starts a fun as `erlang:apply/2` (`erlang.erl:10670-10671`),
+    // `erlang:spawn/1` starts a fun as `erlang:apply/2` (`erlang.erl:10601-10602`),
     // so the check sees the module `erlang`, not the module of the fun.
     let probe_only = process(ops, only(&["capability_probe"]), true);
     assert_eq!(
