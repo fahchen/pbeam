@@ -6,12 +6,13 @@
 //! register. The binary-match instructions read the bits after its position
 //! and move the position. The BEAM validator lets no instruction read a
 //! match context as a term (`get_term_type`, beam_validator.erl:2903-2908).
-//! It lets `move` copy a match context (beam_validator.erl:403-404). A
-//! register holds a reference to the match context, as an ERTS register
-//! holds a boxed pointer to the `ErlSubBits`, so each copy shares the
-//! position. PBeam lets a match context reach only the binary-match
-//! instructions, `move`, and the argument registers of a local call, and
-//! gives a runtime invariant error at each other instruction.
+//! It lets `move` copy a match context, and `byte_size/1` read it
+//! (beam_validator.erl:403-404, 1649-1654). A register holds a reference to
+//! the match context, as an ERTS register holds a boxed pointer to the
+//! `ErlSubBits`, so each copy shares the position. PBeam lets a match
+//! context reach only the binary-match instructions, `move`, `byte_size/1`,
+//! and the argument registers of a local call, and gives a runtime
+//! invariant error at each other instruction.
 
 use std::sync::Arc;
 

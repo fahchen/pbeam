@@ -857,9 +857,12 @@ impl BeamProgram {
                     } else {
                         let values = arguments
                             .iter()
-                            .map(|argument| read(process, argument))
+                            .map(|argument| read_any(process, argument))
                             .collect::<Result<Vec<_>, _>>()?;
-                        self.bif(scheduler, bif_module, name, values)?
+                        match match_context_byte_size(bif_module, name, arguments, &values)? {
+                            Some(size) => BifResult::Value(size),
+                            None => self.bif(scheduler, bif_module, name, values)?,
+                        }
                     };
                     let process = scheduler.current_process_mut();
                     match result {
@@ -2757,12 +2760,78 @@ fn match_context(
     operand: &Operand,
 ) -> Result<Rc<RefCell<MatchContext>>, BeamError> {
     let context = any_match_context(process, operand)?;
-    if !context.borrow().position_known() {
-        return Err(error(format!(
-            "unsupported read of the match context in {operand:?} after a failed bs_match =:= command"
-        )));
-    }
+    check_known_position(&context, operand)?;
     Ok(context)
+}
+
+/// Check that the position of the match context in `operand` is known.
+/// After a failed `=:=` command of `bs_match`, a read gives a runtime
+/// error (row "Binary matching" of docs/erts-differences.md).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// assert!(check_known_position(&context, &Operand::X(0)).is_ok());
+/// context.borrow_mut().forget_position();
+/// assert!(check_known_position(&context, &Operand::X(0)).is_err());
+/// ```
+fn check_known_position(
+    context: &RefCell<MatchContext>,
+    operand: &Operand,
+) -> Result<(), BeamError> {
+    if context.borrow().position_known() {
+        Ok(())
+    } else {
+        Err(error(format!(
+            "unsupported read of the match context in {operand:?} after a failed bs_match =:= command"
+        )))
+    }
+}
+
+/// Return the `byte_size/1` result of a match context in `values`, the
+/// argument values of the BIF `module:name`, or `None` for each other BIF
+/// or argument. The BEAM validator lets `byte_size/1` get a match context
+/// (`validate_bif_sources`, beam_validator.erl:1649-1654), and ERTS gives
+/// the bits from its position to its end in bytes, rounded up
+/// (`emit_bif_byte_size`, jit/arm/instr_guard_bifs.cpp:458-509; ops.tab:
+/// 789-790). `Terra.Input.Parser.decode_codepoint/1` reads the size of its
+/// match context with it.
+///
+/// # Errors
+///
+/// A match context in an argument of another BIF is a runtime invariant
+/// error. A match context with no known position gives the error of
+/// `match_context`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"abc")));
+/// context.borrow_mut().skip(4);
+/// let values = [Term::MatchContext(context)];
+/// let size = match_context_byte_size("erlang", "byte_size", &[Operand::X(0)], &values)?;
+/// assert_eq!(size, Some(Term::Integer(3)));
+/// assert!(match_context_byte_size("erlang", "hd", &[Operand::X(0)], &values).is_err());
+/// ```
+fn match_context_byte_size(
+    module: &str,
+    name: &str,
+    arguments: &[Operand],
+    values: &[Term],
+) -> Result<Option<Term>, BeamError> {
+    if let (("erlang", "byte_size"), [Term::MatchContext(context)]) = ((module, name), values) {
+        check_known_position(context, &arguments[0])?;
+        let bits = context.borrow().remaining_bits();
+        return Ok(Some(Term::Integer(bits.div_ceil(8) as i64)));
+    }
+    match values
+        .iter()
+        .position(|value| matches!(value, Term::MatchContext(_)))
+    {
+        Some(index) => Err(match_context_escape(&arguments[index])),
+        None => Ok(None),
+    }
 }
 
 /// Read the shared match context of a binary-match instruction, also when

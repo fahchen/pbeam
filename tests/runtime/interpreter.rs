@@ -1560,6 +1560,16 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         escape
     );
     assert_eq!(run(vec![erlang_call("hd", 1, false)]), escape);
+    assert_eq!(
+        run(vec![Instruction::Bif {
+            fail_label: 0,
+            module: "erlang".into(),
+            name: "hd".into(),
+            arguments: vec![Operand::X(0)],
+            destination: Operand::X(1),
+        }]),
+        escape
+    );
     // An external call to a loaded function also checks its arguments.
     assert_eq!(
         run(vec![Instruction::CallExternal {
@@ -1718,6 +1728,44 @@ fn run_binary_match(
         .map_err(|error| error.to_string())
 }
 
+/// The `gc_bif` instruction of `byte_size/1` of `argument` to `x0`.
+fn byte_size(argument: Operand) -> Instruction {
+    Instruction::Bif {
+        fail_label: 0,
+        module: "erlang".into(),
+        name: "byte_size".into(),
+        arguments: vec![argument],
+        destination: Operand::X(0),
+    }
+}
+
+/// `byte_size/1` of a match context gives the bits from its position to
+/// its end in bytes, rounded up, as `byte_size/1` of the same bits as a
+/// bitstring (`emit_bif_byte_size`, jit/arm/instr_guard_bifs.cpp:458-509).
+/// On the pinned ERTS, `byte_size(<<1:12>>)` is 2.
+#[test]
+fn gives_the_byte_size_of_a_match_context_from_its_position() {
+    let unit = std::num::NonZeroU64::new(1).unwrap();
+    let skip = |size| {
+        vec![
+            BinaryMatchCommand::EnsureAtLeast { size, unit },
+            BinaryMatchCommand::Skip { size },
+        ]
+    };
+    let size = |size| {
+        run_binary_match(
+            &[1, 2, 3],
+            skip(size),
+            vec![byte_size(Operand::X(0)), Instruction::Return],
+        )
+    };
+    assert_eq!(size(0), Ok(Term::Integer(3)));
+    assert_eq!(size(4), Ok(Term::Integer(3)));
+    assert_eq!(size(8), Ok(Term::Integer(2)));
+    assert_eq!(size(20), Ok(Term::Integer(1)));
+    assert_eq!(size(24), Ok(Term::Integer(0)));
+}
+
 /// A failed `=:=` command of `bs_match` leaves the position unknown until
 /// `bs_set_position`. ERTS has it at the end of the read of the command
 /// (jit/arm/instr_bs.cpp:2995-3045), which PBeam does not model.
@@ -1783,6 +1831,13 @@ fn gives_a_runtime_error_for_a_read_after_a_failed_equal_command() {
             context: Operand::X(0),
             commands: vec![skip],
         }]),
+        Err(
+            "unsupported read of the match context in X(0) after a failed bs_match =:= command"
+                .into()
+        )
+    );
+    assert_eq!(
+        restore(vec![byte_size(Operand::X(0))]),
         Err(
             "unsupported read of the match context in X(0) after a failed bs_match =:= command"
                 .into()
