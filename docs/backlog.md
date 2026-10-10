@@ -32,6 +32,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path runs float arithmetic or reads a float literal, for example a `/` operator in a consumer program.
 - **Source:** owner question on PR #189 (#183).
 
+### Add bitstring terms
+
+- PBeam has no bitstring term whose size is not a multiple of 8 bits. The loader keeps a `BIT_BINARY_EXT` literal as an unsupported literal, so `byte_size(<<1:3>>)` stops with `unsupported BEAM literal index N`. ERTS gives `1` (`erl_bif_guard.c:376-393`). The "Bitstring terms" row records this.
+- The work: a bitstring `Term` variant with the ERTS term order, `BIT_BINARY_EXT` literals in the loader, the bit count in `erlang:byte_size/1`, and the bitstring forms of the binary instructions and BIFs.
+- **Trigger:** a measured path makes or loads a bitstring that is not a binary.
+- **Source:** #360.
+
 ### Load `SMALL_BIG_EXT` and `LARGE_BIG_EXT` literals that fit in 64 bits
 
 - ERTS `dec_term` makes a small integer when the value fits (`external.c:4457-4495`). PBeam loads `SMALL_INTEGER_EXT` and `INTEGER_EXT` only, so a fixture keeps such integers out of literals with `id/1`.

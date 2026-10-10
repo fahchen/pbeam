@@ -118,7 +118,7 @@ bifs! {
     erlang:bsr/2 => unsupported,
     erlang:bump_reductions/1 => |cx, [reductions]| Ok(erlang::bump_reductions(cx.scheduler, reductions)),
     erlang:bxor/2 => unsupported,
-    erlang:byte_size/1 => unsupported,
+    erlang:byte_size/1 => |_, [term]| Ok(erlang::byte_size(term)),
     erlang:call_on_load_function/1 => unsupported,
     erlang:cancel_timer/1 => unsupported,
     erlang:cancel_timer/2 => |cx, [reference, options]| erlang::cancel_timer(cx, reference, options),
