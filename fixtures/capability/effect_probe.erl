@@ -17,6 +17,10 @@
     tty_select/0,
     tty_init/0,
     tty_window_size/0,
+    isatty/0,
+    tty_create/0,
+    setlocale/0,
+    setupterm/0,
     halt_run/0,
     system_flag/0,
     load_nif/0,
@@ -47,6 +51,8 @@
     timer_kept/0,
     persistent_term_permitted/0,
     persistent_term_kept/0,
+    terminal_permitted/0,
+    terminal_badargs/0,
     child/2,
     names/0,
     executables/0,
@@ -109,6 +115,16 @@ tty_init() ->
 tty_window_size() ->
     {ok, TTY} = prim_tty:tty_create(stdout),
     attempt(fun() -> prim_tty:tty_window_size(TTY) end).
+
+isatty() -> attempt(fun() -> prim_tty:isatty(stdout) end).
+
+tty_create() -> attempt(fun() -> prim_tty:tty_create(stdout) end).
+
+%% A permitted setlocale/1 sets the locale of the OS process. The NIF does
+%% not read its argument.
+setlocale() -> attempt(fun() -> prim_tty:setlocale(tty) end).
+
+setupterm() -> attempt(fun() -> prim_tty:setupterm_nif() end).
 
 %% A permitted halt stops the run with the status 3.
 halt_run() -> attempt(fun() -> erlang:halt(3, []) end).
@@ -226,6 +242,30 @@ persistent_term_kept() ->
     Change = restricted(persistent_term, fun() -> persistent_term:put(Key, 2) end),
     [{New, Absent}, {Change, persistent_term:get(Key)}].
 
+%% Permitted terminal queries and setup. The results depend on the standard
+%% streams and on TERM, so the test compares them with an ERTS run that has
+%% the same streams and environment. The probe does not call setlocale/1,
+%% which changes the locale of the OS process. ERTS needs the load of the
+%% NIF library, which can give a reload error.
+terminal_permitted() ->
+    _ = prim_tty:load("prim_tty"),
+    {ok, TTY} = prim_tty:tty_create(stdout),
+    [
+        prim_tty:isatty(stdin),
+        prim_tty:isatty(stdout),
+        reference(TTY),
+        prim_tty:setupterm_nif()
+    ].
+
+%% The fd checks come before the terminal capability check.
+terminal_badargs() ->
+    _ = prim_tty:load("prim_tty"),
+    [
+        badarg(fun() -> prim_tty:isatty(foo) end),
+        badarg(fun() -> prim_tty:tty_create(stdin) end),
+        badarg(fun() -> prim_tty:tty_create(foo) end)
+    ].
+
 %% Permitted process calls that give the same result on ERTS.
 process_permitted() ->
     [link_kept(), monitor_kept(), exit_kept(), exit_self(), send_kept(), timer_kept()].
@@ -332,6 +372,10 @@ stop() ->
     end.
 
 id(Term) -> Term.
+
+%% A guard test, so the compiler does not call erlang:is_reference/1.
+reference(Term) when is_reference(Term) -> reference;
+reference(_) -> other.
 
 %% Run Call in a child whose capability of Kind permits no operation.
 restricted(Kind, Call) ->

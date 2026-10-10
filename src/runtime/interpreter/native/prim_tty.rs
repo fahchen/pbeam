@@ -60,7 +60,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "isatty",
         arity: 1,
-        run: |scheduler, arguments| isatty(&mut scheduler.atoms, &arguments[0]),
+        run: |scheduler, arguments| isatty(scheduler, &arguments[0]),
     },
     Binding {
         name: "read_nif",
@@ -72,12 +72,12 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "setlocale",
         arity: 1,
-        run: |_, _| Ok(setlocale()),
+        run: |scheduler, _| setlocale(scheduler),
     },
     Binding {
         name: "setupterm_nif",
         arity: 0,
-        run: |scheduler, _| setupterm_nif(&mut scheduler.atoms),
+        run: |scheduler, _| setupterm_nif(scheduler),
     },
     Binding {
         name: "tty_create",
@@ -137,26 +137,32 @@ fn tty_get_fd(term: &Term) -> Option<libc::c_int> {
 /// Run `prim_tty:isatty(Fd)`, as the ERTS NIF `isatty_nif`
 /// (`prim_tty_nif.c:257-285`) does on Unix. The atom `stdin`, `stdout`, or
 /// `stderr` gives the result of `isatty_fd` for fd 0, 1, or 2. Each other
-/// term raises `error:badarg`.
+/// term raises `error:badarg`. Then a caller without a `terminal`
+/// capability with `query` gets `error:capability_denied`, and the binding
+/// does not call `isatty`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let stdout = Term::Atom(atoms.put("stdout")?);
+/// let stdout = Term::Atom(scheduler.atoms.put("stdout")?);
 /// // `true` when stdout is a terminal, `false` when it is a file.
-/// assert!(matches!(isatty(&mut atoms, &stdout)?, BifResult::Value(Term::Atom(_))));
-/// assert!(matches!(isatty(&mut atoms, &Term::Integer(1))?, BifResult::Raise { .. }));
+/// assert!(matches!(isatty(&mut scheduler, &stdout)?, BifResult::Value(Term::Atom(_))));
+/// assert!(matches!(isatty(&mut scheduler, &Term::Integer(1))?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
 ///
-/// The atom `ebadf` in a full atom table gives the error of
-/// `AtomTable::put`.
-fn isatty(atoms: &mut AtomTable, fd: &Term) -> Result<BifResult, BeamError> {
-    match tty_get_fd(fd) {
-        Some(fd) => isatty_fd(atoms, fd),
-        None => Ok(BifResult::badarg()),
+/// The atom `ebadf` or `capability_denied` in a full atom table gives the
+/// error of `AtomTable::put`.
+fn isatty(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
+    let Some(fd) = tty_get_fd(fd) else {
+        return Ok(BifResult::badarg());
+    };
+    let check = denial(scheduler, CapabilityKind::Terminal, Operation::Query, None);
+    if let Some(denied) = check? {
+        return Ok(denied);
     }
+    isatty_fd(&mut scheduler.atoms, fd)
 }
 
 /// Return the `isatty_nif` result for a host fd (`prim_tty_nif.c:270-278`):
@@ -189,7 +195,10 @@ fn isatty_fd(atoms: &mut AtomTable, fd: libc::c_int) -> Result<BifResult, BeamEr
 /// `{ok, Ref}`. The resource keeps the mode of the output fd as its first
 /// mode, and its state is `disabled` when `tcgetattr` reads that mode, else
 /// `unavailable` (`prim_tty_nif.c:1006-1010`). The atom `stdin` (fd 0) and
-/// each other term raise `error:badarg` (`prim_tty_nif.c:1003-1004`).
+/// each other term raise `error:badarg` (`prim_tty_nif.c:1003-1004`). Then
+/// a caller without a `terminal` capability with `query` gets
+/// `error:capability_denied`, and the binding reads no mode and makes no
+/// resource.
 ///
 /// # Examples
 ///
@@ -202,11 +211,17 @@ fn isatty_fd(atoms: &mut AtomTable, fd: libc::c_int) -> Result<BifResult, BeamEr
 ///
 /// # Errors
 ///
-/// A full reference counter gives the error of `Scheduler::make_ref`.
+/// A full reference counter gives the error of `Scheduler::make_ref`. The
+/// atom `capability_denied` in a full atom table gives the error of
+/// `AtomTable::put`.
 fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
     let Some(ofd) = tty_get_fd(fd).filter(|&ofd| ofd != libc::STDIN_FILENO) else {
         return Ok(BifResult::badarg());
     };
+    let check = denial(scheduler, CapabilityKind::Terminal, Operation::Query, None);
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
     let (state, first_mode) = match terminal::get_mode(ofd) {
         Some(mode) => (TtyState::Disabled, mode),
         None => (TtyState::Unavailable, terminal::EMPTY_MODE),
@@ -561,43 +576,62 @@ fn tty_encoding() -> BifResult {
 /// Run `prim_tty:setlocale(TTY)`, as the ERTS NIF `setlocale_nif`
 /// (`prim_tty_nif.c:747-773`) does on Unix. It does not read its argument.
 /// It sets the `LC_CTYPE` locale from the environment, and the result is
-/// `true` when the codeset of that locale is UTF-8, else `false`.
+/// `true` when the codeset of that locale is UTF-8, else `false`. A caller
+/// without a `terminal` capability with `setup` gets
+/// `error:capability_denied`, and the binding does not change the locale.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // LC_ALL=C.UTF-8
-/// assert!(matches!(setlocale(), BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(setlocale(&mut scheduler)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
 /// ```
-fn setlocale() -> BifResult {
-    BifResult::Value(Term::static_atom(if terminal::setlocale_utf8() {
-        "true"
-    } else {
-        "false"
-    }))
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table gives the error of
+/// `AtomTable::put`.
+fn setlocale(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    let check = denial(scheduler, CapabilityKind::Terminal, Operation::Setup, None);
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    Ok(BifResult::Value(Term::static_atom(
+        if terminal::setlocale_utf8() {
+            "true"
+        } else {
+            "false"
+        },
+    )))
 }
 
 /// Run `prim_tty:setupterm_nif()`, as the ERTS NIF `tty_setupterm_nif`
 /// (`prim_tty_nif.c:774-791`) does with `HAVE_TERMCAP`. The result is `ok`
 /// when `setupterm` reads the terminfo entry of `TERM`, else
-/// `{error, {setupterm, Errno}}`.
+/// `{error, {setupterm, Errno}}`. A caller without a `terminal` capability
+/// with `setup` gets `error:capability_denied`, and the binding does not
+/// call `setupterm`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // TERM=dumb
-/// assert!(matches!(setupterm_nif(&mut atoms)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(setupterm_nif(&mut scheduler)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
 /// // TERM=pbeam-unknown-term on macOS: {error, {setupterm, enoent}}
-/// assert!(matches!(setupterm_nif(&mut atoms)?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(setupterm_nif(&mut scheduler)?, BifResult::Value(Term::Tuple(_))));
 /// ```
 ///
 /// # Errors
 ///
 /// A new atom in a full atom table gives the error of `AtomTable::put`.
-fn setupterm_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
+fn setupterm_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    let check = denial(scheduler, CapabilityKind::Terminal, Operation::Setup, None);
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
     let result = match terminal::setupterm() {
         Ok(()) => Term::static_atom("ok"),
-        Err(errno) => errno_error(atoms, "setupterm", errno)?,
+        Err(errno) => errno_error(&mut scheduler.atoms, "setupterm", errno)?,
     };
     Ok(BifResult::Value(result))
 }

@@ -227,7 +227,7 @@ fn denies_a_request_for_more_than_the_caller_can_delegate() {
 #[test]
 fn raises_badarg_for_a_capabilities_option_that_is_not_valid() {
     let program = program();
-    let mut expected = vec!["badarg"; 17];
+    let mut expected = vec!["badarg"; 19];
     expected.push("ok");
     assert_eq!(
         run(&program, "malformed", &AllowAll),
