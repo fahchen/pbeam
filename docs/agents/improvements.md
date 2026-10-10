@@ -21,6 +21,64 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261009: Check complete follow-up coverage
+
+**Problem:** The PR description omitted two follow-up tasks for discovered gaps and kept an incomplete owner action.
+
+**Root Cause:** The follow-up list was not compared with the complete gap inventory before the PR was published.
+
+**Fix:** Create a task for each discovered gap, link existing tasks, and update the PR description with the complete set.
+
+**Guardrail:** Before publishing a PR, compare every discovered gap with its task or explicit owner decision and verify that the description lists no stale action.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/270#issuecomment-6078067360>
+
+## 20261009: Qualify stream-specific behavior in user-facing claims
+
+**Problem:** A PR description said that piping the output hides the progress steps, but steps remain visible when only stdout is redirected and stderr remains a terminal.
+
+**Root Cause:** The statement treated all piping and redirection as one output path without naming the stream that controls the behavior.
+
+**Fix:** State that redirecting or piping stderr suppresses the steps.
+
+**Guardrail:** When documenting terminal output behavior, identify the relevant stream and qualify each redirection case.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/296#issuecomment-6081107031>
+
+## 20261009: Preserve child exit status when guest signals change
+
+**Problem:** A child process that exited with status 7 was reported as successful after the guest ignored `SIGCHLD`.
+
+**Root Cause:** The host wait path treated `ECHILD` as an unchanged success status after automatic child reaping.
+
+**Fix:** Isolate child reaping from guest signal changes and handle failed waits explicitly.
+
+**Guardrail:** Test child exit statuses after each guest signal mode and never convert a failed wait into status 0.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/322#issuecomment-6084149434>
+
+## 20261009: Store the normalized program path
+
+**Problem:** Port information returned bytes after a NUL even though the spawned program used only the prefix.
+
+**Root Cause:** The launch path normalized the program name, but the stored port name kept the original binary.
+
+**Fix:** Normalize the program path once and use the same NUL-truncated value for launch and port information.
+
+**Guardrail:** Test program names with a NUL and trailing bytes and compare every reported name with the launched path.
+
+## 20261009: Trace ERTS policy claims to source behavior
+
+**Problem:** Documentation attributed an observed fallback to terminal support, but ERTS applies a file-descriptor policy before it calls the platform polling operation.
+
+**Root Cause:** The explanation inferred platform behavior from the result instead of checking the pinned OTP source and the complete dispatch path.
+
+**Fix:** State the ERTS policy that causes the fallback and cite the pinned source that implements it.
+
+**Guardrail:** Before documenting an ERTS explanation, inspect the pinned OTP source and verify each claimed policy step against the active path.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/332#issuecomment-6089418666>
+
 ## 20261006: Verify OTP hardware assumptions against source behavior
 
 **Problem:** The clock documentation and test rationale assumed that ERTS returns the host TSC frequency when RDTSCP is available.
@@ -131,8 +189,7 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 ## 20261005: Keep explicit exception raise sites separate
 
-**Problem:** An explicit exception raise site was grouped with BIFs that raise
-`badarg`, although it raises the class `error` with its first argument as the reason.
+**Problem:** An explicit exception raise site was grouped with BIFs that raise `badarg`, although it raises the class `error` with its first argument as the reason.
 
 **Root Cause:** The documentation grouped operations by a similar failure shape instead of recording each operation's exact exception class and reason.
 
