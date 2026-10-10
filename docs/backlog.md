@@ -64,6 +64,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 - After #367, PBeam runs the pinned `code:ensure_loaded/1` and returns `{module, Module}` for a loaded module. For a module that is not loaded, the call stops the run with `unresolved external MFA code_server:get_mode/0` (row "Code loading" of `docs/erts-differences.md`). PBeam has no code server and no code path, so it cannot load a module on demand. An implementation must give the pinned ERTS result, including the code-path search and the load of a module that is not loaded yet; it needs code-loading support first. Until then the call stays a clear runtime error.
 - An unconsolidated protocol calls `code:ensure_loaded/1` through `Code.ensure_compiled/1` (Elixir 1.20.4 `lib/elixir/lib/protocol.ex:956-975`). #349 consolidates the protocols of the example runs at build time, as `mix run` does.
+- On-demand loading also changes the output order of processes that race. In interactive mode, the Terra Counter `main` process waits for 11 module loads at its first `IO.inspect/1` call, so the terminal owner writes the restore sequence before the result. PBeam loads all modules before the run, so `main` writes first (#428, row "Code loading" of `docs/erts-differences.md`).
 - **Trigger:** a supported program calls `code:ensure_loaded/1` for a module that is not loaded, or a program needs protocols that are not consolidated.
 - **Source:** the owner PBeam run of `mise run example terra_counter` on 2026-10-10 (#339, #367).
 
@@ -272,6 +273,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Run `error_handler.beam` for an undefined function
 
 - After #166 (PR #180), PBeam gives the result of `error_handler:undefined_function/3` in Rust for a loaded module: it calls `'$handle_undefined_function'/2` or raises `undef` with the first frame. ERTS runs `error_handler.beam` from the export entry (`beam_common.c:1294-1342`). Running the BEAM module needs caller frames in the stack trace (`crash/1` calls `tl/1` on it), `erlang:raise/3` that keeps its frames, and `ensure_loaded/1` through `code_server` or `init` (`error_handler.erl:165-198`). The "Undefined functions" row records the difference. The `error_handler` code also costs reductions: on `erl +S 1`, a call that goes to `'$handle_undefined_function'/2` costs 11 and a caught `undef` costs 13. PBeam charges only the entry and the `return` of the handler, and nothing for an `undef` (owner decision in #7).
+- For a module that is not loaded, ERTS loads the module through `error_handler` and `code_server` (`error_handler.erl:85-98`, `182-198`). The Terra Counter run of #428 shows the effect: in interactive mode, the `main` process waits for 11 module loads at its first `IO.inspect/1` call, and the terminal owner writes the restore sequence before the result. PBeam loads all modules before the run, so `main` writes first.
 - **Trigger:** the stack-trace work gives caller frames and `raise/3` frames, or a consumer sets `process_flag(error_handler, Module)`.
 - **Source:** review of #166.
 
