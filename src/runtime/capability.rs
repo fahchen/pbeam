@@ -24,8 +24,8 @@ use crate::{
 /// The resource kind that a capability covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityKind {
-    /// Processes: spawn, links, monitors, and exit signals to other
-    /// processes.
+    /// Processes: spawn, links, monitors, exit signals to other
+    /// processes, and messages.
     Process,
     /// The terminal: writes, reads, raw mode, and the window size.
     Terminal,
@@ -52,6 +52,8 @@ pub enum Operation {
     Monitor,
     /// `process`: send an exit signal to another process.
     ExitOther,
+    /// `process`: send a message.
+    Send,
     /// `terminal`: write output. `env`: set a variable.
     Write,
     /// `terminal`: read input. `env`: read a variable.
@@ -110,6 +112,7 @@ const KINDS: [KindSpec; 6] = [
             Operation::Link,
             Operation::Monitor,
             Operation::ExitOther,
+            Operation::Send,
         ],
         constraint: Some(("modules", NameForm::Atom)),
     },
@@ -151,11 +154,12 @@ const KINDS: [KindSpec; 6] = [
 ];
 
 /// The atom of each operation in the `{capabilities, Map}` option.
-const OPERATION_NAMES: [(Operation, &str); 15] = [
+const OPERATION_NAMES: [(Operation, &str); 16] = [
     (Operation::Spawn, "spawn"),
     (Operation::Link, "link"),
     (Operation::Monitor, "monitor"),
     (Operation::ExitOther, "exit_other"),
+    (Operation::Send, "send"),
     (Operation::Write, "write"),
     (Operation::Read, "read"),
     (Operation::RawMode, "raw_mode"),

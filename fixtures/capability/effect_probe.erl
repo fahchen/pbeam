@@ -20,16 +20,33 @@
     halt_run/0,
     system_flag/0,
     load_nif/0,
+    link/0,
+    monitor2/0,
+    monitor3/0,
+    exit_other/0,
+    send_instruction/0,
+    send2/0,
+    send3/0,
+    start_timer/0,
     permitted/0,
     runtime_permitted/0,
     runtime_badargs/0,
     system_flag_kept/0,
     load_nif_kept/0,
+    process_permitted/0,
+    process_badargs/0,
+    link_kept/0,
+    monitor_kept/0,
+    exit_kept/0,
+    exit_self/0,
+    send_kept/0,
+    timer_kept/0,
     child/2,
     names/0,
     executables/0,
     signals/0,
     close_kept/0,
+    stop/0,
     done/0
 ]).
 
@@ -96,6 +113,29 @@ system_flag() -> attempt(fun() -> erlang:system_flag(system_logger, logger) end)
 %% The stand-in `prim_tty` calls erlang:load_nif/2 from its own code.
 load_nif() -> attempt(fun() -> prim_tty:load("prim_tty") end).
 
+%% The process entries. A link, a monitor, a send, and a timer to the
+%% caller have a check too. An exit signal to the caller has no check, so
+%% the exit goes to a child.
+link() -> attempt(fun() -> erlang:link(self()) end).
+
+monitor2() -> attempt(fun() -> erlang:monitor(process, self()) end).
+
+monitor3() -> attempt(fun() -> erlang:monitor(process, self(), []) end).
+
+exit_other() ->
+    Child = erlang:spawn(?MODULE, done, []),
+    attempt(fun() -> erlang:exit(Child, normal) end).
+
+%% `!` compiles to the send instruction, and erlang:send/2 to a call of the
+%% BIF.
+send_instruction() -> attempt(fun() -> self() ! ping end).
+
+send2() -> attempt(fun() -> erlang:send(self(), ping) end).
+
+send3() -> attempt(fun() -> erlang:send(self(), ping, []) end).
+
+start_timer() -> attempt(fun() -> erlang:start_timer(0, self(), ping) end).
+
 %% Permitted calls that give the same result on ERTS. The variable
 %% PBEAM_EFFECT_PROBE is not set.
 permitted() ->
@@ -144,6 +184,113 @@ system_flag_kept() ->
 load_nif_kept() ->
     Denied = restricted(fun() -> prim_tty:load("prim_tty") end),
     {Denied, prim_tty:load("prim_tty")}.
+
+%% Permitted process calls that give the same result on ERTS.
+process_permitted() ->
+    [link_kept(), monitor_kept(), exit_kept(), exit_self(), send_kept(), timer_kept()].
+
+%% The argument checks come before the process capability check.
+process_badargs() ->
+    [
+        badarg(fun() -> erlang:monitor(process, id(1)) end),
+        badarg(fun() -> erlang:monitor(id(foo), self()) end),
+        badarg(fun() -> erlang:monitor(process, self(), id([foo])) end),
+        badarg(fun() -> erlang:exit(id(1), normal) end),
+        badarg(fun() -> erlang:send(id(1), ping) end),
+        badarg(fun() -> erlang:send(self(), ping, id([foo])) end),
+        badarg(fun() -> erlang:start_timer(-1, self(), ping) end),
+        badarg(fun() -> erlang:start_timer(0, id(1), ping) end)
+    ].
+
+%% Each probe below gives the result of the call and a sign of its effect.
+%% A denied call has no effect.
+
+%% A link makes the exit of the child an EXIT message. The link exit signal
+%% comes before the DOWN message of the same exit.
+link_kept() ->
+    process_flag(trap_exit, true),
+    {Child, Monitor} = erlang:spawn_monitor(?MODULE, stop, []),
+    Link = attempt(fun() -> erlang:link(Child) end),
+    Child ! stop,
+    receive
+        {'DOWN', Monitor, process, Child, boom} -> ok
+    end,
+    Exit =
+        receive
+            {'EXIT', Child, boom} -> linked
+        after 0 -> unlinked
+        end,
+    process_flag(trap_exit, false),
+    {Link, Exit}.
+
+%% A monitor of a name that no process has gives a noproc DOWN message at
+%% once.
+monitor_kept() ->
+    [
+        {attempt(fun() -> erlang:monitor(process, effect_probe_nobody) end), down()},
+        {attempt(fun() -> erlang:monitor(process, effect_probe_nobody, []) end), down()}
+    ].
+
+%% A kill gives the DOWN reason killed. Else the child exits with boom.
+exit_kept() ->
+    {Child, Monitor} = erlang:spawn_monitor(?MODULE, stop, []),
+    Exit = attempt(fun() -> erlang:exit(Child, kill) end),
+    Child ! stop,
+    receive
+        {'DOWN', Monitor, process, Child, Reason} -> {Exit, Reason}
+    end.
+
+%% An exit signal to the caller, which traps exits, gives an EXIT message.
+exit_self() ->
+    process_flag(trap_exit, true),
+    Self = self(),
+    Exit = attempt(fun() -> erlang:exit(Self, normal) end),
+    Message =
+        receive
+            {'EXIT', Self, normal} -> exit
+        after 0 -> none
+        end,
+    process_flag(trap_exit, false),
+    {Exit, Message}.
+
+%% The send instruction, erlang:send/2, and erlang:send/3. A send to a name
+%% that no process has raises badarg after the check.
+send_kept() ->
+    Self = self(),
+    [
+        {attempt(fun() -> Self ! ping end), ping()},
+        {attempt(fun() -> erlang:send(Self, ping) end), ping()},
+        {attempt(fun() -> erlang:send(Self, ping, []) end), ping()},
+        attempt(fun() -> effect_probe_nobody ! ping end)
+    ].
+
+timer_kept() ->
+    Timer = attempt(fun() -> erlang:start_timer(0, self(), ping) end),
+    Fired =
+        receive
+            {timeout, _, ping} -> fired
+        after 100 -> none
+        end,
+    {Timer, Fired}.
+
+down() ->
+    receive
+        {'DOWN', _, process, {effect_probe_nobody, _}, noproc} -> down
+    after 0 -> none
+    end.
+
+ping() ->
+    receive
+        ping -> got
+    after 0 -> none
+    end.
+
+stop() ->
+    receive
+        stop -> exit(boom)
+    end.
+
+id(Term) -> Term.
 
 restricted(Call) ->
     Capabilities = #{runtime => #{operations => []}, process => #{}},
