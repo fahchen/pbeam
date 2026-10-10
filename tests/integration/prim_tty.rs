@@ -374,6 +374,87 @@ fn reads_the_terminfo_entry_with_setupterm() {
 }
 
 #[test]
+fn reads_the_termcap_capabilities_with_tigetnum_and_tigetflag() {
+    // `tty_nif_probe:terminfo/0` calls `prim_tty:setupterm_nif/0`, then
+    // gives `{tigetnum_nif(C), tigetflag_nif(C)}` for each term `C`. ERTS
+    // calls the termcap `tgetnum` and `tgetflag`, which read the first NUL
+    // of the code and compare its first two characters, so `"cols\0"` and
+    // `"co\0x"` read `co` (prim_tty_nif.c:841-863). A term that is not
+    // iodata raises `error:badarg` (prim_tty_nif.c:844-845, 855-856).
+    let badargs = "{badarg,badarg},".repeat(7);
+    let vt100 = format!(
+        "[{{80,false}},{{24,false}},{{8,false}},{{-1,true}},{{-1,true}},{{-1,true}},\
+         {{-1,false}},{{-1,false}},{{-1,false}},{{-1,false}},{{80,false}},{{80,false}},\
+         {{80,false}},{{-1,true}},{}]\n",
+        badargs.trim_end_matches(',')
+    );
+    let environment = [("TERM", "vt100")];
+    assert_eq!(
+        String::from_utf8(run_erts_nif_probe(FILES, &environment, "terminfo")).unwrap(),
+        vt100
+    );
+    assert_eq!(
+        String::from_utf8(run_isolated(
+            FILES,
+            &environment,
+            "tty_nif_probe:terminfo",
+            &[TTY_NIF_PROBE, STAND_IN]
+        ))
+        .unwrap(),
+        debug_text(&vt100)
+    );
+
+    // A `TERM` without a terminfo entry makes `setupterm` fail, so curses
+    // has no current terminal: each code gives -1 and `false`.
+    let unknown = format!(
+        "[{}{}]\n",
+        "{-1,false},".repeat(14),
+        badargs.trim_end_matches(',')
+    );
+    let environment = [("TERM", "pbeam-unknown-term")];
+    assert_eq!(
+        String::from_utf8(run_erts_nif_probe(FILES, &environment, "terminfo")).unwrap(),
+        unknown
+    );
+    assert_eq!(
+        String::from_utf8(run_isolated(
+            FILES,
+            &environment,
+            "tty_nif_probe:terminfo",
+            &[TTY_NIF_PROBE, STAND_IN]
+        ))
+        .unwrap(),
+        debug_text(&unknown)
+    );
+}
+
+/// Return the `Debug` text of the `isolated_run` result for the `~w` text
+/// of a list of `{Integer | Atom, Atom}` tuples.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(debug_text("[{80,false}]\n"), r#"Ok(List([Tuple([Integer(80), Atom("false")])]))"#);
+/// ```
+fn debug_text(text: &str) -> String {
+    let element = |element: &str| match element.parse::<i64>() {
+        Ok(integer) => format!("Integer({integer})"),
+        Err(_) => format!("Atom(\"{element}\")"),
+    };
+    let tuples: Vec<_> = text
+        .trim_end()
+        .trim_start_matches("[{")
+        .trim_end_matches("}]")
+        .split("},{")
+        .map(|tuple| {
+            let elements: Vec<_> = tuple.split(',').map(element).collect();
+            format!("Tuple([{}])", elements.join(", "))
+        })
+        .collect();
+    format!("Ok(List([{}]))", tuples.join(", "))
+}
+
+#[test]
 fn sets_the_terminal_mode_with_tty_init() {
     // `tty_nif_probe:init/0` calls `prim_tty:tty_init/2`. A term that is not
     // a map, three terms that are not a TTY resource (an atom, a
