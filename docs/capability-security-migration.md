@@ -105,7 +105,7 @@ Capability {
 }
 ```
 
-Task #334 adds `kind`, `ops`, `constraints`, and `delegable`. The `id` and `source` fields have no consumer before revocation, so #336 adds them. The issuer interface of #334 is the Rust trait `Policy` with one function, `initial`, which returns the capabilities of the root process. The default `AllowAll` policy gives a delegable capability of each kind with all operations and the constraint `any`. A Rust host gives another policy to `BeamProgram::execute_with_policy`. #337 adds the requester argument, `grant/3`, and the policy module in BEAM code.
+Task #334 adds `kind`, `ops`, `constraints`, and `delegable`. Revocation is the first consumer of `id` and `source`, so #336 adds them: each copy in a security context has its `id`, and the delegation record of the copy keeps its `source`, because the record can live longer than the copy (see [Revocation](#revocation)). The source is the launcher or the copy of the parent. The policy source comes with the run-time grant of #337. The issuer interface of #334 is the Rust trait `Policy` with one function, `initial`, which returns the capabilities of the root process. The default `AllowAll` policy gives a delegable capability of each kind with all operations and the constraint `any`. A Rust host gives another policy to `BeamProgram::execute_with_policy`. #337 adds the requester argument, `grant/3`, and the policy module in BEAM code.
 
 #### Subject, security context, and lifetime
 
@@ -135,7 +135,9 @@ Each copy of a capability records its source and the child processes that got a 
 
 A revocation is a signal through the signal queue of [#221](https://github.com/fahchen/pbeam/issues/221). When the holder handles the signal, it deletes its copy and sends the revocation to each downstream process. As with the other control signals of ERTS, a revocation takes effect when the target handles the signal, not when the revoker sends it. A revocation does not end the holder. It does not close the resources that the holder already opened: transition 5 owns resource recovery. The cost of a revocation increases with the number of holders, and with multiple schedulers the signal goes between threads as other signals do. In return, a check finds the capabilities of the caller in its own copies, not in a run-wide capability table.
 
-The exit of a holder must not stop a cascade. When a holder exits, it releases its copies, but the receivers of those copies can live longer. A later revocation from a process above the holder must still reach each downstream copy. Thus the delegation records of a holder stay usable after its exit, for example because the exiting holder gives its receivers to the source of each copy. The source can also exit first, and the launcher or the policy process can be the source, so #336 decides the exact form of these records.
+The exit of a holder must not stop a cascade. When a holder exits, it releases its copies, but the receivers of those copies can live longer. A later revocation from a process above the holder must still reach each downstream copy. Decision of #336: the delegation records are one tree of the run, keyed by the copy `id`, as the registered names are one table of the run. The record of a copy holds its holder, its source, and the copies that went from it to children. When a holder leaves the process table, it releases its copies: a copy with no receivers loses its record, and a copy with receivers keeps a released record. When the last receiver of a released record goes, the record goes too. A revocation that reaches a released record does not wait for a signal: the process that handles the revocation goes through the released record at once and sends the revocation signals to the live copies below it. Thus a revocation goes through each holder that exited, also when its source exited first or is the launcher. A check does not read the tree: it reads only the copies of the caller. The alternative, a hand-off of the receivers of an exiting holder to the source of each copy, needs a process to forward each hand-off when the source exits first, and the launcher is not a process. With multiple schedulers (M10), a spawn, an exit, and a revocation write this tree, so it needs a lock or a per-scheduler part.
+
+The revokers of #336 are the launcher and the delegating process. The launcher is the Rust host: before each scheduling step, it revokes the initial copies of the root process of each kind that `Policy::revocations` gives. A delegating process calls `pbeam_cap:revoke(Pid, Kind)`: it revokes the copies of `Kind` that the caller gave to `Pid` at spawn and returns `ok`. The authority of the caller is in its own delegation records: when the caller gave `Pid` no copy of `Kind` that still has a record, the call raises `error:capability_denied`. Thus a revocation of a child whose copy and records went at its exit also raises `error:capability_denied`. The policy process revokes with #337.
 
 Transition 2 has no lease. A lease waits in the backlog.
 
@@ -168,7 +170,7 @@ The effects of the policy process are checked against the capabilities that the 
 
 An opt-in extension can ask the policy at check time. A capability can have a mark that makes its check call the policy BEAM code, which returns `allow` or `deny`. Only a capability with this mark sends a message at check time. The default is off. Transition 2 has no scope syntax: the policy code examines the operation name and the arguments, and the runtime needs only the operation and a summary of the arguments.
 
-A run with the default trusted configuration needs no new API, and its behavior is the same as on ERTS. In a restricted run, BEAM code calls a PBeam-specific module (name not decided, for example `pbeam_cap`) to request and revoke a capability, and uses the `spawn_opt` option `{capabilities, Map}`. #334 adds this option: `Map` maps a kind atom to a map with the optional keys `operations`, `delegable`, and the constraint field of the kind, and an omitted key keeps the value of the parent copy (row "Capability checks" of [ERTS differences](erts-differences.md)). ERTS does not have these interfaces. The task that adds each interface records it in [ERTS differences](erts-differences.md).
+A run with the default trusted configuration needs no new API, and its behavior is the same as on ERTS. In a restricted run, BEAM code calls the PBeam-specific module `pbeam_cap` to request and revoke a capability, and uses the `spawn_opt` option `{capabilities, Map}`. #336 adds `pbeam_cap:revoke/2`, and #337 adds the request. #334 adds this option: `Map` maps a kind atom to a map with the optional keys `operations`, `delegable`, and the constraint field of the kind, and an omitted key keeps the value of the parent copy (row "Capability checks" of [ERTS differences](erts-differences.md)). ERTS does not have these interfaces. The task that adds each interface records it in [ERTS differences](erts-differences.md).
 
 #### Granting procedure
 
@@ -204,7 +206,7 @@ spawn(parent, {M, F, A}, opts):
             else:
                 raise error:capability_denied                                # widen: denied
     child = new_process({M, F, A}, caps: child_caps)
-    parent.delegated[cap.id] += child.pid for each copied cap               # for revocation
+    records[cap.id].receivers += child_cap.id for each copied cap          # for revocation
     return child.pid
 
 # 3. Run time: a process requests a new capability from the policy.
@@ -215,21 +217,31 @@ request(caller, kind, request):                                  # example: read
         deny         -> raise error:capability_denied
 
 # 4. Revocation: an issuer or the delegating process.
-revoke(revoker, holder, cap_id):
-    cap = holder.caps[cap_id]
-    allowed = revoker is policy_proc or launcher
-              or cap.source == {process, revoker.pid}            # a delegator revokes only its own
-    if not allowed: raise error:capability_denied
-    send_signal(holder, {revoke, cap_id})
+launcher_revoke(kind):                                           # Policy::revocations
+    for cap in root.caps where cap.kind == kind: revocation(cap.id)
+
+revoke(revoker, holder, kind):                                   # pbeam_cap:revoke(Pid, Kind)
+    copies = [r for cap in revoker.caps where cap.kind == kind
+                for r in records[cap.id].receivers
+                if records[r].holder == holder]                   # a delegator revokes only its own
+    if copies == []: raise error:capability_denied
+    for copy in copies: revocation(copy)                          # the policy process: #337
+
+revocation(cap_id):
+    if records[cap_id].released: cascade(cap_id)                  # the holder exited
+    else: send_signal(records[cap_id].holder, {revoke, cap_id})
 
 on_signal(holder, {revoke, cap_id}):                             # when the holder handles it
     delete holder.caps[cap_id]
-    for child in holder.delegated[cap_id]:                       # cascade downstream
-        send_signal(child, {revoke, copied_id(child, cap_id)})
+    cascade(cap_id)
+
+cascade(cap_id):                                                 # also at the exit of the holder
+    for child_cap_id in remove(records[cap_id]).receivers:
+        revocation(child_cap_id)                                 # through released records
 
 # 5. Process exit: release all capabilities.
 on_exit(process):
-    keep process.delegated usable for later cascades             # #336 decides the form
+    release each copy: drop its record, or keep it while it has receivers
     drop process.caps
 ```
 
