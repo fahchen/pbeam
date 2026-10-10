@@ -4,6 +4,8 @@ use pbeam_runtime::{BeamProgram, Map, Term};
 
 const BS_CREATE_BIN_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_probe.beam");
+const BS_CREATE_BIN_APPEND_PROBE: &[u8] =
+    include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_append_probe.beam");
 const BS_CREATE_BIN_ALLOC_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_alloc_probe.beam");
 const BS_CREATE_BIN_ALLOC_LIMIT: &[u8] =
@@ -261,5 +263,311 @@ fn rejects_an_allocation_list_that_erts_rejects() {
              code:ensure_loaded(bs_create_bin_alloc_limit) end"
         ),
         "{error,badfile}\n"
+    );
+}
+
+/// Run `bs_create_bin_append_probe:Function` with its arguments.
+fn run_append(program: &BeamProgram, function: &str, arguments: &[Term]) -> Term {
+    program
+        .execute("bs_create_bin_append_probe", function, arguments)
+        .unwrap()
+}
+
+#[test]
+fn builds_an_append_segment_as_pinned_erts() {
+    // `two/2` is `<<A/binary, B/binary>>`, as Elixir compiles `A <> B`, and
+    // `tail/1` is `<<A/binary, "!">>`. erlc makes `A` an `append` segment.
+    // `built/1` appends to a binary that a `string` and a `binary` segment
+    // built in the same function, and `again/1` appends to a binary that
+    // an `append` built. `unit16/2` and `bits/2` have an `append` segment
+    // of unit 16 and unit 1.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_APPEND_PROBE]).unwrap();
+    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    assert_eq!(
+        [
+            run_append(&program, "two", &[binary(b"ab"), binary(b"cd")]),
+            run_append(&program, "two", &[binary(b""), binary(b"")]),
+            run_append(&program, "two", &[binary(&[1, 2]), binary(b"")]),
+            run_append(&program, "tail", &[binary(b"hi")]),
+            run_append(&program, "tail", &[binary(b"")]),
+            run_append(&program, "built", &[binary(b"bc")]),
+            run_append(&program, "again", &[binary(b"x")]),
+            run_append(&program, "unit16", &[binary(&[1, 2]), binary(&[3])]),
+            run_append(&program, "unit16", &[binary(b""), binary(&[3])]),
+            run_append(&program, "bits", &[binary(&[1, 2, 3]), binary(&[4])]),
+        ],
+        [
+            binary(b"abcd"),
+            binary(b""),
+            binary(&[1, 2]),
+            binary(b"hi!"),
+            binary(b"!"),
+            binary(b"abcz"),
+            binary(b"xyz"),
+            binary(&[1, 2, 3]),
+            binary(&[3]),
+            binary(&[1, 2, 3, 4]),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "begin M = bs_create_bin_append_probe, \
+             [M:two(<<\"ab\">>, <<\"cd\">>), M:two(<<>>, <<>>), M:two(<<1,2>>, <<>>), \
+             M:tail(<<\"hi\">>), M:tail(<<>>), M:built(<<\"bc\">>), M:again(<<\"x\">>), \
+             M:unit16(<<1,2>>, <<3>>), M:unit16(<<>>, <<3>>), M:bits(<<1,2,3>>, <<4>>)] end"
+        ),
+        "[<<97,98,99,100>>,<<>>,<<1,2>>,<<104,105,33>>,<<33>>,<<97,98,99,122>>,<<120,121,122>>,\
+         <<1,2,3>>,<<3>>,<<1,2,3,4>>]\n"
+    );
+}
+
+#[test]
+fn jumps_to_the_fail_label_for_an_append_segment_that_fails() {
+    // The guard of `guard/2` compiles to `bs_create_bin` with an `append`
+    // segment and the fail label of the next clause.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_APPEND_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let cases = [
+        (binary(b"a"), binary(b"b")),
+        (binary(b"ab"), binary(b"")),
+        (binary(b"a"), binary(b"c")),
+        (atom("other"), binary(b"b")),
+        (binary(b"a"), atom("ab")),
+    ];
+    assert_eq!(
+        cases.map(|(a, b)| run_append(&program, "guard", &[a, b])),
+        [
+            atom("ab"),
+            atom("ab"),
+            atom("other"),
+            atom("other"),
+            atom("other")
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_create_bin_append_probe:guard(A, B) || {A, B} <- \
+             [{<<\"a\">>, <<\"b\">>}, {<<\"ab\">>, <<>>}, {<<\"a\">>, <<\"c\">>}, \
+             {other, <<\"b\">>}, {<<\"a\">>, ab}]]"
+        ),
+        "[ab,ab,other,other,other]\n"
+    );
+}
+
+#[test]
+fn raises_badarg_with_the_erts_error_info_for_an_append_segment() {
+    // ERTS checks the `binary` segments before the `append` segment, so
+    // with two bad terms the cause names segment 2. A binary whose bit
+    // size is not a multiple of 16 fails the `append` segment of unit 16
+    // with the reason `unit`.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_APPEND_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let caught = |function: &str, segment: i64, reason: &str, value: Term| {
+        let cause = Term::Tuple(vec![
+            Term::Integer(segment),
+            atom("binary"),
+            atom(reason),
+            value,
+        ]);
+        let error_info = Map::from_pairs(vec![
+            (atom("cause"), cause),
+            (atom("function"), atom("format_bs_fail")),
+            (atom("module"), atom("erl_erts_errors")),
+        ])
+        .unwrap();
+        let frame = Term::Tuple(vec![
+            atom("bs_create_bin_append_probe"),
+            atom(function),
+            Term::Integer(2),
+            Term::List(vec![Term::Tuple(vec![
+                atom("error_info"),
+                Term::Map(error_info),
+            ])]),
+        ]);
+        Term::Tuple(vec![atom("error"), atom("badarg"), Term::List(vec![frame])])
+    };
+    let cases = [
+        ("two", atom("other"), binary(b""), 1, "type", atom("other")),
+        (
+            "two",
+            Term::Integer(1),
+            binary(b"x"),
+            1,
+            "type",
+            Term::Integer(1),
+        ),
+        (
+            "two",
+            Term::List(Vec::new()),
+            binary(b""),
+            1,
+            "type",
+            Term::List(Vec::new()),
+        ),
+        ("two", binary(b"a"), atom("ab"), 2, "type", atom("ab")),
+        ("two", atom("other"), atom("ab"), 2, "type", atom("ab")),
+        (
+            "unit16",
+            binary(&[1, 2, 3]),
+            binary(b""),
+            1,
+            "unit",
+            binary(&[1, 2, 3]),
+        ),
+        (
+            "unit16",
+            binary(&[1]),
+            binary(&[4]),
+            1,
+            "unit",
+            binary(&[1]),
+        ),
+        (
+            "unit16",
+            binary(&[1, 2, 3]),
+            atom("ab"),
+            2,
+            "type",
+            atom("ab"),
+        ),
+        (
+            "unit16",
+            atom("other"),
+            binary(b""),
+            1,
+            "type",
+            atom("other"),
+        ),
+    ];
+    for (function, a, b, segment, reason, value) in cases {
+        assert_eq!(
+            run_append(&program, &format!("catch_{function}"), &[a, b]),
+            caught(function, segment, reason, value)
+        );
+    }
+    let frame = |function: &str, cause: &str| {
+        format!(
+            "{{error,badarg,{{bs_create_bin_append_probe,{function},2,[{{error_info,\
+             #{{cause => {{{cause}}},function => format_bs_fail,module => erl_erts_errors}}}}]}}}}"
+        )
+    };
+    let expected = [
+        frame("two", "1,binary,type,other"),
+        frame("two", "1,binary,type,1"),
+        frame("two", "1,binary,type,[]"),
+        frame("two", "2,binary,type,ab"),
+        frame("two", "2,binary,type,ab"),
+        frame("unit16", "1,binary,unit,<<1,2,3>>"),
+        frame("unit16", "1,binary,unit,<<1>>"),
+        frame("unit16", "2,binary,type,ab"),
+        frame("unit16", "1,binary,type,other"),
+    ];
+    assert_eq!(
+        reference(
+            "begin M = bs_create_bin_append_probe, \
+             [begin {C, R, S} = M:F(A, B), {C, R, hd(S)} end || {F, A, B} <- \
+             [{catch_two, other, <<>>}, {catch_two, 1, <<\"x\">>}, {catch_two, [], <<>>}, \
+             {catch_two, <<\"a\">>, ab}, {catch_two, other, ab}, \
+             {catch_unit16, <<1,2,3>>, <<>>}, {catch_unit16, <<1>>, <<4>>}, \
+             {catch_unit16, <<1,2,3>>, ab}, {catch_unit16, other, <<>>}]] end"
+        ),
+        format!("[{}]\n", expected.join(","))
+    );
+}
+
+#[test]
+fn uses_one_reduction_for_each_1024_bytes_of_an_appended_binary() {
+    // `cost/2` gives the reductions between two `process_info/2` calls
+    // around `<<A/binary, B/binary>>`: 1 for the second call, then the
+    // copy of `A` by `erts_bs_append_checked` for a binary that is not
+    // writable (erl_bits.c:1916-1921) and the copy of `B`, each its bit
+    // size divided by 8192. When `B` is empty, the result is `A` and no
+    // copy occurs (erl_bits.c:1882-1888). The ERTS run gives the process
+    // a large heap, so that no garbage collection occurs.
+    // (size of A, size of B, reductions, size of the result)
+    let results = [
+        (0, 0, 1, 0),
+        (1, 0, 1, 1),
+        (8192, 0, 1, 8192),
+        (8192, 1, 9, 8193),
+        (1023, 1, 1, 1024),
+        (1024, 1, 2, 1025),
+        (2048, 1, 3, 2049),
+        (100_000, 0, 1, 100_000),
+        (100_000, 1, 98, 100_001),
+        (0, 1024, 2, 1024),
+        (1024, 1024, 3, 2048),
+        (100_000, 100_000, 195, 200_000),
+    ];
+    let program = BeamProgram::load(&[BS_CREATE_BIN_APPEND_PROBE]).unwrap();
+    for (a, b, reductions, size) in results {
+        assert_eq!(
+            run_append(
+                &program,
+                "cost",
+                &[Term::Binary(vec![1; a]), Term::Binary(vec![2; b])],
+            ),
+            Term::Tuple(vec![Term::Integer(reductions), Term::Integer(size)]),
+            "cost(<<1:{a}/unit:8>>, <<2:{b}/unit:8>>)"
+        );
+    }
+    assert_eq!(
+        reference(
+            "begin Self = self(), [begin spawn_opt(fun() -> {C, S} = \
+             bs_create_bin_append_probe:cost(binary:copy(<<1>>, A), binary:copy(<<2>>, B)), \
+             Self ! {A, B, C, S} end, \
+             [{min_heap_size,4000000},{min_bin_vheap_size,40000000}]), \
+             receive R -> R end end || {A, B} <- [{0,0},{1,0},{8192,0},{8192,1},{1023,1},\
+             {1024,1},{2048,1},{100000,0},{100000,1},{0,1024},{1024,1024},{100000,100000}]] end"
+        ),
+        "[{0,0,1,0},{1,0,1,1},{8192,0,1,8192},{8192,1,9,8193},{1023,1,1,1024},{1024,1,2,1025},\
+         {2048,1,3,2049},{100000,0,1,100000},{100000,1,98,100001},{0,1024,2,1024},\
+         {1024,1024,3,2048},{100000,100000,195,200000}]\n"
+    );
+}
+
+#[test]
+fn copies_a_binary_that_an_append_built_where_erts_appends_in_place() {
+    // `cost_again/2` appends `B` to `<<A/binary, "y">>`, a binary that an
+    // `append` built. ERTS appends in place to this writable binary and
+    // uses reductions only for the copy of `B` while the binary has room
+    // (erl_bits.c:1773-1849). PBeam has no writable binary, so it copies
+    // the start of the result as for each other binary (row "Binary
+    // construction").
+    // (size of A, size of B, PBeam reductions, size of the result); the
+    // ERTS reductions follow in the reference run.
+    let results = [
+        (0, 0, 1, 1),
+        (0, 1, 1, 2),
+        (1024, 1, 2, 1026),
+        (100_000, 1, 98, 100_002),
+        (100_000, 0, 1, 100_001),
+        (0, 1024, 2, 1025),
+    ];
+    let program = BeamProgram::load(&[BS_CREATE_BIN_APPEND_PROBE]).unwrap();
+    for (a, b, reductions, size) in results {
+        assert_eq!(
+            run_append(
+                &program,
+                "cost_again",
+                &[Term::Binary(vec![1; a]), Term::Binary(vec![2; b])],
+            ),
+            Term::Tuple(vec![Term::Integer(reductions), Term::Integer(size)]),
+            "cost_again(<<1:{a}/unit:8>>, <<2:{b}/unit:8>>)"
+        );
+    }
+    assert_eq!(
+        reference(
+            "begin Self = self(), [begin spawn_opt(fun() -> {C, S} = \
+             bs_create_bin_append_probe:cost_again(binary:copy(<<1>>, A), binary:copy(<<2>>, B)), \
+             Self ! {A, B, C, S} end, \
+             [{min_heap_size,4000000},{min_bin_vheap_size,40000000}]), \
+             receive R -> R end end || {A, B} <- [{0,0},{0,1},{1024,1},{100000,1},{100000,0},\
+             {0,1024}]] end"
+        ),
+        "[{0,0,1,1},{0,1,1,2},{1024,1,1,1026},{100000,1,1,100002},{100000,0,1,100001},\
+         {0,1024,2,1025}]\n"
     );
 }

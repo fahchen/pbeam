@@ -24,8 +24,8 @@ use crate::{
 /// The resource kind that a capability covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityKind {
-    /// Processes: spawn, links, monitors, and exit signals to other
-    /// processes.
+    /// Processes: spawn, links, monitors, exit signals to other
+    /// processes, and messages.
     Process,
     /// The terminal: writes, reads, raw mode, and the window size.
     Terminal,
@@ -38,6 +38,8 @@ pub enum CapabilityKind {
     /// The whole runtime: the stop of the run, the system flags, and the
     /// load of a NIF library.
     Runtime,
+    /// The global persistent term store of the node.
+    PersistentTerm,
 }
 
 /// An operation that a capability can permit. Each kind permits only its
@@ -52,9 +54,13 @@ pub enum Operation {
     Monitor,
     /// `process`: send an exit signal to another process.
     ExitOther,
-    /// `terminal`: write output. `env`: set a variable.
+    /// `process`: send a message.
+    Send,
+    /// `terminal`: write output. `env`: set a variable. `persistent_term`:
+    /// store a term.
     Write,
-    /// `terminal`: read input. `env`: read a variable.
+    /// `terminal`: read input. `env`: read a variable. `persistent_term`:
+    /// read the stored terms.
     Read,
     /// `terminal`: set raw mode.
     RawMode,
@@ -101,7 +107,7 @@ struct KindSpec {
 
 /// The kinds of the design table (section "Capability kinds" of
 /// `docs/capability-security-migration.md`).
-const KINDS: [KindSpec; 6] = [
+const KINDS: [KindSpec; 7] = [
     KindSpec {
         kind: CapabilityKind::Process,
         name: "process",
@@ -110,6 +116,7 @@ const KINDS: [KindSpec; 6] = [
             Operation::Link,
             Operation::Monitor,
             Operation::ExitOther,
+            Operation::Send,
         ],
         constraint: Some(("modules", NameForm::Atom)),
     },
@@ -148,14 +155,21 @@ const KINDS: [KindSpec; 6] = [
         operations: &[Operation::Halt, Operation::SystemFlag, Operation::LoadNif],
         constraint: None,
     },
+    KindSpec {
+        kind: CapabilityKind::PersistentTerm,
+        name: "persistent_term",
+        operations: &[Operation::Read, Operation::Write],
+        constraint: None,
+    },
 ];
 
 /// The atom of each operation in the `{capabilities, Map}` option.
-const OPERATION_NAMES: [(Operation, &str); 15] = [
+const OPERATION_NAMES: [(Operation, &str); 16] = [
     (Operation::Spawn, "spawn"),
     (Operation::Link, "link"),
     (Operation::Monitor, "monitor"),
     (Operation::ExitOther, "exit_other"),
+    (Operation::Send, "send"),
     (Operation::Write, "write"),
     (Operation::Read, "read"),
     (Operation::RawMode, "raw_mode"),
@@ -337,7 +351,8 @@ impl Capability {
     /// # Errors
     ///
     /// An operation of another kind, and a `Constraint::Only` for the
-    /// `terminal` or `runtime` kind, which has no constraint field.
+    /// `terminal`, `runtime`, or `persistent_term` kind, which has no
+    /// constraint field.
     pub fn new(
         kind: CapabilityKind,
         operations: &[Operation],
@@ -404,7 +419,7 @@ pub trait Policy {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(AllowAll.initial().len(), 6);
+    /// assert_eq!(AllowAll.initial().len(), 7);
     /// ```
     fn initial(&self) -> Vec<Capability>;
 
@@ -443,7 +458,7 @@ impl Policy for AllowAll {
     ///
     /// ```rust,ignore
     /// let capabilities = AllowAll.initial();
-    /// assert_eq!(capabilities.len(), 6);
+    /// assert_eq!(capabilities.len(), 7);
     /// let process = Capability::new(CapabilityKind::Process, CapabilityKind::Process.operations(), Constraint::Any, true)?;
     /// assert_eq!(capabilities[0], process);
     /// ```
@@ -546,7 +561,7 @@ impl SecurityContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(parent.delegate(None)?.len(), 6);
+    /// assert_eq!(parent.delegate(None)?.len(), 7);
     /// assert_eq!(SecurityContext::default().delegate(Some(&restrictions)), Err(Denied));
     /// ```
     pub(super) fn delegate(
@@ -862,13 +877,14 @@ impl Restriction {
 
 /// Read the value of the `spawn_opt` option `{capabilities, Map}`. Each key
 /// of `Map` is a kind atom: `process`, `terminal`, `port`, `env`, `signal`,
-/// or `runtime`. Each value is a map with the optional keys `operations` (a
-/// proper list of operation atoms of the kind), `delegable` (`true` or
-/// `false`), and the constraint field of the kind: `modules` (atoms),
-/// `executables` (strings), `names` (strings), or `signals` (atoms), with the
-/// value `any` or a proper list of names. A string is a flat proper list of
-/// characters. Return `None` for each other term, which raises `badarg`, as
-/// a spawn option that is not valid does (`erl_process.c:12222-12434`).
+/// `runtime`, or `persistent_term`. Each value is a map with the optional
+/// keys `operations` (a proper list of operation atoms of the kind),
+/// `delegable` (`true` or `false`), and the constraint field of the kind:
+/// `modules` (atoms), `executables` (strings), `names` (strings), or
+/// `signals` (atoms), with the value `any` or a proper list of names. A
+/// string is a flat proper list of characters. Return `None` for each other
+/// term, which raises `badarg`, as a spawn option that is not valid does
+/// (`erl_process.c:12222-12434`).
 ///
 /// # Examples
 ///

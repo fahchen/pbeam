@@ -11,7 +11,7 @@ use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
-use crate::term::{Fun, MAX_ATOM_CHARACTERS};
+use crate::term::{Fun, MAX_ATOM_CHARACTERS, ProcessId, Reference};
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
 /// gives a runtime error.
@@ -439,6 +439,41 @@ pub(super) fn raise(class: &Term, reason: &Term, stacktrace: &Term) -> BifResult
     }
 }
 
+/// Run `erlang:link(Pid)` for a local pid, as ERTS `link_opt`
+/// (`bif.c:136-186`, `411-423`) does through [`Scheduler::link`]: return
+/// `true`, or raise `noproc` for a process that does not exist or exits
+/// when the caller does not trap exits.
+///
+/// The caller needs a `process` capability that permits `link`, also for
+/// its own pid. Without it, the call raises `error:capability_denied` and
+/// makes no link and no signal. The check comes before the process lookup,
+/// so a denied call gives the same result for each pid.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(link(scheduler, child)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(link(scheduler, dead)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn link(scheduler: &mut Scheduler, target: ProcessId) -> Result<BifResult, BeamError> {
+    if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
+        return Ok(denied);
+    }
+    Ok(if scheduler.link(target) {
+        Value(Term::static_atom("true"))
+    } else {
+        Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("noproc"),
+        }
+    })
+}
+
 /// Run `erlang:exit(Id, Reason)`: send an exit signal to a local pid, as
 /// ERTS `send_exit_signal_bif` (`bif.c:1750-1772`) does, and return `true`.
 /// The receiver acts on the signal when it handles it (see
@@ -457,30 +492,62 @@ pub(super) fn raise(class: &Term, reason: &Term, stacktrace: &Term) -> BifResult
 /// which handles them until the signal ends the caller (`bif.c:1698-1716`).
 ///
 /// Each other term raises `error:badarg` (`bif.c:1864-1866`). PBeam cannot
-/// represent a port or a remote pid.
+/// represent a remote pid.
+///
+/// A signal to another process, also through an alias of another process,
+/// and a signal to a port need a `process` capability that permits
+/// `exit_other`. Without it, the call raises `error:capability_denied` and
+/// sends nothing. A signal to the caller, also through an alias of the
+/// caller, has no check. A reference that is not an alias sends nothing and
+/// has no check: in ERTS it holds no pid (`erl_proc_sig_queue.c:1647-1655`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = exit(&mut context, &Term::Reference(reference), &boom);
+/// let result = exit(&mut context, &Term::Reference(reference), &boom)?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let result = exit(&mut context, &Term::Pid(caller), &kill);
+/// let result = exit(&mut context, &Term::Pid(caller), &kill)?;
 /// assert!(matches!(result, BifResult::TrapBif { function: "await_exit", .. }));
-/// assert!(matches!(exit(&mut context, &foo, &boom), BifResult::Raise { .. }));
+/// assert!(matches!(exit(&mut context, &foo, &boom)?, BifResult::Raise { .. }));
 /// ```
-pub(super) fn exit(context: &mut BifContext<'_>, id: &Term, reason: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// A port after the check returns a runtime error (row "Ports" of
+/// `docs/erts-differences.md`). A new `capability_denied` atom in a full
+/// atom table gives the error of `AtomTable::put`.
+pub(super) fn exit(
+    context: &mut BifContext<'_>,
+    id: &Term,
+    reason: &Term,
+) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let caller = scheduler.current_process_mut();
     let (caller_id, trap_exit) = (caller.id, caller.trap_exit);
     let (target, alias) = match id {
-        Term::Pid(target) => (*target, None),
+        Term::Pid(target) => (Some(*target), None),
         Term::Reference(reference) => {
             let Some(owner) = scheduler.alias_owner(*reference) else {
-                return Value(Term::static_atom("true"));
+                return Ok(Value(Term::static_atom("true")));
             };
-            (owner, Some(*reference))
+            (Some(owner), Some(*reference))
         }
-        _ => return BifResult::badarg(),
+        Term::Port(_) => (None, None),
+        _ => return Ok(BifResult::badarg()),
+    };
+    if target != Some(caller_id) {
+        let check = denial(
+            scheduler,
+            CapabilityKind::Process,
+            Operation::ExitOther,
+            None,
+        );
+        if let Some(denied) = check? {
+            return Ok(denied);
+        }
+    }
+    let Some(target) = target else {
+        return Err(unsupported_port("erlang:exit/2"));
     };
     let suicide = alias.is_none()
         && target == caller_id
@@ -495,14 +562,14 @@ pub(super) fn exit(context: &mut BifContext<'_>, id: &Term, reason: &Term) -> Bi
     // A receiver that does not exist drops the signal.
     let _ = scheduler.send_signal(Some(caller_id), target, exit);
     if !suicide {
-        return Value(Term::static_atom("true"));
+        return Ok(Value(Term::static_atom("true")));
     }
     scheduler.current_process_mut().mailbox.fetch();
-    BifResult::TrapBif {
+    Ok(BifResult::TrapBif {
         module: "erts_internal",
         function: "await_exit",
         arguments: Vec::new(),
-    }
+    })
 }
 
 /// Run `erlang:demonitor(Reference, Options)` as ERTS `demonitor_2`
@@ -584,6 +651,12 @@ pub(super) fn demonitor(
 /// alias, and each port name gives the `noproc` `DOWN` message (see
 /// [`Scheduler::monitor`]). PBeam registers no port.
 ///
+/// After these checks, the caller needs a `process` capability that permits
+/// `monitor`, also for its own pid. Without it, the call raises
+/// `error:capability_denied`, makes no reference, and adds no monitor. The
+/// check comes before the name lookup and before the runtime error of a
+/// part that PBeam does not support.
+///
 /// # Examples
 ///
 /// ```rust,ignore
@@ -598,7 +671,8 @@ pub(super) fn demonitor(
 ///
 /// A `time_offset` monitor of `clock_service`, a monitor of the type `port`
 /// with a port, and the `priority` option of a monitor that is not of the
-/// caller, are not supported.
+/// caller, are not supported. A new `capability_denied` atom in a full atom
+/// table gives the error of `AtomTable::put`.
 pub(super) fn monitor(
     context: &mut BifContext<'_>,
     kind: &Term,
@@ -611,21 +685,27 @@ pub(super) fn monitor(
     let Term::Atom(kind) = kind else {
         return Ok(BifResult::badarg());
     };
+    // An `Err` is the runtime error of a valid target that PBeam does not
+    // support. It comes after the capability check.
     let target = match (kind.name(), target) {
-        ("process", Term::Pid(id)) => Some(MonitorTarget::Process(*id)),
-        ("process", target) => local_name(target).map(MonitorTarget::ProcessName),
-        ("port", Term::Port(_)) => return Err(unsupported_port("erlang:monitor/2,3")),
-        ("port", target) => local_name(target).map(MonitorTarget::PortName),
+        ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
+        ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
+        ("port", Term::Port(_)) => Some(Err(unsupported_port("erlang:monitor/2,3"))),
+        ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
         ("time_offset", Term::Atom(service)) if service.name() == "clock_service" => {
             // ponytail: no time offset service yet; add it when a measured path monitors it.
-            return Err(error("unsupported time_offset monitor"));
+            Some(Err(error("unsupported time_offset monitor")))
         }
         _ => None,
     };
     let Some(target) = target else {
         return Ok(BifResult::badarg());
     };
-    let reference = context.scheduler.monitor(target, options)?;
+    let scheduler = &mut *context.scheduler;
+    if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Monitor, None)? {
+        return Ok(denied);
+    }
+    let reference = scheduler.monitor(target?, options)?;
     Ok(Value(Term::Reference(reference)))
 }
 
@@ -1592,7 +1672,8 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 /// `erlang:send/2` (`send_2`, `bif.c:2801-2804`). A local send then uses
 /// reductions, and can return the message after a switch (see
 /// [`local_send_result`]). A `to` that [`deliver_to`] rejects raises
-/// `badarg`.
+/// `badarg`, and a caller without the `send` operation raises
+/// `error:capability_denied`.
 ///
 /// # Examples
 ///
@@ -1605,21 +1686,22 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 ///
 /// # Errors
 ///
-/// A port as `to` returns a runtime error: ERTS runs the port command of
-/// the message (`erl_send`, `bif.c:2872-2899`).
+/// A port as `to` returns a runtime error after the capability check: ERTS
+/// runs the port command of the message (`erl_send`, `bif.c:2872-2899`). A
+/// new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
 pub(in crate::runtime::interpreter) fn send(
     scheduler: &mut Scheduler,
     to: &Term,
     message: Term,
 ) -> Result<BifResult, BeamError> {
-    if let Term::Port(_) = to {
-        return Err(unsupported_port("erlang:send/2"));
-    }
-    Ok(match deliver_to(scheduler, to, message.clone()) {
-        Some(Sent::Local) => local_send_result(scheduler, message),
-        Some(Sent::NoConnect) => Value(message),
-        None => BifResult::badarg(),
-    })
+    Ok(
+        match deliver_to(scheduler, to, message.clone(), "erlang:send/2")? {
+            Ok(Sent::Local) => local_send_result(scheduler, message),
+            Ok(Sent::NoConnect) => Value(message),
+            Err(raise) => raise,
+        },
+    )
 }
 
 /// Run `erlang:send(To, Message, Options)` as ERTS `send_3`
@@ -1627,7 +1709,8 @@ pub(in crate::runtime::interpreter) fn send(
 /// `noconnect`, `nosuspend`, and `priority`. Each other element, and a tail
 /// that is not `[]`, raise `badarg`, and nothing is sent. Then the message
 /// goes to `to` as [`deliver_to`] gives it, and a `to` that it rejects
-/// raises `badarg`. The result is `noconnect` for `{Name, Node}` on another
+/// raises `badarg`. A caller without the `send` operation raises
+/// `error:capability_denied`. The result is `noconnect` for `{Name, Node}` on another
 /// node with `noconnect`, and `ok` for each other send. A local send uses
 /// reductions, and can return `ok` after a switch (see
 /// [`local_send_result`]).
@@ -1652,8 +1735,10 @@ pub(in crate::runtime::interpreter) fn send(
 ///
 /// # Errors
 ///
-/// A port as `to` after valid options returns a runtime error: ERTS runs
-/// the port command of the message (`send_3`, `bif.c:2733-2739`).
+/// A port as `to` after valid options and the capability check returns a
+/// runtime error: ERTS runs the port command of the message (`send_3`,
+/// `bif.c:2733-2739`). A new `capability_denied` atom in a full atom table
+/// gives the error of `AtomTable::put`.
 pub(super) fn send3(
     scheduler: &mut Scheduler,
     to: &Term,
@@ -1671,15 +1756,14 @@ pub(super) fn send3(
             _ => return Ok(BifResult::badarg()),
         }
     }
-    if let Term::Port(_) = to {
-        return Err(unsupported_port("erlang:send/3"));
-    }
-    Ok(match deliver_to(scheduler, to, message.clone()) {
-        Some(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
-        Some(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
-        Some(Sent::NoConnect) => Value(Term::static_atom("ok")),
-        None => BifResult::badarg(),
-    })
+    Ok(
+        match deliver_to(scheduler, to, message.clone(), "erlang:send/3")? {
+            Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
+            Ok(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
+            Ok(Sent::NoConnect) => Value(Term::static_atom("ok")),
+            Err(raise) => raise,
+        },
+    )
 }
 
 /// The reductions of a local send: `erl_send` and `send_3` use them with
@@ -1745,10 +1829,64 @@ enum Sent {
     NoConnect,
 }
 
-/// Give `message` to the process that `to` names, as ERTS `do_send`
-/// (`bif.c:2458-2695`) does. Return `None` for a `to` that `do_send`
-/// rejects with `SEND_BADARG`.
+/// The destination of a send, as ERTS `do_send` (`bif.c:2458-2695`) reads
+/// it before it looks up a name or a process.
+enum Destination<'a> {
+    /// A local pid.
+    Pid(ProcessId),
+    /// A reference, which can be an alias.
+    Alias(Reference),
+    /// A registered name. A name that no process has raises `badarg`.
+    Name(&'a str),
+    /// `{Name, Node}` with the local node. A name that no process has drops
+    /// the message.
+    NodeName(&'a str),
+    /// `{Name, Node}` with another node.
+    Remote,
+    /// A port.
+    Port,
+}
+
+/// Return the destination of `to`, or `None` for a term that `do_send`
+/// rejects with `SEND_BADARG` before any lookup: a term that is not a pid,
+/// a reference, an atom, a port, or a 2-tuple of atoms
+/// (`bif.c:2614-2621`, `2668-2674`).
 ///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(destination(&Term::Pid(pid)), Some(Destination::Pid(_))));
+/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// assert!(matches!(destination(&remote), Some(Destination::Remote)));
+/// assert!(destination(&Term::Integer(1)).is_none());
+/// ```
+fn destination(to: &Term) -> Option<Destination<'_>> {
+    Some(match to {
+        Term::Pid(pid) => Destination::Pid(*pid),
+        Term::Reference(reference) => Destination::Alias(*reference),
+        Term::Atom(name) => Destination::Name(name.name()),
+        Term::Port(_) => Destination::Port,
+        Term::Tuple(elements) => match elements.as_slice() {
+            [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
+                Destination::NodeName(name.name())
+            }
+            [Term::Atom(_), Term::Atom(_)] => Destination::Remote,
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// Give `message` to the process that `to` names, as ERTS `do_send`
+/// (`bif.c:2458-2695`) does, for `bif`, the BIF name of a runtime error.
+/// This is the one send path of the `send` instruction, `erlang:send/2`,
+/// and `erlang:send/3`. Return `Err` with the exception to raise.
+///
+/// - A `to` that [`destination`] rejects raises `badarg`.
+/// - Then the caller needs a `process` capability that permits `send`.
+///   Without it, the send raises `error:capability_denied` and sends
+///   nothing. The check comes before the name lookup, so a denied send
+///   gives the same result for each name.
 /// - A pid gets the message from the caller (see
 ///   [`Scheduler::send_message`]). ERTS drops a message to a process that
 ///   does not exist or exits.
@@ -1757,44 +1895,57 @@ enum Sent {
 ///   (`erl_proc_sig_queue.c:6009-6075`; see
 ///   [`Scheduler::send_alias_message`]).
 /// - An atom gives the message to its registered process. A name that no
-///   process has gives `None`. PBeam registers no port.
-/// - `{Name, Node}` with two atoms and the local node gives the message to
-///   the registered process, or drops it when no process has the name.
-///   Another node drops the message and gives [`Sent::NoConnect`], as ERTS
-///   does on a node that is not alive (`remote_send`, `bif.c:2397-2400`).
-///   Each other tuple gives `None`.
-/// - Each other term gives `None`.
+///   process has raises `badarg`. PBeam registers no port.
+/// - `{Name, Node}` with the local node gives the message to the registered
+///   process, or drops it when no process has the name. Another node drops
+///   the message and gives [`Sent::NoConnect`], as ERTS does on a node that
+///   is not alive (`remote_send`, `bif.c:2397-2400`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(deliver_to(scheduler, &Term::Pid(pid), ok.clone()), Some(Sent::Local)));
+/// assert!(matches!(deliver_to(scheduler, &Term::Pid(pid), ok.clone(), "erlang:send/2")?, Ok(Sent::Local)));
 /// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
-/// assert!(matches!(deliver_to(scheduler, &remote, ok.clone()), Some(Sent::NoConnect)));
-/// assert!(deliver_to(scheduler, &Term::static_atom("nobody"), ok).is_none());
+/// assert!(matches!(deliver_to(scheduler, &remote, ok.clone(), "erlang:send/2")?, Ok(Sent::NoConnect)));
+/// assert!(deliver_to(scheduler, &Term::static_atom("nobody"), ok, "erlang:send/2")?.is_err());
 /// ```
-fn deliver_to(scheduler: &mut Scheduler, to: &Term, message: Term) -> Option<Sent> {
-    let target = match to {
-        Term::Pid(pid) => Some(*pid),
-        Term::Reference(reference) => {
-            scheduler.send_alias_message(*reference, message);
-            return Some(Sent::Local);
+///
+/// # Errors
+///
+/// A port after the check returns a runtime error that names `bif`. A new
+/// `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn deliver_to(
+    scheduler: &mut Scheduler,
+    to: &Term,
+    message: Term,
+    bif: &str,
+) -> Result<Result<Sent, BifResult>, BeamError> {
+    let Some(destination) = destination(to) else {
+        return Ok(Err(BifResult::badarg()));
+    };
+    if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Send, None)? {
+        return Ok(Err(denied));
+    }
+    let target = match destination {
+        Destination::Pid(pid) => Some(pid),
+        Destination::Alias(reference) => {
+            scheduler.send_alias_message(reference, message);
+            return Ok(Ok(Sent::Local));
         }
-        Term::Atom(name) => Some(scheduler.whereis(name.name())?),
-        Term::Tuple(elements) => match elements.as_slice() {
-            [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
-                scheduler.whereis(name.name())
-            }
-            [Term::Atom(_), Term::Atom(_)] => return Some(Sent::NoConnect),
-            _ => return None,
+        Destination::Name(name) => match scheduler.whereis(name) {
+            Some(target) => Some(target),
+            None => return Ok(Err(BifResult::badarg())),
         },
-        _ => return None,
+        Destination::NodeName(name) => scheduler.whereis(name),
+        Destination::Remote => return Ok(Ok(Sent::NoConnect)),
+        Destination::Port => return Err(unsupported_port(bif)),
     };
     if let Some(target) = target {
         let caller = scheduler.current_process_mut().id;
         scheduler.send_message(caller, target, message);
     }
-    Some(Sent::Local)
+    Ok(Ok(Sent::Local))
 }
 
 /// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
@@ -2145,6 +2296,9 @@ pub(super) fn module_loaded(program: &BeamProgram, module: &Term) -> BifResult {
 ///   negative integer, an end after `ERTS_MONOTONIC_END`, and a 64-bit
 ///   overflow raise `badarg`.
 /// - Then a `Dest` that is not a pid or an atom raises `badarg`.
+/// - Then the caller needs a `process` capability that permits `send`, also
+///   for its own pid. Without it, the call raises `error:capability_denied`,
+///   makes no reference, and starts no timer.
 /// - Then the BIF makes a new reference and returns it. A pid that is not
 ///   alive gets no timer, also a pid whose exit started, as
 ///   `erts_pid2proc_opt` finds no exiting process
@@ -2164,7 +2318,9 @@ pub(super) fn module_loaded(program: &BeamProgram, module: &Term) -> BifResult {
 ///
 /// # Errors
 ///
-/// A reference counter overflow gives a runtime error.
+/// A reference counter overflow gives a runtime error. A new
+/// `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
 pub(super) fn start_timer(
     context: &mut BifContext<'_>,
     time: &Term,
@@ -2184,6 +2340,9 @@ pub(super) fn start_timer(
         Term::Atom(name) => Receiver::Name(name.clone()),
         _ => return Ok(BifResult::badarg()),
     };
+    if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Send, None)? {
+        return Ok(denied);
+    }
     let reference = scheduler.make_ref()?;
     if !matches!(receiver, Receiver::Process(id) if scheduler.live_process(id).is_none()) {
         if let Receiver::Process(id) = receiver

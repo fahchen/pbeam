@@ -1182,11 +1182,12 @@ impl BeamProgram {
                 }
                 // The ERTS JIT `i_bs_create_bin` first checks that the term
                 // of each `binary` segment of size `all` is a bitstring, in
-                // segment order, and then builds the binary (JIT
-                // `emit_i_bs_create_bin` in jit/arm/instr_bs.cpp:1442-1663,
-                // 2000-2084). A failed check jumps to `Fail`, or with `Fail`
-                // 0 raises `badarg` with the `error_info` cause
-                // `{Segment, binary, type, Value}` (`emit_bs_create_bin_error_shared`
+                // segment order, then checks the `append` segment, and then
+                // builds the binary (JIT `emit_i_bs_create_bin` in
+                // jit/arm/instr_bs.cpp:1442-1663, 1811-1864, 2000-2084). A
+                // failed check jumps to `Fail`, or with `Fail` 0 raises
+                // `badarg` with the `error_info` cause
+                // `{Segment, binary, Reason, Value}` (`emit_bs_create_bin_error_shared`
                 // in jit/arm/instr_bs.cpp:1002-1019;
                 // `beam_jit_bs_construct_fail_info` in
                 // jit/beam_jit_common.cpp:911-1010).
@@ -1197,9 +1198,9 @@ impl BeamProgram {
                 } => match create_binary(process, segments)? {
                     Ok(bytes) => write(process, destination, Term::Binary(bytes))?,
                     Err(_) if *fail_label != 0 => jump(module, process, *fail_label)?,
-                    Err((segment, value)) => {
+                    Err((segment, reason, value)) => {
                         if let Some(outcome) =
-                            raise_binary_badarg(scheduler, module, segment, value)?
+                            raise_binary_badarg(scheduler, module, segment, reason, value)?
                         {
                             return Ok(outcome);
                         }
@@ -2754,17 +2755,35 @@ fn binary_match(
     Ok(true)
 }
 
+/// The failure of a `bs_create_bin` segment: the segment number of the
+/// compiler, the ERTS `error_info` reason atom (`type` or `unit`), and the
+/// term of the segment.
+type BinarySegmentFailure = (u64, &'static str, Term);
+
 /// Build the binary of the segments of a `bs_create_bin` instruction, as
 /// the ERTS JIT `i_bs_create_bin` does (JIT `emit_i_bs_create_bin` in
 /// jit/arm/instr_bs.cpp:1442-2300). First read the term of each `binary`
 /// segment in order. A term that is not a binary gives the segment number
-/// and the term, and the instruction then fails. Then join the bytes of
-/// the segments. A `string` segment copies its bytes (`erts_bs_put_string`,
-/// erl_bits.c:1641-1654). A `binary` segment copies its binary and uses one
-/// reduction for each 8192 bits (`erts_bs_put_binary_all`,
-/// erl_bits.c:1311-1332; `beam_jit_bs_put_binary_all`,
-/// jit/beam_jit_common.cpp:1043-1057). PBeam has no bitstring that is not
-/// a binary, so the unit 8 test of `erts_bs_put_binary_all` always passes.
+/// and the term, and the instruction then fails. Then check the `append`
+/// segment, and then join the bytes of the segments. A `string` segment
+/// copies its bytes (`erts_bs_put_string`, erl_bits.c:1641-1654). A
+/// `binary` segment copies its binary and uses one reduction for each 8192
+/// bits (`erts_bs_put_binary_all`, erl_bits.c:1311-1332;
+/// `beam_jit_bs_put_binary_all`, jit/beam_jit_common.cpp:1043-1057). PBeam
+/// has no bitstring that is not a binary, so the unit 8 test of
+/// `erts_bs_put_binary_all` always passes.
+///
+/// The `append` segment is the first segment. The JIT checks it after the
+/// `binary` segments of the size pass (jit/arm/instr_bs.cpp:1584-1586,
+/// 1811-1864), with `erts_bs_append_checked` (erl_bits.c:1724-1925). A term
+/// that is not a binary fails with the reason `type`, and a binary whose
+/// size in bits is not a multiple of a unit larger than 1 fails with the
+/// reason `unit`. When the other segments add no bits, the result is the
+/// binary of the `append` segment and the append uses no reduction. Else
+/// the result starts with a copy of that binary, which uses one reduction
+/// for each 8192 bits, as the ERTS path for a binary that is not writable
+/// does (erl_bits.c:1855-1924). PBeam has no writable binary (row "Binary
+/// construction" of `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
@@ -2776,7 +2795,15 @@ fn binary_match(
 /// ];
 /// assert_eq!(create_binary(&mut process, &segments)?, Ok(b"count: 3".to_vec()));
 /// write(&mut process, &Operand::X(0), Term::static_atom("a"))?;
-/// assert_eq!(create_binary(&mut process, &segments)?, Err((2, Term::static_atom("a"))));
+/// assert_eq!(create_binary(&mut process, &segments)?, Err((2, "type", Term::static_atom("a"))));
+///
+/// // <<A/binary-unit:16, "!">> with A = <<1,2,3>>
+/// write(&mut process, &Operand::X(0), Term::Binary(vec![1, 2, 3]))?;
+/// let segments = [
+///     BinarySegment::Append { segment: 1, unit: 16, source: Operand::X(0) },
+///     BinarySegment::String(b"!".to_vec()),
+/// ];
+/// assert_eq!(create_binary(&mut process, &segments)?, Err((1, "unit", Term::Binary(vec![1, 2, 3]))));
 /// ```
 ///
 /// # Errors
@@ -2787,28 +2814,48 @@ fn binary_match(
 fn create_binary(
     process: &mut ProcessState,
     segments: &[BinarySegment],
-) -> Result<Result<Vec<u8>, (u64, Term)>, BeamError> {
+) -> Result<Result<Vec<u8>, BinarySegmentFailure>, BeamError> {
     let mut parts = Vec::with_capacity(segments.len());
+    let mut append = None;
     for segment in segments {
-        parts.push(match segment {
-            BinarySegment::String(text) => (Cow::Borrowed(text.as_slice()), 0),
+        match segment {
+            BinarySegment::String(text) => parts.push((Cow::Borrowed(text.as_slice()), 0)),
             BinarySegment::BinaryAll { segment, source } => {
                 let mut value = read(process, source)?;
                 let Term::Binary(bytes) = &mut value else {
-                    return Ok(Err((*segment, value)));
+                    return Ok(Err((*segment, "type", value)));
                 };
                 let reductions = bytes.len() * 8 / BITS_PER_REDUCTION;
-                (Cow::Owned(std::mem::take(bytes)), reductions)
+                parts.push((Cow::Owned(std::mem::take(bytes)), reductions));
             }
+            BinarySegment::Append {
+                segment,
+                unit,
+                source,
+            } => append = Some((*segment, *unit, read(process, source)?)),
             BinarySegment::Unsupported(kind) => {
                 return Err(error(format!(
                     "unsupported bs_create_bin segment {}",
                     kind.name()
                 )));
             }
-        });
+        }
     }
     let mut bytes = Vec::new();
+    if let Some((segment, unit, mut value)) = append {
+        let Term::Binary(start) = &mut value else {
+            return Ok(Err((segment, "type", value)));
+        };
+        if unit > 1 && !(start.len() as u64 * 8).is_multiple_of(unit) {
+            return Ok(Err((segment, "unit", value)));
+        }
+        bytes = std::mem::take(start);
+        if parts.iter().all(|(part, _)| part.is_empty()) {
+            return Ok(Ok(bytes));
+        }
+        let reductions = bytes.len() * 8 / BITS_PER_REDUCTION;
+        process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+    }
     for (part, reductions) in parts {
         bytes.extend_from_slice(&part);
         process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
@@ -2816,10 +2863,13 @@ fn create_binary(
     Ok(Ok(bytes))
 }
 
-/// Raise the `badarg` of a `bs_create_bin` `binary` segment with a term
-/// that is not a binary in the current process, as ERTS
+/// Raise the `badarg` of a failed `bs_create_bin` `binary` or `append`
+/// segment in the current process, as ERTS
 /// `emit_bs_create_bin_error_shared` does (jit/arm/instr_bs.cpp:1002-1019).
-/// The stack trace is the frame of the function that holds the instruction,
+/// The `error_info` cause is `{Segment, binary, Reason, Value}`: both
+/// segment types give the operation `binary` (`beam_jit_bsc_init`,
+/// jit/beam_jit_bs.cpp:55-74), and `Reason` is `type` or `unit`. The stack
+/// trace is the frame of the function that holds the instruction,
 /// with the ERTS `error_info` (`beam_jit_bs_construct_fail_info` in
 /// jit/beam_jit_common.cpp:911-1010). PBeam keeps no line table and no
 /// caller frames, so the frame has no `file` or `line` and is the only
@@ -2832,7 +2882,7 @@ fn create_binary(
 /// // exits with {badarg, [{bs_create_bin_probe, prefix, 1, [{error_info,
 /// // #{cause => {2, binary, type, a}, function => format_bs_fail,
 /// // module => erl_erts_errors}}]}]}.
-/// let outcome = raise_binary_badarg(scheduler, &module, 2, Term::static_atom("a"))?;
+/// let outcome = raise_binary_badarg(scheduler, &module, 2, "type", Term::static_atom("a"))?;
 /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
 /// ```
 ///
@@ -2844,6 +2894,7 @@ fn raise_binary_badarg(
     scheduler: &mut Scheduler,
     module: &BeamModule,
     segment: u64,
+    reason: &'static str,
     value: Term,
 ) -> Result<Option<Outcome>, BeamError> {
     let index = current_frame(scheduler.current_process_mut()).next_instruction - 1;
@@ -2870,7 +2921,7 @@ fn raise_binary_badarg(
     let cause = Term::Tuple(vec![
         Term::Integer(segment as i64),
         Term::static_atom("binary"),
-        Term::static_atom("type"),
+        Term::static_atom(reason),
         value,
     ]);
     // ponytail: each map form holds atom keys, so `from_pairs` cannot fail.

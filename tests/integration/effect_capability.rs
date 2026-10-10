@@ -31,7 +31,14 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 20] = [
+const PROBES: [(&str, &str, &str); 31] = [
+    ("erlang:exit/2", "process:exit_other", "exit_other"),
+    ("erlang:link/1", "process:link", "link"),
+    ("erlang:monitor/2", "process:monitor", "monitor2"),
+    ("erlang:monitor/3", "process:monitor", "monitor3"),
+    ("erlang:send/2", "process:send", "send2"),
+    ("erlang:send/3", "process:send", "send3"),
+    ("erlang:start_timer/3", "process:send", "start_timer"),
     ("erlang:spawn/3", "process:spawn", "spawn"),
     ("erlang:spawn_link/3", "process:spawn", "spawn_link"),
     ("erlang:spawn_link/3", "process:link", "spawn_link"),
@@ -51,6 +58,10 @@ const PROBES: [(&str, &str, &str); 20] = [
     ("os:getenv/1", "env:read", "getenv"),
     ("os:set_signal/2", "signal:handle", "handle_signal"),
     ("os:set_signal/2", "signal:ignore", "ignore_signal"),
+    ("persistent_term:get/0", "persistent_term:read", "pt_get0"),
+    ("persistent_term:get/1", "persistent_term:read", "pt_get1"),
+    ("persistent_term:get/2", "persistent_term:read", "pt_get2"),
+    ("persistent_term:put/2", "persistent_term:write", "pt_put"),
     ("prim_tty:read_nif/3", "terminal:read", "read_nif"),
     ("prim_tty:tty_init/2", "terminal:raw_mode", "tty_init"),
     ("prim_tty:tty_select/2", "terminal:read", "tty_select"),
@@ -73,7 +84,7 @@ impl Policy for Grants {
 
 /// The kind and the operation of each `kind:operation` name of the
 /// inventory.
-const OPERATIONS: [(&str, CapabilityKind, Operation); 18] = [
+const OPERATIONS: [(&str, CapabilityKind, Operation); 21] = [
     ("process:spawn", CapabilityKind::Process, Operation::Spawn),
     ("process:link", CapabilityKind::Process, Operation::Link),
     (
@@ -86,6 +97,7 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 18] = [
         CapabilityKind::Process,
         Operation::ExitOther,
     ),
+    ("process:send", CapabilityKind::Process, Operation::Send),
     ("terminal:write", CapabilityKind::Terminal, Operation::Write),
     ("terminal:read", CapabilityKind::Terminal, Operation::Read),
     (
@@ -116,6 +128,16 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 18] = [
         CapabilityKind::Runtime,
         Operation::LoadNif,
     ),
+    (
+        "persistent_term:read",
+        CapabilityKind::PersistentTerm,
+        Operation::Read,
+    ),
+    (
+        "persistent_term:write",
+        CapabilityKind::PersistentTerm,
+        Operation::Write,
+    ),
 ];
 
 /// Return the kind and the operation of `kind:operation`.
@@ -128,13 +150,14 @@ fn operation(name: &str) -> (CapabilityKind, Operation) {
 }
 
 /// The capability kinds.
-const KINDS: [CapabilityKind; 6] = [
+const KINDS: [CapabilityKind; 7] = [
     CapabilityKind::Process,
     CapabilityKind::Terminal,
     CapabilityKind::Port,
     CapabilityKind::Env,
     CapabilityKind::Signal,
     CapabilityKind::Runtime,
+    CapabilityKind::PersistentTerm,
 ];
 
 /// Return a policy with a delegable capability of each kind: one of `kind`
@@ -218,6 +241,11 @@ fn atom(program: &BeamProgram, name: &str) -> Term {
     Term::Atom(program.atom(name).unwrap())
 }
 
+/// Return the tuple of `elements`.
+fn tuple(elements: &[Term]) -> Term {
+    Term::Tuple(elements.to_vec())
+}
+
 /// Return the list of the atoms `names` of the program.
 fn atoms(program: &BeamProgram, names: &[&str]) -> Term {
     Term::List(names.iter().map(|&name| atom(program, name)).collect())
@@ -240,6 +268,22 @@ fn each_effect_entry_with_a_capability_denies_without_its_operation() {
             "{entry} without {capability}"
         );
     }
+}
+
+#[test]
+fn checks_the_send_instruction_once_with_erlang_send() {
+    // The `send` instruction has no row in the section "BIFs", so the
+    // column check above does not cover it.
+    let program = program();
+    let policy = without((CapabilityKind::Process, Operation::Send));
+    assert_eq!(
+        run(&program, "send_instruction", &policy),
+        atom(&program, "denied")
+    );
+    assert_eq!(
+        run(&program, "send_instruction", &AllowAll),
+        atom(&program, "ok")
+    );
 }
 
 #[test]
@@ -450,5 +494,137 @@ fn keeps_the_runtime_state_after_a_denied_call() {
     assert_eq!(
         run(&program, "load_nif_kept", &AllowAll),
         Term::Tuple(vec![denied, atom(&program, "ok")])
+    );
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_process_operations() {
+    let program = program();
+    let atom = |name| atom(&program, name);
+    let ok = |sign| tuple(&[atom("ok"), atom(sign)]);
+    let expected = Term::List(vec![
+        ok("linked"),
+        Term::List(vec![ok("down"), ok("down")]),
+        ok("killed"),
+        ok("exit"),
+        Term::List(vec![
+            ok("got"),
+            ok("got"),
+            ok("got"),
+            tuple(&[atom("error"), atom("badarg")]),
+        ]),
+        ok("fired"),
+    ]);
+    assert_eq!(run(&program, "process_permitted", &AllowAll), expected);
+    assert_eq!(
+        erts_with_stand_in("process_permitted"),
+        "[{ok,linked},[{ok,down},{ok,down}],{ok,killed},{ok,exit},\
+         [{ok,got},{ok,got},{ok,got},{error,badarg}],{ok,fired}]\n"
+    );
+}
+
+#[test]
+fn checks_the_process_arguments_before_the_capability() {
+    let program = program();
+    let policy = grants(CapabilityKind::Process, &[], Constraint::Any);
+    let badargs = Term::List(vec![atom(&program, "badarg"); 8]);
+    assert_eq!(run(&program, "process_badargs", &policy), badargs);
+    assert_eq!(
+        erts_with_stand_in("process_badargs"),
+        "[badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg]\n"
+    );
+}
+
+#[test]
+fn keeps_the_process_state_after_a_denied_call() {
+    let program = program();
+    let atom = |name| atom(&program, name);
+    let denied = |sign| tuple(&[atom("denied"), atom(sign)]);
+    let without_process = |operation| without((CapabilityKind::Process, operation));
+    assert_eq!(
+        run(&program, "link_kept", &without_process(Operation::Link)),
+        denied("unlinked")
+    );
+    assert_eq!(
+        run(
+            &program,
+            "monitor_kept",
+            &without_process(Operation::Monitor)
+        ),
+        Term::List(vec![denied("none"), denied("none")])
+    );
+    assert_eq!(
+        run(
+            &program,
+            "exit_kept",
+            &without_process(Operation::ExitOther)
+        ),
+        denied("boom")
+    );
+    let send = without_process(Operation::Send);
+    assert_eq!(
+        run(&program, "send_kept", &send),
+        Term::List(vec![
+            denied("none"),
+            denied("none"),
+            denied("none"),
+            atom("denied"),
+        ])
+    );
+    assert_eq!(run(&program, "timer_kept", &send), denied("none"));
+}
+
+#[test]
+fn sends_an_exit_signal_to_the_caller_without_exit_other() {
+    let program = program();
+    let policy = without((CapabilityKind::Process, Operation::ExitOther));
+    assert_eq!(
+        run(&program, "exit_self", &policy),
+        tuple(&[atom(&program, "ok"), atom(&program, "exit")])
+    );
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_persistent_term_operations() {
+    let program = program();
+    let atom = |name| atom(&program, name);
+    let key = tuple(&[atom("effect_probe"), atom("permitted")]);
+    let expected = Term::List(vec![
+        atom("none"),
+        atom("badarg"),
+        atom("ok"),
+        atom("ok"),
+        Term::Integer(1),
+        Term::Integer(1),
+        tuple(&[key, Term::Integer(1)]),
+    ]);
+    let policy = grants(
+        CapabilityKind::PersistentTerm,
+        &[Operation::Read, Operation::Write],
+        Constraint::Any,
+    );
+    assert_eq!(
+        run(&program, "persistent_term_permitted", &policy),
+        expected
+    );
+    assert_eq!(
+        erts_with_stand_in("persistent_term_permitted"),
+        "[none,badarg,ok,ok,1,1,{{effect_probe,permitted},1}]\n"
+    );
+}
+
+#[test]
+fn keeps_the_persistent_terms_after_a_denied_put() {
+    // A child with `#{persistent_term => #{operations => []}}` tries a put
+    // of a new key, then of a changed value. The parent then sees no value,
+    // then the old value.
+    let program = program();
+    let denied = atom(&program, "denied");
+    assert_eq!(
+        run(&program, "persistent_term_kept", &AllowAll),
+        Term::List(vec![
+            tuple(&[denied.clone(), atom(&program, "none")]),
+            tuple(&[denied, Term::Integer(1)]),
+        ])
     );
 }

@@ -11,16 +11,20 @@
     done/0
 ]).
 
-%% The caller revokes the process capability that it gave to a holder,
+%% Each probe revokes the env capability, so that each holder keeps the
+%% process capability that it needs to send its replies. os:getenv/1 shows
+%% the state of the env capability of a process.
+
+%% The caller revokes the env capability that it gave to a holder,
 %% two times before the holder handles the signals. The revocation goes on
 %% to the child of the holder. Both holders stay alive, and the copy of the
 %% caller stays.
 cascade() ->
     Worker = spawn(?MODULE, holder, []),
     Child = call(Worker, child),
-    Before = [call(Worker, spawn), call(Child, spawn)],
-    Revoked = [revoke(Worker, process), revoke(Worker, process)],
-    After = [call(Worker, spawn), call(Child, spawn), attempt()],
+    Before = [call(Worker, getenv), call(Child, getenv)],
+    Revoked = [revoke(Worker, env), revoke(Worker, env)],
+    After = [call(Worker, getenv), call(Child, getenv), attempt()],
     Alive = [is_process_alive(Worker), is_process_alive(Child)],
     stop([Worker, Child]),
     {Before, Revoked, After, Alive}.
@@ -32,14 +36,14 @@ denied() ->
     Worker = spawn(?MODULE, holder, []),
     Child = call(Worker, child),
     Results = [
-        revoke(Child, process),
-        revoke(self(), process),
-        call(Worker, {revoke, self(), process}),
+        revoke(Child, env),
+        revoke(self(), env),
+        call(Worker, {revoke, self(), env}),
         revoke(Worker, file),
-        revoke(worker, process),
-        call(Worker, {revoke, Child, process}),
-        call(Child, spawn),
-        call(Worker, spawn)
+        revoke(worker, env),
+        call(Worker, {revoke, Child, env}),
+        call(Child, getenv),
+        call(Worker, getenv)
     ],
     stop([Worker, Child]),
     Results.
@@ -50,9 +54,9 @@ exited() ->
     Worker = spawn(?MODULE, holder, []),
     Child = call(Worker, child),
     stop_and_wait(Worker),
-    Before = call(Child, spawn),
-    Revoked = revoke(Worker, process),
-    After = call(Child, spawn),
+    Before = call(Child, getenv),
+    Revoked = revoke(Worker, env),
+    After = call(Child, getenv),
     stop([Child]),
     {Before, Revoked, After}.
 
@@ -64,8 +68,8 @@ below() ->
     Child = call(Worker, child),
     Grandchild = call(Child, child),
     stop_and_wait(Child),
-    Revoked = revoke(Worker, process),
-    After = [call(Worker, spawn), call(Grandchild, spawn)],
+    Revoked = revoke(Worker, env),
+    After = [call(Worker, getenv), call(Grandchild, getenv)],
     stop([Worker, Grandchild]),
     {Revoked, After}.
 
@@ -76,11 +80,11 @@ exiting() ->
     Child = call(Worker, child),
     Monitor = monitor(process, Worker),
     exit(Worker, kill),
-    Revoked = revoke(Worker, process),
+    Revoked = revoke(Worker, env),
     receive
         {'DOWN', Monitor, process, Worker, killed} -> ok
     end,
-    After = call(Child, spawn),
+    After = call(Child, getenv),
     stop([Child]),
     {Revoked, After}.
 
@@ -91,25 +95,25 @@ released() ->
     Child = call(Worker, child),
     stop_and_wait(Worker),
     stop_and_wait(Child),
-    revoke(Worker, process).
+    revoke(Worker, env).
 
-%% The worker exits, and then the launcher revokes the process capability
-%% of the root process. The root process waits for the revocation; then its
-%% spawn and the spawn of the child of the worker are denied.
+%% The worker exits, and then the launcher revokes the env capability of
+%% the root process. The root process waits for the revocation; then its
+%% read and the read of the child of the worker are denied.
 launcher() ->
     Worker = spawn(?MODULE, holder, []),
     Child = call(Worker, child),
     stop_and_wait(Worker),
-    Before = [attempt(), call(Child, spawn)],
+    Before = [attempt(), call(Child, getenv)],
     Waited = wait_denied(10000),
-    After = call(Child, spawn),
+    After = call(Child, getenv),
     stop([Child]),
     {Before, Waited, After}.
 
 %% A process that answers requests until it gets stop.
 holder() ->
     receive
-        {spawn, From} ->
+        {getenv, From} ->
             From ! {self(), attempt()},
             holder();
         {child, From} ->
@@ -148,8 +152,8 @@ revoke(Holder, Kind) ->
     end.
 
 attempt() ->
-    try spawn(?MODULE, done, []) of
-        Pid when is_pid(Pid) -> ok
+    try os:getenv("PBEAM_REVOKE_PROBE") of
+        _ -> ok
     catch
         error:capability_denied -> denied
     end.
