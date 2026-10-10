@@ -6,6 +6,7 @@
     below/0,
     exiting/0,
     released/0,
+    launcher/0,
     holder/0,
     done/0
 ]).
@@ -92,6 +93,19 @@ released() ->
     stop_and_wait(Child),
     revoke(Worker, process).
 
+%% The worker exits, and then the launcher revokes the process capability
+%% of the root process. The root process waits for the revocation; then its
+%% spawn and the spawn of the child of the worker are denied.
+launcher() ->
+    Worker = spawn(?MODULE, holder, []),
+    Child = call(Worker, child),
+    stop_and_wait(Worker),
+    Before = [attempt(), call(Child, spawn)],
+    Waited = wait_denied(10000),
+    After = call(Child, spawn),
+    stop([Child]),
+    {Before, Waited, After}.
+
 %% A process that answers requests until it gets stop.
 holder() ->
     receive
@@ -138,6 +152,17 @@ attempt() ->
         Pid when is_pid(Pid) -> ok
     catch
         error:capability_denied -> denied
+    end.
+
+wait_denied(0) ->
+    timeout;
+wait_denied(Count) ->
+    receive
+    after 1 -> ok
+    end,
+    case attempt() of
+        denied -> denied;
+        ok -> wait_denied(Count - 1)
     end.
 
 done() -> ok.

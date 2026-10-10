@@ -1231,6 +1231,31 @@ impl Scheduler {
         Ok(Ok((id, reference)))
     }
 
+    /// Revoke the initial capabilities of each kind of `kinds` for the
+    /// launcher, which issued them: the root process gets a revocation
+    /// signal for each of its copies of the kind. The copies of the root
+    /// come only from the launcher. Nothing happens after the root process
+    /// left the process table, because the run then ends.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.revoke_issued(&[CapabilityKind::Process]);
+    /// ```
+    pub(super) fn revoke_issued(&mut self, kinds: &[CapabilityKind]) {
+        let root = self.processes.get(&ProcessId(0));
+        let copies: Vec<_> = root.map_or_else(Vec::new, |root| {
+            kinds
+                .iter()
+                .flat_map(|&kind| root.security.ids(kind))
+                .collect()
+        });
+        for id in copies {
+            let signals = self.delegations.revocation(id);
+            self.send_revocations(None, signals);
+        }
+    }
+
     /// Revoke the copies of `kind` that the current process gave to the
     /// process `holder` at spawn, for `pbeam_cap:revoke/2`. A copy whose
     /// holder lives gets a revocation signal. A copy whose holder exited

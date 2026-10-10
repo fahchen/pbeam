@@ -360,6 +360,23 @@ pub trait Policy {
     /// assert_eq!(AllowAll.initial().len(), 5);
     /// ```
     fn initial(&self) -> Vec<Capability>;
+
+    /// Return the kinds of the initial capabilities that the launcher
+    /// revokes now. The launcher calls this function before each scheduling
+    /// step. For each kind, the root process gets a revocation signal for
+    /// each of its copies of that kind that the launcher issued, and the
+    /// revocation then goes to each downstream copy. A host that revokes
+    /// from another thread keeps the kinds in a synchronized queue and takes
+    /// them here. The default revokes nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(AllowAll.revocations().is_empty());
+    /// ```
+    fn revocations(&self) -> Vec<CapabilityKind> {
+        Vec::new()
+    }
 }
 
 /// The default policy. The root process gets a delegable capability of
