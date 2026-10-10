@@ -7,6 +7,7 @@ taplo = "0.10.0"
 actionlint = "1.7.12"
 shellcheck = "0.11.0"
 "github:taiki-e/cargo-llvm-cov" = "0.9.1"
+"github:nextest-rs/nextest" = { version = "0.9.148", version_prefix = "cargo-nextest-" }
 
 [tasks.setup]
 description = "Install check components for the mise-pinned Rust toolchain"
@@ -55,7 +56,7 @@ run = "bash scripts/check_brief.sh"
 [tasks.test-focus]
 description = "Run selected Rust tests and print only the results and failures"
 quiet = true
-usage = 'arg "[args]..." help="Arguments for cargo test, such as --test group, a test name filter, or -- --exact" var=#true double_dash="preserve"'
+usage = 'arg "[args]..." help="Arguments for cargo test, such as --test group for one target of tests/feature/ or tests/integration/, --lib for the unit tests, a test name filter, or -- --exact" var=#true double_dash="preserve"'
 run = 'eval "set -- ${usage_args:-}"; bash scripts/test_focus.sh "$@"'
 
 [tasks.erts-eval]

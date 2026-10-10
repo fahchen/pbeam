@@ -1,9 +1,11 @@
+mod dirty_io;
 mod ets;
 mod host;
 mod interpreter;
 mod mailbox;
 mod pcre2;
 mod persistent_term;
+mod port;
 mod process;
 mod regex_code;
 mod resources;
@@ -14,6 +16,7 @@ mod timer;
 mod tty;
 mod unicode;
 
+pub use host::signal::install_start_dispositions;
 pub use interpreter::BeamProgram;
 
 use crate::term::Term;

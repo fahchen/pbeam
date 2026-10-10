@@ -2,11 +2,44 @@ mod tree;
 
 pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 
-use super::{mailbox::Mailbox, scheduler::AliasMode, timer::TimerKey};
+use super::{
+    dirty_io::Claim, host::output::IovecWritten, mailbox::Mailbox, scheduler::AliasMode,
+    timer::TimerKey,
+};
 use crate::{
     error::{BeamError, error},
-    term::{Atom, ProcessId, Reference, Term},
+    term::{Atom, PortId, ProcessId, Reference, Term},
 };
+
+/// The other end of a link: a process or a port, as the `other.item` of an
+/// ERTS link, which is a pid or a port (`erl_monitor_link.h`). A link tree
+/// orders its entries by the `Eterm` word of the item (see the `TreeKey`
+/// implementation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LinkId {
+    /// A local process.
+    Process(ProcessId),
+    /// A local port.
+    Port(PortId),
+}
+
+impl LinkId {
+    /// Return the term of the identifier: the pid or the port, as the
+    /// second element of an `EXIT` message.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(LinkId::Process(ProcessId(1)).term(), Term::Pid(ProcessId(1)));
+    /// assert_eq!(LinkId::Port(PortId(2)).term(), Term::Port(PortId(2)));
+    /// ```
+    pub(super) fn term(self) -> Term {
+        match self {
+            LinkId::Process(id) => Term::Pid(id),
+            LinkId::Port(id) => Term::Port(id),
+        }
+    }
+}
 
 /// One active function call: its module, code position, and Y registers.
 #[derive(Debug)]
@@ -185,12 +218,12 @@ pub(super) struct ProcessState {
     /// (`FS_OFF_HEAP_MSGQ`), false for `on_heap`. PBeam has no process heap,
     /// so the flag does not change where the messages are kept.
     pub(super) off_heap_message_queue: bool,
-    /// The link tree (`ERTS_P_LINKS`): processes linked to this process, by
-    /// pid, with the identifier of an unlink that waits for its
+    /// The link tree (`ERTS_P_LINKS`): processes and ports linked to this
+    /// process, by pid or port, with the identifier of an unlink that waits for its
     /// acknowledgment, or 0 for an active link (`ErtsILink.unlinking`). A
     /// link that is unlinking sends no exit signal
     /// (`erl_process.c:14068-14081`).
-    pub(super) links: MonitorLinkTree<ProcessId, u64>,
+    pub(super) links: MonitorLinkTree<LinkId, u64>,
     /// The monitor tree: the monitors that this process holds and its
     /// aliases, by reference (`ERTS_P_MONITORS`).
     pub(super) monitors: MonitorLinkTree<Reference, Origin>,
@@ -224,6 +257,14 @@ pub(super) struct ProcessState {
     /// (`jit/arm/instr_bif.cpp:525-536`, `676-701`). `BeamProgram::run` runs
     /// it first.
     pub(super) pending_bif: Option<PendingBif>,
+    /// The dirty IO call of the process, from the switch out at the call
+    /// until `BeamProgram::run` returns its result, or until a signal ends
+    /// the process. ERTS runs the process on a dirty IO scheduler for this
+    /// time (`erl_nif.c:426-543`). While the call runs, the process does not
+    /// run Erlang code, and the scheduler handles its signals for it, as
+    /// `erts_dirty_process_signal_handler` does
+    /// (`erts_dirty_process_signal_handler.erl:52-89`).
+    pub(super) dirty_write: Option<DirtyWrite>,
     /// The trap state of the guard BIF `length/1`: the arguments of its
     /// trap export, the rest of the list and the count so far. ERTS
     /// `i_length` keeps them in the X registers above the live registers
@@ -259,6 +300,24 @@ pub(super) struct PendingBif {
     /// True when the BIF call was a tail call through the export: its
     /// value then returns from the frame with no reduction.
     pub(super) tail: bool,
+}
+
+/// A `prim_tty:write_nif/2` call that runs on a dirty IO thread.
+#[derive(Debug)]
+pub(super) struct DirtyWrite {
+    /// The identifier of the call in the run. The completion of the call
+    /// gives the same identifier.
+    pub(super) call: u64,
+    /// True when the NIF call was a tail call: its value then returns from
+    /// the frame.
+    pub(super) tail: bool,
+    /// The result of the host write, or `None` while the call runs.
+    pub(super) written: Option<IovecWritten>,
+    /// The claim of the process on the call. A dirty IO thread runs the
+    /// call only while the claim exists. The claim goes when this record
+    /// goes: at the result, at the start of the exit, or at the end of the
+    /// run.
+    pub(super) claim: Claim,
 }
 
 impl ProcessState {
@@ -304,6 +363,7 @@ impl ProcessState {
             fcalls: 0,
             reductions: 0,
             pending_bif: None,
+            dirty_write: None,
             length_trap: None,
             bif_timers: MonitorLinkTree::default(),
             continue_exit: None,
@@ -419,6 +479,20 @@ impl ProcessState {
         Ok(Some(Term::Tuple(vec![item.clone(), value])))
     }
 
+    /// Return true while the dirty IO call of the process runs: the
+    /// process waits for its completion and does not run Erlang code.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!process.dirty_running());
+    /// ```
+    pub(super) fn dirty_running(&self) -> bool {
+        self.dirty_write
+            .as_ref()
+            .is_some_and(|write| write.written.is_none())
+    }
+
     /// Mark the receive timer as expired, as `proc_timeout_common`
     /// (`erl_hl_timer.c:692-706`) does. Return true when the process waited
     /// and now has Erlang work, so the scheduler must run it. A process that
@@ -441,65 +515,5 @@ impl ProcessState {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
-    use super::{Frame, ProcessState, ReceiveTimer, Start};
-    use crate::term::{Atom, ProcessId, Term};
-
-    pub(in crate::runtime) fn frame() -> Frame {
-        Frame {
-            module: "fixture".into(),
-            function: "main".into(),
-            next_instruction: 0,
-            stack: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn expires_the_receive_timer_and_wakes_only_a_waiting_process() {
-        let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
-        process.receive_timer = ReceiveTimer::Set {
-            key: (1100, 0),
-            resume: 7,
-        };
-        process.waiting = true;
-        assert!(process.time_out());
-        assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
-        assert!(!process.time_out());
-        assert_eq!(process.receive_timer, ReceiveTimer::Expired { resume: 7 });
-    }
-
-    #[test]
-    fn uses_reductions_down_to_zero_as_erts_bump_reds() {
-        let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
-        process.fcalls = 6;
-        process.bump_reductions(4);
-        assert_eq!(process.fcalls, 2);
-        process.bump_reductions(4);
-        assert_eq!(process.fcalls, 0);
-    }
-
-    #[test]
-    fn returns_a_runtime_error_for_the_negative_budget_of_a_bif() {
-        let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
-        process.fcalls = 0;
-        assert_eq!(process.bif_reductions_left(), Ok(0));
-        process.fcalls = -1;
-        let failure = process.bif_reductions_left().unwrap_err().to_string();
-        assert!(failure.starts_with("unsupported negative reduction budget in a BIF"));
-        assert!(failure.contains("\"Map iteration\""));
-    }
-
-    #[test]
-    fn keeps_the_mfa_of_an_undefined_start_without_a_frame() {
-        let module = Atom::from_static("erlang").unwrap();
-        let function = Atom::from_static("ok").unwrap();
-        let start = Start::Undefined {
-            module: module.clone(),
-            function: function.clone(),
-        };
-        let process = ProcessState::new(ProcessId(1), start, vec![Term::Integer(1)]);
-        assert!(process.frames.is_empty());
-        assert_eq!(process.undefined_start, Some((module, function)));
-        assert_eq!(process.registers, vec![Some(Term::Integer(1))]);
-    }
-}
+#[path = "../../tests/runtime/process.rs"]
+pub(super) mod tests;

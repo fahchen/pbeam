@@ -1,16 +1,15 @@
 //! Native bindings of the `prim_tty` NIFs (`erts/emulator/nifs/common/prim_tty_nif.c`).
 
-use std::io::IoSlice;
-
 use super::*;
 use crate::runtime::{
     host::{
         errno::errno_id,
-        output,
+        input,
+        output::{IovecWrite, IovecWritten},
         terminal::{self, TerminalCheck},
     },
     signal::Signal,
-    tty::{TtyResource, TtyState, Ttys},
+    tty::{InputSelect, TtyResource, TtyState, Ttys},
 };
 use crate::term::Reference;
 
@@ -62,6 +61,13 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, arguments| isatty(&mut scheduler.atoms, &arguments[0]),
     },
     Binding {
+        name: "read_nif",
+        arity: 3,
+        run: |scheduler, arguments| {
+            read_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
+        },
+    },
+    Binding {
         name: "setlocale",
         arity: 1,
         run: |_, _| Ok(setlocale()),
@@ -89,7 +95,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "tty_select",
         arity: 2,
-        run: |scheduler, arguments| Ok(tty_select(scheduler, &arguments[0])),
+        run: |scheduler, arguments| Ok(tty_select(scheduler, &arguments[0], &arguments[1])),
     },
     Binding {
         name: "tty_window_size",
@@ -99,7 +105,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "write_nif",
         arity: 2,
-        run: |scheduler, arguments| write_nif(scheduler, &arguments[0], &arguments[1]),
+        run: |scheduler, arguments| Ok(write_nif(scheduler, &arguments[0], &arguments[1])),
     },
 ];
 
@@ -212,6 +218,7 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
             first_mode,
             set_mode: first_mode,
             owner: None,
+            reader: None,
         },
     );
     Ok(BifResult::Value(Term::Tuple(vec![
@@ -348,37 +355,141 @@ fn monitor_caller(scheduler: &mut Scheduler, tty: Reference) {
 /// Run `prim_tty:tty_select(TTY, Ref)`, as the ERTS NIF `tty_select_nif`
 /// (`prim_tty_nif.c:1213-1233`) does on Unix. A term that is not a TTY
 /// resource raises `error:badarg` (`prim_tty_nif.c:1220-1221`). Else the
-/// resource monitors the caller (`prim_tty_nif.c:1229-1230`; see
-/// [`monitor_caller`]), and the result is `ok`.
-///
-/// ERTS also selects fd 0 for read with `Ref` as the message reference
-/// (`prim_tty_nif.c:1227`), and makes the caller the reader, which
-/// `tty_monitor_down` reads only to stop that select
-/// (`prim_tty_nif.c:1242-1244`). PBeam has no IO poll, so the binding does
-/// not read `Ref` and keeps no reader. The monitor is still observable:
-/// when the caller exits and is the owner of the resource, the monitor sets
+/// binding selects fd 0, the input fd of the resource, for read with `Ref`
+/// as the message reference and the caller as the recipient
+/// (`prim_tty_nif.c:1227`; see [`select_input`]). The caller becomes the
+/// reader of the resource, the resource monitors it
+/// (`prim_tty_nif.c:1229-1230`; see [`monitor_caller`]), and the result is
+/// `ok`. When the reader exits, its monitor removes the select of fd 0
+/// (`prim_tty_nif.c:1242-1244`), and when it is also the owner, it sets
 /// fd 0 to the first mode of the resource (`prim_tty_nif.c:1238-1239`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(tty_select(&mut scheduler, &tty), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
-/// assert!(matches!(tty_select(&mut scheduler, &Term::static_atom("ok")), BifResult::Raise { .. }));
+/// let reference = Term::Reference(scheduler.make_ref()?);
+/// assert!(matches!(tty_select(&mut scheduler, &tty, &reference), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(tty_select(&mut scheduler, &Term::static_atom("ok"), &reference), BifResult::Raise { .. }));
 /// ```
-fn tty_select(scheduler: &mut Scheduler, tty: &Term) -> BifResult {
-    let Term::Reference(reference) = tty else {
+fn tty_select(scheduler: &mut Scheduler, tty: &Term, reference: &Term) -> BifResult {
+    let Term::Reference(tty) = tty else {
         return BifResult::badarg();
     };
-    if scheduler
+    let caller = scheduler.current_process_mut().id;
+    let Some(resource) = scheduler.resources.borrow_mut::<Ttys>().get_mut(*tty) else {
+        return BifResult::badarg();
+    };
+    resource.reader = Some(caller);
+    select_input(scheduler, *tty, reference);
+    monitor_caller(scheduler, *tty);
+    BifResult::Value(Term::static_atom("ok"))
+}
+
+/// Select fd 0 for read for the TTY resource `tty`, with the caller as the
+/// recipient and `reference` as the message reference, as
+/// `enif_select(env, tty->ifd, ERL_NIF_SELECT_READ, tty, NULL, Ref)`
+/// does (`erl_check_io.c:1236-1465`). When fd 0 has input, the caller gets
+/// `{select, TTY, Ref, ready_input}` (see `Scheduler::wait_events`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// select_input(&mut scheduler, tty, &Term::static_atom("undefined"));
+/// ```
+fn select_input(scheduler: &mut Scheduler, tty: Reference, reference: &Term) {
+    let recipient = scheduler.current_process_mut().id;
+    scheduler
         .resources
         .borrow_mut::<Ttys>()
-        .get(*reference)
-        .is_none()
-    {
-        return BifResult::badarg();
+        .select_input(InputSelect {
+            tty,
+            recipient,
+            reference: reference.clone(),
+        });
+}
+
+/// The most bytes of one `read_nif/3` (`prim_tty_nif.c:449`).
+const READ_LIMIT: u64 = 1024;
+
+/// Run `prim_tty:read_nif(TTY, Ref, N)`, as the ERTS NIF `tty_read_nif`
+/// (`prim_tty_nif.c:429-675`) does on Unix. A term that is not a TTY
+/// resource, then an `N` that is not an integer from 0 to 2^64 - 1, raises
+/// `error:badarg` (`prim_tty_nif.c:443-447`). PBeam holds an integer only
+/// up to 2^63 - 1 (see the "Integer range" row of
+/// `docs/erts-differences.md`), so an `N` from 2^63 to 2^64 - 1 does not
+/// get to the binding.
+///
+/// Else the binding reads at most `N` bytes, and at most 1024, from fd 0
+/// with one `read` (`prim_tty_nif.c:449`, `646-657`):
+///
+/// - A `read` that gives 0 bytes, at the end of file or for an `N` of 0,
+///   gives `{error, closed}`.
+/// - A `read` that fails with `EAGAIN` or `EINTR` gives `{ok, <<>>}`.
+/// - A `read` that fails with each other errno gives
+///   `{error, {read, Errno}}` with the `erl_errno_id` atom.
+/// - Else the result is `{ok, Bytes}`.
+///
+/// For `{ok, _}`, the binding first selects fd 0 for read again with `Ref`
+/// and the caller as the recipient (`prim_tty_nif.c:660`; see
+/// [`select_input`]).
+///
+/// ERTS runs this NIF on a dirty IO scheduler (`prim_tty_nif.c:163`). PBeam
+/// has one scheduler thread, so a `read` that blocks stops all processes
+/// until it returns. The `prim_tty` reader calls `read_nif/3` only after
+/// its select message (prim_tty.erl:467-476), and then fd 0 has input.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // stdin is a pipe that holds "hi\n".
+/// // {ok, <<"hi\n">>}
+/// assert!(matches!(read_nif(&mut scheduler, &tty, &reference, &Term::Integer(1024))?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(read_nif(&mut scheduler, &tty, &reference, &Term::Integer(-1))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A new errno atom or the atom `read` in a full atom table gives the
+/// error of `AtomTable::put`.
+fn read_nif(
+    scheduler: &mut Scheduler,
+    tty: &Term,
+    reference: &Term,
+    size: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Reference(tty) = tty else {
+        return Ok(BifResult::badarg());
+    };
+    if scheduler.resources.borrow_mut::<Ttys>().get(*tty).is_none() {
+        return Ok(BifResult::badarg());
     }
-    monitor_caller(scheduler, *reference);
-    BifResult::Value(Term::static_atom("ok"))
+    let Term::Integer(size) = size else {
+        return Ok(BifResult::badarg());
+    };
+    let Ok(size) = u64::try_from(*size) else {
+        return Ok(BifResult::badarg());
+    };
+    let size = usize::try_from(size.min(READ_LIMIT)).expect("1024 fits in usize");
+    let bytes = match input::read(libc::STDIN_FILENO, size) {
+        Ok(bytes) if bytes.is_empty() => {
+            let closed = Term::Tuple(vec![
+                Term::static_atom("error"),
+                Term::static_atom("closed"),
+            ]);
+            return Ok(BifResult::Value(closed));
+        }
+        Ok(bytes) => bytes,
+        Err(libc::EAGAIN | libc::EINTR) => Vec::new(),
+        Err(errno) => {
+            let error = errno_error(&mut scheduler.atoms, "read", errno)?;
+            return Ok(BifResult::Value(error));
+        }
+    };
+    select_input(scheduler, *tty, reference);
+    Ok(BifResult::Value(Term::Tuple(vec![
+        Term::static_atom("ok"),
+        Term::Binary(bytes),
+    ])))
 }
 
 /// Run `prim_tty:tty_encoding(TTY)`, as the ERTS NIF `tty_encoding_nif`
@@ -523,75 +634,101 @@ const MAXIOV: usize = libc::IOV_MAX as usize;
 const MAXIOV: usize = libc::UIO_MAXIOV as usize;
 
 /// Run `prim_tty:write_nif(TTY, IOVec)`, as the ERTS NIF `tty_write_nif`
-/// (`prim_tty_nif.c:354-427`) does on Unix. A term that is not a TTY
-/// resource raises `error:badarg` before the binding reads `IOVec`
-/// (`prim_tty_nif.c:363-364`).
+/// (`prim_tty_nif.c:354-427`) does on Unix. ERTS runs this NIF on a dirty
+/// IO scheduler (`prim_tty_nif.c:161`), so the binding returns the host
+/// work of the call for a dirty IO thread, and the caller switches out
+/// until the work completes. [`dirty_write_result`] then gives the result
+/// of the call.
 ///
-/// Else the binding reads `IOVec` in groups of `MAXIOV` elements with the
-/// checks of `enif_inspect_iovec` (`erl_nif.c:4092-4152`), and writes each
-/// group to the output fd with `host::output::write_all` before it reads the
-/// next group. Each binary that is not empty gives one `writev` entry. A
-/// term that is not a list, a group with an element that is not a binary,
-/// or the group that holds the last element of an improper list, whatever
-/// its tail, raises `error:badarg`, after the binding writes the earlier
-/// groups (`examine_iovec_term`, `erl_nif.c:4092-4150`;
-/// `prim_tty_nif.c:366-368`). A failed write gives
-/// `{error, Errno}` with the `erl_errno_id` atom
-/// (`prim_tty_nif.c:403-406`). Else the result is `ok`, also for `[]`,
-/// which writes nothing.
-///
-/// ERTS runs this NIF on a dirty IO scheduler (`prim_tty_nif.c:161`). PBeam
-/// has one scheduler thread, so a `writev` that blocks stops all processes
-/// until it returns.
+/// A term that is not a TTY resource gives no write and raises
+/// `error:badarg`, and the binding does not read `IOVec`
+/// (`prim_tty_nif.c:363-364`). Else the binding reads
+/// `IOVec` in groups of `MAXIOV` elements with the checks of
+/// `enif_inspect_iovec` (`erl_nif.c:4092-4152`), and the work writes each
+/// group to the output fd with `host::output::write_all` before the next
+/// group. Each binary that is not empty gives one `writev` entry. A term
+/// that is not a list, a group with an element that is not a binary, or
+/// the group that holds the last element of an improper list, whatever its
+/// tail, raises `error:badarg`, after the work writes the earlier groups
+/// (`examine_iovec_term`, `erl_nif.c:4092-4150`;
+/// `prim_tty_nif.c:366-368`). A failed write gives `{error, Errno}` with the
+/// `erl_errno_id` atom (`prim_tty_nif.c:403-406`). Else the result is `ok`,
+/// also for `[]`, which writes nothing.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let iovec = Term::List(vec![Term::Binary(b"Hello, ".to_vec()), Term::Binary(b"world!\n".to_vec())]);
-/// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
-/// // A pipe without a reader: {error, epipe}
-/// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec)?, BifResult::Value(Term::Tuple(_))));
-/// assert!(matches!(write_nif(&mut scheduler, &tty, &Term::static_atom("foo"))?, BifResult::Raise { .. }));
-/// // [<<"h">> | <<"i">>] writes nothing.
+/// // Writes "Hello, world!\n" to the output fd of the TTY.
+/// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec), BifResult::DirtyWrite(_)));
+/// // [<<"h">> | <<"i">>] writes nothing, then raises badarg.
 /// let improper = Term::ImproperList(vec![Term::Binary(b"h".to_vec())], Box::new(Term::Binary(b"i".to_vec())));
-/// assert!(matches!(write_nif(&mut scheduler, &tty, &improper)?, BifResult::Raise { .. }));
-/// assert!(matches!(write_nif(&mut scheduler, &Term::static_atom("stdout"), &iovec)?, BifResult::Raise { .. }));
+/// assert!(matches!(write_nif(&mut scheduler, &tty, &improper), BifResult::DirtyWrite(_)));
+/// ```
+fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> BifResult {
+    let mut write = IovecWrite {
+        fd: -1,
+        groups: Vec::new(),
+        bad_group: true,
+    };
+    let Some(&TtyResource { ofd, .. }) =
+        tty_resource(scheduler.resources.borrow_mut::<Ttys>(), tty)
+    else {
+        return BifResult::DirtyWrite(write);
+    };
+    write.fd = ofd;
+    let (elements, improper) = match iovec {
+        Term::List(elements) => (elements, false),
+        Term::ImproperList(elements, _) => (elements, true),
+        _ => return BifResult::DirtyWrite(write),
+    };
+    let mut groups = elements.chunks(MAXIOV).peekable();
+    while let Some(group) = groups.next() {
+        // The group of the last element reads the tail after it.
+        if improper && groups.peek().is_none() {
+            return BifResult::DirtyWrite(write);
+        }
+        let mut buffers = Vec::with_capacity(group.len());
+        for element in group {
+            match element {
+                Term::Binary(bytes) if bytes.is_empty() => {}
+                Term::Binary(bytes) => buffers.push(bytes.clone()),
+                _ => return BifResult::DirtyWrite(write),
+            }
+        }
+        write.groups.push(buffers);
+    }
+    write.bad_group = false;
+    BifResult::DirtyWrite(write)
+}
+
+/// Return the result of a `prim_tty:write_nif/2` call from the end of its
+/// host work: `ok`, `{error, Errno}` with the `erl_errno_id` atom
+/// (`make_error` with `make_errno`, `prim_tty_nif.c:204-220`, `403-406`), or
+/// `error:badarg` (`prim_tty_nif.c:363-368`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(dirty_write_result(&mut atoms, IovecWritten::All)?, BifResult::Value(_)));
+/// // {error, epipe}
+/// assert!(matches!(dirty_write_result(&mut atoms, IovecWritten::Failed(libc::EPIPE))?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(dirty_write_result(&mut atoms, IovecWritten::BadGroup)?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
 ///
 /// A new errno atom in a full atom table gives the error of
 /// `AtomTable::put`.
-fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifResult, BeamError> {
-    let Some(&TtyResource { ofd, .. }) =
-        tty_resource(scheduler.resources.borrow_mut::<Ttys>(), tty)
-    else {
-        return Ok(BifResult::badarg());
-    };
-    let (elements, improper) = match iovec {
-        Term::List(elements) => (elements, false),
-        Term::ImproperList(elements, _) => (elements, true),
-        _ => return Ok(BifResult::badarg()),
-    };
-    let mut groups = elements.chunks(MAXIOV).peekable();
-    while let Some(group) = groups.next() {
-        // The group of the last element reads the tail after it.
-        if improper && groups.peek().is_none() {
-            return Ok(BifResult::badarg());
-        }
-        let mut buffers = Vec::with_capacity(group.len());
-        for element in group {
-            match element {
-                Term::Binary(bytes) if bytes.is_empty() => {}
-                Term::Binary(bytes) => buffers.push(IoSlice::new(bytes)),
-                _ => return Ok(BifResult::badarg()),
-            }
-        }
-        if let Err(errno) = output::write_all(ofd, &mut buffers) {
-            return Ok(BifResult::Value(error_errno(&mut scheduler.atoms, errno)?));
-        }
-    }
-    Ok(BifResult::Value(Term::static_atom("ok")))
+pub(in crate::runtime::interpreter) fn dirty_write_result(
+    atoms: &mut AtomTable,
+    written: IovecWritten,
+) -> Result<BifResult, BeamError> {
+    Ok(match written {
+        IovecWritten::All => BifResult::Value(Term::static_atom("ok")),
+        IovecWritten::Failed(errno) => BifResult::Value(error_errno(atoms, errno)?),
+        IovecWritten::BadGroup => BifResult::badarg(),
+    })
 }
 
 /// Return the TTY resource of `term`, as `enif_get_resource` with the TTY
@@ -613,59 +750,5 @@ fn tty_resource<'a>(ttys: &'a Ttys, term: &Term) -> Option<&'a TtyResource> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::process::tests::frame;
-    use crate::term::Map;
-
-    #[test]
-    fn gives_ebadf_for_an_fd_that_is_not_open() {
-        // `isatty(-1)` fails with `EBADF`, which is not `EINVAL` or
-        // `ENOTTY` (prim_tty_nif.c:272-277). No fd layout of a child
-        // process reaches this result for fds 0, 1, and 2, because Rust and
-        // ERTS open `/dev/null` on a closed standard fd.
-        let mut atoms = AtomTable::new();
-        let result = isatty_fd(&mut atoms, -1).unwrap();
-        assert!(
-            matches!(&result, BifResult::Value(Term::Atom(atom)) if atom.name() == "ebadf"),
-            "{result:?}"
-        );
-    }
-
-    #[test]
-    fn gives_the_tcsetattr_errno_and_keeps_no_owner() {
-        // `tcsetattr` on an fd that is not open fails with `EBADF`, and
-        // `tty_init/2` returns before it sets `self` and monitors the caller
-        // (prim_tty_nif.c:1131-1133). No fd layout reaches this result: a
-        // TTY resource is `disabled` only when `tcgetattr` of its output fd
-        // succeeds, and `tcsetattr` of the same fd then succeeds.
-        let mut scheduler = Scheduler::new(AtomTable::new());
-        scheduler.start(frame(), vec![]).unwrap();
-        scheduler.schedule_next().unwrap();
-        let reference = scheduler.make_ref().unwrap();
-        scheduler.resources.borrow_mut::<Ttys>().insert(
-            reference,
-            TtyResource {
-                ofd: -1,
-                state: TtyState::Disabled,
-                first_mode: terminal::EMPTY_MODE,
-                set_mode: terminal::EMPTY_MODE,
-                owner: None,
-            },
-        );
-        let options = Term::Map(
-            Map::from_pairs(vec![(Term::static_atom("input"), Term::static_atom("raw"))]).unwrap(),
-        );
-        let result = tty_init(&mut scheduler, &Term::Reference(reference), &options).unwrap();
-        assert_eq!(
-            format!("{result:?}"),
-            r#"Value(Tuple([Atom("error"), Tuple([Atom("tcsetattr"), Atom("ebadf")])]))"#
-        );
-        let tty = scheduler
-            .resources
-            .borrow_mut::<Ttys>()
-            .get(reference)
-            .unwrap();
-        assert_eq!((&tty.state, tty.owner), (&TtyState::Enabled, None));
-    }
-}
+#[path = "../../../../tests/runtime/interpreter/native/prim_tty.rs"]
+mod tests;

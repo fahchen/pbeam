@@ -6,8 +6,8 @@
 //!
 //! `number < atom < reference < fun < port < pid < tuple < map < [] < list < bitstring`
 //!
-//! PBeam has no float or port term, so a number is an integer and integers
-//! compare by value. Terms of one type compare as follows:
+//! PBeam has no float term, so a number is an integer and integers compare
+//! by value. Terms of one type compare as follows:
 //!
 //! - atom: by the bytes of the UTF-8 name, as `erts_cmp_atoms` does, not by
 //!   the atom index;
@@ -16,6 +16,8 @@
 //!   entry, then by the number of free variables, then free variable by
 //!   free variable (`utils.c:2157-2187`). External funs compare by the
 //!   module name, the function name, and the arity (`utils.c:2189-2207`);
+//! - port: by the port number, which is the ERTS port data
+//!   (`utils.c:1751-1755`);
 //! - pid: by the process counter, which gives the order of creation, as the
 //!   ERTS pid data does until the process table uses a slot again;
 //! - tuple: by size, then element by element;
@@ -39,9 +41,9 @@ use super::{Term, match_context::MATCH_CONTEXT_ESCAPE};
 use crate::error::{BeamError, error};
 
 /// The rank of `[]` in the ERTS term order (`NIL_DEF`).
-const NIL_RANK: u8 = 7;
+const NIL_RANK: u8 = 8;
 /// The rank of a list that is not empty in the ERTS term order (`LIST_DEF`).
-const LIST_RANK: u8 = 8;
+const LIST_RANK: u8 = 9;
 
 /// One step of a comparison on the work stack.
 enum Step<'a> {
@@ -123,6 +125,7 @@ fn compare_pair<'a>(
         (Term::Atom(left), Term::Atom(right)) => left.name().cmp(right.name()),
         (Term::Binary(left), Term::Binary(right)) => left.cmp(right),
         (Term::Pid(left), Term::Pid(right)) => left.0.cmp(&right.0),
+        (Term::Port(left), Term::Port(right)) => left.0.cmp(&right.0),
         (Term::Reference(left), Term::Reference(right)) if left == right => Ordering::Equal,
         (Term::Reference(_), Term::Reference(_)) => {
             return Err(error(format!(
@@ -226,7 +229,7 @@ fn sorted_pairs(map: &super::Map) -> Vec<(&Term, &Term)> {
     let mut pairs: Vec<_> = map.iter().collect();
     pairs.sort_unstable_by(|(left, _), (right, _)| {
         left.compare(right)
-            .expect("a map key is an integer, an atom, or a list of these")
+            .expect("a map key is a binary, an integer, an atom, or a list")
     });
     pairs
 }
@@ -247,314 +250,17 @@ fn type_rank(term: &Term) -> u8 {
         Term::Atom(_) => 1,
         Term::Reference(_) => 2,
         Term::Fun(_) => 3,
-        Term::Pid(_) => 4,
-        Term::Tuple(_) => 5,
-        Term::Map(_) => 6,
+        Term::Port(_) => 4,
+        Term::Pid(_) => 5,
+        Term::Tuple(_) => 6,
+        Term::Map(_) => 7,
         Term::List(elements) if elements.is_empty() => NIL_RANK,
         Term::List(_) | Term::ImproperList(..) => LIST_RANK,
-        Term::Binary(_) => 9,
+        Term::Binary(_) => 10,
         Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::cmp::Ordering::{Equal, Greater, Less};
-
-    use super::super::{
-        Atom, AtomTable, Fun, Lambda, Map, MatchContext, ProcessId, Reference, Term,
-        test_atom as atom,
-    };
-
-    #[test]
-    #[should_panic(expected = "a match context reached a term operation")]
-    fn panics_for_a_match_context() {
-        // The interpreter gives a runtime error before a match context can
-        // reach a term operation.
-        let _ = Term::MatchContext(MatchContext::new(b"a")).compare(&Term::Integer(1));
-    }
-
-    fn map(pairs: Vec<(Term, Term)>) -> Term {
-        Term::Map(Map::from_pairs(pairs).unwrap())
-    }
-
-    /// Return a fun of a lambda of `module` with an index, an old unique
-    /// value, and free variables.
-    fn fun(module: &str, index: i32, old_unique: i32, free: Vec<Term>) -> Term {
-        let module = Atom::from_static(module).unwrap();
-        Term::Fun(Fun::new(
-            Lambda::new(module, index, old_unique, 53, 1),
-            free,
-        ))
-    }
-
-    #[test]
-    fn orders_terms_of_different_types_by_type() {
-        // ERTS 29.1.1: lists:sort/1 gives
-        // [-1,1,ab,#Ref<...>,<0.10.0>,{},#{},[],[a],<<>>] for these terms,
-        // and puts a fun between a reference and a pid.
-        let sorted = [
-            Term::Integer(-1),
-            Term::Integer(1),
-            atom("ab"),
-            Term::Reference(Reference(1)),
-            fun("lists", 0, 0, vec![]),
-            Term::Pid(ProcessId(0)),
-            Term::Tuple(vec![]),
-            map(vec![]),
-            Term::List(vec![]),
-            Term::List(vec![atom("a")]),
-            Term::Binary(vec![]),
-        ];
-        for (index, left) in sorted.iter().enumerate() {
-            for (other, right) in sorted.iter().enumerate() {
-                assert_eq!(left.compare(right).unwrap(), index.cmp(&other));
-            }
-        }
-    }
-
-    #[test]
-    fn orders_atoms_by_name_and_not_by_index() {
-        // A fresh table gives z the lower index. ERTS 29.1.1: z >= a is true,
-        // ab >= abc is false, and 'é' >= z is true.
-        let mut table = AtomTable::new();
-        let z = Term::Atom(table.put("pbeam_order_z").unwrap());
-        let a = Term::Atom(table.put("pbeam_order_a").unwrap());
-        assert_eq!(z.compare(&a).unwrap(), Greater);
-        assert_eq!(atom("ab").compare(&atom("abc")).unwrap(), Less);
-        let accent = Term::Atom(table.put("é").unwrap());
-        assert_eq!(accent.compare(&atom("z")).unwrap(), Greater);
-        // Map values compare in the term order of the keys: a, then z.
-        let first = map(vec![
-            (z.clone(), Term::Integer(1)),
-            (a.clone(), Term::Integer(2)),
-        ]);
-        let second = map(vec![(z, Term::Integer(2)), (a, Term::Integer(1))]);
-        assert_eq!(first.compare(&second).unwrap(), Greater);
-    }
-
-    #[test]
-    fn orders_nested_terms_as_pinned_erts() {
-        let list = |names: &[&str]| Term::List(names.iter().map(|name| atom(name)).collect());
-        let tuple = |names: &[&str]| Term::Tuple(names.iter().map(|name| atom(name)).collect());
-        let pairs = [
-            (tuple(&["b"]), tuple(&["a", "a"]), Less),
-            (tuple(&["a", "b"]), tuple(&["a", "a"]), Greater),
-            (list(&["a", "b"]), list(&["a", "c"]), Less),
-            (list(&["a", "b"]), list(&["a"]), Greater),
-            (list(&["b"]), list(&["a", "z"]), Greater),
-            (Term::Binary(vec![1, 2]), Term::Binary(vec![1, 3]), Less),
-            (Term::Binary(vec![1, 2]), Term::Binary(vec![1]), Greater),
-            (Term::Binary(vec![2]), Term::Binary(vec![1, 9]), Greater),
-            (Term::Pid(ProcessId(2)), Term::Pid(ProcessId(1)), Greater),
-            (
-                map(vec![(atom("a"), Term::Integer(1))]),
-                map(vec![]),
-                Greater,
-            ),
-            (
-                map(vec![(atom("z"), Term::Integer(1))]),
-                map(vec![
-                    (atom("a"), Term::Integer(1)),
-                    (atom("b"), Term::Integer(1)),
-                ]),
-                Less,
-            ),
-            (
-                map(vec![(atom("a"), Term::Integer(2))]),
-                map(vec![(atom("b"), Term::Integer(1))]),
-                Less,
-            ),
-            (
-                map(vec![(Term::Integer(1), atom("x"))]),
-                map(vec![(atom("a"), atom("x"))]),
-                Less,
-            ),
-            (
-                Term::Tuple(vec![Term::Reference(Reference(1)), list(&["a"])]),
-                Term::Tuple(vec![Term::Reference(Reference(1)), list(&["a"])]),
-                Equal,
-            ),
-        ];
-        for (left, right, order) in pairs {
-            assert_eq!(
-                left.compare(&right).unwrap(),
-                order,
-                "{left:?} and {right:?}"
-            );
-        }
-        let deep =
-            |levels| (0..levels).fold(Term::List(vec![]), |inner, _| Term::List(vec![inner]));
-        assert_eq!(deep(1_000_000).compare(&deep(999_999)).unwrap(), Greater);
-    }
-
-    #[test]
-    fn orders_improper_lists_by_elements_then_tails_as_pinned_erts() {
-        // ERTS 29.1.1 (`erts_cmp_compound`, `utils.c:1827-1851`): with equal
-        // lengths the tails compare, and a proper list has the tail []. The
-        // tail of a shorter list compares with a list that is not empty.
-        let list =
-            |elements: &[i64]| Term::List(elements.iter().map(|e| Term::Integer(*e)).collect());
-        let improper = |elements: &[i64], tail| {
-            Term::ImproperList(
-                elements
-                    .iter()
-                    .map(|element| Term::Integer(*element))
-                    .collect(),
-                Box::new(tail),
-            )
-        };
-        let tuple = |name| Term::Tuple(vec![atom(name)]);
-        let pairs = [
-            (improper(&[1], atom("x")), list(&[1, 2]), Less),
-            (improper(&[1], Term::Binary(vec![])), list(&[1, 2]), Greater),
-            (
-                improper(&[1, 2], atom("a")),
-                improper(&[1, 2], atom("b")),
-                Less,
-            ),
-            (improper(&[1], atom("a")), list(&[1]), Less),
-            (
-                improper(&[1], Term::Integer(2)),
-                improper(&[1], atom("x")),
-                Less,
-            ),
-            (list(&[]), improper(&[1], atom("x")), Less),
-            (tuple("a"), improper(&[1], atom("x")), Less),
-            (improper(&[1], atom("x")), improper(&[1], atom("x")), Equal),
-            (improper(&[1], Term::Tuple(vec![])), list(&[1]), Less),
-            (list(&[1, 2]), improper(&[1], atom("x")), Greater),
-            (list(&[1]), improper(&[1], atom("a")), Greater),
-            (improper(&[1], tuple("a")), improper(&[1], tuple("b")), Less),
-            (
-                improper(&[1, 2], atom("x")),
-                improper(&[1], Term::Binary(vec![])),
-                Less,
-            ),
-            (improper(&[2], atom("x")), list(&[1, 2]), Greater),
-            (improper(&[1], map(vec![])), list(&[1]), Less),
-        ];
-        for (left, right, order) in pairs {
-            assert_eq!(
-                left.compare(&right).unwrap(),
-                order,
-                "{left:?} and {right:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn orders_local_funs_by_fun_entry_then_free_variables() {
-        // `erts_cmp_compound` (`utils.c:2157-2187`) compares the module name,
-        // the index, the old unique value, the number of free variables, and
-        // then the free variables. ERTS 29.1.1: `fun_probe:make_pair(b) >=
-        // fun_probe:make_pair(a)` is true.
-        let pairs = [
-            (fun("lists", 9, 9, vec![]), fun("maps", 0, 0, vec![]), Less),
-            (
-                fun("lists", 1, 0, vec![]),
-                fun("lists", 0, 9, vec![]),
-                Greater,
-            ),
-            (
-                fun("lists", 0, -1, vec![]),
-                fun("lists", 0, 1, vec![]),
-                Less,
-            ),
-            (
-                fun("lists", 0, 0, vec![atom("a")]),
-                fun("lists", 0, 0, vec![]),
-                Greater,
-            ),
-            (
-                fun("lists", 0, 0, vec![atom("b")]),
-                fun("lists", 0, 0, vec![atom("a")]),
-                Greater,
-            ),
-            (
-                fun("lists", 0, 0, vec![atom("a")]),
-                fun("lists", 0, 0, vec![atom("a")]),
-                Equal,
-            ),
-        ];
-        for (left, right, order) in pairs {
-            assert_eq!(
-                left.compare(&right).unwrap(),
-                order,
-                "{left:?} and {right:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn orders_external_funs_by_mfa_and_after_local_funs() {
-        // `erts_cmp_compound` (`utils.c:2189-2207`) compares the module name,
-        // the function name, and the arity of two external funs, and puts a
-        // local fun before an external fun. ERTS 29.1.1: `fun fun_probe:id/1
-        // >= fun_probe:make_pair(a)` is true, and `fun fun_probe:mfas/0 >=
-        // fun fun_probe:id/1` is true.
-        let external = |module, function, arity| {
-            let atom = |name| Atom::from_static(name).unwrap();
-            Term::Fun(Fun::external(atom(module), atom(function), arity))
-        };
-        let pairs = [
-            (
-                external("lists", "put", 2),
-                external("maps", "get", 2),
-                Less,
-            ),
-            (
-                external("lists", "put", 2),
-                external("lists", "get", 3),
-                Greater,
-            ),
-            (
-                external("lists", "put", 1),
-                external("lists", "put", 2),
-                Less,
-            ),
-            (
-                external("lists", "put", 2),
-                external("lists", "put", 2),
-                Equal,
-            ),
-            (
-                fun("maps", 9, 9, vec![atom("a")]),
-                external("lists", "put", 0),
-                Less,
-            ),
-            (
-                external("lists", "put", 0),
-                fun("maps", 9, 9, vec![]),
-                Greater,
-            ),
-        ];
-        for (left, right, order) in pairs {
-            assert_eq!(
-                left.compare(&right).unwrap(),
-                order,
-                "{left:?} and {right:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_the_order_of_two_different_references() {
-        // ERTS 29.1.1: a reference made later on scheduler 1 is less than one
-        // made earlier on scheduler 2, so PBeam cannot give the ERTS order.
-        let pair = Term::Tuple(vec![atom("a"), Term::Reference(Reference(1))]);
-        let other = Term::Tuple(vec![atom("a"), Term::Reference(Reference(2))]);
-        assert_eq!(
-            pair.compare(&other).unwrap_err().to_string(),
-            "unsupported term order of two references Reference(Reference(1)) and \
-             Reference(Reference(2))"
-        );
-        let earlier = Term::Tuple(vec![atom("a"), Term::Reference(Reference(2))]);
-        assert_eq!(
-            Term::Tuple(vec![atom("b"), Term::Reference(Reference(1))])
-                .compare(&earlier)
-                .unwrap(),
-            Greater
-        );
-    }
-}
+#[path = "../../tests/term/order.rs"]
+mod tests;

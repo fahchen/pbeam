@@ -8,7 +8,7 @@ use crate::{
 
 const WORD_SIZE: usize = 4;
 mod instruction;
-pub(crate) use instruction::{BinaryMatchCommand, Instruction, Operand, TestKind};
+pub(crate) use instruction::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind};
 
 const CHUNK_ALIGNMENT: usize = WORD_SIZE;
 const CHUNK_HEADER_SIZE: usize = WORD_SIZE * 2;
@@ -276,8 +276,9 @@ pub(crate) fn parse(bytes: &[u8], atom_table: &mut AtomTable) -> Result<BeamModu
         .map(|data| parse_lambdas(data, &atoms))
         .transpose()?
         .unwrap_or_default();
+    let strings = chunks.get(b"StrT".as_slice()).copied().unwrap_or_default();
     let (instructions, number_of_labels) =
-        instruction::parse_code(code, &atoms, &imports, &literals, &lambdas)?;
+        instruction::parse_code(code, &atoms, &imports, &literals, &lambdas, strings)?;
     if let Some(label) = exports
         .values()
         .find(|&&label| label < FIRST_LABEL_NUMBER || label > number_of_labels)
@@ -1033,4 +1034,5 @@ fn read_u32(field_bytes: &[u8]) -> Result<u32, BeamError> {
 }
 
 #[cfg(test)]
+#[path = "../../tests/beam/code.rs"]
 mod tests;

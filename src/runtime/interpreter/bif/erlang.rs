@@ -4,6 +4,7 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
 use crate::runtime::local_node;
+use crate::runtime::process::LinkId;
 use crate::runtime::process::{Flush, TimerReference};
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
 use crate::runtime::signal::Signal;
@@ -449,7 +450,7 @@ pub(super) fn exit(context: &mut BifContext<'_>, id: &Term, reason: &Term) -> Bi
         && target == caller_id
         && (*reason == Term::static_atom("kill") || !trap_exit);
     let exit = Signal::Exit {
-        from: caller_id,
+        from: LinkId::Process(caller_id),
         reason: reason.clone(),
         linked: false,
         normal_kills: suicide,
@@ -545,7 +546,7 @@ pub(super) fn demonitor(
 /// `badarg` (`bif.c:881-882`). Each other target, and each other type,
 /// raises `badarg`. A monitor of the caller creates no monitor and no
 /// alias, and each port name gives the `noproc` `DOWN` message (see
-/// [`Scheduler::monitor`]).
+/// [`Scheduler::monitor`]). PBeam registers no port.
 ///
 /// # Examples
 ///
@@ -559,8 +560,9 @@ pub(super) fn demonitor(
 ///
 /// # Errors
 ///
-/// A `time_offset` monitor of `clock_service`, and the `priority` option
-/// of a monitor that is not of the caller, are not supported.
+/// A `time_offset` monitor of `clock_service`, a monitor of the type `port`
+/// with a port, and the `priority` option of a monitor that is not of the
+/// caller, are not supported.
 pub(super) fn monitor(
     context: &mut BifContext<'_>,
     kind: &Term,
@@ -576,6 +578,7 @@ pub(super) fn monitor(
     let target = match (kind.name(), target) {
         ("process", Term::Pid(id)) => Some(MonitorTarget::Process(*id)),
         ("process", target) => local_name(target).map(MonitorTarget::ProcessName),
+        ("port", Term::Port(_)) => return Err(unsupported_port("erlang:monitor/2,3")),
         ("port", target) => local_name(target).map(MonitorTarget::PortName),
         ("time_offset", Term::Atom(service)) if service.name() == "clock_service" => {
             // ponytail: no time offset service yet; add it when a measured path monitors it.
@@ -996,11 +999,7 @@ pub(super) fn tl(list: &Term) -> BifResult {
 /// Run `erlang:integer_to_list/1`: return the decimal characters of an
 /// integer, as ERTS `integer_to_list_1` and `integer_to_list`
 /// (`bif.c:3266-3339`) do. A term that is not an integer raises `badarg`.
-///
-/// A small integer costs no reduction. A bignum costs one reduction for each
-/// 16 digits of [`big_integer_estimate`] (`bif.c:3283-3299`). In the PBeam
-/// integer range, a bignum is from 2^59 to 2^63 - 1 or from -2^63 to
-/// -2^59 - 1, and it costs 1.
+/// [`decimal_digits`] gives the digits and charges a bignum.
 ///
 /// # Examples
 ///
@@ -1018,33 +1017,99 @@ pub(super) fn tl(list: &Term) -> BifResult {
 ///
 /// # Errors
 ///
-/// Return a runtime error for a bignum that costs more than the reductions
-/// left. ERTS then runs the BIF again on a dirty CPU scheduler
-/// (`bif.c:3289-3296`, `3323-3336`), and PBeam has no dirty scheduler. Also return the runtime error of
-/// [`ProcessState::bif_reductions_left`] for a negative budget.
+/// Return the runtime error of [`decimal_digits`].
 pub(super) fn integer_to_list(
     process: &mut ProcessState,
     term: &Term,
 ) -> Result<BifResult, BeamError> {
-    /// `DIGITS_PER_RED` (`bif.c:3283`).
+    let Some(digits) = decimal_digits(process, term, "integer_to_list")? else {
+        return Ok(BifResult::badarg());
+    };
+    let codes = digits.bytes().map(|byte| Term::Integer(i64::from(byte)));
+    Ok(Value(Term::List(codes.collect())))
+}
+
+/// Run `erlang:integer_to_binary/1`: return the decimal characters of an
+/// integer as a binary, as ERTS `integer_to_binary_1` and
+/// `integer_to_binary` (`binary.c:80-145`) do. A term that is not an
+/// integer raises `badarg`. [`decimal_digits`] gives the digits and charges
+/// a bignum.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// let binary = integer_to_binary(&mut process, &Term::Integer(-12))?;
+/// assert!(matches!(binary, BifResult::Value(Term::Binary(bytes)) if bytes == b"-12"));
+/// assert_eq!(process.fcalls, 10);
+/// integer_to_binary(&mut process, &Term::Integer(1 << 59))?;
+/// assert_eq!(process.fcalls, 9);
+/// assert!(matches!(integer_to_binary(&mut process, &Term::static_atom("a"))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`decimal_digits`].
+pub(super) fn integer_to_binary(
+    process: &mut ProcessState,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(digits) = decimal_digits(process, term, "integer_to_binary")? else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(Term::Binary(digits.into_bytes())))
+}
+
+/// Return the decimal characters of an integer for the BIF `erlang:Name/1`,
+/// or `None` for a term that is not an integer. ERTS `integer_to_list`
+/// (`bif.c:3266-3311`) and `integer_to_binary` (`binary.c:80-117`) charge
+/// the same cost.
+///
+/// A small integer costs no reduction. A bignum costs one reduction for each
+/// 16 digits of [`big_integer_estimate`] (`bif.c:3283-3299`,
+/// `binary.c:92-108`). In the PBeam integer range, a bignum is from 2^59 to
+/// 2^63 - 1 or from -2^63 to -2^59 - 1, and it costs 1.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// assert_eq!(decimal_digits(&mut process, &Term::Integer(-12), "integer_to_list")?.as_deref(), Some("-12"));
+/// assert_eq!(process.fcalls, 10);
+/// decimal_digits(&mut process, &Term::Integer(1 << 59), "integer_to_list")?;
+/// assert_eq!(process.fcalls, 9);
+/// assert_eq!(decimal_digits(&mut process, &Term::List(vec![]), "integer_to_list")?, None);
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for a bignum that costs more than the reductions
+/// left. ERTS then runs the BIF again on a dirty CPU scheduler
+/// (`bif.c:3289-3296`, `3323-3336`; `binary.c:98-105`, `129-142`), and
+/// PBeam has no dirty scheduler. Also return the runtime error of
+/// [`ProcessState::bif_reductions_left`] for a negative budget.
+fn decimal_digits(
+    process: &mut ProcessState,
+    term: &Term,
+    name: &str,
+) -> Result<Option<String>, BeamError> {
+    /// `DIGITS_PER_RED` (`bif.c:3283`, `binary.c:92`).
     const DIGITS_PER_RED: usize = 16;
     let Term::Integer(value) = term else {
-        return Ok(BifResult::badarg());
+        return Ok(None);
     };
     if term.small_integer().is_none() {
         let cost = big_integer_estimate(*value) / DIGITS_PER_RED;
         if cost > process.bif_reductions_left()? {
             // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
             return Err(error(format!(
-                "unsupported erlang:integer_to_list/1 of {value} with {} reductions left: ERTS runs it on a dirty CPU scheduler",
+                "unsupported erlang:{name}/1 of {value} with {} reductions left: ERTS runs it on a dirty CPU scheduler",
                 process.fcalls
             )));
         }
         process.bump_reductions(cost as i32);
     }
-    let digits = value.to_string();
-    let codes = digits.bytes().map(|byte| Term::Integer(i64::from(byte)));
-    Ok(Value(Term::List(codes.collect())))
+    Ok(Some(value.to_string()))
 }
 
 /// Return the number of decimal digits that ERTS `big_integer_estimate`
@@ -1090,6 +1155,39 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
                 .map(|character| Term::Integer(i64::from(u32::from(character))))
                 .collect(),
         )),
+        _ => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:atom_to_binary/2`: return the text of an atom as a binary,
+/// as ERTS `atom_to_binary_2` (`erl_unicode.c:1928-1960`) does. With
+/// `utf8` or `unicode`, the binary holds the UTF-8 bytes of the name. With
+/// `latin1`, it holds one byte for each character. A term that is not an
+/// atom, an encoding that is not `latin1`, `utf8`, or `unicode`, and
+/// `latin1` for a name with a character above 255 raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let pi = Term::Atom(atoms.put("\u{3c0}")?);
+/// assert!(matches!(atom_to_binary(&pi, &Term::static_atom("utf8")), BifResult::Value(Term::Binary(bytes)) if bytes == [207, 128]));
+/// assert!(matches!(atom_to_binary(&pi, &Term::static_atom("latin1")), BifResult::Raise { .. }));
+/// let e_acute = Term::Atom(atoms.put("\u{e9}")?);
+/// assert!(matches!(atom_to_binary(&e_acute, &Term::static_atom("latin1")), BifResult::Value(Term::Binary(bytes)) if bytes == [233]));
+/// assert!(matches!(atom_to_binary(&Term::static_atom("ok"), &Term::static_atom("foo")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn atom_to_binary(term: &Term, encoding: &Term) -> BifResult {
+    let (Term::Atom(atom), Term::Atom(encoding)) = (term, encoding) else {
+        return BifResult::badarg();
+    };
+    match encoding.name() {
+        "utf8" | "unicode" => Value(Term::Binary(atom.name().as_bytes().to_vec())),
+        "latin1" => atom
+            .name()
+            .chars()
+            .map(|character| u8::try_from(u32::from(character)).ok())
+            .collect::<Option<Vec<u8>>>()
+            .map_or_else(BifResult::badarg, |bytes| Value(Term::Binary(bytes))),
         _ => BifResult::badarg(),
     }
 }
@@ -1431,21 +1529,29 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(send(scheduler, &Term::Pid(pid), ok.clone()), BifResult::Value(value) if value == ok));
-/// assert!(matches!(send(scheduler, &Term::static_atom("nobody"), ok.clone()), BifResult::Raise { .. }));
+/// assert!(matches!(send(scheduler, &Term::Pid(pid), ok.clone())?, BifResult::Value(value) if value == ok));
+/// assert!(matches!(send(scheduler, &Term::static_atom("nobody"), ok.clone())?, BifResult::Raise { .. }));
 /// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
-/// assert!(matches!(send(scheduler, &remote, ok.clone()), BifResult::Value(_)));
+/// assert!(matches!(send(scheduler, &remote, ok.clone())?, BifResult::Value(_)));
 /// ```
+///
+/// # Errors
+///
+/// A port as `to` returns a runtime error: ERTS runs the port command of
+/// the message (`erl_send`, `bif.c:2872-2899`).
 pub(in crate::runtime::interpreter) fn send(
     scheduler: &mut Scheduler,
     to: &Term,
     message: Term,
-) -> BifResult {
-    match deliver_to(scheduler, to, message.clone()) {
+) -> Result<BifResult, BeamError> {
+    if let Term::Port(_) = to {
+        return Err(unsupported_port("erlang:send/2"));
+    }
+    Ok(match deliver_to(scheduler, to, message.clone()) {
         Some(Sent::Local) => local_send_result(scheduler, message),
         Some(Sent::NoConnect) => Value(message),
         None => BifResult::badarg(),
-    }
+    })
 }
 
 /// Run `erlang:send(To, Message, Options)` as ERTS `send_3`
@@ -1458,7 +1564,8 @@ pub(in crate::runtime::interpreter) fn send(
 /// reductions, and can return `ok` after a switch (see
 /// [`local_send_result`]).
 ///
-/// PBeam has no distribution and no ports, so `nosuspend` changes nothing.
+/// PBeam has no distribution and sends no message to a port, so
+/// `nosuspend` changes nothing.
 /// A `priority` message is an ordinary message unless its receiver gets it
 /// through a priority alias (`erl_proc_sig_queue.c:6021-6045`). Only
 /// `erlang:alias/1` makes a priority alias, so `priority` also changes
@@ -1472,31 +1579,39 @@ pub(in crate::runtime::interpreter) fn send(
 /// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
 /// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
 /// assert!(matches!(send3(scheduler, &remote, ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "noconnect"));
-/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok, &Term::static_atom("x")), BifResult::Raise { .. }));
+/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok, &Term::static_atom("x"))?, BifResult::Raise { .. }));
 /// ```
+///
+/// # Errors
+///
+/// A port as `to` after valid options returns a runtime error: ERTS runs
+/// the port command of the message (`send_3`, `bif.c:2733-2739`).
 pub(super) fn send3(
     scheduler: &mut Scheduler,
     to: &Term,
     message: &Term,
     options: &Term,
-) -> BifResult {
+) -> Result<BifResult, BeamError> {
     let Term::List(options) = options else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     let mut connect = true;
     for option in options {
         match option {
             Term::Atom(option) if option.name() == "noconnect" => connect = false,
             Term::Atom(option) if matches!(option.name(), "nosuspend" | "priority") => {}
-            _ => return BifResult::badarg(),
+            _ => return Ok(BifResult::badarg()),
         }
     }
-    match deliver_to(scheduler, to, message.clone()) {
+    if let Term::Port(_) = to {
+        return Err(unsupported_port("erlang:send/3"));
+    }
+    Ok(match deliver_to(scheduler, to, message.clone()) {
         Some(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
         Some(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
         Some(Sent::NoConnect) => Value(Term::static_atom("ok")),
         None => BifResult::badarg(),
-    }
+    })
 }
 
 /// The reductions of a local send: `erl_send` and `send_3` use them with
@@ -1574,7 +1689,7 @@ enum Sent {
 ///   (`erl_proc_sig_queue.c:6009-6075`; see
 ///   [`Scheduler::send_alias_message`]).
 /// - An atom gives the message to its registered process. A name that no
-///   process has gives `None`. PBeam has no ports.
+///   process has gives `None`. PBeam registers no port.
 /// - `{Name, Node}` with two atoms and the local node gives the message to
 ///   the registered process, or drops it when no process has the name.
 ///   Another node drops the message and gives [`Sent::NoConnect`], as ERTS
@@ -2098,4 +2213,115 @@ fn timer_options(options: &Term) -> Option<(bool, bool)> {
         }
     }
     Some((asynchronous, info))
+}
+
+/// The exit status of a halt whose flush timeout ends, as
+/// `ERTS_HALT_FLUSH_TIMEOUT_EXIT_CODE` (`erl_init.c:75`).
+const HALT_FLUSH_TIMEOUT_STATUS: i32 = 255;
+
+/// Run `erlang:halt(Status, Options)`, as `halt_2` (`bif.c:4309-4398`)
+/// does. `erlang:halt/0` and `erlang:halt/1` call it with the options `[]`
+/// (`erlang.erl:3357-3358`, `3383-3388`).
+///
+/// The options are checked first. Each element of a proper list must be
+/// `{flush, true | false}` or `{flush_timeout, T}`, else the call raises
+/// `badarg` (`bif.c:4316-4343`). `T` is a non-negative small integer, which
+/// `term_to_Uint32` truncates to 32 bits (`big.c:3648-3663`). The last
+/// option of each kind holds. ERTS gives this `badarg` the `error_info`
+/// cause `badopt`, which PBeam does not model.
+///
+/// A non-negative integer `Status` stops the run with the status code
+/// `Status` masked to `INT_MAX` (`bif.c:4346-4362`, `big.c:3545-3565`), as
+/// the error [`BeamError::Halt`]. Each other process stops at once, as in a
+/// halting ERTS scheduler (`erl_process.c:15220-15255`). PBeam writes each
+/// output with a host call before the call returns, so a flush has no port
+/// output to wait for. With a flush and a timeout of 0, the ERTS flush
+/// timer ends before the flush, and the node exits with status 255
+/// (`erl_process.c:15244-15248`, `erl_init.c:2771-2774`; measured 5 of 5).
+///
+/// `abort` (a core dump) and a slogan `Status` (a crash dump with the
+/// string as its slogan, see [`is_slogan`]) give a runtime error: PBeam
+/// writes no core dump and no crash dump. Each other `Status` raises
+/// `badarg` (`bif.c:4379`, `4388-4393`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(halt(&Term::Integer(259), &Term::List(vec![])), Err(BeamError::Halt(259)));
+/// assert!(matches!(halt(&Term::Integer(-1), &Term::List(vec![])), Ok(BifResult::Raise { .. })));
+/// assert!(halt(&Term::static_atom("abort"), &Term::List(vec![])).is_err());
+/// ```
+pub(super) fn halt(status: &Term, options: &Term) -> Result<BifResult, BeamError> {
+    let Term::List(options) = options else {
+        return Ok(BifResult::badarg());
+    };
+    let mut flush = true;
+    let mut timeout = None;
+    for option in options {
+        match option {
+            Term::Tuple(pair) => match pair.as_slice() {
+                [Term::Atom(name), Term::Atom(value)]
+                    if name.name() == "flush" && matches!(value.name(), "true" | "false") =>
+                {
+                    flush = value.name() == "true";
+                }
+                [Term::Atom(name), value] if name.name() == "flush_timeout" => {
+                    match value.small_integer() {
+                        Some(value @ 0..) => timeout = Some(value & i64::from(u32::MAX)),
+                        _ => return Ok(BifResult::badarg()),
+                    }
+                }
+                _ => return Ok(BifResult::badarg()),
+            },
+            _ => return Ok(BifResult::badarg()),
+        }
+    }
+    match status {
+        Term::Integer(code) if *code >= 0 => {
+            if flush && timeout == Some(0) {
+                return Err(BeamError::Halt(HALT_FLUSH_TIMEOUT_STATUS));
+            }
+            let code = i32::try_from(code & i64::from(i32::MAX)).expect("masked to INT_MAX");
+            Err(BeamError::Halt(code))
+        }
+        Term::Atom(abort) if abort.name() == "abort" => Err(error(
+            "unsupported erlang:halt/2 with abort: PBeam writes no core dump",
+        )),
+        _ if is_slogan(status) => Err(error(
+            "unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump",
+        )),
+        _ => Ok(BifResult::badarg()),
+    }
+}
+
+/// The most characters of a crash dump slogan, as `HALT_MSG_SIZE`
+/// (`bif.c:4373`).
+const HALT_MSG_SIZE: usize = 1023;
+
+/// Return whether `status` is a crash dump slogan of `erlang:halt/2`: a list
+/// for which `erts_unicode_list_to_buf` with at most `HALT_MSG_SIZE`
+/// characters does not give a type error (`bif.c:4372-4380`,
+/// `utils.c:2862-2942`). Each of the first 1023 elements must be a code
+/// point outside `0xD800..=0xDFFF`. The tail must be `[]`, unless the list
+/// has more than 1023 elements: ERTS cuts the slogan before it reads the
+/// tail.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_slogan(&Term::List(vec![Term::Integer(65)])));
+/// assert!(!is_slogan(&Term::List(vec![Term::static_atom("foo")])));
+/// assert!(!is_slogan(&Term::ImproperList(vec![Term::Integer(65)], Box::new(Term::static_atom("foo")))));
+/// ```
+fn is_slogan(status: &Term) -> bool {
+    let (elements, proper) = match status {
+        Term::List(elements) => (elements, true),
+        Term::ImproperList(elements, _) => (elements, false),
+        _ => return false,
+    };
+    let characters = elements.iter().take(HALT_MSG_SIZE).all(|element| {
+        matches!(element, Term::Integer(code)
+            if u32::try_from(*code).ok().and_then(char::from_u32).is_some())
+    });
+    characters && (proper || elements.len() > HALT_MSG_SIZE)
 }

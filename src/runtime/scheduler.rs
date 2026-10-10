@@ -1,12 +1,22 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    time::Duration,
+};
 
 use super::{
+    dirty_io::{Claim, Completion, DirtyIo},
     ets::EtsTables,
+    host::{
+        input::{self, Readiness},
+        output::IovecWrite,
+        signal,
+    },
     local_node,
     persistent_term::PersistentTerms,
+    port::Ports,
     process::{
-        Flush, Frame, Monitor, Origin, OriginMonitor, ProcessState, ReceiveTimer, Start,
-        TargetMonitor, TimerReference, WalkPosition,
+        DirtyWrite, Flush, Frame, LinkId, Monitor, Origin, OriginMonitor, ProcessState,
+        ReceiveTimer, Start, TargetMonitor, TimerReference, WalkPosition,
     },
     regex_code::RegexCodes,
     resources::Resources,
@@ -203,6 +213,8 @@ pub(super) struct Scheduler {
     /// (`bif.h:85-96`). Each switch out sets them to 0
     /// (`erl_process.c:9688`).
     virtual_reductions: i32,
+    /// The dirty IO threads of the run and the inbox of their completions.
+    dirty_io: DirtyIo,
 }
 
 impl Scheduler {
@@ -220,6 +232,7 @@ impl Scheduler {
         let mut resources = Resources::default();
         resources.put(RegexCodes::default());
         resources.put(Ttys::default());
+        resources.put(Ports::default());
         Scheduler {
             processes: HashMap::new(),
             freed: HashMap::new(),
@@ -240,6 +253,7 @@ impl Scheduler {
             next_unlink_id: 1,
             system_logger: Term::static_atom("logger"),
             virtual_reductions: 0,
+            dirty_io: DirtyIo::new(),
         }
     }
 
@@ -274,7 +288,13 @@ impl Scheduler {
     /// Put the process `id` at the end of the run queue, unless it is in the
     /// run queue or runs now: such a process keeps its place, as
     /// `erts_schedule_process` and `erts_proc_sys_schedule` do
-    /// (`erl_proc_sig_queue.h:2063-2088`).
+    /// (`erl_proc_sig_queue.h:2063-2088`). A process whose dirty IO call
+    /// runs goes to the run queue only when it has signals to handle: its
+    /// turn then handles them for it, as ERTS sends its pid to
+    /// `erts_dirty_process_signal_handler` (`erts_proc_notify_new_sig`,
+    /// `erl_proc_sig_queue.h:2062-2089`; `erl_proc_sig_queue.c:979-1008`).
+    /// It goes there to run when the call completes
+    /// ([`Self::complete_dirty_writes`]).
     ///
     /// # Examples
     ///
@@ -284,7 +304,8 @@ impl Scheduler {
     fn enqueue(&mut self, id: ProcessId) {
         let current = self.current_process == Some(id);
         let process = self.processes.get_mut(&id).expect("the process is alive");
-        if !process.in_run_queue && !current {
+        let idle_dirty = process.dirty_running() && !process.mailbox.has_control_signals();
+        if !process.in_run_queue && !current && !idle_dirty {
             process.in_run_queue = true;
             self.runnable.push_back(id);
         }
@@ -313,6 +334,8 @@ impl Scheduler {
     ///
     /// - An exiting process runs its exit now. A freed process continues its
     ///   exit at its phase ([`Self::finish_current`]).
+    /// - A process whose dirty IO call runs does not run. Its turn handles
+    ///   its signals ([`Self::handle_dirty_signals`]).
     /// - A process with signals to handle handles them first. An active
     ///   process, which has Erlang work, uses at most
     ///   `ERTS_SIG_HANDLE_REDS_MAX_PREFERED` (100) reductions for it, and a
@@ -343,6 +366,10 @@ impl Scheduler {
         };
         if let Some((process, phase)) = self.freed.remove(&id) {
             self.exit_links(process, phase, CONTEXT_REDS);
+            return Ok(Turn::Done);
+        }
+        if self.processes[&id].dirty_running() {
+            self.handle_dirty_signals(id)?;
             return Ok(Turn::Done);
         }
         self.current_process = Some(id);
@@ -429,6 +456,272 @@ impl Scheduler {
                     }
                 }
             }
+        }
+    }
+
+    /// Wait for at most `timeout`, or without end for `None`, until fd 0
+    /// has input, when fd 0 has a read select, until a pipe of a port has
+    /// input, until a dirty IO call completes, when a call runs, or until a
+    /// handled host signal arrives, when a handler is installed. ERTS waits
+    /// for these events in its poll thread (`erl_process.c:3372`), and an
+    /// idle scheduler sleeps in its poll until the next timer end
+    /// (`erl_process.c:3536-3567`). PBeam has one thread, so it waits only
+    /// when no process can run. A signal stops the wait with `EINTR`, or
+    /// makes the notify pipe readable when it arrives before the wait.
+    ///
+    /// When fd 0 has input, its end of file, or an error, the select ends,
+    /// and its recipient gets `{select, TTY, Reference, ready_input}`
+    /// (`erl_check_io.c:2135-2171`, `prepare_select_msg` at
+    /// `erl_check_io.c:699-760`). A message to a process that does not exist
+    /// is dropped (`erl_check_io.c:851-856`). When fd 0 is not open, the
+    /// select ends without a message, as a select that `erts_poll_control`
+    /// cannot add (`erl_check_io.c:1422-1434`). Each ready pipe of a port
+    /// goes to [`Self::port_ready`]. A completion only wakes the scheduler;
+    /// [`Self::complete_dirty_writes`] takes it. The next scheduling step
+    /// reads the signals in the notify pipe (see [`Self::check_signals`]).
+    ///
+    /// Return `false` when fd 0 has no select, no port waits for a pipe, no
+    /// dirty IO call runs, and no handler is installed, and the function
+    /// does not wait.
+    ///
+    /// # Errors
+    ///
+    /// A ready pipe of a port returns the error of [`Self::port_ready`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // stdin is `/dev/null`: the reader gets its message at once.
+    /// assert!(scheduler.wait_events(None)?);
+    /// assert!(!scheduler.wait_events(None)?);
+    /// ```
+    pub(super) fn wait_events(&mut self, timeout: Option<Duration>) -> Result<bool, BeamError> {
+        let selected = self.resources.borrow_mut::<Ttys>().input_selected();
+        let dirty = self.dirty_io.running();
+        let ports = self.resources.borrow_mut::<Ports>().wait_fds();
+        let fds: Vec<_> = [
+            selected.then_some(libc::STDIN_FILENO),
+            dirty.then(|| self.dirty_io.wake_fd()),
+            signal::notify_fd(),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(ports)
+        .collect();
+        if fds.is_empty() {
+            return Ok(false);
+        }
+        let readiness = input::wait_readable(&fds, timeout);
+        if dirty
+            && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&self.dirty_io.wake_fd()))
+        {
+            self.dirty_io.clear_wake();
+        }
+        // Only fd 0 can be closed: the pipes of a port, the notify pipe, and
+        // the wake socket stay open while the scheduler waits for them. The
+        // select of fd 0 ends when fd 0 is ready or not open.
+        if selected && readiness.ended(libc::STDIN_FILENO) {
+            let ttys = self.resources.borrow_mut::<Ttys>();
+            let select = ttys.take_input_select().expect("fd 0 has a select");
+            if readiness != Readiness::Invalid {
+                let message = Term::Tuple(vec![
+                    Term::static_atom("select"),
+                    Term::Reference(select.tty),
+                    select.reference,
+                    Term::static_atom("ready_input"),
+                ]);
+                self.deliver(select.recipient, message);
+            }
+        }
+        for fd in readiness.into_ready() {
+            self.port_ready(fd)?;
+        }
+        Ok(true)
+    }
+
+    /// Pass each handled host signal that arrived since the last scheduling
+    /// step to [`Self::notify_signals`]. The check reads one flag and makes
+    /// no system call when no signal arrived. ERTS passes a signal at once
+    /// from its signal dispatcher thread (`sys.c:1122-1180`); PBeam passes
+    /// it at the next scheduling step.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.check_signals()?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::notify_signals`].
+    pub(super) fn check_signals(&mut self) -> Result<(), BeamError> {
+        self.notify_signals(&signal::take_notified())
+    }
+
+    /// Do the action of each handled host signal, in the order of arrival,
+    /// as the ERTS signal dispatcher thread does (`sys.c:1163-1176`). For a
+    /// signal of `signum_to_signalterm`, the process registered as
+    /// `erl_signal_server` gets `{notify, Signal}`, and nothing happens when
+    /// no process has the name (`signal_notify_requested` at
+    /// `sys.c:589-607`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.notify_signals(&[libc::SIGTERM])?;
+    /// // erl_signal_server has the message {notify, sigterm}.
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// `SIGINT` gives a runtime error: ERTS runs its break handler
+    /// (`break_requested` at `sys.c:611-624`, `do_break` at
+    /// `break.c:571-687`), which PBeam does not have.
+    fn notify_signals(&mut self, signals: &[libc::c_int]) -> Result<(), BeamError> {
+        for &number in signals {
+            if number == libc::SIGINT {
+                return Err(error(
+                    "unsupported break of SIGINT: PBeam has no break handler",
+                ));
+            }
+            let name =
+                signal::signal_name(number).expect("a handler is set only for a named signal");
+            if let Some(server) = self.whereis("erl_signal_server") {
+                let message =
+                    Term::Tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
+                self.deliver(server, message);
+            }
+        }
+        Ok(())
+    }
+
+    /// Run the `prim_tty:write_nif/2` call of the current process on a
+    /// dirty IO thread, and switch the process out until the call
+    /// completes. The process records the call before the thread gets it,
+    /// so the completion always finds the call. ERTS moves the process to a
+    /// dirty IO scheduler in the same way (`static_schedule_dirty_nif`,
+    /// `erl_nif.c:3437-3477`; `erl_process.c:10244-10262`). The other
+    /// processes run while the call runs. `tail` tells whether the NIF call
+    /// was a tail call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.start_dirty_write(write, true);
+    /// assert_eq!(scheduler.schedule_next()?, Turn::Idle);
+    /// ```
+    pub(super) fn start_dirty_write(&mut self, write: IovecWrite, tail: bool) {
+        let call = self.dirty_io.next_call();
+        let id = self
+            .current_process
+            .expect("the scheduler has a current process");
+        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let record = process.dirty_write.insert(DirtyWrite {
+            call,
+            tail,
+            written: None,
+            claim: Claim::default(),
+        });
+        self.dirty_io.submit(id, call, &record.claim, write);
+        // `enqueue` keeps the process out of the run queue while the call
+        // runs, unless it has signals to handle (`erl_process.c:9762-9771`).
+        self.switch_out(|_| {});
+    }
+
+    /// Handle the signals of the process `id`, whose dirty IO call runs, as
+    /// `erts_dirty_process_signal_handler` handles them for a process that
+    /// runs dirty (`erts_dirty_process_signal_handler.erl:52-89`;
+    /// `erts_internal_dirty_process_handle_signals_1`,
+    /// `erl_proc_sig_queue.c:8892-8963`). The process does not become the
+    /// current process, and its reduction total does not change: ERTS gives
+    /// the reductions of the handling to the handler process.
+    ///
+    /// - A signal that ends the process drops the claim on the call, so a
+    ///   call in the queue does not run, and the scheduler drops the result
+    ///   of a call that runs. The process goes to the end of the run queue
+    ///   and exits in its next turn while the call runs, as
+    ///   `set_self_exiting` puts it in a normal run queue
+    ///   (`erl_process.c:13484-13548`) and a normal scheduler runs the exit
+    ///   of a process that runs dirty (`erl_process.c:10092-10110`).
+    /// - A process with signals left goes to the end of the run queue, as
+    ///   the handler sends the pid to itself again
+    ///   (`erts_dirty_process_signal_handler.erl:83-89`).
+    ///
+    /// The handling uses at most `CONTEXT_REDS` reductions, about the
+    /// budget left to the handler process in its call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.handle_dirty_signals(writer)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An error of [`Scheduler::handle_signals`].
+    fn handle_dirty_signals(&mut self, id: ProcessId) -> Result<(), BeamError> {
+        // `enqueue` puts a process whose call runs in the run queue only
+        // when it has signals to handle, and only its turn handles them.
+        self.processes
+            .get_mut(&id)
+            .expect("the process is alive")
+            .in_run_queue = false;
+        self.handle_signals(id, CONTEXT_REDS, CONTEXT_REDS, HandlingPoint::ScheduleIn)?;
+        let process = self.processes.get_mut(&id).expect("the process is alive");
+        if process.exiting.is_some() {
+            process.dirty_write = None;
+        }
+        // `enqueue` takes the process when it exits or has signals left.
+        self.enqueue(id);
+        Ok(())
+    }
+
+    /// Take each completion from the dirty IO inbox: the process of the
+    /// call gets the result and goes to the end of the run queue, as the
+    /// end of a dirty NIF call moves the process back to a normal run queue
+    /// (`erl_nif.c:462-463`, `507-532`). Its next turn returns the result
+    /// (`dirty_nif_finalizer`, `erl_nif.c:3386-3408`) or raises the
+    /// exception of the call (`dirty_nif_exception`, `erl_nif.c:3410-3435`).
+    ///
+    /// The completion of a process that exits or exited is dropped, as
+    /// `erts_call_dirty_nif` drops the result of an exiting process
+    /// (`erl_nif.c:507-509`, `542`). Process identifiers and call
+    /// identifiers are not used again in a run, so a late completion does
+    /// not find a new process or a new call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.complete_dirty_writes();
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// A completion of a process that does not exit does not match its
+    /// running call, or has no result. Such a process holds the claim on
+    /// its call until the completion, and each call completes once.
+    pub(super) fn complete_dirty_writes(&mut self) {
+        while let Some(Completion {
+            process,
+            call,
+            written,
+        }) = self.dirty_io.take_completion()
+        {
+            let Some(caller) = self
+                .processes
+                .get_mut(&process)
+                .filter(|caller| caller.exiting.is_none())
+            else {
+                continue;
+            };
+            let dirty_write = caller
+                .dirty_write
+                .as_mut()
+                .filter(|write| write.call == call && write.written.is_none())
+                .expect("a completion resumes the running call of its live process");
+            dirty_write.written =
+                Some(written.expect("a call runs while its live process holds the claim"));
+            self.enqueue(process);
         }
     }
 
@@ -879,8 +1172,10 @@ impl Scheduler {
             None
         };
         if link {
-            self.current_process_mut().links.insert(child.id, 0);
-            child.links.insert(parent, 0);
+            self.current_process_mut()
+                .links
+                .insert(LinkId::Process(child.id), 0);
+            child.links.insert(LinkId::Process(parent), 0);
         }
         let id = child.id;
         self.insert(child);
@@ -917,13 +1212,14 @@ impl Scheduler {
         if self.live_process(target).is_none() && !self.current_process_mut().trap_exit {
             return false;
         }
-        if self.current_process_mut().links.insert(target, 0) == Some(0) {
+        let linked = LinkId::Process(target);
+        if self.current_process_mut().links.insert(linked, 0) == Some(0) {
             return true;
         }
         let link = Signal::Link { from: current };
         if self.send_signal(Some(current), target, link).is_err() {
             let exit = Signal::Exit {
-                from: target,
+                from: linked,
                 reason: Term::static_atom("noproc"),
                 linked: true,
                 normal_kills: false,
@@ -952,16 +1248,17 @@ impl Scheduler {
     /// ```
     pub(super) fn unlink(&mut self, target: ProcessId) {
         let current = self.current_process_mut().id;
-        if self.current_process_mut().links.get(&target) != Some(&0) {
+        let link = LinkId::Process(target);
+        if self.current_process_mut().links.get(&link) != Some(&0) {
             return;
         }
         let id = self.next_unlink_id;
         self.next_unlink_id += 1;
         let unlink = Signal::Unlink { from: current, id };
         if self.send_signal(Some(current), target, unlink).is_ok() {
-            self.current_process_mut().links.insert(target, id);
+            self.current_process_mut().links.insert(link, id);
         } else {
-            self.current_process_mut().links.remove(&target);
+            self.current_process_mut().links.remove(&link);
         }
     }
 
@@ -973,7 +1270,7 @@ impl Scheduler {
     /// current process. A pid gets a monitor signal through the pending
     /// signal slot (see [`Scheduler::send_monitor`]). A name that no process
     /// has, and each port name, give a monitor down signal `noproc` to the
-    /// current process at once: PBeam has no ports, so the port lookup
+    /// current process at once: PBeam registers no port, so the port lookup
     /// always fails (`bif.c:907-914`). The `DOWN` message gives the pid as
     /// its item, or `{Name, nonode@nohost}` for a name.
     ///
@@ -1163,10 +1460,38 @@ impl Scheduler {
         }
     }
 
+    /// Remove the registered name `name` from its process, as
+    /// `erlang:unregister/1` does with `erts_unregister_name`
+    /// (`bif.c:2324-2335`, `register.c:429-541`). Return `false` and change
+    /// nothing when `name` is not an atom or no process has the name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
+    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert!(scheduler.unregister(&name));
+    /// assert!(!scheduler.unregister(&name));
+    /// ```
+    pub(super) fn unregister(&mut self, name: &Term) -> bool {
+        let Term::Atom(name) = name else {
+            return false;
+        };
+        let Some(id) = self.names.remove(name.name()) else {
+            return false;
+        };
+        let process = self
+            .processes
+            .get_mut(&id)
+            .expect("a name belongs to a live process");
+        process.registered_name = None;
+        true
+    }
+
     /// Return the process that has the registered name `name`, as ERTS
     /// `erts_whereis_name_to_id` (`register.c:276-300`) finds it in the
     /// `process_reg` table. Return `None` when no live process has the name.
-    /// PBeam has no ports, so a name never gives a port.
+    /// PBeam registers no port, so a name never gives a port.
     ///
     /// # Examples
     ///
@@ -1379,17 +1704,21 @@ impl Scheduler {
                         if reds <= 0 {
                             return self.switch_out_freed(process, ExitPhase::Links(position));
                         }
-                        if unlinking == 0 {
-                            let exit = Signal::Exit {
-                                from: id,
-                                reason: reason.clone(),
-                                linked: true,
-                                normal_kills: false,
-                                alias: None,
-                            };
-                            // A linked process that does not exist drops the
-                            // signal.
-                            let _ = self.send_signal(Some(id), linked, exit);
+                        match linked {
+                            LinkId::Process(linked) if unlinking == 0 => {
+                                let exit = Signal::Exit {
+                                    from: LinkId::Process(id),
+                                    reason: reason.clone(),
+                                    linked: true,
+                                    normal_kills: false,
+                                    alias: None,
+                                };
+                                // A linked process that does not exist drops
+                                // the signal.
+                                let _ = self.send_signal(Some(id), linked, exit);
+                            }
+                            LinkId::Process(_) => {}
+                            LinkId::Port(port) => self.port_link_exit(port, id),
                         }
                         reds -= 1;
                     }
@@ -1473,9 +1802,11 @@ fn named_item(name: &Atom) -> Term {
     Term::Tuple(vec![Term::Atom(name.clone()), local_node()])
 }
 
+mod ports;
 mod signals;
 
 pub(super) use signals::{Flushed, HandlingPoint, Received};
 
 #[cfg(test)]
+#[path = "../../tests/runtime/scheduler.rs"]
 mod tests;

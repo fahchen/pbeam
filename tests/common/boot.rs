@@ -1,6 +1,6 @@
 //! The boot module of `examples/hello_world` and the pinned OTP modules that
 //! it calls. A test that runs the boot with the `pbeam` binary includes this
-//! file with `#[path = "common/boot.rs"] mod boot;`. A function in
+//! file with `#[path = "../common/boot.rs"] mod boot;`. A function in
 //! `common/mod.rs` would be dead code in each other test crate.
 
 use std::{
