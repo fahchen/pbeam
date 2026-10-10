@@ -120,3 +120,7 @@ Check the reduction budget before each unit of work that can grow with the input
 ## Published claims lack evidence checks
 
 Verify every acceptance, measurement, and comparison claim against its cited source before publishing it. Name the baseline and record decisions that differ from the cited requirement.
+
+## Concurrent cache initialization races
+
+Serialize cache creation before moving a downloaded or generated directory into its shared cache path. Check the destination again inside the serialization boundary before the move.
