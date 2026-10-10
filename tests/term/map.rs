@@ -89,8 +89,8 @@ fn keeps_flatmap_keys_in_order_and_replaces_values() {
     assert_eq!(map.len(), 4);
     // A key type that the flatmap does not support leaves the map unchanged.
     assert_eq!(
-        map.insert(Term::Tuple(vec![]), atom("v")),
-        Err(Term::Tuple(vec![]))
+        map.insert(Term::Map(Map::new()), atom("v")),
+        Err(Term::Map(Map::new()))
     );
     assert_eq!(map.len(), 4);
 }
@@ -115,21 +115,45 @@ fn orders_atoms_in_list_keys_by_name_in_a_flatmap() {
 }
 
 #[test]
-fn rejects_list_keys_with_unsupported_elements() {
+fn hashes_tuple_keys_with_the_internal_hash() {
+    // {}, {1, {a}}, [{}], and [1|{2}]: a tuple, also in a list or as an improper list tail.
+    let tuple = Term::Tuple(vec![Term::Integer(1), Term::Tuple(vec![atom("a")])]);
+    let keys = [
+        Term::Tuple(vec![]),
+        tuple,
+        Term::List(vec![Term::Tuple(vec![])]),
+        Term::ImproperList(
+            vec![Term::Integer(1)],
+            Box::new(Term::Tuple(vec![Term::Integer(2)])),
+        ),
+    ];
+    for key in keys {
+        assert_eq!(map_hash(&key), Some(internal_hash(&key)));
+    }
+    assert_eq!(map_hash(&Term::Tuple(vec![])), Some(4510301282025278020));
+}
+
+#[test]
+fn rejects_list_and_tuple_keys_with_unsupported_elements() {
     assert_eq!(
         map_hash(&Term::List(vec![])),
         Some(internal_hash(&Term::List(vec![])))
     );
+    let empty_map = || Term::Map(Map::new());
     let unsupported = [
-        Term::List(vec![Term::Integer(1), Term::Tuple(vec![])]),
-        Term::List(vec![Term::List(vec![Term::Tuple(vec![])])]),
+        Term::List(vec![Term::Integer(1), empty_map()]),
+        Term::List(vec![Term::List(vec![empty_map()])]),
         Term::List(vec![Term::Integer(1 << 59)]),
-        // [1|{}], [1|<<>>], and [[1|{}]]: an improper list tail that is not an immediate.
-        Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Tuple(vec![]))),
+        // {<<>>}, {1, #{}}, and {[1 bsl 59]}: a tuple with an element that is not supported.
+        Term::Tuple(vec![Term::Binary(vec![])]),
+        Term::Tuple(vec![Term::Integer(1), empty_map()]),
+        Term::Tuple(vec![Term::List(vec![Term::Integer(1 << 59)])]),
+        // [1|#{}], [1|<<>>], and [[1|#{}]]: an improper list tail that is not supported.
+        Term::ImproperList(vec![Term::Integer(1)], Box::new(empty_map())),
         Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Binary(vec![]))),
         Term::List(vec![Term::ImproperList(
             vec![Term::Integer(1)],
-            Box::new(Term::Tuple(vec![])),
+            Box::new(empty_map()),
         )]),
     ];
     for key in unsupported {

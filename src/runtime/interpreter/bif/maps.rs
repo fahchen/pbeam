@@ -163,7 +163,7 @@ pub(super) fn find(key: &Term, map: &Term) -> BifResult {
 /// # Errors
 ///
 /// Return a runtime error when a key is of a type that the map form does
-/// not support yet, for example a tuple key. Also return the runtime error
+/// not support yet, for example a map key. Also return the runtime error
 /// of [`ProcessState::bif_reductions_left`] for a negative budget.
 pub(super) fn from_list(
     process: &mut ProcessState,

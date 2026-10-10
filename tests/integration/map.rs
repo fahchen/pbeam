@@ -13,6 +13,7 @@ const ATOM_MAP_PROBE: &[u8] = include_bytes!("../../fixtures/map/atom_map_probe.
 const MAP_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_key_probe.beam");
 const BINARY_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/binary_key_probe.beam");
 const MAP_SIZE_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_size_probe.beam");
+const TUPLE_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/tuple_key_probe.beam");
 
 /// The numbers `N` of the binary keys `<<"kNN">>`, 1 to 33, in the order of a hashmap of these 33
 /// keys under the pinned ERTS.
@@ -570,5 +571,56 @@ fn gives_the_map_size_like_erts() {
         erl_reference("io:format(\"~w~n\", [map_size_probe:main()])"),
         b"[2,2,0,33,34,small,big,small,other,other,{error,{badmap,foo}},{error,{badmap,[1]}},\
           {error,{badmap,<<97,98>>}}]\n"
+    );
+}
+
+#[test]
+fn loads_and_updates_maps_with_tuple_keys_like_erts() {
+    let maps = pinned_beam("maps");
+    let program = BeamProgram::load(&[&maps, TUPLE_KEY_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let int = Term::Integer;
+    let tuple = Term::Tuple;
+    let pair = |key: Term, value: &str| tuple(vec![key, atom(value)]);
+    // A flatmap orders two top-level atoms by atom index (value before abs) and each other two
+    // keys in the term order: a tuple by its size, then by its elements, with atoms by name.
+    let keys = [
+        int(3),
+        atom("value"),
+        atom("abs"),
+        tuple(vec![]),
+        tuple(vec![int(1)]),
+        tuple(vec![atom("abs")]),
+        tuple(vec![atom("value")]),
+        tuple(vec![int(0), int(5)]),
+        tuple(vec![int(1), int(2)]),
+        tuple(vec![Term::List(vec![int(1)]), tuple(vec![int(2)])]),
+        Term::List(vec![int(1)]),
+    ];
+    let mut exact: Vec<Term> = ["h", "f", "g", "j", "c", "e", "d", "n", "m", "k", "i"]
+        .iter()
+        .zip(keys.iter())
+        .map(|(value, key)| pair(key.clone(), value))
+        .collect();
+    exact.insert(9, pair(tuple(vec![int(2), int(1)]), "l"));
+    assert_eq!(
+        program.execute("tuple_key_probe", "main", &[]).unwrap(),
+        Term::List(vec![
+            Term::List(keys.to_vec()),
+            atom("a"),
+            atom("d"),
+            atom("c"),
+            atom("j"),
+            Term::List(exact),
+            atom("true"),
+            atom("error"),
+        ])
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [tuple_key_probe:main()])"),
+        b"[[3,value,abs,{},{1},{abs},{value},{0,5},{1,2},{[1],{2}},[1]],a,d,c,j,[{3,h},{value,f},\
+          {abs,g},{{},j},{{1},c},{{abs},e},{{value},d},{{0,5},n},{{1,2},m},{{2,1},l},\
+          {{[1],{2}},k},{[1],i}],true,error]\n"
     );
 }

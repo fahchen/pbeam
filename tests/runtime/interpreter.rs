@@ -580,11 +580,11 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             map: map(vec![]),
             destination: Operand::X(0),
             pairs: vec![(
-                Operand::Value(Term::Tuple(vec![])),
+                Operand::Value(Term::Map(Map::new())),
                 Operand::Value(Term::Integer(1))
             )],
         }])
-        .contains("unsupported map key Tuple([])")
+        .contains("unsupported map key Map([])")
     );
 }
 
@@ -745,8 +745,8 @@ fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
 
 #[test]
 fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
-    // ERTS accepts a tuple key; a PBeam map does not hold one yet.
-    let pair = Term::Tuple(vec![Term::Tuple(vec![]), Term::Integer(0)]);
+    // ERTS accepts a map key; a PBeam map does not hold one yet.
+    let pair = Term::Tuple(vec![Term::Map(Map::new()), Term::Integer(0)]);
     let from_list = make_program(
         vec![
             Instruction::Move(Operand::Value(Term::List(vec![pair])), Operand::X(0)),
@@ -764,7 +764,7 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
     .execute("fixture", "main", &[]);
     assert_eq!(
         from_list.unwrap_err().to_string(),
-        "unsupported map key Tuple([])"
+        "unsupported map key Map([])"
     );
 }
 
