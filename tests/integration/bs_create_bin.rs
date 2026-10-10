@@ -8,6 +8,8 @@ const BS_CREATE_BIN_APPEND_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_append_probe.beam");
 const BS_CREATE_BIN_ALLOC_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_alloc_probe.beam");
+const BS_CREATE_BIN_INTEGER_PROBE: &[u8] =
+    include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_integer_probe.beam");
 const BS_CREATE_BIN_ALLOC_LIMIT: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_alloc_limit.beam");
 
@@ -202,18 +204,18 @@ fn uses_one_reduction_for_each_1024_bytes_of_a_binary_segment() {
 
 #[test]
 fn stops_at_a_segment_type_that_is_not_implemented() {
-    // `byte/1` is `<<"b", X>>`: a string segment and an integer segment.
-    // ERTS gives `<<98,7>>`. PBeam stops at the integer segment (row
-    // "Binary construction").
+    // `utf16/1` is `<<"b", X/utf16>>`: a string segment and a utf16
+    // segment. ERTS gives `<<98,0,7>>`. PBeam stops at the utf16 segment
+    // (row "Binary construction").
     let program = BeamProgram::load(&[BS_CREATE_BIN_PROBE]).unwrap();
     assert_eq!(
         program
-            .execute("bs_create_bin_probe", "byte", &[Term::Integer(7)])
+            .execute("bs_create_bin_probe", "utf16", &[Term::Integer(7)])
             .unwrap_err()
             .to_string(),
-        "unsupported bs_create_bin segment integer"
+        "unsupported bs_create_bin segment utf16"
     );
-    assert_eq!(reference("bs_create_bin_probe:byte(7)"), "<<98,7>>\n");
+    assert_eq!(reference("bs_create_bin_probe:utf16(7)"), "<<98,0,7>>\n");
 }
 
 #[test]
@@ -569,5 +571,614 @@ fn copies_a_binary_that_an_append_built_where_erts_appends_in_place() {
         ),
         "[{0,0,1,1},{0,1,1,2},{1024,1,1,1026},{100000,1,1,100002},{100000,0,1,100001},\
          {0,1024,2,1025}]\n"
+    );
+}
+
+/// Render an integer, an atom, or a binary as `io:format("~w")` does.
+fn render(term: &Term) -> String {
+    match term {
+        Term::Integer(value) => value.to_string(),
+        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Binary(bytes) => {
+            let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
+            format!("<<{}>>", bytes.join(","))
+        }
+        other => panic!("render has no form for {other:?}"),
+    }
+}
+
+/// Run `bs_create_bin_integer_probe:Function` with its arguments.
+fn run_integer(program: &BeamProgram, function: &str, arguments: &[Term]) -> Term {
+    program
+        .execute("bs_create_bin_integer_probe", function, arguments)
+        .unwrap()
+}
+
+/// Return the ERTS expression that calls `bs_create_bin_integer_probe:Function`
+/// for each case, in a list.
+fn integer_calls<'a>(calls: impl Iterator<Item = (&'a str, &'a [Term])>) -> String {
+    let calls: Vec<String> = calls
+        .map(|(function, arguments)| {
+            let arguments: Vec<String> = arguments.iter().map(render).collect();
+            format!(
+                "bs_create_bin_integer_probe:{function}({})",
+                arguments.join(", ")
+            )
+        })
+        .collect();
+    format!("[{}]", calls.join(", "))
+}
+
+#[test]
+fn builds_integer_and_utf8_segments_as_pinned_erts() {
+    // Each case runs one segment form that the compiler writes: sizes 0, 8,
+    // 16, and 72, the big, little, and native byte orders, sizes in a
+    // register of unit 1 and unit 8, segments that do not start on a byte
+    // boundary, and utf8 code points of 1 to 4 bytes. A value is written
+    // modulo 2^Size, and a size above 64 repeats the sign bit.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_INTEGER_PROBE]).unwrap();
+    let int = Term::Integer;
+    let cases: Vec<(&str, Vec<Term>, Vec<u8>)> = vec![
+        ("byte", vec![int(1)], vec![1]),
+        ("byte", vec![int(263)], vec![7]),
+        ("byte", vec![int(-1)], vec![255]),
+        ("big16", vec![int(0x1234)], vec![0x12, 0x34]),
+        ("big16", vec![int(-2)], vec![255, 254]),
+        ("little16", vec![int(0x1234)], vec![0x34, 0x12]),
+        ("native16", vec![int(0x1234)], vec![0x34, 0x12]),
+        ("wide", vec![int(-1)], vec![255; 9]),
+        (
+            "wide",
+            vec![int(0x0102_0304_0506_0708)],
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
+        ),
+        ("wide", vec![int(1 << 62)], vec![0, 64, 0, 0, 0, 0, 0, 0, 0]),
+        (
+            "wide_little",
+            vec![int(0x0102_0304_0506_0708)],
+            vec![8, 7, 6, 5, 4, 3, 2, 1, 0],
+        ),
+        (
+            "wide_little",
+            vec![int(-2)],
+            vec![254, 255, 255, 255, 255, 255, 255, 255, 255],
+        ),
+        ("nibbles", vec![int(0xA), int(0xB)], vec![0xAB]),
+        ("nibbles", vec![int(0x1F), int(-1)], vec![0xFF]),
+        ("little12", vec![int(0xABC), int(0xD)], vec![0xBC, 0xAD]),
+        ("odd", vec![int(5), int(0x1234)], vec![166, 146]),
+        ("odd", vec![int(-1), int(-1)], vec![255, 255]),
+        ("sized", vec![int(1), int(16)], vec![0, 1]),
+        ("sized", vec![int(-1), int(0)], vec![]),
+        ("bytes", vec![int(0x01_0203), int(3)], vec![1, 2, 3]),
+        ("bytes", vec![int(-1), int(0)], vec![]),
+        ("little_bytes", vec![int(0x01_0203), int(3)], vec![3, 2, 1]),
+        (
+            "little_bytes",
+            vec![int(-3), int(9)],
+            vec![253, 255, 255, 255, 255, 255, 255, 255, 255],
+        ),
+        ("zero", vec![int(5)], b"a".to_vec()),
+        ("pair", vec![int(1), int(2)], vec![1, 2]),
+        ("little_pair", vec![int(1), int(2)], vec![1, 2]),
+        (
+            "before_binary",
+            vec![int(1), Term::Binary(vec![2, 3])],
+            vec![1, 2, 3],
+        ),
+        (
+            "append",
+            vec![Term::Binary(vec![1, 2]), int(3)],
+            vec![1, 2, 3],
+        ),
+        ("append", vec![Term::Binary(Vec::new()), int(300)], vec![44]),
+        (
+            "append_sized",
+            vec![Term::Binary(vec![1, 2]), int(5), int(0)],
+            vec![1, 2],
+        ),
+        ("code", vec![int(0)], vec![0]),
+        ("code", vec![int(0x7F)], vec![0x7F]),
+        ("code", vec![int(0x80)], vec![0xC2, 0x80]),
+        ("code", vec![int(0x7FF)], vec![0xDF, 0xBF]),
+        ("code", vec![int(0x800)], vec![0xE0, 0xA0, 0x80]),
+        ("code", vec![int(0xD7FF)], vec![0xED, 0x9F, 0xBF]),
+        ("code", vec![int(0xE000)], vec![0xEE, 0x80, 0x80]),
+        ("code", vec![int(0xFFFF)], vec![0xEF, 0xBF, 0xBF]),
+        ("code", vec![int(0x10000)], vec![0xF0, 0x90, 0x80, 0x80]),
+        ("code", vec![int(0x10_FFFF)], vec![0xF4, 0x8F, 0xBF, 0xBF]),
+        ("code_tail", vec![int(0xE9)], vec![0xC3, 0xA9, b'!']),
+        (
+            "code_append",
+            vec![Term::Binary(vec![1]), int(0x1_F600)],
+            vec![1, 0xF0, 0x9F, 0x98, 0x80],
+        ),
+        (
+            "sized_code",
+            vec![int(0x41), int(8), int(0xE9)],
+            vec![0x41, 0xC3, 0xA9],
+        ),
+        (
+            "sized_code",
+            vec![int(0x1234), int(16), int(0x41)],
+            vec![0x12, 0x34, 0x41],
+        ),
+    ];
+    for (function, arguments, bytes) in &cases {
+        assert_eq!(
+            run_integer(&program, function, arguments),
+            Term::Binary(bytes.clone()),
+            "{function}{arguments:?}"
+        );
+    }
+    let expected: Vec<String> = cases
+        .iter()
+        .map(|(_, _, bytes)| render(&Term::Binary(bytes.clone())))
+        .collect();
+    assert_eq!(
+        reference(&integer_calls(cases.iter().map(
+            |(function, arguments, _)| (*function, arguments.as_slice())
+        ))),
+        format!("[{}]\n", expected.join(","))
+    );
+}
+
+#[test]
+fn jumps_to_the_fail_label_for_integer_and_utf8_segments_that_fail() {
+    // The guards of `guard/1` and `code_guard/1` compile to `bs_create_bin`
+    // with the fail label of the next clause.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_INTEGER_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let cases = [
+        ("guard", Term::Integer(1)),
+        ("guard", Term::Integer(2)),
+        ("guard", atom("other")),
+        ("code_guard", Term::Integer(0xE9)),
+        ("code_guard", Term::Integer(-1)),
+        ("code_guard", atom("other")),
+    ];
+    let results: Vec<Term> = cases
+        .iter()
+        .map(|(function, argument)| run_integer(&program, function, std::slice::from_ref(argument)))
+        .collect();
+    assert_eq!(
+        results,
+        [
+            atom("one"),
+            atom("other"),
+            atom("other"),
+            atom("e"),
+            atom("other"),
+            atom("other")
+        ]
+    );
+    assert_eq!(
+        reference(&integer_calls(cases.iter().map(|(function, argument)| (
+            *function,
+            std::slice::from_ref(argument)
+        )))),
+        "[one,other,other,e,other,other]\n"
+    );
+}
+
+/// A call of `bs_create_bin_integer_probe` that fails: the function, the
+/// arguments, the exception reason, and the segment, operation, info, and
+/// value of the `error_info` cause.
+type FailureCase<'a> = (&'a str, Vec<Term>, &'a str, i64, &'a str, &'a str, Term);
+
+#[test]
+fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
+    // The size pass checks the sizes of `integer` segments, the code
+    // points of `utf8` segments, and the terms of `binary` segments in
+    // segment order. Then the `append` segment is checked. Then the
+    // construct pass checks the term of each `integer` segment, and checks
+    // a group of little-endian segments in reverse order. A size that is a
+    // positive bignum, or a size of 2^52 or more with a unit other than 1,
+    // raises `system_limit`.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_INTEGER_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let int = Term::Integer;
+    let (one, other) = (atom("one"), atom("other"));
+    let cases: Vec<FailureCase> = vec![
+        (
+            "byte",
+            vec![other.clone()],
+            "badarg",
+            1,
+            "integer",
+            "type",
+            other.clone(),
+        ),
+        (
+            "byte",
+            vec![Term::Binary(vec![1])],
+            "badarg",
+            1,
+            "integer",
+            "type",
+            Term::Binary(vec![1]),
+        ),
+        (
+            "sized",
+            vec![int(1), int(-1)],
+            "badarg",
+            1,
+            "integer",
+            "size",
+            int(-1),
+        ),
+        (
+            "sized",
+            vec![int(1), other.clone()],
+            "badarg",
+            1,
+            "integer",
+            "size",
+            other.clone(),
+        ),
+        (
+            "sized",
+            vec![other.clone(), int(-1)],
+            "badarg",
+            1,
+            "integer",
+            "size",
+            int(-1),
+        ),
+        (
+            "sized",
+            vec![int(1), int(1 << 59)],
+            "system_limit",
+            1,
+            "integer",
+            "size",
+            int(1 << 59),
+        ),
+        (
+            "sized",
+            vec![int(1), int(-(1 << 59) - 1)],
+            "badarg",
+            1,
+            "integer",
+            "size",
+            int(-(1 << 59) - 1),
+        ),
+        (
+            "sized",
+            vec![other.clone(), int(0)],
+            "badarg",
+            1,
+            "integer",
+            "type",
+            other.clone(),
+        ),
+        (
+            "bytes",
+            vec![int(1), int(1 << 52)],
+            "system_limit",
+            1,
+            "integer",
+            "size",
+            int(1 << 52),
+        ),
+        (
+            "bytes",
+            vec![int(1), int(-1)],
+            "badarg",
+            1,
+            "integer",
+            "size",
+            int(-1),
+        ),
+        (
+            "little_bytes",
+            vec![other.clone(), int(1 << 52)],
+            "system_limit",
+            1,
+            "integer",
+            "size",
+            int(1 << 52),
+        ),
+        (
+            "zero",
+            vec![other.clone()],
+            "badarg",
+            1,
+            "integer",
+            "type",
+            other.clone(),
+        ),
+        (
+            "pair",
+            vec![other.clone(), one.clone()],
+            "badarg",
+            1,
+            "integer",
+            "type",
+            other.clone(),
+        ),
+        (
+            "pair",
+            vec![int(1), one.clone()],
+            "badarg",
+            2,
+            "integer",
+            "type",
+            one.clone(),
+        ),
+        (
+            "little_pair",
+            vec![other.clone(), one.clone()],
+            "badarg",
+            2,
+            "integer",
+            "type",
+            one.clone(),
+        ),
+        (
+            "little_pair",
+            vec![other.clone(), int(2)],
+            "badarg",
+            1,
+            "integer",
+            "type",
+            other.clone(),
+        ),
+        (
+            "little12",
+            vec![other.clone(), one.clone()],
+            "badarg",
+            1,
+            "integer",
+            "type",
+            other.clone(),
+        ),
+        (
+            "odd",
+            vec![other.clone(), one.clone()],
+            "badarg",
+            1,
+            "integer",
+            "type",
+            other.clone(),
+        ),
+        (
+            "before_binary",
+            vec![other.clone(), one.clone()],
+            "badarg",
+            2,
+            "binary",
+            "type",
+            one.clone(),
+        ),
+        (
+            "before_binary",
+            vec![other.clone(), Term::Binary(Vec::new())],
+            "badarg",
+            1,
+            "integer",
+            "type",
+            other.clone(),
+        ),
+        (
+            "append",
+            vec![other.clone(), one.clone()],
+            "badarg",
+            1,
+            "binary",
+            "type",
+            other.clone(),
+        ),
+        (
+            "append",
+            vec![Term::Binary(Vec::new()), one.clone()],
+            "badarg",
+            2,
+            "integer",
+            "type",
+            one.clone(),
+        ),
+        (
+            "append_sized",
+            vec![Term::Binary(vec![1]), other.clone(), int(0)],
+            "badarg",
+            2,
+            "integer",
+            "type",
+            other.clone(),
+        ),
+        ("code", vec![int(-1)], "badarg", 1, "utf8", "type", int(-1)),
+        (
+            "code",
+            vec![int(0xD800)],
+            "badarg",
+            1,
+            "utf8",
+            "type",
+            int(0xD800),
+        ),
+        (
+            "code",
+            vec![int(0xDFFF)],
+            "badarg",
+            1,
+            "utf8",
+            "type",
+            int(0xDFFF),
+        ),
+        (
+            "code",
+            vec![int(0x11_0000)],
+            "badarg",
+            1,
+            "utf8",
+            "type",
+            int(0x11_0000),
+        ),
+        (
+            "code",
+            vec![other.clone()],
+            "badarg",
+            1,
+            "utf8",
+            "type",
+            other.clone(),
+        ),
+        (
+            "code_append",
+            vec![other.clone(), int(-1)],
+            "badarg",
+            2,
+            "utf8",
+            "type",
+            int(-1),
+        ),
+        (
+            "sized_code",
+            vec![other.clone(), one.clone(), int(-1)],
+            "badarg",
+            1,
+            "integer",
+            "size",
+            one.clone(),
+        ),
+        (
+            "sized_code",
+            vec![other.clone(), int(8), int(-1)],
+            "badarg",
+            2,
+            "utf8",
+            "type",
+            int(-1),
+        ),
+        (
+            "sized_code",
+            vec![other.clone(), int(8), int(0x41)],
+            "badarg",
+            1,
+            "integer",
+            "type",
+            other.clone(),
+        ),
+    ];
+    let caught = |function: &str, arity: usize, reason: &str, cause: Term| {
+        let error_info = Map::from_pairs(vec![
+            (atom("cause"), cause),
+            (atom("function"), atom("format_bs_fail")),
+            (atom("module"), atom("erl_erts_errors")),
+        ])
+        .unwrap();
+        let frame = Term::Tuple(vec![
+            atom("bs_create_bin_integer_probe"),
+            atom(function),
+            Term::Integer(arity as i64),
+            Term::List(vec![Term::Tuple(vec![
+                atom("error_info"),
+                Term::Map(error_info),
+            ])]),
+        ]);
+        Term::Tuple(vec![atom("error"), atom(reason), frame])
+    };
+    for (function, arguments, reason, segment, operation, info, value) in &cases {
+        let cause = Term::Tuple(vec![
+            int(*segment),
+            atom(operation),
+            atom(info),
+            value.clone(),
+        ]);
+        assert_eq!(
+            run_integer(
+                &program,
+                "catch_call",
+                &[atom(function), Term::List(arguments.clone())]
+            ),
+            caught(function, arguments.len(), reason, cause),
+            "{function}{arguments:?}"
+        );
+    }
+    // The arm64 JIT of the macOS arm64 target fails a size of 2^52 or more
+    // with a unit other than 1 (jit/arm/instr_bs.cpp:1685). The x86_64 JIT
+    // fails only when the size times the unit overflows 64 bits
+    // (jit/x86/instr_bs.cpp:1942-1943), so ERTS on an x86_64 host stops at
+    // the allocation. Compare these cases with ERTS only on arm64.
+    let reference_cases: Vec<&FailureCase> = cases
+        .iter()
+        .filter(|(.., value)| cfg!(target_arch = "aarch64") || *value != int(1 << 52))
+        .collect();
+    let calls: Vec<String> = reference_cases
+        .iter()
+        .map(|(function, arguments, ..)| {
+            let arguments: Vec<String> = arguments.iter().map(render).collect();
+            format!(
+                "bs_create_bin_integer_probe:catch_call({function}, [{}])",
+                arguments.join(",")
+            )
+        })
+        .collect();
+    let expected: Vec<String> = reference_cases
+        .iter()
+        .map(
+            |(function, arguments, reason, segment, operation, info, value)| {
+                format!(
+                    "{{error,{reason},{{bs_create_bin_integer_probe,{function},{},[{{error_info,\
+                 #{{cause => {{{segment},{operation},{info},{}}},function => format_bs_fail,\
+                 module => erl_erts_errors}}}}]}}}}",
+                    arguments.len(),
+                    render(value)
+                )
+            },
+        )
+        .collect();
+    assert_eq!(
+        reference(&format!("[{}]", calls.join(", "))),
+        format!("[{}]\n", expected.join(","))
+    );
+}
+
+#[test]
+fn uses_no_reduction_for_an_integer_segment() {
+    // `cost/2` gives the reductions between two `process_info/2` calls
+    // around `<<X:N>>`: 1 for the second call. `erts_bs_put_integer_be`
+    // uses no reductions (erl_bits.c:926-1028). The ERTS run gives the
+    // process a large heap and binary heap, so that no garbage collection
+    // occurs.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_INTEGER_PROBE]).unwrap();
+    let cases = [(1, 8), (1, 800_000), (-1, 8_000_000)];
+    for (value, bits) in cases {
+        assert_eq!(
+            run_integer(
+                &program,
+                "cost",
+                &[Term::Integer(value), Term::Integer(bits)]
+            ),
+            Term::Tuple(vec![Term::Integer(1), Term::Integer(bits / 8)])
+        );
+    }
+    assert_eq!(
+        reference(
+            "begin Self = self(), [begin spawn_opt(fun() -> \
+             Self ! bs_create_bin_integer_probe:cost(X, N) end, \
+             [{min_heap_size,4000000},{min_bin_vheap_size,40000000}]), \
+             receive R -> R end end || {X, N} <- [{1, 8}, {1, 800000}, {-1, 8000000}]] end"
+        ),
+        "[{1,1},{1,100000},{1,1000000}]\n"
+    );
+}
+
+#[test]
+fn stops_at_a_bitstring_that_is_not_a_binary() {
+    // `nibble/1` is `<<X:4>>`. ERTS gives the bitstring `<<1:4>>`. PBeam
+    // has no bitstring term and stops (row "Binary construction").
+    let program = BeamProgram::load(&[BS_CREATE_BIN_INTEGER_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("bs_create_bin_integer_probe", "nibble", &[Term::Integer(1)])
+            .unwrap_err()
+            .to_string(),
+        "unsupported bs_create_bin result: a bitstring of 4 bits, which is not a binary"
+    );
+    assert_eq!(
+        reference("bs_create_bin_integer_probe:nibble(1)"),
+        "<<1:4>>\n"
     );
 }
