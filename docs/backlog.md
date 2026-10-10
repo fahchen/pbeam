@@ -245,6 +245,20 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - `maps:remove/2` (#129) rebuilds the map, which is O(n). ERTS changes one HAMT path.
 - **Trigger:** a hot path removes keys from large maps.
 
+### Find the key of an ETS object without a search of all objects
+
+- `Table::insert` and `Table::object` in `src/runtime/ets.rs` compare the key with each object of the table, so an insert of a list of N objects takes O(N^2) time. ERTS finds the bucket of the key from its hash (`erl_db_hash.c`).
+- **Evidence:** the `ets:insert/2` cases of `fixtures/preempt/input_probe.erl` (in `costs/1`, `longs/1`, and `vanish/1`, with up to 40000 objects) use about 15 s of the 26 s of the `input_reductions` test without coverage on an Apple M1 Max host, and that test takes about 72 s on CI (#355). The table fills of `exit_owned_probe` have the same cost.
+- **Trigger:** an owner decision to make the CI test time shorter again, or a consumer with large ETS tables.
+- **Source:** PR for #355.
+
+### Build a list cons and a map update without a copy
+
+- A `Term::List` holds its elements in one `Vec`, so a cons copies the tail, and `put_map_assoc` reads a copy of the whole map for a map update `M#{K => V}`. The probes build long lists with `++` of two halves, in O(N log N) time. ERTS makes a cons and a HAMT path update in constant and O(log N) time.
+- **Evidence:** on PBeam, `pairs(1, 100000)` of `bif_cost_probe` takes about 1.5 s, and a loop of 100000 updates `M#{N => N}` did not end in 10 minutes (#355).
+- **Trigger:** an owner decision to make the CI test time shorter again, or a consumer that builds long lists or large maps.
+- **Source:** PR for #355.
+
 ### Transfer an ETS table to a live heir
 
 - `give_away_to_heir`, the `ETS-TRANSFER` message, and the heir checks of `ets:new/2`.
