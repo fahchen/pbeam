@@ -159,7 +159,7 @@ pub(super) fn denial(
     operation: Operation,
     name: Option<&[u8]>,
 ) -> Result<Option<BifResult>, BeamError> {
-    let security = &scheduler.current_process_mut().security;
+    let security = &scheduler.current_process().security;
     if security.check(kind, operation, name).is_ok() {
         return Ok(None);
     }
