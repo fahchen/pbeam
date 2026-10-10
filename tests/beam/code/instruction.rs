@@ -717,6 +717,28 @@ fn decodes_the_is_float_test_of_the_float_test_probe_fixture() {
 }
 
 #[test]
+fn decodes_the_is_bitstr_test_of_the_bitstr_probe_fixture() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/bitstr/bitstr_probe.beam` has these bytes.
+    let is_bitstr = [0x81, 0x55, 0x03]; // kind/1: is_bitstr f5 x0
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([&is_bitstr[..], &[0x03]].concat());
+    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::Test {
+                kind: TestKind::Bitstring,
+                fail_label: 5,
+                value: Operand::X(0),
+            },
+            Instruction::End,
+        ]
+    ));
+}
+
+#[test]
 fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
     // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/io_start/io_start_probe.beam` has these bytes.
