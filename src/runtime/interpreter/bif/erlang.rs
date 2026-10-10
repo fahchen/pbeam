@@ -180,6 +180,12 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
     "erts_alloc",
 ];
 
+/// The minimum heap size in words, `H_MIN_SIZE` of ERTS. ERTS starts it at
+/// `H_DEFAULT_SIZE` (`erl_vm.h:66`, `erl_init.c:808`). Only the emulator
+/// flag `+hms` and the item `min_heap_size` change it, and PBeam has
+/// neither, so the value stays 233.
+const MIN_HEAP_SIZE: i64 = 233;
+
 /// Run `erlang:system_flag(Item, Value)` as ERTS `system_flag_2`
 /// (`bif.c:4972-5304`) does for the items `system_logger` and
 /// `debug_flags`. `system_logger` takes `logger`, `undefined`, or a local
@@ -191,6 +197,13 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// `finalize`. Each item of `UNSUPPORTED_SYSTEM_FLAGS` first checks its
 /// value as ERTS does (`unsupported_system_flag_value`), and raises
 /// `badarg` for a value that is not valid.
+///
+/// After the check of the item and the value, the caller needs a `runtime`
+/// capability that permits `system_flag`, else the call raises
+/// `error:capability_denied` and sets nothing. The check covers each item
+/// that ERTS accepts, also `debug_flags`. A value that only the missing
+/// subsystem rejects, such as a scheduler count above the host count, gives
+/// `capability_denied` to a denied caller where ERTS raises `badarg`.
 ///
 /// PBeam writes no error report (row "Error report" in
 /// `docs/erts-differences.md`), so the system logger value has no other
@@ -210,7 +223,9 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// # Errors
 ///
 /// Each item of `UNSUPPORTED_SYSTEM_FLAGS` with a value that passes the
-/// check, and `time_offset` with `finalize`, give a runtime error.
+/// check, and `time_offset` with `finalize`, give a runtime error. A new
+/// `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
 pub(super) fn system_flag(
     context: &mut BifContext<'_>,
     item: &Term,
@@ -224,24 +239,39 @@ pub(super) fn system_flag(
         Term::Atom(logger) => matches!(logger.name(), "logger" | "undefined"),
         _ => false,
     };
-    Ok(match (item.name(), value) {
-        ("system_logger", _) if logger => Value(std::mem::replace(
-            &mut context.scheduler.system_logger,
+    let valid = match (item.name(), value) {
+        ("system_logger", _) => logger,
+        ("debug_flags", _) => true,
+        ("time_offset", Term::Atom(finalize)) => finalize.name() == "finalize",
+        (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
+            unsupported_system_flag_value(name, value)
+        }
+        _ => false,
+    };
+    if !valid {
+        return Ok(BifResult::badarg());
+    }
+    let scheduler = &mut *context.scheduler;
+    let check = denial(
+        scheduler,
+        CapabilityKind::Runtime,
+        Operation::SystemFlag,
+        None,
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    Ok(match item.name() {
+        "system_logger" => Value(std::mem::replace(
+            &mut scheduler.system_logger,
             value.clone(),
         )),
-        ("debug_flags", _) => Value(Term::static_atom("true")),
-        ("time_offset", Term::Atom(finalize)) if finalize.name() == "finalize" => {
-            return Err(error("unsupported erlang:system_flag/2 item time_offset"));
-        }
-        (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
-            if !unsupported_system_flag_value(name, value) {
-                return Ok(BifResult::badarg());
-            }
+        "debug_flags" => Value(Term::static_atom("true")),
+        name => {
             return Err(error(format!(
                 "unsupported erlang:system_flag/2 item {name}"
             )));
         }
-        _ => BifResult::badarg(),
     })
 }
 
@@ -271,13 +301,17 @@ pub(super) fn system_flag(
 ///   (`erts_set_cpu_topology`, `erl_cpu_topology.c:1348-1400`).
 /// - `erts_alloc` takes `{Allocator, Parameter, Value}` with two atoms and
 ///   an integer (`erts_alloc_set_dyn_param`, `erl_alloc.c:3445-3462`).
+/// - `max_heap_size` takes a small integer `Size`, or a map with a small
+///   integer `size` key and the optional boolean keys `kill`,
+///   `error_logger`, and `include_shared_binaries` (`erts_max_heap_size`,
+///   `erl_gc.c:3824-3872`). `Size` is 0 or at least the minimum heap size
+///   (`bif.c:5089-5090`).
 ///
-/// `max_heap_size`, `reset_seq_trace`, `cpu_topology`, and
-/// `scheduler_bind_type` accept each value here. ERTS also rejects a value
-/// that this check accepts when the value needs the state of the missing
-/// subsystem: the scheduler count, the tracer module, the allocator names,
-/// the CPU topology checks, the minimum heap size, and the CPU binding
-/// support of the host.
+/// `reset_seq_trace`, `cpu_topology`, and `scheduler_bind_type` accept each
+/// value here. ERTS also rejects a value that this check accepts when the
+/// value needs the state of the missing subsystem: the scheduler count, the
+/// tracer module, the allocator names, the CPU topology checks, and the CPU
+/// binding support of the host.
 ///
 /// # Examples
 ///
@@ -336,6 +370,27 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
             ),
             _ => false,
         },
+        "max_heap_size" => {
+            let size = match value {
+                Term::Map(map) => {
+                    let flag = |key| {
+                        map.get(&Term::static_atom(key)).is_none_or(
+                            |flag| matches!(flag, Term::Atom(flag) if matches!(flag.name(), "true" | "false")),
+                        )
+                    };
+                    if !["kill", "error_logger", "include_shared_binaries"]
+                        .into_iter()
+                        .all(flag)
+                    {
+                        return false;
+                    }
+                    map.get(&Term::static_atom("size"))
+                        .and_then(Term::small_integer)
+                }
+                _ => small,
+            };
+            size.is_some_and(|size| size == 0 || size >= MIN_HEAP_SIZE)
+        }
         _ => true,
     }
 }
@@ -2299,14 +2354,29 @@ const HALT_FLUSH_TIMEOUT_STATUS: i32 = 255;
 /// writes no core dump and no crash dump. Each other `Status` raises
 /// `badarg` (`bif.c:4379`, `4388-4393`).
 ///
+/// After the checks of the options and of `Status`, the caller needs a
+/// `runtime` capability that permits `halt`, else the call raises
+/// `error:capability_denied` and the run goes on. ERTS checks the same
+/// arguments before it stops (`bif.c:4316-4389`).
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(halt(&Term::Integer(259), &Term::List(vec![])), Err(BeamError::Halt(259)));
-/// assert!(matches!(halt(&Term::Integer(-1), &Term::List(vec![])), Ok(BifResult::Raise { .. })));
-/// assert!(halt(&Term::static_atom("abort"), &Term::List(vec![])).is_err());
+/// assert_eq!(halt(&mut scheduler, &Term::Integer(259), &Term::List(vec![])), Err(BeamError::Halt(259)));
+/// assert!(matches!(halt(&mut scheduler, &Term::Integer(-1), &Term::List(vec![])), Ok(BifResult::Raise { .. })));
+/// assert!(halt(&mut scheduler, &Term::static_atom("abort"), &Term::List(vec![])).is_err());
 /// ```
-pub(super) fn halt(status: &Term, options: &Term) -> Result<BifResult, BeamError> {
+///
+/// # Errors
+///
+/// A halt gives [`BeamError::Halt`]. `abort` and a slogan give a runtime
+/// error. A new `capability_denied` atom in a full atom table gives the
+/// error of `AtomTable::put`.
+pub(super) fn halt(
+    scheduler: &mut Scheduler,
+    status: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
     let Term::List(options) = options else {
         return Ok(BifResult::badarg());
     };
@@ -2331,22 +2401,27 @@ pub(super) fn halt(status: &Term, options: &Term) -> Result<BifResult, BeamError
             _ => return Ok(BifResult::badarg()),
         }
     }
-    match status {
+    let stop = match status {
         Term::Integer(code) if *code >= 0 => {
             if flush && timeout == Some(0) {
-                return Err(BeamError::Halt(HALT_FLUSH_TIMEOUT_STATUS));
+                BeamError::Halt(HALT_FLUSH_TIMEOUT_STATUS)
+            } else {
+                let code = i32::try_from(code & i64::from(i32::MAX)).expect("masked to INT_MAX");
+                BeamError::Halt(code)
             }
-            let code = i32::try_from(code & i64::from(i32::MAX)).expect("masked to INT_MAX");
-            Err(BeamError::Halt(code))
         }
-        Term::Atom(abort) if abort.name() == "abort" => Err(error(
-            "unsupported erlang:halt/2 with abort: PBeam writes no core dump",
-        )),
-        _ if is_slogan(status) => Err(error(
-            "unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump",
-        )),
-        _ => Ok(BifResult::badarg()),
+        Term::Atom(abort) if abort.name() == "abort" => {
+            error("unsupported erlang:halt/2 with abort: PBeam writes no core dump")
+        }
+        _ if is_slogan(status) => {
+            error("unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump")
+        }
+        _ => return Ok(BifResult::badarg()),
+    };
+    if let Some(denied) = denial(scheduler, CapabilityKind::Runtime, Operation::Halt, None)? {
+        return Ok(denied);
     }
+    Err(stop)
 }
 
 /// The most characters of a crash dump slogan, as `HALT_MSG_SIZE`

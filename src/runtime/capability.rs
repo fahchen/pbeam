@@ -35,6 +35,9 @@ pub enum CapabilityKind {
     Env,
     /// The host signal dispositions.
     Signal,
+    /// The whole runtime: the stop of the run, the system flags, and the
+    /// load of a NIF library.
+    Runtime,
 }
 
 /// An operation that a capability can permit. Each kind permits only its
@@ -65,6 +68,12 @@ pub enum Operation {
     Handle,
     /// `signal`: ignore a host signal.
     Ignore,
+    /// `runtime`: stop the run.
+    Halt,
+    /// `runtime`: set a system flag.
+    SystemFlag,
+    /// `runtime`: load a NIF library.
+    LoadNif,
 }
 
 /// The value form of the names in a constraint field, in the term of the
@@ -92,7 +101,7 @@ struct KindSpec {
 
 /// The kinds of the design table (section "Capability kinds" of
 /// `docs/capability-security-migration.md`).
-const KINDS: [KindSpec; 5] = [
+const KINDS: [KindSpec; 6] = [
     KindSpec {
         kind: CapabilityKind::Process,
         name: "process",
@@ -133,10 +142,16 @@ const KINDS: [KindSpec; 5] = [
         operations: &[Operation::Handle, Operation::Ignore],
         constraint: Some(("signals", NameForm::Atom)),
     },
+    KindSpec {
+        kind: CapabilityKind::Runtime,
+        name: "runtime",
+        operations: &[Operation::Halt, Operation::SystemFlag, Operation::LoadNif],
+        constraint: None,
+    },
 ];
 
 /// The atom of each operation in the `{capabilities, Map}` option.
-const OPERATION_NAMES: [(Operation, &str); 12] = [
+const OPERATION_NAMES: [(Operation, &str); 15] = [
     (Operation::Spawn, "spawn"),
     (Operation::Link, "link"),
     (Operation::Monitor, "monitor"),
@@ -149,6 +164,9 @@ const OPERATION_NAMES: [(Operation, &str); 12] = [
     (Operation::Close, "close"),
     (Operation::Handle, "handle"),
     (Operation::Ignore, "ignore"),
+    (Operation::Halt, "halt"),
+    (Operation::SystemFlag, "system_flag"),
+    (Operation::LoadNif, "load_nif"),
 ];
 
 impl CapabilityKind {
@@ -319,7 +337,7 @@ impl Capability {
     /// # Errors
     ///
     /// An operation of another kind, and a `Constraint::Only` for the
-    /// `terminal` kind, which has no constraint field.
+    /// `terminal` or `runtime` kind, which has no constraint field.
     pub fn new(
         kind: CapabilityKind,
         operations: &[Operation],
@@ -386,7 +404,7 @@ pub trait Policy {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(AllowAll.initial().len(), 5);
+    /// assert_eq!(AllowAll.initial().len(), 6);
     /// ```
     fn initial(&self) -> Vec<Capability>;
 
@@ -425,7 +443,7 @@ impl Policy for AllowAll {
     ///
     /// ```rust,ignore
     /// let capabilities = AllowAll.initial();
-    /// assert_eq!(capabilities.len(), 5);
+    /// assert_eq!(capabilities.len(), 6);
     /// let process = Capability::new(CapabilityKind::Process, CapabilityKind::Process.operations(), Constraint::Any, true)?;
     /// assert_eq!(capabilities[0], process);
     /// ```
@@ -528,7 +546,7 @@ impl SecurityContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(parent.delegate(None)?.len(), 5);
+    /// assert_eq!(parent.delegate(None)?.len(), 6);
     /// assert_eq!(SecurityContext::default().delegate(Some(&restrictions)), Err(Denied));
     /// ```
     pub(super) fn delegate(
@@ -843,8 +861,8 @@ impl Restriction {
 }
 
 /// Read the value of the `spawn_opt` option `{capabilities, Map}`. Each key
-/// of `Map` is a kind atom: `process`, `terminal`, `port`, `env`, or
-/// `signal`. Each value is a map with the optional keys `operations` (a
+/// of `Map` is a kind atom: `process`, `terminal`, `port`, `env`, `signal`,
+/// or `runtime`. Each value is a map with the optional keys `operations` (a
 /// proper list of operation atoms of the kind), `delegable` (`true` or
 /// `false`), and the constraint field of the kind: `modules` (atoms),
 /// `executables` (strings), `names` (strings), or `signals` (atoms), with the
