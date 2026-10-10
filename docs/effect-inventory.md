@@ -362,6 +362,7 @@ Each row is a BIF entry of `BIFS` that has a body.
 | `maps:from_list/1` | `process.self` | `none` | `run` | `inline`, `trap` | Makes a map from a list of pairs. Uses one reduction of the budget of the caller for each 40 work units of the ERTS YCF code: the check, the hash, the sort, and the hashmap build. At the end of the budget, it traps to an internal export and continues in the next turn. | `O(n log n)` | `src/runtime/interpreter/bif/maps.rs`, `src/runtime/interpreter/bif/ycf.rs`, `src/term/map/build.rs` |
 | `maps:keys/1` | `process.self` | `none` | `run` | `inline`, `trap` | Gives the keys of a map. Uses one reduction of the budget of the caller for each 15 keys of a hashmap. At the end of the budget, it traps to an internal export and continues in the next turn. | `O(n)` | `src/runtime/interpreter/bif/maps.rs`, `src/runtime/interpreter/bif/ycf.rs` |
 | `maps:merge/2` | `process.self` | `none` | `run` | `inline`, `trap` | Merges two maps. Unless both maps are flatmaps, uses one reduction of the budget of the caller for each 8 steps of the ERTS hashmap merge. At the end of the budget, it traps to an internal export and continues in the next turn. | `O(n)` | `src/runtime/interpreter/bif/maps.rs`, `src/term/map.rs` |
+| `maps:put/3` | `none` | `none` | `pure` | `inline` | Sets a key of a map to a value, or raises. | `O(n)` | `src/runtime/interpreter/bif/maps.rs` |
 | `maps:remove/2` | `none` | `none` | `pure` | `inline` | Removes a key from a map. | `O(n)` | `src/runtime/interpreter/bif/maps.rs` |
 | `maps:take/2` | `none` | `none` | `pure` | `inline` | Gives the value of a key and the map without the key, or `error`. | `O(n)` | `src/runtime/interpreter/bif/maps.rs` |
 | `net_kernel:dflag_unicode_io/1` | `none` | `none` | `pure` | `inline` | Gives `true` for a pid, or raises `badarg`. | `O(1)` | `src/runtime/interpreter/bif/table.rs` |
@@ -394,7 +395,7 @@ Each entry is a BIF entry of `BIFS` with the form `unsupported`. A call gives th
 - `ets`: `delete/1`, `delete_object/2`, `first/1`, `first_lookup/1`, `give_away/3`, `info/1`, `info/2`, `insert_new/2`, `internal_delete_all/2`, `internal_request_all/0`, `internal_select_delete/2`, `is_compiled_ms/1`, `last/1`, `last_lookup/1`, `lookup_element/3`, `match/1`, `match/2`, `match/3`, `match_object/1`, `match_object/2`, `match_object/3`, `match_spec_compile/1`, `match_spec_run_r/3`, `next/2`, `next_lookup/2`, `prev/2`, `prev_lookup/2`, `rename/2`, `safe_fixtable/2`, `select/1`, `select/2`, `select/3`, `select_count/2`, `select_replace/2`, `select_reverse/1`, `select_reverse/2`, `select_reverse/3`, `setopts/2`, `slot/2`, `take/2`, `update_counter/3`, `update_counter/4`, `update_element/3`, `update_element/4`
 - `file`: `native_name_encoding/0`
 - `lists`: `keysearch/3`
-- `maps`: `from_keys/2`, `get/2`, `is_key/2`, `put/3`, `update/3`, `values/1`
+- `maps`: `from_keys/2`, `get/2`, `is_key/2`, `update/3`, `values/1`
 - `math`: `acos/1`, `acosh/1`, `asin/1`, `asinh/1`, `atan/1`, `atan2/2`, `atanh/1`, `ceil/1`, `cos/1`, `cosh/1`, `erf/1`, `erfc/1`, `exp/1`, `floor/1`, `fmod/2`, `log/1`, `log10/1`, `log2/1`, `pow/2`, `sin/1`, `sinh/1`, `sqrt/1`, `tan/1`, `tanh/1`
 - `os`: `env/0`, `getpid/0`, `perf_counter/0`, `putenv/2`, `system_time/0`, `timestamp/0`, `unsetenv/1`
 - `persistent_term`: `erase/1`, `info/0`, `put_new/2`

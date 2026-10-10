@@ -22,6 +22,85 @@ const BINARY_HASH_ORDER: [i64; 33] = [
     18, 32, 2, 24, 33, 19, 8, 4,
 ];
 
+/// The `{Row, Col}` keys of a hashmap of the 36 cells `{0..5, 0..5}` in the order of the pinned
+/// ERTS.
+const GRID_HASH_ORDER: [(i64, i64); 36] = [
+    (0, 4),
+    (1, 2),
+    (2, 1),
+    (0, 3),
+    (4, 3),
+    (0, 0),
+    (5, 2),
+    (0, 2),
+    (2, 0),
+    (1, 4),
+    (3, 2),
+    (3, 0),
+    (2, 4),
+    (4, 1),
+    (2, 3),
+    (3, 5),
+    (4, 2),
+    (4, 0),
+    (5, 5),
+    (5, 1),
+    (0, 1),
+    (2, 2),
+    (1, 0),
+    (4, 4),
+    (2, 5),
+    (3, 1),
+    (3, 3),
+    (0, 5),
+    (5, 3),
+    (3, 4),
+    (4, 5),
+    (5, 4),
+    (5, 0),
+    (1, 5),
+    (1, 1),
+    (1, 3),
+];
+
+/// The `{Row, Col}` keys of a hashmap of the 32 cells `{0..3, 0..7}` and the key `{9, 9}` in the
+/// order of the pinned ERTS.
+const GROWN_HASH_ORDER: [(i64, i64); 33] = [
+    (0, 4),
+    (1, 2),
+    (2, 1),
+    (2, 6),
+    (0, 3),
+    (0, 0),
+    (0, 2),
+    (2, 0),
+    (1, 4),
+    (3, 2),
+    (2, 7),
+    (1, 7),
+    (3, 0),
+    (2, 4),
+    (0, 6),
+    (2, 3),
+    (3, 6),
+    (3, 5),
+    (0, 7),
+    (0, 1),
+    (2, 2),
+    (1, 0),
+    (2, 5),
+    (3, 1),
+    (1, 6),
+    (3, 7),
+    (3, 3),
+    (0, 5),
+    (3, 4),
+    (1, 5),
+    (1, 1),
+    (9, 9),
+    (1, 3),
+];
+
 /// Return the atom term of a name that the program holds.
 fn atom(program: &BeamProgram, name: &str) -> Term {
     Term::Atom(program.atom(name).unwrap())
@@ -622,5 +701,78 @@ fn loads_and_updates_maps_with_tuple_keys_like_erts() {
         b"[[3,value,abs,{},{1},{abs},{value},{0,5},{1,2},{[1],{2}},[1]],a,d,c,j,[{3,h},{value,f},\
           {abs,g},{{},j},{{1},c},{{abs},e},{{value},d},{{0,5},n},{{1,2},m},{{2,1},l},\
           {{[1],{2}},k},{[1],i}],true,error]\n"
+    );
+}
+
+#[test]
+fn puts_tuple_keys_with_maps_put_like_erts() {
+    let program = BeamProgram::load(&[TUPLE_KEY_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let int = Term::Integer;
+    let cell = |(row, col): (i64, i64)| Term::Tuple(vec![int(row), int(col)]);
+    let cells = |cells: &[(i64, i64)]| Term::List(cells.iter().copied().map(cell).collect());
+    // `maps:put/3` keeps a flatmap of 32 cells in the term order. The 33rd key, from `maps:put/3`
+    // or from the 33rd cell, changes the flatmap to a hashmap in the ERTS hash order.
+    let small: Vec<(i64, i64)> = (0..4)
+        .flat_map(|row| (0..8).map(move |col| (row, col)))
+        .collect();
+    assert_eq!(
+        program.execute("tuple_key_probe", "grid", &[]).unwrap(),
+        Term::List(vec![
+            cells(&small),
+            cells(&GRID_HASH_ORDER),
+            cells(&GROWN_HASH_ORDER),
+            atom("replaced"),
+            int(55),
+            int(36),
+            int(55),
+            Term::Tuple(vec![atom("ok"), atom("grown")]),
+        ])
+    );
+
+    let text = |cells: &[(i64, i64)]| {
+        let cells: Vec<String> = cells
+            .iter()
+            .map(|(row, col)| format!("{{{row},{col}}}"))
+            .collect();
+        cells.join(",")
+    };
+    assert_eq!(
+        String::from_utf8(erl_reference(
+            "io:format(\"~w~n\", [tuple_key_probe:grid()])"
+        ))
+        .unwrap(),
+        format!(
+            "[[{}],[{}],[{}],replaced,55,36,55,{{ok,grown}}]\n",
+            text(&small),
+            text(&GRID_HASH_ORDER),
+            text(&GROWN_HASH_ORDER)
+        )
+    );
+}
+
+#[test]
+fn raises_badmap_and_badkey_for_tuple_keys_like_erts() {
+    let program = BeamProgram::load(&[TUPLE_KEY_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let error = |tag: &str, term: Term| {
+        Term::Tuple(vec![atom("error"), Term::Tuple(vec![atom(tag), term])])
+    };
+    let missing = || Term::Tuple(vec![Term::Integer(9), Term::Integer(9)]);
+    assert_eq!(
+        program.execute("tuple_key_probe", "errors", &[]).unwrap(),
+        Term::List(vec![
+            error("badmap", atom("not_a_map")),
+            error("badkey", missing()),
+            error("badmap", atom("not_a_map")),
+            error("badkey", missing()),
+            error("badkey", missing()),
+        ])
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [tuple_key_probe:errors()])"),
+        b"[{error,{badmap,not_a_map}},{error,{badkey,{9,9}}},{error,{badmap,not_a_map}},\
+          {error,{badkey,{9,9}}},{error,{badkey,{9,9}}}]\n"
     );
 }

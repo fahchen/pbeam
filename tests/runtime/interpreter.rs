@@ -769,6 +769,29 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
 }
 
 #[test]
+fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
+    // ERTS accepts a map key; a PBeam map does not hold one yet.
+    let put = make_program(
+        vec![
+            Instruction::Move(Operand::Value(Term::Map(Map::new())), Operand::X(0)),
+            Instruction::Move(Operand::Value(Term::Integer(0)), Operand::X(1)),
+            Instruction::Move(Operand::Value(Term::Map(Map::new())), Operand::X(2)),
+            Instruction::CallExternal {
+                arity: 3,
+                module: "maps".into(),
+                name: "put".into(),
+                tail: true,
+                deallocate: 0,
+            },
+            Instruction::Return,
+        ],
+        0,
+    )
+    .execute("fixture", "main", &[]);
+    assert_eq!(put.unwrap_err().to_string(), "unsupported map key Map([])");
+}
+
+#[test]
 fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
     let keys = |argument: Term| {
         make_program(

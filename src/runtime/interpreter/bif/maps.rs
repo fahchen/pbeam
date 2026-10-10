@@ -130,6 +130,38 @@ pub(super) fn find(key: &Term, map: &Term) -> BifResult {
     ))
 }
 
+/// Run `maps:put/3`: return the map with the key set to the value, as ERTS
+/// `maps_put_3` does (`erl_map.c:1900-1906`). `erts_maps_put`
+/// (`erl_map.c:2105-2200`) replaces the value of an equal key, puts a new
+/// key of a flatmap in the flatmap key order, and makes a hashmap from a
+/// flatmap that gets its 33rd key. A term that is not a map raises
+/// `error:{badmap, Map}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::new());
+/// let key = Term::Tuple(vec![Term::Integer(1), Term::Integer(2)]);
+/// let put_map = Term::Map(Map::from_pairs(vec![(key.clone(), test_atom("a"))])?);
+/// assert!(matches!(put(&key, &test_atom("a"), &map)?, BifResult::Value(value) if value == put_map));
+/// assert!(matches!(put(&key, &test_atom("a"), &test_atom("foo"))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when the key is of a type that the map form does
+/// not support yet, for example a map key.
+pub(super) fn put(key: &Term, value: &Term, map: &Term) -> Result<BifResult, BeamError> {
+    let mut map = map.clone();
+    let Term::Map(entries) = &mut map else {
+        return Ok(error_with("badmap", &map));
+    };
+    entries
+        .insert(key.clone(), value.clone())
+        .map_err(|key| error(format!("unsupported map key {key:?}")))?;
+    Ok(Value(map))
+}
+
 /// Run `maps:from_list/1`: return the map of the key and value pairs of a
 /// list, as ERTS `maps_from_list_1_helper` does (`erl_map.c:321-363`). The
 /// BIF checks the full list before it builds the map: a term that is not a

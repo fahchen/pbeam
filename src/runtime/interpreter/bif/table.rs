@@ -499,7 +499,7 @@ bifs! {
     maps:is_key/2 => unsupported,
     maps:keys/1 => |cx, [map]| maps::keys(cx.scheduler.current_process_mut(), map, 0),
     maps:merge/2 => |cx, [first, second]| maps::merge(cx.scheduler.current_process_mut(), first, second),
-    maps:put/3 => unsupported,
+    maps:put/3 => |_, [key, value, map]| maps::put(key, value, map),
     maps:remove/2 => |_, [key, map]| Ok(maps::remove(key, map)),
     maps:take/2 => |_, [key, map]| Ok(maps::take(key, map)),
     maps:update/3 => unsupported,
