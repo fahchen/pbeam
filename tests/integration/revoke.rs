@@ -77,13 +77,29 @@ fn text(term: &Term) -> String {
 /// assert_eq!(pbeam("released", &AllowAll), "denied");
 /// ```
 fn pbeam(function: &str, policy: &dyn Policy) -> String {
-    let erlang = pinned_beam("erlang");
-    let erts_internal = pinned_beam("erts_internal");
-    let program = BeamProgram::load(&[&erlang, &erts_internal, REVOKE_PROBE]).unwrap();
-    let result = program
+    let result = program()
         .execute_with_policy("revoke_probe", function, &[], policy)
         .unwrap();
     text(&result)
+}
+
+/// Run `revoke_probe:Function()` on PBeam with no policy, which skips each
+/// capability check, and return the `~w` text.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(unchecked("released"), "ok");
+/// ```
+fn unchecked(function: &str) -> String {
+    text(&program().execute("revoke_probe", function, &[]).unwrap())
+}
+
+/// Load the probe and the pinned `erlang` and `erts_internal`.
+fn program() -> BeamProgram {
+    let erlang = pinned_beam("erlang");
+    let erts_internal = pinned_beam("erts_internal");
+    BeamProgram::load(&[&erlang, &erts_internal, REVOKE_PROBE]).unwrap()
 }
 
 /// Run `revoke_probe:Function()` on the pinned ERTS with one scheduler and
@@ -171,5 +187,20 @@ fn revokes_an_initial_capability_for_the_launcher() {
     assert_eq!(
         pbeam("launcher", &Launcher::default()),
         "{[ok,ok],denied,denied}"
+    );
+}
+
+#[test]
+fn revokes_nothing_in_a_run_with_no_policy() {
+    // With no policy, the run skips each check and holds no copy. A
+    // revocation returns ok after its argument checks and has no effect,
+    // so each later read keeps the ERTS result.
+    assert_eq!(
+        unchecked("cascade"),
+        "{[ok,ok],[ok,ok],[ok,ok,ok],[true,true]}"
+    );
+    assert_eq!(
+        unchecked("denied"),
+        "[ok,ok,ok,{error,badarg},{error,badarg},ok,ok,ok]"
     );
 }
