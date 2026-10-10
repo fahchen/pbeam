@@ -288,16 +288,16 @@ pub(crate) enum Instruction {
         deallocate: u32,
     },
     /// Calls a BIF through `bif0` (opcode 9), `bif1` (opcode 10), `bif2`
-    /// (opcode 11), `gc_bif1` (opcode 124), or `gc_bif2` (opcode 125) and
-    /// writes its value to a register. `bif0` has no fail label and decodes with `fail_label` 0.
+    /// (opcode 11), `gc_bif1` (opcode 124), `gc_bif2` (opcode 125), or
+    /// `gc_bif3` (opcode 152) and writes its value to a register. `bif0` has no fail label and decodes with `fail_label` 0.
     /// With fail label 0, a BIF failure raises its exception; with another
     /// fail label, it jumps to the label.
     ///
     /// Encoding: `bif0` has opcode, import index, destination register;
     /// `bif1` and `bif2` have opcode, fail label, import index, one or two
-    /// arguments, destination register. `gc_bif1` and `gc_bif2` have
-    /// opcode, fail label, live register count, import index, one or two
-    /// arguments, destination register. The live count tells the ERTS garbage collector which X
+    /// arguments, destination register. `gc_bif1`, `gc_bif2`, and `gc_bif3`
+    /// have opcode, fail label, live register count, import index, one, two,
+    /// or three arguments, destination register. The live count tells the ERTS garbage collector which X
     /// registers hold terms; PBeam has no process heap and does not keep it.
     /// An argument can be a typed register (extended subtag 5). Example:
     /// `io:io_request/2` in the pinned `io.beam` has
@@ -313,7 +313,11 @@ pub(crate) enum Instruction {
     /// `x0` typed, and the integer 1, and writes `x0`. `arith_probe:neg/1`
     /// has `[0x7C, 0x0D, 0x37, 0x10, 0x50, 0x03, 0x03]`, which calls import 5
     /// (`erlang:'-'/1`) with fail label 55, live count 1, and `x0`, and
-    /// writes `x0`.
+    /// writes `x0`. `binary_part_probe:guard/3` in
+    /// `fixtures/binary_part/binary_part_probe.beam` has
+    /// `[0x98, 0xD5, 0x30, 0x00, 0x03, 0x13, 0x23, 0x03]`, which calls import 0
+    /// (`erlang:binary_part/3`) with fail label 13, live count 3, `x0`, `x1`,
+    /// and `x2`, and writes `x0`.
     ///
     /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`, and
     /// `node(Pid) =:= node()` in `io:io_request/2` compiles to
@@ -332,7 +336,10 @@ pub(crate) enum Instruction {
     /// guard `when -X > 0` of `arith_probe:neg/1` compiles to
     /// `{gc_bif,'-',{f,55},1,[{x,0}],{x,0}}`, and `length(Args)` in
     /// `proc_lib:trans_init/3` (proc_lib.erl:944) compiles to
-    /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`.
+    /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`. The guard
+    /// `when binary_part(Binary, Start, Length) =:= <<"ell">>` of
+    /// `binary_part_probe:guard/3` compiles to
+    /// `{gc_bif,binary_part,{f,13},3,[{x,0},{x,1},{x,2}],{x,0}}`.
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
@@ -1178,11 +1185,39 @@ pub(crate) enum BinaryMatchCommand {
     /// `[0xF2, 0x00]` is `{ensure_exactly,0}` when atom 15 is
     /// `ensure_exactly`.
     EnsureExactly { size: u64 },
-    /// A command that PBeam does not run yet: `binary`, `integer`, `skip`,
-    /// `get_tail`, or `=:=`. It holds the command name. Example: `[0x0A,
-    /// 0x13, 0x10, 0x02, 0x80, 0x10, 0x13]` is `{integer,1,[],8,1,{x,1}}`
-    /// when atom 19 is `integer`.
-    Unsupported(Atom),
+    /// `{integer,Live,Flags,Size,Unit,Dst}`: read an integer of `size`
+    /// bits (`Size * Unit`) and write it to `destination`. `Flags` is `[]`
+    /// or a literal list: `little` and `native` set `little`, and `signed`
+    /// sets `signed` (`bs_get_flags`, jit/beam_jit_bs.cpp:255-285).
+    /// Example: `[0x42, 0x10, 0x47, 0x00, 0x08, 0x10, 0x10, 0x13]` in
+    /// `bs_match_probe:flagged/1` is `{integer,1,{literal,[little]},16,1,
+    /// {x,1}}` when atom 4 is `integer` and literal 0 is `[little]`.
+    Integer {
+        size: u64,
+        little: bool,
+        signed: bool,
+        destination: Operand,
+    },
+    /// `{binary,Live,Flags,Size,Unit,Dst}`: read a bitstring of `size`
+    /// bits (`Size * Unit`) and write it to `destination`. ERTS does not
+    /// read `Flags`. Example: `[0x0A, 0x13, 0x10, 0x02, 0x20, 0x80, 0x13]`
+    /// in `bs_match_probe:binaries/1` is `{binary,1,{literal,[]},2,8,
+    /// {x,1}}` when atom 19 is `binary`.
+    Binary { size: u64, destination: Operand },
+    /// `{'=:=',Live,Size,Value}`: the next `size` bits are the unsigned
+    /// big-endian integer `value`. Example: `[0xA2, 0x02, 0x10, 0x10]` in
+    /// `bs_match_probe:prefix/1` is `{'=:=',nil,1,1}` when atom 10 is
+    /// `=:=`.
+    Equal { size: u64, value: u64 },
+    /// `{get_tail,Live,Unit,Dst}`: write the bits after the position to
+    /// `destination` and keep the position. ERTS does not read `Unit`.
+    /// Example: `[0xB2, 0x10, 0x80, 0x03]` in `bs_match_probe:tail/1` is
+    /// `{get_tail,1,8,{x,0}}` when atom 11 is `get_tail`.
+    GetTail { destination: Operand },
+    /// `{skip,Size}`: move the position by `size` bits. Example: `[0x0A,
+    /// 0x11, 0x80]` in `bs_match_probe:tail/1` is `{skip,8}` when atom 17
+    /// is `skip`.
+    Skip { size: u64 },
 }
 
 /// One segment of `bs_create_bin` (genop.tab:649-651).
@@ -1443,7 +1478,7 @@ pub(super) fn parse_code(
             OPCODE_BS_MATCH => Instruction::BinaryMatch {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 context: read_move_operand(data, &mut cursor, atoms, literals)?,
-                commands: read_binary_match_commands(data, &mut cursor, atoms)?,
+                commands: read_binary_match_commands(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_BS_CREATE_BIN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
@@ -1792,19 +1827,19 @@ pub(super) fn parse_code(
                     destination: read_register(data, &mut cursor)?,
                 }
             }
-            OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 => {
+            OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
-                if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2) {
+                if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3) {
                     skip_live_registers(data, &mut cursor)?;
                 }
                 let (module, name) = bif_import(
                     imports,
                     read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
                 )?;
-                let argument_count = if matches!(opcode, OPCODE_BIF1 | OPCODE_GC_BIF1) {
-                    1
-                } else {
-                    2
+                let argument_count = match opcode {
+                    OPCODE_BIF1 | OPCODE_GC_BIF1 => 1,
+                    OPCODE_GC_BIF3 => 3,
+                    _ => 2,
                 };
                 let arguments = (0..argument_count)
                     .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
@@ -1935,21 +1970,35 @@ fn read_operand_pairs(
 
 /// Read the command list of `bs_match`: each command is a name atom and
 /// its operands (genop.tab:685-696). The command names and operand counts
-/// are those of the ERTS loader (`gen.bs_match` in emu
-/// `generators.tab:1102-1430`), which fails to load a module with another
-/// command name.
+/// are those of the ERTS loader (`gen.bs_match` in JIT
+/// `jit/arm/generators.tab:532-575` and `beam_jit_bsm_init` in
+/// `jit/beam_jit_bs.cpp:287-364`), which fails to load a module with
+/// another command name. `Live` is unsigned, except for `=:=`, where the
+/// compiler writes `nil` (beam_ssa_codegen.erl:2817-2862). `Size` and
+/// `Unit` are unsigned. `Flags` is `nil` or a literal list, and `Dst` is a
+/// register.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // {list,[ensure_at_least,0,8]} with atom 8 `ensure_at_least`
-/// let commands = read_binary_match_commands(&[0x17, 0x30, 0x82, 0x00, 0x80], &mut 0, &atoms)?;
+/// let commands = read_binary_match_commands(&[0x17, 0x30, 0x82, 0x00, 0x80], &mut 0, &atoms, &[])?;
 /// assert!(matches!(commands.as_slice(), [BinaryMatchCommand::EnsureAtLeast { size: 0, .. }]));
+/// // {list,[skip,8]} with atom 17 `skip`
+/// let commands = read_binary_match_commands(&[0x17, 0x20, 0x0A, 0x11, 0x80], &mut 0, &atoms, &[])?;
+/// assert!(matches!(commands.as_slice(), [BinaryMatchCommand::Skip { size: 8 }]));
 /// ```
+///
+/// # Errors
+///
+/// An unknown command name, `ensure_at_least` with unit 0, a `Size *
+/// Unit` above `u64::MAX`, flags that are not a list, an operand with an
+/// unexpected tag, and a list with an incomplete command are errors.
 fn read_binary_match_commands(
     data: &[u8],
     cursor: &mut usize,
     atoms: &[Atom],
+    literals: &[Option<Term>],
 ) -> Result<Vec<BinaryMatchCommand>, BeamError> {
     let item_count = read_list_count(data, cursor)?;
     let mut commands = Vec::new();
@@ -1967,16 +2016,52 @@ fn read_binary_match_commands(
                 let size = read_operand(data, cursor, TAG_UNSIGNED)?;
                 (BinaryMatchCommand::EnsureExactly { size }, 1)
             }
-            other => {
-                let operand_count = match other {
-                    "binary" | "integer" => 5,
-                    "get_tail" | "=:=" => 3,
-                    "skip" => 1,
-                    _ => return Err(error(format!("unsupported BEAM bs_match command {other}"))),
+            kind @ ("integer" | "binary") => {
+                let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let flags = read_move_operand(data, cursor, atoms, literals)?;
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?
+                    .checked_mul(read_operand(data, cursor, TAG_UNSIGNED)?)
+                    .ok_or_else(|| error(format!("BEAM bs_match {kind} size overflow")))?;
+                let destination = read_register(data, cursor)?;
+                let Operand::Value(Term::List(flags)) = &flags else {
+                    return Err(error(format!(
+                        "unsupported BEAM bs_match {kind} flags {flags:?}"
+                    )));
                 };
-                skip_operands(data, cursor, operand_count)?;
-                (BinaryMatchCommand::Unsupported(name.clone()), operand_count)
+                let has = |names: &[&str]| {
+                    flags.iter().any(
+                        |flag| matches!(flag, Term::Atom(atom) if names.contains(&atom.name())),
+                    )
+                };
+                let command = if kind == "integer" {
+                    BinaryMatchCommand::Integer {
+                        size,
+                        little: has(&["little", "native"]),
+                        signed: has(&["signed"]),
+                        destination,
+                    }
+                } else {
+                    BinaryMatchCommand::Binary { size, destination }
+                };
+                (command, 5)
             }
+            "get_tail" => {
+                let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let _unit = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let destination = read_register(data, cursor)?;
+                (BinaryMatchCommand::GetTail { destination }, 3)
+            }
+            "=:=" => {
+                let _live = read_move_operand(data, cursor, atoms, literals)?;
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let value = read_operand(data, cursor, TAG_UNSIGNED)?;
+                (BinaryMatchCommand::Equal { size, value }, 3)
+            }
+            "skip" => {
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+                (BinaryMatchCommand::Skip { size }, 1)
+            }
+            other => return Err(error(format!("unsupported BEAM bs_match command {other}"))),
         };
         commands.push(command);
         items += 1 + operand_count;
@@ -2133,8 +2218,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_SKIP_BITS2 => Some(5),
         // `bs_get_integer2` is in `io_lib`.
         OPCODE_BS_GET_INTEGER2 => Some(7),
-        // `gc_bif3` is in `io_lib`, for `erlang:binary_part/3`.
-        OPCODE_GC_BIF3 => Some(7),
         // `is_any_native_record` is in `io_lib`.
         OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
         OPCODE_BS_START_MATCH4 => Some(4),

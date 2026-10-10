@@ -173,7 +173,7 @@ fn matches_the_derived_debug_text_and_compares_every_variant() {
     assert_eq!(
         format!("{term:?}"),
         "Tuple([List([Atom(\"ok\"), Binary([1, 2]), Integer(-3), Pid(ProcessId(4)), \
-         Reference(Reference(5)), MatchContext(MatchContext { bytes: [6], position: 0 })]), \
+         Reference(Reference(5)), MatchContext(MatchContext { bytes: [6], position: 0, position_known: true })]), \
          List([])])"
     );
     for (index, leaf) in leaves.iter().enumerate() {
