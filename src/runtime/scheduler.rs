@@ -4,7 +4,10 @@ use std::{
 };
 
 use super::{
-    capability::{CapabilityKind, Denied, Operation, Restriction, SecurityContext},
+    capability::{
+        Capability, CapabilityId, CapabilityKind, Delegations, Denied, Operation, Restriction,
+        Source,
+    },
     dirty_io::{Claim, Completion, DirtyIo},
     ets::EtsTables,
     host::{
@@ -216,6 +219,8 @@ pub(super) struct Scheduler {
     virtual_reductions: i32,
     /// The dirty IO threads of the run and the inbox of their completions.
     dirty_io: DirtyIo,
+    /// The delegation records of the capability copies of the run.
+    delegations: Delegations,
 }
 
 impl Scheduler {
@@ -255,28 +260,33 @@ impl Scheduler {
             system_logger: Term::static_atom("logger"),
             virtual_reductions: 0,
             dirty_io: DirtyIo::new(),
+            delegations: Delegations::default(),
         }
     }
 
-    /// Create the root process with the security context `security`. The
-    /// root process gets `ProcessId(0)`.
+    /// Create the root process with the initial capabilities
+    /// `capabilities`, which the launcher issues. The root process gets
+    /// `ProcessId(0)`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut scheduler = Scheduler::new(AtomTable::new());
-    /// scheduler.start(frame, vec![], SecurityContext::new(AllowAll.initial()))?;
+    /// scheduler.start(frame, vec![], AllowAll.initial())?;
     /// assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
     /// ```
     pub(super) fn start(
         &mut self,
         frame: Frame,
         arguments: Vec<Term>,
-        security: SecurityContext,
+        capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
         let id = self.next_pid()?;
         let mut root = ProcessState::new(id, Start::Entry(frame), arguments);
-        root.security = security;
+        let issued = capabilities
+            .into_iter()
+            .map(|capability| (Source::Launcher, capability));
+        root.security = self.delegations.hold(id, issued);
         self.insert(root);
         Ok(())
     }
@@ -1191,17 +1201,17 @@ impl Scheduler {
                 Ok(())
             }
         };
-        let security = check(true, Operation::Spawn, Some(module.as_bytes()))
+        let copies = check(true, Operation::Spawn, Some(module.as_bytes()))
             .and_then(|()| check(link, Operation::Link, None))
             .and_then(|()| check(monitor, Operation::Monitor, None))
             .and_then(|()| parent.delegate(restrictions));
-        let security = match security {
-            Ok(security) => security,
+        let copies = match copies {
+            Ok(copies) => copies,
             Err(denied) => return Ok(Err(denied)),
         };
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = off_heap_message_queue;
-        child.security = security;
+        child.security = self.delegations.hold(child.id, copies);
         let parent = self.current_process_mut().id;
         child.group_leader = self.current_process_mut().group_leader;
         let reference = if monitor {
@@ -1235,6 +1245,82 @@ impl Scheduler {
         let id = child.id;
         self.insert(child);
         Ok(Ok((id, reference)))
+    }
+
+    /// Revoke the initial capabilities of each kind of `kinds` for the
+    /// launcher, which issued them: the root process gets a revocation
+    /// signal for each of its copies of the kind. The copies of the root
+    /// come only from the launcher. Nothing happens after the root process
+    /// left the process table, because the run then ends.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.revoke_issued(&[CapabilityKind::Process]);
+    /// ```
+    pub(super) fn revoke_issued(&mut self, kinds: &[CapabilityKind]) {
+        let root = self.processes.get(&ProcessId(0));
+        let copies: Vec<_> = root.map_or_else(Vec::new, |root| {
+            kinds
+                .iter()
+                .flat_map(|&kind| root.security.ids(kind))
+                .collect()
+        });
+        for id in copies {
+            let signals = self.delegations.revocation(id);
+            self.send_revocations(None, signals);
+        }
+    }
+
+    /// Revoke the copies of `kind` that the current process gave to the
+    /// process `holder` at spawn, for `pbeam_cap:revoke/2`. A copy whose
+    /// holder lives gets a revocation signal. A copy whose holder exited
+    /// sends the revocation on to its receivers at once (see
+    /// [`Delegations::revocation`]). Return `Err(Denied)` when the current
+    /// process gave `holder` no copy of `kind` that still has a record: a
+    /// process can revoke only a capability that it gave.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.revoke_given(child, CapabilityKind::Process), Ok(()));
+    /// assert_eq!(scheduler.revoke_given(stranger, CapabilityKind::Process), Err(Denied));
+    /// ```
+    pub(super) fn revoke_given(
+        &mut self,
+        holder: ProcessId,
+        kind: CapabilityKind,
+    ) -> Result<(), Denied> {
+        let caller = self.current_process();
+        let (id, copies) = (caller.id, caller.security.ids(kind));
+        let given = self.delegations.given(&copies, holder);
+        if given.is_empty() {
+            return Err(Denied);
+        }
+        for copy in given {
+            let signals = self.delegations.revocation(copy);
+            self.send_revocations(Some(id), signals);
+        }
+        Ok(())
+    }
+
+    /// Send a revocation signal for each `(holder, copy)` of `signals` from
+    /// `sender`, or from the runtime for `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.send_revocations(Some(caller), vec![(child, copy)]);
+    /// ```
+    fn send_revocations(
+        &mut self,
+        sender: Option<ProcessId>,
+        signals: Vec<(ProcessId, CapabilityId)>,
+    ) {
+        for (holder, capability) in signals {
+            self.send_signal(sender, holder, Signal::Revoke { capability })
+                .expect("the holder of a copy that is not released is alive");
+        }
     }
 
     /// Link the current process with the local process `target`, as
@@ -1586,7 +1672,8 @@ impl Scheduler {
     ///    deletion counts from the reductions left in the turn, which the
     ///    timer walk did not change, and the exit switches out when the
     ///    deletion uses them.
-    /// 4. Free its registered name, and leave the process table
+    /// 4. Free its registered name, release its capability copies (see
+    ///    [`Delegations::release`]), and leave the process table
     ///    (`ERTS_CONTINUE_EXIT_FREE`, `erl_process.c:14406-14476`), which
     ///    uses 50 reductions of the count of the exit. Fetch its signal queue
     ///    (`erl_process.c:14537`). With no reductions left, the process
@@ -1673,6 +1760,8 @@ impl Scheduler {
         if let Some(name) = &process.registered_name {
             self.names.remove(name.name());
         }
+        self.delegations
+            .release(std::mem::take(&mut process.security));
         process.mailbox.fetch();
         process.exiting = Some(reason);
         if reds <= 0 {

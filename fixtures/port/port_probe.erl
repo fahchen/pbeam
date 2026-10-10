@@ -26,9 +26,9 @@ stty(Command) ->
 
 %% Turn ISIG off and on through stty, and read the mode after each step
 %% through fd 4 of a nouse_stdio port. Stdin is the terminal of the run.
-%% The results go out with io:put_chars/1, as in get_line_probe, because
-%% io:format/2 with ~w reaches the is_bitstr instruction (opcode 129),
-%% which PBeam does not run.
+%% The results go out with io:put_chars/1, as in get_line_probe. When this
+%% probe was added, io:format/2 with ~w stopped at the is_bitstr
+%% instruction (opcode 129), which PBeam runs since #359.
 terminal() ->
     Off = stty(<<"stty -isig 2>/dev/null">>),
     OffMode = isig(),

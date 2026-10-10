@@ -15,7 +15,7 @@
 //! (`erts_proc_sig_handle_exit`, `erl_proc_sig_queue.c:7259-7473`). Each
 //! handled signal also costs 1 (`erl_proc_sig_queue.c:6968`).
 
-use super::process::LinkId;
+use super::{capability::CapabilityId, process::LinkId};
 use crate::term::{ProcessId, Reference, Term};
 
 /// A non-message signal in the signal queue of a process.
@@ -165,4 +165,15 @@ pub(super) enum Signal {
     /// `erl_proc_sig_queue.c:3520-3557`). It costs 0 and stops the handling
     /// (`erl_proc_sig_queue.c:6853-6865`).
     Flush,
+    /// PBeam only: revoke the capability copy `capability` of the receiver.
+    /// ERTS has no capabilities and no such signal. The receiver deletes its
+    /// copy and sends a revocation signal to each live downstream copy, also
+    /// through a holder that exited (`Delegations::revoke`); the cost is 0,
+    /// as for the other signals that change only the receiver. At exit it
+    /// sends the revocation on in the same way, because the receiver
+    /// released its copy when it left the process table.
+    Revoke {
+        /// The copy that the receiver holds.
+        capability: CapabilityId,
+    },
 }

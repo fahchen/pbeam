@@ -1117,6 +1117,14 @@ pub(crate) enum TestKind {
     /// `{test,is_nonempty_list,{f,8},[{x,0}]}`.
     NonEmptyList,
     Binary,
+    /// `is_bitstr`, opcode 129. Example: `[0x81, 0x55, 0x03]` in
+    /// `bitstr_probe:kind/1` fails to label 5 unless `x0` is a bitstring.
+    /// Erlang: `kind(Term) when is_bitstring(Term) -> Term;` compiles to
+    /// `{test,is_bitstr,{f,5},[{x,0}]}`, as the consolidated
+    /// `String.Chars.impl_for/1` of Elixir does. PBeam has no bitstring
+    /// whose size is not a multiple of 8, so the test passes only for a
+    /// binary.
+    Bitstring,
     Map,
     /// `is_function`, opcode 77. Example: `[0x4D, 0x0D, 0x65, 0x57, 0x03,
     /// 0x40]` in `fun_probe:kind/1` fails to label 101 unless the typed
@@ -1641,6 +1649,7 @@ pub(super) fn parse_code(
             | OPCODE_TEST_IS_NIL
             | OPCODE_TEST_IS_NONEMPTY_LIST
             | OPCODE_TEST_IS_BINARY
+            | OPCODE_TEST_IS_BITSTR
             | OPCODE_TEST_IS_MAP
             | OPCODE_TEST_IS_FUNCTION
             | OPCODE_TEST_IS_INTEGER
@@ -1847,6 +1856,7 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
         OPCODE_TEST_IS_NIL => Ok(TestKind::Nil),
         OPCODE_TEST_IS_NONEMPTY_LIST => Ok(TestKind::NonEmptyList),
         OPCODE_TEST_IS_BINARY => Ok(TestKind::Binary),
+        OPCODE_TEST_IS_BITSTR => Ok(TestKind::Bitstring),
         OPCODE_TEST_IS_MAP => Ok(TestKind::Map),
         OPCODE_TEST_IS_FUNCTION => Ok(TestKind::Function),
         OPCODE_TEST_IS_INTEGER => Ok(TestKind::Integer),
@@ -2103,8 +2113,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_TEST_IS_PID
         | OPCODE_TEST_IS_BINARY
         | OPCODE_TEST_IS_LIST
-        | OPCODE_TEST_IS_MAP
-        | OPCODE_TEST_IS_BITSTR => Some(2),
+        | OPCODE_TEST_IS_MAP => Some(2),
         // `try_case_end Src` is in `erlang:processes_next/1`.
         OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_TRY_CASE_END => Some(1),
         OPCODE_PUT_MAP_ASSOC => Some(5),

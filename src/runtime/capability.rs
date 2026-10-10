@@ -7,13 +7,18 @@
 //! a mechanical test of these copies: it sends no message and runs no
 //! policy code. A denied operation raises `error:capability_denied`, which
 //! ERTS does not have (row "Capability checks" of `docs/erts-differences.md`).
+//!
+//! Each copy has an identifier that the run never gives again. The run-wide
+//! [`Delegations`] tree records the source of each copy and the copies that
+//! went from it to children. A revocation follows these records to the
+//! downstream copies, also through a holder that exited.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use super::{host::filename_encoding, unicode::native_filename};
 use crate::{
     error::{BeamError, error},
-    term::Term,
+    term::{ProcessId, Term},
 };
 
 /// The resource kind that a capability covers.
@@ -170,6 +175,22 @@ impl CapabilityKind {
     /// ```
     pub fn operations(self) -> &'static [Operation] {
         self.spec().operations
+    }
+
+    /// Return the kind whose atom is `name`, as the `{capabilities, Map}`
+    /// option and `pbeam_cap:revoke/2` name it, or `None` for another name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(CapabilityKind::named("env"), Some(CapabilityKind::Env));
+    /// assert_eq!(CapabilityKind::named("file"), None);
+    /// ```
+    pub(super) fn named(name: &str) -> Option<Self> {
+        KINDS
+            .iter()
+            .find(|spec| spec.name == name)
+            .map(|spec| spec.kind)
     }
 }
 
@@ -368,6 +389,26 @@ pub trait Policy {
     /// assert_eq!(AllowAll.initial().len(), 5);
     /// ```
     fn initial(&self) -> Vec<Capability>;
+
+    /// Return the kinds of the initial capabilities that the launcher
+    /// revokes now. The launcher calls this function before each scheduling
+    /// step. For each kind, the root process gets a revocation signal for
+    /// each of its copies of that kind that the launcher issued, and the
+    /// revocation then goes to each downstream copy. While each process
+    /// waits, the run calls this function again only after a timer, a port,
+    /// a terminal, a dirty IO call, or a host signal wakes the scheduler.
+    /// With none of them, the run ends. Thus a revocation that a host thread
+    /// gives while each process waits takes effect only at the next of
+    /// these events. The default revokes nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(AllowAll.revocations().is_empty());
+    /// ```
+    fn revocations(&self) -> Vec<CapabilityKind> {
+        Vec::new()
+    }
 }
 
 /// The default policy. The root process gets a delegable capability of
@@ -406,28 +447,43 @@ impl Policy for AllowAll {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Denied;
 
+/// The identifier of one capability copy. The run never gives an
+/// identifier again, so a delegation record cannot name a later copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct CapabilityId(u64);
+
+/// The source of a capability copy: the field `source` of the design record
+/// (section "Capability kinds" of `docs/capability-security-migration.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Source {
+    /// The launcher issued the copy to the root process.
+    Launcher,
+    /// A parent gave the copy to its child at spawn, from its own copy with
+    /// this identifier.
+    Copy(CapabilityId),
+}
+
+/// One copy of a capability in a security context.
+#[derive(Debug)]
+struct Held {
+    /// The identifier of the copy.
+    id: CapabilityId,
+    /// The capability.
+    capability: Capability,
+}
+
 /// The security context of a process: its copies of its capabilities. The
-/// process owns it, and the copies go when the process state goes. No check
-/// finds a capability by a pid.
+/// process owns it. When the process leaves the process table, the
+/// [`Delegations`] tree releases the copies. No check finds a capability by
+/// a pid.
 #[derive(Debug, Default)]
 pub(super) struct SecurityContext {
     /// The capabilities that the process can use. The delegable ones also
     /// go to each child.
-    capabilities: Vec<Capability>,
+    capabilities: Vec<Held>,
 }
 
 impl SecurityContext {
-    /// Make the context that holds `capabilities`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let context = SecurityContext::new(AllowAll.initial());
-    /// ```
-    pub(super) fn new(capabilities: Vec<Capability>) -> Self {
-        Self { capabilities }
-    }
-
     /// Check `operation` of `kind`: return `Err(Denied)` unless a capability
     /// of the context permits it, and, when `name` is given, permits `name`
     /// in its constraint. `name` is the bytes of a module or signal atom, or
@@ -436,7 +492,7 @@ impl SecurityContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let context = SecurityContext::new(AllowAll.initial());
+    /// let context = delegations.hold(ProcessId(0), AllowAll.initial().into_iter().map(|c| (Source::Launcher, c)));
     /// assert_eq!(context.check(CapabilityKind::Process, Operation::Spawn, Some(b"lists")), Ok(()));
     /// assert_eq!(SecurityContext::default().check(CapabilityKind::Process, Operation::Link, None), Err(Denied));
     /// ```
@@ -449,7 +505,7 @@ impl SecurityContext {
         if self
             .capabilities
             .iter()
-            .any(|capability| capability.permits(kind, operation, name))
+            .any(|held| held.capability.permits(kind, operation, name))
         {
             Ok(())
         } else {
@@ -457,45 +513,272 @@ impl SecurityContext {
         }
     }
 
-    /// Return the context of a new child. With no `restrictions`, the child
-    /// gets a copy of each delegable capability. With `restrictions`, it gets
-    /// a reduced copy of each delegable capability of a requested kind, and
-    /// no other capability. A requested kind without a delegable capability,
-    /// and a restriction that permits more than its capability, give
-    /// `Err(Denied)`.
+    /// Return the copies for a new child, each with its source. With no
+    /// `restrictions`, the child gets a copy of each delegable capability.
+    /// With `restrictions`, it gets a reduced copy of each delegable
+    /// capability of a requested kind, and no other capability. A requested
+    /// kind without a delegable capability, and a restriction that permits
+    /// more than its capability, give `Err(Denied)`. [`Delegations::hold`]
+    /// makes the context of the child from the copies.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let parent = SecurityContext::new(AllowAll.initial());
-    /// assert_eq!(parent.delegate(None)?.capabilities.len(), 5);
+    /// assert_eq!(parent.delegate(None)?.len(), 5);
     /// assert_eq!(SecurityContext::default().delegate(Some(&restrictions)), Err(Denied));
     /// ```
-    pub(super) fn delegate(&self, restrictions: Option<&[Restriction]>) -> Result<Self, Denied> {
+    pub(super) fn delegate(
+        &self,
+        restrictions: Option<&[Restriction]>,
+    ) -> Result<Vec<(Source, Capability)>, Denied> {
         let delegable = || {
             self.capabilities
                 .iter()
-                .filter(|capability| capability.delegable)
+                .filter(|held| held.capability.delegable)
         };
         let Some(restrictions) = restrictions else {
-            return Ok(Self::new(delegable().cloned().collect()));
+            return Ok(delegable()
+                .map(|held| (Source::Copy(held.id), held.capability.clone()))
+                .collect());
         };
         if restrictions
             .iter()
-            .any(|restriction| !delegable().any(|capability| capability.kind == restriction.kind))
+            .any(|restriction| !delegable().any(|held| held.capability.kind == restriction.kind))
         {
             return Err(Denied);
         }
-        let mut capabilities = Vec::new();
-        for capability in delegable() {
+        let mut copies = Vec::new();
+        for held in delegable() {
             if let Some(restriction) = restrictions
                 .iter()
-                .find(|restriction| restriction.kind == capability.kind)
+                .find(|restriction| restriction.kind == held.capability.kind)
             {
-                capabilities.push(restriction.apply(capability)?);
+                copies.push((Source::Copy(held.id), restriction.apply(&held.capability)?));
             }
         }
-        Ok(Self::new(capabilities))
+        Ok(copies)
+    }
+
+    /// Return the identifiers of the copies of `kind` in the context.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(root.ids(CapabilityKind::Env).len(), 1);
+    /// ```
+    pub(super) fn ids(&self, kind: CapabilityKind) -> Vec<CapabilityId> {
+        self.capabilities
+            .iter()
+            .filter(|held| held.capability.kind == kind)
+            .map(|held| held.id)
+            .collect()
+    }
+
+    /// Delete the copy `id`, when the context has it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// context.remove(id);
+    /// assert!(context.ids(CapabilityKind::Process).is_empty());
+    /// ```
+    pub(super) fn remove(&mut self, id: CapabilityId) {
+        self.capabilities.retain(|held| held.id != id);
+    }
+}
+
+/// The delegation record of one capability copy.
+#[derive(Debug)]
+struct Record {
+    /// The process that got the copy.
+    holder: ProcessId,
+    /// The source of the copy.
+    source: Source,
+    /// The copies that went from this copy to children, in the order of
+    /// their identifiers.
+    receivers: BTreeSet<CapabilityId>,
+    /// True after the holder left the process table and released the copy.
+    /// A released record stays while it has receivers, so that a
+    /// revocation from above still reaches them.
+    released: bool,
+}
+
+/// The delegation records of a run: for each capability copy, its holder,
+/// its source, and the copies that went from it to children. The run owns
+/// one tree, as it owns the registered names. A check does not read it: a
+/// check reads only the copies of the caller. A record lives while its copy
+/// lives, and after its holder exits while it has receivers. Thus a
+/// revocation goes through a holder that exited to the copies below it.
+#[derive(Debug, Default)]
+pub(super) struct Delegations {
+    /// The number of the next copy identifier.
+    next_id: u64,
+    /// The records by copy identifier.
+    records: HashMap<CapabilityId, Record>,
+}
+
+impl Delegations {
+    /// Give the process `holder` new copies with their sources, record each
+    /// copy, add each copy to the receivers of its source copy, and return
+    /// the context of the process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let root = delegations.hold(ProcessId(0), AllowAll.initial().into_iter().map(|c| (Source::Launcher, c)));
+    /// let child = delegations.hold(ProcessId(1), root.delegate(None)?);
+    /// ```
+    pub(super) fn hold(
+        &mut self,
+        holder: ProcessId,
+        copies: impl IntoIterator<Item = (Source, Capability)>,
+    ) -> SecurityContext {
+        let capabilities = copies
+            .into_iter()
+            .map(|(source, capability)| {
+                let id = CapabilityId(self.next_id);
+                self.next_id += 1;
+                if let Source::Copy(parent) = source {
+                    self.records
+                        .get_mut(&parent)
+                        .expect("the parent holds its source copy")
+                        .receivers
+                        .insert(id);
+                }
+                let record = Record {
+                    holder,
+                    source,
+                    receivers: BTreeSet::new(),
+                    released: false,
+                };
+                self.records.insert(id, record);
+                Held { id, capability }
+            })
+            .collect();
+        SecurityContext { capabilities }
+    }
+
+    /// Return the copies that went from the copies `from` to the process
+    /// `holder`, also when `holder` exited and its record stays.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(delegations.given(&parent.ids(CapabilityKind::Process), child).len(), 1);
+    /// ```
+    pub(super) fn given(&self, from: &[CapabilityId], holder: ProcessId) -> Vec<CapabilityId> {
+        from.iter()
+            .filter_map(|id| self.records.get(id))
+            .flat_map(|record| &record.receivers)
+            .filter(|receiver| self.records[receiver].holder == holder)
+            .copied()
+            .collect()
+    }
+
+    /// Start the revocation of the copy `id`, which a process holds or
+    /// gave, so it has a record. Return the revocation signal to its holder
+    /// when the holder lives. A released record has no holder to handle a
+    /// signal, so the revocation goes on at once (see [`Self::revoke`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(delegations.revocation(id), vec![(holder, id)]);
+    /// ```
+    pub(super) fn revocation(&mut self, id: CapabilityId) -> Vec<(ProcessId, CapabilityId)> {
+        let record = &self.records[&id];
+        if record.released {
+            self.revoke(id)
+        } else {
+            vec![(record.holder, id)]
+        }
+    }
+
+    /// Remove the record of the revoked copy `id` and return a revocation
+    /// signal for each live downstream copy. The holder of the copy calls
+    /// this when it handles its revocation signal. The walk goes through
+    /// each released record below the copy and removes it, so the
+    /// revocation also reaches the receivers of a holder that exited. A
+    /// copy with no record, for example a copy that a revocation before
+    /// removed, gives no signal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // The root gave a copy to a worker that exited and gave it to its child.
+    /// assert_eq!(delegations.revoke(root_copy), vec![(grandchild, grandchild_copy)]);
+    /// ```
+    pub(super) fn revoke(&mut self, id: CapabilityId) -> Vec<(ProcessId, CapabilityId)> {
+        let Some(receivers) = self.remove(id) else {
+            return Vec::new();
+        };
+        let mut signals = Vec::new();
+        let mut walk = VecDeque::from_iter(receivers);
+        while let Some(receiver) = walk.pop_front() {
+            let record = &self.records[&receiver];
+            if record.released {
+                let record = self
+                    .records
+                    .remove(&receiver)
+                    .expect("a receiver has a record");
+                walk.extend(record.receivers);
+            } else {
+                signals.push((record.holder, receiver));
+            }
+        }
+        signals
+    }
+
+    /// Release the copies of `context`, whose holder left the process
+    /// table. A copy with no receivers loses its record. A copy with
+    /// receivers keeps a released record for a later revocation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// delegations.release(std::mem::take(&mut process.security));
+    /// ```
+    pub(super) fn release(&mut self, context: SecurityContext) {
+        for held in context.capabilities {
+            let record = self
+                .records
+                .get_mut(&held.id)
+                .expect("a held copy has a record");
+            if record.receivers.is_empty() {
+                self.remove(held.id);
+            } else {
+                record.released = true;
+            }
+        }
+    }
+
+    /// Remove the record of the copy `id` from the tree and from the
+    /// receivers of its source, and return its receivers. A released source
+    /// that has no receivers left loses its record too, and so on up the
+    /// tree. Return `None` when the copy has no record.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(delegations.remove(id).is_some());
+    /// assert!(delegations.remove(id).is_none());
+    /// ```
+    fn remove(&mut self, id: CapabilityId) -> Option<BTreeSet<CapabilityId>> {
+        let record = self.records.remove(&id)?;
+        let mut child = id;
+        let mut source = record.source;
+        while let Source::Copy(parent) = source
+            && let Some(parent_record) = self.records.get_mut(&parent)
+        {
+            parent_record.receivers.remove(&child);
+            if !parent_record.released || !parent_record.receivers.is_empty() {
+                break;
+            }
+            source = parent_record.source;
+            child = parent;
+            self.records.remove(&parent);
+        }
+        Some(record.receivers)
     }
 }
 
@@ -569,8 +852,7 @@ pub(super) fn restrictions(term: &Term) -> Option<Vec<Restriction>> {
             let Term::Atom(kind) = kind else {
                 return None;
             };
-            let spec = KINDS.iter().find(|spec| spec.name == kind.name())?;
-            restriction(spec, fields)
+            restriction(CapabilityKind::named(kind.name())?.spec(), fields)
         })
         .collect()
 }
