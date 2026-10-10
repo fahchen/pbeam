@@ -116,3 +116,7 @@ When a public type cannot enforce a canonical representation, document it as a r
 ## Resumable work repeats or skips its budget
 
 Check the reduction budget before each unit of work that can grow with the input, and keep the position of the work across turns and traps. Do not rebuild completed work after a trap, and do not do uncharged O(N) work before a yield.
+
+## Published claims lack evidence checks
+
+Verify every acceptance, measurement, and comparison claim against its cited source before publishing it. Name the baseline and record decisions that differ from the cited requirement.
