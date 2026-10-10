@@ -154,6 +154,10 @@ name = "effect_capability"
 path = "tests/integration/effect_capability.rs"
 
 [[test]]
+name = "error_path"
+path = "tests/integration/error_path.rs"
+
+[[test]]
 name = "ets"
 path = "tests/integration/ets.rs"
 

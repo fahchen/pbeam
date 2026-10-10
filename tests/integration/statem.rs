@@ -11,9 +11,8 @@ const STATEM_PROBE: &[u8] = include_bytes!("../../fixtures/statem/statem_probe.b
 
 #[test]
 fn runs_a_gen_statem_server_entered_with_enter_loop() {
-    // `gen_statem:call/3` has two `raw_raise` instructions (opcode 161),
-    // which PBeam skips at load time. Without the skip, the load fails with
-    // `unsupported BEAM opcode 161`. The enter-loop path does not run them.
+    // `gen_statem:call/3` has two `raw_raise` instructions (opcode 161).
+    // The enter-loop path does not run them.
     // `proc_lib`, `lists`, and `erlang` are not loaded: the path calls only
     // BIFs in those modules, and `lists:keyfind/3` runs from the BIF table.
     let gen_statem = pinned_beam("gen_statem");

@@ -88,7 +88,7 @@ enum ExceptionClass {
     Error,
     /// Class `exit`, as `erlang:exit/1` raises.
     Exit,
-    /// Class `throw`, as `erlang:raise(throw, Reason, [])` raises.
+    /// Class `throw`, as `erlang:throw/1` raises.
     Throw,
 }
 
@@ -1572,6 +1572,45 @@ impl BeamProgram {
                         return Ok(outcome);
                     }
                 }
+                // ERTS `badmatch`, `case_end`, `try_case_end`, and
+                // `badrecord` raise class `error` with the reason
+                // `{Tag, Value}` (emu `instrs.tab:1137-1162`, `1229-1234`;
+                // `expand_error_value` in `beam_common.c:754-768`).
+                Instruction::TaggedError { tag, value } => {
+                    let reason = Term::Tuple(vec![Term::static_atom(tag), read(process, value)?]);
+                    if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                        return Ok(outcome);
+                    }
+                }
+                // ERTS `if_end` raises class `error` with the reason
+                // `if_clause` (emu `instrs.tab:1151-1155`;
+                // `expand_error_value` in `beam_common.c:769-772`).
+                Instruction::IfEnd => {
+                    let reason = Term::static_atom("if_clause");
+                    if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                        return Ok(outcome);
+                    }
+                }
+                // ERTS `raw_raise` raises `x1` with the class in `x0` and the
+                // stack trace of the raw stack trace in `x2`. For a class
+                // that is not `error`, `exit`, or `throw`, it writes
+                // `badarg` to `x0` and continues (emu `instrs.tab:1253-1263`;
+                // `raw_raise` in `beam_common.c:1148-1179`).
+                Instruction::RawRaise => {
+                    let (_, stack) = raw_stacktrace(&read(process, &Operand::X(2))?)?;
+                    let class = read(process, &Operand::X(0))?;
+                    let value = read(process, &Operand::X(1))?;
+                    match ExceptionClass::from_term(&class) {
+                        Some(class) => {
+                            if let Some(outcome) =
+                                raise_with_stacktrace(process, class, value, stack)
+                            {
+                                return Ok(outcome);
+                            }
+                        }
+                        None => write(process, &Operand::X(0), Term::static_atom("badarg"))?,
+                    }
+                }
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::TestYield => {
                     // `emit_i_test_yield` (`jit/arm/instr_common.cpp:3097-3119`).
@@ -1954,6 +1993,11 @@ impl BeamProgram {
             Target::Local(lambda) => lambda,
             Target::External {
                 module, function, ..
+            } if tail && (module.name(), function.name(), arity) == ("erlang", "error", 2) => {
+                return self.tail_call_error_2(scheduler);
+            }
+            Target::External {
+                module, function, ..
             } => return self.call_mfa(scheduler, module.name(), function.name(), arity, tail),
         };
         for (register, value) in (arity..).zip(fun.free()) {
@@ -1963,6 +2007,50 @@ impl BeamProgram {
         let frame = self.frame(lambda.module().name(), lambda.label(), total_arity)?;
         enter_frame(process, frame, tail);
         Ok(None)
+    }
+
+    /// Run a tail call of the fun `fun erlang:error/2`. ERTS
+    /// `i_call_fun_last` removes the frame before it calls the fun
+    /// (`emit_i_call_fun2_last` in `jit/arm/instr_fun.cpp:425-455`). Only an
+    /// apply puts the calling function back for an error BIF
+    /// (`apply_bif_error_adjustment`, `beam_common.c:1345-1431`), so the
+    /// first frame of the stack trace is the function of the caller frame.
+    /// With no caller frame, the first frame is the initial call of the
+    /// process with its arity, and the arguments are not in it
+    /// (`build_stacktrace`, `beam_common.c:1245-1248`). The tail call has
+    /// already released the Y registers of the frame, so the frame holds no
+    /// catch tag. Return the outcome when the process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // `tail(F) -> F(r, [a]).` as the start of a process.
+    /// let outcome = program.tail_call_error_2(&mut scheduler)?;
+    /// // The process exits with {r, [{Module, tail, 1, []}]}.
+    /// assert!(matches!(outcome, Some(Outcome::Exit { .. })));
+    /// ```
+    fn tail_call_error_2(&self, scheduler: &mut Scheduler) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        process.frames.pop();
+        if !process.frames.is_empty() {
+            return self.call_mfa(scheduler, "erlang", "error", 2, false);
+        }
+        let reason = read(process, &Operand::X(0))?;
+        let (module, function, arity) = process.initial_call.clone();
+        let frame = Term::Tuple(vec![
+            Term::Atom(scheduler.atoms.put(&module)?),
+            Term::Atom(scheduler.atoms.put(&function)?),
+            Term::Integer(arity as i64),
+            Term::List(Vec::new()),
+        ]);
+        let process = scheduler.current_process_mut();
+        let stacktrace = Term::List(vec![frame]);
+        Ok(raise_with_stacktrace(
+            process,
+            ExceptionClass::Error,
+            reason,
+            stacktrace,
+        ))
     }
 
     /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
@@ -2013,6 +2101,12 @@ impl BeamProgram {
                 Ok(Some(Outcome::Yield))
             }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
+            BifResult::ErrorWithStacktrace { reason, stacktrace } => Ok(raise_with_stacktrace(
+                process,
+                ExceptionClass::Error,
+                reason,
+                stacktrace,
+            )),
             BifResult::Trap {
                 module,
                 function,
@@ -3391,27 +3485,7 @@ fn raise_binary_failure(
     module: &BeamModule,
     failure: BinarySegmentFailure,
 ) -> Result<Option<Outcome>, BeamError> {
-    let index = current_frame(scheduler.current_process_mut()).next_instruction - 1;
-    let (module_name, name, arity) = module.instructions[..index]
-        .iter()
-        .rev()
-        .find_map(|instruction| match instruction {
-            Instruction::FunctionInfo {
-                module,
-                name,
-                arity,
-            } => Some((module, name, *arity)),
-            _ => None,
-        })
-        .ok_or_else(|| error("invariant error: bs_create_bin has no func_info before it"))?;
-    let atom = |name: &str| {
-        scheduler
-            .atoms
-            .get(name)
-            .map(Term::Atom)
-            .ok_or_else(|| error(format!("invariant error: atom table does not hold {name}")))
-    };
-    let (module_atom, function_atom) = (atom(module_name)?, atom(name)?);
+    let (module_atom, function_atom, arity) = current_function(scheduler, module)?;
     let cause = Term::Tuple(vec![
         Term::Integer(failure.segment as i64),
         Term::static_atom(failure.operation),
@@ -3444,6 +3518,51 @@ fn raise_binary_failure(
         Term::static_atom(failure.reason),
         Term::List(vec![frame]),
     ))
+}
+
+/// Return the module atom, the function atom, and the arity of the function
+/// that holds the last instruction that the active frame ran, from the
+/// `func_info` before it. ERTS finds the function of a code address in the
+/// same way for the first frame of a stack trace (`erts_lookup_function_info`
+/// in `build_stacktrace`, `beam_common.c:1229-1236`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // In `prefix/1` of `bs_create_bin_probe`.
+/// let (module, function, arity) = current_function(scheduler, &module)?;
+/// assert_eq!(arity, 1);
+/// ```
+///
+/// # Errors
+///
+/// An instruction with no `func_info` before it, or a module or function
+/// name that the atom table does not hold, is a runtime invariant error.
+fn current_function(
+    scheduler: &mut Scheduler,
+    module: &BeamModule,
+) -> Result<(Term, Term, u32), BeamError> {
+    let index = current_frame(scheduler.current_process_mut()).next_instruction - 1;
+    let (module_name, name, arity) = module.instructions[..index]
+        .iter()
+        .rev()
+        .find_map(|instruction| match instruction {
+            Instruction::FunctionInfo {
+                module,
+                name,
+                arity,
+            } => Some((module, name, *arity)),
+            _ => None,
+        })
+        .ok_or_else(|| error("invariant error: the instruction has no func_info before it"))?;
+    let atom = |name: &str| {
+        scheduler
+            .atoms
+            .get(name)
+            .map(Term::Atom)
+            .ok_or_else(|| error(format!("invariant error: atom table does not hold {name}")))
+    };
+    Ok((atom(module_name)?, atom(name)?, arity))
 }
 
 /// Read a literal, an X register, or a Y register.
