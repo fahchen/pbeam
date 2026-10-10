@@ -430,6 +430,15 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the task that implements `erlang:list_to_pid/1`.
 - **Source:** Suikou review 01a12608 (#368).
 
+### Give a guest less authority than the boot
+
+- After #338, the guest of an example runs in the root process of `pbeam_boot`, as `erl -eval` runs in the boot process of ERTS (`erts/preloaded/src/init.erl:1192-1217` at `OTP-29.1.1`). Each process of the OTP IO path gets a copy of the delegable capabilities of the root process. Thus the policy `RestrictedGuest.Policy` of `examples/restricted_guest` must give the guest each capability that the boot uses: the `terminal` operations of the IO servers, `signal` `handle` of `sigcont` and `sigwinch`, `runtime` `system_flag` and `load_nif`, `persistent_term` `read` and `write`, `process` `inspect`, and the spawn of `pbeam_boot`, `proc_lib`, and `erlang` (section "Decisions of #338" of `docs/capability-security-migration.md`). A delegable copy is also a copy that its holder can use, so the root process cannot keep a capability for its children only.
+- **Evidence:** a run of the example without one of these operations does not write the output of the guest. For example, it stops with `unsupported erlang:process_info/2 arguments` without `process` `inspect`.
+- **Option:** the kernel process of `pbeam_boot` requests the capabilities of the OTP IO path with `pbeam_cap:request/2` before it starts `user_sup`, and the root process gets only the capabilities of the guest. `logger_server`, which the root process starts, would then need its own grant. Another option is a boot that starts the guest in a child with the option `{capabilities, Map}`, which changes the root process of the run.
+- **Reason:** no consumer must deny the guest a capability that the OTP IO path needs, for example `terminal` `raw_mode`.
+- **Trigger:** a policy that must deny such a capability to a guest, or the launcher of M8.
+- **Source:** implementation of #338.
+
 ## Tests and tooling
 
 ### Load-check every pinned OTP module that loads today
