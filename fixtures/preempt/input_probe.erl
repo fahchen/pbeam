@@ -65,6 +65,16 @@ inputs() ->
       [bin, nil, empty_bin_list, one_bin, {ones, 1}, {ones, 8}, {ones, 16}, nested, binaries,
        {ones, 1000}, {ones, 31970}, {ones, 31990}, {ones, 100000}, bad, bad_tail, atom,
        {bins, 1995}, {tail_bin, 15983}]},
+     {iolist_to_binary,
+      [bin, nil, empty_bin_list, one_bin, {ones, 1}, {ones, 8}, {ones, 16}, nested, binaries,
+       {ones, 1000}, {ones, 31970}, {ones, 31990}, {ones, 100000}, bad, bad_tail, atom,
+       {bins, 1995}, {tail_bin, 15983}]},
+     %% {Bump, Name}: iolist_to_binary/1 after erlang:bump_reductions(Bump).
+     %% With at most 100 reductions left, the call switches out first. With
+     %% fewer than 1000, it walks with a budget of 1000.
+     {iolist_to_binary_late,
+      [{3900, {ones, 10}}, {3900, atom}, {3500, nested}, {3500, {ones, 4000}},
+       {3500, {ones, 8000}}]},
      %% {Process, Item}: the caller, a process with no message, and a
      %% process with 10000 messages that it did not receive.
      {process_info,
@@ -76,7 +86,9 @@ inputs() ->
 long_inputs() ->
     [{maps_merge, {{1, 40000}, {20000, 60000}}}, {ets_insert, {list, 16000}},
      {persistent_term_get, 10000}, {iolist_size, {ones, 100000}},
-     {iolist_to_iovec, {ones, 100000}}, {iolist_to_iovec, {bins, 1995}}].
+     {iolist_to_iovec, {ones, 100000}}, {iolist_to_iovec, {bins, 1995}},
+     {iolist_to_binary, {ones, 100000}}, {iolist_to_binary, {bins, 1995}},
+     {iolist_to_binary_late, {3900, {ones, 10}}}].
 
 %% Return the argument. A call through ?MODULE stops the compiler from
 %% folding a constant.
@@ -117,6 +129,8 @@ arg(ets_insert, Input) -> {table(Input), objects(Input)};
 arg(persistent_term_get, _) -> none;
 arg(iolist_size, Name) -> iodata(Name);
 arg(iolist_to_iovec, Name) -> iodata(Name);
+arg(iolist_to_binary, Name) -> iodata(Name);
+arg(iolist_to_binary_late, {Bump, Name}) -> {Bump, iodata(Name)};
 arg(process_info, {self, Item}) -> {self(), Item};
 arg(process_info, {idle, Item}) -> {spawn(?MODULE, idle, []), Item};
 arg(process_info, {busy, Item}) ->
@@ -216,6 +230,15 @@ run(iolist_size, Iodata) ->
      end];
 run(iolist_to_iovec, Iodata) ->
     [try erlang:iolist_to_iovec(Iodata)
+     catch error:Reason -> Reason
+     end];
+run(iolist_to_binary, Iodata) ->
+    [try iolist_to_binary(Iodata)
+     catch error:Reason -> Reason
+     end];
+run(iolist_to_binary_late, {Bump, Iodata}) ->
+    erlang:bump_reductions(Bump),
+    [try iolist_to_binary(Iodata)
      catch error:Reason -> Reason
      end];
 run(process_info, {Pid, Item}) -> [process_info(Pid, Item)];

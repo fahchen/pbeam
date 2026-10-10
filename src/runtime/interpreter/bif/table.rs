@@ -192,7 +192,7 @@ bifs! {
     erlang:integer_to_list/1 => |cx, [term]| erlang::integer_to_list(cx.scheduler.current_process_mut(), term),
     erlang:integer_to_list/2 => unsupported,
     erlang:iolist_size/1 => |cx, [term]| iolist::iolist_size(cx.scheduler.current_process_mut(), term),
-    erlang:iolist_to_binary/1 => unsupported,
+    erlang:iolist_to_binary/1 => |cx, [term]| iolist::iolist_to_binary(cx.scheduler, term),
     erlang:iolist_to_iovec/1 => |cx, [term]| iolist::iolist_to_iovec(cx.scheduler.current_process_mut(), term),
     erlang:is_atom/1 => unsupported,
     erlang:is_binary/1 => unsupported,

@@ -182,6 +182,48 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("{tail_bin,15983}", 3998),
         ],
     ),
+    // A binary, a list of one binary, `[]`, and a term that is not a list
+    // cost nothing. Each other list walks for the size and then for the
+    // copy, and a copy uses one more step for each 32 bytes of each binary
+    // (`erl_iolist.c:354-649`, `710-928`).
+    (
+        "iolist_to_binary",
+        &[
+            ("bin", 0),
+            ("nil", 0),
+            ("empty_bin_list", 0),
+            ("one_bin", 0),
+            ("{ones,1}", 2),
+            ("{ones,8}", 4),
+            ("{ones,16}", 6),
+            ("nested", 4),
+            ("binaries", 8),
+            ("{ones,1000}", 252),
+            ("{ones,31970}", 7994),
+            ("{ones,31990}", 7998),
+            ("{ones,100000}", 25002),
+            ("bad", 1),
+            ("bad_tail", 1),
+            ("atom", 0),
+            ("{bins,1995}", 4241),
+            ("{tail_bin,15983}", 3998),
+        ],
+    ),
+    // `erlang:bump_reductions(Bump)` and then `iolist_to_binary/1`. With at
+    // most 100 reductions left, the call uses them as virtual reductions,
+    // which the total does not count, and runs again in the next turn. With
+    // fewer than 1000, it walks with a budget of 1000, and its budget
+    // becomes 0 (`erl_iolist.c:34-35`, `857-874`).
+    (
+        "iolist_to_binary_late",
+        &[
+            ("{3900,{ones,10}}", 3905),
+            ("{3900,atom}", 3901),
+            ("{3500,nested}", 3505),
+            ("{3500,{ones,4000}}", 3999),
+            ("{3500,{ones,8000}}", 4999),
+        ],
+    ),
     // Each item that PBeam supports costs 1 after the read, also for a
     // process with 10000 messages (`erl_bif_info.c:1417-1424`, `1601`).
     // `process_info/2` is a heavy BIF, so its call costs nothing.
@@ -263,6 +305,38 @@ const LONGS: &[(&str, &[(&str, i64)])] = &[
     // 4241 reductions for each `iolist_to_iovec/1` of 1995 binaries.
     (
         "iolist_to_iovec",
+        &[
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 2999),
+        ],
+    ),
+    // 25002 reductions for each `iolist_to_binary/1` of 100000 ones.
+    (
+        "iolist_to_binary",
+        &[("b", 4002), ("a", 1), ("b", 998), ("a", 2)],
+    ),
+    // 4241 reductions for each `iolist_to_binary/1` of 1995 binaries.
+    (
+        "iolist_to_binary",
+        &[
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 2999),
+        ],
+    ),
+    // `erlang:bump_reductions(3900)` and then `iolist_to_binary/1` of 10
+    // ones: the call switches out before it walks.
+    (
+        "iolist_to_binary_late",
         &[
             ("b", 667),
             ("a", 1),
