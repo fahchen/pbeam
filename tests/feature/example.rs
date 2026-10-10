@@ -204,8 +204,13 @@ fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts
     assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
 
     // The build writes each called module that the `pbeam` run does not get
-    // into `pbeam.unloaded`: the code path has no BEAM file for it, or the
-    // PBeam loader does not load its BEAM file.
+    // into `pbeam.unloaded`: the code path has no BEAM file for it, the
+    // PBeam loader does not load its BEAM file, or PBeam does not give the
+    // ERTS result of the module. PBeam starts no code server, so with
+    // `code_server`, `code:ensure_loaded/1` of a module that is not loaded
+    // raises `badarg` where ERTS returns `{error,nofile}`
+    // (`code_server.erl:84-85`, `code.erl:585-600`). Without it, the call
+    // stops the run with `unresolved external MFA code_server:get_mode/0`.
     let unloaded = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("target/examples/called_modules/pbeam.unloaded"),
     )
@@ -233,6 +238,7 @@ fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts
             ("HashDict", "no BEAM file in the code path"),
             ("HashSet", "no BEAM file in the code path"),
             ("calendar", "unsupported BEAM opcode 185 (bif3)"),
+            ("code_server", "PBeam has no code server"),
             ("crypto", "unsupported BEAM opcode 149 (on_load)"),
             (
                 "elixir_errors",
@@ -254,7 +260,11 @@ fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts
     // must then give it to the `pbeam` run.
     for (module, file, reason) in entries {
         let Some((load_error, _instruction)) = reason.split_once(" (") else {
-            assert_eq!(file, "", "{module}");
+            if module == "code_server" {
+                assert!(file.ends_with("/code_server.beam"), "{file}");
+            } else {
+                assert_eq!(file, "", "{module}");
+            }
             continue;
         };
         assert!(
