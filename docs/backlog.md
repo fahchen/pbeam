@@ -58,12 +58,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path loads a local fun literal, calls one of the three BIFs, or formats a fun.
 - **Source:** PR #120 (#109).
 
-### Run `erlang:'-'/1` (was #128)
-
-- The measured M2 paths do not run it (pinned ERTS call trace and line counters). #110 removed it. The `is_eq` test of the same task landed in PR #189 (#183), and the `is_float` test is task #167. A negation of a value that is not a literal, such as `-X`, compiles to a `gc_bif` call of `erlang:'-'/1` and returns `unresolved external MFA erlang:-/1` (row "Unimplemented BIFs").
-- **Trigger:** a measured consumer negates a value that is not a literal.
-- **Source:** review of PR #121 (#110).
-
 ## Runtime
 
 ### Run `code:ensure_loaded/1` as ERTS does
@@ -157,7 +151,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
   - Timers: `erlang:start_timer/4`, `erlang:send_after/3,4`, `erlang:cancel_timer/1`, and `erlang:read_timer/1,2`. `erlang:start_timer/3` and `erlang:cancel_timer/2` already use the timer list of #150 (PR #172).
   - Aliases: `erlang:alias/1`, which `erlang:alias/0` calls, and `erlang:unalias/1`.
-  - Equality: `erlang:'=='/2` and `erlang:'/='/2`. They give other results than `=:=` and `=/=` only for floats (see "Add float terms").
+  - Equality: `erlang:'/='/2`. It gives other results than `=/=` only for floats (see "Add float terms").
   - Persistent terms: `persistent_term:erase/1`, `persistent_term:put_new/2`, and `persistent_term:info/0`.
   - Signals: `erlang:exit/3`.
   - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
