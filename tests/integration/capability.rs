@@ -236,6 +236,27 @@ fn raises_badarg_for_a_capabilities_option_that_is_not_valid() {
 }
 
 #[test]
+fn skips_each_spawn_check_and_reduction_in_a_run_with_no_policy() {
+    // With no policy, the run skips each check, and a child gets no copy,
+    // so a `{capabilities, Map}` option does not reduce it. With `AllowAll`,
+    // each of these children is denied (see the tests above).
+    let program = program();
+    let unchecked = |function| program.execute("capability_probe", function, &[]).unwrap();
+    for function in ["reduce", "empty", "undelegable"] {
+        assert_eq!(
+            unchecked(function),
+            results(&program, &["ok"; 5]),
+            "{function}"
+        );
+    }
+    assert_eq!(unchecked("widen"), results(&program, &["ok"; 6]));
+    // The option is still checked: a `Map` that is not valid raises badarg.
+    let mut expected = vec!["badarg"; 19];
+    expected.push("ok");
+    assert_eq!(unchecked("malformed"), results(&program, &expected));
+}
+
+#[test]
 fn makes_only_capabilities_that_their_kind_permits() {
     let names = BTreeSet::from([String::from("HOME")]);
     let error = Capability::new(

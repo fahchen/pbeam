@@ -228,6 +228,12 @@ pub(super) struct Scheduler {
     /// The policy process of a run with a policy module, or `None` with a
     /// Rust policy.
     policy: Option<PolicyProcess>,
+    /// True when the run skips each capability check, as if each effect
+    /// entry were `ambient` (section "Capability" of
+    /// `docs/effect-inventory.md`). The launcher sets it in
+    /// [`Self::without_checks`] before the root process starts, and no BIF
+    /// can change it, so a restricted process cannot turn the checks off.
+    skip_checks: bool,
 }
 
 impl Scheduler {
@@ -269,7 +275,39 @@ impl Scheduler {
             dirty_io: DirtyIo::new(),
             delegations: Delegations::default(),
             policy: None,
+            skip_checks: false,
         }
+    }
+
+    /// Return a scheduler as [`Self::new`] does, for a run that skips each
+    /// capability check: the run of a launcher with no policy. Each check
+    /// passes, no process gets a capability copy, a `{capabilities, Map}`
+    /// spawn option does not reduce the child, and `pbeam_cap:revoke/2` and
+    /// `pbeam_cap:request/2` have no effect.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let scheduler = Scheduler::without_checks(program.atoms.clone());
+    /// assert!(scheduler.skips_checks());
+    /// ```
+    pub(super) fn without_checks(atoms: AtomTable) -> Self {
+        Scheduler {
+            skip_checks: true,
+            ..Scheduler::new(atoms)
+        }
+    }
+
+    /// Return true when the run skips each capability check (see
+    /// [`Self::without_checks`]). Each check reads this first.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!Scheduler::new(AtomTable::new()).skips_checks());
+    /// ```
+    pub(super) fn skips_checks(&self) -> bool {
+        self.skip_checks
     }
 
     /// Create the root process with the initial capabilities
@@ -1181,7 +1219,8 @@ impl Scheduler {
     /// delegable capabilities of the current process, reduced by
     /// `restrictions` (see `SecurityContext::delegate`). A denied check or
     /// delegation gives `Ok(Err(Denied))` before the spawn takes a pid or a
-    /// reference.
+    /// reference. In a run that skips the checks, the spawn has no check,
+    /// and the child gets no copy and ignores `restrictions`.
     ///
     /// # Examples
     ///
@@ -1210,10 +1249,14 @@ impl Scheduler {
                 Ok(())
             }
         };
-        let copies = check(true, Operation::Spawn, Some(module.as_bytes()))
-            .and_then(|()| check(link, Operation::Link, None))
-            .and_then(|()| check(monitor, Operation::Monitor, None))
-            .and_then(|()| parent.delegate(restrictions));
+        let copies = if self.skip_checks {
+            Ok(Vec::new())
+        } else {
+            check(true, Operation::Spawn, Some(module.as_bytes()))
+                .and_then(|()| check(link, Operation::Link, None))
+                .and_then(|()| check(monitor, Operation::Monitor, None))
+                .and_then(|()| parent.delegate(restrictions))
+        };
         let copies = match copies {
             Ok(copies) => copies,
             Err(denied) => return Ok(Err(denied)),
@@ -1288,7 +1331,8 @@ impl Scheduler {
     /// sends the revocation on to its receivers at once (see
     /// [`Delegations::revocation`]). Return `Err(Denied)` when the current
     /// process gave `holder` no copy of `kind` that still has a record: a
-    /// process can revoke only a capability that it gave.
+    /// process can revoke only a capability that it gave. In a run that
+    /// skips the checks, the call returns `Ok(())` and has no effect.
     ///
     /// # Examples
     ///
@@ -1301,6 +1345,9 @@ impl Scheduler {
         holder: ProcessId,
         kind: CapabilityKind,
     ) -> Result<(), Denied> {
+        if self.skip_checks {
+            return Ok(());
+        }
         let caller = self.current_process();
         let (id, copies) = (caller.id, caller.security.ids(kind));
         let given = self.delegations.given(&copies, holder);

@@ -396,6 +396,45 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a policy that must take back a run-time grant, for example an audit rule of #338.
 - **Source:** implementation of #337.
 
+### Limit the targets of `process` `send`
+
+- After #370, the `process` capability with `send` permits a send to each process: the send path checks the operation only (`deliver_to` in `src/runtime/interpreter/bif/erlang.rs`). It has no constraint field.
+- **Option:** a constraint of the targets, for example the pids of the own tree or the registered names of a list.
+- **Reason:** the owner decided an all-or-nothing `send` in Suikou review 01a12608 and put a target constraint in the backlog. No consumer limits the targets yet.
+- **Trigger:** a policy that must keep a guest from a send to a process outside its group, for example an audit rule of #338.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Add a `name` capability kind
+
+- After #368, `erlang:register/2`, `erlang:unregister/1`, and `erlang:whereis/1` are `ambient` in `docs/effect-inventory.md`. A send or a monitor by name checks only the `process` capability.
+- **Option:** a `name` kind with the operations `register` and `lookup` and the constraint field `names`.
+- **Reason:** the owner decided not to add the kind until a consumer needs it (Suikou review 01a12608).
+- **Trigger:** a policy that must limit the names that a guest registers or finds.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Add an `ets` capability kind
+
+- After #368, each `ets` BIF is `ambient` in `docs/effect-inventory.md`. The access mode of a table (`private`, `protected`, or `public`) controls the access, as on ERTS.
+- **Option:** an `ets` kind for the creation of a table, with a constraint of the names of named public tables.
+- **Reason:** the owner decided that ETS has no check until a consumer needs one (Suikou review 01a12608).
+- **Trigger:** a policy that must limit the tables that a guest makes or the public tables that it uses.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Add a `clock` capability kind for a deterministic sandbox
+
+- After #368, `erlang:monotonic_time/1` and `os:system_time/1` are `ambient` in `docs/effect-inventory.md`. A clock is a source of nondeterminism, not an authority, and OTP code reads clocks often, also in the process of the caller.
+- **Option:** a `clock` kind that a deterministic sandbox holds back, or a run clock that the launcher gives.
+- **Reason:** no consumer needs a deterministic run yet.
+- **Trigger:** a sandbox that must give the same result for each run of the same input.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Check `erlang:list_to_pid/1` when it is implemented
+
+- `erlang:list_to_pid/1` is not implemented. It makes a pid of any process from text, also of the policy process, so it must have a check. The decisions of #337 also say that the task that implements it must keep the policy process out or check `process` `exit_other` for trusted processes (section "Policy module, policy process, and policy table" of `docs/capability-security-migration.md`).
+- **Reason:** the owner put the check in the backlog in Suikou review 01a12608, because the BIF has no implementation yet.
+- **Trigger:** the task that implements `erlang:list_to_pid/1`.
+- **Source:** Suikou review 01a12608 (#368).
+
 ## Tests and tooling
 
 ### Load-check every pinned OTP module that loads today

@@ -431,8 +431,9 @@ impl Capability {
 }
 
 /// The source of the initial capabilities of a run. The launcher calls the
-/// policy when it makes the root process. A Rust host can replace the
-/// default [`AllowAll`] policy with [`crate::BeamProgram::execute_with_policy`].
+/// policy when it makes the root process. A Rust host gives a policy to
+/// [`crate::BeamProgram::execute_with_policy`]. A run with no policy,
+/// [`crate::BeamProgram::execute`], skips each check.
 pub trait Policy {
     /// Return the capabilities of the root process.
     ///
@@ -464,9 +465,11 @@ pub trait Policy {
     }
 }
 
-/// The default policy. The root process gets a delegable capability of
-/// each kind with all operations and no constraint, so each process can do
-/// each operation, and a run gives the same results as the pinned ERTS.
+/// The policy that permits each operation, for the tests of the checks. The
+/// root process gets a delegable capability of each kind with all
+/// operations and no constraint, so each check passes, and a run gives the
+/// same results as the pinned ERTS. Unlike a run with no policy, each check
+/// runs, and a child gets copies.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AllowAll;
 

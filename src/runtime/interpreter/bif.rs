@@ -151,12 +151,14 @@ impl BifResult {
 /// permits `name` in its constraint (see `SecurityContext::check`). Else
 /// return `None`. An effect entry calls this after its argument checks and
 /// before its first effect, so a denied call has no effect (row "Capability
-/// checks" of `docs/erts-differences.md`).
+/// checks" of `docs/erts-differences.md`). A run that skips the checks
+/// returns `None` before it reads the capabilities (see
+/// `Scheduler::without_checks`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // The default policy permits each operation.
+/// // `AllowAll` permits each operation.
 /// assert!(denial(&mut scheduler, CapabilityKind::Env, Operation::Read, Some(b"HOME"))?.is_none());
 /// ```
 ///
@@ -169,8 +171,13 @@ pub(super) fn denial(
     operation: Operation,
     name: Option<&[u8]>,
 ) -> Result<Option<BifResult>, BeamError> {
-    let security = &scheduler.current_process().security;
-    if security.check(kind, operation, name).is_ok() {
+    if scheduler.skips_checks()
+        || scheduler
+            .current_process()
+            .security
+            .check(kind, operation, name)
+            .is_ok()
+    {
         return Ok(None);
     }
     BifResult::capability_denied(&mut scheduler.atoms).map(Some)

@@ -210,11 +210,37 @@ fn only(names: &[&str]) -> Constraint {
     Constraint::Only(names.iter().map(|&name| name.to_owned()).collect())
 }
 
-/// Return the `(entry, kind:operation)` pairs of the column "Capability" of
-/// the sections "BIFs" and "Native bindings" of the effect inventory. A
-/// cell is `none`, `later`, or a list of `kind:operation` code spans.
-fn inventory_capabilities() -> BTreeSet<(String, String)> {
-    let mut pairs = BTreeSet::new();
+/// Each entry that the column "Capability" of the effect inventory marks
+/// `ambient`. `effect_probe:ambient/0` calls each entry once.
+const AMBIENT: [&str; 22] = [
+    "erlang:demonitor/1",
+    "erlang:demonitor/2",
+    "erlang:function_exported/3",
+    "erlang:list_to_atom/1",
+    "erlang:monotonic_time/1",
+    "erlang:node/0",
+    "erlang:node/1",
+    "erlang:register/2",
+    "erlang:system_info/1",
+    "erlang:universaltime_to_localtime/1",
+    "erlang:unlink/1",
+    "erlang:unregister/1",
+    "erlang:whereis/1",
+    "ets:delete/2",
+    "ets:insert/2",
+    "ets:lookup/2",
+    "ets:lookup_element/4",
+    "ets:member/2",
+    "ets:new/2",
+    "ets:whereis/1",
+    "os:system_time/1",
+    "re:compile/2",
+];
+
+/// Return the entry and the cell of the column "Capability" of each row of
+/// the sections "BIFs" and "Native bindings" of the effect inventory.
+fn inventory_cells() -> Vec<(&'static str, &'static str)> {
+    let mut cells = Vec::new();
     let mut section = "";
     for line in INVENTORY.lines() {
         if let Some(heading) = line.strip_prefix("## ") {
@@ -222,17 +248,41 @@ fn inventory_capabilities() -> BTreeSet<(String, String)> {
         } else if matches!(section, "BIFs" | "Native bindings")
             && let Some(row) = line.strip_prefix("| `")
         {
-            let cells: Vec<_> = row.split(" | ").collect();
-            let entry = &cells[0][..cells[0].find('`').unwrap()];
-            for capability in cells[2].split(", ") {
-                let capability = capability.trim_matches('`');
-                if capability.contains(':') {
-                    pairs.insert((entry.to_owned(), capability.to_owned()));
-                }
+            let row: Vec<_> = row.split(" | ").collect();
+            cells.push((&row[0][..row[0].find('`').unwrap()], row[2]));
+        }
+    }
+    cells
+}
+
+/// Return the `(entry, kind:operation)` pairs of the column "Capability" of
+/// the sections "BIFs" and "Native bindings" of the effect inventory. A
+/// cell is `none`, `later`, `` `ambient`: Reason ``, or a list of
+/// `kind:operation` code spans.
+fn inventory_capabilities() -> BTreeSet<(String, String)> {
+    let mut pairs = BTreeSet::new();
+    for (entry, cell) in inventory_cells() {
+        if cell.starts_with("`ambient`") {
+            continue;
+        }
+        for capability in cell.split(", ") {
+            let capability = capability.trim_matches('`');
+            if capability.contains(':') {
+                pairs.insert((entry.to_owned(), capability.to_owned()));
             }
         }
     }
     pairs
+}
+
+/// Return the entries that the column "Capability" of the effect inventory
+/// marks `ambient`.
+fn inventory_ambient() -> BTreeSet<&'static str> {
+    inventory_cells()
+        .into_iter()
+        .filter(|(_, cell)| cell.starts_with("`ambient`"))
+        .map(|(entry, _)| entry)
+        .collect()
 }
 
 /// Load the probe, the stand-in `prim_tty`, and the pinned `erlang.beam`,
@@ -282,6 +332,19 @@ fn each_effect_entry_with_a_capability_denies_without_its_operation() {
             "{entry} without {capability}"
         );
     }
+}
+
+#[test]
+fn calls_each_ambient_entry_with_no_capability() {
+    assert_eq!(inventory_ambient(), BTreeSet::from(AMBIENT));
+    // The root process holds no capability, so no policy can permit the
+    // calls: each `ambient` entry has no check.
+    let program = program();
+    let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
+                    nonode@nohost,nonode@nohost,true,effect_probe_ambient_atom,ok,\
+                    effect_probe_ambient,true,[{key,value}],value,true,true,reference]";
+    assert_eq!(text(&run(&program, "ambient", &Grants(vec![]))), expected);
+    assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }
 
 #[test]
@@ -526,6 +589,25 @@ fn keeps_the_runtime_state_after_a_denied_call() {
     assert_eq!(
         run(&program, "load_nif_kept", &AllowAll),
         Term::Tuple(vec![denied, atom(&program, "ok")])
+    );
+}
+
+#[test]
+fn skips_each_effect_check_in_a_run_with_no_policy() {
+    // A child with `#{Kind => #{operations => []}}` makes the call. With no
+    // policy, the run skips each check, so the call has its effect, as on
+    // ERTS: the parent then sees the changed state.
+    let program = program();
+    let unchecked = |function| program.execute("effect_probe", function, &[]).unwrap();
+    let ok = atom(&program, "ok");
+    assert_eq!(
+        unchecked("system_flag_kept"),
+        tuple(&[ok.clone(), atom(&program, "undefined")])
+    );
+    let stored = |value| tuple(&[ok.clone(), Term::Integer(value)]);
+    assert_eq!(
+        unchecked("persistent_term_kept"),
+        Term::List(vec![stored(1), stored(2)])
     );
 }
 

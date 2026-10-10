@@ -1,5 +1,5 @@
 use super::{
-    capability::{AllowAll, Policy, Restriction},
+    capability::{Policy, Restriction},
     host::output::IovecWrite,
     process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::{PolicyEnd, Received, Scheduler, Turn},
@@ -52,6 +52,9 @@ pub struct BeamProgram {
 /// The issuer of the initial capabilities of a run.
 #[derive(Clone, Copy)]
 enum Issuer<'a> {
+    /// No issuer: the launcher has no policy, so the run skips each
+    /// capability check and issues no capability.
+    Unchecked,
     /// A Rust policy of the host.
     Host(&'a dyn Policy),
     /// A policy module in BEAM code, which the policy process runs.
@@ -211,8 +214,15 @@ impl BeamProgram {
     /// again when fds 0 and 1 are terminals, as at the exit of the ERTS
     /// emulator (see `InitialMode::reset`).
     ///
-    /// The root process gets the capabilities of the default [`AllowAll`]
-    /// policy, so each process can do each operation, as on ERTS.
+    /// The run has no policy, so it skips each capability check, as if each
+    /// effect entry were `ambient`, and each process can do each operation,
+    /// as on ERTS. No process gets a capability copy. The `{capabilities,
+    /// Map}` spawn option still raises `badarg` for a `Map` that is not
+    /// valid, but it does not reduce the child. `pbeam_cap:revoke/2` and
+    /// `pbeam_cap:request/2` return `ok` after their argument checks and
+    /// have no effect. The option is fixed for the run: no BIF can change
+    /// it. Use [`BeamProgram::execute_with_policy`] or
+    /// [`BeamProgram::execute_with_policy_module`] for a run with checks.
     ///
     /// # Examples
     ///
@@ -225,7 +235,7 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
     ) -> Result<Term, BeamError> {
-        self.execute_with_policy(module, function, arguments, &AllowAll)
+        self.execute_issued(module, function, arguments, Issuer::Unchecked)
     }
 
     /// Run an exported function as the root process, as
@@ -235,7 +245,9 @@ impl BeamProgram {
     /// `error:capability_denied` before it has an effect (row "Capability
     /// checks" of `docs/erts-differences.md`). The column "Capability" of
     /// `docs/effect-inventory.md` lists the entries that check a capability
-    /// now; the entries marked `later` have no check yet (#335). Before each
+    /// now; the entries marked `ambient` have no check by decision, and the
+    /// entries marked `later` have no check yet (#335). With [`AllowAll`](crate::AllowAll),
+    /// each check passes, as a test of the checks needs. Before each
     /// scheduling step, the launcher revokes the initial capabilities of each
     /// kind that [`Policy::revocations`] gives.
     ///
@@ -320,7 +332,10 @@ impl BeamProgram {
         issuer: Issuer,
     ) -> Result<Term, BeamError> {
         let initial_mode = InitialMode::read();
-        let mut scheduler = Scheduler::new(self.atoms.clone());
+        let mut scheduler = match issuer {
+            Issuer::Unchecked => Scheduler::without_checks(self.atoms.clone()),
+            Issuer::Host(_) | Issuer::Module(_) => Scheduler::new(self.atoms.clone()),
+        };
         let run = self.run_root(&mut scheduler, module, function, arguments, issuer);
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
@@ -338,7 +353,9 @@ impl BeamProgram {
 
     /// Run `Module:Function(Arguments...)` as the root process with the
     /// initial capabilities of `issuer` on `scheduler` until the run ends, as
-    /// `BeamProgram::execute` describes. With a Rust policy, the launcher
+    /// `BeamProgram::execute` describes. With no issuer, the root process
+    /// gets no capability, and `scheduler` must skip the checks (see
+    /// `Scheduler::without_checks`). With a Rust policy, the launcher
     /// revokes the initial capabilities of each kind that
     /// `Policy::revocations` gives before each scheduling step. With a
     /// policy module, the launcher makes the policy process first and the
@@ -372,6 +389,10 @@ impl BeamProgram {
         let label = self.entry_label(module, function, arity)?;
         let frame = self.frame(module, label, arity)?;
         let mut root = match issuer {
+            Issuer::Unchecked => {
+                scheduler.start(frame, arguments.to_vec(), Vec::new())?;
+                None
+            }
             Issuer::Host(policy) => {
                 scheduler.start(frame, arguments.to_vec(), policy.initial())?;
                 None
@@ -396,6 +417,7 @@ impl BeamProgram {
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
             match issuer {
+                Issuer::Unchecked => {}
                 Issuer::Host(policy) => scheduler.revoke_issued(&policy.revocations()),
                 Issuer::Module(policy) => {
                     if let Some(arguments) = scheduler.next_policy_request() {
