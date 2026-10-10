@@ -396,12 +396,13 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
 }
 
 /// Run `erlang:raise(Class, Reason, Stacktrace)` as ERTS `raise_3`
-/// (`bif.c:1549-1692`) does: raise an exception of class `error` or `exit`
-/// with `Reason`. A class that is not `error`, `exit`, or `throw`, or a
-/// stack trace that is not valid, makes the BIF return the atom `badarg`; it
-/// does not raise. A valid stack trace is a proper list of `{Fun, Args}`,
-/// `{Fun, Args, Location}`, `{M, F, A}`, or `{M, F, A, Location}`, where
-/// `Fun` is a fun, `M` and `F` are atoms, and `Location` is a list.
+/// (`bif.c:1549-1692`) does: raise an exception of class `error`, `exit`,
+/// or `throw` with `Reason`. A class that is not `error`, `exit`, or
+/// `throw`, or a stack trace that is not valid, makes the BIF return the
+/// atom `badarg`; it does not raise. A valid stack trace is a proper list of
+/// `{Fun, Args}`, `{Fun, Args, Location}`, `{M, F, A}`, or
+/// `{M, F, A, Location}`, where `Fun` is a fun, `M` and `F` are atoms, and
+/// `Location` is a list.
 ///
 /// PBeam records no stack frames (row "Exception stack trace" in
 /// `docs/erts-differences.md`), so the exception gets the stack trace `[]`.
@@ -409,27 +410,14 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = raise(&Term::static_atom("exit"), &reason, &Term::List(vec![]))?;
-/// assert!(matches!(result, BifResult::Raise { class: ExceptionClass::Exit, .. }));
-/// let result = raise(&Term::static_atom("foo"), &reason, &Term::List(vec![]))?;
+/// let result = raise(&Term::static_atom("throw"), &reason, &Term::List(vec![]));
+/// assert!(matches!(result, BifResult::Raise { class: ExceptionClass::Throw, .. }));
+/// let result = raise(&Term::static_atom("foo"), &reason, &Term::List(vec![]));
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "badarg"));
-/// assert!(raise(&Term::static_atom("throw"), &reason, &Term::List(vec![])).is_err());
 /// ```
-///
-/// # Errors
-///
-/// The class `throw` with a valid stack trace gives a runtime error: PBeam
-/// does not implement the `throw` class.
-pub(super) fn raise(
-    class: &Term,
-    reason: &Term,
-    stacktrace: &Term,
-) -> Result<BifResult, BeamError> {
-    let class = match class {
-        Term::Atom(class) if class.name() == "error" => Some(ExceptionClass::Error),
-        Term::Atom(class) if class.name() == "exit" => Some(ExceptionClass::Exit),
-        Term::Atom(class) if class.name() == "throw" => None,
-        _ => return Ok(Value(Term::static_atom("badarg"))),
+pub(super) fn raise(class: &Term, reason: &Term, stacktrace: &Term) -> BifResult {
+    let Some(class) = ExceptionClass::from_term(class) else {
+        return Value(Term::static_atom("badarg"));
     };
     let location = |location: &Term| matches!(location, Term::List(_) | Term::ImproperList(..));
     let frame = |frame: &Term| match frame {
@@ -442,21 +430,13 @@ pub(super) fn raise(
         },
         _ => false,
     };
-    let Term::List(frames) = stacktrace else {
-        return Ok(Value(Term::static_atom("badarg")));
-    };
-    if !frames.iter().all(frame) {
-        return Ok(Value(Term::static_atom("badarg")));
+    match stacktrace {
+        Term::List(frames) if frames.iter().all(frame) => Raise {
+            class,
+            reason: reason.clone(),
+        },
+        _ => Value(Term::static_atom("badarg")),
     }
-    let Some(class) = class else {
-        return Err(error(
-            "unsupported erlang:raise/3 class throw: the throw class is not implemented",
-        ));
-    };
-    Ok(Raise {
-        class,
-        reason: reason.clone(),
-    })
 }
 
 /// Run `erlang:link(Pid)` for a local pid, as ERTS `link_opt`

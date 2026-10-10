@@ -161,6 +161,31 @@ fn decodes_build_stacktrace_without_operands() {
 }
 
 #[test]
+fn decodes_raise_with_a_raw_stack_trace_and_a_reason() {
+    // `raise_probe:rethrow/1` ends with `{bif,raise,{f,0},[{x,2},{x,1}],{x,0}}`,
+    // which `beam_asm` writes as `raise x2 x1`. ERTS also loads other
+    // sources, such as `raise y0 nil` (`emu/ops.tab:286-288`).
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([0x6C, 0x23, 0x13, 0x6C, 0x04, 0x02, 0x03]);
+    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::Raise {
+                trace: Operand::X(2),
+                value: Operand::X(1),
+            },
+            Instruction::Raise {
+                trace: Operand::Y(0),
+                value: Operand::Value(Term::List(values)),
+            },
+            Instruction::End,
+        ] if values.is_empty()
+    ));
+}
+
+#[test]
 fn decodes_try_and_catch_instructions_with_a_y_register() {
     let code = |instructions: &[u8]| {
         let mut code = vec![0, 0, 0, 16];

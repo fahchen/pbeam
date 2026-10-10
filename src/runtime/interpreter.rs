@@ -73,13 +73,15 @@ enum Outcome {
     DirtyWrite { write: IovecWrite, tail: bool },
 }
 
-/// The class of an exception. The `throw` class is not implemented yet.
+/// The class of an exception.
 #[derive(Debug, Clone, Copy)]
 enum ExceptionClass {
     /// Class `error`, as `erlang:nif_error/1` raises.
     Error,
     /// Class `exit`, as `erlang:exit/1` raises.
     Exit,
+    /// Class `throw`, as `erlang:raise(throw, Reason, [])` raises.
+    Throw,
 }
 
 impl ExceptionClass {
@@ -89,12 +91,34 @@ impl ExceptionClass {
     ///
     /// ```rust,ignore
     /// assert_eq!(ExceptionClass::Error.name(), "error");
-    /// assert_eq!(ExceptionClass::Exit.name(), "exit");
+    /// assert_eq!(ExceptionClass::Throw.name(), "throw");
     /// ```
     fn name(self) -> &'static str {
         match self {
             ExceptionClass::Error => "error",
             ExceptionClass::Exit => "exit",
+            ExceptionClass::Throw => "throw",
+        }
+    }
+
+    /// Return the class of the atom `error`, `exit`, or `throw`, and `None`
+    /// for each other term.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(ExceptionClass::from_term(&Term::static_atom("exit")), Some(ExceptionClass::Exit)));
+    /// assert!(ExceptionClass::from_term(&Term::static_atom("foo")).is_none());
+    /// ```
+    fn from_term(term: &Term) -> Option<Self> {
+        match term {
+            Term::Atom(atom) => match atom.name() {
+                "error" => Some(ExceptionClass::Error),
+                "exit" => Some(ExceptionClass::Exit),
+                "throw" => Some(ExceptionClass::Throw),
+                _ => None,
+            },
+            _ => None,
         }
     }
 }
@@ -853,16 +877,21 @@ impl BeamProgram {
                 Instruction::CatchEnd { register } => {
                     try_end(process, *register)?;
                     // An unset x0 is the ERTS non-value: an exception reached
-                    // the handler. A normal return always sets x0.
+                    // the handler. A normal return always sets x0. A throw
+                    // gives its reason, an error gives `{'EXIT', {Reason,
+                    // Stack}}`, and an exit gives `{'EXIT', Reason}` (emu
+                    // `instrs.tab:1187-1212`).
                     if matches!(process.registers.first(), Some(None)) {
-                        if read(process, &Operand::X(3))? == Term::static_atom("error") {
-                            let reason = read(process, &Operand::X(1))?;
-                            let stack = read(process, &Operand::X(2))?;
-                            write(process, &Operand::X(1), Term::Tuple(vec![reason, stack]))?;
+                        let class = read(process, &Operand::X(3))?;
+                        let mut reason = read(process, &Operand::X(1))?;
+                        if class != Term::static_atom("throw") {
+                            if class == Term::static_atom("error") {
+                                let (_, stack) = raw_stacktrace(&read(process, &Operand::X(2))?)?;
+                                reason = Term::Tuple(vec![reason, stack]);
+                            }
+                            reason = Term::Tuple(vec![Term::static_atom("EXIT"), reason]);
                         }
-                        let reason = read(process, &Operand::X(1))?;
-                        let caught = Term::Tuple(vec![Term::static_atom("EXIT"), reason]);
-                        write(process, &Operand::X(0), caught)?;
+                        write(process, &Operand::X(0), reason)?;
                     }
                 }
                 Instruction::Test {
@@ -1439,9 +1468,24 @@ impl BeamProgram {
                 // `x0` to a list (emu `instrs.tab:1247-1251`; JIT
                 // `emit_build_stacktrace` in
                 // `jit/arm/instr_common.cpp:3046-3056`). The compiler moves
-                // it from `x2` first. PBeam keeps the list in `x2`, so `x0`
-                // already holds it.
-                Instruction::BuildStacktrace => {}
+                // it from `x2` first.
+                Instruction::BuildStacktrace => {
+                    let (_, stack) = raw_stacktrace(&read(process, &Operand::X(0))?)?;
+                    write(process, &Operand::X(0), stack)?;
+                }
+                // ERTS `i_raise` raises the reason again with the class and
+                // the stack trace of the raw stack trace (emu
+                // `ops.tab:284-290`, `instrs.tab:1236-1245`; JIT
+                // `emit_raise` and `emit_raise_shared` in
+                // `jit/x86/instr_common.cpp:3138-3164`;
+                // `erts_sanitize_freason` in `beam_common.c:1089-1097`).
+                Instruction::Raise { trace, value } => {
+                    let (class, stack) = raw_stacktrace(&read(process, trace)?)?;
+                    let value = read(process, value)?;
+                    if let Some(outcome) = raise_with_stacktrace(process, class, value, stack) {
+                        return Ok(outcome);
+                    }
+                }
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::TestYield => {
                     // `emit_i_test_yield` (`jit/arm/instr_common.cpp:3097-3119`).
@@ -2283,13 +2327,13 @@ fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Opt
 /// The scan starts at the newest frame and, in one frame, at the lowest Y
 /// index, as ERTS `next_catch` scans up from the stack top. The frames above
 /// the tag are dropped, and the tag becomes `[]`. The handler gets the
-/// non-value in `x0`, the reason in `x1`, the stack trace in `x2`, and the
-/// class atom in `x3` (`beam_common.c:543`). ERTS keeps a raw stack trace
-/// in `x2` that `build_stacktrace` and `catch_end` change to a list
-/// (`beam_common.c:730-735`, `1204-1292`). PBeam keeps the list. An
-/// uncaught `error` exits the process with `{Reason, Stacktrace}`
-/// (`beam_common.c:684-692`), and an uncaught `exit` exits it with
-/// `Reason`.
+/// non-value in `x0`, the reason in `x1`, the raw stack trace in `x2`, and
+/// the class atom in `x3` (`beam_common.c:541-544`). The raw stack trace
+/// keeps the class and the stack trace, so that `raise` can raise the
+/// exception again (see [`raw_stacktrace`]). An uncaught `error` exits the
+/// process with `{Reason, Stacktrace}` (`beam_common.c:684-692`), an
+/// uncaught `exit` exits it with `Reason`, and an uncaught `throw` becomes
+/// the error `{nocatch, Reason}` (`beam_common.c:509-516`).
 ///
 /// # Examples
 ///
@@ -2325,6 +2369,10 @@ fn raise_with_stacktrace(
         let reason = match class {
             ExceptionClass::Error => Term::Tuple(vec![reason, stacktrace]),
             ExceptionClass::Exit => reason,
+            ExceptionClass::Throw => Term::Tuple(vec![
+                Term::Tuple(vec![Term::static_atom("nocatch"), reason]),
+                stacktrace,
+            ]),
         };
         return Some(Outcome::Exit {
             reason,
@@ -2339,10 +2387,51 @@ fn raise_with_stacktrace(
         .registers
         .resize(process.registers.len().max(4), None);
     process.registers[0] = None;
+    let class = Term::static_atom(class.name());
     process.registers[1] = Some(reason);
-    process.registers[2] = Some(stacktrace);
-    process.registers[3] = Some(Term::static_atom(class.name()));
+    process.registers[2] = Some(Term::Tuple(vec![class.clone(), stacktrace]));
+    process.registers[3] = Some(class);
     None
+}
+
+/// Return the class and the stack trace of a raw stack trace, the value
+/// that the handler of a `try` or a `catch` gets in `x2`.
+///
+/// ERTS makes the raw stack trace, a 3-tuple with the class in an internal
+/// `StackTrace` struct, when it saves the stack trace of an exception
+/// (`save_stacktrace`, `beam_common.c:894`, `1051`). PBeam makes the tuple
+/// `{Class, Stacktrace}` instead. `[]` is the ERTS raw stack trace `NIL`:
+/// `raise` raises class `error` for it, and `build_stacktrace` gives `[]`
+/// (`beam_common.c:1079-1097`, `1219-1220`). ERTS then saves a new stack
+/// trace for the error; PBeam records no frames, so the stack trace stays
+/// `[]`. Compiled code gives a raw stack trace only to `raise` and
+/// `build_stacktrace`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let raw = Term::Tuple(vec![Term::static_atom("exit"), Term::List(vec![])]);
+/// assert!(matches!(raw_stacktrace(&raw)?, (ExceptionClass::Exit, Term::List(_))));
+/// assert!(matches!(raw_stacktrace(&Term::List(vec![]))?, (ExceptionClass::Error, _)));
+/// ```
+///
+/// # Errors
+///
+/// Each other term gives a runtime invariant error. ERTS reads it as a
+/// raw stack trace with no check, so its result is not defined.
+fn raw_stacktrace(raw: &Term) -> Result<(ExceptionClass, Term), BeamError> {
+    if let Term::Tuple(parts) = raw
+        && let [class, stack] = parts.as_slice()
+        && let Some(class) = ExceptionClass::from_term(class)
+    {
+        return Ok((class, stack.clone()));
+    }
+    match raw {
+        Term::List(stack) if stack.is_empty() => Ok((ExceptionClass::Error, raw.clone())),
+        _ => Err(error(format!(
+            "invariant error: {raw:?} is not a raw stack trace"
+        ))),
+    }
 }
 
 /// Clear the catch tag in a Y register of the active frame. The register

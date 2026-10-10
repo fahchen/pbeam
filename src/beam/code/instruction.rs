@@ -425,7 +425,7 @@ pub(crate) enum Instruction {
     },
     /// Starts the handler of a `try`: clears the catch tag, then copies the
     /// exception class from `x3` to `x0`. `x1` holds the reason and `x2` the
-    /// stack trace.
+    /// raw stack trace.
     ///
     /// Encoding: opcode, Y register. Example: `[0x6A, 0x04]` is
     /// `try_case y0`.
@@ -437,8 +437,8 @@ pub(crate) enum Instruction {
         register: u32,
     },
     /// Ends a `catch` expression: clears the catch tag. After an exception,
-    /// `x0` becomes `{'EXIT', {Reason, Stack}}` for class `error` and
-    /// `{'EXIT', Reason}` for class `exit`.
+    /// `x0` becomes `{'EXIT', {Reason, Stack}}` for class `error`,
+    /// `{'EXIT', Reason}` for class `exit`, and `Reason` for class `throw`.
     ///
     /// Encoding: opcode, Y register. Example: `[0x3F, 0x04]` is
     /// `catch_end y0`.
@@ -449,9 +449,25 @@ pub(crate) enum Instruction {
         /// Index of the Y register that holds the tag.
         register: u32,
     },
-    /// Gives the stack trace of the exception in `x0` as a list. The
-    /// compiler moves the stack trace from `x2` to `x0` first. PBeam keeps
-    /// the stack trace as a list, so `x0` does not change.
+    /// Raises an exception again. The class and the stack trace come from
+    /// the raw stack trace `trace`, and the reason is `value`. A `try` uses
+    /// it when no `catch` clause matches, and so does the cleanup of
+    /// `try ... after`.
+    ///
+    /// Encoding: opcode, raw stack trace, reason. Example:
+    /// `[0x6C, 0x23, 0x13]` is `raise x2 x1`.
+    ///
+    /// Erlang: `try erlang:raise(exit, R, []) catch error:_ -> error end`
+    /// compiles to `{bif,raise,{f,0},[{x,2},{x,1}],{x,0}}` after the
+    /// clauses; `beam_asm` writes only the two arguments.
+    Raise {
+        /// The raw stack trace that the handler of the `try` got in `x2`.
+        trace: Operand,
+        /// The reason that the handler of the `try` got in `x1`.
+        value: Operand,
+    },
+    /// Changes the raw stack trace in `x0` to its stack trace, a list. The
+    /// compiler moves the raw stack trace from `x2` to `x0` first.
     ///
     /// Encoding: `[0xA0]`.
     ///
@@ -1478,6 +1494,10 @@ pub(super) fn parse_code(
             OPCODE_CATCH_END => Instruction::CatchEnd {
                 register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
             },
+            OPCODE_RAISE => Instruction::Raise {
+                trace: read_move_operand(data, &mut cursor, atoms, literals)?,
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
             OPCODE_BUILD_STACKTRACE => Instruction::BuildStacktrace,
             OPCODE_SEND => Instruction::Send,
             OPCODE_REMOVE_MESSAGE => Instruction::RemoveMessage,
@@ -2109,7 +2129,6 @@ fn skip_unsupported_instruction(
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
-        OPCODE_RAISE => Some(2),
         OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
         // `bs_get_integer2` is in `io_lib`.

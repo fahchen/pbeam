@@ -552,7 +552,7 @@ raise() ->
      erlang:raise(id(error), id(r), id([{m, f, 1, x}])),
      erlang:raise(id(error), id(r), id([{m, f, 1, [], x}]))].
 
-%% The class throw, which PBeam does not implement. ERTS gives {throw, r}.
+%% `erlang:raise/3` raises the class throw with Reason. It gives {throw, r}.
 raise_throw() ->
     catch_class(fun() -> erlang:raise(id(throw), id(r), id([])) end).
 

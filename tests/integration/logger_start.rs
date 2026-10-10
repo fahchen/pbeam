@@ -950,19 +950,16 @@ fn raises_exceptions_as_pinned_erts() {
 }
 
 #[test]
-fn returns_a_runtime_error_for_a_raise_of_class_throw() {
-    // `logger_start_probe:raise_throw/0`: ERTS raises class `throw`, which
-    // PBeam does not implement (row "Exception raise sites" in
-    // `docs/erts-differences.md`).
+fn raises_class_throw_as_pinned_erts() {
+    // `logger_start_probe:raise_throw/0`: `erlang:raise/3` raises the class
+    // `throw` with its reason (`bif.c:1549-1692`).
     let program = load();
-    let error = program
-        .execute("logger_start_probe", "raise_throw", &[])
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported erlang:raise/3 class throw"),
-        "{error}"
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("logger_start_probe", "raise_throw", &[])
+            .unwrap(),
+        Term::Tuple(vec![atom("throw"), atom("r")])
     );
     assert_eq!(reference("raise_throw"), b"{throw,r}\n");
 }
