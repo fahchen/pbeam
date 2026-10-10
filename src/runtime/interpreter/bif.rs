@@ -1,9 +1,9 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `binary`, `erlang`, `erts_internal`, `ets`, `iolist`, `lists`,
-//! `maps`, `os`, `re`, and `unicode` modules hold the BIF bodies that do not
-//! fit on one table line.
+//! The `binary`, `erlang`, `erts_internal`, `ets`, `file`, `iolist`,
+//! `lists`, `maps`, `os`, `re`, and `unicode` modules hold the BIF bodies
+//! that do not fit on one table line.
 //! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
 //! in `bif.tab`.
 
@@ -19,6 +19,7 @@ mod binary;
 mod erlang;
 mod erts_internal;
 mod ets;
+mod file;
 mod iolist;
 mod lists;
 mod maps;

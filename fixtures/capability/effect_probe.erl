@@ -376,12 +376,18 @@ ambient() ->
         ets:lookup_element(Name, key, 2, none),
         ets:member(Name, key),
         ets:delete(Name, key),
-        reference(ets:whereis(Name))
+        reference(ets:whereis(Name)),
+        atom(file:native_name_encoding()),
+        byte_size(prim_file:internal_name2native("a")),
+        element(1, prim_file:read_file_info("/"))
     ].
 
 %% Guard tests, so the compiler does not call a BIF.
 integer(Term) when is_integer(Term) -> integer;
 integer(_) -> other.
+
+atom(Term) when is_atom(Term) -> atom;
+atom(_) -> other.
 
 date_time({{_, _, _}, {_, _, _}}) -> date_time;
 date_time(_) -> other.

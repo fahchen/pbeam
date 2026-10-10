@@ -182,6 +182,10 @@ name = "fixture_opcodes"
 path = "tests/integration/fixture_opcodes.rs"
 
 [[test]]
+name = "find_executable"
+path = "tests/integration/find_executable.rs"
+
+[[test]]
 name = "float_test"
 path = "tests/integration/float_test.rs"
 

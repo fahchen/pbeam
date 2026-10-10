@@ -11,7 +11,7 @@ use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
-use crate::term::{Fun, MAX_ATOM_CHARACTERS, ProcessId, Reference};
+use crate::term::{Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference};
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
 /// gives a runtime error.
@@ -1682,6 +1682,28 @@ pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> B
             ],
         },
         TimeValue::Badarg => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:list_to_tuple(List)`: return a tuple with the elements of
+/// the proper list `List`, as `list_to_tuple_1` (`bif.c:3789-3812`) does.
+/// `[]` gives `{}`. A term that is not a proper list, and a list with more
+/// than [`MAX_TUPLE_SIZE`] elements, raise `badarg`. The BIF uses no
+/// reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = Term::List(vec![Term::static_atom("a"), Term::Integer(1)]);
+/// assert!(matches!(list_to_tuple(&list), BifResult::Value(Term::Tuple(elements)) if elements.len() == 2));
+/// assert!(matches!(list_to_tuple(&Term::static_atom("a")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn list_to_tuple(list: &Term) -> BifResult {
+    match list {
+        Term::List(elements) if elements.len() <= MAX_TUPLE_SIZE => {
+            Value(Term::Tuple(elements.clone()))
+        }
+        _ => BifResult::badarg(),
     }
 }
 

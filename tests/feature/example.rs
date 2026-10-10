@@ -245,6 +245,10 @@ fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts
                 "unsupported BEAM opcode 132 (bs_match_string)"
             ),
             ("eval_bits", "unsupported BEAM opcode 118 (bs_get_float2)"),
+            (
+                "file_io_server",
+                "unsupported BEAM opcode 141 (bs_skip_utf16)"
+            ),
             ("inet_db", "unsupported BEAM opcode 185 (bif3)"),
             ("io_lib_fread", "unsupported BEAM opcode 185 (bif3)"),
             ("rand", "unsupported BEAM opcode 102 (fnegate)"),
