@@ -136,6 +136,40 @@ fn restarts_a_crashed_worker_as_pinned_erts() {
 }
 
 #[test]
+fn dispatches_consolidated_protocols_as_pinned_erts() {
+    // The script consolidates the protocols of Elixir, as `mix run` does.
+    // `ProtocolDispatch.main/0` calls `String.Chars` and `Inspect` for its
+    // struct `ProtocolDispatch.Point`, and `String.Chars` for an atom. A
+    // consolidated protocol finds the implementation with a pattern match.
+    // An unconsolidated protocol calls `Code.ensure_compiled/1`, which calls
+    // `code:ensure_loaded/1`. Without consolidation, ERTS prints `false` in
+    // the first two lines, and the PBeam run stops in the first dispatch
+    // with status 1. The atom goes to `String.Chars.Atom` of Elixir, which
+    // the example does not import, so the `pbeam` binary gets it only as an
+    // implementation of the consolidated protocol.
+    let erts = run_example(&["protocol_dispatch", "--erts"], None);
+    let pbeam = run_example(&["protocol_dispatch"], None);
+
+    assert_eq!(
+        parts(&erts),
+        (
+            concat!(
+                "String.Chars consolidated: true\\n",
+                "Inspect consolidated: true\\n",
+                "to_string of a point: (1, 2)\\n",
+                "inspect of a point: #Point<1, 2>\\n",
+                "to_string of an atom: ok\\n",
+            )
+            .to_owned(),
+            String::new(),
+            Some(0)
+        ),
+        "ERTS"
+    );
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+}
+
+#[test]
 fn stops_terra_counter_when_the_local_terra_repository_is_not_at_the_pinned_commit() {
     // `scripts/terra.sh` gives the Terra sources to `terra_counter`. With
     // `PBEAM_TERRA_SRC`, it uses that local repository only when it is a git
