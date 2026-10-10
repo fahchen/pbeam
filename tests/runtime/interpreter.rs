@@ -1262,6 +1262,45 @@ fn waits_or_continues_at_a_receive_timeout_and_raises_timeout_value() {
 }
 
 #[test]
+fn raises_class_error_for_the_raw_stack_trace_nil() {
+    // ERTS `erts_sanitize_freason` gives class `error` for the raw stack
+    // trace `NIL`, and `build_stacktrace` gives `[]` for it
+    // (`beam_common.c:1089-1097`, `1219-1220`). ERTS then saves a new stack
+    // trace from the frames of the callers; PBeam records no frames.
+    let raise = |trace: Term| {
+        make_program(
+            vec![
+                Instruction::Move(Operand::Value(trace), Operand::X(0)),
+                Instruction::BuildStacktrace,
+                Instruction::Raise {
+                    trace: Operand::X(0),
+                    value: atom("r"),
+                },
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .unwrap_err()
+        .to_string()
+    };
+    assert_eq!(
+        raise(Term::List(Vec::new())),
+        "root process exited with {r,[]}"
+    );
+    // Compiled code gives `raise` only a raw stack trace. ERTS reads each
+    // other term as a raw stack trace with no check.
+    for trace in [
+        test_atom("foo"),
+        Term::Tuple(vec![test_atom("foo"), Term::List(Vec::new())]),
+    ] {
+        assert_eq!(
+            raise(trace.clone()),
+            format!("invariant error: {trace:?} is not a raw stack trace")
+        );
+    }
+}
+
+#[test]
 fn rejects_call_stack_and_return_errors() {
     assert!(
         make_program(

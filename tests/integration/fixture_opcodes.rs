@@ -76,6 +76,17 @@ fn bitstr_probe_has_the_is_bitstr_bytes() {
 }
 
 #[test]
+fn raise_probe_has_the_raise_bytes() {
+    assert_in_fixture(
+        "fixtures/raise/raise_probe.beam",
+        &[
+            // rethrow/1: raise x2 x1
+            &[0x6C, 0x23, 0x13],
+        ],
+    );
+}
+
+#[test]
 fn compare_probe_has_the_is_lt_is_eq_is_integer_and_is_boolean_bytes() {
     assert_in_fixture(
         "fixtures/compare/compare_probe.beam",
