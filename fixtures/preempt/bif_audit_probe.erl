@@ -100,7 +100,7 @@ arg(error1, small) -> id(x);
 arg(error1, large) -> big_list();
 arg(exit2, small) -> spawn(?MODULE, idle, []);
 arg(get, small) -> put(k, v);
-arg(get, large) -> [put(K, K) || K <- keys(10000)], put(k, v);
+arg(get, large) -> put_keys(10000), put(k, v);
 arg(hd, small) -> [1, 2];
 arg(hd, large) -> big_list();
 arg(tl, small) -> [1, 2];
@@ -127,7 +127,7 @@ arg(min, large) -> {big_list(), big_list()};
 arg(monitor2, small) -> spawn(?MODULE, idle, []);
 arg(monitor3, small) -> spawn(?MODULE, idle, []);
 arg(put, small) -> none;
-arg(put, large) -> [put(K, K) || K <- keys(10000)];
+arg(put, large) -> put_keys(10000);
 arg(send2, small) -> spawn(?MODULE, idle, []);
 arg(send2, large) -> {spawn(?MODULE, idle, []), big_list()};
 arg(send3, small) -> spawn(?MODULE, idle, []);
@@ -160,8 +160,13 @@ arg(re_compile, small) -> "a";
 arg(re_compile, large) -> copies(1000, $a);
 arg(_, _) -> none.
 
-keys(0) -> [];
-keys(N) -> [N | keys(N - 1)].
+%% Put the keys Count..1, each with itself as its value. The loop builds
+%% no list: PBeam copies a list at each cons, so a list of the keys took
+%% O(N^2) time.
+put_keys(0) -> ok;
+put_keys(Count) ->
+    put(Count, Count),
+    put_keys(Count - 1).
 
 %% A public set table with the key 1, and for large a value of 10000
 %% elements.
