@@ -102,7 +102,7 @@ bifs! {
     erlang:atom_to_list/1 => |_, [term]| Ok(erlang::atom_to_list(term)),
     erlang:band/2 => unsupported,
     erlang:binary_part/2 => unsupported,
-    erlang:binary_part/3 => unsupported,
+    erlang:binary_part/3 => |_, [binary, start, length]| Ok(erlang::binary_part(binary, start, length)),
     erlang:binary_to_atom/2 => unsupported,
     erlang:binary_to_existing_atom/2 => unsupported,
     erlang:binary_to_float/1 => unsupported,

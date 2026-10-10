@@ -41,6 +41,21 @@ fn arith_probe_has_the_gc_bif1_and_gc_bif2_bytes() {
 }
 
 #[test]
+fn binary_part_probe_has_the_gc_bif3_bytes() {
+    assert_in_fixture(
+        "fixtures/binary_part/binary_part_probe.beam",
+        &[
+            // guard/3: gc_bif3 f13 live 3 binary_part/3 x0 x1 x2 x0
+            &[0x98, 0xD5, 0x30, 0x00, 0x03, 0x13, 0x23, 0x03],
+            // main/0: gc_bif3 f0 live 1 binary_part/3 y23 y22 x0 y22
+            &[
+                0x98, 0x05, 0x10, 0x00, 0x0C, 0x17, 0x0C, 0x16, 0x03, 0x0C, 0x16,
+            ],
+        ],
+    );
+}
+
+#[test]
 fn binary_match_probe_has_the_binary_match_bytes() {
     assert_in_fixture(
         "fixtures/binary_match/binary_match_probe.beam",
