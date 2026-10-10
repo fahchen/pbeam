@@ -1,9 +1,8 @@
 use std::{
     io::{Read, Write},
     os::fd::{FromRawFd, OwnedFd},
-    path::PathBuf,
     process::Command,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -31,11 +30,6 @@ const RAW: &[&str] = &["raw", "-echo"];
 
 /// The `stty` arguments that set raw mode, but keep `ICANON` on.
 const RAW_CANONICAL: &[&str] = &["raw", "-echo", "icanon"];
-
-/// The paths of the pinned `BOOT_MODULES`. Each `pinned_beam_path` call
-/// starts `erl`, so the tests of this crate find the paths only once.
-static BOOT_PATHS: LazyLock<[PathBuf; BOOT_MODULES.len()]> =
-    LazyLock::new(|| BOOT_MODULES.map(pinned_beam_path));
 
 /// The terminal modes of one run, as `stty -g` writes them, and the exit
 /// status and the output of the run.
@@ -166,7 +160,7 @@ fn pbeam(function: &str) -> Command {
             "--",
             TTY_RESTORE_PROBE,
         ])
-        .args(BOOT_PATHS.iter())
+        .args(BOOT_MODULES.map(pinned_beam_path))
         .arg(boot_beam());
     command
 }

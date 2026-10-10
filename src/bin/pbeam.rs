@@ -20,6 +20,10 @@ struct Cli {
     /// loaded modules hold, such as a module or function name.
     #[arg(value_name = "ATOM")]
     arguments: Vec<String>,
+    /// A loaded policy module, which exports `initial/1` and `grant/3`.
+    /// Without it, the root process gets all capabilities.
+    #[arg(long, value_name = "MODULE")]
+    policy: Option<String>,
     /// BEAM files to load, after `--`.
     #[arg(value_name = "BEAM_FILE", required = true, num_args = 1.., last = true)]
     beam_files: Vec<PathBuf>,
@@ -82,6 +86,8 @@ impl From<String> for Exit {
 
 /// Set the signal dispositions of the ERTS emulator start, read and load
 /// the BEAM files, and run `Module:Function(Atoms...)` as the root process.
+/// With `--policy Policy`, the policy module `Policy` gives the
+/// capabilities (see [`BeamProgram::execute_with_policy_module`]).
 ///
 /// # Examples
 ///
@@ -94,7 +100,8 @@ impl From<String> for Exit {
 ///
 /// A file that cannot be read, a BEAM file that does not load, an argument
 /// that is not an atom of the loaded modules, and the errors of
-/// [`BeamProgram::execute`]. A halt of the run gives [`Exit::Halt`].
+/// [`BeamProgram::execute`] and [`BeamProgram::execute_with_policy_module`].
+/// A halt of the run gives [`Exit::Halt`].
 fn run(arguments: Cli) -> Result<(), Exit> {
     install_start_dispositions();
     let mut modules = Vec::with_capacity(arguments.beam_files.len());
@@ -117,7 +124,12 @@ fn run(arguments: Cli) -> Result<(), Exit> {
                 .ok_or_else(|| format!("argument {name} is not an atom of the loaded modules"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    match program.execute(&arguments.module, &arguments.function, &atoms) {
+    let (module, function) = (&arguments.module, &arguments.function);
+    let result = match &arguments.policy {
+        Some(policy) => program.execute_with_policy_module(module, function, &atoms, policy),
+        None => program.execute(module, function, &atoms),
+    };
+    match result {
         Ok(_) => Ok(()),
         Err(BeamError::Halt(status)) => Err(Exit::Halt(status)),
         Err(execution_error) => Err(Exit::Error(execution_error.to_string())),

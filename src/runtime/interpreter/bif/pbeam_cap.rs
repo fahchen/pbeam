@@ -1,6 +1,7 @@
 //! Bodies of the BIFs of `pbeam_cap`, the PBeam module of capability
 //! requests. ERTS has no such module, so a call raises `error:undef` there
-//! (row "Capability checks" of `docs/erts-differences.md`).
+//! (rows "Capability checks" and "Policy module" of
+//! `docs/erts-differences.md`).
 
 use super::BifResult::Value;
 use super::*;
@@ -46,5 +47,66 @@ pub(super) fn revoke(
     match scheduler.revoke_given(*holder, kind) {
         Ok(()) => Ok(Value(Term::static_atom("ok"))),
         Err(Denied) => BifResult::capability_denied(&mut scheduler.atoms),
+    }
+}
+
+/// Run `pbeam_cap:request(Kind, Request)`: ask the policy process for a
+/// capability of the kind `Kind`. The policy process calls
+/// `grant(Kind, Request, Requester)` of the policy module, and the caller
+/// waits for the grant signal (see [`BifResult::AwaitGrant`]). A grant adds
+/// the capability to the caller, and the call returns `ok`; a denial raises
+/// `error:capability_denied` (see [`await_grant`]).
+///
+/// A `Kind` that is not the atom of a capability kind raises `error:badarg`.
+/// `Request` can be any term. A run with a Rust policy has no policy
+/// process, so the call raises `error:capability_denied` at once, and so
+/// does a call after the policy process exited and a call of the policy
+/// process itself.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = request(&mut scheduler, &Term::static_atom("process"), &Term::List(vec![]))?;
+/// assert!(matches!(result, BifResult::AwaitGrant));
+/// ```
+///
+/// # Errors
+///
+/// A full atom table.
+pub(super) fn request(
+    scheduler: &mut Scheduler,
+    kind: &Term,
+    request: &Term,
+) -> Result<BifResult, BeamError> {
+    if !matches!(kind, Term::Atom(kind) if CapabilityKind::named(kind.name()).is_some()) {
+        return Ok(BifResult::badarg());
+    }
+    match scheduler.request_grant(kind.clone(), request.clone())? {
+        Ok(()) => Ok(BifResult::AwaitGrant),
+        Err(Denied) => BifResult::capability_denied(&mut scheduler.atoms),
+    }
+}
+
+/// Run the export `pbeam_cap:await_grant/0` of a waiting
+/// `pbeam_cap:request/2` call: return `ok` after a grant, raise
+/// `error:capability_denied` after a denial, or wait again when the grant
+/// signal did not come yet, for example when a message woke the caller.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// scheduler.current_process_mut().policy_reply = Some(true);
+/// assert!(matches!(await_grant(&mut scheduler)?, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for the atom `capability_denied` in a
+/// full atom table.
+pub(super) fn await_grant(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    match scheduler.current_process_mut().policy_reply.take() {
+        Some(true) => Ok(Value(Term::static_atom("ok"))),
+        Some(false) => BifResult::capability_denied(&mut scheduler.atoms),
+        None => Ok(BifResult::AwaitGrant),
     }
 }

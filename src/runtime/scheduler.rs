@@ -38,6 +38,10 @@ use crate::{
 /// (`erl_process.c:10183`, `10435`).
 pub(super) const CONTEXT_REDS: i32 = 4000;
 
+/// The pid of the root process, `<0.0.0>`. The launcher makes the root
+/// process with it, also after it made the policy process.
+const ROOT: ProcessId = ProcessId(0);
+
 /// The reductions that `erts_do_exit_process` bumps when a process starts
 /// its exit (`erl_process.c:14229`).
 const EXIT_REDUCTIONS: i32 = 100;
@@ -221,6 +225,9 @@ pub(super) struct Scheduler {
     dirty_io: DirtyIo,
     /// The delegation records of the capability copies of the run.
     delegations: Delegations,
+    /// The policy process of a run with a policy module, or `None` with a
+    /// Rust policy.
+    policy: Option<PolicyProcess>,
 }
 
 impl Scheduler {
@@ -244,7 +251,7 @@ impl Scheduler {
             freed: HashMap::new(),
             runnable: VecDeque::new(),
             current_process: None,
-            next_process_id: 0,
+            next_process_id: ROOT.0 + 1,
             next_reference: 0,
             root_result: None,
             names: HashMap::new(),
@@ -261,12 +268,13 @@ impl Scheduler {
             virtual_reductions: 0,
             dirty_io: DirtyIo::new(),
             delegations: Delegations::default(),
+            policy: None,
         }
     }
 
     /// Create the root process with the initial capabilities
     /// `capabilities`, which the launcher issues. The root process gets
-    /// `ProcessId(0)`.
+    /// `ProcessId(0)`, and each other process a later pid.
     ///
     /// # Examples
     ///
@@ -281,7 +289,7 @@ impl Scheduler {
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
-        let id = self.next_pid()?;
+        let id = ROOT;
         let mut root = ProcessState::new(id, Start::Entry(frame), arguments);
         let issued = capabilities
             .into_iter()
@@ -1038,12 +1046,13 @@ impl Scheduler {
         self.switch_out(|_| {});
     }
 
-    /// Create the next process identifier.
+    /// Create the next process identifier. The root process has
+    /// `ProcessId(0)`, so the first pid of this function is `ProcessId(1)`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Scheduler::new(AtomTable::new()).next_pid()?, ProcessId(0));
+    /// assert_eq!(Scheduler::new(AtomTable::new()).next_pid()?, ProcessId(1));
     /// ```
     fn next_pid(&mut self) -> Result<ProcessId, BeamError> {
         let value = self.next_process_id;
@@ -1085,7 +1094,7 @@ impl Scheduler {
     /// assert!(scheduler.root_exited());
     /// ```
     pub(super) fn root_exited(&self) -> bool {
-        let root = ProcessId(0);
+        let root = ROOT;
         self.root_result.is_some()
             && !self.processes.contains_key(&root)
             && !self.freed.contains_key(&root)
@@ -1213,6 +1222,7 @@ impl Scheduler {
         child.off_heap_message_queue = off_heap_message_queue;
         child.security = self.delegations.hold(child.id, copies);
         let parent = self.current_process_mut().id;
+        child.parent = Some(parent);
         child.group_leader = self.current_process_mut().group_leader;
         let reference = if monitor {
             let reference = self.make_ref()?;
@@ -1259,7 +1269,7 @@ impl Scheduler {
     /// scheduler.revoke_issued(&[CapabilityKind::Process]);
     /// ```
     pub(super) fn revoke_issued(&mut self, kinds: &[CapabilityKind]) {
-        let root = self.processes.get(&ProcessId(0));
+        let root = self.processes.get(&ROOT);
         let copies: Vec<_> = root.map_or_else(Vec::new, |root| {
             kinds
                 .iter()
@@ -1696,7 +1706,7 @@ impl Scheduler {
                 if let ReceiveTimer::Set { key, .. } = process.receive_timer {
                     self.timers.cancel(key);
                 }
-                if id == ProcessId(0) {
+                if id == ROOT {
                     let normal = reason == Term::static_atom("normal");
                     self.root_result = Some(match result {
                         Some(result) if normal => Ok(result),
@@ -1762,6 +1772,7 @@ impl Scheduler {
         }
         self.delegations
             .release(std::mem::take(&mut process.security));
+        self.policy_exited(id, &reason);
         process.mailbox.fetch();
         process.exiting = Some(reason);
         if reds <= 0 {
@@ -1946,9 +1957,12 @@ fn named_item(name: &Atom) -> Term {
     Term::Tuple(vec![Term::Atom(name.clone()), local_node()])
 }
 
+mod policy;
 mod ports;
 mod signals;
 
+pub(super) use policy::PolicyEnd;
+use policy::PolicyProcess;
 pub(super) use signals::{Flushed, HandlingPoint, Received};
 
 #[cfg(test)]
