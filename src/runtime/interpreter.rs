@@ -11,7 +11,10 @@ use crate::{
         code::{self, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::{Atom, AtomTable, Fun, Map, MatchContext, Target, Term, print_term},
+    term::{
+        Atom, AtomTable, Fun, Map, MatchContext, Target, Term, print_term, segment_equals,
+        segment_integer,
+    },
 };
 use std::{borrow::Cow, collections::HashMap};
 
@@ -1140,7 +1143,7 @@ impl BeamProgram {
                 // value of the position (emu bs_instrs.tab:1120-1123). The
                 // compiler gives it a position that `bs_get_position` made.
                 Instruction::BinarySetPosition { context, position } => {
-                    let mut state = match_context(process, context)?;
+                    let mut state = any_match_context(process, context)?;
                     match read(process, position)? {
                         Term::Integer(value) if let Ok(value) = usize::try_from(value) => {
                             state.set_position(value);
@@ -1176,7 +1179,7 @@ impl BeamProgram {
                     context,
                     commands,
                 } => {
-                    if !binary_match(&match_context(process, context)?, commands)? {
+                    if !binary_match(process, context, commands)? {
                         jump(module, process, *fail_label)?;
                     }
                 }
@@ -2543,18 +2546,39 @@ fn read_any(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError
     read_operand(operand, &process.registers, stack)
 }
 
-/// Read the match context of a binary-match instruction. Each other term
-/// is a runtime invariant error: the BEAM validator gives these
-/// instructions only a match context.
+/// Read the match context of a binary-match instruction that reads its
+/// position. A match context after a failed `=:=` command of `bs_match`
+/// has no known position until `bs_set_position`, and gives a runtime
+/// error (row "Binary matching" of docs/erts-differences.md).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// write(&mut process, &Operand::X(0), Term::MatchContext(MatchContext::new(b"a")))?;
 /// assert_eq!(match_context(&process, &Operand::X(0))?.position(), 0);
-/// assert!(match_context(&process, &Operand::Value(Term::Integer(1))).is_err());
 /// ```
 fn match_context(process: &ProcessState, operand: &Operand) -> Result<MatchContext, BeamError> {
+    let context = any_match_context(process, operand)?;
+    if !context.position_known() {
+        return Err(error(format!(
+            "unsupported read of the match context in {operand:?} after a failed bs_match =:= command"
+        )));
+    }
+    Ok(context)
+}
+
+/// Read the match context of a binary-match instruction, also when its
+/// position is not known. Each other term is a runtime invariant error:
+/// the BEAM validator gives these instructions only a match context.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write(&mut process, &Operand::X(0), Term::MatchContext(MatchContext::new(b"a")))?;
+/// assert_eq!(any_match_context(&process, &Operand::X(0))?.position(), 0);
+/// assert!(any_match_context(&process, &Operand::Value(Term::Integer(1))).is_err());
+/// ```
+fn any_match_context(process: &ProcessState, operand: &Operand) -> Result<MatchContext, BeamError> {
     match &read_any(process, operand)? {
         Term::MatchContext(context) => Ok(context.clone()),
         other => Err(error(format!(
@@ -2711,45 +2735,117 @@ fn match_context_escape(operand: &Operand) -> BeamError {
     ))
 }
 
-/// Run the commands of a `bs_match` instruction in order on a match
-/// context, as the instructions that the ERTS loader makes from them do
-/// (`gen.bs_match`, emu generators.tab:1102-1430). Return `false` at the
-/// first command that fails. `ensure_at_least` loads as `i_bs_ensure_bits`,
-/// `i_bs_ensure_bits_unit`, `i_bs_test_unit8`, or `i_bs_test_unit`
-/// (generators.tab:1164-1209; bs_instrs.tab:760-772, 1260-1293), which all
-/// test that `Size` bits remain and that the bits after them are a multiple
-/// of `Unit`. `ensure_exactly` loads as `bs_test_tail2` (generators.tab:
-/// 1210-1220; ops.tab:1220-1222; bs_instrs.tab:746-758), which tests that
-/// exactly `Size` bits remain. Each other command gives a runtime error.
+/// Run the commands of a `bs_match` instruction in order on the match
+/// context in `context`, as the ERTS JIT does (`gen.bs_match`,
+/// jit/arm/generators.tab:532-604; `emit_i_bs_match_test_heap`,
+/// jit/arm/instr_bs.cpp:2916-3205). Return `false` at the first command
+/// that fails. The register keeps the position after each command that
+/// moves it.
+///
+/// - `ensure_at_least` tests that `Size` bits remain and that the bits
+///   after them are a multiple of `Unit`. `ensure_exactly` tests that
+///   exactly `Size` bits remain.
+/// - `integer` reads an integer (`segment_integer`), and `binary` reads a
+///   binary. `skip` moves the position. `get_tail` writes the bits after
+///   the position and keeps the position. These commands do not fail:
+///   the compiler puts an `ensure_at_least` or `ensure_exactly` for their
+///   bits first (beam_ssa_codegen.erl:2759-2868).
+/// - `=:=` fails when the bits are not its value. The position is then
+///   not known (`MatchContext::forget_position`).
+///
+/// # Errors
+///
+/// A command that reads more bits than remain gives a runtime invariant
+/// error. An integer outside the 64-bit signed range needs a bignum, and
+/// a `binary` or `get_tail` of a size that is not a multiple of 8 bits
+/// needs a bitstring term: each gives a runtime error (rows "Integer
+/// range" and "Binary matching" of docs/erts-differences.md).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = MatchContext::new(b"a");
+/// write(&mut process, &Operand::X(0), Term::MatchContext(MatchContext::new(&[7, 8])))?;
 /// let unit = NonZeroU64::new(8).unwrap();
-/// assert!(binary_match(&context, &[BinaryMatchCommand::EnsureAtLeast { size: 0, unit }])?);
-/// assert!(!binary_match(&context, &[BinaryMatchCommand::EnsureExactly { size: 0 }])?);
+/// let byte = BinaryMatchCommand::Integer { size: 8, little: false, signed: false, destination: Operand::X(1) };
+/// assert!(binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureAtLeast { size: 8, unit }, byte])?);
+/// assert_eq!(read(&process, &Operand::X(1))?, Term::Integer(7));
+/// assert!(!binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureExactly { size: 0 }])?);
 /// ```
 fn binary_match(
-    context: &MatchContext,
+    process: &mut ProcessState,
+    context: &Operand,
     commands: &[BinaryMatchCommand],
 ) -> Result<bool, BeamError> {
-    let remaining = context.remaining_bits() as u64;
+    let mut state = match_context(process, context)?;
+    // A binary of `size` bits, or a runtime error for a bitstring.
+    let binary_size = |command: &str, size: u64| {
+        if size.is_multiple_of(8) {
+            Ok(())
+        } else {
+            Err(error(format!(
+                "unsupported bs_match {command} of {size} bits: needs a bitstring term"
+            )))
+        }
+    };
     for command in commands {
-        let passed = match command {
-            BinaryMatchCommand::EnsureAtLeast { size, unit } => {
-                remaining >= *size && (remaining - size).is_multiple_of(unit.get())
-            }
-            BinaryMatchCommand::EnsureExactly { size } => remaining == *size,
-            BinaryMatchCommand::Unsupported(name) => {
-                return Err(error(format!(
-                    "unsupported bs_match command {}",
-                    name.name()
-                )));
-            }
+        let remaining = state.remaining_bits() as u64;
+        let too_few_bits = |size: &u64| {
+            error(format!(
+                "invariant error: a bs_match command needs {size} bits, but {remaining} bits remain"
+            ))
         };
-        if !passed {
-            return Ok(false);
+        match command {
+            BinaryMatchCommand::EnsureAtLeast { size, unit } => {
+                if remaining < *size || !(remaining - size).is_multiple_of(unit.get()) {
+                    return Ok(false);
+                }
+            }
+            BinaryMatchCommand::EnsureExactly { size } => {
+                if remaining != *size {
+                    return Ok(false);
+                }
+            }
+            BinaryMatchCommand::Integer {
+                size,
+                little,
+                signed,
+                destination,
+            } => {
+                let bits = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
+                let value =
+                    segment_integer(&bits, *size as usize, *little, *signed).ok_or_else(|| {
+                        error(
+                            "unsupported bs_match integer outside the 64-bit range: needs a bignum",
+                        )
+                    })?;
+                write(process, context, Term::MatchContext(state.clone()))?;
+                write(process, destination, Term::Integer(value))?;
+            }
+            BinaryMatchCommand::Binary { size, destination } => {
+                binary_size("binary", *size)?;
+                let bytes = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
+                write(process, context, Term::MatchContext(state.clone()))?;
+                write(process, destination, Term::Binary(bytes))?;
+            }
+            BinaryMatchCommand::Equal { size, value } => {
+                let bits = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
+                let equal = segment_equals(&bits, *size as usize, *value);
+                if !equal {
+                    state.forget_position();
+                }
+                write(process, context, Term::MatchContext(state.clone()))?;
+                if !equal {
+                    return Ok(false);
+                }
+            }
+            BinaryMatchCommand::GetTail { destination } => {
+                binary_size("get_tail", remaining)?;
+                write(process, destination, Term::Binary(state.tail()))?;
+            }
+            BinaryMatchCommand::Skip { size } => {
+                state.skip(*size).ok_or_else(|| too_few_bits(size))?;
+                write(process, context, Term::MatchContext(state.clone()))?;
+            }
         }
     }
     Ok(true)

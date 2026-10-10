@@ -16,6 +16,7 @@ pub(crate) use hash::internal_hash;
 pub use map::Map;
 pub(crate) use map::{Direction, from_list_units};
 pub use match_context::MatchContext;
+pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
 
 use std::fmt;

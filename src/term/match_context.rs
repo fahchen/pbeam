@@ -36,9 +36,14 @@ pub struct MatchContext {
     /// ERTS sub-bitstring refers to its binary.
     bytes: Arc<[u8]>,
     /// The bit offset of the next segment from the start of the binary.
-    /// PBeam has only binaries, and each match instruction moves the
-    /// position by whole bytes, so the offset is a multiple of 8.
+    /// The `integer`, `binary`, `skip`, and `=:=` commands of `bs_match`
+    /// can move it by any number of bits.
     position: usize,
+    /// `false` after a failed `=:=` command of `bs_match` and until
+    /// `bs_set_position`. ERTS then has the position at the end of the
+    /// read that holds the command, which PBeam does not model (row
+    /// "Binary matching" of `docs/erts-differences.md`).
+    position_known: bool,
 }
 
 impl MatchContext {
@@ -55,6 +60,7 @@ impl MatchContext {
         Self {
             bytes: bytes.into(),
             position: 0,
+            position_known: true,
         }
     }
 
@@ -84,6 +90,101 @@ impl MatchContext {
     /// ```
     pub(crate) fn set_position(&mut self, position: usize) {
         self.position = position;
+        self.position_known = true;
+    }
+
+    /// Mark the position as unknown after a failed `=:=` command of
+    /// `bs_match`. The ERTS JIT reads up to 64 bits of segments at a time
+    /// and writes the position after the read before it compares a value
+    /// (`beam_jit_opt_bsm_segments`, jit/beam_jit_bs.cpp:366-521; `READ`
+    /// and `EQ` in `emit_i_bs_match_test_heap`, jit/arm/instr_bs.cpp:
+    /// 2995-3045). Thus after a failed `=:=` the position is at the end of
+    /// that read. The compiler restores the position before it reads the
+    /// context again (`bs_restores`, beam_ssa_pre_codegen.erl:308-437).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut context = MatchContext::new(&[1]);
+    /// context.forget_position();
+    /// assert!(!context.position_known());
+    /// context.set_position(0);
+    /// assert!(context.position_known());
+    /// ```
+    pub(crate) fn forget_position(&mut self) {
+        self.position_known = false;
+    }
+
+    /// Return `false` after a failed `=:=` command and until
+    /// `set_position`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(MatchContext::new(&[1]).position_known());
+    /// ```
+    pub(crate) fn position_known(&self) -> bool {
+        self.position_known
+    }
+
+    /// Move the position by `size` bits, as the `skip` command of
+    /// `bs_match` does (`SKIP` in `emit_i_bs_match_test_heap`,
+    /// jit/arm/instr_bs.cpp:3187-3197). Return `None` and keep the
+    /// position when fewer than `size` bits remain.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut context = MatchContext::new(&[1, 2]);
+    /// assert_eq!(context.skip(12), Some(()));
+    /// assert_eq!(context.remaining_bits(), 4);
+    /// assert_eq!(context.skip(5), None);
+    /// ```
+    pub(crate) fn skip(&mut self, size: u64) -> Option<()> {
+        let size = usize::try_from(size)
+            .ok()
+            .filter(|&size| size <= self.remaining_bits())?;
+        self.position += size;
+        Some(())
+    }
+
+    /// Read `size` bits after the position and move the position past
+    /// them, as the `integer`, `binary`, and `=:=` commands of `bs_match`
+    /// do (`emit_read_bits` and `emit_i_bs_match_test_heap`,
+    /// jit/arm/instr_bs.cpp:2496-2748, 3024-3176). Return the bits first
+    /// bit first, packed in bytes: the last byte holds the last `size % 8`
+    /// bits in its high bits, and its other bits are 0. Return `None` and
+    /// keep the position when fewer than `size` bits remain.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut context = MatchContext::new(&[0xAB, 0xCD]);
+    /// assert_eq!(context.read_bits(4), Some(vec![0xA0]));
+    /// assert_eq!(context.read_bits(8), Some(vec![0xBC]));
+    /// assert_eq!(context.read_bits(8), None);
+    /// ```
+    pub(crate) fn read_bits(&mut self, size: u64) -> Option<Vec<u8>> {
+        let start = self.position;
+        self.skip(size)?;
+        Some(bits_at(&self.bytes, start, self.position - start))
+    }
+
+    /// Return the bits after the position packed in bytes, as `read_bits`
+    /// gives them, and keep the position, as the `get_tail` command of
+    /// `bs_match` does (`emit_bs_get_tail_shared`, jit/arm/instr_bs.cpp:
+    /// 407-439).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut context = MatchContext::new(&[1, 2, 3]);
+    /// context.skip(8);
+    /// assert_eq!(context.tail(), vec![2, 3]);
+    /// assert_eq!(context.position(), 8);
+    /// ```
+    pub(crate) fn tail(&self) -> Vec<u8> {
+        bits_at(&self.bytes, self.position, self.remaining_bits())
     }
 
     /// Return the number of bits after the position (`sb->end -
@@ -158,3 +259,101 @@ impl MatchContext {
         Some(code_point)
     }
 }
+
+/// Return `size` bits of `bytes` from the bit offset `start`, packed in
+/// bytes first bit first. The last byte holds the last `size % 8` bits in
+/// its high bits, and its other bits are 0. The bits are in `bytes`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(bits_at(&[0xAB, 0xCD], 4, 8), vec![0xBC]);
+/// assert_eq!(bits_at(&[0xAB, 0xCD], 0, 12), vec![0xAB, 0xC0]);
+/// assert_eq!(bits_at(&[0xAB], 3, 0), Vec::<u8>::new());
+/// ```
+fn bits_at(bytes: &[u8], start: usize, size: usize) -> Vec<u8> {
+    let first = start / 8;
+    let shift = start % 8;
+    let mut bits: Vec<u8> = (first..first + size.div_ceil(8))
+        .map(|index| {
+            let next = bytes.get(index + 1).copied().unwrap_or(0);
+            // A shift of 0 takes no bit of the next byte.
+            (bytes[index] << shift) | (u16::from(next) >> (8 - shift)) as u8
+        })
+        .collect();
+    if let Some(last) = bits.last_mut() {
+        *last &= 0xFF_u8 << ((8 - size % 8) % 8);
+    }
+    bits
+}
+
+/// Return the value of an integer segment of `size` bits that `read_bits`
+/// gave, as the ERTS JIT extracts it (`emit_extract_integer`,
+/// jit/arm/instr_bs.cpp:2750-2879) and `erts_bs_get_integer_2` reads a
+/// segment above 64 bits (`erl_bits.c:170-398`). A big-endian segment has its
+/// bytes in order and then its last `size % 8` bits. A little-endian
+/// segment has its last `size % 8` bits as the most significant part, and
+/// then its bytes from the last byte to the first. A signed segment uses
+/// two's complement. Return `None` for a value outside the 64-bit signed
+/// range, which ERTS gives as a bignum.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(segment_integer(&[0x01, 0x20], 12, false, false), Some(0x012));
+/// assert_eq!(segment_integer(&[0x23, 0x10], 12, true, false), Some(0x123));
+/// assert_eq!(segment_integer(&[0xFF], 8, false, true), Some(-1));
+/// assert_eq!(segment_integer(&[0x80, 0, 0, 0, 0, 0, 0, 0], 64, false, false), None);
+/// assert_eq!(segment_integer(&[], 0, false, true), Some(0));
+/// ```
+pub(crate) fn segment_integer(bits: &[u8], size: usize, little: bool, signed: bool) -> Option<i64> {
+    let (full, partial) = (size / 8, size % 8);
+    // The parts of the segment, each a value and its width in bits, from
+    // the most significant part.
+    let last = (partial > 0).then(|| (bits[full] >> (8 - partial), partial));
+    let bytes = bits[..full].iter().map(|&byte| (byte, 8));
+    let parts: Vec<(u8, usize)> = if little {
+        last.into_iter().chain(bytes.rev()).collect()
+    } else {
+        bytes.chain(last).collect()
+    };
+    let Some((&(first, width), rest)) = parts.split_first() else {
+        return Some(0);
+    };
+    let negative = signed && first >> (width - 1) == 1;
+    let mut value = i64::from(first) - if negative { 1 << width } else { 0 };
+    // Each step moves the value away from 0 or keeps it, so a value that
+    // leaves the 64-bit range does not come back.
+    for &(part, width) in rest {
+        value = value
+            .checked_mul(1 << width)?
+            .checked_add(i64::from(part))?;
+    }
+    Some(value)
+}
+
+/// Return `true` when the `size` bits that `read_bits` gave are the
+/// unsigned big-endian integer `value`, as the `=:=` command of
+/// `bs_match` compares them (`EQ` in `emit_i_bs_match_test_heap`,
+/// jit/arm/instr_bs.cpp:2995-3016). A `value` of `size` or more bits does
+/// not match.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(segment_equals(&[0x61, 0x60], 12, 0x616));
+/// assert!(!segment_equals(&[0x61], 8, 0x161));
+/// assert!(segment_equals(&[0, 0, 0, 0, 0, 0, 0, 0, 0x80], 72, 0x80));
+/// ```
+pub(crate) fn segment_equals(bits: &[u8], size: usize, value: u64) -> bool {
+    (size >= 64 || value >> size == 0)
+        && (0..size).all(|index| {
+            let bit = u64::from(bits[index / 8] >> (7 - index % 8) & 1);
+            let shift = size - 1 - index;
+            bit == if shift < 64 { value >> shift & 1 } else { 0 }
+        })
+}
+
+#[cfg(test)]
+#[path = "../../tests/term/match_context.rs"]
+mod tests;
