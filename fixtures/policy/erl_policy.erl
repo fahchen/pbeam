@@ -23,7 +23,7 @@ initial(Requester) ->
     [
         #{
             kind => process,
-            operations => [spawn, link, monitor],
+            operations => [spawn, link, monitor, send],
             modules => [policy_probe],
             delegable => true
         }

@@ -24,8 +24,8 @@
 ]).
 
 %% The root process holds only the process capability that initial/1 of
-%% the policy gives: spawn, link, and monitor for the modules of this
-%% probe.
+%% the policy gives: spawn, link, monitor, and send for the modules of
+%% this probe.
 initial() ->
     [
         result(fun() -> spawn(?MODULE, done, []) end),
