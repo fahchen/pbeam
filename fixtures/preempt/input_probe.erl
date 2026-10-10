@@ -30,6 +30,10 @@ inputs() ->
       [small, max_small, min_big, min_small, max_negative_big, max_64, min_64]},
      {integer_to_binary,
       [small, max_small, min_big, min_small, max_negative_big, max_64, min_64]},
+     %% {Integer, Base}: the estimate of a bignum depends on the base.
+     {integer_to_binary_2,
+      [{small, 2}, {max_small, 2}, {min_big, 2}, {max_negative_big, 2}, {max_64, 2},
+       {min_64, 2}, {max_64, 10}, {max_64, 36}]},
      %% Two maps of the keys First..Last: two flatmaps, an empty flatmap
      %% and a hashmap, a flatmap and a hashmap, and two hashmaps. The
      %% last pair traps.
@@ -65,6 +69,22 @@ inputs() ->
       [bin, nil, empty_bin_list, one_bin, {ones, 1}, {ones, 8}, {ones, 16}, nested, binaries,
        {ones, 1000}, {ones, 31970}, {ones, 31990}, {ones, 100000}, bad, bad_tail, atom,
        {bins, 1995}, {tail_bin, 15983}]},
+     {iolist_to_binary,
+      [bin, nil, empty_bin_list, one_bin, {ones, 1}, {ones, 8}, {ones, 16}, nested, binaries,
+       {ones, 1000}, {ones, 31970}, {ones, 31990}, {ones, 100000}, bad, bad_tail, atom,
+       {bins, 1995}, {tail_bin, 15983}]},
+     %% {Bump, Name}: iolist_to_binary/1 after erlang:bump_reductions(Bump).
+     %% With at most 100 reductions left, the call switches out first. With
+     %% fewer than 1000, it walks with a budget of 1000.
+     {iolist_to_binary_late,
+      [{3900, {ones, 10}}, {3900, atom}, {3500, nested}, {3500, {ones, 4000}},
+       {3500, {ones, 8000}}]},
+     %% binary:split/3 inputs: see split_arg/1.
+     {binary_split,
+      [first, global, none, long_needle, ac_first, ac_global, trim, bad, {commas, 10},
+       {commas, 1000}, {commas, 20000}, {commas, 50000}, {plain, 1000}, {plain, 100000},
+       {plain, 400000}, {plain_global, 100000}, {plain_ac, 1000}, {plain_ac, 100000},
+       {mixed, 1000}, {mixed, 30000}, {wrap, 319700}, {wrap, 319745}, {wrap, 319760}]},
      %% {Process, Item}: the caller, a process with no message, and a
      %% process with 10000 messages that it did not receive.
      {process_info,
@@ -76,7 +96,10 @@ inputs() ->
 long_inputs() ->
     [{maps_merge, {{1, 40000}, {20000, 60000}}}, {ets_insert, {list, 16000}},
      {persistent_term_get, 10000}, {iolist_size, {ones, 100000}},
-     {iolist_to_iovec, {ones, 100000}}, {iolist_to_iovec, {bins, 1995}}].
+     {iolist_to_iovec, {ones, 100000}}, {iolist_to_iovec, {bins, 1995}},
+     {iolist_to_binary, {ones, 100000}}, {iolist_to_binary, {bins, 1995}},
+     {iolist_to_binary_late, {3900, {ones, 10}}}, {binary_split, {commas, 50000}},
+     {binary_split, {plain_ac, 200000}}].
 
 %% Return the argument. A call through ?MODULE stops the compiler from
 %% folding a constant.
@@ -96,7 +119,7 @@ keys(First, Last) -> [Key || {Key, _} <- pairs(First, Last)].
 
 map({First, Last}) -> maps:from_list(pairs(First, Last)).
 
-%% The integers of integer_to_list/1 and integer_to_binary/1. A bignum
+%% The integers of integer_to_list/1 and integer_to_binary/1,2. A bignum
 %% literal is not a PBeam literal, so the arithmetic builds each bignum.
 integer(small) -> id(12345);
 integer(max_small) -> id(576460752303423487);
@@ -110,6 +133,7 @@ integer(min_64) -> id(-576460752303423488) * 16.
 %% measures the BIF.
 arg(integer_to_list, Name) -> integer(Name);
 arg(integer_to_binary, Name) -> integer(Name);
+arg(integer_to_binary_2, {Name, Base}) -> {integer(Name), Base};
 arg(maps_merge, {First, Second}) -> {map(First), map(Second)};
 arg(map_next, {ordered, Size, Keys}) -> {keys(1, Keys), map({1, Size}), iterator};
 arg(map_next, {Size, Path, Acc}) -> {Path, map({1, Size}), Acc};
@@ -117,6 +141,9 @@ arg(ets_insert, Input) -> {table(Input), objects(Input)};
 arg(persistent_term_get, _) -> none;
 arg(iolist_size, Name) -> iodata(Name);
 arg(iolist_to_iovec, Name) -> iodata(Name);
+arg(iolist_to_binary, Name) -> iodata(Name);
+arg(iolist_to_binary_late, {Bump, Name}) -> {Bump, iodata(Name)};
+arg(binary_split, Name) -> split_arg(Name);
 arg(process_info, {self, Item}) -> {self(), Item};
 arg(process_info, {idle, Item}) -> {spawn(?MODULE, idle, []), Item};
 arg(process_info, {busy, Item}) ->
@@ -168,6 +195,38 @@ iodata({bad_after, Count}) -> ones(Count - 1) ++ [a];
 iodata({bins, Count}) -> copies(Count, <<?S100 ?S100 ?S100 ?S100 ?S100>>);
 iodata({tail_bin, Count}) -> ones(Count) ++ <<?S100 ?S100 ?S100 ?S100 ?S100>>.
 
+%% {Subject, Pattern, Options} of binary:split/3. One pattern is a
+%% Boyer-Moore search, and more patterns are an Aho-Corasick search. The
+%% long subjects are binaries of copies of a unit: {commas, N} has N
+%% matches, {plain, N} has none, and {mixed, N} has 2 * N matches. The
+%% search of {wrap, N} reads N bytes before the last byte of a needle of 19
+%% bytes, so the steps of the memchr skip can wrap below 0.
+split_arg(first) -> {<<"a,b,c">>, <<",">>, []};
+split_arg(global) -> {<<"a,b,,c,">>, <<",">>, [global]};
+split_arg(none) -> {<<"abc">>, <<",">>, []};
+split_arg(long_needle) -> {<<"abcabdabcabxxabcab">>, <<"abcab">>, [global]};
+split_arg(ac_first) -> {<<"banana">>, [<<"an">>, <<"nan">>], []};
+split_arg(ac_global) -> {<<"banana">>, [<<"an">>, <<"nan">>, <<"a">>], [global]};
+split_arg(trim) -> {<<",a,,b,,">>, <<",">>, [global, trim_all]};
+split_arg(bad) -> {<<"a">>, <<>>, []};
+split_arg({commas, Count}) -> {repeat(Count, <<"ab,">>), <<",">>, [global]};
+split_arg({plain, Count}) -> {repeat(Count, <<"x">>), <<"y">>, []};
+split_arg({plain_global, Count}) -> {repeat(Count, <<"x">>), <<"y">>, [global]};
+split_arg({plain_ac, Count}) -> {repeat(Count, <<"x">>), [<<"ab">>, <<"y">>], []};
+split_arg({mixed, Count}) -> {repeat(Count, <<"xyab">>), [<<"ab">>, <<"y">>], [global]};
+split_arg({wrap, Count}) ->
+    Needle = <<"0123456789abcdefghZ">>,
+    {iolist_to_binary([repeat(Count, <<"x">>), Needle]), Needle, []}.
+
+%% A binary of Count copies of Unit, built by doubling.
+repeat(0, _) -> <<>>;
+repeat(Count, Unit) ->
+    Half = repeat(Count div 2, Unit),
+    case Count rem 2 of
+        0 -> <<Half/binary, Half/binary>>;
+        1 -> <<Half/binary, Half/binary, Unit/binary>>
+    end.
+
 %% Wait for stop.
 idle() ->
     receive stop -> ok end.
@@ -203,6 +262,7 @@ put_terms(Count) ->
 %% compiler keeps the call, and the call is a body call_ext.
 run(integer_to_list, Value) -> [integer_to_list(Value)];
 run(integer_to_binary, Value) -> [integer_to_binary(Value)];
+run(integer_to_binary_2, {Value, Base}) -> [integer_to_binary(Value, Base)];
 run(maps_merge, {First, Second}) -> [maps:merge(First, Second)];
 run(map_next, {Path, Map, Acc}) -> [erts_internal:map_next(Path, Map, Acc)];
 run(ets_insert, {Table, Objects}) ->
@@ -216,6 +276,19 @@ run(iolist_size, Iodata) ->
      end];
 run(iolist_to_iovec, Iodata) ->
     [try erlang:iolist_to_iovec(Iodata)
+     catch error:Reason -> Reason
+     end];
+run(iolist_to_binary, Iodata) ->
+    [try iolist_to_binary(Iodata)
+     catch error:Reason -> Reason
+     end];
+run(iolist_to_binary_late, {Bump, Iodata}) ->
+    erlang:bump_reductions(Bump),
+    [try iolist_to_binary(Iodata)
+     catch error:Reason -> Reason
+     end];
+run(binary_split, {Subject, Pattern, Options}) ->
+    [try binary:split(Subject, Pattern, Options)
      catch error:Reason -> Reason
      end];
 run(process_info, {Pid, Item}) -> [process_info(Pid, Item)];

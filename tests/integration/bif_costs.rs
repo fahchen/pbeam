@@ -40,6 +40,22 @@ const PUT_TRAP: &str = "4000";
 ///   pivot. A `badarg` costs nothing.
 /// - `maps:keys/1` (`erl_map.c:1207-1253`, `2801-2834`): 15 units for each
 ///   reduction, one unit for each key of a hashmap. `{hash, 100000}` traps.
+/// - `unicode:characters_to_binary/2` with `latin1`
+///   (`erl_unicode.c:342-505`, `931-1022`): the `utf8_need` walk costs one
+///   step for each byte of a binary and for each integer, and one reduction
+///   for each 50 steps. A binary of bytes below 128 then returns itself.
+///   Else the conversion costs one reduction for each 10 characters.
+///   `{high_bin, 50000}` and `{list, 50000}` trap.
+/// - `erlang:list_to_binary/1` (`erl_iolist.c:113-290`, `424-649`,
+///   `706-914`): `[]`, a list of one binary, and a term that is not a list
+///   cost nothing. Else the size walk and the copy walk each use one step
+///   for each list cell and each list end, 8 steps for each reduction, and
+///   the copy one more step for each 32 bytes of a binary. A walk costs at
+///   least 1. A `badarg` costs the size walk up to the bad element.
+///   `{list, 50000}` traps in the size walk. The size walk of
+///   `{list, 31970}` uses all reductions, so the copy starts in the next
+///   turn. `{big_bin, 1100000}` and `{big_tail, 1100000}` trap in the copy
+///   of the binary.
 const COSTS: &str = "[{maps_from_list,[{nil,0},{{flat,32},0},{{dups,33},8},{{dups,80},19},\
                      {{dups,400},99},{{dups,40000},9999},{{big_dups,33},8},{{two_keys,9,73},23},\
                      {{two_keys,73,9},23},{{bad,400},0},{{improper,400},0},{atom,0}]},\
@@ -58,7 +74,15 @@ const COSTS: &str = "[{maps_from_list,[{nil,0},{{flat,32},0},{{dups,33},8},{{dup
                      {short_list,0},{{bad_after,50000},12000},{leftover_trap,6852}]},\
                      {characters_to_list_latin1,[{{list,3},0},{{list,100},22},\
                      {{list,10000},2200},{{bin,3},0},{{bin,10000},2200},{{high_bin,10000},2400},\
-                     {{list,50000},12000},{{bin,50000},12000}]}]";
+                     {{list,50000},12000},{{bin,50000},12000}]},\
+                     {characters_to_binary_latin1,[{{list,3},0},{{list,100},12},\
+                     {{list,10000},1200},{{list,50000},7000},{{bin,3},0},{{bin,10000},1200},\
+                     {{high_bin,3},0},{{high_bin,10000},1400},{{high_bin,50000},8990},\
+                     {{one_bin,10000},1200},{{bins,100},1200},{nested,0}]},\
+                     {list_to_binary,[{nil,0},{{one_bin,100},0},{{list,3},2},{{list,100},26},\
+                     {{list,10000},2502},{{list,31970},7994},{{list,50000},12502},{{bins,100},64},{nested,6},\
+                     {{big_bin,1100000},4299},{{big_tail,1100000},4299},{{bad_after,400},51},\
+                     {{improper,400},51},{atom,0}]}]";
 
 /// `bif_cost_probe:longs/1` on the pinned ERTS with `erl +S 1`: the runs of
 /// `a`, which calls a BIF that traps three times, and of `b`, which sends
@@ -68,7 +92,21 @@ const LONGS: &str = "[{maps_from_list,[{b,1334},{a,1},{b,2001},{a,1},{b,1334},{a
                      {characters_to_binary,[{b,667},{a,1},{b,1334},{a,1},{b,1334},{a,1},\
                      {b,1665}]},\
                      {characters_to_list,[{b,3335},{a,1},{b,1665},{a,2}]},\
-                     {characters_to_list,[{b,2001},{a,1},{b,2001},{a,1},{b,998},{a,1}]}]";
+                     {characters_to_list,[{b,2001},{a,1},{b,2001},{a,1},{b,998},{a,1}]},\
+                     {characters_to_binary_latin1,[{b,1334},{a,1},{b,1334},{a,1},{b,1334},\
+                     {a,1},{b,998}]},\
+                     {list_to_binary,[{b,4002},{a,1},{b,998},{a,2}]}]";
+
+/// `bif_cost_probe:lows/1` on the pinned ERTS with `erl +S 1`: the
+/// reductions of `erlang:list_to_binary/1` of 10000 bytes after the process
+/// uses `K` reductions, with `K`. The call has `3996 - K` reductions left.
+/// With 100 or fewer (`K` 3896 and 3995), it uses them as virtual
+/// reductions, switches out, and runs again from the start in the next
+/// turn (`ERTS_BIF_YIELD1`). With fewer than 1000 (`K` 2997 and 3895), it
+/// walks with a budget of 1000 (`erl_iolist.c:866-876`): the size walk of
+/// 10001 steps traps after 8000 steps, so the process uses its budget and
+/// continues in the next turn.
+const LOWS: &str = "[{3895,5503},{3896,6403},{3995,6502},{2996,5503},{2997,5503},{0,2507}]";
 
 /// `bif_cost_probe:results/0` on the pinned ERTS: the results of
 /// `unicode:characters_to_list/2` with `unicode` and `latin1` for nested
@@ -79,6 +117,24 @@ const RESULTS: &str = "[[97,98,99,100,101,102,103],[97,98,99,100,101,102,103],\
                        {incomplete,[97],<<226,130>>},[97,226,130],\
                        {incomplete,[97],<<226,130>>},[97,226,130],\
                        {error,[97,97,97],[-1]},{error,[97,97,97],[-1]}]";
+
+/// `bif_cost_probe:binary_results/0` on the pinned ERTS: the results of
+/// `unicode:characters_to_binary/2` with `latin1` and its `badarg` inputs,
+/// of `unicode:bin_is_7bit/1`, of `erlang:list_to_binary/1`, and of
+/// `erlang:split_binary/2`. Each binary is `{binary, Bytes}`.
+const BINARY_RESULTS: &str = "[[{binary,[97,98,99]},{binary,[195,136,65]},\
+                              {binary,[195,136,65,195,191]},{binary,[97]},{binary,[195,136]},\
+                              {binary,[]},{binary,[65,195,136]},\
+                              {binary,[97,98,99,100,101,102,103]}],\
+                              [{error,badarg},{error,badarg},{error,badarg},{error,badarg}],\
+                              [true,true,false,false,false,false,false],\
+                              [{binary,[]},{binary,[1]},{binary,[1,2,3,4]},{binary,[]},\
+                              {binary,[]},{binary,[1,2]},{binary,[1,2]},{error,badarg},\
+                              {error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+                              {error,badarg},{error,badarg}],\
+                              [{{binary,[]},{binary,[97,98,99]}},{{binary,[97]},{binary,[98,99]}},\
+                              {{binary,[97,98,99]},{binary,[]}},{{binary,[]},{binary,[]}},\
+                              {error,badarg},{error,badarg},{error,badarg},{error,badarg}]]";
 
 /// `bif_cost_probe:exits/0` on the pinned ERTS with `erl +S 1`. The exit of
 /// `a` bumps 100 reductions (`erl_process.c:14229`). With 150 or fewer
@@ -133,6 +189,8 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     assert_eq!(run("longs", &options), LONGS);
     assert_eq!(run("exits", &[]), EXITS);
     assert_eq!(run("results", &[]), RESULTS);
+    assert_eq!(run("lows", &options), LOWS);
+    assert_eq!(run("binary_results", &[]), BINARY_RESULTS);
 
     // The reference run checks that the pinned `erl` is the JIT flavor, and
     // that no measured process collects garbage: a collection costs
@@ -152,10 +210,11 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
                  jit = erlang:system_info(emu_flavor), O = {ERTS_OPTIONS}, \
                  true = erts_internal:erase_persistent_terms(), \
                  P = M:puts(O), C = M:costs(O), L = M:longs(O), E = M:exits(), \
-                 R = M:results(), true = erts_internal:erase_persistent_terms(), \
-                 T = M:put_trap(), \
+                 R = M:results(), W = M:lows(O), B = M:binary_results(), \
+                 true = erts_internal:erase_persistent_terms(), T = M:put_trap(), \
                  [0] = lists:usort([element(tuple_size(G), G) || G <- M:gcs(O)]), \
-                 io:format(\"~w~n~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, R, T]), halt()."
+                 io:format(\"~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, R, W, B, T]), \
+                 halt()."
             ),
         ])
         .output()
@@ -166,7 +225,23 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     );
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
-        format!("{PUTS}\n{COSTS}\n{LONGS}\n{EXITS}\n{RESULTS}\n{PUT_TRAP}\n")
+        format!(
+            "{PUTS}\n{COSTS}\n{LONGS}\n{EXITS}\n{RESULTS}\n{LOWS}\n{BINARY_RESULTS}\n{PUT_TRAP}\n"
+        )
+    );
+}
+
+#[test]
+fn stops_characters_to_binary_with_a_latin1_error_result() {
+    let program = BeamProgram::load(&[BIF_COST_PROBE]).unwrap();
+    let failure = program
+        .execute("bif_cost_probe", "bad_latin1", &[])
+        .unwrap_err()
+        .to_string();
+    // ERTS returns {error, <<>>, [256]} (row "Chardata conversion").
+    assert!(
+        failure.contains("unsupported unicode:characters_to_binary/2 result"),
+        "{failure}"
     );
 }
 

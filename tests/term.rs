@@ -1,3 +1,5 @@
+use std::{cell::RefCell, rc::Rc};
+
 use super::{
     AtomTable, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
     test_atom as atom,
@@ -167,7 +169,7 @@ fn matches_the_derived_debug_text_and_compares_every_variant() {
         Term::Integer(-3),
         Term::Pid(ProcessId(4)),
         Term::Reference(Reference(5)),
-        Term::MatchContext(MatchContext::new(&[6])),
+        Term::MatchContext(Rc::new(RefCell::new(MatchContext::new(&[6])))),
     ];
     let term = Term::Tuple(vec![Term::List(leaves.to_vec()), Term::List(vec![])]);
     assert_eq!(

@@ -14,6 +14,7 @@ const MAP_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_key_probe.be
 const BINARY_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/binary_key_probe.beam");
 const MAP_SIZE_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_size_probe.beam");
 const TUPLE_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/tuple_key_probe.beam");
+const MAP_SHARE_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_share_probe.beam");
 
 /// The numbers `N` of the binary keys `<<"kNN">>`, 1 to 33, in the order of a hashmap of these 33
 /// keys under the pinned ERTS.
@@ -774,5 +775,101 @@ fn raises_badmap_and_badkey_for_tuple_keys_like_erts() {
         erl_reference("io:format(\"~w~n\", [tuple_key_probe:errors()])"),
         b"[{error,{badmap,not_a_map}},{error,{badkey,{9,9}}},{error,{badmap,not_a_map}},\
           {error,{badkey,{9,9}}},{error,{badkey,{9,9}}}]\n"
+    );
+}
+
+#[test]
+fn keeps_each_copy_of_a_map_when_another_copy_changes_like_erts() {
+    // `main/0` changes copies of one map in a register, a stack slot, a fun, and a message with
+    // `put_map_exact`, `put_map_assoc`, `maps:merge/2`, `maps:remove/2`, and `maps:take/2`. The
+    // keys are integers, so the order of the ERTS output does not depend on atom indexes.
+    let program = BeamProgram::load(&[MAP_SHARE_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let map = |pairs: &[(i64, &str)]| {
+        let pairs = pairs
+            .iter()
+            .map(|(key, value)| (Term::Integer(*key), atom(value)))
+            .collect();
+        Term::Map(Map::from_pairs(pairs).unwrap())
+    };
+    assert_eq!(
+        program.execute("map_share_probe", "main", &[]).unwrap(),
+        Term::List(vec![
+            map(&[(1, "a"), (2, "b")]),
+            map(&[(1, "a"), (2, "b")]),
+            map(&[(1, "c"), (2, "b")]),
+            map(&[(1, "a"), (2, "b"), (3, "d")]),
+            map(&[(1, "a"), (2, "e")]),
+            map(&[(1, "a"), (2, "f"), (4, "g")]),
+            map(&[(2, "b")]),
+            Term::Tuple(vec![atom("b"), map(&[(1, "a")])]),
+            map(&[(1, "h"), (2, "b")]),
+            map(&[(1, "a"), (2, "b")]),
+            map(&[(1, "a"), (2, "i")]),
+        ])
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [map_share_probe:main()])"),
+        b"[#{1 => a,2 => b},#{1 => a,2 => b},#{1 => c,2 => b},#{1 => a,2 => b,3 => d},\
+          #{1 => a,2 => e},#{1 => a,2 => f,4 => g},#{2 => b},{b,#{1 => a}},#{1 => h,2 => b},\
+          #{1 => a,2 => b},#{1 => a,2 => i}]\n"
+    );
+}
+
+#[test]
+fn keeps_a_shared_flatmap_when_a_copy_becomes_a_hashmap_like_erts() {
+    // The 33 keys of the hashmap are in the ERTS hash order of `uses_a_flatmap_up_to_32_keys_and_a_hashmap_above_like_erts`.
+    let hash33 = [
+        18, 4, 12, 19, 29, 13, 2, 7, 31, 8, 10, 23, 9, 15, 32, 1, 25, 28, 20, 6, 11, 17, 24, 14,
+        33, 3, 16, 30, 21, 5, 27, 26, 22,
+    ];
+    let program = BeamProgram::load(&[MAP_SHARE_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let int = Term::Integer;
+    assert_eq!(
+        program.execute("map_share_probe", "grow", &[]).unwrap(),
+        Term::List(vec![
+            integers(&(1..=32).collect::<Vec<_>>()),
+            integers(&hash33),
+            int(32),
+            int(33),
+            int(1),
+            int(1),
+            atom("one"),
+            atom("uno"),
+            atom("true"),
+        ])
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [map_share_probe:grow()])"),
+        b"[[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32],\
+          [18,4,12,19,29,13,2,7,31,8,10,23,9,15,32,1,25,28,20,6,11,17,24,14,33,3,16,30,21,5,27,26,22],\
+          32,33,1,1,one,uno,true]\n"
+    );
+}
+
+#[test]
+fn raises_badkey_and_keeps_the_shared_map_like_erts() {
+    let program = BeamProgram::load(&[MAP_SHARE_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let int = Term::Integer;
+    let badkey =
+        |key: Term| Term::Tuple(vec![atom("error"), Term::Tuple(vec![atom("badkey"), key])]);
+    assert_eq!(
+        program.execute("map_share_probe", "errors", &[]).unwrap(),
+        Term::List(vec![
+            badkey(int(2)),
+            badkey(int(34)),
+            Term::Map(Map::from_pairs(vec![(int(1), atom("a"))]).unwrap()),
+            int(33),
+            int(1),
+        ])
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [map_share_probe:errors()])"),
+        b"[{error,{badkey,2}},{error,{badkey,34}},#{1 => a},33,1]\n"
     );
 }

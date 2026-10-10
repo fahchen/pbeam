@@ -245,6 +245,10 @@ fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts
                 "unsupported BEAM opcode 132 (bs_match_string)"
             ),
             ("eval_bits", "unsupported BEAM opcode 118 (bs_get_float2)"),
+            (
+                "file_io_server",
+                "unsupported BEAM opcode 141 (bs_skip_utf16)"
+            ),
             ("inet_db", "unsupported BEAM opcode 185 (bif3)"),
             ("io_lib_fread", "unsupported BEAM opcode 185 (bif3)"),
             ("rand", "unsupported BEAM opcode 102 (fnegate)"),
@@ -285,6 +289,136 @@ fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts
             "{module}"
         );
     }
+}
+
+#[test]
+fn runs_restricted_guest_with_its_policy_as_pinned_erts_and_denies_other_operations() {
+    // The `pbeam` run gives `--policy Elixir.RestrictedGuest.Policy`, so
+    // each effect entry checks the capabilities that `initial/1` of the
+    // Elixir policy gives to the root process of `pbeam_boot`. Each worker
+    // starts with `spawn/3` of `RestrictedGuest.Worker`, which the
+    // `modules` constraint permits, and writes to the terminal through the
+    // OTP IO path. The ERTS run has no policy. One test does all the runs,
+    // because a build of the example by a parallel test removes the lists
+    // of the build before it writes them again.
+    let erts = run_example(&["restricted_guest", "--erts"], None);
+    let pbeam = run_example(
+        &[
+            "restricted_guest",
+            "--no-build",
+            "--policy",
+            "Elixir.RestrictedGuest.Policy",
+        ],
+        None,
+    );
+
+    assert_eq!(
+        parts(&erts),
+        (
+            concat!(
+                "worker 1: hello\\n",
+                "worker 2: hello\\n",
+                "worker 3: hello\\n",
+                "main: 3 workers done\\n",
+            )
+            .to_owned(),
+            String::new(),
+            Some(0)
+        ),
+        "ERTS"
+    );
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+
+    // `restricted_guest_probe:denied/0` runs in the root process of
+    // `pbeam_boot` with the policy of the example. Its spawn of
+    // `RestrictedGuest.Worker` is permitted, and the worker writes to the
+    // terminal. Each other operation needs a capability that the policy
+    // does not give, so it raises `error:capability_denied`.
+    let probe = run_restricted_guest(&["pbeam_boot", "start", "restricted_guest_probe", "denied"]);
+    assert_eq!(
+        parts(&probe),
+        (
+            "worker 0: hello\\n".to_owned(),
+            concat!(
+                "pbeam: root process exited with {result,[",
+                "{spawn_own_module,done},",
+                "{spawn_other_module,denied},",
+                "{getenv,denied},",
+                "{open_port,denied},",
+                "{halt,denied},",
+                "{handle_other_signal,denied},",
+                "{ignore_signal,denied},",
+                "{exit_other,denied},",
+                "{group_leader_other,denied},",
+                "{request,denied}",
+                "]}\\n",
+            )
+            .to_owned(),
+            Some(1)
+        ),
+        "denied operations"
+    );
+
+    // `initial/1` gives capabilities only to the root process of the boot.
+    // For another root process it returns `deny`, so the run stops before
+    // the root process starts.
+    let other_root = run_restricted_guest(&["Elixir.RestrictedGuest", "main"]);
+    assert_eq!(
+        parts(&other_root),
+        (
+            String::new(),
+            "pbeam: the policy denied the root process: initial/1 returned deny\\n".to_owned(),
+            Some(1)
+        ),
+        "another root process"
+    );
+}
+
+/// Run the `pbeam` binary of this test build with
+/// `--policy Elixir.RestrictedGuest.Policy`, the `arguments`, and the BEAM
+/// files of the last build of `restricted_guest` and of
+/// `restricted_guest_probe`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let output = run_restricted_guest(&["pbeam_boot", "start", "restricted_guest_probe", "denied"]);
+/// assert_eq!(output.status.code(), Some(1));
+/// ```
+fn run_restricted_guest(arguments: &[&str]) -> Output {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let beams =
+        std::fs::read_to_string(root.join("target/examples/restricted_guest/pbeam.beams")).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    command
+        .args(["--policy", "Elixir.RestrictedGuest.Policy"])
+        .args(arguments)
+        .arg("--")
+        .args(beams.lines())
+        .arg("fixtures/policy/restricted_guest_probe.beam")
+        .current_dir(root);
+    run_with_time_limit(&mut command, Stdio::piped(), RUN_TIME_LIMIT)
+}
+
+#[test]
+fn inspects_a_tuple_as_pinned_erts() {
+    // `InspectTuple.main/0` runs the last call of `TerraCounter.main/0`,
+    // `IO.inspect({:ok, 1})`. `Inspect.Tuple` calls
+    // `erlang:tuple_to_list/1`, `Inspect.Integer` calls
+    // `erlang:integer_to_binary/2`, and `Macro.inspect_atom/2` runs
+    // `String.Tokenizer.tokenize/1`, which reads
+    // `elixir_config:identifier_tokenizer/0`. Without the two BIFs, the
+    // `pbeam` run stops with `unresolved external MFA
+    // erlang:tuple_to_list/1` and status 1.
+    let erts = run_example(&["inspect_tuple", "--erts"], None);
+    let pbeam = run_example(&["inspect_tuple", "--no-build"], None);
+
+    assert_eq!(
+        parts(&erts),
+        ("{:ok, 1}\\n".to_owned(), String::new(), Some(0)),
+        "ERTS"
+    );
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
 }
 
 #[test]

@@ -94,9 +94,10 @@ const NO_EFFECT: [&str; 2] = ["`none`", "`process.self`"];
 /// "Capability". An entry whose authority is only `none` or `process.self`
 /// has no effect, and its cell is `none`. Each other entry is an effect
 /// entry: its cell lists each `kind:operation` that it checks, or is
-/// `later` while a later batch of #335 adds its check. The integration test
-/// `effect_capability` calls each listed entry without its operation and
-/// gets `error:capability_denied`.
+/// `` `ambient`: Reason `` with a reason when it has no check by decision.
+/// The integration test `effect_capability` calls each listed entry without
+/// its operation and gets `error:capability_denied`, and calls each
+/// `ambient` entry with no capability and gets the pinned ERTS result.
 #[test]
 fn effect_inventory_names_the_capability_of_each_effect_entry() {
     let mut rows = 0;
@@ -113,6 +114,15 @@ fn effect_inventory_names_the_capability_of_each_effect_entry() {
             let effect = cells[1]
                 .split(", ")
                 .any(|label| !NO_EFFECT.contains(&label));
+            // A reason can hold ", ", so the value `ambient` comes before
+            // the split of a list.
+            if let Some(reason) = cells[2].strip_prefix("`ambient`: ") {
+                assert!(
+                    effect && !reason.trim().is_empty(),
+                    "docs/effect-inventory.md: {row}"
+                );
+                continue;
+            }
             let capabilities: Vec<_> = cells[2].split(", ").collect();
             let named = capabilities.iter().all(|capability| {
                 let name = capability.trim_matches('`');
@@ -123,7 +133,6 @@ fn effect_inventory_names_the_capability_of_each_effect_entry() {
             });
             let valid = match capabilities.as_slice() {
                 ["`none`"] => !effect,
-                ["`later`"] => effect,
                 _ => effect && named,
             };
             assert!(valid, "docs/effect-inventory.md: {row}");
@@ -161,5 +170,7 @@ fn registry_is_sorted_and_matches_the_exact_mfa() {
     assert!(binding("prim_tty", "write_nif", 2).is_some());
     assert!(binding("prim_tty", "write_nif", 1).is_none());
     assert!(binding("prim_tty", "write", 2).is_none());
+    assert!(binding("prim_file", "read_info_nif", 2).is_some());
     assert!(binding("prim_file", "write_nif", 2).is_none());
+    assert!(binding("zlib", "inflate_nif", 4).is_none());
 }

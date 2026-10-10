@@ -25,7 +25,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityKind {
     /// Processes: spawn, links, monitors, exit signals to other
-    /// processes, and messages.
+    /// processes, messages, the inspection of other processes, and the
+    /// group leader of other processes.
     Process,
     /// The terminal: writes, reads, raw mode, the window size, the setup,
     /// and the queries.
@@ -78,8 +79,11 @@ pub enum Operation {
     Command,
     /// `port`: close a port.
     Close,
-    /// `port`: read the information of a port.
+    /// `process`: read the state of another process. `port`: read the
+    /// information of a port.
     Inspect,
+    /// `process`: set the group leader of another process.
+    GroupLeader,
     /// `signal`: handle a host signal.
     Handle,
     /// `signal`: ignore a host signal.
@@ -127,6 +131,8 @@ const KINDS: [KindSpec; 7] = [
             Operation::Monitor,
             Operation::ExitOther,
             Operation::Send,
+            Operation::Inspect,
+            Operation::GroupLeader,
         ],
         constraint: Some(("modules", NameForm::Atom)),
     },
@@ -181,7 +187,7 @@ const KINDS: [KindSpec; 7] = [
 ];
 
 /// The atom of each operation in the `{capabilities, Map}` option.
-const OPERATION_NAMES: [(Operation, &str); 19] = [
+const OPERATION_NAMES: [(Operation, &str); 20] = [
     (Operation::Spawn, "spawn"),
     (Operation::Link, "link"),
     (Operation::Monitor, "monitor"),
@@ -196,6 +202,7 @@ const OPERATION_NAMES: [(Operation, &str); 19] = [
     (Operation::Command, "command"),
     (Operation::Close, "close"),
     (Operation::Inspect, "inspect"),
+    (Operation::GroupLeader, "group_leader"),
     (Operation::Handle, "handle"),
     (Operation::Ignore, "ignore"),
     (Operation::Halt, "halt"),
@@ -230,7 +237,8 @@ impl CapabilityKind {
     }
 
     /// Return the kind whose atom is `name`, as the `{capabilities, Map}`
-    /// option and `pbeam_cap:revoke/2` name it, or `None` for another name.
+    /// option, `pbeam_cap:revoke/2`, and `pbeam_cap:policy_revoke/2` name
+    /// it, or `None` for another name.
     ///
     /// # Examples
     ///
@@ -431,8 +439,9 @@ impl Capability {
 }
 
 /// The source of the initial capabilities of a run. The launcher calls the
-/// policy when it makes the root process. A Rust host can replace the
-/// default [`AllowAll`] policy with [`crate::BeamProgram::execute_with_policy`].
+/// policy when it makes the root process. A Rust host gives a policy to
+/// [`crate::BeamProgram::execute_with_policy`]. A run with no policy,
+/// [`crate::BeamProgram::execute`], skips each check.
 pub trait Policy {
     /// Return the capabilities of the root process.
     ///
@@ -464,9 +473,11 @@ pub trait Policy {
     }
 }
 
-/// The default policy. The root process gets a delegable capability of
-/// each kind with all operations and no constraint, so each process can do
-/// each operation, and a run gives the same results as the pinned ERTS.
+/// The policy that permits each operation, for the tests of the checks. The
+/// root process gets a delegable capability of each kind with all
+/// operations and no constraint, so each check passes, and a run gives the
+/// same results as the pinned ERTS. Unlike a run with no policy, each check
+/// runs, and a child gets copies.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AllowAll;
 
@@ -662,6 +673,8 @@ impl SecurityContext {
 struct Record {
     /// The process that got the copy.
     holder: ProcessId,
+    /// The kind of the capability of the copy.
+    kind: CapabilityKind,
     /// The source of the copy.
     source: Source,
     /// The copies that went from this copy to children, in the order of
@@ -717,6 +730,7 @@ impl Delegations {
                 }
                 let record = Record {
                     holder,
+                    kind: capability.kind,
                     source,
                     receivers: BTreeSet::new(),
                     released: false,
@@ -743,6 +757,26 @@ impl Delegations {
             .filter(|receiver| self.records[receiver].holder == holder)
             .copied()
             .collect()
+    }
+
+    /// Return the copies of `kind` that the process `holder` holds, or held
+    /// before its exit and that keep a released record, in the order of
+    /// their identifiers. The walk reads each record of the run.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(delegations.held(worker, CapabilityKind::Env), vec![id]);
+    /// ```
+    pub(super) fn held(&self, holder: ProcessId, kind: CapabilityKind) -> Vec<CapabilityId> {
+        let mut held: Vec<_> = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.holder == holder && record.kind == kind)
+            .map(|(&id, _)| id)
+            .collect();
+        held.sort_unstable();
+        held
     }
 
     /// Start the revocation of the copy `id`, which a process holds or

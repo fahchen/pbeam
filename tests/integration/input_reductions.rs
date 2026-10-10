@@ -48,6 +48,22 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("min_64", 1),
         ],
     ),
+    // `integer_to_binary/2` estimates the digits of a bignum in its base
+    // with `lg2_lookup` (`big.c:2589-2597`, `4087-4092`): 2^63 - 1 has 64
+    // digits and costs 4 in base 2, and 13 digits and costs 0 in base 36.
+    (
+        "integer_to_binary_2",
+        &[
+            ("{small,2}", 0),
+            ("{max_small,2}", 0),
+            ("{min_big,2}", 3),
+            ("{max_negative_big,2}", 3),
+            ("{max_64,2}", 4),
+            ("{min_64,2}", 4),
+            ("{max_64,10}", 1),
+            ("{max_64,36}", 0),
+        ],
+    ),
     // Two flatmaps, and an empty flatmap with a hashmap, cost nothing. Each
     // other pair costs one reduction for each 8 steps of `hashmap_merge`
     // (`erl_map.c:1507`, `1736`, `1823`). The last pair traps.
@@ -182,6 +198,82 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("{tail_bin,15983}", 3998),
         ],
     ),
+    // A binary, a list of one binary, `[]`, and a term that is not a list
+    // cost nothing. Each other list walks for the size and then for the
+    // copy, and a copy uses one more step for each 32 bytes of each binary
+    // (`erl_iolist.c:354-649`, `710-928`).
+    (
+        "iolist_to_binary",
+        &[
+            ("bin", 0),
+            ("nil", 0),
+            ("empty_bin_list", 0),
+            ("one_bin", 0),
+            ("{ones,1}", 2),
+            ("{ones,8}", 4),
+            ("{ones,16}", 6),
+            ("nested", 4),
+            ("binaries", 8),
+            ("{ones,1000}", 252),
+            ("{ones,31970}", 7994),
+            ("{ones,31990}", 7998),
+            ("{ones,100000}", 25002),
+            ("bad", 1),
+            ("bad_tail", 1),
+            ("atom", 0),
+            ("{bins,1995}", 4241),
+            ("{tail_bin,15983}", 3998),
+        ],
+    ),
+    // `erlang:bump_reductions(Bump)` and then `iolist_to_binary/1`. With at
+    // most 100 reductions left, the call uses them as virtual reductions,
+    // which the total does not count, and runs again in the next turn. With
+    // fewer than 1000, it walks with a budget of 1000, and its budget
+    // becomes 0 (`erl_iolist.c:34-35`, `857-874`).
+    (
+        "iolist_to_binary_late",
+        &[
+            ("{3900,{ones,10}}", 3905),
+            ("{3900,atom}", 3901),
+            ("{3500,nested}", 3505),
+            ("{3500,{ones,4000}}", 3999),
+            ("{3500,{ones,8000}}", 4999),
+        ],
+    ),
+    // One reduction for each 10 search steps: one step for each byte of
+    // an Aho-Corasick search, for each comparison of a Boyer-Moore search,
+    // for each 8 bytes of its memchr skip, and for each part of a global
+    // result. A search that does not end in its turn traps, and the trap
+    // export bumps only the steps of its last turn
+    // (`erl_bif_binary.c:637-994`, `1433-1645`, `1835-1952`).
+    (
+        "binary_split",
+        &[
+            ("first", 0),
+            ("global", 0),
+            ("none", 0),
+            ("long_needle", 0),
+            ("ac_first", 0),
+            ("ac_global", 0),
+            ("trim", 1),
+            ("bad", 0),
+            ("{commas,10}", 2),
+            ("{commas,1000}", 200),
+            ("{commas,20000}", 4000),
+            ("{commas,50000}", 6000),
+            ("{plain,1000}", 12),
+            ("{plain,100000}", 1250),
+            ("{plain,400000}", 5000),
+            ("{plain_global,100000}", 1250),
+            ("{plain_ac,1000}", 100),
+            ("{plain_ac,100000}", 6000),
+            ("{mixed,1000}", 600),
+            ("{mixed,30000}", 6000),
+            ("{wrap,319700}", 3996),
+            ("{wrap,319745}", 3997),
+            ("{wrap,319760}", 3997),
+        ],
+    ),
     // Each item that PBeam supports costs 1 after the read, also for a
     // process with 10000 messages (`erl_bif_info.c:1417-1424`, `1601`).
     // `process_info/2` is a heavy BIF, so its call costs nothing.
@@ -272,6 +364,57 @@ const LONGS: &[(&str, &[(&str, i64)])] = &[
             ("a", 1),
             ("b", 2999),
         ],
+    ),
+    // 25002 reductions for each `iolist_to_binary/1` of 100000 ones.
+    (
+        "iolist_to_binary",
+        &[("b", 4002), ("a", 1), ("b", 998), ("a", 2)],
+    ),
+    // 4241 reductions for each `iolist_to_binary/1` of 1995 binaries.
+    (
+        "iolist_to_binary",
+        &[
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 2999),
+        ],
+    ),
+    // `erlang:bump_reductions(3900)` and then `iolist_to_binary/1` of 10
+    // ones: the call switches out before it walks.
+    (
+        "iolist_to_binary_late",
+        &[
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 2999),
+        ],
+    ),
+    // A global `binary:split/3` with 50000 matches: its search and its
+    // result build trap.
+    (
+        "binary_split",
+        &[
+            ("b", 1334),
+            ("a", 1),
+            ("b", 2001),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 331),
+        ],
+    ),
+    // An Aho-Corasick search of 200000 bytes with no match.
+    (
+        "binary_split",
+        &[("b", 3335), ("a", 1), ("b", 1665), ("a", 2)],
     ),
 ];
 
