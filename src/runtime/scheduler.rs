@@ -4,6 +4,7 @@ use std::{
 };
 
 use super::{
+    capability::{CapabilityKind, Denied, Operation, Restriction, SecurityContext},
     dirty_io::{Claim, Completion, DirtyIo},
     ets::EtsTables,
     host::{
@@ -257,18 +258,26 @@ impl Scheduler {
         }
     }
 
-    /// Create the root process. The root process gets `ProcessId(0)`.
+    /// Create the root process with the security context `security`. The
+    /// root process gets `ProcessId(0)`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut scheduler = Scheduler::new(AtomTable::new());
-    /// scheduler.start(frame, vec![])?;
+    /// scheduler.start(frame, vec![], SecurityContext::new(AllowAll.initial()))?;
     /// assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
     /// ```
-    pub(super) fn start(&mut self, frame: Frame, arguments: Vec<Term>) -> Result<(), BeamError> {
+    pub(super) fn start(
+        &mut self,
+        frame: Frame,
+        arguments: Vec<Term>,
+        security: SecurityContext,
+    ) -> Result<(), BeamError> {
         let id = self.next_pid()?;
-        self.insert(ProcessState::new(id, Start::Entry(frame), arguments));
+        let mut root = ProcessState::new(id, Start::Entry(frame), arguments);
+        root.security = security;
+        self.insert(root);
         Ok(())
     }
 
@@ -1131,10 +1140,18 @@ impl Scheduler {
     /// processes at once, as `erl_create_process` does, so no signal goes
     /// to the child.
     ///
+    /// First the current process must hold a `process` capability with
+    /// `spawn` that permits the module of `start`, and with `link` and
+    /// `monitor` when the spawn links or monitors. The child gets the
+    /// delegable capabilities of the current process, reduced by
+    /// `restrictions` (see `SecurityContext::delegate`). A denied check or
+    /// delegation gives `Ok(Err(Denied))` before the spawn takes a pid or a
+    /// reference.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], true, false, false)?;
+    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], true, false, false, None)?.unwrap();
     /// assert!(monitor.is_some());
     /// ```
     pub(super) fn spawn(
@@ -1144,9 +1161,31 @@ impl Scheduler {
         monitor: bool,
         link: bool,
         off_heap_message_queue: bool,
-    ) -> Result<(ProcessId, Option<Reference>), BeamError> {
+        restrictions: Option<&[Restriction]>,
+    ) -> Result<Result<(ProcessId, Option<Reference>), Denied>, BeamError> {
+        let module = match &start {
+            Start::Entry(frame) => frame.module.as_str(),
+            Start::Undefined { module, .. } => module.name(),
+        };
+        let parent = &self.current_process_mut().security;
+        let check = |needed: bool, operation: Operation, name: Option<&str>| {
+            if needed {
+                parent.check(CapabilityKind::Process, operation, name)
+            } else {
+                Ok(())
+            }
+        };
+        let security = check(true, Operation::Spawn, Some(module))
+            .and_then(|()| check(link, Operation::Link, None))
+            .and_then(|()| check(monitor, Operation::Monitor, None))
+            .and_then(|()| parent.delegate(restrictions));
+        let security = match security {
+            Ok(security) => security,
+            Err(denied) => return Ok(Err(denied)),
+        };
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = off_heap_message_queue;
+        child.security = security;
         let parent = self.current_process_mut().id;
         child.group_leader = self.current_process_mut().group_leader;
         let reference = if monitor {
@@ -1179,7 +1218,7 @@ impl Scheduler {
         }
         let id = child.id;
         self.insert(child);
-        Ok((id, reference))
+        Ok(Ok((id, reference)))
     }
 
     /// Link the current process with the local process `target`, as
