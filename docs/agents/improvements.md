@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261010: Recheck documented module state after a fixture closure change
+
+**Problem:** The fixture closure started to load `code_server` and `error_handler`, but the documentation still said that they were not loaded. It predicted an unresolved external MFA error, but the call raised `badarg`. The PR also claimed that no runtime result changed.
+
+**Root Cause:** The documented results were not run again after the closure change.
+
+**Fix:** Update the code-loading and undefined-function rows and remove the stale PR claim.
+
+**Guardrail:** When a change adds modules to a fixture closure, run again each documented result that depends on the load state of a module.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/407#issuecomment-6099847541>
+
 ## 20261010: Replace verification placeholders before publishing
 
 **Problem:** A PR description kept a placeholder in the Verification section after an earlier edit did not apply.
