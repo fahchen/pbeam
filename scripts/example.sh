@@ -3,7 +3,7 @@
 # The ERTS run uses one scheduler (+S 1), because the pbeam binary runs all processes on one scheduler thread. With more schedulers, ERTS can run two busy processes at the same time, and the order of their output changes from run to run.
 # Usage: bash scripts/example.sh <name> [--erts]
 # The example is the Elixir sources examples/<name>/*.ex. The entry is main/0 of the module with the camel-case name of the example, for example HelloWorld for hello_world.
-# The compiled example modules and pbeam_boot.beam go into target/examples/<name>/.
+# The compiled example modules and pbeam_boot.beam go into target/examples/<name>/, and the consolidated Elixir protocols go into target/examples/<name>/consolidated/, as `mix run` consolidates them (scripts/example_beams.exs).
 # The terra_counter example also compiles the Terra sources of the pinned commit, which scripts/terra.sh downloads or finds in PBEAM_TERRA_SRC.
 # PBEAM_BIN selects the pbeam binary. Without it, the script runs the binary with cargo run.
 # The commands are those of the Run section of examples/hello_world/README.md.
@@ -70,8 +70,9 @@ rm -rf "$work"
 trap - EXIT
 
 # A command substitution, not a process substitution, so that set -e stops the run when the command fails.
-step "Find the Elixir modules that the example calls"
-elixir_list=$(elixir scripts/example_beams.exs "${examples[@]}")
+step "Consolidate the Elixir protocols and find the Elixir modules that the example calls"
+consolidated=$output/consolidated
+elixir_list=$(elixir scripts/example_beams.exs "$consolidated" "${examples[@]}")
 elixir_beams=()
 while IFS= read -r beam; do
   if [[ -n $beam ]]; then elixir_beams+=("$beam"); fi
@@ -80,11 +81,13 @@ done <<<"$elixir_list"
 if [[ $erts == true ]]; then
   paths=(-pa "$output")
   for beam in ${elixir_beams[@]+"${elixir_beams[@]}"}; do
-    case " ${paths[*]} " in
+    case " ${paths[*]} $consolidated " in
       *" ${beam%/*} "*) ;;
       *) paths+=(-pa "${beam%/*}") ;;
     esac
   done
+  # Each -pa option puts its directory before the directories of the previous -pa options (erl -pa A -pa B gives the code path B, A, and then OTP), so the last option puts the consolidated protocols before the unconsolidated protocols of Elixir.
+  paths+=(-pa "$consolidated")
   step "Run ${entry#Elixir.}.main/0 on the pinned ERTS (erl +S 1)"
   exec erl +S 1 -noshell "${paths[@]}" -eval "'$entry':main(), halt()."
 fi

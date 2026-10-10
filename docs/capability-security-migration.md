@@ -92,6 +92,8 @@ One capability covers one kind of resource. A capability has a kind, a set of pe
 | `signal` | `handle`, `ignore` | `signals`: the permitted host signals. | `os:set_signal/2` |
 | `file` (later) | `read`, `write`, `list` | `root`: a handle of a granted directory. | File operations relative to a directory handle (`openat`). |
 
+Decisions of #335 for the checks of this table. An entry checks after its argument checks and before its first effect, as the spawn check does. A constraint compares the name that the BIF gets: the program name of `open_port/2` as the caller gives it, with no path resolution, and the variable name of `os:getenv/1`, each as its native bytes in the file name encoding of the host. `erlang:port_command/2` and `erlang:port_close/1` compare the program name of the port. `os:set_signal/2` with `default` needs both `handle` and `ignore`, because the table names no operation for it and `SIG_DFL` can end the OS process. The `prim_tty` entries that the table does not name (`isatty/1`, `tty_create/1`, `setlocale/1`, and `setupterm_nif/0`) have no check in the first batch: they are terminal setup and queries, which have no operation in this table. The column "Capability" of the [effect inventory](effect-inventory.md) gives the state of each entry.
+
 A capability is a runtime value, not a term. BEAM code cannot construct one: `{grant, file_read, "/"}` is only a tuple, and no BIF makes a capability from a term. The runtime keeps these fields:
 
 ```text

@@ -59,6 +59,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Runtime
 
+### Run `code:ensure_loaded/1` as ERTS does
+
+- `code:ensure_loaded/1` is not implemented: a call stops the run with `unresolved external MFA code:ensure_loaded/1`. Elixir calls it for each dispatch of a protocol that is not consolidated. PBeam has no code server and no code path, so it cannot load a module on demand. An implementation must give the pinned ERTS result, including the code-path search and the load of a module that is not loaded yet; it needs code-loading support first. Until then the call stays a clear runtime error.
+- #349 plans to consolidate the protocols of the Terra Counter example at build time, as `mix run` does, so that the example does not call `code:ensure_loaded/1`.
+- **Trigger:** a supported program calls `code:ensure_loaded/1`, or a program needs protocols that are not consolidated.
+- **Source:** the owner PBeam run of `mise run example terra_counter` on 2026-10-10 (#339).
+
 ### Model the process heap for GC reductions and the message copy cost
 
 - PBeam has no process heap, and its terms keep no sharing and no literal origin. Thus PBeam charges no garbage collection reductions and no message copy cost, and `maps:merge/2` counts the steps of a subtree that both maps share. A change of the `message_queue_data` process flag does not move the messages and sends no adjust signal. The "Garbage collection reductions", "Scheduling", and "Process flags" rows of `docs/erts-differences.md` record these differences, and this entry owns them.
@@ -380,13 +387,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - `tests/feature/boot.rs`, `tests/integration/time.rs`, `tests/integration/user_drv.rs`, and `tests/integration/prim_tty.rs` set `TERM=dumb` and `LC_ALL=C.UTF-8` on the command, as `run_dumb_utf8` of `tests/common/run.rs` does. They do not use a time limit, and `tests/integration/prim_tty.rs` reads only the exit status with its own stdin, stdout, and stderr. Thus each one can call `run_dumb_utf8`, or a helper that only sets the two variables.
 - **Trigger:** the next change to one of these test runners.
 - **Source:** PR #192 (#186).
-
-### Cache the Rust build in CI
-
-- PR #294 (#292) measured a cache of `target/` with `CARGO_INCREMENTAL=1`. Without a cache, the test build of main run 37929970799 took 68s. With the default `cargo llvm-cov` clean, which removes the incremental state of `pbeam-runtime`, warm builds took 60s and 75s, so the cache gave no gain. A dependency-only cache gives the same result. With `--no-clean`, warm builds took 19s to 30s, but the restore took 23s to 26s and the save 8s to 13s. Against the 68s main baseline, the net change was from 1s slower to 18s faster per run, which is smaller than the run-to-run variation of the test time (244s to 412s). Each entry is about 600 MB, and the repository cache limit is 10 GB.
-- `--no-clean` needs a removal of old `*.profraw` files and of old test executables before each coverage run; without it, the coverage gate reported 9533/10116 after one profile change. The gain does not justify this risk to the merge gate.
-- **Trigger:** the test build becomes much longer than the cache transfer (for example, more crates or a larger dependency tree), or `cargo llvm-cov` keeps the incremental state by itself.
-- **Source:** PR #294 (#292).
 
 ### Fail a test that leaks in nextest
 

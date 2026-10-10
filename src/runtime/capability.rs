@@ -15,6 +15,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
+use super::{host::filename_encoding, unicode::native_filename};
 use crate::{
     error::{BeamError, error},
     term::{ProcessId, Term},
@@ -232,18 +233,36 @@ pub enum Constraint {
 }
 
 impl Constraint {
-    /// Return whether the constraint permits `name`.
+    /// Return whether the constraint permits `name`, a name in `form`: the
+    /// bytes of an atom name for [`NameForm::Atom`], or the native bytes of a
+    /// file name or a variable name for [`NameForm::String`]. A permitted
+    /// string is compared as its native bytes in the file name encoding of
+    /// the host, as ERTS gives the name to the host (see
+    /// [`native_filename`]). A permitted string that the encoding cannot
+    /// hold permits no name.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(Constraint::Any.permits("lists"));
-    /// assert!(!Constraint::Only(BTreeSet::new()).permits("lists"));
+    /// assert!(Constraint::Any.permits(b"lists", NameForm::Atom));
+    /// let home = Constraint::Only(BTreeSet::from([String::from("HOME")]));
+    /// assert!(home.permits(b"HOME", NameForm::String));
+    /// assert!(!home.permits(b"PATH", NameForm::String));
     /// ```
-    fn permits(&self, name: &str) -> bool {
-        match self {
-            Constraint::Any => true,
-            Constraint::Only(names) => names.contains(name),
+    fn permits(&self, name: &[u8], form: NameForm) -> bool {
+        let Constraint::Only(names) = self else {
+            return true;
+        };
+        match form {
+            NameForm::Atom => names.iter().any(|permitted| permitted.as_bytes() == name),
+            NameForm::String => names.iter().any(|permitted| {
+                let characters = permitted
+                    .chars()
+                    .map(|character| Term::Integer(u32::from(character).into()))
+                    .collect();
+                native_filename(&Term::List(characters), filename_encoding())
+                    .is_some_and(|permitted| permitted == name)
+            }),
         }
     }
 
@@ -332,19 +351,29 @@ impl Capability {
     }
 
     /// Return whether the capability permits `operation` of `kind`, and,
-    /// when `name` is given, permits `name` in its constraint.
+    /// when `name` is given, permits `name` in its constraint (see
+    /// [`Constraint::permits`]). A kind without a constraint field
+    /// permits each name.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let spawn = Capability::new(CapabilityKind::Process, &[Operation::Spawn], Constraint::Any, false)?;
-    /// assert!(spawn.permits(CapabilityKind::Process, Operation::Spawn, Some("lists")));
+    /// assert!(spawn.permits(CapabilityKind::Process, Operation::Spawn, Some(b"lists")));
     /// assert!(!spawn.permits(CapabilityKind::Process, Operation::Link, None));
     /// ```
-    fn permits(&self, kind: CapabilityKind, operation: Operation, name: Option<&str>) -> bool {
+    fn permits(&self, kind: CapabilityKind, operation: Operation, name: Option<&[u8]>) -> bool {
         self.kind == kind
             && self.operations & operation.bit() != 0
-            && name.is_none_or(|name| self.constraint.permits(name))
+            && name.is_none_or(|name| {
+                // A kind without a constraint field has `Constraint::Any`,
+                // which permits each name in each form.
+                let form = kind
+                    .spec()
+                    .constraint
+                    .map_or(NameForm::Atom, |(_, form)| form);
+                self.constraint.permits(name, form)
+            })
     }
 }
 
@@ -457,20 +486,21 @@ pub(super) struct SecurityContext {
 impl SecurityContext {
     /// Check `operation` of `kind`: return `Err(Denied)` unless a capability
     /// of the context permits it, and, when `name` is given, permits `name`
-    /// in its constraint.
+    /// in its constraint. `name` is the bytes of a module or signal atom, or
+    /// the native bytes of an executable or variable name.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let context = delegations.hold(ProcessId(0), AllowAll.initial().into_iter().map(|c| (Source::Launcher, c)));
-    /// assert_eq!(context.check(CapabilityKind::Process, Operation::Spawn, Some("lists")), Ok(()));
+    /// assert_eq!(context.check(CapabilityKind::Process, Operation::Spawn, Some(b"lists")), Ok(()));
     /// assert_eq!(SecurityContext::default().check(CapabilityKind::Process, Operation::Link, None), Err(Denied));
     /// ```
     pub(super) fn check(
         &self,
         kind: CapabilityKind,
         operation: Operation,
-        name: Option<&str>,
+        name: Option<&[u8]>,
     ) -> Result<(), Denied> {
         if self
             .capabilities
