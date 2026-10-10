@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 15
     env:
       MISE_AUTO_INSTALL: "0"
-      # Measurement for #354: setup (2b), the target/ cache with incremental compilation, without the test executables.
+      # Measurement for #354: setup (2), the target/ cache with incremental compilation.
       # A restored target/ is useful only when rustc reuses the unchanged code of pbeam-runtime. The value is explicit, so that no default of the runner or the profile can disable it.
       CARGO_INCREMENTAL: "1"
     steps:
@@ -69,7 +69,6 @@ jobs:
             target
             !target/llvm-cov-target/*.profraw
             !target/llvm-cov-target/*.profdata
-            !target/llvm-cov-target/debug/deps/*-????????????????
           key: ${{ runner.os }}-target-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.ref }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-target-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.ref }}-
@@ -89,5 +88,4 @@ jobs:
             target
             !target/llvm-cov-target/*.profraw
             !target/llvm-cov-target/*.profdata
-            !target/llvm-cov-target/debug/deps/*-????????????????
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
