@@ -108,6 +108,28 @@ impl BifResult {
             reason: Term::static_atom("badarith"),
         }
     }
+
+    /// Return the `error:capability_denied` exception of an operation that
+    /// the capabilities of the caller do not permit. ERTS has no such
+    /// exception, so the atom goes into the atom table of the run at the
+    /// first denial.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let denied = BifResult::capability_denied(&mut scheduler.atoms)?;
+    /// assert!(matches!(denied, BifResult::Raise { class: ExceptionClass::Error, .. }));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of `AtomTable::put` for a full atom table.
+    pub(super) fn capability_denied(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
+        Ok(BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::Atom(atoms.put("capability_denied")?),
+        })
+    }
 }
 
 /// Return the runtime error of a BIF that ERTS runs with a port argument

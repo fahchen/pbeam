@@ -1,4 +1,5 @@
 use super::{
+    capability::{AllowAll, Policy, Restriction, SecurityContext},
     host::output::IovecWrite,
     process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::{Received, Scheduler, Turn},
@@ -172,6 +173,9 @@ impl BeamProgram {
     /// again when fds 0 and 1 are terminals, as at the exit of the ERTS
     /// emulator (see `InitialMode::reset`).
     ///
+    /// The root process gets the capabilities of the default [`AllowAll`]
+    /// policy, so each process can do each operation, as on ERTS.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -183,9 +187,32 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
     ) -> Result<Term, BeamError> {
+        self.execute_with_policy(module, function, arguments, &AllowAll)
+    }
+
+    /// Run an exported function as the root process, as
+    /// [`BeamProgram::execute`] does, with the initial capabilities that
+    /// `policy` gives the root process. A process can then do only the
+    /// operations that its capabilities permit: a denied operation raises
+    /// `error:capability_denied` before it has an effect (row "Capability
+    /// checks" of `docs/erts-differences.md`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let result = program.execute_with_policy("process_probe", "main", &[], &AllowAll)?;
+    /// ```
+    pub fn execute_with_policy(
+        &self,
+        module: &str,
+        function: &str,
+        arguments: &[Term],
+        policy: &dyn Policy,
+    ) -> Result<Term, BeamError> {
         let initial_mode = InitialMode::read();
         let mut scheduler = Scheduler::new(self.atoms.clone());
-        let run = self.run_root(&mut scheduler, module, function, arguments);
+        let security = SecurityContext::new(policy.initial());
+        let run = self.run_root(&mut scheduler, module, function, arguments, security);
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
         match scheduler.into_root_result() {
@@ -200,14 +227,15 @@ impl BeamProgram {
         }
     }
 
-    /// Run `Module:Function(Arguments...)` as the root process on
-    /// `scheduler` until the run ends, as `BeamProgram::execute` describes.
+    /// Run `Module:Function(Arguments...)` as the root process with the
+    /// security context `security` on `scheduler` until the run ends, as
+    /// `BeamProgram::execute` describes.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut scheduler = Scheduler::new(program.atoms.clone());
-    /// program.run_root(&mut scheduler, "process_probe", "main", &[])?;
+    /// program.run_root(&mut scheduler, "process_probe", "main", &[], SecurityContext::default())?;
     /// assert!(scheduler.into_root_result().is_some());
     /// ```
     ///
@@ -221,11 +249,13 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arguments: &[Term],
+        security: SecurityContext,
     ) -> Result<(), BeamError> {
         let arity =
             u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
         let label = self.entry_label(module, function, arity)?;
-        scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
+        let frame = self.frame(module, label, arity)?;
+        scheduler.start(frame, arguments.to_vec(), security)?;
         while !scheduler.root_exited() {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
@@ -1795,7 +1825,7 @@ fn take_list_elements(list: &mut Term) -> Option<(Vec<Term>, bool)> {
 }
 
 /// The spawn options that this runtime supports, as the flags of ERTS
-/// `ErlSpawnOpts`.
+/// `ErlSpawnOpts`, and the PBeam option `{capabilities, Map}`.
 #[derive(Default)]
 struct SpawnOptions {
     /// Link the new process to the caller (`SPO_LINK`).
@@ -1805,6 +1835,9 @@ struct SpawnOptions {
     /// Start the new process with the `message_queue_data` flag `off_heap`
     /// (`SPO_OFF_HEAP_MSGQ`), else `on_heap`.
     off_heap_message_queue: bool,
+    /// The restrictions of the capabilities of the new process, or `None` to
+    /// give it a copy of each delegable capability of the caller.
+    capabilities: Option<Vec<Restriction>>,
 }
 
 /// Start a process that runs `module:function` with the elements of
@@ -1817,7 +1850,9 @@ struct SpawnOptions {
 /// also start the process, which then raises `error:system_limit`, as the
 /// `apply` of the ERTS `i_apply_only` start does (`beam_common.c:1501-1513`).
 /// Else a module that is not loaded is the runtime error
-/// `unresolved external MFA M:F/A`.
+/// `unresolved external MFA M:F/A`. After these checks, a spawn that the
+/// capabilities of the caller do not permit raises
+/// `error:capability_denied` (see `Scheduler::spawn`).
 ///
 /// # Examples
 ///
@@ -1867,9 +1902,19 @@ fn create_process(
         link,
         monitor,
         off_heap_message_queue,
+        capabilities,
     } = options;
-    let (pid, reference) =
-        scheduler.spawn(start, arguments, monitor, link, off_heap_message_queue)?;
+    let spawned = scheduler.spawn(
+        start,
+        arguments,
+        monitor,
+        link,
+        off_heap_message_queue,
+        capabilities.as_deref(),
+    );
+    let Ok((pid, reference)) = spawned? else {
+        return BifResult::capability_denied(&mut scheduler.atoms);
+    };
     Ok(BifResult::Value(match reference {
         Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),

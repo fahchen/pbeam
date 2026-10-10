@@ -3,8 +3,8 @@ mod tree;
 pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 
 use super::{
-    dirty_io::Claim, host::output::IovecWritten, mailbox::Mailbox, scheduler::AliasMode,
-    timer::TimerKey,
+    capability::SecurityContext, dirty_io::Claim, host::output::IovecWritten, mailbox::Mailbox,
+    scheduler::AliasMode, timer::TimerKey,
 };
 use crate::{
     error::{BeamError, error},
@@ -285,6 +285,11 @@ pub(super) struct ProcessState {
     /// (`erl_rbtree.h:1392-1396`). `None` until the exit switches out. The
     /// exit then continues with no new bump.
     pub(super) continue_exit: Option<Option<WalkPosition>>,
+    /// The copies of the capabilities of the process. The root process gets
+    /// the capabilities of the policy of the run, and a child gets its copies
+    /// from its parent at spawn (`Scheduler::spawn`). The copies go when the
+    /// process state goes. A new process has none.
+    pub(super) security: SecurityContext,
 }
 
 /// A BIF call that continues after a switch: the export of a BIF and the
@@ -367,6 +372,7 @@ impl ProcessState {
             length_trap: None,
             bif_timers: MonitorLinkTree::default(),
             continue_exit: None,
+            security: SecurityContext::default(),
         }
     }
 
