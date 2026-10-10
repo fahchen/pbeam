@@ -1525,7 +1525,7 @@ fn rejects_bs_create_bin_allocations_that_erts_rejects() {
 
 #[test]
 fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
-    let atoms: Vec<Atom> = ["string", "binary", "all", "integer"]
+    let atoms: Vec<Atom> = ["string", "binary", "all", "integer", "append"]
         .into_iter()
         .map(|name| Atom::from_static(name).unwrap())
         .collect();
@@ -1559,6 +1559,43 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
         assert!(matches!(
             read(&bytes, b"").unwrap().as_slice(),
             [BinarySegment::Unsupported(kind)] if kind == &atoms[segment[0] as usize / 16 - 1]
+        ));
+    }
+    // {atom,append},1,16,nil,{x,0},{atom,all} as the first segment.
+    let segments = read(
+        &[
+            0x17, 0xC0, 0x52, 0x10, 0x08, 0x10, 0x02, 0x03, 0x32, 0x22, 0x20, 0x80, 0x02, 0x13,
+            0x32,
+        ],
+        b"",
+    )
+    .unwrap();
+    assert!(matches!(
+        segments.as_slice(),
+        [
+            BinarySegment::Append {
+                segment: 1,
+                unit: 16,
+                source: Operand::X(0)
+            },
+            BinarySegment::BinaryAll {
+                segment: 2,
+                source: Operand::X(1)
+            },
+        ]
+    ));
+    // An append segment after another segment, and one with size 8.
+    for bytes in [
+        [
+            0x17, 0xC0, 0x22, 0x10, 0x80, 0x02, 0x03, 0x32, 0x52, 0x20, 0x80, 0x02, 0x13, 0x32,
+        ]
+        .as_slice(),
+        [0x17, 0x60, 0x52, 0x10, 0x80, 0x02, 0x03, 0x81].as_slice(),
+    ] {
+        let segments = read(bytes, b"").unwrap();
+        assert!(matches!(
+            segments.last(),
+            Some(BinarySegment::Unsupported(kind)) if kind.name() == "append"
         ));
     }
     // A list of one item, and a string of 7 bytes in a StrT chunk of 5.
