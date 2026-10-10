@@ -1740,10 +1740,9 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
             BinarySegment::BinaryAll { segment: 2, source: Operand::X(0) },
         ] if text == b"count: "
     ));
-    // {atom,integer},2,1,nil,{x,0},{integer,8}; {atom,binary} of unit 1
-    // and size all; {atom,binary} of unit 8 and size 8.
+    // {atom,binary} of unit 1 and size all; {atom,binary} of unit 8 and
+    // size 8.
     for segment in [
-        [0x42, 0x20, 0x10, 0x02, 0x03, 0x81],
         [0x22, 0x20, 0x10, 0x02, 0x03, 0x32],
         [0x22, 0x20, 0x80, 0x02, 0x03, 0x81],
     ] {
@@ -1791,6 +1790,65 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
             Some(BinarySegment::Unsupported(kind)) if kind.name() == "append"
         ));
     }
+    // {atom,integer},1,1,nil,{x,0},{integer,8},
+    // {atom,integer},2,8,{literal,[little]},{x,1},{x,2},
+    // {atom,integer},3,1,{literal,[signed,native]},{x,0},{integer,16},
+    // {atom,utf8},4,0,nil,{x,3},{atom,undefined}, and
+    // {atom,utf16},5,0,nil,{x,0},{atom,undefined}.
+    let atoms: Vec<Atom> = ["integer", "utf8", "undefined", "utf16"]
+        .into_iter()
+        .map(|name| Atom::from_static(name).unwrap())
+        .collect();
+    let literals = [
+        Some(Term::List(vec![Term::static_atom("little")])),
+        Some(Term::List(vec![
+            Term::static_atom("signed"),
+            Term::static_atom("native"),
+        ])),
+    ];
+    let segments = read_binary_segments(
+        &[
+            0x17, 0x08, 0x1E, 0x12, 0x10, 0x10, 0x02, 0x03, 0x81, 0x12, 0x20, 0x80, 0x47, 0x00,
+            0x13, 0x23, 0x12, 0x30, 0x10, 0x47, 0x10, 0x03, 0x09, 0x10, 0x22, 0x40, 0x00, 0x02,
+            0x33, 0x32, 0x42, 0x50, 0x00, 0x02, 0x03, 0x32,
+        ],
+        &mut 0,
+        &atoms,
+        &literals,
+        b"",
+    )
+    .unwrap();
+    assert!(matches!(
+        segments.as_slice(),
+        [
+            BinarySegment::Integer {
+                segment: 1,
+                unit: 1,
+                little: false,
+                source: Operand::X(0),
+                size: Operand::Value(Term::Integer(8)),
+            },
+            BinarySegment::Integer {
+                segment: 2,
+                unit: 8,
+                little: true,
+                source: Operand::X(1),
+                size: Operand::X(2),
+            },
+            BinarySegment::Integer {
+                segment: 3,
+                unit: 1,
+                little: true,
+                source: Operand::X(0),
+                size: Operand::Value(Term::Integer(16)),
+            },
+            BinarySegment::Utf8 {
+                segment: 4,
+                source: Operand::X(3),
+            },
+            BinarySegment::Unsupported(kind),
+        ] if kind.name() == "utf16"
+    ));
     // A list of one item, and a string of 7 bytes in a StrT chunk of 5.
     assert!(read(&[0x17, 0x10, 0x12], b"").is_err());
     assert!(read(&[0x17, 0x60, 0x12, 0x00, 0x80, 0x02, 0x00, 0x71], b"short").is_err());
