@@ -818,6 +818,25 @@ pub(crate) enum Instruction {
         left: Operand,
         right: Operand,
     },
+    /// Jumps to `fail_label` when the operands are equal in the ERTS
+    /// arithmetic order (`is_ne`, opcode 42). PBeam has no float term, so the
+    /// test gives the same result as exact inequality.
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `compare_probe:ne/2` in
+    /// `fixtures/compare/compare_probe.beam` has `[0x2A, 0x0D, 0x1E, 0x03,
+    /// 0x13]`, which fails to label 30 when `x0` equals `x1`.
+    ///
+    /// Erlang: `ne(A, B) when A /= B, A =/= x -> id(true);` compiles to
+    /// `{test,is_ne,{f,30},[{x,0},{x,1}]}`, then an `is_eq_exact` test. A
+    /// guard `A /= B` alone compiles to `is_eq`.
+    /// `String.Tokenizer.continue/6` of Elixir has
+    /// `{test,is_ne,{f,34},[{x,6},{integer,95}]}`.
+    TestNotEqual {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
     /// Jumps to `fail_label` when the operands are exactly equal
     /// (`is_ne_exact`, opcode 44).
     ///
@@ -1696,6 +1715,11 @@ pub(super) fn parse_code(
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
+            OPCODE_TEST_NE => Instruction::TestNotEqual {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
             OPCODE_TEST_EXACT_EQ => Instruction::TestExactEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -2467,7 +2491,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_SKIP_UTF8 => Some(4),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
+        OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
         OPCODE_TEST_IS_NUMBER
         | OPCODE_TEST_IS_ATOM

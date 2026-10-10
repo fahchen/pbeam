@@ -30,6 +30,10 @@ inputs() ->
       [small, max_small, min_big, min_small, max_negative_big, max_64, min_64]},
      {integer_to_binary,
       [small, max_small, min_big, min_small, max_negative_big, max_64, min_64]},
+     %% {Integer, Base}: the estimate of a bignum depends on the base.
+     {integer_to_binary_2,
+      [{small, 2}, {max_small, 2}, {min_big, 2}, {max_negative_big, 2}, {max_64, 2},
+       {min_64, 2}, {max_64, 10}, {max_64, 36}]},
      %% Two maps of the keys First..Last: two flatmaps, an empty flatmap
      %% and a hashmap, a flatmap and a hashmap, and two hashmaps. The
      %% last pair traps.
@@ -115,7 +119,7 @@ keys(First, Last) -> [Key || {Key, _} <- pairs(First, Last)].
 
 map({First, Last}) -> maps:from_list(pairs(First, Last)).
 
-%% The integers of integer_to_list/1 and integer_to_binary/1. A bignum
+%% The integers of integer_to_list/1 and integer_to_binary/1,2. A bignum
 %% literal is not a PBeam literal, so the arithmetic builds each bignum.
 integer(small) -> id(12345);
 integer(max_small) -> id(576460752303423487);
@@ -129,6 +133,7 @@ integer(min_64) -> id(-576460752303423488) * 16.
 %% measures the BIF.
 arg(integer_to_list, Name) -> integer(Name);
 arg(integer_to_binary, Name) -> integer(Name);
+arg(integer_to_binary_2, {Name, Base}) -> {integer(Name), Base};
 arg(maps_merge, {First, Second}) -> {map(First), map(Second)};
 arg(map_next, {ordered, Size, Keys}) -> {keys(1, Keys), map({1, Size}), iterator};
 arg(map_next, {Size, Path, Acc}) -> {Path, map({1, Size}), Acc};
@@ -257,6 +262,7 @@ put_terms(Count) ->
 %% compiler keeps the call, and the call is a body call_ext.
 run(integer_to_list, Value) -> [integer_to_list(Value)];
 run(integer_to_binary, Value) -> [integer_to_binary(Value)];
+run(integer_to_binary_2, {Value, Base}) -> [integer_to_binary(Value, Base)];
 run(maps_merge, {First, Second}) -> [maps:merge(First, Second)];
 run(map_next, {Path, Map, Acc}) -> [erts_internal:map_next(Path, Map, Acc)];
 run(ets_insert, {Table, Objects}) ->
