@@ -437,7 +437,7 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         module: &str,
         function: &str,
-        arguments: Vec<Term>,
+        mut arguments: Vec<Term>,
     ) -> Result<BifResult, BeamError> {
         if let (
             "ets",
@@ -457,7 +457,7 @@ impl BeamProgram {
             return ets::insert_list(&mut context, *id, objects, *done as usize, *keypos as i32);
         }
         let process = scheduler.current_process_mut();
-        match (module, function, arguments.as_slice()) {
+        match (module, function, arguments.as_mut_slice()) {
             ("erlang", "length", [list, Term::Integer(count)]) => {
                 erlang::length(process, list, *count)
             }
@@ -593,7 +593,7 @@ impl BeamProgram {
                     term,
                     stack,
                     *size as usize,
-                    bytes.clone(),
+                    std::mem::take(bytes),
                 ))
             }
             ("erlang", "bif_handle_signals_return", [_, value]) => {
