@@ -1,10 +1,18 @@
-use super::{CONTEXT_REDS, MonitorOptions, MonitorTarget, Scheduler, Turn};
+use super::{CONTEXT_REDS, LinkId, MonitorOptions, MonitorTarget, Scheduler, Turn};
+use crate::runtime::host::input::{Readiness, wait_readable};
+use crate::runtime::host::output::{IovecWrite, IovecWritten};
 use crate::term::test_atom;
 use crate::{
     runtime::ets::{Access, Table},
     runtime::process::{ReceiveTimer, Start, TimerReference, tests::frame},
+    runtime::signal::Signal,
     runtime::timer::{Receiver, Timer},
-    term::{Atom, AtomTable, ProcessId, Term},
+    term::{Atom, AtomTable, ProcessId, Reference, Term},
+};
+use std::{
+    io::{PipeReader, PipeWriter, Read, Write},
+    os::fd::AsRawFd,
+    time::Duration,
 };
 
 /// Return the options of `erlang:monitor/2`.
@@ -167,19 +175,31 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
     assert!(scheduler.link(ProcessId(0)));
     assert!(!scheduler.link(ProcessId(99)));
     scheduler.unlink(child);
-    let unlinking = scheduler.current_process_mut().links.get(&child);
+    let unlinking = scheduler
+        .current_process_mut()
+        .links
+        .get(&LinkId::Process(child));
     assert!(unlinking.is_some_and(|&id| id != 0));
     scheduler.unlink(child);
     scheduler.unlink(ProcessId(99));
     scheduler.unlink(ProcessId(0));
     assert!(scheduler.link(child));
-    assert_eq!(scheduler.current_process_mut().links.get(&child), Some(&0));
+    assert_eq!(
+        scheduler
+            .current_process_mut()
+            .links
+            .get(&LinkId::Process(child)),
+        Some(&0)
+    );
     scheduler.park_current();
 
     // The child handles the link, the unlink, and the link again.
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(
-        scheduler.current_process_mut().links.get(&ProcessId(0)),
+        scheduler
+            .current_process_mut()
+            .links
+            .get(&LinkId::Process(ProcessId(0))),
         Some(&0)
     );
     scheduler.finish_current(atom("normal"), None);
@@ -483,4 +503,337 @@ fn rejects_receive_timeouts_as_erts_set_proc_timer_term() {
             resume: 0
         }
     );
+}
+
+/// Return a write of `bytes` to `fd` in one group.
+fn dirty_write(fd: i32, bytes: &[u8]) -> IovecWrite {
+    IovecWrite {
+        fd,
+        groups: vec![vec![bytes.to_vec()]],
+        bad_group: false,
+    }
+}
+
+/// Wait until a dirty IO call completes, then take the completions.
+fn wait_completion(scheduler: &mut Scheduler) {
+    assert!(
+        scheduler
+            .wait_events(Some(Duration::from_secs(10)))
+            .unwrap()
+    );
+    scheduler.complete_dirty_writes();
+}
+
+#[test]
+fn resumes_a_dirty_write_once_when_it_completes_before_the_next_poll() {
+    // The scheduler records the call on the process before the dirty IO
+    // thread gets it. The completion is in the inbox before the scheduler
+    // takes it; the scheduler resumes the process once.
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    scheduler.start(frame(), vec![]).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.start_dirty_write(dirty_write(writer.as_raw_fd(), b"hi\n"), true);
+    let process = &scheduler.processes[&ProcessId(0)];
+    assert_eq!(
+        process
+            .dirty_write
+            .as_ref()
+            .map(|write| (write.call, write.tail, &write.written)),
+        Some((0, true, &None))
+    );
+    assert!(!process.in_run_queue && !process.waiting);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
+    let mut bytes = [0; 3];
+    reader.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"hi\n");
+    wait_completion(&mut scheduler);
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(0)]);
+    assert_eq!(
+        scheduler.processes[&ProcessId(0)]
+            .dirty_write
+            .as_ref()
+            .map(|write| &write.written),
+        Some(&Some(IovecWritten::All))
+    );
+    // The inbox is empty, and the wait does not wait for the call.
+    scheduler.complete_dirty_writes();
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(0)]);
+    assert!(!scheduler.wait_events(None).unwrap());
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+}
+
+#[test]
+fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
+    // The completion comes after the scheduler took the inbox and ran
+    // another process. A message to the waiting process does not put it
+    // in the run queue, and it gets the message after the call.
+    let (reader, writer) = std::io::pipe().unwrap();
+    let fd = writer.as_raw_fd();
+    // SAFETY: `fcntl` changes only the status flags of an open fd.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as above.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    while (&writer).write(&[0; 4096]).is_ok() {}
+    // SAFETY: as above.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    scheduler.start(frame(), vec![]).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler
+        .spawn(Start::Entry(frame()), vec![], false, false, false)
+        .unwrap();
+    scheduler.start_dirty_write(dirty_write(fd, b"later"), true);
+    scheduler.complete_dirty_writes();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(current(&mut scheduler), ProcessId(1));
+    scheduler.deliver(ProcessId(0), atom("ping"));
+    scheduler.park_current();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
+    assert!(
+        scheduler
+            .wait_events(Some(Duration::from_millis(20)))
+            .unwrap()
+    );
+    scheduler.complete_dirty_writes();
+    assert!(scheduler.runnable.is_empty());
+    let reading = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        (&reader).read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    wait_completion(&mut scheduler);
+    drop(writer);
+    assert!(reading.join().unwrap().ends_with(b"later"));
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(0)]);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(current(&mut scheduler), ProcessId(0));
+    assert_eq!(messages(&scheduler, 0), [atom("ping")]);
+}
+
+/// Return a pipe whose write end holds as many bytes as the pipe takes, so
+/// a blocking write to it waits until the test reads the pipe.
+fn full_pipe() -> (PipeReader, PipeWriter) {
+    let (reader, writer) = std::io::pipe().unwrap();
+    let fd = writer.as_raw_fd();
+    // SAFETY: `fcntl` changes only the status flags of an open fd.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as above.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    while (&writer).write(&[0; 4096]).is_ok() {}
+    while (&writer).write(&[0]).is_ok() {}
+    // SAFETY: as above.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    (reader, writer)
+}
+
+/// Read `reader` until the end of file in a new thread, so each write to
+/// the pipe completes.
+fn drain(reader: PipeReader) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        (&reader).read_to_end(&mut bytes).unwrap();
+        bytes
+    })
+}
+
+/// Take the completions until no dirty IO call runs.
+fn wait_all_completions(scheduler: &mut Scheduler) {
+    while scheduler.dirty_io.running() {
+        wait_completion(scheduler);
+    }
+}
+
+/// Return the exit signal `kill` of `erlang:exit/2` from process 0.
+fn kill() -> Signal {
+    Signal::Exit {
+        from: LinkId::Process(ProcessId(0)),
+        reason: atom("kill"),
+        linked: false,
+        normal_kills: false,
+        alias: None,
+    }
+}
+
+/// Start the root process 0, which spawns the processes `1..=count` with a
+/// monitor and parks. Each spawned process then starts a dirty write of
+/// `bytes` to the fd that `fd` gives for its number. Return the monitor
+/// references.
+fn start_dirty_writers(
+    scheduler: &mut Scheduler,
+    count: u64,
+    fd: impl Fn(u64) -> i32,
+    bytes: &[u8],
+) -> Vec<Reference> {
+    scheduler.start(frame(), vec![]).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    let references = (1..=count)
+        .map(|_| {
+            let (_, reference) = scheduler
+                .spawn(Start::Entry(frame()), vec![], true, false, false)
+                .unwrap();
+            reference.unwrap()
+        })
+        .collect();
+    scheduler.park_current();
+    for id in 1..=count {
+        assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+        assert_eq!(current(scheduler), ProcessId(id));
+        scheduler.start_dirty_write(dirty_write(fd(id), bytes), true);
+    }
+    references
+}
+
+/// Return the `DOWN` message of the monitor `reference` on process `id`
+/// with `reason`.
+fn down(reference: Reference, id: u64, reason: &str) -> Term {
+    Term::Tuple(vec![
+        atom("DOWN"),
+        Term::Reference(reference),
+        atom("process"),
+        Term::Pid(ProcessId(id)),
+        atom(reason),
+    ])
+}
+
+/// The bytes of a write that waits: a pipe holds 64 KiB.
+const WAITING_WRITE: usize = 1 << 20;
+
+/// Wait until `reader` has bytes: the dirty IO thread started the write to
+/// the empty pipe.
+fn wait_write_started(reader: &PipeReader) {
+    assert_eq!(
+        wait_readable(&[reader.as_raw_fd()], Some(Duration::from_secs(10))),
+        Readiness::Ready(vec![reader.as_raw_fd()])
+    );
+}
+
+#[test]
+fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
+    // ERTS 29.1.1 handles the signals of a process that runs dirty with
+    // `erts_dirty_process_signal_handler`, and a normal scheduler runs the
+    // exit of a killed process while its dirty NIF runs. The completion of
+    // the write then arrives after the exit, and the scheduler drops it.
+    let (reader, writer) = std::io::pipe().unwrap();
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    let bytes = vec![b'w'; WAITING_WRITE];
+    let references = start_dirty_writers(&mut scheduler, 1, |_| writer.as_raw_fd(), &bytes);
+    wait_write_started(&reader);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
+    // A message does not put the writer in the run queue.
+    scheduler.deliver(ProcessId(1), atom("ping"));
+    assert!(scheduler.runnable.is_empty());
+    // A signal does: the turn handles it, and the writer does not run.
+    scheduler
+        .send_signal(Some(ProcessId(0)), ProcessId(1), kill())
+        .unwrap();
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(1)]);
+    let reductions = scheduler.processes[&ProcessId(1)].reductions;
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    let writer_state = &scheduler.processes[&ProcessId(1)];
+    assert_eq!(writer_state.exiting, Some(atom("killed")));
+    assert!(writer_state.dirty_write.is_none());
+    assert_eq!(writer_state.reductions, reductions);
+    // The exit runs in the next turn, while the write waits.
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(1)]);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    assert!(!scheduler.processes.contains_key(&ProcessId(1)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(current(&mut scheduler), ProcessId(0));
+    assert_eq!(messages(&scheduler, 0), [down(references[0], 1, "killed")]);
+    scheduler.park_current();
+    // The write continues and completes; its completion does not revive
+    // the writer or wake another process.
+    assert!(scheduler.dirty_io.running());
+    let reading = drain(reader);
+    wait_all_completions(&mut scheduler);
+    drop(writer);
+    assert_eq!(reading.join().unwrap(), bytes);
+    assert!(scheduler.runnable.is_empty());
+    assert!(!scheduler.processes.contains_key(&ProcessId(1)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
+}
+
+#[test]
+fn drops_the_completion_that_arrives_before_the_exit_of_a_killed_dirty_writer() {
+    // The writer handles the kill while its write waits, and the write
+    // completes before the exit turn of the writer. The completion does not
+    // resume the exiting writer, and the writer exits without its result.
+    let (reader, writer) = std::io::pipe().unwrap();
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    let bytes = vec![b'w'; WAITING_WRITE];
+    let references = start_dirty_writers(&mut scheduler, 1, |_| writer.as_raw_fd(), &bytes);
+    wait_write_started(&reader);
+    scheduler
+        .send_signal(Some(ProcessId(0)), ProcessId(1), kill())
+        .unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    let reading = drain(reader);
+    wait_all_completions(&mut scheduler);
+    drop(writer);
+    assert_eq!(reading.join().unwrap(), bytes);
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(1)]);
+    assert!(scheduler.processes[&ProcessId(1)].dirty_write.is_none());
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    assert!(!scheduler.processes.contains_key(&ProcessId(1)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(messages(&scheduler, 0), [down(references[0], 1, "killed")]);
+}
+
+#[test]
+fn exits_without_the_result_of_a_dirty_write_that_completed_before_a_kill() {
+    // The completion puts the writer in the run queue with its result. A
+    // kill then arrives before its turn: the turn handles the kill at
+    // schedule-in, and the writer exits without its result.
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    let references = start_dirty_writers(&mut scheduler, 1, |_| writer.as_raw_fd(), b"done");
+    let mut bytes = [0; 4];
+    reader.read_exact(&mut bytes).unwrap();
+    wait_all_completions(&mut scheduler);
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(1)]);
+    scheduler
+        .send_signal(Some(ProcessId(0)), ProcessId(1), kill())
+        .unwrap();
+    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(1)]);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    assert!(!scheduler.processes.contains_key(&ProcessId(1)));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    assert_eq!(messages(&scheduler, 0), [down(references[0], 1, "killed")]);
+}
+
+#[test]
+fn does_not_run_the_queued_dirty_write_of_a_killed_writer() {
+    // Ten writes wait for a full pipe on the ten dirty IO threads, and the
+    // write of process 11 waits in the queue. The kill of process 11 drops
+    // its claim when its turn handles the kill, so no thread runs its
+    // write, also when the threads take it before its exit turn. ERTS
+    // 29.1.1: a dirty IO scheduler does not call the NIF of an exiting
+    // process (erl_process.c:10252-10258).
+    let (reader, writer) = full_pipe();
+    let (queued_reader, queued_writer) = std::io::pipe().unwrap();
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    let fd = |id| {
+        if id == 11 {
+            queued_writer.as_raw_fd()
+        } else {
+            writer.as_raw_fd()
+        }
+    };
+    start_dirty_writers(&mut scheduler, 11, fd, b"w");
+    scheduler
+        .send_signal(Some(ProcessId(0)), ProcessId(11), kill())
+        .unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    let reading = drain(reader);
+    wait_all_completions(&mut scheduler);
+    drop(writer);
+    assert!(reading.join().unwrap().ends_with(b"wwwwwwwwww"));
+    assert_eq!(
+        wait_readable(&[queued_reader.as_raw_fd()], Some(Duration::ZERO)),
+        Readiness::Pending
+    );
+    let mut runnable = Vec::from(scheduler.runnable.clone());
+    runnable.sort();
+    assert_eq!(runnable, (1..=11).map(ProcessId).collect::<Vec<_>>());
 }

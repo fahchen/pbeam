@@ -66,7 +66,7 @@ fn entries() -> impl Iterator<Item = &'static [u8]> {
 /// assert!(!environ().is_null());
 /// ```
 #[cfg(target_os = "macos")]
-fn environ() -> *const *const c_char {
+pub(super) fn environ() -> *const *const c_char {
     // SAFETY: `_NSGetEnviron` returns a valid pointer to the `environ`
     // variable of the process.
     unsafe { (*libc::_NSGetEnviron()).cast() }
@@ -80,7 +80,7 @@ fn environ() -> *const *const c_char {
 /// assert!(!environ().is_null());
 /// ```
 #[cfg(not(target_os = "macos"))]
-fn environ() -> *const *const c_char {
+pub(super) fn environ() -> *const *const c_char {
     // SAFETY: PBeam never changes its environment, so no other thread
     // writes `environ` while this function reads it.
     unsafe { libc::environ.cast() }

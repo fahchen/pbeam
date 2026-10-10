@@ -118,6 +118,8 @@ Host work that can block must not block a scheduler thread. The intended asynchr
 
 Tokio was an example executor in the discussion, not a finalized dependency requirement. Completion ownership, cancellation, process exit, and shutdown behavior must be defined when the first asynchronous operation is implemented. Late completion must not resume a dead process or resume the same call twice.
 
+The first asynchronous operation is `prim_tty:write_nif/2`, which ERTS runs on a dirty IO scheduler. Task #19 runs it on 10 dirty IO threads of the standard library, as the 10 ERTS dirty IO schedulers, with no other executor. The scheduler records the call on the process before a thread gets it, and the completion identifies the process and the call. Row "Dirty IO" of `docs/erts-differences.md` records the behavior. Task #20 defines the rest of the lifecycle. While the call runs, the scheduler handles the signals of the caller, as `erts_dirty_process_signal_handler` does. A signal that ends the caller drops the claim of the caller on the call: a call in the queue then does not run, and the scheduler drops the result of a call that runs, because the host call cannot stop. At the end of the run, the run drops all claims and does not wait for a call that runs.
+
 A process owns its security context, including realm, subject incarnation, usable and delegable grants, and budget account. Migration carries that context. Spawn cannot exceed the parent's delegable authority or duplicate a budget. Supervisor restart uses a validated template and cannot restore revoked grants.
 
 Host intents become authorized requests only through runtime checks. Fix the subject, operation, parameters, resource identity, grant generation, incarnation, and budget reservation before submission. Recheck queued authority at a synchronized dispatch decision. Revocation before that decision prevents execution; later revocation cannot promise rollback. Completion must settle cost and release resources even when the original subject no longer exists.
@@ -264,7 +266,7 @@ Passing small fixtures does not establish Terra compatibility or complete OTP co
 
 The post-M2 security gate uses the delivered terminal operation as its first consumer. Granted trusted-profile execution preserves the accepted OTP behavior. Denied guests cannot use native entry paths, direct service messages, forged handles, resource reuse, or delegated workers to bypass authority. Both the native terminal provider and a memory provider enforce the same policy. Secure guest execution remains disabled until all reachable operation paths and resource limits pass their specified checks. See the [migration acceptance gates](capability-security-migration.md).
 
-Security implementation starts after M2 acceptance and is proposed before M3. This documentation does not close milestones, change issue dependencies, or supply a second task tracker. Create and link focused implementation issues after design review. Later scheduler, native, bundle, async, and Terra tasks must preserve the accepted security contracts.
+Security implementation is milestone M6 in the milestone order of 2026-10-09. It runs in parallel with M5 Interactive host I/O. This documentation does not close milestones, change issue dependencies, or supply a second task tracker. Create and link focused implementation issues after design review. The asynchronous dispatch transition follows the M5 async tasks. Later native, bundle, Terra, and scheduler tasks (M7–M10) must preserve the accepted security contracts.
 
 ## 12. Unresolved details before implementation claims
 
@@ -274,6 +276,6 @@ Security implementation starts after M2 acceptance and is proposed before M3. Th
 - Required process semantics, including selective receive, timers, links, monitors, and exception behavior for the chosen slice.
 - Native registry conflict policy, validation timing, call-path coverage, errors, resource ownership, and async cancellation.
 - Bundle encoding/versioning, validation limits, resource lookup semantics, and whether compression is needed.
-- Scheduler count policy and host executor for the initial macOS arm64 target.
+- Scheduler count policy for the initial macOS arm64 target.
 
 Resolve each detail when its first implementation slice requires it. Add only the foundations that slice consumes; do not interpret the logical architecture or future platform matrix as a request to scaffold unused components.

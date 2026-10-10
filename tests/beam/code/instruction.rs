@@ -1353,6 +1353,8 @@ fn rejects_a_put_tuple2_without_an_element_list() {
 fn maps_supported_type_tests_and_rejects_unknown_opcodes() {
     assert!(test_kind(OPCODE_TEST_IS_ATOM).is_ok());
     assert!(test_kind(OPCODE_TEST_IS_PID).is_ok());
+    assert!(matches!(test_kind(OPCODE_TEST_IS_PORT), Ok(TestKind::Port)));
+    assert_eq!(unsupported_opcode_operand_count(OPCODE_TEST_IS_PORT), None);
     assert!(test_kind(OPCODE_TEST_IS_LIST).is_ok());
     assert!(test_kind(OPCODE_TEST_IS_BINARY).is_ok());
     assert!(test_kind(255).is_err());
@@ -1387,7 +1389,6 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_TEST_TAGGED_TUPLE, 4),
         (OPCODE_TEST_IS_MAP, 2),
         (OPCODE_BADMATCH, 1),
-        (OPCODE_TEST_IS_PORT, 2),
         (OPCODE_TRY_CASE_END, 1),
         (OPCODE_PUT_MAP_ASSOC, 5),
         (OPCODE_GET_RECORD_ELEMENTS, 3),

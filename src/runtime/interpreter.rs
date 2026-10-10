@@ -1,6 +1,8 @@
 use super::{
-    process::{Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
+    host::output::IovecWrite,
+    process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::{Received, Scheduler, Turn},
+    tty::{InitialMode, Ttys},
 };
 use crate::{
     beam::{
@@ -56,6 +58,9 @@ enum Outcome {
     Yield,
     /// The process exited. `result` is the return value of a normal exit.
     Exit { reason: Term, result: Option<Term> },
+    /// The process waits for its NIF call `write` on a dirty IO thread.
+    /// `tail` tells whether the NIF call was a tail call.
+    DirtyWrite { write: IovecWrite, tail: bool },
 }
 
 /// The class of an exception. The `throw` class is not implemented yet.
@@ -137,17 +142,35 @@ impl BeamProgram {
     /// `check_activities_to_run` (`erl_process.c:9797-9810`). When no
     /// process can run, it sleeps until the first timer end, as
     /// `scheduler_wait` sleeps until the next timeout
-    /// (`erl_process.c:3452-3620`). The run ends at the next scheduling step
-    /// after the root process exits, also when another process can run or a
-    /// timer is active. A process that ends the root process with an exit
-    /// signal continues until it waits, exits, or switches out. This is as
+    /// (`erl_process.c:3452-3620`). When fd 0 has a read select, a port
+    /// waits for a pipe, a dirty IO call runs, or a signal handler is
+    /// installed, it waits for fd 0, for the pipes, for the completion of the
+    /// call, and for the handled host signals until then (see
+    /// `Scheduler::wait_events`). Before each scheduling step, it
+    /// sends `{notify, Signal}` to `erl_signal_server` for each handled
+    /// signal that arrived (see `Scheduler::check_signals`), and a process
+    /// whose dirty IO call completed goes to the run queue (see
+    /// `Scheduler::complete_dirty_writes`). The run ends at
+    /// the next scheduling step after the root process exits, also when
+    /// another process can run or a timer is active. A process that ends
+    /// the root process with an exit signal continues until it waits,
+    /// exits, or switches out. This is as
     /// `halt()` after `-eval` stops the ERTS node
     /// (`erlang.erl:3357-3358`) and as `init` halts after a boot process
     /// exit that is not `normal` (`init.erl:710-712`). A root process exit
     /// gives the error `root process exited with <Reason>`, with the reason
     /// as ERTS prints a term (`print_term`), for example
     /// `root process exited with {badarg,[]}`. A root process that
-    /// waits when no process can run and no timer is active gives an error.
+    /// waits when no process can run, no timer is active, fd 0 has no read
+    /// select, no port waits for a pipe, no dirty IO call runs, and no
+    /// signal handler is installed gives an error. When the run ends, it
+    /// does not wait for a dirty IO call that runs, and a call in the queue
+    /// does not run (see `DirtyIo`). A call of `erlang:halt/2` with a
+    /// status code ends the run at once with the error
+    /// [`BeamError::Halt`]. At the end of the
+    /// run, also after an error, fd 0 gets its mode at the start of the run
+    /// again when fds 0 and 1 are terminals, as at the exit of the ERTS
+    /// emulator (see `InitialMode::reset`).
     ///
     /// # Examples
     ///
@@ -160,28 +183,11 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
     ) -> Result<Term, BeamError> {
-        let arity =
-            u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-        let label = self.entry_label(module, function, arity)?;
+        let initial_mode = InitialMode::read();
         let mut scheduler = Scheduler::new(self.atoms.clone());
-        scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
-        while !scheduler.root_exited() {
-            let now = scheduler.timers.now();
-            scheduler.expire_timers(now);
-            match scheduler.schedule_next()? {
-                Turn::Run => match self.run(&mut scheduler)? {
-                    Outcome::Wait => scheduler.park_current(),
-                    Outcome::Hibernate => scheduler.hibernate_current(),
-                    Outcome::Yield => scheduler.yield_current(),
-                    Outcome::Exit { reason, result } => scheduler.finish_current(reason, result),
-                },
-                Turn::Done => {}
-                Turn::Idle => match scheduler.timers.wait_time(scheduler.timers.now()) {
-                    Some(wait) => std::thread::sleep(wait),
-                    None => break,
-                },
-            }
-        }
+        let run = self.run_root(&mut scheduler, module, function, arguments);
+        initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
+        run?;
         match scheduler.into_root_result() {
             Some(Ok(result)) => Ok(result),
             Some(Err(reason)) => {
@@ -192,6 +198,60 @@ impl BeamProgram {
             }
             None => Err(error("root process waits for a message that cannot arrive")),
         }
+    }
+
+    /// Run `Module:Function(Arguments...)` as the root process on
+    /// `scheduler` until the run ends, as `BeamProgram::execute` describes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut scheduler = Scheduler::new(program.atoms.clone());
+    /// program.run_root(&mut scheduler, "process_probe", "main", &[])?;
+    /// assert!(scheduler.into_root_result().is_some());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of `BeamProgram::execute`, except the root process
+    /// results.
+    fn run_root(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        function: &str,
+        arguments: &[Term],
+    ) -> Result<(), BeamError> {
+        let arity =
+            u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
+        let label = self.entry_label(module, function, arity)?;
+        scheduler.start(self.frame(module, label, arity)?, arguments.to_vec())?;
+        while !scheduler.root_exited() {
+            let now = scheduler.timers.now();
+            scheduler.expire_timers(now);
+            scheduler.check_signals()?;
+            scheduler.complete_dirty_writes();
+            match scheduler.schedule_next()? {
+                Turn::Run => match self.run(scheduler)? {
+                    Outcome::Wait => scheduler.park_current(),
+                    Outcome::Hibernate => scheduler.hibernate_current(),
+                    Outcome::Yield => scheduler.yield_current(),
+                    Outcome::Exit { reason, result } => scheduler.finish_current(reason, result),
+                    Outcome::DirtyWrite { write, tail } => scheduler.start_dirty_write(write, tail),
+                },
+                Turn::Done => {}
+                Turn::Idle => {
+                    let wait = scheduler.timers.wait_time(scheduler.timers.now());
+                    if !scheduler.wait_events(wait)? {
+                        match wait {
+                            Some(wait) => std::thread::sleep(wait),
+                            None => break,
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Return the entry label of an exported function that a run starts
@@ -349,6 +409,20 @@ impl BeamProgram {
                 self.undefined_function(scheduler, module.name(), function.name(), arity, false)?
             };
             if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+        }
+        // A NIF call that ran on a dirty IO thread returns its result or
+        // raises its exception, as `dirty_nif_finalizer` and
+        // `dirty_nif_exception` do (`erl_nif.c:3386-3435`).
+        if let Some(DirtyWrite {
+            tail,
+            written: Some(written),
+            ..
+        }) = scheduler.current_process_mut().dirty_write.take()
+        {
+            let result = native::dirty_write_result(&mut scheduler.atoms, written)?;
+            if let Some(outcome) = self.finish_bif(scheduler.current_process_mut(), result, tail)? {
                 return Ok(outcome);
             }
         }
@@ -643,6 +717,7 @@ impl BeamProgram {
                     let passed = match kind {
                         TestKind::Atom => matches!(value, Term::Atom(_)),
                         TestKind::Pid => matches!(value, Term::Pid(_)),
+                        TestKind::Port => matches!(value, Term::Port(_)),
                         TestKind::Reference => matches!(value, Term::Reference(_)),
                         TestKind::Tuple => matches!(value, Term::Tuple(_)),
                         // `is_list` and `is_nonempty_list` test the cons tag, so an
@@ -1051,7 +1126,7 @@ impl BeamProgram {
                     }
                     let to = read(process, &Operand::X(0))?;
                     let message = read(process, &Operand::X(1))?;
-                    let result = send(scheduler, &to, message);
+                    let result = send(scheduler, &to, message)?;
                     if let Some(outcome) =
                         self.finish_bif(scheduler.current_process_mut(), result, false)?
                     {
@@ -1676,6 +1751,7 @@ impl BeamProgram {
                 reason,
                 result: None,
             })),
+            BifResult::DirtyWrite(write) => Ok(Some(Outcome::DirtyWrite { write, tail })),
         }
     }
 }

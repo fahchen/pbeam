@@ -1,5 +1,5 @@
 -module(registry_probe).
--export([names/0, info/0, send/0, send_error/1, send_to/1, echo/1, wait/0, id/1]).
+-export([names/0, unregister/0, info/0, send/0, send_error/1, send_to/1, echo/1, wait/0, id/1]).
 
 names() ->
     Self = self(),
@@ -14,6 +14,23 @@ names() ->
      try whereis(?MODULE:id(1)) catch error:R1 -> R1 end,
      try whereis(?MODULE:id({registry_probe_names})) catch error:R2 -> R2 end,
      freed()].
+
+%% `erlang:unregister/1` (bif.c:2324-2335, register.c:429-541) removes the
+%% name of a process, and the process can then take a new name. A free name
+%% and a term that is not an atom raise badarg. logger_olp:terminate/2
+%% (logger_olp.erl:299-302) calls it when a logger handler stops.
+unregister() ->
+    Self = self(),
+    true = register(registry_probe_unregister, Self),
+    First = unregister(registry_probe_unregister),
+    [First,
+     whereis(registry_probe_unregister),
+     process_info(Self, registered_name),
+     try unregister(registry_probe_unregister) catch error:R1 -> R1 end,
+     try unregister(?MODULE:id(1)) catch error:R2 -> R2 end,
+     try unregister(?MODULE:id(undefined)) catch error:R3 -> R3 end,
+     register(registry_probe_again, Self),
+     unregister(registry_probe_again)].
 
 info() ->
     Named = spawn(?MODULE, wait, []),
