@@ -25,7 +25,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityKind {
     /// Processes: spawn, links, monitors, exit signals to other
-    /// processes, and messages.
+    /// processes, messages, the inspection of other processes, and the
+    /// group leader of other processes.
     Process,
     /// The terminal: writes, reads, raw mode, the window size, the setup,
     /// and the queries.
@@ -78,8 +79,11 @@ pub enum Operation {
     Command,
     /// `port`: close a port.
     Close,
-    /// `port`: read the information of a port.
+    /// `process`: read the state of another process. `port`: read the
+    /// information of a port.
     Inspect,
+    /// `process`: set the group leader of another process.
+    GroupLeader,
     /// `signal`: handle a host signal.
     Handle,
     /// `signal`: ignore a host signal.
@@ -127,6 +131,8 @@ const KINDS: [KindSpec; 7] = [
             Operation::Monitor,
             Operation::ExitOther,
             Operation::Send,
+            Operation::Inspect,
+            Operation::GroupLeader,
         ],
         constraint: Some(("modules", NameForm::Atom)),
     },
@@ -181,7 +187,7 @@ const KINDS: [KindSpec; 7] = [
 ];
 
 /// The atom of each operation in the `{capabilities, Map}` option.
-const OPERATION_NAMES: [(Operation, &str); 19] = [
+const OPERATION_NAMES: [(Operation, &str); 20] = [
     (Operation::Spawn, "spawn"),
     (Operation::Link, "link"),
     (Operation::Monitor, "monitor"),
@@ -196,6 +202,7 @@ const OPERATION_NAMES: [(Operation, &str); 19] = [
     (Operation::Command, "command"),
     (Operation::Close, "close"),
     (Operation::Inspect, "inspect"),
+    (Operation::GroupLeader, "group_leader"),
     (Operation::Handle, "handle"),
     (Operation::Ignore, "ignore"),
     (Operation::Halt, "halt"),

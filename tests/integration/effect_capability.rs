@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 36] = [
+const PROBES: [(&str, &str, &str); 41] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -43,6 +43,27 @@ const PROBES: [(&str, &str, &str); 36] = [
     ("erlang:send/2", "process:send", "send2"),
     ("erlang:send/3", "process:send", "send3"),
     ("erlang:start_timer/3", "process:send", "start_timer"),
+    ("erlang:process_info/2", "process:inspect", "process_info"),
+    (
+        "erlang:is_process_alive/1",
+        "process:inspect",
+        "is_process_alive",
+    ),
+    (
+        "erts_internal:is_process_alive/2",
+        "process:inspect",
+        "is_alive_request",
+    ),
+    (
+        "erts_internal:group_leader/2",
+        "process:group_leader",
+        "group_leader2",
+    ),
+    (
+        "erts_internal:group_leader/3",
+        "process:group_leader",
+        "group_leader3",
+    ),
     ("erlang:spawn/3", "process:spawn", "spawn"),
     ("erlang:spawn_link/3", "process:spawn", "spawn_link"),
     ("erlang:spawn_link/3", "process:link", "spawn_link"),
@@ -93,7 +114,7 @@ impl Policy for Grants {
 
 /// The kind and the operation of each `kind:operation` name of the
 /// inventory.
-const OPERATIONS: [(&str, CapabilityKind, Operation); 24] = [
+const OPERATIONS: [(&str, CapabilityKind, Operation); 26] = [
     ("process:spawn", CapabilityKind::Process, Operation::Spawn),
     ("process:link", CapabilityKind::Process, Operation::Link),
     (
@@ -107,6 +128,16 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 24] = [
         Operation::ExitOther,
     ),
     ("process:send", CapabilityKind::Process, Operation::Send),
+    (
+        "process:inspect",
+        CapabilityKind::Process,
+        Operation::Inspect,
+    ),
+    (
+        "process:group_leader",
+        CapabilityKind::Process,
+        Operation::GroupLeader,
+    ),
     ("terminal:write", CapabilityKind::Terminal, Operation::Write),
     ("terminal:read", CapabilityKind::Terminal, Operation::Read),
     (
@@ -696,6 +727,75 @@ fn sends_an_exit_signal_to_the_caller_without_exit_other() {
     );
 }
 
+/// Return the policy of [`grants`] with a `process` capability of
+/// `operations`.
+fn process_grants(operations: &[Operation]) -> Grants {
+    grants(CapabilityKind::Process, operations, Constraint::Any)
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_process_inspection() {
+    let program = program();
+    let policy = process_grants(&[
+        Operation::Spawn,
+        Operation::Monitor,
+        Operation::Send,
+        Operation::Inspect,
+        Operation::GroupLeader,
+    ]);
+    let expected = "[[[],{message_queue_len,0},true,ok,true,true,ok,true],true,\
+                    [undefined,false,ok,false,badarg,ok,badarg]]";
+    assert_eq!(
+        text(&run(&program, "process_inspect_permitted", &policy)),
+        expected
+    );
+    assert_eq!(
+        erts_with_stand_in("process_inspect_permitted"),
+        format!("{expected}\n")
+    );
+}
+
+#[test]
+fn checks_the_inspection_arguments_before_the_capability() {
+    let program = program();
+    let policy = process_grants(&[Operation::Spawn, Operation::Monitor]);
+    let badargs = Term::List(vec![atom(&program, "badarg"); 9]);
+    assert_eq!(run(&program, "process_inspect_badargs", &policy), badargs);
+    assert_eq!(
+        erts_with_stand_in("process_inspect_badargs"),
+        "[badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg]\n"
+    );
+}
+
+#[test]
+fn inspects_the_caller_without_inspect_and_group_leader() {
+    let program = program();
+    let policy = process_grants(&[]);
+    let expected = "[[],true,ok,true,true,ok,true]";
+    assert_eq!(
+        text(&run(&program, "process_inspect_self", &policy)),
+        expected
+    );
+    assert_eq!(
+        erts_with_stand_in("process_inspect_self"),
+        format!("{expected}\n")
+    );
+}
+
+#[test]
+fn keeps_the_process_state_after_a_denied_inspection() {
+    // A child of the probe holds no `inspect` and no `group_leader`.
+    let program = program();
+    assert_eq!(
+        text(&run(&program, "inspect_kept", &AllowAll)),
+        "[denied,denied,{denied,none}]"
+    );
+    assert_eq!(
+        text(&run(&program, "group_leader_kept", &AllowAll)),
+        "{[denied,denied],same}"
+    );
+}
+
 #[test]
 fn gives_the_erts_results_of_the_permitted_persistent_term_operations() {
     let program = program();
@@ -753,6 +853,7 @@ fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
+        Term::Integer(integer) => integer.to_string(),
         Term::List(terms) => format!("[{}]", join(terms)),
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         other => panic!("unexpected term {other:?}"),
