@@ -93,11 +93,13 @@ const NO_EFFECT: [&str; 2] = ["`none`", "`process.self`"];
 /// inventory names the capability that its entry checks, in its column
 /// "Capability". An entry whose authority is only `none` or `process.self`
 /// has no effect, and its cell is `none`. Each other entry is an effect
-/// entry: its cell lists each `kind:operation` that it checks, or is
-/// `` `ambient`: Reason `` with a reason when it has no check by decision.
-/// The integration test `effect_capability` calls each listed entry without
-/// its operation and gets `error:capability_denied`, and calls each
-/// `ambient` entry with no capability and gets the pinned ERTS result.
+/// entry: its cell lists each `kind:operation` that it checks, is
+/// `` `ambient`: Reason `` with a reason when it has no check by decision,
+/// or is `` `later`: Task `` with the name of the later task that adds its
+/// check. The integration test `effect_capability` calls each listed entry
+/// without its operation and gets `error:capability_denied`, and calls each
+/// `ambient` and `later` entry with no capability and gets the pinned ERTS
+/// result.
 #[test]
 fn effect_inventory_names_the_capability_of_each_effect_entry() {
     let mut rows = 0;
@@ -114,11 +116,14 @@ fn effect_inventory_names_the_capability_of_each_effect_entry() {
             let effect = cells[1]
                 .split(", ")
                 .any(|label| !NO_EFFECT.contains(&label));
-            // A reason can hold ", ", so the value `ambient` comes before
-            // the split of a list.
-            if let Some(reason) = cells[2].strip_prefix("`ambient`: ") {
+            // A reason or a task name can hold ", ", so the values `ambient`
+            // and `later` come before the split of a list.
+            if let Some(text) = cells[2]
+                .strip_prefix("`ambient`: ")
+                .or_else(|| cells[2].strip_prefix("`later`: "))
+            {
                 assert!(
-                    effect && !reason.trim().is_empty(),
+                    effect && !text.trim().is_empty(),
                     "docs/effect-inventory.md: {row}"
                 );
                 continue;

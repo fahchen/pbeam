@@ -243,13 +243,12 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 27] = [
+const AMBIENT: [&str; 26] = [
     "erlang:cancel_timer/2",
     "erlang:demonitor/1",
     "erlang:demonitor/2",
     "erlang:function_exported/3",
     "erlang:list_to_atom/1",
-    "erlang:module_loaded/1",
     "erlang:monotonic_time/1",
     "erlang:node/0",
     "erlang:node/1",
@@ -273,6 +272,11 @@ const AMBIENT: [&str; 27] = [
     "re:compile/2",
 ];
 
+/// Each entry that the column "Capability" of the effect inventory marks
+/// `later`: it has no check until its named task adds one.
+/// `effect_probe:ambient/0` also calls each entry once.
+const LATER: [&str; 1] = ["erlang:module_loaded/1"];
+
 /// Return the entry and the cell of the column "Capability" of each row of
 /// the sections "BIFs" and "Native bindings" of the effect inventory.
 fn inventory_cells() -> Vec<(&'static str, &'static str)> {
@@ -293,12 +297,12 @@ fn inventory_cells() -> Vec<(&'static str, &'static str)> {
 
 /// Return the `(entry, kind:operation)` pairs of the column "Capability" of
 /// the sections "BIFs" and "Native bindings" of the effect inventory. A
-/// cell is `none`, `` `ambient`: Reason ``, or a list of
-/// `kind:operation` code spans.
+/// cell is `none`, `` `ambient`: Reason ``, `` `later`: Task ``, or a list
+/// of `kind:operation` code spans.
 fn inventory_capabilities() -> BTreeSet<(String, String)> {
     let mut pairs = BTreeSet::new();
     for (entry, cell) in inventory_cells() {
-        if cell.starts_with("`ambient`") {
+        if cell.starts_with("`ambient`") || cell.starts_with("`later`") {
             continue;
         }
         for capability in cell.split(", ") {
@@ -312,11 +316,11 @@ fn inventory_capabilities() -> BTreeSet<(String, String)> {
 }
 
 /// Return the entries that the column "Capability" of the effect inventory
-/// marks `ambient`.
-fn inventory_ambient() -> BTreeSet<&'static str> {
+/// marks with `value`, for example `` `ambient` ``.
+fn inventory_marked(value: &str) -> BTreeSet<&'static str> {
     inventory_cells()
         .into_iter()
-        .filter(|(_, cell)| cell.starts_with("`ambient`"))
+        .filter(|(_, cell)| cell.starts_with(value))
         .map(|(entry, _)| entry)
         .collect()
 }
@@ -373,10 +377,11 @@ fn each_effect_entry_with_a_capability_denies_without_its_operation() {
 }
 
 #[test]
-fn calls_each_ambient_entry_with_no_capability() {
-    assert_eq!(inventory_ambient(), BTreeSet::from(AMBIENT));
+fn calls_each_ambient_and_later_entry_with_no_capability() {
+    assert_eq!(inventory_marked("`ambient`"), BTreeSet::from(AMBIENT));
+    assert_eq!(inventory_marked("`later`"), BTreeSet::from(LATER));
     // The root process holds no capability, so no policy can permit the
-    // calls: each `ambient` entry has no check.
+    // calls: each `ambient` and `later` entry has no check.
     let program = program();
     let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
                     nonode@nohost,nonode@nohost,true,true,false,effect_probe_ambient_atom,ok,\
