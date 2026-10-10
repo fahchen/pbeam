@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261011: Stop a timed step at its deadline before reading queued input
+
+**Problem:** A step of the Terra reference harness read queued port data after its deadline and could still pass, and continuous output could keep a step running past its bound.
+
+**Root Cause:** The wait loop checked the deadline only when no input was available.
+
+**Fix:** Return the timeout result when the deadline has passed, before the loop reads more input.
+
+**Guardrail:** In each wait loop with a deadline, check the deadline before accepting queued input or starting more work.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/432>
+
 ## 20261010: Check runtime paths and test names in documentation
 
 **Problem:** Documentation described a capability requirement that the boot path did not use and named a test that did not exist.
