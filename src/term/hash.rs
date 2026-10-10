@@ -23,7 +23,7 @@
 //! arity` in its place. Equal external funs give equal words.
 
 use super::{
-    Fun, Map, ProcessId, Reference, Target, Term,
+    Fun, Map, PortId, ProcessId, Reference, Target, Term,
     map::{Child, Form, Node},
     match_context::MATCH_CONTEXT_ESCAPE,
 };
@@ -35,6 +35,9 @@ const IMMED1_TAG_BITS: u32 = 4;
 const SMALL_INTEGER_TAG: u64 = 0xF;
 /// The tag bits of an ERTS local pid word (`_TAG_IMMED1_PID`).
 const PID_TAG: u64 = 0x3;
+/// The tag bits of an ERTS local port word (`_TAG_IMMED1_PORT`,
+/// `erl_term.h:82`).
+const PORT_TAG: u64 = 0x7;
 /// The width of the tag of an ERTS atom word (`_TAG_IMMED2_SIZE`).
 const ATOM_TAG_BITS: u32 = 6;
 /// The tag bits of an ERTS atom word (`_TAG_IMMED2_ATOM`).
@@ -122,6 +125,7 @@ fn shape(term: &Term) -> Shape<'_> {
     match term {
         Term::Atom(atom) => Shape::Immediate(atom_word(atom.index())),
         Term::Pid(ProcessId(number)) => Shape::Immediate((number << IMMED1_TAG_BITS) | PID_TAG),
+        Term::Port(PortId(number)) => Shape::Immediate((number << IMMED1_TAG_BITS) | PORT_TAG),
         Term::List(cells) if cells.is_empty() => Shape::Immediate(NIL),
         Term::List(cells) => Shape::List(cells, None),
         Term::ImproperList(cells, tail) => Shape::List(cells, Some(tail)),

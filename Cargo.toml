@@ -25,12 +25,24 @@ name = "boot"
 path = "tests/feature/boot.rs"
 
 [[test]]
+name = "dirty_io"
+path = "tests/feature/dirty_io.rs"
+
+[[test]]
 name = "example"
 path = "tests/feature/example.rs"
 
 [[test]]
+name = "get_line"
+path = "tests/feature/get_line.rs"
+
+[[test]]
 name = "hello"
 path = "tests/feature/hello.rs"
+
+[[test]]
+name = "host_signal"
+path = "tests/feature/host_signal.rs"
 
 [[test]]
 name = "io_fail"
@@ -43,6 +55,14 @@ path = "tests/feature/log.rs"
 [[test]]
 name = "run_end"
 path = "tests/feature/run_end.rs"
+
+[[test]]
+name = "stty"
+path = "tests/feature/stty.rs"
+
+[[test]]
+name = "tty_restore"
+path = "tests/feature/tty_restore.rs"
 
 # Integration tests drive the library API with compiled fixtures.
 [[test]]
@@ -142,6 +162,10 @@ name = "group"
 path = "tests/integration/group.rs"
 
 [[test]]
+name = "halt"
+path = "tests/integration/halt.rs"
+
+[[test]]
 name = "hibernate"
 path = "tests/integration/hibernate.rs"
 
@@ -208,6 +232,18 @@ path = "tests/integration/otp_io.rs"
 [[test]]
 name = "persistent_term"
 path = "tests/integration/persistent_term.rs"
+
+[[test]]
+name = "port"
+path = "tests/integration/port.rs"
+
+[[test]]
+name = "port_fd_limit"
+path = "tests/integration/port_fd_limit.rs"
+
+[[test]]
+name = "port_sigchld"
+path = "tests/integration/port_sigchld.rs"
 
 [[test]]
 name = "preempt"

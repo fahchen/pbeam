@@ -50,9 +50,9 @@ pub(super) fn getenv(name: &Term) -> Result<BifResult, BeamError> {
 /// `badarg`, for example `sigint`, `sigkill`, or `sigsegv`.
 ///
 /// ERTS gives the `badarg` of a `Mode` that is not valid the `error_info`
-/// cause `badopt`, which PBeam does not model. The PBeam handler of
-/// `handle` sends no `{notify, Signal}` message to `erl_signal_server`
-/// (see "OS signals" in `docs/erts-differences.md`).
+/// cause `badopt`, which PBeam does not model. After `handle`, the
+/// scheduler sends `{notify, Signal}` to `erl_signal_server` for each
+/// arrival of the signal (see `Scheduler::check_signals`).
 ///
 /// # Examples
 ///

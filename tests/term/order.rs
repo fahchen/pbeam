@@ -1,7 +1,8 @@
 use std::cmp::Ordering::{Equal, Greater, Less};
 
 use super::super::{
-    Atom, AtomTable, Fun, Lambda, Map, MatchContext, ProcessId, Reference, Term, test_atom as atom,
+    Atom, AtomTable, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
+    test_atom as atom,
 };
 
 #[test]
@@ -292,4 +293,22 @@ fn rejects_the_order_of_two_different_references() {
             .unwrap(),
         Greater
     );
+}
+
+#[test]
+fn orders_ports_by_number_between_funs_and_pids() {
+    // ERTS: #Port<0.3> < #Port<0.10>, fun lists:reverse/1 < #Port<0.3>,
+    // and #Port<0.3> < <0.1.0> (utils.c:1751-1755; erl_term.h order).
+    let (three, ten) = (Term::Port(PortId(3)), Term::Port(PortId(10)));
+    let static_atom = |name| Atom::from_static(name).unwrap();
+    let reverse = Term::Fun(Fun::external(
+        static_atom("lists"),
+        static_atom("reverse"),
+        1,
+    ));
+    assert_eq!(three.compare(&ten).unwrap(), Less);
+    assert_eq!(three.compare(&three).unwrap(), Equal);
+    assert_eq!(reverse.compare(&three).unwrap(), Less);
+    assert_eq!(three.compare(&Term::Pid(ProcessId(1))).unwrap(), Less);
+    assert_eq!(three.compare(&Term::Tuple(vec![])).unwrap(), Less);
 }

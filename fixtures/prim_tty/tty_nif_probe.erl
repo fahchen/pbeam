@@ -1,7 +1,8 @@
 -module(tty_nif_probe).
 -export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, init/0, monitor/0,
          owner/1, holder/3, select/0, encoding/0, select_monitor/0, selector/1, link/0,
-         linker/1, linked_owner/1, root_exit/0, root_free/0, write/0, write_error/0]).
+         linker/1, linked_owner/1, root_exit/0, root_free/0, write/0, write_error/0, read/0,
+         read_error/0, loop/0, loop_reader/2]).
 
 isatty() ->
     [catch_error(fun() -> prim_tty:isatty(A) end)
@@ -154,6 +155,68 @@ write_error() ->
     {ok, Err} = prim_tty:tty_create(stderr),
     [catch_error(fun() -> prim_tty:write_nif(Err, I) end)
      || I <- [[], [<<"Hello">>], [<<"x">>, foo], [<<>>]]].
+
+%% Stdin is a pipe that holds "hello\nworld\n" and has no writer. The
+%% select of tty_select/2 sends one message. Each read_nif/3 that gives
+%% {ok, _} selects fd 0 again, and the probe waits for the message of that
+%% select before the next read. A read of 0 bytes and a read at the end of
+%% file give {error, closed} and do not select fd 0.
+read() ->
+    {ok, Out} = prim_tty:tty_create(stdout),
+    {ok, {re_pattern, _, _, _, Re}} = re:compile("a", []),
+    Badargs = [catch_error(fun() -> prim_tty:read_nif(T, make_ref(), N) end)
+               || {T, N} <- [{foo, 1}, {make_ref(), 1}, {Re, 1}, {Out, -1}, {Out, foo},
+                             {Out, [1]}, {foo, -1}]],
+    ok = prim_tty:tty_select(Out, first),
+    Reads = [ready(Out, first) | [read(Out, N) || N <- [3, 0, 2000, 1024]]],
+    [Badargs, Reads, receive M -> M after 100 -> none end].
+
+read(Out, N) ->
+    Ref = make_ref(),
+    case prim_tty:read_nif(Out, Ref, N) of
+        {ok, _} = Read -> {Read, ready(Out, Ref)};
+        Read -> Read
+    end.
+
+ready(Out, Ref) ->
+    receive {select, Out, Ref, ready_input} -> ready after 1000 -> none end.
+
+%% Stdin is the write end of a pipe, so read fails with EBADF, and
+%% read_nif/3 does not select fd 0.
+read_error() ->
+    {ok, Out} = prim_tty:tty_create(stdout),
+    Read = prim_tty:read_nif(Out, make_ref(), 10),
+    [Read, receive M -> M after 100 -> none end].
+
+%% Stdin is the non-blocking read end of an empty pipe, and stderr is its
+%% write end, so write_nif/2 writes the input of the probe. A read of the
+%% empty pipe gives {ok, <<>>} for EAGAIN and selects fd 0 again. A reader
+%% process then calls tty_select/2, and the probe takes over the select with
+%% read_nif/3, which does not change the reader. When the reader exits, its
+%% monitor stops the select (prim_tty_nif.c:1242-1244), so the next input
+%% sends no message.
+loop() ->
+    {ok, Out} = prim_tty:tty_create(stderr),
+    Ref = make_ref(),
+    Empty = prim_tty:read_nif(Out, Ref, 10),
+    ok = prim_tty:write_nif(Out, [<<"x">>]),
+    Ready = ready(Out, Ref),
+    Read = prim_tty:read_nif(Out, Ref, 10),
+    Reader = spawn(?MODULE, loop_reader, [self(), Out]),
+    receive {Reader, selected} -> ok end,
+    Monitor = monitor(process, Reader),
+    Again = prim_tty:read_nif(Out, again, 10),
+    Reader ! stop,
+    receive {'DOWN', Monitor, process, Reader, normal} -> ok end,
+    ok = prim_tty:write_nif(Out, [<<"y">>]),
+    Stopped = receive {select, Out, again, ready_input} -> ready after 500 -> none end,
+    Last = prim_tty:read_nif(Out, last, 10),
+    [Empty, Ready, Read, Again, Stopped, Last].
+
+loop_reader(Parent, Out) ->
+    ok = prim_tty:tty_select(Out, reader),
+    Parent ! {self(), selected},
+    receive stop -> ok end.
 
 copies(0, _) -> [];
 copies(N, Binary) -> [Binary | copies(N - 1, Binary)].

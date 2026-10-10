@@ -1,5 +1,5 @@
 use super::print_term;
-use crate::term::{MatchContext, ProcessId, Reference, Term};
+use crate::term::{MatchContext, PortId, ProcessId, Reference, Term};
 
 #[test]
 #[should_panic(expected = "a match context reached a term operation")]
@@ -37,4 +37,11 @@ fn prints_pids_and_references_as_pinned_erts() {
         b"#Ref<0.4116665985.1537736705.33174>"
     );
     assert_eq!(print_term(&Term::Reference(Reference(0))), b"#Ref<0.0.1.0>");
+}
+
+#[test]
+fn prints_a_port_as_erts() {
+    // ERTS prints a local port as `#Port<0.N>` (erl_printf_term.c:521-528).
+    // PBeam prints its counter value as `N`, as it prints a pid.
+    assert_eq!(print_term(&Term::Port(PortId(10))), b"#Port<0.10>");
 }

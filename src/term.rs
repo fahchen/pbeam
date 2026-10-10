@@ -55,6 +55,8 @@ pub enum Term {
     Map(Map),
     /// A process identifier owned by this runtime.
     Pid(ProcessId),
+    /// A port identifier owned by this runtime.
+    Port(PortId),
     /// A reference owned by this runtime.
     Reference(Reference),
     /// A fun: the fun entry of a lambda and its free variables for a local
@@ -228,6 +230,7 @@ impl Term {
             Term::Binary(bytes) => Ok(Term::Binary(bytes.clone())),
             Term::Integer(value) => Ok(Term::Integer(*value)),
             Term::Pid(pid) => Ok(Term::Pid(*pid)),
+            Term::Port(port) => Ok(Term::Port(*port)),
             Term::Reference(reference) => Ok(Term::Reference(*reference)),
             Term::MatchContext(context) => Ok(Term::MatchContext(context.clone())),
         }
@@ -359,6 +362,7 @@ impl PartialEq for Term {
                 (Term::Binary(left), Term::Binary(right)) => left == right,
                 (Term::Integer(left), Term::Integer(right)) => left == right,
                 (Term::Pid(left), Term::Pid(right)) => left == right,
+                (Term::Port(left), Term::Port(right)) => left == right,
                 (Term::Reference(left), Term::Reference(right)) => left == right,
                 (Term::MatchContext(left), Term::MatchContext(right)) => left == right,
                 _ => false,
@@ -404,6 +408,7 @@ impl fmt::Debug for Term {
                 Term::Binary(bytes) => write!(formatter, "Binary({bytes:?})")?,
                 Term::Integer(value) => write!(formatter, "Integer({value:?})")?,
                 Term::Pid(pid) => write!(formatter, "Pid({pid:?})")?,
+                Term::Port(port) => write!(formatter, "Port({port:?})")?,
                 Term::Reference(reference) => write!(formatter, "Reference({reference:?})")?,
                 Term::MatchContext(context) => write!(formatter, "MatchContext({context:?})")?,
                 Term::List(elements)
@@ -456,6 +461,14 @@ impl fmt::Debug for Term {
 /// process in one fixed order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessId(pub(crate) u64);
+
+/// An identifier for a port in this runtime: a counter value, which counts
+/// from 0 in each run. PBeam takes it as the ERTS port data, which the
+/// `Eterm` word of a local port holds above the port tag `0x7`
+/// (`erl_term.h:82`, `697-703`), as a pid takes its counter value as the
+/// pid data. The order of identifiers is their creation order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PortId(pub(crate) u64);
 
 /// An identifier for a reference in this runtime: a counter value, and the
 /// pid reference marker in its high bit. The order of identifiers is their

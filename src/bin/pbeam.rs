@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{BeamError, BeamProgram, Term, install_start_dispositions};
 
 #[derive(Parser)]
 #[command(
@@ -35,6 +35,9 @@ struct Cli {
 /// - 1: a runtime error, a file that cannot be read, a BEAM file that does
 ///   not load, or an argument that is not an atom of the loaded modules. The
 ///   binary writes the one stderr line `pbeam: <message>`.
+/// - the low 8 bits of the status code of `erlang:halt/2`, as the C `exit`
+///   of ERTS gives (`bif.c:4346-4362`). The binary writes nothing to
+///   stderr.
 /// - 2: a usage error. `clap` writes the usage text to stderr.
 ///
 /// A Rust panic (status 101) is a PBeam defect, not a BEAM result.
@@ -48,15 +51,37 @@ struct Cli {
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
+        Err(Exit::Halt(status)) => ExitCode::from(status.to_le_bytes()[0]),
+        Err(Exit::Error(message)) => {
             eprintln!("pbeam: {message}");
             ExitCode::FAILURE
         }
     }
 }
 
-/// Read and load the BEAM files, and run `Module:Function(Atoms...)` as the
-/// root process.
+/// How a command line ends without a root result.
+enum Exit {
+    /// `erlang:halt/2` stopped the run with this status code.
+    Halt(i32),
+    /// An error, with the message for stderr.
+    Error(String),
+}
+
+impl From<String> for Exit {
+    /// Make the error of a message.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(Exit::from(String::from("bad")), Exit::Error(_)));
+    /// ```
+    fn from(message: String) -> Self {
+        Self::Error(message)
+    }
+}
+
+/// Set the signal dispositions of the ERTS emulator start, read and load
+/// the BEAM files, and run `Module:Function(Atoms...)` as the root process.
 ///
 /// # Examples
 ///
@@ -69,8 +94,9 @@ fn main() -> ExitCode {
 ///
 /// A file that cannot be read, a BEAM file that does not load, an argument
 /// that is not an atom of the loaded modules, and the errors of
-/// [`BeamProgram::execute`].
-fn run(arguments: Cli) -> Result<(), String> {
+/// [`BeamProgram::execute`]. A halt of the run gives [`Exit::Halt`].
+fn run(arguments: Cli) -> Result<(), Exit> {
+    install_start_dispositions();
     let mut modules = Vec::with_capacity(arguments.beam_files.len());
     for path in arguments.beam_files {
         let bytes = fs::read(&path).map_err(|read_error| {
@@ -91,8 +117,9 @@ fn run(arguments: Cli) -> Result<(), String> {
                 .ok_or_else(|| format!("argument {name} is not an atom of the loaded modules"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    program
-        .execute(&arguments.module, &arguments.function, &atoms)
-        .map(|_| ())
-        .map_err(|execution_error| execution_error.to_string())
+    match program.execute(&arguments.module, &arguments.function, &atoms) {
+        Ok(_) => Ok(()),
+        Err(BeamError::Halt(status)) => Err(Exit::Halt(status)),
+        Err(execution_error) => Err(Exit::Error(execution_error.to_string())),
+    }
 }

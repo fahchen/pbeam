@@ -3,7 +3,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use pbeam_runtime::{BeamProgram, Map, Term};
+use pbeam_runtime::{BeamError, BeamProgram, Map, Term};
 
 #[path = "../common/boot.rs"]
 mod boot;
@@ -160,34 +160,51 @@ fn isolated_logger_boot() {
 }
 
 #[test]
-fn keeps_the_init_stop_request_in_the_mailbox_of_the_init_request_process() {
+fn halts_at_init_stop_as_pinned_erts() {
     // `init:stop/0` sends `{stop, stop}` to the registered `init` process and
-    // returns `ok` (init.erl:536). The `init` request process of
-    // `pbeam_boot` keeps this message in its mailbox and does not exit, so
-    // the node does not stop (see "Run end" in docs/erts-differences.md).
+    // returns `ok` (init.erl:536). `init` shuts down the kernel processes and
+    // calls `halt()` (init.erl:924-945), so the probe never writes its
+    // result, and the node exits with status 0. The `init` request process
+    // of `pbeam_boot` stops its kernel process and calls `halt()`.
     // `isolated_init_stop` does the PBeam run.
     run_isolated("isolated_init_stop");
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/boot",
+            "-eval",
+            "io:format(\"~w~n\", [init_stop_probe:main()]), halt(3).",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        (
+            reference.stdout.as_slice(),
+            reference.stderr.as_slice(),
+            reference.status.code()
+        ),
+        (&b""[..], &b""[..], Some(0))
+    );
 }
 
-/// The child side of
-/// `keeps_the_init_stop_request_in_the_mailbox_of_the_init_request_process`:
-/// run the boot and `init_stop_probe:main/0`, which gives `running` when
-/// `init` does not exit.
+/// The child side of `halts_at_init_stop_as_pinned_erts`: run the boot and
+/// `init_stop_probe:main/0`, which halts the run with status 0.
 #[test]
-#[ignore = "keeps_the_init_stop_request_in_the_mailbox_of_the_init_request_process runs it in a child process"]
+#[ignore = "halts_at_init_stop_as_pinned_erts runs it in a child process"]
 fn isolated_init_stop() {
     let program = boot_program(INIT_STOP_PROBE);
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
 
     assert_eq!(
-        program
-            .execute(
-                "pbeam_boot",
-                "start",
-                &[atom("init_stop_probe"), atom("main")]
-            )
-            .unwrap(),
-        atom("running")
+        program.execute(
+            "pbeam_boot",
+            "start",
+            &[atom("init_stop_probe"), atom("main")]
+        ),
+        Err(BeamError::Halt(0))
     );
 }
 

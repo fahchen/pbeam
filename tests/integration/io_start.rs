@@ -104,6 +104,31 @@ fn negates_booleans_as_pinned_erts() {
 }
 
 #[test]
+fn conjoins_booleans_as_pinned_erts() {
+    // `io_start_probe:ands/0` runs `bif` `erlang:and/2` with fail label 0,
+    // with a fail label, as `group:io_request/5` (group.erl:250) does for
+    // each `io:get_line/2`, and through the `apply` instruction. Two
+    // booleans give their conjunction, and each other term raises `badarg`
+    // (`erl_bif_op.c:45-56`). In the guard `(X and true) =:= false`, the
+    // `badarg` jumps to the fail label, and the next clause runs.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let expected = [
+        "true", "false", "false", "false", "badarg", "badarg", "badarg", "true", "badarg", "other",
+        "false", "other",
+    ]
+    .map(atom);
+    assert_eq!(
+        program.execute("io_start_probe", "ands", &[]).unwrap(),
+        Term::List(expected.to_vec())
+    );
+    assert_eq!(
+        reference("ands"),
+        b"[true,false,false,false,badarg,badarg,badarg,true,badarg,other,false,other]\n"
+    );
+}
+
+#[test]
 fn finds_key_members_as_pinned_erts() {
     // `io_start_probe:keymembers/0` runs `lists:keymember/3` with `call_ext`,
     // as `user_sup:get_user/1` (user_sup.erl:121-122) does, and through the

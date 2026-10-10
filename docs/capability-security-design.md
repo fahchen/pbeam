@@ -1,6 +1,6 @@
 # Capability security and host effect design
 
-Status: design proposal for post-M2 implementation. No security mechanism described here is an implementation claim. Documentation task: [#210](https://github.com/fahchen/pbeam/issues/210).
+Status: design proposal for implementation in M6, after M2. No security mechanism described here is an implementation claim. Documentation task: [#210](https://github.com/fahchen/pbeam/issues/210).
 
 This document consolidates the capability discussions of 2026-10-05 and the terminal-first migration review. The [runtime specification](portable-beam-spec.md) defines the runtime architecture. The [migration guide](capability-security-migration.md) defines implementation contracts and acceptance gates. GitHub Issues and the project board remain the sources of task status.
 

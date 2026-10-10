@@ -4,6 +4,7 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::host;
 use crate::runtime::local_node;
+use crate::runtime::process::LinkId;
 use crate::runtime::process::{Flush, TimerReference};
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
 use crate::runtime::signal::Signal;
@@ -449,7 +450,7 @@ pub(super) fn exit(context: &mut BifContext<'_>, id: &Term, reason: &Term) -> Bi
         && target == caller_id
         && (*reason == Term::static_atom("kill") || !trap_exit);
     let exit = Signal::Exit {
-        from: caller_id,
+        from: LinkId::Process(caller_id),
         reason: reason.clone(),
         linked: false,
         normal_kills: suicide,
@@ -545,7 +546,7 @@ pub(super) fn demonitor(
 /// `badarg` (`bif.c:881-882`). Each other target, and each other type,
 /// raises `badarg`. A monitor of the caller creates no monitor and no
 /// alias, and each port name gives the `noproc` `DOWN` message (see
-/// [`Scheduler::monitor`]).
+/// [`Scheduler::monitor`]). PBeam registers no port.
 ///
 /// # Examples
 ///
@@ -559,8 +560,9 @@ pub(super) fn demonitor(
 ///
 /// # Errors
 ///
-/// A `time_offset` monitor of `clock_service`, and the `priority` option
-/// of a monitor that is not of the caller, are not supported.
+/// A `time_offset` monitor of `clock_service`, a monitor of the type `port`
+/// with a port, and the `priority` option of a monitor that is not of the
+/// caller, are not supported.
 pub(super) fn monitor(
     context: &mut BifContext<'_>,
     kind: &Term,
@@ -576,6 +578,7 @@ pub(super) fn monitor(
     let target = match (kind.name(), target) {
         ("process", Term::Pid(id)) => Some(MonitorTarget::Process(*id)),
         ("process", target) => local_name(target).map(MonitorTarget::ProcessName),
+        ("port", Term::Port(_)) => return Err(unsupported_port("erlang:monitor/2,3")),
         ("port", target) => local_name(target).map(MonitorTarget::PortName),
         ("time_offset", Term::Atom(service)) if service.name() == "clock_service" => {
             // ponytail: no time offset service yet; add it when a measured path monitors it.
@@ -1526,21 +1529,29 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(send(scheduler, &Term::Pid(pid), ok.clone()), BifResult::Value(value) if value == ok));
-/// assert!(matches!(send(scheduler, &Term::static_atom("nobody"), ok.clone()), BifResult::Raise { .. }));
+/// assert!(matches!(send(scheduler, &Term::Pid(pid), ok.clone())?, BifResult::Value(value) if value == ok));
+/// assert!(matches!(send(scheduler, &Term::static_atom("nobody"), ok.clone())?, BifResult::Raise { .. }));
 /// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
-/// assert!(matches!(send(scheduler, &remote, ok.clone()), BifResult::Value(_)));
+/// assert!(matches!(send(scheduler, &remote, ok.clone())?, BifResult::Value(_)));
 /// ```
+///
+/// # Errors
+///
+/// A port as `to` returns a runtime error: ERTS runs the port command of
+/// the message (`erl_send`, `bif.c:2872-2899`).
 pub(in crate::runtime::interpreter) fn send(
     scheduler: &mut Scheduler,
     to: &Term,
     message: Term,
-) -> BifResult {
-    match deliver_to(scheduler, to, message.clone()) {
+) -> Result<BifResult, BeamError> {
+    if let Term::Port(_) = to {
+        return Err(unsupported_port("erlang:send/2"));
+    }
+    Ok(match deliver_to(scheduler, to, message.clone()) {
         Some(Sent::Local) => local_send_result(scheduler, message),
         Some(Sent::NoConnect) => Value(message),
         None => BifResult::badarg(),
-    }
+    })
 }
 
 /// Run `erlang:send(To, Message, Options)` as ERTS `send_3`
@@ -1553,7 +1564,8 @@ pub(in crate::runtime::interpreter) fn send(
 /// reductions, and can return `ok` after a switch (see
 /// [`local_send_result`]).
 ///
-/// PBeam has no distribution and no ports, so `nosuspend` changes nothing.
+/// PBeam has no distribution and sends no message to a port, so
+/// `nosuspend` changes nothing.
 /// A `priority` message is an ordinary message unless its receiver gets it
 /// through a priority alias (`erl_proc_sig_queue.c:6021-6045`). Only
 /// `erlang:alias/1` makes a priority alias, so `priority` also changes
@@ -1567,31 +1579,39 @@ pub(in crate::runtime::interpreter) fn send(
 /// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
 /// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
 /// assert!(matches!(send3(scheduler, &remote, ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "noconnect"));
-/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok, &Term::static_atom("x")), BifResult::Raise { .. }));
+/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok, &Term::static_atom("x"))?, BifResult::Raise { .. }));
 /// ```
+///
+/// # Errors
+///
+/// A port as `to` after valid options returns a runtime error: ERTS runs
+/// the port command of the message (`send_3`, `bif.c:2733-2739`).
 pub(super) fn send3(
     scheduler: &mut Scheduler,
     to: &Term,
     message: &Term,
     options: &Term,
-) -> BifResult {
+) -> Result<BifResult, BeamError> {
     let Term::List(options) = options else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     let mut connect = true;
     for option in options {
         match option {
             Term::Atom(option) if option.name() == "noconnect" => connect = false,
             Term::Atom(option) if matches!(option.name(), "nosuspend" | "priority") => {}
-            _ => return BifResult::badarg(),
+            _ => return Ok(BifResult::badarg()),
         }
     }
-    match deliver_to(scheduler, to, message.clone()) {
+    if let Term::Port(_) = to {
+        return Err(unsupported_port("erlang:send/3"));
+    }
+    Ok(match deliver_to(scheduler, to, message.clone()) {
         Some(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
         Some(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
         Some(Sent::NoConnect) => Value(Term::static_atom("ok")),
         None => BifResult::badarg(),
-    }
+    })
 }
 
 /// The reductions of a local send: `erl_send` and `send_3` use them with
@@ -1669,7 +1689,7 @@ enum Sent {
 ///   (`erl_proc_sig_queue.c:6009-6075`; see
 ///   [`Scheduler::send_alias_message`]).
 /// - An atom gives the message to its registered process. A name that no
-///   process has gives `None`. PBeam has no ports.
+///   process has gives `None`. PBeam registers no port.
 /// - `{Name, Node}` with two atoms and the local node gives the message to
 ///   the registered process, or drops it when no process has the name.
 ///   Another node drops the message and gives [`Sent::NoConnect`], as ERTS
@@ -2193,4 +2213,115 @@ fn timer_options(options: &Term) -> Option<(bool, bool)> {
         }
     }
     Some((asynchronous, info))
+}
+
+/// The exit status of a halt whose flush timeout ends, as
+/// `ERTS_HALT_FLUSH_TIMEOUT_EXIT_CODE` (`erl_init.c:75`).
+const HALT_FLUSH_TIMEOUT_STATUS: i32 = 255;
+
+/// Run `erlang:halt(Status, Options)`, as `halt_2` (`bif.c:4309-4398`)
+/// does. `erlang:halt/0` and `erlang:halt/1` call it with the options `[]`
+/// (`erlang.erl:3357-3358`, `3383-3388`).
+///
+/// The options are checked first. Each element of a proper list must be
+/// `{flush, true | false}` or `{flush_timeout, T}`, else the call raises
+/// `badarg` (`bif.c:4316-4343`). `T` is a non-negative small integer, which
+/// `term_to_Uint32` truncates to 32 bits (`big.c:3648-3663`). The last
+/// option of each kind holds. ERTS gives this `badarg` the `error_info`
+/// cause `badopt`, which PBeam does not model.
+///
+/// A non-negative integer `Status` stops the run with the status code
+/// `Status` masked to `INT_MAX` (`bif.c:4346-4362`, `big.c:3545-3565`), as
+/// the error [`BeamError::Halt`]. Each other process stops at once, as in a
+/// halting ERTS scheduler (`erl_process.c:15220-15255`). PBeam writes each
+/// output with a host call before the call returns, so a flush has no port
+/// output to wait for. With a flush and a timeout of 0, the ERTS flush
+/// timer ends before the flush, and the node exits with status 255
+/// (`erl_process.c:15244-15248`, `erl_init.c:2771-2774`; measured 5 of 5).
+///
+/// `abort` (a core dump) and a slogan `Status` (a crash dump with the
+/// string as its slogan, see [`is_slogan`]) give a runtime error: PBeam
+/// writes no core dump and no crash dump. Each other `Status` raises
+/// `badarg` (`bif.c:4379`, `4388-4393`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(halt(&Term::Integer(259), &Term::List(vec![])), Err(BeamError::Halt(259)));
+/// assert!(matches!(halt(&Term::Integer(-1), &Term::List(vec![])), Ok(BifResult::Raise { .. })));
+/// assert!(halt(&Term::static_atom("abort"), &Term::List(vec![])).is_err());
+/// ```
+pub(super) fn halt(status: &Term, options: &Term) -> Result<BifResult, BeamError> {
+    let Term::List(options) = options else {
+        return Ok(BifResult::badarg());
+    };
+    let mut flush = true;
+    let mut timeout = None;
+    for option in options {
+        match option {
+            Term::Tuple(pair) => match pair.as_slice() {
+                [Term::Atom(name), Term::Atom(value)]
+                    if name.name() == "flush" && matches!(value.name(), "true" | "false") =>
+                {
+                    flush = value.name() == "true";
+                }
+                [Term::Atom(name), value] if name.name() == "flush_timeout" => {
+                    match value.small_integer() {
+                        Some(value @ 0..) => timeout = Some(value & i64::from(u32::MAX)),
+                        _ => return Ok(BifResult::badarg()),
+                    }
+                }
+                _ => return Ok(BifResult::badarg()),
+            },
+            _ => return Ok(BifResult::badarg()),
+        }
+    }
+    match status {
+        Term::Integer(code) if *code >= 0 => {
+            if flush && timeout == Some(0) {
+                return Err(BeamError::Halt(HALT_FLUSH_TIMEOUT_STATUS));
+            }
+            let code = i32::try_from(code & i64::from(i32::MAX)).expect("masked to INT_MAX");
+            Err(BeamError::Halt(code))
+        }
+        Term::Atom(abort) if abort.name() == "abort" => Err(error(
+            "unsupported erlang:halt/2 with abort: PBeam writes no core dump",
+        )),
+        _ if is_slogan(status) => Err(error(
+            "unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump",
+        )),
+        _ => Ok(BifResult::badarg()),
+    }
+}
+
+/// The most characters of a crash dump slogan, as `HALT_MSG_SIZE`
+/// (`bif.c:4373`).
+const HALT_MSG_SIZE: usize = 1023;
+
+/// Return whether `status` is a crash dump slogan of `erlang:halt/2`: a list
+/// for which `erts_unicode_list_to_buf` with at most `HALT_MSG_SIZE`
+/// characters does not give a type error (`bif.c:4372-4380`,
+/// `utils.c:2862-2942`). Each of the first 1023 elements must be a code
+/// point outside `0xD800..=0xDFFF`. The tail must be `[]`, unless the list
+/// has more than 1023 elements: ERTS cuts the slogan before it reads the
+/// tail.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_slogan(&Term::List(vec![Term::Integer(65)])));
+/// assert!(!is_slogan(&Term::List(vec![Term::static_atom("foo")])));
+/// assert!(!is_slogan(&Term::ImproperList(vec![Term::Integer(65)], Box::new(Term::static_atom("foo")))));
+/// ```
+fn is_slogan(status: &Term) -> bool {
+    let (elements, proper) = match status {
+        Term::List(elements) => (elements, true),
+        Term::ImproperList(elements, _) => (elements, false),
+        _ => return false,
+    };
+    let characters = elements.iter().take(HALT_MSG_SIZE).all(|element| {
+        matches!(element, Term::Integer(code)
+            if u32::try_from(*code).ok().and_then(char::from_u32).is_some())
+    });
+    characters && (proper || elements.len() > HALT_MSG_SIZE)
 }

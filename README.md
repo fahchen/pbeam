@@ -19,7 +19,7 @@ The Hello World run uses the boot module `pbeam_boot` of `examples/hello_world` 
 
 [Hello World](docs/hello-world-target.md) is the first target: PBeam executes the
 compiled Elixir entry, prints exactly `Hello, world!\n`, and exits successfully.
-M2 is complete ([tracker #33](https://github.com/fahchen/pbeam/issues/33)). Task #42 runs both Hello World entries with the `pbeam` binary through the compiled Elixir and OTP IO path, and the boot module `pbeam_boot` starts the OTP IO servers. For the current work, see the M3 [tracker #34](https://github.com/fahchen/pbeam/issues/34).
+M2 is complete ([tracker #33](https://github.com/fahchen/pbeam/issues/33)). Task #42 runs both Hello World entries with the `pbeam` binary through the compiled Elixir and OTP IO path, and the boot module `pbeam_boot` starts the OTP IO servers. For the milestone order and the current work, see [Delivery](#delivery).
 [Terra Counter](docs/terra-target.md) follows as a broader macOS arm64 PTY scenario. Full OTP
 compatibility, hot code upgrades, JIT/AOT, and traditional NIF ABI compatibility
 are outside the initial scope. Each executable targets a particular platform;
@@ -28,7 +28,7 @@ system libraries may still be required.
 See the [runtime specification](docs/portable-beam-spec.md) for architecture,
 acceptance criteria, and unresolved decisions.
 
-The [capability security design](docs/capability-security-design.md) records the proposed authority, provider, and native trust contracts. The separate [migration and implementation guide](docs/capability-security-migration.md) starts with the delivered M2 terminal IO path after M2 acceptance. These documents do not claim an implemented sandbox or change the current M2 acceptance gate.
+The [capability security design](docs/capability-security-design.md) records the proposed authority, provider, and native trust contracts. The separate [migration and implementation guide](docs/capability-security-migration.md) starts with the delivered M2 terminal IO path after M2 acceptance. These documents do not claim an implemented sandbox. Milestone M6 ([tracker #304](https://github.com/fahchen/pbeam/issues/304)) implements them.
 
 Development toolchains are pinned in [mise.toml](mise.toml). Use `mise install`
 to install them; see the [target contract](docs/terra-target.md#toolchain-baseline)
@@ -64,6 +64,8 @@ line coverage. The constant-return BEAM fixture is checked in at
 World entry instructions and imports.
 See the [evidence table](docs/hello-world-target.md).
 
+In CI, a pull request that changes only Markdown files runs `mise run lint` instead of `mise run check`. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.sh` lists these files. A push to `main` always runs `mise run check`.
+
 ## Delivery
 
 Work is managed in [GitHub Issues](https://github.com/fahchen/pbeam/issues),
@@ -72,11 +74,17 @@ Work is managed in [GitHub Issues](https://github.com/fahchen/pbeam/issues),
 
 **Milestone tracking issue → epic issue → task issue.**
 
-Each milestone has a dedicated tracking issue. Epics and tasks are assigned to
-the GitHub milestone; native sub-issue links express the hierarchy and native
-blocked-by links express dependencies. Milestone trackers and epics list their
-issues as linked bullets. For the current work, see
-[the M3 tracking issue #34](https://github.com/fahchen/pbeam/issues/34).
+Each milestone has a dedicated tracking issue. Epics and tasks are assigned to the GitHub milestone; native sub-issue links express the hierarchy and native blocked-by links express dependencies. Milestone trackers and epics list their issues as linked bullets.
+
+The owner decision of 2026-10-09 sets the order of the open milestones. M5 and M6 run in parallel.
+
+1. M4 Tooling and examples ([tracker #303](https://github.com/fahchen/pbeam/issues/303))
+2. M5 Interactive host I/O ([tracker #38](https://github.com/fahchen/pbeam/issues/38))
+3. M6 Capability security ([tracker #304](https://github.com/fahchen/pbeam/issues/304))
+4. M7 Linked native calls ([tracker #36](https://github.com/fahchen/pbeam/issues/36))
+5. M8 Embedded application ([tracker #37](https://github.com/fahchen/pbeam/issues/37))
+6. M9 Pinned Terra scenario ([tracker #39](https://github.com/fahchen/pbeam/issues/39))
+7. M10 Multiple schedulers ([tracker #35](https://github.com/fahchen/pbeam/issues/35))
 
 Milestone titles use `[m1] Title`. Epic and task titles use `[m1-e1] Title`;
 GitHub issue numbers identify individual tasks.

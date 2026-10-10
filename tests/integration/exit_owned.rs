@@ -225,6 +225,17 @@ fn runs_the_tty_monitors_in_the_order_of_pinned_erts() {
     // The stand-in replaces the `prim_tty` of the boot, so the reference
     // prints with `erlang:display/1`, which needs no IO server and ends the
     // line with `\r\n`.
+    //
+    // `tty_select/2` selects fd 0 for read (prim_tty_nif.c:1001, 1227). The
+    // ERTS poll thread sends `{select, TTY, Ref, ready_input}` to `a` when
+    // fd 0 has input or its end of file, also while `a` runs. With fd 0
+    // `/dev/null`, the message can arrive in the race, and the handling of
+    // it uses reductions of a turn of `a` (erl_process.c:10321-10351;
+    // erl_proc_sig_queue.c:7160). Thus fd 0 of the reference is the read
+    // end of an empty pipe, and the test keeps the write end open until the
+    // run ends, so the select message does not occur. PBeam waits for fd 0
+    // only when no process can run, so the race does not get the message.
+    let (input, input_writer) = std::io::pipe().unwrap();
     let reference = Command::new("erl")
         .args([
             "+S",
@@ -243,8 +254,10 @@ fn runs_the_tty_monitors_in_the_order_of_pinned_erts() {
                  erlang:display(E), halt()."
             ),
         ])
+        .stdin(input)
         .output()
         .unwrap();
+    drop(input_writer);
     assert!(
         reference.status.success() && reference.stderr.is_empty(),
         "{reference:?}"

@@ -1,6 +1,6 @@
 -module(io_start_probe).
 -export([lists/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
-         system_other/0, format/0, nots/0, keymembers/0]).
+         system_other/0, format/0, nots/0, keymembers/0, ands/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
 %% runs it, and in a guard. `get_tl`, as proc_lib:trans_init/3
@@ -174,3 +174,20 @@ keymembers() ->
      apply(lists, id(keymember), [d, 1, L])].
 
 id(X) -> X.
+
+%% `bif` `erlang:and/2` with fail label 0, in a guard with a fail label, as
+%% group:io_request/5 (group.erl:250) runs it, and through the `apply`
+%% instruction. Two booleans give their conjunction; each other term raises
+%% badarg (erl_bif_op.c:45-56), and in a guard jumps to the fail label.
+ands() ->
+    [id(true) and id(true), id(true) and id(false), id(false) and id(true),
+     id(false) and id(false),
+     try id(true) and id(foo) catch error:R1 -> R1 end,
+     try id(foo) and id(false) catch error:R2 -> R2 end,
+     try id(false) and id(1) catch error:R3 -> R3 end,
+     apply(erlang, id('and'), [id(true), id(true)]),
+     try apply(erlang, id('and'), [id(false), id([])]) catch error:R4 -> R4 end,
+     and_guard(id(true)), and_guard(id(false)), and_guard(id(foo))].
+
+and_guard(X) when (X and true) =:= false -> false;
+and_guard(_) -> other.
