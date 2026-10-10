@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261010: Separate assumed decisions from owner approval
+
+**Problem:** A PR description said that the owner chose an option when the task record said that the option was only an assumption because the owner was away.
+
+**Root Cause:** The description changed an unconfirmed assumption into an approved decision.
+
+**Fix:** State that the option was selected under an assumption and that the owner has not confirmed it.
+
+**Guardrail:** Before publishing a decision, check whether the cited owner or task record confirms it.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/430#issuecomment-6101621215>
+
 ## 20261010: Replace verification placeholders before publishing
 
 **Problem:** A PR description kept a placeholder in the Verification section after an earlier edit did not apply.
