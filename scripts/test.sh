@@ -14,7 +14,7 @@ else
   # The slow status level prints only slow and failed tests, not a line for each passed test.
   # --no-fail-fast runs all tests after a failure, so the output shows each failure.
   # By default, cargo-llvm-cov runs `cargo clean -p pbeam-runtime`, which removes the incremental state of the crate.
-  # --no-clean keeps that state, so rustc reuses the unchanged code of a restored CI cache or of the last local run.
+  # --no-clean keeps that state, so rustc reuses the unchanged code of the last local run.
   # The profile files of the last run must go, or their counts would cover lines that no test runs now.
   # CARGO_TARGET_DIR or a cargo config can move the coverage directory.
   # The pin makes cargo-llvm-cov use the directory that the cleanup below removes files from.
