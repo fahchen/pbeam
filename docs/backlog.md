@@ -331,3 +331,10 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - `--no-clean` needs a removal of old `*.profraw` files and of old test executables before each coverage run; without it, the coverage gate reported 9533/10116 after one profile change. The gain does not justify this risk to the merge gate.
 - **Trigger:** the test build becomes much longer than the cache transfer (for example, more crates or a larger dependency tree), or `cargo llvm-cov` keeps the incremental state by itself.
 - **Source:** PR #294 (#292).
+
+### Fail a test that leaks in nextest
+
+- nextest shows a test as `LEAK` when a process that the test started keeps the stdout or stderr of the test after the test ends. The default result of a leak is pass, so the merge gate does not stop a new leak. A `leak-timeout` with `result = "fail"` in `.config/nextest.toml` makes a leak a failure. After #330, a nextest run of the full suite shows no leak.
+- **Risk:** the default leak period is 100 ms. A program that ends slowly on a loaded CI runner can make a test fail at random.
+- **Trigger:** a new `LEAK` in a nextest run, or an owner decision to gate leaks.
+- **Source:** PR for #330.

@@ -16,13 +16,22 @@
 //! always finds a registered call. A dirty IO thread sends each completion
 //! to the scheduler inbox and then writes one byte to the wake socket, so
 //! an idle scheduler that waits on the socket wakes up.
+//!
+//! A call does not stop when its caller exits. A thread starts a call only
+//! while the caller holds the [`Claim`] of the call. The caller drops the
+//! claim when it starts to exit, and the run drops the claims of all
+//! processes when it ends. A call in the queue then does not run, as a
+//! dirty IO scheduler does not call the NIF of an exiting process
+//! (`erl_process.c:10252-10258`). A call that runs continues until its host
+//! call ends, as ERTS cannot stop a dirty NIF, and the scheduler drops its
+//! result (`erl_nif.c:507-542`).
 
 use std::{
     ffi::c_int,
     io::{Read, Write},
     os::{fd::AsRawFd, unix::net::UnixStream},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         mpsc::{self, Receiver, Sender},
     },
     thread,
@@ -48,9 +57,20 @@ struct Job {
     process: ProcessId,
     /// The identifier of the call in the run.
     call: u64,
+    /// The claim of the caller. The call runs only when the claim still
+    /// exists.
+    claim: Weak<()>,
     /// The host work of the call.
     write: IovecWrite,
 }
+
+/// The claim of a caller on its dirty IO call. The caller holds it from the
+/// call until the call completes or the caller starts to exit. A dirty IO
+/// thread runs the call only while the claim exists, as a dirty IO
+/// scheduler runs the NIF only for a process that does not exit
+/// (`erl_process.c:10252-10258`).
+#[derive(Debug, Default)]
+pub(super) struct Claim(Arc<()>);
 
 /// The end of one host call, which a dirty IO thread sends to the scheduler
 /// inbox.
@@ -60,8 +80,9 @@ pub(super) struct Completion {
     pub(super) process: ProcessId,
     /// The identifier of the call in the run.
     pub(super) call: u64,
-    /// The result of the host work.
-    pub(super) written: IovecWritten,
+    /// The result of the host work, or `None` when the caller dropped the
+    /// [`Claim`] before a thread took the call, so the call did not run.
+    pub(super) written: Option<IovecWritten>,
 }
 
 /// The dirty IO threads of a run, the queue of their calls, and the
@@ -69,9 +90,9 @@ pub(super) struct Completion {
 #[derive(Debug)]
 pub(super) struct DirtyIo {
     /// The send end of the call queue. `None` until the first call starts
-    /// the threads. When the run drops it, the threads still run the calls
-    /// in the queue, and each thread stops when the queue is empty. The
-    /// end of the run with calls that run or wait is task #20.
+    /// the threads. When the run drops it, the threads take the calls that
+    /// are still in the queue, but they do not run them, because the run
+    /// dropped the claims. Each thread stops when the queue is empty.
     jobs: Option<Sender<Job>>,
     /// The send end of the scheduler inbox. Each thread holds a copy.
     completion_sender: Sender<Completion>,
@@ -143,13 +164,14 @@ impl DirtyIo {
 
     /// Give the call `call` of `process` with its host work `write` to the
     /// dirty IO threads. The first call starts the threads. The threads
-    /// take the calls in order.
+    /// take the calls in order, and run a call only while `claim` exists.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let call = dirty_io.next_call();
-    /// dirty_io.submit(ProcessId(0), call, write);
+    /// let claim = Claim::default();
+    /// dirty_io.submit(ProcessId(0), call, &claim, write);
     /// assert!(dirty_io.running());
     /// ```
     ///
@@ -157,7 +179,13 @@ impl DirtyIo {
     ///
     /// The host cannot start a thread. ERTS stops with `Failed to create
     /// dirty io scheduler thread` in this case (`erl_process.c:8964-8971`).
-    pub(super) fn submit(&mut self, process: ProcessId, call: u64, write: IovecWrite) {
+    pub(super) fn submit(
+        &mut self,
+        process: ProcessId,
+        call: u64,
+        claim: &Claim,
+        write: IovecWrite,
+    ) {
         self.running += 1;
         let jobs = self.jobs.get_or_insert_with(|| {
             let (sender, receiver) = mpsc::channel::<Job>();
@@ -176,6 +204,7 @@ impl DirtyIo {
         jobs.send(Job {
             process,
             call,
+            claim: Arc::downgrade(&claim.0),
             write,
         })
         .expect("the dirty IO threads run until the run ends");
@@ -236,10 +265,12 @@ impl DirtyIo {
 }
 
 /// Run the calls of the queue until the run drops the queue and the queue
-/// is empty: write each call, send its completion to the scheduler inbox,
-/// then write one byte to the wake socket, as `wake_poller` writes to the
-/// ERTS wake pipe (`erl_poll.c:429-462`). A full wake socket already wakes the scheduler,
-/// so the thread ignores a write that fails with `WouldBlock`.
+/// is empty: write each call whose claim exists, send its completion to the
+/// scheduler inbox, then write one byte to the wake socket, as
+/// `wake_poller` writes to the ERTS wake pipe (`erl_poll.c:429-462`). A
+/// call whose claim is gone does not run, and its completion has no
+/// result. A full wake socket already wakes the scheduler, so the thread
+/// ignores a write that fails with `WouldBlock`.
 ///
 /// # Examples
 ///
@@ -252,12 +283,15 @@ fn run_jobs(jobs: &Mutex<Receiver<Job>>, completions: &Sender<Completion>, wake:
         let Ok(Ok(Job {
             process,
             call,
+            claim,
             write,
         })) = job
         else {
             return;
         };
-        let written = write.run();
+        // The check does not keep the claim: a caller that exits while the
+        // call runs drops it, and the scheduler then drops the result.
+        let written = (claim.strong_count() > 0).then(|| write.run());
         let completion = Completion {
             process,
             call,

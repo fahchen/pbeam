@@ -21,6 +21,30 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261009: Check complete follow-up coverage
+
+**Problem:** The PR description omitted two follow-up tasks for discovered gaps and kept an incomplete owner action.
+
+**Root Cause:** The follow-up list was not compared with the complete gap inventory before the PR was published.
+
+**Fix:** Create a task for each discovered gap, link existing tasks, and update the PR description with the complete set.
+
+**Guardrail:** Before publishing a PR, compare every discovered gap with its task or explicit owner decision and verify that the description lists no stale action.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/270#issuecomment-6078067360>
+
+## 20261009: Qualify stream-specific behavior in user-facing claims
+
+**Problem:** A PR description said that piping the output hides the progress steps, but steps remain visible when only stdout is redirected and stderr remains a terminal.
+
+**Root Cause:** The statement treated all piping and redirection as one output path without naming the stream that controls the behavior.
+
+**Fix:** State that redirecting or piping stderr suppresses the steps.
+
+**Guardrail:** When documenting terminal output behavior, identify the relevant stream and qualify each redirection case.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/296#issuecomment-6081107031>
+
 ## 20261009: Preserve child exit status when guest signals change
 
 **Problem:** A child process that exited with status 7 was reported as successful after the guest ignored `SIGCHLD`.
@@ -42,8 +66,6 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Fix:** Normalize the program path once and use the same NUL-truncated value for launch and port information.
 
 **Guardrail:** Test program names with a NUL and trailing bytes and compare every reported name with the launched path.
-
-**Reference:** <https://github.com/fahchen/pbeam/pull/322#issuecomment-6084149434>
 
 ## 20261006: Verify OTP hardware assumptions against source behavior
 
