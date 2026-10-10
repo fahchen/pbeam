@@ -245,7 +245,7 @@ bifs! {
     erlang:md5_init/0 => unsupported,
     erlang:md5_update/2 => unsupported,
     erlang:min/2 => |_, [left, right]| Ok(Value(if left.compare(right)?.is_gt() { right.clone() } else { left.clone() })),
-    erlang:module_loaded/1 => unsupported,
+    erlang:module_loaded/1 => |cx, [module]| Ok(erlang::module_loaded(cx.program, module)),
     erlang:monitor/2 => |cx, [kind, target]| erlang::monitor(cx, kind, target, &Term::List(Vec::new())),
     erlang:monitor/3 => |cx, [kind, target, options]| erlang::monitor(cx, kind, target, options),
     erlang:monitor_node/2 => unsupported,
