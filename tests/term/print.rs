@@ -1,3 +1,5 @@
+use std::{cell::RefCell, rc::Rc};
+
 use super::print_term;
 use crate::term::{MatchContext, PortId, ProcessId, Reference, Term};
 
@@ -6,7 +8,9 @@ use crate::term::{MatchContext, PortId, ProcessId, Reference, Term};
 fn panics_for_a_match_context() {
     // The interpreter gives a runtime error before a match context can
     // reach a term operation.
-    print_term(&Term::MatchContext(MatchContext::new(b"a")));
+    print_term(&Term::MatchContext(Rc::new(RefCell::new(
+        MatchContext::new(b"a"),
+    ))));
 }
 
 #[test]

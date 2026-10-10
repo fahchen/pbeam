@@ -10,6 +10,7 @@ const BINARY_MATCH_PROBE: &[u8] =
     include_bytes!("../../fixtures/binary_match/binary_match_probe.beam");
 const BS_MATCH_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_match_probe.beam");
 const BS_GET_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_get_probe.beam");
+const MATCH_COPY_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/match_copy_probe.beam");
 
 /// Evaluate an expression on the pinned ERTS with `binary_match_probe` in
 /// the code path and return its `~w` output.
@@ -688,5 +689,60 @@ fn resumes_a_match_context_and_reads_its_tail_as_pinned_erts() {
              <<$a,16#12>>,<<\"b\">>]]"
         ),
         b"[{[],<<>>},{[2,1],<<243>>},{[1],<<242,3:4>>},{[2,1],<<>>},none]\n"
+    );
+}
+
+#[test]
+fn shares_a_match_context_that_move_copies_as_pinned_erts() {
+    // `match_copy_probe:decode_codepoint/1` has the instructions of
+    // `Terra.Input.Parser.decode_codepoint/1`: `bs_start_match4` with
+    // `resume`, `move` of the match context from `x0` to `y1`, then
+    // `bs_set_position`, `byte_size/1`, and `bs_get_tail` on the copy in
+    // `y1`, and `bs_start_match4` with `no_fail` on a binary in `x3` with
+    // the destination `x1`. The inputs are ASCII, characters of 2, 3, and 4
+    // bytes, short input, a byte that does not start a character, a bad
+    // continuation byte, an overlong form, a surrogate, and a value above
+    // 0x10FFFF.
+    let inputs: [&[u8]; 11] = [
+        b"",
+        b"ab",
+        b"a\xC3\xA9b",
+        b"\xE2\x82\xAC\xF0\x9F\x98\x80z",
+        b"a\xE2\x82",
+        b"\xF4",
+        b"\xFFa",
+        b"\xC3(",
+        b"\xE0\x80\x80",
+        b"\xED\xA0\x80",
+        b"\xF4\x90\x80\x80",
+    ];
+    let erlang = pinned_beam("erlang");
+    let lists = pinned_beam("lists");
+    let program = BeamProgram::load(&[&erlang, &lists, MATCH_COPY_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let invalid = || Term::List(vec![atom("invalid")]);
+    assert_eq!(
+        run_each_in(&program, "match_copy_probe", "parse", &inputs),
+        [
+            Ok(integers(&[])),
+            Ok(integers(&[97, 98])),
+            Ok(integers(&[97, 233, 98])),
+            Ok(integers(&[8364, 128_512, 122])),
+            Ok(Term::List(vec![Term::Integer(97), atom("incomplete")])),
+            Ok(Term::List(vec![atom("incomplete")])),
+            Ok(invalid()),
+            Ok(invalid()),
+            Ok(invalid()),
+            Ok(invalid()),
+            Ok(invalid()),
+        ]
+    );
+    assert_eq!(
+        reference(&format!(
+            "[match_copy_probe:parse(B) || B <- {}]",
+            erlang_binaries(&inputs)
+        )),
+        b"[[],[97,98],[97,233,98],[8364,128512,122],[97,incomplete],[incomplete],\
+[invalid],[invalid],[invalid],[invalid],[invalid]]\n"
     );
 }
