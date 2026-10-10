@@ -1066,7 +1066,17 @@ impl BeamProgram {
                         jump(module, process, *fail_label)?;
                     }
                 }
-                Instruction::TestExactNotEqual {
+                // ERTS `is_ne` (emu instrs.tab:1115-1119, JIT
+                // instr_common.cpp:2081-2105) runs `CMP_NE_ACTION`
+                // (erl_utils.h:134-135) with `EQ_SPEC` in the arithmetic
+                // order. As for `is_eq`, exact equality gives the ERTS
+                // result while PBeam has no float term.
+                Instruction::TestNotEqual {
+                    fail_label,
+                    left,
+                    right,
+                }
+                | Instruction::TestExactNotEqual {
                     fail_label,
                     left,
                     right,
