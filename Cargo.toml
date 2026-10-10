@@ -102,8 +102,20 @@ name = "binary_match"
 path = "tests/integration/binary_match.rs"
 
 [[test]]
+name = "binary_part"
+path = "tests/integration/binary_part.rs"
+
+[[test]]
+name = "binary_find"
+path = "tests/integration/binary_find.rs"
+
+[[test]]
 name = "bitstr"
 path = "tests/integration/bitstr.rs"
+
+[[test]]
+name = "body_bif"
+path = "tests/integration/body_bif.rs"
 
 [[test]]
 name = "bs_create_bin"
@@ -170,6 +182,10 @@ name = "fixture_opcodes"
 path = "tests/integration/fixture_opcodes.rs"
 
 [[test]]
+name = "find_executable"
+path = "tests/integration/find_executable.rs"
+
+[[test]]
 name = "float_test"
 path = "tests/integration/float_test.rs"
 
@@ -200,6 +216,10 @@ path = "tests/integration/improper.rs"
 [[test]]
 name = "input_reductions"
 path = "tests/integration/input_reductions.rs"
+
+[[test]]
+name = "iolist_split"
+path = "tests/integration/iolist_split.rs"
 
 [[test]]
 name = "integer_to_binary"

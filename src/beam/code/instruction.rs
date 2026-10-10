@@ -291,16 +291,16 @@ pub(crate) enum Instruction {
         deallocate: u32,
     },
     /// Calls a BIF through `bif0` (opcode 9), `bif1` (opcode 10), `bif2`
-    /// (opcode 11), `gc_bif1` (opcode 124), or `gc_bif2` (opcode 125) and
-    /// writes its value to a register. `bif0` has no fail label and decodes with `fail_label` 0.
+    /// (opcode 11), `gc_bif1` (opcode 124), `gc_bif2` (opcode 125), or
+    /// `gc_bif3` (opcode 152) and writes its value to a register. `bif0` has no fail label and decodes with `fail_label` 0.
     /// With fail label 0, a BIF failure raises its exception; with another
     /// fail label, it jumps to the label.
     ///
     /// Encoding: `bif0` has opcode, import index, destination register;
     /// `bif1` and `bif2` have opcode, fail label, import index, one or two
-    /// arguments, destination register. `gc_bif1` and `gc_bif2` have
-    /// opcode, fail label, live register count, import index, one or two
-    /// arguments, destination register. The live count tells the ERTS garbage collector which X
+    /// arguments, destination register. `gc_bif1`, `gc_bif2`, and `gc_bif3`
+    /// have opcode, fail label, live register count, import index, one, two,
+    /// or three arguments, destination register. The live count tells the ERTS garbage collector which X
     /// registers hold terms; PBeam has no process heap and does not keep it.
     /// An argument can be a typed register (extended subtag 5). Example:
     /// `io:io_request/2` in the pinned `io.beam` has
@@ -316,7 +316,11 @@ pub(crate) enum Instruction {
     /// `x0` typed, and the integer 1, and writes `x0`. `arith_probe:neg/1`
     /// has `[0x7C, 0x0D, 0x37, 0x10, 0x50, 0x03, 0x03]`, which calls import 5
     /// (`erlang:'-'/1`) with fail label 55, live count 1, and `x0`, and
-    /// writes `x0`.
+    /// writes `x0`. `binary_part_probe:guard/3` in
+    /// `fixtures/binary_part/binary_part_probe.beam` has
+    /// `[0x98, 0xD5, 0x30, 0x00, 0x03, 0x13, 0x23, 0x03]`, which calls import 0
+    /// (`erlang:binary_part/3`) with fail label 13, live count 3, `x0`, `x1`,
+    /// and `x2`, and writes `x0`.
     ///
     /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`, and
     /// `node(Pid) =:= node()` in `io:io_request/2` compiles to
@@ -335,7 +339,10 @@ pub(crate) enum Instruction {
     /// guard `when -X > 0` of `arith_probe:neg/1` compiles to
     /// `{gc_bif,'-',{f,55},1,[{x,0}],{x,0}}`, and `length(Args)` in
     /// `proc_lib:trans_init/3` (proc_lib.erl:944) compiles to
-    /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`.
+    /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`. The guard
+    /// `when binary_part(Binary, Start, Length) =:= <<"ell">>` of
+    /// `binary_part_probe:guard/3` compiles to
+    /// `{gc_bif,binary_part,{f,13},3,[{x,0},{x,1},{x,2}],{x,0}}`.
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
@@ -1317,8 +1324,28 @@ pub(crate) enum BinarySegment {
         unit: u64,
         source: Operand,
     },
-    /// A segment that PBeam does not run yet: an `integer`, `float`,
-    /// `utf8`, `utf16`, `utf32`, or `private_append` segment, an `append`
+    /// An `integer` segment: the integer in `source`, in `size` times
+    /// `unit` bits. `little` is true when the flags hold `little` or
+    /// `native`: the JIT loads `native` as `little` (`bs_get_flags`,
+    /// jit/beam_jit_bs.cpp:255-285). The compiler writes a literal or a
+    /// register `size`, and the unit 1 for a literal size. Example:
+    /// `[0x72, 0x10, 0x10, 0x02, 0x03, 0x81]` is
+    /// `{atom,integer},1,1,nil,{x,0},{integer,8}` when atom 7 is `integer`.
+    Integer {
+        segment: u64,
+        unit: u64,
+        little: bool,
+        source: Operand,
+        size: Operand,
+    },
+    /// A `utf8` segment: the UTF-8 bytes of the code point in `source`.
+    /// The compiler writes the unit 0 and the size `undefined`. Example:
+    /// `[0x82, 0x10, 0x00, 0x02, 0x03, 0x92]` is
+    /// `{atom,utf8},1,0,nil,{x,0},{atom,undefined}` when atom 8 is `utf8`
+    /// and atom 9 is `undefined`.
+    Utf8 { segment: u64, source: Operand },
+    /// A segment that PBeam does not run yet: a `float`, `utf16`, `utf32`,
+    /// or `private_append` segment, an `append`
     /// segment that is not the first segment or has a size other than
     /// `all`, or a `binary` segment with another size or unit. It holds
     /// the segment type. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x81]` is
@@ -1964,19 +1991,19 @@ pub(super) fn parse_code(
                     destination: read_register(data, &mut cursor)?,
                 }
             }
-            OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 => {
+            OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
-                if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2) {
+                if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3) {
                     skip_live_registers(data, &mut cursor)?;
                 }
                 let (module, name) = bif_import(
                     imports,
                     read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
                 )?;
-                let argument_count = if matches!(opcode, OPCODE_BIF1 | OPCODE_GC_BIF1) {
-                    1
-                } else {
-                    2
+                let argument_count = match opcode {
+                    OPCODE_BIF1 | OPCODE_GC_BIF1 => 1,
+                    OPCODE_GC_BIF3 => 3,
+                    _ => 2,
                 };
                 let arguments = (0..argument_count)
                     .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
@@ -2251,7 +2278,7 @@ fn read_binary_segments(
             let kind = atom_at(atoms, read_operand(data, cursor, TAG_ATOM)? as usize)?.clone();
             let segment = read_operand(data, cursor, TAG_UNSIGNED)?;
             let unit = read_operand(data, cursor, TAG_UNSIGNED)?;
-            let _flags = read_move_operand(data, cursor, atoms, literals)?;
+            let flags = read_move_operand(data, cursor, atoms, literals)?;
             if kind.name() == "string" {
                 let offset = read_operand(data, cursor, TAG_UNSIGNED)?;
                 let length = read_operand(data, cursor, TAG_INTEGER)?;
@@ -2279,10 +2306,35 @@ fn read_binary_segments(
                         source,
                     }
                 }
+                _ if kind.name() == "integer" => BinarySegment::Integer {
+                    segment,
+                    unit,
+                    little: is_little_endian(&flags),
+                    source,
+                    size,
+                },
+                _ if kind.name() == "utf8" => BinarySegment::Utf8 { segment, source },
                 _ => BinarySegment::Unsupported(kind),
             })
         })
         .collect()
+}
+
+/// Return true when the `Flags` operand of a `bs_create_bin` segment is a
+/// list that holds the atom `little` or `native`. The ERTS JIT reads both
+/// as `BSF_LITTLE` and ignores `signed` for construction (`bs_get_flags`,
+/// jit/beam_jit_bs.cpp:255-285).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_little_endian(&Operand::Value(Term::List(vec![Term::static_atom("native")]))));
+/// assert!(!is_little_endian(&Operand::Value(Term::List(Vec::new()))));
+/// ```
+fn is_little_endian(flags: &Operand) -> bool {
+    matches!(flags, Operand::Value(Term::List(items)) if items.iter().any(|item| {
+        matches!(item, Term::Atom(atom) if matches!(atom.name(), "little" | "native"))
+    }))
 }
 
 /// Read the extended list of `update_record`: an unsigned 1-based position
@@ -2354,8 +2406,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_SKIP_BITS2 => Some(5),
         // `bs_get_integer2` is in `io_lib`.
         OPCODE_BS_GET_INTEGER2 => Some(7),
-        // `gc_bif3` is in `io_lib`, for `erlang:binary_part/3`.
-        OPCODE_GC_BIF3 => Some(7),
         // `is_any_native_record` is in `io_lib`.
         OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.

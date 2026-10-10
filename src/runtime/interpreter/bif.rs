@@ -1,8 +1,9 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `erlang`, `erts_internal`, `ets`, `lists`, `maps`, `os`, `re`, and
-//! `unicode` modules hold the BIF bodies that do not fit on one table line.
+//! The `binary`, `erlang`, `erts_internal`, `ets`, `file`, `iolist`,
+//! `lists`, `maps`, `os`, `re`, and `unicode` modules hold the BIF bodies
+//! that do not fit on one table line.
 //! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
 //! in `bif.tab`.
 
@@ -12,10 +13,13 @@ use crate::runtime::{
     host::output::IovecWrite,
     scheduler::Flushed,
 };
+use crate::term::ProcessId;
 
+mod binary;
 mod erlang;
 mod erts_internal;
 mod ets;
+mod file;
 mod iolist;
 mod lists;
 mod maps;
@@ -151,12 +155,14 @@ impl BifResult {
 /// permits `name` in its constraint (see `SecurityContext::check`). Else
 /// return `None`. An effect entry calls this after its argument checks and
 /// before its first effect, so a denied call has no effect (row "Capability
-/// checks" of `docs/erts-differences.md`).
+/// checks" of `docs/erts-differences.md`). A run that skips the checks
+/// returns `None` before it reads the capabilities (see
+/// `Scheduler::without_checks`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // The default policy permits each operation.
+/// // `AllowAll` permits each operation.
 /// assert!(denial(&mut scheduler, CapabilityKind::Env, Operation::Read, Some(b"HOME"))?.is_none());
 /// ```
 ///
@@ -169,11 +175,45 @@ pub(super) fn denial(
     operation: Operation,
     name: Option<&[u8]>,
 ) -> Result<Option<BifResult>, BeamError> {
-    let security = &scheduler.current_process().security;
-    if security.check(kind, operation, name).is_ok() {
+    if scheduler.skips_checks()
+        || scheduler
+            .current_process()
+            .security
+            .check(kind, operation, name)
+            .is_ok()
+    {
         return Ok(None);
     }
     BifResult::capability_denied(&mut scheduler.atoms).map(Some)
+}
+
+/// Return the `error:capability_denied` exception when `target` is not the
+/// current process and no capability of the current process permits
+/// `operation` of the `process` kind (see [`denial`]). Else return `None`.
+/// The process inspection BIFs check `inspect` and the group leader BIFs
+/// check `group_leader` with this function after their argument checks and
+/// before the process lookup, so a denied call does not tell whether a
+/// process has the pid. A call for the caller has no check.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let caller = scheduler.current_process().id;
+/// assert!(other_process_denial(&mut scheduler, caller, Operation::Inspect)?.is_none());
+/// ```
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for a full atom table.
+pub(super) fn other_process_denial(
+    scheduler: &mut Scheduler,
+    target: ProcessId,
+    operation: Operation,
+) -> Result<Option<BifResult>, BeamError> {
+    if target == scheduler.current_process().id {
+        return Ok(None);
+    }
+    denial(scheduler, CapabilityKind::Process, operation, None)
 }
 
 /// Return the runtime error of a BIF that ERTS runs with a port argument
@@ -362,6 +402,9 @@ impl BeamProgram {
             ("pbeam_cap", "request", [kind, request]) => {
                 return pbeam_cap::request(scheduler, kind, request);
             }
+            ("pbeam_cap", "policy_revoke", [holder, kind]) => {
+                return pbeam_cap::policy_revoke(scheduler, holder, kind);
+            }
             _ => {}
         }
         let mut context = BifContext {
@@ -407,6 +450,15 @@ impl BeamProgram {
     ///   done, and the key position ([`ets::insert_list`]). ERTS traps to
     ///   `ets:insert/2` with a magic reference to the YCF state
     ///   (`erl_db.c:2297-2332`).
+    /// - `erts_internal:list_to_bitstring_continue/5`, with the phase and the
+    ///   walk state of `erlang:iolist_to_binary/1` ([`iolist::l2b_size`],
+    ///   [`iolist::l2b_copy`]). ERTS traps to
+    ///   `erts_internal:list_to_bitstring_continue/1` with a magic reference
+    ///   to the walk state (`erl_iolist.c:53-55`, `764-835`).
+    /// - `erlang:binary_find_trap/3`, with the subject, the search state, and
+    ///   the pattern of `binary:match/2` or `binary:split/2,3`
+    ///   ([`binary::find_trap`]). ERTS traps to the same export with magic references to the search state
+    ///   and to the compiled pattern (`erl_bif_binary.c:75-77`, `1935-1952`).
     /// - `erlang:bif_handle_signals_return/2`, with the process that the BIF
     ///   read and its result: it handles the signals of the caller up to a
     ///   flush signal and returns the result (`bif.c:5452-5495`).
@@ -549,6 +601,53 @@ impl BeamProgram {
                     merged.clone(),
                 ))
             }
+            (
+                "erts_internal",
+                "list_to_bitstring_continue",
+                [
+                    Term::Atom(phase),
+                    arg,
+                    term,
+                    Term::List(stack),
+                    Term::Integer(size),
+                ],
+            ) if phase.name() == "size" => {
+                let reds_left = process.bif_reductions_left()? as i64;
+                Ok(iolist::l2b_size(
+                    process,
+                    reds_left,
+                    arg,
+                    term,
+                    stack,
+                    *size as usize,
+                ))
+            }
+            (
+                "erts_internal",
+                "list_to_bitstring_continue",
+                [
+                    _,
+                    term,
+                    Term::List(stack),
+                    Term::Integer(size),
+                    Term::Binary(bytes),
+                ],
+            ) => {
+                let reds_left = process.bif_reductions_left()? as i64;
+                Ok(iolist::l2b_copy(
+                    process,
+                    reds_left,
+                    term,
+                    stack,
+                    *size as usize,
+                    bytes.clone(),
+                ))
+            }
+            (
+                "erlang",
+                "binary_find_trap",
+                [subject @ Term::Binary(bytes), Term::Tuple(state), pattern],
+            ) => binary::find_trap(process, subject, bytes, state, pattern),
             ("erlang", "bif_handle_signals_return", [_, value]) => {
                 Ok(match scheduler.flush_signals()? {
                     Flushed::Done => BifResult::Value(value.clone()),
@@ -576,8 +675,11 @@ impl BeamProgram {
 
 /// The PBeam BIFs: functions of PBeam modules that ERTS does not have. They
 /// are not `bif.tab` entries, and no BEAM module defines them.
-const PBEAM_BIFS: [(&str, &str, u32); 2] =
-    [("pbeam_cap", "request", 2), ("pbeam_cap", "revoke", 2)];
+const PBEAM_BIFS: [(&str, &str, u32); 3] = [
+    ("pbeam_cap", "policy_revoke", 2),
+    ("pbeam_cap", "request", 2),
+    ("pbeam_cap", "revoke", 2),
+];
 
 /// Return whether an external call or a `bif` instruction goes to a BIF: the
 /// MFA is an entry of `BIFS`, the `bif.tab` entries, so it runs before the

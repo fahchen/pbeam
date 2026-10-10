@@ -11,7 +11,7 @@ use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
-use crate::term::{Fun, MAX_ATOM_CHARACTERS, ProcessId, Reference};
+use crate::term::{Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference};
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
 /// gives a runtime error.
@@ -1097,6 +1097,57 @@ pub(super) fn length(
     Ok(Value(Term::Integer(count + elements.len() as i64)))
 }
 
+/// Run `erlang:binary_part/3`: return the `length` bytes of a binary from
+/// byte `start`, as ERTS `binary_part_3` (`erl_bif_guard.c:455-458`) and
+/// `erts_binary_part` (`erl_bif_binary.c:1954-2012`) do. A negative length
+/// takes the bytes before `start`. A term that is not a bitstring, a start
+/// that is not a non-negative integer, a length that is not an integer,
+/// and a part that is not in the binary raise `badarg`. ERTS raises
+/// `badarg` for the length `-2^63` because its negation does not fit in a
+/// signed word (`erl_bif_binary.c:1974-1977`); PBeam gives the same result
+/// because 2^63 is more than each start. In a guard, the `gc_bif3`
+/// instruction goes to its fail label instead. ERTS returns a sub-binary of
+/// the argument; PBeam returns a copy of the bytes. PBeam has no bitstring
+/// that is not a binary and no bignum, so these ERTS `badarg` inputs cannot
+/// occur (rows "Bitstring terms" and "Integer range" of
+/// `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let hello = Term::Binary(b"hello".to_vec());
+/// let part = binary_part(&hello, &Term::Integer(5), &Term::Integer(-2));
+/// assert!(matches!(part, BifResult::Value(Term::Binary(bytes)) if bytes == b"lo"));
+/// let past = binary_part(&hello, &Term::Integer(1), &Term::Integer(5));
+/// assert!(matches!(past, BifResult::Raise { .. }));
+/// ```
+pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResult {
+    let (Term::Binary(bytes), Term::Integer(start), Term::Integer(length)) =
+        (binary, start, length)
+    else {
+        return BifResult::badarg();
+    };
+    let Ok(start) = u64::try_from(*start) else {
+        return BifResult::badarg();
+    };
+    let (start, length) = if *length < 0 {
+        let length = length.unsigned_abs();
+        let Some(start) = start.checked_sub(length) else {
+            return BifResult::badarg();
+        };
+        (start, length)
+    } else {
+        (start, *length as u64)
+    };
+    // The start is below 2^63 and the length is at most 2^63, so the sum
+    // does not overflow.
+    let end = start + length;
+    if end > bytes.len() as u64 {
+        return BifResult::badarg();
+    }
+    Value(Term::Binary(bytes[start as usize..end as usize].to_vec()))
+}
+
 /// Run `erlang:byte_size/1`: return the number of bytes of a binary, as
 /// ERTS `byte_size_1` (`erl_bif_guard.c:376-393`) and the JIT
 /// `emit_bif_byte_size` (`jit/arm/instr_guard_bifs.cpp:438-509`) do. A
@@ -1524,6 +1575,83 @@ pub(super) fn int_rem(left: &Term, right: &Term) -> Result<BifResult, BeamError>
     })
 }
 
+/// The reductions that ERTS `bump_reds_linear` (`erl_arith.c:56-72`) uses
+/// for a bignum operation in the PBeam integer range: a bignum of one
+/// 64-bit digit needs fewer than `ERTS_ARITH_WORDS_PER_REDUCTION` (16,
+/// `global.h:1041`) heap words, so it costs `0 / 16 + 1`.
+const BIGNUM_OPERATION_REDUCTIONS: i32 = 1;
+
+/// Run `erlang:'-'/1`: return the negation of an integer, as ERTS
+/// `sminus_1` and `erts_unary_minus` (`erl_arith.c:107-110`,
+/// `erl_arith.c:509-567`) do. The JIT `gc_bif` `-`/1 calls the same
+/// `erts_unary_minus` for each operand that it does not negate inline
+/// (`jit/arm/instr_arith.cpp:224`, `280`). A small integer costs no
+/// reduction, also when its negation is the bignum 2^59. A bignum operand
+/// costs 1 reduction (`erl_arith.c:537-551`). An operand that is not a
+/// number raises `badarith`. PBeam has no float term.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// assert!(matches!(negate(&mut process, &Term::Integer(5))?, BifResult::Value(Term::Integer(-5))));
+/// assert_eq!(process.fcalls, 10);
+/// negate(&mut process, &Term::Integer(1 << 59))?;
+/// assert_eq!(process.fcalls, 9);
+/// assert!(matches!(negate(&mut process, &Term::static_atom("a"))?, BifResult::Raise { .. }));
+/// assert!(negate(&mut process, &Term::Integer(i64::MIN)).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for `-(2^63)`, whose negation is outside the
+/// `i64` range, where ERTS makes a bignum.
+pub(super) fn negate(process: &mut ProcessState, term: &Term) -> Result<BifResult, BeamError> {
+    let Term::Integer(value) = term else {
+        return Ok(BifResult::badarith());
+    };
+    // ponytail: a result outside i64 needs a bignum term; see "Integer range" in docs/erts-differences.md.
+    let result = value.checked_neg().ok_or_else(|| {
+        error(format!(
+            "unsupported erlang:-/1 result of {value}: needs a bignum"
+        ))
+    })?;
+    if term.small_integer().is_none() {
+        process.bump_reductions(BIGNUM_OPERATION_REDUCTIONS);
+    }
+    Ok(Value(Term::Integer(result)))
+}
+
+/// Run `erlang:'band'/2`: return the bitwise and of two integers, as ERTS
+/// `band_2` and `erts_band` (`erl_arith.c:164-170`,
+/// `erl_arith.c:1252-1278`) do. The JIT `gc_bif` `band` calls the same
+/// `erts_band` for operands that are not both small integers
+/// (`jit/arm/instr_arith.cpp:1168`, `1236`). Two small integers cost no
+/// reduction. A bignum operand costs 1 reduction, also when the result is
+/// a small integer (`erl_arith.c:1276`). An operand that is not an integer
+/// raises `badarith`. The result of two `i64` values is an `i64` value.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// let result = band(&mut process, &Term::Integer(12), &Term::Integer(10));
+/// assert!(matches!(result, BifResult::Value(Term::Integer(8))));
+/// assert_eq!(process.fcalls, 10);
+/// band(&mut process, &Term::Integer(1 << 59), &Term::Integer(-1));
+/// assert_eq!(process.fcalls, 9);
+/// assert!(matches!(band(&mut process, &Term::Integer(1), &Term::static_atom("a")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn band(process: &mut ProcessState, left: &Term, right: &Term) -> BifResult {
+    let (Term::Integer(left_value), Term::Integer(right_value)) = (left, right) else {
+        return BifResult::badarith();
+    };
+    if left.small_integer().is_none() || right.small_integer().is_none() {
+        process.bump_reductions(BIGNUM_OPERATION_REDUCTIONS);
+    }
+    Value(Term::Integer(left_value & right_value))
+}
+
 /// Convert `value`, a time in the native unit, to `unit` with
 /// [`time::time_unit_conversion`], as `erlang:monotonic_time/1` and
 /// `os:system_time/1` do (`erl_time_sup.c:2268-2350`). A converted time
@@ -1554,6 +1682,28 @@ pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> B
             ],
         },
         TimeValue::Badarg => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:list_to_tuple(List)`: return a tuple with the elements of
+/// the proper list `List`, as `list_to_tuple_1` (`bif.c:3789-3812`) does.
+/// `[]` gives `{}`. A term that is not a proper list, and a list with more
+/// than [`MAX_TUPLE_SIZE`] elements, raise `badarg`. The BIF uses no
+/// reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = Term::List(vec![Term::static_atom("a"), Term::Integer(1)]);
+/// assert!(matches!(list_to_tuple(&list), BifResult::Value(Term::Tuple(elements)) if elements.len() == 2));
+/// assert!(matches!(list_to_tuple(&Term::static_atom("a")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn list_to_tuple(list: &Term) -> BifResult {
+    match list {
+        Term::List(elements) if elements.len() <= MAX_TUPLE_SIZE => {
+            Value(Term::Tuple(elements.clone()))
+        }
+        _ => BifResult::badarg(),
     }
 }
 
@@ -2048,6 +2198,10 @@ fn is_process_info_item(item: &Term) -> bool {
 /// `process` is not a pid. The items that PBeam supports are in
 /// [`ProcessState::info`].
 ///
+/// For another process, the caller then needs the `process` capability with
+/// `inspect`, else the BIF raises `error:capability_denied` before it looks
+/// up the process (row "Capability checks" of `docs/erts-differences.md`).
+///
 /// - For the caller, first handle the signals that the caller may have sent
 ///   to itself, up to a flush signal (`pi_maybe_flush_signals`,
 ///   `erl_bif_info.c:1198-1268`); without such signals only fetch. The BIF
@@ -2096,6 +2250,9 @@ pub(super) fn process_info(
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
+    if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
+        return Ok(denied);
+    }
     let caller = scheduler.current_process_mut();
     // ponytail: lists of items, other items, and the frames of another process need more state; see "BIF arguments" in docs/erts-differences.md.
     let unsupported = || {
@@ -2167,35 +2324,47 @@ pub(super) fn process_info(
 /// signals that the caller sent before. Else the result is `true`. A
 /// result traps to `erlang:bif_handle_signals_return/2` when the caller has
 /// incoming signals. A term that is not a pid raises `badarg`. PBeam cannot
-/// represent a remote pid.
+/// represent a remote pid. For another process, the caller needs the
+/// `process` capability with `inspect`, else the BIF raises
+/// `error:capability_denied` before it looks up the process.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let alive = is_process_alive(&mut context, &Term::Pid(child));
+/// let alive = is_process_alive(&mut context, &Term::Pid(child))?;
 /// assert!(matches!(alive, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(is_process_alive(&mut context, &Term::Integer(1)), BifResult::Raise { .. }));
+/// assert!(matches!(is_process_alive(&mut context, &Term::Integer(1))?, BifResult::Raise { .. }));
 /// ```
-pub(super) fn is_process_alive(context: &mut BifContext<'_>, pid: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for a full atom table.
+pub(super) fn is_process_alive(
+    context: &mut BifContext<'_>,
+    pid: &Term,
+) -> Result<BifResult, BeamError> {
     let Term::Pid(id) = pid else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
     if *id == scheduler.current_process_mut().id {
-        return Value(Term::static_atom("true"));
+        return Ok(Value(Term::static_atom("true")));
+    }
+    if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
+        return Ok(denied);
     }
     let alive = match scheduler.process(*id) {
         None => "false",
         Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => {
-            return Trap {
+            return Ok(Trap {
                 module: "erts_internal",
                 function: "is_process_alive",
                 arguments: vec![pid.clone()],
-            };
+            });
         }
         Some(_) => "true",
     };
-    signals_return(scheduler, pid, Term::static_atom(alive))
+    Ok(signals_return(scheduler, pid, Term::static_atom(alive)))
 }
 
 /// Return `value` as the result of a BIF that read the state of the process
