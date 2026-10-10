@@ -325,13 +325,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the next change to one of these test runners.
 - **Source:** PR #192 (#186).
 
-### Cache the Rust build in CI
-
-- PR #294 (#292) measured a cache of `target/` with `CARGO_INCREMENTAL=1`. Without a cache, the test build of main run 37929970799 took 68s. With the default `cargo llvm-cov` clean, which removes the incremental state of `pbeam-runtime`, warm builds took 60s and 75s, so the cache gave no gain. A dependency-only cache gives the same result. With `--no-clean`, warm builds took 19s to 30s, but the restore took 23s to 26s and the save 8s to 13s. Against the 68s main baseline, the net change was from 1s slower to 18s faster per run, which is smaller than the run-to-run variation of the test time (244s to 412s). Each entry is about 600 MB, and the repository cache limit is 10 GB.
-- `--no-clean` needs a removal of old `*.profraw` files and of old test executables before each coverage run; without it, the coverage gate reported 9533/10116 after one profile change. The gain does not justify this risk to the merge gate.
-- **Trigger:** the test build becomes much longer than the cache transfer (for example, more crates or a larger dependency tree), or `cargo llvm-cov` keeps the incremental state by itself.
-- **Source:** PR #294 (#292).
-
 ### Fail a test that leaks in nextest
 
 - nextest shows a test as `LEAK` when a process that the test started keeps the stdout or stderr of the test after the test ends. The default result of a leak is pass, so the merge gate does not stop a new leak. A `leak-timeout` with `result = "fail"` in `.config/nextest.toml` makes a leak a failure. After #330, a nextest run of the full suite shows no leak.
