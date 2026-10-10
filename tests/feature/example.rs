@@ -3,6 +3,14 @@
 //! The tests run the script without a `mise` process. Parallel `mise`
 //! processes can write `mise WARN failed to parse cache file` to stderr
 //! when mise writes its cache, and stderr must be the same as ERTS.
+//!
+//! Each test builds its example once: the first ERTS run builds the example
+//! and runs it. Each other run of the test gives `--no-build`, so it uses
+//! that build, and the ERTS run and the `pbeam` run execute the same
+//! compiled modules. Each example has one test, and nextest runs each test
+//! in its own process, so a test run builds each example once. The script
+//! renames each file of the build into `target/examples/<name>/`, so a
+//! parallel build of the same example cannot give a partial file.
 
 use std::{
     path::Path,
@@ -19,21 +27,26 @@ mod run;
 
 use run::run_with_time_limit;
 
-/// The script compiles the example and `pbeam_boot`, and starts `elixir`,
-/// `erl`, and the runtime of the example.
+/// The build compiles the example and `pbeam_boot`, and starts `elixir` and
+/// `erl`. The run starts the runtime of the example.
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(60);
 
 #[test]
 fn runs_hello_world_with_one_command_as_pinned_erts() {
-    // `bash scripts/example.sh hello_world` compiles `examples/hello_world/*.ex`
-    // and `pbeam_boot.erl`, and runs `pbeam_boot:start('Elixir.HelloWorld',
-    // main)` with the `pbeam` binary. With `--erts`, it runs
-    // `'Elixir.HelloWorld':main(), halt().` with `erl +S 1 -noshell`. Each
-    // runtime runs without a locale variable, which gives the C locale, and
-    // with `LC_ALL=C.UTF-8`.
-    for locale in [None, Some("C.UTF-8")] {
-        let erts = run_example(&["hello_world", "--erts"], locale);
-        let pbeam = run_example(&["hello_world"], locale);
+    // `bash scripts/example.sh hello_world --erts` compiles
+    // `examples/hello_world/*.ex` and `pbeam_boot.erl`, and runs
+    // `'Elixir.HelloWorld':main(), halt().` with `erl +S 1 -noshell`. With
+    // `--no-build` and without `--erts`, it runs
+    // `pbeam_boot:start('Elixir.HelloWorld', main)` with the `pbeam` binary
+    // and the same build. Each runtime runs without a locale variable,
+    // which gives the C locale, and with `LC_ALL=C.UTF-8`. Only the first
+    // run builds.
+    for (locale, erts_arguments) in [
+        (None, &["hello_world", "--erts"][..]),
+        (Some("C.UTF-8"), &["hello_world", "--erts", "--no-build"]),
+    ] {
+        let erts = run_example(erts_arguments, locale);
+        let pbeam = run_example(&["hello_world", "--no-build"], locale);
 
         assert_eq!(
             parts(&erts),
@@ -75,7 +88,7 @@ fn runs_fairness_as_pinned_erts_with_one_scheduler() {
     .collect();
 
     let erts = run_example(&["fairness", "--erts"], None);
-    let pbeam = run_example(&["fairness"], None);
+    let pbeam = run_example(&["fairness", "--no-build"], None);
 
     assert_eq!(parts(&erts), (expected, String::new(), Some(0)), "ERTS");
     assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
@@ -87,7 +100,7 @@ fn runs_ping_pong_as_pinned_erts() {
     // They exchange `{:ping, from}` and `{:pong, from}` three times, and the
     // root process prints the round-trip order and the count.
     let erts = run_example(&["ping_pong", "--erts"], None);
-    let pbeam = run_example(&["ping_pong"], None);
+    let pbeam = run_example(&["ping_pong", "--no-build"], None);
 
     assert_eq!(
         parts(&erts),
@@ -107,7 +120,7 @@ fn restarts_a_crashed_worker_as_pinned_erts() {
     // and restarts it each time it raises, three times. Each run sets the
     // primary log level `none`, so ERTS writes no error report.
     let erts = run_example(&["crash_restart", "--erts"], Some("C.UTF-8"));
-    let pbeam = run_example(&["crash_restart"], Some("C.UTF-8"));
+    let pbeam = run_example(&["crash_restart", "--no-build"], Some("C.UTF-8"));
 
     assert_eq!(
         parts(&erts),
@@ -148,7 +161,7 @@ fn dispatches_consolidated_protocols_as_pinned_erts() {
     // the example does not import, so the `pbeam` binary gets it only as an
     // implementation of the consolidated protocol.
     let erts = run_example(&["protocol_dispatch", "--erts"], None);
-    let pbeam = run_example(&["protocol_dispatch"], None);
+    let pbeam = run_example(&["protocol_dispatch", "--no-build"], None);
 
     assert_eq!(
         parts(&erts),
