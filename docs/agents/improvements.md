@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261010: Preserve bit offsets in UTF-8 bitstring reads
+
+**Problem:** A UTF-8 bitstring read used the nearest lower byte boundary for an unaligned position, so it returned the wrong codepoint and could read past the remaining bits.
+
+**Root Cause:** The implementation did not match the ERTS alignment and remaining-bit checks for UTF-8 extraction.
+
+**Fix:** Align the read to the required whole-byte boundary and check that enough bits remain before consuming the UTF-8 sequence.
+
+**Guardrail:** Add a compiled regression fixture for a UTF-8 read after a non-byte-aligned match and compare its exact result with pinned ERTS.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/403#issuecomment-6099778845>
+
 ## 20261010: Replace verification placeholders before publishing
 
 **Problem:** A PR description kept a placeholder in the Verification section after an earlier edit did not apply.
