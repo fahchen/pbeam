@@ -88,26 +88,21 @@ enum Kind<'a> {
     /// An improper list. Its last nested term is the tail.
     ImproperList,
     Tuple,
-    Map,
     Fun(&'a Target),
 }
 
-/// The nested terms of a list, tuple, map, or fun, in order. An improper
-/// list gives its elements and then its tail, a map gives each key and then
-/// its value, and a fun gives its free variables.
+/// The nested terms of a list, tuple, or fun, in order. An improper list
+/// gives its elements and then its tail, and a fun gives its free
+/// variables.
 type Nested<'a> = Box<dyn Iterator<Item = &'a Term> + 'a>;
 
 impl Kind<'_> {
-    /// Build a term of this kind from its nested terms. For a map, the
-    /// terms are keys and values in turn.
+    /// Build a term of this kind from its nested terms.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(Kind::Tuple.build(vec![]), Term::Tuple(vec![]));
-    /// let map = Kind::Map.build(vec![Term::static_atom("ok"), Term::Integer(1)]);
-    /// let pairs = vec![(Term::static_atom("ok"), Term::Integer(1))];
-    /// assert_eq!(map, Term::Map(Map::from_pairs(pairs)?));
     /// let improper = Kind::ImproperList.build(vec![Term::Integer(1), Term::static_atom("x")]);
     /// assert_eq!(improper, Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x"))));
     /// ```
@@ -119,15 +114,6 @@ impl Kind<'_> {
                 Term::ImproperList(terms, Box::new(tail))
             }
             Kind::Tuple => Term::Tuple(terms),
-            Kind::Map => {
-                let mut pairs = Vec::with_capacity(terms.len() / 2);
-                let mut terms = terms.into_iter();
-                while let (Some(key), Some(value)) = (terms.next(), terms.next()) {
-                    pairs.push((key, value));
-                }
-                // A hashmap copy hashes each key again; `Map` has no other way to build a map.
-                Term::Map(Map::from_pairs(pairs).expect("a copied map holds only supported keys"))
-            }
             Kind::Fun(target) => Term::Fun(Fun {
                 target: target.clone(),
                 free: terms,
@@ -208,14 +194,16 @@ impl Term {
         }
     }
 
-    /// Copy a term that has no nested terms. For a list, tuple, map, or
-    /// fun, return its nested terms, kind, and count instead, so the caller
+    /// Copy a term that has no nested terms. A map copy shares the form of
+    /// the map, so it does not copy the pairs. For a list, tuple, or fun,
+    /// return its nested terms, kind, and count instead, so the caller
     /// copies them.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(Term::Integer(1).shallow_clone().ok(), Some(Term::Integer(1)));
+    /// assert!(Term::Map(Map::new()).shallow_clone().is_ok());
     /// assert!(Term::List(vec![]).shallow_clone().is_err());
     /// ```
     fn shallow_clone(&self) -> Result<Term, (Nested<'_>, Kind<'_>, usize)> {
@@ -227,11 +215,7 @@ impl Term {
                 elements.len() + 1,
             )),
             Term::Tuple(elements) => Err((Box::new(elements.iter()), Kind::Tuple, elements.len())),
-            Term::Map(map) => Err((
-                Box::new(map.iter().flat_map(|(key, value)| [key, value])),
-                Kind::Map,
-                map.len() * 2,
-            )),
+            Term::Map(map) => Ok(Term::Map(map.clone())),
             Term::Fun(fun) => Err((
                 Box::new(fun.free.iter()),
                 Kind::Fun(&fun.target),
@@ -265,7 +249,7 @@ impl Term {
                 pending.push(std::mem::replace(&mut **tail, Term::List(vec![])));
             }
             Term::Fun(fun) => pending.append(&mut fun.free),
-            Term::Map(map) => std::mem::replace(map, Map::new()).drain_into(pending),
+            Term::Map(map) => map.drain_into(pending),
             _ => {}
         }
     }
@@ -291,8 +275,8 @@ impl Drop for Term {
 }
 
 impl Clone for Term {
-    /// Copy a term with a work stack of partly copied lists, tuples, maps,
-    /// and funs.
+    /// Copy a term with a work stack of partly copied lists, tuples, and
+    /// funs. A map copy shares the form of the map.
     ///
     /// # Examples
     ///

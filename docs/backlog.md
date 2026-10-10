@@ -248,8 +248,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Build a list cons and a map update without a copy
 
-- A `Term::List` holds its elements in one `Vec`, so a cons copies the tail, and `put_map_assoc` reads a copy of the whole map for a map update `M#{K => V}`. The probes build long lists with `++` of two halves, in O(N log N) time. ERTS makes a cons and a HAMT path update in constant and O(log N) time.
-- **Evidence:** on PBeam, `pairs(1, 100000)` of `bif_cost_probe` takes about 1.5 s, and a loop of 100000 updates `M#{N => N}` did not end in 10 minutes (#355).
+- A `Term::List` holds its elements in one `Vec`, so a cons copies the tail. A copy of a map shares the form of the map in O(1) time (#427), but a map update `M#{K => V}` of a shared map copies the whole form once (`Rc::make_mut`), in O(N) time. The probes build long lists with `++` of two halves, in O(N log N) time. ERTS makes a cons and a HAMT path update in constant and O(log N) time.
+- **Evidence:** on PBeam, `pairs(1, 100000)` of `bif_cost_probe` takes about 1.5 s, and a loop of 100000 updates `M#{N => N}` did not end in 10 minutes (#355). Before #427, the read of the register rebuilt the map with `Map::from_pairs`, which hashes each key again. Since #427, the update copies the shared form once, and that copy does not hash its keys again. The update still hashes the new key, and a change from 32 to 33 keys hashes each key.
 - **Trigger:** an owner decision to make the CI test time shorter again, or a consumer that builds long lists or large maps.
 - **Source:** PR for #355.
 
