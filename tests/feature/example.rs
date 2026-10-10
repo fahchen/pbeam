@@ -401,6 +401,27 @@ fn run_restricted_guest(arguments: &[&str]) -> Output {
 }
 
 #[test]
+fn inspects_a_tuple_as_pinned_erts() {
+    // `InspectTuple.main/0` runs the last call of `TerraCounter.main/0`,
+    // `IO.inspect({:ok, 1})`. `Inspect.Tuple` calls
+    // `erlang:tuple_to_list/1`, `Inspect.Integer` calls
+    // `erlang:integer_to_binary/2`, and `Macro.inspect_atom/2` runs
+    // `String.Tokenizer.tokenize/1`, which reads
+    // `elixir_config:identifier_tokenizer/0`. Without the two BIFs, the
+    // `pbeam` run stops with `unresolved external MFA
+    // erlang:tuple_to_list/1` and status 1.
+    let erts = run_example(&["inspect_tuple", "--erts"], None);
+    let pbeam = run_example(&["inspect_tuple", "--no-build"], None);
+
+    assert_eq!(
+        parts(&erts),
+        ("{:ok, 1}\\n".to_owned(), String::new(), Some(0)),
+        "ERTS"
+    );
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+}
+
+#[test]
 fn stops_terra_counter_when_the_local_terra_repository_is_not_at_the_pinned_commit() {
     // `scripts/terra.sh` gives the Terra sources to `terra_counter`. With
     // `PBEAM_TERRA_SRC`, it uses that local repository only when it is a git

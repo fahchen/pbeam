@@ -1,4 +1,8 @@
-use std::cmp::Ordering::{Equal, Greater, Less};
+use std::{
+    cell::RefCell,
+    cmp::Ordering::{Equal, Greater, Less},
+    rc::Rc,
+};
 
 use super::super::{
     Atom, AtomTable, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
@@ -10,7 +14,8 @@ use super::super::{
 fn panics_for_a_match_context() {
     // The interpreter gives a runtime error before a match context can
     // reach a term operation.
-    let _ = Term::MatchContext(MatchContext::new(b"a")).compare(&Term::Integer(1));
+    let _ = Term::MatchContext(Rc::new(RefCell::new(MatchContext::new(b"a"))))
+        .compare(&Term::Integer(1));
 }
 
 fn map(pairs: Vec<(Term, Term)>) -> Term {
