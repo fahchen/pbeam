@@ -14,7 +14,7 @@
 //! keeps its state between the calls, for example its dictionary and its
 //! messages. The launcher gives it the capabilities of `AllowAll`, so each
 //! effect of the policy code is permitted, as for a process of a run with
-//! the default policy.
+//! the `AllowAll` policy.
 
 use std::collections::VecDeque;
 

@@ -1,5 +1,5 @@
 use super::{
-    capability::{AllowAll, Policy, Restriction},
+    capability::{Policy, Restriction},
     host::output::IovecWrite,
     process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::{PolicyEnd, Received, Scheduler, Turn},
@@ -19,9 +19,11 @@ use crate::{
 use std::{borrow::Cow, collections::HashMap};
 
 mod bif;
+mod bits;
 mod native;
 
 use bif::{BifResult, is_bif, is_function, is_heavy_bif, send};
+use bits::BitWriter;
 
 /// The largest number of arguments of `erlang:apply/3`. ERTS `apply` copies
 /// at most `MAX_REG - 1` arguments to the X registers (`erl_vm.h:55`,
@@ -50,6 +52,9 @@ pub struct BeamProgram {
 /// The issuer of the initial capabilities of a run.
 #[derive(Clone, Copy)]
 enum Issuer<'a> {
+    /// No issuer: the launcher has no policy, so the run skips each
+    /// capability check and issues no capability.
+    Unchecked,
     /// A Rust policy of the host.
     Host(&'a dyn Policy),
     /// A policy module in BEAM code, which the policy process runs.
@@ -209,8 +214,15 @@ impl BeamProgram {
     /// again when fds 0 and 1 are terminals, as at the exit of the ERTS
     /// emulator (see `InitialMode::reset`).
     ///
-    /// The root process gets the capabilities of the default [`AllowAll`]
-    /// policy, so each process can do each operation, as on ERTS.
+    /// The run has no policy, so it skips each capability check, as if each
+    /// effect entry were `ambient`, and each process can do each operation,
+    /// as on ERTS. No process gets a capability copy. The `{capabilities,
+    /// Map}` spawn option still raises `badarg` for a `Map` that is not
+    /// valid, but it does not reduce the child. `pbeam_cap:revoke/2` and
+    /// `pbeam_cap:request/2` return `ok` after their argument checks and
+    /// have no effect. The option is fixed for the run: no BIF can change
+    /// it. Use [`BeamProgram::execute_with_policy`] or
+    /// [`BeamProgram::execute_with_policy_module`] for a run with checks.
     ///
     /// # Examples
     ///
@@ -223,7 +235,7 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
     ) -> Result<Term, BeamError> {
-        self.execute_with_policy(module, function, arguments, &AllowAll)
+        self.execute_issued(module, function, arguments, Issuer::Unchecked)
     }
 
     /// Run an exported function as the root process, as
@@ -233,7 +245,9 @@ impl BeamProgram {
     /// `error:capability_denied` before it has an effect (row "Capability
     /// checks" of `docs/erts-differences.md`). The column "Capability" of
     /// `docs/effect-inventory.md` lists the entries that check a capability
-    /// now; the entries marked `later` have no check yet (#335). Before each
+    /// now; the entries marked `ambient` have no check by decision, and the
+    /// entries marked `later` have no check yet (#335). With [`AllowAll`](crate::AllowAll),
+    /// each check passes, as a test of the checks needs. Before each
     /// scheduling step, the launcher revokes the initial capabilities of each
     /// kind that [`Policy::revocations`] gives.
     ///
@@ -318,7 +332,10 @@ impl BeamProgram {
         issuer: Issuer,
     ) -> Result<Term, BeamError> {
         let initial_mode = InitialMode::read();
-        let mut scheduler = Scheduler::new(self.atoms.clone());
+        let mut scheduler = match issuer {
+            Issuer::Unchecked => Scheduler::without_checks(self.atoms.clone()),
+            Issuer::Host(_) | Issuer::Module(_) => Scheduler::new(self.atoms.clone()),
+        };
         let run = self.run_root(&mut scheduler, module, function, arguments, issuer);
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
@@ -336,7 +353,9 @@ impl BeamProgram {
 
     /// Run `Module:Function(Arguments...)` as the root process with the
     /// initial capabilities of `issuer` on `scheduler` until the run ends, as
-    /// `BeamProgram::execute` describes. With a Rust policy, the launcher
+    /// `BeamProgram::execute` describes. With no issuer, the root process
+    /// gets no capability, and `scheduler` must skip the checks (see
+    /// `Scheduler::without_checks`). With a Rust policy, the launcher
     /// revokes the initial capabilities of each kind that
     /// `Policy::revocations` gives before each scheduling step. With a
     /// policy module, the launcher makes the policy process first and the
@@ -370,6 +389,10 @@ impl BeamProgram {
         let label = self.entry_label(module, function, arity)?;
         let frame = self.frame(module, label, arity)?;
         let mut root = match issuer {
+            Issuer::Unchecked => {
+                scheduler.start(frame, arguments.to_vec(), Vec::new())?;
+                None
+            }
             Issuer::Host(policy) => {
                 scheduler.start(frame, arguments.to_vec(), policy.initial())?;
                 None
@@ -394,6 +417,7 @@ impl BeamProgram {
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
             match issuer {
+                Issuer::Unchecked => {}
                 Issuer::Host(policy) => scheduler.revoke_issued(&policy.revocations()),
                 Issuer::Module(policy) => {
                     if let Some(arguments) = scheduler.next_policy_request() {
@@ -1201,10 +1225,8 @@ impl BeamProgram {
                 } => match create_binary(process, segments)? {
                     Ok(bytes) => write(process, destination, Term::Binary(bytes))?,
                     Err(_) if *fail_label != 0 => jump(module, process, *fail_label)?,
-                    Err((segment, reason, value)) => {
-                        if let Some(outcome) =
-                            raise_binary_badarg(scheduler, module, segment, reason, value)?
-                        {
+                    Err(failure) => {
+                        if let Some(outcome) = raise_binary_failure(scheduler, module, failure)? {
                             return Ok(outcome);
                         }
                     }
@@ -2945,35 +2967,210 @@ fn binary_match(
     Ok(true)
 }
 
-/// The failure of a `bs_create_bin` segment: the segment number of the
-/// compiler, the ERTS `error_info` reason atom (`type` or `unit`), and the
-/// term of the segment.
-type BinarySegmentFailure = (u64, &'static str, Term);
+/// The failure of a `bs_create_bin` segment, which ERTS gives in the
+/// `error_info` cause `{segment, operation, info, value}`
+/// (`beam_jit_bs_construct_fail_info`, jit/beam_jit_common.cpp:911-1010).
+#[derive(Debug, PartialEq)]
+struct BinarySegmentFailure {
+    /// The segment number of the compiler.
+    segment: u64,
+    /// The segment operation: `binary`, `integer`, or `utf8`.
+    operation: &'static str,
+    /// The failed check: `type`, `unit`, or `size`.
+    info: &'static str,
+    /// The term that failed the check.
+    value: Term,
+    /// The exception reason: `badarg`, or `system_limit` for a size that
+    /// is too large.
+    reason: &'static str,
+}
+
+impl BinarySegmentFailure {
+    /// Return the `badarg` failure of a check of `operation`.
+    fn badarg(segment: u64, operation: &'static str, info: &'static str, value: Term) -> Self {
+        BinarySegmentFailure {
+            segment,
+            operation,
+            info,
+            value,
+            reason: "badarg",
+        }
+    }
+}
+
+/// A segment of `bs_create_bin` after the size pass: the bytes of a
+/// `string` or `binary` segment and the reductions of their copy, an
+/// `integer` segment with its term and its size in bits, or the code point
+/// of a `utf8` segment.
+enum BinaryPart<'a> {
+    Bytes(Cow<'a, [u8]>, usize),
+    Integer {
+        segment: u64,
+        value: Term,
+        bits: u64,
+        little: bool,
+        /// True when the size is a literal from 0 to 2^56 - 1, as ERTS
+        /// computes its size at load time (jit/arm/instr_bs.cpp:1493-1505).
+        fixed: bool,
+    },
+    Utf8(char),
+}
+
+impl BinaryPart<'_> {
+    /// Return the `type` failure of an `integer` part whose term is not an
+    /// integer.
+    fn type_failure(&self) -> Option<BinarySegmentFailure> {
+        match self {
+            BinaryPart::Integer { segment, value, .. } if !matches!(value, Term::Integer(_)) => {
+                Some(BinarySegmentFailure::badarg(
+                    *segment,
+                    "integer",
+                    "type",
+                    value.clone(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Return true when the part writes at least one bit.
+    fn has_bits(&self) -> bool {
+        match self {
+            BinaryPart::Bytes(bytes, _) => !bytes.is_empty(),
+            BinaryPart::Integer { bits, .. } => *bits > 0,
+            BinaryPart::Utf8(_) => true,
+        }
+    }
+}
+
+/// Return the size in bits of an `integer` segment, or the exception
+/// reason of its failure, as the ERTS JIT size pass checks it
+/// (jit/arm/instr_bs.cpp:1493-1505, 1639-1689). A `fixed` size, a literal
+/// from 0 to 2^56 - 1, needs no check. Each other size must be a small
+/// integer that is not negative, else it fails with `system_limit` for a
+/// positive bignum and with `badarg` for each other term
+/// (`BSC_REASON_DEPENDS`, jit/beam_jit_common.cpp:968-975). For a unit
+/// other than 1, a size of 2^52 or more fails with `system_limit`, as the
+/// arm64 JIT checks it (jit/arm/instr_bs.cpp:1685). The x86_64 JIT fails
+/// only on an overflow of the size times the unit
+/// (jit/x86/instr_bs.cpp:1942-1943) and then stops at the allocation; row
+/// "Binary construction" of `docs/erts-differences.md` records it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(integer_segment_bits(false, &Term::Integer(3), 8), Ok(24));
+/// assert_eq!(integer_segment_bits(false, &Term::Integer(-1), 1), Err("badarg"));
+/// assert_eq!(integer_segment_bits(false, &Term::Integer(1 << 52), 8), Err("system_limit"));
+/// ```
+fn integer_segment_bits(fixed: bool, size: &Term, unit: u64) -> Result<u64, &'static str> {
+    match (size.small_integer(), size) {
+        (Some(bits), _) if bits >= 0 && (fixed || unit == 1 || bits >> 52 == 0) => {
+            Ok((bits as u64).saturating_mul(unit))
+        }
+        (Some(bits), _) if bits >= 0 => Err("system_limit"),
+        (None, Term::Integer(bits)) if *bits >= 0 => Err("system_limit"),
+        _ => Err("badarg"),
+    }
+}
+
+/// Return the failure of the `integer` part that ERTS reports when the
+/// part at `first` is the first part in segment order whose term is not an
+/// integer. The JIT construct pass joins the adjacent `integer` segments of
+/// a fixed size from 1 to 64 bits and one byte order into one group, up to
+/// 64 bits, and a little-endian group joins a segment only after a whole
+/// number of bytes (`beam_jit_bsc_combine_segments`,
+/// jit/beam_jit_bs.cpp:162-232). It checks the segments of a
+/// little-endian group in reverse order (`push_group`,
+/// jit/beam_jit_bs.cpp:106-123), so the last bad term of that group fails
+/// first.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<A:8/little, B:8/little>> with A = a and B = b fails at B.
+/// assert_eq!(integer_type_failure(&parts, 0).segment, 2);
+/// ```
+fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFailure {
+    let mut group = 0..0;
+    let mut group_little = false;
+    let mut group_bits = 0;
+    for (index, part) in parts.iter().enumerate() {
+        let member = match part {
+            BinaryPart::Integer {
+                bits,
+                little,
+                fixed: true,
+                ..
+            } if (1..=64).contains(bits) => Some((*bits, *little)),
+            _ => None,
+        };
+        match member {
+            Some((bits, little))
+                if !group.is_empty()
+                    && little == group_little
+                    && group_bits + bits <= 64
+                    && (!little || group_bits % 8 == 0) =>
+            {
+                group.end = index + 1;
+                group_bits += bits;
+            }
+            _ if index > first => break,
+            Some((bits, little)) => {
+                group = index..index + 1;
+                group_little = little;
+                group_bits = bits;
+            }
+            None => group = index + 1..index + 1,
+        }
+    }
+    let end = if group_little && group.contains(&first) {
+        group.end
+    } else {
+        first + 1
+    };
+    (first..end)
+        .rev()
+        .find_map(|index| parts[index].type_failure())
+        .expect("the part at `first` has a term that is not an integer")
+}
 
 /// Build the binary of the segments of a `bs_create_bin` instruction, as
 /// the ERTS JIT `i_bs_create_bin` does (JIT `emit_i_bs_create_bin` in
-/// jit/arm/instr_bs.cpp:1442-2300). First read the term of each `binary`
-/// segment in order. A term that is not a binary gives the segment number
-/// and the term, and the instruction then fails. Then check the `append`
-/// segment, and then join the bytes of the segments. A `string` segment
-/// copies its bytes (`erts_bs_put_string`, erl_bits.c:1641-1654). A
-/// `binary` segment copies its binary and uses one reduction for each 8192
-/// bits (`erts_bs_put_binary_all`, erl_bits.c:1311-1332;
-/// `beam_jit_bs_put_binary_all`, jit/beam_jit_common.cpp:1043-1057). PBeam
-/// has no bitstring that is not a binary, so the unit 8 test of
-/// `erts_bs_put_binary_all` always passes.
+/// jit/arm/instr_bs.cpp:1442-2490). It has three passes, and the first
+/// failed check gives the failure.
 ///
-/// The `append` segment is the first segment. The JIT checks it after the
-/// `binary` segments of the size pass (jit/arm/instr_bs.cpp:1584-1586,
-/// 1811-1864), with `erts_bs_append_checked` (erl_bits.c:1724-1925). A term
-/// that is not a binary fails with the reason `type`, and a binary whose
-/// size in bits is not a multiple of a unit larger than 1 fails with the
-/// reason `unit`. When the other segments add no bits, the result is the
-/// binary of the `append` segment and the append uses no reduction. Else
-/// the result starts with a copy of that binary, which uses one reduction
-/// for each 8192 bits, as the ERTS path for a binary that is not writable
-/// does (erl_bits.c:1855-1924). PBeam has no writable binary (row "Binary
-/// construction" of `docs/erts-differences.md`).
+/// The size pass reads the segments in order (jit/arm/instr_bs.cpp:
+/// 1579-1808). A `binary` segment of size `all` with a term that is not a
+/// binary fails with `type`. An `integer` segment checks its size (see
+/// `integer_segment_bits`). A `utf8` segment with a term that is not a
+/// code point from 0 to 16#10FFFF outside 16#D800 to 16#DFFF fails with
+/// `type`.
+///
+/// Then the JIT checks the `append` segment, which is the first segment
+/// (jit/arm/instr_bs.cpp:1811-1864), with `erts_bs_append_checked`
+/// (erl_bits.c:1724-1925). A term that is not a binary fails with the
+/// reason `type`, and a binary whose size in bits is not a multiple of a
+/// unit larger than 1 fails with the reason `unit`. When the other
+/// segments add no bits, the result is the binary of the `append` segment
+/// and the append uses no reduction, but the construct pass still checks
+/// the term of each `integer` segment of size 0. Else the result starts with a copy of
+/// that binary, which uses one reduction for each 8192 bits, as the ERTS
+/// path for a binary that is not writable does (erl_bits.c:1855-1924).
+/// PBeam has no writable binary (row "Binary construction" of
+/// `docs/erts-differences.md`).
+///
+/// The construct pass writes the segments (jit/arm/instr_bs.cpp:
+/// 1994-2486). A `string` segment copies its bytes (`erts_bs_put_string`,
+/// erl_bits.c:1641-1654). A `binary` segment copies its binary and uses
+/// one reduction for each 8192 bits (`beam_jit_bs_put_binary_all`,
+/// jit/beam_jit_common.cpp:1043-1057). An `integer` segment with a term
+/// that is not an integer fails with `type`, in the order of
+/// `integer_type_failure`; else it writes the integer with no reduction
+/// (`erts_bs_put_integer_be` and `erts_bs_put_integer_le`, erl_bits.c:
+/// 926-1167). A `utf8` segment writes the UTF-8 bytes of its code point
+/// (`emit_construct_utf8`). PBeam has no bitstring that is not a binary,
+/// so the unit 8 test of `erts_bs_put_binary_all` always passes.
 ///
 /// # Examples
 ///
@@ -2985,22 +3182,29 @@ type BinarySegmentFailure = (u64, &'static str, Term);
 /// ];
 /// assert_eq!(create_binary(&mut process, &segments)?, Ok(b"count: 3".to_vec()));
 /// write(&mut process, &Operand::X(0), Term::static_atom("a"))?;
-/// assert_eq!(create_binary(&mut process, &segments)?, Err((2, "type", Term::static_atom("a"))));
+/// assert_eq!(
+///     create_binary(&mut process, &segments)?,
+///     Err(BinarySegmentFailure::badarg(2, "binary", "type", Term::static_atom("a")))
+/// );
 ///
-/// // <<A/binary-unit:16, "!">> with A = <<1,2,3>>
-/// write(&mut process, &Operand::X(0), Term::Binary(vec![1, 2, 3]))?;
-/// let segments = [
-///     BinarySegment::Append { segment: 1, unit: 16, source: Operand::X(0) },
-///     BinarySegment::String(b"!".to_vec()),
-/// ];
-/// assert_eq!(create_binary(&mut process, &segments)?, Err((1, "unit", Term::Binary(vec![1, 2, 3]))));
+/// // <<X:16/little>> with X = 16#1234
+/// write(&mut process, &Operand::X(0), Term::Integer(0x1234))?;
+/// let segments = [BinarySegment::Integer {
+///     segment: 1,
+///     unit: 1,
+///     little: true,
+///     source: Operand::X(0),
+///     size: Operand::Value(Term::Integer(16)),
+/// }];
+/// assert_eq!(create_binary(&mut process, &segments)?, Ok(vec![0x34, 0x12]));
 /// ```
 ///
 /// # Errors
 ///
 /// A segment of a type, size, or unit that PBeam does not run yet is a
-/// runtime error. A match context in a `binary` segment is a runtime
-/// invariant error.
+/// runtime error. A result whose size in bits is not a multiple of 8 is a
+/// runtime error, because PBeam has no bitstring term. A match context in
+/// a `binary` segment is a runtime invariant error.
 fn create_binary(
     process: &mut ProcessState,
     segments: &[BinarySegment],
@@ -3009,20 +3213,68 @@ fn create_binary(
     let mut append = None;
     for segment in segments {
         match segment {
-            BinarySegment::String(text) => parts.push((Cow::Borrowed(text.as_slice()), 0)),
+            BinarySegment::String(text) => {
+                parts.push(BinaryPart::Bytes(Cow::Borrowed(text.as_slice()), 0));
+            }
             BinarySegment::BinaryAll { segment, source } => {
                 let mut value = read(process, source)?;
                 let Term::Binary(bytes) = &mut value else {
-                    return Ok(Err((*segment, "type", value)));
+                    return Ok(Err(BinarySegmentFailure::badarg(
+                        *segment, "binary", "type", value,
+                    )));
                 };
                 let reductions = bytes.len() * 8 / BITS_PER_REDUCTION;
-                parts.push((Cow::Owned(std::mem::take(bytes)), reductions));
+                parts.push(BinaryPart::Bytes(
+                    Cow::Owned(std::mem::take(bytes)),
+                    reductions,
+                ));
             }
             BinarySegment::Append {
                 segment,
                 unit,
                 source,
             } => append = Some((*segment, *unit, read(process, source)?)),
+            BinarySegment::Integer {
+                segment,
+                unit,
+                little,
+                source,
+                size,
+            } => {
+                // ERTS computes the size of a literal from 0 to 2^56 - 1 at
+                // load time with no check (jit/arm/instr_bs.cpp:1493-1505).
+                let fixed = matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+                let size = read(process, size)?;
+                let bits = match integer_segment_bits(fixed, &size, *unit) {
+                    Ok(bits) => bits,
+                    Err(reason) => {
+                        return Ok(Err(BinarySegmentFailure {
+                            reason,
+                            ..BinarySegmentFailure::badarg(*segment, "integer", "size", size)
+                        }));
+                    }
+                };
+                parts.push(BinaryPart::Integer {
+                    segment: *segment,
+                    value: read(process, source)?,
+                    bits,
+                    little: *little,
+                    fixed,
+                });
+            }
+            BinarySegment::Utf8 { segment, source } => {
+                let value = read(process, source)?;
+                let code_point = match &value {
+                    Term::Integer(code) => u32::try_from(*code).ok().and_then(char::from_u32),
+                    _ => None,
+                };
+                let Some(code_point) = code_point else {
+                    return Ok(Err(BinarySegmentFailure::badarg(
+                        *segment, "utf8", "type", value,
+                    )));
+                };
+                parts.push(BinaryPart::Utf8(code_point));
+            }
             BinarySegment::Unsupported(kind) => {
                 return Err(error(format!(
                     "unsupported bs_create_bin segment {}",
@@ -3031,39 +3283,67 @@ fn create_binary(
             }
         }
     }
-    let mut bytes = Vec::new();
+    let mut writer = BitWriter::default();
     if let Some((segment, unit, mut value)) = append {
         let Term::Binary(start) = &mut value else {
-            return Ok(Err((segment, "type", value)));
+            return Ok(Err(BinarySegmentFailure::badarg(
+                segment, "binary", "type", value,
+            )));
         };
         if unit > 1 && !(start.len() as u64 * 8).is_multiple_of(unit) {
-            return Ok(Err((segment, "unit", value)));
+            return Ok(Err(BinarySegmentFailure::badarg(
+                segment, "binary", "unit", value,
+            )));
         }
-        bytes = std::mem::take(start);
-        if parts.iter().all(|(part, _)| part.is_empty()) {
-            return Ok(Ok(bytes));
+        if !parts.iter().any(BinaryPart::has_bits) {
+            // The construct pass still checks the term of each `integer`
+            // segment of size 0 (erl_bits.c:934-936).
+            if let Some(index) = parts.iter().position(|part| part.type_failure().is_some()) {
+                return Ok(Err(integer_type_failure(&parts, index)));
+            }
+            return Ok(Ok(std::mem::take(start)));
         }
-        let reductions = bytes.len() * 8 / BITS_PER_REDUCTION;
+        let reductions = start.len() * 8 / BITS_PER_REDUCTION;
         process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+        writer.push_bytes(start);
     }
-    for (part, reductions) in parts {
-        bytes.extend_from_slice(&part);
-        process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+    for (index, part) in parts.iter().enumerate() {
+        match part {
+            BinaryPart::Bytes(bytes, reductions) => {
+                writer.push_bytes(bytes);
+                process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
+            }
+            BinaryPart::Integer {
+                value: Term::Integer(value),
+                bits,
+                little,
+                ..
+            } => writer.push_integer(*value, *bits, *little),
+            BinaryPart::Integer { .. } => return Ok(Err(integer_type_failure(&parts, index))),
+            BinaryPart::Utf8(code_point) => {
+                writer.push_bytes(code_point.encode_utf8(&mut [0; 4]).as_bytes());
+            }
+        }
     }
-    Ok(Ok(bytes))
+    writer.into_bytes().map(Ok).map_err(|bits| {
+        error(format!(
+            "unsupported bs_create_bin result: a bitstring of {bits} bits, which is not a binary"
+        ))
+    })
 }
 
-/// Raise the `badarg` of a failed `bs_create_bin` `binary` or `append`
-/// segment in the current process, as ERTS
-/// `emit_bs_create_bin_error_shared` does (jit/arm/instr_bs.cpp:1002-1019).
-/// The `error_info` cause is `{Segment, binary, Reason, Value}`: both
-/// segment types give the operation `binary` (`beam_jit_bsc_init`,
-/// jit/beam_jit_bs.cpp:55-74), and `Reason` is `type` or `unit`. The stack
-/// trace is the frame of the function that holds the instruction,
-/// with the ERTS `error_info` (`beam_jit_bs_construct_fail_info` in
-/// jit/beam_jit_common.cpp:911-1010). PBeam keeps no line table and no
-/// caller frames, so the frame has no `file` or `line` and is the only
-/// frame (row "Exception stack trace" of `docs/erts-differences.md`).
+/// Raise the exception of a failed `bs_create_bin` segment in the current
+/// process, as ERTS `emit_bs_create_bin_error_shared` does
+/// (jit/arm/instr_bs.cpp:1002-1019). The class is `error`, the reason is
+/// the `reason` of `failure` (`badarg` or `system_limit`), and the
+/// `error_info` cause is `{Segment, Operation, Info, Value}`. The `binary`
+/// and `append` segments give the operation `binary` (`beam_jit_bsc_init`,
+/// jit/beam_jit_bs.cpp:55-74). The stack trace is the frame of the
+/// function that holds the instruction, with the ERTS `error_info`
+/// (`beam_jit_bs_construct_fail_info` in jit/beam_jit_common.cpp:911-1010).
+/// PBeam keeps no line table and no caller frames, so the frame has no
+/// `file` or `line` and is the only frame (row "Exception stack trace" of
+/// `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
@@ -3072,7 +3352,8 @@ fn create_binary(
 /// // exits with {badarg, [{bs_create_bin_probe, prefix, 1, [{error_info,
 /// // #{cause => {2, binary, type, a}, function => format_bs_fail,
 /// // module => erl_erts_errors}}]}]}.
-/// let outcome = raise_binary_badarg(scheduler, &module, 2, "type", Term::static_atom("a"))?;
+/// let failure = BinarySegmentFailure::badarg(2, "binary", "type", Term::static_atom("a"));
+/// let outcome = raise_binary_failure(scheduler, &module, failure)?;
 /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
 /// ```
 ///
@@ -3080,19 +3361,17 @@ fn create_binary(
 ///
 /// An instruction with no `func_info` before it, or a module or function
 /// name that the atom table does not hold, is a runtime invariant error.
-fn raise_binary_badarg(
+fn raise_binary_failure(
     scheduler: &mut Scheduler,
     module: &BeamModule,
-    segment: u64,
-    reason: &'static str,
-    value: Term,
+    failure: BinarySegmentFailure,
 ) -> Result<Option<Outcome>, BeamError> {
     let (module_atom, function_atom, arity) = current_function(scheduler, module)?;
     let cause = Term::Tuple(vec![
-        Term::Integer(segment as i64),
-        Term::static_atom("binary"),
-        Term::static_atom(reason),
-        value,
+        Term::Integer(failure.segment as i64),
+        Term::static_atom(failure.operation),
+        Term::static_atom(failure.info),
+        failure.value,
     ]);
     // ponytail: each map form holds atom keys, so `from_pairs` cannot fail.
     let error_info = Map::from_pairs(vec![
@@ -3114,11 +3393,10 @@ fn raise_binary_badarg(
         Term::Integer(arity.into()),
         Term::List(vec![location]),
     ]);
-    let badarg = Term::static_atom("badarg");
     Ok(raise_with_stacktrace(
         scheduler.current_process_mut(),
         ExceptionClass::Error,
-        badarg,
+        Term::static_atom(failure.reason),
         Term::List(vec![frame]),
     ))
 }

@@ -11,7 +11,7 @@ mod common;
 use std::process::Command;
 
 use common::pinned_beam;
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AllowAll, BeamProgram, Term};
 
 const POLICY_PROBE: &[u8] = include_bytes!("../../fixtures/policy/policy_probe.beam");
 const ERL_POLICY: &[u8] = include_bytes!("../../fixtures/policy/erl_policy.beam");
@@ -129,10 +129,17 @@ fn grants_a_requested_capability_with_an_erlang_and_an_elixir_policy() {
     assert_eq!(pbeam("granted", "erl_policy").unwrap(), granted);
     assert_eq!(pbeam("granted", "Elixir.ElixirPolicy").unwrap(), granted);
     assert_eq!(erts("granted"), "{string,{error,undef},[string,string]}");
-    // A run with the default policy has no policy process, so a request is
+    // A run with a Rust policy has no policy process, so a request is
     // denied at once, and each other call keeps its ERTS result.
-    let default = program().execute("policy_probe", "granted", &[]).unwrap();
-    assert_eq!(text(&default), "{string,denied,[string,string]}");
+    let program = program();
+    let host = program
+        .execute_with_policy("policy_probe", "granted", &[], &AllowAll)
+        .unwrap();
+    assert_eq!(text(&host), "{string,denied,[string,string]}");
+    // A run with no policy skips each check, so a request returns ok and
+    // calls no policy code.
+    let unchecked = program.execute("policy_probe", "granted", &[]).unwrap();
+    assert_eq!(text(&unchecked), "{string,ok,[string,string]}");
 }
 
 #[test]

@@ -1283,8 +1283,28 @@ pub(crate) enum BinarySegment {
         unit: u64,
         source: Operand,
     },
-    /// A segment that PBeam does not run yet: an `integer`, `float`,
-    /// `utf8`, `utf16`, `utf32`, or `private_append` segment, an `append`
+    /// An `integer` segment: the integer in `source`, in `size` times
+    /// `unit` bits. `little` is true when the flags hold `little` or
+    /// `native`: the JIT loads `native` as `little` (`bs_get_flags`,
+    /// jit/beam_jit_bs.cpp:255-285). The compiler writes a literal or a
+    /// register `size`, and the unit 1 for a literal size. Example:
+    /// `[0x72, 0x10, 0x10, 0x02, 0x03, 0x81]` is
+    /// `{atom,integer},1,1,nil,{x,0},{integer,8}` when atom 7 is `integer`.
+    Integer {
+        segment: u64,
+        unit: u64,
+        little: bool,
+        source: Operand,
+        size: Operand,
+    },
+    /// A `utf8` segment: the UTF-8 bytes of the code point in `source`.
+    /// The compiler writes the unit 0 and the size `undefined`. Example:
+    /// `[0x82, 0x10, 0x00, 0x02, 0x03, 0x92]` is
+    /// `{atom,utf8},1,0,nil,{x,0},{atom,undefined}` when atom 8 is `utf8`
+    /// and atom 9 is `undefined`.
+    Utf8 { segment: u64, source: Operand },
+    /// A segment that PBeam does not run yet: a `float`, `utf16`, `utf32`,
+    /// or `private_append` segment, an `append`
     /// segment that is not the first segment or has a size other than
     /// `all`, or a `binary` segment with another size or unit. It holds
     /// the segment type. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x81]` is
@@ -2168,7 +2188,7 @@ fn read_binary_segments(
             let kind = atom_at(atoms, read_operand(data, cursor, TAG_ATOM)? as usize)?.clone();
             let segment = read_operand(data, cursor, TAG_UNSIGNED)?;
             let unit = read_operand(data, cursor, TAG_UNSIGNED)?;
-            let _flags = read_move_operand(data, cursor, atoms, literals)?;
+            let flags = read_move_operand(data, cursor, atoms, literals)?;
             if kind.name() == "string" {
                 let offset = read_operand(data, cursor, TAG_UNSIGNED)?;
                 let length = read_operand(data, cursor, TAG_INTEGER)?;
@@ -2196,10 +2216,35 @@ fn read_binary_segments(
                         source,
                     }
                 }
+                _ if kind.name() == "integer" => BinarySegment::Integer {
+                    segment,
+                    unit,
+                    little: is_little_endian(&flags),
+                    source,
+                    size,
+                },
+                _ if kind.name() == "utf8" => BinarySegment::Utf8 { segment, source },
                 _ => BinarySegment::Unsupported(kind),
             })
         })
         .collect()
+}
+
+/// Return true when the `Flags` operand of a `bs_create_bin` segment is a
+/// list that holds the atom `little` or `native`. The ERTS JIT reads both
+/// as `BSF_LITTLE` and ignores `signed` for construction (`bs_get_flags`,
+/// jit/beam_jit_bs.cpp:255-285).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_little_endian(&Operand::Value(Term::List(vec![Term::static_atom("native")]))));
+/// assert!(!is_little_endian(&Operand::Value(Term::List(Vec::new()))));
+/// ```
+fn is_little_endian(flags: &Operand) -> bool {
+    matches!(flags, Operand::Value(Term::List(items)) if items.iter().any(|item| {
+        matches!(item, Term::Atom(atom) if matches!(atom.name(), "little" | "native"))
+    }))
 }
 
 /// Read the extended list of `update_record`: an unsigned 1-based position

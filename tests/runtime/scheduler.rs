@@ -1,5 +1,5 @@
 use super::{CONTEXT_REDS, LinkId, MonitorOptions, MonitorTarget, Scheduler, Turn};
-use crate::runtime::capability::{AllowAll, Capability, Policy};
+use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
 use crate::runtime::host::output::{IovecWrite, IovecWritten};
 use crate::term::test_atom;
@@ -72,6 +72,47 @@ fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.park_current();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
+}
+
+#[test]
+fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
+    let kinds = [
+        CapabilityKind::Process,
+        CapabilityKind::Terminal,
+        CapabilityKind::Port,
+        CapabilityKind::Env,
+        CapabilityKind::Signal,
+        CapabilityKind::Runtime,
+        CapabilityKind::PersistentTerm,
+    ];
+    // With the checks, a root process with no capability cannot spawn.
+    let mut checked = Scheduler::new(AtomTable::new());
+    assert!(!checked.skips_checks());
+    checked.start(frame(), vec![], Vec::new()).unwrap();
+    checked.schedule_next().unwrap();
+    let spawn = checked.spawn(Start::Entry(frame()), vec![], true, true, false, None);
+    assert_eq!(spawn.unwrap().err(), Some(Denied));
+    assert_eq!(
+        checked.revoke_given(ProcessId(9), CapabilityKind::Env),
+        Err(Denied)
+    );
+    // Without the checks, it spawns with a monitor and a link, the child
+    // gets no copy, and a revocation has no effect.
+    let mut scheduler = Scheduler::without_checks(AtomTable::new());
+    assert!(scheduler.skips_checks());
+    scheduler.start(frame(), vec![], Vec::new()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let (child, monitor) = scheduler
+        .spawn(Start::Entry(frame()), vec![], true, true, false, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(child, ProcessId(1));
+    assert!(monitor.is_some());
+    assert_eq!(scheduler.revoke_given(child, CapabilityKind::Env), Ok(()));
+    for id in [ProcessId(0), child] {
+        let security = &scheduler.processes[&id].security;
+        assert!(kinds.iter().all(|&kind| security.ids(kind).is_empty()));
+    }
 }
 
 #[test]

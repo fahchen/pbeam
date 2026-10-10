@@ -58,12 +58,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path loads a local fun literal, calls one of the three BIFs, or formats a fun.
 - **Source:** PR #120 (#109).
 
-### Run `erlang:'-'/1` (was #128)
-
-- The measured M2 paths do not run it (pinned ERTS call trace and line counters). #110 removed it. The `is_eq` test of the same task landed in PR #189 (#183), and the `is_float` test is task #167. A negation of a value that is not a literal, such as `-X`, compiles to a `gc_bif` call of `erlang:'-'/1` and returns `unresolved external MFA erlang:-/1` (row "Unimplemented BIFs").
-- **Trigger:** a measured consumer negates a value that is not a literal.
-- **Source:** review of PR #121 (#110).
-
 ## Runtime
 
 ### Run `code:ensure_loaded/1` as ERTS does
@@ -147,8 +141,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Write the output in a locale whose codeset is not UTF-8
 
-- In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1` (prim_tty.erl:1309-1321), which PBeam runs as ERTS does. Thus PBeam writes ASCII output as ERTS does. Output that is not ASCII calls `binary_to_latin1/2`, which builds each character with `char_to_latin1/2` (prim_tty.erl:1323-1330). #269 runs the `string` and `binary` segments of `bs_create_bin`. `char_to_latin1/2` also needs the `integer` segment of `bs_create_bin` (prim_tty.erl:1329-1330) and `erlang:integer_to_binary/2` (prim_tty.erl:1325-1328). PBeam stops with `unsupported bs_create_bin segment integer` and status 1 (measured with `IO.puts/1` of the UTF-8 binary of `é`). ERTS writes the Latin-1 output with status 0. The "Boot" row records this.
-- The work: the `integer` segment of `bs_create_bin` and `erlang:integer_to_binary/2` for `char_to_latin1/2`.
+- In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1` (prim_tty.erl:1309-1321), which PBeam runs as ERTS does. Thus PBeam writes ASCII output as ERTS does. Output that is not ASCII calls `binary_to_latin1/2`, which builds each character with `char_to_latin1/2` (prim_tty.erl:1323-1330). #269 runs the `string` and `binary` segments of `bs_create_bin`, and #397 runs the `integer` segment (prim_tty.erl:1329-1330). Thus PBeam writes `é` to a pipe as ERTS does. `char_to_latin1/2` also needs `erlang:integer_to_binary/2` for a character of 512 or more, and for a character of 128 or more when its second argument is `true` (prim_tty.erl:1325-1328). PBeam stops with `unresolved external MFA erlang:integer_to_binary/2` and status 1 (measured with `io:put_chars/1` of the UTF-8 binary of `中`, with `LC_ALL=C` and `TERM=dumb`, to a pipe). ERTS writes `\x{4E2D}` with status 0. The "Boot" row records this.
+- The work: `erlang:integer_to_binary/2` for `char_to_latin1/2`.
 - **Trigger:** a supported run that writes output that is not ASCII in a locale whose codeset is not UTF-8, for example a macOS shell with `LANG`, `LC_ALL`, and `LC_CTYPE` unset.
 - **Source:** "Boot" row (#139, #183, #219, #269).
 
@@ -157,7 +151,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
   - Timers: `erlang:start_timer/4`, `erlang:send_after/3,4`, `erlang:cancel_timer/1`, and `erlang:read_timer/1,2`. `erlang:start_timer/3` and `erlang:cancel_timer/2` already use the timer list of #150 (PR #172).
   - Aliases: `erlang:alias/1`, which `erlang:alias/0` calls, and `erlang:unalias/1`.
-  - Equality: `erlang:'=='/2` and `erlang:'/='/2`. They give other results than `=:=` and `=/=` only for floats (see "Add float terms").
+  - Equality: `erlang:'/='/2`. It gives other results than `=/=` only for floats (see "Add float terms").
   - Persistent terms: `persistent_term:erase/1`, `persistent_term:put_new/2`, and `persistent_term:info/0`.
   - Signals: `erlang:exit/3`.
   - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
@@ -395,6 +389,45 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Reason:** no policy module and no test revokes yet.
 - **Trigger:** a policy that must take back a run-time grant, for example an audit rule of #338.
 - **Source:** implementation of #337.
+
+### Limit the targets of `process` `send`
+
+- After #370, the `process` capability with `send` permits a send to each process: the send path checks the operation only (`deliver_to` in `src/runtime/interpreter/bif/erlang.rs`). It has no constraint field.
+- **Option:** a constraint of the targets, for example the pids of the own tree or the registered names of a list.
+- **Reason:** the owner decided an all-or-nothing `send` in Suikou review 01a12608 and put a target constraint in the backlog. No consumer limits the targets yet.
+- **Trigger:** a policy that must keep a guest from a send to a process outside its group, for example an audit rule of #338.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Add a `name` capability kind
+
+- After #368, `erlang:register/2`, `erlang:unregister/1`, and `erlang:whereis/1` are `ambient` in `docs/effect-inventory.md`. A send or a monitor by name checks only the `process` capability.
+- **Option:** a `name` kind with the operations `register` and `lookup` and the constraint field `names`.
+- **Reason:** the owner decided not to add the kind until a consumer needs it (Suikou review 01a12608).
+- **Trigger:** a policy that must limit the names that a guest registers or finds.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Add an `ets` capability kind
+
+- After #368, each `ets` BIF is `ambient` in `docs/effect-inventory.md`. The access mode of a table (`private`, `protected`, or `public`) controls the access, as on ERTS.
+- **Option:** an `ets` kind for the creation of a table, with a constraint of the names of named public tables.
+- **Reason:** the owner decided that ETS has no check until a consumer needs one (Suikou review 01a12608).
+- **Trigger:** a policy that must limit the tables that a guest makes or the public tables that it uses.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Add a `clock` capability kind for a deterministic sandbox
+
+- After #368, `erlang:monotonic_time/1` and `os:system_time/1` are `ambient` in `docs/effect-inventory.md`. A clock is a source of nondeterminism, not an authority, and OTP code reads clocks often, also in the process of the caller.
+- **Option:** a `clock` kind that a deterministic sandbox holds back, or a run clock that the launcher gives.
+- **Reason:** no consumer needs a deterministic run yet.
+- **Trigger:** a sandbox that must give the same result for each run of the same input.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Check `erlang:list_to_pid/1` when it is implemented
+
+- `erlang:list_to_pid/1` is not implemented. It makes a pid of any process from text, also of the policy process, so it must have a check. The decisions of #337 also say that the task that implements it must keep the policy process out or check `process` `exit_other` for trusted processes (section "Policy module, policy process, and policy table" of `docs/capability-security-migration.md`).
+- **Reason:** the owner put the check in the backlog in Suikou review 01a12608, because the BIF has no implementation yet.
+- **Trigger:** the task that implements `erlang:list_to_pid/1`.
+- **Source:** Suikou review 01a12608 (#368).
 
 ## Tests and tooling
 

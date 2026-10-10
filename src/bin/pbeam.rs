@@ -21,9 +21,16 @@ struct Cli {
     #[arg(value_name = "ATOM")]
     arguments: Vec<String>,
     /// A loaded policy module, which exports `initial/1` and `grant/3`.
-    /// Without it, the root process gets all capabilities.
+    /// Each effect entry then checks the capabilities of its caller.
+    /// Without it, the run skips each capability check.
     #[arg(long, value_name = "MODULE")]
     policy: Option<String>,
+    /// Skip each capability check, as a run without `--policy` does. It
+    /// cannot be used with `--policy`.
+    // The run reads no value: a run without `--policy` skips the checks,
+    // and `clap` rejects the flag with `--policy`.
+    #[arg(long = "no-capability-checks", conflicts_with = "policy")]
+    _no_capability_checks: bool,
     /// BEAM files to load, after `--`.
     #[arg(value_name = "BEAM_FILE", required = true, num_args = 1.., last = true)]
     beam_files: Vec<PathBuf>,
@@ -87,7 +94,9 @@ impl From<String> for Exit {
 /// Set the signal dispositions of the ERTS emulator start, read and load
 /// the BEAM files, and run `Module:Function(Atoms...)` as the root process.
 /// With `--policy Policy`, the policy module `Policy` gives the
-/// capabilities (see [`BeamProgram::execute_with_policy_module`]).
+/// capabilities (see [`BeamProgram::execute_with_policy_module`]). Without
+/// it, and with `--no-capability-checks`, the run skips each capability
+/// check (see [`BeamProgram::execute`]).
 ///
 /// # Examples
 ///

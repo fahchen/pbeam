@@ -1622,6 +1622,83 @@ pub(super) fn int_rem(left: &Term, right: &Term) -> Result<BifResult, BeamError>
     })
 }
 
+/// The reductions that ERTS `bump_reds_linear` (`erl_arith.c:56-72`) uses
+/// for a bignum operation in the PBeam integer range: a bignum of one
+/// 64-bit digit needs fewer than `ERTS_ARITH_WORDS_PER_REDUCTION` (16,
+/// `global.h:1041`) heap words, so it costs `0 / 16 + 1`.
+const BIGNUM_OPERATION_REDUCTIONS: i32 = 1;
+
+/// Run `erlang:'-'/1`: return the negation of an integer, as ERTS
+/// `sminus_1` and `erts_unary_minus` (`erl_arith.c:107-110`,
+/// `erl_arith.c:509-567`) do. The JIT `gc_bif` `-`/1 calls the same
+/// `erts_unary_minus` for each operand that it does not negate inline
+/// (`jit/arm/instr_arith.cpp:224`, `280`). A small integer costs no
+/// reduction, also when its negation is the bignum 2^59. A bignum operand
+/// costs 1 reduction (`erl_arith.c:537-551`). An operand that is not a
+/// number raises `badarith`. PBeam has no float term.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// assert!(matches!(negate(&mut process, &Term::Integer(5))?, BifResult::Value(Term::Integer(-5))));
+/// assert_eq!(process.fcalls, 10);
+/// negate(&mut process, &Term::Integer(1 << 59))?;
+/// assert_eq!(process.fcalls, 9);
+/// assert!(matches!(negate(&mut process, &Term::static_atom("a"))?, BifResult::Raise { .. }));
+/// assert!(negate(&mut process, &Term::Integer(i64::MIN)).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for `-(2^63)`, whose negation is outside the
+/// `i64` range, where ERTS makes a bignum.
+pub(super) fn negate(process: &mut ProcessState, term: &Term) -> Result<BifResult, BeamError> {
+    let Term::Integer(value) = term else {
+        return Ok(BifResult::badarith());
+    };
+    // ponytail: a result outside i64 needs a bignum term; see "Integer range" in docs/erts-differences.md.
+    let result = value.checked_neg().ok_or_else(|| {
+        error(format!(
+            "unsupported erlang:-/1 result of {value}: needs a bignum"
+        ))
+    })?;
+    if term.small_integer().is_none() {
+        process.bump_reductions(BIGNUM_OPERATION_REDUCTIONS);
+    }
+    Ok(Value(Term::Integer(result)))
+}
+
+/// Run `erlang:'band'/2`: return the bitwise and of two integers, as ERTS
+/// `band_2` and `erts_band` (`erl_arith.c:164-170`,
+/// `erl_arith.c:1252-1278`) do. The JIT `gc_bif` `band` calls the same
+/// `erts_band` for operands that are not both small integers
+/// (`jit/arm/instr_arith.cpp:1168`, `1236`). Two small integers cost no
+/// reduction. A bignum operand costs 1 reduction, also when the result is
+/// a small integer (`erl_arith.c:1276`). An operand that is not an integer
+/// raises `badarith`. The result of two `i64` values is an `i64` value.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 10;
+/// let result = band(&mut process, &Term::Integer(12), &Term::Integer(10));
+/// assert!(matches!(result, BifResult::Value(Term::Integer(8))));
+/// assert_eq!(process.fcalls, 10);
+/// band(&mut process, &Term::Integer(1 << 59), &Term::Integer(-1));
+/// assert_eq!(process.fcalls, 9);
+/// assert!(matches!(band(&mut process, &Term::Integer(1), &Term::static_atom("a")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn band(process: &mut ProcessState, left: &Term, right: &Term) -> BifResult {
+    let (Term::Integer(left_value), Term::Integer(right_value)) = (left, right) else {
+        return BifResult::badarith();
+    };
+    if left.small_integer().is_none() || right.small_integer().is_none() {
+        process.bump_reductions(BIGNUM_OPERATION_REDUCTIONS);
+    }
+    Value(Term::Integer(left_value & right_value))
+}
+
 /// Convert `value`, a time in the native unit, to `unit` with
 /// [`time::time_unit_conversion`], as `erlang:monotonic_time/1` and
 /// `os:system_time/1` do (`erl_time_sup.c:2268-2350`). A converted time
