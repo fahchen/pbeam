@@ -21,7 +21,6 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
-
 ## 20261010: Record deferred wake limits with triggers
 
 **Problem:** A cross-thread revocation could remain queued while the scheduler waited on an idle host event source.
@@ -33,6 +32,7 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Guardrail:** When concurrency work is deferred, document its observable limit and the condition that requires the follow-up mechanism.
 
 **Reference:** <https://github.com/fahchen/pbeam/pull/357#issuecomment-6097751596>
+
 ## 20261010: Preserve descendant revocation after holder exit
 
 **Problem:** A delegation chain could lose the record needed to revoke a surviving descendant when an intermediate holder exited.
