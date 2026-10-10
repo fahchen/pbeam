@@ -5,7 +5,11 @@
 //! the oracle of each denial, which ERTS does not have. The default policy
 //! gives the pinned ERTS results.
 
-use std::{collections::BTreeSet, process::Command};
+use std::{
+    collections::BTreeSet,
+    ffi::CStr,
+    process::{Command, Stdio},
+};
 
 use pbeam_runtime::{
     AllowAll, BeamError, BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy,
@@ -31,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 31] = [
+const PROBES: [(&str, &str, &str); 36] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -55,6 +59,7 @@ const PROBES: [(&str, &str, &str); 31] = [
         "port_command",
     ),
     ("erts_internal:port_close/1", "port:close", "port_close"),
+    ("erts_internal:port_info/1", "port:inspect", "port_info"),
     ("os:getenv/1", "env:read", "getenv"),
     ("os:set_signal/2", "signal:handle", "handle_signal"),
     ("os:set_signal/2", "signal:ignore", "ignore_signal"),
@@ -62,7 +67,11 @@ const PROBES: [(&str, &str, &str); 31] = [
     ("persistent_term:get/1", "persistent_term:read", "pt_get1"),
     ("persistent_term:get/2", "persistent_term:read", "pt_get2"),
     ("persistent_term:put/2", "persistent_term:write", "pt_put"),
+    ("prim_tty:isatty/1", "terminal:query", "isatty"),
     ("prim_tty:read_nif/3", "terminal:read", "read_nif"),
+    ("prim_tty:setlocale/1", "terminal:setup", "setlocale"),
+    ("prim_tty:setupterm_nif/0", "terminal:setup", "setupterm"),
+    ("prim_tty:tty_create/1", "terminal:query", "tty_create"),
     ("prim_tty:tty_init/2", "terminal:raw_mode", "tty_init"),
     ("prim_tty:tty_select/2", "terminal:read", "tty_select"),
     (
@@ -84,7 +93,7 @@ impl Policy for Grants {
 
 /// The kind and the operation of each `kind:operation` name of the
 /// inventory.
-const OPERATIONS: [(&str, CapabilityKind, Operation); 21] = [
+const OPERATIONS: [(&str, CapabilityKind, Operation); 24] = [
     ("process:spawn", CapabilityKind::Process, Operation::Spawn),
     ("process:link", CapabilityKind::Process, Operation::Link),
     (
@@ -110,9 +119,12 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 21] = [
         CapabilityKind::Terminal,
         Operation::WindowSize,
     ),
+    ("terminal:setup", CapabilityKind::Terminal, Operation::Setup),
+    ("terminal:query", CapabilityKind::Terminal, Operation::Query),
     ("port:spawn", CapabilityKind::Port, Operation::Spawn),
     ("port:command", CapabilityKind::Port, Operation::Command),
     ("port:close", CapabilityKind::Port, Operation::Close),
+    ("port:inspect", CapabilityKind::Port, Operation::Inspect),
     ("env:read", CapabilityKind::Env, Operation::Read),
     ("env:write", CapabilityKind::Env, Operation::Write),
     ("signal:handle", CapabilityKind::Signal, Operation::Handle),
@@ -383,12 +395,30 @@ fn needs_both_signal_operations_for_the_default_disposition() {
 /// with the stand-in `prim_tty`. The load of the stand-in stops the
 /// standard output of ERTS, so the result goes through a file.
 fn erts_with_stand_in(function: &str) -> String {
+    erts_result(function, |_| {})
+}
+
+/// Return the `~w` text of `effect_probe:Function()` on the pinned ERTS, as
+/// [`erts_with_stand_in`] does, with the standard input and output of the
+/// test process. Thus ERTS sees the same fd 0 and fd 1 as the PBeam run in
+/// the test process.
+fn erts_with_standard_streams(function: &str) -> String {
+    erts_result(function, |command| {
+        command.stdin(Stdio::inherit()).stdout(Stdio::inherit());
+    })
+}
+
+/// Return the `~w` text of `effect_probe:Function()` on the pinned ERTS
+/// with the stand-in `prim_tty`, after `configure` changes the `erl`
+/// command.
+fn erts_result(function: &str, configure: impl FnOnce(&mut Command)) -> String {
     let root = std::env::current_dir().unwrap();
     let result = std::env::temp_dir().join(format!(
         "effect_probe_{function}_{}.txt",
         std::process::id()
     ));
-    let output = Command::new("erl")
+    let mut command = Command::new("erl");
+    command
         .args([
             "+S",
             "1",
@@ -405,9 +435,9 @@ fn erts_with_stand_in(function: &str) -> String {
                 result.display()
             ),
         ])
-        .current_dir(std::env::temp_dir())
-        .output()
-        .unwrap();
+        .current_dir(std::env::temp_dir());
+    configure(&mut command);
+    let output = command.output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let text = std::fs::read_to_string(&result).unwrap();
     std::fs::remove_file(&result).unwrap();
@@ -626,5 +656,148 @@ fn keeps_the_persistent_terms_after_a_denied_put() {
             tuple(&[denied.clone(), atom(&program, "none")]),
             tuple(&[denied, Term::Integer(1)]),
         ])
+    );
+}
+
+/// Return a term as `io:format("~w")` prints it, for the atoms and the
+/// tuples of the terminal probe results.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(text(&Term::List(vec![Term::static_atom("ok")])), "[ok]");
+/// ```
+fn text(term: &Term) -> String {
+    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+    match term {
+        Term::Atom(atom) => atom.name().to_owned(),
+        Term::List(terms) => format!("[{}]", join(terms)),
+        Term::Tuple(terms) => format!("{{{}}}", join(terms)),
+        other => panic!("unexpected term {other:?}"),
+    }
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_terminal_setup_and_queries() {
+    // The results of `isatty/1` and `setupterm_nif/0` depend on the
+    // standard streams and on `TERM`, so ERTS runs with the streams and the
+    // environment of this test process.
+    let program = program();
+    let policy = grants(
+        CapabilityKind::Terminal,
+        &[Operation::Setup, Operation::Query],
+        Constraint::Any,
+    );
+    let pbeam = text(&run(&program, "terminal_permitted", &policy));
+    assert_eq!(
+        format!("{pbeam}\n"),
+        erts_with_standard_streams("terminal_permitted")
+    );
+    assert!(pbeam.contains(",reference,"), "{pbeam}");
+}
+
+#[test]
+fn checks_the_terminal_fds_before_the_capability() {
+    let program = program();
+    let policy = grants(CapabilityKind::Terminal, &[], Constraint::Any);
+    let badargs = Term::List(vec![atom(&program, "badarg"); 3]);
+    assert_eq!(run(&program, "terminal_badargs", &policy), badargs);
+    assert_eq!(
+        erts_with_stand_in("terminal_badargs"),
+        "[badarg,badarg,badarg]\n"
+    );
+}
+
+/// Return the `LC_CTYPE` locale of the test process.
+fn ctype_locale() -> String {
+    // SAFETY: a null locale only reads the current locale, and the result
+    // is a NUL-terminated string that stays valid until the next locale
+    // call.
+    unsafe {
+        CStr::from_ptr(libc::setlocale(libc::LC_CTYPE, std::ptr::null()))
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[test]
+fn keeps_the_locale_after_a_denied_setlocale() {
+    // No test of this file permits `prim_tty:setlocale/1`, so the locale
+    // stays the C start locale of the process. A permitted call sets it from
+    // `LANG`.
+    let program = program();
+    let policy = without((CapabilityKind::Terminal, Operation::Setup));
+    assert_eq!(
+        run(&program, "setlocale", &policy),
+        atom(&program, "denied")
+    );
+    assert_eq!(ctype_locale(), "C");
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_port_information() {
+    let program = program();
+    let atom = |name| atom(&program, name);
+    let item = |key, value| tuple(&[atom(key), value]);
+    let expected = Term::List(vec![
+        atoms(
+            &program,
+            &[
+                "name",
+                "links",
+                "id",
+                "connected",
+                "input",
+                "output",
+                "os_pid",
+            ],
+        ),
+        item(
+            "name",
+            Term::List(
+                b"/bin/cat"
+                    .iter()
+                    .map(|&byte| Term::Integer(byte.into()))
+                    .collect(),
+            ),
+        ),
+        atom("true"),
+        atom("true"),
+        item("input", Term::Integer(0)),
+        item("output", Term::Integer(0)),
+    ]);
+    let policy = grants(
+        CapabilityKind::Port,
+        &[Operation::Spawn, Operation::Inspect],
+        only(&["/bin/cat"]),
+    );
+    assert_eq!(run(&program, "inspect_permitted", &policy), expected);
+    assert_eq!(
+        erts_with_stand_in("inspect_permitted"),
+        "[[name,links,id,connected,input,output,os_pid],\
+         {name,[47,98,105,110,47,99,97,116]},true,true,{input,0},{output,0}]\n"
+    );
+}
+
+#[test]
+fn gives_undefined_for_a_closed_port_without_inspect() {
+    let program = program();
+    let policy = without((CapabilityKind::Port, Operation::Inspect));
+    assert_eq!(
+        run(&program, "inspect_closed", &policy),
+        atoms(&program, &["undefined", "undefined"])
+    );
+    assert_eq!(
+        erts_with_stand_in("inspect_closed"),
+        "[undefined,undefined]\n"
+    );
+}
+
+#[test]
+fn compares_the_program_name_of_a_port_for_its_information() {
+    let program = program();
+    assert_eq!(
+        run(&program, "inspect_names", &AllowAll),
+        atoms(&program, &["ok", "denied"])
     );
 }

@@ -8,6 +8,7 @@
     open_port/0,
     port_command/0,
     port_close/0,
+    port_info/0,
     getenv/0,
     handle_signal/0,
     ignore_signal/0,
@@ -17,6 +18,10 @@
     tty_select/0,
     tty_init/0,
     tty_window_size/0,
+    isatty/0,
+    tty_create/0,
+    setlocale/0,
+    setupterm/0,
     halt_run/0,
     system_flag/0,
     load_nif/0,
@@ -47,6 +52,11 @@
     timer_kept/0,
     persistent_term_permitted/0,
     persistent_term_kept/0,
+    terminal_permitted/0,
+    terminal_badargs/0,
+    inspect_permitted/0,
+    inspect_closed/0,
+    inspect_names/0,
     child/2,
     names/0,
     executables/0,
@@ -81,6 +91,10 @@ port_close() ->
     Port = cat(),
     attempt(fun() -> erlang:port_close(Port) end).
 
+port_info() ->
+    Port = cat(),
+    attempt(fun() -> erlang:port_info(Port) end).
+
 getenv() -> attempt(fun() -> os:getenv("PBEAM_EFFECT_PROBE") end).
 
 handle_signal() -> attempt(fun() -> os:set_signal(sigusr2, handle) end).
@@ -109,6 +123,16 @@ tty_init() ->
 tty_window_size() ->
     {ok, TTY} = prim_tty:tty_create(stdout),
     attempt(fun() -> prim_tty:tty_window_size(TTY) end).
+
+isatty() -> attempt(fun() -> prim_tty:isatty(stdout) end).
+
+tty_create() -> attempt(fun() -> prim_tty:tty_create(stdout) end).
+
+%% A permitted setlocale/1 sets the locale of the OS process. The NIF does
+%% not read its argument.
+setlocale() -> attempt(fun() -> prim_tty:setlocale(tty) end).
+
+setupterm() -> attempt(fun() -> prim_tty:setupterm_nif() end).
 
 %% A permitted halt stops the run with the status 3.
 halt_run() -> attempt(fun() -> erlang:halt(3, []) end).
@@ -226,6 +250,61 @@ persistent_term_kept() ->
     Change = restricted(persistent_term, fun() -> persistent_term:put(Key, 2) end),
     [{New, Absent}, {Change, persistent_term:get(Key)}].
 
+%% Permitted terminal queries and setup. The results depend on the standard
+%% streams and on TERM, so the test compares them with an ERTS run that has
+%% the same streams and environment. The probe does not call setlocale/1,
+%% which changes the locale of the OS process. ERTS needs the load of the
+%% NIF library, which can give a reload error.
+terminal_permitted() ->
+    _ = prim_tty:load("prim_tty"),
+    {ok, TTY} = prim_tty:tty_create(stdout),
+    [
+        prim_tty:isatty(stdin),
+        prim_tty:isatty(stdout),
+        reference(TTY),
+        prim_tty:setupterm_nif()
+    ].
+
+%% The fd checks come before the terminal capability check.
+terminal_badargs() ->
+    _ = prim_tty:load("prim_tty"),
+    [
+        badarg(fun() -> prim_tty:isatty(foo) end),
+        badarg(fun() -> prim_tty:tty_create(stdin) end),
+        badarg(fun() -> prim_tty:tty_create(foo) end)
+    ].
+
+%% A permitted port_info/1 of an open port. The id and the OS pid change
+%% from run to run, so the probe gives only their keys.
+inspect_permitted() ->
+    Port = cat(),
+    Info = erlang:port_info(Port),
+    Self = self(),
+    [
+        [Key || {Key, _} <- Info],
+        lists:keyfind(name, 1, Info),
+        lists:keyfind(links, 1, Info) =:= {links, [Self]},
+        lists:keyfind(connected, 1, Info) =:= {connected, Self},
+        lists:keyfind(input, 1, Info),
+        lists:keyfind(output, 1, Info)
+    ].
+
+%% A closed port and an atom give undefined with no check.
+inspect_closed() ->
+    Port = cat(),
+    true = erlang:port_close(Port),
+    [erlang:port_info(Port), erlang:port_info(effect_probe_nobody)].
+
+%% The `executables` constraint of `port` compares the program name of the
+%% port for port_info/1, also for a port of another process.
+inspect_names() ->
+    Port = cat(),
+    Info = fun() -> erlang:port_info(Port) end,
+    [
+        in_child(#{port => #{executables => ["/bin/cat"]}, process => #{}}, Info),
+        in_child(#{port => #{executables => ["/bin/sh"]}, process => #{}}, Info)
+    ].
+
 %% Permitted process calls that give the same result on ERTS.
 process_permitted() ->
     [link_kept(), monitor_kept(), exit_kept(), exit_self(), send_kept(), timer_kept()].
@@ -333,9 +412,16 @@ stop() ->
 
 id(Term) -> Term.
 
+%% A guard test, so the compiler does not call erlang:is_reference/1.
+reference(Term) when is_reference(Term) -> reference;
+reference(_) -> other.
+
 %% Run Call in a child whose capability of Kind permits no operation.
 restricted(Kind, Call) ->
-    Capabilities = #{Kind => #{operations => []}, process => #{}},
+    in_child(#{Kind => #{operations => []}, process => #{}}, Call).
+
+%% Run Call in a child with the capabilities option Capabilities.
+in_child(Capabilities, Call) ->
     erlang:spawn_opt(?MODULE, child, [self(), Call], [{capabilities, Capabilities}]),
     receive
         {child, Result} -> Result

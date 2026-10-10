@@ -611,17 +611,27 @@ fn port_denial(
 /// owner, and `id` is the port number. A port
 /// that closed and an atom give `undefined`; each other term gives the atom
 /// `badarg`. The result traps to `erlang:bif_handle_signals_return/2` when
-/// the caller has incoming signals.
+/// the caller has incoming signals. For an open port, a caller without a
+/// `port` capability with `inspect` that permits the program path of the
+/// port gets `error:capability_denied`, and the BIF uses no reduction and
+/// reads no information.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = port_info(&mut context, &Term::Port(port));
+/// let result = port_info(&mut context, &Term::Port(port))?;
 /// ```
-pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let info = match (port, open_port_id(scheduler, port)) {
         (_, Some(id)) => {
+            if let Some(denied) = port_denial(scheduler, id, Operation::Inspect)? {
+                return Ok(denied);
+            }
             scheduler
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
@@ -662,5 +672,5 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> BifResult 
         (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
         (_, None) => Term::static_atom("badarg"),
     };
-    signals_return(scheduler, port, info)
+    Ok(signals_return(scheduler, port, info))
 }

@@ -404,7 +404,7 @@ bifs! {
     erts_internal:port_command/3 => |cx, [port, data, options]| erts_internal::port_command(cx, port, data, options),
     erts_internal:port_connect/2 => unsupported,
     erts_internal:port_control/3 => unsupported,
-    erts_internal:port_info/1 => |cx, [port]| Ok(erts_internal::port_info(cx, port)),
+    erts_internal:port_info/1 => |cx, [port]| erts_internal::port_info(cx, port),
     erts_internal:port_info/2 => unsupported,
     erts_internal:prepare_loading/2 => unsupported,
     erts_internal:process_display/2 => unsupported,

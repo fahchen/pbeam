@@ -27,9 +27,11 @@ pub enum CapabilityKind {
     /// Processes: spawn, links, monitors, exit signals to other
     /// processes, and messages.
     Process,
-    /// The terminal: writes, reads, raw mode, and the window size.
+    /// The terminal: writes, reads, raw mode, the window size, the setup,
+    /// and the queries.
     Terminal,
-    /// Ports: the start of an external program, its commands, and its close.
+    /// Ports: the start of an external program, its commands, its close,
+    /// and its information.
     Port,
     /// The OS environment variables.
     Env,
@@ -66,10 +68,18 @@ pub enum Operation {
     RawMode,
     /// `terminal`: read the window size.
     WindowSize,
+    /// `terminal`: set up the terminal: read the terminfo entry, or set the
+    /// locale of the OS process.
+    Setup,
+    /// `terminal`: ask if a standard fd is a terminal, or make a TTY
+    /// resource.
+    Query,
     /// `port`: send a command to a port.
     Command,
     /// `port`: close a port.
     Close,
+    /// `port`: read the information of a port.
+    Inspect,
     /// `signal`: handle a host signal.
     Handle,
     /// `signal`: ignore a host signal.
@@ -128,13 +138,20 @@ const KINDS: [KindSpec; 7] = [
             Operation::Read,
             Operation::RawMode,
             Operation::WindowSize,
+            Operation::Setup,
+            Operation::Query,
         ],
         constraint: None,
     },
     KindSpec {
         kind: CapabilityKind::Port,
         name: "port",
-        operations: &[Operation::Spawn, Operation::Command, Operation::Close],
+        operations: &[
+            Operation::Spawn,
+            Operation::Command,
+            Operation::Close,
+            Operation::Inspect,
+        ],
         constraint: Some(("executables", NameForm::String)),
     },
     KindSpec {
@@ -164,7 +181,7 @@ const KINDS: [KindSpec; 7] = [
 ];
 
 /// The atom of each operation in the `{capabilities, Map}` option.
-const OPERATION_NAMES: [(Operation, &str); 16] = [
+const OPERATION_NAMES: [(Operation, &str); 19] = [
     (Operation::Spawn, "spawn"),
     (Operation::Link, "link"),
     (Operation::Monitor, "monitor"),
@@ -174,8 +191,11 @@ const OPERATION_NAMES: [(Operation, &str); 16] = [
     (Operation::Read, "read"),
     (Operation::RawMode, "raw_mode"),
     (Operation::WindowSize, "window_size"),
+    (Operation::Setup, "setup"),
+    (Operation::Query, "query"),
     (Operation::Command, "command"),
     (Operation::Close, "close"),
+    (Operation::Inspect, "inspect"),
     (Operation::Handle, "handle"),
     (Operation::Ignore, "ignore"),
     (Operation::Halt, "halt"),
@@ -235,8 +255,8 @@ impl Operation {
     /// assert_eq!(Operation::Spawn.bit(), 1);
     /// assert_eq!(Operation::Link.bit(), 2);
     /// ```
-    fn bit(self) -> u16 {
-        1 << self as u16
+    fn bit(self) -> u32 {
+        1 << self as u32
     }
 
     /// Return the operation set of `operations`.
@@ -246,7 +266,7 @@ impl Operation {
     /// ```rust,ignore
     /// assert_eq!(Operation::set(&[Operation::Spawn, Operation::Link]), 3);
     /// ```
-    fn set(operations: &[Operation]) -> u16 {
+    fn set(operations: &[Operation]) -> u32 {
         operations
             .iter()
             .fold(0, |set, operation| set | operation.bit())
@@ -327,7 +347,7 @@ pub struct Capability {
     /// The resource kind.
     kind: CapabilityKind,
     /// The permitted operations, one [`Operation::bit`] each.
-    operations: u16,
+    operations: u32,
     /// The constraint field of the kind. A kind without a constraint field
     /// has `Constraint::Any`.
     constraint: Constraint,
@@ -839,7 +859,7 @@ pub(super) struct Restriction {
     /// The kind of the capability that the restriction applies to.
     kind: CapabilityKind,
     /// The operations of the child copy, one [`Operation::bit`] each.
-    operations: Option<u16>,
+    operations: Option<u32>,
     /// The constraint of the child copy.
     constraint: Option<Constraint>,
     /// Whether the child can give its copy to its own children.
