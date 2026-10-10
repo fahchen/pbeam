@@ -84,10 +84,11 @@ get_argument1(_, []) -> [].
 
 %% Do the kernel part of kernel:start/2. Run logger:internal_init_logger/0
 %% (kernel.erl:37). Do not run os:internal_init_cmd_shell/0 (kernel.erl:38):
-%% it needs file:read_file_info/2, and only os:cmd/1,2 reads the shell that
-%% it puts in a persistent term (os.erl:602, 630-669). Start the kernel_sup
-%% children StdError, SigSrv, User, and LoggerSup in the order of
-%% kernel.erl:124-168 and 224-225. Then run
+%% only os:cmd/1,2 reads the shell that it puts in a persistent term
+%% (os.erl:602, 630-669). Start the kernel_sup children StdError, File,
+%% SigSrv, User, and LoggerSup in the order of kernel.erl:117-168, 188-194,
+%% and 222-225 for a node without -master. File is file_server_2, which
+%% file:read_file_info/1 and os:find_executable/1 call. Then run
 %% erl_signal_handler:start/0 and logger:add_handlers(kernel)
 %% (kernel.erl:41-42). Trap exits, as a supervisor does
 %% (supervisor.erl:950), and stay alive as the link parent of the servers.
@@ -98,6 +99,7 @@ kernel(Boot) ->
     process_flag(trap_exit, true),
     ok = logger:internal_init_logger(),
     {ok, StdError} = standard_error:start_link(),
+    {ok, File} = file_server:start_link(),
     {ok, SigSrv} = gen_event:start_link({local, erl_signal_server}),
     {ok, User} = user_sup:start(),
     {ok, LoggerSup} = logger_sup:start_link(),
@@ -108,7 +110,7 @@ kernel(Boot) ->
         {_Init, stop} ->
             [shutdown(Pid, Time)
              || {Pid, Time} <- [{LoggerSup, infinity}, {User, 2000}, {SigSrv, 2000},
-                                {StdError, 2000}]]
+                                {File, 2000}, {StdError, 2000}]]
     end.
 
 %% Shut down a child as supervisor:shutdown/1 does (supervisor.erl:1627-1656):

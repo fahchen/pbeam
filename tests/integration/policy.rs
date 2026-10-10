@@ -11,7 +11,7 @@ mod common;
 use std::process::Command;
 
 use common::pinned_beam;
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AllowAll, BeamProgram, Term};
 
 const POLICY_PROBE: &[u8] = include_bytes!("../../fixtures/policy/policy_probe.beam");
 const ERL_POLICY: &[u8] = include_bytes!("../../fixtures/policy/erl_policy.beam");
@@ -129,10 +129,17 @@ fn grants_a_requested_capability_with_an_erlang_and_an_elixir_policy() {
     assert_eq!(pbeam("granted", "erl_policy").unwrap(), granted);
     assert_eq!(pbeam("granted", "Elixir.ElixirPolicy").unwrap(), granted);
     assert_eq!(erts("granted"), "{string,{error,undef},[string,string]}");
-    // A run with the default policy has no policy process, so a request is
+    // A run with a Rust policy has no policy process, so a request is
     // denied at once, and each other call keeps its ERTS result.
-    let default = program().execute("policy_probe", "granted", &[]).unwrap();
-    assert_eq!(text(&default), "{string,denied,[string,string]}");
+    let program = program();
+    let host = program
+        .execute_with_policy("policy_probe", "granted", &[], &AllowAll)
+        .unwrap();
+    assert_eq!(text(&host), "{string,denied,[string,string]}");
+    // A run with no policy skips each check, so a request returns ok and
+    // calls no policy code.
+    let unchecked = program.execute("policy_probe", "granted", &[]).unwrap();
+    assert_eq!(text(&unchecked), "{string,ok,[string,string]}");
 }
 
 #[test]
@@ -226,5 +233,62 @@ fn needs_a_loaded_policy_module_with_both_callbacks() {
     assert_eq!(
         pbeam("granted", "policy_probe"),
         Err(String::from("missing export policy_probe:grant/3"))
+    );
+}
+
+#[test]
+fn revokes_a_run_time_grant_and_its_downstream_copies_from_the_policy_process() {
+    // The worker gets a delegable env grant and gives a copy to its child.
+    // The policy revokes the copy of the worker, and the revocation goes on
+    // to the child. A second revocation finds no copy and gives ok. On
+    // ERTS the request and the revocation raise undef, and each read has
+    // its effect.
+    assert_eq!(
+        pbeam("revoked", "erl_policy").unwrap(),
+        "{ok,[string,string],[ok,ok],[denied,denied]}"
+    );
+    assert_eq!(
+        erts("revoked"),
+        "{{error,undef},[string,string],[{error,undef},{error,undef}],[string,string]}"
+    );
+    // The worker exits before the revocation; its released record takes
+    // the revocation to its child.
+    assert_eq!(
+        pbeam("revoked_exited", "erl_policy").unwrap(),
+        "{ok,string,ok,denied}"
+    );
+    assert_eq!(
+        erts("revoked_exited"),
+        "{{error,undef},string,{error,undef},string}"
+    );
+}
+
+#[test]
+fn revokes_a_launcher_copy_of_the_root_process_from_the_policy_process() {
+    assert_eq!(
+        pbeam("revoked_root", "erl_policy").unwrap(),
+        "{pid,ok,denied}"
+    );
+    assert_eq!(erts("revoked_root"), "{pid,{error,undef},pid}");
+}
+
+#[test]
+fn lets_only_the_policy_process_call_policy_revoke() {
+    assert_eq!(
+        pbeam("revoke_denied", "erl_policy").unwrap(),
+        "[ok,denied,denied,{error,badarg},denied,{error,badarg},{error,badarg},ok,ok,string,pid]"
+    );
+    assert_eq!(
+        erts("revoke_denied"),
+        format!("[{},string,pid]", repeat("{error,undef}", 9))
+    );
+    // A run with no policy skips each check, so each call returns ok after
+    // its argument checks and has no effect.
+    let unchecked = program()
+        .execute("policy_probe", "revoke_denied", &[])
+        .unwrap();
+    assert_eq!(
+        text(&unchecked),
+        "[ok,ok,ok,{error,badarg},ok,ok,ok,ok,ok,string,pid]"
     );
 }

@@ -1,13 +1,12 @@
 use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
 use super::{
-    OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
-    OPCODE_BS_INIT_WRITABLE, OPCODE_BS_START_MATCH4, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV,
-    OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FSUB, OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS,
-    OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD,
-    OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
-    OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
-    OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
-    OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
+    OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
+    OPCODE_BS_INIT_WRITABLE, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
+    OPCODE_FSUB, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
+    OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
+    OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP,
+    OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
+    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, parse_code,
     read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
     read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
     skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
@@ -178,6 +177,52 @@ fn decodes_raise_with_a_raw_stack_trace_and_a_reason() {
             },
             Instruction::Raise {
                 trace: Operand::Y(0),
+                value: Operand::Value(Term::List(values)),
+            },
+            Instruction::End,
+        ] if values.is_empty()
+    ));
+}
+
+#[test]
+fn decodes_the_error_path_instructions() {
+    // Bytes of `fixtures/error_path/error_path_probe.beam`: `badmatch x0`,
+    // `badmatch y0`, `case_end x0`, `if_end`, `try_case_end x0`,
+    // `badrecord x0`, and `raw_raise`. ERTS also loads a literal source,
+    // such as `case_end nil` (`emu/ops.tab:273-282`).
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([
+        0x48, 0x03, 0x48, 0x04, 0x4A, 0x03, 0x49, 0x6B, 0x03, 0xB4, 0x03, 0xA1, 0x4A, 0x02, 0x03,
+    ]);
+    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::TaggedError {
+                tag: "badmatch",
+                value: Operand::X(0),
+            },
+            Instruction::TaggedError {
+                tag: "badmatch",
+                value: Operand::Y(0),
+            },
+            Instruction::TaggedError {
+                tag: "case_clause",
+                value: Operand::X(0),
+            },
+            Instruction::IfEnd,
+            Instruction::TaggedError {
+                tag: "try_clause",
+                value: Operand::X(0),
+            },
+            Instruction::TaggedError {
+                tag: "badrecord",
+                value: Operand::X(0),
+            },
+            Instruction::RawRaise,
+            Instruction::TaggedError {
+                tag: "case_clause",
                 value: Operand::Value(Term::List(values)),
             },
             Instruction::End,
@@ -540,6 +585,28 @@ fn decodes_the_is_eq_test_of_the_compare_probe_fixture() {
 }
 
 #[test]
+fn decodes_the_is_ne_test_of_the_compare_probe_fixture() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/compare/compare_probe.beam` has these bytes.
+    let is_ne = [0x2A, 0x0D, 0x1E, 0x03, 0x13]; // ne/2: is_ne f30 x0 x1
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([&is_ne[..], &[0x03]].concat());
+    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::TestNotEqual {
+                fail_label: 30,
+                left: Operand::X(0),
+                right: Operand::X(1),
+            },
+            Instruction::End,
+        ]
+    ));
+}
+
+#[test]
 fn decodes_the_bs_start_match3_test_of_the_binary_match_probe_fixture() {
     // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/binary_match/binary_match_probe.beam` has these bytes.
@@ -707,6 +774,94 @@ fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
             )
         ),
         "{instructions:?}"
+    );
+}
+
+#[test]
+fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs_get_probe() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/binary_match/bs_get_probe.beam` has the first four parts.
+    let parts: [&[u8]; 6] = [
+        // split/2: bs_start_match4 no_fail 2 x0 x0
+        &[0xAA, 0x32, 0x20, 0x03, 0x03],
+        // split/2: bs_get_binary2 f3 {tr,x0,1} 2 x1 8 0 x1
+        &[0x77, 0x35, 0x57, 0x03, 0x10, 0x20, 0x13, 0x80, 0x00, 0x13],
+        // split/2: bs_get_tail x0 x0 2
+        &[0xA5, 0x03, 0x03, 0x20],
+        // nibbles/2: bs_start_match4 resume 2 x0 x0
+        &[0xAA, 0xB2, 0x20, 0x03, 0x03],
+        // bs_start_match4 f5 2 x0 x1, which the ERTS loader also accepts
+        &[0xAA, 0x55, 0x20, 0x03, 0x13],
+        // bs_get_binary2 f3 x0 2 all 8 0 x1
+        &[0x77, 0x35, 0x03, 0x20, 0x42, 0x80, 0x00, 0x13],
+    ];
+    // Atom 3 is `no_fail`, 4 is `all`, and 11 is `resume`.
+    let mut table = AtomTable::new();
+    let atoms: Vec<Atom> = (1..=11)
+        .map(|index| match index {
+            3 => table.put("no_fail").unwrap(),
+            4 => table.put("all").unwrap(),
+            11 => table.put("resume").unwrap(),
+            _ => table.put(&format!("atom{index}")).unwrap(),
+        })
+        .collect();
+    let code = |parts: &[&[u8]]| {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend(parts.concat());
+        code.push(0x03);
+        code
+    };
+    let (instructions, _) = parse_code(&code(&parts), &atoms, &[], &[], &[], &[]).unwrap();
+    assert!(
+        matches!(
+            instructions.as_slice(),
+            [
+                Instruction::BinaryMatchStart {
+                    fail_label: 0,
+                    source: Operand::X(0),
+                    destination: Operand::X(0),
+                },
+                Instruction::BinaryGetBinary {
+                    fail_label: 3,
+                    context: Operand::X(0),
+                    size: Operand::X(1),
+                    unit: 8,
+                    destination: Operand::X(1),
+                },
+                Instruction::BinaryGetTail {
+                    context: Operand::X(0),
+                    destination: Operand::X(0),
+                },
+                Instruction::BinaryMatchResume {
+                    source: Operand::X(0),
+                    destination: Operand::X(0),
+                },
+                Instruction::BinaryMatchStart {
+                    fail_label: 5,
+                    source: Operand::X(0),
+                    destination: Operand::X(1),
+                },
+                Instruction::Unsupported(119),
+                Instruction::End,
+            ]
+        ),
+        "{instructions:?}"
+    );
+    // The ERTS loader has no form of `bs_start_match4` with another atom
+    // (jit/arm/ops.tab:1036-1052).
+    assert_eq!(
+        parse_code(
+            &code(&[&[0xAA, 0x12, 0x20, 0x03, 0x03]]),
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[]
+        )
+        .unwrap_err()
+        .to_string(),
+        "unsupported BEAM bs_start_match4 fail operand atom1"
     );
 }
 
@@ -1079,7 +1234,7 @@ fn decodes_the_list_record_and_receive_wait_instructions_of_pinned_gen_statem() 
                 label: 204,
                 source: Operand::Y(0),
             },
-            Instruction::Unsupported(OPCODE_RAW_RAISE),
+            Instruction::RawRaise,
             Instruction::End,
         ] if matches!(copy.as_slice(), [(5, Operand::Y(2))])
             && matches!(
@@ -1191,6 +1346,57 @@ fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction
     ));
     // Without its destination and the end, the instruction is truncated.
     code.truncate(code.len() - 2);
+    assert!(parse_code(&code, &[], &imports, &[], &[], &[]).is_err());
+}
+
+#[test]
+fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/binary_part/binary_part_probe.beam` has these bytes.
+    // guard/3: gc_bif3 f13 live 3 binary_part/3 x0 x1 x2 x0
+    let guard = [0x98, 0xD5, 0x30, 0x00, 0x03, 0x13, 0x23, 0x03];
+    // main/0: gc_bif3 f0 live 1 binary_part/3 y23 y22 x0 y22
+    let body = [
+        0x98, 0x05, 0x10, 0x00, 0x0C, 0x17, 0x0C, 0x16, 0x03, 0x0C, 0x16,
+    ];
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([&guard[..], &body, &[0x03]].concat());
+    let imports = vec![("erlang".to_owned(), "binary_part".to_owned(), 3)];
+    let (instructions, _) = parse_code(&code, &[], &imports, &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::Bif {
+                fail_label: 13,
+                module: guard_module,
+                name: guard_name,
+                arguments: guard_arguments,
+                destination: Operand::X(0),
+            },
+            Instruction::Bif {
+                fail_label: 0,
+                module: body_module,
+                name: body_name,
+                arguments: body_arguments,
+                destination: Operand::Y(22),
+            },
+            Instruction::End,
+        ] if guard_module == "erlang"
+            && guard_name == "binary_part"
+            && matches!(
+                guard_arguments.as_slice(),
+                [Operand::X(0), Operand::X(1), Operand::X(2)]
+            )
+            && body_module == "erlang"
+            && body_name == "binary_part"
+            && matches!(
+                body_arguments.as_slice(),
+                [Operand::Y(23), Operand::Y(22), Operand::X(0)]
+            )
+    ));
+    // Without its destination and the end, the instruction is truncated.
+    code.truncate(code.len() - 3);
     assert!(parse_code(&code, &[], &imports, &[], &[], &[]).is_err());
 }
 
@@ -1551,23 +1757,18 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
     for (opcode, count) in [
         (OPCODE_TEST_HEAP, 2),
         (OPCODE_BIF0, 2),
-        (OPCODE_TEST_NE, 3),
+        (OPCODE_TEST_EXACT_EQ, 3),
         (OPCODE_TEST_TAGGED_TUPLE, 4),
         (OPCODE_TEST_IS_MAP, 2),
-        (OPCODE_BADMATCH, 1),
-        (OPCODE_TRY_CASE_END, 1),
         (OPCODE_PUT_MAP_ASSOC, 5),
         (OPCODE_GET_RECORD_ELEMENTS, 3),
         (OPCODE_PUT_RECORD, 6),
         (OPCODE_PUT_TUPLE2, 2),
         (OPCODE_INIT_YREGS, 1),
         (OPCODE_BS_INIT_WRITABLE, 0),
-        (OPCODE_BS_START_MATCH4, 4),
-        (OPCODE_RAW_RAISE, 0),
         (OPCODE_BS_GET_UTF16, 5),
         (OPCODE_BS_GET_UTF32, 5),
         (OPCODE_BS_GET_INTEGER2, 7),
-        (OPCODE_GC_BIF3, 7),
         (OPCODE_IS_ANY_NATIVE_RECORD, 2),
         (OPCODE_FMOVE, 2),
         (OPCODE_FADD, 4),
@@ -1691,10 +1892,9 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
             BinarySegment::BinaryAll { segment: 2, source: Operand::X(0) },
         ] if text == b"count: "
     ));
-    // {atom,integer},2,1,nil,{x,0},{integer,8}; {atom,binary} of unit 1
-    // and size all; {atom,binary} of unit 8 and size 8.
+    // {atom,binary} of unit 1 and size all; {atom,binary} of unit 8 and
+    // size 8.
     for segment in [
-        [0x42, 0x20, 0x10, 0x02, 0x03, 0x81],
         [0x22, 0x20, 0x10, 0x02, 0x03, 0x32],
         [0x22, 0x20, 0x80, 0x02, 0x03, 0x81],
     ] {
@@ -1742,6 +1942,65 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
             Some(BinarySegment::Unsupported(kind)) if kind.name() == "append"
         ));
     }
+    // {atom,integer},1,1,nil,{x,0},{integer,8},
+    // {atom,integer},2,8,{literal,[little]},{x,1},{x,2},
+    // {atom,integer},3,1,{literal,[signed,native]},{x,0},{integer,16},
+    // {atom,utf8},4,0,nil,{x,3},{atom,undefined}, and
+    // {atom,utf16},5,0,nil,{x,0},{atom,undefined}.
+    let atoms: Vec<Atom> = ["integer", "utf8", "undefined", "utf16"]
+        .into_iter()
+        .map(|name| Atom::from_static(name).unwrap())
+        .collect();
+    let literals = [
+        Some(Term::List(vec![Term::static_atom("little")])),
+        Some(Term::List(vec![
+            Term::static_atom("signed"),
+            Term::static_atom("native"),
+        ])),
+    ];
+    let segments = read_binary_segments(
+        &[
+            0x17, 0x08, 0x1E, 0x12, 0x10, 0x10, 0x02, 0x03, 0x81, 0x12, 0x20, 0x80, 0x47, 0x00,
+            0x13, 0x23, 0x12, 0x30, 0x10, 0x47, 0x10, 0x03, 0x09, 0x10, 0x22, 0x40, 0x00, 0x02,
+            0x33, 0x32, 0x42, 0x50, 0x00, 0x02, 0x03, 0x32,
+        ],
+        &mut 0,
+        &atoms,
+        &literals,
+        b"",
+    )
+    .unwrap();
+    assert!(matches!(
+        segments.as_slice(),
+        [
+            BinarySegment::Integer {
+                segment: 1,
+                unit: 1,
+                little: false,
+                source: Operand::X(0),
+                size: Operand::Value(Term::Integer(8)),
+            },
+            BinarySegment::Integer {
+                segment: 2,
+                unit: 8,
+                little: true,
+                source: Operand::X(1),
+                size: Operand::X(2),
+            },
+            BinarySegment::Integer {
+                segment: 3,
+                unit: 1,
+                little: true,
+                source: Operand::X(0),
+                size: Operand::Value(Term::Integer(16)),
+            },
+            BinarySegment::Utf8 {
+                segment: 4,
+                source: Operand::X(3),
+            },
+            BinarySegment::Unsupported(kind),
+        ] if kind.name() == "utf16"
+    ));
     // A list of one item, and a string of 7 bytes in a StrT chunk of 5.
     assert!(read(&[0x17, 0x10, 0x12], b"").is_err());
     assert!(read(&[0x17, 0x60, 0x12, 0x00, 0x80, 0x02, 0x00, 0x71], b"short").is_err());

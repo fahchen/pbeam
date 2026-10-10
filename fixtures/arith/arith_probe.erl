@@ -81,8 +81,8 @@ below_big(_) -> other.
 
 %% `gc_bif1` (opcode 124) `erlang:'-'/1` in a guard with a fail label, as
 %% `gc_bif` `erlang:length/1` in proc_lib:trans_init/3 (proc_lib.erl:944)
-%% has one argument. It is the decode example of `gc_bif1`. PBeam has no
-%% implementation of `erlang:'-'/1` yet.
+%% has one argument. It is the decode example of `gc_bif1`.
+%% body_bif_probe:neg/0 runs `erlang:'-'/1` with fail label 0.
 neg(X) when -X > 0 -> {neg, -X};
 neg(_) -> other.
 
