@@ -8,9 +8,12 @@
 %% time. Each other term jumps to the fail label.
 kinds() ->
     Made = <<"a", (?MODULE:kind(<<"b">>))/binary>>,
+    Port = open_port({spawn_executable, "/bin/sh"}, [binary, {args, ["-c", "cat"]}]),
     Terms = [<<"b">>, <<>>, Made, 1, 1 bsl 60, a, "s", {t}, [], [a | b],
-             #{k => v}, self(), make_ref(), fun kinds/0],
-    [?MODULE:kind(Term) || Term <- Terms].
+             #{k => v}, self(), make_ref(), fun kinds/0, Port],
+    Kinds = [?MODULE:kind(Term) || Term <- Terms],
+    port_close(Port),
+    Kinds.
 
 kind(Term) when is_bitstring(Term) -> Term;
 kind(_) -> other.
