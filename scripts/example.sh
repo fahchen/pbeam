@@ -130,7 +130,10 @@ boot_modules="erlang prim_tty proc_lib application application_controller lists 
 # The pbeam binary loads only the BEAM files that it gets. Add each OTP module that an example module calls and that the boot list does not have, for example shell, which Terra calls. The script does not add the modules that these OTP modules call. A module that erl does not find, such as elixir_quote of the Elixir compiler, is not an OTP module.
 step "Find the OTP modules that the example calls"
 otp_list=$(erl -noshell -eval '[io:format("~ts~n", [M]) || M <- lists:usort([M || F <- init:get_plain_arguments(), {ok, {_, [{imports, I}]}} <- [beam_lib:chunks(F, [imports])], {M, _, _} <- I]), not lists:prefix("Elixir.", atom_to_list(M)), code:which(M) =/= non_existing], halt().' -extra "${examples[@]}")
-for module in $otp_list; do
+# Terra calls Code.ensure_loaded/1 (Terra lib/terra/runtime.ex:121 and 161), and the Elixir module Code calls code:ensure_loaded/1. The search above reads only the imports of the example modules, so it does not find code. Thus add code for terra_counter.
+extra_modules=
+if [[ $name == terra_counter ]]; then extra_modules=code; fi
+for module in $otp_list $extra_modules; do
   case " $boot_modules " in
     *" $module "*) ;;
     *) boot_modules+=" $module" ;;
