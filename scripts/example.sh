@@ -90,6 +90,15 @@ if [[ $erts == true ]]; then
 fi
 
 boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal"
+# The pbeam binary loads only the BEAM files that it gets. Add each OTP module that an example module calls and that the boot list does not have, for example shell, which Terra calls. The script does not add the modules that these OTP modules call. A module that erl does not find, such as elixir_quote of the Elixir compiler, is not an OTP module.
+step "Find the OTP modules that the example calls"
+otp_list=$(erl -noshell -eval '[io:format("~ts~n", [M]) || M <- lists:usort([M || F <- init:get_plain_arguments(), {ok, {_, [{imports, I}]}} <- [beam_lib:chunks(F, [imports])], {M, _, _} <- I]), not lists:prefix("Elixir.", atom_to_list(M)), code:which(M) =/= non_existing], halt().' -extra "${examples[@]}")
+for module in $otp_list; do
+  case " $boot_modules " in
+    *" $module "*) ;;
+    *) boot_modules+=" $module" ;;
+  esac
+done
 step "Find the BEAM files of the OTP boot modules"
 # shellcheck disable=SC2086 # Each module name is one argument.
 boot_list=$(erl -noshell -eval '[io:format("~ts~n", [case code:which(list_to_atom(M)) of preloaded -> filename:join([code:lib_dir(erts), "ebin", M ++ ".beam"]); Path -> Path end]) || M <- init:get_plain_arguments()], halt().' -extra $boot_modules)

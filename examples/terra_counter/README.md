@@ -31,4 +31,4 @@ The task does the steps of the other examples (see the [Hello World example](../
 1. `scripts/terra.sh` finds the Terra sources. Without the variable `PBEAM_TERRA_SRC`, it downloads the pinned commit from GitHub into `target/terra/<commit>/` with `git fetch --depth 1`, once. With `PBEAM_TERRA_SRC`, it uses that local Terra git repository and does not change it. In both cases, it stops with status 2 when `HEAD` is not the pinned commit, or when `lib/` or `examples/counter_app.exs` has changed, untracked, or ignored files.
 2. `elixirc` compiles the Terra sources `lib/**/*.ex` and the Counter application `examples/counter_app.exs` into `target/examples/terra_counter/`. Mix is not used, because the Terra `mix.exs` needs Hex for the development dependency `ex_doc`.
 
-The `pbeam` binary loads the Terra modules, `Counter`, and `TerraCounter`, the pinned Elixir modules that they call, and the OTP modules of the boot.
+The `pbeam` binary loads the Terra modules, `Counter`, and `TerraCounter`, the pinned Elixir modules that they call, the OTP modules of the boot, and the OTP modules that they call directly, for example `shell`.
