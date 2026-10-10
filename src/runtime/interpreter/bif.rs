@@ -77,6 +77,12 @@ pub(super) enum BifResult {
     /// process switches out, and it gets the result of the call when the
     /// work completes.
     DirtyWrite(IovecWrite),
+    /// PBeam only: the calling process waits for the answer of the policy
+    /// process to its `pbeam_cap:request/2` call. It continues through the
+    /// export `pbeam_cap:await_grant/0` each time it runs again, until the
+    /// grant signal gives the answer. ERTS has no such wait, because it has
+    /// no policy process.
+    AwaitGrant,
     /// The calling process exits with this reason, and no catch tag sees
     /// it, as `ERTS_BIF_EXITED` does when a BIF that handles the signals of
     /// its caller finds that a signal ended the caller (`bif.c:1708-1710`,
@@ -348,8 +354,14 @@ impl BeamProgram {
         name: &str,
         arguments: Vec<Term>,
     ) -> Result<BifResult, BeamError> {
-        if let ("pbeam_cap", "revoke", [holder, kind]) = (module, name, arguments.as_slice()) {
-            return pbeam_cap::revoke(scheduler, holder, kind);
+        match (module, name, arguments.as_slice()) {
+            ("pbeam_cap", "revoke", [holder, kind]) => {
+                return pbeam_cap::revoke(scheduler, holder, kind);
+            }
+            ("pbeam_cap", "request", [kind, request]) => {
+                return pbeam_cap::request(scheduler, kind, request);
+            }
+            _ => {}
         }
         let mut context = BifContext {
             program: self,
@@ -400,6 +412,9 @@ impl BeamProgram {
     /// - `erts_internal:await_exit/0`: it handles the signals of the caller
     ///   until the exit signal of `exit(self(), Reason)` ends the caller
     ///   (`bif.c:1698-1716`).
+    /// - `pbeam_cap:await_grant/0`, after [`BifResult::AwaitGrant`]: it
+    ///   returns the answer of the policy process, or waits again
+    ///   ([`pbeam_cap::await_grant`]). ERTS has no such export.
     ///
     /// The last two run again after a switch when their reductions are used
     /// up (`ERTS_BIF_YIELD2`, `ERTS_BIF_YIELD0`).
@@ -544,6 +559,7 @@ impl BeamProgram {
                     },
                 })
             }
+            ("pbeam_cap", "await_grant", []) => pbeam_cap::await_grant(scheduler),
             ("erts_internal", "await_exit", []) => Ok(match scheduler.await_exit()? {
                 Some(reason) => BifResult::Exited(reason),
                 None => BifResult::TrapBif {
@@ -559,7 +575,8 @@ impl BeamProgram {
 
 /// The PBeam BIFs: functions of PBeam modules that ERTS does not have. They
 /// are not `bif.tab` entries, and no BEAM module defines them.
-const PBEAM_BIFS: [(&str, &str, u32); 1] = [("pbeam_cap", "revoke", 2)];
+const PBEAM_BIFS: [(&str, &str, u32); 2] =
+    [("pbeam_cap", "request", 2), ("pbeam_cap", "revoke", 2)];
 
 /// Return whether an external call or a `bif` instruction goes to a BIF: the
 /// MFA is an entry of `BIFS`, the `bif.tab` entries, so it runs before the

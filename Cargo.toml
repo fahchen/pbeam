@@ -53,6 +53,10 @@ name = "log"
 path = "tests/feature/log.rs"
 
 [[test]]
+name = "policy_option"
+path = "tests/feature/policy_option.rs"
+
+[[test]]
 name = "run_end"
 path = "tests/feature/run_end.rs"
 
@@ -106,12 +110,20 @@ name = "bs_create_bin"
 path = "tests/integration/bs_create_bin.rs"
 
 [[test]]
+name = "byte_size"
+path = "tests/integration/byte_size.rs"
+
+[[test]]
 name = "calls"
 path = "tests/integration/calls.rs"
 
 [[test]]
 name = "capability"
 path = "tests/integration/capability.rs"
+
+[[test]]
+name = "code"
+path = "tests/integration/code.rs"
 
 [[test]]
 name = "compare"
@@ -244,6 +256,10 @@ path = "tests/integration/otp_io.rs"
 [[test]]
 name = "persistent_term"
 path = "tests/integration/persistent_term.rs"
+
+[[test]]
+name = "policy"
+path = "tests/integration/policy.rs"
 
 [[test]]
 name = "port"
