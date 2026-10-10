@@ -2993,27 +2993,7 @@ fn raise_binary_badarg(
     reason: &'static str,
     value: Term,
 ) -> Result<Option<Outcome>, BeamError> {
-    let index = current_frame(scheduler.current_process_mut()).next_instruction - 1;
-    let (module_name, name, arity) = module.instructions[..index]
-        .iter()
-        .rev()
-        .find_map(|instruction| match instruction {
-            Instruction::FunctionInfo {
-                module,
-                name,
-                arity,
-            } => Some((module, name, *arity)),
-            _ => None,
-        })
-        .ok_or_else(|| error("invariant error: bs_create_bin has no func_info before it"))?;
-    let atom = |name: &str| {
-        scheduler
-            .atoms
-            .get(name)
-            .map(Term::Atom)
-            .ok_or_else(|| error(format!("invariant error: atom table does not hold {name}")))
-    };
-    let (module_atom, function_atom) = (atom(module_name)?, atom(name)?);
+    let (module_atom, function_atom, arity) = current_function(scheduler, module)?;
     let cause = Term::Tuple(vec![
         Term::Integer(segment as i64),
         Term::static_atom("binary"),
@@ -3047,6 +3027,51 @@ fn raise_binary_badarg(
         badarg,
         Term::List(vec![frame]),
     ))
+}
+
+/// Return the module atom, the function atom, and the arity of the function
+/// that holds the last instruction that the active frame ran, from the
+/// `func_info` before it. ERTS finds the function of a code address in the
+/// same way for the first frame of a stack trace (`erts_lookup_function_info`
+/// in `build_stacktrace`, `beam_common.c:1229-1236`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // In `prefix/1` of `bs_create_bin_probe`.
+/// let (module, function, arity) = current_function(scheduler, &module)?;
+/// assert_eq!(arity, 1);
+/// ```
+///
+/// # Errors
+///
+/// An instruction with no `func_info` before it, or a module or function
+/// name that the atom table does not hold, is a runtime invariant error.
+fn current_function(
+    scheduler: &mut Scheduler,
+    module: &BeamModule,
+) -> Result<(Term, Term, u32), BeamError> {
+    let index = current_frame(scheduler.current_process_mut()).next_instruction - 1;
+    let (module_name, name, arity) = module.instructions[..index]
+        .iter()
+        .rev()
+        .find_map(|instruction| match instruction {
+            Instruction::FunctionInfo {
+                module,
+                name,
+                arity,
+            } => Some((module, name, *arity)),
+            _ => None,
+        })
+        .ok_or_else(|| error("invariant error: the instruction has no func_info before it"))?;
+    let atom = |name: &str| {
+        scheduler
+            .atoms
+            .get(name)
+            .map(Term::Atom)
+            .ok_or_else(|| error(format!("invariant error: atom table does not hold {name}")))
+    };
+    Ok((atom(module_name)?, atom(name)?, arity))
 }
 
 /// Read a literal, an X register, or a Y register.
