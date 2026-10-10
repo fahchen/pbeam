@@ -348,6 +348,23 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the launcher and manifest work (M8) must read capability constraints from a manifest or a configuration file, or a policy that is not BEAM code.
 - **Source:** design review of #310 (question 4, PR #314).
 
+### Wake the scheduler for a launcher revocation
+
+- After #336, the run calls `Policy::revocations` before each scheduling step (`BeamProgram::run_root` in `src/runtime/interpreter.rs`). While each process waits, `Scheduler::wait_events` blocks until a timer, a port, a terminal, a dirty IO call, or a host signal wakes it. With none of them, the run ends. Thus a revocation that a host thread gives while each process waits takes effect only at the next of these events, or never.
+- **Option:** a wake handle of the launcher, for example a pipe or a socket that `Scheduler::wait_events` also polls, as the notify pipe of the host signals (`signal::notify_fd`). A host thread writes to it after it puts a kind in its queue.
+- **Reason:** no consumer revokes from another thread. The only launcher that revokes is the test policy of `tests/integration/revoke.rs`, which revokes while the root process runs.
+- **Trigger:** a host that revokes from another thread or at a set time, for example the launcher and manifest work (M8).
+- **Source:** Codex review of PR #357 (#336).
+
+### Bound the work of one revocation
+
+- After #336, one revocation signal, and one `pbeam_cap:revoke/2` call, go through all the released records below the copy and send a signal to each live downstream copy in one step (`Delegations::revoke` in `src/runtime/capability.rs`). The signal counts 1 and the BIF counts 1 reduction, and neither yields. The cost row of `docs/effect-inventory.md` is `O(r)`, as the design of #310 accepts ("The cost of a revocation increases with the number of holders").
+- **Evidence:** ERTS counts more than 1 for a signal that does more work (for example `cnt += 4` for a NIF select, `erl_proc_sig_queue.c:6955` at `OTP-29.1.1`), and an exiting process sends its link signals in parts with a reduction budget (`ERTS_CONTINUE_EXIT_LINKS`, `erl_process.c:14545-14554`). ERTS has no revocation, so no ERTS count applies.
+- **Option:** a count for each record that the revocation reads, or a walk that yields and continues in the next turn.
+- **Reason:** a delegation tree with many released records or many live copies below one copy has no consumer yet. With one scheduler, the other processes wait only for the time of the walk.
+- **Trigger:** a consumer with large delegation trees, or the multiple schedulers of M10.
+- **Source:** Codex review of PR #357 (#336).
+
 ## Tests and tooling
 
 ### Load-check every pinned OTP module that loads today

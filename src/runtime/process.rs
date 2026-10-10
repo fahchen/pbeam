@@ -287,8 +287,10 @@ pub(super) struct ProcessState {
     pub(super) continue_exit: Option<Option<WalkPosition>>,
     /// The copies of the capabilities of the process. The root process gets
     /// the capabilities of the policy of the run, and a child gets its copies
-    /// from its parent at spawn (`Scheduler::spawn`). The copies go when the
-    /// process state goes. A new process has none.
+    /// from its parent at spawn (`Scheduler::spawn`). A handled revocation
+    /// signal deletes a copy. The exit releases the copies when the process
+    /// leaves the process table (`Delegations::release`). A new process has
+    /// none.
     pub(super) security: SecurityContext,
 }
 

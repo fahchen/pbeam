@@ -387,6 +387,12 @@ impl Scheduler {
                 self.handled(id, node).flush = Flush::Flushed;
                 return Ok(Handled::Stop(0));
             }
+            Signal::Revoke { capability } => {
+                self.handled(id, node).security.remove(capability);
+                let signals = self.delegations.revoke(capability);
+                self.send_revocations(Some(id), signals);
+                0
+            }
             Signal::Link { from } => {
                 // A link that the receiver has keeps its node and its state
                 // (`erl_proc_sig_queue.c:6641`).
@@ -649,6 +655,8 @@ impl Scheduler {
     /// its sender, an unlink signal gives an unlink acknowledgment, and the
     /// group-leader, is-alive, and process-info requests reply `badarg`,
     /// `false`, and `undefined`. A TTY monitor signal runs its TTY monitor.
+    /// A revocation signal sends the revocation on to the downstream copies:
+    /// the process released its copy when it left the process table.
     /// Each other signal is dropped. Each signal
     /// and receive marker counts 1, and a monitor signal 4 more
     /// (`erl_proc_sig_queue.c:7307`, `7352`). The handling stops when the
@@ -723,6 +731,10 @@ impl Scheduler {
                 } => {
                     let undefined = Term::static_atom("undefined");
                     self.send_message(id, requester, reply(reference, undefined));
+                }
+                Signal::Revoke { capability } => {
+                    let signals = self.delegations.revoke(capability);
+                    self.send_revocations(Some(id), signals);
                 }
                 _ => {}
             }

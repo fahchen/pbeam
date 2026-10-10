@@ -1,5 +1,5 @@
 use super::{CONTEXT_REDS, LinkId, MonitorOptions, MonitorTarget, Scheduler, Turn};
-use crate::runtime::capability::{AllowAll, Policy, SecurityContext};
+use crate::runtime::capability::{AllowAll, Capability, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
 use crate::runtime::host::output::{IovecWrite, IovecWritten};
 use crate::term::test_atom;
@@ -33,9 +33,9 @@ fn messages(scheduler: &Scheduler, id: u64) -> Vec<Term> {
     scheduler.processes[&ProcessId(id)].mailbox.messages()
 }
 
-/// Return the security context of the default policy.
-fn allow_all() -> SecurityContext {
-    SecurityContext::new(AllowAll.initial())
+/// Return the initial capabilities of the default policy.
+fn allow_all() -> Vec<Capability> {
+    AllowAll.initial()
 }
 
 fn current(scheduler: &mut Scheduler) -> ProcessId {

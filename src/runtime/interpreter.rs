@@ -1,5 +1,5 @@
 use super::{
-    capability::{AllowAll, Policy, Restriction, SecurityContext},
+    capability::{AllowAll, Policy, Restriction},
     host::output::IovecWrite,
     process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::{Received, Scheduler, Turn},
@@ -197,7 +197,9 @@ impl BeamProgram {
     /// `error:capability_denied` before it has an effect (row "Capability
     /// checks" of `docs/erts-differences.md`). The column "Capability" of
     /// `docs/effect-inventory.md` lists the entries that check a capability
-    /// now; the entries marked `later` have no check yet (#335).
+    /// now; the entries marked `later` have no check yet (#335). Before each
+    /// scheduling step, the launcher revokes the initial capabilities of each
+    /// kind that [`Policy::revocations`] gives.
     ///
     /// # Examples
     ///
@@ -213,8 +215,7 @@ impl BeamProgram {
     ) -> Result<Term, BeamError> {
         let initial_mode = InitialMode::read();
         let mut scheduler = Scheduler::new(self.atoms.clone());
-        let security = SecurityContext::new(policy.initial());
-        let run = self.run_root(&mut scheduler, module, function, arguments, security);
+        let run = self.run_root(&mut scheduler, module, function, arguments, policy);
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
         match scheduler.into_root_result() {
@@ -230,14 +231,16 @@ impl BeamProgram {
     }
 
     /// Run `Module:Function(Arguments...)` as the root process with the
-    /// security context `security` on `scheduler` until the run ends, as
-    /// `BeamProgram::execute` describes.
+    /// initial capabilities of `policy` on `scheduler` until the run ends, as
+    /// `BeamProgram::execute` describes. Before each scheduling step, the
+    /// launcher revokes the initial capabilities of each kind that
+    /// `Policy::revocations` gives.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut scheduler = Scheduler::new(program.atoms.clone());
-    /// program.run_root(&mut scheduler, "process_probe", "main", &[], SecurityContext::default())?;
+    /// program.run_root(&mut scheduler, "process_probe", "main", &[], &AllowAll)?;
     /// assert!(scheduler.into_root_result().is_some());
     /// ```
     ///
@@ -251,17 +254,18 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arguments: &[Term],
-        security: SecurityContext,
+        policy: &dyn Policy,
     ) -> Result<(), BeamError> {
         let arity =
             u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
         let label = self.entry_label(module, function, arity)?;
         let frame = self.frame(module, label, arity)?;
-        scheduler.start(frame, arguments.to_vec(), security)?;
+        scheduler.start(frame, arguments.to_vec(), policy.initial())?;
         while !scheduler.root_exited() {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
+            scheduler.revoke_issued(&policy.revocations());
             scheduler.complete_dirty_writes();
             match scheduler.schedule_next()? {
                 Turn::Run => match self.run(scheduler)? {
