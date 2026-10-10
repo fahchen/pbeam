@@ -93,6 +93,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** <https://github.com/fahchen/pbeam/pull/403#issuecomment-6099778845>
 
+## 20261010: Validate arguments before capability checks
+
+**Problem:** A denied process received `capability_denied` for invalid `system_flag(max_heap_size, Value)` values instead of the pinned ERTS `badarg` result.
+
+**Root Cause:** The capability check ran before complete validation of the flag value and its range.
+
+**Fix:** Validate the value and its minimum before authorization. Add denied-policy probes that compare invalid values with the pinned ERTS.
+
+**Guardrail:** For every capability-gated operation, test invalid input from both allowed and denied callers and preserve the ERTS error precedence.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/375#issuecomment-6098512127>
+
 ## 20261010: Replace verification placeholders before publishing
 
 **Problem:** A PR description kept a placeholder in the Verification section after an earlier edit did not apply.
