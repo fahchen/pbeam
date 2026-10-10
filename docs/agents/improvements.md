@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261010: Check that edited sentences keep their referent
+
+**Problem:** A documentation edit left "So does" pointing to the wrong sentence. The text then said that a request after the policy process exits returns `ok`, but the request raises `error:capability_denied`.
+
+**Root Cause:** The edit changed the nearby sentences but did not check the transition that referred to them.
+
+**Fix:** Replace the transition with an explicit statement of the denial behavior.
+
+**Guardrail:** After you edit documentation, read each pronoun and transition again and verify that it still refers to the intended behavior. Prefer an explicit statement to a reference such as "So does".
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/408#issuecomment-6099846363>
+
 ## 20261010: Replace verification placeholders before publishing
 
 **Problem:** A PR description kept a placeholder in the Verification section after an earlier edit did not apply.
