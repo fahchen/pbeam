@@ -2,6 +2,7 @@
 
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
+use crate::runtime::capability;
 use crate::runtime::host;
 use crate::runtime::local_node;
 use crate::runtime::process::LinkId;
@@ -724,9 +725,12 @@ pub(super) fn spawn_link(
 /// `message_queue_data` flag of the new process, and the last such option
 /// wins (`erl_process.c:12305-12319`). `options` that are not a proper list,
 /// and a `message_queue_data` option with another value, raise `badarg`, as
-/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) does. Any other
-/// option gives a runtime error. After the options, a `module` or
-/// `function` that is not an atom raises `badarg`, as in `spawn/3`.
+/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) does. The PBeam
+/// option `{capabilities, Map}` restricts the capabilities of the new process
+/// (see `capability::restrictions`), and the last such option wins. A `Map`
+/// that is not valid raises `badarg`. Any other option gives a runtime
+/// error. After the options, a `module` or `function` that is not an atom
+/// raises `badarg`, as in `spawn/3`.
 ///
 /// # Examples
 ///
@@ -758,6 +762,13 @@ pub(super) fn spawn_opt(
                     Term::Atom(value) if value.name() == "off_heap" => true,
                     _ => return Ok(BifResult::badarg()),
                 };
+            }
+            Term::Tuple(option) if matches!(option.as_slice(), [Term::Atom(name), _] if name.name() == "capabilities") =>
+            {
+                let Some(restrictions) = capability::restrictions(&option[1]) else {
+                    return Ok(BifResult::badarg());
+                };
+                spawn_options.capabilities = Some(restrictions);
             }
             // ponytail: ERTS accepts more options; see "Spawn options" in docs/erts-differences.md.
             _ => return Err(error(format!("unsupported spawn option {option:?}"))),
