@@ -19,7 +19,7 @@ pub use match_context::MatchContext;
 pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
 
-use std::fmt;
+use std::{cell::RefCell, fmt, rc::Rc};
 
 /// The smallest ERTS small integer on a 64-bit system: -(2^59).
 pub(crate) const SMALL_INTEGER_MIN: i64 = -(1 << 59);
@@ -68,10 +68,16 @@ pub enum Term {
     /// fun, or the module, function, and arity for an external fun.
     Fun(Fun),
     /// A binary match context that `bs_start_match3` makes in a register.
-    /// Only the binary-match instructions read it, and a local call keeps
-    /// it in its argument register. Each other instruction that gets a
-    /// match context gives a runtime invariant error.
-    MatchContext(MatchContext),
+    /// The term is a reference to the match context, as an ERTS register
+    /// holds a boxed pointer to the `ErlSubBits` on the process heap. A
+    /// copy of the term, from `move`, `bs_start_match3`, or
+    /// `bs_start_match4`, shares the match context and its position. The
+    /// registers and stack slots of one process own the references, and
+    /// the last reference that drops releases the match context. Only the
+    /// binary-match instructions read it, `move` copies it, and a local
+    /// call keeps it in its argument register. Each other instruction that
+    /// gets a match context gives a runtime invariant error.
+    MatchContext(Rc<RefCell<MatchContext>>),
 }
 
 /// The kind of a term that contains other terms. A fun keeps the entry of
@@ -369,7 +375,10 @@ impl PartialEq for Term {
                 (Term::Pid(left), Term::Pid(right)) => left == right,
                 (Term::Port(left), Term::Port(right)) => left == right,
                 (Term::Reference(left), Term::Reference(right)) => left == right,
-                (Term::MatchContext(left), Term::MatchContext(right)) => left == right,
+                // A match context is a heap object, so its identity is its
+                // address. ERTS never compares a match context
+                // (`get_term_type`, beam_validator.erl:2903-2908).
+                (Term::MatchContext(left), Term::MatchContext(right)) => Rc::ptr_eq(left, right),
                 _ => false,
             };
             if !equal {
@@ -415,7 +424,9 @@ impl fmt::Debug for Term {
                 Term::Pid(pid) => write!(formatter, "Pid({pid:?})")?,
                 Term::Port(port) => write!(formatter, "Port({port:?})")?,
                 Term::Reference(reference) => write!(formatter, "Reference({reference:?})")?,
-                Term::MatchContext(context) => write!(formatter, "MatchContext({context:?})")?,
+                Term::MatchContext(context) => {
+                    write!(formatter, "MatchContext({:?})", context.borrow())?
+                }
                 Term::List(elements)
                 | Term::ImproperList(elements, _)
                 | Term::Tuple(elements)

@@ -1518,9 +1518,9 @@ fn rejects_unresolved_exports_and_function_labels() {
     );
 }
 
-/// PBeam lets a match context reach only the binary-match instructions
-/// and local calls. It gives a runtime invariant error for each other
-/// use, and for a binary-match instruction that gets another term.
+/// PBeam lets a match context reach only the binary-match instructions,
+/// `move`, and local calls. It gives a runtime invariant error for each
+/// other use, and for a binary-match instruction that gets another term.
 #[test]
 fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
     let run = |rest: Vec<Instruction>| {
@@ -1554,8 +1554,9 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
     };
     let escape = "invariant error: the match context in X(0) reached an instruction that \
                   is not a binary match";
+    // `swap` of a match context is not implemented yet.
     assert_eq!(
-        run(vec![Instruction::Move(Operand::X(0), Operand::X(1))]),
+        run(vec![Instruction::Swap(Operand::X(0), Operand::X(1))]),
         escape
     );
     assert_eq!(run(vec![erlang_call("hd", 1, false)]), escape);
@@ -1569,22 +1570,6 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
             deallocate: 0,
         }]),
         escape
-    );
-    // A reuse in another register would share the position in ERTS.
-    assert_eq!(
-        run(vec![Instruction::BinaryMatchStart {
-            fail_label: 1,
-            source: Operand::X(0),
-            destination: Operand::X(1),
-        }]),
-        "unsupported bs_start_match3 that copies the match context in X(0) to X(1)"
-    );
-    assert_eq!(
-        run(vec![Instruction::BinaryMatchResume {
-            source: Operand::X(0),
-            destination: Operand::X(1),
-        }]),
-        "unsupported bs_start_match4 resume that copies the match context in X(0) to X(1)"
     );
     assert_eq!(
         run(vec![Instruction::BinaryMatchResume {
@@ -1618,6 +1603,87 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
             destination: Operand::X(1),
         }]),
         "invariant error: Value(Atom(\"a\")) holds Atom(\"a\"), not a match context"
+    );
+}
+
+/// A copy of a match context to another register shares the match
+/// context, as ERTS copies the term that refers to it (`emit_i_move`,
+/// jit/arm/instr_common.cpp:516-519; `emit_i_bs_start_match3`,
+/// jit/arm/instr_bs.cpp:158-159, 187-188; jit/arm/ops.tab:1036-1045). A
+/// read of the copy moves the position of the source, and a change of the
+/// position of the source moves the position of the copy.
+#[test]
+fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
+    let run = |copy: Instruction, to: Operand| {
+        let body = vec![
+            Instruction::Allocate { stack_size: 1 },
+            Instruction::Move(Operand::Value(Term::Binary(b"ab".to_vec())), Operand::X(0)),
+            Instruction::BinaryMatchStart {
+                fail_label: 1,
+                source: Operand::X(0),
+                destination: Operand::X(0),
+            },
+            copy,
+            // Read `a` with the copy, then the position with the source.
+            Instruction::BinaryGetUtf8 {
+                fail_label: 1,
+                context: to.clone(),
+                destination: Operand::X(2),
+            },
+            Instruction::BinaryGetPosition {
+                context: Operand::X(0),
+                destination: Operand::X(3),
+            },
+            // Set the position 0 with the source, then read `a` again with
+            // the copy.
+            Instruction::BinarySetPosition {
+                context: Operand::X(0),
+                position: Operand::Value(Term::Integer(0)),
+            },
+            Instruction::BinaryGetUtf8 {
+                fail_label: 1,
+                context: to,
+                destination: Operand::X(4),
+            },
+            Instruction::PutTuple {
+                destination: Operand::X(0),
+                elements: vec![Operand::X(2), Operand::X(3), Operand::X(4)],
+            },
+            Instruction::Deallocate { stack_size: 1 },
+            Instruction::Return,
+        ];
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap()
+    };
+    let expected = Term::Tuple(vec![Term::Integer(97), Term::Integer(8), Term::Integer(97)]);
+    assert_eq!(
+        run(
+            Instruction::Move(Operand::X(0), Operand::Y(0)),
+            Operand::Y(0)
+        ),
+        expected
+    );
+    assert_eq!(
+        run(
+            Instruction::BinaryMatchStart {
+                fail_label: 1,
+                source: Operand::X(0),
+                destination: Operand::X(1),
+            },
+            Operand::X(1)
+        ),
+        expected
+    );
+    assert_eq!(
+        run(
+            Instruction::BinaryMatchResume {
+                source: Operand::X(0),
+                destination: Operand::X(1),
+            },
+            Operand::X(1)
+        ),
+        expected
     );
 }
 
