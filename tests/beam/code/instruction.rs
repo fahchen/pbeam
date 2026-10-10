@@ -2,16 +2,15 @@ use super::super::{read_integer, read_integer_after_first, read_operand, read_va
 use super::{
     OPCODE_BADMATCH, OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
     OPCODE_BS_INIT_WRITABLE, OPCODE_BS_START_MATCH4, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV,
-    OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FSUB, OPCODE_GC_BIF3, OPCODE_GET_RECORD_ELEMENTS,
-    OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD,
-    OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
-    OPCODE_RAW_RAISE, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
-    OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
-    OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE, OPCODE_TRY_CASE_END, parse_code,
-    read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
-    read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
-    skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
-    unsupported_opcode_operand_count,
+    OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FSUB, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL,
+    OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC,
+    OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_RAW_RAISE, OPCODE_TEST_HEAP,
+    OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
+    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_NE, OPCODE_TEST_TAGGED_TUPLE,
+    OPCODE_TRY_CASE_END, parse_code, read_binary_match_commands, read_binary_segments,
+    read_move_operand, read_operand_pairs, read_pair_count, read_record_updates, skip_allocation,
+    skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
+    test_kind, unsupported_opcode_operand_count,
 };
 use crate::{
     beam::code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
@@ -1195,6 +1194,57 @@ fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction
 }
 
 #[test]
+fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/binary_part/binary_part_probe.beam` has these bytes.
+    // guard/3: gc_bif3 f13 live 3 binary_part/3 x0 x1 x2 x0
+    let guard = [0x98, 0xD5, 0x30, 0x00, 0x03, 0x13, 0x23, 0x03];
+    // main/0: gc_bif3 f0 live 1 binary_part/3 y23 y22 x0 y22
+    let body = [
+        0x98, 0x05, 0x10, 0x00, 0x0C, 0x17, 0x0C, 0x16, 0x03, 0x0C, 0x16,
+    ];
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([&guard[..], &body, &[0x03]].concat());
+    let imports = vec![("erlang".to_owned(), "binary_part".to_owned(), 3)];
+    let (instructions, _) = parse_code(&code, &[], &imports, &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::Bif {
+                fail_label: 13,
+                module: guard_module,
+                name: guard_name,
+                arguments: guard_arguments,
+                destination: Operand::X(0),
+            },
+            Instruction::Bif {
+                fail_label: 0,
+                module: body_module,
+                name: body_name,
+                arguments: body_arguments,
+                destination: Operand::Y(22),
+            },
+            Instruction::End,
+        ] if guard_module == "erlang"
+            && guard_name == "binary_part"
+            && matches!(
+                guard_arguments.as_slice(),
+                [Operand::X(0), Operand::X(1), Operand::X(2)]
+            )
+            && body_module == "erlang"
+            && body_name == "binary_part"
+            && matches!(
+                body_arguments.as_slice(),
+                [Operand::Y(23), Operand::Y(22), Operand::X(0)]
+            )
+    ));
+    // Without its destination and the end, the instruction is truncated.
+    code.truncate(code.len() - 3);
+    assert!(parse_code(&code, &[], &imports, &[], &[], &[]).is_err());
+}
+
+#[test]
 fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
     let code = |instructions: &[u8]| {
         let mut code = vec![0, 0, 0, 16];
@@ -1567,7 +1617,6 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_BS_GET_UTF16, 5),
         (OPCODE_BS_GET_UTF32, 5),
         (OPCODE_BS_GET_INTEGER2, 7),
-        (OPCODE_GC_BIF3, 7),
         (OPCODE_IS_ANY_NATIVE_RECORD, 2),
         (OPCODE_FMOVE, 2),
         (OPCODE_FADD, 4),
