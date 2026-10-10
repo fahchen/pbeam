@@ -14,6 +14,7 @@
 
 use super::BifResult::{Raise, Value};
 use super::*;
+use crate::runtime::host::filename_encoding;
 use crate::runtime::time;
 
 bifs! {
@@ -37,7 +38,7 @@ bifs! {
     binary:list_to_bin/1 => unsupported,
     binary:longest_common_prefix/1 => unsupported,
     binary:longest_common_suffix/1 => unsupported,
-    binary:match/2 => unsupported,
+    binary:match/2 => |cx, [subject, pattern]| binary::match_2(cx.scheduler.current_process_mut(), subject, pattern),
     binary:match/3 => unsupported,
     binary:matches/2 => unsupported,
     binary:matches/3 => unsupported,
@@ -148,8 +149,8 @@ bifs! {
     erlang:dt_get_tag_data/0 => unsupported,
     erlang:dt_prepend_vm_tag_data/1 => unsupported,
     erlang:dt_put_tag/1 => unsupported,
-    erlang:dt_restore_tag/1 => unsupported,
-    erlang:dt_spread_tag/1 => unsupported,
+    erlang:dt_restore_tag/1 => |_, [tag]| Ok(match tag { Term::Atom(atom) if atom.name() == "true" => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
+    erlang:dt_spread_tag/1 => |_, [flag]| Ok(match flag { Term::Atom(atom) if matches!(atom.name(), "true" | "false") => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     erlang:element/2 => |_, [index, tuple]| Ok(erlang::element(index, tuple)),
     erlang:erase/0 => unsupported,
     erlang:erase/1 => unsupported,
@@ -227,7 +228,7 @@ bifs! {
     erlang:list_to_pid/1 => unsupported,
     erlang:list_to_port/1 => unsupported,
     erlang:list_to_ref/1 => unsupported,
-    erlang:list_to_tuple/1 => unsupported,
+    erlang:list_to_tuple/1 => |_, [list]| Ok(erlang::list_to_tuple(list)),
     erlang:load_nif/2 => |cx, [_, _]| native::load_nif_error(&mut cx.scheduler.atoms, "bad_lib", "load_nif/2 must be explicitly called from the NIF module. It cannot be called through apply/3."),
     erlang:loaded/0 => unsupported,
     erlang:localtime/0 => unsupported,
@@ -485,7 +486,7 @@ bifs! {
     ets:update_element/3 => unsupported,
     ets:update_element/4 => unsupported,
     ets:whereis/1 => |cx, [name]| Ok(match name { Term::Atom(name) => Value(cx.scheduler.ets.whereis(name.name()).map_or(Term::static_atom("undefined"), Term::Reference)), _ => BifResult::badarg() }),
-    file:native_name_encoding/0 => unsupported,
+    file:native_name_encoding/0 => |_, []| Ok(file::native_name_encoding(filename_encoding())),
     io:printable_range/0 => |_, []| Ok(Value(Term::static_atom("latin1"))),
     lists:keyfind/3 => |cx, [key, position, list]| Ok(lists::keyfind(cx.scheduler.current_process_mut(), key, position, list)),
     lists:keymember/3 => |cx, [key, position, list]| Ok(lists::keymember(cx.scheduler.current_process_mut(), key, position, list)),
@@ -546,7 +547,7 @@ bifs! {
     persistent_term:info/0 => unsupported,
     persistent_term:put/2 => |cx, [key, value]| persistent_term::put(cx, key, value),
     persistent_term:put_new/2 => unsupported,
-    prim_file:internal_name2native/1 => unsupported,
+    prim_file:internal_name2native/1 => |_, [name]| Ok(file::internal_name2native(name)),
     prim_file:internal_native2name/1 => unsupported,
     prim_file:internal_normalize_utf8/1 => unsupported,
     prim_file:is_translatable/1 => unsupported,

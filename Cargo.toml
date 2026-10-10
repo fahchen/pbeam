@@ -106,6 +106,10 @@ name = "binary_part"
 path = "tests/integration/binary_part.rs"
 
 [[test]]
+name = "binary_find"
+path = "tests/integration/binary_find.rs"
+
+[[test]]
 name = "bitstr"
 path = "tests/integration/bitstr.rs"
 
@@ -176,6 +180,10 @@ path = "tests/integration/exit_signal.rs"
 [[test]]
 name = "fixture_opcodes"
 path = "tests/integration/fixture_opcodes.rs"
+
+[[test]]
+name = "find_executable"
+path = "tests/integration/find_executable.rs"
 
 [[test]]
 name = "float_test"
