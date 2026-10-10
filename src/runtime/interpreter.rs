@@ -1,5 +1,5 @@
 use super::{
-    capability::{AllowAll, Policy, Restriction},
+    capability::{Policy, Restriction},
     host::output::IovecWrite,
     process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::{PolicyEnd, Received, Scheduler, Turn},
@@ -11,14 +11,19 @@ use crate::{
         code::{self, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
-    term::{Atom, AtomTable, Fun, Map, MatchContext, Target, Term, print_term},
+    term::{
+        Atom, AtomTable, Fun, Map, MatchContext, Target, Term, print_term, segment_equals,
+        segment_integer,
+    },
 };
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, rc::Rc};
 
 mod bif;
+mod bits;
 mod native;
 
 use bif::{BifResult, is_bif, is_function, is_heavy_bif, send};
+use bits::BitWriter;
 
 /// The largest number of arguments of `erlang:apply/3`. ERTS `apply` copies
 /// at most `MAX_REG - 1` arguments to the X registers (`erl_vm.h:55`,
@@ -47,6 +52,9 @@ pub struct BeamProgram {
 /// The issuer of the initial capabilities of a run.
 #[derive(Clone, Copy)]
 enum Issuer<'a> {
+    /// No issuer: the launcher has no policy, so the run skips each
+    /// capability check and issues no capability.
+    Unchecked,
     /// A Rust policy of the host.
     Host(&'a dyn Policy),
     /// A policy module in BEAM code, which the policy process runs.
@@ -73,13 +81,15 @@ enum Outcome {
     DirtyWrite { write: IovecWrite, tail: bool },
 }
 
-/// The class of an exception. The `throw` class is not implemented yet.
+/// The class of an exception.
 #[derive(Debug, Clone, Copy)]
 enum ExceptionClass {
     /// Class `error`, as `erlang:nif_error/1` raises.
     Error,
     /// Class `exit`, as `erlang:exit/1` raises.
     Exit,
+    /// Class `throw`, as `erlang:throw/1` raises.
+    Throw,
 }
 
 impl ExceptionClass {
@@ -89,12 +99,34 @@ impl ExceptionClass {
     ///
     /// ```rust,ignore
     /// assert_eq!(ExceptionClass::Error.name(), "error");
-    /// assert_eq!(ExceptionClass::Exit.name(), "exit");
+    /// assert_eq!(ExceptionClass::Throw.name(), "throw");
     /// ```
     fn name(self) -> &'static str {
         match self {
             ExceptionClass::Error => "error",
             ExceptionClass::Exit => "exit",
+            ExceptionClass::Throw => "throw",
+        }
+    }
+
+    /// Return the class of the atom `error`, `exit`, or `throw`, and `None`
+    /// for each other term.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(ExceptionClass::from_term(&Term::static_atom("exit")), Some(ExceptionClass::Exit)));
+    /// assert!(ExceptionClass::from_term(&Term::static_atom("foo")).is_none());
+    /// ```
+    fn from_term(term: &Term) -> Option<Self> {
+        match term {
+            Term::Atom(atom) => match atom.name() {
+                "error" => Some(ExceptionClass::Error),
+                "exit" => Some(ExceptionClass::Exit),
+                "throw" => Some(ExceptionClass::Throw),
+                _ => None,
+            },
+            _ => None,
         }
     }
 }
@@ -182,8 +214,15 @@ impl BeamProgram {
     /// again when fds 0 and 1 are terminals, as at the exit of the ERTS
     /// emulator (see `InitialMode::reset`).
     ///
-    /// The root process gets the capabilities of the default [`AllowAll`]
-    /// policy, so each process can do each operation, as on ERTS.
+    /// The run has no policy, so it skips each capability check, as if each
+    /// effect entry were `ambient`, and each process can do each operation,
+    /// as on ERTS. No process gets a capability copy. The `{capabilities,
+    /// Map}` spawn option still raises `badarg` for a `Map` that is not
+    /// valid, but it does not reduce the child. `pbeam_cap:revoke/2`,
+    /// `pbeam_cap:policy_revoke/2`, and `pbeam_cap:request/2` return `ok`
+    /// after their argument checks and have no effect. The option is fixed for the run: no BIF can change
+    /// it. Use [`BeamProgram::execute_with_policy`] or
+    /// [`BeamProgram::execute_with_policy_module`] for a run with checks.
     ///
     /// # Examples
     ///
@@ -196,7 +235,7 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
     ) -> Result<Term, BeamError> {
-        self.execute_with_policy(module, function, arguments, &AllowAll)
+        self.execute_issued(module, function, arguments, Issuer::Unchecked)
     }
 
     /// Run an exported function as the root process, as
@@ -206,7 +245,9 @@ impl BeamProgram {
     /// `error:capability_denied` before it has an effect (row "Capability
     /// checks" of `docs/erts-differences.md`). The column "Capability" of
     /// `docs/effect-inventory.md` lists the entries that check a capability
-    /// now; the entries marked `later` have no check yet (#335). Before each
+    /// now; the entries marked `ambient` have no check by decision. With
+    /// [`AllowAll`](crate::AllowAll), each check passes, as a test of the
+    /// checks needs. Before each
     /// scheduling step, the launcher revokes the initial capabilities of each
     /// kind that [`Policy::revocations`] gives.
     ///
@@ -291,7 +332,10 @@ impl BeamProgram {
         issuer: Issuer,
     ) -> Result<Term, BeamError> {
         let initial_mode = InitialMode::read();
-        let mut scheduler = Scheduler::new(self.atoms.clone());
+        let mut scheduler = match issuer {
+            Issuer::Unchecked => Scheduler::without_checks(self.atoms.clone()),
+            Issuer::Host(_) | Issuer::Module(_) => Scheduler::new(self.atoms.clone()),
+        };
         let run = self.run_root(&mut scheduler, module, function, arguments, issuer);
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
@@ -309,7 +353,9 @@ impl BeamProgram {
 
     /// Run `Module:Function(Arguments...)` as the root process with the
     /// initial capabilities of `issuer` on `scheduler` until the run ends, as
-    /// `BeamProgram::execute` describes. With a Rust policy, the launcher
+    /// `BeamProgram::execute` describes. With no issuer, the root process
+    /// gets no capability, and `scheduler` must skip the checks (see
+    /// `Scheduler::without_checks`). With a Rust policy, the launcher
     /// revokes the initial capabilities of each kind that
     /// `Policy::revocations` gives before each scheduling step. With a
     /// policy module, the launcher makes the policy process first and the
@@ -343,6 +389,10 @@ impl BeamProgram {
         let label = self.entry_label(module, function, arity)?;
         let frame = self.frame(module, label, arity)?;
         let mut root = match issuer {
+            Issuer::Unchecked => {
+                scheduler.start(frame, arguments.to_vec(), Vec::new())?;
+                None
+            }
             Issuer::Host(policy) => {
                 scheduler.start(frame, arguments.to_vec(), policy.initial())?;
                 None
@@ -367,6 +417,7 @@ impl BeamProgram {
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
             match issuer {
+                Issuer::Unchecked => {}
                 Issuer::Host(policy) => scheduler.revoke_issued(&policy.revocations()),
                 Issuer::Module(policy) => {
                     if let Some(arguments) = scheduler.next_policy_request() {
@@ -613,8 +664,16 @@ impl BeamProgram {
             };
             frame.next_instruction += 1;
             match instruction {
+                // ERTS `move` copies the word of the source to the
+                // destination (`emit_i_move`, jit/arm/instr_common.cpp:
+                // 516-519). The BEAM validator lets it copy a match
+                // context, and the two registers then name one value
+                // (`assign_1`, beam_validator.erl:403-404, 2690-2693). The
+                // copy of a match context term shares the match context.
+                // `Terra.Input.Parser.do_parse/3` saves its match context
+                // in a Y register with `move`.
                 Instruction::Move(source, destination) => {
-                    let value = read(process, source)?;
+                    let value = read_any(process, source)?;
                     write(process, destination, value)?;
                 }
                 Instruction::Allocate { stack_size } => {
@@ -783,10 +842,6 @@ impl BeamProgram {
                             arguments.len()
                         )));
                     }
-                    let values = arguments
-                        .iter()
-                        .map(|argument| read(process, argument))
-                        .collect::<Result<Vec<_>, _>>()?;
                     // A `bif` instruction with fail label 0 raises the
                     // exception of the BIF, as `handle_error` does in ERTS
                     // (`bif_instrs.tab`). Another fail label jumps to the
@@ -797,9 +852,17 @@ impl BeamProgram {
                     // (`jit/arm/ops.tab:1329-1333`). At a trap, it keeps
                     // its trap state, switches out, and runs again when the
                     // process runs again (`jit/arm/instr_bif.cpp:253-272`).
-                    let result = match scheduler.current_process_mut().length_trap.take() {
-                        Some(state) => self.bif_trap(scheduler, "erlang", "length", state)?,
-                        None => self.bif(scheduler, bif_module, name, values)?,
+                    let result = if let Some(state) = process.length_trap.take() {
+                        self.bif_trap(scheduler, "erlang", "length", state)?
+                    } else {
+                        let values = arguments
+                            .iter()
+                            .map(|argument| read_any(process, argument))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        match match_context_byte_size(bif_module, name, arguments, &values)? {
+                            Some(size) => BifResult::Value(size),
+                            None => self.bif(scheduler, bif_module, name, values)?,
+                        }
                     };
                     let process = scheduler.current_process_mut();
                     match result {
@@ -853,16 +916,21 @@ impl BeamProgram {
                 Instruction::CatchEnd { register } => {
                     try_end(process, *register)?;
                     // An unset x0 is the ERTS non-value: an exception reached
-                    // the handler. A normal return always sets x0.
+                    // the handler. A normal return always sets x0. A throw
+                    // gives its reason, an error gives `{'EXIT', {Reason,
+                    // Stack}}`, and an exit gives `{'EXIT', Reason}` (emu
+                    // `instrs.tab:1187-1212`).
                     if matches!(process.registers.first(), Some(None)) {
-                        if read(process, &Operand::X(3))? == Term::static_atom("error") {
-                            let reason = read(process, &Operand::X(1))?;
-                            let stack = read(process, &Operand::X(2))?;
-                            write(process, &Operand::X(1), Term::Tuple(vec![reason, stack]))?;
+                        let class = read(process, &Operand::X(3))?;
+                        let mut reason = read(process, &Operand::X(1))?;
+                        if class != Term::static_atom("throw") {
+                            if class == Term::static_atom("error") {
+                                let (_, stack) = raw_stacktrace(&read(process, &Operand::X(2))?)?;
+                                reason = Term::Tuple(vec![reason, stack]);
+                            }
+                            reason = Term::Tuple(vec![Term::static_atom("EXIT"), reason]);
                         }
-                        let reason = read(process, &Operand::X(1))?;
-                        let caught = Term::Tuple(vec![Term::static_atom("EXIT"), reason]);
-                        write(process, &Operand::X(0), caught)?;
+                        write(process, &Operand::X(0), reason)?;
                     }
                 }
                 Instruction::Test {
@@ -1010,7 +1078,17 @@ impl BeamProgram {
                         jump(module, process, *fail_label)?;
                     }
                 }
-                Instruction::TestExactNotEqual {
+                // ERTS `is_ne` (emu instrs.tab:1115-1119, JIT
+                // instr_common.cpp:2081-2105) runs `CMP_NE_ACTION`
+                // (erl_utils.h:134-135) with `EQ_SPEC` in the arithmetic
+                // order. As for `is_eq`, exact equality gives the ERTS
+                // result while PBeam has no float term.
+                Instruction::TestNotEqual {
+                    fail_label,
+                    left,
+                    right,
+                }
+                | Instruction::TestExactNotEqual {
                     fail_label,
                     left,
                     right,
@@ -1067,54 +1145,112 @@ impl BeamProgram {
                 // `erts_bs_start_match_3` in erl_bits.c:81-105). A literal
                 // source loads as `jump Fail` (emu ops.tab:1266-1267; JIT
                 // jit/arm/ops.tab:1054-1055), which gives the same result.
-                // The compiler gives a real fail label
-                // (beam_ssa_codegen.erl:1666-1673), so the label is never 0.
-                // ERTS writes a reused match context to the destination, so
-                // the two registers share one position. PBeam keeps the
-                // position in each register, so it reuses a match context
-                // only in its own register and else stops (row "Binary
-                // matching" of docs/erts-differences.md).
-                // `prim_tty:is_usascii/1` reuses the match context in `x0`
-                // with the destination `x0`.
+                // `bs_start_match4` with `no_fail` loads with the fail label
+                // 0 (JIT jit/arm/ops.tab:1036-1037). The JIT then does not
+                // test the source: the compiler gives it only a binary or a
+                // match context (jit/arm/instr_bs.cpp:142-148), so each
+                // other term is an invariant error.
+                // ERTS writes a reused match context to the destination
+                // (jit/arm/instr_bs.cpp:158-159, 187-188), so the two
+                // registers share the match context and its position. The
+                // copy of a match context term gives the same sharing.
                 Instruction::BinaryMatchStart {
                     fail_label,
                     source,
                     destination,
-                } => match &read_any(process, source)? {
-                    Term::Binary(bytes) => {
-                        let context = Term::MatchContext(MatchContext::new(bytes));
+                } => match read_any(process, source)? {
+                    Term::Binary(ref bytes) => {
+                        let context = MatchContext::new(bytes);
+                        let context = Term::MatchContext(Rc::new(RefCell::new(context)));
                         write(process, destination, context)?;
                     }
-                    Term::MatchContext(_) => {
-                        if !matches!(
-                            (source, destination),
-                            (Operand::X(from), Operand::X(to)) | (Operand::Y(from), Operand::Y(to))
-                                if from == to
-                        ) {
-                            return Err(error(format!(
-                                "unsupported bs_start_match3 that copies the match context in {source:?} to {destination:?}"
-                            )));
-                        }
+                    context @ Term::MatchContext(_) => write(process, destination, context)?,
+                    other if *fail_label == 0 => {
+                        return Err(error(format!(
+                            "invariant error: bs_start_match3 with no fail label got {other:?}, not a binary or a match context"
+                        )));
                     }
                     _ => jump(module, process, *fail_label)?,
                 },
+                // On a 64-bit system, ERTS loads `bs_start_match4` with
+                // `resume` as nothing when the source is the destination,
+                // and else as `move` (JIT jit/arm/ops.tab:1041-1045). The
+                // compiler gives it only a match context
+                // (beam_ssa_codegen.erl:2300-2302). The copy shares the
+                // match context, as for `move`.
+                Instruction::BinaryMatchResume {
+                    source,
+                    destination,
+                } => {
+                    let context = any_match_context(process, source)?;
+                    write(process, destination, Term::MatchContext(context))?;
+                }
+                // ERTS `bs_get_tail` writes the bits after the position as
+                // a sub-bitstring and keeps the position
+                // (`emit_bs_get_tail` and `emit_bs_get_tail_shared` in
+                // jit/arm/instr_bs.cpp:407-454). PBeam has no bitstring
+                // term (row "Binary matching" of docs/erts-differences.md).
+                Instruction::BinaryGetTail {
+                    context,
+                    destination,
+                } => {
+                    let state = match_context(process, context)?;
+                    let state = state.borrow();
+                    let bits = state.remaining_bits();
+                    if !bits.is_multiple_of(8) {
+                        return Err(error(format!(
+                            "unsupported bs_get_tail of {bits} bits: needs a bitstring term"
+                        )));
+                    }
+                    write(process, destination, Term::Binary(state.tail()))?;
+                }
+                // ERTS `i_bs_get_binary2` checks the size
+                // (`binary_field_size`), then reads the bits as a
+                // sub-bitstring and moves the position, or jumps to `Fail`
+                // when fewer bits remain (`emit_bs_get_binary` in
+                // jit/arm/instr_bs.cpp:506-556; `erts_bs_get_binary_2` in
+                // erl_bits.c:400-424). The loader fuses it with a
+                // `bs_get_tail` after it (jit/arm/ops.tab:991-997), which
+                // gives the same result.
+                Instruction::BinaryGetBinary {
+                    fail_label,
+                    context,
+                    size,
+                    unit,
+                    destination,
+                } => {
+                    let state = match_context(process, context)?;
+                    let bytes = binary_field_size(&read(process, size)?, *unit)
+                        .and_then(|bits| Some((bits, state.borrow_mut().read_bits(bits)?)));
+                    match bytes {
+                        Some((bits, bytes)) => {
+                            if !bits.is_multiple_of(8) {
+                                return Err(error(format!(
+                                    "unsupported bs_get_binary2 of {bits} bits: needs a bitstring term"
+                                )));
+                            }
+                            write(process, destination, Term::Binary(bytes))?;
+                        }
+                        None => jump(module, process, *fail_label)?,
+                    }
+                }
                 // ERTS `i_bs_get_position` writes `sb->start` as a small
                 // integer (emu ops.tab:1274-1277, bs_instrs.tab:1125-1129).
                 Instruction::BinaryGetPosition {
                     context,
                     destination,
                 } => {
-                    let position = match_context(process, context)?.position();
+                    let position = match_context(process, context)?.borrow().position();
                     write(process, destination, Term::Integer(position as i64))?;
                 }
                 // ERTS `bs_set_position` sets `sb->start` to the unsigned
                 // value of the position (emu bs_instrs.tab:1120-1123). The
                 // compiler gives it a position that `bs_get_position` made.
                 Instruction::BinarySetPosition { context, position } => {
-                    let mut state = match_context(process, context)?;
+                    let state = any_match_context(process, context)?;
                     match read(process, position)? {
                         Term::Integer(value) if let Ok(value) = usize::try_from(value) => {
-                            state.set_position(value);
+                            state.borrow_mut().set_position(value);
                         }
                         other => {
                             return Err(error(format!(
@@ -1122,7 +1258,6 @@ impl BeamProgram {
                             )));
                         }
                     }
-                    write(process, context, Term::MatchContext(state))?;
                 }
                 // ERTS `i_bs_get_utf8` reads a byte below 128 directly and
                 // else calls `erts_bs_get_utf8`, which fails for each
@@ -1133,10 +1268,9 @@ impl BeamProgram {
                     context,
                     destination,
                 } => {
-                    let mut state = match_context(process, context)?;
-                    match state.get_utf8() {
+                    let code_point = match_context(process, context)?.borrow_mut().get_utf8();
+                    match code_point {
                         Some(code_point) => {
-                            write(process, context, Term::MatchContext(state))?;
                             write(process, destination, Term::Integer(code_point.into()))?;
                         }
                         None => jump(module, process, *fail_label)?,
@@ -1147,17 +1281,18 @@ impl BeamProgram {
                     context,
                     commands,
                 } => {
-                    if !binary_match(&match_context(process, context)?, commands)? {
+                    if !binary_match(process, context, commands)? {
                         jump(module, process, *fail_label)?;
                     }
                 }
                 // The ERTS JIT `i_bs_create_bin` first checks that the term
                 // of each `binary` segment of size `all` is a bitstring, in
-                // segment order, and then builds the binary (JIT
-                // `emit_i_bs_create_bin` in jit/arm/instr_bs.cpp:1442-1663,
-                // 2000-2084). A failed check jumps to `Fail`, or with `Fail`
-                // 0 raises `badarg` with the `error_info` cause
-                // `{Segment, binary, type, Value}` (`emit_bs_create_bin_error_shared`
+                // segment order, then checks the `append` segment, and then
+                // builds the binary (JIT `emit_i_bs_create_bin` in
+                // jit/arm/instr_bs.cpp:1442-1663, 1811-1864, 2000-2084). A
+                // failed check jumps to `Fail`, or with `Fail` 0 raises
+                // `badarg` with the `error_info` cause
+                // `{Segment, binary, Reason, Value}` (`emit_bs_create_bin_error_shared`
                 // in jit/arm/instr_bs.cpp:1002-1019;
                 // `beam_jit_bs_construct_fail_info` in
                 // jit/beam_jit_common.cpp:911-1010).
@@ -1168,10 +1303,8 @@ impl BeamProgram {
                 } => match create_binary(process, segments)? {
                     Ok(bytes) => write(process, destination, Term::Binary(bytes))?,
                     Err(_) if *fail_label != 0 => jump(module, process, *fail_label)?,
-                    Err((segment, value)) => {
-                        if let Some(outcome) =
-                            raise_binary_badarg(scheduler, module, segment, value)?
-                        {
+                    Err(failure) => {
+                        if let Some(outcome) = raise_binary_failure(scheduler, module, failure)? {
                             return Ok(outcome);
                         }
                     }
@@ -1438,9 +1571,63 @@ impl BeamProgram {
                 // `x0` to a list (emu `instrs.tab:1247-1251`; JIT
                 // `emit_build_stacktrace` in
                 // `jit/arm/instr_common.cpp:3046-3056`). The compiler moves
-                // it from `x2` first. PBeam keeps the list in `x2`, so `x0`
-                // already holds it.
-                Instruction::BuildStacktrace => {}
+                // it from `x2` first.
+                Instruction::BuildStacktrace => {
+                    let (_, stack) = raw_stacktrace(&read(process, &Operand::X(0))?)?;
+                    write(process, &Operand::X(0), stack)?;
+                }
+                // ERTS `i_raise` raises the reason again with the class and
+                // the stack trace of the raw stack trace (emu
+                // `ops.tab:284-290`, `instrs.tab:1236-1245`; JIT
+                // `emit_raise` and `emit_raise_shared` in
+                // `jit/x86/instr_common.cpp:3138-3164`;
+                // `erts_sanitize_freason` in `beam_common.c:1089-1097`).
+                Instruction::Raise { trace, value } => {
+                    let (class, stack) = raw_stacktrace(&read(process, trace)?)?;
+                    let value = read(process, value)?;
+                    if let Some(outcome) = raise_with_stacktrace(process, class, value, stack) {
+                        return Ok(outcome);
+                    }
+                }
+                // ERTS `badmatch`, `case_end`, `try_case_end`, and
+                // `badrecord` raise class `error` with the reason
+                // `{Tag, Value}` (emu `instrs.tab:1137-1162`, `1229-1234`;
+                // `expand_error_value` in `beam_common.c:754-768`).
+                Instruction::TaggedError { tag, value } => {
+                    let reason = Term::Tuple(vec![Term::static_atom(tag), read(process, value)?]);
+                    if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                        return Ok(outcome);
+                    }
+                }
+                // ERTS `if_end` raises class `error` with the reason
+                // `if_clause` (emu `instrs.tab:1151-1155`;
+                // `expand_error_value` in `beam_common.c:769-772`).
+                Instruction::IfEnd => {
+                    let reason = Term::static_atom("if_clause");
+                    if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                        return Ok(outcome);
+                    }
+                }
+                // ERTS `raw_raise` raises `x1` with the class in `x0` and the
+                // stack trace of the raw stack trace in `x2`. For a class
+                // that is not `error`, `exit`, or `throw`, it writes
+                // `badarg` to `x0` and continues (emu `instrs.tab:1253-1263`;
+                // `raw_raise` in `beam_common.c:1148-1179`).
+                Instruction::RawRaise => {
+                    let (_, stack) = raw_stacktrace(&read(process, &Operand::X(2))?)?;
+                    let class = read(process, &Operand::X(0))?;
+                    let value = read(process, &Operand::X(1))?;
+                    match ExceptionClass::from_term(&class) {
+                        Some(class) => {
+                            if let Some(outcome) =
+                                raise_with_stacktrace(process, class, value, stack)
+                            {
+                                return Ok(outcome);
+                            }
+                        }
+                        None => write(process, &Operand::X(0), Term::static_atom("badarg"))?,
+                    }
+                }
                 Instruction::Noop | Instruction::Label(_) => {}
                 Instruction::TestYield => {
                     // `emit_i_test_yield` (`jit/arm/instr_common.cpp:3097-3119`).
@@ -1823,6 +2010,11 @@ impl BeamProgram {
             Target::Local(lambda) => lambda,
             Target::External {
                 module, function, ..
+            } if tail && (module.name(), function.name(), arity) == ("erlang", "error", 2) => {
+                return self.tail_call_error_2(scheduler);
+            }
+            Target::External {
+                module, function, ..
             } => return self.call_mfa(scheduler, module.name(), function.name(), arity, tail),
         };
         for (register, value) in (arity..).zip(fun.free()) {
@@ -1832,6 +2024,50 @@ impl BeamProgram {
         let frame = self.frame(lambda.module().name(), lambda.label(), total_arity)?;
         enter_frame(process, frame, tail);
         Ok(None)
+    }
+
+    /// Run a tail call of the fun `fun erlang:error/2`. ERTS
+    /// `i_call_fun_last` removes the frame before it calls the fun
+    /// (`emit_i_call_fun2_last` in `jit/arm/instr_fun.cpp:425-455`). Only an
+    /// apply puts the calling function back for an error BIF
+    /// (`apply_bif_error_adjustment`, `beam_common.c:1345-1431`), so the
+    /// first frame of the stack trace is the function of the caller frame.
+    /// With no caller frame, the first frame is the initial call of the
+    /// process with its arity, and the arguments are not in it
+    /// (`build_stacktrace`, `beam_common.c:1245-1248`). The tail call has
+    /// already released the Y registers of the frame, so the frame holds no
+    /// catch tag. Return the outcome when the process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // `tail(F) -> F(r, [a]).` as the start of a process.
+    /// let outcome = program.tail_call_error_2(&mut scheduler)?;
+    /// // The process exits with {r, [{Module, tail, 1, []}]}.
+    /// assert!(matches!(outcome, Some(Outcome::Exit { .. })));
+    /// ```
+    fn tail_call_error_2(&self, scheduler: &mut Scheduler) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        process.frames.pop();
+        if !process.frames.is_empty() {
+            return self.call_mfa(scheduler, "erlang", "error", 2, false);
+        }
+        let reason = read(process, &Operand::X(0))?;
+        let (module, function, arity) = process.initial_call.clone();
+        let frame = Term::Tuple(vec![
+            Term::Atom(scheduler.atoms.put(&module)?),
+            Term::Atom(scheduler.atoms.put(&function)?),
+            Term::Integer(arity as i64),
+            Term::List(Vec::new()),
+        ]);
+        let process = scheduler.current_process_mut();
+        let stacktrace = Term::List(vec![frame]);
+        Ok(raise_with_stacktrace(
+            process,
+            ExceptionClass::Error,
+            reason,
+            stacktrace,
+        ))
     }
 
     /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
@@ -1882,6 +2118,12 @@ impl BeamProgram {
                 Ok(Some(Outcome::Yield))
             }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
+            BifResult::ErrorWithStacktrace { reason, stacktrace } => Ok(raise_with_stacktrace(
+                process,
+                ExceptionClass::Error,
+                reason,
+                stacktrace,
+            )),
             BifResult::Trap {
                 module,
                 function,
@@ -2282,13 +2524,13 @@ fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Opt
 /// The scan starts at the newest frame and, in one frame, at the lowest Y
 /// index, as ERTS `next_catch` scans up from the stack top. The frames above
 /// the tag are dropped, and the tag becomes `[]`. The handler gets the
-/// non-value in `x0`, the reason in `x1`, the stack trace in `x2`, and the
-/// class atom in `x3` (`beam_common.c:543`). ERTS keeps a raw stack trace
-/// in `x2` that `build_stacktrace` and `catch_end` change to a list
-/// (`beam_common.c:730-735`, `1204-1292`). PBeam keeps the list. An
-/// uncaught `error` exits the process with `{Reason, Stacktrace}`
-/// (`beam_common.c:684-692`), and an uncaught `exit` exits it with
-/// `Reason`.
+/// non-value in `x0`, the reason in `x1`, the raw stack trace in `x2`, and
+/// the class atom in `x3` (`beam_common.c:541-544`). The raw stack trace
+/// keeps the class and the stack trace, so that `raise` can raise the
+/// exception again (see [`raw_stacktrace`]). An uncaught `error` exits the
+/// process with `{Reason, Stacktrace}` (`beam_common.c:684-692`), an
+/// uncaught `exit` exits it with `Reason`, and an uncaught `throw` becomes
+/// the error `{nocatch, Reason}` (`beam_common.c:509-516`).
 ///
 /// # Examples
 ///
@@ -2324,6 +2566,10 @@ fn raise_with_stacktrace(
         let reason = match class {
             ExceptionClass::Error => Term::Tuple(vec![reason, stacktrace]),
             ExceptionClass::Exit => reason,
+            ExceptionClass::Throw => Term::Tuple(vec![
+                Term::Tuple(vec![Term::static_atom("nocatch"), reason]),
+                stacktrace,
+            ]),
         };
         return Some(Outcome::Exit {
             reason,
@@ -2338,10 +2584,51 @@ fn raise_with_stacktrace(
         .registers
         .resize(process.registers.len().max(4), None);
     process.registers[0] = None;
+    let class = Term::static_atom(class.name());
     process.registers[1] = Some(reason);
-    process.registers[2] = Some(stacktrace);
-    process.registers[3] = Some(Term::static_atom(class.name()));
+    process.registers[2] = Some(Term::Tuple(vec![class.clone(), stacktrace]));
+    process.registers[3] = Some(class);
     None
+}
+
+/// Return the class and the stack trace of a raw stack trace, the value
+/// that the handler of a `try` or a `catch` gets in `x2`.
+///
+/// ERTS makes the raw stack trace, a 3-tuple with the class in an internal
+/// `StackTrace` struct, when it saves the stack trace of an exception
+/// (`save_stacktrace`, `beam_common.c:894`, `1051`). PBeam makes the tuple
+/// `{Class, Stacktrace}` instead. `[]` is the ERTS raw stack trace `NIL`:
+/// `raise` raises class `error` for it, and `build_stacktrace` gives `[]`
+/// (`beam_common.c:1079-1097`, `1219-1220`). ERTS then saves a new stack
+/// trace for the error; PBeam records no frames, so the stack trace stays
+/// `[]`. Compiled code gives a raw stack trace only to `raise` and
+/// `build_stacktrace`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let raw = Term::Tuple(vec![Term::static_atom("exit"), Term::List(vec![])]);
+/// assert!(matches!(raw_stacktrace(&raw)?, (ExceptionClass::Exit, Term::List(_))));
+/// assert!(matches!(raw_stacktrace(&Term::List(vec![]))?, (ExceptionClass::Error, _)));
+/// ```
+///
+/// # Errors
+///
+/// Each other term gives a runtime invariant error. ERTS reads it as a
+/// raw stack trace with no check, so its result is not defined.
+fn raw_stacktrace(raw: &Term) -> Result<(ExceptionClass, Term), BeamError> {
+    if let Term::Tuple(parts) = raw
+        && let [class, stack] = parts.as_slice()
+        && let Some(class) = ExceptionClass::from_term(class)
+    {
+        return Ok((class, stack.clone()));
+    }
+    match raw {
+        Term::List(stack) if stack.is_empty() => Ok((ExceptionClass::Error, raw.clone())),
+        _ => Err(error(format!(
+            "invariant error: {raw:?} is not a raw stack trace"
+        ))),
+    }
 }
 
 /// Clear the catch tag in a Y register of the active frame. The register
@@ -2445,7 +2732,8 @@ fn read(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// write(&mut process, &Operand::X(0), Term::MatchContext(MatchContext::new(b"a")))?;
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
 /// assert!(matches!(read_any(&process, &Operand::X(0))?, Term::MatchContext(_)));
 /// ```
 fn read_any(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
@@ -2453,20 +2741,118 @@ fn read_any(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError
     read_operand(operand, &process.registers, stack)
 }
 
-/// Read the match context of a binary-match instruction. Each other term
-/// is a runtime invariant error: the BEAM validator gives these
-/// instructions only a match context.
+/// Read the match context of a binary-match instruction that reads its
+/// position. A match context after a failed `=:=` command of `bs_match`
+/// has no known position until `bs_set_position`, and gives a runtime
+/// error (row "Binary matching" of docs/erts-differences.md). Return the
+/// shared match context, so a change of its position is also in each
+/// copy of it.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// write(&mut process, &Operand::X(0), Term::MatchContext(MatchContext::new(b"a")))?;
-/// assert_eq!(match_context(&process, &Operand::X(0))?.position(), 0);
-/// assert!(match_context(&process, &Operand::Value(Term::Integer(1))).is_err());
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
+/// assert_eq!(match_context(&process, &Operand::X(0))?.borrow().position(), 0);
 /// ```
-fn match_context(process: &ProcessState, operand: &Operand) -> Result<MatchContext, BeamError> {
+fn match_context(
+    process: &ProcessState,
+    operand: &Operand,
+) -> Result<Rc<RefCell<MatchContext>>, BeamError> {
+    let context = any_match_context(process, operand)?;
+    check_known_position(&context, operand)?;
+    Ok(context)
+}
+
+/// Check that the position of the match context in `operand` is known.
+/// After a failed `=:=` command of `bs_match`, a read gives a runtime
+/// error (row "Binary matching" of docs/erts-differences.md).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// assert!(check_known_position(&context, &Operand::X(0)).is_ok());
+/// context.borrow_mut().forget_position();
+/// assert!(check_known_position(&context, &Operand::X(0)).is_err());
+/// ```
+fn check_known_position(
+    context: &RefCell<MatchContext>,
+    operand: &Operand,
+) -> Result<(), BeamError> {
+    if context.borrow().position_known() {
+        Ok(())
+    } else {
+        Err(error(format!(
+            "unsupported read of the match context in {operand:?} after a failed bs_match =:= command"
+        )))
+    }
+}
+
+/// Return the `byte_size/1` result of a match context in `values`, the
+/// argument values of the BIF `module:name`, or `None` for each other BIF
+/// or argument. The BEAM validator lets `byte_size/1` get a match context
+/// (`validate_bif_sources`, beam_validator.erl:1649-1654), and ERTS gives
+/// the bits from its position to its end in bytes, rounded up
+/// (`emit_bif_byte_size`, jit/arm/instr_guard_bifs.cpp:458-509; ops.tab:
+/// 789-790). `Terra.Input.Parser.decode_codepoint/1` reads the size of its
+/// match context with it.
+///
+/// # Errors
+///
+/// A match context in an argument of another BIF is a runtime invariant
+/// error. A match context with no known position gives the error of
+/// `match_context`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"abc")));
+/// context.borrow_mut().skip(4);
+/// let values = [Term::MatchContext(context)];
+/// let size = match_context_byte_size("erlang", "byte_size", &[Operand::X(0)], &values)?;
+/// assert_eq!(size, Some(Term::Integer(3)));
+/// assert!(match_context_byte_size("erlang", "hd", &[Operand::X(0)], &values).is_err());
+/// ```
+fn match_context_byte_size(
+    module: &str,
+    name: &str,
+    arguments: &[Operand],
+    values: &[Term],
+) -> Result<Option<Term>, BeamError> {
+    if let (("erlang", "byte_size"), [Term::MatchContext(context)]) = ((module, name), values) {
+        check_known_position(context, &arguments[0])?;
+        let bits = context.borrow().remaining_bits();
+        return Ok(Some(Term::Integer(bits.div_ceil(8) as i64)));
+    }
+    match values
+        .iter()
+        .position(|value| matches!(value, Term::MatchContext(_)))
+    {
+        Some(index) => Err(match_context_escape(&arguments[index])),
+        None => Ok(None),
+    }
+}
+
+/// Read the shared match context of a binary-match instruction, also when
+/// its position is not known. Each other term is a runtime invariant
+/// error: the BEAM validator gives these instructions only a match
+/// context.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
+/// assert_eq!(any_match_context(&process, &Operand::X(0))?.borrow().position(), 0);
+/// assert!(any_match_context(&process, &Operand::Value(Term::Integer(1))).is_err());
+/// ```
+fn any_match_context(
+    process: &ProcessState,
+    operand: &Operand,
+) -> Result<Rc<RefCell<MatchContext>>, BeamError> {
     match &read_any(process, operand)? {
-        Term::MatchContext(context) => Ok(context.clone()),
+        Term::MatchContext(context) => Ok(Rc::clone(context)),
         other => Err(error(format!(
             "invariant error: {operand:?} holds {other:?}, not a match context"
         ))),
@@ -2569,7 +2955,8 @@ fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, B
 /// # Examples
 ///
 /// ```rust,ignore
-/// let registers = vec![Some(Term::MatchContext(MatchContext::new(b"a")))];
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// let registers = vec![Some(Term::MatchContext(context))];
 /// assert!(check_local_call_arguments(&registers, 1).is_ok());
 /// assert!(check_local_call_arguments(&registers, 2).is_err());
 /// ```
@@ -2588,7 +2975,8 @@ fn check_local_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<
 /// # Examples
 ///
 /// ```rust,ignore
-/// let registers = vec![Some(Term::MatchContext(MatchContext::new(b"a")))];
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// let registers = vec![Some(Term::MatchContext(context))];
 /// assert!(check_remote_call_arguments(&registers, 1).is_err());
 /// assert!(check_remote_call_arguments(&[Some(Term::Integer(1))], 1).is_ok());
 /// ```
@@ -2601,11 +2989,37 @@ fn check_remote_call_arguments(registers: &[Option<Term>], arity: u32) -> Result
     }
 }
 
+/// Return the size in bits of a `bs_get_binary2` segment of `size` units
+/// of `unit` bits, or `None` when the instruction fails. As the ERTS JIT
+/// field size check, a size that is not a non-negative integer fails
+/// (`emit_bs_get_field_size` in jit/arm/instr_bs.cpp:38-116). That check
+/// also fails a register size from 2^48 and a literal size above
+/// `MAX_SMALL / unit`. The compiler gives a unit from 1 to 256
+/// (`type_to_record` in erl_bits.erl:93), so such a size is always more
+/// bits than a binary has, and `erts_bs_get_binary_2` then fails
+/// (erl_bits.c:400-424). Thus `MatchContext::read_bits` gives the same
+/// result for it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(binary_field_size(&Term::Integer(3), 8), Some(24));
+/// assert_eq!(binary_field_size(&Term::Integer(-1), 8), None);
+/// assert_eq!(binary_field_size(&Term::static_atom("all"), 8), None);
+/// assert_eq!(binary_field_size(&Term::Integer(i64::MAX), 8), None);
+/// ```
+fn binary_field_size(size: &Term, unit: u64) -> Option<u64> {
+    match size {
+        Term::Integer(size) => u64::try_from(*size).ok()?.checked_mul(unit),
+        _ => None,
+    }
+}
+
 /// Return the runtime invariant error of a match context in `operand` at an
-/// instruction that is not a binary match or a local call. The BEAM
-/// validator also lets `move` and `swap` copy a match context
-/// (beam_validator.erl:403-407, 2690-2693), which PBeam does not implement
-/// yet (row "Binary matching" of docs/erts-differences.md).
+/// instruction that is not a binary match, `move`, or a local call. The
+/// BEAM validator also lets `swap` exchange a match context
+/// (beam_validator.erl:405-407), which PBeam does not implement yet (row
+/// "Binary matching" of docs/erts-differences.md).
 ///
 /// # Examples
 ///
@@ -2621,61 +3035,322 @@ fn match_context_escape(operand: &Operand) -> BeamError {
     ))
 }
 
-/// Run the commands of a `bs_match` instruction in order on a match
-/// context, as the instructions that the ERTS loader makes from them do
-/// (`gen.bs_match`, emu generators.tab:1102-1430). Return `false` at the
-/// first command that fails. `ensure_at_least` loads as `i_bs_ensure_bits`,
-/// `i_bs_ensure_bits_unit`, `i_bs_test_unit8`, or `i_bs_test_unit`
-/// (generators.tab:1164-1209; bs_instrs.tab:760-772, 1260-1293), which all
-/// test that `Size` bits remain and that the bits after them are a multiple
-/// of `Unit`. `ensure_exactly` loads as `bs_test_tail2` (generators.tab:
-/// 1210-1220; ops.tab:1220-1222; bs_instrs.tab:746-758), which tests that
-/// exactly `Size` bits remain. Each other command gives a runtime error.
+/// Run the commands of a `bs_match` instruction in order on the match
+/// context in `context`, as the ERTS JIT does (`gen.bs_match`,
+/// jit/arm/generators.tab:532-604; `emit_i_bs_match_test_heap`,
+/// jit/arm/instr_bs.cpp:2916-3205). Return `false` at the first command
+/// that fails. The register keeps the position after each command that
+/// moves it.
+///
+/// - `ensure_at_least` tests that `Size` bits remain and that the bits
+///   after them are a multiple of `Unit`. `ensure_exactly` tests that
+///   exactly `Size` bits remain.
+/// - `integer` reads an integer (`segment_integer`), and `binary` reads a
+///   binary. `skip` moves the position. `get_tail` writes the bits after
+///   the position and keeps the position. These commands do not fail:
+///   the compiler puts an `ensure_at_least` or `ensure_exactly` for their
+///   bits first (beam_ssa_codegen.erl:2759-2868).
+/// - `=:=` fails when the bits are not its value. The position is then
+///   not known (`MatchContext::forget_position`).
+///
+/// # Errors
+///
+/// A command that reads more bits than remain gives a runtime invariant
+/// error. An integer outside the 64-bit signed range needs a bignum, and
+/// a `binary` or `get_tail` of a size that is not a multiple of 8 bits
+/// needs a bitstring term: each gives a runtime error (rows "Integer
+/// range" and "Binary matching" of docs/erts-differences.md).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = MatchContext::new(b"a");
+/// let context = Rc::new(RefCell::new(MatchContext::new(&[7, 8])));
+/// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
 /// let unit = NonZeroU64::new(8).unwrap();
-/// assert!(binary_match(&context, &[BinaryMatchCommand::EnsureAtLeast { size: 0, unit }])?);
-/// assert!(!binary_match(&context, &[BinaryMatchCommand::EnsureExactly { size: 0 }])?);
+/// let byte = BinaryMatchCommand::Integer { size: 8, little: false, signed: false, destination: Operand::X(1) };
+/// assert!(binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureAtLeast { size: 8, unit }, byte])?);
+/// assert_eq!(read(&process, &Operand::X(1))?, Term::Integer(7));
+/// assert!(!binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureExactly { size: 0 }])?);
 /// ```
 fn binary_match(
-    context: &MatchContext,
+    process: &mut ProcessState,
+    context: &Operand,
     commands: &[BinaryMatchCommand],
 ) -> Result<bool, BeamError> {
-    let remaining = context.remaining_bits() as u64;
+    let context = match_context(process, context)?;
+    let mut state = context.borrow_mut();
+    // A binary of `size` bits, or a runtime error for a bitstring.
+    let binary_size = |command: &str, size: u64| {
+        if size.is_multiple_of(8) {
+            Ok(())
+        } else {
+            Err(error(format!(
+                "unsupported bs_match {command} of {size} bits: needs a bitstring term"
+            )))
+        }
+    };
     for command in commands {
-        let passed = match command {
-            BinaryMatchCommand::EnsureAtLeast { size, unit } => {
-                remaining >= *size && (remaining - size).is_multiple_of(unit.get())
-            }
-            BinaryMatchCommand::EnsureExactly { size } => remaining == *size,
-            BinaryMatchCommand::Unsupported(name) => {
-                return Err(error(format!(
-                    "unsupported bs_match command {}",
-                    name.name()
-                )));
-            }
+        let remaining = state.remaining_bits() as u64;
+        let too_few_bits = |size: &u64| {
+            error(format!(
+                "invariant error: a bs_match command needs {size} bits, but {remaining} bits remain"
+            ))
         };
-        if !passed {
-            return Ok(false);
+        match command {
+            BinaryMatchCommand::EnsureAtLeast { size, unit } => {
+                if remaining < *size || !(remaining - size).is_multiple_of(unit.get()) {
+                    return Ok(false);
+                }
+            }
+            BinaryMatchCommand::EnsureExactly { size } => {
+                if remaining != *size {
+                    return Ok(false);
+                }
+            }
+            BinaryMatchCommand::Integer {
+                size,
+                little,
+                signed,
+                destination,
+            } => {
+                let bits = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
+                let value =
+                    segment_integer(&bits, *size as usize, *little, *signed).ok_or_else(|| {
+                        error(
+                            "unsupported bs_match integer outside the 64-bit range: needs a bignum",
+                        )
+                    })?;
+                write(process, destination, Term::Integer(value))?;
+            }
+            BinaryMatchCommand::Binary { size, destination } => {
+                binary_size("binary", *size)?;
+                let bytes = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
+                write(process, destination, Term::Binary(bytes))?;
+            }
+            BinaryMatchCommand::Equal { size, value } => {
+                let bits = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
+                let equal = segment_equals(&bits, *size as usize, *value);
+                if !equal {
+                    state.forget_position();
+                    return Ok(false);
+                }
+            }
+            BinaryMatchCommand::GetTail { destination } => {
+                binary_size("get_tail", remaining)?;
+                write(process, destination, Term::Binary(state.tail()))?;
+            }
+            BinaryMatchCommand::Skip { size } => {
+                state.skip(*size).ok_or_else(|| too_few_bits(size))?;
+            }
         }
     }
     Ok(true)
 }
 
+/// The failure of a `bs_create_bin` segment, which ERTS gives in the
+/// `error_info` cause `{segment, operation, info, value}`
+/// (`beam_jit_bs_construct_fail_info`, jit/beam_jit_common.cpp:911-1010).
+#[derive(Debug, PartialEq)]
+struct BinarySegmentFailure {
+    /// The segment number of the compiler.
+    segment: u64,
+    /// The segment operation: `binary`, `integer`, or `utf8`.
+    operation: &'static str,
+    /// The failed check: `type`, `unit`, or `size`.
+    info: &'static str,
+    /// The term that failed the check.
+    value: Term,
+    /// The exception reason: `badarg`, or `system_limit` for a size that
+    /// is too large.
+    reason: &'static str,
+}
+
+impl BinarySegmentFailure {
+    /// Return the `badarg` failure of a check of `operation`.
+    fn badarg(segment: u64, operation: &'static str, info: &'static str, value: Term) -> Self {
+        BinarySegmentFailure {
+            segment,
+            operation,
+            info,
+            value,
+            reason: "badarg",
+        }
+    }
+}
+
+/// A segment of `bs_create_bin` after the size pass: the bytes of a
+/// `string` or `binary` segment and the reductions of their copy, an
+/// `integer` segment with its term and its size in bits, or the code point
+/// of a `utf8` segment.
+enum BinaryPart<'a> {
+    Bytes(Cow<'a, [u8]>, usize),
+    Integer {
+        segment: u64,
+        value: Term,
+        bits: u64,
+        little: bool,
+        /// True when the size is a literal from 0 to 2^56 - 1, as ERTS
+        /// computes its size at load time (jit/arm/instr_bs.cpp:1493-1505).
+        fixed: bool,
+    },
+    Utf8(char),
+}
+
+impl BinaryPart<'_> {
+    /// Return the `type` failure of an `integer` part whose term is not an
+    /// integer.
+    fn type_failure(&self) -> Option<BinarySegmentFailure> {
+        match self {
+            BinaryPart::Integer { segment, value, .. } if !matches!(value, Term::Integer(_)) => {
+                Some(BinarySegmentFailure::badarg(
+                    *segment,
+                    "integer",
+                    "type",
+                    value.clone(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Return true when the part writes at least one bit.
+    fn has_bits(&self) -> bool {
+        match self {
+            BinaryPart::Bytes(bytes, _) => !bytes.is_empty(),
+            BinaryPart::Integer { bits, .. } => *bits > 0,
+            BinaryPart::Utf8(_) => true,
+        }
+    }
+}
+
+/// Return the size in bits of an `integer` segment, or the exception
+/// reason of its failure, as the ERTS JIT size pass checks it
+/// (jit/arm/instr_bs.cpp:1493-1505, 1639-1689). A `fixed` size, a literal
+/// from 0 to 2^56 - 1, needs no check. Each other size must be a small
+/// integer that is not negative, else it fails with `system_limit` for a
+/// positive bignum and with `badarg` for each other term
+/// (`BSC_REASON_DEPENDS`, jit/beam_jit_common.cpp:968-975). For a unit
+/// other than 1, a size of 2^52 or more fails with `system_limit`, as the
+/// arm64 JIT checks it (jit/arm/instr_bs.cpp:1685). The x86_64 JIT fails
+/// only on an overflow of the size times the unit
+/// (jit/x86/instr_bs.cpp:1942-1943) and then stops at the allocation; row
+/// "Binary construction" of `docs/erts-differences.md` records it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(integer_segment_bits(false, &Term::Integer(3), 8), Ok(24));
+/// assert_eq!(integer_segment_bits(false, &Term::Integer(-1), 1), Err("badarg"));
+/// assert_eq!(integer_segment_bits(false, &Term::Integer(1 << 52), 8), Err("system_limit"));
+/// ```
+fn integer_segment_bits(fixed: bool, size: &Term, unit: u64) -> Result<u64, &'static str> {
+    match (size.small_integer(), size) {
+        (Some(bits), _) if bits >= 0 && (fixed || unit == 1 || bits >> 52 == 0) => {
+            Ok((bits as u64).saturating_mul(unit))
+        }
+        (Some(bits), _) if bits >= 0 => Err("system_limit"),
+        (None, Term::Integer(bits)) if *bits >= 0 => Err("system_limit"),
+        _ => Err("badarg"),
+    }
+}
+
+/// Return the failure of the `integer` part that ERTS reports when the
+/// part at `first` is the first part in segment order whose term is not an
+/// integer. The JIT construct pass joins the adjacent `integer` segments of
+/// a fixed size from 1 to 64 bits and one byte order into one group, up to
+/// 64 bits, and a little-endian group joins a segment only after a whole
+/// number of bytes (`beam_jit_bsc_combine_segments`,
+/// jit/beam_jit_bs.cpp:162-232). It checks the segments of a
+/// little-endian group in reverse order (`push_group`,
+/// jit/beam_jit_bs.cpp:106-123), so the last bad term of that group fails
+/// first.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<A:8/little, B:8/little>> with A = a and B = b fails at B.
+/// assert_eq!(integer_type_failure(&parts, 0).segment, 2);
+/// ```
+fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFailure {
+    let mut group = 0..0;
+    let mut group_little = false;
+    let mut group_bits = 0;
+    for (index, part) in parts.iter().enumerate() {
+        let member = match part {
+            BinaryPart::Integer {
+                bits,
+                little,
+                fixed: true,
+                ..
+            } if (1..=64).contains(bits) => Some((*bits, *little)),
+            _ => None,
+        };
+        match member {
+            Some((bits, little))
+                if !group.is_empty()
+                    && little == group_little
+                    && group_bits + bits <= 64
+                    && (!little || group_bits % 8 == 0) =>
+            {
+                group.end = index + 1;
+                group_bits += bits;
+            }
+            _ if index > first => break,
+            Some((bits, little)) => {
+                group = index..index + 1;
+                group_little = little;
+                group_bits = bits;
+            }
+            None => group = index + 1..index + 1,
+        }
+    }
+    let end = if group_little && group.contains(&first) {
+        group.end
+    } else {
+        first + 1
+    };
+    (first..end)
+        .rev()
+        .find_map(|index| parts[index].type_failure())
+        .expect("the part at `first` has a term that is not an integer")
+}
+
 /// Build the binary of the segments of a `bs_create_bin` instruction, as
 /// the ERTS JIT `i_bs_create_bin` does (JIT `emit_i_bs_create_bin` in
-/// jit/arm/instr_bs.cpp:1442-2300). First read the term of each `binary`
-/// segment in order. A term that is not a binary gives the segment number
-/// and the term, and the instruction then fails. Then join the bytes of
-/// the segments. A `string` segment copies its bytes (`erts_bs_put_string`,
-/// erl_bits.c:1641-1654). A `binary` segment copies its binary and uses one
-/// reduction for each 8192 bits (`erts_bs_put_binary_all`,
-/// erl_bits.c:1311-1332; `beam_jit_bs_put_binary_all`,
-/// jit/beam_jit_common.cpp:1043-1057). PBeam has no bitstring that is not
-/// a binary, so the unit 8 test of `erts_bs_put_binary_all` always passes.
+/// jit/arm/instr_bs.cpp:1442-2490). It has three passes, and the first
+/// failed check gives the failure.
+///
+/// The size pass reads the segments in order (jit/arm/instr_bs.cpp:
+/// 1579-1808). A `binary` segment of size `all` with a term that is not a
+/// binary fails with `type`. An `integer` segment checks its size (see
+/// `integer_segment_bits`). A `utf8` segment with a term that is not a
+/// code point from 0 to 16#10FFFF outside 16#D800 to 16#DFFF fails with
+/// `type`.
+///
+/// Then the JIT checks the `append` segment, which is the first segment
+/// (jit/arm/instr_bs.cpp:1811-1864), with `erts_bs_append_checked`
+/// (erl_bits.c:1724-1925). A term that is not a binary fails with the
+/// reason `type`, and a binary whose size in bits is not a multiple of a
+/// unit larger than 1 fails with the reason `unit`. When the other
+/// segments add no bits, the result is the binary of the `append` segment
+/// and the append uses no reduction, but the construct pass still checks
+/// the term of each `integer` segment of size 0. Else the result starts with a copy of
+/// that binary, which uses one reduction for each 8192 bits, as the ERTS
+/// path for a binary that is not writable does (erl_bits.c:1855-1924).
+/// PBeam has no writable binary (row "Binary construction" of
+/// `docs/erts-differences.md`).
+///
+/// The construct pass writes the segments (jit/arm/instr_bs.cpp:
+/// 1994-2486). A `string` segment copies its bytes (`erts_bs_put_string`,
+/// erl_bits.c:1641-1654). A `binary` segment copies its binary and uses
+/// one reduction for each 8192 bits (`beam_jit_bs_put_binary_all`,
+/// jit/beam_jit_common.cpp:1043-1057). An `integer` segment with a term
+/// that is not an integer fails with `type`, in the order of
+/// `integer_type_failure`; else it writes the integer with no reduction
+/// (`erts_bs_put_integer_be` and `erts_bs_put_integer_le`, erl_bits.c:
+/// 926-1167). A `utf8` segment writes the UTF-8 bytes of its code point
+/// (`emit_construct_utf8`). PBeam has no bitstring that is not a binary,
+/// so the unit 8 test of `erts_bs_put_binary_all` always passes.
 ///
 /// # Examples
 ///
@@ -2687,29 +3362,98 @@ fn binary_match(
 /// ];
 /// assert_eq!(create_binary(&mut process, &segments)?, Ok(b"count: 3".to_vec()));
 /// write(&mut process, &Operand::X(0), Term::static_atom("a"))?;
-/// assert_eq!(create_binary(&mut process, &segments)?, Err((2, Term::static_atom("a"))));
+/// assert_eq!(
+///     create_binary(&mut process, &segments)?,
+///     Err(BinarySegmentFailure::badarg(2, "binary", "type", Term::static_atom("a")))
+/// );
+///
+/// // <<X:16/little>> with X = 16#1234
+/// write(&mut process, &Operand::X(0), Term::Integer(0x1234))?;
+/// let segments = [BinarySegment::Integer {
+///     segment: 1,
+///     unit: 1,
+///     little: true,
+///     source: Operand::X(0),
+///     size: Operand::Value(Term::Integer(16)),
+/// }];
+/// assert_eq!(create_binary(&mut process, &segments)?, Ok(vec![0x34, 0x12]));
 /// ```
 ///
 /// # Errors
 ///
 /// A segment of a type, size, or unit that PBeam does not run yet is a
-/// runtime error. A match context in a `binary` segment is a runtime
-/// invariant error.
+/// runtime error. A result whose size in bits is not a multiple of 8 is a
+/// runtime error, because PBeam has no bitstring term. A match context in
+/// a `binary` segment is a runtime invariant error.
 fn create_binary(
     process: &mut ProcessState,
     segments: &[BinarySegment],
-) -> Result<Result<Vec<u8>, (u64, Term)>, BeamError> {
+) -> Result<Result<Vec<u8>, BinarySegmentFailure>, BeamError> {
     let mut parts = Vec::with_capacity(segments.len());
+    let mut append = None;
     for segment in segments {
-        parts.push(match segment {
-            BinarySegment::String(text) => (Cow::Borrowed(text.as_slice()), 0),
+        match segment {
+            BinarySegment::String(text) => {
+                parts.push(BinaryPart::Bytes(Cow::Borrowed(text.as_slice()), 0));
+            }
             BinarySegment::BinaryAll { segment, source } => {
                 let mut value = read(process, source)?;
                 let Term::Binary(bytes) = &mut value else {
-                    return Ok(Err((*segment, value)));
+                    return Ok(Err(BinarySegmentFailure::badarg(
+                        *segment, "binary", "type", value,
+                    )));
                 };
                 let reductions = bytes.len() * 8 / BITS_PER_REDUCTION;
-                (Cow::Owned(std::mem::take(bytes)), reductions)
+                parts.push(BinaryPart::Bytes(
+                    Cow::Owned(std::mem::take(bytes)),
+                    reductions,
+                ));
+            }
+            BinarySegment::Append {
+                segment,
+                unit,
+                source,
+            } => append = Some((*segment, *unit, read(process, source)?)),
+            BinarySegment::Integer {
+                segment,
+                unit,
+                little,
+                source,
+                size,
+            } => {
+                // ERTS computes the size of a literal from 0 to 2^56 - 1 at
+                // load time with no check (jit/arm/instr_bs.cpp:1493-1505).
+                let fixed = matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+                let size = read(process, size)?;
+                let bits = match integer_segment_bits(fixed, &size, *unit) {
+                    Ok(bits) => bits,
+                    Err(reason) => {
+                        return Ok(Err(BinarySegmentFailure {
+                            reason,
+                            ..BinarySegmentFailure::badarg(*segment, "integer", "size", size)
+                        }));
+                    }
+                };
+                parts.push(BinaryPart::Integer {
+                    segment: *segment,
+                    value: read(process, source)?,
+                    bits,
+                    little: *little,
+                    fixed,
+                });
+            }
+            BinarySegment::Utf8 { segment, source } => {
+                let value = read(process, source)?;
+                let code_point = match &value {
+                    Term::Integer(code) => u32::try_from(*code).ok().and_then(char::from_u32),
+                    _ => None,
+                };
+                let Some(code_point) = code_point else {
+                    return Ok(Err(BinarySegmentFailure::badarg(
+                        *segment, "utf8", "type", value,
+                    )));
+                };
+                parts.push(BinaryPart::Utf8(code_point));
             }
             BinarySegment::Unsupported(kind) => {
                 return Err(error(format!(
@@ -2717,24 +3461,69 @@ fn create_binary(
                     kind.name()
                 )));
             }
-        });
+        }
     }
-    let mut bytes = Vec::new();
-    for (part, reductions) in parts {
-        bytes.extend_from_slice(&part);
+    let mut writer = BitWriter::default();
+    if let Some((segment, unit, mut value)) = append {
+        let Term::Binary(start) = &mut value else {
+            return Ok(Err(BinarySegmentFailure::badarg(
+                segment, "binary", "type", value,
+            )));
+        };
+        if unit > 1 && !(start.len() as u64 * 8).is_multiple_of(unit) {
+            return Ok(Err(BinarySegmentFailure::badarg(
+                segment, "binary", "unit", value,
+            )));
+        }
+        if !parts.iter().any(BinaryPart::has_bits) {
+            // The construct pass still checks the term of each `integer`
+            // segment of size 0 (erl_bits.c:934-936).
+            if let Some(index) = parts.iter().position(|part| part.type_failure().is_some()) {
+                return Ok(Err(integer_type_failure(&parts, index)));
+            }
+            return Ok(Ok(std::mem::take(start)));
+        }
+        let reductions = start.len() * 8 / BITS_PER_REDUCTION;
         process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+        writer.push_bytes(start);
     }
-    Ok(Ok(bytes))
+    for (index, part) in parts.iter().enumerate() {
+        match part {
+            BinaryPart::Bytes(bytes, reductions) => {
+                writer.push_bytes(bytes);
+                process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
+            }
+            BinaryPart::Integer {
+                value: Term::Integer(value),
+                bits,
+                little,
+                ..
+            } => writer.push_integer(*value, *bits, *little),
+            BinaryPart::Integer { .. } => return Ok(Err(integer_type_failure(&parts, index))),
+            BinaryPart::Utf8(code_point) => {
+                writer.push_bytes(code_point.encode_utf8(&mut [0; 4]).as_bytes());
+            }
+        }
+    }
+    writer.into_bytes().map(Ok).map_err(|bits| {
+        error(format!(
+            "unsupported bs_create_bin result: a bitstring of {bits} bits, which is not a binary"
+        ))
+    })
 }
 
-/// Raise the `badarg` of a `bs_create_bin` `binary` segment with a term
-/// that is not a binary in the current process, as ERTS
-/// `emit_bs_create_bin_error_shared` does (jit/arm/instr_bs.cpp:1002-1019).
-/// The stack trace is the frame of the function that holds the instruction,
-/// with the ERTS `error_info` (`beam_jit_bs_construct_fail_info` in
-/// jit/beam_jit_common.cpp:911-1010). PBeam keeps no line table and no
-/// caller frames, so the frame has no `file` or `line` and is the only
-/// frame (row "Exception stack trace" of `docs/erts-differences.md`).
+/// Raise the exception of a failed `bs_create_bin` segment in the current
+/// process, as ERTS `emit_bs_create_bin_error_shared` does
+/// (jit/arm/instr_bs.cpp:1002-1019). The class is `error`, the reason is
+/// the `reason` of `failure` (`badarg` or `system_limit`), and the
+/// `error_info` cause is `{Segment, Operation, Info, Value}`. The `binary`
+/// and `append` segments give the operation `binary` (`beam_jit_bsc_init`,
+/// jit/beam_jit_bs.cpp:55-74). The stack trace is the frame of the
+/// function that holds the instruction, with the ERTS `error_info`
+/// (`beam_jit_bs_construct_fail_info` in jit/beam_jit_common.cpp:911-1010).
+/// PBeam keeps no line table and no caller frames, so the frame has no
+/// `file` or `line` and is the only frame (row "Exception stack trace" of
+/// `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
@@ -2743,7 +3532,8 @@ fn create_binary(
 /// // exits with {badarg, [{bs_create_bin_probe, prefix, 1, [{error_info,
 /// // #{cause => {2, binary, type, a}, function => format_bs_fail,
 /// // module => erl_erts_errors}}]}]}.
-/// let outcome = raise_binary_badarg(scheduler, &module, 2, Term::static_atom("a"))?;
+/// let failure = BinarySegmentFailure::badarg(2, "binary", "type", Term::static_atom("a"));
+/// let outcome = raise_binary_failure(scheduler, &module, failure)?;
 /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
 /// ```
 ///
@@ -2751,38 +3541,17 @@ fn create_binary(
 ///
 /// An instruction with no `func_info` before it, or a module or function
 /// name that the atom table does not hold, is a runtime invariant error.
-fn raise_binary_badarg(
+fn raise_binary_failure(
     scheduler: &mut Scheduler,
     module: &BeamModule,
-    segment: u64,
-    value: Term,
+    failure: BinarySegmentFailure,
 ) -> Result<Option<Outcome>, BeamError> {
-    let index = current_frame(scheduler.current_process_mut()).next_instruction - 1;
-    let (module_name, name, arity) = module.instructions[..index]
-        .iter()
-        .rev()
-        .find_map(|instruction| match instruction {
-            Instruction::FunctionInfo {
-                module,
-                name,
-                arity,
-            } => Some((module, name, *arity)),
-            _ => None,
-        })
-        .ok_or_else(|| error("invariant error: bs_create_bin has no func_info before it"))?;
-    let atom = |name: &str| {
-        scheduler
-            .atoms
-            .get(name)
-            .map(Term::Atom)
-            .ok_or_else(|| error(format!("invariant error: atom table does not hold {name}")))
-    };
-    let (module_atom, function_atom) = (atom(module_name)?, atom(name)?);
+    let (module_atom, function_atom, arity) = current_function(scheduler, module)?;
     let cause = Term::Tuple(vec![
-        Term::Integer(segment as i64),
-        Term::static_atom("binary"),
-        Term::static_atom("type"),
-        value,
+        Term::Integer(failure.segment as i64),
+        Term::static_atom(failure.operation),
+        Term::static_atom(failure.info),
+        failure.value,
     ]);
     // ponytail: each map form holds atom keys, so `from_pairs` cannot fail.
     let error_info = Map::from_pairs(vec![
@@ -2804,13 +3573,57 @@ fn raise_binary_badarg(
         Term::Integer(arity.into()),
         Term::List(vec![location]),
     ]);
-    let badarg = Term::static_atom("badarg");
     Ok(raise_with_stacktrace(
         scheduler.current_process_mut(),
         ExceptionClass::Error,
-        badarg,
+        Term::static_atom(failure.reason),
         Term::List(vec![frame]),
     ))
+}
+
+/// Return the module atom, the function atom, and the arity of the function
+/// that holds the last instruction that the active frame ran, from the
+/// `func_info` before it. ERTS finds the function of a code address in the
+/// same way for the first frame of a stack trace (`erts_lookup_function_info`
+/// in `build_stacktrace`, `beam_common.c:1229-1236`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // In `prefix/1` of `bs_create_bin_probe`.
+/// let (module, function, arity) = current_function(scheduler, &module)?;
+/// assert_eq!(arity, 1);
+/// ```
+///
+/// # Errors
+///
+/// An instruction with no `func_info` before it, or a module or function
+/// name that the atom table does not hold, is a runtime invariant error.
+fn current_function(
+    scheduler: &mut Scheduler,
+    module: &BeamModule,
+) -> Result<(Term, Term, u32), BeamError> {
+    let index = current_frame(scheduler.current_process_mut()).next_instruction - 1;
+    let (module_name, name, arity) = module.instructions[..index]
+        .iter()
+        .rev()
+        .find_map(|instruction| match instruction {
+            Instruction::FunctionInfo {
+                module,
+                name,
+                arity,
+            } => Some((module, name, *arity)),
+            _ => None,
+        })
+        .ok_or_else(|| error("invariant error: the instruction has no func_info before it"))?;
+    let atom = |name: &str| {
+        scheduler
+            .atoms
+            .get(name)
+            .map(Term::Atom)
+            .ok_or_else(|| error(format!("invariant error: atom table does not hold {name}")))
+    };
+    Ok((atom(module_name)?, atom(name)?, arity))
 }
 
 /// Read a literal, an X register, or a Y register.

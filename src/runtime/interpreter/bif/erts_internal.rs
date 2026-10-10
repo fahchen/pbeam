@@ -26,25 +26,35 @@ use crate::term::PortId;
 /// change as a signal through `erts_internal:group_leader/3`. Return the
 /// atom `badarg` without an exception when `Leader` is not a pid, when
 /// `Target` is not a pid or no process has it, and when `Target` exits
-/// (`erts_set_group_leader`, `bif.c:4860-4870`).
+/// (`erts_set_group_leader`, `bif.c:4860-4870`). For another process, the
+/// caller needs the `process` capability with `group_leader` after the pid
+/// checks, else the BIF raises `error:capability_denied` before it looks up
+/// the process.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = group_leader(&mut context, &Term::Pid(leader), &Term::Pid(target));
+/// let result = group_leader(&mut context, &Term::Pid(leader), &Term::Pid(target))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let result = group_leader(&mut context, &Term::Integer(1), &Term::Pid(target));
+/// let result = group_leader(&mut context, &Term::Integer(1), &Term::Pid(target))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "badarg"));
 /// ```
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for a full atom table.
 pub(super) fn group_leader(
     context: &mut BifContext<'_>,
     leader: &Term,
     target: &Term,
-) -> BifResult {
+) -> Result<BifResult, BeamError> {
     let (Term::Pid(leader), Term::Pid(target)) = (leader, target) else {
-        return Value(Term::static_atom("badarg"));
+        return Ok(Value(Term::static_atom("badarg")));
     };
     let scheduler = &mut *context.scheduler;
+    if let Some(denied) = other_process_denial(scheduler, *target, Operation::GroupLeader)? {
+        return Ok(denied);
+    }
     let caller = scheduler.current_process_mut().id;
     let result = match scheduler.process_mut(*target) {
         None => "badarg",
@@ -55,7 +65,7 @@ pub(super) fn group_leader(
             "true"
         }
     };
-    Value(Term::static_atom(result))
+    Ok(Value(Term::static_atom(result)))
 }
 
 /// Run `erts_internal:group_leader(Leader, Target, Ref)` as
@@ -66,26 +76,35 @@ pub(super) fn group_leader(
 /// gives the caller `{Ref, badarg}` at once
 /// (`erts_proc_sig_send_group_leader`, `erl_proc_sig_queue.c:2970-3025`).
 /// `Leader` that is not a pid, `Target` that is not a pid, and `Ref` that is
-/// not a reference raise `badarg`.
+/// not a reference raise `badarg`. For another process, the caller then
+/// needs the `process` capability with `group_leader`, else the BIF raises
+/// `error:capability_denied` and sends no signal and no reply.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = group_leader_request(&mut context, &Term::Pid(leader), &Term::Pid(target), &Term::Reference(reference));
+/// let result = group_leader_request(&mut context, &Term::Pid(leader), &Term::Pid(target), &Term::Reference(reference))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
 /// ```
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for a full atom table.
 pub(super) fn group_leader_request(
     context: &mut BifContext<'_>,
     leader: &Term,
     target: &Term,
     reference: &Term,
-) -> BifResult {
+) -> Result<BifResult, BeamError> {
     let (Term::Pid(leader), Term::Pid(target), Term::Reference(reference)) =
         (leader, target, reference)
     else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
+    if let Some(denied) = other_process_denial(scheduler, *target, Operation::GroupLeader)? {
+        return Ok(denied);
+    }
     let caller = scheduler.current_process_mut().id;
     let request = Signal::GroupLeader {
         leader: *leader,
@@ -102,7 +121,7 @@ pub(super) fn group_leader_request(
         ]);
         scheduler.deliver(caller, reply);
     }
-    Value(Term::static_atom("ok"))
+    Ok(Value(Term::static_atom("ok")))
 }
 
 /// Run `erts_internal:is_process_alive(Pid, Ref)`, which
@@ -116,26 +135,35 @@ pub(super) fn group_leader_request(
 /// `erlang:bif_handle_signals_return/2` when the caller has incoming
 /// signals. A term that is not a pid, and a term that is not a reference
 /// or is an alias (a pid reference), also of an owner that exited, raise
-/// `badarg`.
+/// `badarg`. For another process, the caller then needs the `process`
+/// capability with `inspect`, else the BIF raises `error:capability_denied`
+/// and sends no request and no reply.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = is_process_alive(&mut context, &Term::Pid(child), &Term::Reference(reference));
+/// let result = is_process_alive(&mut context, &Term::Pid(child), &Term::Reference(reference))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
 /// ```
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for a full atom table.
 pub(super) fn is_process_alive(
     context: &mut BifContext<'_>,
     pid: &Term,
     reference: &Term,
-) -> BifResult {
+) -> Result<BifResult, BeamError> {
     let (Term::Pid(target), Term::Reference(reference)) = (pid, reference) else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     if reference.is_pid_reference() {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     }
     let scheduler = &mut *context.scheduler;
+    if let Some(denied) = other_process_denial(scheduler, *target, Operation::Inspect)? {
+        return Ok(denied);
+    }
     let caller = scheduler.current_process_mut().id;
     let request = Signal::IsAlive {
         requester: caller,
@@ -145,14 +173,14 @@ pub(super) fn is_process_alive(
         .send_signal(Some(caller), *target, request)
         .is_ok()
     {
-        return Value(Term::static_atom("ok"));
+        return Ok(Value(Term::static_atom("ok")));
     }
     let reply = Term::Tuple(vec![
         Term::Reference(*reference),
         Term::static_atom("false"),
     ]);
     scheduler.deliver(caller, reply);
-    signals_return(scheduler, pid, Term::static_atom("ok"))
+    Ok(signals_return(scheduler, pid, Term::static_atom("ok")))
 }
 
 /// The reductions of a port operation that ERTS runs at once: the output
@@ -611,17 +639,27 @@ fn port_denial(
 /// owner, and `id` is the port number. A port
 /// that closed and an atom give `undefined`; each other term gives the atom
 /// `badarg`. The result traps to `erlang:bif_handle_signals_return/2` when
-/// the caller has incoming signals.
+/// the caller has incoming signals. For an open port, a caller without a
+/// `port` capability with `inspect` that permits the program path of the
+/// port gets `error:capability_denied`, and the BIF uses no reduction and
+/// reads no information.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = port_info(&mut context, &Term::Port(port));
+/// let result = port_info(&mut context, &Term::Port(port))?;
 /// ```
-pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let info = match (port, open_port_id(scheduler, port)) {
         (_, Some(id)) => {
+            if let Some(denied) = port_denial(scheduler, id, Operation::Inspect)? {
+                return Ok(denied);
+            }
             scheduler
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
@@ -662,5 +700,5 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> BifResult 
         (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
         (_, None) => Term::static_atom("badarg"),
     };
-    signals_return(scheduler, port, info)
+    Ok(signals_return(scheduler, port, info))
 }

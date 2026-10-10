@@ -63,13 +63,20 @@ fn cost_to_proc(process: &mut ProcessState, steps: i64) {
 
 /// Run `unicode:characters_to_binary/2`: convert `chardata` to one UTF-8
 /// binary, as `unicode_characters_to_binary_2` does
-/// (`erl_unicode.c:931-1022`). Only the `unicode` and `utf8` encodings are
-/// supported, and they give the same result. A list of one binary reads as
-/// the binary. A term that is not chardata raises `badarg`.
+/// (`erl_unicode.c:931-1022`). The `latin1` encoding reads each byte of a
+/// binary and each integer as one code point from 0 to 255, and `unicode`
+/// and `utf8` read binaries as UTF-8 and integers as code points. A list of
+/// one binary reads as the binary. A term that is not chardata raises
+/// `badarg`.
 ///
 /// The `utf8_need` walk costs one reduction for each 50 steps
-/// ([`utf8_need`]). A valid UTF-8 binary then returns itself. Else the
-/// conversion starts with the steps left, but at least 64
+/// ([`utf8_need`]). A valid UTF-8 binary with `unicode` or `utf8` then
+/// returns itself (`erl_unicode.c:966-971`). ERTS checks the same for
+/// `latin1`, but it compares the size of the binary in bits with the bytes
+/// of its UTF-8 form (`aligned_binary_size`, `erl_unicode.c:188-197`), so
+/// only an empty binary passes. The conversion of an empty binary gives an
+/// equal binary with no cost, so PBeam converts each `latin1` binary. Else
+/// the conversion starts with the steps left, but at least 64
 /// ([`utf8_turn`]).
 ///
 /// # Examples
@@ -78,63 +85,71 @@ fn cost_to_proc(process: &mut ProcessState, steps: i64) {
 /// let chardata = Term::List(vec![Term::Integer(104), Term::Integer(105)]);
 /// let result = characters_to_binary(&mut process, &chardata, &Term::static_atom("unicode"))?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes == b"hi"));
+/// let latin1 = Term::Binary(vec![200]);
+/// let result = characters_to_binary(&mut process, &latin1, &Term::static_atom("latin1"))?;
+/// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes == [195, 136]));
 /// let foo = Term::List(vec![Term::static_atom("foo")]);
 /// assert!(matches!(characters_to_binary(&mut process, &foo, &Term::static_atom("unicode"))?, BifResult::Raise { .. }));
-/// assert!(characters_to_binary(&mut process, &chardata, &Term::static_atom("latin1")).is_err());
+/// assert!(characters_to_binary(&mut process, &chardata, &Term::static_atom("utf16")).is_err());
 /// ```
 ///
 /// # Errors
 ///
-/// Return a runtime error for an encoding other than `unicode` and `utf8`,
-/// for chardata that ERTS returns as an `error` or `incomplete` tuple (see
-/// [`utf8_turn`]), and the runtime error of
+/// Return a runtime error for an encoding other than `latin1`, `unicode`,
+/// and `utf8`, for chardata that ERTS returns as an `error` or `incomplete`
+/// tuple (see [`utf8_turn`]), and the runtime error of
 /// [`ProcessState::bif_reductions_left`] for a negative budget.
 pub(super) fn characters_to_binary(
     process: &mut ProcessState,
     chardata: &Term,
     encoding: &Term,
 ) -> Result<BifResult, BeamError> {
-    match encoding {
-        Term::Atom(encoding) if matches!(encoding.name(), "unicode" | "utf8") => {}
-        // ponytail: ERTS also converts `latin1` and other encodings; see "Chardata conversion" in docs/erts-differences.md.
+    let latin1 = match encoding {
+        Term::Atom(encoding) if encoding.name() == "latin1" => true,
+        Term::Atom(encoding) if matches!(encoding.name(), "unicode" | "utf8") => false,
+        // ponytail: ERTS traps each other encoding to `unicode:characters_to_binary_int/2`; see "Chardata conversion" in docs/erts-differences.md.
         _ => {
             return Err(error(format!(
                 "unsupported unicode:characters_to_binary/2 encoding {encoding:?}"
             )));
         }
-    }
+    };
     let subject = match chardata {
         Term::List(elements) if matches!(elements.as_slice(), [Term::Binary(_)]) => &elements[0],
         _ => chardata,
     };
-    let Some(cost) = utf8_need(subject, false) else {
+    let Some(cost) = utf8_need(subject, latin1) else {
         return Ok(BifResult::badarg());
     };
     let simple = (cost / SIMPLE_FACTOR) as i64;
     cost_to_proc(process, simple);
     if let Term::Binary(bytes) = subject
+        && !latin1
         && std::str::from_utf8(bytes).is_ok()
     {
         return Ok(Value(subject.clone()));
     }
     let left = (allowed_iterations(process)? - simple).max(ONHEAP_BINARY_LIMIT);
-    utf8_turn(process, Utf8Output::default(), subject, left)
+    utf8_turn(process, Utf8Output::default(), subject, left, encoding)
 }
 
 /// Convert `chardata` after the bytes of `output` with `left` loop steps,
 /// as `do_build_utf8` and `build_utf8_return` do
 /// (`erl_unicode.c:508-749`, `787-849`), and bump one reduction for each 10
-/// steps. When the steps end before the chardata, the BIF uses all
-/// reductions and traps to `erlang:characters_to_utf8_trap/2` with the
-/// bytes and the rest, which continues with the steps of its budget
-/// (`erl_unicode.c:851-886`). The bytes of an unfinished UTF-8 sequence go
-/// before the rest as a binary.
+/// steps. With the encoding `latin1`, each byte of a binary and each
+/// integer is one code point from 0 to 255. When the steps end before the
+/// chardata, the BIF uses all reductions and traps to
+/// `erlang:characters_to_utf8_trap/3` with the bytes, the rest, and the
+/// encoding, which continues with the
+/// steps of its budget (`erl_unicode.c:851-886`). The bytes of an
+/// unfinished UTF-8 sequence go before the rest as a binary.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// process.fcalls = 3;
-/// let trap = utf8_turn(&mut process, Utf8Output::default(), &Term::Binary(vec![97; 100]), 64)?;
+/// let unicode = Term::static_atom("unicode");
+/// let trap = utf8_turn(&mut process, Utf8Output::default(), &Term::Binary(vec![97; 100]), 64, &unicode)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "characters_to_utf8_trap", .. }));
 /// assert_eq!(process.fcalls, 0);
 /// ```
@@ -149,9 +164,11 @@ fn utf8_turn(
     mut output: Utf8Output,
     chardata: &Term,
     mut left: i64,
+    encoding: &Term,
 ) -> Result<BifResult, BeamError> {
+    let latin1 = matches!(encoding, Term::Atom(name) if name.name() == "latin1");
     let start = left;
-    let (rest, failed) = build_utf8(chardata, &mut left, false, &mut output);
+    let (rest, failed) = build_utf8(chardata, &mut left, latin1, &mut output);
     cost_to_proc(process, start - left);
     let done = rest == Term::List(Vec::new());
     if failed || (done && !output.leftover.is_empty()) {
@@ -170,18 +187,21 @@ fn utf8_turn(
         arguments: vec![
             Term::Binary(output.bytes),
             leftover_before(output.leftover, rest),
+            encoding.clone(),
         ],
     })
 }
 
 /// Continue `unicode:characters_to_binary/2` in the export
-/// `erlang:characters_to_utf8_trap/2` with the steps of the budget, as
-/// `characters_to_utf8_trap` does (`erl_unicode.c:851-886`).
+/// `erlang:characters_to_utf8_trap/3` with the steps of the budget and the
+/// encoding of the call, as `characters_to_utf8_trap` does
+/// (`erl_unicode.c:851-886`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = utf8_trap(&mut process, b"ab".to_vec(), &Term::Binary(b"c".to_vec()))?;
+/// let utf8 = Term::static_atom("utf8");
+/// let result = utf8_trap(&mut process, b"ab".to_vec(), &Term::Binary(b"c".to_vec()), &utf8)?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes == b"abc"));
 /// ```
 ///
@@ -193,13 +213,14 @@ pub(super) fn utf8_trap(
     process: &mut ProcessState,
     bytes: Vec<u8>,
     rest: &Term,
+    encoding: &Term,
 ) -> Result<BifResult, BeamError> {
     let left = allowed_iterations(process)?;
     let output = Utf8Output {
         bytes,
         ..Utf8Output::default()
     };
-    utf8_turn(process, output, rest, left)
+    utf8_turn(process, output, rest, left, encoding)
 }
 
 /// Return `rest` with the bytes of an unfinished UTF-8 sequence before it

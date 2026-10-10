@@ -5,7 +5,11 @@
 //! the oracle of each denial, which ERTS does not have. The default policy
 //! gives the pinned ERTS results.
 
-use std::{collections::BTreeSet, process::Command};
+use std::{
+    collections::BTreeSet,
+    ffi::CStr,
+    process::{Command, Stdio},
+};
 
 use pbeam_runtime::{
     AllowAll, BeamError, BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy,
@@ -31,7 +35,35 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 20] = [
+const PROBES: [(&str, &str, &str); 43] = [
+    ("erlang:exit/2", "process:exit_other", "exit_other"),
+    ("erlang:link/1", "process:link", "link"),
+    ("erlang:monitor/2", "process:monitor", "monitor2"),
+    ("erlang:monitor/3", "process:monitor", "monitor3"),
+    ("erlang:send/2", "process:send", "send2"),
+    ("erlang:send/3", "process:send", "send3"),
+    ("erlang:start_timer/3", "process:send", "start_timer"),
+    ("erlang:process_info/2", "process:inspect", "process_info"),
+    (
+        "erlang:is_process_alive/1",
+        "process:inspect",
+        "is_process_alive",
+    ),
+    (
+        "erts_internal:is_process_alive/2",
+        "process:inspect",
+        "is_alive_request",
+    ),
+    (
+        "erts_internal:group_leader/2",
+        "process:group_leader",
+        "group_leader2",
+    ),
+    (
+        "erts_internal:group_leader/3",
+        "process:group_leader",
+        "group_leader3",
+    ),
     ("erlang:spawn/3", "process:spawn", "spawn"),
     ("erlang:spawn_link/3", "process:spawn", "spawn_link"),
     ("erlang:spawn_link/3", "process:link", "spawn_link"),
@@ -48,10 +80,21 @@ const PROBES: [(&str, &str, &str); 20] = [
         "port_command",
     ),
     ("erts_internal:port_close/1", "port:close", "port_close"),
+    ("erts_internal:port_info/1", "port:inspect", "port_info"),
     ("os:getenv/1", "env:read", "getenv"),
     ("os:set_signal/2", "signal:handle", "handle_signal"),
     ("os:set_signal/2", "signal:ignore", "ignore_signal"),
+    ("persistent_term:get/0", "persistent_term:read", "pt_get0"),
+    ("persistent_term:get/1", "persistent_term:read", "pt_get1"),
+    ("persistent_term:get/2", "persistent_term:read", "pt_get2"),
+    ("persistent_term:put/2", "persistent_term:write", "pt_put"),
+    ("prim_tty:isatty/1", "terminal:query", "isatty"),
     ("prim_tty:read_nif/3", "terminal:read", "read_nif"),
+    ("prim_tty:setlocale/1", "terminal:setup", "setlocale"),
+    ("prim_tty:setupterm_nif/0", "terminal:setup", "setupterm"),
+    ("prim_tty:tigetflag_nif/1", "terminal:query", "tigetflag"),
+    ("prim_tty:tigetnum_nif/1", "terminal:query", "tigetnum"),
+    ("prim_tty:tty_create/1", "terminal:query", "tty_create"),
     ("prim_tty:tty_init/2", "terminal:raw_mode", "tty_init"),
     ("prim_tty:tty_select/2", "terminal:read", "tty_select"),
     (
@@ -73,7 +116,7 @@ impl Policy for Grants {
 
 /// The kind and the operation of each `kind:operation` name of the
 /// inventory.
-const OPERATIONS: [(&str, CapabilityKind, Operation); 18] = [
+const OPERATIONS: [(&str, CapabilityKind, Operation); 26] = [
     ("process:spawn", CapabilityKind::Process, Operation::Spawn),
     ("process:link", CapabilityKind::Process, Operation::Link),
     (
@@ -85,6 +128,17 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 18] = [
         "process:exit_other",
         CapabilityKind::Process,
         Operation::ExitOther,
+    ),
+    ("process:send", CapabilityKind::Process, Operation::Send),
+    (
+        "process:inspect",
+        CapabilityKind::Process,
+        Operation::Inspect,
+    ),
+    (
+        "process:group_leader",
+        CapabilityKind::Process,
+        Operation::GroupLeader,
     ),
     ("terminal:write", CapabilityKind::Terminal, Operation::Write),
     ("terminal:read", CapabilityKind::Terminal, Operation::Read),
@@ -98,9 +152,12 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 18] = [
         CapabilityKind::Terminal,
         Operation::WindowSize,
     ),
+    ("terminal:setup", CapabilityKind::Terminal, Operation::Setup),
+    ("terminal:query", CapabilityKind::Terminal, Operation::Query),
     ("port:spawn", CapabilityKind::Port, Operation::Spawn),
     ("port:command", CapabilityKind::Port, Operation::Command),
     ("port:close", CapabilityKind::Port, Operation::Close),
+    ("port:inspect", CapabilityKind::Port, Operation::Inspect),
     ("env:read", CapabilityKind::Env, Operation::Read),
     ("env:write", CapabilityKind::Env, Operation::Write),
     ("signal:handle", CapabilityKind::Signal, Operation::Handle),
@@ -116,6 +173,16 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 18] = [
         CapabilityKind::Runtime,
         Operation::LoadNif,
     ),
+    (
+        "persistent_term:read",
+        CapabilityKind::PersistentTerm,
+        Operation::Read,
+    ),
+    (
+        "persistent_term:write",
+        CapabilityKind::PersistentTerm,
+        Operation::Write,
+    ),
 ];
 
 /// Return the kind and the operation of `kind:operation`.
@@ -128,13 +195,14 @@ fn operation(name: &str) -> (CapabilityKind, Operation) {
 }
 
 /// The capability kinds.
-const KINDS: [CapabilityKind; 6] = [
+const KINDS: [CapabilityKind; 7] = [
     CapabilityKind::Process,
     CapabilityKind::Terminal,
     CapabilityKind::Port,
     CapabilityKind::Env,
     CapabilityKind::Signal,
     CapabilityKind::Runtime,
+    CapabilityKind::PersistentTerm,
 ];
 
 /// Return a policy with a delegable capability of each kind: one of `kind`
@@ -173,11 +241,42 @@ fn only(names: &[&str]) -> Constraint {
     Constraint::Only(names.iter().map(|&name| name.to_owned()).collect())
 }
 
-/// Return the `(entry, kind:operation)` pairs of the column "Capability" of
-/// the sections "BIFs" and "Native bindings" of the effect inventory. A
-/// cell is `none`, `later`, or a list of `kind:operation` code spans.
-fn inventory_capabilities() -> BTreeSet<(String, String)> {
-    let mut pairs = BTreeSet::new();
+/// Each entry that the column "Capability" of the effect inventory marks
+/// `ambient`. `effect_probe:ambient/0` calls each entry once.
+const AMBIENT: [&str; 27] = [
+    "erlang:cancel_timer/2",
+    "erlang:demonitor/1",
+    "erlang:demonitor/2",
+    "erlang:function_exported/3",
+    "erlang:list_to_atom/1",
+    "erlang:module_loaded/1",
+    "erlang:monotonic_time/1",
+    "erlang:node/0",
+    "erlang:node/1",
+    "erlang:register/2",
+    "erlang:system_info/1",
+    "erlang:universaltime_to_localtime/1",
+    "erlang:unlink/1",
+    "erlang:unregister/1",
+    "erlang:whereis/1",
+    "ets:delete/2",
+    "ets:insert/2",
+    "ets:lookup/2",
+    "ets:lookup_element/4",
+    "ets:member/2",
+    "ets:new/2",
+    "ets:whereis/1",
+    "file:native_name_encoding/0",
+    "os:system_time/1",
+    "prim_file:internal_name2native/1",
+    "prim_file:read_info_nif/2",
+    "re:compile/2",
+];
+
+/// Return the entry and the cell of the column "Capability" of each row of
+/// the sections "BIFs" and "Native bindings" of the effect inventory.
+fn inventory_cells() -> Vec<(&'static str, &'static str)> {
+    let mut cells = Vec::new();
     let mut section = "";
     for line in INVENTORY.lines() {
         if let Some(heading) = line.strip_prefix("## ") {
@@ -185,25 +284,51 @@ fn inventory_capabilities() -> BTreeSet<(String, String)> {
         } else if matches!(section, "BIFs" | "Native bindings")
             && let Some(row) = line.strip_prefix("| `")
         {
-            let cells: Vec<_> = row.split(" | ").collect();
-            let entry = &cells[0][..cells[0].find('`').unwrap()];
-            for capability in cells[2].split(", ") {
-                let capability = capability.trim_matches('`');
-                if capability.contains(':') {
-                    pairs.insert((entry.to_owned(), capability.to_owned()));
-                }
+            let row: Vec<_> = row.split(" | ").collect();
+            cells.push((&row[0][..row[0].find('`').unwrap()], row[2]));
+        }
+    }
+    cells
+}
+
+/// Return the `(entry, kind:operation)` pairs of the column "Capability" of
+/// the sections "BIFs" and "Native bindings" of the effect inventory. A
+/// cell is `none`, `` `ambient`: Reason ``, or a list of
+/// `kind:operation` code spans.
+fn inventory_capabilities() -> BTreeSet<(String, String)> {
+    let mut pairs = BTreeSet::new();
+    for (entry, cell) in inventory_cells() {
+        if cell.starts_with("`ambient`") {
+            continue;
+        }
+        for capability in cell.split(", ") {
+            let capability = capability.trim_matches('`');
+            if capability.contains(':') {
+                pairs.insert((entry.to_owned(), capability.to_owned()));
             }
         }
     }
     pairs
 }
 
-/// Load the probe, the stand-in `prim_tty`, and the pinned `erlang.beam`,
-/// which has `erlang:open_port/2`, `erlang:port_command/2`,
-/// `erlang:port_close/1`, and `erlang:port_info/1`.
+/// Return the entries that the column "Capability" of the effect inventory
+/// marks `ambient`.
+fn inventory_ambient() -> BTreeSet<&'static str> {
+    inventory_cells()
+        .into_iter()
+        .filter(|(_, cell)| cell.starts_with("`ambient`"))
+        .map(|(entry, _)| entry)
+        .collect()
+}
+
+/// Load the probe, the stand-in `prim_tty`, the pinned `erlang.beam`, which
+/// has `erlang:open_port/2`, `erlang:port_command/2`, `erlang:port_close/1`,
+/// and `erlang:port_info/1`, and the pinned `prim_file.beam`, whose
+/// `read_file_info/1` calls `prim_file:read_info_nif/2`.
 fn program() -> BeamProgram {
     let erlang = pinned_beam("erlang");
-    BeamProgram::load(&[&erlang, PRIM_TTY, EFFECT_PROBE]).unwrap()
+    let prim_file = pinned_beam("prim_file");
+    BeamProgram::load(&[&erlang, &prim_file, PRIM_TTY, EFFECT_PROBE]).unwrap()
 }
 
 /// Run `effect_probe:Function()` with `policy`.
@@ -216,6 +341,11 @@ fn run(program: &BeamProgram, function: &str, policy: &dyn Policy) -> Term {
 /// Return the atom `name` of the program.
 fn atom(program: &BeamProgram, name: &str) -> Term {
     Term::Atom(program.atom(name).unwrap())
+}
+
+/// Return the tuple of `elements`.
+fn tuple(elements: &[Term]) -> Term {
+    Term::Tuple(elements.to_vec())
 }
 
 /// Return the list of the atoms `names` of the program.
@@ -240,6 +370,35 @@ fn each_effect_entry_with_a_capability_denies_without_its_operation() {
             "{entry} without {capability}"
         );
     }
+}
+
+#[test]
+fn calls_each_ambient_entry_with_no_capability() {
+    assert_eq!(inventory_ambient(), BTreeSet::from(AMBIENT));
+    // The root process holds no capability, so no policy can permit the
+    // calls: each `ambient` entry has no check.
+    let program = program();
+    let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
+                    nonode@nohost,nonode@nohost,true,true,false,effect_probe_ambient_atom,ok,\
+                    effect_probe_ambient,true,[{key,value}],value,true,true,reference,atom,2,ok]";
+    assert_eq!(text(&run(&program, "ambient", &Grants(vec![]))), expected);
+    assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
+}
+
+#[test]
+fn checks_the_send_instruction_once_with_erlang_send() {
+    // The `send` instruction has no row in the section "BIFs", so the
+    // column check above does not cover it.
+    let program = program();
+    let policy = without((CapabilityKind::Process, Operation::Send));
+    assert_eq!(
+        run(&program, "send_instruction", &policy),
+        atom(&program, "denied")
+    );
+    assert_eq!(
+        run(&program, "send_instruction", &AllowAll),
+        atom(&program, "ok")
+    );
 }
 
 #[test]
@@ -339,12 +498,30 @@ fn needs_both_signal_operations_for_the_default_disposition() {
 /// with the stand-in `prim_tty`. The load of the stand-in stops the
 /// standard output of ERTS, so the result goes through a file.
 fn erts_with_stand_in(function: &str) -> String {
+    erts_result(function, |_| {})
+}
+
+/// Return the `~w` text of `effect_probe:Function()` on the pinned ERTS, as
+/// [`erts_with_stand_in`] does, with the standard input and output of the
+/// test process. Thus ERTS sees the same fd 0 and fd 1 as the PBeam run in
+/// the test process.
+fn erts_with_standard_streams(function: &str) -> String {
+    erts_result(function, |command| {
+        command.stdin(Stdio::inherit()).stdout(Stdio::inherit());
+    })
+}
+
+/// Return the `~w` text of `effect_probe:Function()` on the pinned ERTS
+/// with the stand-in `prim_tty`, after `configure` changes the `erl`
+/// command.
+fn erts_result(function: &str, configure: impl FnOnce(&mut Command)) -> String {
     let root = std::env::current_dir().unwrap();
     let result = std::env::temp_dir().join(format!(
         "effect_probe_{function}_{}.txt",
         std::process::id()
     ));
-    let output = Command::new("erl")
+    let mut command = Command::new("erl");
+    command
         .args([
             "+S",
             "1",
@@ -361,9 +538,9 @@ fn erts_with_stand_in(function: &str) -> String {
                 result.display()
             ),
         ])
-        .current_dir(std::env::temp_dir())
-        .output()
-        .unwrap();
+        .current_dir(std::env::temp_dir());
+    configure(&mut command);
+    let output = command.output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let text = std::fs::read_to_string(&result).unwrap();
     std::fs::remove_file(&result).unwrap();
@@ -450,5 +627,369 @@ fn keeps_the_runtime_state_after_a_denied_call() {
     assert_eq!(
         run(&program, "load_nif_kept", &AllowAll),
         Term::Tuple(vec![denied, atom(&program, "ok")])
+    );
+}
+
+#[test]
+fn skips_each_effect_check_in_a_run_with_no_policy() {
+    // A child with `#{Kind => #{operations => []}}` makes the call. With no
+    // policy, the run skips each check, so the call has its effect, as on
+    // ERTS: the parent then sees the changed state.
+    let program = program();
+    let unchecked = |function| program.execute("effect_probe", function, &[]).unwrap();
+    let ok = atom(&program, "ok");
+    assert_eq!(
+        unchecked("system_flag_kept"),
+        tuple(&[ok.clone(), atom(&program, "undefined")])
+    );
+    let stored = |value| tuple(&[ok.clone(), Term::Integer(value)]);
+    assert_eq!(
+        unchecked("persistent_term_kept"),
+        Term::List(vec![stored(1), stored(2)])
+    );
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_process_operations() {
+    let program = program();
+    let atom = |name| atom(&program, name);
+    let ok = |sign| tuple(&[atom("ok"), atom(sign)]);
+    let expected = Term::List(vec![
+        ok("linked"),
+        Term::List(vec![ok("down"), ok("down")]),
+        ok("killed"),
+        ok("exit"),
+        Term::List(vec![
+            ok("got"),
+            ok("got"),
+            ok("got"),
+            tuple(&[atom("error"), atom("badarg")]),
+        ]),
+        ok("fired"),
+    ]);
+    assert_eq!(run(&program, "process_permitted", &AllowAll), expected);
+    assert_eq!(
+        erts_with_stand_in("process_permitted"),
+        "[{ok,linked},[{ok,down},{ok,down}],{ok,killed},{ok,exit},\
+         [{ok,got},{ok,got},{ok,got},{error,badarg}],{ok,fired}]\n"
+    );
+}
+
+#[test]
+fn checks_the_process_arguments_before_the_capability() {
+    let program = program();
+    let policy = grants(CapabilityKind::Process, &[], Constraint::Any);
+    let badargs = Term::List(vec![atom(&program, "badarg"); 8]);
+    assert_eq!(run(&program, "process_badargs", &policy), badargs);
+    assert_eq!(
+        erts_with_stand_in("process_badargs"),
+        "[badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg]\n"
+    );
+}
+
+#[test]
+fn keeps_the_process_state_after_a_denied_call() {
+    let program = program();
+    let atom = |name| atom(&program, name);
+    let denied = |sign| tuple(&[atom("denied"), atom(sign)]);
+    let without_process = |operation| without((CapabilityKind::Process, operation));
+    assert_eq!(
+        run(&program, "link_kept", &without_process(Operation::Link)),
+        denied("unlinked")
+    );
+    assert_eq!(
+        run(
+            &program,
+            "monitor_kept",
+            &without_process(Operation::Monitor)
+        ),
+        Term::List(vec![denied("none"), denied("none")])
+    );
+    assert_eq!(
+        run(
+            &program,
+            "exit_kept",
+            &without_process(Operation::ExitOther)
+        ),
+        denied("boom")
+    );
+    let send = without_process(Operation::Send);
+    assert_eq!(
+        run(&program, "send_kept", &send),
+        Term::List(vec![
+            denied("none"),
+            denied("none"),
+            denied("none"),
+            atom("denied"),
+        ])
+    );
+    assert_eq!(run(&program, "timer_kept", &send), denied("none"));
+}
+
+#[test]
+fn sends_an_exit_signal_to_the_caller_without_exit_other() {
+    let program = program();
+    let policy = without((CapabilityKind::Process, Operation::ExitOther));
+    assert_eq!(
+        run(&program, "exit_self", &policy),
+        tuple(&[atom(&program, "ok"), atom(&program, "exit")])
+    );
+}
+
+/// Return the policy of [`grants`] with a `process` capability of
+/// `operations`.
+fn process_grants(operations: &[Operation]) -> Grants {
+    grants(CapabilityKind::Process, operations, Constraint::Any)
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_process_inspection() {
+    let program = program();
+    let policy = process_grants(&[
+        Operation::Spawn,
+        Operation::Monitor,
+        Operation::Send,
+        Operation::Inspect,
+        Operation::GroupLeader,
+    ]);
+    let expected = "[[[],{message_queue_len,0},true,ok,true,true,ok,true],true,\
+                    [undefined,false,ok,false,badarg,ok,badarg]]";
+    assert_eq!(
+        text(&run(&program, "process_inspect_permitted", &policy)),
+        expected
+    );
+    assert_eq!(
+        erts_with_stand_in("process_inspect_permitted"),
+        format!("{expected}\n")
+    );
+}
+
+#[test]
+fn checks_the_inspection_arguments_before_the_capability() {
+    let program = program();
+    let policy = process_grants(&[Operation::Spawn, Operation::Monitor]);
+    let badargs = Term::List(vec![atom(&program, "badarg"); 9]);
+    assert_eq!(run(&program, "process_inspect_badargs", &policy), badargs);
+    assert_eq!(
+        erts_with_stand_in("process_inspect_badargs"),
+        "[badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg]\n"
+    );
+}
+
+#[test]
+fn inspects_the_caller_without_inspect_and_group_leader() {
+    let program = program();
+    let policy = process_grants(&[]);
+    let expected = "[[],true,ok,true,true,ok,true]";
+    assert_eq!(
+        text(&run(&program, "process_inspect_self", &policy)),
+        expected
+    );
+    assert_eq!(
+        erts_with_stand_in("process_inspect_self"),
+        format!("{expected}\n")
+    );
+}
+
+#[test]
+fn keeps_the_process_state_after_a_denied_inspection() {
+    // A child of the probe holds no `inspect` and no `group_leader`.
+    let program = program();
+    assert_eq!(
+        text(&run(&program, "inspect_kept", &AllowAll)),
+        "[denied,denied,{denied,none}]"
+    );
+    assert_eq!(
+        text(&run(&program, "group_leader_kept", &AllowAll)),
+        "{[denied,denied],same}"
+    );
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_persistent_term_operations() {
+    let program = program();
+    let atom = |name| atom(&program, name);
+    let key = tuple(&[atom("effect_probe"), atom("permitted")]);
+    let expected = Term::List(vec![
+        atom("none"),
+        atom("badarg"),
+        atom("ok"),
+        atom("ok"),
+        Term::Integer(1),
+        Term::Integer(1),
+        tuple(&[key, Term::Integer(1)]),
+    ]);
+    let policy = grants(
+        CapabilityKind::PersistentTerm,
+        &[Operation::Read, Operation::Write],
+        Constraint::Any,
+    );
+    assert_eq!(
+        run(&program, "persistent_term_permitted", &policy),
+        expected
+    );
+    assert_eq!(
+        erts_with_stand_in("persistent_term_permitted"),
+        "[none,badarg,ok,ok,1,1,{{effect_probe,permitted},1}]\n"
+    );
+}
+
+#[test]
+fn keeps_the_persistent_terms_after_a_denied_put() {
+    // A child with `#{persistent_term => #{operations => []}}` tries a put
+    // of a new key, then of a changed value. The parent then sees no value,
+    // then the old value.
+    let program = program();
+    let denied = atom(&program, "denied");
+    assert_eq!(
+        run(&program, "persistent_term_kept", &AllowAll),
+        Term::List(vec![
+            tuple(&[denied.clone(), atom(&program, "none")]),
+            tuple(&[denied, Term::Integer(1)]),
+        ])
+    );
+}
+
+/// Return a term as `io:format("~w")` prints it, for the atoms, the
+/// integers, and the tuples of the terminal probe results.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(text(&Term::List(vec![Term::static_atom("ok")])), "[ok]");
+/// ```
+fn text(term: &Term) -> String {
+    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+    match term {
+        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Integer(integer) => integer.to_string(),
+        Term::List(terms) => format!("[{}]", join(terms)),
+        Term::Tuple(terms) => format!("{{{}}}", join(terms)),
+        other => panic!("unexpected term {other:?}"),
+    }
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_terminal_setup_and_queries() {
+    // The results of `isatty/1`, `setupterm_nif/0`, `tigetnum_nif/1`, and
+    // `tigetflag_nif/1` depend on the standard streams and on `TERM`, so
+    // ERTS runs with the streams and the environment of this test process.
+    let program = program();
+    let policy = grants(
+        CapabilityKind::Terminal,
+        &[Operation::Setup, Operation::Query],
+        Constraint::Any,
+    );
+    let pbeam = text(&run(&program, "terminal_permitted", &policy));
+    assert_eq!(
+        format!("{pbeam}\n"),
+        erts_with_standard_streams("terminal_permitted")
+    );
+    assert!(pbeam.contains(",reference,"), "{pbeam}");
+}
+
+#[test]
+fn checks_the_terminal_fds_and_codes_before_the_capability() {
+    let program = program();
+    let policy = grants(CapabilityKind::Terminal, &[], Constraint::Any);
+    let badargs = Term::List(vec![atom(&program, "badarg"); 5]);
+    assert_eq!(run(&program, "terminal_badargs", &policy), badargs);
+    assert_eq!(
+        erts_with_stand_in("terminal_badargs"),
+        "[badarg,badarg,badarg,badarg,badarg]\n"
+    );
+}
+
+/// Return the `LC_CTYPE` locale of the test process.
+fn ctype_locale() -> String {
+    // SAFETY: a null locale only reads the current locale, and the result
+    // is a NUL-terminated string that stays valid until the next locale
+    // call.
+    unsafe {
+        CStr::from_ptr(libc::setlocale(libc::LC_CTYPE, std::ptr::null()))
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[test]
+fn keeps_the_locale_after_a_denied_setlocale() {
+    // No test of this file permits `prim_tty:setlocale/1`, so the locale
+    // stays the C start locale of the process. A permitted call sets it from
+    // `LANG`.
+    let program = program();
+    let policy = without((CapabilityKind::Terminal, Operation::Setup));
+    assert_eq!(
+        run(&program, "setlocale", &policy),
+        atom(&program, "denied")
+    );
+    assert_eq!(ctype_locale(), "C");
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_port_information() {
+    let program = program();
+    let atom = |name| atom(&program, name);
+    let item = |key, value| tuple(&[atom(key), value]);
+    let expected = Term::List(vec![
+        atoms(
+            &program,
+            &[
+                "name",
+                "links",
+                "id",
+                "connected",
+                "input",
+                "output",
+                "os_pid",
+            ],
+        ),
+        item(
+            "name",
+            Term::List(
+                b"/bin/cat"
+                    .iter()
+                    .map(|&byte| Term::Integer(byte.into()))
+                    .collect(),
+            ),
+        ),
+        atom("true"),
+        atom("true"),
+        item("input", Term::Integer(0)),
+        item("output", Term::Integer(0)),
+    ]);
+    let policy = grants(
+        CapabilityKind::Port,
+        &[Operation::Spawn, Operation::Inspect],
+        only(&["/bin/cat"]),
+    );
+    assert_eq!(run(&program, "inspect_permitted", &policy), expected);
+    assert_eq!(
+        erts_with_stand_in("inspect_permitted"),
+        "[[name,links,id,connected,input,output,os_pid],\
+         {name,[47,98,105,110,47,99,97,116]},true,true,{input,0},{output,0}]\n"
+    );
+}
+
+#[test]
+fn gives_undefined_for_a_closed_port_without_inspect() {
+    let program = program();
+    let policy = without((CapabilityKind::Port, Operation::Inspect));
+    assert_eq!(
+        run(&program, "inspect_closed", &policy),
+        atoms(&program, &["undefined", "undefined"])
+    );
+    assert_eq!(
+        erts_with_stand_in("inspect_closed"),
+        "[undefined,undefined]\n"
+    );
+}
+
+#[test]
+fn compares_the_program_name_of_a_port_for_its_information() {
+    let program = program();
+    assert_eq!(
+        run(&program, "inspect_names", &AllowAll),
+        atoms(&program, &["ok", "denied"])
     );
 }

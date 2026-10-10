@@ -20,12 +20,17 @@
     done/0,
     worker/1,
     hello/1,
-    request_for/3
+    request_for/3,
+    revoked/0,
+    revoked_exited/0,
+    revoked_root/0,
+    revoke_denied/0,
+    holder/0
 ]).
 
 %% The root process holds only the process capability that initial/1 of
-%% the policy gives: spawn, link, and monitor for the modules of this
-%% probe.
+%% the policy gives: spawn, link, monitor, and send for the modules of
+%% this probe.
 initial() ->
     [
         result(fun() -> spawn(?MODULE, done, []) end),
@@ -154,6 +159,65 @@ idle_exit() ->
     end,
     [First, request(env, home)].
 
+%% The policy grants a delegable env capability to a worker at run time,
+%% and the worker gives a copy to its child. Then the policy revokes the
+%% env capability of the worker. The revocation goes on to the child. Both
+%% stay alive, and a second revocation has no copy left to revoke.
+revoked() ->
+    Worker = spawn(?MODULE, holder, []),
+    Granted = call(Worker, {request, env, shared_home}),
+    Child = call(Worker, child),
+    Before = [call(Worker, getenv), call(Child, getenv)],
+    Revoked = [policy_revoke(Worker, env), policy_revoke(Worker, env)],
+    After = [call(Worker, getenv), call(Child, getenv)],
+    stop([Worker, Child]),
+    {Granted, Before, Revoked, After}.
+
+%% The worker exits before the revocation. Its released record stays, so
+%% the revocation of the policy still reaches its child.
+revoked_exited() ->
+    Worker = spawn(?MODULE, holder, []),
+    Granted = call(Worker, {request, env, shared_home}),
+    Child = call(Worker, child),
+    stop_and_wait(Worker),
+    Before = call(Child, getenv),
+    Revoked = policy_revoke(Worker, env),
+    After = call(Child, getenv),
+    stop([Child]),
+    {Granted, Before, Revoked, After}.
+
+%% The policy revokes the process capability that the launcher gave to the
+%% root process with initial/1.
+revoked_root() ->
+    Before = result(fun() -> spawn(?MODULE, done, []) end),
+    Revoked = policy_revoke(self(), process),
+    After = result(fun() -> spawn(?MODULE, done, []) end),
+    {Before, Revoked, After}.
+
+%% Only the policy process can call pbeam_cap:policy_revoke/2. Arguments
+%% that are not valid raise badarg before the check of the caller. A kind
+%% that the holder does not hold, and a holder that exited with no record,
+%% give ok with no effect. The denied calls revoke nothing.
+revoke_denied() ->
+    Worker = spawn(?MODULE, holder, []),
+    Gone = spawn(?MODULE, holder, []),
+    stop_and_wait(Gone),
+    Results = [
+        call(Worker, {request, env, home}),
+        result(fun() -> pbeam_cap:policy_revoke(Worker, env) end),
+        result(fun() -> pbeam_cap:policy_revoke(self(), process) end),
+        result(fun() -> pbeam_cap:policy_revoke(worker, env) end),
+        call(Worker, {policy_revoke, Worker, env}),
+        policy_revoke(worker, env),
+        policy_revoke(Worker, file),
+        policy_revoke(Worker, port),
+        policy_revoke(Gone, process),
+        call(Worker, getenv),
+        result(fun() -> spawn(?MODULE, done, []) end)
+    ],
+    stop([Worker]),
+    Results.
+
 bad_initial() -> done().
 atom_initial() -> done().
 raise_initial() -> done().
@@ -176,6 +240,55 @@ hello(Root) -> Root ! hello.
 request_for(Root, Kind, Request) -> Root ! {self(), request(Kind, Request)}.
 
 request(Kind, Request) -> result(fun() -> pbeam_cap:request(Kind, Request) end).
+
+%% Ask the policy to revoke the copies of Kind of Holder, and return the
+%% result of its pbeam_cap:policy_revoke/2 call. On ERTS the request
+%% raises undef.
+policy_revoke(Holder, Kind) ->
+    case request(env, {revoke, Holder, Kind}) of
+        denied ->
+            receive
+                {revoked, Result} -> Result
+            end;
+        Other ->
+            Other
+    end.
+
+%% A process that answers requests until it gets stop.
+holder() ->
+    receive
+        {getenv, From} ->
+            From ! {self(), result(fun() -> os:getenv("HOME") end)},
+            holder();
+        {child, From} ->
+            From ! {self(), spawn(?MODULE, holder, [])},
+            holder();
+        {{request, Kind, Request}, From} ->
+            From ! {self(), request(Kind, Request)},
+            holder();
+        {{policy_revoke, Holder, Kind}, From} ->
+            From ! {self(), result(fun() -> pbeam_cap:policy_revoke(Holder, Kind) end)},
+            holder();
+        stop ->
+            ok
+    end.
+
+call(Pid, Request) ->
+    Pid ! {Request, self()},
+    receive
+        {Pid, Reply} -> Reply
+    end.
+
+stop(Pids) ->
+    [Pid ! stop || Pid <- Pids],
+    ok.
+
+stop_and_wait(Pid) ->
+    Monitor = monitor(process, Pid),
+    Pid ! stop,
+    receive
+        {'DOWN', Monitor, process, Pid, normal} -> ok
+    end.
 
 %% The class of a result: a pid, a string, or another value, or the error
 %% reason.

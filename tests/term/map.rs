@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use super::{Child, Direction, HAMT_MAX_LEVEL, Hamt, Map, Node, Repr, encode_path, map_hash};
 use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom};
 
@@ -89,8 +91,8 @@ fn keeps_flatmap_keys_in_order_and_replaces_values() {
     assert_eq!(map.len(), 4);
     // A key type that the flatmap does not support leaves the map unchanged.
     assert_eq!(
-        map.insert(Term::Tuple(vec![]), atom("v")),
-        Err(Term::Tuple(vec![]))
+        map.insert(Term::Map(Map::new()), atom("v")),
+        Err(Term::Map(Map::new()))
     );
     assert_eq!(map.len(), 4);
 }
@@ -115,21 +117,45 @@ fn orders_atoms_in_list_keys_by_name_in_a_flatmap() {
 }
 
 #[test]
-fn rejects_list_keys_with_unsupported_elements() {
+fn hashes_tuple_keys_with_the_internal_hash() {
+    // {}, {1, {a}}, [{}], and [1|{2}]: a tuple, also in a list or as an improper list tail.
+    let tuple = Term::Tuple(vec![Term::Integer(1), Term::Tuple(vec![atom("a")])]);
+    let keys = [
+        Term::Tuple(vec![]),
+        tuple,
+        Term::List(vec![Term::Tuple(vec![])]),
+        Term::ImproperList(
+            vec![Term::Integer(1)],
+            Box::new(Term::Tuple(vec![Term::Integer(2)])),
+        ),
+    ];
+    for key in keys {
+        assert_eq!(map_hash(&key), Some(internal_hash(&key)));
+    }
+    assert_eq!(map_hash(&Term::Tuple(vec![])), Some(4510301282025278020));
+}
+
+#[test]
+fn rejects_list_and_tuple_keys_with_unsupported_elements() {
     assert_eq!(
         map_hash(&Term::List(vec![])),
         Some(internal_hash(&Term::List(vec![])))
     );
+    let empty_map = || Term::Map(Map::new());
     let unsupported = [
-        Term::List(vec![Term::Integer(1), Term::Tuple(vec![])]),
-        Term::List(vec![Term::List(vec![Term::Tuple(vec![])])]),
+        Term::List(vec![Term::Integer(1), empty_map()]),
+        Term::List(vec![Term::List(vec![empty_map()])]),
         Term::List(vec![Term::Integer(1 << 59)]),
-        // [1|{}], [1|<<>>], and [[1|{}]]: an improper list tail that is not an immediate.
-        Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Tuple(vec![]))),
+        // {<<>>}, {1, #{}}, and {[1 bsl 59]}: a tuple with an element that is not supported.
+        Term::Tuple(vec![Term::Binary(vec![])]),
+        Term::Tuple(vec![Term::Integer(1), empty_map()]),
+        Term::Tuple(vec![Term::List(vec![Term::Integer(1 << 59)])]),
+        // [1|#{}], [1|<<>>], and [[1|#{}]]: an improper list tail that is not supported.
+        Term::ImproperList(vec![Term::Integer(1)], Box::new(empty_map())),
         Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Binary(vec![]))),
         Term::List(vec![Term::ImproperList(
             vec![Term::Integer(1)],
-            Box::new(Term::Tuple(vec![])),
+            Box::new(empty_map()),
         )]),
     ];
     for key in unsupported {
@@ -355,6 +381,82 @@ fn changes_the_value_of_an_existing_key_in_place() {
     assert!(hash.get_mut(&Term::Tuple(vec![])).is_none());
 }
 
+/// Return the map of a `Map` term.
+fn map_of(term: &Term) -> &Map {
+    let Term::Map(map) = term else {
+        panic!("not a map: {term:?}")
+    };
+    map
+}
+
+#[test]
+fn shares_the_form_of_a_map_between_the_copies_of_a_term() {
+    // A copy of the term, also a copy of a term that holds the map, gets the same form.
+    for size in [2, 40] {
+        let map = Term::Map(integers(1..=size));
+        let tuple = Term::Tuple(vec![Term::List(vec![map.clone()])]);
+        let tuple = tuple.clone();
+        let Term::Tuple(copied) = &tuple else {
+            unreachable!()
+        };
+        let Term::List(copied) = &copied[0] else {
+            unreachable!()
+        };
+        for copy in [&map.clone(), &copied[0]] {
+            assert!(Rc::ptr_eq(&map_of(&map).repr, &map_of(copy).repr));
+            assert_eq!(copy, &map);
+        }
+    }
+}
+
+#[test]
+fn copies_a_shared_form_before_a_change() {
+    let change = |change: fn(&mut Map)| {
+        for size in [2, 32, 40] {
+            let map = integers(1..=size);
+            let mut copy = map.clone();
+            change(&mut copy);
+            assert!(!Rc::ptr_eq(&map.repr, &copy.repr));
+            assert_eq!(keys(&map), keys(&integers(1..=size)));
+            assert!(map.iter().all(|(_, value)| *value == atom("v")));
+            assert_eq!(map.is_hashmap(), size > 32);
+            // The copy that changed is only owner of its form now, so a second change does not copy it.
+            let form = Rc::as_ptr(&copy.repr);
+            change(&mut copy);
+            assert_eq!(Rc::as_ptr(&copy.repr), form);
+        }
+    };
+    change(|map| *map.get_mut(&Term::Integer(1)).unwrap() = atom("w"));
+    change(|map| map.insert(Term::Integer(2), atom("w")).unwrap());
+    change(|map| map.insert(Term::Integer(-1), atom("w")).unwrap());
+
+    // A copy of a flatmap of 32 keys that gets the 33rd key is a hashmap. The other copy stays
+    // a flatmap of 32 keys.
+    let flat = integers(1..=32);
+    let mut grown = flat.clone();
+    grown.insert(Term::Integer(33), atom("v")).unwrap();
+    assert_eq!((flat.len(), flat.is_hashmap()), (32, false));
+    assert_eq!((grown.len(), grown.is_hashmap()), (33, true));
+}
+
+#[test]
+fn drains_the_pairs_of_a_map_only_from_the_last_copy() {
+    let mut pending = Vec::new();
+    for size in [2, 40] {
+        let mut map = integers(1..=size);
+        let mut copy = map.clone();
+        map.drain_into(&mut pending);
+        assert!(pending.is_empty());
+        assert_eq!(copy.len(), size as usize);
+        // `Term::drop` drops the map after `drain_into`.
+        drop(map);
+        copy.drain_into(&mut pending);
+        assert_eq!(pending.len(), 2 * size as usize);
+        assert_eq!(copy.len(), 0);
+        pending.clear();
+    }
+}
+
 #[test]
 fn sorts_pairs_by_the_flatmap_key_order() {
     // ERTS 29.1.1: (id(#{}))#{abs := 1, value := 2} raises {badkey,value},
@@ -407,7 +509,7 @@ fn sorts_pairs_by_the_flatmap_key_order() {
 
 #[test]
 fn builds_the_same_map_from_pairs_in_any_order() {
-    let forward = integers(1..=40);
+    let mut forward = integers(1..=40);
     let backward = integers((1..=40).rev());
     assert_eq!(keys(&forward), keys(&backward));
     let mut pending = Vec::new();
@@ -479,8 +581,8 @@ fn keeps_keys_with_equal_hashes_in_a_collision_child() {
         }
     }
     assert_eq!(collision_levels, [HAMT_MAX_LEVEL]);
-    let map = Map {
-        repr: Repr::Hash(hamt),
+    let mut map = Map {
+        repr: Repr::Hash(hamt).into(),
     };
     let pairs: Vec<_> = map
         .iter()

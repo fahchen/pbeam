@@ -24,12 +24,15 @@ use crate::{
 /// The resource kind that a capability covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityKind {
-    /// Processes: spawn, links, monitors, and exit signals to other
-    /// processes.
+    /// Processes: spawn, links, monitors, exit signals to other
+    /// processes, messages, the inspection of other processes, and the
+    /// group leader of other processes.
     Process,
-    /// The terminal: writes, reads, raw mode, and the window size.
+    /// The terminal: writes, reads, raw mode, the window size, the setup,
+    /// and the queries.
     Terminal,
-    /// Ports: the start of an external program, its commands, and its close.
+    /// Ports: the start of an external program, its commands, its close,
+    /// and its information.
     Port,
     /// The OS environment variables.
     Env,
@@ -38,6 +41,8 @@ pub enum CapabilityKind {
     /// The whole runtime: the stop of the run, the system flags, and the
     /// load of a NIF library.
     Runtime,
+    /// The global persistent term store of the node.
+    PersistentTerm,
 }
 
 /// An operation that a capability can permit. Each kind permits only its
@@ -52,18 +57,33 @@ pub enum Operation {
     Monitor,
     /// `process`: send an exit signal to another process.
     ExitOther,
-    /// `terminal`: write output. `env`: set a variable.
+    /// `process`: send a message.
+    Send,
+    /// `terminal`: write output. `env`: set a variable. `persistent_term`:
+    /// store a term.
     Write,
-    /// `terminal`: read input. `env`: read a variable.
+    /// `terminal`: read input. `env`: read a variable. `persistent_term`:
+    /// read the stored terms.
     Read,
     /// `terminal`: set raw mode.
     RawMode,
     /// `terminal`: read the window size.
     WindowSize,
+    /// `terminal`: set up the terminal: read the terminfo entry, or set the
+    /// locale of the OS process.
+    Setup,
+    /// `terminal`: ask if a standard fd is a terminal, make a TTY resource,
+    /// or read a capability of the terminfo entry.
+    Query,
     /// `port`: send a command to a port.
     Command,
     /// `port`: close a port.
     Close,
+    /// `process`: read the state of another process. `port`: read the
+    /// information of a port.
+    Inspect,
+    /// `process`: set the group leader of another process.
+    GroupLeader,
     /// `signal`: handle a host signal.
     Handle,
     /// `signal`: ignore a host signal.
@@ -101,7 +121,7 @@ struct KindSpec {
 
 /// The kinds of the design table (section "Capability kinds" of
 /// `docs/capability-security-migration.md`).
-const KINDS: [KindSpec; 6] = [
+const KINDS: [KindSpec; 7] = [
     KindSpec {
         kind: CapabilityKind::Process,
         name: "process",
@@ -110,6 +130,9 @@ const KINDS: [KindSpec; 6] = [
             Operation::Link,
             Operation::Monitor,
             Operation::ExitOther,
+            Operation::Send,
+            Operation::Inspect,
+            Operation::GroupLeader,
         ],
         constraint: Some(("modules", NameForm::Atom)),
     },
@@ -121,13 +144,20 @@ const KINDS: [KindSpec; 6] = [
             Operation::Read,
             Operation::RawMode,
             Operation::WindowSize,
+            Operation::Setup,
+            Operation::Query,
         ],
         constraint: None,
     },
     KindSpec {
         kind: CapabilityKind::Port,
         name: "port",
-        operations: &[Operation::Spawn, Operation::Command, Operation::Close],
+        operations: &[
+            Operation::Spawn,
+            Operation::Command,
+            Operation::Close,
+            Operation::Inspect,
+        ],
         constraint: Some(("executables", NameForm::String)),
     },
     KindSpec {
@@ -148,20 +178,31 @@ const KINDS: [KindSpec; 6] = [
         operations: &[Operation::Halt, Operation::SystemFlag, Operation::LoadNif],
         constraint: None,
     },
+    KindSpec {
+        kind: CapabilityKind::PersistentTerm,
+        name: "persistent_term",
+        operations: &[Operation::Read, Operation::Write],
+        constraint: None,
+    },
 ];
 
 /// The atom of each operation in the `{capabilities, Map}` option.
-const OPERATION_NAMES: [(Operation, &str); 15] = [
+const OPERATION_NAMES: [(Operation, &str); 20] = [
     (Operation::Spawn, "spawn"),
     (Operation::Link, "link"),
     (Operation::Monitor, "monitor"),
     (Operation::ExitOther, "exit_other"),
+    (Operation::Send, "send"),
     (Operation::Write, "write"),
     (Operation::Read, "read"),
     (Operation::RawMode, "raw_mode"),
     (Operation::WindowSize, "window_size"),
+    (Operation::Setup, "setup"),
+    (Operation::Query, "query"),
     (Operation::Command, "command"),
     (Operation::Close, "close"),
+    (Operation::Inspect, "inspect"),
+    (Operation::GroupLeader, "group_leader"),
     (Operation::Handle, "handle"),
     (Operation::Ignore, "ignore"),
     (Operation::Halt, "halt"),
@@ -196,7 +237,8 @@ impl CapabilityKind {
     }
 
     /// Return the kind whose atom is `name`, as the `{capabilities, Map}`
-    /// option and `pbeam_cap:revoke/2` name it, or `None` for another name.
+    /// option, `pbeam_cap:revoke/2`, and `pbeam_cap:policy_revoke/2` name
+    /// it, or `None` for another name.
     ///
     /// # Examples
     ///
@@ -221,8 +263,8 @@ impl Operation {
     /// assert_eq!(Operation::Spawn.bit(), 1);
     /// assert_eq!(Operation::Link.bit(), 2);
     /// ```
-    fn bit(self) -> u16 {
-        1 << self as u16
+    fn bit(self) -> u32 {
+        1 << self as u32
     }
 
     /// Return the operation set of `operations`.
@@ -232,7 +274,7 @@ impl Operation {
     /// ```rust,ignore
     /// assert_eq!(Operation::set(&[Operation::Spawn, Operation::Link]), 3);
     /// ```
-    fn set(operations: &[Operation]) -> u16 {
+    fn set(operations: &[Operation]) -> u32 {
         operations
             .iter()
             .fold(0, |set, operation| set | operation.bit())
@@ -313,7 +355,7 @@ pub struct Capability {
     /// The resource kind.
     kind: CapabilityKind,
     /// The permitted operations, one [`Operation::bit`] each.
-    operations: u16,
+    operations: u32,
     /// The constraint field of the kind. A kind without a constraint field
     /// has `Constraint::Any`.
     constraint: Constraint,
@@ -337,7 +379,8 @@ impl Capability {
     /// # Errors
     ///
     /// An operation of another kind, and a `Constraint::Only` for the
-    /// `terminal` or `runtime` kind, which has no constraint field.
+    /// `terminal`, `runtime`, or `persistent_term` kind, which has no
+    /// constraint field.
     pub fn new(
         kind: CapabilityKind,
         operations: &[Operation],
@@ -396,15 +439,16 @@ impl Capability {
 }
 
 /// The source of the initial capabilities of a run. The launcher calls the
-/// policy when it makes the root process. A Rust host can replace the
-/// default [`AllowAll`] policy with [`crate::BeamProgram::execute_with_policy`].
+/// policy when it makes the root process. A Rust host gives a policy to
+/// [`crate::BeamProgram::execute_with_policy`]. A run with no policy,
+/// [`crate::BeamProgram::execute`], skips each check.
 pub trait Policy {
     /// Return the capabilities of the root process.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(AllowAll.initial().len(), 6);
+    /// assert_eq!(AllowAll.initial().len(), 7);
     /// ```
     fn initial(&self) -> Vec<Capability>;
 
@@ -429,9 +473,11 @@ pub trait Policy {
     }
 }
 
-/// The default policy. The root process gets a delegable capability of
-/// each kind with all operations and no constraint, so each process can do
-/// each operation, and a run gives the same results as the pinned ERTS.
+/// The policy that permits each operation, for the tests of the checks. The
+/// root process gets a delegable capability of each kind with all
+/// operations and no constraint, so each check passes, and a run gives the
+/// same results as the pinned ERTS. Unlike a run with no policy, each check
+/// runs, and a child gets copies.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AllowAll;
 
@@ -443,7 +489,7 @@ impl Policy for AllowAll {
     ///
     /// ```rust,ignore
     /// let capabilities = AllowAll.initial();
-    /// assert_eq!(capabilities.len(), 6);
+    /// assert_eq!(capabilities.len(), 7);
     /// let process = Capability::new(CapabilityKind::Process, CapabilityKind::Process.operations(), Constraint::Any, true)?;
     /// assert_eq!(capabilities[0], process);
     /// ```
@@ -546,7 +592,7 @@ impl SecurityContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(parent.delegate(None)?.len(), 6);
+    /// assert_eq!(parent.delegate(None)?.len(), 7);
     /// assert_eq!(SecurityContext::default().delegate(Some(&restrictions)), Err(Denied));
     /// ```
     pub(super) fn delegate(
@@ -627,6 +673,8 @@ impl SecurityContext {
 struct Record {
     /// The process that got the copy.
     holder: ProcessId,
+    /// The kind of the capability of the copy.
+    kind: CapabilityKind,
     /// The source of the copy.
     source: Source,
     /// The copies that went from this copy to children, in the order of
@@ -682,6 +730,7 @@ impl Delegations {
                 }
                 let record = Record {
                     holder,
+                    kind: capability.kind,
                     source,
                     receivers: BTreeSet::new(),
                     released: false,
@@ -708,6 +757,26 @@ impl Delegations {
             .filter(|receiver| self.records[receiver].holder == holder)
             .copied()
             .collect()
+    }
+
+    /// Return the copies of `kind` that the process `holder` holds, or held
+    /// before its exit and that keep a released record, in the order of
+    /// their identifiers. The walk reads each record of the run.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(delegations.held(worker, CapabilityKind::Env), vec![id]);
+    /// ```
+    pub(super) fn held(&self, holder: ProcessId, kind: CapabilityKind) -> Vec<CapabilityId> {
+        let mut held: Vec<_> = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.holder == holder && record.kind == kind)
+            .map(|(&id, _)| id)
+            .collect();
+        held.sort_unstable();
+        held
     }
 
     /// Start the revocation of the copy `id`, which a process holds or
@@ -824,7 +893,7 @@ pub(super) struct Restriction {
     /// The kind of the capability that the restriction applies to.
     kind: CapabilityKind,
     /// The operations of the child copy, one [`Operation::bit`] each.
-    operations: Option<u16>,
+    operations: Option<u32>,
     /// The constraint of the child copy.
     constraint: Option<Constraint>,
     /// Whether the child can give its copy to its own children.
@@ -862,13 +931,14 @@ impl Restriction {
 
 /// Read the value of the `spawn_opt` option `{capabilities, Map}`. Each key
 /// of `Map` is a kind atom: `process`, `terminal`, `port`, `env`, `signal`,
-/// or `runtime`. Each value is a map with the optional keys `operations` (a
-/// proper list of operation atoms of the kind), `delegable` (`true` or
-/// `false`), and the constraint field of the kind: `modules` (atoms),
-/// `executables` (strings), `names` (strings), or `signals` (atoms), with the
-/// value `any` or a proper list of names. A string is a flat proper list of
-/// characters. Return `None` for each other term, which raises `badarg`, as
-/// a spawn option that is not valid does (`erl_process.c:12222-12434`).
+/// `runtime`, or `persistent_term`. Each value is a map with the optional
+/// keys `operations` (a proper list of operation atoms of the kind),
+/// `delegable` (`true` or `false`), and the constraint field of the kind:
+/// `modules` (atoms), `executables` (strings), `names` (strings), or
+/// `signals` (atoms), with the value `any` or a proper list of names. A
+/// string is a flat proper list of characters. Return `None` for each other
+/// term, which raises `badarg`, as a spawn option that is not valid does
+/// (`erl_process.c:12222-12434`).
 ///
 /// # Examples
 ///

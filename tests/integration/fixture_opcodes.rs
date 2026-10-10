@@ -41,6 +41,21 @@ fn arith_probe_has_the_gc_bif1_and_gc_bif2_bytes() {
 }
 
 #[test]
+fn binary_part_probe_has_the_gc_bif3_bytes() {
+    assert_in_fixture(
+        "fixtures/binary_part/binary_part_probe.beam",
+        &[
+            // guard/3: gc_bif3 f13 live 3 binary_part/3 x0 x1 x2 x0
+            &[0x98, 0xD5, 0x30, 0x00, 0x03, 0x13, 0x23, 0x03],
+            // main/0: gc_bif3 f0 live 1 binary_part/3 y23 y22 x0 y22
+            &[
+                0x98, 0x05, 0x10, 0x00, 0x0C, 0x17, 0x0C, 0x16, 0x03, 0x0C, 0x16,
+            ],
+        ],
+    );
+}
+
+#[test]
 fn binary_match_probe_has_the_binary_match_bytes() {
     assert_in_fixture(
         "fixtures/binary_match/binary_match_probe.beam",
@@ -65,6 +80,52 @@ fn binary_match_probe_has_the_binary_match_bytes() {
 }
 
 #[test]
+fn bs_match_probe_has_the_bs_match_command_bytes() {
+    assert_in_fixture(
+        "fixtures/binary_match/bs_match_probe.beam",
+        &[
+            // tail/1: bs_match f28 x0 {list,[ensure_at_least,8,8,skip,8,
+            // get_tail,1,8,{x,0}]}
+            &[
+                0xB6, 0x0D, 0x1C, 0x03, 0x17, 0x90, 0x92, 0x80, 0x80, 0x0A, 0x11, 0x80, 0xB2, 0x10,
+                0x80, 0x03,
+            ],
+            // prefix/1: bs_match f15 x0 {list,[ensure_at_least,32,1,
+            // '=:=',nil,31,850802231,'=:=',nil,1,1]}
+            &[
+                0xB6, 0xF5, 0x03, 0x17, 0xB0, 0x92, 0x08, 0x20, 0x10, 0xA2, 0x02, 0x08, 0x1F, 0x58,
+                0x32, 0xB6, 0x36, 0x37, 0xA2, 0x02, 0x10, 0x10,
+            ],
+            // flagged/1: {integer,1,{literal,[little]},16,1,{x,1}}
+            &[0x42, 0x10, 0x47, 0x00, 0x08, 0x10, 0x10, 0x13],
+            // binaries/1: {binary,1,{literal,[]},2,8,{x,1}}
+            &[0x0A, 0x13, 0x10, 0x02, 0x20, 0x80, 0x13],
+        ],
+    );
+}
+
+#[test]
+fn bs_get_probe_has_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_bytes() {
+    assert_in_fixture(
+        "fixtures/binary_match/bs_get_probe.beam",
+        &[
+            // split/2: bs_start_match4 no_fail 2 x0 x0
+            &[0xAA, 0x32, 0x20, 0x03, 0x03],
+            // split/2: bs_get_binary2 f3 {tr,x0,1} 2 x1 8 0 x1
+            &[0x77, 0x35, 0x57, 0x03, 0x10, 0x20, 0x13, 0x80, 0x00, 0x13],
+            // split/2: bs_get_tail x0 x0 2
+            &[0xA5, 0x03, 0x03, 0x20],
+            // split_units/2: bs_get_binary2 f6 {tr,x0,1} 2 x1 16 0 x1
+            &[
+                0x77, 0x65, 0x57, 0x03, 0x10, 0x20, 0x13, 0x08, 0x10, 0x00, 0x13,
+            ],
+            // nibbles/2: bs_start_match4 resume 2 x0 x0
+            &[0xAA, 0xB2, 0x20, 0x03, 0x03],
+        ],
+    );
+}
+
+#[test]
 fn bitstr_probe_has_the_is_bitstr_bytes() {
     assert_in_fixture(
         "fixtures/bitstr/bitstr_probe.beam",
@@ -76,7 +137,41 @@ fn bitstr_probe_has_the_is_bitstr_bytes() {
 }
 
 #[test]
-fn compare_probe_has_the_is_lt_is_eq_is_integer_and_is_boolean_bytes() {
+fn raise_probe_has_the_raise_bytes() {
+    assert_in_fixture(
+        "fixtures/raise/raise_probe.beam",
+        &[
+            // rethrow/1: raise x2 x1
+            &[0x6C, 0x23, 0x13],
+        ],
+    );
+}
+
+#[test]
+fn error_path_probe_has_the_error_path_instruction_bytes() {
+    assert_in_fixture(
+        "fixtures/error_path/error_path_probe.beam",
+        &[
+            // badmatch/1: label 14, badmatch x0
+            &[0x01, 0xE0, 0x48, 0x03],
+            // badmatch_y/1: label 17, badmatch y0
+            &[0x01, 0x08, 0x11, 0x48, 0x04],
+            // case_end/1: label 20, case_end x0
+            &[0x01, 0x08, 0x14, 0x4A, 0x03],
+            // if_end/1: label 23, if_end
+            &[0x01, 0x08, 0x17, 0x49],
+            // try_case_end/1: label 27, try_case_end x0
+            &[0x01, 0x08, 0x1B, 0x6B, 0x03],
+            // badrecord/1: label 30, badrecord x0
+            &[0x01, 0x08, 0x1E, 0xB4, 0x03],
+            // raw_raise/1: move y0 x0, raw_raise
+            &[0x40, 0x04, 0x03, 0xA1],
+        ],
+    );
+}
+
+#[test]
+fn compare_probe_has_the_is_lt_is_eq_is_ne_is_integer_and_is_boolean_bytes() {
     assert_in_fixture(
         "fixtures/compare/compare_probe.beam",
         &[
@@ -90,6 +185,8 @@ fn compare_probe_has_the_is_lt_is_eq_is_integer_and_is_boolean_bytes() {
             &[0x72, 0xC5, 0x03],
             // eq/2: is_eq f25 x0 x1
             &[0x29, 0x0D, 0x19, 0x03, 0x13],
+            // ne/2: is_ne f30 x0 x1
+            &[0x2A, 0x0D, 0x1E, 0x03, 0x13],
         ],
     );
 }

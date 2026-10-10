@@ -19,13 +19,13 @@ use pbeam_runtime::{AllowAll, BeamProgram, Capability, CapabilityKind, Policy, T
 const REVOKE_PROBE: &[u8] = include_bytes!("../../fixtures/capability/revoke_probe.beam");
 
 /// The time after the start of the run when [`Launcher`] revokes the
-/// `process` capability. The root process of `revoke_probe:launcher/0`
+/// `env` capability. The root process of `revoke_probe:launcher/0`
 /// makes its processes in much less time, and then waits up to 10 seconds
 /// for the revocation.
 const REVOKE_AFTER: Duration = Duration::from_millis(100);
 
 /// A test launcher: the default capabilities, and a revocation of the
-/// `process` capability of the root process at [`REVOKE_AFTER`] after the
+/// `env` capability of the root process at [`REVOKE_AFTER`] after the
 /// launcher issued the capabilities.
 #[derive(Default)]
 struct Launcher {
@@ -47,7 +47,7 @@ impl Policy for Launcher {
             return Vec::new();
         }
         self.revoked.set(true);
-        vec![CapabilityKind::Process]
+        vec![CapabilityKind::Env]
     }
 }
 
@@ -77,13 +77,29 @@ fn text(term: &Term) -> String {
 /// assert_eq!(pbeam("released", &AllowAll), "denied");
 /// ```
 fn pbeam(function: &str, policy: &dyn Policy) -> String {
-    let erlang = pinned_beam("erlang");
-    let erts_internal = pinned_beam("erts_internal");
-    let program = BeamProgram::load(&[&erlang, &erts_internal, REVOKE_PROBE]).unwrap();
-    let result = program
+    let result = program()
         .execute_with_policy("revoke_probe", function, &[], policy)
         .unwrap();
     text(&result)
+}
+
+/// Run `revoke_probe:Function()` on PBeam with no policy, which skips each
+/// capability check, and return the `~w` text.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(unchecked("released"), "ok");
+/// ```
+fn unchecked(function: &str) -> String {
+    text(&program().execute("revoke_probe", function, &[]).unwrap())
+}
+
+/// Load the probe and the pinned `erlang` and `erts_internal`.
+fn program() -> BeamProgram {
+    let erlang = pinned_beam("erlang");
+    let erts_internal = pinned_beam("erts_internal");
+    BeamProgram::load(&[&erlang, &erts_internal, REVOKE_PROBE]).unwrap()
 }
 
 /// Run `revoke_probe:Function()` on the pinned ERTS with one scheduler and
@@ -116,10 +132,11 @@ fn erts(function: &str) -> String {
 
 #[test]
 fn revokes_a_given_copy_and_its_downstream_copies_when_the_holders_handle_the_signal() {
-    // Each spawn before the revocation gives the ERTS result. The second
-    // revocation signal finds no copy. After the revocation, the next spawn
+    // Each read before the revocation gives the ERTS result. The second
+    // revocation signal finds no copy. After the revocation, the next read
     // of the worker and of its child is denied, both holders live, and the
-    // copy of the caller stays.
+    // copy of the caller stays. The probe revokes `env`, so each holder
+    // keeps the `process` capability that its replies need.
     assert_eq!(
         pbeam("cascade", &AllowAll),
         "{[ok,ok],[ok,ok],[denied,denied,ok],[true,true]}"
@@ -165,10 +182,25 @@ fn releases_the_copies_and_the_records_when_the_holders_exit() {
 
 #[test]
 fn revokes_an_initial_capability_for_the_launcher() {
-    // The launcher revokes the `process` capability of the root process.
+    // The launcher revokes the `env` capability of the root process.
     // The revocation goes through the worker, which exited, to its child.
     assert_eq!(
         pbeam("launcher", &Launcher::default()),
         "{[ok,ok],denied,denied}"
+    );
+}
+
+#[test]
+fn revokes_nothing_in_a_run_with_no_policy() {
+    // With no policy, the run skips each check and holds no copy. A
+    // revocation returns ok after its argument checks and has no effect,
+    // so each later read keeps the ERTS result.
+    assert_eq!(
+        unchecked("cascade"),
+        "{[ok,ok],[ok,ok],[ok,ok,ok],[true,true]}"
+    );
+    assert_eq!(
+        unchecked("denied"),
+        "[ok,ok,ok,{error,badarg},{error,badarg},ok,ok,ok]"
     );
 }

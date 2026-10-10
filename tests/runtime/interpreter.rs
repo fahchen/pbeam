@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     BeamModule, Map, Term,
-    beam::code::{Instruction, Operand, TestKind},
+    beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind},
     term::{Atom, AtomTable, Lambda, test_atom},
 };
 
@@ -580,11 +580,11 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             map: map(vec![]),
             destination: Operand::X(0),
             pairs: vec![(
-                Operand::Value(Term::Tuple(vec![])),
+                Operand::Value(Term::Map(Map::new())),
                 Operand::Value(Term::Integer(1))
             )],
         }])
-        .contains("unsupported map key Tuple([])")
+        .contains("unsupported map key Map([])")
     );
 }
 
@@ -745,8 +745,8 @@ fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
 
 #[test]
 fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
-    // ERTS accepts a tuple key; a PBeam map does not hold one yet.
-    let pair = Term::Tuple(vec![Term::Tuple(vec![]), Term::Integer(0)]);
+    // ERTS accepts a map key; a PBeam map does not hold one yet.
+    let pair = Term::Tuple(vec![Term::Map(Map::new()), Term::Integer(0)]);
     let from_list = make_program(
         vec![
             Instruction::Move(Operand::Value(Term::List(vec![pair])), Operand::X(0)),
@@ -764,8 +764,31 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
     .execute("fixture", "main", &[]);
     assert_eq!(
         from_list.unwrap_err().to_string(),
-        "unsupported map key Tuple([])"
+        "unsupported map key Map([])"
     );
+}
+
+#[test]
+fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
+    // ERTS accepts a map key; a PBeam map does not hold one yet.
+    let put = make_program(
+        vec![
+            Instruction::Move(Operand::Value(Term::Map(Map::new())), Operand::X(0)),
+            Instruction::Move(Operand::Value(Term::Integer(0)), Operand::X(1)),
+            Instruction::Move(Operand::Value(Term::Map(Map::new())), Operand::X(2)),
+            Instruction::CallExternal {
+                arity: 3,
+                module: "maps".into(),
+                name: "put".into(),
+                tail: true,
+                deallocate: 0,
+            },
+            Instruction::Return,
+        ],
+        0,
+    )
+    .execute("fixture", "main", &[]);
+    assert_eq!(put.unwrap_err().to_string(), "unsupported map key Map([])");
 }
 
 #[test]
@@ -977,9 +1000,20 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
         convert(chardata(), "utf8").unwrap(),
         Term::Binary(b"Hello\n".to_vec())
     );
+    // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], latin1)
+    // is <<"Hello\n">>, and unicode:characters_to_binary([<<233>>], latin1)
+    // is <<195,169>>.
     assert_eq!(
-        convert(chardata(), "latin1").unwrap_err().to_string(),
-        "unsupported unicode:characters_to_binary/2 encoding Atom(\"latin1\")"
+        convert(chardata(), "latin1").unwrap(),
+        Term::Binary(b"Hello\n".to_vec())
+    );
+    assert_eq!(
+        convert(Term::List(vec![Term::Binary(vec![233])]), "latin1").unwrap(),
+        Term::Binary(vec![195, 169])
+    );
+    assert_eq!(
+        convert(chardata(), "utf16").unwrap_err().to_string(),
+        "unsupported unicode:characters_to_binary/2 encoding Atom(\"utf16\")"
     );
 }
 
@@ -1262,6 +1296,95 @@ fn waits_or_continues_at_a_receive_timeout_and_raises_timeout_value() {
 }
 
 #[test]
+fn raises_class_error_for_the_raw_stack_trace_nil() {
+    // ERTS `erts_sanitize_freason` gives class `error` for the raw stack
+    // trace `NIL`, and `build_stacktrace` gives `[]` for it
+    // (`beam_common.c:1089-1097`, `1219-1220`). ERTS then saves a new stack
+    // trace from the frames of the callers; PBeam records no frames.
+    let raise = |trace: Term| {
+        make_program(
+            vec![
+                Instruction::Move(Operand::Value(trace), Operand::X(0)),
+                Instruction::BuildStacktrace,
+                Instruction::Raise {
+                    trace: Operand::X(0),
+                    value: atom("r"),
+                },
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .unwrap_err()
+        .to_string()
+    };
+    assert_eq!(
+        raise(Term::List(Vec::new())),
+        "root process exited with {r,[]}"
+    );
+    // Compiled code gives `raise` only a raw stack trace. ERTS reads each
+    // other term as a raw stack trace with no check.
+    for trace in [
+        test_atom("foo"),
+        Term::Tuple(vec![test_atom("foo"), Term::List(Vec::new())]),
+    ] {
+        assert_eq!(
+            raise(trace.clone()),
+            format!("invariant error: {trace:?} is not a raw stack trace")
+        );
+    }
+}
+
+#[test]
+fn exits_with_the_error_of_an_error_path_instruction_with_no_catch() {
+    // With no catch tag, the exception of `badmatch` and `if_end` ends the
+    // process with `{Reason, Stacktrace}` (`beam_common.c:684-692`).
+    let exit = |instruction: Instruction| {
+        make_program(vec![instruction], 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(
+        exit(Instruction::TaggedError {
+            tag: "badmatch",
+            value: atom("r"),
+        }),
+        "root process exited with {{badmatch,r},[]}"
+    );
+    assert_eq!(
+        exit(Instruction::IfEnd),
+        "root process exited with {if_clause,[]}"
+    );
+}
+
+#[test]
+fn raw_raise_writes_badarg_for_a_class_that_is_not_valid() {
+    // ERTS `raw_raise` writes `badarg` to `x0` and continues for a class
+    // that is not `error`, `exit`, or `throw` (emu `instrs.tab:1253-1263`,
+    // `beam_common.c:1148-1179`). The compiler writes `badarg` to `x0` after
+    // `raw_raise` too, so a compiled fixture does not show this write.
+    let raw_raise = |class: &str| {
+        make_program(
+            vec![
+                Instruction::Move(atom(class), Operand::X(0)),
+                Instruction::Move(atom("r"), Operand::X(1)),
+                Instruction::Move(Operand::Value(Term::List(Vec::new())), Operand::X(2)),
+                Instruction::RawRaise,
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+    };
+    assert_eq!(raw_raise("foo").unwrap(), Term::static_atom("badarg"));
+    // The raw stack trace `[]` keeps the class of `x0`.
+    assert_eq!(
+        raw_raise("exit").unwrap_err().to_string(),
+        "root process exited with r"
+    );
+}
+
+#[test]
 fn rejects_call_stack_and_return_errors() {
     assert!(
         make_program(
@@ -1395,9 +1518,9 @@ fn rejects_unresolved_exports_and_function_labels() {
     );
 }
 
-/// PBeam lets a match context reach only the binary-match instructions
-/// and local calls. It gives a runtime invariant error for each other
-/// use, and for a binary-match instruction that gets another term.
+/// PBeam lets a match context reach only the binary-match instructions,
+/// `move`, and local calls. It gives a runtime invariant error for each
+/// other use, and for a binary-match instruction that gets another term.
 #[test]
 fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
     let run = |rest: Vec<Instruction>| {
@@ -1431,11 +1554,22 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
     };
     let escape = "invariant error: the match context in X(0) reached an instruction that \
                   is not a binary match";
+    // `swap` of a match context is not implemented yet.
     assert_eq!(
-        run(vec![Instruction::Move(Operand::X(0), Operand::X(1))]),
+        run(vec![Instruction::Swap(Operand::X(0), Operand::X(1))]),
         escape
     );
     assert_eq!(run(vec![erlang_call("hd", 1, false)]), escape);
+    assert_eq!(
+        run(vec![Instruction::Bif {
+            fail_label: 0,
+            module: "erlang".into(),
+            name: "hd".into(),
+            arguments: vec![Operand::X(0)],
+            destination: Operand::X(1),
+        }]),
+        escape
+    );
     // An external call to a loaded function also checks its arguments.
     assert_eq!(
         run(vec![Instruction::CallExternal {
@@ -1447,14 +1581,23 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         }]),
         escape
     );
-    // A reuse in another register would share the position in ERTS.
+    assert_eq!(
+        run(vec![Instruction::BinaryMatchResume {
+            source: atom("a"),
+            destination: Operand::X(0),
+        }]),
+        "invariant error: Value(Atom(\"a\")) holds Atom(\"a\"), not a match context"
+    );
+    // `bs_start_match4` with `no_fail` has the fail label 0. The compiler
+    // gives it only a binary or a match context.
     assert_eq!(
         run(vec![Instruction::BinaryMatchStart {
-            fail_label: 1,
-            source: Operand::X(0),
+            fail_label: 0,
+            source: atom("a"),
             destination: Operand::X(1),
         }]),
-        "unsupported bs_start_match3 that copies the match context in X(0) to X(1)"
+        "invariant error: bs_start_match3 with no fail label got Atom(\"a\"), not a binary or a \
+         match context"
     );
     assert_eq!(
         run(vec![Instruction::BinarySetPosition {
@@ -1471,6 +1614,289 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         }]),
         "invariant error: Value(Atom(\"a\")) holds Atom(\"a\"), not a match context"
     );
+}
+
+/// A copy of a match context to another register shares the match
+/// context, as ERTS copies the term that refers to it (`emit_i_move`,
+/// jit/arm/instr_common.cpp:516-519; `emit_i_bs_start_match3`,
+/// jit/arm/instr_bs.cpp:158-159, 187-188; jit/arm/ops.tab:1036-1045). A
+/// read of the copy moves the position of the source, and a change of the
+/// position of the source moves the position of the copy.
+#[test]
+fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
+    let run = |copy: Instruction, to: Operand| {
+        let body = vec![
+            Instruction::Allocate { stack_size: 1 },
+            Instruction::Move(Operand::Value(Term::Binary(b"ab".to_vec())), Operand::X(0)),
+            Instruction::BinaryMatchStart {
+                fail_label: 1,
+                source: Operand::X(0),
+                destination: Operand::X(0),
+            },
+            copy,
+            // Read `a` with the copy, then the position with the source.
+            Instruction::BinaryGetUtf8 {
+                fail_label: 1,
+                context: to.clone(),
+                destination: Operand::X(2),
+            },
+            Instruction::BinaryGetPosition {
+                context: Operand::X(0),
+                destination: Operand::X(3),
+            },
+            // Set the position 0 with the source, then read `a` again with
+            // the copy.
+            Instruction::BinarySetPosition {
+                context: Operand::X(0),
+                position: Operand::Value(Term::Integer(0)),
+            },
+            Instruction::BinaryGetUtf8 {
+                fail_label: 1,
+                context: to,
+                destination: Operand::X(4),
+            },
+            Instruction::PutTuple {
+                destination: Operand::X(0),
+                elements: vec![Operand::X(2), Operand::X(3), Operand::X(4)],
+            },
+            Instruction::Deallocate { stack_size: 1 },
+            Instruction::Return,
+        ];
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap()
+    };
+    let expected = Term::Tuple(vec![Term::Integer(97), Term::Integer(8), Term::Integer(97)]);
+    assert_eq!(
+        run(
+            Instruction::Move(Operand::X(0), Operand::Y(0)),
+            Operand::Y(0)
+        ),
+        expected
+    );
+    assert_eq!(
+        run(
+            Instruction::BinaryMatchStart {
+                fail_label: 1,
+                source: Operand::X(0),
+                destination: Operand::X(1),
+            },
+            Operand::X(1)
+        ),
+        expected
+    );
+    assert_eq!(
+        run(
+            Instruction::BinaryMatchResume {
+                source: Operand::X(0),
+                destination: Operand::X(1),
+            },
+            Operand::X(1)
+        ),
+        expected
+    );
+}
+
+/// Run `bs_match` with `commands` on a match context of `bytes` in `x0`,
+/// then the instructions of `then`. The fail label 3 returns `failed`.
+fn run_binary_match(
+    bytes: &[u8],
+    commands: Vec<BinaryMatchCommand>,
+    then: Vec<Instruction>,
+) -> Result<Term, String> {
+    let mut body = vec![
+        Instruction::Move(Operand::Value(Term::Binary(bytes.to_vec())), Operand::X(0)),
+        Instruction::BinaryMatchStart {
+            fail_label: 1,
+            source: Operand::X(0),
+            destination: Operand::X(0),
+        },
+        Instruction::BinaryMatch {
+            fail_label: 3,
+            context: Operand::X(0),
+            commands,
+        },
+    ];
+    body.extend(then);
+    body.extend([
+        Instruction::Label(3),
+        Instruction::Move(atom("failed"), Operand::X(0)),
+        Instruction::Return,
+    ]);
+    make_program(body, 0)
+        .execute("fixture", "main", &[])
+        .map_err(|error| error.to_string())
+}
+
+/// The `gc_bif` instruction of `byte_size/1` of `argument` to `x0`.
+fn byte_size(argument: Operand) -> Instruction {
+    Instruction::Bif {
+        fail_label: 0,
+        module: "erlang".into(),
+        name: "byte_size".into(),
+        arguments: vec![argument],
+        destination: Operand::X(0),
+    }
+}
+
+/// `byte_size/1` of a match context gives the bits from its position to
+/// its end in bytes, rounded up, as `byte_size/1` of the same bits as a
+/// bitstring (`emit_bif_byte_size`, jit/arm/instr_guard_bifs.cpp:458-509).
+/// On the pinned ERTS, `byte_size(<<1:12>>)` is 2.
+#[test]
+fn gives_the_byte_size_of_a_match_context_from_its_position() {
+    let unit = std::num::NonZeroU64::new(1).unwrap();
+    let skip = |size| {
+        vec![
+            BinaryMatchCommand::EnsureAtLeast { size, unit },
+            BinaryMatchCommand::Skip { size },
+        ]
+    };
+    let size = |size| {
+        run_binary_match(
+            &[1, 2, 3],
+            skip(size),
+            vec![byte_size(Operand::X(0)), Instruction::Return],
+        )
+    };
+    assert_eq!(size(0), Ok(Term::Integer(3)));
+    assert_eq!(size(4), Ok(Term::Integer(3)));
+    assert_eq!(size(8), Ok(Term::Integer(2)));
+    assert_eq!(size(20), Ok(Term::Integer(1)));
+    assert_eq!(size(24), Ok(Term::Integer(0)));
+}
+
+/// A failed `=:=` command of `bs_match` leaves the position unknown until
+/// `bs_set_position`. ERTS has it at the end of the read of the command
+/// (jit/arm/instr_bs.cpp:2995-3045), which PBeam does not model.
+#[test]
+fn gives_a_runtime_error_for_a_read_after_a_failed_equal_command() {
+    let unit = std::num::NonZeroU64::new(8).unwrap();
+    let skip = BinaryMatchCommand::Skip { size: 8 };
+    let byte = |destination| BinaryMatchCommand::Integer {
+        size: 8,
+        little: false,
+        signed: false,
+        destination,
+    };
+    // `bs_get_position` x0 x1 before the match, and `bs_set_position` x0
+    // x1 at the fail label, as the compiler restores the position.
+    let restore = |rest: Vec<Instruction>| {
+        let mut body = vec![
+            Instruction::Move(Operand::Value(Term::Binary(vec![7, 8])), Operand::X(0)),
+            Instruction::BinaryMatchStart {
+                fail_label: 1,
+                source: Operand::X(0),
+                destination: Operand::X(0),
+            },
+            Instruction::BinaryGetPosition {
+                context: Operand::X(0),
+                destination: Operand::X(1),
+            },
+            Instruction::BinaryMatch {
+                fail_label: 3,
+                context: Operand::X(0),
+                commands: vec![
+                    BinaryMatchCommand::EnsureAtLeast { size: 16, unit },
+                    BinaryMatchCommand::Equal { size: 8, value: 1 },
+                ],
+            },
+            Instruction::Move(atom("matched"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+        ];
+        body.extend(rest);
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .map_err(|error| error.to_string())
+    };
+    assert_eq!(
+        restore(vec![
+            Instruction::BinarySetPosition {
+                context: Operand::X(0),
+                position: Operand::X(1),
+            },
+            Instruction::BinaryMatch {
+                fail_label: 1,
+                context: Operand::X(0),
+                commands: vec![byte(Operand::X(0))],
+            },
+            Instruction::Return,
+        ]),
+        Ok(Term::Integer(7))
+    );
+    assert_eq!(
+        restore(vec![Instruction::BinaryMatch {
+            fail_label: 1,
+            context: Operand::X(0),
+            commands: vec![skip],
+        }]),
+        Err(
+            "unsupported read of the match context in X(0) after a failed bs_match =:= command"
+                .into()
+        )
+    );
+    assert_eq!(
+        restore(vec![byte_size(Operand::X(0))]),
+        Err(
+            "unsupported read of the match context in X(0) after a failed bs_match =:= command"
+                .into()
+        )
+    );
+    // A successful `=:=` moves the position, and an ensure command that
+    // fails jumps to the fail label.
+    assert_eq!(
+        run_binary_match(
+            &[1, 2],
+            vec![
+                BinaryMatchCommand::Equal { size: 8, value: 1 },
+                byte(Operand::X(0))
+            ],
+            vec![Instruction::Return]
+        ),
+        Ok(Term::Integer(2))
+    );
+    assert_eq!(
+        run_binary_match(
+            &[1],
+            vec![BinaryMatchCommand::EnsureAtLeast { size: 16, unit }],
+            vec![Instruction::Return]
+        ),
+        Ok(test_atom("failed"))
+    );
+}
+
+/// The compiler puts an ensure command before each command that reads
+/// bits, so a read past the end is a runtime invariant error.
+#[test]
+fn gives_an_invariant_error_for_a_bs_match_read_past_the_end() {
+    let past_end = |command| run_binary_match(&[1], vec![command], vec![Instruction::Return]);
+    let error = |size: u64| {
+        Err(format!(
+            "invariant error: a bs_match command needs {size} bits, but 8 bits remain"
+        ))
+    };
+    assert_eq!(
+        past_end(BinaryMatchCommand::Integer {
+            size: 16,
+            little: false,
+            signed: false,
+            destination: Operand::X(1),
+        }),
+        error(16)
+    );
+    assert_eq!(
+        past_end(BinaryMatchCommand::Binary {
+            size: 16,
+            destination: Operand::X(1),
+        }),
+        error(16)
+    );
+    assert_eq!(
+        past_end(BinaryMatchCommand::Equal { size: 9, value: 0 }),
+        error(9)
+    );
+    assert_eq!(past_end(BinaryMatchCommand::Skip { size: 9 }), error(9));
 }
 
 #[test]

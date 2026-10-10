@@ -1,6 +1,6 @@
-//! Read and set the host terminal state of an fd, and read the locale and
-//! the terminfo entry, as the Unix part of the ERTS `prim_tty` NIFs does
-//! (`erts/emulator/nifs/common/prim_tty_nif.c`).
+//! Read and set the host terminal state of an fd, and read the locale, the
+//! terminfo entry, and its capabilities, as the Unix part of the ERTS
+//! `prim_tty` NIFs does (`erts/emulator/nifs/common/prim_tty_nif.c`).
 
 use std::{
     ffi::{CStr, c_char, c_int, c_void},
@@ -23,6 +23,8 @@ unsafe extern "C" {
     #[link_name = "setupterm"]
     fn curses_setupterm(term: *const c_char, fildes: c_int, errret: *mut c_int) -> c_int;
     fn del_curterm(terminal: *mut c_void) -> c_int;
+    fn tgetnum(id: *const c_char) -> c_int;
+    fn tgetflag(id: *const c_char) -> c_int;
     /// The current terminal of curses, which `setupterm` sets.
     static mut cur_term: *mut c_void;
 }
@@ -122,6 +124,46 @@ pub(crate) fn setupterm() -> Result<(), c_int> {
         SAVED_TERMINAL.store(cur_term, Ordering::Relaxed);
     }
     Ok(())
+}
+
+/// Return the numeric capability `code` of the current terminal with the
+/// curses `tgetnum`, as `tty_tigetnum_nif` (`prim_tty_nif.c:841-850`)
+/// does. ERTS calls the termcap function `tgetnum`, not `tigetnum`, so
+/// `code` is a termcap code, such as `co` for the columns. An absent
+/// capability, and each capability before a successful `setupterm`, give
+/// -1.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TERM=vt100, after setupterm()
+/// assert_eq!(termcap_number(c"co"), 80);
+/// assert_eq!(termcap_number(c"zz"), -1);
+/// ```
+pub(crate) fn termcap_number(code: &CStr) -> c_int {
+    // SAFETY: `code` is a NUL-terminated string. `tgetnum` reads the
+    // current terminal of curses, and gives -1 when there is none.
+    unsafe { tgetnum(code.as_ptr()) }
+}
+
+/// Return whether the current terminal has the boolean capability `code`,
+/// with the curses `tgetflag`, as `tty_tigetflag_nif`
+/// (`prim_tty_nif.c:852-863`) does. ERTS calls the termcap function
+/// `tgetflag`, not `tigetflag`, so `code` is a termcap code, such as `xn`
+/// for the newline glitch. An absent capability, and each capability
+/// before a successful `setupterm`, give `false`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TERM=vt100, after setupterm()
+/// assert!(termcap_flag(c"xn"));
+/// assert!(!termcap_flag(c"zz"));
+/// ```
+pub(crate) fn termcap_flag(code: &CStr) -> bool {
+    // SAFETY: `code` is a NUL-terminated string. `tgetflag` reads the
+    // current terminal of curses, and gives 0 when there is none.
+    unsafe { tgetflag(code.as_ptr()) != 0 }
 }
 
 /// Return the window size of the terminal as `(columns, rows)`, as

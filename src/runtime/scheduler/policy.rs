@@ -10,11 +10,13 @@
 //! `grant/3` call for each `pbeam_cap:request/2` call, in the order of the
 //! requests, and sends the answer to the requester as a grant signal. A
 //! call that does not give a grant form, that raises an exception, or that
-//! uses more than [`POLICY_REDUCTIONS`] reductions is a denial. The process
+//! uses more than [`POLICY_REDUCTIONS`] reductions is a denial. In a call,
+//! the policy code can revoke the copies of a kind of a process with
+//! `pbeam_cap:policy_revoke/2` (see [`Scheduler::policy_revoke`]). The process
 //! keeps its state between the calls, for example its dictionary and its
 //! messages. The launcher gives it the capabilities of `AllowAll`, so each
 //! effect of the policy code is permitted, as for a process of a run with
-//! the default policy.
+//! the `AllowAll` policy.
 
 use std::collections::VecDeque;
 
@@ -22,7 +24,7 @@ use super::Scheduler;
 use crate::{
     error::BeamError,
     runtime::{
-        capability::{self, AllowAll, Capability, Denied, Policy, Source},
+        capability::{self, AllowAll, Capability, CapabilityKind, Denied, Policy, Source},
         process::{Frame, ProcessState, Start},
         signal::Signal,
     },
@@ -176,6 +178,43 @@ impl Scheduler {
             arguments: vec![kind, request, requester],
         });
         Ok(Ok(()))
+    }
+
+    /// Revoke the copies of `kind` of the process `holder`, for
+    /// `pbeam_cap:policy_revoke/2`, whatever their source: the launcher, the
+    /// policy, or a parent. Only the policy process can revoke them. A copy
+    /// that `holder` holds gets a revocation signal from the policy process,
+    /// and `holder` sends the revocation on to the copies that it gave when
+    /// it handles the signal. After the exit of `holder`, its released
+    /// records send the revocation at once to the live copies below them
+    /// (see `Delegations::revocation`). Return `Err(Denied)` when the
+    /// current process is not the policy process. A holder with no copy of
+    /// `kind` and no released record of it gives `Ok(())` with no effect, as
+    /// does each call in a run that skips the checks.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // The current process is the policy process.
+    /// assert_eq!(scheduler.policy_revoke(worker, CapabilityKind::Env), Ok(()));
+    /// ```
+    pub(in crate::runtime) fn policy_revoke(
+        &mut self,
+        holder: ProcessId,
+        kind: CapabilityKind,
+    ) -> Result<(), Denied> {
+        if self.skip_checks {
+            return Ok(());
+        }
+        let Some(policy) = self.policy_current() else {
+            return Err(Denied);
+        };
+        let id = policy.id;
+        for copy in self.delegations.held(holder, kind) {
+            let signals = self.delegations.revocation(copy);
+            self.send_revocations(Some(id), signals);
+        }
+        Ok(())
     }
 
     /// Start the `grant/3` call of the oldest request when the policy

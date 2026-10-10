@@ -183,6 +183,245 @@ fn dispatches_consolidated_protocols_as_pinned_erts() {
 }
 
 #[test]
+fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts() {
+    // `CalledModules.main/0` calls `String.length/1` of Elixir and
+    // `string:length/1` of OTP, and each one calls `unicode_util:gc/1`. The
+    // example does not import `unicode_util`. With only the modules that
+    // the example imports, the `pbeam` run stops with
+    // `unresolved external MFA unicode_util:gc/1` and status 1.
+    let erts = run_example(&["called_modules", "--erts"], None);
+    let pbeam = run_example(&["called_modules", "--no-build"], None);
+
+    assert_eq!(
+        parts(&erts),
+        (
+            "String.length: 5\\n:string.length: 5\\n".to_owned(),
+            String::new(),
+            Some(0)
+        ),
+        "ERTS"
+    );
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+
+    // The build writes each called module that the `pbeam` run does not get
+    // into `pbeam.unloaded`: the code path has no BEAM file for it, the
+    // PBeam loader does not load its BEAM file, or PBeam does not give the
+    // ERTS result of the module. PBeam starts no code server, so with
+    // `code_server`, `code:ensure_loaded/1` of a module that is not loaded
+    // raises `badarg` where ERTS returns `{error,nofile}`
+    // (`code_server.erl:84-85`, `code.erl:585-600`). Without it, the call
+    // stops the run with `unresolved external MFA code_server:get_mode/0`.
+    let unloaded = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/examples/called_modules/pbeam.unloaded"),
+    )
+    .unwrap();
+    let entries = unloaded
+        .lines()
+        .map(|line| {
+            let [module, file, reason] = line.split('\t').collect::<Vec<_>>()[..] else {
+                panic!("an unloaded line is not <module> <file> <reason>: {line:?}");
+            };
+            (module, file, reason)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|&(module, _, reason)| (module, reason))
+            .collect::<Vec<_>>(),
+        [
+            ("Dict", "no BEAM file in the code path"),
+            (
+                "Elixir.IEx.Evaluator",
+                "unsupported BEAM opcode 132 (bs_match_string)"
+            ),
+            ("HashDict", "no BEAM file in the code path"),
+            ("HashSet", "no BEAM file in the code path"),
+            ("calendar", "unsupported BEAM opcode 185 (bif3)"),
+            ("code_server", "PBeam has no code server"),
+            ("crypto", "unsupported BEAM opcode 149 (on_load)"),
+            (
+                "elixir_errors",
+                "unsupported BEAM opcode 132 (bs_match_string)"
+            ),
+            ("eval_bits", "unsupported BEAM opcode 118 (bs_get_float2)"),
+            (
+                "file_io_server",
+                "unsupported BEAM opcode 141 (bs_skip_utf16)"
+            ),
+            ("inet_db", "unsupported BEAM opcode 185 (bif3)"),
+            ("io_lib_fread", "unsupported BEAM opcode 185 (bif3)"),
+            ("rand", "unsupported BEAM opcode 102 (fnegate)"),
+            (
+                "shell_docs",
+                "unsupported BEAM opcode 132 (bs_match_string)"
+            ),
+        ]
+    );
+
+    // Each BEAM file of the list gives the load error of its reason. A
+    // module that the loader learns to load fails this check, so the build
+    // must then give it to the `pbeam` run.
+    for (module, file, reason) in entries {
+        let Some((load_error, _instruction)) = reason.split_once(" (") else {
+            if module == "code_server" {
+                assert!(file.ends_with("/code_server.beam"), "{file}");
+            } else {
+                assert_eq!(file, "", "{module}");
+            }
+            continue;
+        };
+        assert!(
+            file.ends_with(&format!("/{module}.beam")),
+            "{module}: {file}"
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_pbeam"))
+            .args(["pbeam_boot", "start", "--", file])
+            .output()
+            .unwrap();
+        assert_eq!(
+            parts(&output),
+            (
+                String::new(),
+                format!("pbeam: cannot load BEAM modules: {load_error}\\n"),
+                Some(1)
+            ),
+            "{module}"
+        );
+    }
+}
+
+#[test]
+fn runs_restricted_guest_with_its_policy_as_pinned_erts_and_denies_other_operations() {
+    // The `pbeam` run gives `--policy Elixir.RestrictedGuest.Policy`, so
+    // each effect entry checks the capabilities that `initial/1` of the
+    // Elixir policy gives to the root process of `pbeam_boot`. Each worker
+    // starts with `spawn/3` of `RestrictedGuest.Worker`, which the
+    // `modules` constraint permits, and writes to the terminal through the
+    // OTP IO path. The ERTS run has no policy. One test does all the runs,
+    // because a build of the example by a parallel test removes the lists
+    // of the build before it writes them again.
+    let erts = run_example(&["restricted_guest", "--erts"], None);
+    let pbeam = run_example(
+        &[
+            "restricted_guest",
+            "--no-build",
+            "--policy",
+            "Elixir.RestrictedGuest.Policy",
+        ],
+        None,
+    );
+
+    assert_eq!(
+        parts(&erts),
+        (
+            concat!(
+                "worker 1: hello\\n",
+                "worker 2: hello\\n",
+                "worker 3: hello\\n",
+                "main: 3 workers done\\n",
+            )
+            .to_owned(),
+            String::new(),
+            Some(0)
+        ),
+        "ERTS"
+    );
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+
+    // `restricted_guest_probe:denied/0` runs in the root process of
+    // `pbeam_boot` with the policy of the example. Its spawn of
+    // `RestrictedGuest.Worker` is permitted, and the worker writes to the
+    // terminal. Each other operation needs a capability that the policy
+    // does not give, so it raises `error:capability_denied`.
+    let probe = run_restricted_guest(&["pbeam_boot", "start", "restricted_guest_probe", "denied"]);
+    assert_eq!(
+        parts(&probe),
+        (
+            "worker 0: hello\\n".to_owned(),
+            concat!(
+                "pbeam: root process exited with {result,[",
+                "{spawn_own_module,done},",
+                "{spawn_other_module,denied},",
+                "{getenv,denied},",
+                "{open_port,denied},",
+                "{halt,denied},",
+                "{handle_other_signal,denied},",
+                "{ignore_signal,denied},",
+                "{exit_other,denied},",
+                "{group_leader_other,denied},",
+                "{request,denied}",
+                "]}\\n",
+            )
+            .to_owned(),
+            Some(1)
+        ),
+        "denied operations"
+    );
+
+    // `initial/1` gives capabilities only to the root process of the boot.
+    // For another root process it returns `deny`, so the run stops before
+    // the root process starts.
+    let other_root = run_restricted_guest(&["Elixir.RestrictedGuest", "main"]);
+    assert_eq!(
+        parts(&other_root),
+        (
+            String::new(),
+            "pbeam: the policy denied the root process: initial/1 returned deny\\n".to_owned(),
+            Some(1)
+        ),
+        "another root process"
+    );
+}
+
+/// Run the `pbeam` binary of this test build with
+/// `--policy Elixir.RestrictedGuest.Policy`, the `arguments`, and the BEAM
+/// files of the last build of `restricted_guest` and of
+/// `restricted_guest_probe`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let output = run_restricted_guest(&["pbeam_boot", "start", "restricted_guest_probe", "denied"]);
+/// assert_eq!(output.status.code(), Some(1));
+/// ```
+fn run_restricted_guest(arguments: &[&str]) -> Output {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let beams =
+        std::fs::read_to_string(root.join("target/examples/restricted_guest/pbeam.beams")).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    command
+        .args(["--policy", "Elixir.RestrictedGuest.Policy"])
+        .args(arguments)
+        .arg("--")
+        .args(beams.lines())
+        .arg("fixtures/policy/restricted_guest_probe.beam")
+        .current_dir(root);
+    run_with_time_limit(&mut command, Stdio::piped(), RUN_TIME_LIMIT)
+}
+
+#[test]
+fn inspects_a_tuple_as_pinned_erts() {
+    // `InspectTuple.main/0` runs the last call of `TerraCounter.main/0`,
+    // `IO.inspect({:ok, 1})`. `Inspect.Tuple` calls
+    // `erlang:tuple_to_list/1`, `Inspect.Integer` calls
+    // `erlang:integer_to_binary/2`, and `Macro.inspect_atom/2` runs
+    // `String.Tokenizer.tokenize/1`, which reads
+    // `elixir_config:identifier_tokenizer/0`. Without the two BIFs, the
+    // `pbeam` run stops with `unresolved external MFA
+    // erlang:tuple_to_list/1` and status 1.
+    let erts = run_example(&["inspect_tuple", "--erts"], None);
+    let pbeam = run_example(&["inspect_tuple", "--no-build"], None);
+
+    assert_eq!(
+        parts(&erts),
+        ("{:ok, 1}\\n".to_owned(), String::new(), Some(0)),
+        "ERTS"
+    );
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+}
+
+#[test]
 fn stops_terra_counter_when_the_local_terra_repository_is_not_at_the_pinned_commit() {
     // `scripts/terra.sh` gives the Terra sources to `terra_counter`. With
     // `PBEAM_TERRA_SRC`, it uses that local repository only when it is a git

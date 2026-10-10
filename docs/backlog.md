@@ -35,7 +35,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Add bitstring terms
 
 - PBeam has no bitstring term whose size is not a multiple of 8 bits, so `is_bitstr` passes only for a binary. The loader keeps a `BIT_BINARY_EXT` literal as an unsupported literal, so `byte_size(<<1:3>>)` stops with `unsupported BEAM literal index N`. ERTS gives `1` (`erl_bif_guard.c:376-393`). The "Bitstring terms" row records this.
-- The work: a bitstring `Term` variant with the ERTS term order, `BIT_BINARY_EXT` literals in the loader, the bit count in `erlang:byte_size/1`, and the bitstring forms of the binary instructions and BIFs.
+- The work: a bitstring `Term` variant with the ERTS term order, `BIT_BINARY_EXT` literals in the loader, the bit count in `erlang:byte_size/1`, and the bitstring forms of the binary instructions and BIFs, such as the `binary` and `get_tail` commands of `bs_match`, `bs_get_binary2`, and `bs_get_tail` of a size that is not a multiple of 8 bits.
 - **Trigger:** a measured path makes or loads a bitstring that is not a binary.
 - **Source:** #359 and #360.
 
@@ -58,18 +58,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path loads a local fun literal, calls one of the three BIFs, or formats a fun.
 - **Source:** PR #120 (#109).
 
-### Run `erlang:'-'/1` (was #128)
-
-- The measured M2 paths do not run it (pinned ERTS call trace and line counters). #110 removed it. The `is_eq` test of the same task landed in PR #189 (#183), and the `is_float` test is task #167. A negation of a value that is not a literal, such as `-X`, compiles to a `gc_bif` call of `erlang:'-'/1` and returns `unresolved external MFA erlang:-/1` (row "Unimplemented BIFs").
-- **Trigger:** a measured consumer negates a value that is not a literal.
-- **Source:** review of PR #121 (#110).
-
 ## Runtime
 
 ### Run `code:ensure_loaded/1` as ERTS does
 
 - After #367, PBeam runs the pinned `code:ensure_loaded/1` and returns `{module, Module}` for a loaded module. For a module that is not loaded, the call stops the run with `unresolved external MFA code_server:get_mode/0` (row "Code loading" of `docs/erts-differences.md`). PBeam has no code server and no code path, so it cannot load a module on demand. An implementation must give the pinned ERTS result, including the code-path search and the load of a module that is not loaded yet; it needs code-loading support first. Until then the call stays a clear runtime error.
 - An unconsolidated protocol calls `code:ensure_loaded/1` through `Code.ensure_compiled/1` (Elixir 1.20.4 `lib/elixir/lib/protocol.ex:956-975`). #349 consolidates the protocols of the example runs at build time, as `mix run` does.
+- On-demand loading also changes the output order of processes that race. In interactive mode, the Terra Counter `main` process waits for 11 module loads at its first `IO.inspect/1` call, so the terminal owner writes the restore sequence before the result. PBeam loads all modules before the run, so `main` writes first (#428, row "Code loading" of `docs/erts-differences.md`).
 - **Trigger:** a supported program calls `code:ensure_loaded/1` for a module that is not loaded, or a program needs protocols that are not consolidated.
 - **Source:** the owner PBeam run of `mise run example terra_counter` on 2026-10-10 (#339, #367).
 
@@ -120,9 +115,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Run `integer_to_list/1` and `integer_to_binary/1` of a large integer with no reductions left
 
-- When the digits of a bignum divided by 16 are more than the reductions left, ERTS runs `integer_to_list/1` or `integer_to_binary/1` again on a dirty CPU scheduler (`bif.c:3283-3299`; `binary.c:92-108`). PBeam has no dirty scheduler. For an integer from 2^59 to 2^63 - 1 with no reductions left, it returns the runtime error `unsupported erlang:integer_to_list/1 of N with 0 reductions left: ERTS runs it on a dirty CPU scheduler`, or the same error for `erlang:integer_to_binary/1`. The "Scheduling" row of `docs/erts-differences.md` records this, and this entry owns it.
+- When the digits of a bignum divided by 16 are more than the reductions left, ERTS runs `integer_to_list/1` or `integer_to_binary/1` again on a dirty CPU scheduler (`bif.c:3283-3299`; `binary.c:92-108`). PBeam has no dirty scheduler. For an integer from 2^59 to 2^63 - 1 with no reductions left, it returns the runtime error `unsupported erlang:integer_to_list/1 of N with 0 reductions left: ERTS runs it on a dirty CPU scheduler`, or the same error for `erlang:integer_to_binary/1`. `erlang:integer_to_binary/2` gives the same error for a bignum whose cost in its base is more than the reductions left, for example 4 in base 2. The "Scheduling" row of `docs/erts-differences.md` records this, and this entry owns it.
 - **Trigger:** a measured path converts such an integer at the end of a budget, or a task adds dirty schedulers.
-- **Source:** #234 (PR #243), #268.
+- **Source:** #234 (PR #243), #268, #399.
 
 ### Read the clock after `ERTS_CHECK_TIME_REDS` reductions
 
@@ -130,34 +125,27 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path depends on the turn in which a timer expires while other processes run.
 - **Source:** #229 (PR #236).
 
-### Run the other binary-match instructions and `bs_match` commands
+### Run the other binary-match instructions
 
-- PBeam runs `bs_start_match3`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, and `bs_match` with the commands `ensure_at_least` and `ensure_exactly`. The other `bs_match` commands (`binary`, `integer`, `skip`, `get_tail`, and `=:=`) stop the run with `unsupported bs_match command <Name>`. `bs_start_match3` that copies a match context to another register stops the run with `unsupported bs_start_match3 that copies the match context in <Source> to <Destination>`. Each other binary-match instruction, such as `bs_start_match4`, `bs_get_tail`, `bs_skip_utf8`, and `bs_get_binary2`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Evidence:** `binary_match_probe:byte(<<7,8>>)` stops with `unsupported bs_match command integer`.
-- **Trigger:** a measured path matches a binary with one of these commands or instructions. Add only the commands and instructions that the path needs.
-- **Source:** #219 (PR #227).
+- PBeam runs `bs_start_match3`, `bs_start_match4`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, `bs_get_tail`, `bs_get_binary2` with a size in a register or a literal integer, and `bs_match` with each command that the ERTS loader accepts. `move`, `bs_start_match3`, and `bs_start_match4` share a match context that they copy to another register, and `byte_size/1` reads a match context. `swap` and `bit_size/1` of a match context stop the run with `invariant error: the match context in <Operand> reached an instruction that is not a binary match`. After a failed `=:=` command of `bs_match`, PBeam does not know the position, so a read of the match context before `bs_set_position` stops the run with `unsupported read of the match context in <Operand> after a failed bs_match =:= command`. Each other binary-match instruction, such as `bs_skip_utf8` and `bs_get_integer2`, and `bs_get_binary2` with the size `all`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it. The entry "Add bitstring terms" owns the `binary` and `get_tail` commands, and the `bs_get_binary2` and `bs_get_tail` instructions, of a size that is not a multiple of 8 bits.
+- **Evidence:** `bs_match_probe:bits(<<165>>)` stops with `unsupported bs_match binary of 3 bits: needs a bitstring term`. The test `gives_a_runtime_error_for_a_read_after_a_failed_equal_command` of `tests/runtime/interpreter.rs` stops at a `skip` command after a failed `=:=`.
+- **Trigger:** a measured path matches a binary with one of these instructions, gives a match context to `swap` or `bit_size/1`, or reads a match context after a failed `=:=` command without `bs_set_position`. Add only the instructions that the path needs.
+- **Source:** #219 (PR #227), #395, #396, #421.
 
 ### Set raw mode through `shell:start_interactive({noshell, raw})`
 
-- `shell:start_interactive({noshell, raw})` calls `user_drv:start_shell/1` (shell.erl:149-150). `user_drv` calls `prim_tty:reinit/2` with the input `raw` (user_drv.erl:387-411), and `prim_tty` reads the terminfo values `co` and `xn` with `tigetnum_nif/1` and `tigetflag_nif/1` (prim_tty.erl:333-345, 1405-1408). These NIFs have no PBeam binding, so the stub raises `error:undef` (see "Native functions without a binding" in `docs/effect-inventory.md`). `user_drv` catches only `error:enotsup` (user_drv.erl:412) and raises the exception again with the `raise` instruction (opcode 108), which stops the run with `unsupported BEAM opcode 108`. Thus a PBeam program cannot set fd 0 to raw mode yet. The test of #300 sets raw mode with `stty` while the program waits.
-- **Evidence:** `ok = user_drv:start_shell(#{initial_shell => noshell, input => raw})` in a probe run by `pbeam_boot` in a pseudo-terminal stops with `pbeam: unsupported BEAM opcode 108` and status 1. On pinned ERTS, the call returns `ok`, and the next output has no carriage return, because raw mode turns `OPOST` off.
-- The work: the `tigetnum_nif/1` and `tigetflag_nif/1` bindings and the `raise` instruction, and then the other NIFs that the raw path of `prim_tty` and `user_drv` calls.
+- `shell:start_interactive({noshell, raw})` calls `user_drv:start_shell/1` (shell.erl:149-150). `user_drv` calls `prim_tty:reinit/2` with the input `raw` (user_drv.erl:387-411), and `prim_tty` reads the terminfo values `co` and `xn` with `tigetnum_nif/1` and `tigetflag_nif/1` (prim_tty.erl:333-345, 1405-1408). Before #388, these NIFs had no PBeam binding, so the stub raised `error:undef`. `user_drv` catches only `error:enotsup` (user_drv.erl:412) and raises the exception again with the `raise` instruction (opcode 108). Before #384, this instruction stopped the run with `unsupported BEAM opcode 108`. Thus a PBeam program cannot set fd 0 to raw mode yet. The test of #300 sets raw mode with `stty` while the program waits.
+- **Evidence:** `ok = user_drv:start_shell(#{initial_shell => noshell, input => raw})` in a probe run by `pbeam_boot` in a pseudo-terminal before #384 stops with `pbeam: unsupported BEAM opcode 108` and status 1. On pinned ERTS, the call returns `ok`, and the next output has no carriage return, because raw mode turns `OPOST` off.
+- The work: the other NIFs that the raw path of `prim_tty` and `user_drv` calls. #388 adds the `tigetnum_nif/1` and `tigetflag_nif/1` bindings.
 - **Trigger:** a program sets raw mode, for example the Terra reference run (#3).
 - **Source:** PR for #300.
-
-### Write the output in a locale whose codeset is not UTF-8
-
-- In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1` (prim_tty.erl:1309-1321), which PBeam runs as ERTS does. Thus PBeam writes ASCII output as ERTS does. Output that is not ASCII calls `binary_to_latin1/2`, which builds each character with `char_to_latin1/2` (prim_tty.erl:1323-1330). #269 runs the `string` and `binary` segments of `bs_create_bin`. `char_to_latin1/2` also needs the `integer` segment of `bs_create_bin` (prim_tty.erl:1329-1330) and `erlang:integer_to_binary/2` (prim_tty.erl:1325-1328). PBeam stops with `unsupported bs_create_bin segment integer` and status 1 (measured with `IO.puts/1` of the UTF-8 binary of `é`). ERTS writes the Latin-1 output with status 0. The "Boot" row records this.
-- The work: the `integer` segment of `bs_create_bin` and `erlang:integer_to_binary/2` for `char_to_latin1/2`.
-- **Trigger:** a supported run that writes output that is not ASCII in a locale whose codeset is not UTF-8, for example a macOS shell with `LANG`, `LC_ALL`, and `LC_CTYPE` unset.
-- **Source:** "Boot" row (#139, #183, #219, #269).
 
 ### Run the unsupported BIFs that OTP code calls
 
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
   - Timers: `erlang:start_timer/4`, `erlang:send_after/3,4`, `erlang:cancel_timer/1`, and `erlang:read_timer/1,2`. `erlang:start_timer/3` and `erlang:cancel_timer/2` already use the timer list of #150 (PR #172).
   - Aliases: `erlang:alias/1`, which `erlang:alias/0` calls, and `erlang:unalias/1`.
-  - Equality: `erlang:'=='/2` and `erlang:'/='/2`. They give other results than `=:=` and `=/=` only for floats (see "Add float terms").
+  - Equality: `erlang:'/='/2`. It gives other results than `=/=` only for floats (see "Add float terms").
   - Persistent terms: `persistent_term:erase/1`, `persistent_term:put_new/2`, and `persistent_term:info/0`.
   - Signals: `erlang:exit/3`.
   - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
@@ -166,7 +154,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Run the remaining test instructions for `io:format/2`
 
-- The loader accepts `is_ne`, `is_number`, and `is_any_native_record`, but each one stops the run with `unsupported BEAM opcode N`. Under the PBeam boot, `io:format/2` with `~p` of an integer, a list, a tuple, or a map stops at `is_any_native_record`. For an integer, this is the guard `is_record(Record)` of `io_lib_pretty:print_length/7` (io_lib_pretty.erl:938) (measured). #359 added `is_bitstr`, and #302 added `is_port`, which stopped `~w` of a list, a tuple, or a map before (io_lib.erl:820, 823). The "Unimplemented instructions" row records these instructions and `bs_init_writable`, `gc_bif3`, `get_record_elements`, and `put_record`. A format without a term argument, `~w` of an integer, a list, a tuple, or a map, and `~s` of a string already work. PR #188 also named `net_kernel:dflag_unicode_io/1` and `erl_scan:reserved_word/1`. The first is a BIF that PBeam runs (PR #88), and the second is a function of `erl_scan.beam`, which a run gives with the other OTP modules.
+- The loader accepts `is_number` and `is_any_native_record`, but each one stops the run with `unsupported BEAM opcode N`. Under the PBeam boot, `io:format/2` with `~p` of an integer, a list, a tuple, or a map stops at `is_any_native_record`. For an integer, this is the guard `is_record(Record)` of `io_lib_pretty:print_length/7` (io_lib_pretty.erl:938) (measured). #359 added `is_bitstr`, #399 added `is_ne`, and #302 added `is_port`, which stopped `~w` of a list, a tuple, or a map before (io_lib.erl:820, 823). The "Unimplemented instructions" row records these instructions and `bs_init_writable`, `gc_bif3`, `get_record_elements`, and `put_record`. A format without a term argument, `~w` of an integer, a list, a tuple, or a map, and `~s` of a string already work. PR #188 also named `net_kernel:dflag_unicode_io/1` and `erl_scan:reserved_word/1`. The first is a BIF that PBeam runs (PR #88), and the second is a function of `erl_scan.beam`, which a run gives with the other OTP modules.
 - **Trigger:** a consumer or a probe prints a compound term with `io:format/2`, for example to compare its output byte for byte through the `pbeam` binary.
 - **Source:** PR #188 (#179) and measured probes at the M2 close.
 
@@ -261,8 +249,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Build a list cons and a map update without a copy
 
-- A `Term::List` holds its elements in one `Vec`, so a cons copies the tail, and `put_map_assoc` reads a copy of the whole map for a map update `M#{K => V}`. The probes build long lists with `++` of two halves, in O(N log N) time. ERTS makes a cons and a HAMT path update in constant and O(log N) time.
-- **Evidence:** on PBeam, `pairs(1, 100000)` of `bif_cost_probe` takes about 1.5 s, and a loop of 100000 updates `M#{N => N}` did not end in 10 minutes (#355).
+- A `Term::List` holds its elements in one `Vec`, so a cons copies the tail. A copy of a map shares the form of the map in O(1) time (#427), but a map update `M#{K => V}` of a shared map copies the whole form once (`Rc::make_mut`), in O(N) time. The probes build long lists with `++` of two halves, in O(N log N) time. ERTS makes a cons and a HAMT path update in constant and O(log N) time.
+- **Evidence:** on PBeam, `pairs(1, 100000)` of `bif_cost_probe` takes about 1.5 s, and a loop of 100000 updates `M#{N => N}` did not end in 10 minutes (#355). Before #427, the read of the register rebuilt the map with `Map::from_pairs`, which hashes each key again. Since #427, the update copies the shared form once, and that copy does not hash its keys again. The update still hashes the new key, and a change from 32 to 33 keys hashes each key.
 - **Trigger:** an owner decision to make the CI test time shorter again, or a consumer that builds long lists or large maps.
 - **Source:** PR for #355.
 
@@ -282,15 +270,10 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Exceptions
 
-### `erlang:error/2` and the `throw` class
-
-- After #155 (PR #177), `erlang:error/2` is still `unsupported`; `re:ucompile/2` (`re.erl:1742-1751`) stops at it. `erlang:throw/1` and `erlang:raise(throw, R, Stack)` give runtime errors.
-- **Trigger:** a measured path raises through them.
-- **Source:** review of #155.
-
 ### Run `error_handler.beam` for an undefined function
 
 - After #166 (PR #180), PBeam gives the result of `error_handler:undefined_function/3` in Rust for a loaded module: it calls `'$handle_undefined_function'/2` or raises `undef` with the first frame. ERTS runs `error_handler.beam` from the export entry (`beam_common.c:1294-1342`). Running the BEAM module needs caller frames in the stack trace (`crash/1` calls `tl/1` on it), `erlang:raise/3` that keeps its frames, and `ensure_loaded/1` through `code_server` or `init` (`error_handler.erl:165-198`). The "Undefined functions" row records the difference. The `error_handler` code also costs reductions: on `erl +S 1`, a call that goes to `'$handle_undefined_function'/2` costs 11 and a caught `undef` costs 13. PBeam charges only the entry and the `return` of the handler, and nothing for an `undef` (owner decision in #7).
+- For a module that is not loaded, ERTS loads the module through `error_handler` and `code_server` (`error_handler.erl:85-98`, `182-198`). The Terra Counter run of #428 shows the effect: in interactive mode, the `main` process waits for 11 module loads at its first `IO.inspect/1` call, and the terminal owner writes the restore sequence before the result. PBeam loads all modules before the run, so `main` writes first.
 - **Trigger:** the stack-trace work gives caller frames and `raise/3` frames, or a consumer sets `process_flag(error_handler, Module)`.
 - **Source:** review of #166.
 
@@ -394,13 +377,62 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the first check that reads policy data, for example an audit rule of #338 or the opt-in check-time extension.
 - **Source:** implementation of #337.
 
-### Revoke a capability from the policy process
+### Revoke a grant that the holder did not handle yet
 
-- After #337, the launcher (`Policy::revocations`) and a delegating process (`pbeam_cap:revoke/2`) can revoke. The design of #310 names the policy process as a third revoker, for example of a capability that it granted at run time.
-- **Option:** a PBeam BIF that only the policy process can call, which revokes the copies of a kind of a process that have the source `policy` or that came from the launcher.
-- **Reason:** no policy module and no test revokes yet.
-- **Trigger:** a policy that must take back a run-time grant, for example an audit rule of #338.
-- **Source:** implementation of #337.
+- After #378, `pbeam_cap:policy_revoke/2` revokes the copies of a kind that have a delegation record when it runs (`Scheduler::policy_revoke` in `src/runtime/scheduler/policy.rs`). A copy of a grant gets its record when the requester handles the grant signal (`Signal::Grant` in `src/runtime/scheduler/signals.rs`). Thus a revocation in a later call of the policy code does not revoke a grant that the requester did not handle yet, and the requester then holds the copy.
+- **Evidence:** with one scheduler, the grant signal puts the requester in the run queue before the next call of the policy process (`Scheduler::queue_signal` and `Scheduler::begin_policy_call`). The requester handles the signal in its turn when its signal queue does not hold more signals than the turn can handle.
+- **Option:** give the copy its identifier and its record when the policy process sends the grant signal, and release the record when the requester exits before it handles the signal. Then the revocation signal comes after the grant signal in the queue of the requester.
+- **Reason:** no policy revokes a grant in the call after the grant, and no consumer fills the signal queue of a requester that waits for its grant.
+- **Trigger:** the multiple schedulers of M10, or a policy that revokes a grant in the call after the grant, for example an audit rule of #338.
+- **Source:** implementation of #378.
+
+### Limit the targets of `process` `send`
+
+- After #370, the `process` capability with `send` permits a send to each process: the send path checks the operation only (`deliver_to` in `src/runtime/interpreter/bif/erlang.rs`). It has no constraint field.
+- **Option:** a constraint of the targets, for example the pids of the own tree or the registered names of a list.
+- **Reason:** the owner decided an all-or-nothing `send` in Suikou review 01a12608 and put a target constraint in the backlog. No consumer limits the targets yet.
+- **Trigger:** a policy that must keep a guest from a send to a process outside its group, for example an audit rule of #338.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Add a `name` capability kind
+
+- After #368, `erlang:register/2`, `erlang:unregister/1`, and `erlang:whereis/1` are `ambient` in `docs/effect-inventory.md`. A send or a monitor by name checks only the `process` capability.
+- **Option:** a `name` kind with the operations `register` and `lookup` and the constraint field `names`.
+- **Reason:** the owner decided not to add the kind until a consumer needs it (Suikou review 01a12608).
+- **Trigger:** a policy that must limit the names that a guest registers or finds.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Add an `ets` capability kind
+
+- After #368, each `ets` BIF is `ambient` in `docs/effect-inventory.md`. The access mode of a table (`private`, `protected`, or `public`) controls the access, as on ERTS.
+- **Option:** an `ets` kind for the creation of a table, with a constraint of the names of named public tables.
+- **Reason:** the owner decided that ETS has no check until a consumer needs one (Suikou review 01a12608).
+- **Trigger:** a policy that must limit the tables that a guest makes or the public tables that it uses.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Add a `clock` capability kind for a deterministic sandbox
+
+- After #368, `erlang:monotonic_time/1` and `os:system_time/1` are `ambient` in `docs/effect-inventory.md`. A clock is a source of nondeterminism, not an authority, and OTP code reads clocks often, also in the process of the caller.
+- **Option:** a `clock` kind that a deterministic sandbox holds back, or a run clock that the launcher gives.
+- **Reason:** no consumer needs a deterministic run yet.
+- **Trigger:** a sandbox that must give the same result for each run of the same input.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Check `erlang:list_to_pid/1` when it is implemented
+
+- `erlang:list_to_pid/1` is not implemented. It makes a pid of any process from text, also of the policy process, so it must have a check. The decisions of #337 also say that the task that implements it must keep the policy process out or check `process` `exit_other` for trusted processes (section "Policy module, policy process, and policy table" of `docs/capability-security-migration.md`).
+- **Reason:** the owner put the check in the backlog in Suikou review 01a12608, because the BIF has no implementation yet.
+- **Trigger:** the task that implements `erlang:list_to_pid/1`.
+- **Source:** Suikou review 01a12608 (#368).
+
+### Give a guest less authority than the boot
+
+- After #338, the guest of an example runs in the root process of `pbeam_boot`, as `erl -eval` runs in the boot process of ERTS (`erts/preloaded/src/init.erl:1192-1217` at `OTP-29.1.1`). Each process of the OTP IO path gets a copy of the delegable capabilities of the root process. Thus the policy `RestrictedGuest.Policy` of `examples/restricted_guest` must give the guest each capability that the boot uses: the `terminal` operations of the IO servers, `signal` `handle` of `sigcont` and `sigwinch`, `runtime` `system_flag` and `load_nif`, `persistent_term` `read` and `write`, `process` `inspect`, and the spawn of `pbeam_boot`, `proc_lib`, and `erlang` (section "Decisions of #338" of `docs/capability-security-migration.md`). A delegable copy is also a copy that its holder can use, so the root process cannot keep a capability for its children only.
+- **Evidence:** a run of the example without one of these operations does not write the output of the guest. For example, it stops with `unsupported erlang:process_info/2 arguments` without `process` `inspect`.
+- **Option:** the kernel process of `pbeam_boot` requests the capabilities of the OTP IO path with `pbeam_cap:request/2` before it starts `user_sup`, and the root process gets only the capabilities of the guest. `logger_server`, which the root process starts, would then need its own grant. Another option is a boot that starts the guest in a child with the option `{capabilities, Map}`, which changes the root process of the run.
+- **Reason:** no consumer must deny the guest a capability that the OTP IO path needs, for example `terminal` `raw_mode`.
+- **Trigger:** a policy that must deny such a capability to a guest, or the launcher of M8.
+- **Source:** implementation of #338.
 
 ## Tests and tooling
 

@@ -16,14 +16,18 @@ pub(crate) use hash::internal_hash;
 pub use map::Map;
 pub(crate) use map::{Direction, from_list_units};
 pub use match_context::MatchContext;
+pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
 
-use std::fmt;
+use std::{cell::RefCell, fmt, rc::Rc};
 
 /// The smallest ERTS small integer on a 64-bit system: -(2^59).
 pub(crate) const SMALL_INTEGER_MIN: i64 = -(1 << 59);
 /// The largest ERTS small integer on a 64-bit system: 2^59 - 1.
 const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
+/// The largest number of elements in a tuple: 2^24 - 1
+/// (`ERTS_MAX_TUPLE_SIZE` and `MAX_ARITYVAL` in `erl_term.h:322-323`).
+pub(crate) const MAX_TUPLE_SIZE: usize = (1 << 24) - 1;
 
 /// A BEAM term. Lists, tuples, maps, and funs can nest to any depth, as in
 /// ERTS, so `Drop`, `Clone`, `PartialEq`, and `Debug` use explicit work
@@ -48,10 +52,11 @@ pub enum Term {
     /// A BEAM map: a flatmap up to 32 keys and a hashmap above 32 keys, as
     /// in ERTS. `Map` keeps each map in its canonical form, so two maps with
     /// the same pairs are equal. A key is a binary, an atom, a small integer,
-    /// `[]`, a list whose elements are atoms, small integers, `[]`, or such
-    /// lists, or an improper list of such elements whose tail is an atom or a
-    /// small integer; a flatmap also accepts any integer. Atom keys are
-    /// ordered and hashed by their atom index, as in ERTS.
+    /// `[]`, a list or a tuple whose elements are atoms, small integers,
+    /// `[]`, or such lists or tuples, or an improper list of such elements
+    /// whose tail is an atom, a small integer, or such a tuple; a flatmap
+    /// also accepts any integer. Top-level atom keys are ordered by their
+    /// atom index, and all atoms are hashed by their atom index, as in ERTS.
     Map(Map),
     /// A process identifier owned by this runtime.
     Pid(ProcessId),
@@ -63,10 +68,16 @@ pub enum Term {
     /// fun, or the module, function, and arity for an external fun.
     Fun(Fun),
     /// A binary match context that `bs_start_match3` makes in a register.
-    /// Only the binary-match instructions read it, and a local call keeps
-    /// it in its argument register. Each other instruction that gets a
-    /// match context gives a runtime invariant error.
-    MatchContext(MatchContext),
+    /// The term is a reference to the match context, as an ERTS register
+    /// holds a boxed pointer to the `ErlSubBits` on the process heap. A
+    /// copy of the term, from `move`, `bs_start_match3`, or
+    /// `bs_start_match4`, shares the match context and its position. The
+    /// registers and stack slots of one process own the references, and
+    /// the last reference that drops releases the match context. Only the
+    /// binary-match instructions read it, `move` copies it, and a local
+    /// call keeps it in its argument register. Each other instruction that
+    /// gets a match context gives a runtime invariant error.
+    MatchContext(Rc<RefCell<MatchContext>>),
 }
 
 /// The kind of a term that contains other terms. A fun keeps the entry of
@@ -77,26 +88,21 @@ enum Kind<'a> {
     /// An improper list. Its last nested term is the tail.
     ImproperList,
     Tuple,
-    Map,
     Fun(&'a Target),
 }
 
-/// The nested terms of a list, tuple, map, or fun, in order. An improper
-/// list gives its elements and then its tail, a map gives each key and then
-/// its value, and a fun gives its free variables.
+/// The nested terms of a list, tuple, or fun, in order. An improper list
+/// gives its elements and then its tail, and a fun gives its free
+/// variables.
 type Nested<'a> = Box<dyn Iterator<Item = &'a Term> + 'a>;
 
 impl Kind<'_> {
-    /// Build a term of this kind from its nested terms. For a map, the
-    /// terms are keys and values in turn.
+    /// Build a term of this kind from its nested terms.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(Kind::Tuple.build(vec![]), Term::Tuple(vec![]));
-    /// let map = Kind::Map.build(vec![Term::static_atom("ok"), Term::Integer(1)]);
-    /// let pairs = vec![(Term::static_atom("ok"), Term::Integer(1))];
-    /// assert_eq!(map, Term::Map(Map::from_pairs(pairs)?));
     /// let improper = Kind::ImproperList.build(vec![Term::Integer(1), Term::static_atom("x")]);
     /// assert_eq!(improper, Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x"))));
     /// ```
@@ -108,15 +114,6 @@ impl Kind<'_> {
                 Term::ImproperList(terms, Box::new(tail))
             }
             Kind::Tuple => Term::Tuple(terms),
-            Kind::Map => {
-                let mut pairs = Vec::with_capacity(terms.len() / 2);
-                let mut terms = terms.into_iter();
-                while let (Some(key), Some(value)) = (terms.next(), terms.next()) {
-                    pairs.push((key, value));
-                }
-                // A hashmap copy hashes each key again; `Map` has no other way to build a map.
-                Term::Map(Map::from_pairs(pairs).expect("a copied map holds only supported keys"))
-            }
             Kind::Fun(target) => Term::Fun(Fun {
                 target: target.clone(),
                 free: terms,
@@ -197,14 +194,16 @@ impl Term {
         }
     }
 
-    /// Copy a term that has no nested terms. For a list, tuple, map, or
-    /// fun, return its nested terms, kind, and count instead, so the caller
+    /// Copy a term that has no nested terms. A map copy shares the form of
+    /// the map, so it does not copy the pairs. For a list, tuple, or fun,
+    /// return its nested terms, kind, and count instead, so the caller
     /// copies them.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(Term::Integer(1).shallow_clone().ok(), Some(Term::Integer(1)));
+    /// assert!(Term::Map(Map::new()).shallow_clone().is_ok());
     /// assert!(Term::List(vec![]).shallow_clone().is_err());
     /// ```
     fn shallow_clone(&self) -> Result<Term, (Nested<'_>, Kind<'_>, usize)> {
@@ -216,11 +215,7 @@ impl Term {
                 elements.len() + 1,
             )),
             Term::Tuple(elements) => Err((Box::new(elements.iter()), Kind::Tuple, elements.len())),
-            Term::Map(map) => Err((
-                Box::new(map.iter().flat_map(|(key, value)| [key, value])),
-                Kind::Map,
-                map.len() * 2,
-            )),
+            Term::Map(map) => Ok(Term::Map(map.clone())),
             Term::Fun(fun) => Err((
                 Box::new(fun.free.iter()),
                 Kind::Fun(&fun.target),
@@ -254,7 +249,7 @@ impl Term {
                 pending.push(std::mem::replace(&mut **tail, Term::List(vec![])));
             }
             Term::Fun(fun) => pending.append(&mut fun.free),
-            Term::Map(map) => std::mem::replace(map, Map::new()).drain_into(pending),
+            Term::Map(map) => map.drain_into(pending),
             _ => {}
         }
     }
@@ -280,8 +275,8 @@ impl Drop for Term {
 }
 
 impl Clone for Term {
-    /// Copy a term with a work stack of partly copied lists, tuples, maps,
-    /// and funs.
+    /// Copy a term with a work stack of partly copied lists, tuples, and
+    /// funs. A map copy shares the form of the map.
     ///
     /// # Examples
     ///
@@ -364,7 +359,10 @@ impl PartialEq for Term {
                 (Term::Pid(left), Term::Pid(right)) => left == right,
                 (Term::Port(left), Term::Port(right)) => left == right,
                 (Term::Reference(left), Term::Reference(right)) => left == right,
-                (Term::MatchContext(left), Term::MatchContext(right)) => left == right,
+                // A match context is a heap object, so its identity is its
+                // address. ERTS never compares a match context
+                // (`get_term_type`, beam_validator.erl:2903-2908).
+                (Term::MatchContext(left), Term::MatchContext(right)) => Rc::ptr_eq(left, right),
                 _ => false,
             };
             if !equal {
@@ -410,7 +408,9 @@ impl fmt::Debug for Term {
                 Term::Pid(pid) => write!(formatter, "Pid({pid:?})")?,
                 Term::Port(port) => write!(formatter, "Port({port:?})")?,
                 Term::Reference(reference) => write!(formatter, "Reference({reference:?})")?,
-                Term::MatchContext(context) => write!(formatter, "MatchContext({context:?})")?,
+                Term::MatchContext(context) => {
+                    write!(formatter, "MatchContext({:?})", context.borrow())?
+                }
                 Term::List(elements)
                 | Term::ImproperList(elements, _)
                 | Term::Tuple(elements)

@@ -23,6 +23,7 @@ use crate::runtime::{
     unicode::is_native_filename,
 };
 
+mod prim_file;
 mod prim_tty;
 
 pub(super) use prim_tty::dirty_write_result;
@@ -78,13 +79,21 @@ struct Library {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(LIBRARIES[0].module, "prim_tty");
+/// assert_eq!(LIBRARIES[0].module, "prim_file");
+/// assert_eq!(LIBRARIES[1].module, "prim_tty");
 /// ```
-const LIBRARIES: &[Library] = &[Library {
-    module: "prim_tty",
-    functions: &prim_tty::FUNCTIONS,
-    bindings: prim_tty::BINDINGS,
-}];
+const LIBRARIES: &[Library] = &[
+    Library {
+        module: "prim_file",
+        functions: &prim_file::FUNCTIONS,
+        bindings: prim_file::BINDINGS,
+    },
+    Library {
+        module: "prim_tty",
+        functions: &prim_tty::FUNCTIONS,
+        bindings: prim_tty::BINDINGS,
+    },
+];
 
 /// Return the registered static NIF library of `module`, or `None` when
 /// PBeam has no bindings for the module.
@@ -93,7 +102,8 @@ const LIBRARIES: &[Library] = &[Library {
 ///
 /// ```rust,ignore
 /// assert_eq!(library("prim_tty").map(|library| library.functions[0]), Some(("isatty", 1)));
-/// assert!(library("prim_file").is_none());
+/// assert_eq!(library("prim_file").map(|library| library.functions[0]), Some(("open_nif", 2)));
+/// assert!(library("zlib").is_none());
 /// ```
 fn library(module: &str) -> Option<&'static Library> {
     let index = LIBRARIES.binary_search_by_key(&module, |library| library.module);

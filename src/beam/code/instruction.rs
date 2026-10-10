@@ -53,6 +53,7 @@ const OPCODE_SELECT_TUPLE_ARITY: u8 = 60;
 const OPCODE_JUMP: u8 = 61;
 const OPCODE_CATCH: u8 = 62;
 const OPCODE_CATCH_END: u8 = 63;
+/// `bs_get_binary2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:449).
 const OPCODE_BS_GET_BINARY2: u8 = 119;
 const OPCODE_BS_SKIP_BITS2: u8 = 120;
 /// `bs_get_integer2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:447).
@@ -81,6 +82,7 @@ const OPCODE_FMUL: u8 = 100;
 const OPCODE_FDIV: u8 = 101;
 const OPCODE_GC_BIF1: u8 = 124;
 const OPCODE_GC_BIF2: u8 = 125;
+/// `bs_get_tail Ctx Dst Live` (genop.tab:591-593).
 const OPCODE_BS_GET_TAIL: u8 = 165;
 /// `bs_start_match3 Fail Bin Live Dst` (genop.tab:597).
 const OPCODE_BS_START_MATCH3: u8 = 166;
@@ -88,6 +90,7 @@ const OPCODE_BS_START_MATCH3: u8 = 166;
 const OPCODE_BS_GET_POSITION: u8 = 167;
 /// `bs_set_position Ctx Pos` (genop.tab:603-605).
 const OPCODE_BS_SET_POSITION: u8 = 168;
+/// `bs_start_match4 Fail Live Src Dst` (genop.tab:613-617).
 const OPCODE_BS_START_MATCH4: u8 = 170;
 /// `bs_get_utf8 Fail Ctx Live Flags Dst` (genop.tab:501).
 const OPCODE_BS_GET_UTF8: u8 = 138;
@@ -288,16 +291,16 @@ pub(crate) enum Instruction {
         deallocate: u32,
     },
     /// Calls a BIF through `bif0` (opcode 9), `bif1` (opcode 10), `bif2`
-    /// (opcode 11), `gc_bif1` (opcode 124), or `gc_bif2` (opcode 125) and
-    /// writes its value to a register. `bif0` has no fail label and decodes with `fail_label` 0.
+    /// (opcode 11), `gc_bif1` (opcode 124), `gc_bif2` (opcode 125), or
+    /// `gc_bif3` (opcode 152) and writes its value to a register. `bif0` has no fail label and decodes with `fail_label` 0.
     /// With fail label 0, a BIF failure raises its exception; with another
     /// fail label, it jumps to the label.
     ///
     /// Encoding: `bif0` has opcode, import index, destination register;
     /// `bif1` and `bif2` have opcode, fail label, import index, one or two
-    /// arguments, destination register. `gc_bif1` and `gc_bif2` have
-    /// opcode, fail label, live register count, import index, one or two
-    /// arguments, destination register. The live count tells the ERTS garbage collector which X
+    /// arguments, destination register. `gc_bif1`, `gc_bif2`, and `gc_bif3`
+    /// have opcode, fail label, live register count, import index, one, two,
+    /// or three arguments, destination register. The live count tells the ERTS garbage collector which X
     /// registers hold terms; PBeam has no process heap and does not keep it.
     /// An argument can be a typed register (extended subtag 5). Example:
     /// `io:io_request/2` in the pinned `io.beam` has
@@ -313,7 +316,11 @@ pub(crate) enum Instruction {
     /// `x0` typed, and the integer 1, and writes `x0`. `arith_probe:neg/1`
     /// has `[0x7C, 0x0D, 0x37, 0x10, 0x50, 0x03, 0x03]`, which calls import 5
     /// (`erlang:'-'/1`) with fail label 55, live count 1, and `x0`, and
-    /// writes `x0`.
+    /// writes `x0`. `binary_part_probe:guard/3` in
+    /// `fixtures/binary_part/binary_part_probe.beam` has
+    /// `[0x98, 0xD5, 0x30, 0x00, 0x03, 0x13, 0x23, 0x03]`, which calls import 0
+    /// (`erlang:binary_part/3`) with fail label 13, live count 3, `x0`, `x1`,
+    /// and `x2`, and writes `x0`.
     ///
     /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`, and
     /// `node(Pid) =:= node()` in `io:io_request/2` compiles to
@@ -332,7 +339,10 @@ pub(crate) enum Instruction {
     /// guard `when -X > 0` of `arith_probe:neg/1` compiles to
     /// `{gc_bif,'-',{f,55},1,[{x,0}],{x,0}}`, and `length(Args)` in
     /// `proc_lib:trans_init/3` (proc_lib.erl:944) compiles to
-    /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`.
+    /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`. The guard
+    /// `when binary_part(Binary, Start, Length) =:= <<"ell">>` of
+    /// `binary_part_probe:guard/3` compiles to
+    /// `{gc_bif,binary_part,{f,13},3,[{x,0},{x,1},{x,2}],{x,0}}`.
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
@@ -425,7 +435,7 @@ pub(crate) enum Instruction {
     },
     /// Starts the handler of a `try`: clears the catch tag, then copies the
     /// exception class from `x3` to `x0`. `x1` holds the reason and `x2` the
-    /// stack trace.
+    /// raw stack trace.
     ///
     /// Encoding: opcode, Y register. Example: `[0x6A, 0x04]` is
     /// `try_case y0`.
@@ -437,8 +447,8 @@ pub(crate) enum Instruction {
         register: u32,
     },
     /// Ends a `catch` expression: clears the catch tag. After an exception,
-    /// `x0` becomes `{'EXIT', {Reason, Stack}}` for class `error` and
-    /// `{'EXIT', Reason}` for class `exit`.
+    /// `x0` becomes `{'EXIT', {Reason, Stack}}` for class `error`,
+    /// `{'EXIT', Reason}` for class `exit`, and `Reason` for class `throw`.
     ///
     /// Encoding: opcode, Y register. Example: `[0x3F, 0x04]` is
     /// `catch_end y0`.
@@ -449,9 +459,61 @@ pub(crate) enum Instruction {
         /// Index of the Y register that holds the tag.
         register: u32,
     },
-    /// Gives the stack trace of the exception in `x0` as a list. The
-    /// compiler moves the stack trace from `x2` to `x0` first. PBeam keeps
-    /// the stack trace as a list, so `x0` does not change.
+    /// Raises an exception again. The class and the stack trace come from
+    /// the raw stack trace `trace`, and the reason is `value`. A `try` uses
+    /// it when no `catch` clause matches, and so does the cleanup of
+    /// `try ... after`.
+    ///
+    /// Encoding: opcode, raw stack trace, reason. Example:
+    /// `[0x6C, 0x23, 0x13]` is `raise x2 x1`.
+    ///
+    /// Erlang: `try erlang:raise(exit, R, []) catch error:_ -> error end`
+    /// compiles to `{bif,raise,{f,0},[{x,2},{x,1}],{x,0}}` after the
+    /// clauses; `beam_asm` writes only the two arguments.
+    Raise {
+        /// The raw stack trace that the handler of the `try` got in `x2`.
+        trace: Operand,
+        /// The reason that the handler of the `try` got in `x1`.
+        value: Operand,
+    },
+    /// Raises class `error` with the reason `{Tag, Value}`, where `Tag` is
+    /// `badmatch`, `case_clause`, `try_clause`, or `badrecord`. `badmatch`,
+    /// `case_end`, `try_case_end`, and `badrecord` map here.
+    ///
+    /// Encoding: opcode, value. Examples: `[0x48, 0x04]` is `badmatch y0`,
+    /// `[0x4A, 0x03]` is `case_end x0`, `[0x6B, 0x03]` is
+    /// `try_case_end x0`, and `[0xB4, 0x03]` is `badrecord x0`.
+    ///
+    /// Erlang: `{ok, _} = X` compiles to `{badmatch,{x,0}}`, `case X of a ->
+    /// ok end` to `{case_end,{x,0}}`, `try f() of a -> ok catch _ -> e end`
+    /// to `{try_case_end,{x,0}}`, and `X#r.a` to `{badrecord,{x,0}}` when no
+    /// clause matches.
+    TaggedError {
+        /// The atom of the reason tuple: `badmatch`, `case_clause`,
+        /// `try_clause`, or `badrecord`.
+        tag: &'static str,
+        /// The term that did not match.
+        value: Operand,
+    },
+    /// Raises class `error` with the reason `if_clause`.
+    ///
+    /// Encoding: `[0x49]`.
+    ///
+    /// Erlang: `if X =:= a -> ok end` compiles to `if_end` after the
+    /// guard.
+    IfEnd,
+    /// Raises the reason in `x1` with the class in `x0` and the stack trace
+    /// of the raw stack trace in `x2`. A class that is not `error`, `exit`,
+    /// or `throw` writes `badarg` to `x0` and continues.
+    ///
+    /// Encoding: `[0xA1]`.
+    ///
+    /// Erlang: `try f() catch _:R:St -> erlang:raise(C, R, St) end` compiles
+    /// to `{move,{y,0},{x,0}}` and `raw_raise` after `try_case`, when the
+    /// handler uses `St` only in `erlang:raise/3`.
+    RawRaise,
+    /// Changes the raw stack trace in `x0` to its stack trace, a list. The
+    /// compiler moves the raw stack trace from `x2` to `x0` first.
     ///
     /// Encoding: `[0xA0]`.
     ///
@@ -756,6 +818,25 @@ pub(crate) enum Instruction {
         left: Operand,
         right: Operand,
     },
+    /// Jumps to `fail_label` when the operands are equal in the ERTS
+    /// arithmetic order (`is_ne`, opcode 42). PBeam has no float term, so the
+    /// test gives the same result as exact inequality.
+    ///
+    /// Encoding: opcode, fail label, two operands. A typed register (extended
+    /// subtag 5) reads as its register. Example: `compare_probe:ne/2` in
+    /// `fixtures/compare/compare_probe.beam` has `[0x2A, 0x0D, 0x1E, 0x03,
+    /// 0x13]`, which fails to label 30 when `x0` equals `x1`.
+    ///
+    /// Erlang: `ne(A, B) when A /= B, A =/= x -> id(true);` compiles to
+    /// `{test,is_ne,{f,30},[{x,0},{x,1}]}`, then an `is_eq_exact` test. A
+    /// guard `A /= B` alone compiles to `is_eq`.
+    /// `String.Tokenizer.continue/6` of Elixir has
+    /// `{test,is_ne,{f,34},[{x,6},{integer,95}]}`.
+    TestNotEqual {
+        fail_label: u32,
+        left: Operand,
+        right: Operand,
+    },
     /// Jumps to `fail_label` when the operands are exactly equal
     /// (`is_ne_exact`, opcode 44).
     ///
@@ -838,9 +919,83 @@ pub(crate) enum Instruction {
     /// Erlang: `kind(<<_/utf8, _/binary>>) -> utf8;` compiles to
     /// `{test,bs_start_match3,{f,5},1,[{x,0}],{x,0}}`, as
     /// `unicode_util:cp/1` does for its argument.
+    ///
+    /// The decoder also makes this instruction from `bs_start_match4`
+    /// (opcode 170) with a fail label or the atom `no_fail`, as the ERTS
+    /// loader makes `bs_start_match3` from it (JIT jit/arm/ops.tab:
+    /// 1036-1039; emu ops.tab:1243-1246). `no_fail` gives the fail label 0:
+    /// the compiler uses it only for a source that is a binary or a match
+    /// context (beam_ssa_codegen.erl:2303-2306).
+    ///
+    /// Encoding of `bs_start_match4`: opcode, fail label or atom, unsigned
+    /// live count, source register, destination register. Example:
+    /// `bs_get_probe:split/2` in `fixtures/binary_match/bs_get_probe.beam`
+    /// has `[0xAA, 0x32, 0x20, 0x03, 0x03]`: atom 3 (`no_fail`), live
+    /// count 2, and the source and destination `x0`.
+    ///
+    /// Erlang: `case Bin of <<Head:N/binary, Tail/binary>> -> ...` after
+    /// the guard `is_binary(Bin)` compiles to
+    /// `{bs_start_match4,{atom,no_fail},2,{x,0},{x,0}}`.
     BinaryMatchStart {
         fail_label: u32,
         source: Operand,
+        destination: Operand,
+    },
+    /// Continues a match with the match context in `source`
+    /// (`bs_start_match4` with the atom `resume`, opcode 170). On a 64-bit
+    /// system, the ERTS loader removes it when `source` is `destination`,
+    /// and else makes it `move` (JIT jit/arm/ops.tab:1041-1045; emu
+    /// ops.tab:1248-1252). The compiler uses it only for a source that is
+    /// a match context (beam_ssa_codegen.erl:2300-2302).
+    ///
+    /// Encoding: as `BinaryMatchStart` from `bs_start_match4`. Example:
+    /// `bs_get_probe:nibbles/2` has `[0xAA, 0xB2, 0x20, 0x03, 0x03]`: atom
+    /// 11 (`resume`), live count 2, and the source and destination `x0`.
+    ///
+    /// Erlang: a local function that gets the match context of its caller,
+    /// such as `nibbles(<<N:4, Rest/bits>>, Acc)` after the call
+    /// `nibbles(Rest, [])` with `Rest` of a match, compiles to
+    /// `{bs_start_match4,{atom,resume},2,{x,0},{x,0}}`.
+    BinaryMatchResume {
+        source: Operand,
+        destination: Operand,
+    },
+    /// Writes the bits after the position of the match context in
+    /// `context` to `destination` as a binary, and keeps the position
+    /// (`bs_get_tail`, opcode 165).
+    ///
+    /// Encoding: opcode, context, destination register, unsigned live
+    /// count. The decoder skips the live count. Example:
+    /// `bs_get_probe:split/2` has `[0xA5, 0x03, 0x03, 0x20]`, which writes
+    /// the rest of the match context in `x0` to `x0`.
+    ///
+    /// Erlang: `<<Head:N/binary, Tail/binary>>` compiles to
+    /// `{bs_get_tail,{x,0},{x,0},2}` for `Tail`.
+    BinaryGetTail {
+        context: Operand,
+        destination: Operand,
+    },
+    /// Reads `Size * unit` bits from the match context in `context` and
+    /// writes them to `destination` as a binary, or jumps to `fail_label`
+    /// (`bs_get_binary2`, opcode 119). `size` is a register or a literal.
+    ///
+    /// Encoding: opcode, fail label, context, unsigned live count, size,
+    /// unsigned unit, unsigned flags, destination register. The decoder
+    /// skips the live count and the flags, as the ERTS loader does (JIT
+    /// jit/arm/ops.tab:1002-1003). Example: `bs_get_probe:split/2` has
+    /// `[0x77, 0x35, 0x57, 0x03, 0x10, 0x20, 0x13, 0x80, 0x00, 0x13]`: fail
+    /// label 3, the typed register `x0`, live count 2, size `x1`, unit 8,
+    /// flags 0, and the destination `x1`. The size `all` decodes as
+    /// `Instruction::Unsupported`.
+    ///
+    /// Erlang: `<<Head:N/binary, Tail/binary>>` compiles to
+    /// `{test,bs_get_binary2,{f,3},2,[{tr,{x,0},...},{x,1},8,{field_flags,[]}],{x,1}}`
+    /// for `Head`.
+    BinaryGetBinary {
+        fail_label: u32,
+        context: Operand,
+        size: Operand,
+        unit: u64,
         destination: Operand,
     },
     /// Writes the bit position of the match context in `context` to
@@ -1162,11 +1317,39 @@ pub(crate) enum BinaryMatchCommand {
     /// `[0xF2, 0x00]` is `{ensure_exactly,0}` when atom 15 is
     /// `ensure_exactly`.
     EnsureExactly { size: u64 },
-    /// A command that PBeam does not run yet: `binary`, `integer`, `skip`,
-    /// `get_tail`, or `=:=`. It holds the command name. Example: `[0x0A,
-    /// 0x13, 0x10, 0x02, 0x80, 0x10, 0x13]` is `{integer,1,[],8,1,{x,1}}`
-    /// when atom 19 is `integer`.
-    Unsupported(Atom),
+    /// `{integer,Live,Flags,Size,Unit,Dst}`: read an integer of `size`
+    /// bits (`Size * Unit`) and write it to `destination`. `Flags` is `[]`
+    /// or a literal list: `little` and `native` set `little`, and `signed`
+    /// sets `signed` (`bs_get_flags`, jit/beam_jit_bs.cpp:255-285).
+    /// Example: `[0x42, 0x10, 0x47, 0x00, 0x08, 0x10, 0x10, 0x13]` in
+    /// `bs_match_probe:flagged/1` is `{integer,1,{literal,[little]},16,1,
+    /// {x,1}}` when atom 4 is `integer` and literal 0 is `[little]`.
+    Integer {
+        size: u64,
+        little: bool,
+        signed: bool,
+        destination: Operand,
+    },
+    /// `{binary,Live,Flags,Size,Unit,Dst}`: read a bitstring of `size`
+    /// bits (`Size * Unit`) and write it to `destination`. ERTS does not
+    /// read `Flags`. Example: `[0x0A, 0x13, 0x10, 0x02, 0x20, 0x80, 0x13]`
+    /// in `bs_match_probe:binaries/1` is `{binary,1,{literal,[]},2,8,
+    /// {x,1}}` when atom 19 is `binary`.
+    Binary { size: u64, destination: Operand },
+    /// `{'=:=',Live,Size,Value}`: the next `size` bits are the unsigned
+    /// big-endian integer `value`. Example: `[0xA2, 0x02, 0x10, 0x10]` in
+    /// `bs_match_probe:prefix/1` is `{'=:=',nil,1,1}` when atom 10 is
+    /// `=:=`.
+    Equal { size: u64, value: u64 },
+    /// `{get_tail,Live,Unit,Dst}`: write the bits after the position to
+    /// `destination` and keep the position. ERTS does not read `Unit`.
+    /// Example: `[0xB2, 0x10, 0x80, 0x03]` in `bs_match_probe:tail/1` is
+    /// `{get_tail,1,8,{x,0}}` when atom 11 is `get_tail`.
+    GetTail { destination: Operand },
+    /// `{skip,Size}`: move the position by `size` bits. Example: `[0x0A,
+    /// 0x11, 0x80]` in `bs_match_probe:tail/1` is `{skip,8}` when atom 17
+    /// is `skip`.
+    Skip { size: u64 },
 }
 
 /// One segment of `bs_create_bin` (genop.tab:649-651).
@@ -1183,10 +1366,44 @@ pub(crate) enum BinarySegment {
     /// is `{atom,binary},2,8,nil,{x,0},{atom,all}` when atom 4 is `binary`
     /// and atom 5 is `all`.
     BinaryAll { segment: u64, source: Operand },
-    /// A segment that PBeam does not run yet: an `integer`, `float`,
-    /// `utf8`, `utf16`, `utf32`, `append`, or `private_append` segment, or
-    /// a `binary` segment with another size or unit. It holds the segment
-    /// type. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x81]` is
+    /// An `append` segment of size `all` as the first segment: the binary
+    /// in `source` is the start of the result. The compiler writes it for
+    /// `<<A/binary, ...>>`, and the ERTS JIT runs it only as the first
+    /// segment (`emit_i_bs_create_bin`, jit/arm/instr_bs.cpp:1811-1864).
+    /// `unit` is the segment unit, which the size of the binary must be a
+    /// multiple of. Example: `[0x62, 0x10, 0x80, 0x02, 0x03, 0x52]` is
+    /// `{atom,append},1,8,nil,{x,0},{atom,all}` when atom 6 is `append`
+    /// and atom 5 is `all`.
+    Append {
+        segment: u64,
+        unit: u64,
+        source: Operand,
+    },
+    /// An `integer` segment: the integer in `source`, in `size` times
+    /// `unit` bits. `little` is true when the flags hold `little` or
+    /// `native`: the JIT loads `native` as `little` (`bs_get_flags`,
+    /// jit/beam_jit_bs.cpp:255-285). The compiler writes a literal or a
+    /// register `size`, and the unit 1 for a literal size. Example:
+    /// `[0x72, 0x10, 0x10, 0x02, 0x03, 0x81]` is
+    /// `{atom,integer},1,1,nil,{x,0},{integer,8}` when atom 7 is `integer`.
+    Integer {
+        segment: u64,
+        unit: u64,
+        little: bool,
+        source: Operand,
+        size: Operand,
+    },
+    /// A `utf8` segment: the UTF-8 bytes of the code point in `source`.
+    /// The compiler writes the unit 0 and the size `undefined`. Example:
+    /// `[0x82, 0x10, 0x00, 0x02, 0x03, 0x92]` is
+    /// `{atom,utf8},1,0,nil,{x,0},{atom,undefined}` when atom 8 is `utf8`
+    /// and atom 9 is `undefined`.
+    Utf8 { segment: u64, source: Operand },
+    /// A segment that PBeam does not run yet: a `float`, `utf16`, `utf32`,
+    /// or `private_append` segment, an `append`
+    /// segment that is not the first segment or has a size other than
+    /// `all`, or a `binary` segment with another size or unit. It holds
+    /// the segment type. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x81]` is
     /// `{atom,binary},2,8,nil,{x,0},{integer,8}` when atom 4 is `binary`.
     Unsupported(Atom),
 }
@@ -1386,6 +1603,73 @@ pub(super) fn parse_code(
                     destination: read_register(data, &mut cursor)?,
                 }
             }
+            OPCODE_BS_START_MATCH4 => {
+                // `Fail` is a label, or the atom `no_fail` or `resume`
+                // (genop.tab:613-617). `None` is `resume`.
+                let fail_label = if data
+                    .get(cursor)
+                    .is_some_and(|first| first & COMPACT_TAG_MASK == TAG_ATOM)
+                {
+                    let atom = atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?;
+                    match atom.name() {
+                        "no_fail" => Some(0),
+                        "resume" => None,
+                        other => {
+                            return Err(error(format!(
+                                "unsupported BEAM bs_start_match4 fail operand {other}"
+                            )));
+                        }
+                    }
+                } else {
+                    Some(read_operand(data, &mut cursor, TAG_LABEL)? as u32)
+                };
+                skip_live_registers(data, &mut cursor)?;
+                let source = read_register(data, &mut cursor)?;
+                let destination = read_register(data, &mut cursor)?;
+                match fail_label {
+                    Some(fail_label) => Instruction::BinaryMatchStart {
+                        fail_label,
+                        source,
+                        destination,
+                    },
+                    None => Instruction::BinaryMatchResume {
+                        source,
+                        destination,
+                    },
+                }
+            }
+            OPCODE_BS_GET_TAIL => {
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let destination = read_register(data, &mut cursor)?;
+                skip_live_registers(data, &mut cursor)?;
+                Instruction::BinaryGetTail {
+                    context,
+                    destination,
+                }
+            }
+            OPCODE_BS_GET_BINARY2 => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                skip_live_registers(data, &mut cursor)?;
+                let size = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let unit = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let _flags = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let destination = read_register(data, &mut cursor)?;
+                // ERTS loads the size `all` as `i_bs_get_binary_all2` (JIT
+                // jit/arm/ops.tab:999-1000). The pinned compiler makes it
+                // only with `no_ssa_opt`.
+                if matches!(&size, Operand::Value(Term::Atom(all)) if all.name() == "all") {
+                    Instruction::Unsupported(opcode)
+                } else {
+                    Instruction::BinaryGetBinary {
+                        fail_label,
+                        context,
+                        size,
+                        unit,
+                        destination,
+                    }
+                }
+            }
             OPCODE_BS_GET_POSITION => {
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let destination = read_register(data, &mut cursor)?;
@@ -1413,7 +1697,7 @@ pub(super) fn parse_code(
             OPCODE_BS_MATCH => Instruction::BinaryMatch {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 context: read_move_operand(data, &mut cursor, atoms, literals)?,
-                commands: read_binary_match_commands(data, &mut cursor, atoms)?,
+                commands: read_binary_match_commands(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_BS_CREATE_BIN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
@@ -1427,6 +1711,11 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_TEST_EQ => Instruction::TestEqual {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                left: read_move_operand(data, &mut cursor, atoms, literals)?,
+                right: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_TEST_NE => Instruction::TestNotEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -1464,6 +1753,28 @@ pub(super) fn parse_code(
             OPCODE_CATCH_END => Instruction::CatchEnd {
                 register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
             },
+            OPCODE_RAISE => Instruction::Raise {
+                trace: read_move_operand(data, &mut cursor, atoms, literals)?,
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_BADMATCH => Instruction::TaggedError {
+                tag: "badmatch",
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_CASE_END => Instruction::TaggedError {
+                tag: "case_clause",
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_TRY_CASE_END => Instruction::TaggedError {
+                tag: "try_clause",
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_BADRECORD => Instruction::TaggedError {
+                tag: "badrecord",
+                value: read_move_operand(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_IF_END => Instruction::IfEnd,
+            OPCODE_RAW_RAISE => Instruction::RawRaise,
             OPCODE_BUILD_STACKTRACE => Instruction::BuildStacktrace,
             OPCODE_SEND => Instruction::Send,
             OPCODE_REMOVE_MESSAGE => Instruction::RemoveMessage,
@@ -1758,19 +2069,19 @@ pub(super) fn parse_code(
                     destination: read_register(data, &mut cursor)?,
                 }
             }
-            OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 => {
+            OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
-                if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2) {
+                if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3) {
                     skip_live_registers(data, &mut cursor)?;
                 }
                 let (module, name) = bif_import(
                     imports,
                     read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
                 )?;
-                let argument_count = if matches!(opcode, OPCODE_BIF1 | OPCODE_GC_BIF1) {
-                    1
-                } else {
-                    2
+                let argument_count = match opcode {
+                    OPCODE_BIF1 | OPCODE_GC_BIF1 => 1,
+                    OPCODE_GC_BIF3 => 3,
+                    _ => 2,
                 };
                 let arguments = (0..argument_count)
                     .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
@@ -1901,21 +2212,35 @@ fn read_operand_pairs(
 
 /// Read the command list of `bs_match`: each command is a name atom and
 /// its operands (genop.tab:685-696). The command names and operand counts
-/// are those of the ERTS loader (`gen.bs_match` in emu
-/// `generators.tab:1102-1430`), which fails to load a module with another
-/// command name.
+/// are those of the ERTS loader (`gen.bs_match` in JIT
+/// `jit/arm/generators.tab:532-575` and `beam_jit_bsm_init` in
+/// `jit/beam_jit_bs.cpp:287-364`), which fails to load a module with
+/// another command name. `Live` is unsigned, except for `=:=`, where the
+/// compiler writes `nil` (beam_ssa_codegen.erl:2817-2862). `Size` and
+/// `Unit` are unsigned. `Flags` is `nil` or a literal list, and `Dst` is a
+/// register.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // {list,[ensure_at_least,0,8]} with atom 8 `ensure_at_least`
-/// let commands = read_binary_match_commands(&[0x17, 0x30, 0x82, 0x00, 0x80], &mut 0, &atoms)?;
+/// let commands = read_binary_match_commands(&[0x17, 0x30, 0x82, 0x00, 0x80], &mut 0, &atoms, &[])?;
 /// assert!(matches!(commands.as_slice(), [BinaryMatchCommand::EnsureAtLeast { size: 0, .. }]));
+/// // {list,[skip,8]} with atom 17 `skip`
+/// let commands = read_binary_match_commands(&[0x17, 0x20, 0x0A, 0x11, 0x80], &mut 0, &atoms, &[])?;
+/// assert!(matches!(commands.as_slice(), [BinaryMatchCommand::Skip { size: 8 }]));
 /// ```
+///
+/// # Errors
+///
+/// An unknown command name, `ensure_at_least` with unit 0, a `Size *
+/// Unit` above `u64::MAX`, flags that are not a list, an operand with an
+/// unexpected tag, and a list with an incomplete command are errors.
 fn read_binary_match_commands(
     data: &[u8],
     cursor: &mut usize,
     atoms: &[Atom],
+    literals: &[Option<Term>],
 ) -> Result<Vec<BinaryMatchCommand>, BeamError> {
     let item_count = read_list_count(data, cursor)?;
     let mut commands = Vec::new();
@@ -1933,16 +2258,52 @@ fn read_binary_match_commands(
                 let size = read_operand(data, cursor, TAG_UNSIGNED)?;
                 (BinaryMatchCommand::EnsureExactly { size }, 1)
             }
-            other => {
-                let operand_count = match other {
-                    "binary" | "integer" => 5,
-                    "get_tail" | "=:=" => 3,
-                    "skip" => 1,
-                    _ => return Err(error(format!("unsupported BEAM bs_match command {other}"))),
+            kind @ ("integer" | "binary") => {
+                let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let flags = read_move_operand(data, cursor, atoms, literals)?;
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?
+                    .checked_mul(read_operand(data, cursor, TAG_UNSIGNED)?)
+                    .ok_or_else(|| error(format!("BEAM bs_match {kind} size overflow")))?;
+                let destination = read_register(data, cursor)?;
+                let Operand::Value(Term::List(flags)) = &flags else {
+                    return Err(error(format!(
+                        "unsupported BEAM bs_match {kind} flags {flags:?}"
+                    )));
                 };
-                skip_operands(data, cursor, operand_count)?;
-                (BinaryMatchCommand::Unsupported(name.clone()), operand_count)
+                let has = |names: &[&str]| {
+                    flags.iter().any(
+                        |flag| matches!(flag, Term::Atom(atom) if names.contains(&atom.name())),
+                    )
+                };
+                let command = if kind == "integer" {
+                    BinaryMatchCommand::Integer {
+                        size,
+                        little: has(&["little", "native"]),
+                        signed: has(&["signed"]),
+                        destination,
+                    }
+                } else {
+                    BinaryMatchCommand::Binary { size, destination }
+                };
+                (command, 5)
             }
+            "get_tail" => {
+                let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let _unit = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let destination = read_register(data, cursor)?;
+                (BinaryMatchCommand::GetTail { destination }, 3)
+            }
+            "=:=" => {
+                let _live = read_move_operand(data, cursor, atoms, literals)?;
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let value = read_operand(data, cursor, TAG_UNSIGNED)?;
+                (BinaryMatchCommand::Equal { size, value }, 3)
+            }
+            "skip" => {
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+                (BinaryMatchCommand::Skip { size }, 1)
+            }
+            other => return Err(error(format!("unsupported BEAM bs_match command {other}"))),
         };
         commands.push(command);
         items += 1 + operand_count;
@@ -1991,11 +2352,11 @@ fn read_binary_segments(
         ));
     }
     (0..item_count / BINARY_SEGMENT_ITEMS)
-        .map(|_| {
+        .map(|index| {
             let kind = atom_at(atoms, read_operand(data, cursor, TAG_ATOM)? as usize)?.clone();
             let segment = read_operand(data, cursor, TAG_UNSIGNED)?;
             let unit = read_operand(data, cursor, TAG_UNSIGNED)?;
-            let _flags = read_move_operand(data, cursor, atoms, literals)?;
+            let flags = read_move_operand(data, cursor, atoms, literals)?;
             if kind.name() == "string" {
                 let offset = read_operand(data, cursor, TAG_UNSIGNED)?;
                 let length = read_operand(data, cursor, TAG_INTEGER)?;
@@ -2014,10 +2375,44 @@ fn read_binary_segments(
                 {
                     BinarySegment::BinaryAll { segment, source }
                 }
+                Operand::Value(Term::Atom(size))
+                    if kind.name() == "append" && index == 0 && size.name() == "all" =>
+                {
+                    BinarySegment::Append {
+                        segment,
+                        unit,
+                        source,
+                    }
+                }
+                _ if kind.name() == "integer" => BinarySegment::Integer {
+                    segment,
+                    unit,
+                    little: is_little_endian(&flags),
+                    source,
+                    size,
+                },
+                _ if kind.name() == "utf8" => BinarySegment::Utf8 { segment, source },
                 _ => BinarySegment::Unsupported(kind),
             })
         })
         .collect()
+}
+
+/// Return true when the `Flags` operand of a `bs_create_bin` segment is a
+/// list that holds the atom `little` or `native`. The ERTS JIT reads both
+/// as `BSF_LITTLE` and ignores `signed` for construction (`bs_get_flags`,
+/// jit/beam_jit_bs.cpp:255-285).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_little_endian(&Operand::Value(Term::List(vec![Term::static_atom("native")]))));
+/// assert!(!is_little_endian(&Operand::Value(Term::List(Vec::new()))));
+/// ```
+fn is_little_endian(flags: &Operand) -> bool {
+    matches!(flags, Operand::Value(Term::List(items)) if items.iter().any(|item| {
+        matches!(item, Term::Atom(atom) if matches!(atom.name(), "little" | "native"))
+    }))
 }
 
 /// Read the extended list of `update_record`: an unsigned 1-based position
@@ -2086,27 +2481,17 @@ fn skip_unsupported_instruction(
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
-        OPCODE_RAISE => Some(2),
-        OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
         // `bs_get_integer2` is in `io_lib`.
         OPCODE_BS_GET_INTEGER2 => Some(7),
-        // `gc_bif3` is in `io_lib`, for `erlang:binary_part/3`.
-        OPCODE_GC_BIF3 => Some(7),
         // `is_any_native_record` is in `io_lib`.
         OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
-        OPCODE_BS_START_MATCH4 => Some(4),
-        OPCODE_BS_GET_TAIL => Some(3),
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
         OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
         OPCODE_BS_SKIP_UTF8 => Some(4),
-        OPCODE_BADRECORD => Some(1),
-        OPCODE_IF_END => Some(0),
-        // `raw_raise` is in `gen_statem:call/3`.
-        OPCODE_RAW_RAISE => Some(0),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_NE | OPCODE_TEST_EXACT_EQ => Some(3),
+        OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
         OPCODE_TEST_IS_NUMBER
         | OPCODE_TEST_IS_ATOM
@@ -2114,8 +2499,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_TEST_IS_BINARY
         | OPCODE_TEST_IS_LIST
         | OPCODE_TEST_IS_MAP => Some(2),
-        // `try_case_end Src` is in `erlang:processes_next/1`.
-        OPCODE_BADMATCH | OPCODE_CASE_END | OPCODE_TRY_CASE_END => Some(1),
         OPCODE_PUT_MAP_ASSOC => Some(5),
         OPCODE_GET_MAP_ELEMENTS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
         OPCODE_PUT_RECORD => Some(6),

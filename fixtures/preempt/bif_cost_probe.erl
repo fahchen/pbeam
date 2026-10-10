@@ -1,8 +1,8 @@
 -module(bif_cost_probe).
 -export([costs/1, longs/1, puts/1, put_trap/0, put_race/0, exits/0, bad_long/0,
-         bad_binary/0, results/0, gcs/1]).
--export([measure/3, put_loop/2, exiter/2, watcher/3, traced/3, start/4, long_loop/5,
-         send_loop/3]).
+         bad_binary/0, bad_latin1/0, results/0, binary_results/0, lows/1, gcs/1]).
+-export([measure/3, measure_low/3, put_loop/2, exiter/2, watcher/3, traced/3, start/4,
+         long_loop/5, send_loop/3]).
 
 %% The reductions of the BIFs whose ERTS cost depends on their input and
 %% that #234 did not charge, and the reductions of a process exit, on the
@@ -49,7 +49,22 @@ inputs() ->
        short_bin, short_list, {bad_after, 50000}, leftover_trap]},
      {characters_to_list_latin1,
       [{list, 3}, {list, 100}, {list, 10000}, {bin, 3}, {bin, 10000}, {high_bin, 10000},
-       {list, 50000}, {bin, 50000}]}].
+       {list, 50000}, {bin, 50000}]},
+     %% A binary of bytes below 128 returns itself. {high_bin, 50000} and
+     %% {list, 50000} trap.
+     {characters_to_binary_latin1,
+      [{list, 3}, {list, 100}, {list, 10000}, {list, 50000}, {bin, 3}, {bin, 10000},
+       {high_bin, 3}, {high_bin, 10000}, {high_bin, 50000}, {one_bin, 10000}, {bins, 100},
+       nested]},
+     %% Iodata: see iodata/1. {list, 50000} traps in the size walk. The size
+     %% walk of {list, 31970} uses all 3997 reductions, so the copy starts in
+     %% the next turn. The copy of {big_bin, 1100000} and of
+     %% {big_tail, 1100000} traps in the binary.
+     {list_to_binary,
+      [nil, {one_bin, 100}, {list, 3}, {list, 100}, {list, 10000}, {list, 31970},
+       {list, 50000},
+       {bins, 100}, nested, {big_bin, 1100000}, {big_tail, 1100000}, {bad_after, 400},
+       {improper, 400}, atom]}].
 
 %% Return the argument. A call through ?MODULE stops the compiler from
 %% folding a constant.
@@ -86,6 +101,8 @@ arg(maps_keys, {_, Count}) -> maps:from_list(pairs(1, Count));
 arg(characters_to_binary, Input) -> chardata(Input);
 arg(characters_to_list, Input) -> chardata(Input);
 arg(characters_to_list_latin1, Input) -> chardata(Input);
+arg(characters_to_binary_latin1, Input) -> chardata(Input);
+arg(list_to_binary, Input) -> iodata(Input);
 arg(persistent_term_put, Key) -> Key;
 arg(none, _) -> none.
 
@@ -100,6 +117,11 @@ run(maps_keys, Map) -> [maps:keys(Map)];
 run(characters_to_binary, Chardata) -> [unicode:characters_to_binary(Chardata, unicode)];
 run(characters_to_list, Chardata) -> [unicode:characters_to_list(Chardata, unicode)];
 run(characters_to_list_latin1, Chardata) -> [unicode:characters_to_list(Chardata, latin1)];
+run(characters_to_binary_latin1, Chardata) -> [unicode:characters_to_binary(Chardata, latin1)];
+run(list_to_binary, Iodata) ->
+    [try list_to_binary(Iodata)
+     catch error:Reason -> Reason
+     end];
 run(persistent_term_put, Key) -> [persistent_term:put(Key, make_ref())];
 run(none, _) -> [].
 
@@ -130,6 +152,23 @@ chardata({bad_after, Count}) -> copies(Count, $a) ++ [-1];
 %% before the rest.
 chardata(leftover_trap) -> [copies(28547, $a), <<"bb">>, <<226>>, <<130, 172>>].
 
+%% The iodata of erlang:list_to_binary/1. {big_bin, N} has a byte and then
+%% a binary of N bytes, and {big_tail, N} has the binary as its tail.
+%% {bad_after, N} has an element that is not a byte after N bytes, and
+%% {improper, N} the tail x.
+iodata(nil) -> [];
+iodata({big_bin, Count}) -> [$a, big_bytes(Count)];
+iodata({big_tail, Count}) -> [$a | big_bytes(Count)];
+iodata({bad_after, Count}) -> copies(Count, $a) ++ [256];
+iodata({improper, Count}) -> copies(Count, $a) ++ x;
+iodata(atom) -> id(x);
+iodata(Input) -> chardata(Input).
+
+%% A binary of Count bytes, a multiple of 1000, from binaries of 1000
+%% bytes.
+big_bytes(Count) ->
+    list_to_binary(copies(Count div 1000, bytes(1000, $b))).
+
 %% A binary of Count copies of Byte. erlang:iolist_to_iovec/1 puts the
 %% bytes of a list into one binary.
 bytes(Count, Byte) ->
@@ -142,6 +181,70 @@ results() ->
     [unicode:characters_to_list(chardata(Input), Encoding)
      || Input <- [nested, bad_code, bad_bin, short_bin, short_list, {bad_after, 3}],
         Encoding <- [unicode, latin1]].
+
+%% The results of unicode:characters_to_binary/2 with latin1,
+%% unicode:bin_is_7bit/1, erlang:list_to_binary/1, and
+%% erlang:split_binary/2 for each input shape, with each binary as
+%% {binary, Bytes}, so that ~w writes the bytes and not a string.
+binary_results() ->
+    Latin1 = [unicode:characters_to_binary(Chardata, latin1)
+              || Chardata <- [<<"abc">>, <<200, 65>>, [<<200>>, 65, [255]], [<<"a">>],
+                              [<<200>>], [], [65 | <<200>>], chardata(nested)]],
+    Latin1Errors = [catch_error(fun() -> unicode:characters_to_binary(Chardata, latin1) end)
+                    || Chardata <- [[1, foo], foo, [a | b], [65 | x]]],
+    Bit7 = [unicode:bin_is_7bit(Term)
+            || Term <- [<<>>, <<"abc">>, <<128>>, <<1, 255>>, foo, [1], 1]],
+    Lists = [catch_error(fun() -> list_to_binary(Iodata) end)
+             || Iodata <- [[], [<<1>>], [1, [2, <<3>>] | <<4>>], [[]], [<<>>, []],
+                           [<<1>>, <<2>>], [<<1>> | <<2>>], <<1>>, [256], [-1], foo, [a],
+                           [1 | 2], [[1 | x]]]],
+    Splits = [catch_error(fun() -> split_binary(Binary, Position) end)
+              || {Binary, Position} <- [{<<"abc">>, 0}, {<<"abc">>, 1}, {<<"abc">>, 3},
+                                        {<<>>, 0}, {<<"abc">>, 4}, {<<"abc">>, -1},
+                                        {<<"abc">>, a}, {"abc", 1}]],
+    show_binaries([Latin1, Latin1Errors, Bit7, Lists, Splits]).
+
+catch_error(Fun) ->
+    try Fun()
+    catch error:Reason -> {error, Reason}
+    end.
+
+show_binaries(Binary) when is_binary(Binary) ->
+    {binary, unicode:characters_to_list(Binary, latin1)};
+show_binaries([Head | Tail]) ->
+    [show_binaries(Head) | show_binaries(Tail)];
+show_binaries({First, Second}) ->
+    {show_binaries(First), show_binaries(Second)};
+show_binaries(Term) ->
+    Term.
+
+%% unicode:characters_to_binary/2 with latin1 of a code point above 255.
+%% ERTS returns {error, <<>>, [256]}, and PBeam returns a runtime error (row
+%% "Chardata conversion" in docs/erts-differences.md).
+bad_latin1() ->
+    unicode:characters_to_binary([256], latin1).
+
+%% For each K, the reductions of erlang:list_to_binary/1 of {list, 10000}
+%% after the process uses K reductions: the call runs with 3996 - K
+%% reductions left. With 100 or fewer, it switches out and runs again in
+%% the next turn. With fewer than 1000, it walks with a budget of 1000
+%% (erl_iolist.c:34-35, 866-876). The result includes K.
+lows(Opts) ->
+    Arg = iodata({list, 10000}),
+    [{K, low_delta(K, Arg, Opts)} || K <- low_budgets()].
+
+low_budgets() -> [3895, 3896, 3995, 2996, 2997, 0].
+
+low_delta(K, Arg, Opts) ->
+    Pid = spawn_opt(?MODULE, measure_low, [self(), K, Arg], Opts),
+    receive {Pid, Delta} -> Delta end.
+
+measure_low(Collector, K, Arg) ->
+    erlang:yield(),
+    Before = ?REDS,
+    erlang:bump_reductions(K),
+    run(list_to_binary, Arg),
+    Collector ! {self(), ?REDS - Before}.
 
 %% For each BIF and input, the reductions of the BIF: the reductions of
 %% run/2 in a new process, without the reductions of run(none, _) and of
@@ -176,7 +279,8 @@ bad_long() ->
 long_inputs() ->
     [{maps_from_list, {dups, 40000}}, {maps_keys, {hash, 100000}},
      {characters_to_binary, {list, 50000}}, {characters_to_list, {bin, 100000}},
-     {characters_to_list, {list, 50000}}].
+     {characters_to_list, {list, 50000}}, {characters_to_binary_latin1, {high_bin, 50000}},
+     {list_to_binary, {list, 100000}}].
 
 %% For each BIF that traps, two processes a and b. Process a calls the BIF
 %% three times and sends its tag after each call. Process b sends its tag
@@ -323,6 +427,8 @@ gcs(Opts) ->
      || {Bif, Inputs} <- [{none, [none]} | inputs()],
         Input <- Inputs]
     ++ [{puts, gc_count(put_loop, [70], Opts)}]
+    ++ [{low, K, gc_count(measure_low, [K, iodata({list, 10000})], Opts)}
+        || K <- low_budgets()]
     ++ [{Bif, gc_count(long_loop, [a, Bif, arg(Bif, Input), 3], Opts)}
         || {Bif, Input} <- long_inputs()].
 
