@@ -1,6 +1,6 @@
 //! Native bindings of the `prim_tty` NIFs (`erts/emulator/nifs/common/prim_tty_nif.c`).
 
-use super::bif::denial;
+use super::bif::{denial, iodata_bytes};
 use super::*;
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
@@ -14,6 +14,7 @@ use crate::runtime::{
     tty::{InputSelect, TtyResource, TtyState, Ttys},
 };
 use crate::term::Reference;
+use std::ffi::CString;
 
 /// The functions of the ERTS `prim_tty` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`prim_tty_nif.c:153-174`). `erlang:load_nif/2`
@@ -78,6 +79,16 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "setupterm_nif",
         arity: 0,
         run: |scheduler, _| setupterm_nif(scheduler),
+    },
+    Binding {
+        name: "tigetflag_nif",
+        arity: 1,
+        run: |scheduler, arguments| tigetflag_nif(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "tigetnum_nif",
+        arity: 1,
+        run: |scheduler, arguments| tigetnum_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "tty_create",
@@ -634,6 +645,108 @@ fn setupterm_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
         Err(errno) => errno_error(&mut scheduler.atoms, "setupterm", errno)?,
     };
     Ok(BifResult::Value(result))
+}
+
+/// Run `prim_tty:tigetnum_nif(Code)`, as the ERTS NIF `tty_tigetnum_nif`
+/// (`prim_tty_nif.c:841-850`) does with `HAVE_TERMCAP`. The result is the
+/// integer that `tgetnum` gives for the termcap code in the iodata `Code`,
+/// such as `"co\0"`, from the terminfo entry of the last successful
+/// `setupterm_nif/0`; -1 when the entry has no such capability. A term
+/// that is not iodata raises `error:badarg` (see [`termcap_code`]). Then a
+/// caller without a `terminal` capability with `query` gets
+/// `error:capability_denied`, and the binding does not call `tgetnum`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TERM=vt100, after setupterm_nif()
+/// let code = Term::Binary(b"co\0".to_vec());
+/// assert!(matches!(tigetnum_nif(&mut scheduler, &code)?, BifResult::Value(Term::Integer(80))));
+/// assert!(matches!(tigetnum_nif(&mut scheduler, &Term::static_atom("co"))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table gives the error of
+/// `AtomTable::put`.
+fn tigetnum_nif(scheduler: &mut Scheduler, code: &Term) -> Result<BifResult, BeamError> {
+    let Some(code) = termcap_code(code) else {
+        return Ok(BifResult::badarg());
+    };
+    let check = denial(scheduler, CapabilityKind::Terminal, Operation::Query, None);
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    Ok(BifResult::Value(Term::Integer(
+        terminal::termcap_number(&code).into(),
+    )))
+}
+
+/// Run `prim_tty:tigetflag_nif(Code)`, as the ERTS NIF `tty_tigetflag_nif`
+/// (`prim_tty_nif.c:852-863`) does with `HAVE_TERMCAP`. The result is
+/// `true` when `tgetflag` finds the boolean termcap code in the iodata
+/// `Code`, such as `"xn\0"`, in the terminfo entry of the last successful
+/// `setupterm_nif/0`, else `false`. A term that is not iodata raises
+/// `error:badarg` (see [`termcap_code`]). Then a caller without a
+/// `terminal` capability with `query` gets `error:capability_denied`, and
+/// the binding does not call `tgetflag`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TERM=vt100, after setupterm_nif()
+/// let code = Term::Binary(b"xn\0".to_vec());
+/// assert!(matches!(tigetflag_nif(&mut scheduler, &code)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(tigetflag_nif(&mut scheduler, &Term::static_atom("xn"))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table gives the error of
+/// `AtomTable::put`.
+fn tigetflag_nif(scheduler: &mut Scheduler, code: &Term) -> Result<BifResult, BeamError> {
+    let Some(code) = termcap_code(code) else {
+        return Ok(BifResult::badarg());
+    };
+    let check = denial(scheduler, CapabilityKind::Terminal, Operation::Query, None);
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    Ok(BifResult::Value(Term::static_atom(
+        if terminal::termcap_flag(&code) {
+            "true"
+        } else {
+            "false"
+        },
+    )))
+}
+
+/// Return the termcap code that `tgetnum` and `tgetflag` read from the
+/// iodata `term`: its bytes up to the first NUL, as a C string. ERTS gives
+/// the bytes of `enif_inspect_iolist_as_binary` to the C function
+/// (`prim_tty_nif.c:844-846`, `855-857`), which stops at the first NUL.
+/// `prim_tty` always adds a NUL (`prim_tty.erl:1405-1408`). For iodata with
+/// no NUL, ERTS reads the memory after the bytes, and PBeam reads all the
+/// bytes (see "NIF stubs" in `docs/erts-differences.md`). Return `None`
+/// for a term that is not iodata, for which ERTS raises `error:badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let code = Term::List(vec![Term::Binary(b"c".to_vec()), Term::Integer(b'o'.into()), Term::Integer(0)]);
+/// assert_eq!(termcap_code(&code), Some(c"co".to_owned()));
+/// assert_eq!(termcap_code(&Term::Binary(b"co\0x".to_vec())), Some(c"co".to_owned()));
+/// assert_eq!(termcap_code(&Term::static_atom("co")), None);
+/// ```
+fn termcap_code(term: &Term) -> Option<CString> {
+    let mut bytes = iodata_bytes(term)?;
+    bytes.truncate(
+        bytes
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(bytes.len()),
+    );
+    Some(CString::new(bytes).expect("the bytes before the first NUL hold no NUL"))
 }
 
 /// Return `{error, {Function, Errno}}`, where `Errno` is the `erl_errno_id`

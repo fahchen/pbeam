@@ -1178,11 +1178,39 @@ pub(crate) enum BinaryMatchCommand {
     /// `[0xF2, 0x00]` is `{ensure_exactly,0}` when atom 15 is
     /// `ensure_exactly`.
     EnsureExactly { size: u64 },
-    /// A command that PBeam does not run yet: `binary`, `integer`, `skip`,
-    /// `get_tail`, or `=:=`. It holds the command name. Example: `[0x0A,
-    /// 0x13, 0x10, 0x02, 0x80, 0x10, 0x13]` is `{integer,1,[],8,1,{x,1}}`
-    /// when atom 19 is `integer`.
-    Unsupported(Atom),
+    /// `{integer,Live,Flags,Size,Unit,Dst}`: read an integer of `size`
+    /// bits (`Size * Unit`) and write it to `destination`. `Flags` is `[]`
+    /// or a literal list: `little` and `native` set `little`, and `signed`
+    /// sets `signed` (`bs_get_flags`, jit/beam_jit_bs.cpp:255-285).
+    /// Example: `[0x42, 0x10, 0x47, 0x00, 0x08, 0x10, 0x10, 0x13]` in
+    /// `bs_match_probe:flagged/1` is `{integer,1,{literal,[little]},16,1,
+    /// {x,1}}` when atom 4 is `integer` and literal 0 is `[little]`.
+    Integer {
+        size: u64,
+        little: bool,
+        signed: bool,
+        destination: Operand,
+    },
+    /// `{binary,Live,Flags,Size,Unit,Dst}`: read a bitstring of `size`
+    /// bits (`Size * Unit`) and write it to `destination`. ERTS does not
+    /// read `Flags`. Example: `[0x0A, 0x13, 0x10, 0x02, 0x20, 0x80, 0x13]`
+    /// in `bs_match_probe:binaries/1` is `{binary,1,{literal,[]},2,8,
+    /// {x,1}}` when atom 19 is `binary`.
+    Binary { size: u64, destination: Operand },
+    /// `{'=:=',Live,Size,Value}`: the next `size` bits are the unsigned
+    /// big-endian integer `value`. Example: `[0xA2, 0x02, 0x10, 0x10]` in
+    /// `bs_match_probe:prefix/1` is `{'=:=',nil,1,1}` when atom 10 is
+    /// `=:=`.
+    Equal { size: u64, value: u64 },
+    /// `{get_tail,Live,Unit,Dst}`: write the bits after the position to
+    /// `destination` and keep the position. ERTS does not read `Unit`.
+    /// Example: `[0xB2, 0x10, 0x80, 0x03]` in `bs_match_probe:tail/1` is
+    /// `{get_tail,1,8,{x,0}}` when atom 11 is `get_tail`.
+    GetTail { destination: Operand },
+    /// `{skip,Size}`: move the position by `size` bits. Example: `[0x0A,
+    /// 0x11, 0x80]` in `bs_match_probe:tail/1` is `{skip,8}` when atom 17
+    /// is `skip`.
+    Skip { size: u64 },
 }
 
 /// One segment of `bs_create_bin` (genop.tab:649-651).
@@ -1463,7 +1491,7 @@ pub(super) fn parse_code(
             OPCODE_BS_MATCH => Instruction::BinaryMatch {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 context: read_move_operand(data, &mut cursor, atoms, literals)?,
-                commands: read_binary_match_commands(data, &mut cursor, atoms)?,
+                commands: read_binary_match_commands(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_BS_CREATE_BIN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
@@ -1955,21 +1983,35 @@ fn read_operand_pairs(
 
 /// Read the command list of `bs_match`: each command is a name atom and
 /// its operands (genop.tab:685-696). The command names and operand counts
-/// are those of the ERTS loader (`gen.bs_match` in emu
-/// `generators.tab:1102-1430`), which fails to load a module with another
-/// command name.
+/// are those of the ERTS loader (`gen.bs_match` in JIT
+/// `jit/arm/generators.tab:532-575` and `beam_jit_bsm_init` in
+/// `jit/beam_jit_bs.cpp:287-364`), which fails to load a module with
+/// another command name. `Live` is unsigned, except for `=:=`, where the
+/// compiler writes `nil` (beam_ssa_codegen.erl:2817-2862). `Size` and
+/// `Unit` are unsigned. `Flags` is `nil` or a literal list, and `Dst` is a
+/// register.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // {list,[ensure_at_least,0,8]} with atom 8 `ensure_at_least`
-/// let commands = read_binary_match_commands(&[0x17, 0x30, 0x82, 0x00, 0x80], &mut 0, &atoms)?;
+/// let commands = read_binary_match_commands(&[0x17, 0x30, 0x82, 0x00, 0x80], &mut 0, &atoms, &[])?;
 /// assert!(matches!(commands.as_slice(), [BinaryMatchCommand::EnsureAtLeast { size: 0, .. }]));
+/// // {list,[skip,8]} with atom 17 `skip`
+/// let commands = read_binary_match_commands(&[0x17, 0x20, 0x0A, 0x11, 0x80], &mut 0, &atoms, &[])?;
+/// assert!(matches!(commands.as_slice(), [BinaryMatchCommand::Skip { size: 8 }]));
 /// ```
+///
+/// # Errors
+///
+/// An unknown command name, `ensure_at_least` with unit 0, a `Size *
+/// Unit` above `u64::MAX`, flags that are not a list, an operand with an
+/// unexpected tag, and a list with an incomplete command are errors.
 fn read_binary_match_commands(
     data: &[u8],
     cursor: &mut usize,
     atoms: &[Atom],
+    literals: &[Option<Term>],
 ) -> Result<Vec<BinaryMatchCommand>, BeamError> {
     let item_count = read_list_count(data, cursor)?;
     let mut commands = Vec::new();
@@ -1987,16 +2029,52 @@ fn read_binary_match_commands(
                 let size = read_operand(data, cursor, TAG_UNSIGNED)?;
                 (BinaryMatchCommand::EnsureExactly { size }, 1)
             }
-            other => {
-                let operand_count = match other {
-                    "binary" | "integer" => 5,
-                    "get_tail" | "=:=" => 3,
-                    "skip" => 1,
-                    _ => return Err(error(format!("unsupported BEAM bs_match command {other}"))),
+            kind @ ("integer" | "binary") => {
+                let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let flags = read_move_operand(data, cursor, atoms, literals)?;
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?
+                    .checked_mul(read_operand(data, cursor, TAG_UNSIGNED)?)
+                    .ok_or_else(|| error(format!("BEAM bs_match {kind} size overflow")))?;
+                let destination = read_register(data, cursor)?;
+                let Operand::Value(Term::List(flags)) = &flags else {
+                    return Err(error(format!(
+                        "unsupported BEAM bs_match {kind} flags {flags:?}"
+                    )));
                 };
-                skip_operands(data, cursor, operand_count)?;
-                (BinaryMatchCommand::Unsupported(name.clone()), operand_count)
+                let has = |names: &[&str]| {
+                    flags.iter().any(
+                        |flag| matches!(flag, Term::Atom(atom) if names.contains(&atom.name())),
+                    )
+                };
+                let command = if kind == "integer" {
+                    BinaryMatchCommand::Integer {
+                        size,
+                        little: has(&["little", "native"]),
+                        signed: has(&["signed"]),
+                        destination,
+                    }
+                } else {
+                    BinaryMatchCommand::Binary { size, destination }
+                };
+                (command, 5)
             }
+            "get_tail" => {
+                let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let _unit = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let destination = read_register(data, cursor)?;
+                (BinaryMatchCommand::GetTail { destination }, 3)
+            }
+            "=:=" => {
+                let _live = read_move_operand(data, cursor, atoms, literals)?;
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+                let value = read_operand(data, cursor, TAG_UNSIGNED)?;
+                (BinaryMatchCommand::Equal { size, value }, 3)
+            }
+            "skip" => {
+                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+                (BinaryMatchCommand::Skip { size }, 1)
+            }
+            other => return Err(error(format!("unsupported BEAM bs_match command {other}"))),
         };
         commands.push(command);
         items += 1 + operand_count;

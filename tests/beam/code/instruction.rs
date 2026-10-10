@@ -641,6 +641,76 @@ fn decodes_the_binary_match_instructions_of_is_usascii() {
 }
 
 #[test]
+fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/binary_match/bs_match_probe.beam` has these bytes.
+    let parts: [&[u8]; 2] = [
+        // tail/1: bs_match f28 x0 {list,[ensure_at_least,8,8,skip,8,
+        // get_tail,1,8,{x,0}]}
+        &[
+            0xB6, 0x0D, 0x1C, 0x03, 0x17, 0x90, 0x92, 0x80, 0x80, 0x0A, 0x11, 0x80, 0xB2, 0x10,
+            0x80, 0x03,
+        ],
+        // prefix/1: bs_match f15 x0 {list,[ensure_at_least,32,1,
+        // '=:=',nil,31,850802231,'=:=',nil,1,1]}
+        &[
+            0xB6, 0xF5, 0x03, 0x17, 0xB0, 0x92, 0x08, 0x20, 0x10, 0xA2, 0x02, 0x08, 0x1F, 0x58,
+            0x32, 0xB6, 0x36, 0x37, 0xA2, 0x02, 0x10, 0x10,
+        ],
+    ];
+    // Atom 9 is `ensure_at_least`, 10 is `=:=`, 11 is `get_tail`, and 17
+    // is `skip`.
+    let mut table = AtomTable::new();
+    let atoms: Vec<Atom> = (1..=17)
+        .map(|index| match index {
+            9 => table.put("ensure_at_least").unwrap(),
+            10 => table.put("=:=").unwrap(),
+            11 => table.put("get_tail").unwrap(),
+            17 => table.put("skip").unwrap(),
+            _ => table.put(&format!("atom{index}")).unwrap(),
+        })
+        .collect();
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend(parts.concat());
+    code.push(0x03);
+    let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[], &[]).unwrap();
+    assert!(
+        matches!(
+            instructions.as_slice(),
+            [
+                Instruction::BinaryMatch {
+                    fail_label: 28,
+                    context: Operand::X(0),
+                    commands: tail,
+                },
+                Instruction::BinaryMatch {
+                    fail_label: 15,
+                    context: Operand::X(0),
+                    commands: prefix,
+                },
+                Instruction::End,
+            ] if matches!(
+                tail.as_slice(),
+                [
+                    BinaryMatchCommand::EnsureAtLeast { size: 8, unit },
+                    BinaryMatchCommand::Skip { size: 8 },
+                    BinaryMatchCommand::GetTail { destination: Operand::X(0) },
+                ] if unit.get() == 8
+            ) && matches!(
+                prefix.as_slice(),
+                [
+                    BinaryMatchCommand::EnsureAtLeast { size: 32, unit },
+                    BinaryMatchCommand::Equal { size: 31, value: 850_802_231 },
+                    BinaryMatchCommand::Equal { size: 1, value: 1 },
+                ] if unit.get() == 1
+            )
+        ),
+        "{instructions:?}"
+    );
+}
+
+#[test]
 fn reads_each_bs_match_command_and_rejects_bad_command_lists() {
     let mut table = AtomTable::new();
     let names = [
@@ -652,33 +722,70 @@ fn reads_each_bs_match_command_and_rejects_bad_command_lists() {
         "=:=",
         "skip",
         "other",
+        "little",
+        "signed",
     ];
     let atoms: Vec<Atom> = names.iter().map(|name| table.put(name).unwrap()).collect();
-    // {list,[binary,1,[],8,1,{x,1}, integer,1,[],8,1,{x,1},
-    // get_tail,1,8,{x,1}, '=:=',1,8,0, skip,8]}: 22 items.
+    let literals = vec![Some(Term::List(vec![
+        Term::Atom(atoms[8].clone()),
+        Term::Atom(atoms[9].clone()),
+    ]))];
+    // {list,[binary,1,nil,2,8,{x,1}, integer,1,{literal,0},12,1,{x,2},
+    // get_tail,1,8,{x,3}, '=:=',nil,8,97, skip,8]}: 22 items. Literal 0
+    // is [little,signed].
     let list = [
-        0x17, 0x08, 0x16, 0x32, 0x10, 0x02, 0x80, 0x10, 0x13, 0x42, 0x10, 0x02, 0x80, 0x10, 0x13,
-        0x52, 0x10, 0x80, 0x13, 0x62, 0x10, 0x80, 0x00, 0x72, 0x80,
+        0x17, 0x08, 0x16, 0x32, 0x10, 0x02, 0x20, 0x80, 0x23, 0x42, 0x10, 0x47, 0x00, 0xC0, 0x10,
+        0x23, 0x52, 0x10, 0x80, 0x33, 0x62, 0x02, 0x80, 0x08, 0x61, 0x72, 0x80,
     ];
     let mut cursor = 0;
-    let commands = read_binary_match_commands(&list, &mut cursor, &atoms).unwrap();
+    let commands = read_binary_match_commands(&list, &mut cursor, &atoms, &literals).unwrap();
     assert_eq!(cursor, list.len());
     assert!(
         matches!(
             commands.as_slice(),
             [
-                BinaryMatchCommand::Unsupported(binary),
-                BinaryMatchCommand::Unsupported(integer),
-                BinaryMatchCommand::Unsupported(get_tail),
-                BinaryMatchCommand::Unsupported(equal),
-                BinaryMatchCommand::Unsupported(skip),
-            ] if [binary, integer, get_tail, equal, skip].map(Atom::name)
-                == ["binary", "integer", "get_tail", "=:=", "skip"]
+                BinaryMatchCommand::Binary {
+                    size: 16,
+                    destination: Operand::X(2),
+                },
+                BinaryMatchCommand::Integer {
+                    size: 12,
+                    little: true,
+                    signed: true,
+                    destination: Operand::X(2),
+                },
+                BinaryMatchCommand::GetTail {
+                    destination: Operand::X(3),
+                },
+                BinaryMatchCommand::Equal { size: 8, value: 97 },
+                BinaryMatchCommand::Skip { size: 8 },
+            ]
+        ),
+        "{commands:?}"
+    );
+    // {list,[integer,1,nil,8,1,{x,1}]}: nil flags read as unsigned
+    // big-endian.
+    let commands = read_binary_match_commands(
+        &[0x17, 0x60, 0x42, 0x10, 0x02, 0x80, 0x10, 0x13],
+        &mut 0,
+        &atoms,
+        &literals,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            commands.as_slice(),
+            [BinaryMatchCommand::Integer {
+                size: 8,
+                little: false,
+                signed: false,
+                destination: Operand::X(1),
+            }]
         ),
         "{commands:?}"
     );
     let failure = |list: &[u8]| {
-        read_binary_match_commands(list, &mut 0, &atoms)
+        read_binary_match_commands(list, &mut 0, &atoms, &literals)
             .unwrap_err()
             .to_string()
     };
@@ -696,6 +803,18 @@ fn reads_each_bs_match_command_and_rejects_bad_command_lists() {
     assert_eq!(
         failure(&[0x17, 0x20, 0x12, 0x00, 0x80]),
         "BEAM bs_match command list has an incomplete command"
+    );
+    // {integer,1,{x,1},8,1,{x,1}}: the flags are a register.
+    assert_eq!(
+        failure(&[0x17, 0x60, 0x42, 0x10, 0x13, 0x80, 0x10, 0x13]),
+        "unsupported BEAM bs_match integer flags X(1)"
+    );
+    // {binary,1,nil,2^62,4,{x,1}}: the size in bits is 2^64.
+    assert_eq!(
+        failure(&[
+            0x17, 0x60, 0x32, 0x10, 0x02, 0xD8, 0x40, 0, 0, 0, 0, 0, 0, 0, 0x40, 0x13
+        ]),
+        "BEAM bs_match binary size overflow"
     );
 }
 
