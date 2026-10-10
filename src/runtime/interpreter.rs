@@ -764,6 +764,14 @@ impl BeamProgram {
                             ) || matches!(value, Term::ImproperList(..))
                         }
                         TestKind::Binary => matches!(value, Term::Binary(_)),
+                        // `is_bitstr` loads as `is_bitstring`, which passes for
+                        // each boxed term with a bitstring header (emu
+                        // `ops.tab:796-802`, `instrs.tab:945-949`; JIT
+                        // `jit/arm/ops.tab:594-597`, `emit_is_bitstring` in
+                        // `jit/arm/instr_common.cpp:1158-1184`;
+                        // `erl_term.h:384-391`). Each PBeam bitstring is a
+                        // binary.
+                        TestKind::Bitstring => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
                         TestKind::Function => matches!(value, Term::Fun(_)),
                         TestKind::Integer => matches!(value, Term::Integer(_)),
