@@ -128,3 +128,7 @@ Serialize cache creation before moving a downloaded or generated directory into 
 ## Persistent build outputs contaminate discovery
 
 Discover generated inputs from the current build set, not from a persistent output directory. Remove stale artifacts or isolate each build before scanning.
+
+## Fixture setup hides unloaded-module behavior
+
+Keep modules that tests must observe as unloaded out of fixture closure and generated inputs. Add a check that fails when setup loads one of those modules.
