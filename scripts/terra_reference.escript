@@ -75,12 +75,15 @@ run_steps(_Port, [], Screen, Done) ->
 send_key(_Port, none) -> ok;
 send_key(Port, Key) -> true = port_command(Port, Key).
 
+%% The step accepts only the output that it receives before the deadline. After the deadline, queued or continuous output does not make the step pass.
 await(Port, Expect, Screen, Deadline) ->
+    Timeout = Deadline - erlang:monotonic_time(millisecond),
     case Expect =/= exit andalso shows(Screen, Expect) of
         true ->
             {ok, Screen};
+        false when Timeout =< 0 ->
+            {timeout, Screen};
         false ->
-            Timeout = max(0, Deadline - erlang:monotonic_time(millisecond)),
             receive
                 {Port, {data, Bytes}} -> await(Port, Expect, feed(Bytes, Screen), Deadline);
                 {Port, {exit_status, Status}} -> {exit, Status, Screen}
