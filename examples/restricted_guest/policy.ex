@@ -8,8 +8,9 @@ defmodule RestrictedGuest.Policy do
   copy of the delegable capabilities of the root process. Thus the root
   process gets only the capabilities that the boot and the guest use:
 
-    * `process`: `spawn` of the guest modules and of the start wrappers
-      that the boot uses, and `link`, `monitor`, `send`, and `inspect`.
+    * `process`: `spawn` of the worker module of the guest and of the
+      start wrappers that the boot uses, and `link`, `monitor`, `send`,
+      and `inspect`.
       There is no `exit_other` and no `group_leader`.
     * `terminal`: the operations of the OTP IO path that writes the output
       of the guest.
@@ -23,7 +24,9 @@ defmodule RestrictedGuest.Policy do
   each run-time request.
   """
 
-  @guest_modules [RestrictedGuest, RestrictedGuest.Worker]
+  # The boot calls `RestrictedGuest.main/0` in the root process, so only
+  # the worker module of the guest is a spawn target.
+  @guest_modules [RestrictedGuest.Worker]
   # `pbeam_boot` starts `init` and the kernel process. `proc_lib` starts
   # each OTP server, and `erlang` (`erlang:apply/2`) starts each fun of
   # `spawn/1`. The `modules` constraint compares only the module of the MFA

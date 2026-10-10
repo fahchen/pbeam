@@ -29,10 +29,10 @@ main: 3 workers done
 
 `initial/1` gives the root process of `pbeam_boot:start/2` its capabilities, and each child gets a copy of them. The guest runs in this root process, and the OTP IO servers that write its output are its descendants. Thus the policy gives the capabilities that the boot and the guest use, and no other:
 
-- `process`: `spawn` of `RestrictedGuest`, `RestrictedGuest.Worker`, and the start wrappers `pbeam_boot`, `proc_lib`, and `erlang`, and `link`, `monitor`, `send`, and `inspect`.
+- `process`: `spawn` of `RestrictedGuest.Worker` and of the start wrappers `pbeam_boot`, `proc_lib`, and `erlang`, and `link`, `monitor`, `send`, and `inspect`.
 - `terminal`: `write`, `read`, `raw_mode`, `window_size`, `setup`, and `query`, for `user_drv` and `prim_tty`.
 - `signal`: `handle` of `sigcont` and `sigwinch`.
 - `runtime`: `system_flag` and `load_nif`.
 - `persistent_term`: `read` and `write`.
 
-The root process gets no `env` and no `port` capability, and no `exit_other`, `group_leader`, or `halt` operation. `initial/1` returns `deny` for a root process that is not `pbeam_boot:start/2`, and `grant/3` denies each request of `pbeam_cap:request/2`. An operation that the policy does not permit raises `error:capability_denied`. The test `denies_each_operation_outside_the_policy_of_restricted_guest` of `tests/feature/example.rs` runs `restricted_guest_probe:denied/0` of `fixtures/policy` with this policy and shows each denial. See "Decisions of #338" in the [capability security migration](../../docs/capability-security-migration.md) for the reasons.
+The root process gets no `env` and no `port` capability, and no `exit_other`, `group_leader`, or `halt` operation. `initial/1` returns `deny` for a root process that is not `pbeam_boot:start/2`, and `grant/3` denies each request of `pbeam_cap:request/2`. An operation that the policy does not permit raises `error:capability_denied`. The test `runs_restricted_guest_with_its_policy_as_pinned_erts_and_denies_other_operations` of `tests/feature/example.rs` runs `restricted_guest_probe:denied/0` of `fixtures/policy` with this policy and shows each denial. See "Decisions of #338" in the [capability security migration](../../docs/capability-security-migration.md) for the reasons.
