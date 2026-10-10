@@ -14,6 +14,7 @@ use super::{
 use crate::{
     error::BeamError,
     runtime::{
+        capability::Source,
         mailbox::{NodeId, Step, Walk},
         scheduler::AliasMode,
         signal::Signal,
@@ -391,6 +392,18 @@ impl Scheduler {
                 self.handled(id, node).security.remove(capability);
                 let signals = self.delegations.revoke(capability);
                 self.send_revocations(Some(id), signals);
+                0
+            }
+            Signal::Grant { capability } => {
+                let granted = capability
+                    .map(|capability| self.delegations.hold(id, [(Source::Policy, capability)]));
+                let process = self.handled(id, node);
+                process.policy_reply = Some(granted.is_some());
+                if let Some(granted) = granted {
+                    process.security.add(granted);
+                }
+                // The `pbeam_cap:request/2` call waits for this signal.
+                self.activate(id);
                 0
             }
             Signal::Link { from } => {

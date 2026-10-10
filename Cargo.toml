@@ -53,6 +53,10 @@ name = "log"
 path = "tests/feature/log.rs"
 
 [[test]]
+name = "policy_option"
+path = "tests/feature/policy_option.rs"
+
+[[test]]
 name = "run_end"
 path = "tests/feature/run_end.rs"
 
@@ -248,6 +252,10 @@ path = "tests/integration/otp_io.rs"
 [[test]]
 name = "persistent_term"
 path = "tests/integration/persistent_term.rs"
+
+[[test]]
+name = "policy"
+path = "tests/integration/policy.rs"
 
 [[test]]
 name = "port"
