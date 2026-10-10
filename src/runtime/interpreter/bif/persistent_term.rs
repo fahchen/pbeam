@@ -1,28 +1,99 @@
 //! Bodies of the `persistent_term` BIFs that do not fit on one table line.
+//!
+//! Each BIF entry first checks the `persistent_term` capability of the
+//! caller: `read` for `get/0,1,2` and `write` for `put/2`. ERTS checks no
+//! argument of these BIFs, so the check comes before the table access, and
+//! a denied call raises `error:capability_denied` and has no effect. The
+//! trap exports `get_all_trap/2` and `put_common_trap/1` continue a call
+//! that passed its check, so they do not check again.
 
 use super::BifResult::Value;
 use super::*;
+use crate::runtime::capability::{CapabilityKind, Operation};
 
 /// Run `persistent_term:get/0`: return each key and value of the node, as
 /// ERTS `persistent_term_get_0` does (`erl_bif_persistent.c:324-356`). ERTS
 /// takes the table of the call and keeps it until the last chunk, so the
 /// result is the table at the call. See [`get_all_trap`] for the chunks.
 ///
+/// The caller needs a `persistent_term` capability that permits `read`,
+/// else the call raises `error:capability_denied` and uses no reduction.
+///
 /// # Examples
 ///
 /// ```rust,ignore
 /// process.fcalls = 10;
-/// let all = get_all(&mut context);
+/// let all = get_all(&mut context)?;
 /// assert!(matches!(all, BifResult::Value(Term::List(pairs)) if pairs.is_empty()));
 /// ```
-pub(super) fn get_all(context: &mut BifContext<'_>) -> BifResult {
-    let pairs = context.scheduler.persistent_terms.get_all();
+///
+/// # Errors
+///
+/// A new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn get_all(context: &mut BifContext<'_>) -> Result<BifResult, BeamError> {
+    let scheduler = &mut *context.scheduler;
+    let check = denial(
+        scheduler,
+        CapabilityKind::PersistentTerm,
+        Operation::Read,
+        None,
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    let pairs = scheduler.persistent_terms.get_all();
     let entries = pairs.len();
-    get_all_trap(
-        context.scheduler.current_process_mut(),
+    Ok(get_all_trap(
+        scheduler.current_process_mut(),
         Term::List(pairs),
         entries,
-    )
+    ))
+}
+
+/// Run `persistent_term:get/1` with no `default` and `persistent_term:get/2`
+/// with its `default`: return the value of `key`. A key with no value gives
+/// `default`, or raises `badarg` with no `default`, as
+/// `persistent_term_get_1` and `persistent_term_get_2` do with their shared
+/// `persistent_term_get` (`erl_bif_persistent.c:358-398`).
+///
+/// The caller needs a `persistent_term` capability that permits `read`,
+/// else the call raises `error:capability_denied`, also for a key with no
+/// value.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let missing = get(&mut context, &Term::static_atom("key"), None)?;
+/// assert!(matches!(missing, BifResult::Raise { .. }));
+/// let default = get(&mut context, &Term::static_atom("key"), Some(&Term::Integer(1)))?;
+/// assert!(matches!(default, BifResult::Value(Term::Integer(1))));
+/// ```
+///
+/// # Errors
+///
+/// A new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn get(
+    context: &mut BifContext<'_>,
+    key: &Term,
+    default: Option<&Term>,
+) -> Result<BifResult, BeamError> {
+    let scheduler = &mut *context.scheduler;
+    let check = denial(
+        scheduler,
+        CapabilityKind::PersistentTerm,
+        Operation::Read,
+        None,
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    Ok(scheduler
+        .persistent_terms
+        .get(key)
+        .or(default)
+        .map_or_else(BifResult::badarg, |value| Value(value.clone())))
 }
 
 /// Use the reductions of the `entries` pairs that remain of the result
@@ -74,6 +145,10 @@ pub(super) fn get_all_trap(process: &mut ProcessState, all: Term, entries: usize
 /// out, and the new value is visible at once (row "Persistent terms" in
 /// `docs/erts-differences.md`).
 ///
+/// The caller needs a `persistent_term` capability that permits `write`,
+/// else the call raises `error:capability_denied` and stores nothing, also
+/// for a key that has exactly this value.
+///
 /// # Examples
 ///
 /// ```rust,ignore
@@ -86,15 +161,26 @@ pub(super) fn get_all_trap(process: &mut ProcessState, all: Term, entries: usize
 /// # Errors
 ///
 /// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
+/// negative budget. A new `capability_denied` atom in a full atom table
+/// gives the error of `AtomTable::put`.
 pub(super) fn put(
     context: &mut BifContext<'_>,
     key: &Term,
     value: &Term,
 ) -> Result<BifResult, BeamError> {
-    match context.scheduler.persistent_terms.put(key, value) {
+    let scheduler = &mut *context.scheduler;
+    let check = denial(
+        scheduler,
+        CapabilityKind::PersistentTerm,
+        Operation::Write,
+        None,
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    match scheduler.persistent_terms.put(key, value) {
         None => Ok(Value(Term::static_atom("ok"))),
-        Some(copied) => put_trap(context.scheduler.current_process_mut(), copied),
+        Some(copied) => put_trap(scheduler.current_process_mut(), copied),
     }
 }
 
