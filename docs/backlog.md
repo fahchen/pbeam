@@ -365,6 +365,22 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer with large delegation trees, or the multiple schedulers of M10.
 - **Source:** Codex review of PR #357 (#336).
 
+### Publish a shared policy table that checks read
+
+- After #337, the policy process runs `initial/1` and `grant/3`, and a check reads only the copies of the caller (`SecurityContext::check` in `src/runtime/capability.rs`). The design of #310 also has a shared policy table: the policy process publishes data, like `persistent_term`, and a check reads it with no lock and no message (section "Policy module, policy process, and policy table" of `docs/capability-security-migration.md`).
+- **Evidence:** ERTS replaces the `persistent_term` table pointer on a write and frees the old table after thread progress (`erts/emulator/beam/erl_bif_persistent.c:187`, `773-779` at `OTP-29.1.1`).
+- **Reason:** no check reads policy data yet. A table without a reader would be a foundation with no consumer.
+- **Trigger:** the first check that reads policy data, for example an audit rule of #338 or the opt-in check-time extension.
+- **Source:** implementation of #337.
+
+### Revoke a capability from the policy process
+
+- After #337, the launcher (`Policy::revocations`) and a delegating process (`pbeam_cap:revoke/2`) can revoke. The design of #310 names the policy process as a third revoker, for example of a capability that it granted at run time.
+- **Option:** a PBeam BIF that only the policy process can call, which revokes the copies of a kind of a process that have the source `policy` or that came from the launcher.
+- **Reason:** no policy module and no test revokes yet.
+- **Trigger:** a policy that must take back a run-time grant, for example an audit rule of #338.
+- **Source:** implementation of #337.
+
 ## Tests and tooling
 
 ### Load-check every pinned OTP module that loads today
