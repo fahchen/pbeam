@@ -13,6 +13,7 @@ use crate::runtime::{
     host::output::IovecWrite,
     scheduler::Flushed,
 };
+use crate::term::ProcessId;
 
 mod binary;
 mod erlang;
@@ -183,6 +184,35 @@ pub(super) fn denial(
         return Ok(None);
     }
     BifResult::capability_denied(&mut scheduler.atoms).map(Some)
+}
+
+/// Return the `error:capability_denied` exception when `target` is not the
+/// current process and no capability of the current process permits
+/// `operation` of the `process` kind (see [`denial`]). Else return `None`.
+/// The process inspection BIFs check `inspect` and the group leader BIFs
+/// check `group_leader` with this function after their argument checks and
+/// before the process lookup, so a denied call does not tell whether a
+/// process has the pid. A call for the caller has no check.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let caller = scheduler.current_process().id;
+/// assert!(other_process_denial(&mut scheduler, caller, Operation::Inspect)?.is_none());
+/// ```
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for a full atom table.
+pub(super) fn other_process_denial(
+    scheduler: &mut Scheduler,
+    target: ProcessId,
+    operation: Operation,
+) -> Result<Option<BifResult>, BeamError> {
+    if target == scheduler.current_process().id {
+        return Ok(None);
+    }
+    denial(scheduler, CapabilityKind::Process, operation, None)
 }
 
 /// Return the runtime error of a BIF that ERTS runs with a port argument
