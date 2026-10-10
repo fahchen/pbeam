@@ -90,6 +90,27 @@ fn bs_match_probe_has_the_bs_match_command_bytes() {
 }
 
 #[test]
+fn bs_get_probe_has_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_bytes() {
+    assert_in_fixture(
+        "fixtures/binary_match/bs_get_probe.beam",
+        &[
+            // split/2: bs_start_match4 no_fail 2 x0 x0
+            &[0xAA, 0x32, 0x20, 0x03, 0x03],
+            // split/2: bs_get_binary2 f3 {tr,x0,1} 2 x1 8 0 x1
+            &[0x77, 0x35, 0x57, 0x03, 0x10, 0x20, 0x13, 0x80, 0x00, 0x13],
+            // split/2: bs_get_tail x0 x0 2
+            &[0xA5, 0x03, 0x03, 0x20],
+            // split_units/2: bs_get_binary2 f6 {tr,x0,1} 2 x1 16 0 x1
+            &[
+                0x77, 0x65, 0x57, 0x03, 0x10, 0x20, 0x13, 0x08, 0x10, 0x00, 0x13,
+            ],
+            // nibbles/2: bs_start_match4 resume 2 x0 x0
+            &[0xAA, 0xB2, 0x20, 0x03, 0x03],
+        ],
+    );
+}
+
+#[test]
 fn bitstr_probe_has_the_is_bitstr_bytes() {
     assert_in_fixture(
         "fixtures/bitstr/bitstr_probe.beam",

@@ -1099,8 +1099,11 @@ impl BeamProgram {
                 // `erts_bs_start_match_3` in erl_bits.c:81-105). A literal
                 // source loads as `jump Fail` (emu ops.tab:1266-1267; JIT
                 // jit/arm/ops.tab:1054-1055), which gives the same result.
-                // The compiler gives a real fail label
-                // (beam_ssa_codegen.erl:1666-1673), so the label is never 0.
+                // `bs_start_match4` with `no_fail` loads with the fail label
+                // 0 (JIT jit/arm/ops.tab:1036-1037). The JIT then does not
+                // test the source: the compiler gives it only a binary or a
+                // match context (jit/arm/instr_bs.cpp:142-148), so each
+                // other term is an invariant error.
                 // ERTS writes a reused match context to the destination, so
                 // the two registers share one position. PBeam keeps the
                 // position in each register, so it reuses a match context
@@ -1118,18 +1121,76 @@ impl BeamProgram {
                         write(process, destination, context)?;
                     }
                     Term::MatchContext(_) => {
-                        if !matches!(
-                            (source, destination),
-                            (Operand::X(from), Operand::X(to)) | (Operand::Y(from), Operand::Y(to))
-                                if from == to
-                        ) {
-                            return Err(error(format!(
-                                "unsupported bs_start_match3 that copies the match context in {source:?} to {destination:?}"
-                            )));
-                        }
+                        reuse_match_context("bs_start_match3", source, destination)?;
+                    }
+                    other if *fail_label == 0 => {
+                        return Err(error(format!(
+                            "invariant error: bs_start_match3 with no fail label got {other:?}, not a binary or a match context"
+                        )));
                     }
                     _ => jump(module, process, *fail_label)?,
                 },
+                // On a 64-bit system, ERTS loads `bs_start_match4` with
+                // `resume` as nothing when the source is the destination,
+                // and else as `move` (JIT jit/arm/ops.tab:1041-1045). The
+                // compiler gives it only a match context
+                // (beam_ssa_codegen.erl:2300-2302).
+                Instruction::BinaryMatchResume {
+                    source,
+                    destination,
+                } => {
+                    any_match_context(process, source)?;
+                    reuse_match_context("bs_start_match4 resume", source, destination)?;
+                }
+                // ERTS `bs_get_tail` writes the bits after the position as
+                // a sub-bitstring and keeps the position
+                // (`emit_bs_get_tail` and `emit_bs_get_tail_shared` in
+                // jit/arm/instr_bs.cpp:407-454). PBeam has no bitstring
+                // term (row "Binary matching" of docs/erts-differences.md).
+                Instruction::BinaryGetTail {
+                    context,
+                    destination,
+                } => {
+                    let state = match_context(process, context)?;
+                    let bits = state.remaining_bits();
+                    if !bits.is_multiple_of(8) {
+                        return Err(error(format!(
+                            "unsupported bs_get_tail of {bits} bits: needs a bitstring term"
+                        )));
+                    }
+                    write(process, destination, Term::Binary(state.tail()))?;
+                }
+                // ERTS `i_bs_get_binary2` checks the size
+                // (`binary_field_size`), then reads the bits as a
+                // sub-bitstring and moves the position, or jumps to `Fail`
+                // when fewer bits remain (`emit_bs_get_binary` in
+                // jit/arm/instr_bs.cpp:506-556; `erts_bs_get_binary_2` in
+                // erl_bits.c:400-424). The loader fuses it with a
+                // `bs_get_tail` after it (jit/arm/ops.tab:991-997), which
+                // gives the same result.
+                Instruction::BinaryGetBinary {
+                    fail_label,
+                    context,
+                    size,
+                    unit,
+                    destination,
+                } => {
+                    let mut state = match_context(process, context)?;
+                    match binary_field_size(&read(process, size)?, *unit)
+                        .and_then(|bits| Some((bits, state.read_bits(bits)?)))
+                    {
+                        Some((bits, bytes)) => {
+                            if !bits.is_multiple_of(8) {
+                                return Err(error(format!(
+                                    "unsupported bs_get_binary2 of {bits} bits: needs a bitstring term"
+                                )));
+                            }
+                            write(process, context, Term::MatchContext(state))?;
+                            write(process, destination, Term::Binary(bytes))?;
+                        }
+                        None => jump(module, process, *fail_label)?,
+                    }
+                }
                 // ERTS `i_bs_get_position` writes `sb->start` as a small
                 // integer (emu ops.tab:1274-1277, bs_instrs.tab:1125-1129).
                 Instruction::BinaryGetPosition {
@@ -2712,6 +2773,64 @@ fn check_remote_call_arguments(registers: &[Option<Term>], arity: u32) -> Result
     {
         Some(index) => Err(match_context_escape(&Operand::X(index))),
         None => Ok(()),
+    }
+}
+
+/// Check that an instruction that reuses the match context in `source`
+/// writes it to the same register. ERTS writes the match context to
+/// `destination`, so both registers share one position. PBeam keeps the
+/// position in each register, so a copy to another register gives a
+/// runtime error (row "Binary matching" of docs/erts-differences.md).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(reuse_match_context("bs_start_match3", &Operand::X(0), &Operand::X(0)).is_ok());
+/// assert_eq!(
+///     reuse_match_context("bs_start_match3", &Operand::X(0), &Operand::Y(0)).unwrap_err().to_string(),
+///     "unsupported bs_start_match3 that copies the match context in X(0) to Y(0)"
+/// );
+/// ```
+fn reuse_match_context(
+    instruction: &str,
+    source: &Operand,
+    destination: &Operand,
+) -> Result<(), BeamError> {
+    if matches!(
+        (source, destination),
+        (Operand::X(from), Operand::X(to)) | (Operand::Y(from), Operand::Y(to)) if from == to
+    ) {
+        Ok(())
+    } else {
+        Err(error(format!(
+            "unsupported {instruction} that copies the match context in {source:?} to {destination:?}"
+        )))
+    }
+}
+
+/// Return the size in bits of a `bs_get_binary2` segment of `size` units
+/// of `unit` bits, or `None` when the instruction fails. As the ERTS JIT
+/// field size check, a size that is not a non-negative integer fails
+/// (`emit_bs_get_field_size` in jit/arm/instr_bs.cpp:38-116). That check
+/// also fails a register size from 2^48 and a literal size above
+/// `MAX_SMALL / unit`. The compiler gives a unit from 1 to 256
+/// (`type_to_record` in erl_bits.erl:93), so such a size is always more
+/// bits than a binary has, and `erts_bs_get_binary_2` then fails
+/// (erl_bits.c:400-424). Thus `MatchContext::read_bits` gives the same
+/// result for it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(binary_field_size(&Term::Integer(3), 8), Some(24));
+/// assert_eq!(binary_field_size(&Term::Integer(-1), 8), None);
+/// assert_eq!(binary_field_size(&Term::static_atom("all"), 8), None);
+/// assert_eq!(binary_field_size(&Term::Integer(i64::MAX), 8), None);
+/// ```
+fn binary_field_size(size: &Term, unit: u64) -> Option<u64> {
+    match size {
+        Term::Integer(size) => u64::try_from(*size).ok()?.checked_mul(unit),
+        _ => None,
     }
 }
 
