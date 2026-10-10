@@ -4,6 +4,7 @@ use super::BifResult::Value;
 use super::erlang::signals_return;
 use super::*;
 use crate::runtime::{
+    capability::{CapabilityKind, Operation},
     host::{
         errno::errno_id,
         filename_encoding,
@@ -212,10 +213,15 @@ struct PortSettings {
 /// 2. Read the name. A term that is not `{spawn_executable, Name}`, or a
 ///    `Name` that is not a file name (see [`native_name`]), gives the atom
 ///    `badarg`.
-/// 3. Start the program (see [`spawn::spawn`]). A pipe, the fd limit, and
+/// 3. Check the capabilities of the caller: without a `port` capability
+///    with `spawn` that permits the native bytes of `Name`, the BIF raises
+///    `error:capability_denied` and starts no program. The constraint
+///    compares the name as the caller gives it. It does not resolve a
+///    relative name or a symbolic link.
+/// 4. Start the program (see [`spawn::spawn`]). A pipe, the fd limit, and
 ///    the access check give the `erl_errno_id` atom of their failure, for
 ///    example `enoent`.
-/// 4. Open the port, owned by and linked to the caller, and return a new
+/// 5. Open the port, owned by and linked to the caller, and return a new
 ///    reference. The caller gets `{Reference, Port}`, as the init ack of a
 ///    driver with `ERL_DRV_FLAG_USE_INIT_ACK` sends it
 ///    (`sys_drivers.c:251`, `1332`).
@@ -231,7 +237,8 @@ struct PortSettings {
 ///
 /// An option that ERTS accepts and PBeam does not support, the port kinds
 /// `spawn`, `spawn_driver`, and `fd`, a port without `binary`, and a failed
-/// `posix_spawn` return a runtime error.
+/// `posix_spawn` return a runtime error. A new atom in a full atom table
+/// gives the error of `AtomTable::put`.
 pub(super) fn open_port(
     context: &mut BifContext<'_>,
     name: &Term,
@@ -249,6 +256,15 @@ pub(super) fn open_port(
         ));
     }
     let scheduler = &mut *context.scheduler;
+    let check = denial(
+        scheduler,
+        CapabilityKind::Port,
+        Operation::Spawn,
+        Some(&path),
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
     let child = match spawn::spawn(&path, &settings.args, settings.streams) {
         Ok(child) => child,
         Err(SpawnError::Open(errno)) => {
@@ -475,7 +491,9 @@ fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
 /// (`sys_drivers.c:1180-1184`). A term that is not an open port, or `Data`
 /// that is not iodata, gives the atom `badarg`. The result traps to
 /// `erlang:bif_handle_signals_return/2` when the caller has incoming
-/// signals.
+/// signals. After these checks, a caller without a `port` capability with
+/// `command` that permits the program path of `Port` gets
+/// `error:capability_denied`, and the BIF writes nothing.
 ///
 /// # Examples
 ///
@@ -485,7 +503,8 @@ fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
 ///
 /// # Errors
 ///
-/// An `OptionList` other than `[]` returns a runtime error.
+/// An `OptionList` other than `[]` returns a runtime error. A new atom in a
+/// full atom table gives the error of `AtomTable::put`.
 pub(super) fn port_command(
     context: &mut BifContext<'_>,
     port: &Term,
@@ -502,6 +521,9 @@ pub(super) fn port_command(
     else {
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
+    if let Some(denied) = port_denial(scheduler, id, Operation::Command)? {
+        return Ok(denied);
+    }
     scheduler
         .current_process_mut()
         .bump_reductions(PORT_REDUCTIONS);
@@ -524,23 +546,59 @@ pub(super) fn port_command(
 /// The owner then gets the link exit signal `normal` of the port. A term
 /// that is not an open port gives the atom `badarg`. The result traps to
 /// `erlang:bif_handle_signals_return/2` when the caller has incoming
-/// signals, as the `EXIT` signal of the port to its owner.
+/// signals, as the `EXIT` signal of the port to its owner. After the port
+/// check, a caller without a `port` capability with `close` that permits
+/// the program path of `Port` gets `error:capability_denied`, and the port
+/// stays open.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = port_close(&mut context, &Term::Port(port));
+/// let result = port_close(&mut context, &Term::Port(port))?;
 /// ```
-pub(super) fn port_close(context: &mut BifContext<'_>, port: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+pub(super) fn port_close(
+    context: &mut BifContext<'_>,
+    port: &Term,
+) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let Some(id) = open_port_id(scheduler, port) else {
-        return signals_return(scheduler, port, Term::static_atom("badarg"));
+        return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
+    if let Some(denied) = port_denial(scheduler, id, Operation::Close)? {
+        return Ok(denied);
+    }
     scheduler
         .current_process_mut()
         .bump_reductions(PORT_REDUCTIONS);
     scheduler.close_port(id, Term::static_atom("normal"));
-    signals_return(scheduler, port, Term::static_atom("true"))
+    Ok(signals_return(scheduler, port, Term::static_atom("true")))
+}
+
+/// Return the `error:capability_denied` exception when no `port`
+/// capability of the caller permits `operation` for the program path of the
+/// open port `id`, else `None` (see `denial`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(port_denial(&mut scheduler, port, Operation::Close)?.is_none());
+/// ```
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+fn port_denial(
+    scheduler: &mut Scheduler,
+    id: PortId,
+    operation: Operation,
+) -> Result<Option<BifResult>, BeamError> {
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    let name = ports.get(id).expect("the port is open").name.clone();
+    denial(scheduler, CapabilityKind::Port, operation, Some(&name))
 }
 
 /// Run `erts_internal:port_info(Port)`, which `erlang:port_info/1` calls, as

@@ -818,6 +818,22 @@ impl Scheduler {
         }
     }
 
+    /// Return the current process for a read, for example a capability
+    /// check that does not change the process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.schedule_next();
+    /// assert_eq!(scheduler.current_process().id, ProcessId(0));
+    /// ```
+    pub(super) fn current_process(&self) -> &ProcessState {
+        // ponytail: only the run loop calls this, after `schedule_next` returned a process.
+        self.current_process
+            .and_then(|id| self.processes.get(&id))
+            .expect("the scheduler has a current process")
+    }
+
     /// Return the current process.
     ///
     /// # Examples
@@ -1167,15 +1183,15 @@ impl Scheduler {
             Start::Entry(frame) => frame.module.as_str(),
             Start::Undefined { module, .. } => module.name(),
         };
-        let parent = &self.current_process_mut().security;
-        let check = |needed: bool, operation: Operation, name: Option<&str>| {
+        let parent = &self.current_process().security;
+        let check = |needed: bool, operation: Operation, name: Option<&[u8]>| {
             if needed {
                 parent.check(CapabilityKind::Process, operation, name)
             } else {
                 Ok(())
             }
         };
-        let security = check(true, Operation::Spawn, Some(module))
+        let security = check(true, Operation::Spawn, Some(module.as_bytes()))
             .and_then(|()| check(link, Operation::Link, None))
             .and_then(|()| check(monitor, Operation::Monitor, None))
             .and_then(|()| parent.delegate(restrictions));

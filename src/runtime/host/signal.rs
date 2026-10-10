@@ -41,32 +41,6 @@ pub(crate) enum Disposition {
     Handle,
 }
 
-/// Set the disposition of the signal with the atom name `name`, and return
-/// whether the name is a signal of `signalterm_to_signum`, as
-/// `erts_set_signal` (sys.c:754-767) does. A name that is not a signal
-/// changes nothing.
-///
-/// As `sys_signal` (sys.c:437-460) on the pinned aarch64 build, the
-/// `sigaction` call has an empty mask and no flags, and its result is
-/// ignored. Thus `sigstop`, which the host does not let a process change,
-/// also returns `true`. With no `SA_RESTART`, a handled signal stops a
-/// `select` of the scheduler with `EINTR`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(set_signal("sighup", Disposition::Ignore));
-/// assert!(set_signal("sigstop", Disposition::Handle));
-/// assert!(!set_signal("sigint", Disposition::Ignore));
-/// ```
-pub(crate) fn set_signal(name: &str, disposition: Disposition) -> bool {
-    let Some(signal) = signal_number(name) else {
-        return false;
-    };
-    set_disposition(signal, disposition);
-    true
-}
-
 /// Set the dispositions of the emulator start, as `erts_sys_init_float`
 /// (sys_float.c:31-37), `init_break_handler` (sys.c:799-803), and
 /// `erts_sys_unix_later_init` (sys.c:812-823) do: `SIG_IGN` for `SIGFPE`,
@@ -96,14 +70,22 @@ pub fn install_start_dispositions() {
 
 /// Set the disposition of the host signal `signal` with `sigaction`, as
 /// `sys_signal` (sys.c:437-460) does. The notify pipe exists before a
-/// handler is installed.
+/// handler is installed. `os:set_signal/2` calls it with the number of
+/// [`signal_number`], as `erts_set_signal` (sys.c:754-767) does.
+///
+/// As `sys_signal` on the pinned aarch64 build, the `sigaction` call has an
+/// empty mask and no flags, and its result is ignored. Thus `sigstop`,
+/// which the host does not let a process change, also gives `ok`. With no
+/// `SA_RESTART`, a handled signal stops a `select` of the scheduler with
+/// `EINTR`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// set_disposition(libc::SIGUSR2, Disposition::Handle);
+/// set_disposition(libc::SIGSTOP, Disposition::Ignore);
 /// ```
-fn set_disposition(signal: c_int, disposition: Disposition) {
+pub(crate) fn set_disposition(signal: c_int, disposition: Disposition) {
     let handler = match disposition {
         Disposition::Ignore => libc::SIG_IGN,
         Disposition::Default => libc::SIG_DFL,
@@ -247,7 +229,7 @@ pub(crate) fn signal_name(signal: c_int) -> Option<&'static str> {
 /// assert_eq!(signal_number("sigwinch"), Some(libc::SIGWINCH));
 /// assert_eq!(signal_number("sigint"), None);
 /// ```
-fn signal_number(name: &str) -> Option<c_int> {
+pub(crate) fn signal_number(name: &str) -> Option<c_int> {
     SIGNALS
         .iter()
         .find(|(signal, _)| *signal == name)
@@ -289,7 +271,7 @@ const SIGNALS: &[(&str, c_int)] = &[
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(set_signal("sigusr2", Disposition::Handle));
+/// set_disposition(libc::SIGUSR2, Disposition::Handle);
 /// // SAFETY: the handler of SIGUSR2 writes to the notify pipe.
 /// unsafe { libc::raise(libc::SIGUSR2) };
 /// ```

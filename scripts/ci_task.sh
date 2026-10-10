@@ -4,7 +4,7 @@
 set -euo pipefail
 
 # The Markdown files that a test or build step reads. Add a file here when code starts to read it.
-# tests/runtime/interpreter/native.rs reads docs/effect-inventory.md with include_str!.
+# tests/runtime/interpreter/native.rs and tests/integration/effect_capability.rs read docs/effect-inventory.md with include_str!.
 code_docs=(docs/effect-inventory.md)
 
 paths=$(cat)
