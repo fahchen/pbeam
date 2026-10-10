@@ -329,9 +329,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Add realm and incarnation identity to the subject
 
-- After the design of #310, the subject is the process, and a run has one realm. The security context lives as long as the process, and no lookup uses the pid number, so a pid number that a later process gets again gives no old capability.
+- After the design of #310, the subject is the process, and a run has one realm. The security context lives as long as the process, and no check finds a capability by the pid number. The delegation records hold pids, and PBeam never gives a pid number again (`Scheduler::next_pid`), so a record cannot name a later process.
 - **Reason:** no consumer reads a realm or an incarnation.
-- **Trigger:** a host that runs plugins that do not trust each other, each with its own policy; a lookup of authority by pid; or completion routing of transition 6 that needs an incarnation.
+- **Trigger:** a host that runs plugins that do not trust each other, each with its own policy; a lookup of authority by pid; PBeam uses process table slots again as ERTS does; or completion routing of transition 6 that needs an incarnation.
 - **Source:** design review of #310 (question 2, PR #314).
 
 ### Add a text syntax for capability scopes

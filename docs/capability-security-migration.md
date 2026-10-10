@@ -55,7 +55,7 @@ The security context holds the usable and delegable capabilities of the process.
 
 Separate use from delegation. A parent can create a restricted worker only within its delegation ceiling. A use grant alone does not grant delegation. Child authority, lease, and budget cannot exceed the validated delegation template.
 
-Attach the context to the process. Scheduler migration moves it with process ownership. Neither thread-local state nor a worker's current PID is an authority source. A restart is a new process. It gets only the capabilities that its spawner can delegate at that time, so it cannot recover revoked authority.
+Attach the context to the process. Scheduler migration moves it with process ownership. Neither thread-local state nor a worker's current PID is an authority source. A restart is a new process. It gets only the capabilities that its spawner can delegate at that time, so it cannot recover authority that was revoked from its spawner.
 
 Reserve child budgets from a shared parent account or reference that account. Never copy an independent full budget on spawn. Define resource ownership and quota failure behavior before enforcing each quota.
 
@@ -109,7 +109,7 @@ Capability {
 
 The subject is the process. The security context is one new `ProcessState` field (`src/runtime/process.rs`). It holds the copies of the capabilities of the process: the capabilities that the process can use and the capabilities that it can delegate. The context moves with the process when the multiple-scheduler work (M10) moves process ownership between threads. Thread-local state and the current pid of a worker are not authority sources.
 
-The capabilities live as long as the process. When a process exits, the runtime releases all its copies. No lookup uses the pid number, so a process that gets a pid number again cannot get the capabilities of an old process. Thus transition 2 has no incarnation field. A run has one isolation domain, so transition 2 has no realm. A realm comes with its first consumer, for example a host that runs plugins that do not trust each other, each with its own policy (see the backlog).
+The capabilities live as long as the process. When a process exits, the runtime releases all its copies. No check finds a capability by the pid number, so a process that gets a pid number again cannot get the capabilities of an old process. The delegation records of a copy (its source and its receivers) hold pids. PBeam never gives a pid number again: `Scheduler::next_pid` (`src/runtime/scheduler.rs`) takes each pid from a `u64` counter (row "Process and reference counters" of [ERTS differences](erts-differences.md)). Thus a record cannot name a later process, and transition 2 has no incarnation field. If PBeam uses process table slots again as ERTS does, the delegation records need an incarnation (see the backlog). A run has one isolation domain, so transition 2 has no realm. A realm comes with its first consumer, for example a host that runs plugins that do not trust each other, each with its own policy (see the backlog).
 
 This decision replaces the realm, process, and incarnation identity that an earlier version of this contract asked for. No transition 2 consumer reads a realm or an incarnation, and the process lifetime of the context gives the same guarantee.
 
@@ -125,13 +125,13 @@ A child gets the delegable capabilities of its parent, as capabilities that it c
 
 The `spawn_opt` option `{capabilities, ...}` gives the child a part of the delegable capabilities of the parent. It can only reduce operations and constraints. A request for more operations or wider constraints than the parent can delegate raises `error:capability_denied`, and no process is made. Delegation from a process that is not the parent, for example a broker, waits in the backlog. The policy process can grant a capability at run time, so this need is smaller.
 
-`erlang:spawn/3`, `erlang:spawn_link/3`, and `erlang:spawn_opt/4` make each process through `Scheduler::spawn` (`src/runtime/scheduler.rs`), and that function has one caller (`src/runtime/interpreter.rs:1872`). Thus the first check, `process` with `spawn` in `Scheduler::spawn`, covers each spawn BIF. An OTP supervisor restart is also a spawn by the supervisor process. The supervisor applies the start MFA of the child (`lib/stdlib/src/supervisor.erl:1034-1036` at `OTP-29.1.1`), and `proc_lib:start_link/5` calls `erlang:spawn_opt/4` with `link` and `monitor` (`lib/stdlib/src/proc_lib.erl:266-269`, `511-514`). A restarted child is a new process. It gets only the capabilities that the supervisor can delegate at the restart, so a restart cannot recover a revoked capability. A capability that the policy granted to the old child at run time does not go to the new child; the new child requests it again.
+`erlang:spawn/3`, `erlang:spawn_link/3`, and `erlang:spawn_opt/4` make each process through `Scheduler::spawn` (`src/runtime/scheduler.rs`), and that function has one caller (`src/runtime/interpreter.rs:1872`). Thus the first check, `process` with `spawn` in `Scheduler::spawn`, covers each spawn BIF. The `modules` constraint is not yet complete for OTP process starts: `proc_lib:spawn_opt/4` spawns `proc_lib:init_p/5` and gives the application MFA as an argument (`lib/stdlib/src/proc_lib.erl:269`), so a check of the spawn module finds `proc_lib`. A permission for `proc_lib` alone permits each MFA through this wrapper. #334 decides how the constraint treats `proc_lib` and the other start wrappers, before #338 uses a rule for the own modules of a guest. An OTP supervisor restart is also a spawn by the supervisor process. The supervisor applies the start MFA of the child (`lib/stdlib/src/supervisor.erl:1034-1036` at `OTP-29.1.1`), and `proc_lib:start_link/5` calls `erlang:spawn_opt/4` with `link` and `monitor` (`lib/stdlib/src/proc_lib.erl:266-269`, `511-514`). A restarted child is a new process. It gets only the capabilities that the supervisor can delegate at the restart. Thus a restart cannot recover a capability that a revoker took from the supervisor or from a process above it, because the revocation removes the copy of the supervisor. A revocation of only the copy of the child does not remove the copy of the supervisor, so a restarted child gets that capability again. To take a capability from each later child too, the revoker revokes it at the supervisor. A capability that the policy granted to the old child at run time does not go to the new child; the new child requests it again.
 
 #### Revocation
 
 Each copy of a capability records its source and the child processes that got a copy of it. The policy process, the launcher, and the delegating process can revoke a capability. A delegating process can revoke only a capability that it gave. Another revoker gets `error:capability_denied`.
 
-A revocation is a signal through the signal queue of [#221](https://github.com/fahchen/pbeam/issues/221). When the holder handles the signal, it deletes its copy and sends the revocation to each downstream process. As with the other control signals of ERTS, a revocation takes effect when the target handles the signal, not when the revoker sends it. A revocation does not end the holder. It does not close the resources that the holder already opened: transition 5 owns resource recovery. The cost of a revocation increases with the number of holders, and with multiple schedulers the signal goes between threads as other signals do. In return, a check reads only the copies of the caller and no global table.
+A revocation is a signal through the signal queue of [#221](https://github.com/fahchen/pbeam/issues/221). When the holder handles the signal, it deletes its copy and sends the revocation to each downstream process. As with the other control signals of ERTS, a revocation takes effect when the target handles the signal, not when the revoker sends it. A revocation does not end the holder. It does not close the resources that the holder already opened: transition 5 owns resource recovery. The cost of a revocation increases with the number of holders, and with multiple schedulers the signal goes between threads as other signals do. In return, a check finds the capabilities of the caller in its own copies, not in a run-wide capability table.
 
 Transition 2 has no lease. A lease waits in the backlog.
 
@@ -156,7 +156,7 @@ defmodule PBeam.Policy do
 end
 ```
 
-The launcher loads the policy module and starts a trusted policy process before the root process. The policy process is outside the supervisor tree, so the application cannot end or replace it. The policy code runs at grant time only. A return value that is not a grant form, an exception, or a reduction limit overrun is a denial.
+The launcher loads the policy module and starts a trusted policy process before the root process. The policy process is outside the supervisor tree, so a supervisor shutdown does not end it. The application must not end or replace it. Because a guest with `process` `exit_other` can send an exit signal to any pid, #337 defines how the runtime protects the policy process, for example an `exit_other` constraint that excludes trusted processes. The policy code runs at grant time only. A return value that is not a grant form, an exception, or a reduction limit overrun is a denial.
 
 The policy process publishes data to a shared policy table, like `persistent_term`. Writes are not frequent and can be slow. A write replaces the table, and the old table is freed when it has no reader, as the `persistent_term` table pointer and its update after thread progress do (`erts/emulator/beam/erl_bif_persistent.c:187`, `773-779` at `OTP-29.1.1`). Reads take no lock, so multiple schedulers can read at the same time. A check reads the capabilities of the caller and the table directly. It sends no message and runs no policy code.
 
@@ -182,6 +182,10 @@ start_run(policy_module):
 spawn(parent, {M, F, A}, opts):
     check(parent, process, spawn, %{module: M})                  # check: can the parent spawn M?
     requested = opts[:capabilities]                              # optional: a part for the child
+    if requested != nil:
+        for kind in keys(requested):
+            if no cap in parent.caps where cap.delegable and cap.kind == kind:
+                raise error:capability_denied                                # kind not delegable
     child_caps = []
     for cap in parent.caps where cap.delegable:
         if requested == nil:
