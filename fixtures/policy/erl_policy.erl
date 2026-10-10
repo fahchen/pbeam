@@ -54,6 +54,12 @@ grant(process, effect, _Requester) ->
 grant(_Kind, {spin, Count}, _Requester) ->
     spin(Count),
     deny;
+grant(_Kind, {spin_grant, Count}, _Requester) ->
+    spin(Count),
+    {grant, home()};
+grant(_Kind, {wait_spin, Count}, _Requester) ->
+    wait_spin(Count),
+    {grant, home()};
 grant(_Kind, wake, _Requester) ->
     Policy = self(),
     spawn(fun() -> Policy ! wake end),
@@ -74,3 +80,15 @@ loop() -> loop().
 
 spin(0) -> ok;
 spin(Count) -> spin(Count - 1).
+
+%% Each step uses 3000 reductions and then waits 1 ms in a receive, so the
+%% policy process switches out in the receive and not at the end of its
+%% budget.
+wait_spin(0) ->
+    ok;
+wait_spin(Count) ->
+    spin(3000),
+    receive
+    after 1 -> ok
+    end,
+    wait_spin(Count - 1).

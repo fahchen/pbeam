@@ -4,6 +4,7 @@
     granted/0,
     forms/0,
     failures/0,
+    overrun/0,
     requester/0,
     effect/0,
     wait/0,
@@ -71,6 +72,19 @@ failures() ->
         request(env, self_request),
         request(file, home),
         request(<<"env">>, home)
+    ].
+
+%% The reduction limit of a call also holds when the call waits in a
+%% receive at the end of each turn, and when it returns. 20 steps of
+%% wait_spin use about 60000 reductions and get the grant; 40 steps use
+%% about 120000 and are denied. spin_grant(Count) returns its grant in the
+%% turn after its last switch out for the budget, so only the check at the
+%% return finds that the call used more than the limit.
+overrun() ->
+    [
+        request(env, {wait_spin, 20}),
+        request(env, {wait_spin, 40}),
+        request(env, {spin_grant, 101000})
     ].
 
 %% The policy sends the requester map of a worker and the requester map of

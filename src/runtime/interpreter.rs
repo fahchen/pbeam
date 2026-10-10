@@ -1924,11 +1924,14 @@ impl BeamProgram {
 
 /// Return the outcome of a turn of the current process, `outcome`, after
 /// the policy process ends its call of the policy code. When the current
-/// process is the policy process and runs a call, a return or an exception
-/// that it does not catch ends the call, and so does a switch out after
-/// more than `POLICY_REDUCTIONS` reductions of the call. The policy process
-/// then waits for the next request (see `Scheduler::end_policy_call`). An
-/// exit signal that ends the policy process ends it as each other process.
+/// process is the policy process and runs a call, each end of a turn after
+/// more than `POLICY_REDUCTIONS` reductions of the call ends the call as an
+/// overrun: a switch out for the budget, a wait in `receive`, a
+/// hibernation, a dirty IO call, a return, and an exception. Thus a call
+/// that waits often cannot pass the limit. Else a return or an exception
+/// that the call does not catch ends the call. The policy process then
+/// waits for the next request (see `Scheduler::end_policy_call`). An exit
+/// signal that ends the policy process ends it as each other process.
 ///
 /// # Examples
 ///
@@ -1940,14 +1943,13 @@ fn policy_turn(scheduler: &mut Scheduler, outcome: Outcome) -> Outcome {
         return outcome;
     }
     let end = match outcome {
+        Outcome::Exit { .. } if scheduler.current_process().exiting.is_some() => return outcome,
+        _ if scheduler.policy_overrun() => PolicyEnd::Overrun,
         Outcome::Exit {
             result: Some(value),
             ..
         } => PolicyEnd::Returned(value),
-        Outcome::Exit { reason, .. } if scheduler.current_process().exiting.is_none() => {
-            PolicyEnd::Raised(reason)
-        }
-        Outcome::Yield if scheduler.policy_overrun() => PolicyEnd::Overrun,
+        Outcome::Exit { reason, .. } => PolicyEnd::Raised(reason),
         outcome => return outcome,
     };
     scheduler.end_policy_call(end);

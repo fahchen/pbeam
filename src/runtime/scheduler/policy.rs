@@ -30,7 +30,8 @@ use crate::{
 };
 
 /// The largest number of reductions of one call of the policy code. A
-/// call that uses more is a denial when the policy process switches out.
+/// call that uses more is a denial at the end of the turn of the policy
+/// process, also when the call waits or returns in that turn.
 /// ERTS has no policy code and no such limit; PBeam takes the value of 25
 /// turns of `CONTEXT_REDS`.
 pub(in crate::runtime) const POLICY_REDUCTIONS: u64 = 100_000;

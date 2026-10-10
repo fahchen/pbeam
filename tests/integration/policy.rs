@@ -155,6 +155,17 @@ fn denies_an_exception_and_a_reduction_overrun_of_the_policy_code() {
 }
 
 #[test]
+fn denies_an_overrun_that_ends_in_a_receive_or_a_return() {
+    // A call that waits in a receive at the end of each turn, and a call
+    // that returns in the turn after its last switch out for the budget,
+    // are denied when they use more than 100000 reductions.
+    assert_eq!(
+        pbeam("overrun", "erl_policy").unwrap(),
+        "[ok,denied,denied]"
+    );
+}
+
+#[test]
 fn gives_the_requester_map_and_keeps_the_policy_process_state() {
     // The requester maps of a worker and of the root process are exact.
     // The crash of the worker, which is linked to the root process, does
