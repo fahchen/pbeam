@@ -183,6 +183,111 @@ fn dispatches_consolidated_protocols_as_pinned_erts() {
 }
 
 #[test]
+fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts() {
+    // `CalledModules.main/0` calls `String.length/1` of Elixir and
+    // `string:length/1` of OTP, and each one calls `unicode_util:gc/1`. The
+    // example does not import `unicode_util`. With only the modules that
+    // the example imports, the `pbeam` run stops with
+    // `unresolved external MFA unicode_util:gc/1` and status 1.
+    let erts = run_example(&["called_modules", "--erts"], None);
+    let pbeam = run_example(&["called_modules", "--no-build"], None);
+
+    assert_eq!(
+        parts(&erts),
+        (
+            "String.length: 5\\n:string.length: 5\\n".to_owned(),
+            String::new(),
+            Some(0)
+        ),
+        "ERTS"
+    );
+    assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
+
+    // The build writes each called module that the `pbeam` run does not get
+    // into `pbeam.unloaded`: the code path has no BEAM file for it, the
+    // PBeam loader does not load its BEAM file, or PBeam does not give the
+    // ERTS result of the module. PBeam starts no code server, so with
+    // `code_server`, `code:ensure_loaded/1` of a module that is not loaded
+    // raises `badarg` where ERTS returns `{error,nofile}`
+    // (`code_server.erl:84-85`, `code.erl:585-600`). Without it, the call
+    // stops the run with `unresolved external MFA code_server:get_mode/0`.
+    let unloaded = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/examples/called_modules/pbeam.unloaded"),
+    )
+    .unwrap();
+    let entries = unloaded
+        .lines()
+        .map(|line| {
+            let [module, file, reason] = line.split('\t').collect::<Vec<_>>()[..] else {
+                panic!("an unloaded line is not <module> <file> <reason>: {line:?}");
+            };
+            (module, file, reason)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|&(module, _, reason)| (module, reason))
+            .collect::<Vec<_>>(),
+        [
+            ("Dict", "no BEAM file in the code path"),
+            (
+                "Elixir.IEx.Evaluator",
+                "unsupported BEAM opcode 132 (bs_match_string)"
+            ),
+            ("HashDict", "no BEAM file in the code path"),
+            ("HashSet", "no BEAM file in the code path"),
+            ("calendar", "unsupported BEAM opcode 185 (bif3)"),
+            ("code_server", "PBeam has no code server"),
+            ("crypto", "unsupported BEAM opcode 149 (on_load)"),
+            (
+                "elixir_errors",
+                "unsupported BEAM opcode 132 (bs_match_string)"
+            ),
+            ("eval_bits", "unsupported BEAM opcode 118 (bs_get_float2)"),
+            ("inet_db", "unsupported BEAM opcode 185 (bif3)"),
+            ("io_lib_fread", "unsupported BEAM opcode 185 (bif3)"),
+            ("rand", "unsupported BEAM opcode 102 (fnegate)"),
+            (
+                "shell_docs",
+                "unsupported BEAM opcode 132 (bs_match_string)"
+            ),
+        ]
+    );
+
+    // Each BEAM file of the list gives the load error of its reason. A
+    // module that the loader learns to load fails this check, so the build
+    // must then give it to the `pbeam` run.
+    for (module, file, reason) in entries {
+        let Some((load_error, _instruction)) = reason.split_once(" (") else {
+            if module == "code_server" {
+                assert!(file.ends_with("/code_server.beam"), "{file}");
+            } else {
+                assert_eq!(file, "", "{module}");
+            }
+            continue;
+        };
+        assert!(
+            file.ends_with(&format!("/{module}.beam")),
+            "{module}: {file}"
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_pbeam"))
+            .args(["pbeam_boot", "start", "--", file])
+            .output()
+            .unwrap();
+        assert_eq!(
+            parts(&output),
+            (
+                String::new(),
+                format!("pbeam: cannot load BEAM modules: {load_error}\\n"),
+                Some(1)
+            ),
+            "{module}"
+        );
+    }
+}
+
+#[test]
 fn stops_terra_counter_when_the_local_terra_repository_is_not_at_the_pinned_commit() {
     // `scripts/terra.sh` gives the Terra sources to `terra_counter`. With
     // `PBEAM_TERRA_SRC`, it uses that local repository only when it is a git

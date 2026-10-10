@@ -1097,6 +1097,57 @@ pub(super) fn length(
     Ok(Value(Term::Integer(count + elements.len() as i64)))
 }
 
+/// Run `erlang:binary_part/3`: return the `length` bytes of a binary from
+/// byte `start`, as ERTS `binary_part_3` (`erl_bif_guard.c:455-458`) and
+/// `erts_binary_part` (`erl_bif_binary.c:1954-2012`) do. A negative length
+/// takes the bytes before `start`. A term that is not a bitstring, a start
+/// that is not a non-negative integer, a length that is not an integer,
+/// and a part that is not in the binary raise `badarg`. ERTS raises
+/// `badarg` for the length `-2^63` because its negation does not fit in a
+/// signed word (`erl_bif_binary.c:1974-1977`); PBeam gives the same result
+/// because 2^63 is more than each start. In a guard, the `gc_bif3`
+/// instruction goes to its fail label instead. ERTS returns a sub-binary of
+/// the argument; PBeam returns a copy of the bytes. PBeam has no bitstring
+/// that is not a binary and no bignum, so these ERTS `badarg` inputs cannot
+/// occur (rows "Bitstring terms" and "Integer range" of
+/// `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let hello = Term::Binary(b"hello".to_vec());
+/// let part = binary_part(&hello, &Term::Integer(5), &Term::Integer(-2));
+/// assert!(matches!(part, BifResult::Value(Term::Binary(bytes)) if bytes == b"lo"));
+/// let past = binary_part(&hello, &Term::Integer(1), &Term::Integer(5));
+/// assert!(matches!(past, BifResult::Raise { .. }));
+/// ```
+pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResult {
+    let (Term::Binary(bytes), Term::Integer(start), Term::Integer(length)) =
+        (binary, start, length)
+    else {
+        return BifResult::badarg();
+    };
+    let Ok(start) = u64::try_from(*start) else {
+        return BifResult::badarg();
+    };
+    let (start, length) = if *length < 0 {
+        let length = length.unsigned_abs();
+        let Some(start) = start.checked_sub(length) else {
+            return BifResult::badarg();
+        };
+        (start, length)
+    } else {
+        (start, *length as u64)
+    };
+    // The start is below 2^63 and the length is at most 2^63, so the sum
+    // does not overflow.
+    let end = start + length;
+    if end > bytes.len() as u64 {
+        return BifResult::badarg();
+    }
+    Value(Term::Binary(bytes[start as usize..end as usize].to_vec()))
+}
+
 /// Run `erlang:byte_size/1`: return the number of bytes of a binary, as
 /// ERTS `byte_size_1` (`erl_bif_guard.c:376-393`) and the JIT
 /// `emit_bif_byte_size` (`jit/arm/instr_guard_bifs.cpp:438-509`) do. A
