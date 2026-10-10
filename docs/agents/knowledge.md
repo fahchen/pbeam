@@ -119,9 +119,7 @@ Check the reduction budget before each unit of work that can grow with the input
 
 ## Published claims lack evidence checks
 
-Verify every acceptance, measurement, and comparison claim against its cited
-source before publishing it. State limits that weaken the claim. Name the
-baseline and record decisions that differ from the cited requirement.
+Verify every acceptance, measurement, and comparison claim against its cited source before publishing it. State limits that weaken the claim. Name the baseline and record decisions that differ from the cited requirement.
 
 ## Concurrent cache initialization races
 
