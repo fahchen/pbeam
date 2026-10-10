@@ -240,9 +240,9 @@ impl BeamProgram {
     /// `error:capability_denied` before it has an effect (row "Capability
     /// checks" of `docs/erts-differences.md`). The column "Capability" of
     /// `docs/effect-inventory.md` lists the entries that check a capability
-    /// now; the entries marked `ambient` have no check by decision, and the
-    /// entries marked `later` have no check yet (#335). With [`AllowAll`](crate::AllowAll),
-    /// each check passes, as a test of the checks needs. Before each
+    /// now; the entries marked `ambient` have no check by decision. With
+    /// [`AllowAll`](crate::AllowAll), each check passes, as a test of the
+    /// checks needs. Before each
     /// scheduling step, the launcher revokes the initial capabilities of each
     /// kind that [`Policy::revocations`] gives.
     ///

@@ -93,12 +93,11 @@ const NO_EFFECT: [&str; 2] = ["`none`", "`process.self`"];
 /// inventory names the capability that its entry checks, in its column
 /// "Capability". An entry whose authority is only `none` or `process.self`
 /// has no effect, and its cell is `none`. Each other entry is an effect
-/// entry: its cell lists each `kind:operation` that it checks, is
-/// `` `ambient`: Reason `` with a reason when it has no check by decision,
-/// or is `later` while a later batch of #335 adds its check. The integration
-/// test `effect_capability` calls each listed entry without its operation
-/// and gets `error:capability_denied`, and calls each `ambient` entry with
-/// no capability and gets the pinned ERTS result.
+/// entry: its cell lists each `kind:operation` that it checks, or is
+/// `` `ambient`: Reason `` with a reason when it has no check by decision.
+/// The integration test `effect_capability` calls each listed entry without
+/// its operation and gets `error:capability_denied`, and calls each
+/// `ambient` entry with no capability and gets the pinned ERTS result.
 #[test]
 fn effect_inventory_names_the_capability_of_each_effect_entry() {
     let mut rows = 0;
@@ -134,7 +133,6 @@ fn effect_inventory_names_the_capability_of_each_effect_entry() {
             });
             let valid = match capabilities.as_slice() {
                 ["`none`"] => !effect,
-                ["`later`"] => effect,
                 _ => effect && named,
             };
             assert!(valid, "docs/effect-inventory.md: {row}");

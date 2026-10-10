@@ -241,11 +241,13 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 22] = [
+const AMBIENT: [&str; 24] = [
+    "erlang:cancel_timer/2",
     "erlang:demonitor/1",
     "erlang:demonitor/2",
     "erlang:function_exported/3",
     "erlang:list_to_atom/1",
+    "erlang:module_loaded/1",
     "erlang:monotonic_time/1",
     "erlang:node/0",
     "erlang:node/1",
@@ -286,7 +288,7 @@ fn inventory_cells() -> Vec<(&'static str, &'static str)> {
 
 /// Return the `(entry, kind:operation)` pairs of the column "Capability" of
 /// the sections "BIFs" and "Native bindings" of the effect inventory. A
-/// cell is `none`, `later`, `` `ambient`: Reason ``, or a list of
+/// cell is `none`, `` `ambient`: Reason ``, or a list of
 /// `kind:operation` code spans.
 fn inventory_capabilities() -> BTreeSet<(String, String)> {
     let mut pairs = BTreeSet::new();
@@ -370,7 +372,7 @@ fn calls_each_ambient_entry_with_no_capability() {
     // calls: each `ambient` entry has no check.
     let program = program();
     let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
-                    nonode@nohost,nonode@nohost,true,effect_probe_ambient_atom,ok,\
+                    nonode@nohost,nonode@nohost,true,true,false,effect_probe_ambient_atom,ok,\
                     effect_probe_ambient,true,[{key,value}],value,true,true,reference]";
     assert_eq!(text(&run(&program, "ambient", &Grants(vec![]))), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
