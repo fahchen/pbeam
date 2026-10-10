@@ -270,6 +270,10 @@ name = "registry"
 path = "tests/integration/registry.rs"
 
 [[test]]
+name = "revoke"
+path = "tests/integration/revoke.rs"
+
+[[test]]
 name = "root_exit"
 path = "tests/integration/root_exit.rs"
 

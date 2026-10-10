@@ -3,6 +3,8 @@
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
 //! The `erlang`, `erts_internal`, `ets`, `lists`, `maps`, `os`, `re`, and
 //! `unicode` modules hold the BIF bodies that do not fit on one table line.
+//! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
+//! in `bif.tab`.
 
 use super::*;
 use crate::runtime::{host::output::IovecWrite, scheduler::Flushed};
@@ -14,6 +16,7 @@ mod iolist;
 mod lists;
 mod maps;
 mod os;
+mod pbeam_cap;
 mod persistent_term;
 mod re;
 mod unicode;
@@ -311,6 +314,9 @@ impl BeamProgram {
         name: &str,
         arguments: Vec<Term>,
     ) -> Result<BifResult, BeamError> {
+        if let ("pbeam_cap", "revoke", [holder, kind]) = (module, name, arguments.as_slice()) {
+            return pbeam_cap::revoke(scheduler, holder, kind);
+        }
         let mut context = BifContext {
             program: self,
             scheduler,
@@ -517,10 +523,14 @@ impl BeamProgram {
     }
 }
 
+/// The PBeam BIFs: functions of PBeam modules that ERTS does not have. They
+/// are not `bif.tab` entries, and no BEAM module defines them.
+const PBEAM_BIFS: [(&str, &str, u32); 1] = [("pbeam_cap", "revoke", 2)];
+
 /// Return whether an external call or a `bif` instruction goes to a BIF: the
 /// MFA is an entry of `BIFS`, the `bif.tab` entries, so it runs before the
-/// module code, as in ERTS. Any other MFA, also in `erlang`, runs the BEAM
-/// code of its module.
+/// module code, as in ERTS, or an entry of `PBEAM_BIFS`. Any other MFA,
+/// also in `erlang`, runs the BEAM code of its module.
 ///
 /// # Examples
 ///
@@ -528,12 +538,14 @@ impl BeamProgram {
 /// assert!(is_bif("erlang", "self", 0));
 /// assert!(is_bif("maps", "keys", 1));
 /// assert!(is_bif("lists", "keyfind", 3));
+/// assert!(is_bif("pbeam_cap", "revoke", 2));
 /// assert!(!is_bif("erlang", "spawn_monitor", 3));
 /// assert!(!is_bif("maps", "keys", 2));
 /// assert!(!is_bif("io", "put_chars", 2));
 /// ```
 pub(super) fn is_bif(module: &str, name: &str, arity: u32) -> bool {
     BIFS.binary_search(&(module, name, arity)).is_ok()
+        || PBEAM_BIFS.contains(&(module, name, arity))
 }
 
 /// The heavy BIFs: the `hbif` entries of the ERTS `bif.tab`

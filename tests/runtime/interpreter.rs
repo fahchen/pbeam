@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use super::bif::BIFS;
 use super::{
-    BeamProgram, Outcome, Scheduler, SecurityContext, call_arguments, function_at_label,
-    read_operand, write_operand,
+    BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -178,7 +177,7 @@ fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
     let mut scheduler = Scheduler::new(program.atoms.clone());
     let frame = program.frame("fun_probe", label, 1).unwrap();
     scheduler
-        .start(frame, vec![Term::Integer(1)], SecurityContext::default())
+        .start(frame, vec![Term::Integer(1)], Vec::new())
         .unwrap();
     scheduler.schedule_next().unwrap();
     assert!(matches!(

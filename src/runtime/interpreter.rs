@@ -1,5 +1,5 @@
 use super::{
-    capability::{AllowAll, Policy, Restriction, SecurityContext},
+    capability::{AllowAll, Capability, Policy, Restriction},
     host::output::IovecWrite,
     process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
     scheduler::{Received, Scheduler, Turn},
@@ -212,8 +212,8 @@ impl BeamProgram {
     ) -> Result<Term, BeamError> {
         let initial_mode = InitialMode::read();
         let mut scheduler = Scheduler::new(self.atoms.clone());
-        let security = SecurityContext::new(policy.initial());
-        let run = self.run_root(&mut scheduler, module, function, arguments, security);
+        let capabilities = policy.initial();
+        let run = self.run_root(&mut scheduler, module, function, arguments, capabilities);
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
         match scheduler.into_root_result() {
@@ -229,14 +229,14 @@ impl BeamProgram {
     }
 
     /// Run `Module:Function(Arguments...)` as the root process with the
-    /// security context `security` on `scheduler` until the run ends, as
-    /// `BeamProgram::execute` describes.
+    /// initial capabilities `capabilities` on `scheduler` until the run
+    /// ends, as `BeamProgram::execute` describes.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut scheduler = Scheduler::new(program.atoms.clone());
-    /// program.run_root(&mut scheduler, "process_probe", "main", &[], SecurityContext::default())?;
+    /// program.run_root(&mut scheduler, "process_probe", "main", &[], AllowAll.initial())?;
     /// assert!(scheduler.into_root_result().is_some());
     /// ```
     ///
@@ -250,13 +250,13 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arguments: &[Term],
-        security: SecurityContext,
+        capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
         let arity =
             u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
         let label = self.entry_label(module, function, arity)?;
         let frame = self.frame(module, label, arity)?;
-        scheduler.start(frame, arguments.to_vec(), security)?;
+        scheduler.start(frame, arguments.to_vec(), capabilities)?;
         while !scheduler.root_exited() {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
