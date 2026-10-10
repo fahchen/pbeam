@@ -9,6 +9,7 @@ use pbeam_runtime::{BeamProgram, Term};
 const BINARY_MATCH_PROBE: &[u8] =
     include_bytes!("../../fixtures/binary_match/binary_match_probe.beam");
 const BS_MATCH_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_match_probe.beam");
+const BS_GET_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_get_probe.beam");
 
 /// Evaluate an expression on the pinned ERTS with `binary_match_probe` in
 /// the code path and return its `~w` output.
@@ -528,4 +529,164 @@ fn reads_utf8_after_a_skip_to_an_unaligned_position_as_pinned_erts() {
         ]
     );
     assert_eq!(erts, b"[65,false,233,false,8364,128512,false]\n");
+}
+
+/// Run `bs_get_probe:Function` with each argument list, and return the
+/// results or the text of each error.
+fn bs_get_each(function: &str, calls: &[Vec<Term>]) -> Vec<Result<Term, String>> {
+    let program = BeamProgram::load(&[BS_GET_PROBE]).unwrap();
+    calls
+        .iter()
+        .map(|arguments| {
+            program
+                .execute("bs_get_probe", function, arguments)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+/// The atom `name` of `bs_get_probe`.
+fn bs_get_atom(name: &str) -> Term {
+    let program = BeamProgram::load(&[BS_GET_PROBE]).unwrap();
+    Term::Atom(program.atom(name).unwrap())
+}
+
+/// The tuple `{Head, Tail}` of two binaries.
+fn halves(head: &[u8], tail: &[u8]) -> Result<Term, String> {
+    Ok(Term::Tuple(vec![
+        Term::Binary(head.to_vec()),
+        Term::Binary(tail.to_vec()),
+    ]))
+}
+
+#[test]
+fn runs_bs_start_match4_bs_get_binary2_and_bs_get_tail_as_pinned_erts() {
+    // `bs_get_probe:split/2` runs `bs_start_match4` with `no_fail`, then
+    // `bs_get_binary2` with the size in `x1` and unit 8, and then
+    // `bs_get_tail`. A size that is not a non-negative integer fails the
+    // field size check (`emit_bs_get_field_size`, jit/arm/instr_bs.cpp:
+    // 38-116). A size larger than the rest fails in
+    // `erts_bs_get_binary_2` (erl_bits.c:400-424). 2^59 is an ERTS bignum.
+    let bytes = || Term::Binary(vec![1, 2, 3]);
+    let calls = [
+        vec![bytes(), Term::Integer(0)],
+        vec![bytes(), Term::Integer(1)],
+        vec![bytes(), Term::Integer(3)],
+        vec![bytes(), Term::Integer(4)],
+        vec![Term::Binary(Vec::new()), Term::Integer(0)],
+        vec![Term::Binary(Vec::new()), Term::Integer(1)],
+        vec![bytes(), Term::Integer(-1)],
+        vec![bytes(), bs_get_atom("short")],
+        vec![bytes(), Term::Integer(1 << 59)],
+        vec![bytes(), Term::Integer(1 << 62)],
+    ];
+    let short = || Ok(bs_get_atom("short"));
+    assert_eq!(
+        bs_get_each("split", &calls),
+        [
+            halves(b"", &[1, 2, 3]),
+            halves(&[1], &[2, 3]),
+            halves(&[1, 2, 3], b""),
+            short(),
+            halves(b"", b""),
+            short(),
+            short(),
+            short(),
+            short(),
+            short(),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_get_probe:split(B, N) || {B, N} <- [{<<1,2,3>>,0},{<<1,2,3>>,1},\
+             {<<1,2,3>>,3},{<<1,2,3>>,4},{<<>>,0},{<<>>,1},{<<1,2,3>>,-1},\
+             {<<1,2,3>>,short},{<<1,2,3>>,1 bsl 59},{<<1,2,3>>,1 bsl 62}]]"
+        ),
+        b"[{<<>>,<<1,2,3>>},{<<1>>,<<2,3>>},{<<1,2,3>>,<<>>},short,{<<>>,<<>>},\
+          short,short,short,short,short]\n"
+    );
+}
+
+#[test]
+fn multiplies_the_bs_get_binary2_size_by_its_unit_as_pinned_erts() {
+    // `bs_get_probe:split_units/2` runs `bs_get_binary2` with unit 16.
+    let calls = [
+        vec![Term::Binary(vec![1, 2, 3]), Term::Integer(1)],
+        vec![Term::Binary(vec![1, 2, 3, 4]), Term::Integer(2)],
+        vec![Term::Binary(vec![1, 2, 3]), Term::Integer(2)],
+    ];
+    assert_eq!(
+        bs_get_each("split_units", &calls),
+        [
+            halves(&[1, 2], &[3]),
+            halves(&[1, 2, 3, 4], b""),
+            Ok(bs_get_atom("short")),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_get_probe:split_units(B, N) || {B, N} <- [{<<1,2,3>>,1},{<<1,2,3,4>>,2},\
+             {<<1,2,3>>,2}]]"
+        ),
+        b"[{<<1,2>>,<<3>>},{<<1,2,3,4>>,<<>>},short]\n"
+    );
+}
+
+#[test]
+fn stops_at_a_bs_get_binary2_that_needs_a_bitstring() {
+    // `bs_get_probe:split_bits/2` runs `bs_get_binary2` with unit 1. ERTS
+    // gives the bitstring `<<0:3>>` for 3 bits. PBeam has no bitstring
+    // term, so it stops the run (row "Binary matching").
+    let calls: Vec<Vec<Term>> = [8, 16, 17, 3]
+        .into_iter()
+        .map(|size| vec![Term::Binary(vec![1, 2]), Term::Integer(size)])
+        .collect();
+    assert_eq!(
+        bs_get_each("split_bits", &calls),
+        [
+            halves(&[1], &[2]),
+            halves(&[1, 2], b""),
+            Ok(bs_get_atom("short")),
+            Err("unsupported bs_get_binary2 of 3 bits: needs a bitstring term".into()),
+        ]
+    );
+    assert_eq!(
+        reference("[bs_get_probe:split_bits(<<1,2>>, N) || N <- [8,16,17,3]]"),
+        b"[{<<1>>,<<2>>},{<<1,2>>,<<>>},short,{<<0:3>>,<<8,2:5>>}]\n"
+    );
+}
+
+#[test]
+fn resumes_a_match_context_and_reads_its_tail_as_pinned_erts() {
+    // `bs_get_probe:nibbles/2` gets the match context of `nibbles/1` and
+    // runs `bs_start_match4` with `resume`. At the fail label, it runs
+    // `bs_set_position` and then `bs_get_tail`. A tail of 12 bits is a
+    // bitstring in ERTS, so PBeam stops the run (row "Binary matching").
+    let calls: Vec<Vec<Term>> = [&b"a"[..], b"a\x12\xF3", b"a\x1F\x23", b"a\x12", b"b"]
+        .into_iter()
+        .map(|input| vec![Term::Binary(input.to_vec())])
+        .collect();
+    let nibbles = |values: &[i64], tail: &[u8]| {
+        Ok(Term::Tuple(vec![
+            Term::List(values.iter().copied().map(Term::Integer).collect()),
+            Term::Binary(tail.to_vec()),
+        ]))
+    };
+    assert_eq!(
+        bs_get_each("nibbles", &calls),
+        [
+            nibbles(&[], b""),
+            nibbles(&[2, 1], &[0xF3]),
+            Err("unsupported bs_get_tail of 12 bits: needs a bitstring term".into()),
+            nibbles(&[2, 1], b""),
+            Ok(bs_get_atom("none")),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_get_probe:nibbles(B) || B <- [<<\"a\">>,<<$a,16#12,16#F3>>,<<$a,16#1F,16#23>>,\
+             <<$a,16#12>>,<<\"b\">>]]"
+        ),
+        b"[{[],<<>>},{[2,1],<<243>>},{[1],<<242,3:4>>},{[2,1],<<>>},none]\n"
+    );
 }

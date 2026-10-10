@@ -59,8 +59,8 @@ pub fn boot_beam() -> &'static Path {
 
 /// The pinned OTP modules that `pbeam_boot` calls when it starts the
 /// `init` request process, `logger_server`, `application_controller`,
-/// `standard_error`, `erl_signal_server`, `user_sup`, `logger_sup`,
-/// `erl_signal_handler`, and the `default` logger handler. Without one of
+/// `standard_error`, `file_server_2`, `erl_signal_server`, `user_sup`,
+/// `logger_sup`, `erl_signal_handler`, and the `default` logger handler. Without one of
 /// them, the boot stops with `unresolved external MFA` of that module.
 ///
 /// # Examples
@@ -72,7 +72,7 @@ pub fn boot_beam() -> &'static Path {
 ///     .args(&beams)
 ///     .arg(boot_beam());
 /// ```
-pub const BOOT_MODULES: [&str; 41] = [
+pub const BOOT_MODULES: [&str; 42] = [
     "erlang",
     "prim_tty",
     "proc_lib",
@@ -86,6 +86,7 @@ pub const BOOT_MODULES: [&str; 41] = [
     "prim_tty_sighandler",
     "erl_signal_handler",
     "standard_error",
+    "file_server",
     "supervisor_bridge",
     "user_sup",
     "user_drv",

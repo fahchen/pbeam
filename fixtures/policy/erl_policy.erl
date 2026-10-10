@@ -1,6 +1,8 @@
 %% A policy module for policy_probe. The root process of each probe
 %% function gets the capabilities of initial/1, and each request of
-%% policy_probe names the answer of grant/3.
+%% policy_probe names the answer of grant/3. A request {revoke, Holder,
+%% Kind} revokes the copies of Kind of Holder and sends the result to the
+%% requester.
 -module(erl_policy).
 -export([initial/1, grant/3, noop/0]).
 
@@ -33,6 +35,11 @@ grant(_Kind, {answer, Answer}, _Requester) ->
     Answer;
 grant(env, home, _Requester) ->
     {grant, home()};
+grant(env, shared_home, _Requester) ->
+    {grant, (home())#{delegable => true}};
+grant(_Kind, {revoke, Holder, Kind}, #{pid := Pid}) ->
+    Pid ! {revoked, policy_revoke(Holder, Kind)},
+    deny;
 grant(_Kind, raise, _Requester) ->
     error(policy_bug);
 grant(_Kind, exit, _Requester) ->
@@ -72,6 +79,13 @@ grant(_Kind, {kill, Count}, _Requester) ->
     exit(self(), kill).
 
 noop() -> ok.
+
+policy_revoke(Holder, Kind) ->
+    try
+        pbeam_cap:policy_revoke(Holder, Kind)
+    catch
+        error:Reason -> {error, Reason}
+    end.
 
 home() ->
     #{kind => env, operations => [read], names => ["HOME"], delegable => false}.

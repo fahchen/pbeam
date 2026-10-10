@@ -1,6 +1,6 @@
-//! The BIFs `binary:split/2,3`: the Boyer-Moore and Aho-Corasick searches of
-//! ERTS `erl_bif_binary.c`, with their reduction budget and their traps, and
-//! the split results.
+//! The BIFs `binary:match/2` and `binary:split/2,3`: the Boyer-Moore and
+//! Aho-Corasick searches of ERTS `erl_bif_binary.c`, with their reduction
+//! budget and their traps, and the match and split results.
 
 use super::BifResult::Value;
 use super::*;
@@ -14,6 +14,12 @@ const TRIM: u8 = 0x02;
 /// The option `trim_all`: remove each empty part
 /// (`BF_FLAG_SPLIT_TRIM_ALL`, `erl_bif_binary.c:1120`).
 const TRIM_ALL: u8 = 0x04;
+/// PBeam only: the search gives the result of `binary:match/2`, not of
+/// `binary:split/2,3`. ERTS keeps the result functions of the BIF in the
+/// search context instead (`bf_context_init` with
+/// `do_match_not_found_result` and `do_match_single_result`,
+/// `erl_bif_binary.c:1559-1560`, `1647-1673`).
+const MATCH: u8 = 0x08;
 
 /// The search steps for each reduction: `BM_LOOP_FACTOR` and
 /// `AC_LOOP_FACTOR` (`erl_bif_binary.c:635`, `824`), both 10.
@@ -66,7 +72,8 @@ struct AcNode {
 /// `BinaryFindContext` keeps it (`erl_bif_binary.c:252-310`). A trap gives
 /// it to the next turn as a term ([`Find::to_term`]).
 struct Find {
-    /// The options `global`, `trim`, and `trim_all`.
+    /// The options `global`, `trim`, and `trim_all`, and the result kind
+    /// [`MATCH`].
     flags: u8,
     /// The end of the search scope (`hsend`).
     end: u64,
@@ -845,6 +852,62 @@ pub(super) fn split(
     pattern: &Term,
     options_term: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
+    find_first_turn(process, subject, pattern, options_term, 0)
+}
+
+/// Run `binary:match/2` as ERTS `binary_match` does with no options
+/// (`erl_bif_binary.c:1540-1582`): a subject that is not a binary and a
+/// pattern that is not valid raise `badarg` with no cost. Then the first
+/// match of the search gives `{Position, Length}`, and no match gives
+/// `nomatch` (`erl_bif_binary.c:1647-1673`). A pattern of one binary runs
+/// the Boyer-Moore search, and two or more binaries run the Aho-Corasick
+/// search, which gives the first match that starts first, and of these the
+/// longest. When the search steps of the turn end, the call uses all
+/// reductions and traps to the export `erlang:binary_find_trap/3`
+/// ([`find_trap`]).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {1, 2}
+/// let result = match_2(&mut process, &Term::Binary(b"abcab".to_vec()), &Term::Binary(b"bc".to_vec()))?;
+/// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(match_2(&mut process, &Term::Binary(b"ab".to_vec()), &Term::Binary(vec![]))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn match_2(
+    process: &mut ProcessState,
+    subject: &Term,
+    pattern: &Term,
+) -> Result<BifResult, BeamError> {
+    find_first_turn(process, subject, pattern, None, MATCH)
+}
+
+/// Check the arguments of `binary:match/2` or `binary:split/2,3`, and run
+/// the first turn of its search with the flags of the options and `kind`
+/// ([`MATCH`] or 0).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = find_first_turn(&mut process, &subject, &pattern, None, MATCH)?;
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+fn find_first_turn(
+    process: &mut ProcessState,
+    subject: &Term,
+    pattern: &Term,
+    options_term: Option<&Term>,
+    kind: u8,
+) -> Result<BifResult, BeamError> {
     let Term::Binary(bytes) = subject else {
         return Ok(BifResult::badarg());
     };
@@ -854,7 +917,7 @@ pub(super) fn split(
         return Ok(BifResult::badarg());
     };
     let mut find = Find {
-        flags,
+        flags: flags | kind,
         end,
         pos: start as i64,
         node: ROOT,
@@ -871,7 +934,7 @@ pub(super) fn split(
     })
 }
 
-/// Continue `binary:split/2,3` in the export `erlang:binary_find_trap/3`, as
+/// Continue `binary:match/2` or `binary:split/2,3` in the export `erlang:binary_find_trap/3`, as
 /// `binary_find_trap` does (`erl_bif_binary.c:1935-1952`), with the budget
 /// of the next turn. ERTS keeps the compiled pattern, and PBeam compiles the
 /// pattern again with no cost. When the search steps end again, the call
@@ -902,7 +965,7 @@ pub(super) fn find_trap(
     })
 }
 
-/// Return the trap of `binary:split/2,3` to `erlang:binary_find_trap/3`
+/// Return the trap of `binary:match/2` or `binary:split/2,3` to `erlang:binary_find_trap/3`
 /// with the subject, the state, and the pattern.
 ///
 /// # Examples
@@ -922,7 +985,7 @@ fn find_trap_result(subject: &Term, find: &Find, pattern: &Term) -> BifResult {
 /// (`erl_bif_binary.c:110-121`, `1433-1538`). The turn has 10 search steps
 /// for each reduction of the budget, and at least 1. A search turn with no
 /// restart bumps one reduction for each 10 steps that it used, and returns
-/// the parts. A restart returns `None` with no bump.
+/// the match result or the parts. A restart returns `None` with no bump.
 ///
 /// # Examples
 ///
@@ -953,7 +1016,12 @@ fn find_turn(
         };
         match search {
             Search::Restart => None,
+            Search::NotFound if find.flags & MATCH != 0 => Some(Term::static_atom("nomatch")),
             Search::NotFound => Some(not_found(find.flags, subject)),
+            Search::Found(pos, len) if find.flags & MATCH != 0 => Some(Term::Tuple(vec![
+                Term::Integer(pos as i64),
+                Term::Integer(len as i64),
+            ])),
             Search::Found(pos, len) => Some(split_once(find.flags, subject, pos, len)),
             Search::FoundAll => split_all(find, subject, &mut reds),
         }

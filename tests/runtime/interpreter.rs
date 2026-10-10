@@ -1569,6 +1569,31 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         "unsupported bs_start_match3 that copies the match context in X(0) to X(1)"
     );
     assert_eq!(
+        run(vec![Instruction::BinaryMatchResume {
+            source: Operand::X(0),
+            destination: Operand::X(1),
+        }]),
+        "unsupported bs_start_match4 resume that copies the match context in X(0) to X(1)"
+    );
+    assert_eq!(
+        run(vec![Instruction::BinaryMatchResume {
+            source: atom("a"),
+            destination: Operand::X(0),
+        }]),
+        "invariant error: Value(Atom(\"a\")) holds Atom(\"a\"), not a match context"
+    );
+    // `bs_start_match4` with `no_fail` has the fail label 0. The compiler
+    // gives it only a binary or a match context.
+    assert_eq!(
+        run(vec![Instruction::BinaryMatchStart {
+            fail_label: 0,
+            source: atom("a"),
+            destination: Operand::X(1),
+        }]),
+        "invariant error: bs_start_match3 with no fail label got Atom(\"a\"), not a binary or a \
+         match context"
+    );
+    assert_eq!(
         run(vec![Instruction::BinarySetPosition {
             context: Operand::X(0),
             position: atom("a"),

@@ -53,6 +53,7 @@ const OPCODE_SELECT_TUPLE_ARITY: u8 = 60;
 const OPCODE_JUMP: u8 = 61;
 const OPCODE_CATCH: u8 = 62;
 const OPCODE_CATCH_END: u8 = 63;
+/// `bs_get_binary2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:449).
 const OPCODE_BS_GET_BINARY2: u8 = 119;
 const OPCODE_BS_SKIP_BITS2: u8 = 120;
 /// `bs_get_integer2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:447).
@@ -81,6 +82,7 @@ const OPCODE_FMUL: u8 = 100;
 const OPCODE_FDIV: u8 = 101;
 const OPCODE_GC_BIF1: u8 = 124;
 const OPCODE_GC_BIF2: u8 = 125;
+/// `bs_get_tail Ctx Dst Live` (genop.tab:591-593).
 const OPCODE_BS_GET_TAIL: u8 = 165;
 /// `bs_start_match3 Fail Bin Live Dst` (genop.tab:597).
 const OPCODE_BS_START_MATCH3: u8 = 166;
@@ -88,6 +90,7 @@ const OPCODE_BS_START_MATCH3: u8 = 166;
 const OPCODE_BS_GET_POSITION: u8 = 167;
 /// `bs_set_position Ctx Pos` (genop.tab:603-605).
 const OPCODE_BS_SET_POSITION: u8 = 168;
+/// `bs_start_match4 Fail Live Src Dst` (genop.tab:613-617).
 const OPCODE_BS_START_MATCH4: u8 = 170;
 /// `bs_get_utf8 Fail Ctx Live Flags Dst` (genop.tab:501).
 const OPCODE_BS_GET_UTF8: u8 = 138;
@@ -897,9 +900,83 @@ pub(crate) enum Instruction {
     /// Erlang: `kind(<<_/utf8, _/binary>>) -> utf8;` compiles to
     /// `{test,bs_start_match3,{f,5},1,[{x,0}],{x,0}}`, as
     /// `unicode_util:cp/1` does for its argument.
+    ///
+    /// The decoder also makes this instruction from `bs_start_match4`
+    /// (opcode 170) with a fail label or the atom `no_fail`, as the ERTS
+    /// loader makes `bs_start_match3` from it (JIT jit/arm/ops.tab:
+    /// 1036-1039; emu ops.tab:1243-1246). `no_fail` gives the fail label 0:
+    /// the compiler uses it only for a source that is a binary or a match
+    /// context (beam_ssa_codegen.erl:2303-2306).
+    ///
+    /// Encoding of `bs_start_match4`: opcode, fail label or atom, unsigned
+    /// live count, source register, destination register. Example:
+    /// `bs_get_probe:split/2` in `fixtures/binary_match/bs_get_probe.beam`
+    /// has `[0xAA, 0x32, 0x20, 0x03, 0x03]`: atom 3 (`no_fail`), live
+    /// count 2, and the source and destination `x0`.
+    ///
+    /// Erlang: `case Bin of <<Head:N/binary, Tail/binary>> -> ...` after
+    /// the guard `is_binary(Bin)` compiles to
+    /// `{bs_start_match4,{atom,no_fail},2,{x,0},{x,0}}`.
     BinaryMatchStart {
         fail_label: u32,
         source: Operand,
+        destination: Operand,
+    },
+    /// Continues a match with the match context in `source`
+    /// (`bs_start_match4` with the atom `resume`, opcode 170). On a 64-bit
+    /// system, the ERTS loader removes it when `source` is `destination`,
+    /// and else makes it `move` (JIT jit/arm/ops.tab:1041-1045; emu
+    /// ops.tab:1248-1252). The compiler uses it only for a source that is
+    /// a match context (beam_ssa_codegen.erl:2300-2302).
+    ///
+    /// Encoding: as `BinaryMatchStart` from `bs_start_match4`. Example:
+    /// `bs_get_probe:nibbles/2` has `[0xAA, 0xB2, 0x20, 0x03, 0x03]`: atom
+    /// 11 (`resume`), live count 2, and the source and destination `x0`.
+    ///
+    /// Erlang: a local function that gets the match context of its caller,
+    /// such as `nibbles(<<N:4, Rest/bits>>, Acc)` after the call
+    /// `nibbles(Rest, [])` with `Rest` of a match, compiles to
+    /// `{bs_start_match4,{atom,resume},2,{x,0},{x,0}}`.
+    BinaryMatchResume {
+        source: Operand,
+        destination: Operand,
+    },
+    /// Writes the bits after the position of the match context in
+    /// `context` to `destination` as a binary, and keeps the position
+    /// (`bs_get_tail`, opcode 165).
+    ///
+    /// Encoding: opcode, context, destination register, unsigned live
+    /// count. The decoder skips the live count. Example:
+    /// `bs_get_probe:split/2` has `[0xA5, 0x03, 0x03, 0x20]`, which writes
+    /// the rest of the match context in `x0` to `x0`.
+    ///
+    /// Erlang: `<<Head:N/binary, Tail/binary>>` compiles to
+    /// `{bs_get_tail,{x,0},{x,0},2}` for `Tail`.
+    BinaryGetTail {
+        context: Operand,
+        destination: Operand,
+    },
+    /// Reads `Size * unit` bits from the match context in `context` and
+    /// writes them to `destination` as a binary, or jumps to `fail_label`
+    /// (`bs_get_binary2`, opcode 119). `size` is a register or a literal.
+    ///
+    /// Encoding: opcode, fail label, context, unsigned live count, size,
+    /// unsigned unit, unsigned flags, destination register. The decoder
+    /// skips the live count and the flags, as the ERTS loader does (JIT
+    /// jit/arm/ops.tab:1002-1003). Example: `bs_get_probe:split/2` has
+    /// `[0x77, 0x35, 0x57, 0x03, 0x10, 0x20, 0x13, 0x80, 0x00, 0x13]`: fail
+    /// label 3, the typed register `x0`, live count 2, size `x1`, unit 8,
+    /// flags 0, and the destination `x1`. The size `all` decodes as
+    /// `Instruction::Unsupported`.
+    ///
+    /// Erlang: `<<Head:N/binary, Tail/binary>>` compiles to
+    /// `{test,bs_get_binary2,{f,3},2,[{tr,{x,0},...},{x,1},8,{field_flags,[]}],{x,1}}`
+    /// for `Head`.
+    BinaryGetBinary {
+        fail_label: u32,
+        context: Operand,
+        size: Operand,
+        unit: u64,
         destination: Operand,
     },
     /// Writes the bit position of the match context in `context` to
@@ -1505,6 +1582,73 @@ pub(super) fn parse_code(
                     fail_label,
                     source,
                     destination: read_register(data, &mut cursor)?,
+                }
+            }
+            OPCODE_BS_START_MATCH4 => {
+                // `Fail` is a label, or the atom `no_fail` or `resume`
+                // (genop.tab:613-617). `None` is `resume`.
+                let fail_label = if data
+                    .get(cursor)
+                    .is_some_and(|first| first & COMPACT_TAG_MASK == TAG_ATOM)
+                {
+                    let atom = atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?;
+                    match atom.name() {
+                        "no_fail" => Some(0),
+                        "resume" => None,
+                        other => {
+                            return Err(error(format!(
+                                "unsupported BEAM bs_start_match4 fail operand {other}"
+                            )));
+                        }
+                    }
+                } else {
+                    Some(read_operand(data, &mut cursor, TAG_LABEL)? as u32)
+                };
+                skip_live_registers(data, &mut cursor)?;
+                let source = read_register(data, &mut cursor)?;
+                let destination = read_register(data, &mut cursor)?;
+                match fail_label {
+                    Some(fail_label) => Instruction::BinaryMatchStart {
+                        fail_label,
+                        source,
+                        destination,
+                    },
+                    None => Instruction::BinaryMatchResume {
+                        source,
+                        destination,
+                    },
+                }
+            }
+            OPCODE_BS_GET_TAIL => {
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let destination = read_register(data, &mut cursor)?;
+                skip_live_registers(data, &mut cursor)?;
+                Instruction::BinaryGetTail {
+                    context,
+                    destination,
+                }
+            }
+            OPCODE_BS_GET_BINARY2 => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                skip_live_registers(data, &mut cursor)?;
+                let size = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let unit = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let _flags = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let destination = read_register(data, &mut cursor)?;
+                // ERTS loads the size `all` as `i_bs_get_binary_all2` (JIT
+                // jit/arm/ops.tab:999-1000). The pinned compiler makes it
+                // only with `no_ssa_opt`.
+                if matches!(&size, Operand::Value(Term::Atom(all)) if all.name() == "all") {
+                    Instruction::Unsupported(opcode)
+                } else {
+                    Instruction::BinaryGetBinary {
+                        fail_label,
+                        context,
+                        size,
+                        unit,
+                        destination,
+                    }
                 }
             }
             OPCODE_BS_GET_POSITION => {
@@ -2313,14 +2457,11 @@ fn skip_unsupported_instruction(
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
-        OPCODE_BS_GET_BINARY2 => Some(7),
         OPCODE_BS_SKIP_BITS2 => Some(5),
         // `bs_get_integer2` is in `io_lib`.
         OPCODE_BS_GET_INTEGER2 => Some(7),
         // `is_any_native_record` is in `io_lib`.
         OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
-        OPCODE_BS_START_MATCH4 => Some(4),
-        OPCODE_BS_GET_TAIL => Some(3),
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
         OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
         OPCODE_BS_SKIP_UTF8 => Some(4),

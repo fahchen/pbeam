@@ -11,7 +11,7 @@ use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
-use crate::term::{Fun, MAX_ATOM_CHARACTERS, ProcessId, Reference};
+use crate::term::{Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference};
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
 /// gives a runtime error.
@@ -1732,6 +1732,28 @@ pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> B
     }
 }
 
+/// Run `erlang:list_to_tuple(List)`: return a tuple with the elements of
+/// the proper list `List`, as `list_to_tuple_1` (`bif.c:3789-3812`) does.
+/// `[]` gives `{}`. A term that is not a proper list, and a list with more
+/// than [`MAX_TUPLE_SIZE`] elements, raise `badarg`. The BIF uses no
+/// reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = Term::List(vec![Term::static_atom("a"), Term::Integer(1)]);
+/// assert!(matches!(list_to_tuple(&list), BifResult::Value(Term::Tuple(elements)) if elements.len() == 2));
+/// assert!(matches!(list_to_tuple(&Term::static_atom("a")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn list_to_tuple(list: &Term) -> BifResult {
+    match list {
+        Term::List(elements) if elements.len() <= MAX_TUPLE_SIZE => {
+            Value(Term::Tuple(elements.clone()))
+        }
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `erlang:posixtime_to_universaltime/1`: return the UTC date and time
 /// `{{Year, Month, Day}, {Hour, Minute, Second}}` of `time`, the seconds
 /// since 1970-01-01 00:00:00 UTC, with [`time::seconds_to_univ`]. Each
@@ -2223,6 +2245,10 @@ fn is_process_info_item(item: &Term) -> bool {
 /// `process` is not a pid. The items that PBeam supports are in
 /// [`ProcessState::info`].
 ///
+/// For another process, the caller then needs the `process` capability with
+/// `inspect`, else the BIF raises `error:capability_denied` before it looks
+/// up the process (row "Capability checks" of `docs/erts-differences.md`).
+///
 /// - For the caller, first handle the signals that the caller may have sent
 ///   to itself, up to a flush signal (`pi_maybe_flush_signals`,
 ///   `erl_bif_info.c:1198-1268`); without such signals only fetch. The BIF
@@ -2271,6 +2297,9 @@ pub(super) fn process_info(
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
+    if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
+        return Ok(denied);
+    }
     let caller = scheduler.current_process_mut();
     // ponytail: lists of items, other items, and the frames of another process need more state; see "BIF arguments" in docs/erts-differences.md.
     let unsupported = || {
@@ -2342,35 +2371,47 @@ pub(super) fn process_info(
 /// signals that the caller sent before. Else the result is `true`. A
 /// result traps to `erlang:bif_handle_signals_return/2` when the caller has
 /// incoming signals. A term that is not a pid raises `badarg`. PBeam cannot
-/// represent a remote pid.
+/// represent a remote pid. For another process, the caller needs the
+/// `process` capability with `inspect`, else the BIF raises
+/// `error:capability_denied` before it looks up the process.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let alive = is_process_alive(&mut context, &Term::Pid(child));
+/// let alive = is_process_alive(&mut context, &Term::Pid(child))?;
 /// assert!(matches!(alive, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(is_process_alive(&mut context, &Term::Integer(1)), BifResult::Raise { .. }));
+/// assert!(matches!(is_process_alive(&mut context, &Term::Integer(1))?, BifResult::Raise { .. }));
 /// ```
-pub(super) fn is_process_alive(context: &mut BifContext<'_>, pid: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for a full atom table.
+pub(super) fn is_process_alive(
+    context: &mut BifContext<'_>,
+    pid: &Term,
+) -> Result<BifResult, BeamError> {
     let Term::Pid(id) = pid else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
     if *id == scheduler.current_process_mut().id {
-        return Value(Term::static_atom("true"));
+        return Ok(Value(Term::static_atom("true")));
+    }
+    if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
+        return Ok(denied);
     }
     let alive = match scheduler.process(*id) {
         None => "false",
         Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => {
-            return Trap {
+            return Ok(Trap {
                 module: "erts_internal",
                 function: "is_process_alive",
                 arguments: vec![pid.clone()],
-            };
+            });
         }
         Some(_) => "true",
     };
-    signals_return(scheduler, pid, Term::static_atom(alive))
+    Ok(signals_return(scheduler, pid, Term::static_atom(alive)))
 }
 
 /// Return `value` as the result of a BIF that read the state of the process
