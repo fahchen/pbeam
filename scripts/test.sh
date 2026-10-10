@@ -16,13 +16,17 @@ else
   # By default, cargo-llvm-cov runs `cargo clean -p pbeam-runtime`, which removes the incremental state of the crate.
   # --no-clean keeps that state, so rustc reuses the unchanged code of a restored CI cache or of the last local run.
   # The profile files of the last run must go, or their counts would cover lines that no test runs now.
+  # CARGO_TARGET_DIR or a cargo config can move the coverage directory.
+  # The pin makes cargo-llvm-cov use the directory that the cleanup below removes files from.
+  cov_dir=target/llvm-cov-target
+  export CARGO_LLVM_COV_TARGET_DIR=$cov_dir
   cargo llvm-cov clean --profraw-only
-  rm -f target/llvm-cov-target/*.profdata
+  rm -f "$cov_dir"/*.profdata
   # A change of the profile or the features gives the test executables new file names, and the old executables stay.
   # cargo-llvm-cov reports each executable whose name matches a workspace target, so an old executable would add uncovered lines.
   # Each executable of the workspace has no extension; dependency files such as proc-macro libraries have one and stay.
   # rustc links the executables again from the incremental state.
-  deps=target/llvm-cov-target/debug/deps
+  deps=$cov_dir/debug/deps
   if [[ -d "$deps" ]]; then
     find "$deps" -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
   fi
