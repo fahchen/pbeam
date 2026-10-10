@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261010: Preserve descendant revocation after holder exit
+
+**Problem:** A delegation chain could lose the record needed to revoke a surviving descendant when an intermediate holder exited.
+
+**Root Cause:** The design removed capability copies with the holder but did not define the lifetime of delegation records separately.
+
+**Fix:** Keep enough delegation ancestry to reach surviving descendants after an intermediate holder exits. Add this exit case to the revocation task.
+
+**Guardrail:** Test revocation through an exited intermediate holder before accepting a delegation design.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/314#issuecomment-6096908500>
+
 ## 20261009: Check complete follow-up coverage
 
 **Problem:** The PR description omitted two follow-up tasks for discovered gaps and kept an incomplete owner action.
