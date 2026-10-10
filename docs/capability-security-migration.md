@@ -49,17 +49,242 @@ Acceptance: the M2 checks retain their exact results. The inventory names every 
 
 ## Transition 2: process identity and authority
 
-Use a subject with realm identity, process identity, and process incarnation. The first deployment can use one application realm. This does not establish tenant isolation.
+The subject is the process. The first deployment has one realm, and the process lifetime of the security context replaces a separate incarnation (see [Transition 2 decisions](#transition-2-decisions)). This does not establish tenant isolation.
 
-The security context refers to usable grants, delegable authority, and a budget account. Only the trusted launcher issues initial authority within host policy. A manifest requests authority; it does not issue authority. Guest terms cannot construct grants or choose an issuer.
+The security context holds the usable and delegable capabilities of the process. A budget account comes with the first budget gate. Only the trusted launcher issues initial authority within host policy. A manifest requests authority; it does not issue authority. Guest terms cannot construct grants or choose an issuer.
 
 Separate use from delegation. A parent can create a restricted worker only within its delegation ceiling. A use grant alone does not grant delegation. Child authority, lease, and budget cannot exceed the validated delegation template.
 
-Attach the context to the process. Scheduler migration moves it with process ownership. Neither thread-local state nor a worker's current PID is an authority source. A restart uses a validated template and a new incarnation. It cannot recover revoked authority.
+Attach the context to the process. Scheduler migration moves it with process ownership. Neither thread-local state nor a worker's current PID is an authority source. A restart is a new process. It gets only the capabilities that its spawner can delegate at that time, so it cannot recover authority that was revoked from its spawner.
 
 Reserve child budgets from a shared parent account or reference that account. Never copy an independent full budget on spawn. Define resource ownership and quota failure behavior before enforcing each quota.
 
 Acceptance: forged grants fail. Spawn cannot increase authority or duplicate a budget. Migration preserves the subject. Restart does not restore revoked grants. Trusted execution retains the accepted process behavior.
+
+### Transition 2 decisions
+
+Status: confirmed by the owner in the design review of [#310](https://github.com/fahchen/pbeam/issues/310). These decisions answer the "First grant" choices for transition 2. Transition 2 has no budget gate: the "First budget gate" choices wait in the [backlog](backlog.md). A later consumer that needs a different answer changes the decision in its own design task.
+
+Transition 2 first adds a replaceable authorization foundation, and every effect entry calls it. The default policy permits all operations, so a run with the default policy gives the same results as the pinned ERTS. When a check permits an operation, the result must be identical to the pinned ERTS result. A denial is behavior that ERTS does not have, so security-specific negative tests are its oracle.
+
+#### Granting and checking
+
+Granting and checking are two separate steps. In a capability model, to hold a capability is the authority: a capability is a reference that a guest cannot forge, and it carries its own constraints. Thus the complex decision occurs at grant time, when the issuer selects the capability and its constraints. A check is a mechanical test of the capability that the caller holds.
+
+| | Granting | Checking |
+| --- | --- | --- |
+| Question | Which process holds which capability, with which constraints? | Does a capability of the caller permit this use? |
+| Time | Issue, delegation at spawn, and revocation. | Each effect, for example a file read, a terminal write, or a spawn. |
+| Actor | The launcher (initial capabilities), the policy process (at run time), and a delegating process (it can only reduce). | The runtime, in the scheduling turn of the caller. |
+| Speed | Not frequent. It can be slow and can run any policy code. | Frequent. It must be fast and sends no message. |
+| Result | The security context of the process gets or loses a capability. | Permitted: the same result as ERTS. Denied: `error:capability_denied`. |
+
+#### Capability kinds
+
+One capability covers one kind of resource. A capability has a kind, a set of permitted operations, and constraints. A check passes when the caller holds a capability of the kind, the operation is in the permitted set, and the arguments are within the constraints.
+
+| Capability | Operations | Constraint fields | Protected effect entries (examples) |
+| --- | --- | --- | --- |
+| `process` | `spawn`, `link`, `monitor`, `exit_other` | `modules`: the modules that a child can start in, or `any`. | `erlang:spawn/3`, `erlang:spawn_opt/4`, `erlang:link/1`, `erlang:monitor/2`, `erlang:exit/2` |
+| `terminal` | `write`, `read`, `raw_mode`, `window_size` | None. | `prim_tty:write_nif/2`, `prim_tty:read_nif/3`, `prim_tty:tty_select/2`, `prim_tty:tty_init/2`, `prim_tty:tty_window_size/1` |
+| `port` | `spawn`, `command`, `close` | `executables`: the permitted executable files. | `erlang:open_port/2`, `erlang:port_command/2`, `erlang:port_close/1` |
+| `env` | `read`, `write` | `names`: the permitted variable names. | `os:getenv/1`, `os:putenv/2` |
+| `signal` | `handle`, `ignore` | `signals`: the permitted host signals. | `os:set_signal/2` |
+| `file` (later) | `read`, `write`, `list` | `root`: a handle of a granted directory. | File operations relative to a directory handle (`openat`). |
+
+A capability is a runtime value, not a term. BEAM code cannot construct one: `{grant, file_read, "/"}` is only a tuple, and no BIF makes a capability from a term. The runtime keeps these fields:
+
+```text
+Capability {
+  id:          unique in the run, never given again
+  kind:        process | terminal | port | env | signal
+  ops:         the set of permitted operations
+  constraints: the constraint fields of the kind
+  delegable:   true when the holder can give it to a child
+  source:      launcher | policy | process(parent)
+}
+```
+
+Task #334 adds `kind`, `ops`, `constraints`, and `delegable`. The `id` and `source` fields have no consumer before revocation, so #336 adds them. The issuer interface of #334 is the Rust trait `Policy` with one function, `initial`, which returns the capabilities of the root process. The default `AllowAll` policy gives a delegable capability of each kind with all operations and the constraint `any`. A Rust host gives another policy to `BeamProgram::execute_with_policy`. #337 adds the requester argument, `grant/3`, and the policy module in BEAM code.
+
+#### Subject, security context, and lifetime
+
+The subject is the process. The security context is one new `ProcessState` field (`src/runtime/process.rs`). It holds the copies of the capabilities of the process: the capabilities that the process can use and the capabilities that it can delegate. The context moves with the process when the multiple-scheduler work (M10) moves process ownership between threads. Thread-local state and the current pid of a worker are not authority sources.
+
+The capabilities live as long as the process. When a process exits, the runtime releases all its copies. No check finds a capability by the pid number, so a process that gets a pid number again cannot get the capabilities of an old process. The delegation records of a copy (its source and its receivers) hold pids. PBeam never gives a pid number again: `Scheduler::next_pid` (`src/runtime/scheduler.rs`) takes each pid from a `u64` counter (row "Process and reference counters" of [ERTS differences](erts-differences.md)). Thus a record cannot name a later process, and transition 2 has no incarnation field. If PBeam uses process table slots again as ERTS does, the delegation records need an incarnation (see the backlog). A run has one isolation domain, so transition 2 has no realm. A realm comes with its first consumer, for example a host that runs plugins that do not trust each other, each with its own policy (see the backlog).
+
+This decision replaces the realm, process, and incarnation identity that an earlier version of this contract asked for. No transition 2 consumer reads a realm or an incarnation, and the process lifetime of the context gives the same guarantee.
+
+#### Issuers
+
+The launcher issues the initial capabilities when it makes the root process: it calls `initial/1` of the policy module. The launcher also starts the policy process and gives it the issuer identity. At run time, the policy process issues capabilities with `grant/3` and revokes them. Only the policy process can call the issue interface. A guest process cannot call it.
+
+Example: a launcher runs a third-party plugin `Plugin.main/0`. The root gets `terminal` with `write` (use only) and `process` with `spawn` (use and delegate). A worker of the plugin requests a `file` capability to read `/data/plugin_a/config.json`. The policy finds the path in the permitted area and grants `file` with `read`, constrained to that directory. Later the plugin behaves incorrectly, and the policy process revokes that capability. The next file read of the worker raises `error:capability_denied`.
+
+#### Inheritance and delegation
+
+A child gets the delegable capabilities of its parent, as capabilities that it can use and delegate. A capability that the parent can only use does not go to the child. When the launcher gives the root a delegable `process` capability with `spawn`, `link`, and `monitor`, an OTP supervisor tree works with no change.
+
+The `spawn_opt` option `{capabilities, ...}` gives the child a part of the delegable capabilities of the parent. It can only reduce operations and constraints. A request for more operations or wider constraints than the parent can delegate raises `error:capability_denied`, and no process is made. Delegation from a process that is not the parent, for example a broker, waits in the backlog. The policy process can grant a capability at run time, so this need is smaller.
+
+`erlang:spawn/3`, `erlang:spawn_link/3`, and `erlang:spawn_opt/4` make each process through `Scheduler::spawn` (`src/runtime/scheduler.rs`), and that function has one caller (`src/runtime/interpreter.rs:1872`). Thus the first check, `process` with `spawn` in `Scheduler::spawn`, covers each spawn BIF. `Scheduler::spawn` also makes the link of `spawn_link` and the `link` option, and the monitor of the `monitor` option. Thus a spawn with a link also checks `process` with `link`, and a spawn with a monitor also checks `process` with `monitor`, before the spawn takes a pid. A spawn cannot make a link or a monitor that `erlang:link/1` or `erlang:monitor/2` would deny. The `modules` constraint is not yet complete for OTP process starts: `proc_lib:spawn_opt/4` spawns `proc_lib:init_p/5` and gives the application MFA as an argument (`lib/stdlib/src/proc_lib.erl:269`), so a check of the spawn module finds `proc_lib`. A permission for `proc_lib` alone permits each MFA through this wrapper. Decision of #334: the constraint compares only the module of the MFA that the spawn BIF gets, and it does not look into the arguments of a start wrapper. Thus `proc_lib` starts are checked as `proc_lib`, and a fun that `erlang:spawn/1` starts is checked as `erlang`, because `erlang:spawn/1` spawns `erlang:apply/2` (`erts/preloaded/src/erlang.erl:10601-10602` at `OTP-29.1.1`). A rule for the own modules of a guest (#338) lists the start wrappers that it permits, for example `proc_lib` and `erlang`. The alternative, a check of the MFA in the wrapper arguments, needs the argument layout of each wrapper: `proc_lib:init_p/3` and `init_p/5`, then `gen:init_it/6` and the callback module of `supervisor`. That layout is internal OTP code, which changes between OTP releases, and a wrapper can start code through more levels than one. The module check does not limit authority: the child gets at most the delegable capabilities of its parent, and the parent can call each loaded module in its own process. An OTP supervisor restart is also a spawn by the supervisor process. The supervisor applies the start MFA of the child (`lib/stdlib/src/supervisor.erl:1034-1036` at `OTP-29.1.1`), and `proc_lib:start_link/5` calls `erlang:spawn_opt/4` with `link` and `monitor` (`lib/stdlib/src/proc_lib.erl:266-269`, `511-514`). A restarted child is a new process. It gets only the capabilities that the supervisor can delegate at the restart. Thus a restart cannot recover a capability that a revoker took from the supervisor or from a process above it, because the revocation removes the copy of the supervisor. A revocation of only the copy of the child does not remove the copy of the supervisor, so a restarted child gets that capability again. To take a capability from each later child too, the revoker revokes it at the supervisor. A capability that the policy granted to the old child at run time does not go to the new child; the new child requests it again.
+
+#### Revocation
+
+Each copy of a capability records its source and the child processes that got a copy of it. The policy process, the launcher, and the delegating process can revoke a capability. A delegating process can revoke only a capability that it gave. Another revoker gets `error:capability_denied`.
+
+A revocation is a signal through the signal queue of [#221](https://github.com/fahchen/pbeam/issues/221). When the holder handles the signal, it deletes its copy and sends the revocation to each downstream process. As with the other control signals of ERTS, a revocation takes effect when the target handles the signal, not when the revoker sends it. A revocation does not end the holder. It does not close the resources that the holder already opened: transition 5 owns resource recovery. The cost of a revocation increases with the number of holders, and with multiple schedulers the signal goes between threads as other signals do. In return, a check finds the capabilities of the caller in its own copies, not in a run-wide capability table.
+
+The exit of a holder must not stop a cascade. When a holder exits, it releases its copies, but the receivers of those copies can live longer. A later revocation from a process above the holder must still reach each downstream copy. Thus the delegation records of a holder stay usable after its exit, for example because the exiting holder gives its receivers to the source of each copy. The source can also exit first, and the launcher or the policy process can be the source, so #336 decides the exact form of these records.
+
+Transition 2 has no lease. A lease waits in the backlog.
+
+#### Denial result
+
+A denied operation raises `error:capability_denied` before it has an effect. For example, a denied spawn raises it before it takes a pid. The reason names no capability and no policy. ERTS has no authorization policy, so this result is PBeam-specific. The task that adds the first check records it in [ERTS differences](erts-differences.md).
+
+#### Policy module, policy process, and policy table
+
+A policy is a BEAM module in any BEAM language, for example Elixir or Erlang. It has two callbacks:
+
+```elixir
+defmodule PBeam.Policy do
+  @type kind :: :process | :terminal | :port | :env | :signal
+  @type requester :: %{pid: pid(), parent: pid() | :none, initial_call: mfa()}
+
+  # At run start: the initial capabilities of the root process.
+  @callback initial(requester()) :: [PBeam.Capability.t()]
+
+  # At run time: a process requests a capability of a kind.
+  @callback grant(kind(), request :: map(), requester()) :: {:grant, PBeam.Capability.t()} | :deny
+end
+```
+
+The launcher loads the policy module and starts a trusted policy process before the root process. The policy process is outside the supervisor tree, so a supervisor shutdown does not end it. The application must not end or replace it. Because a guest with `process` `exit_other` can send an exit signal to any pid, #337 defines how the runtime protects the policy process, for example an `exit_other` constraint that excludes trusted processes. The policy code runs at grant time only. A return value that is not a grant form, an exception, or a reduction limit overrun is a denial.
+
+The policy process publishes data to a shared policy table, like `persistent_term`. Writes are not frequent and can be slow. A write replaces the table, and the old table is freed when it has no reader, as the `persistent_term` table pointer and its update after thread progress do (`erts/emulator/beam/erl_bif_persistent.c:187`, `773-779` at `OTP-29.1.1`). Reads take no lock, so multiple schedulers can read at the same time. A check reads the capabilities of the caller and the table directly. It sends no message and runs no policy code.
+
+The effects of the policy process are checked against the capabilities that the launcher gave it, not against the rules that it publishes. When the policy process stops, the published table stays valid, and a new run-time grant request is denied. The policy process task decides whether the launcher restarts the policy process and whether `erlang:processes/0` shows it.
+
+An opt-in extension can ask the policy at check time. A capability can have a mark that makes its check call the policy BEAM code, which returns `allow` or `deny`. Only a capability with this mark sends a message at check time. The default is off. Transition 2 has no scope syntax: the policy code examines the operation name and the arguments, and the runtime needs only the operation and a summary of the arguments.
+
+A run with the default trusted configuration needs no new API, and its behavior is the same as on ERTS. In a restricted run, BEAM code calls a PBeam-specific module (name not decided, for example `pbeam_cap`) to request and revoke a capability, and uses the `spawn_opt` option `{capabilities, Map}`. #334 adds this option: `Map` maps a kind atom to a map with the optional keys `operations`, `delegable`, and the constraint field of the kind, and an omitted key keeps the value of the parent copy (row "Capability checks" of [ERTS differences](erts-differences.md)). ERTS does not have these interfaces. The task that adds each interface records it in [ERTS differences](erts-differences.md).
+
+#### Granting procedure
+
+The names in this procedure are examples.
+
+```text
+# 1. Run start: the launcher issues the initial capabilities.
+start_run(policy_module):
+    policy_proc = spawn_trusted(PolicyProcess, policy_module)   # outside the supervisor tree
+    root = new_process(entry)
+    root.caps = policy_module.initial(requester(root))           # each source = launcher
+    run(root)
+
+# 2. A parent makes a child: inherit by default, reduce on request.
+spawn(parent, {M, F, A}, opts):
+    check(parent, process, spawn, %{module: M})                  # check: can the parent spawn M?
+    if link in opts: check(parent, process, link)                # spawn_link and the link option
+    if monitor in opts: check(parent, process, monitor)          # the monitor option
+    requested = opts[:capabilities]                              # optional: a part for the child
+    if requested != nil:
+        for kind in keys(requested):
+            if no cap in parent.caps where cap.delegable and cap.kind == kind:
+                raise error:capability_denied                                # kind not delegable
+    child_caps = []
+    for cap in parent.caps where cap.delegable:
+        if requested == nil:
+            child_caps += copy(cap, source: {process, parent.pid})          # inherit as is
+        else if r = requested[cap.kind]:
+            if r.ops ⊆ cap.ops and r.constraints ⊆ cap.constraints:          # reduce only
+                child_caps += copy(cap, ops: r.ops, constraints: r.constraints,
+                                   delegable: r.delegable ?? cap.delegable,
+                                   source: {process, parent.pid})
+            else:
+                raise error:capability_denied                                # widen: denied
+    child = new_process({M, F, A}, caps: child_caps)
+    parent.delegated[cap.id] += child.pid for each copied cap               # for revocation
+    return child.pid
+
+# 3. Run time: a process requests a new capability from the policy.
+request(caller, kind, request):                                  # example: read /data/plugin_a
+    reply = call(policy_proc, {grant, kind, request, requester(caller)})
+    case policy_module.grant(kind, request, requester(caller)):  # runs in the policy process
+        {grant, cap} -> send_signal(caller, {add_cap, cap with source: policy})
+        deny         -> raise error:capability_denied
+
+# 4. Revocation: an issuer or the delegating process.
+revoke(revoker, holder, cap_id):
+    cap = holder.caps[cap_id]
+    allowed = revoker is policy_proc or launcher
+              or cap.source == {process, revoker.pid}            # a delegator revokes only its own
+    if not allowed: raise error:capability_denied
+    send_signal(holder, {revoke, cap_id})
+
+on_signal(holder, {revoke, cap_id}):                             # when the holder handles it
+    delete holder.caps[cap_id]
+    for child in holder.delegated[cap_id]:                       # cascade downstream
+        send_signal(child, {revoke, copied_id(child, cap_id)})
+
+# 5. Process exit: release all capabilities.
+on_exit(process):
+    keep process.delegated usable for later cascades             # #336 decides the form
+    drop process.caps
+```
+
+#### Components and the check flow
+
+```mermaid
+flowchart LR
+    L["Launcher<br/>pbeam binary or M8 launcher"]
+    P["Policy process<br/>outside the supervisor tree<br/>has the issuer identity"]
+    T[("Policy table<br/>like persistent_term<br/>few writes, fast concurrent reads")]
+    subgraph G["Guest process"]
+      C["Security context<br/>ProcessState field<br/>usable copies<br/>delegable copies"]
+    end
+    E["Effect entry<br/>BIF, native, host operation, VM operation"]
+    R["Result"]
+    L -- "initial capabilities at root creation" --> C
+    L -- "starts it, gives the issuer identity" --> P
+    P -- "publishes rules, few writes" --> T
+    P -- "grants and revokes at run time, signals" --> C
+    E -- "1. reads the copies of the caller" --> C
+    E -- "2. reads the table, no message" --> T
+    E -- "permitted: ERTS result<br/>denied: error:capability_denied" --> R
+```
+
+#### Inheritance, delegation, and revocation
+
+```mermaid
+sequenceDiagram
+    participant L as Launcher
+    participant R as Root process
+    participant W as Worker
+    participant X as Child of the worker
+    participant P as Policy process
+    L->>R: initial terminal write (use)<br/>process spawn (use and delegate)
+    R->>W: spawn copies the delegable capabilities<br/>(process spawn)
+    W->>X: spawn copies the delegable capabilities
+    P->>W: run-time grant of file read in /data/plugin_a/
+    Note over W: each process keeps its own copies<br/>and records the source and the receivers
+    R->>W: revoke process spawn (signal)
+    W->>X: cascade the revocation (signal)
+    Note over W,X: after the signal, the next spawn<br/>raises error:capability_denied
+    Note over W: at exit, the process releases all its copies
+```
+
+#### Implementation tasks
+
+The implementation tasks of [m6-e1] are in this order:
+
+1. [#334](https://github.com/fahchen/pbeam/issues/334) Add capability types and the policy interface, checked at spawn. It adds the capability kinds, the security context field, the replaceable policy interface with an allow-all default, inheritance, the `{capabilities, ...}` reduction, and the `process` `spawn` check in `Scheduler::spawn`. Negative tests use a Rust test policy that denies one operation. Blocked by this design.
+2. [#335](https://github.com/fahchen/pbeam/issues/335) Check every effect entry against its capability. Batches by effect inventory class. The inventory test fails when an effect entry has no check. Blocked by #334.
+3. [#336](https://github.com/fahchen/pbeam/issues/336) Record delegation and revoke capabilities with signals. Blocked by #334, and parallel with #335.
+4. [#337](https://github.com/fahchen/pbeam/issues/337) Run a policy module, a policy process, and a shared policy table. A policy in Elixir and a policy in Erlang both work. Blocked by #334 and #336.
+5. [#338](https://github.com/fahchen/pbeam/issues/338) Add the first audit rules with an Elixir policy, for example "a guest can only write to the terminal and spawn its own modules", with negative tests and an ERTS comparison of the permitted part. Blocked by #335 and #337.
+
+With the default policy, each task keeps every existing pinned-ERTS comparison result.
 
 ## Transition 3: authorized terminal effects and providers
 
@@ -154,10 +379,10 @@ Resolve each choice in its consuming issue and design change. Do not encode an a
 
 | Consumer | Required decision |
 | --- | --- |
-| First grant | Scope syntax, subset rules, issuer model, lease clock, and revocation representation. |
+| First grant | Scope syntax, subset rules, issuer model, lease clock, and revocation representation. Transition 2: see [Transition 2 decisions](#transition-2-decisions). |
 | First protected IO request | Entry list, trusted correlation storage, forwarding and batching rules, denial results, and service authority. |
 | First resource handle | Opaque representation, generation reuse, transfer rules, ownership, and error mapping. |
-| First budget gate | Quota unit, reservation ownership, excess behavior, and shared allocation accounting. |
+| First budget gate | Quota unit, reservation ownership, excess behavior, and shared allocation accounting. Transition 2 has no budget gate: see [Transition 2 decisions](#transition-2-decisions) and the [backlog](backlog.md). |
 | First queued operation | Dispatch linearization, policy changes, cancellation, cost settlement, and completion cleanup. |
 | First constrained filesystem or network provider | Supported platform, enforceable semantics, dependency configuration, and real bypass tests. |
 | First isolated extension | OS process, WASM, or another boundary and its tested guarantees. |

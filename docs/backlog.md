@@ -302,6 +302,45 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a change of the pinned OTP version. Run the reproduction again. If ERTS raises `badarg`, put the input back into the live reference run of `logger_start_probe:ordered/0`, remove the PBeam-only test, and change the row.
 - **Source:** investigation of a flaky reference test in the review of #155.
 
+## Capability security
+
+### Add a lease to a capability
+
+- After the design of #310, a capability stays valid until a revocation or the exit of its holder. A lease ends a capability at a set time.
+- **Reason:** the owner put the lease in the backlog in the design review of #310 (question 7). The revocation signal of #336 covers the current needs.
+- **Option:** an end time on the run clock `Timers::now` (`src/runtime/timer.rs`), which is the host monotonic `Instant` from the run start. The host system clock can go back, so it is not a good lease clock.
+- **Trigger:** a consumer must take back authority at a set time without a revoker.
+- **Source:** design review of #310 (PR #314).
+
+### Limit resources with budgets and quotas
+
+- Transition 2 has no budget gate. The "First budget gate" choices of `docs/capability-security-migration.md` are open: the quota unit, the reservation ownership, the excess behavior, and the accounting of shared allocations (questions 9 to 12 of the design review of #310).
+- **Evidence:** at its process limit, ERTS raises `error:system_limit` from the spawn BIF and sends "Too many processes" to the logger (`erts/emulator/beam/erl_process.c:12537-12540` at `OTP-29.1.1`). A probe with `erl +S 1 +P 1024` gives `system_limit` from `spawn` and `spawn_link`. This is the preferred excess behavior of a process quota. The migration contract requires that a child refers to a shared parent account and never copies a full budget.
+- **Trigger:** a consumer must limit the resources that a guest uses.
+- **Source:** design review of #310 (PR #314).
+
+### Delegate a capability from a process that is not the parent
+
+- After the design of #310, a process gets a capability only from its parent at spawn (#334), from the launcher, or from the policy process at run time (#337).
+- **Option:** a broker process gives one of its capabilities to a new child of another process, after the broker agrees explicitly.
+- **Reason:** no consumer needs it. A run-time grant of the policy process covers most requests for a capability from another source.
+- **Trigger:** a real consumer that a run-time grant of the policy process cannot serve.
+- **Source:** design review of #310 (question 17, PR #314).
+
+### Add realm and incarnation identity to the subject
+
+- After the design of #310, the subject is the process, and a run has one realm. The security context lives as long as the process, and no check finds a capability by the pid number. The delegation records hold pids, and PBeam never gives a pid number again (`Scheduler::next_pid`), so a record cannot name a later process.
+- **Reason:** no consumer reads a realm or an incarnation.
+- **Trigger:** a host that runs plugins that do not trust each other, each with its own policy; a lookup of authority by pid; PBeam uses process table slots again as ERTS does; or completion routing of transition 6 that needs an incarnation.
+- **Source:** design review of #310 (question 2, PR #314).
+
+### Add a text syntax for capability scopes
+
+- After the design of #310, the policy code examines the operation name and the arguments, and each capability kind has data constraint fields. The runtime needs only the operation and a summary of the arguments, so no scope syntax exists.
+- **Reason:** no consumer reads a scope from text.
+- **Trigger:** the launcher and manifest work (M8) must read capability constraints from a manifest or a configuration file, or a policy that is not BEAM code.
+- **Source:** design review of #310 (question 4, PR #314).
+
 ## Tests and tooling
 
 ### Load-check every pinned OTP module that loads today
