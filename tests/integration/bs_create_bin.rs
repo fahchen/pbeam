@@ -1096,7 +1096,16 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
             "{function}{arguments:?}"
         );
     }
-    let calls: Vec<String> = cases
+    // The arm64 JIT of the macOS arm64 target fails a size of 2^52 or more
+    // with a unit other than 1 (jit/arm/instr_bs.cpp:1685). The x86_64 JIT
+    // fails only when the size times the unit overflows 64 bits
+    // (jit/x86/instr_bs.cpp:1942-1943), so ERTS on an x86_64 host stops at
+    // the allocation. Compare these cases with ERTS only on arm64.
+    let reference_cases: Vec<&FailureCase> = cases
+        .iter()
+        .filter(|(.., value)| cfg!(target_arch = "aarch64") || *value != int(1 << 52))
+        .collect();
+    let calls: Vec<String> = reference_cases
         .iter()
         .map(|(function, arguments, ..)| {
             let arguments: Vec<String> = arguments.iter().map(render).collect();
@@ -1106,7 +1115,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
             )
         })
         .collect();
-    let expected: Vec<String> = cases
+    let expected: Vec<String> = reference_cases
         .iter()
         .map(
             |(function, arguments, reason, segment, operation, info, value)| {

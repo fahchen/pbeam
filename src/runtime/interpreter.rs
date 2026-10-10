@@ -2838,7 +2838,11 @@ impl BinaryPart<'_> {
 /// integer that is not negative, else it fails with `system_limit` for a
 /// positive bignum and with `badarg` for each other term
 /// (`BSC_REASON_DEPENDS`, jit/beam_jit_common.cpp:968-975). For a unit
-/// other than 1, a size of 2^52 or more fails with `system_limit`.
+/// other than 1, a size of 2^52 or more fails with `system_limit`, as the
+/// arm64 JIT checks it (jit/arm/instr_bs.cpp:1685). The x86_64 JIT fails
+/// only on an overflow of the size times the unit
+/// (jit/x86/instr_bs.cpp:1942-1943) and then stops at the allocation; row
+/// "Binary construction" of `docs/erts-differences.md` records it.
 ///
 /// # Examples
 ///
