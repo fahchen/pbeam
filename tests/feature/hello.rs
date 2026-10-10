@@ -331,7 +331,10 @@ fn prints_help_and_exits_successfully() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Load BEAM files and run a function as the root process."));
     assert!(stdout.contains("Each argument is an atom that the loaded modules hold"));
-    assert!(stdout.contains("Usage: pbeam <MODULE> <FUNCTION> [ATOM]... -- <BEAM_FILE>..."));
+    assert!(
+        stdout.contains("Usage: pbeam [OPTIONS] <MODULE> <FUNCTION> [ATOM]... -- <BEAM_FILE>...")
+    );
+    assert!(stdout.contains("--policy <MODULE>"));
     assert!(stdout.contains("-h, --help"));
     assert!(output.stderr.is_empty());
 }

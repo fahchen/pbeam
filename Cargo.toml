@@ -53,6 +53,10 @@ name = "log"
 path = "tests/feature/log.rs"
 
 [[test]]
+name = "policy_option"
+path = "tests/feature/policy_option.rs"
+
+[[test]]
 name = "run_end"
 path = "tests/feature/run_end.rs"
 
