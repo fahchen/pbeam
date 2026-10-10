@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 15
     env:
       MISE_AUTO_INSTALL: "0"
-      # Measurement for #354: setup (1), no Rust build cache.
+      # Measurement for #354: setup (3), a dependency cache without incremental compilation.
       # A restored target/ is useful only when rustc reuses the unchanged code of pbeam-runtime. The value is explicit, so that no default of the runner or the profile can disable it.
       CARGO_INCREMENTAL: "0"
     steps:
@@ -59,7 +59,35 @@ jobs:
       - name: Install Rust check components
         run: mise run setup
 
+      # Each run saves its own entry, because an entry is immutable. A run restores the newest entry of its own ref, else the newest entry of main. A pull request can read the entries of main, but it cannot write them.
+      # Cargo fingerprints still rebuild each changed crate, so a restored entry cannot hide a compile error.
+      - name: Restore Rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: |
+            target
+            !target/llvm-cov-target/*.profraw
+            !target/llvm-cov-target/*.profdata
+            !target/llvm-cov-target/debug/deps/*-????????????????
+          key: ${{ runner.os }}-deps-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-deps-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.ref }}-
+            ${{ runner.os }}-deps-${{ hashFiles('Cargo.lock', 'mise.toml') }}-refs/heads/main-
+
       - name: Run repository checks
         env:
           TASK: ${{ steps.select.outputs.task }}
         run: mise run "$TASK"
+
+      # An exact key hit is a re-run of the same commit, so the build did not change.
+      - name: Save Rust build cache
+        if: ${{ !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: |
+            target
+            !target/llvm-cov-target/*.profraw
+            !target/llvm-cov-target/*.profdata
+            !target/llvm-cov-target/debug/deps/*-????????????????
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
