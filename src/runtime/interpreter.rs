@@ -2,7 +2,7 @@ use super::{
     capability::{AllowAll, Policy, Restriction},
     host::output::IovecWrite,
     process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
-    scheduler::{Received, Scheduler, Turn},
+    scheduler::{PolicyEnd, Received, Scheduler, Turn},
     tty::{InitialMode, Ttys},
 };
 use crate::{
@@ -42,6 +42,15 @@ pub struct BeamProgram {
     /// The atom table of the loaded modules. ERTS has one atom table for
     /// each emulator, so each run starts its own table from a copy of it.
     atoms: AtomTable,
+}
+
+/// The issuer of the initial capabilities of a run.
+#[derive(Clone, Copy)]
+enum Issuer<'a> {
+    /// A Rust policy of the host.
+    Host(&'a dyn Policy),
+    /// A policy module in BEAM code, which the policy process runs.
+    Module(&'a str),
 }
 
 /// Why a process stopped running on the scheduler.
@@ -213,9 +222,77 @@ impl BeamProgram {
         arguments: &[Term],
         policy: &dyn Policy,
     ) -> Result<Term, BeamError> {
+        self.execute_issued(module, function, arguments, Issuer::Host(policy))
+    }
+
+    /// Run an exported function as the root process, as
+    /// [`BeamProgram::execute`] does, with the policy module `policy`, a
+    /// loaded BEAM module in any BEAM language. The module exports
+    /// `initial/1` and `grant/3`.
+    ///
+    /// Before the root process, the launcher makes the policy process, a
+    /// trusted process outside each supervisor tree. It calls
+    /// `policy:initial(Requester)` with the requester map of the root
+    /// process, `#{pid => <0.0.0>, parent => none, initial_call => {Module,
+    /// Function, Arity}}`. The value is a list of capability maps, each
+    /// with the keys `kind`, `operations`, `delegable`, and the constraint
+    /// field of the kind, with the values of the `{capabilities, Map}` spawn
+    /// option. The root process gets these capabilities. A call of
+    /// `pbeam_cap:request(Kind, Request)` in a process waits until the
+    /// policy process calls `policy:grant(Kind, Request, Requester)` with
+    /// the requester map of the process. A `{grant, Capability}` value adds
+    /// the capability to the process through a grant signal, and the call
+    /// returns `ok`. Each other value, an exception, and a call that uses
+    /// more than 100000 reductions deny the request: the call raises
+    /// `error:capability_denied`. The policy code runs with all
+    /// capabilities.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let result = program.execute_with_policy_module("policy_probe", "main", &[], "erl_policy")?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`BeamProgram::execute`]. A policy module that is not
+    /// loaded or that does not export `initial/1` or `grant/3` gives the
+    /// error `missing BEAM module M` or `missing export M:F/A`. When the
+    /// call of `initial/1` does not give a list of capability maps, raises
+    /// an exception, uses more than 100000 reductions, or ends with the
+    /// policy process, the run gives the error `the policy denied the root
+    /// process: <cause>`, and the root process does not start. When the
+    /// call waits and no process can run, the run gives the error `the
+    /// policy process waits in initial/1`.
+    pub fn execute_with_policy_module(
+        &self,
+        module: &str,
+        function: &str,
+        arguments: &[Term],
+        policy: &str,
+    ) -> Result<Term, BeamError> {
+        self.execute_issued(module, function, arguments, Issuer::Module(policy))
+    }
+
+    /// Run an exported function as the root process with the initial
+    /// capabilities of `issuer`, as [`BeamProgram::execute_with_policy`] and
+    /// [`BeamProgram::execute_with_policy_module`] describe.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let result = program.execute_issued("process_probe", "main", &[], Issuer::Host(&AllowAll))?;
+    /// ```
+    fn execute_issued(
+        &self,
+        module: &str,
+        function: &str,
+        arguments: &[Term],
+        issuer: Issuer,
+    ) -> Result<Term, BeamError> {
         let initial_mode = InitialMode::read();
         let mut scheduler = Scheduler::new(self.atoms.clone());
-        let run = self.run_root(&mut scheduler, module, function, arguments, policy);
+        let run = self.run_root(&mut scheduler, module, function, arguments, issuer);
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
         match scheduler.into_root_result() {
@@ -231,50 +308,91 @@ impl BeamProgram {
     }
 
     /// Run `Module:Function(Arguments...)` as the root process with the
-    /// initial capabilities of `policy` on `scheduler` until the run ends, as
-    /// `BeamProgram::execute` describes. Before each scheduling step, the
-    /// launcher revokes the initial capabilities of each kind that
-    /// `Policy::revocations` gives.
+    /// initial capabilities of `issuer` on `scheduler` until the run ends, as
+    /// `BeamProgram::execute` describes. With a Rust policy, the launcher
+    /// revokes the initial capabilities of each kind that
+    /// `Policy::revocations` gives before each scheduling step. With a
+    /// policy module, the launcher makes the policy process first and the
+    /// root process when `initial/1` returns. Before each scheduling step,
+    /// it starts the `grant/3` call of the next request when the policy
+    /// process waits (see `Scheduler::next_policy_request`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut scheduler = Scheduler::new(program.atoms.clone());
-    /// program.run_root(&mut scheduler, "process_probe", "main", &[], &AllowAll)?;
+    /// program.run_root(&mut scheduler, "process_probe", "main", &[], Issuer::Host(&AllowAll))?;
     /// assert!(scheduler.into_root_result().is_some());
     /// ```
     ///
     /// # Errors
     ///
     /// The errors of `BeamProgram::execute`, except the root process
-    /// results.
+    /// results, and the errors of the policy module of
+    /// `BeamProgram::execute_with_policy_module`.
     fn run_root(
         &self,
         scheduler: &mut Scheduler,
         module: &str,
         function: &str,
         arguments: &[Term],
-        policy: &dyn Policy,
+        issuer: Issuer,
     ) -> Result<(), BeamError> {
         let arity =
             u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
         let label = self.entry_label(module, function, arity)?;
         let frame = self.frame(module, label, arity)?;
-        scheduler.start(frame, arguments.to_vec(), policy.initial())?;
+        let mut root = match issuer {
+            Issuer::Host(policy) => {
+                scheduler.start(frame, arguments.to_vec(), policy.initial())?;
+                None
+            }
+            Issuer::Module(policy) => {
+                self.entry_label(policy, "grant", 3)?;
+                let initial = self.entry_label(policy, "initial", 1)?;
+                let initial = self.frame(policy, initial, 1)?;
+                scheduler.start_policy(initial, (module, function, arguments.len()))?;
+                Some(frame)
+            }
+        };
         while !scheduler.root_exited() {
+            if let Some(initial) = scheduler.take_policy_initial() {
+                let capabilities = initial.map_err(|cause| {
+                    error(format!("the policy denied the root process: {cause}"))
+                })?;
+                let frame = root.take().expect("initial/1 returns once");
+                scheduler.start(frame, arguments.to_vec(), capabilities)?;
+            }
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
-            scheduler.revoke_issued(&policy.revocations());
+            match issuer {
+                Issuer::Host(policy) => scheduler.revoke_issued(&policy.revocations()),
+                Issuer::Module(policy) => {
+                    if let Some(arguments) = scheduler.next_policy_request() {
+                        let frame = self.mfa_frame(policy, "grant", 3)?;
+                        scheduler.begin_policy_call(frame, arguments);
+                    }
+                }
+            }
             scheduler.complete_dirty_writes();
             match scheduler.schedule_next()? {
-                Turn::Run => match self.run(scheduler)? {
-                    Outcome::Wait => scheduler.park_current(),
-                    Outcome::Hibernate => scheduler.hibernate_current(),
-                    Outcome::Yield => scheduler.yield_current(),
-                    Outcome::Exit { reason, result } => scheduler.finish_current(reason, result),
-                    Outcome::DirtyWrite { write, tail } => scheduler.start_dirty_write(write, tail),
-                },
+                // A message woke the policy process, but it has no call.
+                Turn::Run if scheduler.policy_idle() => scheduler.park_current(),
+                Turn::Run => {
+                    let outcome = self.run(scheduler)?;
+                    match policy_turn(scheduler, outcome) {
+                        Outcome::Wait => scheduler.park_current(),
+                        Outcome::Hibernate => scheduler.hibernate_current(),
+                        Outcome::Yield => scheduler.yield_current(),
+                        Outcome::Exit { reason, result } => {
+                            scheduler.finish_current(reason, result)
+                        }
+                        Outcome::DirtyWrite { write, tail } => {
+                            scheduler.start_dirty_write(write, tail)
+                        }
+                    }
+                }
                 Turn::Done => {}
                 Turn::Idle => {
                     let wait = scheduler.timers.wait_time(scheduler.timers.now());
@@ -286,6 +404,9 @@ impl BeamProgram {
                     }
                 }
             }
+        }
+        if root.is_some() {
+            return Err(error("the policy process waits in initial/1"));
         }
         Ok(())
     }
@@ -1783,6 +1904,15 @@ impl BeamProgram {
                 });
                 Ok(Some(Outcome::Yield))
             }
+            BifResult::AwaitGrant => {
+                process.pending_bif = Some(PendingBif {
+                    module: "pbeam_cap",
+                    function: "await_grant",
+                    arguments: Vec::new(),
+                    tail,
+                });
+                Ok(Some(Outcome::Wait))
+            }
             BifResult::Exited(reason) => Ok(Some(Outcome::Exit {
                 reason,
                 result: None,
@@ -1790,6 +1920,38 @@ impl BeamProgram {
             BifResult::DirtyWrite(write) => Ok(Some(Outcome::DirtyWrite { write, tail })),
         }
     }
+}
+
+/// Return the outcome of a turn of the current process, `outcome`, after
+/// the policy process ends its call of the policy code. When the current
+/// process is the policy process and runs a call, a return or an exception
+/// that it does not catch ends the call, and so does a switch out after
+/// more than `POLICY_REDUCTIONS` reductions of the call. The policy process
+/// then waits for the next request (see `Scheduler::end_policy_call`). An
+/// exit signal that ends the policy process ends it as each other process.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let outcome = policy_turn(&mut scheduler, program.run(&mut scheduler)?);
+/// ```
+fn policy_turn(scheduler: &mut Scheduler, outcome: Outcome) -> Outcome {
+    if !scheduler.policy_running() {
+        return outcome;
+    }
+    let end = match outcome {
+        Outcome::Exit {
+            result: Some(value),
+            ..
+        } => PolicyEnd::Returned(value),
+        Outcome::Exit { reason, .. } if scheduler.current_process().exiting.is_none() => {
+            PolicyEnd::Raised(reason)
+        }
+        Outcome::Yield if scheduler.policy_overrun() => PolicyEnd::Overrun,
+        outcome => return outcome,
+    };
+    scheduler.end_policy_call(end);
+    Outcome::Wait
 }
 
 /// Enter `frame`: a tail call replaces the active frame, and a body call

@@ -242,6 +242,10 @@ name = "persistent_term"
 path = "tests/integration/persistent_term.rs"
 
 [[test]]
+name = "policy"
+path = "tests/integration/policy.rs"
+
+[[test]]
 name = "port"
 path = "tests/integration/port.rs"
 

@@ -254,7 +254,12 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
         next_reference: u64::MAX,
         ..Scheduler::new(AtomTable::new())
     };
-    assert!(scheduler.start(frame(), vec![], allow_all()).is_err());
+    // The root process has the fixed pid 0, so the overflow comes at the
+    // first spawn.
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let spawn = scheduler.spawn(Start::Entry(frame()), vec![], false, false, false, None);
+    assert!(spawn.is_err());
     assert!(scheduler.make_ref().is_err());
 }
 

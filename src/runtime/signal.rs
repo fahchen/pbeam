@@ -15,7 +15,10 @@
 //! (`erts_proc_sig_handle_exit`, `erl_proc_sig_queue.c:7259-7473`). Each
 //! handled signal also costs 1 (`erl_proc_sig_queue.c:6968`).
 
-use super::{capability::CapabilityId, process::LinkId};
+use super::{
+    capability::{Capability, CapabilityId},
+    process::LinkId,
+};
 use crate::term::{ProcessId, Reference, Term};
 
 /// A non-message signal in the signal queue of a process.
@@ -175,5 +178,15 @@ pub(super) enum Signal {
     Revoke {
         /// The copy that the receiver holds.
         capability: CapabilityId,
+    },
+    /// PBeam only: the answer of the policy process to the
+    /// `pbeam_cap:request/2` call of the receiver. ERTS has no capabilities
+    /// and no such signal. The receiver adds a copy of the granted
+    /// capability, with the source `policy`, to its security context, and
+    /// its call continues; the cost is 0, as for `Revoke`. At exit it is
+    /// dropped, so the copy has no delegation record.
+    Grant {
+        /// The capability that the policy granted, or `None` for a denial.
+        capability: Option<Capability>,
     },
 }

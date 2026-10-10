@@ -292,6 +292,20 @@ pub(super) struct ProcessState {
     /// leaves the process table (`Delegations::release`). A new process has
     /// none.
     pub(super) security: SecurityContext,
+    /// The process that spawned this process, as `p->parent`
+    /// (`erl_process.c:12755-12760`), or `None` for the root process and the
+    /// policy process, which the launcher makes. The policy module gets it
+    /// in the requester map of `grant/3`.
+    pub(super) parent: Option<ProcessId>,
+    /// The module, the function, and the arity of the start of the process,
+    /// as `p->u.initial` (`erl_process.c:12979-12981`). The policy module
+    /// gets it in the requester map of `initial/1` and `grant/3`.
+    pub(super) initial_call: (String, String, usize),
+    /// The answer of the policy process to the `pbeam_cap:request/2` call
+    /// of the process: `true` for a grant and `false` for a denial, or
+    /// `None` while the call waits. The grant signal sets it, and the call
+    /// takes it.
+    pub(super) policy_reply: Option<bool>,
 }
 
 /// A BIF call that continues after a switch: the export of a BIF and the
@@ -342,10 +356,18 @@ impl ProcessState {
     /// assert_eq!(process.undefined_start, Some((module, function)));
     /// ```
     pub(super) fn new(id: ProcessId, start: Start, arguments: Vec<Term>) -> Self {
-        let (frames, undefined_start) = match start {
-            Start::Entry(frame) => (vec![frame], None),
-            Start::Undefined { module, function } => (Vec::new(), Some((module, function))),
+        let (frames, undefined_start, initial_call) = match start {
+            Start::Entry(frame) => {
+                let initial_call = (frame.module.clone(), frame.function.clone());
+                (vec![frame], None, initial_call)
+            }
+            Start::Undefined { module, function } => {
+                let initial_call = (module.name().to_owned(), function.name().to_owned());
+                (Vec::new(), Some((module, function)), initial_call)
+            }
         };
+        let (module, function) = initial_call;
+        let initial_call = (module, function, arguments.len());
         Self {
             id,
             frames,
@@ -375,6 +397,9 @@ impl ProcessState {
             bif_timers: MonitorLinkTree::default(),
             continue_exit: None,
             security: SecurityContext::default(),
+            parent: None,
+            initial_call,
+            policy_reply: None,
         }
     }
 
