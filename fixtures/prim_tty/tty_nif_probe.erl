@@ -1,5 +1,5 @@
 -module(tty_nif_probe).
--export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, init/0, monitor/0,
+-export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, terminfo/0, init/0, monitor/0,
          owner/1, holder/3, select/0, encoding/0, select_monitor/0, selector/1, link/0,
          linker/1, linked_owner/1, root_exit/0, root_free/0, write/0, write_error/0, read/0,
          read_error/0, loop/0, loop_reader/2]).
@@ -25,6 +25,17 @@ setlocale() ->
 
 setupterm() ->
     [prim_tty:setupterm_nif(), prim_tty:setupterm_nif()].
+
+%% setupterm_nif/0 reads the terminfo entry of TERM first. Each term gives
+%% {tigetnum_nif/1, tigetflag_nif/1}: termcap codes as prim_tty gives
+%% them, other iodata shapes, and terms that are not iodata.
+terminfo() ->
+    _ = prim_tty:setupterm_nif(),
+    [{catch_error(fun() -> prim_tty:tigetnum_nif(C) end),
+      catch_error(fun() -> prim_tty:tigetflag_nif(C) end)}
+     || C <- ["co\0", "li\0", "it\0", "xn\0", "am\0", "bs\0", "km\0", "zz\0", "\0", "c\0",
+              "cols\0", "co\0x", [<<"c">>, $o | <<0>>], <<"xn", 0>>, foo, 1, [256], [-1],
+              [$c | x], make_ref(), 'co\0']].
 
 init() ->
     {ok, Out} = prim_tty:tty_create(stdout),

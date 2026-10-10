@@ -22,6 +22,8 @@
     tty_create/0,
     setlocale/0,
     setupterm/0,
+    tigetnum/0,
+    tigetflag/0,
     halt_run/0,
     system_flag/0,
     load_nif/0,
@@ -133,6 +135,10 @@ tty_create() -> attempt(fun() -> prim_tty:tty_create(stdout) end).
 setlocale() -> attempt(fun() -> prim_tty:setlocale(tty) end).
 
 setupterm() -> attempt(fun() -> prim_tty:setupterm_nif() end).
+
+tigetnum() -> attempt(fun() -> prim_tty:tigetnum_nif("co\0") end).
+
+tigetflag() -> attempt(fun() -> prim_tty:tigetflag_nif("xn\0") end).
 
 %% A permitted halt stops the run with the status 3.
 halt_run() -> attempt(fun() -> erlang:halt(3, []) end).
@@ -262,16 +268,20 @@ terminal_permitted() ->
         prim_tty:isatty(stdin),
         prim_tty:isatty(stdout),
         reference(TTY),
-        prim_tty:setupterm_nif()
+        prim_tty:setupterm_nif(),
+        prim_tty:tigetnum_nif("co\0"),
+        prim_tty:tigetflag_nif("xn\0")
     ].
 
-%% The fd checks come before the terminal capability check.
+%% The fd and code checks come before the terminal capability check.
 terminal_badargs() ->
     _ = prim_tty:load("prim_tty"),
     [
         badarg(fun() -> prim_tty:isatty(foo) end),
         badarg(fun() -> prim_tty:tty_create(stdin) end),
-        badarg(fun() -> prim_tty:tty_create(foo) end)
+        badarg(fun() -> prim_tty:tty_create(foo) end),
+        badarg(fun() -> prim_tty:tigetnum_nif(foo) end),
+        badarg(fun() -> prim_tty:tigetflag_nif(foo) end)
     ].
 
 %% A permitted port_info/1 of an open port. The id and the OS pid change

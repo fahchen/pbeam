@@ -63,7 +63,7 @@ The authority column gives the protected domains that a request to the entry use
 | `host.filesystem.read` | Reads of host files. |
 | `host.stderr` | Writes to fd 2 by the runtime, not by guest code. |
 | `host.spawn` | An external program that a port starts: its start, the reads and writes of its pipes, and its exit status. The program runs with the user, the environment, the working directory, and fds 0, 1, and 2 of the PBeam process. |
-| `terminal.query` | Reads of terminal state: `isatty`, `tcgetattr`, and the window size. |
+| `terminal.query` | Reads of terminal state: `isatty`, `tcgetattr`, the window size, and the termcap capabilities of the curses terminal. |
 | `terminal.setup` | The terminfo setup of the curses library. |
 | `terminal.text_write` | Bytes to the terminal output fd. |
 | `terminal.tui_control` | Terminal control sequences in the output bytes. PBeam does not filter them. |
@@ -238,6 +238,8 @@ These entries call the host or a linked C library. A process-wide effect changes
 | `host::terminal::check` | `terminal.query` | `host` | `host-call` | Calls `isatty` on an fd. | `O(1)` | `src/runtime/host/terminal.rs` |
 | `host::terminal::setlocale_utf8` | `host.locale`, `host.environment` | `host` | `host-call` | Calls `setlocale(LC_CTYPE, "")` and reads the codeset. This sets the C library locale of the OS process from the environment. | `unknown` | `src/runtime/host/terminal.rs` |
 | `host::terminal::setupterm` | `terminal.setup`, `host.environment`, `host.filesystem.read` | `host` | `host-blocking` | Calls the curses `setupterm` for `TERM` and fd -1, which reads the terminfo database. It keeps the new `cur_term` of the curses library and frees the earlier one. | `unknown` | `src/runtime/host/terminal.rs` |
+| `host::terminal::termcap_number` | `terminal.query` | `host` | `host-call` | Calls the curses `tgetnum` for a termcap code. It reads the terminal of the last successful `setupterm`. | `unknown` | `src/runtime/host/terminal.rs` |
+| `host::terminal::termcap_flag` | `terminal.query` | `host` | `host-call` | Calls the curses `tgetflag` for a termcap code. It reads the terminal of the last successful `setupterm`. | `unknown` | `src/runtime/host/terminal.rs` |
 | `host::terminal::window_size` | `terminal.query` | `host` | `host-call` | Calls `ioctl(TIOCGWINSZ)` on fd 0, then on the output fd. | `O(1)` | `src/runtime/host/terminal.rs` |
 | `host::terminal::get_mode` | `terminal.query` | `host` | `host-call` | Calls `tcgetattr` on an fd. | `O(1)` | `src/runtime/host/terminal.rs` |
 | `host::terminal::set_mode` | `terminal.raw` | `host` | `host-call` | Calls `tcsetattr(TCSANOW)` on an fd. The terminal mode is shared with each other process that uses the terminal. | `O(1)` | `src/runtime/host/terminal.rs` |
@@ -414,6 +416,8 @@ Each row is a binding of the static NIF registry. The `nif_start` instruction ru
 | `prim_tty:read_nif/3` | `terminal.input`, `runtime.atom` | `terminal:read` | `host` | `host-blocking` | Reads at most 1024 bytes from fd 0 with one `read`. After `{ok, Bytes}`, also `{ok, <<>>}` for `EAGAIN` and `EINTR`, it selects fd 0 for read again with the caller as the recipient. 0 bytes give `{error, closed}`, and a failed read gives `{error, {read, Errno}}`. ERTS runs this NIF on a dirty IO scheduler. After the argument checks, it checks the capability `terminal` with `read`, before it reads. | `O(n)` | `src/runtime/interpreter/native/prim_tty.rs`, `src/runtime/host/input.rs` |
 | `prim_tty:setlocale/1` | `host.locale`, `host.environment` | `terminal:setup` | `host` | `host-call` | Sets the `LC_CTYPE` locale of the OS process from the environment and tells whether its codeset is UTF-8. It reads no argument, so it first checks the capability `terminal` with `setup`, before it sets the locale. | `unknown` | `src/runtime/interpreter/native/prim_tty.rs`, `src/runtime/host/terminal.rs` |
 | `prim_tty:setupterm_nif/0` | `terminal.setup`, `host.environment`, `host.filesystem.read`, `runtime.atom` | `terminal:setup` | `host` | `host-blocking` | Reads the terminfo entry of `TERM` into the curses library, or gives `{error, {setupterm, Errno}}`. It first checks the capability `terminal` with `setup`, before it calls `setupterm`. | `unknown` | `src/runtime/interpreter/native/prim_tty.rs`, `src/runtime/host/terminal.rs` |
+| `prim_tty:tigetflag_nif/1` | `terminal.query` | `terminal:query` | `host` | `host-call` | Gives `true` when the terminfo entry of the last successful `setupterm_nif/0` has the boolean termcap code of an iodata argument, else `false`. After the iodata check, it checks the capability `terminal` with `query`, before it calls `tgetflag`. | `unknown` | `src/runtime/interpreter/native/prim_tty.rs`, `src/runtime/host/terminal.rs` |
+| `prim_tty:tigetnum_nif/1` | `terminal.query` | `terminal:query` | `host` | `host-call` | Gives the number of the termcap code of an iodata argument in the terminfo entry of the last successful `setupterm_nif/0`, or -1. After the iodata check, it checks the capability `terminal` with `query`, before it calls `tgetnum`. | `unknown` | `src/runtime/interpreter/native/prim_tty.rs`, `src/runtime/host/terminal.rs` |
 | `prim_tty:tty_create/1` | `terminal.query`, `runtime.resource` | `terminal:query` | `host` | `host-call` | Reads the mode of fd 1 or 2 with `tcgetattr` and makes a TTY record for it. After the fd check, it checks the capability `terminal` with `query`, before it reads the mode. | `O(1)` | `src/runtime/interpreter/native/prim_tty.rs`, `src/runtime/tty.rs` |
 | `prim_tty:tty_encoding/1` | `none` | `none` | `pure` | `inline` | Gives `utf8`. | `O(1)` | `src/runtime/interpreter/native/prim_tty.rs` |
 | `prim_tty:tty_init/2` | `terminal.raw`, `runtime.resource`, `runtime.atom` | `terminal:raw_mode` | `host` | `host-call` | Sets the output fd to the first mode or to its raw form with `tcsetattr`. Then the caller becomes the owner of the TTY record, and a TTY monitor signal goes to the caller. At the owner exit, exit cleanup sets fd 0 to the first mode. After the argument checks, it checks the capability `terminal` with `raw_mode` for each input mode, before it changes the TTY record. | `O(n)` | `src/runtime/interpreter/native/prim_tty.rs`, `src/runtime/tty.rs` |
@@ -425,7 +429,7 @@ Each row is a binding of the static NIF registry. The `nif_start` instruction ru
 
 Each entry is a function of a static NIF library that has no PBeam binding. The `nif_start` instruction runs the BEAM stub body, which calls `erlang:nif_error(undef)` and raises `error:undef`. These entries have no effect. Authority: `none`. Determinism: `pure`. Execution: `inline`. Cost: `O(1)`. Owner: `src/runtime/interpreter/native/prim_tty.rs`.
 
-- `prim_tty`: `tty_is_open/2`, `isprint/1`, `wcwidth/1`, `wcswidth/1`, `sizeof_wchar/0`, `tigetnum_nif/1`, `tigetflag_nif/1`, `tinfo_nif/0`, `tigetstr_nif/1`, `tputs_nif/2`
+- `prim_tty`: `tty_is_open/2`, `isprint/1`, `wcwidth/1`, `wcswidth/1`, `sizeof_wchar/0`, `tinfo_nif/0`, `tigetstr_nif/1`, `tputs_nif/2`
 
 ## Linked native code and dependencies
 
@@ -434,7 +438,7 @@ All in-process native code is part of the TCB. A classification above does not l
 | Component | Use | Linked by | Notes |
 | --- | --- | --- | --- |
 | `libc` (libSystem on macOS, glibc on Linux) | Each host operation, and the PCRE2 allocation | `Cargo.toml` (`libc` crate) | The Rust and C code calls it directly. |
-| Curses library | `setupterm` and `del_curterm` | `src/runtime/host/terminal.rs` (`libncurses` on macOS, `libtinfo.so.6` on Linux) | The dynamic loader selects the file at startup. |
+| Curses library | `setupterm`, `del_curterm`, `tgetnum`, and `tgetflag` | `src/runtime/host/terminal.rs` (`libncurses` on macOS, `libtinfo.so.6` on Linux) | The dynamic loader selects the file at startup. |
 | PCRE2 10.47 | `re:compile/2` | `build.rs` (`vendor/pcre2`, static) | C code from OTP 29.1.1. It runs on the scheduler thread with the stack guard of `src/runtime/pcre2.rs`. |
 | Rust standard library | Startup, file read, clock, sleep, and stderr output | The Rust toolchain of `mise.toml` | Startup sets `SIGPIPE` and opens `/dev/null` for a closed standard fd. |
 | `clap` | Command line parse at startup | `Cargo.toml` | Its derive procedural macros run at build time. |
@@ -447,6 +451,7 @@ This inventory cannot classify the entries in this section. Each unknown entry p
 | Entry | Unknown part | Reason |
 | --- | --- | --- |
 | `host::terminal::setupterm` and `prim_tty:setupterm_nif/0` | Cost, and the complete set of environment variables and files that the curses library reads | The linked curses build selects the terminfo search path. This inventory did not review the curses source. |
+| `host::terminal::termcap_number`, `host::terminal::termcap_flag`, `prim_tty:tigetnum_nif/1`, and `prim_tty:tigetflag_nif/1` | Cost of the capability lookup | The linked curses build looks up the termcap code. This inventory did not review the curses source. |
 | `host::terminal::setlocale_utf8` and `prim_tty:setlocale/1` | Cost, and the locale files and environment variables that the C library reads | The C library selects the locale data. This inventory did not review the C library source. |
 | `host::clock::local_time` and `erlang:universaltime_to_localtime/1` | Cost, and the time zone files and environment variables that the C library reads | `tzset`, `localtime_r`, and `posix2time` read the time zone data of the C library. This inventory did not review the C library source. |
 | `re:compile/2` | Cost: compile time and memory | PCRE2 has no reviewed bound other than the stack guard. Compiled code stays in `RegexCodes` until the run ends. |
