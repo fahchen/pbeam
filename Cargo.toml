@@ -45,6 +45,10 @@ name = "host_signal"
 path = "tests/feature/host_signal.rs"
 
 [[test]]
+name = "io_device"
+path = "tests/feature/io_device.rs"
+
+[[test]]
 name = "io_fail"
 path = "tests/feature/io_fail.rs"
 
