@@ -341,6 +341,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the launcher and manifest work (M8) must read capability constraints from a manifest or a configuration file, or a policy that is not BEAM code.
 - **Source:** design review of #310 (question 4, PR #314).
 
+### Wake the scheduler for a launcher revocation
+
+- After #336, the run calls `Policy::revocations` before each scheduling step (`BeamProgram::run_root` in `src/runtime/interpreter.rs`). While each process waits, `Scheduler::wait_events` blocks until a timer, a port, a terminal, a dirty IO call, or a host signal wakes it. With none of them, the run ends. Thus a revocation that a host thread gives while each process waits takes effect only at the next of these events, or never.
+- **Option:** a wake handle of the launcher, for example a pipe or a socket that `Scheduler::wait_events` also polls, as the notify pipe of the host signals (`signal::notify_fd`). A host thread writes to it after it puts a kind in its queue.
+- **Reason:** no consumer revokes from another thread. The only launcher that revokes is the test policy of `tests/integration/revoke.rs`, which revokes while the root process runs.
+- **Trigger:** a host that revokes from another thread or at a set time, for example the launcher and manifest work (M8).
+- **Source:** Codex review of PR #357 (#336).
+
 ## Tests and tooling
 
 ### Load-check every pinned OTP module that loads today

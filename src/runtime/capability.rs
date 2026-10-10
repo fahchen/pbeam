@@ -365,9 +365,12 @@ pub trait Policy {
     /// revokes now. The launcher calls this function before each scheduling
     /// step. For each kind, the root process gets a revocation signal for
     /// each of its copies of that kind that the launcher issued, and the
-    /// revocation then goes to each downstream copy. A host that revokes
-    /// from another thread keeps the kinds in a synchronized queue and takes
-    /// them here. The default revokes nothing.
+    /// revocation then goes to each downstream copy. While each process
+    /// waits, the run calls this function again only after a timer, a port,
+    /// a terminal, a dirty IO call, or a host signal wakes the scheduler.
+    /// With none of them, the run ends. Thus a revocation that a host thread
+    /// gives while each process waits takes effect only at the next of
+    /// these events. The default revokes nothing.
     ///
     /// # Examples
     ///
