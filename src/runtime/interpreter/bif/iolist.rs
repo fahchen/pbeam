@@ -1,7 +1,7 @@
-//! The iodata BIFs `erlang:iolist_size/1`, `erlang:iolist_to_iovec/1`, and
-//! `erlang:iolist_to_binary/1`, and the iodata walk of ERTS
-//! `generic_iolist_size` and `generic_iolist_copy` (`erl_iolist.c:113-649`)
-//! that they share.
+//! The iodata BIFs `erlang:iolist_size/1`, `erlang:iolist_to_iovec/1`,
+//! `erlang:iolist_to_binary/1`, and `erlang:list_to_binary/1`, and the
+//! iodata walk of ERTS `generic_iolist_size` and `generic_iolist_copy`
+//! (`erl_iolist.c:113-649`) that they share.
 
 use super::BifResult::Value;
 use super::*;
@@ -22,13 +22,13 @@ const STEPS_PER_RED: i64 = 8;
 /// (`ERTS_IOLIST_COPY_BITS_PER_YIELD_COUNT`, `erl_iolist.c:305`, in bits).
 const COPY_BYTES_PER_STEP: i64 = 32;
 
-/// The smallest budget with which `erlang:iolist_to_binary/1` walks a list:
+/// The smallest budget with which [`list_to_bitstring`] walks a list:
 /// `IOL2B_MIN_EXEC_REDS` (`erl_iolist.c:34`), `CONTEXT_REDS / 4`. A caller
 /// with fewer reductions walks with this budget.
 const L2B_MIN_REDS: i64 = 1000;
 
-/// The budget at or below which `erlang:iolist_to_binary/1` switches out
-/// the caller before it reads its argument: `IOL2B_RESCHED_REDS`
+/// The budget at or below which [`list_to_bitstring`] switches out the
+/// caller before it reads its argument: `IOL2B_RESCHED_REDS`
 /// (`erl_iolist.c:35`), `CONTEXT_REDS / 40`.
 const L2B_RESCHED_REDS: i64 = 100;
 
@@ -515,16 +515,9 @@ fn copy_bytes(bytes: &mut Vec<u8>, rest: &[u8], steps: &mut i64) -> Option<usize
     None
 }
 
-/// Run `erlang:iolist_to_binary/1` as ERTS `iolist_to_binary_1` and
-/// `list_to_bitstring_bif` do (`erl_iolist.c:857-902`, `916-928`). A binary
-/// gives itself with no cost. Then a caller with at most 100 reductions
-/// switches out: the call uses the rest of its budget as virtual reductions
-/// and runs again from the start in the next turn (`ERTS_BIF_YIELD1`,
-/// `bif.h:501-505`). A caller with fewer than 1000 reductions walks with a
-/// budget of 1000, so that its budget can become 0. Then `[]` gives
-/// `<<>>`, a list of one binary gives the binary, and another term that is
-/// not a list raises `badarg`, all with no cost. Each other list goes to
-/// [`l2b_size`].
+/// Run `erlang:iolist_to_binary/1` as ERTS `iolist_to_binary_1` does
+/// (`erl_iolist.c:916-928`). A binary gives itself with no cost. Each other
+/// term goes to [`list_to_bitstring`].
 ///
 /// # Examples
 ///
@@ -532,13 +525,12 @@ fn copy_bytes(bytes: &mut Vec<u8>, rest: &[u8], steps: &mut i64) -> Option<usize
 /// scheduler.current_process_mut().fcalls = 4000;
 /// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![2])]);
 /// assert!(matches!(iolist_to_binary(&mut scheduler, &list)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
-/// assert!(matches!(iolist_to_binary(&mut scheduler, &Term::static_atom("a"))?, BifResult::Raise { .. }));
+/// assert!(matches!(iolist_to_binary(&mut scheduler, &Term::Binary(vec![1]))?, BifResult::Value(Term::Binary(bytes)) if bytes == [1]));
 /// ```
 ///
 /// # Errors
 ///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
+/// Return the runtime error of [`list_to_bitstring`].
 pub(super) fn iolist_to_binary(
     scheduler: &mut Scheduler,
     term: &Term,
@@ -546,6 +538,61 @@ pub(super) fn iolist_to_binary(
     if let Term::Binary(_) = term {
         return Ok(Value(term.clone()));
     }
+    list_to_bitstring(scheduler, term, "iolist_to_binary")
+}
+
+/// Run `erlang:list_to_binary/1` as ERTS `list_to_binary_1` does
+/// (`erl_iolist.c:910-914`): each term goes to [`list_to_bitstring`], so a
+/// binary raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// scheduler.current_process_mut().fcalls = 4000;
+/// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![2])]);
+/// assert!(matches!(list_to_binary(&mut scheduler, &list)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
+/// assert!(matches!(list_to_binary(&mut scheduler, &Term::Binary(vec![1]))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`list_to_bitstring`].
+pub(super) fn list_to_binary(
+    scheduler: &mut Scheduler,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    list_to_bitstring(scheduler, term, "list_to_binary")
+}
+
+/// Run the shared part of `erlang:iolist_to_binary/1` and
+/// `erlang:list_to_binary/1` as ERTS `list_to_bitstring_bif` does
+/// (`erl_iolist.c:857-902`), for the BIF `erlang:<bif>/1`. A caller with at
+/// most 100 reductions switches out first: the call uses the rest of its
+/// budget as virtual reductions and runs `erlang:<bif>/1` again from the
+/// start in the next turn (`ERTS_BIF_YIELD1`, `bif.h:501-505`). A caller
+/// with fewer than 1000 reductions walks with a budget of 1000, so that its
+/// budget can become 0. Then `[]` gives `<<>>`, a list of one binary gives
+/// the binary, and a term that is not a list raises `badarg`, all with no
+/// cost. Each other list goes to [`l2b_size`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// scheduler.current_process_mut().fcalls = 4000;
+/// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![2])]);
+/// assert!(matches!(list_to_bitstring(&mut scheduler, &list, "list_to_binary")?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
+/// assert!(matches!(list_to_bitstring(&mut scheduler, &Term::static_atom("a"), "iolist_to_binary")?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+fn list_to_bitstring(
+    scheduler: &mut Scheduler,
+    term: &Term,
+    bif: &'static str,
+) -> Result<BifResult, BeamError> {
     let process = scheduler.current_process_mut();
     let mut reds_left = process.bif_reductions_left()? as i64;
     if reds_left <= L2B_RESCHED_REDS {
@@ -553,7 +600,7 @@ pub(super) fn iolist_to_binary(
         scheduler.vbump_reductions(fcalls);
         return Ok(BifResult::TrapBif {
             module: "erlang",
-            function: "iolist_to_binary",
+            function: bif,
             arguments: vec![term.clone()],
         });
     }
@@ -570,7 +617,7 @@ pub(super) fn iolist_to_binary(
     }
 }
 
-/// Continue the size walk of `erlang:iolist_to_binary/1` for the argument
+/// Continue the size walk of [`list_to_bitstring`] for the argument
 /// `arg` at `term`, with the tails of `stack` above it, the byte count
 /// `size` so far, and the budget `reds_left`, as `list_to_bitstring_engine`
 /// does before it copies (`erl_iolist.c:710-753`, `837-840`). The walk of
@@ -648,7 +695,7 @@ pub(super) fn l2b_size(
     l2b_copy(process, reds_left, arg, &[], size, Vec::new())
 }
 
-/// Continue the copy walk of `erlang:iolist_to_binary/1` at `term`, with
+/// Continue the copy walk of [`list_to_bitstring`] at `term`, with
 /// the tails of `stack` above it, `reds_left` reductions, the result size
 /// `size`, and the bytes `bytes` that the walk copied, as
 /// `generic_iolist_copy` does for a binary result (`erl_iolist.c:424-649`,
@@ -701,7 +748,7 @@ pub(super) fn l2b_copy(
     Value(Term::Binary(bytes))
 }
 
-/// Return the trap of `erlang:iolist_to_binary/1` to the export
+/// Return the trap of [`list_to_bitstring`] to the export
 /// `erts_internal:list_to_bitstring_continue` with `arguments`.
 ///
 /// # Examples
