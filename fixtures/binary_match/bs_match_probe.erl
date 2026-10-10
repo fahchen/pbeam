@@ -1,6 +1,6 @@
 -module(bs_match_probe).
 -export([unsigned/1, flagged/1, wide/1, prefix/1, skip/1, binaries/1, bits/1,
-         tail/1, bit_tail/1]).
+         tail/1, bit_tail/1, unaligned_utf8/1]).
 
 %% The integer command: unsigned big-endian integers below, at, and above
 %% one byte, also at positions that are not byte-aligned, and a size with a
@@ -47,3 +47,8 @@ tail(_) -> false.
 %% The get_tail command of a tail that is not a multiple of 8 bits.
 bit_tail(<<_:4, Rest/bits>>) -> Rest;
 bit_tail(_) -> false.
+
+%% The skip command moves the position to a bit that is not byte-aligned,
+%% and bs_get_utf8 then reads the character at that position.
+unaligned_utf8(<<_:4, C/utf8, _/bits>>) -> C;
+unaligned_utf8(_) -> false.

@@ -96,3 +96,21 @@ fn compares_bits_with_an_unsigned_big_endian_value() {
     assert!(!segment_equals(&wide, 72, 0x80));
     assert!(segment_equals(&[0xFF; 8], 64, u64::MAX));
 }
+
+#[test]
+fn reads_utf8_at_a_position_that_is_not_byte_aligned() {
+    let mut context = MatchContext::new(&[0x0C, 0x3A, 0x90]);
+    context.skip(4);
+    assert_eq!(context.get_utf8(), Some(233));
+    assert_eq!(context.position(), 20);
+    // 4 bits remain: no byte to read, and the position stays.
+    let mut context = MatchContext::new(&[0x04]);
+    context.skip(4);
+    assert_eq!(context.get_utf8(), None);
+    assert_eq!(context.position(), 4);
+    // 12 bits remain: a first byte of 2 bytes, but no second byte.
+    let mut context = MatchContext::new(&[0x0C, 0x3A]);
+    context.skip(4);
+    assert_eq!(context.get_utf8(), None);
+    assert_eq!(context.position(), 4);
+}

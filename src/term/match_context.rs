@@ -201,11 +201,12 @@ impl MatchContext {
     }
 
     /// Read one UTF-8 character at the position and move the position
-    /// past it, as `erts_bs_get_utf8` does (`erl_bits.c:2128-2221`).
-    /// Return `None` and keep the position for short input, a first byte
-    /// that does not start a character (`0x80..=0xC1` and `0xF8..=0xFF`),
-    /// a bad continuation byte, an overlong form of 3 or 4 bytes, a
-    /// surrogate, or a value above 0x10FFFF.
+    /// past it, as `erts_bs_get_utf8` does (`erl_bits.c:2128-2221`). The
+    /// position can be at any bit. Return `None` and keep the position for
+    /// short input, a first byte that does not start a character
+    /// (`0x80..=0xC1` and `0xF8..=0xFF`), a bad continuation byte, an
+    /// overlong form of 3 or 4 bytes, a surrogate, or a value above
+    /// 0x10FFFF.
     ///
     /// # Examples
     ///
@@ -215,9 +216,17 @@ impl MatchContext {
     /// assert_eq!(MatchContext::new(&[192, 128]).get_utf8(), None);
     /// assert_eq!(MatchContext::new(&[237, 160, 128]).get_utf8(), None);
     /// assert_eq!(MatchContext::new(&[244, 144, 128, 128]).get_utf8(), None);
+    /// let mut context = MatchContext::new(&[0x04, 0x10]);
+    /// context.skip(4);
+    /// assert_eq!(context.get_utf8(), Some(65));
     /// ```
     pub(crate) fn get_utf8(&mut self) -> Option<u32> {
-        let rest = &self.bytes[self.position / 8..];
+        // The whole bytes after the position, up to 4, aligned as
+        // `erts_align_utf8_bytes` copies them (`erl_bits.c:2108-2126`).
+        // A missing byte is short input, as the `remaining_bits` checks of
+        // `erts_bs_get_utf8` give.
+        let bits = (self.remaining_bits() / 8).min(4) * 8;
+        let rest = bits_at(&self.bytes, self.position, bits);
         let first = u32::from(*rest.first()?);
         // A byte of the character that is a continuation byte `10xxxxxx`.
         let continuation = |index: usize| {

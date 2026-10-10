@@ -496,3 +496,36 @@ fn stops_at_a_binary_or_get_tail_command_that_needs_a_bitstring() {
     );
     assert_eq!(erts, b"[<<5:4>>,false]\n");
 }
+
+#[test]
+fn reads_utf8_after_a_skip_to_an_unaligned_position_as_pinned_erts() {
+    // `bs_match_probe:unaligned_utf8/1` skips 4 bits with `bs_match` and
+    // then runs `bs_get_utf8`. ERTS aligns up to 4 whole bytes after the
+    // position and fails when a byte of the character is not there
+    // (`erts_align_utf8_bytes` and `erts_bs_get_utf8`, erl_bits.c:
+    // 2106-2221).
+    let inputs: [&[u8]; 7] = [
+        &[0x04, 0x10],
+        &[0x04],
+        &[0x0C, 0x3A, 0x90],
+        &[0x0C, 0x3A],
+        &[0x0E, 0x28, 0x2A, 0xC0],
+        &[0x0F, 0x09, 0xF9, 0x88, 0x00],
+        &[0x0C, 0x00],
+    ];
+    let (results, erts) = bs_match_each("unaligned_utf8", &inputs);
+    let false_atom = || Ok(probe_atom("false"));
+    assert_eq!(
+        results,
+        [
+            Ok(Term::Integer(65)),
+            false_atom(),
+            Ok(Term::Integer(233)),
+            false_atom(),
+            Ok(Term::Integer(8364)),
+            Ok(Term::Integer(128_512)),
+            false_atom(),
+        ]
+    );
+    assert_eq!(erts, b"[65,false,233,false,8364,128512,false]\n");
+}
