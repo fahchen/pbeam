@@ -65,6 +65,31 @@ fn binary_match_probe_has_the_binary_match_bytes() {
 }
 
 #[test]
+fn bs_match_probe_has_the_bs_match_command_bytes() {
+    assert_in_fixture(
+        "fixtures/binary_match/bs_match_probe.beam",
+        &[
+            // tail/1: bs_match f28 x0 {list,[ensure_at_least,8,8,skip,8,
+            // get_tail,1,8,{x,0}]}
+            &[
+                0xB6, 0x0D, 0x1C, 0x03, 0x17, 0x90, 0x92, 0x80, 0x80, 0x0A, 0x11, 0x80, 0xB2, 0x10,
+                0x80, 0x03,
+            ],
+            // prefix/1: bs_match f15 x0 {list,[ensure_at_least,32,1,
+            // '=:=',nil,31,850802231,'=:=',nil,1,1]}
+            &[
+                0xB6, 0xF5, 0x03, 0x17, 0xB0, 0x92, 0x08, 0x20, 0x10, 0xA2, 0x02, 0x08, 0x1F, 0x58,
+                0x32, 0xB6, 0x36, 0x37, 0xA2, 0x02, 0x10, 0x10,
+            ],
+            // flagged/1: {integer,1,{literal,[little]},16,1,{x,1}}
+            &[0x42, 0x10, 0x47, 0x00, 0x08, 0x10, 0x10, 0x13],
+            // binaries/1: {binary,1,{literal,[]},2,8,{x,1}}
+            &[0x0A, 0x13, 0x10, 0x02, 0x20, 0x80, 0x13],
+        ],
+    );
+}
+
+#[test]
 fn bitstr_probe_has_the_is_bitstr_bytes() {
     assert_in_fixture(
         "fixtures/bitstr/bitstr_probe.beam",

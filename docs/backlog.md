@@ -35,7 +35,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Add bitstring terms
 
 - PBeam has no bitstring term whose size is not a multiple of 8 bits, so `is_bitstr` passes only for a binary. The loader keeps a `BIT_BINARY_EXT` literal as an unsupported literal, so `byte_size(<<1:3>>)` stops with `unsupported BEAM literal index N`. ERTS gives `1` (`erl_bif_guard.c:376-393`). The "Bitstring terms" row records this.
-- The work: a bitstring `Term` variant with the ERTS term order, `BIT_BINARY_EXT` literals in the loader, the bit count in `erlang:byte_size/1`, and the bitstring forms of the binary instructions and BIFs.
+- The work: a bitstring `Term` variant with the ERTS term order, `BIT_BINARY_EXT` literals in the loader, the bit count in `erlang:byte_size/1`, and the bitstring forms of the binary instructions and BIFs, such as the `binary` and `get_tail` commands of `bs_match` of a size that is not a multiple of 8 bits.
 - **Trigger:** a measured path makes or loads a bitstring that is not a binary.
 - **Source:** #359 and #360.
 
@@ -130,12 +130,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path depends on the turn in which a timer expires while other processes run.
 - **Source:** #229 (PR #236).
 
-### Run the other binary-match instructions and `bs_match` commands
+### Run the other binary-match instructions
 
-- PBeam runs `bs_start_match3`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, and `bs_match` with the commands `ensure_at_least` and `ensure_exactly`. The other `bs_match` commands (`binary`, `integer`, `skip`, `get_tail`, and `=:=`) stop the run with `unsupported bs_match command <Name>`. `bs_start_match3` that copies a match context to another register stops the run with `unsupported bs_start_match3 that copies the match context in <Source> to <Destination>`. Each other binary-match instruction, such as `bs_start_match4`, `bs_get_tail`, `bs_skip_utf8`, and `bs_get_binary2`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Evidence:** `binary_match_probe:byte(<<7,8>>)` stops with `unsupported bs_match command integer`.
-- **Trigger:** a measured path matches a binary with one of these commands or instructions. Add only the commands and instructions that the path needs.
-- **Source:** #219 (PR #227).
+- PBeam runs `bs_start_match3`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, and `bs_match` with each command that the ERTS loader accepts. `bs_start_match3` that copies a match context to another register stops the run with `unsupported bs_start_match3 that copies the match context in <Source> to <Destination>`. After a failed `=:=` command of `bs_match`, PBeam does not know the position, so a read of the match context before `bs_set_position` stops the run with `unsupported read of the match context in <Operand> after a failed bs_match =:= command`. Each other binary-match instruction, such as `bs_start_match4`, `bs_get_tail`, `bs_skip_utf8`, and `bs_get_binary2`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it. The entry "Add bitstring terms" owns the `binary` and `get_tail` commands of a size that is not a multiple of 8 bits.
+- **Evidence:** `bs_match_probe:bits(<<165>>)` stops with `unsupported bs_match binary of 3 bits: needs a bitstring term`. The test `gives_a_runtime_error_for_a_read_after_a_failed_equal_command` of `tests/runtime/interpreter.rs` stops at a `skip` command after a failed `=:=`.
+- **Trigger:** a measured path matches a binary with one of these instructions, or reads a match context after a failed `=:=` command without `bs_set_position`. Add only the instructions that the path needs.
+- **Source:** #219 (PR #227), #395.
 
 ### Set raw mode through `shell:start_interactive({noshell, raw})`
 
