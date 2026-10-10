@@ -114,6 +114,10 @@ name = "capability"
 path = "tests/integration/capability.rs"
 
 [[test]]
+name = "code"
+path = "tests/integration/code.rs"
+
+[[test]]
 name = "compare"
 path = "tests/integration/compare.rs"
 
