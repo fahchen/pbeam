@@ -2080,6 +2080,28 @@ pub(super) fn function_exported(
     Value(Term::static_atom(if exported { "true" } else { "false" }))
 }
 
+/// Run `erlang:module_loaded/1`, as ERTS `module_loaded_1`
+/// (`beam_bif_load.c:738-755`) does: return `true` when `module` has current
+/// code and no `-on_load` function waits to run, and `false` for an atom
+/// that names no loaded module. A `module` that is not an atom raises
+/// `badarg`. The PBeam loader does not load a module that has an `on_load`
+/// instruction (`unsupported BEAM opcode 149`), so each loaded module counts.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let loaded = module_loaded(&program, &Term::static_atom("erlang"));
+/// assert!(matches!(loaded, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(module_loaded(&program, &Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn module_loaded(program: &BeamProgram, module: &Term) -> BifResult {
+    let Term::Atom(module) = module else {
+        return BifResult::badarg();
+    };
+    let loaded = program.modules.contains_key(module.name());
+    Value(Term::static_atom(if loaded { "true" } else { "false" }))
+}
+
 /// Run `erlang:start_timer(Time, Dest, Msg)`, as ERTS `start_timer_3` and
 /// `setup_bif_timer` (`erl_hl_timer.c:2605-2620`, `1804-1871`) do:
 ///
