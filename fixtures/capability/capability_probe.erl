@@ -79,6 +79,8 @@ malformed() ->
         with([{capabilities, #{process => #{modules => 3}}}]),
         with([{capabilities, #{process => #{modules => ["lists"]}}}]),
         with([{capabilities, #{terminal => #{modules => any}}}]),
+        with([{capabilities, #{persistent_term => #{names => any}}}]),
+        with([{capabilities, #{persistent_term => #{operations => [halt]}}}]),
         with([{capabilities, #{env => #{names => [[-1]]}}}]),
         with([{capabilities, #{env => #{names => [[a]]}}}]),
         with([
@@ -87,7 +89,8 @@ malformed() ->
                 terminal => #{operations => [write, read, raw_mode, window_size]},
                 port => #{operations => [spawn, command, close], executables => ["/bin/echo"]},
                 env => #{operations => [read, write], names => ["HOME", ""]},
-                signal => #{operations => [handle, ignore], signals => [sighup]}
+                signal => #{operations => [handle, ignore], signals => [sighup]},
+                persistent_term => #{operations => [read, write]}
             }}
         ])
     ].

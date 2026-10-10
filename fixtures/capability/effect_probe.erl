@@ -28,6 +28,10 @@
     send2/0,
     send3/0,
     start_timer/0,
+    pt_get0/0,
+    pt_get1/0,
+    pt_get2/0,
+    pt_put/0,
     permitted/0,
     runtime_permitted/0,
     runtime_badargs/0,
@@ -41,6 +45,8 @@
     exit_self/0,
     send_kept/0,
     timer_kept/0,
+    persistent_term_permitted/0,
+    persistent_term_kept/0,
     child/2,
     names/0,
     executables/0,
@@ -136,6 +142,16 @@ send3() -> attempt(fun() -> erlang:send(self(), ping, []) end).
 
 start_timer() -> attempt(fun() -> erlang:start_timer(0, self(), ping) end).
 
+%% The persistent term entries. The key has no value, so a get/1 without
+%% the check raises badarg.
+pt_get0() -> attempt(fun() -> persistent_term:get() end).
+
+pt_get1() -> attempt(fun() -> persistent_term:get({?MODULE, missing}) end).
+
+pt_get2() -> attempt(fun() -> persistent_term:get({?MODULE, missing}, none) end).
+
+pt_put() -> attempt(fun() -> persistent_term:put({?MODULE, put}, 1) end).
+
 %% Permitted calls that give the same result on ERTS. The variable
 %% PBEAM_EFFECT_PROBE is not set.
 permitted() ->
@@ -179,12 +195,36 @@ runtime_badargs() ->
 %% denied call has no effect, so the next call of the parent sees the
 %% start state.
 system_flag_kept() ->
-    Denied = restricted(fun() -> erlang:system_flag(system_logger, undefined) end),
+    Denied = restricted(runtime, fun() -> erlang:system_flag(system_logger, undefined) end),
     {Denied, erlang:system_flag(system_logger, logger)}.
 
 load_nif_kept() ->
-    Denied = restricted(fun() -> prim_tty:load("prim_tty") end),
+    Denied = restricted(runtime, fun() -> prim_tty:load("prim_tty") end),
     {Denied, prim_tty:load("prim_tty")}.
+
+%% Permitted persistent term calls that give the same result on ERTS. A put
+%% of the same value again also gives ok.
+persistent_term_permitted() ->
+    Key = {?MODULE, permitted},
+    [
+        persistent_term:get(Key, none),
+        badarg(fun() -> persistent_term:get(Key) end),
+        persistent_term:put(Key, 1),
+        persistent_term:put(Key, 1),
+        persistent_term:get(Key),
+        persistent_term:get(Key, none),
+        lists:keyfind(Key, 1, persistent_term:get())
+    ].
+
+%% A child with a persistent_term capability of no operation tries a put of
+%% a new key and of a changed value. A denied put stores nothing.
+persistent_term_kept() ->
+    Key = {?MODULE, kept},
+    New = restricted(persistent_term, fun() -> persistent_term:put(Key, 1) end),
+    Absent = persistent_term:get(Key, none),
+    ok = persistent_term:put(Key, 1),
+    Change = restricted(persistent_term, fun() -> persistent_term:put(Key, 2) end),
+    [{New, Absent}, {Change, persistent_term:get(Key)}].
 
 %% Permitted process calls that give the same result on ERTS.
 process_permitted() ->
@@ -293,8 +333,9 @@ stop() ->
 
 id(Term) -> Term.
 
-restricted(Call) ->
-    Capabilities = #{runtime => #{operations => []}, process => #{}},
+%% Run Call in a child whose capability of Kind permits no operation.
+restricted(Kind, Call) ->
+    Capabilities = #{Kind => #{operations => []}, process => #{}},
     erlang:spawn_opt(?MODULE, child, [self(), Call], [{capabilities, Capabilities}]),
     receive
         {child, Result} -> Result

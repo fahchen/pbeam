@@ -31,7 +31,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 27] = [
+const PROBES: [(&str, &str, &str); 31] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -58,6 +58,10 @@ const PROBES: [(&str, &str, &str); 27] = [
     ("os:getenv/1", "env:read", "getenv"),
     ("os:set_signal/2", "signal:handle", "handle_signal"),
     ("os:set_signal/2", "signal:ignore", "ignore_signal"),
+    ("persistent_term:get/0", "persistent_term:read", "pt_get0"),
+    ("persistent_term:get/1", "persistent_term:read", "pt_get1"),
+    ("persistent_term:get/2", "persistent_term:read", "pt_get2"),
+    ("persistent_term:put/2", "persistent_term:write", "pt_put"),
     ("prim_tty:read_nif/3", "terminal:read", "read_nif"),
     ("prim_tty:tty_init/2", "terminal:raw_mode", "tty_init"),
     ("prim_tty:tty_select/2", "terminal:read", "tty_select"),
@@ -80,7 +84,7 @@ impl Policy for Grants {
 
 /// The kind and the operation of each `kind:operation` name of the
 /// inventory.
-const OPERATIONS: [(&str, CapabilityKind, Operation); 19] = [
+const OPERATIONS: [(&str, CapabilityKind, Operation); 21] = [
     ("process:spawn", CapabilityKind::Process, Operation::Spawn),
     ("process:link", CapabilityKind::Process, Operation::Link),
     (
@@ -124,6 +128,16 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 19] = [
         CapabilityKind::Runtime,
         Operation::LoadNif,
     ),
+    (
+        "persistent_term:read",
+        CapabilityKind::PersistentTerm,
+        Operation::Read,
+    ),
+    (
+        "persistent_term:write",
+        CapabilityKind::PersistentTerm,
+        Operation::Write,
+    ),
 ];
 
 /// Return the kind and the operation of `kind:operation`.
@@ -136,13 +150,14 @@ fn operation(name: &str) -> (CapabilityKind, Operation) {
 }
 
 /// The capability kinds.
-const KINDS: [CapabilityKind; 6] = [
+const KINDS: [CapabilityKind; 7] = [
     CapabilityKind::Process,
     CapabilityKind::Terminal,
     CapabilityKind::Port,
     CapabilityKind::Env,
     CapabilityKind::Signal,
     CapabilityKind::Runtime,
+    CapabilityKind::PersistentTerm,
 ];
 
 /// Return a policy with a delegable capability of each kind: one of `kind`
@@ -566,5 +581,50 @@ fn sends_an_exit_signal_to_the_caller_without_exit_other() {
     assert_eq!(
         run(&program, "exit_self", &policy),
         tuple(&[atom(&program, "ok"), atom(&program, "exit")])
+    );
+}
+
+#[test]
+fn gives_the_erts_results_of_the_permitted_persistent_term_operations() {
+    let program = program();
+    let atom = |name| atom(&program, name);
+    let key = tuple(&[atom("effect_probe"), atom("permitted")]);
+    let expected = Term::List(vec![
+        atom("none"),
+        atom("badarg"),
+        atom("ok"),
+        atom("ok"),
+        Term::Integer(1),
+        Term::Integer(1),
+        tuple(&[key, Term::Integer(1)]),
+    ]);
+    let policy = grants(
+        CapabilityKind::PersistentTerm,
+        &[Operation::Read, Operation::Write],
+        Constraint::Any,
+    );
+    assert_eq!(
+        run(&program, "persistent_term_permitted", &policy),
+        expected
+    );
+    assert_eq!(
+        erts_with_stand_in("persistent_term_permitted"),
+        "[none,badarg,ok,ok,1,1,{{effect_probe,permitted},1}]\n"
+    );
+}
+
+#[test]
+fn keeps_the_persistent_terms_after_a_denied_put() {
+    // A child with `#{persistent_term => #{operations => []}}` tries a put
+    // of a new key, then of a changed value. The parent then sees no value,
+    // then the old value.
+    let program = program();
+    let denied = atom(&program, "denied");
+    assert_eq!(
+        run(&program, "persistent_term_kept", &AllowAll),
+        Term::List(vec![
+            tuple(&[denied.clone(), atom(&program, "none")]),
+            tuple(&[denied, Term::Integer(1)]),
+        ])
     );
 }
