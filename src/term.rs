@@ -16,6 +16,7 @@ pub(crate) use hash::internal_hash;
 pub use map::Map;
 pub(crate) use map::{Direction, from_list_units};
 pub use match_context::MatchContext;
+pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
 
 use std::fmt;
@@ -48,10 +49,11 @@ pub enum Term {
     /// A BEAM map: a flatmap up to 32 keys and a hashmap above 32 keys, as
     /// in ERTS. `Map` keeps each map in its canonical form, so two maps with
     /// the same pairs are equal. A key is a binary, an atom, a small integer,
-    /// `[]`, a list whose elements are atoms, small integers, `[]`, or such
-    /// lists, or an improper list of such elements whose tail is an atom or a
-    /// small integer; a flatmap also accepts any integer. Atom keys are
-    /// ordered and hashed by their atom index, as in ERTS.
+    /// `[]`, a list or a tuple whose elements are atoms, small integers,
+    /// `[]`, or such lists or tuples, or an improper list of such elements
+    /// whose tail is an atom, a small integer, or such a tuple; a flatmap
+    /// also accepts any integer. Top-level atom keys are ordered by their
+    /// atom index, and all atoms are hashed by their atom index, as in ERTS.
     Map(Map),
     /// A process identifier owned by this runtime.
     Pid(ProcessId),

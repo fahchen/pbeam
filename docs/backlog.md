@@ -35,7 +35,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Add bitstring terms
 
 - PBeam has no bitstring term whose size is not a multiple of 8 bits, so `is_bitstr` passes only for a binary. The loader keeps a `BIT_BINARY_EXT` literal as an unsupported literal, so `byte_size(<<1:3>>)` stops with `unsupported BEAM literal index N`. ERTS gives `1` (`erl_bif_guard.c:376-393`). The "Bitstring terms" row records this.
-- The work: a bitstring `Term` variant with the ERTS term order, `BIT_BINARY_EXT` literals in the loader, the bit count in `erlang:byte_size/1`, and the bitstring forms of the binary instructions and BIFs.
+- The work: a bitstring `Term` variant with the ERTS term order, `BIT_BINARY_EXT` literals in the loader, the bit count in `erlang:byte_size/1`, and the bitstring forms of the binary instructions and BIFs, such as the `binary` and `get_tail` commands of `bs_match` of a size that is not a multiple of 8 bits.
 - **Trigger:** a measured path makes or loads a bitstring that is not a binary.
 - **Source:** #359 and #360.
 
@@ -57,12 +57,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2`, `erlang:fun_info_mfa/1`, and `erlang:fun_to_list/1` are `unsupported` BIF table entries (row "Unimplemented BIFs"). `io_lib` calls `erlang:fun_to_list/1` to write a fun (io_lib.erl:699, 826).
 - **Trigger:** a measured path loads a local fun literal, calls one of the three BIFs, or formats a fun.
 - **Source:** PR #120 (#109).
-
-### Run `erlang:'-'/1` (was #128)
-
-- The measured M2 paths do not run it (pinned ERTS call trace and line counters). #110 removed it. The `is_eq` test of the same task landed in PR #189 (#183), and the `is_float` test is task #167. A negation of a value that is not a literal, such as `-X`, compiles to a `gc_bif` call of `erlang:'-'/1` and returns `unresolved external MFA erlang:-/1` (row "Unimplemented BIFs").
-- **Trigger:** a measured consumer negates a value that is not a literal.
-- **Source:** review of PR #121 (#110).
 
 ## Runtime
 
@@ -130,25 +124,25 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path depends on the turn in which a timer expires while other processes run.
 - **Source:** #229 (PR #236).
 
-### Run the other binary-match instructions and `bs_match` commands
+### Run the other binary-match instructions
 
-- PBeam runs `bs_start_match3`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, and `bs_match` with the commands `ensure_at_least` and `ensure_exactly`. The other `bs_match` commands (`binary`, `integer`, `skip`, `get_tail`, and `=:=`) stop the run with `unsupported bs_match command <Name>`. `bs_start_match3` that copies a match context to another register stops the run with `unsupported bs_start_match3 that copies the match context in <Source> to <Destination>`. Each other binary-match instruction, such as `bs_start_match4`, `bs_get_tail`, `bs_skip_utf8`, and `bs_get_binary2`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Evidence:** `binary_match_probe:byte(<<7,8>>)` stops with `unsupported bs_match command integer`.
-- **Trigger:** a measured path matches a binary with one of these commands or instructions. Add only the commands and instructions that the path needs.
-- **Source:** #219 (PR #227).
+- PBeam runs `bs_start_match3`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, and `bs_match` with each command that the ERTS loader accepts. `bs_start_match3` that copies a match context to another register stops the run with `unsupported bs_start_match3 that copies the match context in <Source> to <Destination>`. After a failed `=:=` command of `bs_match`, PBeam does not know the position, so a read of the match context before `bs_set_position` stops the run with `unsupported read of the match context in <Operand> after a failed bs_match =:= command`. Each other binary-match instruction, such as `bs_start_match4`, `bs_get_tail`, `bs_skip_utf8`, and `bs_get_binary2`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it. The entry "Add bitstring terms" owns the `binary` and `get_tail` commands of a size that is not a multiple of 8 bits.
+- **Evidence:** `bs_match_probe:bits(<<165>>)` stops with `unsupported bs_match binary of 3 bits: needs a bitstring term`. The test `gives_a_runtime_error_for_a_read_after_a_failed_equal_command` of `tests/runtime/interpreter.rs` stops at a `skip` command after a failed `=:=`.
+- **Trigger:** a measured path matches a binary with one of these instructions, or reads a match context after a failed `=:=` command without `bs_set_position`. Add only the instructions that the path needs.
+- **Source:** #219 (PR #227), #395.
 
 ### Set raw mode through `shell:start_interactive({noshell, raw})`
 
-- `shell:start_interactive({noshell, raw})` calls `user_drv:start_shell/1` (shell.erl:149-150). `user_drv` calls `prim_tty:reinit/2` with the input `raw` (user_drv.erl:387-411), and `prim_tty` reads the terminfo values `co` and `xn` with `tigetnum_nif/1` and `tigetflag_nif/1` (prim_tty.erl:333-345, 1405-1408). These NIFs have no PBeam binding, so the stub raises `error:undef` (see "Native functions without a binding" in `docs/effect-inventory.md`). `user_drv` catches only `error:enotsup` (user_drv.erl:412) and raises the exception again with the `raise` instruction (opcode 108). Before #384, this instruction stopped the run with `unsupported BEAM opcode 108`. Thus a PBeam program cannot set fd 0 to raw mode yet. The test of #300 sets raw mode with `stty` while the program waits.
+- `shell:start_interactive({noshell, raw})` calls `user_drv:start_shell/1` (shell.erl:149-150). `user_drv` calls `prim_tty:reinit/2` with the input `raw` (user_drv.erl:387-411), and `prim_tty` reads the terminfo values `co` and `xn` with `tigetnum_nif/1` and `tigetflag_nif/1` (prim_tty.erl:333-345, 1405-1408). Before #388, these NIFs had no PBeam binding, so the stub raised `error:undef`. `user_drv` catches only `error:enotsup` (user_drv.erl:412) and raises the exception again with the `raise` instruction (opcode 108). Before #384, this instruction stopped the run with `unsupported BEAM opcode 108`. Thus a PBeam program cannot set fd 0 to raw mode yet. The test of #300 sets raw mode with `stty` while the program waits.
 - **Evidence:** `ok = user_drv:start_shell(#{initial_shell => noshell, input => raw})` in a probe run by `pbeam_boot` in a pseudo-terminal before #384 stops with `pbeam: unsupported BEAM opcode 108` and status 1. On pinned ERTS, the call returns `ok`, and the next output has no carriage return, because raw mode turns `OPOST` off.
-- The work: the `tigetnum_nif/1` and `tigetflag_nif/1` bindings, and then the other NIFs that the raw path of `prim_tty` and `user_drv` calls.
+- The work: the other NIFs that the raw path of `prim_tty` and `user_drv` calls. #388 adds the `tigetnum_nif/1` and `tigetflag_nif/1` bindings.
 - **Trigger:** a program sets raw mode, for example the Terra reference run (#3).
 - **Source:** PR for #300.
 
 ### Write the output in a locale whose codeset is not UTF-8
 
-- In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1` (prim_tty.erl:1309-1321), which PBeam runs as ERTS does. Thus PBeam writes ASCII output as ERTS does. Output that is not ASCII calls `binary_to_latin1/2`, which builds each character with `char_to_latin1/2` (prim_tty.erl:1323-1330). #269 runs the `string` and `binary` segments of `bs_create_bin`. `char_to_latin1/2` also needs the `integer` segment of `bs_create_bin` (prim_tty.erl:1329-1330) and `erlang:integer_to_binary/2` (prim_tty.erl:1325-1328). PBeam stops with `unsupported bs_create_bin segment integer` and status 1 (measured with `IO.puts/1` of the UTF-8 binary of `é`). ERTS writes the Latin-1 output with status 0. The "Boot" row records this.
-- The work: the `integer` segment of `bs_create_bin` and `erlang:integer_to_binary/2` for `char_to_latin1/2`.
+- In such a locale, `prim_tty` writes in latin1 mode. `prim_tty:to_latin1/2` calls `is_usascii/1` (prim_tty.erl:1309-1321), which PBeam runs as ERTS does. Thus PBeam writes ASCII output as ERTS does. Output that is not ASCII calls `binary_to_latin1/2`, which builds each character with `char_to_latin1/2` (prim_tty.erl:1323-1330). #269 runs the `string` and `binary` segments of `bs_create_bin`, and #397 runs the `integer` segment (prim_tty.erl:1329-1330). Thus PBeam writes `é` to a pipe as ERTS does. `char_to_latin1/2` also needs `erlang:integer_to_binary/2` for a character of 512 or more, and for a character of 128 or more when its second argument is `true` (prim_tty.erl:1325-1328). PBeam stops with `unresolved external MFA erlang:integer_to_binary/2` and status 1 (measured with `io:put_chars/1` of the UTF-8 binary of `中`, with `LC_ALL=C` and `TERM=dumb`, to a pipe). ERTS writes `\x{4E2D}` with status 0. The "Boot" row records this.
+- The work: `erlang:integer_to_binary/2` for `char_to_latin1/2`.
 - **Trigger:** a supported run that writes output that is not ASCII in a locale whose codeset is not UTF-8, for example a macOS shell with `LANG`, `LC_ALL`, and `LC_CTYPE` unset.
 - **Source:** "Boot" row (#139, #183, #219, #269).
 
@@ -157,7 +151,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
   - Timers: `erlang:start_timer/4`, `erlang:send_after/3,4`, `erlang:cancel_timer/1`, and `erlang:read_timer/1,2`. `erlang:start_timer/3` and `erlang:cancel_timer/2` already use the timer list of #150 (PR #172).
   - Aliases: `erlang:alias/1`, which `erlang:alias/0` calls, and `erlang:unalias/1`.
-  - Equality: `erlang:'=='/2` and `erlang:'/='/2`. They give other results than `=:=` and `=/=` only for floats (see "Add float terms").
+  - Equality: `erlang:'/='/2`. It gives other results than `=/=` only for floats (see "Add float terms").
   - Persistent terms: `persistent_term:erase/1`, `persistent_term:put_new/2`, and `persistent_term:info/0`.
   - Signals: `erlang:exit/3`.
   - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.

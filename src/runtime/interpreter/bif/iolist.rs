@@ -733,7 +733,7 @@ fn l2b_trap(arguments: Vec<Term>) -> BifResult {
 /// assert_eq!(iodata_bytes(&tail(Term::static_atom("x"))), None);
 /// assert_eq!(iodata_bytes(&Term::static_atom("foo")), None);
 /// ```
-pub(super) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
+pub(in crate::runtime::interpreter) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
     let (mut bytes, mut unlimited) = (Vec::new(), i64::MAX);
     let step = Walk::new(term, &[]).run(&mut unlimited, |leaf, _, _| {
         if let Term::Binary(binary) = leaf {
