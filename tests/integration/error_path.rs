@@ -100,6 +100,22 @@ fn raises_the_exceptions_of_the_error_path_instructions_as_pinned_erts() {
                 ),
                 frame("error_2_tail", Term::List(Vec::new())),
                 frame("error_2_body", Term::List(vec![atom("a")])),
+                // A tail call of a fun removes the frame first
+                // (`instr_fun.cpp:425-455`), and a tail apply keeps it
+                // (`beam_common.c:1345-1431`).
+                frame("error_2_fun_caller", Term::List(vec![atom("b")])),
+                frame("error_2_apply_tail", Term::List(vec![atom("c")])),
+            ]),
+            // With no caller frame, the first frame is the initial call with
+            // its arity (`beam_common.c:1245-1248`).
+            tuple(vec![
+                r(),
+                Term::List(vec![tuple(vec![
+                    atom("error_path_probe"),
+                    atom("error_2_fun_tail"),
+                    Term::Integer(1),
+                    Term::List(Vec::new()),
+                ])]),
             ]),
         ])
     );
@@ -118,6 +134,9 @@ fn raises_the_exceptions_of_the_error_path_instructions_as_pinned_erts() {
          {r,error_path_probe,error_2_tail,1},\
          {r,error_path_probe,error_2_tail,[a|b]},\
          {r,error_path_probe,error_2_tail,[]},\
-         {r,error_path_probe,error_2_body,[a]}]}\n"
+         {r,error_path_probe,error_2_body,[a]},\
+         {r,error_path_probe,error_2_fun_caller,[b]},\
+         {r,error_path_probe,error_2_apply_tail,[c]}],\
+         {r,[{error_path_probe,error_2_fun_tail,1,[]}]}}\n"
     );
 }

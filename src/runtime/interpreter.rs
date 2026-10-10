@@ -1910,6 +1910,11 @@ impl BeamProgram {
             Target::Local(lambda) => lambda,
             Target::External {
                 module, function, ..
+            } if tail && (module.name(), function.name(), arity) == ("erlang", "error", 2) => {
+                return self.tail_call_error_2(scheduler);
+            }
+            Target::External {
+                module, function, ..
             } => return self.call_mfa(scheduler, module.name(), function.name(), arity, tail),
         };
         for (register, value) in (arity..).zip(fun.free()) {
@@ -1919,6 +1924,50 @@ impl BeamProgram {
         let frame = self.frame(lambda.module().name(), lambda.label(), total_arity)?;
         enter_frame(process, frame, tail);
         Ok(None)
+    }
+
+    /// Run a tail call of the fun `fun erlang:error/2`. ERTS
+    /// `i_call_fun_last` removes the frame before it calls the fun
+    /// (`emit_i_call_fun2_last` in `jit/arm/instr_fun.cpp:425-455`). Only an
+    /// apply puts the calling function back for an error BIF
+    /// (`apply_bif_error_adjustment`, `beam_common.c:1345-1431`), so the
+    /// first frame of the stack trace is the function of the caller frame.
+    /// With no caller frame, the first frame is the initial call of the
+    /// process with its arity, and the arguments are not in it
+    /// (`build_stacktrace`, `beam_common.c:1245-1248`). The tail call has
+    /// already released the Y registers of the frame, so the frame holds no
+    /// catch tag. Return the outcome when the process exits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // `tail(F) -> F(r, [a]).` as the start of a process.
+    /// let outcome = program.tail_call_error_2(&mut scheduler)?;
+    /// // The process exits with {r, [{Module, tail, 1, []}]}.
+    /// assert!(matches!(outcome, Some(Outcome::Exit { .. })));
+    /// ```
+    fn tail_call_error_2(&self, scheduler: &mut Scheduler) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        process.frames.pop();
+        if !process.frames.is_empty() {
+            return self.call_mfa(scheduler, "erlang", "error", 2, false);
+        }
+        let reason = read(process, &Operand::X(0))?;
+        let (module, function, arity) = process.initial_call.clone();
+        let frame = Term::Tuple(vec![
+            Term::Atom(scheduler.atoms.put(&module)?),
+            Term::Atom(scheduler.atoms.put(&function)?),
+            Term::Integer(arity as i64),
+            Term::List(Vec::new()),
+        ]);
+        let process = scheduler.current_process_mut();
+        let stacktrace = Term::List(vec![frame]);
+        Ok(raise_with_stacktrace(
+            process,
+            ExceptionClass::Error,
+            reason,
+            stacktrace,
+        ))
     }
 
     /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`

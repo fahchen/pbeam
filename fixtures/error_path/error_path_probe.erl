@@ -1,6 +1,6 @@
 -module(error_path_probe).
 -compile(nowarn_deprecated_catch).
--export([main/0, throw_reason/1]).
+-export([main/0, throw_reason/1, error_2_fun_tail/1]).
 
 -record(r, {a}).
 
@@ -22,7 +22,7 @@ main() ->
         fun() -> erlang:error(id(r), none) end,
         fun() -> erlang:throw(id(r)) end
     ],
-    {[{caught(F), caught_by_catch(F)} || F <- Cases], raw_raise(id(foo)), down(), error_2_frames()}.
+    {[{caught(F), caught_by_catch(F)} || F <- Cases], raw_raise(id(foo)), down(), error_2_frames(), error_2_spawned()}.
 
 caught(F) ->
     try F() catch C:R -> {C, R} end.
@@ -80,7 +80,11 @@ raw_raise(Class) ->
 %% left out: PBeam has no line table.
 error_2_frames() ->
     [first_frame(fun() -> error_2_tail(Args) end) || Args <- [[a], none, [a | b], []]] ++
-        [first_frame(fun() -> error_2_body(id([a])) end)].
+        [
+            first_frame(fun() -> error_2_body(id([a])) end),
+            first_frame(fun error_2_fun_caller/0),
+            first_frame(fun() -> error_2_apply_tail(id(erlang)) end)
+        ].
 
 first_frame(F) ->
     try
@@ -98,6 +102,27 @@ error_2_body(Args) ->
     X = id(Args),
     erlang:error(r, X),
     id(X).
+
+%% A tail call of a fun removes the frame before erlang:error/2 runs, so the
+%% first frame is the caller. A tail apply keeps the frame of the caller of
+%% the apply.
+error_2_fun_caller() ->
+    X = error_2_fun_tail(id(fun erlang:error/2)),
+    id(X).
+
+error_2_fun_tail(F) ->
+    F(r, [b]).
+
+error_2_apply_tail(M) ->
+    M:error(r, [c]).
+
+%% With no caller frame, the first frame is the initial call of the process
+%% with its arity.
+error_2_spawned() ->
+    {Pid, Ref} = spawn_monitor(?MODULE, error_2_fun_tail, [fun erlang:error/2]),
+    receive
+        {'DOWN', Ref, process, Pid, Reason} -> Reason
+    end.
 
 %% A throw with no catch ends the process with {{nocatch, Reason}, Stack}.
 throw_reason(R) ->
