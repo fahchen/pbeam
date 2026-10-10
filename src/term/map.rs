@@ -25,6 +25,7 @@
 //! `{<<>>}`.
 
 use std::cmp::Ordering;
+use std::rc::Rc;
 
 use super::{Term, hash::internal_hash};
 use crate::error::{BeamError, error};
@@ -97,12 +98,22 @@ enum Entry<'a> {
 
 /// A BEAM map: a flatmap up to 32 keys and a HAMT above 32 keys, as in
 /// ERTS. The layout is private, so every map is in its canonical form.
+///
+/// A copy of a map shares the form of the map, as an ERTS copy of a map
+/// term in a register or a stack slot is the same boxed pointer. A change
+/// through one copy first copies a shared form, so the other copies do not
+/// change.
+#[derive(Clone)]
 pub struct Map {
-    /// The flatmap or hashmap form of the map.
-    repr: Repr,
+    /// The flatmap or hashmap form of the map. All copies of the map own
+    /// one reference to it. `insert` and `get_mut` copy it first when
+    /// another copy also holds it (`Rc::make_mut`). The last copy that drops
+    /// releases it.
+    repr: Rc<Repr>,
 }
 
 /// The two forms of a map. The number of keys selects the form.
+#[derive(Clone)]
 enum Repr {
     /// At most 32 pairs, sorted by the flatmap key order.
     Flat(Vec<(Term, Term)>),
@@ -111,6 +122,7 @@ enum Repr {
 }
 
 /// A hash array mapped trie of map pairs.
+#[derive(Clone)]
 struct Hamt {
     /// The node at level 0.
     root: Node,
@@ -128,6 +140,7 @@ pub(super) enum Form<'a> {
 
 /// A HAMT node. Bit `i` of `bitmap` is set when slot `i` holds a child.
 /// `children` holds one child per set bit, in ascending slot order.
+#[derive(Clone)]
 pub(super) struct Node {
     /// The occupied slots.
     bitmap: u16,
@@ -136,6 +149,7 @@ pub(super) struct Node {
 }
 
 /// The child in one slot of a HAMT node.
+#[derive(Clone)]
 pub(super) enum Child {
     /// A key and its value.
     Leaf(Term, Term),
@@ -158,7 +172,7 @@ impl Map {
     /// ```
     pub(crate) fn new() -> Self {
         Map {
-            repr: Repr::Flat(Vec::new()),
+            repr: Rc::new(Repr::Flat(Vec::new())),
         }
     }
 
@@ -199,7 +213,7 @@ impl Map {
     /// assert_eq!(map.len(), 1);
     /// ```
     pub(crate) fn len(&self) -> usize {
-        match &self.repr {
+        match &*self.repr {
             Repr::Flat(pairs) => pairs.len(),
             Repr::Hash(hamt) => hamt.size,
         }
@@ -213,7 +227,7 @@ impl Map {
     /// assert!(!Map::new().is_hashmap());
     /// ```
     pub(crate) fn is_hashmap(&self) -> bool {
-        matches!(self.repr, Repr::Hash(_))
+        matches!(*self.repr, Repr::Hash(_))
     }
 
     /// Return the flatmap pairs or the hashmap root, so that the ERTS
@@ -226,7 +240,7 @@ impl Map {
     /// assert!(matches!(map.form(), Form::Flat([(Term::Integer(1), Term::Integer(2))])));
     /// ```
     pub(super) fn form(&self) -> Form<'_> {
-        match &self.repr {
+        match &*self.repr {
             Repr::Flat(pairs) => Form::Flat(pairs),
             Repr::Hash(hamt) => Form::Hash {
                 size: hamt.size,
@@ -248,7 +262,7 @@ impl Map {
     /// assert_eq!(map.get(&Term::Tuple(vec![])), None);
     /// ```
     pub(crate) fn get(&self, key: &Term) -> Option<&Term> {
-        let hamt = match &self.repr {
+        let hamt = match &*self.repr {
             Repr::Flat(pairs) => {
                 return pairs
                     .iter()
@@ -278,7 +292,9 @@ impl Map {
     }
 
     /// Return the value of a key for a change in place, or `None` when the
-    /// map does not hold the key. The key lookup is the one of `get`.
+    /// map does not hold the key. The key lookup is the one of `get`. When
+    /// another copy also holds the form of the map, copy the form first, so
+    /// the change does not show in the other copy.
     ///
     /// # Examples
     ///
@@ -289,7 +305,7 @@ impl Map {
     /// assert!(map.get_mut(&Term::Integer(2)).is_none());
     /// ```
     pub(crate) fn get_mut(&mut self, key: &Term) -> Option<&mut Term> {
-        let hamt = match &mut self.repr {
+        let hamt = match Rc::make_mut(&mut self.repr) {
             Repr::Flat(pairs) => {
                 return pairs
                     .iter_mut()
@@ -357,7 +373,9 @@ impl Map {
     }
 
     /// Set a key to a value. Replace the value when the key exists. A
-    /// flatmap that gets its 33rd key becomes a hashmap, as in ERTS.
+    /// flatmap that gets its 33rd key becomes a hashmap, as in ERTS. When
+    /// another copy also holds the form of the map, copy the form first, so
+    /// the change does not show in the other copy.
     ///
     /// # Examples
     ///
@@ -376,7 +394,7 @@ impl Map {
     /// Return the first key that the map form does not support yet. The map
     /// does not change.
     pub(crate) fn insert(&mut self, key: Term, value: Term) -> Result<(), Term> {
-        let pairs = match &mut self.repr {
+        let pairs = match Rc::make_mut(&mut self.repr) {
             Repr::Flat(pairs) => pairs,
             Repr::Hash(hamt) => {
                 let Some(hash) = map_hash(&key) else {
@@ -409,7 +427,7 @@ impl Map {
                 for (hash, (key, value)) in hashes.into_iter().zip(pairs) {
                     hamt.insert(hash, key, value);
                 }
-                self.repr = Repr::Hash(hamt);
+                self.repr = Rc::new(Repr::Hash(hamt));
             }
         }
         Ok(())
@@ -430,7 +448,7 @@ impl Map {
     /// ```
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Term, &Term)> {
         // `pairs` holds the flatmap pairs, or the pairs of the current collision child.
-        let (mut pairs, mut nodes) = match &self.repr {
+        let (mut pairs, mut nodes) = match &*self.repr {
             Repr::Flat(pairs) => (pairs.iter(), Vec::new()),
             Repr::Hash(hamt) => (Default::default(), vec![hamt.root.children.iter()]),
         };
@@ -452,18 +470,29 @@ impl Map {
         })
     }
 
-    /// Move every key and value onto a work stack. `Term` uses this to drop
-    /// a deep map without recursion.
+    /// Move every key and value onto a work stack and leave the map empty.
+    /// When another copy also holds the form of the map, move nothing: the
+    /// last copy moves the pairs. `Term` uses this to drop a deep map
+    /// without recursion.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut pending = Vec::new();
-    /// Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?.drain_into(&mut pending);
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut copy = map.clone();
+    /// map.drain_into(&mut pending);
+    /// assert!(pending.is_empty());
+    /// drop(map);
+    /// copy.drain_into(&mut pending);
     /// assert_eq!(pending, [Term::Integer(1), Term::Integer(2)]);
     /// ```
-    pub(crate) fn drain_into(self, pending: &mut Vec<Term>) {
-        let root = match self.repr {
+    pub(crate) fn drain_into(&mut self, pending: &mut Vec<Term>) {
+        // A shared representation stays with its other copies; the last copy drains it.
+        let Some(repr) = Rc::get_mut(&mut self.repr) else {
+            return;
+        };
+        let root = match std::mem::replace(repr, Repr::Flat(Vec::new())) {
             Repr::Flat(pairs) => {
                 pending.extend(pairs.into_iter().flat_map(|(key, value)| [key, value]));
                 return;
@@ -527,7 +556,7 @@ impl Map {
         budget: usize,
         direction: Direction,
     ) -> Result<Option<Chunk<'_>>, BeamError> {
-        let hamt = match &self.repr {
+        let hamt = match &*self.repr {
             Repr::Flat(pairs) => {
                 let size = pairs.len() as u64;
                 let path = path.small_integer().map(unsigned_val);
@@ -579,7 +608,7 @@ impl Map {
     /// assert_eq!(map(1..41)?.merge_steps(&map(1..41)?).map(|steps| steps / 8), Some(8));
     /// ```
     pub(crate) fn merge_steps(&self, other: &Map) -> Option<usize> {
-        let both_flat = matches!((&self.repr, &other.repr), (Repr::Flat(_), Repr::Flat(_)));
+        let both_flat = matches!((&*self.repr, &*other.repr), (Repr::Flat(_), Repr::Flat(_)));
         if both_flat || self.len() == 0 || other.len() == 0 {
             return None;
         }
