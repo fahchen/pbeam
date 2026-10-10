@@ -21,6 +21,7 @@ else
   src=target/terra/$commit
   if [[ ! -d $src ]]; then
     # Download into a directory of this run, then rename it, so that the copy in target/terra/<commit>/ is never a part of a download. When a parallel run made the copy first, use that copy.
+    # The rename is one rename(2) call through file:rename/2 of erl. It fails when target/terra/<commit>/ is a directory that is not empty. A check before mv is not sufficient: when a parallel run makes the copy between the check and mv, mv moves the download into that copy.
     mkdir -p target/terra
     work=$(mktemp -d target/terra/download.XXXXXX)
     trap 'rm -rf "$work"' EXIT
@@ -28,7 +29,7 @@ else
     git -C "$work" init --quiet
     git -C "$work" fetch --quiet --depth 1 "$url" "$commit"
     git -C "$work" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
-    if [[ -d $src ]]; then rm -rf "$work"; else mv "$work" "$src"; fi
+    erl -noshell -eval 'halt(case apply(file, rename, init:get_plain_arguments()) of ok -> 0; _ -> 1 end).' -extra "$work" "$src" || rm -rf "$work"
     trap - EXIT
   fi
 fi
