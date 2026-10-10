@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261010: Include hidden work in complexity claims
+
+**Problem:** A PR description and effect inventory stated an `O(r)` policy revocation cost but omitted the sort of the matching copies.
+
+**Root Cause:** The analysis counted selection work but did not count the ordering work needed for deterministic signal delivery.
+
+**Fix:** State the cost as `O(r log r)` and define the variables in the affected documentation.
+
+**Guardrail:** Expand every documented complexity claim into its complete operation sequence, including sorting and deterministic-order steps.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/413#issuecomment-6100116408>
+
 ## 20261010: Replace verification placeholders before publishing
 
 **Problem:** A PR description kept a placeholder in the Verification section after an earlier edit did not apply.
