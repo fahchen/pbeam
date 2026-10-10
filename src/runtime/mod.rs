@@ -1,3 +1,4 @@
+mod capability;
 mod dirty_io;
 mod ets;
 mod host;
@@ -16,6 +17,7 @@ mod timer;
 mod tty;
 mod unicode;
 
+pub use capability::{AllowAll, Capability, CapabilityKind, Constraint, Operation, Policy};
 pub use host::signal::install_start_dispositions;
 pub use interpreter::BeamProgram;
 

@@ -106,6 +106,10 @@ name = "calls"
 path = "tests/integration/calls.rs"
 
 [[test]]
+name = "capability"
+path = "tests/integration/capability.rs"
+
+[[test]]
 name = "compare"
 path = "tests/integration/compare.rs"
 
