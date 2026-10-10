@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::capability::SecurityContext;
+use crate::runtime::capability::{AllowAll, Policy, SecurityContext};
 use crate::runtime::process::tests::frame;
 use crate::term::Map;
 
@@ -25,9 +25,8 @@ fn gives_the_tcsetattr_errno_and_keeps_no_owner() {
     // TTY resource is `disabled` only when `tcgetattr` of its output fd
     // succeeds, and `tcsetattr` of the same fd then succeeds.
     let mut scheduler = Scheduler::new(AtomTable::new());
-    scheduler
-        .start(frame(), vec![], SecurityContext::default())
-        .unwrap();
+    let security = SecurityContext::new(AllowAll.initial());
+    scheduler.start(frame(), vec![], security).unwrap();
     scheduler.schedule_next().unwrap();
     let reference = scheduler.make_ref().unwrap();
     scheduler.resources.borrow_mut::<Ttys>().insert(

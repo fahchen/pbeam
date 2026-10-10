@@ -126,6 +126,10 @@ name = "demonitor"
 path = "tests/integration/demonitor.rs"
 
 [[test]]
+name = "effect_capability"
+path = "tests/integration/effect_capability.rs"
+
+[[test]]
 name = "ets"
 path = "tests/integration/ets.rs"
 
