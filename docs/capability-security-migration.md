@@ -133,6 +133,8 @@ Each copy of a capability records its source and the child processes that got a 
 
 A revocation is a signal through the signal queue of [#221](https://github.com/fahchen/pbeam/issues/221). When the holder handles the signal, it deletes its copy and sends the revocation to each downstream process. As with the other control signals of ERTS, a revocation takes effect when the target handles the signal, not when the revoker sends it. A revocation does not end the holder. It does not close the resources that the holder already opened: transition 5 owns resource recovery. The cost of a revocation increases with the number of holders, and with multiple schedulers the signal goes between threads as other signals do. In return, a check finds the capabilities of the caller in its own copies, not in a run-wide capability table.
 
+The exit of a holder must not stop a cascade. When a holder exits, it releases its copies, but the receivers of those copies can live longer. A later revocation from a process above the holder must still reach each downstream copy. Thus the delegation records of a holder stay usable after its exit, for example because the exiting holder gives its receivers to the source of each copy. The source can also exit first, and the launcher or the policy process can be the source, so #336 decides the exact form of these records.
+
 Transition 2 has no lease. A lease waits in the backlog.
 
 #### Denial result
@@ -224,7 +226,9 @@ on_signal(holder, {revoke, cap_id}):                             # when the hold
         send_signal(child, {revoke, copied_id(child, cap_id)})
 
 # 5. Process exit: release all capabilities.
-on_exit(process): drop process.caps
+on_exit(process):
+    keep process.delegated usable for later cascades             # #336 decides the form
+    drop process.caps
 ```
 
 #### Components and the check flow
