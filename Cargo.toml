@@ -98,6 +98,10 @@ name = "binary_match"
 path = "tests/integration/binary_match.rs"
 
 [[test]]
+name = "bitstr"
+path = "tests/integration/bitstr.rs"
+
+[[test]]
 name = "bs_create_bin"
 path = "tests/integration/bs_create_bin.rs"
 

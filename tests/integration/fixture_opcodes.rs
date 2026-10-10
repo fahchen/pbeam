@@ -65,6 +65,17 @@ fn binary_match_probe_has_the_binary_match_bytes() {
 }
 
 #[test]
+fn bitstr_probe_has_the_is_bitstr_bytes() {
+    assert_in_fixture(
+        "fixtures/bitstr/bitstr_probe.beam",
+        &[
+            // kind/1: is_bitstr f5 x0
+            &[0x81, 0x55, 0x03],
+        ],
+    );
+}
+
+#[test]
 fn compare_probe_has_the_is_lt_is_eq_is_integer_and_is_boolean_bytes() {
     assert_in_fixture(
         "fixtures/compare/compare_probe.beam",
