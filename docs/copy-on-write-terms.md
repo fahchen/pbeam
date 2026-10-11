@@ -164,7 +164,7 @@ Logical copy rule: a later implementation of a value that depends on a copy comp
 
 ### Result of #459
 
-Task #459 made the sharing of this section the behavior of the code and closed the copy-on-write epic:
+Task #459 made the sharing of this section the behavior of the code and implements the last representation task of the epic. The epic itself stays open until this task merges and the epic checkpoint is recorded:
 
 - `Term::MatchContext` holds an `Arc<MatchState>`. `MatchState` keeps the binary of the match and its bit position and `position_known` flag in one `AtomicU64`: the low 63 bits are the position, and the top bit is the flag. Only the process that owns the match context reads and writes it, so each access uses the `Relaxed` order, as owner decision R3 of [#450](https://github.com/fahchen/pbeam/issues/450) requires. The `Rc<RefCell<...>>` and the `RefCell` borrow go away.
 - `Term::clone` is one match over the variants. It shares the storage of each compound term, and no arm walks the nested terms. `shallow_clone` went away, and only the work stack of `Drop` stays.
