@@ -8,10 +8,13 @@
 %% order of start_clean.boot (init.erl:1348-1350). It then runs the kernel
 %% part of kernel:start/2, and sets the registered user process as the
 %% group leader before it starts -eval (init.erl:1539-1546). In a pbeam run
-%% in boot mode (--boot), the process then enters the runtime: it drops the
-%% boot authority and gets the capabilities that the policy gives
-%% Module:Function/0. In each other run, pbeam_cap:enter_runtime/2 returns
-%% ok and has no effect. ERTS has no pbeam_cap module.
+%% in boot mode (--boot), the process then registers the IO servers user
+%% and standard_error as IO services, so that a runtime process can send
+%% them the IO requests that its terminal capability permits, and enters
+%% the runtime: it drops the boot authority and gets the capabilities that
+%% the policy gives Module:Function/0. In each other run,
+%% pbeam_cap:serve/2 and pbeam_cap:enter_runtime/2 return ok and have no
+%% effect. ERTS has no pbeam_cap module.
 start(Module, Function) ->
     process_flag(trap_exit, true),
     Init = spawn(?MODULE, init, [self(), [{noshell, []}]]),
@@ -23,6 +26,8 @@ start(Module, Function) ->
     receive {Kernel, started} -> ok end,
     Init ! {self(), kernel, Kernel},
     group_leader(whereis(user), self()),
+    ok = pbeam_cap:serve(whereis(user), io),
+    ok = pbeam_cap:serve(whereis(standard_error), io),
     ok = pbeam_cap:enter_runtime(Module, Function),
     Module:Function().
 

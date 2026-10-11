@@ -556,6 +556,12 @@ pub(super) struct SecurityContext {
     /// boot root process, and only `pbeam_cap:enter_runtime/2` of the root
     /// process clears the flag, one way.
     boot: bool,
+    /// True for a boot process that `pbeam_cap:serve(Pid, io)` registered
+    /// as an IO service: the runtime to boot gate permits a message from a
+    /// runtime process to it when the message is an IO request that the
+    /// sender may make (see `io_service::send_denial` of the BIFs). Only a boot
+    /// context has the flag, and a child does not get it.
+    io_service: bool,
 }
 
 impl SecurityContext {
@@ -572,6 +578,7 @@ impl SecurityContext {
         Self {
             capabilities: Vec::new(),
             boot: true,
+            io_service: false,
         }
     }
 
@@ -586,6 +593,35 @@ impl SecurityContext {
     /// ```
     pub(super) fn is_boot(&self) -> bool {
         self.boot
+    }
+
+    /// Register the boot process of this context as an IO service (see
+    /// `pbeam_cap:serve/2`). Return `false` and change nothing when the
+    /// context is not a boot context.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut boot = SecurityContext::boot();
+    /// assert!(boot.serve_io());
+    /// assert!(boot.serves_io());
+    /// assert!(!SecurityContext::default().serve_io());
+    /// ```
+    pub(super) fn serve_io(&mut self) -> bool {
+        self.io_service = self.boot;
+        self.boot
+    }
+
+    /// Return whether the context is the context of an IO service (see
+    /// [`Self::serve_io`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!SecurityContext::boot().serves_io());
+    /// ```
+    pub(super) fn serves_io(&self) -> bool {
+        self.io_service
     }
 
     /// Check `operation` of `kind`: return `Err(Denied)` unless the context
@@ -789,6 +825,7 @@ impl Delegations {
         SecurityContext {
             capabilities,
             boot: false,
+            io_service: false,
         }
     }
 
