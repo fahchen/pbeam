@@ -80,7 +80,7 @@ The column "Capability" of the sections "BIFs" and "Native bindings" gives the c
 | `none` | The entry has no effect, so it has no check. |
 | `kind:operation` | The entry checks the capability `kind` with `operation` after its argument checks and before its first effect. Without it, the entry raises `error:capability_denied` and has no effect. A list gives each check of the entry. |
 | `ambient`: reason | The entry has an effect, and it has no check by decision. Each process can call it, also a process with no capability, and a policy cannot deny it. The text after the value gives the reason. |
-| `later`: task | The entry has an effect, and a named later task adds its check. Until then, each process can call it, also a process with no capability, and a policy cannot deny it. The text after the value names the task or its epic. |
+| `later`: task | The entry has an effect, and a later task adds its check. Until then, each process can call it, also a process with no capability, and a policy cannot deny it. The text after the value names the task, its epic, or, when no task exists, the capability kind that adds the check. |
 
 The value `ambient` is set for each entry. It is not the start option that skips all checks: a run with no policy (`BeamProgram::execute`, and the `pbeam` binary without `--policy` or with `--no-capability-checks`) skips each check of this column, as if each entry were `ambient`. A run with a policy makes the checks of this column.
 
