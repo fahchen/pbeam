@@ -278,7 +278,7 @@ bifs! {
     erlang:process_info/2 => |cx, [process, item]| erlang::process_info(cx, process, item),
     erlang:processes/0 => unsupported,
     erlang:put/2 => |cx, [key, value]| Ok(erlang::put(cx, key, value)),
-    erlang:raise/3 => |_, [class, reason, stacktrace]| Ok(erlang::raise(class, reason, stacktrace)),
+    erlang:raise/3 => |cx, [class, reason, stacktrace]| Ok(erlang::raise(cx.scheduler.backtrace_depth, class, reason, stacktrace)),
     erlang:read_timer/1 => unsupported,
     erlang:read_timer/2 => unsupported,
     erlang:ref_to_list/1 => unsupported,

@@ -216,6 +216,11 @@ pub(super) struct Scheduler {
     /// `undefined`, or a pid, as `system_logger` in `erl_trace.c`. The start
     /// value is `logger` (`erl_trace.c:339`).
     pub(super) system_logger: Term,
+    /// The maximum number of frames that `erlang:raise/3` keeps, as
+    /// `erts_backtrace_depth`. The start value is 8 (`DEFAULT_BACKTRACE_SIZE`,
+    /// `error.h:207`, `erl_init.c:805`), and
+    /// `erlang:system_flag(backtrace_depth, Depth)` changes it.
+    pub(super) backtrace_depth: usize,
     /// The virtual reductions of the current turn, as `esdp->virtual_reds`.
     /// They use the budget, but the reduction total does not count them
     /// (`bif.h:85-96`). Each switch out sets them to 0
@@ -271,6 +276,7 @@ impl Scheduler {
             pending_monitor: None,
             next_unlink_id: 1,
             system_logger: Term::static_atom("logger"),
+            backtrace_depth: 8,
             virtual_reductions: 0,
             dirty_io: DirtyIo::new(),
             delegations: Delegations::default(),

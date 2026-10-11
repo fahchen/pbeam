@@ -2118,12 +2118,11 @@ impl BeamProgram {
                 Ok(Some(Outcome::Yield))
             }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
-            BifResult::ErrorWithStacktrace { reason, stacktrace } => Ok(raise_with_stacktrace(
-                process,
-                ExceptionClass::Error,
+            BifResult::RaiseWithStacktrace {
+                class,
                 reason,
                 stacktrace,
-            )),
+            } => Ok(raise_with_stacktrace(process, class, reason, stacktrace)),
             BifResult::Trap {
                 module,
                 function,

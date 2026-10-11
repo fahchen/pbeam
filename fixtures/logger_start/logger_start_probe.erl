@@ -505,12 +505,11 @@ process_flag() ->
      catch_error(fun() -> process_flag(min_heap_size, id(a)) end),
      catch_error(fun() -> process_flag(min_bin_vheap_size, id(-1)) end)].
 
-%% A flag that needs a subsystem that PBeam does not have: the stack trace
-%% depth, the time offset, the trace control word, the sequential tracer,
-%% sequential trace tokens, the heap limit, process priorities, saved calls,
-%% the heap size, and node monitors. ERTS gives 8, volatile, 0, false, true,
-%% the old heap limit map twice, normal, 0, 233, and 0.
-unsupported_flag(backtrace_depth) -> erlang:system_flag(backtrace_depth, 8);
+%% A flag that needs a subsystem that PBeam does not have: the time offset,
+%% the trace control word, the sequential tracer, sequential trace tokens,
+%% the heap limit, process priorities, saved calls, the heap size, and node
+%% monitors. ERTS gives volatile, 0, false, true, the old heap limit map
+%% twice, normal, 0, 233, and 0.
 unsupported_flag(time_offset) -> erlang:system_flag(time_offset, finalize);
 unsupported_flag(trace_control_word) -> erlang:system_flag(trace_control_word, 0);
 unsupported_flag(sequential_tracer) -> erlang:system_flag(sequential_tracer, self());
