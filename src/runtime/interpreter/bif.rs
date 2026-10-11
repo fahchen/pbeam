@@ -45,10 +45,13 @@ pub(super) enum BifResult {
         /// Reason of the exception, without a stack trace.
         reason: Term,
     },
-    /// The BIF raises an exception of class `error` with this stack trace
-    /// in the calling process, as `erlang:error/2` does with the frame of
-    /// its caller (`EXC_ERROR_2`, `beam_common.c:478-495`).
-    ErrorWithStacktrace {
+    /// The BIF raises an exception with this stack trace in the calling
+    /// process, as `erlang:error/2` does with the frame of its caller
+    /// (`EXC_ERROR_2`, `beam_common.c:478-495`) and `erlang:raise/3` does
+    /// with the frames that it gets (`bif.c:1626-1692`).
+    RaiseWithStacktrace {
+        /// Class of the exception.
+        class: ExceptionClass,
         /// Reason of the exception.
         reason: Term,
         /// Stack trace of the exception.

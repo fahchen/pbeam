@@ -1951,8 +1951,11 @@ impl BeamProgram {
             Target::Local(lambda) => lambda,
             Target::External {
                 module, function, ..
-            } if tail && (module.name(), function.name(), arity) == ("erlang", "error", 2) => {
-                return self.tail_call_error_2(scheduler);
+            } if tail
+                && (module.name(), function.name()) == ("erlang", "error")
+                && matches!(arity, 1 | 2) =>
+            {
+                return self.tail_call_error(scheduler, arity);
             }
             Target::External {
                 module, function, ..
@@ -1969,7 +1972,8 @@ impl BeamProgram {
         Ok(None)
     }
 
-    /// Run a tail call of the fun `fun erlang:error/2`. ERTS
+    /// Run a tail call of the fun `fun erlang:error/1` or
+    /// `fun erlang:error/2`, with the arity `arity`. ERTS
     /// `i_call_fun_last` removes the frame before it calls the fun
     /// (`emit_i_call_fun2_last` in `jit/arm/instr_fun.cpp:425-455`). Only an
     /// apply puts the calling function back for an error BIF
@@ -1985,15 +1989,19 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // `tail(F) -> F(r, [a]).` as the start of a process.
-    /// let outcome = program.tail_call_error_2(&mut scheduler)?;
+    /// let outcome = program.tail_call_error(&mut scheduler, 2)?;
     /// // The process exits with {r, [{Module, tail, 1, []}]}.
     /// assert!(matches!(outcome, Some(Outcome::Exit { .. })));
     /// ```
-    fn tail_call_error_2(&self, scheduler: &mut Scheduler) -> Result<Option<Outcome>, BeamError> {
+    fn tail_call_error(
+        &self,
+        scheduler: &mut Scheduler,
+        arity: u32,
+    ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         process.frames.pop();
         if !process.frames.is_empty() {
-            return self.call_mfa(scheduler, "erlang", "error", 2, false);
+            return self.call_mfa(scheduler, "erlang", "error", arity, false);
         }
         let reason = read(process, &Operand::X(0))?;
         let (module, function, arity) = process.initial_call.clone();
@@ -2062,12 +2070,11 @@ impl BeamProgram {
                 Ok(Some(Outcome::Yield))
             }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
-            BifResult::ErrorWithStacktrace { reason, stacktrace } => Ok(raise_with_stacktrace(
-                process,
-                ExceptionClass::Error,
+            BifResult::RaiseWithStacktrace {
+                class,
                 reason,
                 stacktrace,
-            )),
+            } => Ok(raise_with_stacktrace(process, class, reason, stacktrace)),
             BifResult::Trap {
                 module,
                 function,

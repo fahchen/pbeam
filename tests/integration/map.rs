@@ -236,16 +236,19 @@ fn tests_map_keys_with_has_map_fields_like_erts() {
 #[test]
 fn takes_the_badmap_path_when_add_gets_a_non_map() {
     // `add/1` tests is_map and then calls erlang:error({badmap, M}), which
-    // raises class `error` with the reason `{badmap, 1}`. PBeam gives each
-    // `error` exception the stack trace `[]` (row "Exception stack trace" in
-    // `docs/erts-differences.md`).
+    // raises class `error` with the reason `{badmap, 1}`. The stack trace of
+    // `erlang:error/1` is the frame of its caller with its arity
+    // (`beam_common.c:1011-1027`, `utils.c:3448-3455`). PBeam gives no
+    // location and no caller frames (row "Exception stack trace" in
+    // `docs/erts-differences.md`); ERTS gives `{file, ...}`, `{line, 7}`, and
+    // the caller frames.
     let program = BeamProgram::load(&[MAP_PROBE]).unwrap();
     let error = program
         .execute("map_probe", "add", &[Term::Integer(1)])
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("root process exited with {{badmap,1},[]}"),
+        error.contains("root process exited with {{badmap,1},[{map_probe,add,1,[]}]}"),
         "{error}"
     );
 
