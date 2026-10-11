@@ -858,4 +858,28 @@ fn counts_the_steps_of_the_erts_hashmap_merge() {
     for (map, other, cost) in costs {
         assert_eq!(map.merge_steps(&other).map(|steps| steps / 8), Some(cost));
     }
+
+    // ERTS 29.1.1: a node that both maps hold costs no step (`erl_map.c:1608-1612`), and two
+    // copies of one map hold one root. A change shares the nodes off its path.
+    let map = range(1, 1000);
+    let changed = |map: &Map, keys: &[i64]| {
+        let mut copy = map.clone();
+        for key in keys {
+            copy.insert(Term::Integer(*key), atom("x")).unwrap();
+        }
+        copy
+    };
+    let twice = changed(&changed(&map, &[500]), &[600]);
+    let costs = [
+        (map.clone(), changed(&map, &[500]), 5),
+        (changed(&map, &[500]), map.clone(), 5),
+        (map.clone(), changed(&map, &[2000]), 5),
+        (map.clone(), changed(&map, &[1, 2, 3, 4, 5, 6, 7, 8]), 23),
+        (changed(&map, &[500]), twice, 9),
+        (map.clone(), map.clone(), 0),
+        (map.clone(), range(1, 1000), 213),
+    ];
+    for (map, other, cost) in costs {
+        assert_eq!(map.merge_steps(&other).map(|steps| steps / 8), Some(cost));
+    }
 }

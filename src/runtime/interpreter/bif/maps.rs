@@ -452,9 +452,10 @@ fn iterator_pairs<'a>(
 
 /// Run `maps:merge/2`: return the first map with each pair of the second
 /// map put into it, so the values of the second map win, as ERTS
-/// `maps_merge_2` does (`erl_map.c:1257-1284`). When the first argument is
-/// not a map, raise `error:{badmap, First}`; else when the second argument
-/// is not a map, raise `error:{badmap, Second}`.
+/// `maps_merge_2` does (`erl_map.c:1257-1284`). Two copies of one map give
+/// the first argument with no cost (`erl_map.c:1258-1262`). When the first
+/// argument is not a map, raise `error:{badmap, First}`; else when the
+/// second argument is not a map, raise `error:{badmap, Second}`.
 ///
 /// Two flatmaps merge with no cost. Each other pair runs the steps of the
 /// ERTS hashmap merge ([`Map::merge_steps`]) through [`merge_trap`].
@@ -480,6 +481,9 @@ pub(super) fn merge(
     second: &Term,
 ) -> Result<BifResult, BeamError> {
     match (first, second) {
+        (Term::Map(first_map), Term::Map(second_map)) if first_map.same_form(second_map) => {
+            Ok(Value(first.clone()))
+        }
         (Term::Map(first), Term::Map(second)) => {
             let pairs = first.iter().chain(second.iter());
             let pairs = pairs.map(|(key, value)| (key.clone(), value.clone()));

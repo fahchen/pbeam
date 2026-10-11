@@ -607,6 +607,20 @@ impl Map {
         hamt.chunk(path, limit, direction)
     }
 
+    /// Return true when the two maps are copies of one map: they hold the
+    /// same form, as two ERTS map terms that are the same boxed pointer.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// assert!(map.same_form(&map.clone()));
+    /// assert!(!map.same_form(&Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?));
+    /// ```
+    pub(crate) fn same_form(&self, other: &Map) -> bool {
+        Arc::ptr_eq(&self.repr, &other.repr)
+    }
+
     /// Return the number of steps of the ERTS hashmap merge for
     /// `maps:merge(self, other)`, or `None` when ERTS does not run it
     /// (`maps_merge_2`, `erl_map.c:1257-1284`). Two flatmaps merge with
@@ -627,6 +641,9 @@ impl Map {
     /// assert_eq!(map(0..0)?.merge_steps(&map(0..40)?), None);
     /// // ERTS 29.1.1: maps:merge/2 of two maps of the keys 1..40 costs 8.
     /// assert_eq!(map(1..41)?.merge_steps(&map(1..41)?).map(|steps| steps / 8), Some(8));
+    /// // Two copies of one hashmap share the root node.
+    /// let big = map(1..41)?;
+    /// assert_eq!(big.merge_steps(&big.clone()), Some(0));
     /// ```
     pub(crate) fn merge_steps(&self, other: &Map) -> Option<usize> {
         let both_flat = matches!((&*self.repr, &*other.repr), (Repr::Flat(_), Repr::Flat(_)));
@@ -643,18 +660,27 @@ impl Map {
                 })
                 .collect()
         }
-        Some(merge_walk(&hashes(self), &hashes(other), 0))
+        // The tree of a flatmap is new (`map_merge_mixed`), so it shares no node.
+        let roots = match (&*self.repr, &*other.repr) {
+            (Repr::Hash(first), Repr::Hash(second)) => Some((&first.root, &second.root)),
+            _ => None,
+        };
+        Some(merge_walk(&hashes(self), &hashes(other), roots, 0))
     }
 }
 
 /// Return the steps that ERTS `hashmap_merge` uses below a slot path that
 /// both maps use, at `level`. `first` and `second` hold the hash and the key
-/// of each key of the two maps under the path. The walk uses one step
-/// (`--reds`, `erl_map.c:1736`) when it starts to build a node, and one step
-/// when a merged child returns to its node (`erl_map.c:1706-1727`). A HAMT
-/// node has a child in a slot when a key hash has that slot path, so the
-/// steps depend only on the key hashes:
+/// of each key of the two maps under the path. `nodes` holds the HAMT nodes
+/// of the two maps at the path, when both maps have a node there. The walk
+/// uses one step (`--reds`, `erl_map.c:1736`) when it starts to build a
+/// node, and one step when a merged child returns to its node
+/// (`erl_map.c:1706-1727`). A HAMT node has a child in a slot when a key
+/// hash has that slot path, so the steps depend only on the key hashes and
+/// on the nodes that the two maps share:
 ///
+/// - The two maps hold the same node: ERTS takes it with no step
+///   (`erl_map.c:1608-1612`).
 /// - At the collision level 16, the walk merges the collision nodes with no
 ///   step (`erl_map.c:1728-1734`).
 /// - One key in each map, and the two keys are equal: the child of the
@@ -663,20 +689,24 @@ impl Map {
 ///   costs 1 for the return of its child and the steps of that child
 ///   (`erl_map.c:1742-1766`).
 ///
-/// ERTS also takes a subtree that both maps share in memory with no step
-/// (`erl_map.c:1608-1612`). PBeam walks such a subtree.
-///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let (one, two) = (Term::Integer(1), Term::Integer(2));
-/// assert_eq!(merge_walk(&[(7, &one)], &[(7, &one)], 1), 0);
+/// assert_eq!(merge_walk(&[(7, &one)], &[(7, &one)], None, 1), 0);
 /// // The root, and the return of slot 7, and the build at level 1.
-/// assert_eq!(merge_walk(&[(7, &one)], &[(0x17, &two)], 0), 3);
-/// assert_eq!(merge_walk(&[(7, &one)], &[(7, &two)], 16), 0);
+/// assert_eq!(merge_walk(&[(7, &one)], &[(0x17, &two)], None, 0), 3);
+/// assert_eq!(merge_walk(&[(7, &one)], &[(7, &two)], None, 16), 0);
+/// let node = Node::empty();
+/// assert_eq!(merge_walk(&[(7, &one)], &[(0x17, &two)], Some((&node, &node)), 0), 0);
 /// ```
-fn merge_walk(first: &[(u64, &Term)], second: &[(u64, &Term)], level: u32) -> usize {
-    if level == HAMT_MAX_LEVEL {
+fn merge_walk(
+    first: &[(u64, &Term)],
+    second: &[(u64, &Term)],
+    nodes: Option<(&Node, &Node)>,
+    level: u32,
+) -> usize {
+    if nodes.is_some_and(|(first, second)| std::ptr::eq(first, second)) || level == HAMT_MAX_LEVEL {
         return 0;
     }
     if let ([(_, first)], [(_, second)]) = (first, second)
@@ -691,10 +721,19 @@ fn merge_walk(first: &[(u64, &Term)], second: &[(u64, &Term)], level: u32) -> us
         }
         slots
     }
+    // The nodes of the two maps in a slot, when both maps have a node there.
+    let below = |slot| {
+        let (first, second) = nodes?;
+        match (first.child(slot)?, second.child(slot)?) {
+            (Child::Node(first), Child::Node(second)) => Some((&**first, &**second)),
+            _ => None,
+        }
+    };
     let children = slots(first, level).into_iter().zip(slots(second, level));
-    let shared = children.filter(|(first, second)| !first.is_empty() && !second.is_empty());
+    let shared = (0..).zip(children);
+    let shared = shared.filter(|(_, (first, second))| !first.is_empty() && !second.is_empty());
     1 + shared
-        .map(|(first, second)| 1 + merge_walk(&first, &second, level + 1))
+        .map(|(slot, (first, second))| 1 + merge_walk(&first, &second, below(slot), level + 1))
         .sum::<usize>()
 }
 
