@@ -245,10 +245,10 @@ pub(super) struct ProcessState {
     pub(super) registered_name: Option<Atom>,
     /// The module that the export entry calls for a function that a module
     /// does not export, as the process-specific error handler of
-    /// `erts_proc_get_error_handler` (`erl_process.h:2441-2449`). `None`
+    /// `erts_proc_get_error_handler` (`erl_process.h:2420-2430`). `None`
     /// means the default `error_handler`: ERTS keeps the default in the
     /// process specific data also as a `NULL` pointer
-    /// (`erts_proc_set_error_handler`, `erl_process.h:2453-2465`).
+    /// (`erts_proc_set_error_handler`, `erl_process.h:2432-2446`).
     pub(super) error_handler: Option<String>,
     /// The reductions that remain in the current turn, as `p->fcalls` and
     /// the JIT `FCALLS` register. `Scheduler::schedule_next` sets it to

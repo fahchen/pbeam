@@ -4,6 +4,7 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::capability;
 use crate::runtime::host;
+use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::Finish;
 use crate::runtime::local_node;
 use crate::runtime::process::LinkId;
@@ -58,8 +59,8 @@ const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
 /// (`erts_change_message_queue_management`, `erl_message.c:1022-1100`), and
 /// its start value is `on_heap`. `error_handler` takes an atom and sets the
 /// module that the export entry calls for a function that a module does not
-/// export (`process_flag_aux`, `bif.c:2094-2101`;
-/// `erts_proc_set_error_handler`, `erl_process.h:2453-2465`); its start
+/// export (`process_flag_2`, `bif.c:2045-2051`;
+/// `erts_proc_set_error_handler`, `erl_process.h:2432-2446`); its start
 /// value is the atom `error_handler`. Each other value raises `badarg`. A
 /// flag that ERTS does not know raises `badarg`, also a tuple that is not
 /// `{monitor_nodes, Options}`.
@@ -132,10 +133,10 @@ pub(super) fn process_flag(
             Value(old)
         }
         Term::Atom(flag) if flag.name() == "error_handler" => {
-            // `process_flag_aux` takes an atom for `error_handler` and gives
-            // `badarg` for each other value (`bif.c:2094-2101`), and
+            // `process_flag_2` takes an atom for `error_handler` and gives
+            // `badarg` for each other value (`bif.c:2045-2051`), and
             // `erts_proc_set_error_handler` returns the old handler
-            // (`erl_process.h:2453-2465`).
+            // (`erl_process.h:2432-2446`).
             let Some(value) = value else {
                 return Ok(BifResult::badarg());
             };
@@ -147,8 +148,8 @@ pub(super) fn process_flag(
                     process
                         .error_handler
                         .clone()
-                        .unwrap_or_else(|| "error_handler".to_owned()),
-                    (value != "error_handler").then(|| value.to_owned()),
+                        .unwrap_or_else(|| DEFAULT_ERROR_HANDLER.to_owned()),
+                    (value != DEFAULT_ERROR_HANDLER).then(|| value.to_owned()),
                 )
             };
             let old = Term::Atom(context.scheduler.atoms.put(&name)?);

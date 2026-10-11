@@ -1,7 +1,7 @@
 //! The export entry of a function that a module does not export calls
 //! `error_handler:undefined_function/3` (`beam_common.c:1294-1342`), and
 //! `erlang:process_flag(error_handler, Module)` sets the module of that call
-//! (`process_flag_aux`, `bif.c:2094-2101`).
+//! (`process_flag_2`, `bif.c:2045-2051`).
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -18,7 +18,9 @@ const UNDEF_INIT: &[u8] = include_bytes!("../../fixtures/undef/undef_init.beam")
 
 /// The pinned `error_handler` module that the export entry runs, and the
 /// `init` module that its `ensure_loaded/1` calls
-/// (`error_handler.erl:182-198`). The probe starts the init responder of
+/// (`error_handler.erl:182-198`). The run loads `error_handler_target` and
+/// `error_handler_custom`, and `reference` loads them too, so the two runs
+/// compare the same code. The probe starts the init responder of
 /// `fixtures/undef/undef_init` only when the run has no init process, so the
 /// ERTS run of the reference keeps its own init process.
 fn program() -> BeamProgram {
@@ -40,7 +42,13 @@ fn program() -> BeamProgram {
 }
 
 /// Run `error_handler_probe:Function()` on the pinned ERTS and return its
-/// `~w` output.
+/// `~w` output. The run loads the two modules that `program()` loads and that
+/// ERTS does not load at its own start, because `error_handler_custom` is the
+/// handler of the measured calls and `error_handler_target` is the module of
+/// the failed calls. Without the load, the ERTS run takes the code path of
+/// `error_handler:ensure_loaded/1` on the first `undef` and the module of the
+/// handler is not in the export table, so its result and its reductions are
+/// not those of PBeam (`error_handler.erl:182-198`).
 fn reference(function: &str) -> String {
     let reference = Command::new("erl")
         .args([
@@ -52,7 +60,11 @@ fn reference(function: &str) -> String {
             "-pa",
             "fixtures/undef",
             "-eval",
-            &format!("io:format(\"~w~n\", [error_handler_probe:{function}()]), halt()."),
+            &format!(
+                "{{module,error_handler_target}} = code:ensure_loaded(error_handler_target), \
+                 {{module,error_handler_custom}} = code:ensure_loaded(error_handler_custom), \
+                 io:format(\"~w~n\", [error_handler_probe:{function}()]), halt()."
+            ),
         ])
         .output()
         .unwrap();
@@ -111,8 +123,8 @@ fn raises_undef_through_error_handler_beam_as_pinned_erts() {
 #[test]
 fn sets_the_error_handler_of_the_process_as_pinned_erts() {
     // `process_flag(error_handler, Module)` sets the module and returns the
-    // old handler (`erts_proc_set_error_handler`, `erl_process.h:2453-2465`;
-    // `process_flag_aux`, `bif.c:2094-2101`). The handler module exports
+    // old handler (`erts_proc_set_error_handler`, `erl_process.h:2432-2446`;
+    // `process_flag_2`, `bif.c:2045-2051`). The handler module exports
     // `undefined_function/3`, which ERTS then runs in place of
     // `error_handler` (`call_error_handler`, `beam_common.c:1310-1316`).
     // The custom handler of the fixture continues the call of the default
@@ -152,13 +164,55 @@ fn sets_the_error_handler_of_the_process_as_pinned_erts() {
             badarg,
         ])
     );
-    let reference = reference("flag");
-    assert!(
-        reference.starts_with(
-            "{error_handler,error_handler_custom,{'EXIT',{undef,\
-             [{error_handler_target,missing,[b],[]},"
-        ),
-        "{reference}"
+    // The two runs load the same modules, so the whole result matches: the
+    // custom handler raises `undef` through `erlang:raise/3` with the frame of
+    // the failed call, and `erlang:raise/3` keeps the frames of its argument
+    // (`bif.c:1626-1687`).
+    assert_eq!(
+        reference("flag"),
+        "{error_handler,error_handler_custom,\
+         {'EXIT',{undef,[{error_handler_target,missing,[b],[]}]}}}\n"
+    );
+}
+
+#[test]
+fn sets_the_error_handler_for_an_unloaded_module_as_pinned_erts() {
+    // A custom handler answers a call of a module that the run does not load:
+    // `error_handler_custom:undefined_function/3` reads the export of that
+    // module and raises `undef`, so the call needs no code server and no init
+    // process (`error_handler.erl:85-98`). The run of the library API has
+    // neither, and the probe starts no init process, so only a custom handler
+    // can answer this call. A process with the default handler keeps the
+    // runtime error `unresolved external MFA` (row "Undefined functions" of
+    // `docs/erts-differences.md`).
+    let program = program();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let undef = Term::Tuple(vec![
+        atom("EXIT"),
+        Term::Tuple(vec![
+            atom("undef"),
+            Term::list_from(vec![Term::Tuple(vec![
+                atom("error_handler_unloaded"),
+                atom("value"),
+                Term::list_from(vec![atom("a")]),
+                Term::nil(),
+            ])]),
+        ]),
+    ]);
+    assert_eq!(
+        program
+            .execute("error_handler_probe", "flag_unloaded", &[])
+            .unwrap(),
+        Term::Tuple(vec![
+            atom("error_handler"),
+            atom("error_handler_custom"),
+            undef,
+        ])
+    );
+    assert_eq!(
+        reference("flag_unloaded"),
+        "{error_handler,error_handler_custom,\
+         {'EXIT',{undef,[{error_handler_unloaded,value,[a],[]}]}}}\n"
     );
 }
 
@@ -189,15 +243,15 @@ fn charges_the_reductions_of_error_handler_beam_as_pinned_erts() {
             .unwrap(),
         Term::list_from(expected)
     );
-    // ERTS charges the load of `error_handler` in the `plain` case, because a
-    // `-eval` run has no current code for it before the first `undef`
-    // (`code:ensure_loaded/1`, `code.erl:581-613`). PBeam loads the module
-    // before the run, so its count is lower. The remaining difference of the
-    // two runs is a PBeam count of the reductions of the error handler path
-    // of the failed call, which the row "Undefined functions" of
-    // `docs/erts-differences.md` records. The test keeps the ERTS counts for
-    // the comparison.
-    assert_eq!(reference("reductions"), "[{plain,62},{handled,5}]\n");
+    // The two runs load the same modules, so the `handled` case matches
+    // exactly. The `plain` case costs 9 reductions more on PBeam: this run of
+    // the library API has no code server, so
+    // `error_handler:ensure_loaded/1` calls `init:ensure_loaded/1` and waits
+    // for the reply of the init process of the fixture, where the ERTS run
+    // calls `code:ensure_loaded/1` (`error_handler.erl:182-198`). The boot run
+    // of `tests/feature/error_handler.rs` has the code server of ERTS and
+    // takes the same path, and there the two runs give the same counts.
+    assert_eq!(reference("reductions"), "[{plain,16},{handled,8}]\n");
 }
 
 /// Return the `~w` text of a term of atoms, integers, tuples, and lists.

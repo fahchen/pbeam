@@ -1,7 +1,7 @@
 -module(error_handler_probe).
 -compile(nowarn_deprecated_catch).
--export([caught/0, frames/0, first/0, flag/0, flag_errors/0, reductions/0, id/1, caller/0,
-         apply_caller/3]).
+-export([caught/0, frames/0, first/0, flag/0, flag_errors/0, flag_unloaded/0, reductions/0, id/1,
+         caller/0, apply_caller/3]).
 
 -define(REDS, element(2, process_info(self(), reductions))).
 
@@ -31,7 +31,7 @@ caller() ->
 
 %% Return the old and the new value of the error handler of the process, and
 %% the result of a call that the module of the handler answers
-%% (`error_handler.erl:85-98`; `process_flag_aux`, `bif.c:2094-2101`).
+%% (`error_handler.erl:85-98`; `process_flag_2`, `bif.c:2045-2051`).
 flag() ->
     init_server(),
     Old = erlang:process_flag(error_handler, error_handler_custom),
@@ -39,10 +39,21 @@ flag() ->
     Back = erlang:process_flag(error_handler, Old),
     {Old, Back, Result}.
 
+%% The custom handler answers a call of a module that the run does not load.
+%% `error_handler_custom:undefined_function/3` checks the export of the module
+%% and raises `undef`, so this call needs no code server and no init process
+%% (`error_handler.erl:85-98`). This function starts no init process, so a run
+%% of the library API has no process that answers `ensure_loaded`.
+flag_unloaded() ->
+    Old = erlang:process_flag(error_handler, error_handler_custom),
+    Result = (catch error_handler_unloaded:value(a)),
+    Back = erlang:process_flag(error_handler, Old),
+    {Old, Back, Result}.
+
 %% The custom handler answers the calls of the loaded module
 %% `error_handler_target` (`error_handler_custom:undefined_function/3`).
-%% `process_flag_aux` takes the atom of the module and gives `badarg` for a
-%% value that is not an atom (`bif.c:2094-2101`).
+%% `process_flag_2` takes the atom of the module and gives `badarg` for a
+%% value that is not an atom (`bif.c:2045-2051`).
 flag_errors() ->
     [try erlang:process_flag(error_handler, Value) catch Class:Reason -> {Class, Reason} end
      || Value <- [not_an_atom_1, 1, {a}, []]].

@@ -94,6 +94,68 @@ fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
 }
 
 #[test]
+fn returns_the_value_of_a_handler_that_a_tail_call_runs() {
+    // The last expression of `undef_probe:apply_last/3` is the `apply_last`
+    // instruction. ERTS enters the export of the error handler with the stack
+    // of that frame, so the `return` of the handler continues at the caller of
+    // `apply_last/3` (`emit_export_trampoline`,
+    // `jit/arm/beam_asm_global.cpp:164-232`).
+    // `undef_handler:'$handle_undefined_function'/2` returns for a function
+    // that is not `stop` (`error_handler.erl:206-213`), so its value reaches
+    // the caller. A body call of the handler instead continues at the
+    // instruction after `apply_last/3`.
+    let (erlang, error_handler) = (pinned_beam("erlang"), pinned_beam("error_handler"));
+    let program = BeamProgram::load(&[
+        &erlang,
+        &error_handler,
+        &pinned_beam("init"),
+        UNDEF_INIT,
+        UNDEF_PROBE,
+        UNDEF_TARGET,
+        UNDEF_HANDLER,
+    ])
+    .unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute(
+                "undef_probe",
+                "apply_last",
+                &[atom("undef_handler"), atom("missing"), atom("a")],
+            )
+            .unwrap(),
+        Term::Tuple(vec![
+            atom("handled"),
+            atom("missing"),
+            Term::list_from(vec![atom("a")]),
+        ])
+    );
+
+    // The reference uses the `erl` flags of the row "Undefined functions".
+    // The ERTS run does not load `undef_init`, so `init_server/0` returns `ok`
+    // and the run keeps its own init process.
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-pa",
+            "fixtures/undef",
+            "-eval",
+            "io:format(\"~w~n\", [undef_probe:apply_last(undef_handler, missing, a)]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        "{handled,missing,[a]}\n"
+    );
+}
+
+#[test]
 fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
     // ERTS starts each process with `i_apply_only` of its MFA
     // (`erl_process.c:12616`), so the child goes to the export entry of

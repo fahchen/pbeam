@@ -43,6 +43,11 @@ const APPLY_FUN_MAX_ARGUMENTS: usize = 1022;
 /// new binary (`ERL_BITS_PER_REDUCTION`, erl_bits.h:41).
 const BITS_PER_REDUCTION: usize = 8 * 1024;
 
+/// The module of the error handler of a process that does not set one, as
+/// the atom `error_handler` of `erts_proc_get_error_handler` when the
+/// process-specific data holds no handler (`erl_process.h:2420-2430`).
+const DEFAULT_ERROR_HANDLER: &str = "error_handler";
+
 #[derive(Debug)]
 pub struct BeamProgram {
     /// The start modules by name. Each run starts its code table with them
@@ -540,7 +545,12 @@ impl BeamProgram {
                 raise(process, ExceptionClass::Error, system_limit)
             } else {
                 let arity = process.registers.len() as u32;
-                self.undefined_function(scheduler, module.name(), function.name(), arity)?
+                // The start of a process is a tail call of the MFA from the
+                // initial function of ERTS (`i_apply_only`,
+                // `erl_process.c:12616`). PBeam starts the process with no
+                // frame, so the handler enters as a body call of the first
+                // frame and its `return` ends the process.
+                self.undefined_function(scheduler, module.name(), function.name(), arity, false)?
             };
             if let Some(outcome) = outcome {
                 return Ok(outcome);
@@ -1721,7 +1731,7 @@ impl BeamProgram {
                 enter_frame(process, frame, tail);
                 Ok(None)
             }
-            None => self.undefined_function(scheduler, module, name, arity),
+            None => self.undefined_function(scheduler, module, name, arity, tail),
         }
     }
 
@@ -1734,10 +1744,11 @@ impl BeamProgram {
     /// The module name of the call is the module of the function, and not
     /// the name of a loaded module: ERTS looks up the export entry of the
     /// name and makes a stub entry when the module is not loaded
-    /// (`erts_export_get_or_make_stub`, `beam_common.c:1532-1605`).
+    /// (`erts_export_get_or_make_stub`, `export.c:228-242`; the call of
+    /// `fixed_apply`, `beam_common.c:1559-1563`).
     ///
     /// `call_error_handler` finds the error handler of the process
-    /// (`erts_proc_get_error_handler`, `erl_process.h:2441-2449`), which
+    /// (`erts_proc_get_error_handler`, `erl_process.h:2420-2430`), which
     /// `erlang:process_flag(error_handler, Module)` sets, and finds
     /// `undefined_function/3` in it. It then puts the module, the function,
     /// and the argument list in `x0`, `x1`, and `x2` and runs that export.
@@ -1747,18 +1758,21 @@ impl BeamProgram {
     /// that export raises `error:undef` with the current frame
     /// (`call_error_handler`, `beam_common.c:1310-1316`).
     ///
-    /// The handler runs as a body call: ERTS dispatches to its export with
-    /// the return address of the caller on the stack, so its `return`
-    /// continues at the caller, as a `call_ext` does.
+    /// `tail` is the form of the failed call: ERTS enters the export of the
+    /// handler with the stack of the caller, so its `return` continues at
+    /// the continuation of that call, as `call_ext` or `call_ext_last` does
+    /// (`emit_export_trampoline` in `jit/arm/beam_asm_global.cpp:164-232`).
+    /// A handler that returns thus gives its value to the caller of a body
+    /// call, and to the caller of the caller of a tail call.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // `undef_handler:missing(m)` calls the handler with x0 = missing, x1 = [m].
-    /// assert!(program.undefined_function(&mut scheduler, "undef_handler", "missing", 1)?.is_none());
+    /// assert!(program.undefined_function(&mut scheduler, "undef_handler", "missing", 1, false)?.is_none());
     /// // `undef_target:missing(a)` with no catch tag exits with
     /// // `{undef, [{undef_target, missing, [a], []}]}`.
-    /// let outcome = program.undefined_function(&mut scheduler, "undef_target", "missing", 1)?;
+    /// let outcome = program.undefined_function(&mut scheduler, "undef_target", "missing", 1, false)?;
     /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
     /// ```
     ///
@@ -1773,19 +1787,25 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arity: u32,
+        tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
+        let default_handler = process.error_handler.is_none();
         let handler = process
             .error_handler
             .clone()
-            .unwrap_or_else(|| "error_handler".to_owned());
-        // A call of a module that the run does not load needs a load of that
-        // module before the handler can run. `error_handler.beam` asks
-        // `code:ensure_loaded/1` or `init:ensure_loaded/1`, and a run with
-        // neither a code server nor the init process of `pbeam_boot` cannot
-        // answer that call: `gen:call/4` with the timeout `infinity` would
-        // wait forever (`gen.erl:233-250`; `error_handler.erl:182-198`).
-        if scheduler.code.get(module).is_none() && !loads_modules(scheduler) {
+            .unwrap_or_else(|| DEFAULT_ERROR_HANDLER.to_owned());
+        // A call of a module that the run does not load makes the default
+        // `error_handler` ask for a load of that module:
+        // `error_handler:ensure_loaded/1` calls `code:ensure_loaded/1` or
+        // `init:ensure_loaded/1` (`error_handler.erl:182-198`). A run with
+        // no code server and no init process cannot answer that call:
+        // `init:ensure_loaded/1` sends to the registered name `init` and
+        // waits for the reply (`init.erl:463-464`, `485-490`), and the send
+        // raises `badarg` when no process has that name. A custom handler
+        // answers the call itself and needs no load, so the runtime error
+        // applies only to the default handler.
+        if scheduler.code.get(module).is_none() && default_handler && !loads_modules(scheduler) {
             return Err(error(format!(
                 "unresolved external MFA {module}:{function}/{arity}"
             )));
@@ -1807,7 +1827,7 @@ impl BeamProgram {
             .export_frame(&handler, "undefined_function", 3)?;
         let process = scheduler.current_process_mut();
         if let Some(frame) = lookup {
-            enter_frame(process, frame, false);
+            enter_frame(process, frame, tail);
             write(process, &Operand::X(0), module_atom)?;
             write(process, &Operand::X(1), function_atom)?;
             write(process, &Operand::X(2), arguments)?;
@@ -2191,8 +2211,11 @@ fn policy_turn(scheduler: &mut Scheduler, outcome: Outcome) -> Outcome {
 /// Return true when the run can load a module at run time: it has the live
 /// code server of `code:start_link/0` (`code.erl:1682-1712`), or the init
 /// process that `pbeam_boot` registers and that answers `{ensure_loaded,
-/// Module}` (`init.erl:730-750`). Else a load call from `error_handler` or
-/// from `code:ensure_loaded/1` waits without end (`gen.erl:233-250`).
+/// Module}` (`init.erl:730-750`). Else the load call of
+/// `error_handler:ensure_loaded/1` reaches `init:ensure_loaded/1`, which
+/// sends to the registered name `init` and waits for the reply
+/// (`init.erl:463-464`, `485-490`); a send to a name that no process has
+/// raises `badarg`.
 ///
 /// # Examples
 ///
@@ -3690,11 +3713,11 @@ fn frame_function<'a>(
 }
 
 /// Return the stack trace frames of the current process, from the active
-/// frame to the first frame, as ERTS `build_stacktrace` walks the saved stack
-/// of an exception (`beam_common.c:1011-1040`). Each frame is `{Module,
-/// Function, Arity, []}`, as `erts_build_mfa_item` gives a frame without
-/// arguments (`utils.c:3448-3455`). PBeam keeps no line table, so each
-/// location is `[]` (row "Exception stack trace" of
+/// frame to the first frame, as ERTS `build_stacktrace` walks the saved
+/// continuation pointers of an exception (`beam_common.c:1205-1292`). Each
+/// frame is `{Module, Function, Arity, []}`, as `erts_build_mfa_item` gives
+/// a frame without arguments (`utils.c:3448-3455`). PBeam keeps no line
+/// table, so each location is `[]` (row "Exception stack trace" of
 /// `docs/erts-differences.md`).
 ///
 /// # Examples

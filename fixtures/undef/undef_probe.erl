@@ -38,9 +38,11 @@ down(Module, Function, Arguments) ->
 %% no boot (see `undef_init`). A call of `undef_init:serve/0` in a run
 %% without that module is an undefined function: the export entry of the
 %% call then raises `undef` again and again. `erlang:function_exported/3`
-%% stops that, and the atom `undef_init` exists before the first call.
+%% stops that, and the atom `undef_init` exists before the first call. The
+%% name check keeps the call idempotent: `undef_init:start/0` waits for the
+%% message of its server, which takes the name `init` only when it is free.
 init_server() ->
-    case erlang:function_exported(undef_init, start, 0) of
+    case erlang:function_exported(undef_init, start, 0) andalso whereis(init) =:= undefined of
         true -> undef_init:start();
         false -> ok
     end.
@@ -55,7 +57,14 @@ last(X) ->
 
 only(X) -> undef_target:missing(X).
 
+%% The last call is a tail call: the export entry enters the error handler
+%% with the stack of this frame, so a handler that returns gives its value to
+%% the caller of this function and not to this function
+%% (`emit_export_trampoline`, `jit/arm/beam_asm_global.cpp:164-232`).
+%% `undef_handler:'$handle_undefined_function'/2` returns for each function
+%% that is not `stop` (`error_handler.erl:206-213`).
 apply_last(M, F, X) ->
+    init_server(),
     id(x),
     M:F(X).
 
