@@ -167,4 +167,6 @@ rm -rf "$work"
 trap - EXIT
 
 paths=("${path_directories[@]}")
+# A policy run gives the whole list: the runtime-to-boot gate denies the load call of a runtime process to `code_server`.
+if [[ ${#policy[@]} -gt 0 ]]; then run "${beams[@]}"; fi
 run "${start[@]}"

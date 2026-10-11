@@ -19,11 +19,8 @@
 //! order of an interactive-mode ERTS run (#428).
 
 use std::{
-    io::{Read, Write},
-    os::fd::{FromRawFd, OwnedFd},
     path::Path,
     process::{Command, Output, Stdio},
-    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -99,6 +96,17 @@ fn loads_a_module_that_is_not_in_the_start_set_on_demand() {
     let output = root.join("target/examples/called_modules");
     let start = std::fs::read_to_string(output.join("pbeam.start")).unwrap();
     let paths = std::fs::read_to_string(output.join("erts.paths")).unwrap();
+    // Each module of the calls under test is not in the start set, so the run
+    // loads each one on demand. A build that gives the whole closure fails
+    // this assertion, and the run then loads nothing.
+    for module in ["Elixir.String.beam", "string.beam", "unicode_util.beam"] {
+        assert!(
+            !start
+                .lines()
+                .any(|line| line.ends_with(&format!("/{module}"))),
+            "{module} is in the start set"
+        );
+    }
     let root_dir = Command::new("erl")
         .args([
             "-noshell",
@@ -570,6 +578,9 @@ fn run_restricted_guest(policy: &str, arguments: &[&str]) -> Output {
 /// ```
 #[cfg(target_os = "macos")]
 fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
     let (master, slave) = open_terminal().expect("a pseudo-terminal");
     let mut command = Command::new("bash");
     command
@@ -580,9 +591,10 @@ fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
         .stdout(Stdio::from(slave.try_clone().unwrap()))
         .stderr(Stdio::from(slave.try_clone().unwrap()));
     let mut child = command.spawn().unwrap();
-    // The child holds its own copies of the slave fds after the spawn, so
-    // the test closes its slave and keeps the master for the reads and the
-    // writes.
+    // `spawn` gives each `Stdio` to the child and closes the copies of the
+    // test, so the test drops the command and its slave. It keeps the master
+    // for the reads and the writes.
+    drop(command);
     drop(slave);
     let output = Arc::new(Mutex::new(Vec::new()));
     let reader = {
@@ -672,7 +684,7 @@ fn restore_before_result(bytes: &[u8]) -> (&[u8], &[u8]) {
 /// let (master, slave) = open_terminal().unwrap();
 /// ```
 #[cfg(target_os = "macos")]
-fn open_terminal() -> Result<(OwnedFd, OwnedFd), std::io::Error> {
+fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::io::Error> {
     let (mut master, mut slave) = (-1, -1);
     // SAFETY: `openpty` writes two new fds to `master` and `slave`, and
     // accepts a null name and mode. `fcntl` changes only the fd flags. Each
@@ -697,7 +709,12 @@ fn open_terminal() -> Result<(OwnedFd, OwnedFd), std::io::Error> {
         for fd in [master, slave] {
             assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
         }
-        Ok((OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)))
+        use std::os::fd::FromRawFd;
+
+        Ok((
+            std::os::fd::OwnedFd::from_raw_fd(master),
+            std::os::fd::OwnedFd::from_raw_fd(slave),
+        ))
     }
 }
 
@@ -722,11 +739,12 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
     // A host that does not permit a pseudo-terminal, for example a sandbox
     // that denies `/dev/ptmx`, cannot run this test: the test then ends
     // without a result, and the operator runs it on a host that permits one.
-    let Ok((master, slave)) = open_terminal() else {
-        eprintln!("the host does not permit a pseudo-terminal: the test does not run");
+    if let Ok((master, slave)) = open_terminal() {
+        drop((master, slave));
+    } else {
+        println!("the host does not permit a pseudo-terminal: the test does not run");
         return;
-    };
-    drop((master, slave));
+    }
     let (erts, erts_status) = run_terra_counter_in_terminal(&["terra_counter", "--erts"]);
     let (pbeam, pbeam_status) = run_terra_counter_in_terminal(&["terra_counter", "--no-build"]);
     assert_eq!(erts_status, pbeam_status, "status");

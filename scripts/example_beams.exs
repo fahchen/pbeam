@@ -177,9 +177,10 @@ roots =
   Enum.flat_map(Map.values(own), &ExampleBeams.called/1) ++
     Enum.map(String.split(boot), &String.to_atom/1)
 
-start = ExampleBeams.start(boot, consolidated, %{})
-
 {found, unloaded} = ExampleBeams.closure(roots, own, %{}, consolidated)
+
+# The start set holds each consolidated protocol that a called module refers to, so it needs the closure.
+start = ExampleBeams.start(boot, consolidated, found)
 
 unloadable =
   for {module, nil} <- start do
