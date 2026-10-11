@@ -26,9 +26,10 @@ fn free(term: &Term) -> &[Term] {
 
 #[test]
 fn shares_the_thing_between_the_copies_of_a_fun() {
-    // A copy of a fun shares the thing of the source, as an ERTS copy of a
-    // fun term is the same boxed pointer to the `ErlFunThing`
-    // (`copy_struct`, copy.c:812-842).
+    // A copy of a fun shares the thing of the source: a register or stack
+    // copy of an ERTS fun term copies the pointer word, so both copies point
+    // to one `ErlFunThing` (erl_fun.h:65-85). A message copy makes a new
+    // thing in the receiver heap (copy.c:866-881).
     let source = fun(vec![Term::Integer(1), Term::Integer(2)]);
     let copy = source.clone();
     assert!(Arc::ptr_eq(thing(&source), thing(&copy)));
