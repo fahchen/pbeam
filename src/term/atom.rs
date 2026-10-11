@@ -6,10 +6,20 @@
 //! exists keeps its index. A new atom gets the next index. ERTS never frees
 //! or reuses an index. The atom word is `(index << 6) | 0xB`, so a flatmap
 //! orders atom keys by index, and a hashmap hashes an atom key by its index.
+//!
+//! An ERTS atom term is one tagged word that holds the table index
+//! (`make_atom` and `_unchecked_atom_val` in `erl_term.h:300`, `:303`), and
+//! the name stays in the atom table (`erts_atom_table` in `atom.c:38`). A
+//! copy of an atom therefore copies one word and allocates nothing. PBeam
+//! keeps the name with the atom, in an `Arc<str>`, so a copy of an atom
+//! shares the name and also allocates nothing.
 
 mod static_names;
 
-use std::{collections::HashMap, sync::LazyLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+};
 
 use static_names::STATIC_ATOM_NAMES;
 
@@ -38,9 +48,10 @@ static STATIC_INDICES: LazyLock<HashMap<&'static str, u32>> = LazyLock::new(|| {
 pub struct Atom {
     /// The ERTS atom-table index. The atom word is `(index << 6) | 0xB`.
     index: u32,
-    /// The atom name. Name-based code, such as BIF dispatch and `Debug`,
-    /// reads it without the table.
-    name: String,
+    /// The atom name, in an `Arc<str>`. Name-based code, such as BIF
+    /// dispatch and `Debug`, reads it without the table. A copy of an atom
+    /// shares this name, so it takes O(1) time and allocates nothing.
+    name: Arc<str>,
 }
 
 impl Atom {
@@ -83,7 +94,7 @@ impl Atom {
     pub fn from_static(name: &str) -> Option<Atom> {
         STATIC_INDICES.get(name).map(|&index| Atom {
             index,
-            name: name.to_owned(),
+            name: Arc::from(name),
         })
     }
 }
@@ -145,7 +156,7 @@ impl AtomTable {
         self.indices.insert(name.to_owned(), index);
         Ok(Atom {
             index,
-            name: name.to_owned(),
+            name: Arc::from(name),
         })
     }
 
@@ -161,7 +172,7 @@ impl AtomTable {
     pub(crate) fn get(&self, name: &str) -> Option<Atom> {
         self.indices.get(name).map(|&index| Atom {
             index,
-            name: name.to_owned(),
+            name: Arc::from(name),
         })
     }
 }
