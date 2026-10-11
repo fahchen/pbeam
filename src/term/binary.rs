@@ -12,7 +12,11 @@
 //! `Binary` derefs to `[u8]`, so each reader uses the byte slice operations
 //! and cannot see the sharing. The size is a number of bits, because an
 //! ERTS sub-bitstring can start and end at any bit
-//! (`erts_bs_get_binary_2`, `erl_bits.c:400-424`). PBeam has no bitstring
+//! (`erts_bs_get_binary_2`, `erl_bits.c:400-424`). [`Binary::bits`] copies
+//! no byte when the first bit is on a byte boundary, which is the case of
+//! each supported path. For a first bit that is not on a byte boundary, it
+//! packs the bits of the view in a vector at that call, and the vector is
+//! in one `Arc`, so a copy of such a view is O(1). PBeam has no bitstring
 //! term, so a size that is not a whole number of bytes comes only from a
 //! segment that PBeam does not run yet, and each such path stops with a
 //! runtime error (row "Bitstring terms" of `docs/erts-differences.md`).
@@ -85,6 +89,10 @@ impl Binary {
     /// ERTS sub-bitstring refers to the original binary. The bit positions
     /// are from the first bit of this binary. The view keeps the offset of
     /// its bits, so it shares the array with its source.
+    ///
+    /// The view copies no byte when the bit position `start` is on a byte
+    /// boundary. Else the bits are packed in a vector of one `Arc` at this
+    /// call, so a copy of the view is O(1).
     ///
     /// # Examples
     ///
