@@ -100,10 +100,10 @@ Expected result (analysis): the tuple, list, nested, and send benchmarks go from
 | List | `List(Vec<Term>)` and `ImproperList(Vec<Term>, Box<Term>)` | `Nil` or `Cons(ConsRef)`, where a `ConsRef` holds an `Arc<Cons>` (see [Drop rule](#drop-rule)); a cons holds a head and a tail; `ImproperList` is removed (#458) | `put_list` makes a new cons in O(1) time and shares the tail; `get_list`, `get_hd`, and `get_tl` read the cell in O(1) time. The copy of the head or the tail into a register is O(1) for a list, a map, or an immediate, but a tuple, a fun, or a binary is still a deep copy until #454, #455, and #456 | #457 (API), #458 (cons cells) |
 | Binary | `Binary(Vec<u8>)` | `Arc<[u8]>` with an offset and a length | The bytes do not change after construction. `binary_part/3`, `bs_get_binary2`, `bs_get_tail`, and `binary:split/2,3` return views of the same bytes | #456 |
 | Map | `Map { repr: Rc<Repr> }`; HAMT nodes by value | `Arc<Repr>`; each HAMT node in `Arc` | `Arc::make_mut` on each node of the path; a flatmap is copied whole | #453 |
-| Fun | `Fun { target, free: Vec<Term> }` | `Fun(Arc<FunThing>)` | Immutable | #455 |
+| Fun | `Fun { target, free: Vec<Term> }` | `Fun(Option<Arc<FunThing>>)` newtype, where `FunThing` holds the entry and the free variables (#455) | Immutable; a copy shares the thing, and the entry and the free variables do not change | #455 |
 | Match context | `Rc<RefCell<MatchContext>>`; bytes copied into an `Arc<[u8]>` | `Arc<MatchState>`; bytes are the shared binary; position and `position_known` in one `AtomicU64` | `Relaxed` atomic store by the owner process | #456 (bytes), #459 (`Arc` and atomic) |
 
-After #454, #455, #456, and #458, `Term::clone` is a shallow copy. Then #459 removes the work-stack branch of `shallow_clone`, and only the work stack of `Drop` stays.
+After #454, #455, #456, and #458, `Term::clone` is a shallow copy. #455 removes the work stack of `Clone`: `shallow_clone` keeps the `Term` variants and the byte copy of a binary, and `Clone::clone` calls it. #456 changes the binary arm of `shallow_clone`, and #459 removes `shallow_clone`. Only the work stack of `Drop` stays.
 
 ## List API
 
@@ -131,13 +131,14 @@ A trap of a list BIF keeps the rest of its list as a term in O(1) time: `length/
 - For each `Arc` node, `Drop` calls `Arc::into_inner`. When it returns the inner value, this holder was the last one, and the nested terms go on the work stack. When it returns `None`, another holder keeps the node, and nothing goes on the stack.
 - A cons cell puts its tail and then its head on the work stack, so the head comes off first, and the stack stays short for a long list. `Term` has a `Drop`, so a drop cannot move the `Arc` out of a `Term::Cons`. Thus `Term::Cons` holds a `ConsRef`, a wrapper of `Option<Arc<Cons>>`: the drop takes the `Arc` out of the `Option` and calls `Arc::into_inner`. The `Option` is empty only after this, and every other reader finds a cell. A replacement `Arc` would need one more allocation for each dropped cell (#458).
 - A tuple holds its elements in `Tuple(Option<Arc<Vec<Term>>>)` for the same reason: the drop takes the `Arc` out of the `Option` and calls `Arc::into_inner`, and the elements of the last holder go on the work stack (#454).
+- A fun holds its thing in `Fun(Option<Arc<FunThing>>)` for the same reason: the drop takes the `Arc` out of the `Option` and calls `Arc::into_inner`, and the free variables of the last holder go on the work stack (#455).
 - `Arc::into_inner` is in `impl<T, A: Allocator> Arc<T, A>`, which has an implicit `T: Sized` bound. Thus each `Arc` that holds terms has a sized payload. A tuple is `Arc<Vec<Term>>`, not `Arc<[Term]>`: `Arc::into_inner` does not accept `Arc<[Term]>`. `Arc::make_mut` accepts `Arc<[Term]>` and returns a `&mut [Term]`, so it is not a second reason. The cost is a second allocation for each tuple and one more pointer step for each element read. A thin `Arc` of a header and an inline slice needs `unsafe` code, so this design does not use it. A binary `Arc<[u8]>` holds no terms, so its usual drop does not recurse.
 - Do not use `Arc::get_mut` or `Arc::try_unwrap` for this. When two threads drop the last two holders at the same time, both calls can fail, and the drop of the last `Arc` then drops the inner value recursively. The standard library guarantees that, of concurrent `Arc::into_inner` calls on all clones, exactly one call returns the inner value.
 - `Map::drain_into` changes from `Rc::get_mut` to `Arc::into_inner` in #453.
 
 ## Equality and thread safety
 
-- `PartialEq` returns `true` for two terms that hold the same `Arc` (`Arc::ptr_eq`) before it compares their contents. Two different allocations with equal contents are still compared element by element, so the worst case stays O(size). #454 adds the fast path for a tuple and #458 for a cons cell. #455 adds it for the free variables of a fun.
+- `PartialEq` returns `true` for two terms that hold the same `Arc` (`Arc::ptr_eq`) before it compares their contents. Two different allocations with equal contents are still compared element by element, so the worst case stays O(size). #454 adds the fast path for a tuple, #458 for a cons cell, and #455 for a fun. The fast path of a fun compares its shared thing, which holds the entry and the free variables.
 - A compile-time assertion checks `Term: Send + Sync` (#459). On main, `Rc<Repr>` of `Map` (`src/term/map.rs:112`) and `Rc<RefCell<MatchContext>>` (`src/term.rs:80`) are the parts that are not `Send`. #453 replaces the first, and #459 replaces the second.
 - Process mutable state stays exclusive to its process. Terms are shared and immutable. #459 changes the wording of #10 to this rule.
 
@@ -201,6 +202,17 @@ The `tuple` benchmark is about 15 times faster and the `nested` benchmark about 
 
 A second probe of the same day isolates the remaining `tuple` time: `tuple_size/1` on the same tuple, 20000 times, gives 26414, 28351, and 28417 µs after the change and 34, 35, and 40 µs on ERTS. Thus the remaining ~21 ms of the `tuple` benchmark is the recursion, the arithmetic, and the BIF call of the loop, not the tuple read. The module `/tmp/cow454/cowb3.erl` (not committed) holds the probe.
 
+### Fun benchmark (#455)
+
+Release build, Apple Silicon macOS, revision `31f765b` (origin/main) before the fun change and the branch of #455 after it. Each value is the median of five interleaved runs in microseconds. The host was shared with other work, so the spread is wide. Each `after` value of the two probes below is lower than each `before` value of the same probe. The probe module is the [Benchmark module](#benchmark-module) at `/tmp/dsh/cow455/cowb.erl`, and the commands are the commands above with that directory and the revision before the change in a second worktree.
+
+| Probe | ERTS µs | Before µs | After µs |
+| --- | --- | --- | --- |
+| `funcopy`: put a fun with a 1000-element free variable into a tuple, 20000 times | 34 | 13734 | 12971 |
+| `funsend`: send that fun to the process itself, 2000 times | 178 | 4807 | 3061 |
+
+The design benchmarks (`tuple`, `list`, `send`, `send2`, `map_get`, `map_put`, and `nested`) do not copy a fun. Their medians moved within the spread of the shared host, which is wider than the effect of this change, so this run does not separate them. #454 and #458 already made the nested terms of a fun an O(1) copy. Thus the change removes the free-variable vector and the copy of the entry of an unshared fun. The remaining time of `funcopy` and `funsend` is the BIF call, the tuple or message work, and the loop.
+
 ### Rust micro-benchmark
 
 Revision `8a949de`, release build. A scratch crate (not committed) depends on `pbeam-runtime` by path and runs `cargo run --release`. It prints `size_of::<Term>()`, the clone and drop time of `Rc` and `Arc`, and the time of `Term::clone` and `Arc::clone` of a 1000-element tuple of integers.
@@ -223,7 +235,7 @@ The design run of 2026-10-11 on main (revision not recorded; this task did not r
 
 ```erlang
 -module(cowb).
--export([send/0, send2/0, sink/2, tuple/0, list/0, map_get/0, map_put/0, nested/0]).
+-export([send/0, send2/0, sink/2, tuple/0, list/0, map_get/0, map_put/0, nested/0, funcopy/0, funsend/0]).
 
 %% Each benchmark exits with {Name, Microseconds}.
 time(Name, F) ->
@@ -263,6 +275,16 @@ mp_loop(M, N) -> put(m, M#{N => N}), mp_loop(M, N - 1).
 nested() -> T = list_to_tuple([seq(1, 100) || _ <- seq(1, 100)]), time(nested, fun() -> nested_loop(T, 2000, 0) end).
 nested_loop(_, 0, A) -> A;
 nested_loop(T, N, A) -> nested_loop(T, N - 1, A + hd(element(50, T))).
+
+%% Put a fun with a 1000-element free variable into a tuple, 20000 times.
+funcopy() -> A = seq(1, 1000), F = fun() -> A end, time(funcopy, fun() -> fc_loop(F, 20000) end).
+fc_loop(_, 0) -> ok;
+fc_loop(F, N) -> T = {F, N}, fc_loop(element(1, T), N - 1).
+
+%% Self-send of a fun with a 1000-element free variable, 2000 times.
+funsend() -> A = seq(1, 1000), F = fun() -> A end, time(funsend, fun() -> fs_loop(F, 2000) end).
+fs_loop(_, 0) -> ok;
+fs_loop(F, N) -> self() ! F, receive _ -> fs_loop(F, N - 1) end.
 
 %% Send of a 1000-element list to another process, 2000 times.
 send2() -> L = seq(1, 1000), time(send2, fun() -> Self = self(), P = spawn(cowb, sink, [Self, 2000]), send2_loop(P, L, 2000), receive done -> ok end end).
