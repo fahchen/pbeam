@@ -21,9 +21,15 @@
 use std::{
     path::Path,
     process::{Command, Output, Stdio},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+// The pseudo-terminal test runs on macOS only, so its imports come with the
+// same condition. Linux CI compiles this test crate with `-D warnings`, and
+// an unconditional import of `thread` or `Instant` is then unused.
+#[cfg(target_os = "macos")]
+use std::thread;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 #[expect(
     dead_code,
