@@ -20,7 +20,7 @@ use crate::runtime::scheduler::CONTEXT_REDS;
 /// # Examples
 ///
 /// ```rust,ignore
-/// let entry = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
+/// let entry = Term::tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
 /// let found = keyfind(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::list_from(vec![entry.clone()]));
 /// assert!(matches!(found, BifResult::Value(term) if term == entry));
 /// let missing = keyfind(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::nil());
@@ -47,7 +47,7 @@ pub(super) fn keyfind(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let entry = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
+/// let entry = Term::tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
 /// let found = keymember(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::list_from(vec![entry]));
 /// assert!(matches!(found, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
 /// let missing = keymember(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::nil());

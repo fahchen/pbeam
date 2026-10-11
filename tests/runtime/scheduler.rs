@@ -166,14 +166,14 @@ fn sends_down_and_exit_signals_and_records_the_root_result() {
     assert_eq!(
         messages(&scheduler, 0),
         [
-            Term::Tuple(vec![
+            Term::tuple(vec![
                 atom("DOWN"),
                 Term::Reference(monitor.unwrap()),
                 atom("process"),
                 Term::Pid(monitored),
                 atom("normal"),
             ]),
-            Term::Tuple(vec![atom("EXIT"), Term::Pid(linked), atom("boom")]),
+            Term::tuple(vec![atom("EXIT"), Term::Pid(linked), atom("boom")]),
         ]
     );
     scheduler.finish_current(atom("normal"), Some(atom("ok")));
@@ -350,18 +350,18 @@ fn creates_no_monitor_of_the_caller_and_sends_noproc_for_a_missing_target() {
         .unwrap();
     scheduler.park_current();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    let named = Term::Tuple(vec![atom("undefined"), atom("nonode@nohost")]);
+    let named = Term::tuple(vec![atom("undefined"), atom("nonode@nohost")]);
     assert_eq!(
         messages(&scheduler, 0),
         [
-            Term::Tuple(vec![
+            Term::tuple(vec![
                 atom("DOWN"),
                 Term::Reference(port),
                 atom("port"),
                 named,
                 atom("noproc"),
             ]),
-            Term::Tuple(vec![
+            Term::tuple(vec![
                 atom("DOWN"),
                 Term::Reference(gone),
                 atom("process"),
@@ -432,7 +432,7 @@ fn deletes_the_tables_of_a_process_when_it_exits() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(
         messages(&scheduler, 0),
-        [Term::Tuple(vec![
+        [Term::tuple(vec![
             atom("DOWN"),
             Term::Reference(monitor.unwrap()),
             atom("process"),
@@ -751,7 +751,7 @@ fn start_dirty_writers(
 /// Return the `DOWN` message of the monitor `reference` on process `id`
 /// with `reason`.
 fn down(reference: Reference, id: u64, reason: &str) -> Term {
-    Term::Tuple(vec![
+    Term::tuple(vec![
         atom("DOWN"),
         Term::Reference(reference),
         atom("process"),

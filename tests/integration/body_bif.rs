@@ -56,10 +56,10 @@ fn runs_max_less_and_equal_in_body_position_as_pinned_erts() {
             Term::list_from(vec![Term::Integer(1)]),
             Term::list_from(vec![Term::Integer(1), Term::Integer(2)]),
             binary(b"a"),
-            Term::Tuple(vec![Term::Integer(1), Term::Integer(2)]),
+            Term::tuple(vec![Term::Integer(1), Term::Integer(2)]),
             Term::nil(),
-            Term::Tuple(Vec::new()),
-            Term::Tuple(vec![Term::Integer(1), atom("a")]),
+            Term::tuple(Vec::new()),
+            Term::tuple(vec![Term::Integer(1), atom("a")]),
             binary(b"ab"),
         ])
     );
@@ -252,7 +252,7 @@ fn charges_a_bignum_operand_as_pinned_erts() {
     // bignum 2^59 costs 1 more.
     let program = BeamProgram::load(&[BODY_BIF_PROBE]).unwrap();
     let pair =
-        |value, reductions| Term::Tuple(vec![Term::Integer(value), Term::Integer(reductions)]);
+        |value, reductions| Term::tuple(vec![Term::Integer(value), Term::Integer(reductions)]);
     assert_eq!(
         program.execute("body_bif_probe", "costs", &[]).unwrap(),
         Term::list_from(vec![

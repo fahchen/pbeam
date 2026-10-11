@@ -208,7 +208,7 @@ impl Term {
     /// ```rust,ignore
     /// assert!(Term::nil().is_nil());
     /// assert!(!Term::list_from([Term::Integer(1)]).is_nil());
-    /// assert!(!Term::Tuple(vec![]).is_nil());
+    /// assert!(!Term::tuple(vec![]).is_nil());
     /// ```
     pub fn is_nil(&self) -> bool {
         matches!(self, Term::Nil)
@@ -222,7 +222,7 @@ impl Term {
     /// ```rust,ignore
     /// assert!(Term::nil().is_list());
     /// assert!(Term::list_with_tail(vec![Term::Integer(1)], Term::static_atom("x")).is_list());
-    /// assert!(!Term::Tuple(vec![]).is_list());
+    /// assert!(!Term::tuple(vec![]).is_list());
     /// ```
     pub fn is_list(&self) -> bool {
         matches!(self, Term::Nil | Term::Cons(_))

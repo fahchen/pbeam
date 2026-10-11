@@ -166,8 +166,8 @@ impl Scheduler {
 /// let message = port_message(PortId(0), "exit_status", Term::Integer(0));
 /// ```
 fn port_message(id: PortId, tag: &str, value: Term) -> Term {
-    Term::Tuple(vec![
+    Term::tuple(vec![
         Term::Port(id),
-        Term::Tuple(vec![Term::static_atom(tag), value]),
+        Term::tuple(vec![Term::static_atom(tag), value]),
     ])
 }

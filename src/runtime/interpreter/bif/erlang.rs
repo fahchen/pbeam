@@ -145,7 +145,7 @@ pub(super) fn process_flag(
                 flag.name()
             )));
         }
-        Term::Tuple(elements) if matches!(elements.as_slice(), [Term::Atom(tag), _] if tag.name() == "monitor_nodes") =>
+        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.name() == "monitor_nodes") =>
         {
             return Err(error(
                 "unsupported erlang:process_flag/2 flag {monitor_nodes, Options}",
@@ -348,7 +348,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
     let small = value.small_integer();
     let cpu = |cpu: &Term| match cpu {
         Term::Tuple(elements) => {
-            matches!(elements.as_slice(), [Term::Atom(tag), _, _, _, _, _, _] if tag.name() == "cpu")
+            matches!(elements.as_ref(), [Term::Atom(tag), _, _, _, _, _, _] if tag.name() == "cpu")
         }
         _ => false,
     };
@@ -366,7 +366,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
         "trace_control_word" => integer.is_some_and(|word| u32::try_from(word).is_ok()),
         "sequential_tracer" => match value {
             Term::Pid(_) => true,
-            Term::Tuple(elements) => matches!(elements.as_slice(), [Term::Atom(_), _]),
+            Term::Tuple(elements) => matches!(elements.as_ref(), [Term::Atom(_), _]),
             _ => atom == Some("false"),
         },
         "scheduler_wall_time" => matches!(atom, Some("true" | "false")),
@@ -381,7 +381,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
         },
         "erts_alloc" => match value {
             Term::Tuple(elements) => matches!(
-                elements.as_slice(),
+                elements.as_ref(),
                 [Term::Atom(_), Term::Atom(_), Term::Integer(_)]
             ),
             _ => false,
@@ -480,7 +480,7 @@ pub(super) fn error_2(
     } else {
         Term::Integer(arity.into())
     };
-    let frame = Term::Tuple(vec![module, function, args, Term::nil()]);
+    let frame = Term::tuple(vec![module, function, args, Term::nil()]);
     Ok(BifResult::RaiseWithStacktrace {
         class: ExceptionClass::Error,
         reason: reason.clone(),
@@ -519,7 +519,7 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
     };
     let location = |location: &Term| location.is_list();
     let frame = |frame: &Term| match frame {
-        Term::Tuple(elements) => match elements.as_slice() {
+        Term::Tuple(elements) => match elements.as_ref() {
             [Term::Fun(_), _] => true,
             [Term::Fun(_), _, place] => location(place),
             [Term::Atom(_), Term::Atom(_), _] => true,
@@ -538,14 +538,11 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
     let kept = if depth < count { depth.max(1) } else { count };
     let frames = frames.take(kept).map(|frame| match frame {
         Term::Tuple(elements)
-            if matches!(
-                elements.as_slice(),
-                [Term::Fun(_), _] | [Term::Atom(_), _, _]
-            ) =>
+            if matches!(elements.as_ref(), [Term::Fun(_), _] | [Term::Atom(_), _, _]) =>
         {
-            let mut elements = elements.clone();
+            let mut elements: Vec<Term> = elements.iter().cloned().collect();
             elements.push(Term::nil());
-            Term::Tuple(elements)
+            Term::tuple(elements)
         }
         _ => frame.clone(),
     });
@@ -846,7 +843,7 @@ pub(super) fn monitor(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let alias = Term::Tuple(vec![Term::static_atom("alias"), Term::static_atom("demonitor")]);
+/// let alias = Term::tuple(vec![Term::static_atom("alias"), Term::static_atom("demonitor")]);
 /// let options = monitor_options(&Term::list_from(vec![alias])).unwrap();
 /// assert_eq!(options.alias, Some(AliasMode::Demonitor));
 /// assert!(monitor_options(&Term::static_atom("x")).is_none());
@@ -861,7 +858,7 @@ fn monitor_options(options: &Term) -> Option<MonitorOptions> {
     for option in options {
         match option {
             Term::Atom(option) if option.name() == "priority" => result.priority = true,
-            Term::Tuple(pair) => match pair.as_slice() {
+            Term::Tuple(pair) => match pair.as_ref() {
                 [Term::Atom(key), Term::Atom(mode)] if key.name() == "alias" => {
                     result.alias = Some(match mode.name() {
                         "explicit_unalias" => AliasMode::ExplicitUnalias,
@@ -886,13 +883,13 @@ fn monitor_options(options: &Term) -> Option<MonitorOptions> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(local_name(&Term::Tuple(vec![name.clone(), local_node()])), Some(atom));
+/// assert_eq!(local_name(&Term::tuple(vec![name.clone(), local_node()])), Some(atom));
 /// assert_eq!(local_name(&Term::Integer(1)), None);
 /// ```
 fn local_name(target: &Term) -> Option<Atom> {
     match target {
         Term::Atom(name) => Some(name.clone()),
-        Term::Tuple(pair) => match pair.as_slice() {
+        Term::Tuple(pair) => match pair.as_ref() {
             [Term::Atom(name), node] if *node == local_node() => Some(name.clone()),
             _ => None,
         },
@@ -987,7 +984,7 @@ pub(super) fn spawn_opt(
         match option {
             Term::Atom(option) if option.name() == "link" => spawn_options.link = true,
             Term::Atom(option) if option.name() == "monitor" => spawn_options.monitor = true,
-            Term::Tuple(option) if matches!(option.as_slice(), [Term::Atom(name), _] if name.name() == "message_queue_data") =>
+            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.name() == "message_queue_data") =>
             {
                 spawn_options.off_heap_message_queue = match &option[1] {
                     Term::Atom(value) if value.name() == "on_heap" => false,
@@ -995,7 +992,7 @@ pub(super) fn spawn_opt(
                     _ => return Ok(BifResult::badarg()),
                 };
             }
-            Term::Tuple(option) if matches!(option.as_slice(), [Term::Atom(name), _] if name.name() == "capabilities") =>
+            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.name() == "capabilities") =>
             {
                 let Some(restrictions) = capability::restrictions(&option[1]) else {
                     return Ok(BifResult::badarg());
@@ -1328,7 +1325,7 @@ pub(super) fn split_binary(binary: &Term, position: &Term) -> BifResult {
     match (binary, position) {
         (Term::Binary(bytes), Term::Integer(at)) if (0..=bytes.len() as i64).contains(at) => {
             let (left, right) = bytes.split_at(*at as usize);
-            Value(Term::Tuple(vec![
+            Value(Term::tuple(vec![
                 Term::Binary(left.to_vec()),
                 Term::Binary(right.to_vec()),
             ]))
@@ -1677,7 +1674,7 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
 /// `AtomTable::put`.
 pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResult, BeamError> {
     match item {
-        Term::Atom(atom) if atom.name() == "os_type" => Ok(Value(Term::Tuple(vec![
+        Term::Atom(atom) if atom.name() == "os_type" => Ok(Value(Term::tuple(vec![
             Term::Atom(atoms.put("unix")?),
             Term::Atom(atoms.put(&host::os_flavor())?),
         ]))),
@@ -1905,7 +1902,7 @@ pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> B
 pub(super) fn list_to_tuple(list: &Term) -> BifResult {
     match list.proper_list() {
         Some(elements) if elements.clone().count() <= MAX_TUPLE_SIZE => {
-            Value(Term::Tuple(elements.cloned().collect()))
+            Value(Term::tuple(elements.cloned().collect()))
         }
         _ => BifResult::badarg(),
     }
@@ -1919,14 +1916,14 @@ pub(super) fn list_to_tuple(list: &Term) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let tuple = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
+/// let tuple = Term::tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
 /// assert!(matches!(tuple_to_list(&tuple), BifResult::Value(list) if list.proper_list().is_some_and(|elements| elements.len() == 2)));
-/// assert!(matches!(tuple_to_list(&Term::Tuple(vec![])), BifResult::Value(list) if list.is_nil()));
+/// assert!(matches!(tuple_to_list(&Term::tuple(vec![])), BifResult::Value(list) if list.is_nil()));
 /// assert!(matches!(tuple_to_list(&Term::nil()), BifResult::Raise { .. }));
 /// ```
 pub(super) fn tuple_to_list(tuple: &Term) -> BifResult {
     match tuple {
-        Term::Tuple(elements) => Value(Term::list_from(elements.clone())),
+        Term::Tuple(elements) => Value(Term::list_from(elements.iter().cloned())),
         _ => BifResult::badarg(),
     }
 }
@@ -1961,11 +1958,11 @@ pub(super) fn posixtime_to_universaltime(time: &Term) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let triple = |a, b, c| Term::Tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+/// let triple = |a, b, c| Term::tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
 /// // TZ=EST5EDT,M3.2.0,M11.1.0: {{2026,1,15},{7,0,0}}
-/// let date = Term::Tuple(vec![triple(2026, 1, 15), triple(12, 0, 0)]);
+/// let date = Term::tuple(vec![triple(2026, 1, 15), triple(12, 0, 0)]);
 /// assert!(matches!(universaltime_to_localtime(&date), BifResult::Value(_)));
-/// let date = Term::Tuple(vec![triple(1901, 12, 31), triple(23, 59, 59)]);
+/// let date = Term::tuple(vec![triple(1901, 12, 31), triple(23, 59, 59)]);
 /// assert!(matches!(universaltime_to_localtime(&date), BifResult::Raise { .. }));
 /// ```
 pub(super) fn universaltime_to_localtime(date: &Term) -> BifResult {
@@ -1985,9 +1982,9 @@ pub(super) fn universaltime_to_localtime(date: &Term) -> BifResult {
 /// let term = date_time((1970, 1, 2, 0, 0, 0));
 /// ```
 fn date_time((year, month, day, hour, minute, second): time::DateTime) -> Term {
-    Term::Tuple(vec![
-        Term::Tuple([year, month, day].map(Term::Integer).into()),
-        Term::Tuple([hour, minute, second].map(Term::Integer).into()),
+    Term::tuple(vec![
+        Term::tuple([year, month, day].map(Term::Integer).to_vec()),
+        Term::tuple([hour, minute, second].map(Term::Integer).to_vec()),
     ])
 }
 
@@ -1999,7 +1996,7 @@ fn date_time((year, month, day, hour, minute, second): time::DateTime) -> Term {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let tuple = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
+/// let tuple = Term::tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
 /// assert!(matches!(element(&Term::Integer(2), &tuple), BifResult::Value(Term::Integer(1))));
 /// assert!(matches!(element(&Term::Integer(3), &tuple), BifResult::Raise { .. }));
 /// assert!(matches!(element(&Term::Integer(1), &Term::nil()), BifResult::Raise { .. }));
@@ -2054,7 +2051,7 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 /// ```rust,ignore
 /// assert!(matches!(send(scheduler, &Term::Pid(pid), ok.clone())?, BifResult::Value(value) if value == ok));
 /// assert!(matches!(send(scheduler, &Term::static_atom("nobody"), ok.clone())?, BifResult::Raise { .. }));
-/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// let remote = Term::tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
 /// assert!(matches!(send(scheduler, &remote, ok.clone())?, BifResult::Value(_)));
 /// ```
 ///
@@ -2102,7 +2099,7 @@ pub(in crate::runtime::interpreter) fn send(
 /// ```rust,ignore
 /// let noconnect = Term::list_from(vec![Term::static_atom("noconnect")]);
 /// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
-/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// let remote = Term::tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
 /// assert!(matches!(send3(scheduler, &remote, ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "noconnect"));
 /// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok, &Term::static_atom("x"))?, BifResult::Raise { .. }));
 /// ```
@@ -2230,7 +2227,7 @@ enum Destination<'a> {
 ///
 /// ```rust,ignore
 /// assert!(matches!(destination(&Term::Pid(pid)), Some(Destination::Pid(_))));
-/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// let remote = Term::tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
 /// assert!(matches!(destination(&remote), Some(Destination::Remote)));
 /// assert!(destination(&Term::Integer(1)).is_none());
 /// ```
@@ -2240,7 +2237,7 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
         Term::Reference(reference) => Destination::Alias(*reference),
         Term::Atom(name) => Destination::Name(name.name()),
         Term::Port(_) => Destination::Port,
-        Term::Tuple(elements) => match elements.as_slice() {
+        Term::Tuple(elements) => match elements.as_ref() {
             [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
                 Destination::NodeName(name.name())
             }
@@ -2285,7 +2282,7 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
 ///
 /// ```rust,ignore
 /// assert!(matches!(deliver_to(scheduler, &Term::Pid(pid), ok.clone(), "erlang:send/2")?, Ok(Sent::Local)));
-/// let remote = Term::Tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
+/// let remote = Term::tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
 /// assert!(matches!(deliver_to(scheduler, &remote, ok.clone(), "erlang:send/2")?, Ok(Sent::NoConnect)));
 /// assert!(deliver_to(scheduler, &Term::static_atom("nobody"), ok, "erlang:send/2")?.is_err());
 /// ```
@@ -2443,7 +2440,7 @@ const PROCESS_INFO_ITEMS: [&str; 40] = [
 ///
 /// ```rust,ignore
 /// assert!(is_process_info_item(&Term::static_atom("registered_name")));
-/// let lookup = Term::Tuple(vec![Term::static_atom("dictionary"), Term::Integer(1)]);
+/// let lookup = Term::tuple(vec![Term::static_atom("dictionary"), Term::Integer(1)]);
 /// assert!(is_process_info_item(&lookup));
 /// assert!(!is_process_info_item(&Term::static_atom("ok")));
 /// ```
@@ -2451,7 +2448,7 @@ fn is_process_info_item(item: &Term) -> bool {
     match item {
         Term::Atom(name) => PROCESS_INFO_ITEMS.contains(&name.name()),
         Term::Tuple(elements) => {
-            matches!(elements.as_slice(), [Term::Atom(key), _] if key.name() == "dictionary")
+            matches!(elements.as_ref(), [Term::Atom(key), _] if key.name() == "dictionary")
         }
         _ => false,
     }
@@ -2743,7 +2740,7 @@ pub(super) fn finish_loading(
             for name in names {
                 modules.push(Term::Atom(scheduler.atoms.put(&name)?));
             }
-            Ok(Value(Term::Tuple(vec![
+            Ok(Value(Term::tuple(vec![
                 Term::static_atom("duplicated"),
                 Term::list_from(modules),
             ])))
@@ -2946,7 +2943,7 @@ pub(super) fn start_timer(
         {
             process.bif_timers.insert(TimerReference(reference), ());
         }
-        let message = Term::Tuple(vec![
+        let message = Term::tuple(vec![
             Term::static_atom("timeout"),
             Term::Reference(reference),
             message.clone(),
@@ -3015,7 +3012,7 @@ pub(super) fn cancel_timer(
         return Ok(Value(result));
     }
     let caller = scheduler.current_process_mut().id;
-    let message = Term::Tuple(vec![
+    let message = Term::tuple(vec![
         Term::static_atom("cancel_timer"),
         Term::Reference(*reference),
         result,
@@ -3041,7 +3038,7 @@ fn timer_options(options: &Term) -> Option<(bool, bool)> {
         let Term::Tuple(fields) = option else {
             return None;
         };
-        let [Term::Atom(name), Term::Atom(value)] = fields.as_slice() else {
+        let [Term::Atom(name), Term::Atom(value)] = fields.as_ref() else {
             return None;
         };
         let value = match value.name() {
@@ -3117,7 +3114,7 @@ pub(super) fn halt(
     let mut timeout = None;
     for option in options {
         match option {
-            Term::Tuple(pair) => match pair.as_slice() {
+            Term::Tuple(pair) => match pair.as_ref() {
                 [Term::Atom(name), Term::Atom(value)]
                     if name.name() == "flush" && matches!(value.name(), "true" | "false") =>
                 {

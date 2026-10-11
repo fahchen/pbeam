@@ -87,7 +87,7 @@ pub(super) fn new(
                 "set" | "protected" | "compressed" => {}
                 _ => return Ok(BifResult::badarg()),
             },
-            Term::Tuple(elements) => match elements.as_slice() {
+            Term::Tuple(elements) => match elements.as_ref() {
                 [Term::Atom(key), value] => match (key.name(), value) {
                     ("keypos", value) => match value.small_integer() {
                         // The C `int` keeps the low 32 bits (`erl_db_util.h:346`).
@@ -164,7 +164,7 @@ pub(super) fn new(
 /// ```rust,ignore
 /// let table = new(&mut context, &test_atom("t"), &Term::nil())?;
 /// let BifResult::Value(table) = table else { unreachable!() };
-/// let object = Term::Tuple(vec![test_atom("k"), test_atom("v")]);
+/// let object = Term::tuple(vec![test_atom("k"), test_atom("v")]);
 /// assert!(matches!(insert(&mut context, &table, &object)?, BifResult::Value(_)));
 /// assert!(matches!(insert(&mut context, &table, &test_atom("x"))?, BifResult::Raise { .. }));
 /// ```
@@ -248,7 +248,7 @@ pub(super) fn insert(
 ///
 /// ```rust,ignore
 /// process.fcalls = 10;
-/// let objects = Term::list_from(vec![Term::Tuple(vec![test_atom("k")]); 8]);
+/// let objects = Term::list_from(vec![Term::tuple(vec![test_atom("k")]); 8]);
 /// // 8 units of the check and 16 units of the insert: 3 reductions.
 /// assert!(matches!(insert_list(&mut context, id, &objects, 0, 1)?, BifResult::Value(_)));
 /// assert_eq!(context.scheduler.current_process_mut().fcalls, 7);
@@ -404,7 +404,7 @@ impl Units {
 ///
 /// Return a runtime error for an object in a table with the key position
 /// 0: ERTS aborts the emulator there (`Invalid tag in make_internal_hash`).
-fn put_objects(table: &mut Table, tuples: &[&Vec<Term>], keypos: i32) -> Result<(), BeamError> {
+fn put_objects(table: &mut Table, tuples: &[&[Term]], keypos: i32) -> Result<(), BeamError> {
     if keypos == 0 && !tuples.is_empty() {
         // ponytail: ERTS aborts here; see "ETS tables" in docs/erts-differences.md.
         return Err(error(
@@ -412,7 +412,7 @@ fn put_objects(table: &mut Table, tuples: &[&Vec<Term>], keypos: i32) -> Result<
         ));
     }
     for elements in tuples {
-        table.insert((*elements).clone());
+        table.insert(elements.to_vec());
     }
     Ok(())
 }
@@ -425,7 +425,7 @@ fn put_objects(table: &mut Table, tuples: &[&Vec<Term>], keypos: i32) -> Result<
 /// # Examples
 ///
 /// ```rust,ignore
-/// let object = Term::Tuple(vec![test_atom("k")]);
+/// let object = Term::tuple(vec![test_atom("k")]);
 /// assert!(valid_objects([&object], 1).is_some());
 /// assert!(valid_objects([&object], 2).is_none());
 /// assert!(valid_objects([&object], -1).is_none());
@@ -433,12 +433,12 @@ fn put_objects(table: &mut Table, tuples: &[&Vec<Term>], keypos: i32) -> Result<
 fn valid_objects<'a>(
     objects: impl IntoIterator<Item = &'a Term>,
     keypos: i32,
-) -> Option<Vec<&'a Vec<Term>>> {
+) -> Option<Vec<&'a [Term]>> {
     let keypos = i64::from(keypos) as u64;
     objects
         .into_iter()
         .map(|object| match object {
-            Term::Tuple(elements) if elements.len() as u64 >= keypos => Some(elements),
+            Term::Tuple(elements) if elements.len() as u64 >= keypos => Some(elements.as_ref()),
             _ => None,
         })
         .collect()
@@ -518,7 +518,7 @@ pub(super) fn lookup(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
     let Some(table) = context.scheduler.ets.table(table, caller, Operation::Read) else {
         return BifResult::badarg();
     };
-    let object = table.object(key).map(|object| Term::Tuple(object.to_vec()));
+    let object = table.object(key).map(|object| Term::tuple(object.to_vec()));
     Value(Term::list_from(object))
 }
 

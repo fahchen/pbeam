@@ -360,7 +360,7 @@ fn atom(program: &BeamProgram, name: &str) -> Term {
 
 /// Return the tuple of `elements`.
 fn tuple(elements: &[Term]) -> Term {
-    Term::Tuple(elements.to_vec())
+    Term::tuple(elements.to_vec())
 }
 
 /// Return the list of the atoms `names` of the program.
@@ -488,7 +488,7 @@ fn keeps_the_port_open_after_a_denied_close() {
     let policy = without((CapabilityKind::Port, Operation::Close));
     assert_eq!(
         run(&program, "close_kept", &policy),
-        Term::Tuple(vec![atom(&program, "denied"), atom(&program, "open")])
+        Term::tuple(vec![atom(&program, "denied"), atom(&program, "open")])
     );
 }
 
@@ -577,9 +577,9 @@ fn gives_the_erts_results_of_the_permitted_runtime_operations() {
         atom(&program, "undefined"),
         atom(&program, "true"),
         atom(&program, "ok"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom(&program, "error"),
-            Term::Tuple(vec![
+            Term::tuple(vec![
                 atom(&program, "reload"),
                 Term::list_from(reload.iter().map(|&byte| Term::Integer(byte.into()))),
             ]),
@@ -634,11 +634,11 @@ fn keeps_the_runtime_state_after_a_denied_call() {
     let denied = atom(&program, "denied");
     assert_eq!(
         run(&program, "system_flag_kept", &AllowAll),
-        Term::Tuple(vec![denied.clone(), atom(&program, "logger")])
+        Term::tuple(vec![denied.clone(), atom(&program, "logger")])
     );
     assert_eq!(
         run(&program, "load_nif_kept", &AllowAll),
-        Term::Tuple(vec![denied, atom(&program, "ok")])
+        Term::tuple(vec![denied, atom(&program, "ok")])
     );
 }
 

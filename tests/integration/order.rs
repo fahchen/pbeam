@@ -37,7 +37,7 @@ fn compares_terms_in_is_ge_and_erlang_ge_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("order_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::list_from(vec![atom("pbeam_order_z"), atom("pbeam_order_a")]),
             Term::list_from(RESULTS.split(',').map(atom)),
             Term::list_from(bif_results().split(',').map(atom)),

@@ -49,7 +49,7 @@ fn raises_the_exceptions_of_the_error_path_instructions_as_pinned_erts() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[ERROR_PATH_PROBE, &erlang]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let tuple = Term::Tuple;
+    let tuple = Term::tuple;
     let tagged = |tag: &str| tuple(vec![atom(tag), atom("b")]);
     let error = |reason: Term| {
         tuple(vec![

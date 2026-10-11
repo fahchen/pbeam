@@ -165,7 +165,7 @@ fn parse(program: &BeamProgram, cases: &str) -> Term {
         if close == ']' {
             Term::list_from(elements)
         } else {
-            Term::Tuple(elements)
+            Term::tuple(elements)
         }
     }
     let parsed = term(program, &mut cases.chars().peekable());

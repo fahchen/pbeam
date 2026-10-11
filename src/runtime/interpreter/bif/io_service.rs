@@ -23,7 +23,7 @@ use crate::runtime::capability::SecurityContext;
 /// ```rust,ignore
 /// // The current process entered the runtime with `terminal` `write`;
 /// // `user` is an IO service.
-/// let request = Term::Tuple(vec![io_request, Term::Pid(caller), reply_as, put_chars]);
+/// let request = Term::tuple(vec![io_request, Term::Pid(caller), reply_as, put_chars]);
 /// assert!(send_denial(&mut scheduler, user, &request)?.is_none());
 /// assert!(send_denial(&mut scheduler, user, &Term::static_atom("x"))?.is_some());
 /// ```
@@ -67,15 +67,15 @@ pub(super) fn send_denial(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let put_chars = Term::Tuple(vec![Term::static_atom("put_chars"), unicode, Term::Binary(b"hi\n".to_vec())]);
-/// let request = Term::Tuple(vec![io_request, Term::Pid(sender), reply_as, put_chars]);
+/// let put_chars = Term::tuple(vec![Term::static_atom("put_chars"), unicode, Term::Binary(b"hi\n".to_vec())]);
+/// let request = Term::tuple(vec![io_request, Term::Pid(sender), reply_as, put_chars]);
 /// assert!(io_request_permitted(sender, &security, &request));
 /// ```
 fn io_request_permitted(sender: ProcessId, security: &SecurityContext, message: &Term) -> bool {
     let Term::Tuple(elements) = message else {
         return false;
     };
-    let [Term::Atom(tag), Term::Pid(from), _reply_as, request] = elements.as_slice() else {
+    let [Term::Atom(tag), Term::Pid(from), _reply_as, request] = elements.as_ref() else {
         return false;
     };
     if tag.name() != "io_request" || *from != sender {
@@ -91,7 +91,7 @@ fn io_request_permitted(sender: ProcessId, security: &SecurityContext, message: 
         let Term::Tuple(elements) = request else {
             return false;
         };
-        let permitted = match elements.as_slice() {
+        let permitted = match elements.as_ref() {
             [Term::Atom(tag), _encoding, _chars] => tag.name() == "put_chars" && writes(),
             [
                 Term::Atom(tag),

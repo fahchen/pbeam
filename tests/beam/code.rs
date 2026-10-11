@@ -153,7 +153,7 @@ fn puts_literal_atoms_into_the_table_in_byte_order() {
     let (lit_a, lit_b) = (atom(&atoms, "pbeam_lit_a"), atom(&atoms, "pbeam_lit_b"));
     let pairs = vec![(lit_a, Term::Integer(1)), (lit_b.clone(), Term::Integer(2))];
     let map = Term::Map(Map::from_pairs(pairs).unwrap());
-    assert_eq!(literal, Term::Tuple(vec![lit_b, map]));
+    assert_eq!(literal, Term::tuple(vec![lit_b, map]));
     assert_eq!(
         format!("{literal:?}"),
         "Tuple([Atom(\"pbeam_lit_b\"), Map([(Atom(\"pbeam_lit_b\"), Integer(2)), \
@@ -182,7 +182,7 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
     .unwrap();
     assert_eq!(
         read(&[131, 104, 2, 119, 2, b'o', b'k', 106]).unwrap(),
-        Some(Term::Tuple(vec![Term::static_atom("ok"), Term::nil()]))
+        Some(Term::tuple(vec![Term::static_atom("ok"), Term::nil()]))
     );
     // NEW_FLOAT_EXT (70) 1.0 inside a tuple, inside a list, and as a list tail.
     let float = [70, 63, 240, 0, 0, 0, 0, 0, 0];

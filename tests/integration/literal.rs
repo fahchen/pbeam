@@ -10,9 +10,9 @@ fn decodes_tuple_and_list_literals_and_builds_lists_on_the_empty_list() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("literal_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::list_from(vec![atom("flush")]),
-            Term::Tuple(vec![atom("error"), atom("enotsup")]),
+            Term::tuple(vec![atom("error"), atom("enotsup")]),
             atom("same"),
         ])
     );

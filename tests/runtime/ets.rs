@@ -41,7 +41,7 @@ fn finds_a_named_table_of_each_access_mode() {
 fn deletes_only_the_object_with_an_exactly_equal_key() {
     let mut table = Table::new(ProcessId(0), Access::Public, 2);
     let object = |value, key| vec![Term::Integer(value), key];
-    let tuple = |value| Term::Tuple(vec![Term::Integer(value)]);
+    let tuple = |value| Term::tuple(vec![Term::Integer(value)]);
     table.insert(object(1, tuple(1)));
     table.insert(object(2, tuple(2)));
     table.delete(&tuple(3));

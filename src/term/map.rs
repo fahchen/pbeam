@@ -270,7 +270,7 @@ impl Map {
     /// ```rust,ignore
     /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
     /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(2)));
-    /// assert_eq!(map.get(&Term::Tuple(vec![])), None);
+    /// assert_eq!(map.get(&Term::tuple(vec![])), None);
     /// ```
     pub(crate) fn get(&self, key: &Term) -> Option<&Term> {
         let hamt = match &*self.repr {
@@ -356,7 +356,7 @@ impl Map {
     ///
     /// ```rust,ignore
     /// let mut pairs = vec![
-    ///     (Term::Tuple(vec![]), Term::Integer(0)),
+    ///     (Term::tuple(vec![]), Term::Integer(0)),
     ///     (Term::static_atom("abs"), Term::Integer(1)),
     ///     (Term::static_atom("value"), Term::Integer(2)),
     /// ];
@@ -364,7 +364,7 @@ impl Map {
     /// // value has atom index 745, abs has atom index 762, and an atom
     /// // comes before a tuple.
     /// assert_eq!(pairs[0].0, Term::static_atom("value"));
-    /// assert_eq!(pairs[2].0, Term::Tuple(vec![]));
+    /// assert_eq!(pairs[2].0, Term::tuple(vec![]));
     /// ```
     ///
     /// # Errors
@@ -399,8 +399,8 @@ impl Map {
     /// map.insert(Term::Integer(1), Term::Integer(2))?;
     /// map.insert(Term::Integer(1), Term::Integer(3))?;
     /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(3)));
-    /// map.insert(Term::Tuple(vec![Term::Integer(1)]), Term::Integer(4))?;
-    /// assert_eq!(map.get(&Term::Tuple(vec![Term::Integer(1)])), Some(&Term::Integer(4)));
+    /// map.insert(Term::tuple(vec![Term::Integer(1)]), Term::Integer(4))?;
+    /// assert_eq!(map.get(&Term::tuple(vec![Term::Integer(1)])), Some(&Term::Integer(4)));
     /// assert!(map.insert(Term::Map(Map::new()), Term::Integer(1)).is_err());
     /// ```
     ///
@@ -1183,10 +1183,10 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
 /// assert!(map_hash(&Term::list_from([Term::Integer(97)])).is_some());
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
-/// assert_eq!(map_hash(&Term::Tuple(vec![])), Some(4510301282025278020));
+/// assert_eq!(map_hash(&Term::tuple(vec![])), Some(4510301282025278020));
 /// assert_eq!(map_hash(&Term::Binary(vec![])), Some(10873612744977862784));
 /// assert_eq!(map_hash(&Term::list_from([Term::Binary(vec![])])), None);
-/// assert_eq!(map_hash(&Term::Tuple(vec![Term::Binary(vec![])])), None);
+/// assert_eq!(map_hash(&Term::tuple(vec![Term::Binary(vec![])])), None);
 /// let improper = |tail| Term::cons(Term::Integer(1), tail);
 /// assert!(map_hash(&improper(Term::Integer(2))).is_some());
 /// assert_eq!(map_hash(&improper(Term::Map(Map::new()))), None);
@@ -1200,7 +1200,7 @@ fn map_hash(key: &Term) -> Option<u64> {
         match term {
             Term::Atom(_) | Term::Nil => {}
             Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
-            Term::Tuple(elements) => pending.extend(elements),
+            Term::Tuple(elements) => pending.extend(elements.iter()),
             _ => {
                 term.small_integer()?;
             }

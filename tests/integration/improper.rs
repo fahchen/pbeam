@@ -76,11 +76,11 @@ fn loads_compares_and_hashes_improper_list_literals_as_pinned_erts() {
     .collect::<Vec<_>>();
     assert_eq!(
         program.execute("improper_probe", "literals", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             improper(vec![atom("a")], atom("b")),
-            Term::Tuple(vec![improper(
+            Term::tuple(vec![improper(
                 integers(&[1, 2]),
-                Term::Tuple(vec![atom("t")])
+                Term::tuple(vec![atom("t")])
             )]),
             atoms("lt,ge,lt,lt,lt,lt,lt,ge,lt"),
             atoms("lt,ge,lt,lt,lt,lt,lt,ge,lt"),
@@ -131,7 +131,7 @@ fn builds_and_matches_improper_lists_as_pinned_erts() {
             int(0),
             imp(),
             atom("x"),
-            Term::Tuple(vec![int(1), int(2), int(3)]),
+            Term::tuple(vec![int(1), int(2), int(3)]),
             atom("nonempty"),
             atom("nil"),
             atom("other"),
@@ -168,7 +168,7 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
     let program = BeamProgram::load(&[IMPROPER_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let int = Term::Integer;
-    let error = |reason: &str| Term::Tuple(vec![atom("error"), atom(reason)]);
+    let error = |reason: &str| Term::tuple(vec![atom("error"), atom(reason)]);
     let badarg = || error("badarg");
     let x = || atom("x");
     let imp = || improper(vec![int(1)], x());
@@ -189,7 +189,7 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
                 imp(),
                 atom("true"),
                 badarg(),
-                Term::Tuple(vec![atom("a")]),
+                Term::tuple(vec![atom("a")]),
                 badarg(),
                 atom("true"),
                 badarg(),
@@ -235,7 +235,7 @@ fn gives_the_iodata_and_chardata_results_of_pinned_erts_for_improper_lists() {
     // list of `re:compile/2` raises `badarg`.
     let program = BeamProgram::load(&[IMPROPER_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
     assert_eq!(
         program.execute("improper_probe", "iodata", &[]).unwrap(),

@@ -123,8 +123,8 @@ fn starts_the_logger_and_the_application_controller_as_pinned_erts() {
 fn isolated_logger_boot() {
     let program = boot_program(LOGGER_BOOT_PROBE);
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let registered = |name: &str, value: &str| Term::Tuple(vec![atom(name), atom(value)]);
-    let expected = Term::Tuple(vec![
+    let registered = |name: &str, value: &str| Term::tuple(vec![atom(name), atom(value)]);
+    let expected = Term::tuple(vec![
         Term::list_from(vec![atom("default")]),
         atom("notice"),
         Term::Map(
@@ -144,7 +144,7 @@ fn isolated_logger_boot() {
             registered("logger_std_h_default", "true"),
             registered("logger_simple_h", "false"),
         ]),
-        Term::Tuple(vec![atom("ok"), atom("notice")]),
+        Term::tuple(vec![atom("ok"), atom("notice")]),
     ]);
 
     assert_eq!(

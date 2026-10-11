@@ -61,7 +61,7 @@ fn jumps_to_the_guard_fail_label_on_badarith_as_pinned_erts() {
     // the next clause runs (`jit/arm/instr_arith.cpp:114-143`).
     let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    let pair = |tag, value| Term::Tuple(vec![atom(tag), Term::Integer(value)]);
+    let pair = |tag, value| Term::tuple(vec![atom(tag), Term::Integer(value)]);
     let expected = vec![
         pair("up", 2),
         atom("other"),

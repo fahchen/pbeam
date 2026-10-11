@@ -170,7 +170,7 @@ fn reads_and_updates_maps_as_pinned_erts() {
     // jumps to the fail label, and the next clause runs.
     let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let tagged = |tag: &str, name: &str| Term::Tuple(vec![atom(tag), atom(name)]);
+    let tagged = |tag: &str, name: &str| Term::tuple(vec![atom(tag), atom(name)]);
     let expected = vec![
         atom("cooked"),
         tagged("badkey", "ofd"),
@@ -214,8 +214,8 @@ fn reports_the_first_missing_map_key_as_pinned_erts() {
     // guard it jumps to the fail label.
     let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badkey = |key: Term| Term::Tuple(vec![atom("badkey"), key]);
-    let tuple = |name: &str| Term::Tuple(vec![atom(name)]);
+    let badkey = |key: Term| Term::tuple(vec![atom("badkey"), key]);
+    let tuple = |name: &str| Term::tuple(vec![atom(name)]);
     let expected = vec![
         badkey(tuple("x")),
         badkey(tuple("x")),
@@ -225,7 +225,7 @@ fn reports_the_first_missing_map_key_as_pinned_erts() {
         badkey(tuple("x")),
         badkey(tuple("x")),
         badkey(tuple("abs")),
-        badkey(Term::Tuple(vec![])),
+        badkey(Term::tuple(vec![])),
         atom("other"),
         atom("updated"),
     ];
@@ -271,9 +271,9 @@ fn merges_maps_as_pinned_erts() {
         options.clone(),
         options,
         map(big),
-        Term::Tuple(vec![atom("badmap"), atom("foo")]),
-        Term::Tuple(vec![atom("badmap"), atom("bar")]),
-        Term::Tuple(vec![atom("badmap"), atom("foo")]),
+        Term::tuple(vec![atom("badmap"), atom("foo")]),
+        Term::tuple(vec![atom("badmap"), atom("bar")]),
+        Term::tuple(vec![atom("badmap"), atom("foo")]),
     ];
     assert_eq!(
         program.execute("io_start_probe", "merge", &[]).unwrap(),
@@ -385,7 +385,7 @@ fn returns_the_host_os_type_as_pinned_erts() {
     let Term::Tuple(elements) = os_type else {
         panic!("os:type/0 must return a tuple");
     };
-    let [Term::Atom(family), Term::Atom(flavor)] = elements.as_slice() else {
+    let [Term::Atom(family), Term::Atom(flavor)] = elements.as_ref() else {
         panic!("os:type/0 must return a tuple of two atoms");
     };
     assert_eq!(family.name(), "unix");

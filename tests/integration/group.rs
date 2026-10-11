@@ -47,12 +47,12 @@ fn registers_a_process_name_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("group_probe", "registry", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("badarg"),
             atom("true"),
             atom("badarg"),
             atom("badarg"),
-            Term::Tuple(vec![atom("registered_name"), atom("pbeam_probe_reg")]),
+            Term::tuple(vec![atom("registered_name"), atom("pbeam_probe_reg")]),
         ])
     );
 
@@ -101,9 +101,9 @@ fn executes_the_pinned_group_server_for_one_put_chars_request() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("group_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("ok"),
-            Term::Tuple(vec![
+            Term::tuple(vec![
                 atom("unicode"),
                 Term::Binary(b"Hello, world!\n".to_vec()),
             ]),

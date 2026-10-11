@@ -16,7 +16,7 @@ fn panics_for_a_match_context() {
 #[test]
 fn prints_a_deep_term_without_recursion() {
     let depth = 1_000_000;
-    let deep = (0..depth).fold(Term::Tuple(vec![]), |inner, _| Term::Tuple(vec![inner]));
+    let deep = (0..depth).fold(Term::tuple(vec![]), |inner, _| Term::tuple(vec![inner]));
     let text = print_term(&deep);
     assert_eq!(text.len(), 2 * (depth + 1));
     assert!(text[..=depth].iter().all(|&byte| byte == b'{'));

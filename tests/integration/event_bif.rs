@@ -34,7 +34,7 @@ fn evaluate(expression: &str) -> Vec<u8> {
 
 /// Return `count` copies of the tuple `{error, Reason}` of `program`.
 fn errors(program: &BeamProgram, reason: &str, count: usize) -> impl Iterator<Item = Term> {
-    let error = Term::Tuple(vec![
+    let error = Term::tuple(vec![
         Term::Atom(program.atom("error").unwrap()),
         Term::Atom(program.atom(reason).unwrap()),
     ]);
@@ -141,12 +141,12 @@ fn selects_the_minimum_as_pinned_erts() {
             Term::Integer(1),
             Term::Integer(1),
             atom("a"),
-            Term::Tuple(vec![Term::Integer(1)]),
-            Term::Tuple(vec![Term::Integer(1)]),
+            Term::tuple(vec![Term::Integer(1)]),
+            Term::tuple(vec![Term::Integer(1)]),
             Term::Binary(b"a".to_vec()),
             atom("true"),
             atom("a"),
-            Term::Tuple(vec![]),
+            Term::tuple(vec![]),
         ])
     );
     assert_eq!(
@@ -221,7 +221,7 @@ fn counts_queued_messages_as_pinned_erts() {
     let erts_internal = pinned_beam("erts_internal");
     let program = BeamProgram::load(&[&erts_internal, EVENT_BIF_PROBE]).unwrap();
     let item = Term::Atom(program.atom("message_queue_len").unwrap());
-    let expected = [0, 2, 1, 2].map(|count| Term::Tuple(vec![item.clone(), Term::Integer(count)]));
+    let expected = [0, 2, 1, 2].map(|count| Term::tuple(vec![item.clone(), Term::Integer(count)]));
     assert_eq!(
         program
             .execute("event_bif_probe", "queue_len", &[])

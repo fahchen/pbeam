@@ -65,7 +65,7 @@ fn raises_badarg_for_each_status_and_option_that_halt_rejects() {
     assert_eq!(results.len(), 22);
     for result in results {
         assert!(
-            matches!(result, Term::Tuple(pair) if matches!(pair.as_slice(),
+            matches!(result, Term::Tuple(pair) if matches!(pair.as_ref(),
                 [Term::Atom(class), Term::Atom(reason)]
                     if class.name() == "error" && reason.name() == "badarg")),
             "{pbeam:?}"

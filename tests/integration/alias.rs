@@ -42,7 +42,7 @@ fn monitors_a_process_by_pid_and_name_and_a_port_name_as_pinned_erts() {
     // that no process has, and a port name.
     let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let tuple = Term::Tuple;
+    let tuple = Term::tuple;
     let list = |elements: Vec<Term>| Term::list_from(elements);
     let badarg = || tuple(vec![atom("error"), atom("badarg")]);
     let named = |name: &str| tuple(vec![atom(name), atom("nonode@nohost")]);
@@ -103,7 +103,7 @@ fn returns_a_runtime_error_for_a_time_offset_monitor() {
 ///
 /// ```rust,ignore
 /// let (result, atom) = run("modes");
-/// assert_eq!(result, Term::Tuple(vec![/* ... */]));
+/// assert_eq!(result, Term::tuple(vec![/* ... */]));
 /// ```
 fn run(function: &str) -> (Term, impl Fn(&str) -> Term) {
     let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
@@ -135,7 +135,7 @@ fn reads_the_options_of_monitor_3_before_the_type_as_pinned_erts() {
     // element and an improper tail with `badarg` before `monitor` checks the
     // type and the target (bif.c:988-997).
     let (result, atom) = run("options");
-    let tuple = Term::Tuple;
+    let tuple = Term::tuple;
     let list = |elements: Vec<Term>| Term::list_from(elements);
     let badarg = || tuple(vec![atom("error"), atom("badarg")]);
     let ok = |value: &str| tuple(vec![atom("ok"), atom(value)]);
@@ -159,7 +159,7 @@ fn tags_down_messages_with_the_tag_option_as_pinned_erts() {
     // (erl_proc_sig_queue.c:6417-6429), also by name, for noproc, and for
     // a port name.
     let (result, atom) = run("tags");
-    let tuple = Term::Tuple;
+    let tuple = Term::tuple;
     let list = |elements: Vec<Term>| Term::list_from(elements);
     let named = |name: &str| tuple(vec![atom(name), atom("nonode@nohost")]);
     let improper = Term::list_with_tail(vec![Term::Integer(1)], Term::Integer(2));
@@ -215,7 +215,7 @@ fn ends_each_alias_mode_as_pinned_erts() {
     let atoms = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
     assert_eq!(
         result,
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atoms(&["true", "false", "true", "false", "false", "false"]),
             atoms(&["a1", "a2", "b1", "c1", "c2", "e1"]),
         ])
@@ -232,7 +232,7 @@ fn ends_an_alias_at_the_down_message_unless_explicit_unalias_as_pinned_erts() {
     // `reply_demonitor` alias, and keeps an `explicit_unalias` alias, also
     // for the noproc DOWN message (erl_proc_sig_queue.c:6463-6490).
     let (result, atom) = run("downs");
-    let tuple = Term::Tuple;
+    let tuple = Term::tuple;
     let list = |elements: Vec<Term>| Term::list_from(elements);
     let pair = |tag: &str| tuple(vec![atom(tag), atom("normal")]);
     let noproc = |kind: &str| tuple(vec![atom("DOWN"), atom(kind), atom("noproc")]);
@@ -261,7 +261,7 @@ fn sends_an_exit_signal_through_an_active_alias_as_pinned_erts() {
     let (result, atom) = run("exits");
     assert_eq!(
         result,
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::list_from(vec![atom("true"); 6]),
             atom("alive"),
             atom("boom"),
@@ -296,7 +296,7 @@ fn runs_erlang_send_2_and_send_3_as_pinned_erts() {
     // `reply_demonitor` alias with `send/3`, which ends it, so `send/2` to
     // the alias drops `r2`.
     let (result, atom) = run("sends");
-    let tuple = Term::Tuple;
+    let tuple = Term::tuple;
     let list = |elements: Vec<Term>| Term::list_from(elements);
     let badarg = || tuple(vec![atom("error"), atom("badarg")]);
     let ok = |value: &str| tuple(vec![atom("ok"), atom(value)]);
@@ -344,7 +344,7 @@ fn replies_to_a_gen_server_call_through_an_alias_as_pinned_erts() {
     let gen_module = pinned_beam("gen");
     let program = BeamProgram::load(&[ALIAS_PROBE, &gen_server, &gen_module]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let echo = |value| Term::Tuple(vec![atom("echo"), Term::Integer(value)]);
+    let echo = |value| Term::tuple(vec![atom("echo"), Term::Integer(value)]);
     assert_eq!(
         program.execute("alias_probe", "call", &[]).unwrap(),
         Term::list_from(vec![echo(1), echo(2), atom("timeout"), Term::nil()])

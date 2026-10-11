@@ -16,11 +16,11 @@ fn delivers_link_exit_before_monitor_down_and_normal_exit_to_trapping_process() 
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, EXIT_SIGNAL_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let pair = |tag: &str, reason: &str| Term::Tuple(vec![atom(tag), atom(reason)]);
+    let pair = |tag: &str, reason: &str| Term::tuple(vec![atom(tag), atom(reason)]);
     assert_eq!(
         program.execute("exit_signal_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
-            Term::Tuple(vec![pair("EXIT", "boom"), pair("DOWN", "boom")]),
+        Term::tuple(vec![
+            Term::tuple(vec![pair("EXIT", "boom"), pair("DOWN", "boom")]),
             pair("EXIT", "normal"),
         ])
     );
@@ -53,8 +53,8 @@ fn sends_exit_signals_with_exit_2_as_erts_does() {
     let re = pinned_beam("re");
     let program = BeamProgram::load(&[&erlang, &re, EXIT_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let returned = Term::Tuple(vec![atom("returned"), atom("true"), atom("true")]);
-    let pair = |tag: &str, value: &str| Term::Tuple(vec![atom(tag), atom(value)]);
+    let returned = Term::tuple(vec![atom("returned"), atom("true"), atom("true")]);
+    let pair = |tag: &str, value: &str| Term::tuple(vec![atom(tag), atom(value)]);
     assert_eq!(
         program.execute("exit_probe", "main", &[]).unwrap(),
         Term::list_from(vec![
@@ -67,7 +67,7 @@ fn sends_exit_signals_with_exit_2_as_erts_does() {
             pair("alive", "none"),
             atom("boom"),
             atom("killed"),
-            Term::Tuple(vec![atom("alive"), pair("normal", "true")]),
+            Term::tuple(vec![atom("alive"), pair("normal", "true")]),
             atom("killed"),
             atom("badarg"),
             atom("badarg"),

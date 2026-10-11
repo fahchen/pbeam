@@ -96,7 +96,7 @@ fn rejects_zero_a_negative_integer_and_each_other_term() {
         Term::Integer(-1),
         Term::Integer(i64::MIN),
         Term::static_atom("ok"),
-        Term::Tuple(vec![]),
+        Term::tuple(vec![]),
         Term::nil(),
     ] {
         assert_eq!(time_unit_conversion(5, 1, &unit), TimeValue::Badarg);
@@ -123,8 +123,8 @@ fn gives_the_date_of_each_64_bit_posix_time() {
 
 #[test]
 fn reads_only_a_date_tuple_of_small_integers() {
-    let triple = |a, b, c| Term::Tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
-    let date = |date, time| Term::Tuple(vec![date, time]);
+    let triple = |a, b, c| Term::tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+    let date = |date, time| Term::tuple(vec![date, time]);
     // The values are not checked here.
     assert_eq!(
         time_to_parts(&date(
@@ -135,20 +135,20 @@ fn reads_only_a_date_tuple_of_small_integers() {
     );
     for term in [
         triple(2026, 1, 1),
-        Term::Tuple(vec![triple(2026, 1, 1)]),
-        Term::Tuple(vec![triple(2026, 1, 1), triple(0, 0, 0), triple(0, 0, 0)]),
+        Term::tuple(vec![triple(2026, 1, 1)]),
+        Term::tuple(vec![triple(2026, 1, 1), triple(0, 0, 0), triple(0, 0, 0)]),
         date(Term::nil(), triple(0, 0, 0)),
         date(triple(2026, 1, 1), Term::Integer(0)),
         date(
-            Term::Tuple(vec![Term::Integer(2026), Term::Integer(1)]),
+            Term::tuple(vec![Term::Integer(2026), Term::Integer(1)]),
             triple(0, 0, 0),
         ),
-        date(triple(2026, 1, 1), Term::Tuple(vec![Term::Integer(0); 4])),
+        date(triple(2026, 1, 1), Term::tuple(vec![Term::Integer(0); 4])),
         date(triple(1 << 59, 1, 1), triple(0, 0, 0)),
         date(triple(2026, 1, 1), triple(0, 0, -(1 << 59) - 1)),
         date(
             triple(2026, 1, 1),
-            Term::Tuple(vec![
+            Term::tuple(vec![
                 Term::Integer(0),
                 Term::Integer(0),
                 Term::static_atom("ok"),

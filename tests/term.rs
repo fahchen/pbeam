@@ -17,7 +17,7 @@ fn fun(index: i32, free: Vec<Term>) -> Term {
 
 fn deep(levels: usize) -> Term {
     (0..levels).fold(Term::nil(), |inner, level| match level % 4 {
-        0 => Term::Tuple(vec![inner]),
+        0 => Term::tuple(vec![inner]),
         1 => Term::list_from(vec![Term::Integer(1), inner]),
         2 => map(vec![(atom("k"), inner)]),
         _ => fun(0, vec![inner]),
@@ -43,7 +43,7 @@ fn clones_compares_formats_and_drops_deep_improper_lists_without_recursion() {
     // Each level nests through the tail or through the first element.
     let deep = |levels: usize| {
         (0..levels).fold(atom("x"), |inner, level| match level % 2 {
-            0 => Term::list_with_tail(vec![Term::Integer(1)], Term::Tuple(vec![inner])),
+            0 => Term::list_with_tail(vec![Term::Integer(1)], Term::tuple(vec![inner])),
             _ => Term::list_with_tail(vec![inner], atom("t")),
         })
     };
@@ -83,7 +83,7 @@ fn compares_and_formats_improper_lists_by_elements_and_tail() {
     assert_eq!(
         format!(
             "{:?}",
-            Term::Tuple(vec![improper(&[1, 2], Term::Tuple(vec![atom("t")]))])
+            Term::tuple(vec![improper(&[1, 2], Term::tuple(vec![atom("t")]))])
         ),
         "Tuple([ImproperList([Integer(1), Integer(2)], Tuple([Atom(\"t\")]))])"
     );
@@ -125,7 +125,7 @@ fn compares_funs_by_their_lambda_and_free_variables() {
     assert_ne!(tagged("a"), tagged("b"));
     assert_ne!(tagged("a"), fun(1, vec![atom("a")]));
     assert_ne!(tagged("a"), fun(0, vec![]));
-    assert_ne!(fun(0, vec![]), Term::Tuple(vec![]));
+    assert_ne!(fun(0, vec![]), Term::tuple(vec![]));
     assert_eq!(fun(0, vec![]), fun(0, vec![]));
     // ERTS identifies a fun entry by its module, index, old unique
     // value, and arity (`fun_cmp` in `erl_fun.c:79-85`). The entry label
@@ -162,6 +162,20 @@ fn compares_external_funs_by_their_mfa() {
 }
 
 #[test]
+fn prints_each_free_variable_of_a_fun() {
+    // The `Debug` walk writes the free variables of a fun and separates them
+    // with `, `. A tuple and a fun shared one arm of the walk before #454, and
+    // the test of a tuple with two elements covered the separator. The arm of
+    // a fun needs this test of its own.
+    let term = fun(0, vec![Term::Integer(1), Term::Integer(2)]);
+    assert_eq!(
+        format!("{term:?}"),
+        "Fun(Local(Lambda { module: Atom { index: 971, name: \"lists\" }, index: 0, \
+         old_unique: 7, label: 53, arity: 1 }), [Integer(1), Integer(2)])"
+    );
+}
+
+#[test]
 fn matches_the_derived_debug_text_and_compares_every_variant() {
     let leaves = [
         atom("ok"),
@@ -171,7 +185,7 @@ fn matches_the_derived_debug_text_and_compares_every_variant() {
         Term::Reference(Reference(5)),
         Term::MatchContext(Rc::new(RefCell::new(MatchContext::new(&[6])))),
     ];
-    let term = Term::Tuple(vec![Term::list_from(leaves.to_vec()), Term::nil()]);
+    let term = Term::tuple(vec![Term::list_from(leaves.to_vec()), Term::nil()]);
     assert_eq!(
         format!("{term:?}"),
         "Tuple([List([Atom(\"ok\"), Binary([1, 2]), Integer(-3), Pid(ProcessId(4)), \
@@ -182,9 +196,9 @@ fn matches_the_derived_debug_text_and_compares_every_variant() {
         assert_eq!(leaf, &leaf.clone());
         assert_ne!(leaf, &leaves[(index + 1) % leaves.len()]);
     }
-    assert_ne!(Term::nil(), Term::Tuple(vec![]));
+    assert_ne!(Term::nil(), Term::tuple(vec![]));
     assert_ne!(Term::nil(), Term::list_from(vec![Term::Integer(1)]));
-    assert_ne!(Term::Tuple(vec![atom("a")]), Term::Tuple(vec![atom("b")]));
+    assert_ne!(Term::tuple(vec![atom("a")]), Term::tuple(vec![atom("b")]));
 }
 
 #[test]
@@ -255,7 +269,7 @@ fn keeps_the_creation_order_and_the_pid_reference_marker() {
 
 #[test]
 fn clones_compares_and_formats_ports() {
-    let port = Term::Tuple(vec![Term::Port(PortId(5))]);
+    let port = Term::tuple(vec![Term::Port(PortId(5))]);
     assert_eq!(port.clone(), port);
     assert_ne!(Term::Port(PortId(5)), Term::Port(PortId(6)));
     assert_ne!(Term::Port(PortId(5)), Term::Pid(ProcessId(5)));
@@ -269,14 +283,14 @@ fn finds_a_fun_at_any_depth_without_recursion() {
     assert!(!deep(3).contains_fun());
     assert!(deep(4).contains_fun());
     assert!(fun(0, vec![]).contains_fun());
-    assert!(element(Term::Tuple(vec![fun(0, vec![])])).contains_fun());
+    assert!(element(Term::tuple(vec![fun(0, vec![])])).contains_fun());
     assert!(map(vec![(atom("k"), fun(0, vec![]))]).contains_fun());
     assert!(!map(vec![(atom("k"), atom("v"))]).contains_fun());
     let improper = |tail| Term::list_with_tail(vec![Term::Integer(1)], tail);
     assert!(improper(fun(0, vec![])).contains_fun());
     assert!(!improper(atom("x")).contains_fun());
     assert!(Term::list_with_tail(vec![fun(0, vec![])], atom("x")).contains_fun());
-    let nested = (0..1_000_000).fold(fun(0, vec![]), |inner, _| Term::Tuple(vec![inner]));
+    let nested = (0..1_000_000).fold(fun(0, vec![]), |inner, _| Term::tuple(vec![inner]));
     assert!(nested.contains_fun());
     let nested = (0..1_000_000).fold(Term::Integer(1), |inner, _| element(inner));
     assert!(!nested.contains_fun());

@@ -507,7 +507,7 @@ impl Scheduler {
         initial_call: &(String, String, usize),
     ) -> Result<Term, BeamError> {
         let (module, function, arity) = initial_call;
-        let initial_call = Term::Tuple(vec![
+        let initial_call = Term::tuple(vec![
             Term::Atom(self.atoms.put(module)?),
             Term::Atom(self.atoms.put(function)?),
             Term::Integer(*arity as i64),
@@ -550,7 +550,7 @@ fn granted(value: &Term) -> Option<Capability> {
     let Term::Tuple(elements) = value else {
         return None;
     };
-    match elements.as_slice() {
+    match elements.as_ref() {
         [Term::Atom(grant), capability] if grant.name() == "grant" => {
             capability::capability(capability)
         }

@@ -58,13 +58,13 @@ const CALLS: &[(&str, &[i64])] = &[
 /// ```
 fn runs_term(program: &BeamProgram, loops: &[(&str, &[i64])]) -> Term {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let run = |tag: &str, length: i64| Term::Tuple(vec![atom(tag), Term::Integer(length)]);
+    let run = |tag: &str, length: i64| Term::tuple(vec![atom(tag), Term::Integer(length)]);
     Term::list_from(loops.iter().map(|(name, lengths)| {
         let runs: Vec<_> = lengths
             .iter()
             .flat_map(|&length| [run("a", length), run("b", length)])
             .collect();
-        Term::Tuple(vec![atom(name), Term::list_from(runs)])
+        Term::tuple(vec![atom(name), Term::list_from(runs)])
     }))
 }
 
@@ -176,7 +176,7 @@ fn orders_term(program: &BeamProgram) -> Term {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let order = |names: &[&str; 3]| Term::list_from(names.iter().map(|name| atom(name)));
     Term::list_from(ORDERS.iter().map(|(kind, orders)| {
-        Term::Tuple(vec![atom(kind), Term::list_from(orders.iter().map(order))])
+        Term::tuple(vec![atom(kind), Term::list_from(orders.iter().map(order))])
     }))
 }
 

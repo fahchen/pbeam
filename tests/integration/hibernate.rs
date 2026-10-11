@@ -24,19 +24,19 @@ fn runs_erlang_hibernate_as_the_pinned_erts_instruction() {
     // A message in the queue before the call: the call returns at once.
     assert_eq!(
         run("queued"),
-        Term::Tuple(vec![atom("ok"), atom("true"), list(&["early"])])
+        Term::tuple(vec![atom("ok"), atom("true"), list(&["early"])])
     );
     // No message in the queue: the process waits for the message of a
     // child.
     assert_eq!(
         run("later"),
-        Term::Tuple(vec![atom("ok"), atom("true"), list(&["late"])])
+        Term::tuple(vec![atom("ok"), atom("true"), list(&["late"])])
     );
     // The `apply` instruction and a fun call run `hibernate() ->
     // erlang:hibernate().` in `erlang.beam` (`erlang.erl:3524-3527`).
     assert_eq!(
         run("apply"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("ok"),
             atom("ok"),
             atom("ok"),
@@ -45,20 +45,20 @@ fn runs_erlang_hibernate_as_the_pinned_erts_instruction() {
     );
     // `call_ext_last` waits first, and then returns from the frame
     // (`jit/arm/ops.tab:669-673`).
-    assert_eq!(run("tail"), Term::Tuple(vec![atom("ok"), list(&["late"])]));
+    assert_eq!(run("tail"), Term::tuple(vec![atom("ok"), list(&["late"])]));
     // A process that starts in `erlang:hibernate/0` waits, and then exits
     // with reason `normal`.
     assert_eq!(
         run("bottom"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("waiting"),
-            Term::Tuple(vec![atom("down"), atom("normal")]),
+            Term::tuple(vec![atom("down"), atom("normal")]),
         ])
     );
     // With a message in the queue, the child runs before the call returns.
     assert_eq!(
         run("order"),
-        Term::Tuple(vec![atom("ok"), list(&["own", "child"])])
+        Term::tuple(vec![atom("ok"), list(&["own", "child"])])
     );
 
     let reference = Command::new("erl")

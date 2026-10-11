@@ -182,10 +182,10 @@ const MDAYS: [i64; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 /// # Examples
 ///
 /// ```rust,ignore
-/// let triple = |a, b, c| Term::Tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
-/// let date = Term::Tuple(vec![triple(2026, 2, 30), triple(24, 0, 0)]);
+/// let triple = |a, b, c| Term::tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+/// let date = Term::tuple(vec![triple(2026, 2, 30), triple(24, 0, 0)]);
 /// assert_eq!(time_to_parts(&date), Some((2026, 2, 30, 24, 0, 0)));
-/// let date = Term::Tuple(vec![triple(1 << 59, 1, 1), triple(0, 0, 0)]);
+/// let date = Term::tuple(vec![triple(1 << 59, 1, 1), triple(0, 0, 0)]);
 /// assert_eq!(time_to_parts(&date), None);
 /// assert_eq!(time_to_parts(&triple(2026, 1, 1)), None);
 /// ```
@@ -193,7 +193,7 @@ pub(super) fn time_to_parts(date: &Term) -> Option<DateTime> {
     let Term::Tuple(parts) = date else {
         return None;
     };
-    let [Term::Tuple(date), Term::Tuple(time)] = parts.as_slice() else {
+    let [Term::Tuple(date), Term::Tuple(time)] = &parts[..] else {
         return None;
     };
     let ([year, month, day], [hour, minute, second]) = (small_triple(date)?, small_triple(time)?);
