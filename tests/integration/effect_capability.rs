@@ -243,7 +243,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 26] = [
+const AMBIENT: [&str; 27] = [
     "erlang:cancel_timer/2",
     "erlang:demonitor/1",
     "erlang:demonitor/2",
@@ -268,6 +268,7 @@ const AMBIENT: [&str; 26] = [
     "file:native_name_encoding/0",
     "os:system_time/1",
     "prim_file:internal_name2native/1",
+    "prim_file:internal_native2name/1",
     "prim_file:read_info_nif/2",
     "re:compile/2",
 ];
@@ -385,7 +386,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     let program = program();
     let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
                     nonode@nohost,nonode@nohost,true,true,false,effect_probe_ambient_atom,ok,\
-                    effect_probe_ambient,true,[{key,value}],value,true,true,reference,atom,2,ok]";
+                    effect_probe_ambient,true,[{key,value}],value,true,true,reference,atom,2,ok,1]";
     assert_eq!(text(&run(&program, "ambient", &Grants(vec![]))), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }

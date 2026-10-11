@@ -548,7 +548,7 @@ bifs! {
     persistent_term:put/2 => |cx, [key, value]| persistent_term::put(cx, key, value),
     persistent_term:put_new/2 => unsupported,
     prim_file:internal_name2native/1 => |_, [name]| Ok(file::internal_name2native(name)),
-    prim_file:internal_native2name/1 => unsupported,
+    prim_file:internal_native2name/1 => |_, [name]| file::internal_native2name(name, filename_encoding()),
     prim_file:internal_normalize_utf8/1 => unsupported,
     prim_file:is_translatable/1 => unsupported,
     re:compile/1 => unsupported,

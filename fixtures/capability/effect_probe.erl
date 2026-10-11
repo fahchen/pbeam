@@ -379,7 +379,8 @@ ambient() ->
         reference(ets:whereis(Name)),
         atom(file:native_name_encoding()),
         byte_size(prim_file:internal_name2native("a")),
-        element(1, prim_file:read_file_info("/"))
+        element(1, prim_file:read_file_info("/")),
+        length(prim_file:internal_native2name(<<"a">>))
     ].
 
 %% Guard tests, so the compiler does not call a BIF.
