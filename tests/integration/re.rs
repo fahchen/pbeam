@@ -347,9 +347,11 @@ fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
     // `unicode:characters_to_binary/2`, takes the first frame of
     // `erlang:error(new_stacktrace, [RE, Options])`, and raises `badarg`
     // again with `erlang:raise/3` (`re.erl:1742-1751`). PBeam gives
-    // `erlang:error/2` this first frame, so the match succeeds. The
-    // exception has the stack trace `[]`, as each `erlang:raise/3` in PBeam
-    // (row "Exception stack trace" in `docs/erts-differences.md`).
+    // `erlang:error/2` this first frame, so the match succeeds.
+    // `erlang:raise/3` keeps the frame `{re, compile, [RE, Options], []}`
+    // (`bif.c:1626-1687`). ERTS also gives the location of the frame and the
+    // caller frames; PBeam gives neither (row "Exception stack trace" in
+    // `docs/erts-differences.md`).
     let program = program();
     let error = program
         .execute(
@@ -358,7 +360,10 @@ fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
             &[Term::Atom(program.atom("chardata").unwrap())],
         )
         .unwrap_err();
-    assert_eq!(error.to_string(), "root process exited with {badarg,[]}");
+    assert_eq!(
+        error.to_string(),
+        "root process exited with {badarg,[{re,compile,[foo,[unicode]],[]}]}"
+    );
     assert_eq!(
         reference_of("try re_probe:unsupported(chardata) catch error:R -> R end"),
         "badarg\n"

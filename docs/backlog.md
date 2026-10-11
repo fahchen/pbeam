@@ -278,9 +278,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Run `error_handler.beam` for an undefined function
 
-- After #166 (PR #180), PBeam gives the result of `error_handler:undefined_function/3` in Rust for a loaded module: it calls `'$handle_undefined_function'/2` or raises `undef` with the first frame. ERTS runs `error_handler.beam` from the export entry (`beam_common.c:1294-1342`). Running the BEAM module needs caller frames in the stack trace (`crash/1` calls `tl/1` on it), `erlang:raise/3` that keeps its frames, and `ensure_loaded/1` through `code_server` or `init` (`error_handler.erl:165-198`). The "Undefined functions" row records the difference. The `error_handler` code also costs reductions: on `erl +S 1`, a call that goes to `'$handle_undefined_function'/2` costs 11 and a caught `undef` costs 13. PBeam charges only the entry and the `return` of the handler, and nothing for an `undef` (owner decision in #7).
+- After #166 (PR #180), PBeam gives the result of `error_handler:undefined_function/3` in Rust for a loaded module: it calls `'$handle_undefined_function'/2` or raises `undef` with the first frame. ERTS runs `error_handler.beam` from the export entry (`beam_common.c:1294-1342`). Running the BEAM module needs `ensure_loaded/1` through `code_server` or `init` (`error_handler.erl:182-198`). Since #446, `erlang:error/1` gives the frame that `crash/1` removes with `tl/1`, and `erlang:raise/3` keeps its frames (`error_handler.erl:165-178`). The "Undefined functions" row records the difference. The `error_handler` code also costs reductions: on `erl +S 1`, a call that goes to `'$handle_undefined_function'/2` costs 11 and a caught `undef` costs 13. PBeam charges only the entry and the `return` of the handler, and nothing for an `undef` (owner decision in #7).
 - For a module that is not loaded, ERTS loads the module through `error_handler` and `code_server` (`error_handler.erl:85-98`, `182-198`). The Terra Counter run of #428 shows the effect: in interactive mode, the `main` process waits for 11 module loads at its first `IO.inspect/1` call, and the terminal owner writes the restore sequence before the result. PBeam loads all modules before the run, so `main` writes first.
-- **Trigger:** the stack-trace work gives caller frames and `raise/3` frames, or a consumer sets `process_flag(error_handler, Module)`.
+- **Trigger:** #447, or a consumer sets `process_flag(error_handler, Module)`.
 - **Source:** review of #166.
 
 ### Raise `undef` for an entry module that the run does not load
@@ -300,12 +300,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - PBeam writes no report for an uncaught exception. For an uncaught `error` or `throw`, ERTS sends `{log, error, "Error in process ~p with exit value:~n~p~n", Args, Metadata}` to the registered `logger` process (beam_common.c:697-718, erl_trace.c:2812-2820). The "Error report" row records this. `pbeam_boot` starts `logger` (PR #188), so the receiver exists. PR #188 said that #73 tracks this work, but #73 is closed.
 - **Trigger:** a consumer needs the report of a process that crashes.
 - **Source:** PR #188 (#179).
-
-### Keep the frames that `erlang:raise/3` receives
-
-- After #155 (PR #177), `erlang:raise/3` checks its stack trace argument but gives the exception `[]`. ERTS keeps the frames, at most `backtrace_depth` and at least one when the depth is 0. A frame with a location keeps its location, and an old frame without a location (`{Fun, Args}` or `{M, F, A}`) gets the location `[]` (`bif.c:1626-1681`). The "Exception stack trace" row of PR #177 records this.
-- **Trigger:** the stack-trace work, or a consumer that reads raised frames.
-- **Source:** review of #155.
 
 ### Value checks of `process_flag/2` and `system_flag/2`
 

@@ -157,8 +157,8 @@ pub(super) fn process_flag(
 
 /// The items of ERTS `system_flag_2` (`bif.c:4972-5304`) that need a
 /// subsystem that PBeam does not have: schedulers, the garbage collector,
-/// stack traces, tracing, the time offset, statistics, the CPU topology,
-/// and the memory allocators.
+/// tracing, the time offset, statistics, the CPU topology, and the memory
+/// allocators.
 const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
     "multi_scheduling",
     "schedulers_online",
@@ -166,7 +166,6 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
     "min_heap_size",
     "min_bin_vheap_size",
     "max_heap_size",
-    "backtrace_depth",
     "trace_control_word",
     "sequential_tracer",
     "reset_seq_trace",
@@ -187,13 +186,21 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// neither, so the value stays 233.
 const MIN_HEAP_SIZE: i64 = 233;
 
+/// The largest value of `backtrace_depth`, `MAX_BACKTRACE_SIZE` of ERTS
+/// (`error.h:206`). `system_flag(backtrace_depth, Depth)` sets a larger
+/// depth to this value (`bif.c:5108-5115`).
+const MAX_BACKTRACE_SIZE: i64 = 64;
+
 /// Run `erlang:system_flag(Item, Value)` as ERTS `system_flag_2`
-/// (`bif.c:4972-5304`) does for the items `system_logger` and
-/// `debug_flags`. `system_logger` takes `logger`, `undefined`, or a local
-/// pid, sets the node value, and returns the old value
+/// (`bif.c:4972-5304`) does for the items `system_logger`, `debug_flags`,
+/// and `backtrace_depth`. `system_logger` takes `logger`, `undefined`, or a
+/// local pid, sets the node value, and returns the old value
 /// (`erts_set_system_logger`, `erl_trace.c:2486-2491`). The start value is
 /// `logger` (`erl_trace.c:339`). Each other value raises `badarg`.
-/// `debug_flags` returns `true` for each value. An item that ERTS does not
+/// `debug_flags` returns `true` for each value. `backtrace_depth` takes a
+/// small integer of 0 or more, sets the depth of the run to at most 64, and
+/// returns the old depth (`bif.c:5108-5115`). Each other value raises
+/// `badarg`. An item that ERTS does not
 /// know raises `badarg`, also `time_offset` with a value that is not
 /// `finalize`. Each item of `UNSUPPORTED_SYSTEM_FLAGS` first checks its
 /// value as ERTS does (`unsupported_system_flag_value`), and raises
@@ -216,9 +223,11 @@ const MIN_HEAP_SIZE: i64 = 233;
 /// let old = system_flag(&mut context, &Term::static_atom("system_logger"), &Term::Pid(pid))?;
 /// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "logger"));
 /// assert!(matches!(system_flag(&mut context, &foo, &Term::Integer(1))?, BifResult::Raise { .. }));
-/// assert!(system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::Integer(8)).is_err());
+/// let depth = system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::Integer(100))?;
+/// assert!(matches!(depth, BifResult::Value(Term::Integer(8))));
 /// let depth = system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::static_atom("foo"))?;
 /// assert!(matches!(depth, BifResult::Raise { .. }));
+/// assert!(system_flag(&mut context, &Term::static_atom("trace_control_word"), &Term::Integer(0)).is_err());
 /// ```
 ///
 /// # Errors
@@ -243,6 +252,7 @@ pub(super) fn system_flag(
     let valid = match (item.name(), value) {
         ("system_logger", _) => logger,
         ("debug_flags", _) => true,
+        ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
         ("time_offset", Term::Atom(finalize)) => finalize.name() == "finalize",
         (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
             unsupported_system_flag_value(name, value)
@@ -262,13 +272,18 @@ pub(super) fn system_flag(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    Ok(match item.name() {
-        "system_logger" => Value(std::mem::replace(
+    Ok(match (item.name(), value.small_integer()) {
+        ("system_logger", _) => Value(std::mem::replace(
             &mut scheduler.system_logger,
             value.clone(),
         )),
-        "debug_flags" => Value(Term::static_atom("true")),
-        name => {
+        ("debug_flags", _) => Value(Term::static_atom("true")),
+        ("backtrace_depth", Some(depth)) => {
+            let depth = depth.min(MAX_BACKTRACE_SIZE) as usize;
+            let old = std::mem::replace(&mut scheduler.backtrace_depth, depth);
+            Value(Term::Integer(old as i64))
+        }
+        (name, _) => {
             return Err(error(format!(
                 "unsupported erlang:system_flag/2 item {name}"
             )));
@@ -285,8 +300,8 @@ pub(super) fn system_flag(
 /// - `schedulers_online` and `dirty_cpu_schedulers_online` take a small
 ///   integer of 1 or more (`erts_set_schedulers_online`,
 ///   `erl_process.c:8241-8242`).
-/// - `fullsweep_after`, `min_heap_size`, `min_bin_vheap_size`, and
-///   `backtrace_depth` take a small integer of 0 or more.
+/// - `fullsweep_after`, `min_heap_size`, and `min_bin_vheap_size` take a
+///   small integer of 0 or more.
 /// - `trace_control_word` takes an integer from 0 to `u32::MAX`
 ///   (`db_set_trace_control_word`, `erl_db_util.c:1091-1103`).
 /// - `sequential_tracer` takes `false`, a pid, or `{Module, State}` with an
@@ -317,8 +332,8 @@ pub(super) fn system_flag(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(!unsupported_system_flag_value("backtrace_depth", &Term::static_atom("foo")));
-/// assert!(unsupported_system_flag_value("backtrace_depth", &Term::Integer(8)));
+/// assert!(!unsupported_system_flag_value("min_heap_size", &Term::static_atom("foo")));
+/// assert!(unsupported_system_flag_value("min_heap_size", &Term::Integer(8)));
 /// assert!(!unsupported_system_flag_value("schedulers_online", &Term::Integer(0)));
 /// ```
 fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
@@ -345,7 +360,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
         "schedulers_online" | "dirty_cpu_schedulers_online" => {
             small.is_some_and(|count| count >= 1)
         }
-        "fullsweep_after" | "min_heap_size" | "min_bin_vheap_size" | "backtrace_depth" => {
+        "fullsweep_after" | "min_heap_size" | "min_bin_vheap_size" => {
             small.is_some_and(|size| size >= 0)
         }
         "trace_control_word" => integer.is_some_and(|word| u32::try_from(word).is_ok()),
@@ -396,6 +411,34 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
     }
 }
 
+/// Run `erlang:error(Reason)` as ERTS `error_1` (`bif.c:1436-1440`) does:
+/// raise an exception of class `error` with `Reason`. The first frame of
+/// the stack trace is the frame of the function that calls the BIF, with
+/// its arity: ERTS `handle_error` starts with the arguments `am_true`
+/// (`beam_common.c:454`), and `erts_build_mfa_item` puts the arity in the
+/// frame when the arguments are not a list (`utils.c:3448-3455`). Thus
+/// this is [`error_2`] with arguments that are not a list.
+///
+/// `error_handler:crash/1` calls `tl/1` on this stack trace
+/// (`error_handler.erl:172-178`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // In `tail/1`: erlang:error(r).
+/// let result = error_1(context, &Term::static_atom("r"))?;
+/// // The stack trace is [{Module, tail, 1, []}].
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A caller instruction with no `func_info` before it is a runtime
+/// invariant error.
+pub(super) fn error_1(context: &mut BifContext<'_>, reason: &Term) -> Result<BifResult, BeamError> {
+    error_2(context, reason, &Term::static_atom("true"))
+}
+
 /// Run `erlang:error(Reason, Args)` as ERTS `error_2` (`bif.c:1448-1454`)
 /// does: raise an exception of class `error` with `Reason`. ERTS puts
 /// `Args` in the first frame of the stack trace, the frame of the function
@@ -415,7 +458,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
 /// // In `tail/1`: erlang:error(r, [a]) and erlang:error(r, none).
 /// let result = error_2(context, &Term::static_atom("r"), &args)?;
 /// // The stack trace is [{Module, tail, [a], []}] or [{Module, tail, 1, []}].
-/// assert!(matches!(result, BifResult::ErrorWithStacktrace { .. }));
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { .. }));
 /// ```
 ///
 /// # Errors
@@ -438,7 +481,8 @@ pub(super) fn error_2(
         Term::Integer(arity.into())
     };
     let frame = Term::Tuple(vec![module, function, args, Term::nil()]);
-    Ok(BifResult::ErrorWithStacktrace {
+    Ok(BifResult::RaiseWithStacktrace {
+        class: ExceptionClass::Error,
         reason: reason.clone(),
         stacktrace: Term::list_from(vec![frame]),
     })
@@ -453,18 +497,23 @@ pub(super) fn error_2(
 /// `{M, F, A, Location}`, where `Fun` is a fun, `M` and `F` are atoms, and
 /// `Location` is a list.
 ///
-/// PBeam records no stack frames (row "Exception stack trace" in
-/// `docs/erts-differences.md`), so the exception gets the stack trace `[]`.
+/// The exception gets the frames of `Stacktrace`. When the list has more
+/// frames than `depth`, the run value of `backtrace_depth`, it keeps the
+/// first `depth` frames, and one frame for the depth 0
+/// (`bif.c:1626-1637`). A `{Fun, Args}` frame becomes `{Fun, Args, []}`,
+/// and a `{M, F, A}` frame becomes `{M, F, A, []}` (`bif.c:1661-1687`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = raise(&Term::static_atom("throw"), &reason, &Term::nil());
-/// assert!(matches!(result, BifResult::Raise { class: ExceptionClass::Throw, .. }));
-/// let result = raise(&Term::static_atom("foo"), &reason, &Term::nil());
+/// let frames = Term::list_from(vec![mfa]); // [{m, f, 1}]
+/// let result = raise(8, &Term::static_atom("throw"), &reason, &frames);
+/// // The stack trace is [{m, f, 1, []}].
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { class: ExceptionClass::Throw, .. }));
+/// let result = raise(8, &Term::static_atom("foo"), &reason, &Term::nil());
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "badarg"));
 /// ```
-pub(super) fn raise(class: &Term, reason: &Term, stacktrace: &Term) -> BifResult {
+pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term) -> BifResult {
     let Some(class) = ExceptionClass::from_term(class) else {
         return Value(Term::static_atom("badarg"));
     };
@@ -479,12 +528,34 @@ pub(super) fn raise(class: &Term, reason: &Term, stacktrace: &Term) -> BifResult
         },
         _ => false,
     };
-    match stacktrace.proper_list() {
-        Some(frames) if frames.iter().all(frame) => Raise {
-            class,
-            reason: reason.clone(),
-        },
-        _ => Value(Term::static_atom("badarg")),
+    let Some(frames) = stacktrace.proper_list() else {
+        return Value(Term::static_atom("badarg"));
+    };
+    if !frames.iter().all(frame) {
+        return Value(Term::static_atom("badarg"));
+    }
+    let kept = if depth < frames.len() {
+        depth.max(1)
+    } else {
+        frames.len()
+    };
+    let frames = frames[..kept].iter().map(|frame| match frame {
+        Term::Tuple(elements)
+            if matches!(
+                elements.as_slice(),
+                [Term::Fun(_), _] | [Term::Atom(_), _, _]
+            ) =>
+        {
+            let mut elements = elements.clone();
+            elements.push(Term::nil());
+            Term::Tuple(elements)
+        }
+        _ => frame.clone(),
+    });
+    BifResult::RaiseWithStacktrace {
+        class,
+        reason: reason.clone(),
+        stacktrace: Term::list_from(frames),
     }
 }
 

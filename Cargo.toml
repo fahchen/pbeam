@@ -350,6 +350,10 @@ name = "signal_queue"
 path = "tests/integration/signal_queue.rs"
 
 [[test]]
+name = "stack_trace"
+path = "tests/integration/stack_trace.rs"
+
+[[test]]
 name = "statem"
 path = "tests/integration/statem.rs"
 
