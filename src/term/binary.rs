@@ -13,13 +13,16 @@
 //! and cannot see the sharing. The size is a number of bits, because an
 //! ERTS sub-bitstring can start and end at any bit
 //! (`erts_bs_get_binary_2`, `erl_bits.c:400-424`). [`Binary::bits`] copies
-//! no byte when the first bit is on a byte boundary, which is the case of
-//! each supported path. For a first bit that is not on a byte boundary, it
-//! packs the bits of the view in a vector at that call, and the vector is
-//! in one `Arc`, so a copy of such a view is O(1). PBeam has no bitstring
-//! term, so a size that is not a whole number of bytes comes only from a
-//! segment that PBeam does not run yet, and each such path stops with a
-//! runtime error (row "Bitstring terms" of `docs/erts-differences.md`).
+//! no byte when the first bit is on a byte boundary. For a first bit that
+//! is not on a byte boundary, it packs the bits of the view in a vector at
+//! that call, and the vector is in one `Arc`, so a copy of such a view is
+//! O(1). The `binary` command of `bs_match` reads a whole number of bytes
+//! at a bit position (`GET_BITSTRING`, jit/arm/instr_bs.cpp:3136-3176), so
+//! the packed view of that command is a supported path. PBeam has no
+//! bitstring term, so a segment whose size is not a whole number of bytes
+//! comes only from a path that PBeam does not run yet, and each such path
+//! stops with a runtime error (row "Bitstring terms" of
+//! `docs/erts-differences.md`).
 //! [`Binary::to_bytes`] gives an owned vector to the code that changes
 //! bytes, such as a `bs_create_bin` append segment. The bytes of a binary
 //! contain no term, so the drop of a deep term does not walk them, and a
@@ -92,7 +95,10 @@ impl Binary {
     ///
     /// The view copies no byte when the bit position `start` is on a byte
     /// boundary. Else the bits are packed in a vector of one `Arc` at this
-    /// call, so a copy of the view is O(1).
+    /// call, so a copy of the view is O(1), and the bits after the size in
+    /// the last byte are 0, as an ERTS bitstring has them (`erl_bits.h`).
+    /// The `binary` command of `bs_match` reads a whole number of bytes at
+    /// such a position (`GET_BITSTRING`, jit/arm/instr_bs.cpp:3136-3176).
     ///
     /// # Examples
     ///
