@@ -429,8 +429,8 @@ pub(super) fn error_2(
     let caller = current_frame(context.scheduler.current_process_mut())
         .module
         .clone();
-    let (module, function, arity) =
-        current_function(context.scheduler, context.program.module(&caller)?)?;
+    let module = Rc::clone(context.scheduler.code.module(&caller)?);
+    let (module, function, arity) = current_function(context.scheduler, &module)?;
     let args = match args {
         Term::List(_) | Term::ImproperList(..) => args.clone(),
         _ => Term::Integer(arity.into()),
@@ -840,7 +840,6 @@ pub(super) fn spawn(
     arguments: &Term,
 ) -> Result<BifResult, BeamError> {
     create_process(
-        context.program,
         context.scheduler,
         module,
         function,
@@ -868,14 +867,7 @@ pub(super) fn spawn_link(
         link: true,
         ..SpawnOptions::default()
     };
-    create_process(
-        context.program,
-        context.scheduler,
-        module,
-        function,
-        arguments,
-        options,
-    )
+    create_process(context.scheduler, module, function, arguments, options)
 }
 
 /// Run `erlang:spawn_opt/4`, which `erlang:spawn_monitor/3` in `erlang.beam`
@@ -937,7 +929,6 @@ pub(super) fn spawn_opt(
         }
     }
     create_process(
-        context.program,
         context.scheduler,
         module,
         function,
@@ -2560,13 +2551,13 @@ pub(super) fn signals_return(scheduler: &mut Scheduler, from: &Term, value: Term
 ///
 /// ```rust,ignore
 /// let erlang = Term::static_atom("erlang");
-/// let exported = function_exported(&program, &erlang, &Term::static_atom("self"), &Term::Integer(0));
+/// let exported = function_exported(&scheduler.code, &erlang, &Term::static_atom("self"), &Term::Integer(0));
 /// assert!(matches!(exported, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let exported = function_exported(&program, &erlang, &Term::static_atom("self"), &Term::Integer(1 << 59));
+/// let exported = function_exported(&scheduler.code, &erlang, &Term::static_atom("self"), &Term::Integer(1 << 59));
 /// assert!(matches!(exported, BifResult::Raise { .. }));
 /// ```
 pub(super) fn function_exported(
-    program: &BeamProgram,
+    code: &CodeTable,
     module: &Term,
     name: &Term,
     arity: &Term,
@@ -2577,9 +2568,7 @@ pub(super) fn function_exported(
     };
     let (module, name) = (module.name(), name.name());
     let exported = u32::try_from(arity as i32).is_ok_and(|arity| {
-        program
-            .modules
-            .get(module)
+        code.get(module)
             .is_some_and(|loaded| loaded.exports.contains_key(&(name.to_owned(), arity)))
             || is_bif(module, name, arity)
             // `erts_is_builtin` (`beam_common.c`) also counts these
@@ -2602,15 +2591,15 @@ pub(super) fn function_exported(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let loaded = module_loaded(&program, &Term::static_atom("erlang"));
+/// let loaded = module_loaded(&scheduler.code, &Term::static_atom("erlang"));
 /// assert!(matches!(loaded, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(module_loaded(&program, &Term::Integer(1)), BifResult::Raise { .. }));
+/// assert!(matches!(module_loaded(&scheduler.code, &Term::Integer(1)), BifResult::Raise { .. }));
 /// ```
-pub(super) fn module_loaded(program: &BeamProgram, module: &Term) -> BifResult {
+pub(super) fn module_loaded(code: &CodeTable, module: &Term) -> BifResult {
     let Term::Atom(module) = module else {
         return BifResult::badarg();
     };
-    let loaded = program.modules.contains_key(module.name());
+    let loaded = code.get(module.name()).is_some();
     Value(Term::static_atom(if loaded { "true" } else { "false" }))
 }
 
