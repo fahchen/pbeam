@@ -1,7 +1,14 @@
-//! Read the information of a host file, as the ERTS `prim_file` NIF library
-//! reads it on Unix (`nifs/unix/unix_prim_file.c`).
+//! Read host files, their information, directories, symbolic links, and the
+//! current directory, as the ERTS `prim_file` NIF library reads them on Unix
+//! (`nifs/unix/unix_prim_file.c`).
 
-use std::ffi::{CStr, c_int};
+use std::{
+    ffi::{CStr, OsStr, c_int},
+    fs::{self, File},
+    io::{self, Read},
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::Path,
+};
 
 use super::errno::errno;
 
@@ -125,4 +132,140 @@ pub(crate) fn read_info(path: &CStr, follow_links: bool) -> Result<FileInfo, c_i
         uid: data.st_uid as u32,
         gid: data.st_gid as u32,
     })
+}
+
+/// Return the contents of the regular file at `path`, as `read_file_nif`
+/// (`prim_file_nif.c:1354-1387`) reads them on Unix:
+///
+/// 1. `open` with `O_RDONLY` (`efile_open` and `get_flags`,
+///    `unix_prim_file.c:142-226`). A failed call gives its `errno`.
+/// 2. A directory gives `EISDIR` (`open_file_is_dir`, `unix_prim_file.c:126-140`).
+/// 3. `fstat` gives the size (`efile_read_handle_info`,
+///    `unix_prim_file.c:803-818`). A failed `fstat` or the size 0 reads to
+///    the end of the file. Else the read stops after `st_size` bytes or at
+///    the end of the file (`read_file`, `prim_file_nif.c:1300-1352`). A
+///    failed read gives its `errno`.
+///
+/// PBeam opens the file with `O_CLOEXEC` too, which only closes it in a
+/// child that starts while the read runs.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(read_file(c"/dev/null"), Ok(vec![]));
+/// assert_eq!(read_file(c"/"), Err(libc::EISDIR));
+/// assert_eq!(read_file(c"/pbeam-missing"), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `open` or `read`, `EISDIR` for a directory, and `ENOMEM`
+/// when the buffer cannot grow, as `enif_realloc_binary` gives it.
+pub(crate) fn read_file(path: &CStr) -> Result<Vec<u8>, c_int> {
+    let mut file = File::open(host_path(path)).map_err(os_errno)?;
+    let metadata = file.metadata().ok();
+    if metadata.as_ref().is_some_and(fs::Metadata::is_dir) {
+        return Err(libc::EISDIR);
+    }
+    let size = metadata.map_or(0, |metadata| metadata.len());
+    let mut contents = Vec::new();
+    let read = if size == 0 {
+        file.read_to_end(&mut contents)
+    } else {
+        file.take(size).read_to_end(&mut contents)
+    };
+    read.map_err(os_errno)?;
+    Ok(contents)
+}
+
+/// Return the names of the entries of the directory at `path` in the order
+/// of `readdir`, without `.` and `..`, as `efile_list_dir`
+/// (`unix_prim_file.c:897-943`) reads them. A failed `opendir` gives its
+/// `errno`. As in ERTS, a failed `readdir` ends the list.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(list_dir(c"/")?.contains(&b"tmp".to_vec()));
+/// assert_eq!(list_dir(c"/pbeam-missing"), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `opendir`, for example `ENOENT` or `ENOTDIR`.
+pub(crate) fn list_dir(path: &CStr) -> Result<Vec<Vec<u8>>, c_int> {
+    Ok(fs::read_dir(host_path(path))
+        .map_err(os_errno)?
+        .map_while(Result::ok)
+        .map(|entry| entry.file_name().into_vec())
+        .collect())
+}
+
+/// Return the contents of the symbolic link at `path`, as `efile_read_link`
+/// (`unix_prim_file.c:859-895`) reads it: `readlink` into a buffer of 256
+/// bytes, which doubles while the contents fill it.
+///
+/// `readlink` that gives 0 bytes, for the empty link that macOS allows,
+/// gives the `errno` that an earlier call of the thread left, as in ERTS.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // /tmp/link is a symbolic link to "target".
+/// assert_eq!(read_link(c"/tmp/link"), Ok(b"target".to_vec()));
+/// assert_eq!(read_link(c"/"), Err(libc::EINVAL));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `readlink`, for example `EINVAL` for a file that is not
+/// a symbolic link.
+pub(crate) fn read_link(path: &CStr) -> Result<Vec<u8>, c_int> {
+    let mut contents = vec![0; 256];
+    loop {
+        // SAFETY: `path` is a NUL-terminated string, and `readlink` writes
+        // at most `contents.len()` bytes into `contents`.
+        let copied =
+            unsafe { libc::readlink(path.as_ptr(), contents.as_mut_ptr().cast(), contents.len()) };
+        let Some(copied) = usize::try_from(copied).ok().filter(|&copied| copied > 0) else {
+            return Err(errno());
+        };
+        if copied < contents.len() {
+            contents.truncate(copied);
+            return Ok(contents);
+        }
+        contents.resize(contents.len() * 2, 0);
+    }
+}
+
+/// Return the current directory of the OS process, as `efile_get_cwd`
+/// (`unix_prim_file.c:1050-1083`) reads it with `getcwd`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(get_cwd()?, std::env::current_dir()?.into_os_string().into_vec());
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `getcwd` other than `ERANGE`, for example `ENOENT` when
+/// the directory was removed.
+pub(crate) fn get_cwd() -> Result<Vec<u8>, c_int> {
+    Ok(std::env::current_dir()
+        .map_err(os_errno)?
+        .into_os_string()
+        .into_vec())
+}
+
+/// Return the host path of the bytes of `path`.
+fn host_path(path: &CStr) -> &Path {
+    Path::new(OsStr::from_bytes(path.to_bytes()))
+}
+
+/// Return the `errno` of a failed host call. The standard library gives an
+/// error with no `errno` only when its buffer cannot grow, which is
+/// `ENOMEM` in ERTS.
+fn os_errno(error: io::Error) -> c_int {
+    error.raw_os_error().unwrap_or(libc::ENOMEM)
 }

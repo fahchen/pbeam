@@ -1,11 +1,19 @@
 //! Native bindings of the `prim_file` NIFs (`erts/emulator/nifs/common/prim_file_nif.c`).
+//!
+//! The bindings have no capability check yet: the `file` kind of the
+//! capability security migration adds it (row "Capability checks" of
+//! `docs/erts-differences.md`). ERTS runs each of these NIFs on a dirty IO
+//! scheduler (`prim_file_nif.c:196`, `200-201`, `207`, `212`). PBeam runs
+//! them on the scheduler thread, so a host call that waits stops all
+//! processes until it returns (row "Dirty IO" of
+//! `docs/erts-differences.md`).
 
 use super::*;
 use crate::runtime::host::{
     errno::errno_id,
     file::{self, FileInfo, FileType},
 };
-use std::ffi::CStr;
+use std::ffi::{CStr, c_int};
 
 /// The functions of the ERTS `prim_file` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`prim_file_nif.c:177-219`). `erlang:load_nif/2`
@@ -59,13 +67,35 @@ pub(super) const FUNCTIONS: [(&str, u32); 33] = [
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!((BINDINGS[0].name, BINDINGS[0].arity), ("read_info_nif", 2));
+/// assert_eq!((BINDINGS[0].name, BINDINGS[0].arity), ("get_cwd_nif", 0));
 /// ```
-pub(super) const BINDINGS: &[Binding] = &[Binding {
-    name: "read_info_nif",
-    arity: 2,
-    run: |scheduler, arguments| read_info_nif(scheduler, &arguments[0], &arguments[1]),
-}];
+pub(super) const BINDINGS: &[Binding] = &[
+    Binding {
+        name: "get_cwd_nif",
+        arity: 0,
+        run: |scheduler, _| get_cwd_nif(&mut scheduler.atoms),
+    },
+    Binding {
+        name: "list_dir_nif",
+        arity: 1,
+        run: |scheduler, arguments| list_dir_nif(&mut scheduler.atoms, &arguments[0]),
+    },
+    Binding {
+        name: "read_file_nif",
+        arity: 1,
+        run: |scheduler, arguments| read_file_nif(&mut scheduler.atoms, &arguments[0]),
+    },
+    Binding {
+        name: "read_info_nif",
+        arity: 2,
+        run: |scheduler, arguments| read_info_nif(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "read_link_nif",
+        arity: 1,
+        run: |scheduler, arguments| read_link_nif(&mut scheduler.atoms, &arguments[0]),
+    },
+];
 
 /// The smallest file time that `build_file_info` gives, in seconds since
 /// 1970: `{{1902,1,1},{0,0,0}}` (`EFILE_MIN_FILETIME`,
@@ -93,13 +123,6 @@ const MAX_FILETIME: i64 = 253_402_300_799;
 /// 4. Else the result is the `#file_info` tuple of `build_file_info`
 ///    (`prim_file_nif.c:996-1017`), with the times in seconds since 1970
 ///    between [`MIN_FILETIME`] and [`MAX_FILETIME`].
-///
-/// The binding has no capability check yet: the `file` kind of the
-/// capability security migration is planned (row "Capability checks" of
-/// `docs/erts-differences.md`). ERTS runs this NIF on a dirty IO scheduler
-/// (`prim_file_nif.c:196`). PBeam runs it on the scheduler thread, so a
-/// `stat` that waits stops all processes until it returns (row "Dirty IO"
-/// of `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
@@ -134,6 +157,133 @@ fn read_info_nif(
     };
     match file::read_info(path, follow_links != 0) {
         Ok(info) => file_info(atoms, &info),
+        Err(errno) => error_tuple(atoms, &errno_id(errno)),
+    }
+}
+
+/// Run `prim_file:read_file_nif(Path)`, as the ERTS NIF `read_file_nif`
+/// (`prim_file_nif.c:1354-1387`) does on Unix. A `Path` that
+/// [`marshal_path`] does not accept gives `{error, einval}`. Else the
+/// result is `{ok, Contents}` with the bytes of [`file::read_file`], or
+/// `{error, Errno}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {ok, <<>>}
+/// let result = read_file_nif(&mut atoms, &Term::Binary(b"/dev/null\0".to_vec()))?;
+/// // {error, eisdir}
+/// let result = read_file_nif(&mut atoms, &Term::Binary(b"/\0".to_vec()))?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn read_file_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamError> {
+    let Some(path) = marshal_path(path) else {
+        return error_tuple(atoms, "einval");
+    };
+    ok_tuple(atoms, file::read_file(path).map(Term::Binary))
+}
+
+/// Run `prim_file:list_dir_nif(Path)`, as the ERTS NIF `list_dir_nif`
+/// (`prim_file_nif.c:1132-1147`) does on Unix. A `Path` that
+/// [`marshal_path`] does not accept gives `{error, einval}`. Else the
+/// result is `{ok, Names}` with a binary for each name of
+/// [`file::list_dir`], or `{error, Errno}`. `efile_list_dir` adds each name
+/// at the head of the list (`unix_prim_file.c:921-937`), so `Names` is in
+/// the reverse order of `readdir`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {ok, [<<"b">>, <<"a">>]} when readdir gives "a", then "b"
+/// let result = list_dir_nif(&mut atoms, &Term::Binary(b"/tmp/dir\0".to_vec()))?;
+/// // {error, enoent}
+/// let result = list_dir_nif(&mut atoms, &Term::Binary(b"/pbeam-missing\0".to_vec()))?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn list_dir_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamError> {
+    let Some(path) = marshal_path(path) else {
+        return error_tuple(atoms, "einval");
+    };
+    let names = file::list_dir(path)
+        .map(|names| Term::List(names.into_iter().rev().map(Term::Binary).collect()));
+    ok_tuple(atoms, names)
+}
+
+/// Run `prim_file:read_link_nif(Path)`, as the ERTS NIF `read_link_nif`
+/// (`prim_file_nif.c:1115-1130`) does on Unix. A `Path` that
+/// [`marshal_path`] does not accept gives `{error, einval}`. Else the
+/// result is `{ok, Contents}` with the bytes of [`file::read_link`], or
+/// `{error, Errno}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {ok, <<"target">>} for a symbolic link to "target"
+/// let result = read_link_nif(&mut atoms, &Term::Binary(b"/tmp/link\0".to_vec()))?;
+/// // {error, einval}
+/// let result = read_link_nif(&mut atoms, &Term::Binary(b"/\0".to_vec()))?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn read_link_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamError> {
+    let Some(path) = marshal_path(path) else {
+        return error_tuple(atoms, "einval");
+    };
+    ok_tuple(atoms, file::read_link(path).map(Term::Binary))
+}
+
+/// Run `prim_file:get_cwd_nif()`, as the ERTS NIF `get_cwd_nif`
+/// (`prim_file_nif.c:1269-1280`) does on Unix: `{ok, Path}` with the bytes
+/// of [`file::get_cwd`], or `{error, Errno}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {ok, <<"/home/user">>}
+/// let result = get_cwd_nif(&mut atoms)?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn get_cwd_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
+    ok_tuple(atoms, file::get_cwd().map(Term::Binary))
+}
+
+/// Return `{ok, Value}` for `Ok(Value)`, as `enif_make_tuple2(env, am_ok,
+/// Result)` makes it, or the [`error_tuple`] of the `errno` of `Err`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {ok, <<>>}
+/// let result = ok_tuple(&mut atoms, Ok(Term::Binary(vec![])))?;
+/// // {error, enoent}
+/// let result = ok_tuple(&mut atoms, Err(libc::ENOENT))?;
+/// ```
+///
+/// # Errors
+///
+/// A new error atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn ok_tuple(atoms: &mut AtomTable, result: Result<Term, c_int>) -> Result<BifResult, BeamError> {
+    match result {
+        Ok(value) => Ok(BifResult::Value(Term::Tuple(vec![
+            Term::static_atom("ok"),
+            value,
+        ]))),
         Err(errno) => error_tuple(atoms, &errno_id(errno)),
     }
 }
