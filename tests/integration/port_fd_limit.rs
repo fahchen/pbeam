@@ -52,6 +52,6 @@ fn runs_a_port_whose_pipes_are_at_or_above_fd_setsize() {
     drop(fds);
     assert_eq!(
         result.unwrap(),
-        Term::Tuple(vec![Term::Binary(b"hi".to_vec()), Term::Integer(5)])
+        Term::tuple(vec![Term::Binary(b"hi".to_vec()), Term::Integer(5)])
     );
 }

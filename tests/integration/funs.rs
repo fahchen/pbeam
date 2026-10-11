@@ -68,7 +68,7 @@ fn makes_and_calls_local_funs_as_pinned_erts() {
     // raises `{badfun, Term}` (`beam_common.c:1605-1731`).
     let program = BeamProgram::load(&[FUN_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let pair = |first: &str, second| Term::Tuple(vec![atom(first), second]);
+    let pair = |first: &str, second| Term::tuple(vec![atom(first), second]);
     let expected = vec![
         pair("tag", atom("one")),
         atom("const"),
@@ -78,7 +78,7 @@ fn makes_and_calls_local_funs_as_pinned_erts() {
         atom("same"),
         atom("true"),
         atom("false"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("badarity"),
             atom("same"),
             Term::list_from(vec![Term::Integer(1), Term::Integer(2)]),
@@ -140,8 +140,8 @@ fn applies_funs_as_pinned_erts() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, FUN_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let pair = |first: &str, second: &str| Term::Tuple(vec![atom(first), atom(second)]);
-    let badarity = |arguments| Term::Tuple(vec![atom("badarity"), atom("same"), arguments]);
+    let pair = |first: &str, second: &str| Term::tuple(vec![atom(first), atom(second)]);
+    let badarity = |arguments| Term::tuple(vec![atom("badarity"), atom("same"), arguments]);
     let expected = vec![
         pair("a", "x"),
         pair("a", "u"),
@@ -213,7 +213,7 @@ fn makes_and_calls_external_funs_as_pinned_erts() {
     ]
     .map(atom)
     .into();
-    expected.push(Term::Tuple(vec![
+    expected.push(Term::tuple(vec![
         atom("badarity"),
         atom("same"),
         Term::list_from(vec![Term::Integer(1), Term::Integer(2)]),
@@ -245,7 +245,7 @@ fn releases_the_frame_before_a_tail_apply_as_pinned_erts() {
     // reaches the `try` of the inner function.
     let program = BeamProgram::load(&[TAIL_CATCH]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let pair = |first: &str, second| Term::Tuple(vec![atom(first), second]);
+    let pair = |first: &str, second| Term::tuple(vec![atom(first), second]);
     let expected = vec![
         pair("outer", pair("badfun", atom("notfun"))),
         pair("outer", atom("badarg")),

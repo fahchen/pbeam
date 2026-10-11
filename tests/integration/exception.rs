@@ -13,7 +13,7 @@ fn atom(program: &BeamProgram, name: &str) -> Term {
 }
 
 fn pair(first: Term, second: Term) -> Term {
-    Term::Tuple(vec![first, second])
+    Term::tuple(vec![first, second])
 }
 
 /// Run an expression under the pinned ERTS with the exception fixture on the
@@ -40,7 +40,7 @@ fn catches_error_and_exit_exceptions_with_try_and_catch() {
     let atom = |name: &str| atom(&program, name);
     assert_eq!(
         program.execute("exception_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             pair(atom("value"), atom("ok")),
             atom("ok"),
             pair(atom("exit"), atom("undef")),

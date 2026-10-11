@@ -39,7 +39,7 @@ fn makes_tables_and_raises_badarg_as_pinned_erts() {
     // (erl_db.c:2821-2831), also with the type `bag`.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program.execute("ets_probe", "new", &[]).unwrap(),
         Term::list_from(vec![
@@ -73,10 +73,10 @@ fn deletes_the_tables_of_an_owner_before_its_down_message_as_pinned_erts() {
     assert_eq!(
         program.execute("ets_probe", "owner_exit", &[]).unwrap(),
         Term::list_from(vec![
-            Term::Tuple(vec![atom("error"), atom("badarg")]),
+            Term::tuple(vec![atom("error"), atom("badarg")]),
             atom("stopped"),
             atom("ets_probe_owned"),
-            Term::Tuple(vec![atom("error"), atom("badarg")]),
+            Term::tuple(vec![atom("error"), atom("badarg")]),
             atom("stopped"),
             atom("ets_probe_heir"),
         ])
@@ -97,7 +97,7 @@ fn inserts_objects_as_pinned_erts() {
     // adds nothing (erl_db.c:1812-1827), and a table that does not exist.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program.execute("ets_probe", "insert", &[]).unwrap(),
         Term::list_from(vec![
@@ -129,7 +129,7 @@ fn looks_up_elements_as_pinned_erts() {
     // truncation, or not a small integer, and a table that does not exist.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program.execute("ets_probe", "lookup", &[]).unwrap(),
         Term::list_from(vec![
@@ -160,15 +160,15 @@ fn checks_table_access_as_pinned_erts() {
     // table and its name are gone after the `DOWN` message of its owner.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
-    let all = || Term::Tuple(vec![atom("owner"), atom("true"), atom("true")]);
-    let none = || Term::Tuple(vec![badarg(), badarg(), badarg()]);
+    let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
+    let all = || Term::tuple(vec![atom("owner"), atom("true"), atom("true")]);
+    let none = || Term::tuple(vec![badarg(), badarg(), badarg()]);
     assert_eq!(
         program.execute("ets_probe", "access", &[]).unwrap(),
         Term::list_from(vec![
             Term::list_from(vec![
                 all(),
-                Term::Tuple(vec![atom("owner"), badarg(), badarg()]),
+                Term::tuple(vec![atom("owner"), badarg(), badarg()]),
                 none(),
                 none(),
                 all(),

@@ -864,9 +864,9 @@ impl BeamProgram {
                             if error_class {
                                 let (_, stack) =
                                     raw_stacktrace(read_ref(process, &Operand::X(2))?)?;
-                                reason = Term::Tuple(vec![reason, stack]);
+                                reason = Term::tuple(vec![reason, stack]);
                             }
-                            reason = Term::Tuple(vec![Term::static_atom("EXIT"), reason]);
+                            reason = Term::tuple(vec![Term::static_atom("EXIT"), reason]);
                         }
                         write(process, &Operand::X(0), reason)?;
                     }
@@ -1292,7 +1292,7 @@ impl BeamProgram {
                         .iter()
                         .map(|element| read(process, element))
                         .collect::<Result<_, _>>()?;
-                    write(process, destination, Term::Tuple(elements))?;
+                    write(process, destination, Term::tuple(elements))?;
                 }
                 Instruction::GetTupleElement {
                     tuple,
@@ -1320,6 +1320,9 @@ impl BeamProgram {
                         return Err(error("BEAM update_record source is not a tuple"));
                     };
                     // ERTS reads each value before it writes the destination, which can be a value register.
+                    // A tuple that another copy shares is copied first (`Arc::make_mut`),
+                    // as the `set_tuple_element` instruction changes a new tuple in place.
+                    let fields = std::sync::Arc::make_mut(fields.arc_mut());
                     for (position, value) in updates {
                         let value = read(process, value)?;
                         let field = (*position as usize)
@@ -1537,7 +1540,7 @@ impl BeamProgram {
                 // `{Tag, Value}` (emu `instrs.tab:1137-1162`, `1229-1234`;
                 // `expand_error_value` in `beam_common.c:754-768`).
                 Instruction::TaggedError { tag, value } => {
-                    let reason = Term::Tuple(vec![Term::static_atom(tag), read(process, value)?]);
+                    let reason = Term::tuple(vec![Term::static_atom(tag), read(process, value)?]);
                     if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
                         return Ok(outcome);
                     }
@@ -1791,7 +1794,7 @@ impl BeamProgram {
             write(process, &Operand::X(1), arguments)?;
             return Ok(None);
         }
-        let frame = Term::Tuple(vec![module_atom, function_atom, arguments, Term::nil()]);
+        let frame = Term::tuple(vec![module_atom, function_atom, arguments, Term::nil()]);
         let undef = Term::static_atom("undef");
         Ok(raise_with_stacktrace(
             process,
@@ -1941,12 +1944,12 @@ impl BeamProgram {
             FunCall::Enter { target, free } => (target, free),
             FunCall::BadArity(fun) => {
                 let arguments = call_arguments(&process.registers, arity)?;
-                let call = Term::Tuple(vec![fun, Term::list_from(arguments)]);
-                let reason = Term::Tuple(vec![Term::static_atom("badarity"), call]);
+                let call = Term::tuple(vec![fun, Term::list_from(arguments)]);
+                let reason = Term::tuple(vec![Term::static_atom("badarity"), call]);
                 return Ok(raise(process, ExceptionClass::Error, reason));
             }
             FunCall::BadFun(fun) => {
-                let reason = Term::Tuple(vec![Term::static_atom("badfun"), fun]);
+                let reason = Term::tuple(vec![Term::static_atom("badfun"), fun]);
                 return Ok(raise(process, ExceptionClass::Error, reason));
             }
         };
@@ -2008,7 +2011,7 @@ impl BeamProgram {
         }
         let reason = read(process, &Operand::X(0))?;
         let (module, function, arity) = process.initial_call.clone();
-        let frame = Term::Tuple(vec![
+        let frame = Term::tuple(vec![
             Term::Atom(scheduler.atoms.put(&module)?),
             Term::Atom(scheduler.atoms.put(&function)?),
             Term::Integer(arity as i64),
@@ -2272,7 +2275,7 @@ fn create_process(
         return BifResult::capability_denied(&mut scheduler.atoms);
     };
     Ok(BifResult::Value(match reference {
-        Some(reference) => Term::Tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
+        Some(reference) => Term::tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),
     }))
 }
@@ -2385,7 +2388,7 @@ fn light_bif_switch(process: &mut ProcessState) -> bool {
 /// let cooked = vec![(Term::static_atom("output"), Term::static_atom("cooked"))];
 /// assert!(matches!(update_map_exact(map, cooked.clone())?, Ok(Term::Map(_))));
 /// let badmap = update_map_exact(Term::static_atom("foo"), cooked)?.unwrap_err();
-/// assert_eq!(badmap, Term::Tuple(vec![Term::static_atom("badmap"), Term::static_atom("foo")]));
+/// assert_eq!(badmap, Term::tuple(vec![Term::static_atom("badmap"), Term::static_atom("foo")]));
 /// ```
 ///
 /// # Errors
@@ -2397,12 +2400,12 @@ fn update_map_exact(
     mut pairs: Vec<(Term, Term)>,
 ) -> Result<Result<Term, Term>, BeamError> {
     let Term::Map(entries) = &mut map else {
-        return Ok(Err(Term::Tuple(vec![Term::static_atom("badmap"), map])));
+        return Ok(Err(Term::tuple(vec![Term::static_atom("badmap"), map])));
     };
     Map::sort_pairs(&mut pairs)?;
     for (key, value) in pairs {
         let Some(existing) = entries.get_mut(&key) else {
-            return Ok(Err(Term::Tuple(vec![Term::static_atom("badkey"), key])));
+            return Ok(Err(Term::tuple(vec![Term::static_atom("badkey"), key])));
         };
         *existing = value;
     }
@@ -2471,7 +2474,7 @@ fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Opt
 /// # Examples
 ///
 /// ```rust,ignore
-/// let frame = Term::Tuple(vec![module, function, Term::nil(), Term::nil()]);
+/// let frame = Term::tuple(vec![module, function, Term::nil(), Term::nil()]);
 /// let undef = Term::static_atom("undef");
 /// let outcome = raise_with_stacktrace(&mut process, ExceptionClass::Error, undef, Term::list_from(vec![frame]));
 /// // With no catch tag, the exit reason is `{undef, [Frame]}`.
@@ -2500,10 +2503,10 @@ fn raise_with_stacktrace(
         });
     let Some((depth, slot, handler)) = tag else {
         let reason = match class {
-            ExceptionClass::Error => Term::Tuple(vec![reason, stacktrace]),
+            ExceptionClass::Error => Term::tuple(vec![reason, stacktrace]),
             ExceptionClass::Exit => reason,
-            ExceptionClass::Throw => Term::Tuple(vec![
-                Term::Tuple(vec![Term::static_atom("nocatch"), reason]),
+            ExceptionClass::Throw => Term::tuple(vec![
+                Term::tuple(vec![Term::static_atom("nocatch"), reason]),
                 stacktrace,
             ]),
         };
@@ -2522,7 +2525,7 @@ fn raise_with_stacktrace(
     process.registers[0] = None;
     let class = Term::static_atom(class.name());
     process.registers[1] = Some(reason);
-    process.registers[2] = Some(Term::Tuple(vec![class.clone(), stacktrace]));
+    process.registers[2] = Some(Term::tuple(vec![class.clone(), stacktrace]));
     process.registers[3] = Some(class);
     None
 }
@@ -2543,7 +2546,7 @@ fn raise_with_stacktrace(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let raw = Term::Tuple(vec![Term::static_atom("exit"), Term::nil()]);
+/// let raw = Term::tuple(vec![Term::static_atom("exit"), Term::nil()]);
 /// assert!(matches!(raw_stacktrace(&raw)?, (ExceptionClass::Exit, stack) if stack.is_nil()));
 /// assert!(matches!(raw_stacktrace(&Term::nil())?, (ExceptionClass::Error, _)));
 /// ```
@@ -2554,7 +2557,7 @@ fn raise_with_stacktrace(
 /// raw stack trace with no check, so its result is not defined.
 fn raw_stacktrace(raw: &Term) -> Result<(ExceptionClass, Term), BeamError> {
     if let Term::Tuple(parts) = raw
-        && let [class, stack] = parts.as_slice()
+        && let [class, stack] = &parts[..]
         && let Some(class) = ExceptionClass::from_term(class)
     {
         return Ok((class, stack.clone()));
@@ -2653,7 +2656,7 @@ fn read(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// write(&mut process, &Operand::X(0), Term::Tuple(vec![Term::Integer(1)]))?;
+/// write(&mut process, &Operand::X(0), Term::tuple(vec![Term::Integer(1)]))?;
 /// assert!(matches!(read_ref(&process, &Operand::X(0))?, Term::Tuple(_)));
 /// ```
 fn read_ref<'a>(process: &'a ProcessState, operand: &'a Operand) -> Result<&'a Term, BeamError> {
@@ -3544,7 +3547,7 @@ fn raise_binary_failure(
     failure: BinarySegmentFailure,
 ) -> Result<Option<Outcome>, BeamError> {
     let (module_atom, function_atom, arity) = current_function(scheduler, module)?;
-    let cause = Term::Tuple(vec![
+    let cause = Term::tuple(vec![
         Term::Integer(failure.segment as i64),
         Term::static_atom(failure.operation),
         Term::static_atom(failure.info),
@@ -3563,8 +3566,8 @@ fn raise_binary_failure(
         ),
     ])
     .expect("atom keys fit each map form");
-    let location = Term::Tuple(vec![Term::static_atom("error_info"), Term::Map(error_info)]);
-    let frame = Term::Tuple(vec![
+    let location = Term::tuple(vec![Term::static_atom("error_info"), Term::Map(error_info)]);
+    let frame = Term::tuple(vec![
         module_atom,
         function_atom,
         Term::Integer(arity.into()),

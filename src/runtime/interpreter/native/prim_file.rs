@@ -280,7 +280,7 @@ fn get_cwd_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
 /// `AtomTable::put`.
 fn ok_tuple(atoms: &mut AtomTable, result: Result<Term, c_int>) -> Result<BifResult, BeamError> {
     match result {
-        Ok(value) => Ok(BifResult::Value(Term::Tuple(vec![
+        Ok(value) => Ok(BifResult::Value(Term::tuple(vec![
             Term::static_atom("ok"),
             value,
         ]))),
@@ -324,7 +324,7 @@ fn marshal_path(path: &Term) -> Option<&CStr> {
 /// The atom `Reason` in a full atom table gives the error of
 /// `AtomTable::put`.
 fn error_tuple(atoms: &mut AtomTable, reason: &str) -> Result<BifResult, BeamError> {
-    Ok(BifResult::Value(Term::Tuple(vec![
+    Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("error"),
         Term::Atom(atoms.put(reason)?),
     ])))
@@ -362,7 +362,7 @@ fn file_info(atoms: &mut AtomTable, info: &FileInfo) -> Result<BifResult, BeamEr
     };
     let time = |seconds: i64| Term::Integer(seconds.clamp(MIN_FILETIME, MAX_FILETIME));
     let integer = |value: u32| Term::Integer(value.into());
-    Ok(BifResult::Value(Term::Tuple(vec![
+    Ok(BifResult::Value(Term::tuple(vec![
         Term::Atom(atoms.put("file_info")?),
         Term::Integer(info.size),
         Term::Atom(atoms.put(file_type)?),

@@ -331,7 +331,7 @@ fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
     assert!(matches!(
         spawn_opt(vec![test_atom("link"), test_atom("monitor")]),
         Ok(Term::Tuple(ref elements))
-            if matches!(elements.as_slice(), [Term::Pid(_), Term::Reference(_)])
+            if matches!(elements.as_ref(), [Term::Pid(_), Term::Reference(_)])
     ));
     assert!(matches!(spawn_opt(vec![]), Ok(Term::Pid(_))));
     assert!(
@@ -393,7 +393,7 @@ fn handles_tuple_tests_timeouts_and_unbound_receive_markers() {
             Instruction::Return,
         ])
         .unwrap(),
-        Term::Tuple(vec![test_atom("a")])
+        Term::tuple(vec![test_atom("a")])
     );
 }
 
@@ -408,7 +408,7 @@ fn rejects_invalid_tuple_access_receives_and_bifs() {
     assert!(error(vec![Instruction::LoopReceiveEnd(1)]).contains("loop_rec_end"));
     assert!(error(vec![Instruction::RemoveMessage]).contains("remove_message"));
     assert!(error(vec![element(Term::Integer(1), 0)]).contains("not a tuple"));
-    assert!(error(vec![element(Term::Tuple(vec![]), 0)]).contains("no element 0"));
+    assert!(error(vec![element(Term::tuple(vec![]), 0)]).contains("no element 0"));
     assert!(
         error(vec![Instruction::Bif {
             fail_label: 0,
@@ -670,7 +670,7 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
                     fail_label,
                     map: Operand::Value(Term::Map(Map::new())),
                     destination: Operand::X(0),
-                    pairs: vec![(Operand::Value(Term::Tuple(vec![])), atom("cooked"))],
+                    pairs: vec![(Operand::Value(Term::tuple(vec![])), atom("cooked"))],
                 },
                 Instruction::Return,
                 Instruction::Label(3),
@@ -746,7 +746,7 @@ fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
 #[test]
 fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
     // ERTS accepts a map key; a PBeam map does not hold one yet.
-    let pair = Term::Tuple(vec![Term::Map(Map::new()), Term::Integer(0)]);
+    let pair = Term::tuple(vec![Term::Map(Map::new()), Term::Integer(0)]);
     let from_list = make_program(
         vec![
             Instruction::Move(Operand::Value(Term::list_from(vec![pair])), Operand::X(0)),
@@ -1086,11 +1086,11 @@ fn reads_and_tests_lists_as_pinned_erts() {
     // ERTS: lst([a,b,c]) is {a,[b,c]}, and lst([a]) is {a,[]}.
     assert_eq!(
         get_list(list(&["a", "b", "c"])).unwrap(),
-        Term::Tuple(vec![test_atom("a"), list(&["b", "c"])])
+        Term::tuple(vec![test_atom("a"), list(&["b", "c"])])
     );
     assert_eq!(
         get_list(list(&["a"])).unwrap(),
-        Term::Tuple(vec![test_atom("a"), list(&[])])
+        Term::tuple(vec![test_atom("a"), list(&[])])
     );
     // ERTS: hd1([x,y]) is x.
     let get_head = |argument: Term| {
@@ -1116,11 +1116,11 @@ fn reads_and_tests_lists_as_pinned_erts() {
     };
     assert_eq!(
         get_list(improper(&["a"], "x")).unwrap(),
-        Term::Tuple(vec![test_atom("a"), test_atom("x")])
+        Term::tuple(vec![test_atom("a"), test_atom("x")])
     );
     assert_eq!(
         get_list(improper(&["a", "b"], "x")).unwrap(),
-        Term::Tuple(vec![test_atom("a"), improper(&["b"], "x")])
+        Term::tuple(vec![test_atom("a"), improper(&["b"], "x")])
     );
     assert_eq!(get_head(improper(&["x"], "y")).unwrap(), test_atom("x"));
     // ERTS: nil([]) is nil, nil([a]) is nonempty, and nil(a) is other.
@@ -1174,7 +1174,7 @@ fn reads_and_tests_lists_as_pinned_erts() {
 #[test]
 fn updates_record_positions_as_pinned_erts() {
     let record = || {
-        Operand::Value(Term::Tuple(vec![
+        Operand::Value(Term::tuple(vec![
             test_atom("r"),
             Term::Integer(1),
             Term::Integer(2),
@@ -1205,7 +1205,7 @@ fn updates_record_positions_as_pinned_erts() {
     };
     assert_eq!(
         run(Operand::X(0), vec![(3, Operand::X(1)), (4, Operand::X(2))]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             test_atom("r"),
             Term::Integer(1),
             Term::Integer(9),
@@ -1216,7 +1216,7 @@ fn updates_record_positions_as_pinned_erts() {
     // value of x1 before the write, as the ERTS `SCRATCH_X_REG` rewrite does.
     assert_eq!(
         run(Operand::X(1), vec![(2, Operand::X(2)), (3, Operand::X(1))]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             test_atom("r"),
             Term::Integer(1),
             Term::Integer(9),
@@ -1322,7 +1322,7 @@ fn raises_class_error_for_the_raw_stack_trace_nil() {
     // other term as a raw stack trace with no check.
     for trace in [
         test_atom("foo"),
-        Term::Tuple(vec![test_atom("foo"), Term::nil()]),
+        Term::tuple(vec![test_atom("foo"), Term::nil()]),
     ] {
         assert_eq!(
             raise(trace.clone()),
@@ -1663,7 +1663,7 @@ fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
             .execute("fixture", "main", &[])
             .unwrap()
     };
-    let expected = Term::Tuple(vec![Term::Integer(97), Term::Integer(8), Term::Integer(97)]);
+    let expected = Term::tuple(vec![Term::Integer(97), Term::Integer(8), Term::Integer(97)]);
     assert_eq!(
         run(
             Instruction::Move(Operand::X(0), Operand::Y(0)),
@@ -1932,7 +1932,7 @@ fn handles_register_values_and_reports_invalid_registers() {
 fn borrows_literal_and_register_operands_without_a_copy() {
     // A read-only instruction gets a reference to the literal or the
     // register itself, so a large tuple is not copied.
-    let tuple = || Term::Tuple(vec![Term::Integer(1); 1000]);
+    let tuple = || Term::tuple(vec![Term::Integer(1); 1000]);
     let literal = Operand::Value(tuple());
     let registers = vec![Some(tuple())];
     let stack = vec![StackSlot::Term(tuple())];
@@ -1972,10 +1972,10 @@ fn selects_tuple_arity_and_rejects_call_last_stack_size() {
         .unwrap()
     };
     assert_eq!(
-        select(Term::Tuple(vec![Term::Integer(1)])),
+        select(Term::tuple(vec![Term::Integer(1)])),
         test_atom("one")
     );
-    assert_eq!(select(Term::Tuple(vec![])), test_atom("other"));
+    assert_eq!(select(Term::tuple(vec![])), test_atom("other"));
     assert_eq!(select(test_atom("a")), test_atom("other"));
 
     let error = |body| {
@@ -2081,9 +2081,9 @@ fn finds_a_live_catch_tag_after_other_slots_and_skips_a_cleared_tag() {
     ]);
     assert_eq!(
         run(body).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::static_atom("EXIT"),
-            Term::Tuple(vec![Term::static_atom("undef"), Term::nil()]),
+            Term::tuple(vec![Term::static_atom("undef"), Term::nil()]),
         ])
     );
     // `try_end` writes `[]` over the tag, so the exception is not caught.
@@ -2143,7 +2143,7 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
                     register: 0,
                     label: 3,
                 },
-                element_bif(index, Operand::Value(Term::Tuple(vec![])), Operand::X(0)),
+                element_bif(index, Operand::Value(Term::tuple(vec![])), Operand::X(0)),
                 Instruction::Label(3),
                 Instruction::CatchEnd { register: 0 },
                 Instruction::Deallocate { stack_size: 1 },
@@ -2157,14 +2157,14 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
     // PBeam gives the stack trace [].
     assert_eq!(
         element(1).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             test_atom("EXIT"),
-            Term::Tuple(vec![test_atom("badarg"), Term::nil()]),
+            Term::tuple(vec![test_atom("badarg"), Term::nil()]),
         ])
     );
     // Without a catch, the exception exits the process.
     let body = vec![
-        element_bif(1, Operand::Value(Term::Tuple(vec![])), Operand::X(0)),
+        element_bif(1, Operand::Value(Term::tuple(vec![])), Operand::X(0)),
         Instruction::Return,
     ];
     assert_eq!(
@@ -2407,7 +2407,7 @@ fn applies_module_functions_and_bifs_as_pinned_erts() {
     body.extend(apply_body(3, atom("fixture"), atom("id")));
     assert_eq!(
         run_with_apply_targets(body).unwrap(),
-        Term::Tuple(vec![test_atom("a"), test_atom("b"), test_atom("c")])
+        Term::tuple(vec![test_atom("a"), test_atom("b"), test_atom("c")])
     );
     // `catch last(erlang, exit)` gives `{'EXIT',bye}`: `apply_last` runs
     // the `erlang:exit/1` BIF, and the exception reaches the catch.
@@ -2429,7 +2429,7 @@ fn applies_module_functions_and_bifs_as_pinned_erts() {
             Instruction::Return,
         ])
         .unwrap(),
-        Term::Tuple(vec![test_atom("EXIT"), test_atom("bye")])
+        Term::tuple(vec![test_atom("EXIT"), test_atom("bye")])
     );
 }
 
@@ -2448,7 +2448,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
     // which calls `fixture:id/3` and gives `{x,y,z}`.
     let mut body = apply_of(test_atom("fixture"), test_atom("id"), xyz());
     body.extend(apply_body(3, atom("erlang"), atom("apply")));
-    let tuple = Term::Tuple(vec![test_atom("x"), test_atom("y"), test_atom("z")]);
+    let tuple = Term::tuple(vec![test_atom("x"), test_atom("y"), test_atom("z")]);
     assert_eq!(run_with_apply_targets(body).unwrap(), tuple);
     // `erlang:apply(erlang, apply, [fixture, id, [x, y, z]])` as a tail
     // `call_ext` runs the inner call.
@@ -2611,7 +2611,7 @@ fn puts_and_gets_process_dictionary_values_as_pinned_erts() {
         make_program(body, 0)
             .execute("fixture", "main", &[])
             .unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             undefined.clone(),
             Term::Integer(1),
             Term::Integer(2),
@@ -2699,7 +2699,7 @@ fn reverses_a_list_onto_a_tail_that_is_not_a_list() {
 
 #[test]
 fn finds_key_tuples_as_pinned_erts() {
-    let tuple = |elements: Vec<Term>| Term::Tuple(elements);
+    let tuple = |elements: Vec<Term>| Term::tuple(elements);
     let keyfind = |key: Term, position: Term, list: Vec<Term>| {
         call_ext_with(
             "lists",
@@ -2815,7 +2815,7 @@ fn reads_tuple_elements_as_pinned_erts() {
     // ERTS 29.1.1: element(2, {a,b,c}) is b.
     let body = vec![
         Instruction::Move(
-            Operand::Value(Term::Tuple(vec![a.clone(), b.clone(), c])),
+            Operand::Value(Term::tuple(vec![a.clone(), b.clone(), c])),
             Operand::X(0),
         ),
         element_bif(2, Operand::X(0), Operand::X(0)),
@@ -2828,7 +2828,7 @@ fn reads_tuple_elements_as_pinned_erts() {
         b
     );
     let element = |index: Term, tuple: Term| call_ext_with("erlang", "element", vec![index, tuple]);
-    let one = Term::Tuple(vec![a.clone()]);
+    let one = Term::tuple(vec![a.clone()]);
     // ERTS 29.1.1: element(1, {a}) is a.
     assert_eq!(element(Term::Integer(1), one.clone()).unwrap(), a);
     // ERTS 29.1.1 raises badarg for element(0, {a}), element(2, {a}),
@@ -2848,7 +2848,7 @@ fn reads_tuple_elements_as_pinned_erts() {
 fn reads_the_tuple_size_as_pinned_erts() {
     let tuple_size = |term: Term| call_ext_with("erlang", "tuple_size", vec![term]);
     // ERTS 29.1.1: tuple_size({}) is 0, and tuple_size(a) raises badarg.
-    assert_eq!(tuple_size(Term::Tuple(vec![])).unwrap(), Term::Integer(0));
+    assert_eq!(tuple_size(Term::tuple(vec![])).unwrap(), Term::Integer(0));
     assert_eq!(
         tuple_size(test_atom("a")).unwrap_err().to_string(),
         BADARG_EXIT
@@ -2906,17 +2906,17 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
         Instruction::Return,
     ];
     // ERTS 29.1.1 gives the frames of the caller; PBeam records none.
-    let stacktrace = Term::Tuple(vec![test_atom("current_stacktrace"), Term::nil()]);
+    let stacktrace = Term::tuple(vec![test_atom("current_stacktrace"), Term::nil()]);
     assert_eq!(
         make_program(body, 0)
             .execute("fixture", "main", &[])
             .unwrap(),
-        Term::Tuple(vec![stacktrace, Term::nil()])
+        Term::tuple(vec![stacktrace, Term::nil()])
     );
     let process_info =
         |process: Term, item: Term| call_ext_with("erlang", "process_info", vec![process, item]);
     let root = || Term::Pid(crate::ProcessId(0));
-    let dictionary = || Term::Tuple(vec![test_atom("dictionary"), test_atom("k")]);
+    let dictionary = || Term::tuple(vec![test_atom("dictionary"), test_atom("k")]);
     // ERTS 29.1.1 checks the item before the process. It raises badarg for
     // process_info(a, current_stacktrace), process_info(a, bogus_item),
     // process_info(self(), bogus_item), process_info(self(), 5),
@@ -2934,7 +2934,7 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
         ),
         (
             root(),
-            Term::Tuple(vec![test_atom("bogus"), test_atom("k")]),
+            Term::tuple(vec![test_atom("bogus"), test_atom("k")]),
         ),
     ] {
         assert_eq!(

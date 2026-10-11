@@ -99,7 +99,7 @@ fn text(term: &Term) -> String {
 fn cases(program: &BeamProgram) -> Term {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let case = |setup: &str, count: i64, budget: i64| {
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom(setup),
             Term::Integer(count),
             Term::Integer(budget),

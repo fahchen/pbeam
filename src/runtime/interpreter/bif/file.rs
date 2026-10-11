@@ -93,7 +93,7 @@ pub(super) fn internal_native2name(
     };
     Ok(Value(name_from_native(bytes, encoding)?.unwrap_or_else(
         || {
-            Term::Tuple(vec![
+            Term::tuple(vec![
                 Term::static_atom("error"),
                 Term::static_atom("warning"),
             ])

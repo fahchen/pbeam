@@ -23,7 +23,7 @@ fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let list = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
     let frame = |arguments: &[&str]| {
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("undef_target"),
             atom("missing"),
             list(arguments),
@@ -31,9 +31,9 @@ fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
         ])
     };
     let caught =
-        |arguments: &[&str]| Term::Tuple(vec![atom("error"), atom("undef"), frame(arguments)]);
+        |arguments: &[&str]| Term::tuple(vec![atom("error"), atom("undef"), frame(arguments)]);
     let handled = |function: &str, arguments: &[&str]| {
-        Term::Tuple(vec![atom("handled"), atom(function), list(arguments)])
+        Term::tuple(vec![atom("handled"), atom(function), list(arguments)])
     };
     // `call_ext` (a), `call_ext_last` (b), `call_ext_only` (c), `apply`
     // (d), `apply_last` (e), `erlang:apply/3` (f, and g as
@@ -55,7 +55,7 @@ fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
             caught(&["i"]),
             caught(&["j", "k"]),
             caught(&[]),
-            Term::Tuple(vec![atom("EXIT"), atom("undef"), frame(&["l"])]),
+            Term::tuple(vec![atom("EXIT"), atom("undef"), frame(&["l"])]),
             handled("missing", &["m"]),
             handled("other", &["n", "o"]),
         ])
@@ -105,9 +105,9 @@ fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
     };
     assert_eq!(
         down("undef_target", "missing"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("undef"),
-            Term::list_from(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::tuple(vec![
                 atom("undef_target"),
                 atom("missing"),
                 arguments.clone(),
@@ -117,7 +117,7 @@ fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
     );
     assert_eq!(
         down("undef_handler", "stop"),
-        Term::Tuple(vec![atom("handled"), atom("stop"), arguments.clone()])
+        Term::tuple(vec![atom("handled"), atom("stop"), arguments.clone()])
     );
 
     // The reference uses the `erl` flags of the row "Undefined functions":
@@ -167,9 +167,9 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
     };
     assert_eq!(
         down("undef_target", 1023),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("undef"),
-            Term::list_from(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::tuple(vec![
                 atom("undef_target"),
                 atom("missing"),
                 arguments(1023),
@@ -180,7 +180,7 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
     // PBeam gives the stack trace `[]` (row "Exception stack trace"). ERTS
     // gives `[{erlang, apply, [Module, missing, Args], ErrorInfo}]`, so the
     // reference compares only the reason.
-    let system_limit = Term::Tuple(vec![atom("system_limit"), Term::nil()]);
+    let system_limit = Term::tuple(vec![atom("system_limit"), Term::nil()]);
     assert_eq!(down("undef_target", 1024), system_limit);
     // `missing` is not a loaded module.
     assert_eq!(down("missing", 1024), system_limit);

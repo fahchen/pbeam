@@ -714,7 +714,7 @@ enum PartialTerm {
 /// let mut atoms = AtomTable::new();
 /// // {}
 /// let term = read_external_term(&[104, 0], &mut cursor, &mut atoms)?;
-/// assert_eq!(term, Some(Term::Tuple(vec![])));
+/// assert_eq!(term, Some(Term::tuple(vec![])));
 /// assert_eq!(cursor, 2);
 /// ```
 ///
@@ -784,7 +784,7 @@ fn read_external_term(
                 Term::Atom(atom_table.put(name)?)
             }
             ETF_SMALL_TUPLE_EXT => match take(data, cursor, 1)?[0] {
-                0 => Term::Tuple(Vec::new()),
+                0 => Term::tuple(Vec::new()),
                 remaining => {
                     let elements = Vec::new();
                     partial.push(PartialTerm::Tuple {
@@ -829,7 +829,7 @@ fn read_external_term(
                 }) => {
                     elements.push(term);
                     if remaining == 1 {
-                        term = Term::Tuple(elements);
+                        term = Term::tuple(elements);
                         continue;
                     }
                     let remaining = remaining - 1;

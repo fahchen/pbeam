@@ -125,7 +125,7 @@ fn runs_bs_start_match3_of_a_binary_as_pinned_erts() {
                 &[Term::Binary(vec![195, 169])]
             )
             .unwrap(),
-        Term::Tuple(vec![utf8, Term::Integer(233)])
+        Term::tuple(vec![utf8, Term::Integer(233)])
     );
     assert_eq!(
         reference("binary_match_probe:first(<<195,169>>)"),
@@ -400,7 +400,7 @@ fn runs_the_equal_and_get_tail_commands_as_pinned_erts() {
     ];
     let (results, erts) = bs_match_each("prefix", &inputs);
     let tagged = |tag: &str, rest: &[u8]| {
-        Ok(Term::Tuple(vec![
+        Ok(Term::tuple(vec![
             probe_atom(tag),
             Term::Binary(rest.to_vec()),
         ]))
@@ -413,7 +413,7 @@ fn runs_the_equal_and_get_tail_commands_as_pinned_erts() {
             tagged("hello", b"!"),
             tagged("hi", b" there"),
             tagged("hi", b""),
-            Ok(Term::Tuple(vec![probe_atom("nibble"), Term::Integer(15)])),
+            Ok(Term::tuple(vec![probe_atom("nibble"), Term::Integer(15)])),
             Ok(probe_atom("other")),
             Ok(probe_atom("other"))
         ]
@@ -548,7 +548,7 @@ fn bs_get_atom(name: &str) -> Term {
 
 /// The tuple `{Head, Tail}` of two binaries.
 fn halves(head: &[u8], tail: &[u8]) -> Result<Term, String> {
-    Ok(Term::Tuple(vec![
+    Ok(Term::tuple(vec![
         Term::Binary(head.to_vec()),
         Term::Binary(tail.to_vec()),
     ]))
@@ -662,7 +662,7 @@ fn resumes_a_match_context_and_reads_its_tail_as_pinned_erts() {
         .map(|input| vec![Term::Binary(input.to_vec())])
         .collect();
     let nibbles = |values: &[i64], tail: &[u8]| {
-        Ok(Term::Tuple(vec![
+        Ok(Term::tuple(vec![
             Term::list_from(values.iter().copied().map(Term::Integer)),
             Term::Binary(tail.to_vec()),
         ]))

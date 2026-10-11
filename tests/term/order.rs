@@ -44,7 +44,7 @@ fn orders_terms_of_different_types_by_type() {
         Term::Reference(Reference(1)),
         fun("lists", 0, 0, vec![]),
         Term::Pid(ProcessId(0)),
-        Term::Tuple(vec![]),
+        Term::tuple(vec![]),
         map(vec![]),
         Term::nil(),
         Term::list_from(vec![atom("a")]),
@@ -80,7 +80,7 @@ fn orders_atoms_by_name_and_not_by_index() {
 #[test]
 fn orders_nested_terms_as_pinned_erts() {
     let list = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
-    let tuple = |names: &[&str]| Term::Tuple(names.iter().map(|name| atom(name)).collect());
+    let tuple = |names: &[&str]| Term::tuple(names.iter().map(|name| atom(name)).collect());
     let pairs = [
         (tuple(&["b"]), tuple(&["a", "a"]), Less),
         (tuple(&["a", "b"]), tuple(&["a", "a"]), Greater),
@@ -115,8 +115,8 @@ fn orders_nested_terms_as_pinned_erts() {
             Less,
         ),
         (
-            Term::Tuple(vec![Term::Reference(Reference(1)), list(&["a"])]),
-            Term::Tuple(vec![Term::Reference(Reference(1)), list(&["a"])]),
+            Term::tuple(vec![Term::Reference(Reference(1)), list(&["a"])]),
+            Term::tuple(vec![Term::Reference(Reference(1)), list(&["a"])]),
             Equal,
         ),
     ];
@@ -146,7 +146,7 @@ fn orders_improper_lists_by_elements_then_tails_as_pinned_erts() {
             tail,
         )
     };
-    let tuple = |name| Term::Tuple(vec![atom(name)]);
+    let tuple = |name| Term::tuple(vec![atom(name)]);
     let pairs = [
         (improper(&[1], atom("x")), list(&[1, 2]), Less),
         (improper(&[1], Term::Binary(vec![])), list(&[1, 2]), Greater),
@@ -164,7 +164,7 @@ fn orders_improper_lists_by_elements_then_tails_as_pinned_erts() {
         (list(&[]), improper(&[1], atom("x")), Less),
         (tuple("a"), improper(&[1], atom("x")), Less),
         (improper(&[1], atom("x")), improper(&[1], atom("x")), Equal),
-        (improper(&[1], Term::Tuple(vec![])), list(&[1]), Less),
+        (improper(&[1], Term::tuple(vec![])), list(&[1]), Less),
         (list(&[1, 2]), improper(&[1], atom("x")), Greater),
         (list(&[1]), improper(&[1], atom("a")), Greater),
         (improper(&[1], tuple("a")), improper(&[1], tuple("b")), Less),
@@ -284,16 +284,16 @@ fn orders_external_funs_by_mfa_and_after_local_funs() {
 fn rejects_the_order_of_two_different_references() {
     // ERTS 29.1.1: a reference made later on scheduler 1 is less than one
     // made earlier on scheduler 2, so PBeam cannot give the ERTS order.
-    let pair = Term::Tuple(vec![atom("a"), Term::Reference(Reference(1))]);
-    let other = Term::Tuple(vec![atom("a"), Term::Reference(Reference(2))]);
+    let pair = Term::tuple(vec![atom("a"), Term::Reference(Reference(1))]);
+    let other = Term::tuple(vec![atom("a"), Term::Reference(Reference(2))]);
     assert_eq!(
         pair.compare(&other).unwrap_err().to_string(),
         "unsupported term order of two references Reference(Reference(1)) and \
          Reference(Reference(2))"
     );
-    let earlier = Term::Tuple(vec![atom("a"), Term::Reference(Reference(2))]);
+    let earlier = Term::tuple(vec![atom("a"), Term::Reference(Reference(2))]);
     assert_eq!(
-        Term::Tuple(vec![atom("b"), Term::Reference(Reference(1))])
+        Term::tuple(vec![atom("b"), Term::Reference(Reference(1))])
             .compare(&earlier)
             .unwrap(),
         Greater
@@ -315,5 +315,5 @@ fn orders_ports_by_number_between_funs_and_pids() {
     assert_eq!(three.compare(&three).unwrap(), Equal);
     assert_eq!(reverse.compare(&three).unwrap(), Less);
     assert_eq!(three.compare(&Term::Pid(ProcessId(1))).unwrap(), Less);
-    assert_eq!(three.compare(&Term::Tuple(vec![])).unwrap(), Less);
+    assert_eq!(three.compare(&Term::tuple(vec![])).unwrap(), Less);
 }

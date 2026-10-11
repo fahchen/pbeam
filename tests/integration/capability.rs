@@ -58,7 +58,7 @@ fn program() -> BeamProgram {
 fn results(program: &BeamProgram, names: &[&str]) -> Term {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     Term::list_from(names.iter().map(|&name| match name {
-        "badarg" => Term::Tuple(vec![atom("error"), atom("badarg")]),
+        "badarg" => Term::tuple(vec![atom("error"), atom("badarg")]),
         name => atom(name),
     }))
 }

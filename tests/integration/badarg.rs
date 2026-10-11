@@ -15,12 +15,12 @@ fn raises_badarg_that_catch_and_try_catch_as_pinned_erts() {
     let program = BeamProgram::load(&[BADARG_PROBE]).unwrap();
     let badarg = Term::Atom(program.atom("badarg").unwrap());
     let error = Term::Atom(program.atom("error").unwrap());
-    let caught = Term::Tuple(vec![error, badarg.clone()]);
+    let caught = Term::tuple(vec![error, badarg.clone()]);
     let mut expected = vec![badarg; 11];
     expected.extend([caught.clone(), caught]);
     assert_eq!(
         program.execute("badarg_probe", "main", &[]).unwrap(),
-        Term::Tuple(expected)
+        Term::tuple(expected)
     );
 
     let reference = Command::new("erl")

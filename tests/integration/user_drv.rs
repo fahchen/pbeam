@@ -242,7 +242,7 @@ fn executes_the_pinned_user_drv_server_for_one_put_chars_sync_request() {
     let program = BeamProgram::load(&beams).unwrap();
     assert_eq!(
         program.execute("user_drv_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::list_from(vec![Term::Binary(b"Hello, world!\n".to_vec())]),
             Term::Atom(program.atom("ok").unwrap()),
         ])

@@ -98,7 +98,7 @@ fn reads_the_registered_name_of_another_process_as_pinned_erts() {
     assert_eq!(
         program.execute("registry_probe", "info", &[]).unwrap(),
         Term::list_from(vec![
-            Term::Tuple(vec![atom("registered_name"), atom("registry_probe_info")]),
+            Term::tuple(vec![atom("registered_name"), atom("registry_probe_info")]),
             Term::nil(),
             atom("undefined"),
             atom("undefined"),

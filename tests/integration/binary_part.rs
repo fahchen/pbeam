@@ -35,7 +35,7 @@ fn gives_the_binary_part_like_erts() {
     let program = BeamProgram::load(&[BINARY_PART_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = vec![
         binary(b"hello"),
         binary(b"ell"),

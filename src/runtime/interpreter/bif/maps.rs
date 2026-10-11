@@ -115,7 +115,7 @@ pub(super) fn size(map: &Term) -> BifResult {
 ///
 /// ```rust,ignore
 /// let map = Term::Map(Map::from_pairs(vec![(test_atom("a"), Term::Integer(1))])?);
-/// let found = Term::Tuple(vec![test_atom("ok"), Term::Integer(1)]);
+/// let found = Term::tuple(vec![test_atom("ok"), Term::Integer(1)]);
 /// assert!(matches!(find(&test_atom("a"), &map), BifResult::Value(value) if value == found));
 /// assert!(matches!(find(&test_atom("b"), &map), BifResult::Value(value) if value == test_atom("error")));
 /// assert!(matches!(find(&test_atom("a"), &test_atom("foo")), BifResult::Raise { .. }));
@@ -126,7 +126,7 @@ pub(super) fn find(key: &Term, map: &Term) -> BifResult {
     };
     Value(entries.get(key).map_or_else(
         || Term::static_atom("error"),
-        |value| Term::Tuple(vec![Term::static_atom("ok"), value.clone()]),
+        |value| Term::tuple(vec![Term::static_atom("ok"), value.clone()]),
     ))
 }
 
@@ -141,7 +141,7 @@ pub(super) fn find(key: &Term, map: &Term) -> BifResult {
 ///
 /// ```rust,ignore
 /// let map = Term::Map(Map::new());
-/// let key = Term::Tuple(vec![Term::Integer(1), Term::Integer(2)]);
+/// let key = Term::tuple(vec![Term::Integer(1), Term::Integer(2)]);
 /// let put_map = Term::Map(Map::from_pairs(vec![(key.clone(), test_atom("a"))])?);
 /// assert!(matches!(put(&key, &test_atom("a"), &map)?, BifResult::Value(value) if value == put_map));
 /// assert!(matches!(put(&key, &test_atom("a"), &test_atom("foo"))?, BifResult::Raise { .. }));
@@ -185,7 +185,7 @@ pub(super) fn put(key: &Term, value: &Term, map: &Term) -> Result<BifResult, Bea
 /// # Examples
 ///
 /// ```rust,ignore
-/// let pair = |key: i64, value: &str| Term::Tuple(vec![Term::Integer(key), test_atom(value)]);
+/// let pair = |key: i64, value: &str| Term::tuple(vec![Term::Integer(key), test_atom(value)]);
 /// let list = Term::list_from(vec![pair(2, "b"), pair(1, "a"), pair(2, "c")]);
 /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), test_atom("a")), (Term::Integer(2), test_atom("c"))])?);
 /// assert!(matches!(from_list(&mut process, &list, 0)?, BifResult::Value(value) if value == map));
@@ -315,7 +315,7 @@ pub(super) fn is_key(key: &Term, map: &Term) -> BifResult {
 ///
 /// ```rust,ignore
 /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), test_atom("a"))])?);
-/// let pair = Term::Tuple(vec![Term::Integer(1), test_atom("a")]);
+/// let pair = Term::tuple(vec![Term::Integer(1), test_atom("a")]);
 /// assert!(matches!(map_next(&mut process, &Term::Integer(0), &map, &Term::nil())?, BifResult::Value(pairs) if pairs == Term::list_from([pair])));
 /// assert!(matches!(map_next(&mut process, &Term::Integer(2), &map, &Term::nil())?, BifResult::Raise { .. }));
 /// ```
@@ -360,7 +360,7 @@ pub(super) fn map_next(
             iterator_pairs(pairs, next)
         }
         Direction::Backward => {
-            let pairs = pairs.map(|(key, value)| Term::Tuple(vec![key.clone(), value.clone()]));
+            let pairs = pairs.map(|(key, value)| Term::tuple(vec![key.clone(), value.clone()]));
             let list = Term::list_with_tail(pairs.collect(), acc.clone());
             match next {
                 Some(path) => Term::list_with_tail(vec![path, map.clone()], list),
@@ -384,7 +384,7 @@ pub(super) fn map_next(
 /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), test_atom("a"))])?);
 /// let Term::Map(entries) = &map else { unreachable!() };
 /// process.fcalls = 40;
-/// let first = Term::Tuple(vec![Term::Integer(1), test_atom("a"), test_atom("none")]);
+/// let first = Term::tuple(vec![Term::Integer(1), test_atom("a"), test_atom("none")]);
 /// let path = |key| Term::list_from([Term::Integer(key)]);
 /// assert!(matches!(ordered_next(&mut process, &path(1), entries, &map)?, BifResult::Value(value) if value == first));
 /// assert_eq!(process.fcalls, 8);
@@ -434,14 +434,14 @@ fn ordered_next(
 /// ```rust,ignore
 /// let (key, value) = (Term::Integer(1), test_atom("a"));
 /// let result = iterator_pairs([(&key, &value)].into_iter(), test_atom("none"));
-/// assert_eq!(result, Term::Tuple(vec![key.clone(), value.clone(), test_atom("none")]));
+/// assert_eq!(result, Term::tuple(vec![key.clone(), value.clone(), test_atom("none")]));
 /// ```
 fn iterator_pairs<'a>(
     pairs: impl DoubleEndedIterator<Item = (&'a Term, &'a Term)>,
     next: Term,
 ) -> Term {
     pairs.rev().fold(next, |rest, (key, value)| {
-        Term::Tuple(vec![key.clone(), value.clone(), rest])
+        Term::tuple(vec![key.clone(), value.clone(), rest])
     })
 }
 
@@ -608,7 +608,7 @@ pub(super) fn take(key: &Term, map: &Term) -> BifResult {
     let Some(value) = entries.get(key) else {
         return Value(Term::static_atom("error"));
     };
-    Value(Term::Tuple(vec![value.clone(), without(entries, key)]))
+    Value(Term::tuple(vec![value.clone(), without(entries, key)]))
 }
 
 /// Return the `error:{Tag, Term}` exception, as ERTS `BIF_ERROR` with
@@ -618,11 +618,11 @@ pub(super) fn take(key: &Term, map: &Term) -> BifResult {
 ///
 /// ```rust,ignore
 /// let BifResult::Raise { reason, .. } = error_with("badmap", &test_atom("foo")) else { panic!() };
-/// assert_eq!(reason, Term::Tuple(vec![test_atom("badmap"), test_atom("foo")]));
+/// assert_eq!(reason, Term::tuple(vec![test_atom("badmap"), test_atom("foo")]));
 /// ```
 fn error_with(tag: &str, term: &Term) -> BifResult {
     BifResult::Raise {
         class: ExceptionClass::Error,
-        reason: Term::Tuple(vec![Term::static_atom(tag), term.clone()]),
+        reason: Term::tuple(vec![Term::static_atom(tag), term.clone()]),
     }
 }

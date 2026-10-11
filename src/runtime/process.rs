@@ -481,7 +481,7 @@ impl ProcessState {
     ///
     /// ```rust,ignore
     /// let length = process.info(&Term::static_atom("message_queue_len"), 0, 2, false)?;
-    /// assert_eq!(length, Some(Term::Tuple(vec![Term::static_atom("message_queue_len"), Term::Integer(2)])));
+    /// assert_eq!(length, Some(Term::tuple(vec![Term::static_atom("message_queue_len"), Term::Integer(2)])));
     /// ```
     ///
     /// # Errors
@@ -509,7 +509,7 @@ impl ProcessState {
             ),
             _ => return Ok(None),
         };
-        Ok(Some(Term::Tuple(vec![item.clone(), value])))
+        Ok(Some(Term::tuple(vec![item.clone(), value])))
     }
 
     /// Return true while the dirty IO call of the process runs: the

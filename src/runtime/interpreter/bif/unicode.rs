@@ -366,7 +366,7 @@ fn list_turn(
     };
     let converted = code_points(&output.bytes);
     let result = match reason {
-        Some(reason) => Term::Tuple(vec![Term::static_atom(reason), converted, rest]),
+        Some(reason) => Term::tuple(vec![Term::static_atom(reason), converted, rest]),
         None => converted,
     };
     let characters = if output.bytes.is_empty() {
@@ -467,7 +467,7 @@ pub(super) fn analyze_turn(
         _ => Some("error"),
     };
     let result = match reason {
-        Some(reason) => Term::Tuple(vec![
+        Some(reason) => Term::tuple(vec![
             Term::static_atom(reason),
             converted,
             Term::Binary(rest.to_vec()),

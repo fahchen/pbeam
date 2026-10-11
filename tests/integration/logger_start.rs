@@ -111,8 +111,8 @@ fn removes_map_keys_as_pinned_erts() {
             54, 34, 46, 52, 41, 42, 55, 38, 56, 61, 31, 44, 49, 64, 35, 36, 32, 58, 60, 43, 57, 48,
             37, 40, 33, 53, 62, 47, 63, 51, 50, 45, 59, 39,
         ]),
-        Term::Tuple(vec![atom("badmap"), atom("foo")]),
-        Term::Tuple(vec![atom("badmap"), Term::nil()]),
+        Term::tuple(vec![atom("badmap"), atom("foo")]),
+        Term::tuple(vec![atom("badmap"), Term::nil()]),
     ];
     assert_eq!(
         program
@@ -143,14 +143,14 @@ fn takes_map_keys_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs).unwrap());
     let expected = vec![
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("one"),
             map(vec![(Term::Integer(2), atom("two"))]),
         ]),
         atom("error"),
-        Term::Tuple(vec![Term::Integer(1), map(vec![])]),
+        Term::tuple(vec![Term::Integer(1), map(vec![])]),
         Term::list_from((1..=32).map(Term::Integer)),
-        Term::Tuple(vec![atom("badmap"), atom("foo")]),
+        Term::tuple(vec![atom("badmap"), atom("foo")]),
     ];
     assert_eq!(
         program.execute("logger_start_probe", "take", &[]).unwrap(),
@@ -208,7 +208,7 @@ fn reads_and_deletes_ets_keys_as_pinned_erts() {
     // reference raise `badarg`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let pair = |first: Term, second: Term| Term::Tuple(vec![first, second]);
+    let pair = |first: Term, second: Term| Term::tuple(vec![first, second]);
     let found = |key: Term, value: Term| Term::list_from(vec![pair(key, value)]);
     let badarg = pair(atom("error"), atom("badarg"));
     let mut expected = vec![
@@ -258,9 +258,9 @@ fn checks_ets_access_rights_as_pinned_erts() {
     // exit of the owner deletes its table and frees its name.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let expected = vec![
-        Term::list_from(vec![Term::Tuple(vec![atom("k"), atom("v")])]),
+        Term::list_from(vec![Term::tuple(vec![atom("k"), atom("v")])]),
         atom("true"),
         badarg.clone(),
         badarg.clone(),
@@ -291,7 +291,7 @@ fn finds_map_keys_as_pinned_erts() {
     // term that is not a map raises `{badmap, Map}`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let pair = |first: Term, second: Term| Term::Tuple(vec![first, second]);
+    let pair = |first: Term, second: Term| Term::tuple(vec![first, second]);
     let ok = |value: Term| pair(atom("ok"), value);
     let badmap = |term: Term| pair(atom("error"), pair(atom("badmap"), term));
     let expected = vec![
@@ -332,7 +332,7 @@ fn builds_maps_from_lists_as_pinned_erts() {
             .map(|&(key, value)| (Term::Integer(key), Term::Integer(value)))
             .collect())
     };
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let keys = [
         18, 4, 34, 12, 19, 29, 13, 2, 7, 38, 31, 8, 10, 23, 9, 15, 35, 36, 32, 1, 25, 28, 20, 6,
         11, 17, 24, 37, 40, 14, 33, 3, 16, 30, 21, 5, 27, 26, 22, 39,
@@ -372,7 +372,7 @@ fn tests_map_keys_as_pinned_erts() {
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let badmap =
-        |term: Term| Term::Tuple(vec![atom("error"), Term::Tuple(vec![atom("badmap"), term])]);
+        |term: Term| Term::tuple(vec![atom("error"), Term::tuple(vec![atom("badmap"), term])]);
     let expected = vec![
         atom("true"),
         atom("false"),
@@ -406,7 +406,7 @@ fn takes_list_heads_as_pinned_erts() {
     // `hd_guard/1` gives `no`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let expected = vec![
         atom("a"),
         atom("a"),
@@ -448,7 +448,7 @@ fn pairs_text(keys: &[i64]) -> String {
 
 /// Return the list `[{K, K}, ...]` of integer keys.
 fn integer_pairs(keys: &[i64]) -> Term {
-    let pair = |key: &i64| Term::Tuple(vec![Term::Integer(*key), Term::Integer(*key)]);
+    let pair = |key: &i64| Term::tuple(vec![Term::Integer(*key), Term::Integer(*key)]);
     Term::list_from(keys.iter().map(pair))
 }
 
@@ -462,7 +462,7 @@ fn lists_map_pairs_as_pinned_erts() {
     // 32 pairs at path 0 and the rest in the next call, in the HAMT order.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let pair = |key: Term, value: Term| Term::Tuple(vec![key, value]);
+    let pair = |key: Term, value: Term| Term::tuple(vec![key, value]);
     let expected = vec![
         Term::nil(),
         Term::list_from(vec![
@@ -501,14 +501,14 @@ fn walks_maps_with_a_path_as_pinned_erts() {
     // `badarg`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let pair = |key: i64, value: &str| Term::Tuple(vec![Term::Integer(key), atom(value)]);
+    let pair = |key: i64, value: &str| Term::tuple(vec![Term::Integer(key), atom(value)]);
     let small = Term::list_from(vec![pair(1, "a"), pair(2, "b")]);
-    let iterator = Term::Tuple(vec![
+    let iterator = Term::tuple(vec![
         Term::Integer(1),
         atom("a"),
-        Term::Tuple(vec![Term::Integer(2), atom("b"), atom("none")]),
+        Term::tuple(vec![Term::Integer(2), atom("b"), atom("none")]),
     ]);
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = vec![
         small.clone(),
         Term::list_from(vec![pair(1, "a"), pair(2, "b"), atom("x")]),
@@ -550,7 +550,7 @@ fn iterates_maps_as_pinned_erts() {
     let expected = vec![
         integers(&[1, 2]),
         integers(&BIG_40_KEYS),
-        Term::Tuple(vec![Term::Integer(18), Term::Integer(18)]),
+        Term::tuple(vec![Term::Integer(18), Term::Integer(18)]),
         atom("true"),
         Term::Integer(26),
         atom("true"),
@@ -578,15 +578,15 @@ fn iterates_maps_in_a_given_key_order_as_pinned_erts() {
     // checks PBeam for it without a reference run.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = vec![
         Term::list_from(vec![atom("a"), atom("b"), atom("c")]),
         Term::list_from((1..=40).rev().map(Term::Integer)),
         atom("true"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("c"),
             Term::Integer(3),
-            Term::Tuple(vec![atom("a"), Term::Integer(1), atom("none")]),
+            Term::tuple(vec![atom("a"), Term::Integer(1), atom("none")]),
         ]),
         atom("none"),
     ];
@@ -626,7 +626,7 @@ fn returns_badarg_for_an_ordered_path_that_crashes_pinned_erts() {
         program
             .execute("logger_start_probe", "ordered_second_call_badarg", &[])
             .unwrap(),
-        Term::Tuple(vec![atom("error"), atom("badarg")])
+        Term::tuple(vec![atom("error"), atom("badarg")])
     );
 }
 
@@ -661,7 +661,7 @@ fn removes_monitors_as_pinned_erts() {
     // term that is not a reference raises `badarg`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let expected = vec![
         atom("true"),
         atom("none"),
@@ -695,7 +695,7 @@ fn removes_links_as_pinned_erts() {
     // A term that is not a pid raises `badarg`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let expected = vec![
         atom("true"),
         atom("true"),
@@ -726,7 +726,7 @@ fn sets_the_system_logger_as_pinned_erts() {
     // value. Each other value raises `badarg`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let expected = vec![
         atom("logger"),
         atom("undefined"),
@@ -758,7 +758,7 @@ fn rejects_system_flag_items_as_pinned_erts() {
     // subsystem.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = vec![badarg.clone(); 3];
     expected.push(atom("true"));
     expected.extend(vec![badarg; 38]);
@@ -790,7 +790,7 @@ fn sets_the_message_queue_data_flag_as_pinned_erts() {
     // value raises `badarg`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let expected = vec![
         atom("on_heap"),
         atom("off_heap"),
@@ -825,7 +825,7 @@ fn rejects_process_flags_as_pinned_erts() {
     // uses a subsystem that PBeam does not have.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program
             .execute("logger_start_probe", "process_flag", &[])
@@ -923,12 +923,12 @@ fn raises_exceptions_as_pinned_erts() {
     // `badarg` for a class or a stack trace that is not valid.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let pair = |class: &str, reason: Term| Term::Tuple(vec![atom(class), reason]);
+    let pair = |class: &str, reason: Term| Term::tuple(vec![atom(class), reason]);
     let mut expected = vec![
         pair("error", atom("foo")),
-        pair("error", Term::Tuple(vec![atom("a"), atom("b")])),
+        pair("error", Term::tuple(vec![atom("a"), atom("b")])),
         pair("error", atom("r")),
-        pair("exit", Term::Tuple(vec![atom("r")])),
+        pair("exit", Term::tuple(vec![atom("r")])),
     ];
     expected.extend(std::iter::repeat_n(atom("badarg"), 12));
     assert_eq!(
@@ -954,7 +954,7 @@ fn raises_class_throw_as_pinned_erts() {
         program
             .execute("logger_start_probe", "raise_throw", &[])
             .unwrap(),
-        Term::Tuple(vec![atom("throw"), atom("r")])
+        Term::tuple(vec![atom("throw"), atom("r")])
     );
     assert_eq!(reference("raise_throw"), b"{throw,r}\n");
 }
@@ -992,8 +992,8 @@ fn walks_collision_nodes_and_bignum_paths_as_pinned_erts() {
         -74925715755171563,
     ];
     let keys = |parts: &[&[Term]]| Term::list_from(parts.concat());
-    let chunk = |keys: Term, path: Term| Term::Tuple(vec![keys, path]);
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let chunk = |keys: Term, path: Term| Term::tuple(vec![keys, path]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let all = keys(&[&integers(&before), &collision, &integers(&after)]);
     let expected = vec![
         chunk(keys(&[&integers(&before), &collision]), Term::Integer(369)),

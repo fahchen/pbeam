@@ -42,7 +42,7 @@ fn runs_code_ensure_loaded_for_a_loaded_module_as_pinned_erts() {
     // `erlang:module_loaded/1` returns `true` (`code.erl:581-583`).
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let module = |name: &str| Term::Tuple(vec![atom("module"), atom(name)]);
+    let module = |name: &str| Term::tuple(vec![atom("module"), atom(name)]);
     assert_eq!(
         program.execute("code_probe", "loaded", &[]).unwrap(),
         Term::list_from(vec![module("code_probe"), module("code"), module("erlang")])
@@ -61,7 +61,7 @@ fn runs_erlang_module_loaded_as_pinned_erts() {
     // (`beam_bif_load.c:738-755`).
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program.execute("code_probe", "module_loaded", &[]).unwrap(),
         Term::list_from(vec![

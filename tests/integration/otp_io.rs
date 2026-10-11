@@ -25,7 +25,7 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
     // group leader. The result proves the call ran `io`'s own code.
     assert_eq!(
         program.execute("otp_io_calls", "io_call", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::Atom(program.atom("error").unwrap()),
             Term::Atom(program.atom("enotsup").unwrap()),
         ])

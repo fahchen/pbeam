@@ -193,7 +193,7 @@ fn boot_flags(program: &BeamProgram, code_path: &[OsString]) -> Result<Term, Str
         .ok_or("boot flag pa is not an atom of the loaded modules")?;
     let flags = code_path.iter().map(|directory| {
         let value = Term::Binary(directory.as_bytes().to_vec());
-        Term::Tuple(vec![Term::Atom(pa.clone()), Term::list_from(vec![value])])
+        Term::tuple(vec![Term::Atom(pa.clone()), Term::list_from(vec![value])])
     });
     Ok(Term::list_from(flags))
 }

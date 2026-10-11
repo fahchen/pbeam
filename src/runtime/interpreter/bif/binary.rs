@@ -596,7 +596,7 @@ fn compile(pattern: &Term) -> Option<Pattern> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let scope = Term::Tuple(vec![Term::static_atom("scope"), Term::Tuple(vec![Term::Integer(3), Term::Integer(-2)])]);
+/// let scope = Term::tuple(vec![Term::static_atom("scope"), Term::tuple(vec![Term::Integer(3), Term::Integer(-2)])]);
 /// assert_eq!(options(Some(&Term::list_from(vec![scope])), 3), Some((0, 1, 3)));
 /// ```
 fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
@@ -610,10 +610,10 @@ fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
             Term::Atom(atom) if atom.name() == "trim" => flags |= TRIM,
             Term::Atom(atom) if atom.name() == "trim_all" => flags |= TRIM_ALL,
             Term::Tuple(option) => {
-                let [Term::Atom(scope), Term::Tuple(range)] = option.as_slice() else {
+                let [Term::Atom(scope), Term::Tuple(range)] = option.as_ref() else {
                     return None;
                 };
-                let [Term::Integer(pos), Term::Integer(len)] = range.as_slice() else {
+                let [Term::Integer(pos), Term::Integer(len)] = range.as_ref() else {
                     return None;
                 };
                 if scope.name() != "scope" || *pos < 0 {
@@ -772,7 +772,7 @@ impl Find {
         let mut fields: Vec<Term> = integers.into_iter().map(Term::Integer).collect();
         fields.push(Term::list_from(matches));
         fields.push(Term::list_from(parts));
-        Term::Tuple(fields)
+        Term::tuple(fields)
     }
 
     /// Return the state of a trap term of [`Find::to_term`].
@@ -1021,7 +1021,7 @@ fn find_turn(
             Search::Restart => None,
             Search::NotFound if find.flags & MATCH != 0 => Some(Term::static_atom("nomatch")),
             Search::NotFound => Some(not_found(find.flags, subject)),
-            Search::Found(pos, len) if find.flags & MATCH != 0 => Some(Term::Tuple(vec![
+            Search::Found(pos, len) if find.flags & MATCH != 0 => Some(Term::tuple(vec![
                 Term::Integer(pos as i64),
                 Term::Integer(len as i64),
             ])),

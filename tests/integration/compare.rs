@@ -115,7 +115,7 @@ fn runs_the_is_lt_is_integer_and_is_boolean_tests_as_pinned_erts() {
     let program = BeamProgram::load(&[COMPARE_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let atoms = |names: &[&str]| Term::list_from(names.iter().map(|&name| atom(name)));
-    let pair = |tag, value| Term::Tuple(vec![atom(tag), Term::Integer(value)]);
+    let pair = |tag, value| Term::tuple(vec![atom(tag), Term::Integer(value)]);
     let expected = Term::list_from(vec![
         Term::list_from(vec![
             pair("pos", 2),

@@ -92,8 +92,8 @@ impl Term {
 ///
 /// ```rust,ignore
 /// let mut steps = Vec::new();
-/// let left = Term::Tuple(vec![Term::Integer(1)]);
-/// let right = Term::Tuple(vec![Term::Integer(2)]);
+/// let left = Term::tuple(vec![Term::Integer(1)]);
+/// let right = Term::tuple(vec![Term::Integer(2)]);
 /// assert_eq!(compare_pair(&left, &right, &mut steps)?, Ordering::Equal);
 /// assert_eq!(steps.len(), 1);
 /// ```
@@ -120,7 +120,7 @@ fn compare_pair<'a>(
             )));
         }
         (Term::Tuple(left), Term::Tuple(right)) if left.len() == right.len() => {
-            steps.extend(left.iter().zip(right).rev().map(|(l, r)| Step(l, r)));
+            steps.extend(left.iter().zip(right.iter()).rev().map(|(l, r)| Step(l, r)));
             Ordering::Equal
         }
         (Term::Tuple(left), Term::Tuple(right)) => left.len().cmp(&right.len()),

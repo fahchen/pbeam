@@ -80,7 +80,7 @@ fn parse_options(options: &Term) -> Option<CompileOptions> {
                 "export" => parsed.export = true,
                 name => parsed.compile |= lookup(&COMPILE_OPTIONS, name)?,
             },
-            Term::Tuple(elements) => match elements.as_slice() {
+            Term::Tuple(elements) => match elements.as_ref() {
                 [Term::Atom(key), Term::Atom(value)] if key.name() == "newline" => {
                     parsed.newline = Some(lookup(&NEWLINES, value.name())?);
                 }
@@ -172,9 +172,9 @@ pub(super) fn compile(
                 .into_iter()
                 .map(|byte| Term::Integer(byte.into()));
             let offset = i64::try_from(failure.offset).expect("a pattern offset fits in i64");
-            return Ok(Value(Term::Tuple(vec![
+            return Ok(Value(Term::tuple(vec![
                 Term::static_atom("error"),
-                Term::Tuple(vec![Term::list_from(message), Term::Integer(offset)]),
+                Term::tuple(vec![Term::list_from(message), Term::Integer(offset)]),
             ])));
         }
     };
@@ -193,9 +193,9 @@ pub(super) fn compile(
         .borrow_mut::<RegexCodes>()
         .0
         .insert(reference, code);
-    Ok(Value(Term::Tuple(vec![
+    Ok(Value(Term::tuple(vec![
         Term::static_atom("ok"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::static_atom("re_pattern"),
             Term::Integer(capture_count.into()),
             Term::Integer(unicode.into()),
@@ -239,9 +239,9 @@ fn export(code: &pcre2::Code, unicode: bool, source: Vec<u8>, options: &Term) ->
     header.extend_from_slice(&crc32(&encoded).to_be_bytes());
     header.push(EXPORT_VERSION);
     header.push(unicode.into());
-    Term::Tuple(vec![
+    Term::tuple(vec![
         Term::static_atom("ok"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::static_atom("re_exported_pattern"),
             Term::Binary(header),
             Term::Binary(source),

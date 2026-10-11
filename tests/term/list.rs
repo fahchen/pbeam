@@ -61,7 +61,7 @@ fn tests_the_list_kind_of_each_term() {
         (Term::nil(), true, true, false),
         (one, false, true, true),
         (improper(), false, true, true),
-        (Term::Tuple(vec![]), false, false, false),
+        (Term::tuple(vec![]), false, false, false),
         (atom("x"), false, false, false),
     ];
     for (term, nil, list, nonempty) in cases {

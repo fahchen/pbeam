@@ -34,13 +34,13 @@ fn keeps_persistent_terms_for_all_processes_as_pinned_erts() {
         program
             .execute("persistent_term_probe", "main", &[])
             .unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("default"),
             atom("ok"),
             Term::Integer(1),
             atom("ok"),
             atom("ok"),
-            Term::Tuple(vec![
+            Term::tuple(vec![
                 atom("value"),
                 Term::list_from(vec![atom("a"), Term::Binary(b"b".to_vec())]),
             ]),
@@ -90,8 +90,8 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
 
     let program = BeamProgram::load(&[PERSISTENT_TERM_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let pair = |key: Term, value: i64| Term::Tuple(vec![key, Term::Integer(value)]);
-    let ok_tuple = Term::Tuple(vec![atom("ok")]);
+    let pair = |key: Term, value: i64| Term::tuple(vec![key, Term::Integer(value)]);
+    let ok_tuple = Term::tuple(vec![atom("ok")]);
     let binary = Term::Binary(b"0123456789abcdefg".to_vec());
     let string = Term::list_from(b"abc".iter().map(|&c| Term::Integer(c.into())));
     let small_map = Term::Map(
@@ -113,7 +113,7 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
         program
             .execute("persistent_term_probe", "table", &[])
             .unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::nil(),
             Term::list_from(vec![
                 pair(atom("true"), 1),
@@ -139,7 +139,7 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
                 pair(string, 7),
                 pair(binary, 6),
                 pair(small_map, 12),
-                pair(Term::list_from(vec![atom("ok"), Term::Tuple(vec![])]), 10),
+                pair(Term::list_from(vec![atom("ok"), Term::tuple(vec![])]), 10),
                 pair(Term::Integer(1 << 60), 8),
                 pair(
                     Term::list_with_tail(vec![Term::Integer(1)], Term::Integer(2)),

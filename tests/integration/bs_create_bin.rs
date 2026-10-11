@@ -104,23 +104,23 @@ fn raises_badarg_with_the_erts_error_info_for_a_term_that_is_not_a_binary() {
     let program = BeamProgram::load(&[BS_CREATE_BIN_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let caught = |value: Term| {
-        let cause = Term::Tuple(vec![Term::Integer(2), atom("binary"), atom("type"), value]);
+        let cause = Term::tuple(vec![Term::Integer(2), atom("binary"), atom("type"), value]);
         let error_info = Map::from_pairs(vec![
             (atom("cause"), cause),
             (atom("function"), atom("format_bs_fail")),
             (atom("module"), atom("erl_erts_errors")),
         ])
         .unwrap();
-        let frame = Term::Tuple(vec![
+        let frame = Term::tuple(vec![
             atom("bs_create_bin_probe"),
             atom("prefix"),
             Term::Integer(1),
-            Term::list_from(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::tuple(vec![
                 atom("error_info"),
                 Term::Map(error_info),
             ])]),
         ]);
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("error"),
             atom("badarg"),
             Term::list_from(vec![frame]),
@@ -130,7 +130,7 @@ fn raises_badarg_with_the_erts_error_info_for_a_term_that_is_not_a_binary() {
         atom("other"),
         Term::Integer(1),
         Term::nil(),
-        Term::Tuple(vec![atom("other")]),
+        Term::tuple(vec![atom("other")]),
     ];
     for value in values {
         assert_eq!(run(&program, "catch_bad", value.clone()), caught(value));
@@ -189,7 +189,7 @@ fn uses_one_reduction_for_each_1024_bytes_of_a_binary_segment() {
         expected.extend(std::iter::repeat_n(1, size));
         assert_eq!(
             run(&program, "cost", Term::Binary(vec![1; size])),
-            Term::Tuple(vec![
+            Term::tuple(vec![
                 Term::Integer(1 + size as i64 / 1024),
                 Term::Binary(expected)
             ])
@@ -371,7 +371,7 @@ fn raises_badarg_with_the_erts_error_info_for_an_append_segment() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
     let caught = |function: &str, segment: i64, reason: &str, value: Term| {
-        let cause = Term::Tuple(vec![
+        let cause = Term::tuple(vec![
             Term::Integer(segment),
             atom("binary"),
             atom(reason),
@@ -383,16 +383,16 @@ fn raises_badarg_with_the_erts_error_info_for_an_append_segment() {
             (atom("module"), atom("erl_erts_errors")),
         ])
         .unwrap();
-        let frame = Term::Tuple(vec![
+        let frame = Term::tuple(vec![
             atom("bs_create_bin_append_probe"),
             atom(function),
             Term::Integer(2),
-            Term::list_from(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::tuple(vec![
                 atom("error_info"),
                 Term::Map(error_info),
             ])]),
         ]);
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("error"),
             atom("badarg"),
             Term::list_from(vec![frame]),
@@ -512,7 +512,7 @@ fn uses_one_reduction_for_each_1024_bytes_of_an_appended_binary() {
                 "cost",
                 &[Term::Binary(vec![1; a]), Term::Binary(vec![2; b])],
             ),
-            Term::Tuple(vec![Term::Integer(reductions), Term::Integer(size)]),
+            Term::tuple(vec![Term::Integer(reductions), Term::Integer(size)]),
             "cost(<<1:{a}/unit:8>>, <<2:{b}/unit:8>>)"
         );
     }
@@ -557,7 +557,7 @@ fn copies_a_binary_that_an_append_built_where_erts_appends_in_place() {
                 "cost_again",
                 &[Term::Binary(vec![1; a]), Term::Binary(vec![2; b])],
             ),
-            Term::Tuple(vec![Term::Integer(reductions), Term::Integer(size)]),
+            Term::tuple(vec![Term::Integer(reductions), Term::Integer(size)]),
             "cost_again(<<1:{a}/unit:8>>, <<2:{b}/unit:8>>)"
         );
     }
@@ -1069,19 +1069,19 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
             (atom("module"), atom("erl_erts_errors")),
         ])
         .unwrap();
-        let frame = Term::Tuple(vec![
+        let frame = Term::tuple(vec![
             atom("bs_create_bin_integer_probe"),
             atom(function),
             Term::Integer(arity as i64),
-            Term::list_from(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::tuple(vec![
                 atom("error_info"),
                 Term::Map(error_info),
             ])]),
         ]);
-        Term::Tuple(vec![atom("error"), atom(reason), frame])
+        Term::tuple(vec![atom("error"), atom(reason), frame])
     };
     for (function, arguments, reason, segment, operation, info, value) in &cases {
-        let cause = Term::Tuple(vec![
+        let cause = Term::tuple(vec![
             int(*segment),
             atom(operation),
             atom(info),
@@ -1152,7 +1152,7 @@ fn uses_no_reduction_for_an_integer_segment() {
                 "cost",
                 &[Term::Integer(value), Term::Integer(bits)]
             ),
-            Term::Tuple(vec![Term::Integer(1), Term::Integer(bits / 8)])
+            Term::tuple(vec![Term::Integer(1), Term::Integer(bits / 8)])
         );
     }
     assert_eq!(

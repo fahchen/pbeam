@@ -116,7 +116,7 @@ pub(super) fn group_leader_request(
         .send_signal(Some(caller), *target, request)
         .is_err()
     {
-        let reply = Term::Tuple(vec![
+        let reply = Term::tuple(vec![
             Term::Reference(*reference),
             Term::static_atom("badarg"),
         ]);
@@ -176,7 +176,7 @@ pub(super) fn is_process_alive(
     {
         return Ok(Value(Term::static_atom("ok")));
     }
-    let reply = Term::Tuple(vec![
+    let reply = Term::tuple(vec![
         Term::Reference(*reference),
         Term::static_atom("false"),
     ]);
@@ -309,7 +309,7 @@ pub(super) fn open_port(
     let port = scheduler.open_port(path, settings.exit_status, child)?;
     let reference = scheduler.make_ref()?;
     let caller = scheduler.current_process_mut().id;
-    let ack = Term::Tuple(vec![Term::Reference(reference), Term::Port(port)]);
+    let ack = Term::tuple(vec![Term::Reference(reference), Term::Port(port)]);
     scheduler.deliver(caller, ack);
     Ok(Value(Term::Reference(reference)))
 }
@@ -426,7 +426,7 @@ fn port_args(args: &Term) -> Option<Vec<Vec<u8>>> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let name = Term::Tuple(vec![Term::static_atom("spawn_executable"), Term::Binary(b"/bin/sh".to_vec())]);
+/// let name = Term::tuple(vec![Term::static_atom("spawn_executable"), Term::Binary(b"/bin/sh".to_vec())]);
 /// assert_eq!(spawn_executable(&name)?, Some(b"/bin/sh".to_vec()));
 /// ```
 ///
@@ -437,7 +437,7 @@ fn spawn_executable(name: &Term) -> Result<Option<Vec<u8>>, BeamError> {
     let Term::Tuple(elements) = name else {
         return Ok(None);
     };
-    match elements.as_slice() {
+    match elements.as_ref() {
         [Term::Atom(kind), name] if kind.name() == "spawn_executable" => {
             Ok(native_name(name, false))
         }
@@ -667,7 +667,7 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
                 .borrow_mut::<Ports>()
                 .get(id)
                 .expect("the port is open");
-            let item = |name, value| Term::Tuple(vec![Term::static_atom(name), value]);
+            let item = |name, value| Term::tuple(vec![Term::static_atom(name), value]);
             let links = vec![Term::Pid(port.owner)];
             Term::list_from(vec![
                 item(
@@ -740,7 +740,7 @@ pub(super) fn prepare_loading(
             scheduler.code.prepare(reference, prepared);
             Ok(Value(Term::Reference(reference)))
         }
-        Err(PrepareError::BadFile) => Ok(Value(Term::Tuple(vec![
+        Err(PrepareError::BadFile) => Ok(Value(Term::tuple(vec![
             Term::static_atom("error"),
             Term::static_atom("badfile"),
         ]))),
