@@ -406,6 +406,19 @@ impl Scheduler {
                 self.activate(id);
                 0
             }
+            Signal::EnterRuntime { capabilities } => {
+                let issued = capabilities
+                    .into_iter()
+                    .map(|capability| (Source::Launcher, capability));
+                let runtime = self.delegations.hold(id, issued);
+                let process = self.handled(id, node);
+                // The boot context has no copies to release.
+                process.security = runtime;
+                process.policy_reply = Some(true);
+                // The `pbeam_cap:enter_runtime/2` call waits for this signal.
+                self.activate(id);
+                0
+            }
             Signal::Link { from } => {
                 // A link that the receiver has keeps its node and its state
                 // (`erl_proc_sig_queue.c:6641`).

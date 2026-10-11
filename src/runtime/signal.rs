@@ -189,4 +189,15 @@ pub(super) enum Signal {
         /// The capability that the policy granted, or `None` for a denial.
         capability: Option<Capability>,
     },
+    /// PBeam only: the answer of `initial/1` of the policy process to the
+    /// `pbeam_cap:enter_runtime/2` call of the root process in boot mode.
+    /// ERTS has no capabilities and no such signal. The receiver replaces
+    /// its boot authority with a copy of each capability, with the source
+    /// `launcher`, one way, and its call continues; the cost is 0, as for
+    /// `Grant`. At exit it is dropped. A denial of `initial/1` stops the run
+    /// and sends no signal.
+    EnterRuntime {
+        /// The capabilities that `initial/1` gave.
+        capabilities: Vec<Capability>,
+    },
 }

@@ -494,7 +494,9 @@ pub(super) fn raise(class: &Term, reason: &Term, stacktrace: &Term) -> BifResult
 /// The caller needs a `process` capability that permits `link`, also for
 /// its own pid. Without it, the call raises `error:capability_denied` and
 /// makes no link and no signal. The check comes before the process lookup,
-/// so a denied call gives the same result for each pid.
+/// so a denied call gives the same result for each pid. Then the runtime to
+/// boot gate denies a link to a boot process in the same way (see
+/// `boot_denial`).
 ///
 /// # Examples
 ///
@@ -509,6 +511,9 @@ pub(super) fn raise(class: &Term, reason: &Term, stacktrace: &Term) -> BifResult
 /// `AtomTable::put`.
 pub(super) fn link(scheduler: &mut Scheduler, target: ProcessId) -> Result<BifResult, BeamError> {
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
+        return Ok(denied);
+    }
+    if let Some(denied) = boot_denial(scheduler, target)? {
         return Ok(denied);
     }
     Ok(if scheduler.link(target) {
@@ -547,6 +552,8 @@ pub(super) fn link(scheduler: &mut Scheduler, target: ProcessId) -> Result<BifRe
 /// sends nothing. A signal to the caller, also through an alias of the
 /// caller, has no check. A reference that is not an alias sends nothing and
 /// has no check: in ERTS it holds no pid (`erl_proc_sig_queue.c:1647-1655`).
+/// After the check, the runtime to boot gate denies a signal to a boot
+/// process, also through its alias, in the same way (see `boot_denial`).
 ///
 /// # Examples
 ///
@@ -596,6 +603,9 @@ pub(super) fn exit(
     let Some(target) = target else {
         return Err(unsupported_port("erlang:exit/2"));
     };
+    if let Some(denied) = boot_denial(scheduler, target)? {
+        return Ok(denied);
+    }
     let suicide = alias.is_none()
         && target == caller_id
         && (*reason == Term::static_atom("kill") || !trap_exit);
@@ -2194,6 +2204,10 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
 ///   Without it, the send raises `error:capability_denied` and sends
 ///   nothing. The check comes before the name lookup, so a denied send
 ///   gives the same result for each name.
+/// - After the lookup, the runtime to boot gate denies a message to a boot
+///   process, by its pid or its name, in the same way (see `boot_denial`).
+///   A message to an alias has no gate: the owner gave the alias as a reply
+///   channel, for example for the reply of `gen:call/4`.
 /// - A pid gets the message from the caller (see
 ///   [`Scheduler::send_message`]). ERTS drops a message to a process that
 ///   does not exist or exits.
@@ -2249,10 +2263,45 @@ fn deliver_to(
         Destination::Port => return Err(unsupported_port(bif)),
     };
     if let Some(target) = target {
+        if let Some(denied) = boot_denial(scheduler, target)? {
+            return Ok(Err(denied));
+        }
         let caller = scheduler.current_process_mut().id;
         scheduler.send_message(caller, target, message);
     }
     Ok(Ok(Sent::Local))
+}
+
+/// Run `erlang:unregister(Name)`: remove the registered name `Name` and
+/// return `true`, as ERTS `unregister_1` (`bif.c:2324-2335`) does through
+/// `Scheduler::unregister`. A `Name` that is not an atom, and a name that no
+/// process has, raise `badarg`. The entry is `ambient`, but the runtime to
+/// boot gate denies the name of a boot process (see `boot_denial`): the
+/// call raises `error:capability_denied` and the name stays.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = unregister(scheduler, &Term::static_atom("worker"))?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// ```
+///
+/// # Errors
+///
+/// A new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn unregister(scheduler: &mut Scheduler, name: &Term) -> Result<BifResult, BeamError> {
+    if let Term::Atom(atom) = name
+        && let Some(owner) = scheduler.whereis(atom.name())
+        && let Some(denied) = boot_denial(scheduler, owner)?
+    {
+        return Ok(denied);
+    }
+    Ok(if scheduler.unregister(name) {
+        Value(Term::static_atom("true"))
+    } else {
+        BifResult::badarg()
+    })
 }
 
 /// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
@@ -2625,6 +2674,10 @@ pub(super) fn module_loaded(program: &BeamProgram, module: &Term) -> BifResult {
 /// - Then the caller needs a `process` capability that permits `send`, also
 ///   for its own pid. Without it, the call raises `error:capability_denied`,
 ///   makes no reference, and starts no timer.
+/// - Then the runtime to boot gate denies a timer for a boot process, or for
+///   a name that a boot process has now, in the same way (see
+///   `boot_denial`). A name gets its process when the timer expires, so a
+///   name that a boot process registers later is not denied.
 /// - Then the BIF makes a new reference and returns it. A pid that is not
 ///   alive gets no timer, also a pid whose exit started, as
 ///   `erts_pid2proc_opt` finds no exiting process
@@ -2667,6 +2720,15 @@ pub(super) fn start_timer(
         _ => return Ok(BifResult::badarg()),
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Send, None)? {
+        return Ok(denied);
+    }
+    let target = match &receiver {
+        Receiver::Process(id) => Some(*id),
+        Receiver::Name(name) => scheduler.whereis(name.name()),
+    };
+    if let Some(target) = target
+        && let Some(denied) = boot_denial(scheduler, target)?
+    {
         return Ok(denied);
     }
     let reference = scheduler.make_ref()?;

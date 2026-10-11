@@ -7,7 +7,11 @@
 %% starts the kernel processes logger and application_controller in the
 %% order of start_clean.boot (init.erl:1348-1350). It then runs the kernel
 %% part of kernel:start/2, and sets the registered user process as the
-%% group leader before it starts -eval (init.erl:1539-1546).
+%% group leader before it starts -eval (init.erl:1539-1546). In a pbeam run
+%% in boot mode (--boot), the process then enters the runtime: it drops the
+%% boot authority and gets the capabilities that the policy gives
+%% Module:Function/0. In each other run, pbeam_cap:enter_runtime/2 returns
+%% ok and has no effect. ERTS has no pbeam_cap module.
 start(Module, Function) ->
     process_flag(trap_exit, true),
     Init = spawn(?MODULE, init, [self(), [{noshell, []}]]),
@@ -19,6 +23,7 @@ start(Module, Function) ->
     receive {Kernel, started} -> ok end,
     Init ! {self(), kernel, Kernel},
     group_leader(whereis(user), self()),
+    ok = pbeam_cap:enter_runtime(Module, Function),
     Module:Function().
 
 %% Start a kernel process and give its link to init (init.erl:1519-1528).

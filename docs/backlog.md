@@ -427,6 +427,22 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a policy that must deny such a capability to a guest, or the launcher of M8.
 - **Source:** implementation of #338.
 
+### Give a trusted guest direct access to boot processes
+
+- After #462, the runtime to boot gate denies each message from a runtime process to a boot process by its pid or its name, and each link, exit signal, group leader change, inspection, timer, and `erlang:unregister/1` that targets a boot process (row "Boot authority" of `docs/erts-differences.md`). Only a monitor and a message to an alias of a boot process pass. Thus a guest in a run with `--boot` cannot call a boot service that has no service entry, for example `init:get_argument/1`, which sends a request to `init`, or `logger`, which calls `logger_server`.
+- **Option:** a capability, for example of a new kind `boot`, that permits a trusted guest the operations of the gate on boot processes.
+- **Reason:** the owner decided that the gate denies by default (Suikou review 01a1282e, R2), and no policy run needs such a service yet.
+- **Trigger:** a policy run needs a boot service that has no entry, such as `init:get_argument/1` or `logger`.
+- **Source:** design of #461, implementation of #462.
+
+### Spawn a runtime process from a boot process
+
+- After #462, a boot process that spawns with the option `{capabilities, Map}` gets `error:capability_denied` (`SecurityContext::delegate` in `src/runtime/capability.rs`). A boot process has no capability copies to reduce, and only `pbeam_cap:enter_runtime/2` of the root process makes a runtime process.
+- **Option:** the boot spawn makes a runtime child with the capabilities of `Map`, with the source `launcher`, so that a launcher can start more than one application root.
+- **Reason:** no consumer needs it yet. The design keeps the denial fail-closed (Suikou review 01a1282e).
+- **Trigger:** the launcher of [m8].
+- **Source:** design of #461, implementation of #462.
+
 ## Tests and tooling
 
 ### Load-check every pinned OTP module that loads today
