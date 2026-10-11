@@ -75,56 +75,84 @@ unmeasured or unrelated support to a separate task.
 
 ## Binary decoders drop required operands
 
-Consume and validate every encoded operand even when runtime semantics do not use its value. Keep the skip behavior in one helper and preserve cursor and tag checks.
+Consume and validate every encoded operand even when runtime semantics do not use
+its value. Keep the skip behavior in one helper and preserve cursor and tag
+checks.
 
 ## Opaque resource fields lack ownership documentation
 
-Document every struct field that wraps an opaque or owned resource. State the owner, the live representation, and the operation that releases it.
+Document every struct field that wraps an opaque or owned resource. State the
+owner, the live representation, and the operation that releases it.
 
 ## Documentation must match the current branch
 
-Describe only behavior that exists in the current branch. Mark future behavior as planned work, not as current behavior.
+Describe only behavior that exists in the current branch. Mark future behavior
+as planned work, not as current behavior.
 
 ## Encoded examples match complete operands
 
-Validate each encoded example against the actual encoder or disassembler. Include every operand and use the correct tag for each value.
+Validate each encoded example against the actual encoder or disassembler.
+Include every operand and use the correct tag for each value.
 
 ## Exit cleanup is completed before errors return
 
-Run every required exit cleanup and notification stage before returning an error. Preserve the first error and return it after cleanup completes.
+Run every required exit cleanup and notification stage before returning an error.
+Preserve the first error and return it after cleanup completes.
 
 ## Invariant violations remain visible
 
-Treat a broken runtime invariant as an explicit failure. Do not skip missing entries when skipping would hide a defect or leave runtime state inconsistent.
+Treat a broken runtime invariant as an explicit failure. Do not skip missing
+entries when skipping would hide a defect or leave runtime state inconsistent.
 
 ## Test process failures preserve diagnostics
 
-Include the process status, standard output, and standard error in test failure messages. Display non-UTF-8 output without dropping the bytes needed to diagnose the failure.
+Include the process status, standard output, and standard error in test failure
+messages. Display non-UTF-8 output without dropping the bytes needed to diagnose
+the failure.
 
 ## Documented commands omit required setup
 
-Make each documented command runnable with all required setup inputs. Reuse the same setup shown by the validated command or fixture.
+Make each documented command runnable with all required setup inputs. Reuse the
+same setup shown by the validated command or fixture.
 
 ## Instruction stream construction mixes ownership
 
-Choose one instruction-stream construction model for each opcode path. Either return the instruction for the outer loop to append, or append all required instructions in the path and continue. Do not mix both models.
+Choose one instruction-stream construction model for each opcode path. Either
+return the instruction for the outer loop to append, or append all required
+instructions in the path and continue. Do not mix both models.
 
 ## Public values can violate documented canonical forms
 
-When a public type cannot enforce a canonical representation, document it as a runtime-produced form, not as a type invariant. State that callers must preserve the form when they pass values into runtime operations.
+When a public type cannot enforce a canonical representation, document it as a
+runtime-produced form, not as a type invariant. State that callers must
+preserve the form when they pass values into runtime operations.
 
 ## Resumable work repeats or skips its budget
 
-Check the reduction budget before each unit of work that can grow with the input and on every switch-out and completion path. Keep the position of the work across turns and traps. Do not rebuild completed work after a trap, and do not do uncharged O(N) work before a yield.
+Check the reduction budget before each unit of work that can grow with the input
+and on every switch-out and completion path. Keep the position of the work
+across turns and traps. Do not rebuild completed work after a trap, and do not do
+uncharged O(N) work before a yield.
 
 ## Published claims lack evidence checks
 
-Verify every acceptance, measurement, and comparison claim against its cited source before publishing it. State limits that weaken the claim. Name the baseline and record decisions that differ from the cited requirement.
+Verify every acceptance, measurement, and comparison claim against its cited
+source before publishing it. State limits that weaken the claim. Name the
+baseline and record decisions that differ from the cited requirement.
 
 ## Concurrent cache initialization races
 
-Serialize cache creation before moving a downloaded or generated directory into its shared cache path. Check the destination again inside the serialization boundary before the move.
+Serialize cache creation before moving a downloaded or generated directory into
+its shared cache path. Check the destination again inside the serialization
+boundary before the move.
 
 ## Persistent build outputs contaminate discovery
 
-Discover generated inputs from the current build set, not from a persistent output directory. Remove stale artifacts or isolate each build before scanning.
+Discover generated inputs from the current build set, not from a persistent
+output directory. Remove stale artifacts or isolate each build before scanning.
+
+## Planned representations ignore type constraints
+
+Check planned data representations against the language type system before
+documenting them. Do not describe an implementation that cannot compile or that
+relies on an unstated unsafe alternative.
