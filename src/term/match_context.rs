@@ -14,6 +14,11 @@
 //! and the argument registers of a local call, and gives a runtime
 //! invariant error at each other instruction.
 
+use std::{
+    fmt,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
 use super::Binary;
 
 /// The panic message of a term operation, such as printing or hashing,
@@ -22,52 +27,101 @@ use super::Binary;
 pub(crate) const MATCH_CONTEXT_ESCAPE: &str =
     "a match context reached a term operation: only binary-match instructions read it";
 
+/// The bit of the state of a match context that marks a known position.
+const POSITION_KNOWN: u64 = 1 << 63;
+/// The mask of the bit position in the state of a match context. The other
+/// 63 bits hold the position, which is enough for the bits of a binary.
+const POSITION_MASK: u64 = POSITION_KNOWN - 1;
+
 /// The state of a binary match: the binary and the bit position of the
 /// next segment (`sb->start`). The match ends at the end of the binary
 /// (`sb->end`). ERTS makes a match context of the binary itself, with no
 /// copy (`erts_bs_start_match_3`, `erl_bits.c:81-105`), so a PBeam match
 /// context shares the bytes of the binary.
 ///
+/// A term holds the state in an `Arc`, so a copy of the term shares the
+/// state and its position, as an ERTS register holds a boxed pointer to
+/// the `ErlSubBits`. Only the process that owns the match context reads and
+/// writes the position, so each access uses the `Relaxed` order and needs
+/// no `RefCell` and no `Mutex` (owner decision R3 of
+/// [#450](https://github.com/fahchen/pbeam/issues/450),
+/// `docs/copy-on-write-terms.md`).
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let mut context = MatchContext::new(Binary::from(&[b'A', 195, 169][..]));
+/// let context = MatchState::new(Binary::from(&[b'A', 195, 169][..]));
 /// assert_eq!(context.get_utf8(), Some(65));
 /// assert_eq!(context.position(), 8);
 /// assert_eq!(context.remaining_bits(), 16);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MatchContext {
-    /// The bytes of the binary. A clone of the context shares them, as an
+pub struct MatchState {
+    /// The bytes of the binary. A copy of the state shares them, as an
     /// ERTS sub-bitstring refers to its binary.
     bytes: Binary,
-    /// The bit offset of the next segment from the start of the binary.
-    /// The `integer`, `binary`, `skip`, and `=:=` commands of `bs_match`
-    /// can move it by any number of bits.
-    position: usize,
-    /// `false` after a failed `=:=` command of `bs_match` and until
-    /// `bs_set_position`. ERTS then has the position at the end of the
-    /// read that holds the command, which PBeam does not model (row
-    /// "Binary matching" of `docs/erts-differences.md`).
-    position_known: bool,
+    /// The bit offset of the next segment from the start of the binary, and
+    /// the flag of a known position, in one `AtomicU64`. The low 63 bits
+    /// hold the offset, and the top bit is [`POSITION_KNOWN`]. The
+    /// `integer`, `binary`, `skip`, and `=:=` commands of `bs_match` can
+    /// move the offset by any number of bits. The flag is `false` after a
+    /// failed `=:=` command of `bs_match` and until `bs_set_position`.
+    /// ERTS then has the position at the end of the read that holds the
+    /// command, which PBeam does not model (row "Binary matching" of
+    /// `docs/erts-differences.md`).
+    position: AtomicU64,
 }
 
-impl MatchContext {
+impl fmt::Debug for MatchState {
+    /// Write the state as `MatchState { bytes: [1], position: 0, position_known: true }`.
+    /// The derived text of the atomic word shows the flag bit as a large
+    /// number, which hides the position.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let context = MatchState::new(Binary::from(&[1][..]));
+    /// assert_eq!(
+    ///     format!("{context:?}"),
+    ///     "MatchState { bytes: [1], position: 0, position_known: true }"
+    /// );
+    /// ```
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MatchState")
+            .field("bytes", &self.bytes)
+            .field("position", &self.position())
+            .field("position_known", &self.position_known())
+            .finish()
+    }
+}
+
+impl MatchState {
     /// Make a match context at the start of a binary, as
     /// `erts_bs_start_match_3` does (`erl_bits.c:81-105`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let context = MatchContext::new(Binary::from(&[1, 2][..]));
+    /// let context = MatchState::new(Binary::from(&[1, 2][..]));
     /// assert_eq!((context.position(), context.remaining_bits()), (0, 16));
     /// ```
     pub(crate) fn new(bytes: Binary) -> Self {
         Self {
             bytes,
-            position: 0,
-            position_known: true,
+            position: AtomicU64::new(POSITION_KNOWN),
         }
+    }
+
+    /// Return the atomic state: the bit position and the flag of a known
+    /// position.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(MatchState::new(Binary::from(&[1][..])).state(), 1 << 63);
+    /// ```
+    fn state(&self) -> u64 {
+        self.position.load(Ordering::Relaxed)
     }
 
     /// Return the bytes of the binary of this match context, as the match
@@ -77,7 +131,7 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let context = MatchContext::new(Binary::from(&[1, 2][..]));
+    /// let context = MatchState::new(Binary::from(&[1, 2][..]));
     /// assert_eq!(context.bytes().len(), 2);
     /// ```
     #[cfg(test)]
@@ -91,10 +145,10 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(MatchContext::new(Binary::from(&[1][..])).position(), 0);
+    /// assert_eq!(MatchState::new(Binary::from(&[1][..])).position(), 0);
     /// ```
     pub(crate) fn position(&self) -> usize {
-        self.position
+        (self.state() & POSITION_MASK) as usize
     }
 
     /// Set the bit position of the next segment, as `bs_set_position`
@@ -104,14 +158,16 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut context = MatchContext::new(Binary::from(&[1][..]));
+    /// let context = MatchState::new(Binary::from(&[1][..]));
     /// context.get_utf8();
     /// context.set_position(0);
     /// assert_eq!(context.remaining_bits(), 8);
     /// ```
-    pub(crate) fn set_position(&mut self, position: usize) {
-        self.position = position;
-        self.position_known = true;
+    pub(crate) fn set_position(&self, position: usize) {
+        self.position.store(
+            (position as u64 & POSITION_MASK) | POSITION_KNOWN,
+            Ordering::Relaxed,
+        );
     }
 
     /// Mark the position as unknown after a failed `=:=` command of
@@ -126,14 +182,14 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut context = MatchContext::new(Binary::from(&[1][..]));
+    /// let context = MatchState::new(Binary::from(&[1][..]));
     /// context.forget_position();
     /// assert!(!context.position_known());
     /// context.set_position(0);
     /// assert!(context.position_known());
     /// ```
-    pub(crate) fn forget_position(&mut self) {
-        self.position_known = false;
+    pub(crate) fn forget_position(&self) {
+        self.position.fetch_and(!POSITION_KNOWN, Ordering::Relaxed);
     }
 
     /// Return `false` after a failed `=:=` command and until
@@ -142,10 +198,10 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(MatchContext::new(Binary::from(&[1][..])).position_known());
+    /// assert!(MatchState::new(Binary::from(&[1][..])).position_known());
     /// ```
     pub(crate) fn position_known(&self) -> bool {
-        self.position_known
+        self.state() & POSITION_KNOWN != 0
     }
 
     /// Move the position by `size` bits, as the `skip` command of
@@ -158,16 +214,16 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut context = MatchContext::new(Binary::from(&[1, 2][..]));
+    /// let context = MatchState::new(Binary::from(&[1, 2][..]));
     /// assert_eq!(context.skip(12), Some(()));
     /// assert_eq!(context.remaining_bits(), 4);
     /// assert_eq!(context.skip(5), None);
     /// ```
-    pub(crate) fn skip(&mut self, size: u64) -> Option<()> {
+    pub(crate) fn skip(&self, size: u64) -> Option<()> {
         let size = usize::try_from(size)
             .ok()
             .filter(|&size| size <= self.remaining_bits())?;
-        self.position += size;
+        self.position.fetch_add(size as u64, Ordering::Relaxed);
         Some(())
     }
 
@@ -182,19 +238,19 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut context = MatchContext::new(Binary::from(&[0xAB, 0xCD][..]));
+    /// let context = MatchState::new(Binary::from(&[0xAB, 0xCD][..]));
     /// assert_eq!(context.read_bits(4), Some(vec![0xA0]));
     /// assert_eq!(context.read_bits(8), Some(vec![0xBC]));
     /// assert_eq!(context.read_bits(8), None);
     /// ```
-    pub(crate) fn read_bits(&mut self, size: u64) -> Option<Vec<u8>> {
-        let start = self.position;
+    pub(crate) fn read_bits(&self, size: u64) -> Option<Vec<u8>> {
+        let start = self.position();
         self.skip(size)?;
-        Some(segment_bits(&self.bytes, start, self.position - start))
+        Some(segment_bits(&self.bytes, start, self.position() - start))
     }
 
     /// Read `size` bits after the position and move the position past them,
-    /// as [`MatchContext::read_bits`] does, and return the bits as a view of
+    /// as [`MatchState::read_bits`] does, and return the bits as a view of
     /// the bytes of the binary. The view shares the bytes of the binary, as
     /// an ERTS `bs_get_binary2` or `bs_match` binary command writes a
     /// sub-bitstring that refers to the original binary
@@ -206,31 +262,31 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut context = MatchContext::new(Binary::from(&[1, 2, 3][..]));
+    /// let context = MatchState::new(Binary::from(&[1, 2, 3][..]));
     /// assert_eq!(context.read_bytes(16), Some(Binary::from(&[1, 2][..])));
     /// let bits = context.read_bytes(4).expect("4 bits remain");
     /// assert_eq!(&bits[..], &[0b0000_0000]);
     /// ```
-    pub(crate) fn read_bytes(&mut self, size: u64) -> Option<Binary> {
-        let start = self.position;
+    pub(crate) fn read_bytes(&self, size: u64) -> Option<Binary> {
+        let start = self.position();
         self.skip(size)?;
-        Some(self.bytes.bits(start, self.position))
+        Some(self.bytes.bits(start, self.position()))
     }
 
-    /// Move the position past `size` bits, as [`MatchContext::read_bits`]
+    /// Move the position past `size` bits, as [`MatchState::read_bits`]
     /// does, and give no bits. A caller that needs no bitstring term uses
     /// the function, so it copies no bits of the segment.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut context = MatchContext::new(Binary::from(&[1, 2, 3][..]));
+    /// let context = MatchState::new(Binary::from(&[1, 2, 3][..]));
     /// assert_eq!(context.advance(16), Some(()));
     /// assert_eq!(context.position(), 16);
     /// assert_eq!(context.advance(16), None);
     /// assert_eq!(context.position(), 16);
     /// ```
-    pub(crate) fn advance(&mut self, size: u64) -> Option<()> {
+    pub(crate) fn advance(&self, size: u64) -> Option<()> {
         self.skip(size)
     }
 
@@ -243,7 +299,7 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let context = MatchContext::new(Binary::from(&[1, 2, 3][..]));
+    /// let context = MatchState::new(Binary::from(&[1, 2, 3][..]));
     /// assert_eq!(context.bits_at(0, 16), Some(Binary::from(&[1, 2][..])));
     /// assert_eq!(context.bits_at(0, 4), None);
     /// ```
@@ -262,14 +318,17 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut context = MatchContext::new(Binary::from(&[1, 2, 3][..]));
+    /// let context = MatchState::new(Binary::from(&[1, 2, 3][..]));
     /// context.skip(8);
     /// assert_eq!(context.tail(), Some(Binary::from(&[2, 3][..])));
     /// assert_eq!(context.position(), 8);
     /// ```
     pub(crate) fn tail(&self) -> Option<Binary> {
         let size = self.bytes.len() * 8;
-        (self.position.is_multiple_of(8)).then(|| self.bytes.bits(self.position, size))
+        let position = self.position();
+        position
+            .is_multiple_of(8)
+            .then(|| self.bytes.bits(position, size))
     }
 
     /// Return the number of bits after the position (`sb->end -
@@ -278,11 +337,11 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(MatchContext::new(Binary::from(&[1, 2][..])).remaining_bits(), 16);
-    /// assert_eq!(MatchContext::new(Binary::from(&[][..])).remaining_bits(), 0);
+    /// assert_eq!(MatchState::new(Binary::from(&[1, 2][..])).remaining_bits(), 16);
+    /// assert_eq!(MatchState::new(Binary::from(&[][..])).remaining_bits(), 0);
     /// ```
     pub(crate) fn remaining_bits(&self) -> usize {
-        self.bytes.len() * 8 - self.position
+        self.bytes.len() * 8 - self.position()
     }
 
     /// Read one UTF-8 character at the position and move the position
@@ -296,22 +355,22 @@ impl MatchContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(MatchContext::new(Binary::from(&[195, 169][..])).get_utf8(), Some(233));
-    /// assert_eq!(MatchContext::new(Binary::from(&[195][..])).get_utf8(), None);
-    /// assert_eq!(MatchContext::new(Binary::from(&[192, 128][..])).get_utf8(), None);
-    /// assert_eq!(MatchContext::new(Binary::from(&[237, 160, 128][..])).get_utf8(), None);
-    /// assert_eq!(MatchContext::new(Binary::from(&[244, 144, 128, 128][..])).get_utf8(), None);
-    /// let mut context = MatchContext::new(Binary::from(&[0x04, 0x10][..]));
+    /// assert_eq!(MatchState::new(Binary::from(&[195, 169][..])).get_utf8(), Some(233));
+    /// assert_eq!(MatchState::new(Binary::from(&[195][..])).get_utf8(), None);
+    /// assert_eq!(MatchState::new(Binary::from(&[192, 128][..])).get_utf8(), None);
+    /// assert_eq!(MatchState::new(Binary::from(&[237, 160, 128][..])).get_utf8(), None);
+    /// assert_eq!(MatchState::new(Binary::from(&[244, 144, 128, 128][..])).get_utf8(), None);
+    /// let context = MatchState::new(Binary::from(&[0x04, 0x10][..]));
     /// context.skip(4);
     /// assert_eq!(context.get_utf8(), Some(65));
     /// ```
-    pub(crate) fn get_utf8(&mut self) -> Option<u32> {
+    pub(crate) fn get_utf8(&self) -> Option<u32> {
         // The whole bytes after the position, up to 4, aligned as
         // `erts_align_utf8_bytes` copies them (`erl_bits.c:2108-2126`).
         // A missing byte is short input, as the `remaining_bits` checks of
         // `erts_bs_get_utf8` give.
         let bits = (self.remaining_bits() / 8).min(4) * 8;
-        let rest = segment_bits(&self.bytes, self.position, bits);
+        let rest = segment_bits(&self.bytes, self.position(), bits);
         let first = u32::from(*rest.first()?);
         // A byte of the character that is a continuation byte `10xxxxxx`.
         let continuation = |index: usize| {
@@ -349,7 +408,8 @@ impl MatchContext {
             }
             _ => return None,
         };
-        self.position += size * 8;
+        self.position
+            .fetch_add((size * 8) as u64, Ordering::Relaxed);
         Some(code_point)
     }
 }

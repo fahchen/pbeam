@@ -84,7 +84,7 @@ The owner selected option A (round 1). The work adds an API layer first and chan
 2. A send, ETS, and `persistent_term` share a term physically (O(1)). See [Sharing between processes](#sharing-between-processes).
 3. A list is made of cons cells. `get_list` and `put_list` take O(1) time, as on ERTS. An improper list has its natural form, and the canonical form rule of `ImproperList` goes away. A list API comes first (#457), so callers do not match a `Vec`. Then one PR changes the representation (#458).
 4. Drop keeps the work stack and uses `Arc::into_inner` for each `Arc` node. See [Drop rule](#drop-rule).
-5. A match context is `Arc<MatchState>`. Its bytes are a shared binary (no copy in `MatchContext::new`). Its position and its `position_known` flag are in one `AtomicU64`: 63 bits for the bit position and 1 bit for the flag. Only the owner process uses it, so `Relaxed` order is sufficient, and it needs no `RefCell` and no `Mutex`.
+5. A match context is `Arc<MatchState>`. Its bytes are a shared binary (no copy in `MatchState::new`). Its position and its `position_known` flag are in one `AtomicU64`: 63 bits for the bit position and 1 bit for the flag. Only the owner process uses it, so `Relaxed` order is sufficient, and it needs no `RefCell` and no `Mutex`.
 6. `PartialEq` has an `Arc::ptr_eq` fast path. A compile-time assertion checks `Term: Send + Sync`.
 7. A map and its HAMT nodes are in `Arc`. An update copies only the path (O(log N)), as `erl_map.c:2477` does. A flatmap of at most 32 pairs is copied whole, as `erts_maps_put` does. Shared subtrees make the steps of `maps:merge/2` the same as on ERTS (`erl_map.c:1608-1612`). This is a reduction change, so #453 measures it against the pinned ERTS. Result of #453: the steps are the same as on ERTS for a map and an update of it. They are different for the results of the other map BIFs and for a map from a send, ETS, or `persistent_term` (row "Map merge reductions" of `docs/erts-differences.md`).
 
@@ -103,7 +103,7 @@ Expected result (analysis): the tuple, list, nested, and send benchmarks go from
 | Fun | `Fun { target, free: Vec<Term> }` | `Fun(Option<Arc<FunThing>>)` newtype, where `FunThing` holds the entry and the free variables (#455) | Immutable; a copy shares the thing, and the entry and the free variables do not change | #455 |
 | Match context | `Rc<RefCell<MatchContext>>`; bytes copied into an `Arc<[u8]>` | `Arc<MatchState>`; bytes are the shared binary (#456); position and `position_known` in one `AtomicU64` (#459) | `Relaxed` atomic store by the owner process | #456 (bytes), #459 (`Arc` and atomic) |
 
-After #454, #455, #456, and #458, `Term::clone` is a shallow copy. #455 removes the work stack of `Clone`: `shallow_clone` keeps the `Term` variants, and #456 makes its binary arm copy the `Arc` of the binary and not its bytes. #459 removes `shallow_clone`. Only the work stack of `Drop` stays.
+After #454, #455, #456, and #458, `Term::clone` is a shallow copy. #455 removed the work stack of `Clone`: `shallow_clone` kept the `Term` variants, and #456 made its binary arm copy the `Arc` of the binary and not its bytes. #459 removed `shallow_clone`: `Clone::clone` is now one match over the variants. Only the work stack of `Drop` stays.
 
 ## List API
 
@@ -130,7 +130,7 @@ A trap of a list BIF keeps the rest of its list as a term in O(1) time: `length/
 Task #456 changed `Term::Binary` from `Binary(Vec<u8>)` to a `Binary` newtype in `src/term/binary.rs`: one `Arc<Vec<u8>>` that holds the bytes of the source binary from its first byte, the bit offset of the view of this binary in that array, and its size in bits. A copy of a binary term copies the `Arc`, so it takes O(1) time, and each sub-binary keeps the array of its source (`docs/portable-beam-spec.md:97`). `PartialEq` compares the bytes of the two views, so the size of the array does not change the result.
 
 - `Term::binary(bytes)` builds a binary and replaces each `Term::Binary(vec![..])` construction outside the term module. The other constructions use `Binary::from`.
-- `binary_part/3`, `bs_get_binary2`, the `binary` and `get_tail` commands of `bs_match`, and `binary:split/2,3` return a view of the bytes of the source. `MatchContext::new` takes the `Binary` of its instruction, so it copies no bytes, `MatchContext::bits_at` gives the bytes between two bit positions as a view of the same array, and `MatchContext::advance` moves the position past a segment that needs no bitstring term, so `bs_get_binary2` copies no byte to find the view.
+- `binary_part/3`, `bs_get_binary2`, the `binary` and `get_tail` commands of `bs_match`, and `binary:split/2,3` return a view of the bytes of the source. `MatchState::new` takes the `Binary` of its instruction, so it copies no bytes, `MatchState::bits_at` gives the bytes between two bit positions as a view of the same array, and `MatchState::advance` moves the position past a segment that needs no bitstring term, so `bs_get_binary2` copies no byte to find the view.
 - The size of a view is a number of bits, because an ERTS sub-bitstring starts and ends at any bit (`erts_bs_get_binary_2`, `erl_bits.c:400-424`). `Binary::bits` copies no byte when the first bit is on a byte boundary, and it packs the bits of a view whose first bit is not on a byte boundary in a vector of one `Arc` at that call. The `binary` command of `bs_match` reads a whole number of bytes at such a position (`GET_BITSTRING`, jit/arm/instr_bs.cpp:3136-3176), so that view is a supported path. PBeam has no bitstring term, so a view whose size is not a whole number of bytes comes only from a segment that PBeam does not run yet, and each such path stops with the runtime error that `docs/erts-differences.md` records in the row "Bitstring terms".
 - A `bs_create_bin` append segment takes the bytes of a binary as an owned vector with `Binary::to_bytes`, which copies them, because the term keeps its binary. The copy phase of `list_to_bitstring/1` owns the `Binary` of its trap state, so it takes the bytes with `Binary::take_bytes`, which moves the array out with `Arc::into_inner` when the state was its last holder. No turn copies the bytes of an earlier turn, and the work stays O(n).
 
@@ -149,8 +149,8 @@ Task #456 changed `Term::Binary` from `Binary(Vec<u8>)` to a `Binary` newtype in
 ## Equality and thread safety
 
 - `PartialEq` returns `true` for two terms that hold the same `Arc` (`Arc::ptr_eq`) before it compares their contents. A binary also needs one offset and one size, because two views of one array can hold different bytes. Two different allocations with equal contents are still compared element by element, so the worst case stays O(size). #454 adds the fast path for a tuple, #458 for a cons cell, and #455 for a fun. The fast path of a fun compares its shared thing, which holds the entry and the free variables. #456 adds the fast path for a binary.
-- A compile-time assertion checks `Term: Send + Sync` (#459). On main, `Rc<Repr>` of `Map` (`src/term/map.rs:112`) and `Rc<RefCell<MatchContext>>` (`src/term.rs:80`) are the parts that are not `Send`. #453 replaces the first, and #459 replaces the second.
-- Process mutable state stays exclusive to its process. Terms are shared and immutable. #459 changes the wording of #10 to this rule.
+- A compile-time assertion checks `Term: Send + Sync` (#459). On main, `Rc<Repr>` of `Map` (`src/term/map.rs:112`) and `Rc<RefCell<MatchContext>>` (`src/term.rs:80`) were the parts that were not `Send`. #453 replaced the first, and #459 replaced the second. The assertion is the empty trait `TermIsSendAndSync: Send + Sync` with an `impl` for `Term`: the bound of the trait is the check, and the trait has no function, so it adds no runtime code and no coverage line.
+- Process mutable state stays exclusive to its process. Terms are shared and immutable. #459 changed the wording of #10 to this rule.
 
 ## Sharing between processes
 
@@ -161,6 +161,18 @@ Logical copy rule: a later implementation of a value that depends on a copy comp
 - `docs/erts-differences.md` gets a "Message copy" row in #459: PBeam shares a term in a send, ETS, and `persistent_term`. The row states the ERTS copy policy of each operation: a send to another process copies the term and expands shared subterms, and a send to the process itself with the message queue on the heap does not copy; an ETS insert copies the term and expands shared subterms, and a lookup copies the stored term out; `persistent_term:put/2` copies the term and keeps its internal sharing (`erl_bif_persistent.c:744-761`), and `get/1` does not copy. The row states the logical copy rule.
 - The backlog entry "Model the process heap for GC reductions and the message copy cost" keeps the send reductions.
 - PBeam does not track the literal origin of a term now. Only the send reductions or `memory` need it (the copy skips literals, `copy.c:105-107`), and the same backlog entry owns it.
+
+### Result of #459
+
+Task #459 made the sharing of this section the behavior of the code and implements the last representation task of the epic. The epic itself stays open until this task merges and the epic checkpoint is recorded:
+
+- `Term::MatchContext` holds an `Arc<MatchState>`. `MatchState` keeps the binary of the match and one `AtomicU64` that holds the bit position and the `position_known` flag: the low 63 bits are the position, and the top bit is the flag. Only the process that owns the match context reads and writes it, so each access uses the `Relaxed` order, as owner decision R3 of [#450](https://github.com/fahchen/pbeam/issues/450) requires. The `Rc<RefCell<...>>` and the `RefCell` borrow go away.
+- `Term::clone` is one match over the variants. It shares the storage of each compound term, and no arm walks the nested terms. `shallow_clone` went away, and only the work stack of `Drop` stays.
+- A compile-time assertion checks `Term: Send + Sync`. The four `#![expect(clippy::arc_with_non_send_sync, ...)]` attributes of the term modules went away, because their reason ("a term is not `Send` and `Sync` until #459") no longer holds.
+- The unit tests `sends_a_message_that_shares_the_term_of_the_sender` (`tests/runtime/scheduler.rs`), `shares_the_stored_term_of_an_ets_lookup`, and `shares_the_stored_term_of_a_persistent_term` (`tests/runtime/interpreter.rs`) use `Term::shares_storage_with` on the real code paths: `Scheduler::send_message`, `ets:insert/2` and `ets:lookup/2`, and `persistent_term:put/2` and `persistent_term:get/1`. Each test fails when `Term::clone` copies a compound term again.
+- This task changes no return value, no exception, no message, and no reduction count. The reduction differences that `docs/erts-differences.md` already records stay: PBeam counts no send copy reduction (row "Message copy"), and `maps:merge/2` of a map that came from a send, ETS, or `persistent_term` uses a different number of steps than on ERTS (row "Map merge reductions"). The property tests and the binary-match tests do not change.
+
+The epic checkpoint benchmark of the Terra Counter is not recorded here. The session that landed #459 runs under a file sandbox that denies `/dev/ptmx`, so no pseudo-terminal starts. The harness and the exact commands wait in the PR of #459.
 
 ## Needless clones
 
@@ -267,6 +279,8 @@ Before #455, `Term::Fun` holds the entry and the free variables, so `Fun` and `T
 
 The design run of 2026-10-11 on main (revision not recorded; this task did not run it again): start the Terra Counter example in a PTY, wait 20 s, send the keys `j`, `j`, `k`, and `q` 2 s apart, and record the time from each key to the first output after it. The output came 0.13, 0.16, 0.17, and 0.21 s after the four keys. Before #427, each output came seconds after its key. The PTY script of this run is not in the repository.
 
+The epic checkpoint of [#450](https://github.com/fahchen/pbeam/issues/450) re-runs this measurement after #459 with the debug and release `pbeam` builds and with the pinned ERTS. The checkpoint stays open: the session that landed #459 runs under a file sandbox that denies `/dev/ptmx`, so the harness cannot start a pseudo-terminal there. See the PR of #459 for the harness and the exact commands.
+
 ### Benchmark module
 
 ```erlang
@@ -353,7 +367,7 @@ These are the decisions of 2026-10-11 in Suikou review 01a1282e.
 
 - Option A, with `Arc` now (design round 1; design question 1).
 - Lists are cons cells, not `Vec` (design question 2).
-- A send shares a term (R3; design question 3). #10 changes its wording to "process mutable state is exclusive; terms are shared and immutable".
+- A send shares a term (R3; design question 3). #459 changed the wording of #10 to "process mutable state is exclusive; terms are shared and immutable".
 - The epic is `[m5-e4]` in the milestone `[m5] Interactive host I/O` (R4; design question 8). The design draft named it `[m5-e3]`; the code loading epic took that number. The first implementation task is the borrowed read (#452).
 - The mutable state of a match context is an `AtomicU64` with `Relaxed` order, not a `Mutex` (design question 4).
 - #453 measures the steps of `maps:merge/2` against the pinned ERTS (design question 5). The row "Map merge reductions" of `docs/erts-differences.md` records the result.

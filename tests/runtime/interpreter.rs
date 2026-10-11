@@ -1,6 +1,6 @@
 use std::{collections::HashMap, rc::Rc};
 
-use super::bif::BIFS;
+use super::bif::{BIFS, BifResult};
 use super::{
     BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
     read_operand, write_operand,
@@ -8,8 +8,18 @@ use super::{
 use crate::{
     BeamModule, Map, Term,
     beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind},
-    term::{Atom, AtomTable, Lambda, test_atom},
+    runtime::{
+        capability::{AllowAll, Capability, Policy},
+        ets::{Access, Table},
+        process::tests::frame,
+    },
+    term::{Atom, AtomTable, Lambda, Reference, test_atom},
 };
+
+/// Return the initial capabilities of the default policy.
+fn allow_all() -> Vec<Capability> {
+    AllowAll.initial()
+}
 
 /// The runtime error of a root process that exits with an uncaught
 /// `error:badarg`. PBeam gives the stack trace `[]`.
@@ -3252,4 +3262,69 @@ fn rejects_integer_conversions_of_a_bignum_with_no_reductions_left() {
             )
         );
     }
+}
+
+#[test]
+fn shares_the_stored_term_of_an_ets_lookup() {
+    // An ETS insert copies the object into the table and a lookup copies it
+    // out on ERTS (`db_store_term`, erl_db_util.c:3559, and
+    // `db_copy_from_comp`, `:3729`). PBeam shares the term by owner
+    // decision R3 of #450 (row "Message copy" of docs/erts-differences.md).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new(program.atoms.clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    scheduler
+        .ets
+        .create(Reference(0), None, Table::new(owner, Access::Public, 1));
+    // A list for the value: the element of the looked-up object shares the
+    // cons cell of the inserted term.
+    let value = Term::list_from([Term::Integer(2), Term::Integer(3)]);
+    let object = Term::tuple(vec![Term::Integer(1), value.clone()]);
+    program
+        .bif(&mut scheduler, "ets", "insert", vec![id.clone(), object])
+        .unwrap();
+    let result = program
+        .bif(&mut scheduler, "ets", "lookup", vec![id, Term::Integer(1)])
+        .unwrap();
+    let BifResult::Value(objects) = result else {
+        panic!("ets:lookup/2 did not return a value");
+    };
+    let (mut objects, _) = objects.list_cells().expect("ets:lookup/2 returns a list");
+    let found = objects.next().expect("the table holds the object");
+    let Term::Tuple(elements) = found else {
+        panic!("the stored object is a tuple");
+    };
+    assert!(value.shares_storage_with(&elements[1]));
+}
+
+#[test]
+fn shares_the_stored_term_of_a_persistent_term() {
+    // `persistent_term:put/2` copies the term to a literal area on ERTS
+    // (`erl_bif_persistent.c:744-761`), and `persistent_term:get/1` does not
+    // copy (`:380-388`). PBeam shares the term by owner decision R3 of #450
+    // (row "Message copy" of docs/erts-differences.md).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new(program.atoms.clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let key = Term::tuple(vec![Term::Integer(7)]);
+    let value = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap());
+    program
+        .bif(
+            &mut scheduler,
+            "persistent_term",
+            "put",
+            vec![key.clone(), value.clone()],
+        )
+        .unwrap();
+    let result = program
+        .bif(&mut scheduler, "persistent_term", "get", vec![key])
+        .unwrap();
+    let BifResult::Value(stored) = result else {
+        panic!("persistent_term:get/1 did not return a value");
+    };
+    assert!(value.shares_storage_with(&stored));
 }

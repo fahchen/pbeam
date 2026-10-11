@@ -20,12 +20,12 @@ pub(crate) use hash::internal_hash;
 use list::{Cons, ConsRef};
 pub use map::Map;
 pub(crate) use map::{Direction, from_list_units};
-pub use match_context::MatchContext;
+pub use match_context::MatchState;
 pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
 use tuple::Tuple;
 
-use std::{cell::RefCell, fmt, rc::Rc};
+use std::{fmt, sync::Arc};
 
 /// The smallest ERTS small integer on a 64-bit system: -(2^59).
 pub(crate) const SMALL_INTEGER_MIN: i64 = -(1 << 59);
@@ -35,8 +35,9 @@ const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
 /// (`ERTS_MAX_TUPLE_SIZE` and `MAX_ARITYVAL` in `erl_term.h:322-323`).
 pub(crate) const MAX_TUPLE_SIZE: usize = (1 << 24) - 1;
 
-/// A BEAM term. Lists, tuples, maps, and funs can nest to any depth, as in
-/// ERTS, so `Drop`, `Clone`, `PartialEq`, and `Debug` use explicit work
+/// A BEAM term. Lists, tuples, maps, funs, and binaries can nest to any
+/// depth, as in ERTS. A clone of a compound term shares its storage and
+/// takes O(1) time. `Drop`, `PartialEq`, and `Debug` use explicit work
 /// stacks and do not recurse on the Rust stack.
 pub enum Term {
     /// An atom: its index in the atom table of the program, and its name.
@@ -81,14 +82,26 @@ pub enum Term {
     /// The term is a reference to the match context, as an ERTS register
     /// holds a boxed pointer to the `ErlSubBits` on the process heap. A
     /// copy of the term, from `move`, `bs_start_match3`, or
-    /// `bs_start_match4`, shares the match context and its position. The
-    /// registers and stack slots of one process own the references, and
-    /// the last reference that drops releases the match context. Only the
-    /// binary-match instructions read it, `move` copies it, and a local
-    /// call keeps it in its argument register. Each other instruction that
-    /// gets a match context gives a runtime invariant error.
-    MatchContext(Rc<RefCell<MatchContext>>),
+    /// `bs_start_match4`, shares the state and its position. The registers
+    /// and stack slots of one process own the references, and the last
+    /// reference that drops releases the state. Only the binary-match
+    /// instructions read it, `move` copies it, and a local call keeps it in
+    /// its argument register. Each other instruction that gets a match
+    /// context gives a runtime invariant error.
+    MatchContext(Arc<MatchState>),
 }
+
+/// Check at compile time that a term is `Send` and `Sync`, which the
+/// multi-scheduler work of [#10](https://github.com/fahchen/pbeam/issues/10)
+/// needs (owner decision R3 of
+/// [#450](https://github.com/fahchen/pbeam/issues/450),
+/// `docs/copy-on-write-terms.md`). The bound of the trait is the check: a
+/// `Term` that is not `Send` or not `Sync` does not satisfy it, so the
+/// crate does not compile. The trait has no function, so it adds no
+/// runtime code and no coverage line.
+#[allow(dead_code)]
+trait TermIsSendAndSync: Send + Sync {}
+impl TermIsSendAndSync for Term {}
 
 impl Term {
     /// Return the term of a static atom, such as `true` or `normal`. A
@@ -172,37 +185,6 @@ impl Term {
         false
     }
 
-    /// Copy a term without a walk of its nested terms. A tuple copy shares
-    /// its element array, a map copy shares the form of the map, a list copy
-    /// shares its cons cells, and a fun copy shares its free variables, so
-    /// they take O(1) time. A binary copy still copies its bytes (#456).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(Term::Integer(1).shallow_clone(), Term::Integer(1));
-    /// assert_eq!(Term::Map(Map::new()).shallow_clone(), Term::Map(Map::new()));
-    /// assert_eq!(Term::list_from([Term::Integer(1)]).shallow_clone(), Term::list_from([Term::Integer(1)]));
-    /// assert_eq!(Term::tuple(vec![]).shallow_clone(), Term::tuple(vec![]));
-    /// assert_eq!(fun.shallow_clone(), fun);
-    /// ```
-    fn shallow_clone(&self) -> Term {
-        match self {
-            Term::Nil => Term::Nil,
-            Term::Cons(cell) => Term::Cons(cell.clone()),
-            Term::Tuple(elements) => Term::Tuple(elements.clone()),
-            Term::Map(map) => Term::Map(map.clone()),
-            Term::Fun(fun) => Term::Fun(fun.clone()),
-            Term::Atom(atom) => Term::Atom(atom.clone()),
-            Term::Binary(bytes) => Term::Binary(bytes.clone()),
-            Term::Integer(value) => Term::Integer(*value),
-            Term::Pid(pid) => Term::Pid(*pid),
-            Term::Port(port) => Term::Port(*port),
-            Term::Reference(reference) => Term::Reference(*reference),
-            Term::MatchContext(context) => Term::MatchContext(context.clone()),
-        }
-    }
-
     /// Move the nested terms of a list, tuple, map, or fun onto a work stack
     /// and leave the term empty. A tuple gives up its array
     /// ([`Tuple::take_last`]), and only the last holder of the array moves
@@ -233,6 +215,31 @@ impl Term {
     }
 }
 
+#[cfg(test)]
+impl Term {
+    /// Return whether two terms hold one shared storage: one element array
+    /// of a tuple, one cons cell, or one form of a map. A test uses it to
+    /// show that a send, an ETS lookup, and a `persistent_term:get/1`
+    /// result share the term of the store (owner decision R3 of
+    /// [#450](https://github.com/fahchen/pbeam/issues/450),
+    /// `docs/copy-on-write-terms.md`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let term = Term::tuple(vec![Term::Integer(1)]);
+    /// assert!(term.shares_storage_with(&term.clone()));
+    /// ```
+    pub(crate) fn shares_storage_with(&self, other: &Term) -> bool {
+        match (self, other) {
+            (Term::Cons(left), Term::Cons(right)) => left.same_cell(right),
+            (Term::Tuple(left), Term::Tuple(right)) => left.same_array(right),
+            (Term::Map(left), Term::Map(right)) => left.same_form(right),
+            _ => false,
+        }
+    }
+}
+
 impl Drop for Term {
     /// Move nested terms onto a work stack, so dropping a deep term does not
     /// recurse.
@@ -253,10 +260,15 @@ impl Drop for Term {
 }
 
 impl Clone for Term {
-    /// Copy a term without a walk of its nested terms. A tuple copy shares
-    /// its element array, a map copy shares the form of the map, a list copy
-    /// shares its cons cells, and a fun copy shares its free variables, so
-    /// they take O(1) time.
+    /// Copy a term. The copy of a compound term shares its storage, so it
+    /// takes O(1) time and does not walk the nested terms: a tuple copy
+    /// shares its element array, a map copy shares the form of the map, a
+    /// list copy shares its cons cells, a fun copy shares its free
+    /// variables, a binary copy shares its bytes, and a match context copy
+    /// shares its state. A send, ETS, and `persistent_term` use this copy,
+    /// so they share a term with the process that gives it (owner decision
+    /// R3 of [#450](https://github.com/fahchen/pbeam/issues/450),
+    /// `docs/copy-on-write-terms.md`).
     ///
     /// # Examples
     ///
@@ -265,7 +277,20 @@ impl Clone for Term {
     /// assert_eq!(term.clone(), term);
     /// ```
     fn clone(&self) -> Self {
-        self.shallow_clone()
+        match self {
+            Term::Atom(atom) => Term::Atom(atom.clone()),
+            Term::Binary(bytes) => Term::Binary(bytes.clone()),
+            Term::Integer(value) => Term::Integer(*value),
+            Term::Nil => Term::Nil,
+            Term::Cons(cell) => Term::Cons(cell.clone()),
+            Term::Tuple(elements) => Term::Tuple(elements.clone()),
+            Term::Map(map) => Term::Map(map.clone()),
+            Term::Pid(pid) => Term::Pid(*pid),
+            Term::Port(port) => Term::Port(*port),
+            Term::Reference(reference) => Term::Reference(*reference),
+            Term::Fun(fun) => Term::Fun(fun.clone()),
+            Term::MatchContext(context) => Term::MatchContext(Arc::clone(context)),
+        }
     }
 }
 
@@ -338,7 +363,7 @@ impl PartialEq for Term {
                 // A match context is a heap object, so its identity is its
                 // address. ERTS never compares a match context
                 // (`get_term_type`, beam_validator.erl:2903-2908).
-                (Term::MatchContext(left), Term::MatchContext(right)) => Rc::ptr_eq(left, right),
+                (Term::MatchContext(left), Term::MatchContext(right)) => Arc::ptr_eq(left, right),
                 _ => false,
             };
             if !equal {
@@ -387,9 +412,7 @@ impl fmt::Debug for Term {
                 Term::Pid(pid) => write!(formatter, "Pid({pid:?})")?,
                 Term::Port(port) => write!(formatter, "Port({port:?})")?,
                 Term::Reference(reference) => write!(formatter, "Reference({reference:?})")?,
-                Term::MatchContext(context) => {
-                    write!(formatter, "MatchContext({:?})", context.borrow())?
-                }
+                Term::MatchContext(context) => write!(formatter, "MatchContext({context:?})")?,
                 Term::Nil | Term::Cons(_) => {
                     let (elements, tail) = term.list_cells().expect("the term is a list");
                     let elements: Vec<_> = elements.collect();

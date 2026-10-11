@@ -180,7 +180,7 @@ impl Binary {
 
     /// Return the bytes of this binary as an owned vector. A size that is
     /// not a whole number of bytes gives the extra bits in the high bits of
-    /// the last byte, as [`MatchContext::read_bits`] packs them. The
+    /// the last byte, as [`MatchState::read_bits`] packs them. The
     /// function copies the bytes, and leaves the binary and its array
     /// unchanged.
     ///
@@ -257,7 +257,7 @@ fn byte(bit: usize) -> usize {
 }
 
 /// Return the `size` bits of `bytes` from the bit `shift`, packed in bytes
-/// as [`MatchContext::read_bits`] gives them: the first bit is the high bit
+/// as [`MatchState::read_bits`] gives them: the first bit is the high bit
 /// of the first byte, and the bits after the size in the last byte are 0.
 ///
 /// # Examples

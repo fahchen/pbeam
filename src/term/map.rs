@@ -23,10 +23,6 @@
 //! maps, funs, pids, and references, which PBeam does not have yet. So does
 //! a list or a tuple with a binary element, for example `[<<>>]` and
 //! `{<<>>}`.
-#![expect(
-    clippy::arc_with_non_send_sync,
-    reason = "a term is not Send and Sync until #459, and a map uses Arc now so that #459 does not change it again"
-)]
 
 use std::cmp::Ordering;
 use std::sync::Arc;
