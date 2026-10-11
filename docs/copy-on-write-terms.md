@@ -88,7 +88,7 @@ The owner selected option A (round 1). The work adds an API layer first and chan
 6. `PartialEq` has an `Arc::ptr_eq` fast path. A compile-time assertion checks `Term: Send + Sync`.
 7. A map and its HAMT nodes are in `Arc`. An update copies only the path (O(log N)), as `erl_map.c:2477` does. A flatmap of at most 32 pairs is copied whole, as `erts_maps_put` does. Shared subtrees make the steps of `maps:merge/2` the same as on ERTS (`erl_map.c:1608-1612`). This is a reduction change, so #453 measures it against the pinned ERTS. Result of #453: the steps are the same as on ERTS for a map and an update of it. They are different for the results of the other map BIFs and for a map from a send, ETS, or `persistent_term` (row "Map merge reductions" of `docs/erts-differences.md`).
 
-Expected result (analysis): the tuple, list, nested, and send benchmarks go from milliseconds to microseconds. `size_of::<Term>()` is 96 bytes before #460 and 80 bytes after it (measured; see [Atom size](#atom-size-460)). The target of at most 24 bytes needs the shared free variables of a fun (#455) and the shared binary bytes (#456). See [Limits and open points](#limits-and-open-points) for the binary layout that this target needs.
+Expected result (analysis): the tuple, list, nested, and send benchmarks go from milliseconds to microseconds. `size_of::<Term>()` is 96 bytes before #460, 80 bytes after it (measured; see [Atom size](#atom-size-460)), and 32 bytes after #455 (measured; see [Fun size](#fun-size-455)). The target of at most 24 bytes needs the shared binary bytes (#456). See [Limits and open points](#limits-and-open-points) for the binary layout that this target needs.
 
 ## Representation of each term kind
 
@@ -239,7 +239,19 @@ Revision `31f765b` (the base of the branch) before the atom change and the branc
 | `size_of::<Fun>()` | 96 bytes | 80 bytes |
 | `size_of::<Term>()` | 96 bytes | 80 bytes |
 
-An `Arc<str>` is a 16-byte fat pointer, and the index is 4 bytes, so `Atom` is 24 bytes where the inline `String` needs 32. `Fun` is the largest variant before and after: it holds the `Target` (a `Lambda` with one atom, or an external fun with two atoms and an arity) and the `Vec<Term>` of the free variables. Thus `Term` follows `Fun`, and #460 alone cannot reach the design target of 24 bytes. The target needs #455 and #456 (see [Limits and open points](#limits-and-open-points)).
+An `Arc<str>` is a 16-byte fat pointer, and the index is 4 bytes, so `Atom` is 24 bytes where the inline `String` needs 32. Before #455, `Fun` is the largest variant at both revisions of the table above: it holds the `Target` (a `Lambda` with one atom, or an external fun with two atoms and an arity) and the `Vec<Term>` of the free variables. Thus `Term` follows `Fun`, and #460 alone cannot reach the design target of 24 bytes. The target needs #455 and #456 (see [Limits and open points](#limits-and-open-points)).
+
+### Fun size (#455)
+
+The branch of #455 merged with #460, 64-bit build. A scratch unit test of the crate (not committed) prints the sizes with `std::mem::size_of`; `Fun` is not public, so a scratch crate cannot read it.
+
+| Value | Before #455 | After #455 |
+| --- | --- | --- |
+| `size_of::<Fun>()` | 80 bytes | 8 bytes |
+| `size_of::<FunThing>()` | 80 bytes, in the term | 80 bytes, behind the pointer |
+| `size_of::<Term>()` | 80 bytes | 32 bytes |
+
+Before #455, `Term::Fun` holds the entry and the free variables, so `Fun` and `Term` are 80 bytes. After #455, `Fun` is one pointer to the thing, so a copy moves 8 bytes. The thing stays 80 bytes behind the pointer, so the free variables do not move with a copy. `Term` is 32 bytes: its largest payloads are `Atom` (24 bytes, #460) and the binary `Vec<u8>` (24 bytes), and the enum tag needs the other 8 bytes. Thus #455 removes the fun from the largest variant, and #456 owns the remaining gap to the target of 24 bytes (see [Limits and open points](#limits-and-open-points)).
 
 ### Terra Counter key latency
 
@@ -340,6 +352,6 @@ These are the decisions of 2026-10-11 in Suikou review 01a1282e.
 
 ## Limits and open points
 
-- Measured result of #460: `size_of::<Term>()` is 80 bytes, not the 24 bytes of the target above. `Fun` is the largest variant (80 bytes: a 56-byte `Target` and a 24-byte `Vec<Term>`), and #460 shrinks only the atom (`Atom` goes from 32 bytes to 24 bytes). Thus the target of 24 bytes needs #455, which puts the entry and the free variables of a fun behind one pointer, and #456, which puts the binary bytes behind one pointer. Analysis of this document: a term cannot be smaller than its largest payload, so #456 must not leave a 32-byte binary payload. A fat `Arc<[u8]>` (16 bytes) with an inline `usize` offset and length is 32 bytes, and a smaller offset or length type adds a binary size limit that ERTS does not have, so it is not permitted. A model enum with a 24-byte `Atom`, a 24-byte `Vec<u8>` binary, and each other payload at 8 bytes is 32 bytes, and the same model with an 8-byte binary payload is 24 bytes. Thus the binary payload decides the target, and the earlier analysis that each enum payload must be at most 16 bytes is too strong.
+- Measured result of #460: `size_of::<Term>()` is 80 bytes, not the 24 bytes of the target above. `Fun` is the largest variant (80 bytes: a 56-byte `Target` and a 24-byte `Vec<Term>`), and #460 shrinks only the atom (`Atom` goes from 32 bytes to 24 bytes). Thus the target of 24 bytes needs #455, which puts the entry and the free variables of a fun behind one pointer, and #456, which puts the binary bytes behind one pointer. Analysis of this document: a term cannot be smaller than its largest payload, so #456 must not leave a 32-byte binary payload. A fat `Arc<[u8]>` (16 bytes) with an inline `usize` offset and length is 32 bytes, and a smaller offset or length type adds a binary size limit that ERTS does not have, so it is not permitted. A model enum with a 24-byte `Atom`, a 24-byte `Vec<u8>` binary, and each other payload at 8 bytes is 32 bytes, and the same model with an 8-byte binary payload is 24 bytes. Thus the binary payload decides the target, and the earlier analysis that each enum payload must be at most 16 bytes is too strong. Measured result of #455: `size_of::<Term>()` is 32 bytes and `size_of::<Fun>()` is 8 bytes, which confirms this model, so the binary payload now decides the remaining gap to 24 bytes.
 - `length/1` and `lists:nth/2` take O(n) time on cons cells, as on ERTS. Since #458, code that needs the length of a list walks it.
 - The drop of the last holder of a term still takes O(size) time, as on main.
