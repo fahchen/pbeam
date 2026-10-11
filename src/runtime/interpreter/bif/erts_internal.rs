@@ -334,7 +334,7 @@ pub(super) fn open_port(
 /// An option that ERTS accepts and PBeam does not support returns a runtime
 /// error, also when a later element is not valid.
 fn port_settings(settings: &Term) -> Result<Option<PortSettings>, BeamError> {
-    let Some((elements, None)) = list_cells(settings) else {
+    let Some(elements) = settings.proper_list() else {
         return Ok(None);
     };
     let mut result = PortSettings {
@@ -410,13 +410,11 @@ fn unsupported_option(name: &str) -> BeamError {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let args = Term::List(vec![Term::Binary(b"-c".to_vec()), Term::List(vec![])]);
+/// let args = Term::list_from(vec![Term::Binary(b"-c".to_vec()), Term::nil()]);
 /// assert_eq!(port_args(&args), Some(vec![b"-c".to_vec(), Vec::new()]));
 /// ```
 fn port_args(args: &Term) -> Option<Vec<Vec<u8>>> {
-    let (elements, None) = list_cells(args)? else {
-        return None;
-    };
+    let elements = args.proper_list()?;
     elements.iter().map(|arg| native_name(arg, true)).collect()
 }
 
@@ -467,8 +465,8 @@ fn spawn_executable(name: &Term) -> Result<Option<Vec<u8>>, BeamError> {
 /// ```rust,ignore
 /// assert_eq!(native_name(&Term::Binary(b"/bin/sh\0x".to_vec()), false), Some(b"/bin/sh".to_vec()));
 /// assert_eq!(native_name(&Term::static_atom("ok"), false), Some(b"ok".to_vec()));
-/// assert_eq!(native_name(&Term::List(vec![]), false), None);
-/// assert_eq!(native_name(&Term::List(vec![]), true), Some(Vec::new()));
+/// assert_eq!(native_name(&Term::nil(), false), None);
+/// assert_eq!(native_name(&Term::nil(), true), Some(Vec::new()));
 /// ```
 fn native_name(name: &Term, allow_empty: bool) -> Option<Vec<u8>> {
     let characters;
@@ -479,10 +477,10 @@ fn native_name(name: &Term, allow_empty: bool) -> Option<Vec<u8>> {
         }
         Term::Atom(atom) => {
             let text = atom.name().chars();
-            characters = Term::List(text.map(|c| Term::Integer(u32::from(c).into())).collect());
+            characters = Term::list_from(text.map(|c| Term::Integer(u32::from(c).into())));
             &characters
         }
-        Term::List(elements) if elements.is_empty() && !allow_empty => return None,
+        name if name.is_nil() && !allow_empty => return None,
         name => name,
     };
     native_filename(name, filename_encoding())
@@ -527,7 +525,7 @@ fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = port_command(&mut context, &Term::Port(port), &Term::Binary(b"hi".to_vec()), &Term::List(vec![]))?;
+/// let result = port_command(&mut context, &Term::Port(port), &Term::Binary(b"hi".to_vec()), &Term::nil())?;
 /// ```
 ///
 /// # Errors
@@ -540,7 +538,7 @@ pub(super) fn port_command(
     data: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    if *options != Term::List(vec![]) {
+    if *options != Term::nil() {
         return Err(error(
             "unsupported erlang:port_command/3 options: see \"Ports\" in docs/erts-differences.md",
         ));
@@ -671,17 +669,12 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
                 .expect("the port is open");
             let item = |name, value| Term::Tuple(vec![Term::static_atom(name), value]);
             let links = vec![Term::Pid(port.owner)];
-            Term::List(vec![
+            Term::list_from(vec![
                 item(
                     "name",
-                    Term::List(
-                        port.name
-                            .iter()
-                            .map(|&byte| Term::Integer(byte.into()))
-                            .collect(),
-                    ),
+                    Term::list_from(port.name.iter().map(|&byte| Term::Integer(byte.into()))),
                 ),
-                item("links", Term::List(links)),
+                item("links", Term::list_from(links)),
                 item(
                     "id",
                     Term::Integer(id.0.try_into().expect("a port number below 2^63")),

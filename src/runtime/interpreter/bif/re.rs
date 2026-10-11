@@ -64,15 +64,13 @@ struct CompileOptions {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let options = parse_options(&Term::List(vec![Term::static_atom("unicode")])).unwrap();
+/// let options = parse_options(&Term::list_from(vec![Term::static_atom("unicode")])).unwrap();
 /// assert_eq!(options.compile, pcre2::UTF);
-/// assert!(parse_options(&Term::List(vec![Term::static_atom("global")])).is_none());
+/// assert!(parse_options(&Term::list_from(vec![Term::static_atom("global")])).is_none());
 /// assert!(parse_options(&Term::static_atom("foo")).is_none());
 /// ```
 fn parse_options(options: &Term) -> Option<CompileOptions> {
-    let Term::List(options) = options else {
-        return None;
-    };
+    let options = options.proper_list()?;
     let mut parsed = CompileOptions::default();
     for option in options {
         match option {
@@ -134,13 +132,13 @@ fn lookup(table: &[(&str, u32)], name: &str) -> Option<u32> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let unicode = Term::List(vec![Term::static_atom("unicode")]);
+/// let unicode = Term::list_from(vec![Term::static_atom("unicode")]);
 /// let result = compile(&mut context, &Term::Binary(b"(a)".to_vec()), &unicode)?;
 /// // {ok, {re_pattern, 1, 1, 0, Ref}}
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
-/// let result = compile(&mut context, &Term::List(vec![Term::Integer(256)]), &unicode)?;
+/// let result = compile(&mut context, &Term::list_from(vec![Term::Integer(256)]), &unicode)?;
 /// assert!(matches!(result, BifResult::Trap { function: "ucompile", .. }));
-/// let result = compile(&mut context, &Term::static_atom("foo"), &Term::List(vec![]))?;
+/// let result = compile(&mut context, &Term::static_atom("foo"), &Term::nil())?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 ///
@@ -176,7 +174,7 @@ pub(super) fn compile(
             let offset = i64::try_from(failure.offset).expect("a pattern offset fits in i64");
             return Ok(Value(Term::Tuple(vec![
                 Term::static_atom("error"),
-                Term::Tuple(vec![Term::List(message.collect()), Term::Integer(offset)]),
+                Term::Tuple(vec![Term::list_from(message), Term::Integer(offset)]),
             ])));
         }
     };
@@ -230,7 +228,7 @@ const EXPORT_VERSION: u8 = 1;
 ///
 /// ```rust,ignore
 /// let code = pcre2::compile(b"a", 0, None, None)?;
-/// let options = Term::List(vec![Term::static_atom("export")]);
+/// let options = Term::list_from(vec![Term::static_atom("export")]);
 /// // {ok, {re_exported_pattern, <<"re-PCRE2",163,240,192,168,1,0>>,
 /// //       <<"a">>, [export], Encoded}} on aarch64 macOS, as ERTS
 /// let result = export(&code, false, b"a".to_vec(), &options);

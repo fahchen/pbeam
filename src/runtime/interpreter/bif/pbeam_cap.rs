@@ -114,7 +114,7 @@ pub(super) fn policy_revoke(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = request(&mut scheduler, &Term::static_atom("process"), &Term::List(vec![]))?;
+/// let result = request(&mut scheduler, &Term::static_atom("process"), &Term::nil())?;
 /// assert!(matches!(result, BifResult::AwaitGrant));
 /// ```
 ///
