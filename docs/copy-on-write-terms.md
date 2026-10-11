@@ -96,7 +96,7 @@ Expected result (analysis): the tuple, list, nested, and send benchmarks go from
 | --- | --- | --- | --- | --- |
 | Integer, pid, port, reference | `i64` or `u64` in the enum | No change | Immediate | None |
 | Atom | `Atom { index: u32, name: String }` | No inline `String`: for example an `Arc<str>`, or only the index | Immutable; a clone does not allocate | #460 |
-| Tuple | `Tuple(Vec<Term>)` | `Tuple(Arc<Vec<Term>>)` newtype with `Deref<Target = [Term]>` and constructors | `set_tuple_element` and `setelement/3` use `Arc::make_mut`: a shared tuple is copied (O(n), as `setelement/3` on ERTS), an unshared tuple changes in place | #454 |
+| Tuple | `Tuple(Vec<Term>)` | `Tuple(Option<Arc<Vec<Term>>>)` newtype with `Deref<Target = [Term]>` and the `Term::tuple` constructor (#454) | `set_tuple_element` and `setelement/3` use `Arc::make_mut`: a shared tuple is copied (O(n), as `setelement/3` on ERTS), an unshared tuple changes in place | #454 |
 | List | `List(Vec<Term>)` and `ImproperList(Vec<Term>, Box<Term>)` | `Nil` or `Cons(ConsRef)`, where a `ConsRef` holds an `Arc<Cons>` (see [Drop rule](#drop-rule)); a cons holds a head and a tail; `ImproperList` is removed (#458) | `put_list` makes a new cons in O(1) time and shares the tail; `get_list`, `get_hd`, and `get_tl` read the cell in O(1) time. The copy of the head or the tail into a register is O(1) for a list, a map, or an immediate, but a tuple, a fun, or a binary is still a deep copy until #454, #455, and #456 | #457 (API), #458 (cons cells) |
 | Binary | `Binary(Vec<u8>)` | `Arc<[u8]>` with an offset and a length | The bytes do not change after construction. `binary_part/3`, `bs_get_binary2`, `bs_get_tail`, and `binary:split/2,3` return views of the same bytes | #456 |
 | Map | `Map { repr: Rc<Repr> }`; HAMT nodes by value | `Arc<Repr>`; each HAMT node in `Arc` | `Arc::make_mut` on each node of the path; a flatmap is copied whole | #453 |
@@ -130,13 +130,14 @@ A trap of a list BIF keeps the rest of its list as a term in O(1) time: `length/
 - `Drop` keeps the work stack, so a deep term or a long list does not overflow the Rust stack.
 - For each `Arc` node, `Drop` calls `Arc::into_inner`. When it returns the inner value, this holder was the last one, and the nested terms go on the work stack. When it returns `None`, another holder keeps the node, and nothing goes on the stack.
 - A cons cell puts its tail and then its head on the work stack, so the head comes off first, and the stack stays short for a long list. `Term` has a `Drop`, so a drop cannot move the `Arc` out of a `Term::Cons`. Thus `Term::Cons` holds a `ConsRef`, a wrapper of `Option<Arc<Cons>>`: the drop takes the `Arc` out of the `Option` and calls `Arc::into_inner`. The `Option` is empty only after this, and every other reader finds a cell. A replacement `Arc` would need one more allocation for each dropped cell (#458).
-- `Arc::into_inner` is in `impl<T, A: Allocator> Arc<T, A>`, which has an implicit `T: Sized` bound. Thus each `Arc` that holds terms has a sized payload. A tuple is `Arc<Vec<Term>>`, not `Arc<[Term]>`: the cost is a second allocation for each tuple and one more pointer step for each element read. A thin `Arc` of a header and an inline slice needs `unsafe` code, so this design does not use it. A binary `Arc<[u8]>` holds no terms, so its usual drop does not recurse.
+- A tuple holds its elements in `Tuple(Option<Arc<Vec<Term>>>)` for the same reason: the drop takes the `Arc` out of the `Option` and calls `Arc::into_inner`, and the elements of the last holder go on the work stack (#454).
+- `Arc::into_inner` is in `impl<T, A: Allocator> Arc<T, A>`, which has an implicit `T: Sized` bound. Thus each `Arc` that holds terms has a sized payload. A tuple is `Arc<Vec<Term>>`, not `Arc<[Term]>`: `Arc::into_inner` does not accept `Arc<[Term]>`, and `Arc::make_mut` cannot change a slice in place. The cost is a second allocation for each tuple and one more pointer step for each element read. A thin `Arc` of a header and an inline slice needs `unsafe` code, so this design does not use it. A binary `Arc<[u8]>` holds no terms, so its usual drop does not recurse.
 - Do not use `Arc::get_mut` or `Arc::try_unwrap` for this. When two threads drop the last two holders at the same time, both calls can fail, and the drop of the last `Arc` then drops the inner value recursively. The standard library guarantees that, of concurrent `Arc::into_inner` calls on all clones, exactly one call returns the inner value.
 - `Map::drain_into` changes from `Rc::get_mut` to `Arc::into_inner` in #453.
 
 ## Equality and thread safety
 
-- `PartialEq` returns `true` for two terms that hold the same `Arc` (`Arc::ptr_eq`) before it compares their contents. Two different allocations with equal contents are still compared element by element, so the worst case stays O(size).
+- `PartialEq` returns `true` for two terms that hold the same `Arc` (`Arc::ptr_eq`) before it compares their contents. Two different allocations with equal contents are still compared element by element, so the worst case stays O(size). #454 adds the fast path for a tuple and #458 for a cons cell. #455 adds it for the free variables of a fun.
 - A compile-time assertion checks `Term: Send + Sync` (#459). On main, `Rc<Repr>` of `Map` (`src/term/map.rs:112`) and `Rc<RefCell<MatchContext>>` (`src/term.rs:80`) are the parts that are not `Send`. #453 replaces the first, and #459 replaces the second.
 - Process mutable state stays exclusive to its process. Terms are shared and immutable. #459 changes the wording of #10 to this rule.
 
@@ -180,7 +181,25 @@ target/release/pbeam cowb tuple -- /tmp/cow451/cowb.beam
 | `map_put`: `M#{N => N}` that keeps `M`, 2000 times | 146 | 125324 | about 860 |
 | `nested`: `element/2` on a tuple of 100 lists of 100 elements, 2000 times | 5 | 298058 | about 60000 |
 
-The ERTS values below 100 µs can vary by more than 20% between runs. The design run of the same day on an earlier main gave ratios within a factor of 2 of these ratios.
+The ERTS values below 100 µs can vary by more than 20% between runs. The design run of the same day on an earlier main gave ratios within a factor of 2 of these ratios. The revision of this table is `8a949de`, before #452 and #453, so its PBeam values are higher than the values of the next section.
+
+### Tuple benchmark (#454)
+
+Release build, Apple Silicon macOS, revision `901beff` before the tuple change and the branch of #454 after it. Each value is the median of five runs in microseconds, with no other load on the host. The benchmark module of [Benchmark module](#benchmark-module) is at `/tmp/cow454/cowb.erl`. The commands are the commands above, with the directory `/tmp/cow454` and the revision before the change in a second worktree.
+
+| Benchmark | ERTS µs | Before µs | After µs |
+| --- | --- | --- | --- |
+| `tuple`: `element/2` on a 1000-element tuple, 20000 times | 41 | 316007 | 20886 |
+| `nested`: `element/2` and `hd/1` on a tuple of 100 lists of 100 elements, 2000 times | 6 | 6555 | 3191 |
+| `list`: `hd/1` on a 1000-element list, 20000 times | 53 | 18638 | 17992 |
+| `send`: send a 1000-element list to the process itself, 2000 times | 174 | 2921 | 3024 |
+| `send2`: send a 1000-element list to another process, 2000 times | 10756 | 4870 | 5032 |
+| `map_get`: `map_get/2` on a 1000-key map, 20000 times | 216 | 24124 | 25218 |
+| `map_put`: `M#{N => N}` that keeps `M`, 2000 times | 146 | 4942 | 4861 |
+
+The `tuple` benchmark is about 15 times faster and the `nested` benchmark about 2 times faster. The four other benchmarks stay within the run-to-run spread, because they do not copy a tuple.
+
+A second probe of the same day isolates the remaining `tuple` time: `tuple_size/1` on the same tuple, 20000 times, gives 26414, 28351, and 28417 µs after the change and 34, 35, and 40 µs on ERTS. Thus the remaining ~21 ms of the `tuple` benchmark is the recursion, the arithmetic, and the BIF call of the loop, not the tuple read. The module `/tmp/cow454/cowb3.erl` (not committed) holds the probe.
 
 ### Rust micro-benchmark
 
