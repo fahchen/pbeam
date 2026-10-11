@@ -117,37 +117,38 @@ impl CodeTable {
     }
 
     /// Create the frame for an exported function of a loaded module. Return
-    /// `None` when the module does not export the function: ERTS then runs
-    /// the export entry of the function, which calls the error handler
-    /// (`call_error_handler` in `beam_common.c:1294-1342`).
+    /// `None` when the module is not loaded: ERTS then goes to the export
+    /// entry of the module, which calls the error handler
+    /// (`call_error_handler` in `beam_common.c:1294-1342`). Return `None`
+    /// when a loaded module does not export the function: ERTS then runs the
+    /// export entry of the function, which also calls the error handler.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert!(code.export_frame("undef_handler", "$handle_undefined_function", 2)?.is_some());
     /// assert!(code.export_frame("undef_target", "missing", 1)?.is_none());
-    /// assert!(code.export_frame("nomod", "missing", 1).is_err());
+    /// assert!(code.export_frame("nomod", "missing", 1)?.is_none());
     /// ```
     ///
     /// # Errors
     ///
-    /// A module that is not loaded is the runtime error
-    /// `unresolved external MFA M:F/A`. ERTS loads it from the code path.
+    /// A function that the module does not export at an entry label is the
+    /// errors of [`frame`]. A module name is a name, so this function has no
+    /// other error.
     pub(in crate::runtime) fn export_frame(
         &self,
         module: &str,
         function: &str,
         arity: u32,
     ) -> Result<Option<Frame>, BeamError> {
-        let loaded = self.get(module).ok_or_else(|| {
-            error(format!(
-                "unresolved external MFA {module}:{function}/{arity}"
-            ))
-        })?;
-        loaded
-            .exports
-            .get(&(function.to_owned(), arity))
-            .map(|label| frame(loaded, *label, arity))
+        self.get(module)
+            .and_then(|loaded| {
+                loaded
+                    .exports
+                    .get(&(function.to_owned(), arity))
+                    .map(|label| frame(loaded, *label, arity))
+            })
             .transpose()
     }
 

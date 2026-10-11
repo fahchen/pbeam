@@ -97,34 +97,68 @@ add_to_kernel(Init, Server, Res) ->
 %% The init request process. It traps exits (init.erl:588), links to each
 %% kernel process that starts with {ok, Pid} (init.erl:768-772), and answers
 %% get_arguments and {get_argument, Arg} with the values as strings
-%% (init.erl:816-819). It answers fetch_loaded with [] (init.erl:720-722):
-%% the boot loads no module with primLoad, because the pbeam binary loads
-%% the start modules. For init:stop/0
+%% (init.erl:816-819). It answers fetch_loaded with the modules that
+%% {ensure_loaded, Module} loaded (init.erl:720-722, 738-750): the boot
+%% loads no module with primLoad, because the pbeam binary loads the start
+%% modules. It answers {ensure_loaded, Module} as init does
+%% (init.erl:730-750): it reads the file of the module through
+%% erl_prim_loader and loads it with erlang:load_module/2. For init:stop/0
 %% it stops the kernel process and halts with status 0 (init.erl:536,
 %% 788-789, 924-945). It keeps other messages in its mailbox.
 init(Boot, Flags) ->
     process_flag(trap_exit, true),
-    init_loop(Boot, Flags, undefined).
+    init_loop(Boot, Flags, undefined, []).
 
-init_loop(Boot, Flags, Kernel) ->
+init_loop(Boot, Flags, Kernel, Loaded) ->
     receive
         {Boot, started, {_Server, {ok, Pid}}} when is_pid(Pid) ->
             link(Pid),
             Boot ! {self(), ok, Pid},
-            init_loop(Boot, Flags, Kernel);
+            init_loop(Boot, Flags, Kernel, Loaded);
         {Boot, kernel, Pid} ->
-            init_loop(Boot, Flags, Pid);
+            init_loop(Boot, Flags, Pid, Loaded);
         {From, get_arguments} ->
             From ! {init, get_arguments(Flags)},
-            init_loop(Boot, Flags, Kernel);
+            init_loop(Boot, Flags, Kernel, Loaded);
         {From, {get_argument, Arg}} ->
             From ! {init, get_argument(Arg, Flags)},
-            init_loop(Boot, Flags, Kernel);
+            init_loop(Boot, Flags, Kernel, Loaded);
         {From, fetch_loaded} ->
-            From ! {init, []},
-            init_loop(Boot, Flags, Kernel);
+            From ! {init, Loaded},
+            init_loop(Boot, Flags, Kernel, Loaded);
+        {From, {ensure_loaded, Module}} ->
+            {Res, Loaded1} = ensure_loaded(Module, Loaded),
+            From ! {init, Res},
+            init_loop(Boot, Flags, Kernel, Loaded1);
         {stop, stop} ->
             stop(Kernel)
+    end.
+
+%% Load a module that the run does not hold, as init:ensure_loaded/2 does
+%% (init.erl:730-737): a module that is loaded needs no file, and the
+%% loaded list keeps the file of each module that this function loads
+%% (init.erl:738-750). The file name is the module name with the object
+%% file extension (init.erl:738-739, 1844-1847). The loader reads the file
+%% with erl_prim_loader:get_file/1 and loads the module with
+%% erlang:load_module/2, as init:do_load_module/2 does (init.erl:1614-1624).
+%% A module that the loader does not load gives the load error of
+%% erlang:load_module/2, and a file that the loader does not find gives the
+%% atom error of erl_prim_loader:get_file/1 (init.erl:747).
+ensure_loaded(Module, Loaded) ->
+    case erlang:module_loaded(Module) of
+        true ->
+            {{module, Module}, Loaded};
+        false ->
+            File = atom_to_list(Module) ++ ".beam",
+            case erl_prim_loader:get_file(File) of
+                {ok, BinCode, FullName} ->
+                    case erlang:load_module(Module, BinCode) of
+                        {module, Module} -> {{module, Module}, [{Module, FullName} | Loaded]};
+                        Error -> {Error, Loaded}
+                    end;
+                Error ->
+                    {Error, Loaded}
+            end
     end.
 
 %% Stop the kernel process as the stop of the kernel application stops

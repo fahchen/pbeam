@@ -252,7 +252,12 @@ fn stops_the_boot_at_the_first_missing_otp_module() {
     // Without the pinned OTP modules, the boot process calls
     // `erl_prim_loader:start/0` first, as the `init` boot process starts the
     // loader before it runs start_clean.boot (init.erl:1196-1202), and the
-    // run stops there.
+    // run stops there. The boot registers the `init` process and starts it,
+    // so the export entry of the call runs the default error handler
+    // (`call_error_handler`, `beam_common.c:1294-1342`). The run does not
+    // load `error_handler` and no code server answers a load, so
+    // `error_handler:undefined_function/3` is not found and the call raises
+    // `error:undef` with the frame of its initial call.
     let output = Command::new(env!("CARGO_BIN_EXE_pbeam"))
         .args([
             "pbeam_boot",
@@ -275,7 +280,7 @@ fn stops_the_boot_at_the_first_missing_otp_module() {
         ),
         (
             &b""[..],
-            &b"pbeam: unresolved external MFA erl_prim_loader:start/0\n"[..],
+            &b"pbeam: root process exited with {undef,[{erl_prim_loader,start,[],[]}]}\n"[..],
             Some(1)
         )
     );
