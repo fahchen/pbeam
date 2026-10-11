@@ -261,3 +261,23 @@ fn clones_compares_and_formats_ports() {
     assert_ne!(Term::Port(PortId(5)), Term::Pid(ProcessId(5)));
     assert_eq!(format!("{port:?}"), "Tuple([Port(PortId(5))])");
 }
+
+#[test]
+fn finds_a_fun_at_any_depth_without_recursion() {
+    let element = |term| Term::list_from(vec![Term::Integer(1), term]);
+    assert!(!Term::Integer(1).contains_fun());
+    assert!(!deep(3).contains_fun());
+    assert!(deep(4).contains_fun());
+    assert!(fun(0, vec![]).contains_fun());
+    assert!(element(Term::Tuple(vec![fun(0, vec![])])).contains_fun());
+    assert!(map(vec![(atom("k"), fun(0, vec![]))]).contains_fun());
+    assert!(!map(vec![(atom("k"), atom("v"))]).contains_fun());
+    let improper = |tail| Term::list_with_tail(vec![Term::Integer(1)], tail);
+    assert!(improper(fun(0, vec![])).contains_fun());
+    assert!(!improper(atom("x")).contains_fun());
+    assert!(Term::list_with_tail(vec![fun(0, vec![])], atom("x")).contains_fun());
+    let nested = (0..1_000_000).fold(fun(0, vec![]), |inner, _| Term::Tuple(vec![inner]));
+    assert!(nested.contains_fun());
+    let nested = (0..1_000_000).fold(Term::Integer(1), |inner, _| element(inner));
+    assert!(!nested.contains_fun());
+}

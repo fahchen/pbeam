@@ -4,7 +4,7 @@
 %% initial/1 of boot_policy gives. ERTS has no pbeam_cap module and no
 %% capability, so the probe runs only on pbeam.
 -module(boot_authority_probe).
--export([main/0, denied/0, child_enter/0, service/0, worker/0]).
+-export([main/0, denied/0, child_enter/0, serve/0, service/0, worker/0]).
 
 -define(UNSET, "PBEAM_BOOT_AUTHORITY_PROBE_UNSET").
 
@@ -57,6 +57,37 @@ main() ->
         {runtime_process_info, process_info(Worker, registered_name)},
         {runtime_unregister, register(boot_authority_guest, Root) andalso
             unregister(boot_authority_guest)}
+    ],
+    exit({result, Boot ++ Runtime}).
+
+%% The boot root process registers the boot process Service as an IO
+%% service with pbeam_cap:serve/2. A pid that is not a live boot process
+%% and arguments that are not a pid and io raise badarg. After the root
+%% process enters the runtime, the IO service entry of Service checks its
+%% IO requests: boot_policy gives no terminal capability, so a put_chars
+%% request is denied, and a requests request with no request passes. A
+%% runtime process gets the argument checks of pbeam_cap:serve/2 too. The
+%% root process exits with {result, Results}.
+serve() ->
+    Service = spawn(?MODULE, worker, []),
+    Dead = spawn(?MODULE, worker, []),
+    Ref = monitor(process, Dead),
+    Dead ! stop,
+    receive
+        {'DOWN', Ref, process, Dead, normal} -> ok
+    end,
+    Boot = [
+        {serve_not_pid, result(fun() -> pbeam_cap:serve(boot_authority_service, io) end)},
+        {serve_not_io, result(fun() -> pbeam_cap:serve(Service, file) end)},
+        {serve_dead, result(fun() -> pbeam_cap:serve(Dead, io) end)},
+        {serve, pbeam_cap:serve(Service, io)},
+        {serve_again, pbeam_cap:serve(Service, io)}
+    ],
+    ok = pbeam_cap:enter_runtime(?MODULE, guest),
+    Runtime = [
+        {put_chars, result(fun() -> Service ! {io_request, self(), x, {put_chars, unicode, <<"x">>}}, sent end)},
+        {empty_requests, result(fun() -> Service ! {io_request, self(), x, {requests, []}}, sent end)},
+        {runtime_serve_not_io, result(fun() -> pbeam_cap:serve(Service, file) end)}
     ],
     exit({result, Boot ++ Runtime}).
 

@@ -2262,9 +2262,11 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
 ///   nothing. The check comes before the name lookup, so a denied send
 ///   gives the same result for each name.
 /// - After the lookup, the runtime to boot gate denies a message to a boot
-///   process, by its pid or its name, in the same way (see `boot_denial`).
-///   A message to an alias has no gate: the owner gave the alias as a reply
-///   channel, for example for the reply of `gen:call/4`.
+///   process, by its pid or its name, in the same way, unless the boot
+///   process is an IO service and the message is an IO request that the
+///   caller may make (see `io_service::send_denial`). A message to an alias
+///   has no gate: the owner gave the alias as a reply channel, for example
+///   for the reply of `gen:call/4`.
 /// - A pid gets the message from the caller (see
 ///   [`Scheduler::send_message`]). ERTS drops a message to a process that
 ///   does not exist or exits.
@@ -2320,7 +2322,7 @@ fn deliver_to(
         Destination::Port => return Err(unsupported_port(bif)),
     };
     if let Some(target) = target {
-        if let Some(denied) = boot_denial(scheduler, target)? {
+        if let Some(denied) = io_service::send_denial(scheduler, target, &message)? {
             return Ok(Err(denied));
         }
         let caller = scheduler.current_process_mut().id;

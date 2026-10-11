@@ -148,6 +148,34 @@ impl Term {
         }
     }
 
+    /// Return whether the term is a fun or contains a fun at any depth: in a
+    /// list, an improper list and its tail, a tuple, or a key or a value of
+    /// a map. The walk uses a work list, not recursion, so a deep term does
+    /// not overflow the stack.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!Term::list_from(vec![Term::Integer(1)]).contains_fun());
+    /// assert!(Term::Tuple(vec![Term::list_from(vec![fun])]).contains_fun());
+    /// ```
+    pub(crate) fn contains_fun(&self) -> bool {
+        let mut pending = vec![self];
+        while let Some(term) = pending.pop() {
+            match term {
+                Term::Fun(_) => return true,
+                Term::Tuple(elements) => pending.extend(elements),
+                Term::Cons(cell) => {
+                    pending.push(&cell.tail);
+                    pending.push(&cell.head);
+                }
+                Term::Map(map) => pending.extend(map.iter().flat_map(|(key, value)| [key, value])),
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// Copy a term that has no nested terms. A map copy shares the form of
     /// the map, and a list copy shares its cons cells, so they do not copy
     /// the nested terms. For a tuple or fun, return its nested terms, kind,
