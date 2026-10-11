@@ -267,18 +267,18 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Exceptions
 
-### Run `error_handler.beam` for an undefined function
+### Give caller frames and line locations in stack traces
 
-- After #166 (PR #180), PBeam gives the result of `error_handler:undefined_function/3` in Rust for a loaded module: it calls `'$handle_undefined_function'/2` or raises `undef` with the first frame. ERTS runs `error_handler.beam` from the export entry (`beam_common.c:1294-1342`). Running the BEAM module needs `ensure_loaded/1` through `code_server` or `init` (`error_handler.erl:182-198`). Since #446, `erlang:error/1` gives the frame that `crash/1` removes with `tl/1`, and `erlang:raise/3` keeps its frames (`error_handler.erl:165-178`). The "Undefined functions" row records the difference. The `error_handler` code also costs reductions: on `erl +S 1`, a call that goes to `'$handle_undefined_function'/2` costs 11 and a caught `undef` costs 13. PBeam charges only the entry and the `return` of the handler, and nothing for an `undef` (owner decision in #7).
-- For a module that is not loaded, ERTS loads the module through `error_handler` and `code_server` (`error_handler.erl:85-98`, `182-198`). The Terra Counter run of #428 shows the effect: in interactive mode, the `main` process waits for 11 module loads at its first `IO.inspect/1` call, and the terminal owner writes the restore sequence before the result. PBeam loads all modules before the run, so `main` writes first.
-- **Trigger:** #447, or a consumer sets `process_flag(error_handler, Module)`.
-- **Source:** review of #166.
+- PBeam records no line table, so `erlang:error/1,2` gives the frame of its caller with the location `[]` and the frames of the process after it. ERTS records the location of each frame. PBeam matches ERTS only at `backtrace_depth` 0 or 1, and only for code with no line table.
+- The error handler path of [#447](https://github.com/fahchen/pbeam/issues/447) adds the frame of the caller of `error_handler:crash/1` to the frames of `erlang:error/1` in about one of four calls. The reductions of the error handler code match ERTS in a run with a live code server; a run of the library API has no code server and charges the extra reductions of the `init:ensure_loaded/1` round trip.
+- **Trigger:** a consumer needs the location of a frame, or the exact frames of an `undef` exception.
+- **Source:** owner decision of 2026-10-11 (Suikou review 01a1282e, AFK log second batch); [#446](https://github.com/fahchen/pbeam/issues/446), [#447](https://github.com/fahchen/pbeam/issues/447), PR [#473](https://github.com/fahchen/pbeam/pull/473).
 
 ### Raise `undef` for an entry module that the run does not load
 
-- After #42 (PR #194), the `pbeam` binary accepts only an argument atom that a loaded module holds. It stops with `argument <M> is not an atom of the loaded modules` or `unresolved external MFA M:F/A`. ERTS raises `undef` through `error_handler` after a load attempt. Doing the same needs a `BeamProgram` API to add an atom, and the undefined-module path of `error_handler` (a code server or a load attempt). The "Run arguments" and "Undefined functions" rows record the difference.
-- **Trigger:** a consumer runs an entry module that is not in the loaded BEAM files.
-- **Source:** review of #42.
+- After #42 (PR #194), the `pbeam` binary accepts only an argument atom that a loaded module holds and stops with `argument <M> is not an atom of the loaded modules`, and it stops with `missing BEAM module M` for an entry module that the start BEAM files do not hold. #447 runs the pinned `error_handler` for a call of a module that the run does not load, so the undefined-module path of `error_handler` exists now. The remaining work is a `BeamProgram` API that adds the atom of the entry module and of each argument, and an entry that loads its module through the error handler. The "Run arguments" and "Undefined functions" rows record the difference.
+- **Trigger:** a consumer runs an entry module, or gives an argument atom, that the start BEAM files do not hold.
+- **Source:** review of #42; the remaining work of [#447](https://github.com/fahchen/pbeam/issues/447).
 
 ### Halt the PBeam boot with the `init` crash text
 

@@ -25,6 +25,19 @@ fn deep(levels: usize) -> Term {
 }
 
 #[test]
+fn holds_no_inline_atom_name_in_a_term() {
+    // #460: an atom holds no inline `String`, so its payload is at most 24
+    // bytes. `size_of::<Term>()` is 80 bytes on this branch, because the
+    // `Fun` variant (`src/term/fun.rs`) is the largest one. The design
+    // target of `docs/copy-on-write-terms.md` is at most 24 bytes; it needs
+    // the shared free variables of a fun (#455) and the shared binary bytes
+    // (#456). This test holds the size that #460 reaches and stops a later
+    // change from making a term larger.
+    assert!(size_of::<super::Atom>() <= 24);
+    assert!(size_of::<Term>() <= 80);
+}
+
+#[test]
 fn clones_compares_formats_and_drops_deep_terms_without_recursion() {
     let term = deep(1_000_000);
     let copy = term.clone();

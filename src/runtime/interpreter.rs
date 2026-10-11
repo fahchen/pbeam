@@ -43,6 +43,11 @@ const APPLY_FUN_MAX_ARGUMENTS: usize = 1022;
 /// new binary (`ERL_BITS_PER_REDUCTION`, erl_bits.h:41).
 const BITS_PER_REDUCTION: usize = 8 * 1024;
 
+/// The module of the error handler of a process that does not set one, as
+/// the atom `error_handler` of `erts_proc_get_error_handler` when the
+/// process-specific data holds no handler (`erl_process.h:2420-2430`).
+const DEFAULT_ERROR_HANDLER: &str = "error_handler";
+
 #[derive(Debug)]
 pub struct BeamProgram {
     /// The start modules by name. Each run starts its code table with them
@@ -540,6 +545,11 @@ impl BeamProgram {
                 raise(process, ExceptionClass::Error, system_limit)
             } else {
                 let arity = process.registers.len() as u32;
+                // The start of a process is a tail call of the MFA from the
+                // initial function of ERTS (`i_apply_only`,
+                // `erl_process.c:12616`). PBeam starts the process with no
+                // frame, so the handler enters as a body call of the first
+                // frame and its `return` ends the process.
                 self.undefined_function(scheduler, module.name(), function.name(), arity, false)?
             };
             if let Some(outcome) = outcome {
@@ -1739,27 +1749,34 @@ impl BeamProgram {
     /// the module, the function, and the argument list `Args`
     /// (`call_error_handler` in `beam_common.c:1294-1342`; JIT
     /// `emit_export_trampoline` in `jit/arm/beam_asm_global.cpp:164-232`).
-    /// For a loaded module, `undefined_function/3` calls
-    /// `call_undefined_function_handler/3` (`error_handler.erl:85-98`).
-    /// PBeam does the result of these functions here and does not run
-    /// `error_handler.beam` (see "Undefined functions" in
-    /// `docs/erts-differences.md`):
+    /// The module name of the call is the module of the function, and not
+    /// the name of a loaded module: ERTS looks up the export entry of the
+    /// name and makes a stub entry when the module is not loaded
+    /// (`erts_export_get_or_make_stub`, `export.c:228-242`; the call of
+    /// `fixed_apply`, `beam_common.c:1559-1563`).
     ///
-    /// - When the module exports `'$handle_undefined_function'/2`, enter it
-    ///   with `x0 = Function` and `x1 = Args`, as the tail call
-    ///   `Module:Handler(Func, Args)` does (`error_handler.erl:206-213`). A
-    ///   tail call replaces the active frame.
-    /// - Else raise `error:undef` with the stack trace
-    ///   `[{Module, Function, Args, []}]`, as `crash/3` and `crash/1` do
-    ///   (`error_handler.erl:165-178`). ERTS puts the caller frames after
-    ///   this frame. PBeam records no frames.
+    /// `call_error_handler` finds the error handler of the process
+    /// (`erts_proc_get_error_handler`, `erl_process.h:2420-2430`), which
+    /// `erlang:process_flag(error_handler, Module)` sets, and finds
+    /// `undefined_function/3` in it. It then puts the module, the function,
+    /// and the argument list in `x0`, `x1`, and `x2` and runs that export.
+    /// Thus `error_handler.beam` runs, and the error of the module load and
+    /// the `undef` frame come from that code
+    /// (`error_handler.erl:85-98,165-178,206-213`). An error handler without
+    /// that export raises `error:undef` with the current frame
+    /// (`call_error_handler`, `beam_common.c:1310-1316`).
     ///
-    /// Return the outcome when the process exits.
+    /// `tail` is the form of the failed call: ERTS enters the export of the
+    /// handler with the stack of the caller, so its `return` continues at
+    /// the continuation of that call, as `call_ext` or `call_ext_last` does
+    /// (`emit_export_trampoline` in `jit/arm/beam_asm_global.cpp:164-232`).
+    /// A handler that returns thus gives its value to the caller of a body
+    /// call, and to the caller of the caller of a tail call.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// // `undef_handler:missing(m)` enters the handler with x0 = missing, x1 = [m].
+    /// // `undef_handler:missing(m)` calls the handler with x0 = missing, x1 = [m].
     /// assert!(program.undefined_function(&mut scheduler, "undef_handler", "missing", 1, false)?.is_none());
     /// // `undef_target:missing(a)` with no catch tag exits with
     /// // `{undef, [{undef_target, missing, [a], []}]}`.
@@ -1780,31 +1797,60 @@ impl BeamProgram {
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        let atom = |name: &str| {
-            scheduler
-                .atoms
+        let process = scheduler.current_process_mut();
+        let default_handler = process.error_handler.is_none();
+        let handler = process
+            .error_handler
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ERROR_HANDLER.to_owned());
+        // A call of a module that the run does not load makes the default
+        // `error_handler` ask for a load of that module:
+        // `error_handler:ensure_loaded/1` calls `code:ensure_loaded/1` or
+        // `init:ensure_loaded/1` (`error_handler.erl:182-198`). A run with
+        // no code server and no init process cannot answer that call:
+        // `init:ensure_loaded/1` sends to the registered name `init` and
+        // waits for the reply (`init.erl:463-464`, `485-490`), and the send
+        // raises `badarg` when no process has that name. A custom handler
+        // answers the call itself and needs no load, so the runtime error
+        // applies only to the default handler.
+        if scheduler.code.get(module).is_none() && default_handler && !loads_modules(scheduler) {
+            return Err(error(format!(
+                "unresolved external MFA {module}:{function}/{arity}"
+            )));
+        }
+        let atom = |atoms: &AtomTable, name: &str| {
+            atoms
                 .get(name)
                 .map(Term::Atom)
                 .ok_or_else(|| error(format!("atom table does not hold {name}")))
         };
-        let (module_atom, function_atom) = (atom(module)?, atom(function)?);
-        let handler = scheduler
-            .code
-            .export_frame(module, "$handle_undefined_function", 2)?;
+        let (module_atom, function_atom) = (
+            atom(&scheduler.atoms, module)?,
+            atom(&scheduler.atoms, function)?,
+        );
         let process = scheduler.current_process_mut();
         let arguments = Term::list_from(call_arguments(&process.registers, arity)?);
-        if let Some(handler) = handler {
-            enter_frame(process, handler, tail);
-            write(process, &Operand::X(0), function_atom)?;
-            write(process, &Operand::X(1), arguments)?;
+        let lookup = scheduler
+            .code
+            .export_frame(&handler, "undefined_function", 3)?;
+        let process = scheduler.current_process_mut();
+        if let Some(frame) = lookup {
+            enter_frame(process, frame, tail);
+            write(process, &Operand::X(0), module_atom)?;
+            write(process, &Operand::X(1), function_atom)?;
+            write(process, &Operand::X(2), arguments)?;
             return Ok(None);
         }
+        // ERTS sets the reason `undef` and the current MFA to the export
+        // entry of the undefined function, so the stack trace frame is the
+        // tuple of `build_stacktrace` (`beam_common.c:1310-1316`;
+        // `utils.c:3448-3455`). The arguments of the failed call are the
+        // list of the call.
         let frame = Term::tuple(vec![module_atom, function_atom, arguments, Term::nil()]);
-        let undef = Term::static_atom("undef");
         Ok(raise_with_stacktrace(
             process,
             ExceptionClass::Error,
-            undef,
+            Term::static_atom("undef"),
             Term::list_from(vec![frame]),
         ))
     }
@@ -2168,6 +2214,26 @@ fn policy_turn(scheduler: &mut Scheduler, outcome: Outcome) -> Outcome {
     };
     scheduler.end_policy_call(end);
     Outcome::Wait
+}
+
+/// Return true when the run can load a module at run time: it has the live
+/// code server of `code:start_link/0` (`code.erl:1682-1712`), or the init
+/// process that `pbeam_boot` registers and that answers `{ensure_loaded,
+/// Module}` (`init.erl:730-750`). Else the load call of
+/// `error_handler:ensure_loaded/1` reaches `init:ensure_loaded/1`, which
+/// sends to the registered name `init` and waits for the reply
+/// (`init.erl:463-464`, `485-490`); a send to a name that no process has
+/// raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!loads_modules(&scheduler));
+/// ```
+fn loads_modules(scheduler: &Scheduler) -> bool {
+    ["code_server", "init"]
+        .into_iter()
+        .any(|name| scheduler.whereis(name).is_some())
 }
 
 /// Enter `frame`: a tail call replaces the active frame, and a body call
@@ -3608,19 +3674,8 @@ fn current_function(
     scheduler: &mut Scheduler,
     module: &BeamModule,
 ) -> Result<(Term, Term, u32), BeamError> {
-    let index = current_frame(scheduler.current_process_mut()).next_instruction - 1;
-    let (module_name, name, arity) = module.instructions[..index]
-        .iter()
-        .rev()
-        .find_map(|instruction| match instruction {
-            Instruction::FunctionInfo {
-                module,
-                name,
-                arity,
-            } => Some((module, name, *arity)),
-            _ => None,
-        })
-        .ok_or_else(|| error("invariant error: the instruction has no func_info before it"))?;
+    let frame = current_frame(scheduler.current_process_mut());
+    let (module_name, name, arity) = frame_function(module, frame)?;
     let atom = |name: &str| {
         scheduler
             .atoms
@@ -3629,6 +3684,91 @@ fn current_function(
             .ok_or_else(|| error(format!("invariant error: atom table does not hold {name}")))
     };
     Ok((atom(module_name)?, atom(name)?, arity))
+}
+
+/// Return the module, the function, and the arity of the function that holds
+/// the next instruction of `frame`, from the `func_info` before that
+/// instruction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (module, function, arity) = frame_function(module, &frame)?;
+/// assert_eq!(function, "main");
+/// ```
+///
+/// # Errors
+///
+/// An instruction with no `func_info` before it is a runtime invariant
+/// error.
+fn frame_function<'a>(
+    module: &'a BeamModule,
+    frame: &Frame,
+) -> Result<(&'a str, &'a str, u32), BeamError> {
+    let index = frame.next_instruction - 1;
+    module.instructions[..index]
+        .iter()
+        .rev()
+        .find_map(|instruction| match instruction {
+            Instruction::FunctionInfo {
+                module,
+                name,
+                arity,
+            } => Some((module.as_str(), name.as_str(), *arity)),
+            _ => None,
+        })
+        .ok_or_else(|| error("invariant error: the instruction has no func_info before it"))
+}
+
+/// Return the stack trace frames of the current process, from the active
+/// frame to the first frame, as ERTS `build_stacktrace` walks the saved
+/// continuation pointers of an exception (`beam_common.c:1205-1292`). Each
+/// frame is `{Module, Function, Arity, []}`, as `erts_build_mfa_item` gives
+/// a frame without arguments (`utils.c:3448-3455`). PBeam keeps no line
+/// table, so each location is `[]` (row "Exception stack trace" of
+/// `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let frames = mfa_stacktrace(&mut scheduler)?;
+/// assert_eq!(frames.len(), scheduler.current_process().frames.len());
+/// ```
+///
+/// # Errors
+///
+/// A module that the code table does not hold, or an instruction with no
+/// `func_info` before it, is a runtime invariant error.
+fn mfa_stacktrace(scheduler: &mut Scheduler) -> Result<Vec<Term>, BeamError> {
+    let frames: Vec<Frame> = scheduler
+        .current_process()
+        .frames
+        .iter()
+        .rev()
+        .cloned()
+        .collect();
+    let mut stacktrace = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let module = Rc::clone(scheduler.code.module(&frame.module)?);
+        let (_, function, arity) = frame_function(&module, &frame)?;
+        // A loaded module put the names of its function info into the atom
+        // table of the run, so each name is present.
+        let atom = |name: &str| {
+            Term::Atom(
+                scheduler
+                    .atoms
+                    .get(name)
+                    .expect("a loaded module put its names in the atom table"),
+            )
+        };
+        stacktrace.push(Term::tuple(vec![
+            atom(&frame.module),
+            atom(function),
+            Term::Integer(arity.into()),
+            Term::nil(),
+        ]));
+    }
+    Ok(stacktrace)
 }
 
 /// Borrow a literal, an X register, or a Y register. The reference points
