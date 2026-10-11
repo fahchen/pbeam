@@ -721,7 +721,7 @@ impl BeamProgram {
                     arity,
                 } => {
                     let passed = matches!(
-                        &read(process, value)?,
+                        read_ref(process, value)?,
                         Term::Tuple(elements) if elements.len() == *arity as usize
                     );
                     if !passed {
@@ -733,7 +733,7 @@ impl BeamProgram {
                     value,
                     arity,
                 } => {
-                    let result = is_function(&read(process, value)?, &read(process, arity)?);
+                    let result = is_function(read_ref(process, value)?, read_ref(process, arity)?);
                     // The `badarg` of the check fails the test and raises
                     // nothing.
                     let passed = matches!(
@@ -749,7 +749,7 @@ impl BeamProgram {
                     fail_label,
                     choices,
                 } => {
-                    let target = match &read(process, value)? {
+                    let target = match read_ref(process, value)? {
                         Term::Tuple(elements) => choices
                             .iter()
                             .find(|(arity, _)| *arity as usize == elements.len())
@@ -921,11 +921,14 @@ impl BeamProgram {
                     // Stack}}`, and an exit gives `{'EXIT', Reason}` (emu
                     // `instrs.tab:1187-1212`).
                     if matches!(process.registers.first(), Some(None)) {
-                        let class = read(process, &Operand::X(3))?;
+                        let class = read_ref(process, &Operand::X(3))?;
+                        let throw = *class == Term::static_atom("throw");
+                        let error_class = *class == Term::static_atom("error");
                         let mut reason = read(process, &Operand::X(1))?;
-                        if class != Term::static_atom("throw") {
-                            if class == Term::static_atom("error") {
-                                let (_, stack) = raw_stacktrace(&read(process, &Operand::X(2))?)?;
+                        if !throw {
+                            if error_class {
+                                let (_, stack) =
+                                    raw_stacktrace(read_ref(process, &Operand::X(2))?)?;
                                 reason = Term::Tuple(vec![reason, stack]);
                             }
                             reason = Term::Tuple(vec![Term::static_atom("EXIT"), reason]);
@@ -938,7 +941,7 @@ impl BeamProgram {
                     fail_label,
                     value,
                 } => {
-                    let value = read(process, value)?;
+                    let value = read_ref(process, value)?;
                     let passed = match kind {
                         TestKind::Atom => matches!(value, Term::Atom(_)),
                         TestKind::Pid => matches!(value, Term::Pid(_)),
@@ -950,10 +953,10 @@ impl BeamProgram {
                         // `emit_is_list` and `emit_is_nonempty_list` in
                         // `jit/arm/instr_common.cpp:1118-1364`).
                         TestKind::List => matches!(value, Term::List(_) | Term::ImproperList(..)),
-                        TestKind::Nil => matches!(&value, Term::List(values) if values.is_empty()),
+                        TestKind::Nil => matches!(value, Term::List(values) if values.is_empty()),
                         TestKind::NonEmptyList => {
                             matches!(
-                                &value,
+                                value,
                                 Term::List(values) if !values.is_empty()
                             ) || matches!(value, Term::ImproperList(..))
                         }
@@ -976,7 +979,7 @@ impl BeamProgram {
                         // float term, so the test fails for each term.
                         TestKind::Float => false,
                         TestKind::Boolean => {
-                            matches!(&value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
+                            matches!(value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
                         }
                     };
                     if !passed {
@@ -989,6 +992,8 @@ impl BeamProgram {
                     pairs,
                 } => match map_values(process, map, pairs.iter().map(|(key, _)| key))? {
                     Some(values) => {
+                        // The destinations store the values, so they get copies.
+                        let values: Vec<Term> = values.into_iter().cloned().collect();
                         for ((_, destination), value) in pairs.iter().zip(values) {
                             write(process, destination, value)?;
                         }
@@ -1074,7 +1079,7 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if read(process, left)? != read(process, right)? {
+                    if read_ref(process, left)? != read_ref(process, right)? {
                         jump(module, process, *fail_label)?;
                     }
                 }
@@ -1093,7 +1098,7 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if read(process, left)? == read(process, right)? {
+                    if read_ref(process, left)? == read_ref(process, right)? {
                         jump(module, process, *fail_label)?;
                     }
                 }
@@ -1102,8 +1107,8 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if !read(process, left)?
-                        .compare(&read(process, right)?)?
+                    if !read_ref(process, left)?
+                        .compare(read_ref(process, right)?)?
                         .is_lt()
                     {
                         jump(module, process, *fail_label)?;
@@ -1114,8 +1119,8 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if read(process, left)?
-                        .compare(&read(process, right)?)?
+                    if read_ref(process, left)?
+                        .compare(read_ref(process, right)?)?
                         .is_lt()
                     {
                         jump(module, process, *fail_label)?;
@@ -1128,7 +1133,7 @@ impl BeamProgram {
                     tag,
                 } => {
                     let passed = matches!(
-                        &read(process, value)?,
+                        read_ref(process, value)?,
                         Term::Tuple(fields)
                             if fields.len() == *arity as usize
                                 && fields.first() == Some(tag)
@@ -1220,7 +1225,7 @@ impl BeamProgram {
                     destination,
                 } => {
                     let state = match_context(process, context)?;
-                    let bytes = binary_field_size(&read(process, size)?, *unit)
+                    let bytes = binary_field_size(read_ref(process, size)?, *unit)
                         .and_then(|bits| Some((bits, state.borrow_mut().read_bits(bits)?)));
                     match bytes {
                         Some((bits, bytes)) => {
@@ -1248,8 +1253,8 @@ impl BeamProgram {
                 // compiler gives it a position that `bs_get_position` made.
                 Instruction::BinarySetPosition { context, position } => {
                     let state = any_match_context(process, context)?;
-                    match read(process, position)? {
-                        Term::Integer(value) if let Ok(value) = usize::try_from(value) => {
+                    match read_ref(process, position)? {
+                        Term::Integer(value) if let Ok(value) = usize::try_from(*value) => {
                             state.borrow_mut().set_position(value);
                         }
                         other => {
@@ -1316,7 +1321,7 @@ impl BeamProgram {
                 // PBeam has no float register and no float or bignum term,
                 // so an integer stops the run.
                 Instruction::FloatConvert { source } => {
-                    if let Term::Integer(_) = read(process, source)? {
+                    if let Term::Integer(_) = read_ref(process, source)? {
                         return Err(error("unsupported BEAM opcode 97"));
                     }
                     let badarith = Term::static_atom("badarith");
@@ -1329,10 +1334,10 @@ impl BeamProgram {
                     fail_label,
                     choices,
                 } => {
-                    let value = read(process, value)?;
+                    let value = read_ref(process, value)?;
                     let target = choices
                         .iter()
-                        .find(|(choice, _)| choice == &value)
+                        .find(|(choice, _)| choice == value)
                         .map_or(*fail_label, |(_, label)| *label);
                     jump(module, process, target)?;
                 }
@@ -1364,15 +1369,16 @@ impl BeamProgram {
                     index,
                     destination,
                 } => {
-                    let mut tuple = read(process, tuple)?;
-                    let Term::Tuple(fields) = &mut tuple else {
+                    let Term::Tuple(fields) = read_ref(process, tuple)? else {
                         return Err(error("BEAM tuple element source is not a tuple"));
                     };
                     let index = *index as usize;
-                    if index >= fields.len() {
+                    let Some(field) = fields.get(index) else {
                         return Err(error(format!("BEAM tuple has no element {index}")));
-                    }
-                    write(process, destination, fields.swap_remove(index))?;
+                    };
+                    // The destination stores the element, so it gets a copy.
+                    let field = field.clone();
+                    write(process, destination, field)?;
                 }
                 Instruction::UpdateRecord {
                     source,
@@ -1405,8 +1411,20 @@ impl BeamProgram {
                     source,
                     destination,
                 } => {
-                    let (first, _) = nonempty_list(read(process, source)?)?;
-                    write(process, destination, first)?;
+                    // `get_hd` reads only the head, so only the head is copied.
+                    let head = match read_ref(process, source)? {
+                        Term::List(values) | Term::ImproperList(values, _)
+                            if let Some(head) = values.first() =>
+                        {
+                            head.clone()
+                        }
+                        list => {
+                            return Err(error(format!(
+                                "BEAM list source {list:?} is not a nonempty list"
+                            )));
+                        }
+                    };
+                    write(process, destination, head)?;
                 }
                 Instruction::GetTail {
                     source,
@@ -1573,7 +1591,7 @@ impl BeamProgram {
                 // `jit/arm/instr_common.cpp:3046-3056`). The compiler moves
                 // it from `x2` first.
                 Instruction::BuildStacktrace => {
-                    let (_, stack) = raw_stacktrace(&read(process, &Operand::X(0))?)?;
+                    let (_, stack) = raw_stacktrace(read_ref(process, &Operand::X(0))?)?;
                     write(process, &Operand::X(0), stack)?;
                 }
                 // ERTS `i_raise` raises the reason again with the class and
@@ -1583,7 +1601,7 @@ impl BeamProgram {
                 // `jit/x86/instr_common.cpp:3138-3164`;
                 // `erts_sanitize_freason` in `beam_common.c:1089-1097`).
                 Instruction::Raise { trace, value } => {
-                    let (class, stack) = raw_stacktrace(&read(process, trace)?)?;
+                    let (class, stack) = raw_stacktrace(read_ref(process, trace)?)?;
                     let value = read(process, value)?;
                     if let Some(outcome) = raise_with_stacktrace(process, class, value, stack) {
                         return Ok(outcome);
@@ -1614,10 +1632,10 @@ impl BeamProgram {
                 // `badarg` to `x0` and continues (emu `instrs.tab:1253-1263`;
                 // `raw_raise` in `beam_common.c:1148-1179`).
                 Instruction::RawRaise => {
-                    let (_, stack) = raw_stacktrace(&read(process, &Operand::X(2))?)?;
-                    let class = read(process, &Operand::X(0))?;
+                    let (_, stack) = raw_stacktrace(read_ref(process, &Operand::X(2))?)?;
+                    let class = ExceptionClass::from_term(read_ref(process, &Operand::X(0))?);
                     let value = read(process, &Operand::X(1))?;
-                    match ExceptionClass::from_term(&class) {
+                    match class {
                         Some(class) => {
                             if let Some(outcome) =
                                 raise_with_stacktrace(process, class, value, stack)
@@ -2384,7 +2402,7 @@ fn release_frame(process: &mut ProcessState, deallocate: u32) -> Result<(), Beam
 /// assert!(return_from_frame(&mut process)?.is_some());
 /// ```
 fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, BeamError> {
-    read(process, &Operand::X(0)).map_err(|_| error("return before setting x0"))?;
+    read_ref(process, &Operand::X(0)).map_err(|_| error("return before setting x0"))?;
     process.frames.pop();
     if !process.frames.is_empty() {
         return Ok(None);
@@ -2403,7 +2421,8 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
 /// ```
 fn normal_exit(process: &ProcessState) -> Result<Outcome, BeamError> {
     let result = read_operand(&Operand::X(0), &process.registers, &[])
-        .map_err(|_| error("return before setting x0"))?;
+        .map_err(|_| error("return before setting x0"))?
+        .clone();
     Ok(Outcome::Exit {
         reason: Term::static_atom("normal"),
         result: Some(result),
@@ -2472,16 +2491,16 @@ fn update_map_exact(
     Ok(Ok(map))
 }
 
-/// Read the value of each key in the map of a `get_map_elements` or
+/// Borrow the value of each key in the map of a `get_map_elements` or
 /// `has_map_fields` instruction, or return `None` at the first key that the
-/// map does not hold.
+/// map does not hold. The read copies neither the map nor a value.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // x0 holds #{output => raw}.
 /// let output = Operand::Value(Term::static_atom("output"));
-/// assert_eq!(map_values(&process, &Operand::X(0), [&output])?, Some(vec![Term::static_atom("raw")]));
+/// assert_eq!(map_values(&process, &Operand::X(0), [&output])?, Some(vec![&Term::static_atom("raw")]));
 /// let input = Operand::Value(Term::static_atom("input"));
 /// assert_eq!(map_values(&process, &Operand::X(0), [&output, &input])?, None);
 /// ```
@@ -2491,16 +2510,15 @@ fn update_map_exact(
 /// Return a runtime error when the source is not a map. The compiler puts an
 /// `is_map` test before each of these instructions.
 fn map_values<'a>(
-    process: &ProcessState,
-    map: &Operand,
+    process: &'a ProcessState,
+    map: &'a Operand,
     keys: impl IntoIterator<Item = &'a Operand>,
-) -> Result<Option<Vec<Term>>, BeamError> {
-    let map = read(process, map)?;
-    let Term::Map(map) = &map else {
+) -> Result<Option<Vec<&'a Term>>, BeamError> {
+    let Term::Map(map) = read_ref(process, map)? else {
         return Err(error("BEAM get_map_elements source is not a map"));
     };
     keys.into_iter()
-        .map(|key| Ok(map.get(&read(process, key)?).cloned()))
+        .map(|key| Ok(map.get(read_ref(process, key)?)))
         .collect()
 }
 
@@ -2710,7 +2728,8 @@ fn label_index(module: &BeamModule, label: u32) -> Result<usize, BeamError> {
         .ok_or_else(|| error(format!("missing BEAM label {label}")))
 }
 
-/// Read an operand from the process registers or the active frame. A
+/// Read a copy of an operand from the process registers or the active
+/// frame, for an instruction that stores the value in another place. A
 /// match context is a runtime invariant error: only the binary-match
 /// instructions read it, with `read_any` or `match_context`.
 ///
@@ -2720,14 +2739,29 @@ fn label_index(module: &BeamModule, label: u32) -> Result<usize, BeamError> {
 /// assert_eq!(read(&process, &Operand::Value(Term::Integer(1)))?, Term::Integer(1));
 /// ```
 fn read(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
-    match read_any(process, operand)? {
+    read_ref(process, operand).cloned()
+}
+
+/// Borrow an operand from the process registers or the active frame, for
+/// an instruction that only reads the value. The reference points to the
+/// literal or the register, so the read copies no term. A match context is
+/// a runtime invariant error, as for `read`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write(&mut process, &Operand::X(0), Term::Tuple(vec![Term::Integer(1)]))?;
+/// assert!(matches!(read_ref(&process, &Operand::X(0))?, Term::Tuple(_)));
+/// ```
+fn read_ref<'a>(process: &'a ProcessState, operand: &'a Operand) -> Result<&'a Term, BeamError> {
+    match read_any_ref(process, operand)? {
         Term::MatchContext(_) => Err(match_context_escape(operand)),
         value => Ok(value),
     }
 }
 
-/// Read an operand from the process registers or the active frame, also
-/// when it is a match context.
+/// Read a copy of an operand from the process registers or the active
+/// frame, also when it is a match context.
 ///
 /// # Examples
 ///
@@ -2737,6 +2771,23 @@ fn read(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
 /// assert!(matches!(read_any(&process, &Operand::X(0))?, Term::MatchContext(_)));
 /// ```
 fn read_any(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
+    read_any_ref(process, operand).cloned()
+}
+
+/// Borrow an operand from the process registers or the active frame, also
+/// when it is a match context.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
+/// assert!(matches!(read_any_ref(&process, &Operand::X(0))?, Term::MatchContext(_)));
+/// ```
+fn read_any_ref<'a>(
+    process: &'a ProcessState,
+    operand: &'a Operand,
+) -> Result<&'a Term, BeamError> {
     let stack = process.frames.last().map_or(&[][..], |frame| &frame.stack);
     read_operand(operand, &process.registers, stack)
 }
@@ -3626,22 +3677,24 @@ fn current_function(
     Ok((atom(module_name)?, atom(name)?, arity))
 }
 
-/// Read a literal, an X register, or a Y register.
+/// Borrow a literal, an X register, or a Y register. The reference points
+/// to the literal of the instruction or to the register, so the read
+/// copies no term.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let registers = vec![Some(Term::Integer(7))];
-/// assert_eq!(read_operand(&Operand::X(0), &registers, &[])?, Term::Integer(7));
+/// assert_eq!(read_operand(&Operand::X(0), &registers, &[])?, &Term::Integer(7));
 /// assert!(read_operand(&Operand::Y(0), &registers, &[]).is_err());
 /// ```
-fn read_operand(
-    operand: &Operand,
-    registers: &[Option<Term>],
-    stack: &[StackSlot],
-) -> Result<Term, BeamError> {
+fn read_operand<'a>(
+    operand: &'a Operand,
+    registers: &'a [Option<Term>],
+    stack: &'a [StackSlot],
+) -> Result<&'a Term, BeamError> {
     match operand {
-        Operand::Value(value) => Ok(value.clone()),
+        Operand::Value(value) => Ok(value),
         Operand::UnsupportedLiteral(index) => {
             Err(error(format!("unsupported BEAM literal index {index}")))
         }
@@ -3650,10 +3703,10 @@ fn read_operand(
         )),
         Operand::X(index) => registers
             .get(*index as usize)
-            .and_then(Clone::clone)
+            .and_then(Option::as_ref)
             .ok_or_else(|| error(format!("register x{index} is unset"))),
         Operand::Y(index) => match stack.get(*index as usize) {
-            Some(StackSlot::Term(value)) => Ok(value.clone()),
+            Some(StackSlot::Term(value)) => Ok(value),
             // The BEAM validator never lets an instruction read a catch tag.
             Some(StackSlot::Catch(_)) => {
                 Err(error(format!("stack register y{index} holds a catch tag")))

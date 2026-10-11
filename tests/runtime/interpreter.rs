@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use super::bif::BIFS;
 use super::{
-    BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand, write_operand,
+    BeamProgram, Outcome, Scheduler, StackSlot, call_arguments, function_at_label, read_operand,
+    write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -1904,7 +1905,7 @@ fn handles_register_values_and_reports_invalid_registers() {
     let mut registers = vec![Some(Term::Integer(7))];
     assert_eq!(
         read_operand(&Operand::X(0), &registers, &[]).unwrap(),
-        Term::Integer(7)
+        &Term::Integer(7)
     );
     assert!(read_operand(&Operand::X(1), &registers, &[]).is_err());
     assert!(read_operand(&Operand::Y(0), &registers, &[]).is_err());
@@ -1929,6 +1930,26 @@ fn handles_register_values_and_reports_invalid_registers() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn borrows_literal_and_register_operands_without_a_copy() {
+    // A read-only instruction gets a reference to the literal or the
+    // register itself, so a large tuple is not copied.
+    let tuple = || Term::Tuple(vec![Term::Integer(1); 1000]);
+    let literal = Operand::Value(tuple());
+    let registers = vec![Some(tuple())];
+    let stack = vec![StackSlot::Term(tuple())];
+    let (Operand::Value(literal_term), Some(x0), StackSlot::Term(y0)) =
+        (&literal, &registers[0], &stack[0])
+    else {
+        unreachable!("the fixture holds terms");
+    };
+    let read =
+        |operand: &Operand| read_operand(operand, &registers, &stack).unwrap() as *const Term;
+    assert_eq!(read(&literal), literal_term as *const Term);
+    assert_eq!(read(&Operand::X(0)), x0 as *const Term);
+    assert_eq!(read(&Operand::Y(0)), y0 as *const Term);
 }
 
 #[test]
