@@ -105,9 +105,9 @@ long_inputs() ->
 %% folding a constant.
 id(X) -> X.
 
-%% The keys First..Last as pairs {K, K}. Each '++' joins two halves, so
-%% that PBeam, which copies a list at each cons, builds a long list in
-%% O(N log N).
+%% The keys First..Last as pairs {K, K}. Each '++' joins two halves. The
+%% probe has this form from the time when PBeam copied a list at each cons
+%% (before #458).
 pairs(First, Last) when First > Last -> [];
 pairs(Key, Key) -> [{Key, Key}];
 pairs(First, Last) ->
