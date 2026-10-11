@@ -80,9 +80,10 @@ fn raises_undef_through_error_handler_beam_as_pinned_erts() {
     // `error_handler:undefined_function/3` raises `error:undef` with the
     // frame of the failed call and the frames of its callers
     // (`error_handler.erl:165-178`). PBeam runs the pinned module, so the
-    // first frame is the tuple that `crash/3` builds. The frames of
-    // `erl_eval` and `init` follow in the ERTS run, and the frame of
-    // `pbeam_boot:start/3` follows in a PBeam boot run.
+    // first frame is the tuple that `crash/3` builds. The failed call is the
+    // last call of `caller/0`, so the handler replaces the frame of
+    // `caller/0` and the frame of `frames/0` follows the first frame. ERTS
+    // puts the frames of `erl_eval` and `init` after its own caller frames.
     let program = program();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let frame = Term::tuple(vec![
