@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    rc::Rc,
     time::Duration,
 };
 
@@ -15,6 +16,7 @@ use super::{
         output::IovecWrite,
         signal,
     },
+    interpreter::CodeTable,
     local_node,
     persistent_term::PersistentTerms,
     port::Ports,
@@ -29,6 +31,7 @@ use super::{
     tty::Ttys,
 };
 use crate::{
+    beam::BeamModule,
     error::{BeamError, error},
     term::{Atom, AtomTable, ProcessId, Reference, Term},
 };
@@ -188,6 +191,10 @@ pub(super) struct Scheduler {
     /// run starts with a copy of the program table, and a BIF such as
     /// `erlang:list_to_atom/1` adds its new atoms here.
     pub(super) atoms: AtomTable,
+    /// The code table of the run, with its prepared code. The launcher puts
+    /// the start modules of the program into it before the root process
+    /// starts, and `erlang:finish_loading/1` adds a new module.
+    pub(super) code: CodeTable,
     /// The modules whose NIF library `erlang:load_nif/2` loaded in the run,
     /// as the `nif` field of the ERTS module instance
     /// (`beam/erl_nif.c:4774-4777`, `4990-4997`). PBeam has one instance of
@@ -270,6 +277,7 @@ impl Scheduler {
             ets: EtsTables::default(),
             resources,
             atoms,
+            code: CodeTable::default(),
             nif_libraries: HashSet::new(),
             timers: Timers::new(),
             alias_owners: HashMap::new(),
@@ -910,6 +918,28 @@ impl Scheduler {
         self.current_process
             .and_then(|id| self.processes.get_mut(&id))
             .expect("the scheduler has a current process")
+    }
+
+    /// Return the module of the active frame of the current process from
+    /// the code table of the run.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.current_module()?.name, "process_probe");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A module that is not loaded is the error `missing BEAM module M`.
+    pub(super) fn current_module(&self) -> Result<&Rc<BeamModule>, BeamError> {
+        // ponytail: only the run loop calls this, for a process with an active frame.
+        let frame = self
+            .current_process
+            .and_then(|id| self.processes.get(&id))
+            .and_then(|process| process.frames.last())
+            .expect("the current process has an active frame");
+        self.code.module(&frame.module)
     }
 
     /// Return the process `id` of the process table, also the current

@@ -261,6 +261,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer needs the ERTS result of a root `exit(normal)`, for example a program that ends its root process and keeps its other processes alive.
 - **Source:** M2 exit check (#220).
 
+### Read code files from the bundle as a read-only code path root
+
+- In interactive mode, a bundle is a read-only code path root. `prim_file` reads a path under this root from the bundle, not from the host file system. Thus `erl_prim_loader` and `code_server` run the pinned code path search on a bundle as on a directory (design section 13 of `docs/code-loading.md`). The bundle format does not exist yet, so no task can define the root or its paths now.
+- **Trigger:** the bundle format of [#15](https://github.com/fahchen/pbeam/issues/15) lands.
+- **Source:** design `code-loading.md` of Suikou review 01a1282e, accepted by the owner on 2026-10-11 (#441).
+
 ## Exceptions
 
 ### Run `error_handler.beam` for an undefined function

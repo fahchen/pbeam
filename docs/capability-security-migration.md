@@ -97,7 +97,7 @@ One capability covers one kind of resource. A capability has a kind, a set of pe
 
 Decisions of #335 for the checks of this table. An entry checks after its argument checks and before its first effect, as the spawn check does. A constraint compares the name that the BIF gets: the program name of `open_port/2` as the caller gives it, with no path resolution, and the variable name of `os:getenv/1`, each as its native bytes in the file name encoding of the host. `erlang:port_command/2` and `erlang:port_close/1` compare the program name of the port. `os:set_signal/2` with `default` needs both `handle` and `ignore`, because the table names no operation for it and `SIG_DFL` can end the OS process. Suikou review 01a12608 added the `runtime` kind for the effects on the whole runtime ([#369](https://github.com/fahchen/pbeam/issues/369)). `erlang:halt/2` checks `halt` after the checks of the options and the status, also for `abort` and a crash dump slogan. `erlang:system_flag/2` checks `system_flag` for each item and value that the PBeam value check accepts, also `debug_flags`. A value that only the missing subsystem rejects, such as a scheduler count above the host count, raises `capability_denied` in a denied process where ERTS raises `badarg`. The `i_load_nif` path of `erlang:load_nif/2` checks `load_nif` after the path check and before the library state. A call of `erlang:load_nif/2` through `apply` only gives an error and loads nothing, so it has no check. The same review added the operation `send` to the `process` kind ([#370](https://github.com/fahchen/pbeam/issues/370)). The `send` instruction, `erlang:send/2`, and `erlang:send/3` share one send path, which checks `send` once, after the check of the destination form and before the name lookup. `erlang:start_timer/3` checks `send` after the checks of the time and the destination. `erlang:link/1` checks `link`, and `erlang:monitor/2,3` check `monitor` after the checks of the options, the type, and the target, also for the pid of the caller. `erlang:exit/2` checks `exit_other` for a signal to another process, also through its alias, and for a port. A signal to the caller, also through its alias, has no check. A check comes before the runtime error of a part that PBeam does not support, such as a port, so a denied process cannot stop the run with it. The same review added the `persistent_term` kind for the global persistent term store ([#371](https://github.com/fahchen/pbeam/issues/371)). ERTS checks no argument of `persistent_term:get/0,1,2` and `persistent_term:put/2`, so each checks first: `get/0,1,2` check `read`, also for a key with no value, and `put/2` checks `write`, also for a key that has the same value. The trap exports of `get/0` and `put/2` continue a permitted call, so they do not check again. The same review added the operations `setup` and `query` to the `terminal` kind and the operation `inspect` to the `port` kind ([#372](https://github.com/fahchen/pbeam/issues/372)). `setup` and `query` stay separate operations. `prim_tty:setupterm_nif/0` and `prim_tty:setlocale/1` check `setup`. ERTS reads no argument of them on Unix, so each checks first. `prim_tty:isatty/1` and `prim_tty:tty_create/1` check `query` after the fd check. `prim_tty:tigetnum_nif/1` and `prim_tty:tigetflag_nif/1` read a capability of the terminfo entry, so they check `query` after the iodata check of the code ([#388](https://github.com/fahchen/pbeam/issues/388)). `erlang:port_info/1` checks `inspect` for the program name of an open port, as `erlang:port_command/2` and `erlang:port_close/1` do, also for a port of another process. A closed port and an atom give `undefined` with no check, because they have no program name. The same review added the operations `inspect` and `group_leader` to the `process` kind ([#373](https://github.com/fahchen/pbeam/issues/373)). `erlang:process_info/2`, `erlang:is_process_alive/1`, and `erts_internal:is_process_alive/2` check `inspect`, and `erts_internal:group_leader/2,3` check `group_leader`, each only when the target is another process. A call for the caller has no check. Each checks after its argument checks and before the process lookup, so a denied call does not tell whether a process has the pid, and a denied request sends no signal and no reply. `erlang:group_leader/2` in `erlang.beam` calls `erts_internal:group_leader/2`, and `erts_internal:group_leader/3` when the target has incoming signals, so it checks through them. `erlang:is_process_alive/1` traps to `erts_internal:is_process_alive/1` for a process that exits or has incoming signals, and that Erlang function calls `erts_internal:is_process_alive/2`, so the trap path checks again. The column "Capability" of the [effect inventory](effect-inventory.md) gives the state of each entry.
 
-Decisions of [#368](https://github.com/fahchen/pbeam/issues/368) (Suikou review 01a12608). The inventory value `ambient` marks an entry that has no check by decision: each process can call it, also a process with no capability, and a policy cannot deny it. Each `ambient` row gives its reason, and the inventory test accepts `ambient` only with a reason. These entries are `ambient`: `erlang:unlink/1` and `erlang:demonitor/1,2`, which change only a link or a monitor of the caller; `erlang:register/2`, `erlang:unregister/1`, and `erlang:whereis/1`, because a send or a monitor by name checks the `process` capability; each `ets` BIF, because the access mode of the table controls the access; `erlang:monotonic_time/1` and `os:system_time/1`, because a clock is a source of nondeterminism, not an authority; `erlang:universaltime_to_localtime/1`, `erlang:system_info/1`, `erlang:node/0,1`, and `erlang:function_exported/3`, which only read; and `erlang:list_to_atom/1` and `re:compile/2`, whose resource use is a budget, not a capability. [#373](https://github.com/fahchen/pbeam/issues/373) made `erlang:cancel_timer/2` `ambient`, because only a process that has the timer reference can cancel the timer, and `erlang:start_timer/3` checks `send`. [#437](https://github.com/fahchen/pbeam/issues/437) brought back the inventory value `later` for `erlang:module_loaded/1` only (Suikou review 01a126ad, item 5). The value marks an entry that has an effect, and a named later task adds its check. Until then, each process can call it, as an `ambient` entry. Each `later` row names its task, and the inventory test accepts `later` only with a name. `erlang:module_loaded/1` is not `ambient`: the epic for on-demand code loading adds the check of the code loading capability. That epic has no issue yet, so the row names it and the backlog entry "Run `code:ensure_loaded/1` as ERTS does". No other entry is `later`. The backlog has the `name`, `ets`, and `clock` kinds, a target constraint of `process` `send`, and the check of `erlang:list_to_pid/1`.
+Decisions of [#368](https://github.com/fahchen/pbeam/issues/368) (Suikou review 01a12608). The inventory value `ambient` marks an entry that has no check by decision: each process can call it, also a process with no capability, and a policy cannot deny it. Each `ambient` row gives its reason, and the inventory test accepts `ambient` only with a reason. These entries are `ambient`: `erlang:unlink/1` and `erlang:demonitor/1,2`, which change only a link or a monitor of the caller; `erlang:register/2`, `erlang:unregister/1`, and `erlang:whereis/1`, because a send or a monitor by name checks the `process` capability; each `ets` BIF, because the access mode of the table controls the access; `erlang:monotonic_time/1` and `os:system_time/1`, because a clock is a source of nondeterminism, not an authority; `erlang:universaltime_to_localtime/1`, `erlang:system_info/1`, `erlang:node/0,1`, and `erlang:function_exported/3`, which only read; and `erlang:list_to_atom/1` and `re:compile/2`, whose resource use is a budget, not a capability. [#373](https://github.com/fahchen/pbeam/issues/373) made `erlang:cancel_timer/2` `ambient`, because only a process that has the timer reference can cancel the timer, and `erlang:start_timer/3` checks `send`. [#437](https://github.com/fahchen/pbeam/issues/437) brought back the inventory value `later` for `erlang:module_loaded/1` only (Suikou review 01a126ad, item 5). The value marks an entry that has an effect, and a named later task adds its check. Until then, each process can call it, as an `ambient` entry. Each `later` row names its task, and the inventory test accepts `later` only with a name. `erlang:module_loaded/1` is not `ambient`: [#465](https://github.com/fahchen/pbeam/issues/465) adds its check `code:inspect`. [#442](https://github.com/fahchen/pbeam/issues/442) adds `erlang:finish_loading/1` as `later`: #465 adds its check `code:load`, because the owner decisions of Suikou review 01a1282e make `erlang:finish_loading/1` and the read of a code file the authorization points. #442 adds `erts_internal:prepare_loading/2` as `ambient`, as `erlang:list_to_atom/1`: it only decodes the bytes and makes atoms, and its resource use is a budget. No other entry is `later`. The backlog has the `name`, `ets`, and `clock` kinds, a target constraint of `process` `send`, and the check of `erlang:list_to_pid/1`.
 
 The value `ambient` of one entry is different from the start option that skips all checks. A run with no policy skips each check, as if each entry were `ambient`: `BeamProgram::execute`, and the `pbeam` binary without `--policy` or with `--no-capability-checks`. The launcher sets the option before the root process starts: `Scheduler::without_checks` keeps one `bool`, each check reads it first, and no BIF can change it. With the option, no process gets a capability copy, the `{capabilities, Map}` spawn option raises `badarg` for a `Map` that is not valid but does not reduce the child, and `pbeam_cap:revoke/2` and `pbeam_cap:request/2` return `ok` with no effect. The binary rejects `--no-capability-checks` with `--policy`, because the policy would then have no effect. A run with a policy module or a Rust policy makes each check, and `AllowAll` stays for the tests of the checks. Measured cost: a loop of 1,000,000 `Self ! x` and `receive` uses a median of 1.920 s CPU time with the option and 1.935 s with `AllowAll` (40 runs each), less than 1% difference.
 
@@ -338,6 +338,162 @@ The implementation tasks of [m6-e1] are in this order:
 6. [#378](https://github.com/fahchen/pbeam/issues/378) Revoke capability copies from the policy process. Blocked by #336 and #337. It adds `pbeam_cap:policy_revoke/2`.
 
 With the default policy, each task keeps every existing pinned-ERTS comparison result.
+
+### Boot authority and runtime authority
+
+Status: design confirmed by the owner on 2026-10-11 (Suikou review 01a1282e). This section records the design. No part of it is implemented yet. [#462](https://github.com/fahchen/pbeam/issues/462), [#463](https://github.com/fahchen/pbeam/issues/463), and [#464](https://github.com/fahchen/pbeam/issues/464) implement it. The task that adds each PBeam BIF of this design records the BIF in [ERTS differences](erts-differences.md).
+
+Owner decision: separate boot authority from runtime authority. Capabilities apply only to runtime processes.
+
+#### Problem
+
+In the decisions of #338, the guest runs in the root process of `pbeam_boot`. Each process of the OTP IO path is a descendant of the root process. Thus the policy gives the root process all authority that the boot uses, and the guest can use that authority too (see [Decisions of #338](#decisions-of-338)). The policy author must also know the internal steps of the boot.
+
+#### Kernel tree and application tree
+
+The kernel tree and the application tree are separate supervision trees. Their authority is controlled separately:
+
+- The kernel tree has no capability check. It contains `init`, `erl_prim_loader`, `application_controller`, the kernel `application_master`, and the full `kernel_sup` tree, with `code_server`. These processes are the boot processes. The launcher trusts them as it trusts itself.
+- The policy controls the application tree. The application tree is the `application_master` of the user application, its top supervisor, and their descendants. The code of `-eval` and `-s` is also in the application tree. The policy `initial/1` gives the capabilities of the application root. After that, the existing rules of check, delegation, and revocation apply.
+- When an application process calls a kernel service, for example the IO server that writes to the terminal, the runtime checks the capabilities of the caller (see [Runtime-to-boot gate](#runtime-to-boot-gate) and [IO service entry](#io-service-entry)).
+
+The supervision tree gives the boundary, not the order of the calls in `pbeam_boot`. In the target structure (#464), the launcher marks as boot each process that exists before the user application starts. A process that a boot process starts later is a boot process, for example a child of `supervisor:start_child(kernel_sup, ...)`. The root of the user application is the exception: `application_controller`, a boot process, starts the `application_master` of the user application (`lib/kernel/src/application_controller.erl:1442-1448`), so the boot rule alone makes the application tree a boot tree. #464 defines the trusted transition that makes the application root a runtime process and gives it the capabilities of `initial/1` before user code runs, for example the one-way drop of option B at the application root. Each process that the application root starts, and each descendant, is a runtime process. Until the kernel start of [#449](https://github.com/fahchen/pbeam/issues/449), the interim rule of #462 applies: each process that the root process makes in boot mode, and each descendant of such a process, is a boot process.
+
+The pinned ERTS process tree at `OTP-29.1.1`, from `init/1` of `kernel` (`lib/kernel/src/kernel.erl:91-227`) and a probe on the pinned ERTS:
+
+```mermaid
+flowchart TD
+    subgraph K["Kernel tree: no capability check"]
+      init["init<br/>no supervisor"]
+      epl["erl_prim_loader"]
+      logger["logger (logger_server)"]
+      ac["application_controller"]
+      am["kernel application_master<br/>and its start_it process"]
+      ksup["kernel_sup<br/>one_for_all"]
+      code["code_server"]
+      stderr["standard_error_sup<br/>standard_error"]
+      file["file_server_2"]
+      onload["on_load<br/>stops after the boot"]
+      inetdb["inet_db"]
+      dist["rex, global_name_server, global_group<br/>net_sup not started without distribution"]
+      sig["erl_signal_server<br/>gen_event"]
+      user["user_sup<br/>user (group), user_drv,<br/>user_drv_reader, user_drv_writer"]
+      lsup["logger_sup<br/>logger_proxy, logger_handler_watcher,<br/>logger handlers"]
+      cfg["kernel_config"]
+      refc["kernel_refc"]
+      safe["kernel_safe_sup<br/>children on demand"]
+    end
+    subgraph A["Application tree: capabilities of the policy"]
+      app["application_master<br/>of the user application"]
+      top["top supervisor and its descendants"]
+      eval["code of -eval and -s<br/>in the boot process of init"]
+    end
+    init --> epl & logger & ac
+    ac --> am --> ksup
+    ksup --> code & stderr & file & onload & inetdb & dist & sig & user & lsup & cfg & refc & safe
+    ac -.-> app --> top
+    init -.-> eval
+```
+
+- The probe runs `supervisor:which_children(kernel_sup)` and `process_info/2` with `erl -noshell` of the pinned OTP 29.1.1, in the default interactive mode, without distribution. The children of `kernel_sup` are `code_server`, `standard_error`, `file_server_2`, `on_load` (`undefined`), `inet_db`, `rex`, `global_name_server`, `net_sup` (`undefined`), `global_group`, `erl_signal_server`, `user`, `logger_sup`, `kernel_config`, `kernel_refc`, and `kernel_safe_sup`. `kernel_safe_sup` has no children. `init` links to `erl_prim_loader`, `logger`, `application_controller`, and the boot process that runs `-eval`. The kernel `application_master` links to `application_controller` and to its `application_master:start_it/4` process, which links to `kernel_sup`.
+- The child order is in `lib/kernel/src/kernel.erl:221-226`. The timer server and the compile server are optional direct children of `kernel_sup` (`lib/kernel/src/kernel.erl:218-219`), not children of `kernel_safe_sup`. `kernel_sup` is `one_for_all` (`lib/kernel/src/kernel.erl:92`), so a failure of a permanent kernel child restarts all kernel children.
+- The default boot of the pinned OTP install also starts `sasl`. The probe shows its `application_master` next to the kernel `application_master`. `sasl` is in the application tree.
+- PBeam now: `pbeam_boot` starts `init`, `logger`, `application_controller`, and one kernel process (`examples/hello_world/pbeam_boot.erl:11-22`). The kernel process starts `standard_error`, `file_server_2`, `erl_signal_server`, `user_sup`, and `logger_sup` (`examples/hello_world/pbeam_boot.erl:98-108`). PBeam has no `erl_prim_loader`, no kernel `application_master`, no `kernel_sup`, no `code_server`, no `inet_db`, no `kernel_config`, no `kernel_refc`, and no `kernel_safe_sup`.
+
+#### Boot context
+
+- `SecurityContext` gets a boot flag. A check in a boot process passes and does not read copies. A boot process is not in the `Delegations` tree, and it cannot be revoked. It is in the TCB, as the launcher is.
+- A child that a boot process spawns without `{capabilities, Map}` is a boot process. Only the launcher makes the boot root. No BIF changes a runtime process into a boot process.
+- A boot process that spawns with `{capabilities, Map}` gets `error:capability_denied` (fail-closed), until the launcher of [m8] needs it.
+- A boot call of `pbeam_cap:request/2` returns `ok` and does not call the policy. `pbeam_cap:policy_revoke(BootPid, Kind)` returns `ok` and has no effect, as the existing rule does for a holder with no copy of `Kind`.
+- The `Delegations` tree holds only runtime copies, so the cascade logic does not change. After a revocation of the `terminal` `write` copy of a guest, the gate denies the next `put_chars` request of the guest, because the gate reads the current copies of the sender. A request that is already in the queue of a boot process is not withdrawn, as with the existing rule for a resource that is already open.
+
+#### Runtime-to-boot gate
+
+The gate applies when the caller is a runtime process and the target is a boot process. It runs after the existing check. It is fail-closed:
+
+- A send, to a pid or to a registered name after resolution, is denied by default with `error:capability_denied`. It is permitted only when it matches a registered service entry.
+- A send to an alias that a boot process made is permitted. The boot process gives the alias as a reply channel, for example for a `gen:call` reply (`lib/stdlib/src/gen.erl:251-281`).
+- A `monitor` is permitted. It is read-only, and `io` monitors the IO server before each request (`lib/stdlib/src/io.erl:1667-1668`).
+- `link`, `exit/2`, `group_leader/2`, and inspection (`process_info` and `is_process_alive`) of a boot process are denied.
+- `unregister/1` of the registered name of a boot process is denied, for example `unregister(user)`. Without this check, a runtime process could stop the kernel services. The effect inventory now gives `unregister/1` no capability (`ambient`).
+- The boot-to-runtime direction has no check.
+
+Default deny agrees with [Transition 4](#transition-4-protect-the-otp-service-path): an unadapted privileged service is not available to a secure guest. A run without a policy has no check, so default deny changes only restricted runs. A capability that gives a trusted guest direct access to the boot processes waits for its first consumer.
+
+#### IO service entry
+
+The IO service entry prevents a confused deputy. The IO server uses for a guest only the terminal authority that the guest holds:
+
+- A boot-only BIF `pbeam_cap:serve(Pid, io)` registers an IO service by pid, not by name. `pbeam_boot` registers `user` and `standard_error`. `unregister/1` gives no capability, so a name can change to a different process; a pid is not used again in a run.
+- A message to an IO service is permitted only in the form `{io_request, From, ReplyAs, Req}`, and `From` must be the real sender. The runtime knows the sender, so a false pid is denied.
+- This sender rule is for option B (#463), where the guest sends its IO requests directly to `user`. In option A, the `application_master` of the user application is the group leader of its processes, and it forwards their IO requests unchanged (`lib/kernel/src/application_master.erl:170-171`, `246-257`). The sender is then the `application_master`, and `From` is the application process, so the sender rule denies the request. #464 defines an authenticated forward that keeps the original caller and checks the capabilities of that caller.
+- `{put_chars, Enc, Chars}` needs the `terminal` `write` capability of the caller.
+- `{put_chars, Enc, io_lib, F, A}` is permitted only when `F` is `format`, `fwrite`, or `write`. `io` makes these forms (`lib/stdlib/src/io.erl:1750-1755`). Each other MFA is denied, because `group` applies the MFA of the request in its own process (`lib/kernel/src/group.erl:626-627`), with boot authority.
+- The MFA form is also denied when `A` contains a fun at any depth. A permitted function name is not sufficient, because these functions call a fun of the caller in the process of `group`: `format` and `fwrite` call the fun of the `~K` control modifier (`lib/stdlib/src/io_lib_format.erl:247-248`), and `write/2` calls the fun of the option `{maps_order, Fun}` (`lib/stdlib/src/io_lib.erl:599-604`). Both go to `maps:iterator/2`, which calls the fun (`lib/stdlib/src/maps.erl:1070-1071`). A probe on the pinned ERTS shows that `io_lib:format("~Kp", [Fun, Map])` and `io_lib:write(Map, [{maps_order, Fun}])` call `Fun`. A restricted guest that prints a fun with the MFA form, for example `io:format("~p", [Fun])`, is denied too. #463 records this difference in [ERTS differences](erts-differences.md).
+- `{requests, L}` checks each request of `L`.
+- Each other request, for example `get_line`, `setopts`, `getopts`, and `get_geometry`, is denied until a consumer needs it.
+
+#### Order of the options
+
+The three options:
+
+- Option A, independent application root: the user code starts as an OTP application. `application_controller` starts its `application_master`, which starts the top supervisor, next to the kernel tree.
+- Option B, one-way drop: the user code runs in the boot process, as with `erl -eval`. Before the user code runs, the process gives up its boot authority one time and gets the capabilities of `initial/1`. The processes that it made before stay boot processes.
+- Option C, one model: the boot processes stay under the policy. Each kernel process requests its IO authority with `pbeam_cap:request/2` before `user_sup` starts, and the root process gets only the authority of the guest.
+
+| | Option A | Option B | Option C |
+| --- | --- | --- | --- |
+| Advantages | Boot and application are different processes, and the supervision tree gives the boundary. The launcher of [m8] can start more than one application. | The guest stays in the boot process, so its pid, `trap_exit`, and group leader are the same as with `erl -eval`. The result path of the root does not change. The change is small. | No new concept. |
+| Disadvantages | The guest is not in the boot process. `trap_exit`, links, the group leader, and the result path can be different from `erl -eval`. It needs `application_controller` and `kernel_sup`. | The root has different authority before and after the drop, so the drop must be one way and one time. | It does not agree with the owner decision: the boot stays under the policy. Each process that the root starts needs a grant. The policy author must know the boot internals, and the rules can fail after an OTP upgrade. The confused deputy stays. |
+| Risk | Observable behavior can be different from ERTS, for example `process_info(self(), trap_exit)`. | Guest code that runs before the drop has full authority (fail-open). Thus the launcher declares the boot mode explicitly, and `pbeam_boot` calls the drop each time. | The confused deputy is not solved. |
+
+All three options need the same runtime-to-boot gate. Without it, a guest can get boot authority, for example through `supervisor:start_child/2` of `logger_sup`.
+
+Decision: option A is the target, and option B is the interim step:
+
+1. [#462](https://github.com/fahchen/pbeam/issues/462) adds the boot context, the launcher boot mode, the one-way drop (option B), and the fail-closed gate.
+2. [#463](https://github.com/fahchen/pbeam/issues/463) adds the IO service entry and runs `examples/restricted_guest` with the strict policy.
+3. [#464](https://github.com/fahchen/pbeam/issues/464) moves the user code to an independent application root (option A), after the kernel start of [m5-e3] ([#449](https://github.com/fahchen/pbeam/issues/449)). Its boot set is the kernel tree.
+
+Reasons: today PBeam has no kernel `application_master` and no `kernel_sup`, so option A cannot start before #449. The owner decided to separate the kernel tree from the application tree and to start the kernel as OTP does; this is the structure of option A. Option B runs `examples/restricted_guest` with the strict policy before #449, with a small change. Option C does not agree with the owner decision.
+
+The one-way drop of option B:
+
+- The launcher has a boot mode: the option `--boot` of the `pbeam` binary and an argument of the Rust API. It is permitted only with a policy module. In boot mode, the launcher does not wait for `initial/1` before it makes the root, and the root starts with boot authority.
+- The root calls `pbeam_cap:enter_runtime(Module, Function)`. The policy process calls `initial/1` through `PolicyCall::Initial` with the requester `#{pid => Root, parent => none, initial_call => {Module, Function, 0}}`, and the root waits in the BIF for the grant signal. When the root handles the signal, it removes the boot flag and adds the copies with the source `Launcher` in one step. Thus `Policy::revocations` and `pbeam_cap:policy_revoke/2` work as before.
+- When `initial/1` denies the root, the run stops with the existing error `the policy denied the root process: <cause>`.
+- In a process that is not a boot process, or in a run without a policy, the call returns `ok` and has no effect. Thus `pbeam_boot` calls it each time before `Module:Function()`, and a runtime process gets no authority from it.
+- A run without `--boot`, which includes each existing ERTS comparison test and each Rust `AllowAll` run, does not change.
+
+#### Smaller decisions
+
+- The launcher declares the boot mode, not the policy. The owner decided that the boot is not under the policy, and the launcher is the only issuer of the initial authority. The policy describes only the runtime. The alternative was a `boot` value that `initial/1` returns for the root.
+- The strict policy names `send` and `monitor` explicitly. They are not hidden in the IO service entry. A worker needs `send` to report `{:done, pid}`, and an explicit list is easier to audit. #463 records the minimal set with a run that fails when each item is removed. The planned strict policy of `examples/restricted_guest`:
+
+```elixir
+def initial(%{parent: :none, initial_call: {RestrictedGuest, :main, 0}}) do
+  [
+    %{kind: :process, operations: [:spawn, :send, :monitor], modules: [RestrictedGuest.Worker], delegable: true},
+    %{kind: :terminal, operations: [:write], delegable: true}
+  ]
+end
+```
+
+- The policy process stays as it is. It is not a boot process. It already holds the copies of `AllowAll`, so its behavior is the same, and the change has no consumer.
+- A boot `gen:call` to a runtime process with the timeout `infinity` gets its reply at the pid of the boot process, not at an alias (`lib/stdlib/src/gen.erl:221-227`, `233-250`). The gate denies this reply. No boot path calls a runtime process now. #462 records the denial, and an entry is added when a consumer needs it.
+
+#### ERTS evidence
+
+ERTS has no authorization model: all processes have the same authority. The evidence below is at `OTP-29.1.1`:
+
+- `erl -eval` runs in the boot process `do_boot`, which `init` starts with `spawn_link` and which traps exits (`erts/preloaded/src/init.erl:1192-1197`). Before it runs the code, `start_em` sets the group leader to `user` (`erts/preloaded/src/init.erl:1539-1546`). Thus the guest of option B stays in one process to keep its pid, `trap_exit`, and group leader.
+- ERTS marks some processes as system processes with `SPO_SYSTEM_PROC` (`erts/emulator/beam/erl_init.c:335-353`), for example the helper of `prim_file` (`erts/preloaded/src/prim_file.erl:117-120`). This class prevents `init:restart/0` from killing the process. It does not give different authority.
+- `application_master` becomes the group leader of the processes of its application to identify them, and it forwards their IO to the old group leader (`lib/kernel/src/application_master.erl:121-134`, `244-257`). This is the OTP boundary between kernel and application.
+- The IO path: `io` monitors the IO server and sends `{io_request, self(), Mref, Request}` (`lib/stdlib/src/io.erl:1667-1668`). `io:format/2` becomes `{put_chars, unicode, io_lib, format, [Format, Args]}` (`lib/stdlib/src/io.erl:1752-1753`). `group` applies the MFA in its own process (`lib/kernel/src/group.erl:626-627`). The writer process of `prim_tty`, started with `proc_lib` (`lib/kernel/src/prim_tty.erl:268`), calls `write_nif` (`lib/kernel/src/prim_tty.erl:549-560`).
+- Confused deputy examples: `logger_server` calls `adding_handler` of the handler module of the caller in its own process (`lib/kernel/src/logger_server.erl:175-178`). `supervisor:start_child/2` asks any supervisor to start any child specification (`lib/stdlib/src/supervisor.erl:650-651`). A `gen:call` reply goes to an alias, except for a local call with the timeout `infinity` (`lib/stdlib/src/gen.erl:233-262`).
+
+Conclusion: if a boot process has full authority, each message from a runtime process to it can increase authority. Thus the runtime-to-boot boundary needs a gate that denies by default.
 
 ## Transition 3: authorized terminal effects and providers
 

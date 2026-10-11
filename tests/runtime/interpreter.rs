@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use super::bif::BIFS;
 use super::{
-    BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand, write_operand,
+    BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
+    read_operand, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -28,11 +29,11 @@ fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
     BeamProgram {
         modules: HashMap::from([(
             "fixture".into(),
-            BeamModule {
+            Rc::new(BeamModule {
                 name: "fixture".into(),
                 exports: HashMap::from([(("main".into(), 0), 2)]),
                 instructions,
-            },
+            }),
         )]),
         atoms: AtomTable::new(),
     }
@@ -55,7 +56,7 @@ fn atom(name: &str) -> Operand {
 /// Run `main/0` with a `child/1` function that calls `erlang:exit/1`.
 fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
     let mut program = make_program(body, 0);
-    let module = program.modules.get_mut("fixture").unwrap();
+    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
     module.exports.insert(("child".into(), 1), 11);
     module.instructions.extend([
         Instruction::FunctionInfo {
@@ -175,7 +176,8 @@ fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
         BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
     let label = program.modules["fun_probe"].exports[&("tail_wait".to_owned(), 1)];
     let mut scheduler = Scheduler::new(program.atoms.clone());
-    let frame = program.frame("fun_probe", label, 1).unwrap();
+    scheduler.code = CodeTable::new(program.modules.clone());
+    let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
     scheduler
         .start(frame, vec![Term::Integer(1)], Vec::new())
         .unwrap();
@@ -490,9 +492,7 @@ fn recognizes_runtime_process_identifiers_as_pids() {
         ],
         1,
     );
-    program
-        .modules
-        .get_mut("fixture")
+    Rc::get_mut(program.modules.get_mut("fixture").unwrap())
         .unwrap()
         .exports
         .insert(("main".into(), 1), 2);
@@ -856,7 +856,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
     );
     program.modules.insert(
         "maps".into(),
-        BeamModule {
+        Rc::new(BeamModule {
             name: "maps".into(),
             exports: HashMap::from([(("keys".into(), 1), 1)]),
             instructions: vec![
@@ -869,7 +869,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
                 Instruction::Move(atom("module_code"), Operand::X(0)),
                 Instruction::Return,
             ],
-        },
+        }),
     );
     // The BIF returns the keys of the empty map. The module code would
     // return `module_code`.
@@ -899,7 +899,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
     );
     program.modules.insert(
         "lists".into(),
-        BeamModule {
+        Rc::new(BeamModule {
             name: "lists".into(),
             exports: HashMap::from([(("keysearch".into(), 3), 1)]),
             instructions: vec![
@@ -912,7 +912,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
                 Instruction::Move(atom("stub"), Operand::X(0)),
                 Instruction::Return,
             ],
-        },
+        }),
     );
     // `lists:keysearch/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
     // BIF, so the BEAM stub body of the loaded `lists` module must not run.
@@ -1475,18 +1475,18 @@ fn rejects_unresolved_exports_and_function_labels() {
         instructions: vec![],
     };
     let program = BeamProgram {
-        modules: HashMap::from([("external".into(), module)]),
+        modules: HashMap::from([("external".into(), Rc::new(module))]),
         atoms: AtomTable::new(),
     };
     assert!(
-        program
+        CodeTable::new(program.modules.clone())
             .mfa_frame("missing", "run", 0)
             .unwrap_err()
             .to_string()
             .contains("unresolved external MFA missing:run/0")
     );
     assert!(
-        program
+        CodeTable::new(program.modules.clone())
             .mfa_frame("external", "missing", 0)
             .unwrap_err()
             .to_string()
@@ -1535,7 +1535,7 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         body.extend(rest);
         // `child/1` does not read its argument.
         let mut program = make_program(body, 0);
-        let module = program.modules.get_mut("fixture").unwrap();
+        let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
         module.exports.insert(("child".into(), 1), 11);
         module.instructions.extend([
             Instruction::FunctionInfo {
@@ -1904,7 +1904,7 @@ fn handles_register_values_and_reports_invalid_registers() {
     let mut registers = vec![Some(Term::Integer(7))];
     assert_eq!(
         read_operand(&Operand::X(0), &registers, &[]).unwrap(),
-        Term::Integer(7)
+        &Term::Integer(7)
     );
     assert!(read_operand(&Operand::X(1), &registers, &[]).is_err());
     assert!(read_operand(&Operand::Y(0), &registers, &[]).is_err());
@@ -1929,6 +1929,26 @@ fn handles_register_values_and_reports_invalid_registers() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn borrows_literal_and_register_operands_without_a_copy() {
+    // A read-only instruction gets a reference to the literal or the
+    // register itself, so a large tuple is not copied.
+    let tuple = || Term::Tuple(vec![Term::Integer(1); 1000]);
+    let literal = Operand::Value(tuple());
+    let registers = vec![Some(tuple())];
+    let stack = vec![StackSlot::Term(tuple())];
+    let (Operand::Value(literal_term), Some(x0), StackSlot::Term(y0)) =
+        (&literal, &registers[0], &stack[0])
+    else {
+        unreachable!("the fixture holds terms");
+    };
+    let read =
+        |operand: &Operand| read_operand(operand, &registers, &stack).unwrap() as *const Term;
+    assert_eq!(read(&literal), literal_term as *const Term);
+    assert_eq!(read(&Operand::X(0)), x0 as *const Term);
+    assert_eq!(read(&Operand::Y(0)), y0 as *const Term);
 }
 
 #[test]
@@ -2239,7 +2259,7 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
     );
     program.modules.insert(
         "erts_internal".into(),
-        BeamModule {
+        Rc::new(BeamModule {
             name: "erts_internal".into(),
             exports: HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
             instructions: vec![
@@ -2253,7 +2273,7 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
                 Instruction::Move(Operand::X(2), Operand::X(0)),
                 Instruction::Return,
             ],
-        },
+        }),
     );
     assert_eq!(
         program.execute("fixture", "main", &[]).unwrap(),
@@ -2294,7 +2314,7 @@ fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamErr
 /// Return the program of `run_with_apply_targets`.
 fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
     let mut program = make_program(body, 0);
-    let module = program.modules.get_mut("fixture").unwrap();
+    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
     module.exports.extend([
         (("zero".into(), 0), 11),
         (("id".into(), 3), 12),
@@ -2621,7 +2641,7 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
     ];
     body.extend(wait_forever());
     let mut program = make_program(body, 0);
-    let module = program.modules.get_mut("fixture").unwrap();
+    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
     module.exports.insert(("fresh".into(), 0), 11);
     module.instructions.extend([
         Instruction::FunctionInfo {
@@ -3112,7 +3132,7 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
             erlang_call("spawn", 3, false),
         ];
         let mut program = make_program([body, wait_forever()].concat(), 0);
-        let module = program.modules.get_mut("fixture").unwrap();
+        let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
         module.exports.insert(("burner".into(), 0), 21);
         module.exports.insert(("sender".into(), 1), 25);
         let function = |name: &str, arity, label| {

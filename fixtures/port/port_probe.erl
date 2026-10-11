@@ -96,16 +96,30 @@ read_all(Port, Data) ->
     end.
 
 %% Input of a program through port_command/2, and the counts of port_info/1.
+%% The program echoes 5 bytes, and then waits for 1 more byte before it
+%% exits. The probe reads all 5 bytes, and sends the last byte only after
+%% the second port_info/1, so the port is open at each port_info/1 call and
+%% the counts are 5. Else the program can exit and the port can close
+%% before the second call, which then gives undefined.
 command() ->
     process_flag(trap_exit, true),
     Self = self(),
-    Port = open_port({spawn_executable, sh()}, [binary, {args, ["-c", "head -c 5"]}]),
+    Port = open_port({spawn_executable, sh()},
+                     [binary, {args, ["-c", "head -c 5; head -c 1 >/dev/null"]}]),
     Before = info(Port, Self),
     Sent = [port_command(Port, <<"hel">>), port_command(Port, ["l", $o])],
-    Data = receive {Port, {data, D}} -> D end,
+    Data = data(Port, 5, []),
     After = info(Port, Self),
+    true = port_command(Port, <<"x">>),
     Exit = receive {'EXIT', Port, Reason} -> Reason end,
     [Before, Sent, Data, After, Exit, erlang:port_info(Port), flush()].
+
+%% Size bytes of data from the port, as one binary. The program can write
+%% its output in more than one part, and each part comes as one message.
+data(_Port, 0, Data) ->
+    iolist_to_binary(lists:reverse(Data, []));
+data(Port, Size, Data) ->
+    receive {Port, {data, D}} -> data(Port, Size - byte_size(D), [D | Data]) end.
 
 info(Port, Self) ->
     Info = erlang:port_info(Port),
