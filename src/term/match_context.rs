@@ -150,8 +150,10 @@ impl MatchContext {
 
     /// Move the position by `size` bits, as the `skip` command of
     /// `bs_match` does (`SKIP` in `emit_i_bs_match_test_heap`,
-    /// jit/arm/instr_bs.cpp:3187-3197). Return `None` and keep the
-    /// position when fewer than `size` bits remain.
+    /// jit/arm/instr_bs.cpp:3187-3197) and as the reads of `bs_get_binary2`
+    /// and the `integer`, `binary`, and `=:=` commands of `bs_match` move
+    /// it. Return `None` and keep the position when fewer than `size` bits
+    /// remain.
     ///
     /// # Examples
     ///
@@ -213,6 +215,23 @@ impl MatchContext {
         let start = self.position;
         self.skip(size)?;
         Some(self.bytes.bits(start, self.position))
+    }
+
+    /// Move the position past `size` bits, as [`MatchContext::read_bits`]
+    /// does, and give no bits. A caller that needs no bitstring term uses
+    /// the function, so it copies no bits of the segment.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut context = MatchContext::new(Binary::from(&[1, 2, 3][..]));
+    /// assert_eq!(context.advance(16), Some(()));
+    /// assert_eq!(context.position(), 16);
+    /// assert_eq!(context.advance(16), None);
+    /// assert_eq!(context.position(), 16);
+    /// ```
+    pub(crate) fn advance(&mut self, size: u64) -> Option<()> {
+        self.skip(size)
     }
 
     /// Return the bits between the bit positions `start` and `end` as a view

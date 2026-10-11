@@ -1262,7 +1262,13 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
     if end > bytes.len() as u64 {
         return BifResult::badarg();
     }
-    Value(Term::binary(bytes[start as usize..end as usize].to_vec()))
+    // ERTS makes a sub-binary that refers to the source
+    // (`binary_part_3` in `erl_bif_binary.c`; `binary_referenced_byte_size_1`,
+    // `erl_bif_binary.c:2508-2530`), so the part shares the bytes of the
+    // source and keeps their offset.
+    Value(Term::Binary(
+        bytes.bits(start as usize * 8, end as usize * 8),
+    ))
 }
 
 /// Run `erlang:byte_size/1`: return the number of bytes of a binary, as

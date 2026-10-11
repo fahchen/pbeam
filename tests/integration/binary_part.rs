@@ -87,3 +87,27 @@ fn stops_at_a_bitstring_literal() {
         "{error,badarg}\n"
     );
 }
+
+#[test]
+fn gives_a_part_that_shares_the_bytes_of_its_source() {
+    // `erts_binary_part` makes a sub-binary that refers to the source
+    // (`binary_part_3` in `erl_bif_binary.c`; `binary_referenced_byte_size_1`,
+    // `erl_bif_binary.c:2508-2530`), so a part keeps the offset of its bytes
+    // in the array of the source. The source and the part are one array when
+    // the part points into it, and a copy would point outside it.
+    let program = BeamProgram::load(&[BINARY_PART_PROBE]).unwrap();
+    let result = program.execute("binary_part_probe", "main", &[]).unwrap();
+    let parts: Vec<&Term> = result.proper_list().expect("a list").collect();
+    // `main/0` gives `binary_part(<<"hello">>, 0, 5)` first and
+    // `binary_part(<<"hello">>, 1, 3)` second.
+    let (Term::Binary(source), Term::Binary(part)) = (parts[0], parts[1]) else {
+        panic!("the results are binaries");
+    };
+    assert_eq!((&source[..], &part[..]), (&b"hello"[..], &b"ell"[..]));
+    let (source, part) = (source.as_ptr() as usize, part.as_ptr() as usize);
+    assert!(
+        (source..source + 5).contains(&part),
+        "the part {part:#x} is not in the array of the source {source:#x}"
+    );
+    assert_eq!(part - source, 1);
+}

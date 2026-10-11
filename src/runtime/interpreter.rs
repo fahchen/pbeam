@@ -1155,19 +1155,20 @@ impl BeamProgram {
                     destination,
                 } => {
                     let state = match_context(process, context)?;
+                    // ERTS writes a sub-bitstring that refers to the
+                    // original binary and moves the position past the
+                    // segment (`erts_bs_get_binary_2`, `erl_bits.c:400-424`),
+                    // so the view needs no copy. The position moves before
+                    // the size check, as the `Fail` jump does.
                     let bytes = binary_field_size(read_ref(process, size)?, *unit)
-                        .and_then(|bits| Some((bits, state.borrow_mut().read_bits(bits)?)));
+                        .and_then(|bits| Some((bits, state.borrow_mut().advance(bits)?)));
                     match bytes {
-                        Some((bits, _)) => {
+                        Some((bits, ())) => {
                             if !bits.is_multiple_of(8) {
                                 return Err(error(format!(
                                     "unsupported bs_get_binary2 of {bits} bits: needs a bitstring term"
                                 )));
                             }
-                            // The size is a multiple of 8, so the view of the
-                            // segment always exists: `MatchContext::bits_at`
-                            // gives a view for each size that is a whole
-                            // number of bytes.
                             let position = state.borrow().position();
                             let bytes = state
                                 .borrow()

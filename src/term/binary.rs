@@ -46,8 +46,9 @@ pub struct Binary {
     /// The bytes of the view, with the bits of an offset that is not on a
     /// byte boundary packed as [`Binary::deref`] gives them. `None` when the
     /// offset is on a byte boundary, because the view is then a slice of the
-    /// array with no copy.
-    packed: Option<Vec<u8>>,
+    /// array with no copy. The `Arc` keeps a copy of such a binary O(1), as
+    /// a copy of a byte-aligned binary is.
+    packed: Option<Arc<Vec<u8>>>,
 }
 
 impl Binary {
@@ -63,6 +64,20 @@ impl Binary {
     #[cfg(test)]
     pub(crate) fn bytes(&self) -> &Arc<Vec<u8>> {
         &self.bytes
+    }
+
+    /// Return the packed bits of a view whose size is not a whole number of
+    /// bytes, or `None` for each other view.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let view = Binary::from(&[0xC3]).bits(4, 8);
+    /// assert!(view.packed().is_some());
+    /// ```
+    #[cfg(test)]
+    pub(crate) fn packed(&self) -> Option<&Arc<Vec<u8>>> {
+        self.packed.as_ref()
     }
 
     /// Return the bits from the bit position `start` to the bit position
@@ -94,7 +109,11 @@ impl Binary {
             // the bits include that byte. `pack_bits` reads one byte past the
             // slice, and the last byte of the array has no byte after it.
             let end = (first + size.div_ceil(BITS_PER_BYTE) + 1).min(self.bytes.len());
-            pack_bits(&self.bytes[first..end], offset % BITS_PER_BYTE, size)
+            Arc::new(pack_bits(
+                &self.bytes[first..end],
+                offset % BITS_PER_BYTE,
+                size,
+            ))
         });
         Binary {
             bytes: Arc::clone(&self.bytes),

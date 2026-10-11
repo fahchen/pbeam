@@ -164,3 +164,19 @@ fn prints_a_binary_as_its_bytes() {
     // The array of a binary formatter writes the same text.
     assert_eq!(format!("{:?}", Binary::from(vec![1, 2])), "[1, 2]");
 }
+
+#[test]
+fn copies_a_view_whose_size_is_not_a_whole_number_of_bytes_in_o1_time() {
+    // The bits of such a view are packed in one `Arc`, so a copy of the view
+    // copies the `Arc` and not the bits. PBeam has no bitstring term, so
+    // such a view comes only from a segment that PBeam does not run yet.
+    let source = Binary::from(&[0xC3]);
+    let view = source.bits(4, 8);
+    assert_eq!(&view[..], &[0b0011_0000]);
+    let copy = view.clone();
+    assert_eq!(&copy[..], &[0b0011_0000]);
+    assert!(view.same_bytes(&copy));
+    let packed = view.packed().expect("the bits of the view are packed");
+    let copied = copy.packed().expect("the bits of the copy are packed");
+    assert!(Arc::ptr_eq(packed, copied));
+}

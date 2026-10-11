@@ -4,6 +4,7 @@
 
 use super::BifResult::Value;
 use super::*;
+use crate::term::Binary;
 
 /// The option `global`: find each match (`BF_FLAG_GLOBAL`,
 /// `erl_bif_binary.c:1118`).
@@ -647,14 +648,17 @@ fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(not_found(0, b"ab"), Term::list_from(vec![Term::binary(b"ab".to_vec())]));
-/// assert_eq!(not_found(TRIM, b""), Term::nil());
+/// assert_eq!(not_found(0, &Binary::from(&[1, 2][..])), Term::list_from(vec![Term::binary(vec![1, 2])]));
+/// assert_eq!(not_found(TRIM, &Binary::from(&[][..])), Term::nil());
 /// ```
-fn not_found(flags: u8, subject: &[u8]) -> Term {
+fn not_found(flags: u8, subject: &Binary) -> Term {
     if flags & (TRIM | TRIM_ALL) != 0 && subject.is_empty() {
         return Term::nil();
     }
-    Term::list_from(vec![Term::binary(subject.to_vec())])
+    // ERTS puts a sub-binary of the subject in the result (`binary_split`,
+    // `erl_bif_binary.c:1599-1645`), so the part shares the bytes of the
+    // subject.
+    Term::list_from(vec![Term::Binary(subject.bits(0, subject.len() * 8))])
 }
 
 /// Return the result of the first match at `pos` with `len` bytes, as
@@ -667,16 +671,20 @@ fn not_found(flags: u8, subject: &[u8]) -> Term {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let parts = split_once(0, b"a,b", 1, 1);
+/// let parts = split_once(0, &Binary::from(&[97, 44, 98][..]), 1, 1);
 /// assert_eq!(parts, Term::list_from(vec![Term::binary(b"a".to_vec()), Term::binary(b"b".to_vec())]));
 /// ```
-fn split_once(flags: u8, subject: &[u8], pos: u64, len: u64) -> Term {
+fn split_once(flags: u8, subject: &Binary, pos: u64, len: u64) -> Term {
     let (pos, after) = (pos as usize, (pos + len) as usize);
-    let first = Term::binary(subject[..pos].to_vec());
+    let size = subject.len() * 8;
+    // ERTS puts sub-binaries of the subject in the result
+    // (`do_split_single_result`, `erl_bif_binary.c:1753-1833`), so each part
+    // shares the bytes of the subject.
+    let first = Term::Binary(subject.bits(0, pos * 8));
     if flags & (TRIM | TRIM_ALL) != 0 && after == subject.len() {
         return Term::list_from(if pos > 0 { vec![first] } else { Vec::new() });
     }
-    let rest = Term::binary(subject[after..].to_vec());
+    let rest = Term::Binary(subject.bits(after * 8, size));
     Term::list_from(if flags & TRIM_ALL != 0 && pos == 0 {
         vec![rest]
     } else {
@@ -697,9 +705,9 @@ fn split_once(flags: u8, subject: &[u8], pos: u64, len: u64) -> Term {
 /// ```rust,ignore
 /// find.matches = vec![(1, 1)];
 /// let mut reds = 100;
-/// assert_eq!(split_all(&mut find, b"a,b", &mut reds), Some(Term::list_from(vec![Term::binary(b"a".to_vec()), Term::binary(b"b".to_vec())])));
+/// assert_eq!(split_all(&mut find, &Binary::from(&[97, 44, 98][..]), &mut reds), Some(Term::list_from(vec![Term::binary(b"a".to_vec()), Term::binary(b"b".to_vec())])));
 /// ```
-fn split_all(find: &mut Find, subject: &[u8], reds: &mut u64) -> Option<Term> {
+fn split_all(find: &mut Find, subject: &Binary, reds: &mut u64) -> Option<Term> {
     let matches = &find.matches;
     let build = find.build.get_or_insert_with(|| Build {
         head: matches.len() as i64 - 1,
@@ -708,6 +716,14 @@ fn split_all(find: &mut Find, subject: &[u8], reds: &mut u64) -> Option<Term> {
     });
     let mut trim = find.flags & (TRIM | TRIM_ALL);
     let mut steps = *reds;
+    // ERTS puts sub-binaries of the subject in the result
+    // (`do_split_global_result`, `erl_bif_binary.c:1835-1933`), so each part
+    // shares the bytes of the subject. A part is empty when its end is at or
+    // before its start: the build can pass the end of a part to the next one
+    // after a trap, and `Binary::bits` needs a range that does not go
+    // backwards.
+    let part_at =
+        |start: u64, end: u64| subject.bits(start as usize * 8, end.max(start) as usize * 8);
     while build.head >= 0 {
         steps = steps.wrapping_sub(1);
         if steps == 0 {
@@ -717,18 +733,18 @@ fn split_all(find: &mut Find, subject: &[u8], reds: &mut u64) -> Option<Term> {
             return None;
         }
         let (pos, len) = matches[build.head as usize];
-        let part = &subject[(pos + len) as usize..build.end_pos as usize];
+        let part = part_at(pos + len, build.end_pos);
         if !(part.is_empty() && trim != 0) {
-            build.parts.push(Term::binary(part.to_vec()));
+            build.parts.push(Term::Binary(part));
             trim &= !TRIM;
         }
         build.end_pos = pos;
         build.head -= 1;
     }
     *reds = steps;
-    let first = &subject[..matches[0].0 as usize];
+    let first = part_at(0, matches[0].0);
     if !(first.is_empty() && trim != 0) {
-        build.parts.push(Term::binary(first.to_vec()));
+        build.parts.push(Term::Binary(first));
     }
     let mut parts = std::mem::take(&mut build.parts);
     parts.reverse();
@@ -956,7 +972,7 @@ fn find_first_turn(
 pub(super) fn find_trap(
     process: &mut ProcessState,
     subject: &Term,
-    bytes: &[u8],
+    bytes: &Binary,
     state: &[Term],
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
@@ -1004,18 +1020,19 @@ fn find_turn(
     process: &mut ProcessState,
     pattern: &Pattern,
     find: &mut Find,
-    subject: &[u8],
+    subject: &Binary,
 ) -> Result<Option<Term>, BeamError> {
     let initial = (process.bif_reductions_left()? as u64 * LOOP_FACTOR).max(1);
     let mut reds = initial;
+    let bytes: &[u8] = subject;
     let parts = if find.build.is_some() {
         split_all(find, subject, &mut reds)
     } else {
         let search = match (pattern, find.flags & GLOBAL != 0) {
-            (Pattern::Bm(bm), false) => bm.first(find, subject, &mut reds),
-            (Pattern::Bm(bm), true) => bm.all(find, subject, &mut reds),
-            (Pattern::Ac(trie), false) => ac_first(trie, find, subject, &mut reds),
-            (Pattern::Ac(trie), true) => ac_all(trie, find, subject, &mut reds),
+            (Pattern::Bm(bm), false) => bm.first(find, bytes, &mut reds),
+            (Pattern::Bm(bm), true) => bm.all(find, bytes, &mut reds),
+            (Pattern::Ac(trie), false) => ac_first(trie, find, bytes, &mut reds),
+            (Pattern::Ac(trie), true) => ac_all(trie, find, bytes, &mut reds),
         };
         match search {
             Search::Restart => None,
@@ -1035,3 +1052,7 @@ fn find_turn(
     }
     Ok(parts)
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/interpreter/bif/binary.rs"]
+mod tests;
