@@ -45,7 +45,7 @@ fn runs_code_ensure_loaded_for_a_loaded_module_as_pinned_erts() {
     let module = |name: &str| Term::Tuple(vec![atom("module"), atom(name)]);
     assert_eq!(
         program.execute("code_probe", "loaded", &[]).unwrap(),
-        Term::List(vec![module("code_probe"), module("code"), module("erlang")])
+        Term::list_from(vec![module("code_probe"), module("code"), module("erlang")])
     );
     assert_eq!(
         reference("code_probe:loaded()"),
@@ -64,7 +64,7 @@ fn runs_erlang_module_loaded_as_pinned_erts() {
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program.execute("code_probe", "module_loaded", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("true"),
             atom("true"),
             atom("false"),
@@ -157,7 +157,9 @@ fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         other => panic!("unexpected term {other:?}"),
     }

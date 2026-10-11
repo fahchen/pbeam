@@ -56,7 +56,10 @@ fn pbeam(function: &str) -> Result<Term, BeamError> {
 #[test]
 fn raises_badarg_for_each_status_and_option_that_halt_rejects() {
     let pbeam = pbeam("badargs").unwrap();
-    let Term::List(results) = &pbeam else {
+    let Some(results) = pbeam
+        .proper_list()
+        .map(|results| results.collect::<Vec<_>>())
+    else {
         panic!("{pbeam:?}");
     };
     assert_eq!(results.len(), 22);

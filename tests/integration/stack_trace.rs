@@ -48,7 +48,7 @@ fn keeps_the_stack_trace_frames_of_error_1_and_raise_3_as_pinned_erts() {
     let program = BeamProgram::load(&[STACK_TRACE_PROBE, &erlang, &lists]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let tuple = Term::Tuple;
-    let list = Term::List;
+    let list = |elements: Vec<Term>| Term::list_from(elements);
     let int = Term::Integer;
     let nil = || list(Vec::new());
     let r = || atom("r");

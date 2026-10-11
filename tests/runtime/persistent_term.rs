@@ -33,14 +33,8 @@ fn puts_and_gets_values_by_exactly_equal_keys() {
     // An equal key replaces the value and adds no key. The same value
     // changes nothing.
     assert_eq!(terms.put(&logger_config("other"), &Term::Integer(2)), None);
-    assert_eq!(
-        terms.put(&logger_config("default"), &Term::List(vec![])),
-        Some(0)
-    );
-    assert_eq!(
-        terms.get(&logger_config("default")),
-        Some(&Term::List(vec![]))
-    );
+    assert_eq!(terms.put(&logger_config("default"), &Term::nil()), Some(0));
+    assert_eq!(terms.get(&logger_config("default")), Some(&Term::nil()));
     assert_eq!(terms.num_entries, 3);
 }
 

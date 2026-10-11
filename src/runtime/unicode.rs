@@ -71,27 +71,30 @@ pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
             1
         }
     };
+    // Each frame is the rest of a list: its next cons cell, or its tail.
     let mut frames = match chardata {
         Term::Binary(bytes) => return Some(binary_cost(bytes)),
-        _ => vec![list_parts(chardata)?],
+        _ if chardata.is_list() => vec![chardata],
+        _ => return None,
     };
     let mut cost = 0;
-    while let Some((elements, index, tail)) = frames.last_mut() {
-        let Some(element) = elements.get(*index) else {
-            match tail {
-                Some(Term::Binary(bytes)) => cost += binary_cost(bytes),
-                Some(_) => return None,
-                None => {}
+    while let Some(frame) = frames.last_mut() {
+        let Some((element, rest)) = frame.cons_cell() else {
+            match frame {
+                Term::Binary(bytes) => cost += binary_cost(bytes),
+                tail if tail.is_nil() => {}
+                _ => return None,
             }
             frames.pop();
             continue;
         };
-        *index += 1;
+        *frame = rest;
         match element {
             Term::Integer(_) if element.small_integer().is_none() => return Some(cost),
             Term::Integer(_) => cost += 1,
             Term::Binary(bytes) => cost += binary_cost(bytes),
-            _ => frames.push(list_parts(element)?),
+            _ if element.is_list() => frames.push(element),
+            _ => return None,
         }
     }
     Some(cost)
@@ -133,32 +136,25 @@ pub(super) fn build_utf8(
     if *left <= 0 || *chardata == nil() {
         return (chardata.clone(), false);
     }
+    // Each frame is the rest of a list: its next cons cell, or its tail.
     let mut frames = match chardata {
         Term::Binary(bytes) => return build_binary(bytes, left, latin1, output),
-        _ => match list_parts(chardata) {
-            Some(frame) => vec![frame],
-            None => return (chardata.clone(), true),
-        },
-    };
-    let rest_from = |(elements, index, tail): (&[Term], usize, Option<&Term>)| {
-        Term::list_with_tail(
-            elements[index..].to_vec(),
-            tail.cloned().unwrap_or_else(nil),
-        )
+        _ if chardata.is_list() => vec![chardata],
+        _ => return (chardata.clone(), true),
     };
     let (rest, error) = loop {
         let top = frames.len() - 1;
-        let (elements, index, tail) = frames[top];
-        let Some(element) = elements.get(index) else {
-            match tail {
-                Some(Term::Binary(bytes)) => {
+        let frame = frames[top];
+        let Some((element, after)) = frame.cons_cell() else {
+            match frame {
+                Term::Binary(bytes) => {
                     let (rest, error) = build_binary(bytes, left, latin1, output);
                     if error || *left == 0 {
                         break (rest, error);
                     }
                 }
-                Some(tail) => break (tail.clone(), true),
-                None => {}
+                tail if tail.is_nil() => {}
+                tail => break (tail.clone(), true),
             }
             frames.pop();
             if frames.is_empty() {
@@ -166,13 +162,12 @@ pub(super) fn build_utf8(
             }
             continue;
         };
-        let after = (elements, index + 1, tail);
         match element {
             Term::Binary(bytes) => {
-                frames[top].1 += 1;
+                frames[top] = after;
                 let (rest, error) = build_binary(bytes, left, latin1, output);
                 if error || rest != nil() {
-                    break (Term::list_with_tail(vec![rest], rest_from(after)), error);
+                    break (Term::cons(rest, after.clone()), error);
                 }
             }
             Term::Integer(_) => {
@@ -182,48 +177,32 @@ pub(super) fn build_utf8(
                     .and_then(|value| u32::try_from(value).ok())
                     .and_then(char::from_u32);
                 let Some(character) = character else {
-                    break (rest_from(frames[top]), true);
+                    break (frame.clone(), true);
                 };
-                frames[top].1 += 1;
+                frames[top] = after;
                 output
                     .bytes
                     .extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes());
                 output.characters += 1;
                 *left -= 1;
             }
-            _ => match list_parts(element) {
-                Some(frame) => {
-                    frames[top].1 += 1;
-                    frames.push(frame);
-                    continue;
-                }
-                None => break (rest_from(frames[top]), true),
-            },
+            _ if element.is_list() => {
+                frames[top] = after;
+                frames.push(element);
+                continue;
+            }
+            _ => break (frame.clone(), true),
         }
         if *left == 0 {
-            break (rest_from(after), false);
+            break (after.clone(), false);
         }
     };
     frames.pop();
-    let rest = frames.into_iter().rev().fold(rest, |rest, frame| {
-        Term::list_with_tail(vec![rest], rest_from(frame))
-    });
+    let rest = frames
+        .into_iter()
+        .rev()
+        .fold(rest, |rest, frame| Term::cons(rest, frame.clone()));
     (rest, error)
-}
-
-/// Return the elements, the start position, and the tail of a list as a
-/// frame of a walk, or `None` for a term that is not a list.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let list = Term::list_with_tail(vec![Term::Integer(1)], Term::Binary(vec![]));
-/// assert!(matches!(list_parts(&list), Some(([Term::Integer(1)], 0, Some(Term::Binary(_))))));
-/// assert!(list_parts(&Term::Integer(1)).is_none());
-/// ```
-fn list_parts(list: &Term) -> Option<(&[Term], usize, Option<&Term>)> {
-    let (elements, tail) = list.list_cells()?;
-    Some((elements, 0, tail))
 }
 
 /// Convert a binary with a budget of `left` loop steps, as the binary part
@@ -510,14 +489,14 @@ pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> boo
 pub(super) fn native_filename(name: &Term, encoding: FilenameEncoding) -> Option<Vec<u8>> {
     let elements = name.proper_list()?;
     let mut bytes = Vec::new();
-    let mut pending = vec![elements.iter()];
+    let mut pending = vec![elements];
     while let Some(elements) = pending.last_mut() {
         let Some(element) = elements.next() else {
             pending.pop();
             continue;
         };
         if let Some(nested) = element.proper_list() {
-            pending.push(nested.iter());
+            pending.push(nested);
             continue;
         }
         let character = u32::try_from(element.small_integer()?)

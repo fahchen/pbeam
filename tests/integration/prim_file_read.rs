@@ -60,15 +60,18 @@ const NAMES_LATIN1: &str = "[[],[97,98,99],[99,97,102,195,169],[97,255],[97,0,98
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![Term::Binary(vec![97])])), "[<<97>>]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Binary(vec![97])])), "[<<97>>]");
 /// ```
 fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+    let join =
+        |terms: &mut dyn Iterator<Item = &Term>| terms.map(text).collect::<Vec<_>>().join(",");
+    if let Some(mut terms) = term.proper_list() {
+        return format!("[{}]", join(&mut terms));
+    }
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
         Term::Integer(value) => value.to_string(),
-        Term::List(terms) => format!("[{}]", join(terms)),
-        Term::Tuple(terms) => format!("{{{}}}", join(terms)),
+        Term::Tuple(terms) => format!("{{{}}}", join(&mut terms.iter())),
         Term::Binary(bytes) => {
             let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
             format!("<<{}>>", bytes.join(","))
@@ -171,12 +174,11 @@ fn isolated_prim_file_read() {
 /// Return the path as a list of its bytes, which is the character list of
 /// an ASCII path.
 fn characters(path: &Path) -> Term {
-    Term::List(
+    Term::list_from(
         path.as_os_str()
             .as_encoded_bytes()
             .iter()
-            .map(|&byte| Term::Integer(byte.into()))
-            .collect(),
+            .map(|&byte| Term::Integer(byte.into())),
     )
 }
 

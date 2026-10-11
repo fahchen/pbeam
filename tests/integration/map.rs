@@ -109,7 +109,7 @@ fn atom(program: &BeamProgram, name: &str) -> Term {
 
 /// Return the list of the atoms in a comma-separated list of names.
 fn atoms(program: &BeamProgram, names: &str) -> Term {
-    Term::List(names.split(',').map(|name| atom(program, name)).collect())
+    Term::list_from(names.split(',').map(|name| atom(program, name)))
 }
 
 fn map(program: &BeamProgram, pairs: &[(&str, Term)]) -> Term {
@@ -121,16 +121,12 @@ fn map(program: &BeamProgram, pairs: &[(&str, Term)]) -> Term {
 }
 
 fn integers(keys: &[i64]) -> Term {
-    Term::List(keys.iter().map(|key| Term::Integer(*key)).collect())
+    Term::list_from(keys.iter().map(|key| Term::Integer(*key)))
 }
 
 /// Return the list of the bytes of a string, as Erlang writes `"..."`.
 fn string(text: &str) -> Term {
-    Term::List(
-        text.bytes()
-            .map(|byte| Term::Integer(byte.into()))
-            .collect(),
-    )
+    Term::list_from(text.bytes().map(|byte| Term::Integer(byte.into())))
 }
 
 /// Run an expression under the pinned ERTS with the map fixtures in the code
@@ -203,7 +199,7 @@ fn uses_a_flatmap_up_to_32_keys_and_a_hashmap_above_like_erts() {
             atom("different"),
             atom("v"),
             atom("missing"),
-            Term::List(vec![Term::Integer(1), Term::Integer(2), atom("a")]),
+            Term::list_from(vec![Term::Integer(1), Term::Integer(2), atom("a")]),
             integers(&[-101714049538469044, -1, 5]),
         ])
     );
@@ -318,7 +314,7 @@ fn orders_a_hashmap_of_all_static_atoms_like_erts() {
     let result = program
         .execute("atom_map_probe", "static_keys", &[])
         .unwrap();
-    let Term::List(keys) = &result else {
+    let Some(keys) = result.proper_list().map(|keys| keys.collect::<Vec<_>>()) else {
         panic!("maps:keys/1 returns a list");
     };
     let names: Vec<&str> = keys
@@ -344,7 +340,7 @@ fn orders_a_hashmap_of_all_static_atoms_like_erts() {
 fn orders_and_hashes_list_keys_like_erts() {
     let program = BeamProgram::load(&[MAP_KEY_PROBE]).unwrap();
     let atom = |name: &str| atom(&program, name);
-    let list = Term::List;
+    let list = |elements: Vec<Term>| Term::list_from(elements);
     let int = Term::Integer;
     // A flatmap: the atom a first, then [], then lists in the term order. The atom a in
     // [a] compares by name, so [a] comes after the strings "a" and "b" and after [300].
@@ -432,7 +428,7 @@ fn orders_and_hashes_list_keys_like_erts() {
 fn hashes_nested_lists_and_string_chunks_like_erts() {
     let program = BeamProgram::load(&[MAP_KEY_PROBE]).unwrap();
     let atom = |name: &str| atom(&program, name);
-    let list = Term::List;
+    let list = |elements: Vec<Term>| Term::list_from(elements);
     let int = Term::Integer;
     let (min, max) = (-(1i64 << 59), (1i64 << 59) - 1);
     assert_eq!(
@@ -495,7 +491,7 @@ fn keeps_keys_with_equal_hashes_in_a_collision_node_like_erts() {
         integers(&[161, 92, 65, 50, 231, 24, 153, 137]),
     );
     // The two keys have equal hashes, so ERTS keeps them next to each other in the term order.
-    let keys = Term::List(
+    let keys = Term::list_from(
         [18, 4, 12, 19, 29, 13, 2]
             .map(Term::Integer)
             .into_iter()
@@ -506,14 +502,13 @@ fn keeps_keys_with_equal_hashes_in_a_collision_node_like_erts() {
                     5, 27, 26, 22,
                 ]
                 .map(Term::Integer),
-            )
-            .collect(),
+            ),
     );
     assert_eq!(
         program
             .execute("map_key_probe", "collision_keys", &[])
             .unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             keys,
             atom("a"),
             atom("b"),
@@ -521,7 +516,7 @@ fn keeps_keys_with_equal_hashes_in_a_collision_node_like_erts() {
             atom("true"),
             atom("c"),
             atom("d"),
-            Term::List(vec![second, first]),
+            Term::list_from(vec![second, first]),
         ])
     );
 
@@ -544,9 +539,9 @@ fn loads_map_literals_with_binary_keys_like_erts() {
     let hash_keys = BINARY_HASH_ORDER.map(|key| binary(&format!("k{key:02}")));
     assert_eq!(
         program.execute("binary_key_probe", "main", &[]).unwrap(),
-        Term::List(vec![
-            Term::List(vec![binary("a"), binary("b")]),
-            Term::List(vec![
+        Term::list_from(vec![
+            Term::list_from(vec![binary("a"), binary("b")]),
+            Term::list_from(vec![
                 int(1),
                 atom("a"),
                 string("s"),
@@ -555,7 +550,7 @@ fn loads_map_literals_with_binary_keys_like_erts() {
                 binary("ab"),
                 binary("b"),
             ]),
-            Term::List(hash_keys.to_vec()),
+            Term::list_from(hash_keys.to_vec()),
             int(0),
             int(0),
             int(7),
@@ -582,23 +577,22 @@ fn puts_binary_keys_into_maps_like_erts() {
     let int = Term::Integer;
     let binary = |text: &str| Term::Binary(text.as_bytes().to_vec());
     let pairs = |pairs: &[(&str, i64)]| {
-        Term::List(
+        Term::list_from(
             pairs
                 .iter()
-                .map(|(key, value)| Term::Tuple(vec![binary(key), int(*value)]))
-                .collect(),
+                .map(|(key, value)| Term::Tuple(vec![binary(key), int(*value)])),
         )
     };
     // `maps:put/3` puts `<<"ab">>` between `<<"a">>` and `<<"b">>` of a flatmap, and the 33rd key
     // changes a flatmap to a hashmap in the hash order.
-    let grown = Term::List(
+    let grown = Term::list_from(
         BINARY_HASH_ORDER
             .map(|key| Term::Tuple(vec![binary(&format!("k{key:02}")), int(key)]))
             .to_vec(),
     );
     assert_eq!(
         program.execute("binary_key_probe", "update", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             pairs(&[("a", 0), ("ab", 1), ("b", 0)]),
             pairs(&[("a", 2), ("ab", 1), ("b", 0)]),
             grown,
@@ -633,7 +627,7 @@ fn gives_the_map_size_like_erts() {
         |term: Term| Term::Tuple(vec![atom("error"), Term::Tuple(vec![atom("badmap"), term])]);
     assert_eq!(
         program.execute("map_size_probe", "main", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             int(2),
             int(2),
             int(0),
@@ -645,7 +639,7 @@ fn gives_the_map_size_like_erts() {
             atom("other"),
             atom("other"),
             badmap(atom("foo")),
-            badmap(Term::List(vec![int(1)])),
+            badmap(Term::list_from(vec![int(1)])),
             badmap(Term::Binary(b"ab".to_vec())),
         ])
     );
@@ -677,8 +671,8 @@ fn loads_and_updates_maps_with_tuple_keys_like_erts() {
         tuple(vec![atom("value")]),
         tuple(vec![int(0), int(5)]),
         tuple(vec![int(1), int(2)]),
-        tuple(vec![Term::List(vec![int(1)]), tuple(vec![int(2)])]),
-        Term::List(vec![int(1)]),
+        tuple(vec![Term::list_from(vec![int(1)]), tuple(vec![int(2)])]),
+        Term::list_from(vec![int(1)]),
     ];
     let mut exact: Vec<Term> = ["h", "f", "g", "j", "c", "e", "d", "n", "m", "k", "i"]
         .iter()
@@ -688,13 +682,13 @@ fn loads_and_updates_maps_with_tuple_keys_like_erts() {
     exact.insert(9, pair(tuple(vec![int(2), int(1)]), "l"));
     assert_eq!(
         program.execute("tuple_key_probe", "main", &[]).unwrap(),
-        Term::List(vec![
-            Term::List(keys.to_vec()),
+        Term::list_from(vec![
+            Term::list_from(keys.to_vec()),
             atom("a"),
             atom("d"),
             atom("c"),
             atom("j"),
-            Term::List(exact),
+            Term::list_from(exact),
             atom("true"),
             atom("error"),
         ])
@@ -714,7 +708,7 @@ fn puts_tuple_keys_with_maps_put_like_erts() {
     let atom = |name: &str| atom(&program, name);
     let int = Term::Integer;
     let cell = |(row, col): (i64, i64)| Term::Tuple(vec![int(row), int(col)]);
-    let cells = |cells: &[(i64, i64)]| Term::List(cells.iter().copied().map(cell).collect());
+    let cells = |cells: &[(i64, i64)]| Term::list_from(cells.iter().copied().map(cell));
     // `maps:put/3` keeps a flatmap of 32 cells in the term order. The 33rd key, from `maps:put/3`
     // or from the 33rd cell, changes the flatmap to a hashmap in the ERTS hash order.
     let small: Vec<(i64, i64)> = (0..4)
@@ -722,7 +716,7 @@ fn puts_tuple_keys_with_maps_put_like_erts() {
         .collect();
     assert_eq!(
         program.execute("tuple_key_probe", "grid", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             cells(&small),
             cells(&GRID_HASH_ORDER),
             cells(&GROWN_HASH_ORDER),
@@ -765,7 +759,7 @@ fn raises_badmap_and_badkey_for_tuple_keys_like_erts() {
     let missing = || Term::Tuple(vec![Term::Integer(9), Term::Integer(9)]);
     assert_eq!(
         program.execute("tuple_key_probe", "errors", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             error("badmap", atom("not_a_map")),
             error("badkey", missing()),
             error("badmap", atom("not_a_map")),
@@ -797,7 +791,7 @@ fn keeps_each_copy_of_a_map_when_another_copy_changes_like_erts() {
     };
     assert_eq!(
         program.execute("map_share_probe", "main", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             map(&[(1, "a"), (2, "b")]),
             map(&[(1, "a"), (2, "b")]),
             map(&[(1, "c"), (2, "b")]),
@@ -832,7 +826,7 @@ fn keeps_a_shared_flatmap_when_a_copy_becomes_a_hashmap_like_erts() {
     let int = Term::Integer;
     assert_eq!(
         program.execute("map_share_probe", "grow", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             integers(&(1..=32).collect::<Vec<_>>()),
             integers(&hash33),
             int(32),
@@ -862,7 +856,7 @@ fn raises_badkey_and_keeps_the_shared_map_like_erts() {
         |key: Term| Term::Tuple(vec![atom("error"), Term::Tuple(vec![atom("badkey"), key])]);
     assert_eq!(
         program.execute("map_share_probe", "errors", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             badkey(int(2)),
             badkey(int(34)),
             Term::Map(Map::from_pairs(vec![(int(1), atom("a"))]).unwrap()),

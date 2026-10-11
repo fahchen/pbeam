@@ -209,6 +209,7 @@ pub(super) fn from_list(
     let Some((elements, tail)) = list.list_cells() else {
         return Ok(BifResult::badarg());
     };
+    let elements: Vec<&Term> = elements.collect();
     let proper = tail.is_none();
     fn pair(element: &Term) -> Option<(&Term, &Term)> {
         match element {
@@ -216,7 +217,10 @@ pub(super) fn from_list(
             _ => None,
         }
     }
-    let pairs = elements.iter().map(pair).collect::<Option<Vec<_>>>();
+    let pairs = elements
+        .iter()
+        .map(|element| pair(element))
+        .collect::<Option<Vec<_>>>();
     let checked = elements
         .iter()
         .position(|element| pair(element).is_none())
@@ -338,10 +342,8 @@ pub(super) fn map_next(
         _ if *acc == Term::static_atom("iterator") => Direction::Forward,
         _ => return Ok(BifResult::badarg()),
     };
-    if direction == Direction::Forward
-        && let Some((keys, tail)) = path.list_cells()
-    {
-        return ordered_next(process, keys, tail, entries, map);
+    if direction == Direction::Forward && path.is_list() {
+        return ordered_next(process, path, entries, map);
     }
     let budget = (process.bif_reductions_left()? / PAIR_REDUCTIONS).max(1);
     let Some(chunk) = entries.chunk(path, budget, direction)? else {
@@ -369,8 +371,8 @@ pub(super) fn map_next(
 }
 
 /// Run the ordered iterator of `erts_internal:map_next/3`
-/// (`erl_map.c:3655-3707`) for a list path of `keys` and the `tail` of an
-/// improper list path: take the keys in order, up to `MAX(1, reductions /
+/// (`erl_map.c:3655-3707`) for a list path of keys, proper or improper:
+/// take the keys in order, up to `MAX(1, reductions /
 /// ORDERED_ITER_FACTOR)` keys, where the factor is 32. When the path ends
 /// in the chunk, the call costs 32 for each key. When keys remain, it uses
 /// all reductions. A key that the map does not hold, and a tail that is not
@@ -383,9 +385,10 @@ pub(super) fn map_next(
 /// let Term::Map(entries) = &map else { unreachable!() };
 /// process.fcalls = 40;
 /// let first = Term::Tuple(vec![Term::Integer(1), test_atom("a"), test_atom("none")]);
-/// assert!(matches!(ordered_next(&mut process, &[Term::Integer(1)], None, entries, &map)?, BifResult::Value(value) if value == first));
+/// let path = |key| Term::list_from([Term::Integer(key)]);
+/// assert!(matches!(ordered_next(&mut process, &path(1), entries, &map)?, BifResult::Value(value) if value == first));
 /// assert_eq!(process.fcalls, 8);
-/// assert!(matches!(ordered_next(&mut process, &[Term::Integer(2)], None, entries, &map)?, BifResult::Raise { .. }));
+/// assert!(matches!(ordered_next(&mut process, &path(2), entries, &map)?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -394,31 +397,28 @@ pub(super) fn map_next(
 /// negative budget.
 fn ordered_next(
     process: &mut ProcessState,
-    keys: &[Term],
-    tail: Option<&Term>,
+    path: &Term,
     entries: &Map,
     map: &Term,
 ) -> Result<BifResult, BeamError> {
     /// `ORDERED_ITER_FACTOR` in a release build (`erl_map.c:3657-3661`).
     const ORDERED_ITER_FACTOR: usize = 32;
     let budget = (process.bif_reductions_left()? / ORDERED_ITER_FACTOR).max(1);
-    let (taken, rest) = keys.split_at(keys.len().min(budget));
-    let next = match (rest, tail) {
-        ([], None) => Term::static_atom("none"),
-        ([], Some(_)) => return Ok(BifResult::badarg()),
-        (rest, tail) => {
-            let tail = tail.cloned().unwrap_or(Term::nil());
-            let rest = Term::list_with_tail(rest.to_vec(), tail);
-            Term::list_with_tail(vec![rest], map.clone())
-        }
+    let mut keys = path.list_iter().expect("an ordered map path is a list");
+    let taken: Vec<&Term> = keys.by_ref().take(budget).collect();
+    let rest = keys.rest();
+    let next = match rest {
+        _ if rest.is_nil() => Term::static_atom("none"),
+        _ if rest.is_nonempty_list() => Term::cons(rest.clone(), map.clone()),
+        _ => return Ok(BifResult::badarg()),
     };
     let pairs = taken
         .iter()
-        .map(|key| entries.get(key).map(|value| (key, value)));
+        .map(|&key| entries.get(key).map(|value| (key, value)));
     let Some(pairs) = pairs.collect::<Option<Vec<_>>>() else {
         return Ok(BifResult::badarg());
     };
-    if rest.is_empty() {
+    if !rest.is_nonempty_list() {
         process.bump_reductions((ORDERED_ITER_FACTOR * taken.len()) as i32);
     } else {
         process.bump_all_reductions();

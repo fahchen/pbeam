@@ -31,17 +31,17 @@ fn converts_atoms_to_binaries_as_pinned_erts() {
     let utf8 = binary("h\u{e9}llo".as_bytes());
     let pi = binary(&[207, 128]);
     let two = binary(&[195, 191, 196, 128]);
-    let expected = Term::List(vec![
-        Term::List(vec![ok.clone(), ok.clone(), ok, raised.clone()]),
-        Term::List(vec![binary(b""), binary(b""), binary(b""), raised.clone()]),
-        Term::List(vec![
+    let expected = Term::list_from(vec![
+        Term::list_from(vec![ok.clone(), ok.clone(), ok, raised.clone()]),
+        Term::list_from(vec![binary(b""), binary(b""), binary(b""), raised.clone()]),
+        Term::list_from(vec![
             binary(&[104, 233, 108, 108, 111]),
             utf8.clone(),
             utf8,
             raised.clone(),
         ]),
-        Term::List(vec![raised.clone(), pi.clone(), pi, raised.clone()]),
-        Term::List(vec![raised.clone(), two.clone(), two, raised.clone()]),
+        Term::list_from(vec![raised.clone(), pi.clone(), pi, raised.clone()]),
+        Term::list_from(vec![raised.clone(), two.clone(), two, raised.clone()]),
         raised.clone(),
         raised.clone(),
         raised,

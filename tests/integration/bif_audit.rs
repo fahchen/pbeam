@@ -53,7 +53,7 @@ const SEND_COPY: (&str, &str) = ("{send2,[1,313]}", "{send2,[1,1]}");
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
@@ -61,7 +61,9 @@ fn text(term: &Term) -> String {
         Term::Atom(atom) if atom.name() == "not" => "'not'".to_owned(),
         Term::Atom(atom) => atom.name().to_owned(),
         Term::Integer(value) => value.to_string(),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         other => panic!("unexpected term {other:?}"),
     }
@@ -71,7 +73,7 @@ fn text(term: &Term) -> String {
 fn charges_each_bif_with_a_body_as_pinned_erts_except_the_message_copy() {
     let program = BeamProgram::load(&[BIF_AUDIT_PROBE]).unwrap();
     let costs = program
-        .execute("bif_audit_probe", "costs", &[Term::List(vec![])])
+        .execute("bif_audit_probe", "costs", &[Term::nil()])
         .unwrap();
     assert_eq!(text(&costs), ERTS_COSTS.replace(SEND_COPY.0, SEND_COPY.1));
 

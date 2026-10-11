@@ -1282,7 +1282,7 @@ impl BeamProgram {
                     // `jit/arm/instr_common.cpp:707-721`).
                     let head = read(process, head)?;
                     let tail = read(process, tail)?;
-                    write(process, destination, Term::list_with_tail(vec![head], tail))?;
+                    write(process, destination, Term::cons(head, tail))?;
                 }
                 Instruction::PutTuple {
                     elements,
@@ -1333,7 +1333,8 @@ impl BeamProgram {
                     write(process, destination, record)?;
                 }
                 Instruction::GetList { source, head, tail } => {
-                    let (first, rest) = nonempty_list(read(process, source)?)?;
+                    let (first, rest) = nonempty_list(read_ref(process, source)?)?;
+                    let (first, rest) = (first.clone(), rest.clone());
                     write(process, head, first)?;
                     write(process, tail, rest)?;
                 }
@@ -1355,7 +1356,9 @@ impl BeamProgram {
                     source,
                     destination,
                 } => {
-                    let (_, rest) = nonempty_list(read(process, source)?)?;
+                    // `get_tl` reads only the tail, so only the tail is copied.
+                    let (_, rest) = nonempty_list(read_ref(process, source)?)?;
+                    let rest = rest.clone();
                     write(process, destination, rest)?;
                 }
                 Instruction::Send => {
@@ -1831,7 +1834,7 @@ impl BeamProgram {
                 let badarg = Term::static_atom("badarg");
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
-            let Some((arguments, proper)) = list.take_list_elements() else {
+            let Some((arguments, proper)) = list.list_elements() else {
                 let badarg = Term::static_atom("badarg");
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
@@ -1883,8 +1886,8 @@ impl BeamProgram {
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
-        let mut list = read(process, &Operand::X(1))?;
-        let Some((arguments, proper)) = list.take_list_elements() else {
+        let list = read(process, &Operand::X(1))?;
+        let Some((arguments, proper)) = list.list_elements() else {
             let badarg = Term::static_atom("badarg");
             return Ok(raise(process, ExceptionClass::Error, badarg));
         };
@@ -2228,7 +2231,7 @@ fn create_process(
     else {
         return Ok(BifResult::badarg());
     };
-    let arguments = arguments.to_vec();
+    let arguments: Vec<Term> = arguments.cloned().collect();
     let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
     // A function that the loaded module does not export gives an undefined
     // start, which goes to `undefined_function` when the process first
@@ -2577,8 +2580,8 @@ fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
     write(process, &Operand::Y(register), Term::nil())
 }
 
-/// Return the head and the tail of a nonempty proper or improper list,
-/// which `get_list`, `get_hd`, and `get_tl` read as the `CAR` and the `CDR`
+/// Return the head and the tail of a nonempty proper or improper list, in
+/// O(1) time, which `get_list` and `get_tl` read as the `CAR` and the `CDR`
 /// of the first cons cell (emu `instrs.tab:389-407`; JIT
 /// `jit/arm/instr_common.cpp:274-318`). The BEAM validator makes sure that
 /// the source is a nonempty list.
@@ -2588,14 +2591,14 @@ fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
 /// ```rust,ignore
 /// let x = || Term::static_atom("x");
 /// let list = Term::list_from(vec![Term::Integer(1), Term::Integer(2)]);
-/// assert_eq!(nonempty_list(list)?, (Term::Integer(1), Term::list_from(vec![Term::Integer(2)])));
+/// assert_eq!(nonempty_list(&list)?, (&Term::Integer(1), &Term::list_from(vec![Term::Integer(2)])));
 /// let improper = Term::list_with_tail(vec![Term::Integer(1)], x());
-/// assert_eq!(nonempty_list(improper)?, (Term::Integer(1), x()));
-/// assert!(nonempty_list(Term::nil()).is_err());
+/// assert_eq!(nonempty_list(&improper)?, (&Term::Integer(1), &x()));
+/// assert!(nonempty_list(&Term::nil()).is_err());
 /// ```
-fn nonempty_list(list: Term) -> Result<(Term, Term), BeamError> {
-    list.split_cons()
-        .map_err(|list| error(format!("BEAM list source {list:?} is not a nonempty list")))
+fn nonempty_list(list: &Term) -> Result<(&Term, &Term), BeamError> {
+    list.cons_cell()
+        .ok_or_else(|| error(format!("BEAM list source {list:?} is not a nonempty list")))
 }
 
 /// Continue execution after a label in the active module.

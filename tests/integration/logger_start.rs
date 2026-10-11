@@ -53,7 +53,7 @@ fn reverses_lists_as_pinned_erts() {
     // `badarg`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let list = |names: &[&str]| Term::List(names.iter().map(|name| atom(name)).collect());
+    let list = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
     let expected = vec![
         list(&["c", "b", "a", "d"]),
         atom("foo"),
@@ -67,7 +67,7 @@ fn reverses_lists_as_pinned_erts() {
         program
             .execute("logger_start_probe", "reverse", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("reverse"),
@@ -86,7 +86,7 @@ fn removes_map_keys_as_pinned_erts() {
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs).unwrap());
-    let integers = |keys: &[i64]| Term::List(keys.iter().copied().map(Term::Integer).collect());
+    let integers = |keys: &[i64]| Term::list_from(keys.iter().copied().map(Term::Integer));
     let both = map(vec![
         (Term::Integer(1), atom("one")),
         (Term::Integer(2), atom("two")),
@@ -112,13 +112,13 @@ fn removes_map_keys_as_pinned_erts() {
             37, 40, 33, 53, 62, 47, 63, 51, 50, 45, 59, 39,
         ]),
         Term::Tuple(vec![atom("badmap"), atom("foo")]),
-        Term::Tuple(vec![atom("badmap"), Term::List(vec![])]),
+        Term::Tuple(vec![atom("badmap"), Term::nil()]),
     ];
     assert_eq!(
         program
             .execute("logger_start_probe", "remove", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("remove"),
@@ -149,12 +149,12 @@ fn takes_map_keys_as_pinned_erts() {
         ]),
         atom("error"),
         Term::Tuple(vec![Term::Integer(1), map(vec![])]),
-        Term::List((1..=32).map(Term::Integer).collect()),
+        Term::list_from((1..=32).map(Term::Integer)),
         Term::Tuple(vec![atom("badmap"), atom("foo")]),
     ];
     assert_eq!(
         program.execute("logger_start_probe", "take", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("take"),
@@ -186,7 +186,7 @@ fn removes_map_keys_through_maps_without() {
         program
             .execute("logger_start_probe", "without", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("without"),
@@ -209,7 +209,7 @@ fn reads_and_deletes_ets_keys_as_pinned_erts() {
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let pair = |first: Term, second: Term| Term::Tuple(vec![first, second]);
-    let found = |key: Term, value: Term| Term::List(vec![pair(key, value)]);
+    let found = |key: Term, value: Term| Term::list_from(vec![pair(key, value)]);
     let badarg = pair(atom("error"), atom("badarg"));
     let mut expected = vec![
         atom("logger_start_probe"),
@@ -219,10 +219,10 @@ fn reads_and_deletes_ets_keys_as_pinned_erts() {
         atom("undefined"),
         found(atom("a"), Term::Integer(1)),
         found(pair(atom("h"), atom("b")), Term::Integer(2)),
-        found(Term::List(vec![atom("x")]), Term::Integer(3)),
-        Term::List(vec![]),
+        found(Term::list_from(vec![atom("x")]), Term::Integer(3)),
+        Term::nil(),
         found(atom("v"), atom("k")),
-        Term::List(vec![]),
+        Term::nil(),
         atom("true"),
         atom("true"),
         atom("false"),
@@ -230,14 +230,14 @@ fn reads_and_deletes_ets_keys_as_pinned_erts() {
         atom("true"),
         atom("true"),
         atom("true"),
-        Term::List(vec![]),
+        Term::nil(),
         atom("false"),
         found(pair(atom("h"), atom("b")), Term::Integer(2)),
     ];
     expected.extend(std::iter::repeat_n(badarg, 8));
     assert_eq!(
         program.execute("logger_start_probe", "ets", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("ets"),
@@ -260,7 +260,7 @@ fn checks_ets_access_rights_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
     let expected = vec![
-        Term::List(vec![Term::Tuple(vec![atom("k"), atom("v")])]),
+        Term::list_from(vec![Term::Tuple(vec![atom("k"), atom("v")])]),
         atom("true"),
         badarg.clone(),
         badarg.clone(),
@@ -274,7 +274,7 @@ fn checks_ets_access_rights_as_pinned_erts() {
         program
             .execute("logger_start_probe", "ets_access", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("ets_access"),
@@ -303,11 +303,11 @@ fn finds_map_keys_as_pinned_erts() {
         ok(Term::Integer(40)),
         atom("error"),
         badmap(atom("foo")),
-        badmap(Term::List(vec![])),
+        badmap(Term::nil()),
     ];
     assert_eq!(
         program.execute("logger_start_probe", "find", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("find"),
@@ -344,7 +344,7 @@ fn builds_maps_from_lists_as_pinned_erts() {
             (Term::Integer(2), atom("c")),
         ]),
         map(vec![(atom("type"), atom("standard_io"))]),
-        Term::List(keys.into_iter().map(Term::Integer).collect()),
+        Term::list_from(keys.into_iter().map(Term::Integer)),
         integer_map(&[(0, 1), (1, 2), (2, 80)]),
     ];
     expected.extend(std::iter::repeat_n(badarg, 4));
@@ -352,7 +352,7 @@ fn builds_maps_from_lists_as_pinned_erts() {
         program
             .execute("logger_start_probe", "from_list", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("from_list"),
@@ -382,13 +382,13 @@ fn tests_map_keys_as_pinned_erts() {
         atom("no"),
         atom("no"),
         badmap(atom("foo")),
-        badmap(Term::List(vec![])),
+        badmap(Term::nil()),
     ];
     assert_eq!(
         program
             .execute("logger_start_probe", "is_key", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("is_key"),
@@ -419,7 +419,7 @@ fn takes_list_heads_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("logger_start_probe", "hd", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("hd"),
@@ -449,7 +449,7 @@ fn pairs_text(keys: &[i64]) -> String {
 /// Return the list `[{K, K}, ...]` of integer keys.
 fn integer_pairs(keys: &[i64]) -> Term {
     let pair = |key: &i64| Term::Tuple(vec![Term::Integer(*key), Term::Integer(*key)]);
-    Term::List(keys.iter().map(pair).collect())
+    Term::list_from(keys.iter().map(pair))
 }
 
 #[test]
@@ -464,13 +464,13 @@ fn lists_map_pairs_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let pair = |key: Term, value: Term| Term::Tuple(vec![key, value]);
     let expected = vec![
-        Term::List(vec![]),
-        Term::List(vec![
+        Term::nil(),
+        Term::list_from(vec![
             pair(Term::Integer(1), atom("a")),
             pair(Term::Integer(2), atom("b")),
             pair(atom("three"), Term::Integer(3)),
         ]),
-        Term::List(vec![pair(atom("type"), atom("standard_io"))]),
+        Term::list_from(vec![pair(atom("type"), atom("standard_io"))]),
         integer_pairs(&BIG_40_KEYS),
         integer_pairs(&BIG_100_KEYS),
     ];
@@ -478,7 +478,7 @@ fn lists_map_pairs_as_pinned_erts() {
         program
             .execute("logger_start_probe", "to_list", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     let text = format!(
         "[[],[{{1,a}},{{2,b}},{{three,3}}],[{{type,standard_io}}],{},{}]\n",
@@ -502,7 +502,7 @@ fn walks_maps_with_a_path_as_pinned_erts() {
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let pair = |key: i64, value: &str| Term::Tuple(vec![Term::Integer(key), atom(value)]);
-    let small = Term::List(vec![pair(1, "a"), pair(2, "b")]);
+    let small = Term::list_from(vec![pair(1, "a"), pair(2, "b")]);
     let iterator = Term::Tuple(vec![
         Term::Integer(1),
         atom("a"),
@@ -511,7 +511,7 @@ fn walks_maps_with_a_path_as_pinned_erts() {
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = vec![
         small.clone(),
-        Term::List(vec![pair(1, "a"), pair(2, "b"), atom("x")]),
+        Term::list_from(vec![pair(1, "a"), pair(2, "b"), atom("x")]),
         small,
         iterator,
         atom("none"),
@@ -527,7 +527,7 @@ fn walks_maps_with_a_path_as_pinned_erts() {
         program
             .execute("logger_start_probe", "map_next", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     let text = format!(
         "[[{{1,a}},{{2,b}}],[{{1,a}},{{2,b}},x],[{{1,a}},{{2,b}}],{{1,a,{{2,b,none}}}},none,43,32,{},{},43,end_,{}]\n",
@@ -546,7 +546,7 @@ fn iterates_maps_as_pinned_erts() {
     // `[26 | Map]`, and the call with path 26 gives the rest.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let integers = |keys: &[i64]| Term::List(keys.iter().copied().map(Term::Integer).collect());
+    let integers = |keys: &[i64]| Term::list_from(keys.iter().copied().map(Term::Integer));
     let expected = vec![
         integers(&[1, 2]),
         integers(&BIG_40_KEYS),
@@ -557,7 +557,7 @@ fn iterates_maps_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("logger_start_probe", "next", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     let keys: Vec<_> = BIG_40_KEYS.iter().map(i64::to_string).collect();
     let text = format!("[[1,2],[{}],{{18,18}},true,26,true]\n", keys.join(","));
@@ -580,8 +580,8 @@ fn iterates_maps_in_a_given_key_order_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = vec![
-        Term::List(vec![atom("a"), atom("b"), atom("c")]),
-        Term::List((1..=40).rev().map(Term::Integer).collect()),
+        Term::list_from(vec![atom("a"), atom("b"), atom("c")]),
+        Term::list_from((1..=40).rev().map(Term::Integer)),
         atom("true"),
         Term::Tuple(vec![
             atom("c"),
@@ -595,7 +595,7 @@ fn iterates_maps_in_a_given_key_order_as_pinned_erts() {
         program
             .execute("logger_start_probe", "ordered", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     let keys: Vec<_> = (1..=40).rev().map(|key: i64| key.to_string()).collect();
     let text = format!(
@@ -676,7 +676,7 @@ fn removes_monitors_as_pinned_erts() {
         program
             .execute("logger_start_probe", "demonitor", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("demonitor"),
@@ -709,7 +709,7 @@ fn removes_links_as_pinned_erts() {
         program
             .execute("logger_start_probe", "unlink", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("unlink"),
@@ -740,7 +740,7 @@ fn sets_the_system_logger_as_pinned_erts() {
         program
             .execute("logger_start_probe", "system_logger", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("system_logger"),
@@ -766,7 +766,7 @@ fn rejects_system_flag_items_as_pinned_erts() {
         program
             .execute("logger_start_probe", "system_flag", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         String::from_utf8(reference("system_flag")).unwrap(),
@@ -804,7 +804,7 @@ fn sets_the_message_queue_data_flag_as_pinned_erts() {
         program
             .execute("logger_start_probe", "message_queue_data", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("message_queue_data"),
@@ -830,7 +830,7 @@ fn rejects_process_flags_as_pinned_erts() {
         program
             .execute("logger_start_probe", "process_flag", &[])
             .unwrap(),
-        Term::List(vec![badarg; 20])
+        Term::list_from(vec![badarg; 20])
     );
     assert_eq!(
         String::from_utf8(reference("process_flag")).unwrap(),
@@ -933,7 +933,7 @@ fn raises_exceptions_as_pinned_erts() {
     expected.extend(std::iter::repeat_n(atom("badarg"), 12));
     assert_eq!(
         program.execute("logger_start_probe", "raise", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         String::from_utf8(reference("raise")).unwrap(),
@@ -974,7 +974,7 @@ fn walks_collision_nodes_and_bignum_paths_as_pinned_erts() {
     let integers = |keys: &[i64]| keys.iter().copied().map(Term::Integer).collect::<Vec<_>>();
     let a = [246, 157, 203, 77, 19, 254, 19, 93];
     let b = [161, 92, 65, 50, 231, 24, 153, 137];
-    let collision = [Term::List(integers(&b)), Term::List(integers(&a))];
+    let collision = [Term::list_from(integers(&b)), Term::list_from(integers(&a))];
     let before = [
         19, 213, 340, 110, 91, 164, 399, 139, 361, 212, 41, 114, 100, 29, 347, 365, 171, 140, 13,
         42, 149, 55, 2, 146, 372, 317, 191, 316, 202, 192, 233,
@@ -991,7 +991,7 @@ fn walks_collision_nodes_and_bignum_paths_as_pinned_erts() {
         -101714049538469044,
         -74925715755171563,
     ];
-    let keys = |parts: &[&[Term]]| Term::List(parts.concat());
+    let keys = |parts: &[&[Term]]| Term::list_from(parts.concat());
     let chunk = |keys: Term, path: Term| Term::Tuple(vec![keys, path]);
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
     let all = keys(&[&integers(&before), &collision, &integers(&after)]);
@@ -1013,7 +1013,7 @@ fn walks_collision_nodes_and_bignum_paths_as_pinned_erts() {
         program
             .execute("logger_start_probe", "map_paths", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     let text = |keys: &[i64]| {
         keys.iter()

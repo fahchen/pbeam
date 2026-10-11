@@ -376,7 +376,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
         }
         "scheduling_statistics" => matches!(atom, Some("disable" | "enable" | "clear")),
         "internal_cpu_topology" => match value.proper_list() {
-            Some(cpus) => !cpus.is_empty() && cpus.iter().all(cpu),
+            Some(cpus) => !value.is_nil() && cpus.clone().all(cpu),
             None => atom == Some("undefined"),
         },
         "erts_alloc" => match value {
@@ -531,15 +531,12 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
     let Some(frames) = stacktrace.proper_list() else {
         return Value(Term::static_atom("badarg"));
     };
-    if !frames.iter().all(frame) {
+    if !frames.clone().all(frame) {
         return Value(Term::static_atom("badarg"));
     }
-    let kept = if depth < frames.len() {
-        depth.max(1)
-    } else {
-        frames.len()
-    };
-    let frames = frames[..kept].iter().map(|frame| match frame {
+    let count = frames.clone().count();
+    let kept = if depth < count { depth.max(1) } else { count };
+    let frames = frames.take(kept).map(|frame| match frame {
         Term::Tuple(elements)
             if matches!(
                 elements.as_slice(),
@@ -1079,7 +1076,7 @@ pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
 /// let x = Term::static_atom("x");
 /// assert!(matches!(append(&mut process, &Term::nil(), &x)?, BifResult::Value(term) if term == x));
 /// let list = append(&mut process, &Term::list_from(vec![Term::Integer(1)]), &x)?;
-/// assert!(matches!(list, BifResult::Value(list) if matches!(list.list_cells(), Some((elements, Some(_))) if elements.len() == 1)));
+/// assert!(matches!(list, BifResult::Value(list) if list == Term::cons(Term::Integer(1), x.clone())));
 /// assert!(matches!(append(&mut process, &x, &Term::nil())?, BifResult::Raise { .. }));
 /// ```
 ///
@@ -1094,20 +1091,26 @@ pub(super) fn append(
 ) -> Result<BifResult, BeamError> {
     match left {
         _ if left.is_nil() => Ok(Value(right.clone())),
-        _ if left.is_list() => append_chunk(process, left, right, 0),
+        _ if left.is_list() => append_chunk(process, left, right, left),
         _ => Ok(BifResult::badarg()),
     }
 }
 
-/// Copy the next chunk of `left` after its first `done` elements, as ERTS
-/// `append_continue` does (`erl_bif_lists.c:237-251`). For a `right` of `[]`,
-/// `append_empty_rhs` only walks the list, 32 elements for each reduction
+/// Walk the next chunk of `left` from `rest`, the cons cell after the
+/// elements done, as ERTS `append_continue` does
+/// (`erl_bif_lists.c:237-251`). For a `right` of `[]`, `append_empty_rhs`
+/// only walks the list, 32 elements for each reduction
 /// (`erl_bif_lists.c:61-89`). Else `lists_append_onheap` copies 60 elements
 /// for each reduction (`erl_bif_lists.c:176-235`). Each chunk takes as many
 /// elements as the budget permits, and bumps the reductions for the
 /// elements that it took. When elements remain, the BIF traps to its export
-/// with the number of elements done (`erl_bif_lists.c:282-289`, `316-320`).
-/// At the end, an improper `left` raises `badarg`.
+/// with the rest of `left`, as the ERTS state keeps its `iterator`
+/// (`erl_bif_lists.c:47-55`, `282-289`, `316-320`). At the end, an improper
+/// `left` raises `badarg`. Else a `right` of `[]` gives `left` itself, as
+/// `append_empty_rhs` gives `lhs_original`, and another `right` gives a copy
+/// of the elements of `left` with the tail `right`. PBeam makes the copy at
+/// the end, in O(n) time, because a cons cell does not change after it is
+/// made.
 ///
 /// ERTS copies on the heap only while the heap has free words. When the
 /// heap is full, it continues in `lists_append_alloc` with 40 elements for
@@ -1121,7 +1124,7 @@ pub(super) fn append(
 /// ```rust,ignore
 /// process.fcalls = 1;
 /// let left = Term::list_from((0..61).map(Term::Integer));
-/// let trap = append_chunk(&mut process, &left, &Term::list_from(vec![Term::Integer(61)]), 0)?;
+/// let trap = append_chunk(&mut process, &left, &Term::list_from(vec![Term::Integer(61)]), &left)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "++", .. }));
 /// assert_eq!(process.fcalls, 0);
 /// ```
@@ -1134,29 +1137,31 @@ pub(super) fn append_chunk(
     process: &mut ProcessState,
     left: &Term,
     right: &Term,
-    done: i64,
+    rest: &Term,
 ) -> Result<BifResult, BeamError> {
-    let (elements, tail) = left.list_cells().expect("'++' appends to a nonempty list");
-    let done = usize::try_from(done).expect("'++' counts the elements that it copied");
+    let mut elements = rest.list_iter().expect("'++' walks a list");
     let per_reduction = if right.is_nil() { 32 } else { 60 };
     let budget = per_reduction * process.bif_reductions_left()?;
-    let rest = elements.len() - done;
-    let walked = rest.min(budget);
+    let walked = elements.by_ref().take(budget).count();
     process.bump_reductions((walked / per_reduction) as i32);
-    if walked < rest {
+    let rest = elements.rest();
+    if rest.is_nonempty_list() {
         return Ok(BifResult::TrapBif {
             module: "erlang",
             function: "++",
-            arguments: vec![
-                left.clone(),
-                right.clone(),
-                Term::Integer((done + walked) as i64),
-            ],
+            arguments: vec![left.clone(), right.clone(), rest.clone()],
         });
     }
-    Ok(match tail {
-        Some(_) => BifResult::badarg(),
-        None => Value(Term::list_with_tail(elements.to_vec(), right.clone())),
+    Ok(match rest {
+        _ if !rest.is_nil() => BifResult::badarg(),
+        _ if right.is_nil() => Value(left.clone()),
+        _ => {
+            let elements = left.list_iter().expect("'++' appends to a list");
+            Value(Term::list_with_tail(
+                elements.cloned().collect(),
+                right.clone(),
+            ))
+        }
     })
 }
 
@@ -1191,26 +1196,25 @@ pub(super) fn length(
     list: &Term,
     count: i64,
 ) -> Result<BifResult, BeamError> {
-    let Some((elements, tail)) = list.list_cells() else {
+    let Some(mut elements) = list.list_iter() else {
         return Ok(BifResult::badarg());
     };
     let max_iter = 16 * process.bif_reductions_left()?;
-    if elements.len() > max_iter {
+    let counted = elements.by_ref().take(max_iter).count();
+    let rest = elements.rest();
+    if rest.is_nonempty_list() {
         process.bump_all_reductions();
         return Ok(BifResult::TrapBif {
             module: "erlang",
             function: "length",
-            arguments: vec![
-                list_rest(&elements[max_iter..], tail),
-                Term::Integer(count + max_iter as i64),
-            ],
+            arguments: vec![rest.clone(), Term::Integer(count + counted as i64)],
         });
     }
-    if tail.is_some() {
+    if !rest.is_nil() {
         return Ok(BifResult::badarg());
     }
-    process.bump_reductions((elements.len() / 16) as i32);
-    Ok(Value(Term::Integer(count + elements.len() as i64)))
+    process.bump_reductions((counted / 16) as i32);
+    Ok(Value(Term::Integer(count + counted as i64)))
 }
 
 /// Run `erlang:binary_part/3`: return the `length` bytes of a binary from
@@ -1302,10 +1306,10 @@ pub(super) fn byte_size(term: &Term) -> BifResult {
 /// assert!(matches!(tl(&Term::nil()), BifResult::Raise { .. }));
 /// ```
 pub(super) fn tl(list: &Term) -> BifResult {
-    let Some(([_, rest @ ..], tail)) = list.list_cells() else {
-        return BifResult::badarg();
-    };
-    Value(list_rest(rest, tail))
+    match list.cons_cell() {
+        Some((_, tail)) => Value(tail.clone()),
+        None => BifResult::badarg(),
+    }
 }
 
 /// Run `erlang:split_binary/2`: return `{Left, Right}`, the bytes of a
@@ -1623,12 +1627,11 @@ pub(super) fn atom_to_binary(term: &Term, encoding: &Term) -> BifResult {
 /// A new atom in a full atom table gives the error of `AtomTable::put`,
 /// where ERTS stops the emulator.
 pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResult, BeamError> {
-    let Some((elements, tail)) = term.list_cells() else {
+    let Some(mut elements) = term.list_iter() else {
         return Ok(BifResult::badarg());
     };
-    let proper = tail.is_none();
     let mut name = String::new();
-    for (count, element) in elements.iter().enumerate() {
+    for (count, element) in elements.by_ref().enumerate() {
         if count == MAX_ATOM_CHARACTERS {
             return Ok(Raise {
                 class: ExceptionClass::Error,
@@ -1644,7 +1647,7 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
         };
         name.push(character);
     }
-    if !proper {
+    if !elements.rest().is_nil() {
         return Ok(BifResult::badarg());
     }
     Ok(Value(Term::Atom(atoms.put(&name)?)))
@@ -1901,7 +1904,9 @@ pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> B
 /// ```
 pub(super) fn list_to_tuple(list: &Term) -> BifResult {
     match list.proper_list() {
-        Some(elements) if elements.len() <= MAX_TUPLE_SIZE => Value(Term::Tuple(elements.to_vec())),
+        Some(elements) if elements.clone().count() <= MAX_TUPLE_SIZE => {
+            Value(Term::Tuple(elements.cloned().collect()))
+        }
         _ => BifResult::badarg(),
     }
 }
@@ -2503,7 +2508,7 @@ pub(super) fn process_info(
     item: &Term,
 ) -> Result<BifResult, BeamError> {
     let valid = match item.proper_list() {
-        Some(items) => items.iter().all(is_process_info_item),
+        Some(items) => items.clone().all(is_process_info_item),
         None => is_process_info_item(item),
     };
     let (true, Term::Pid(id)) = (valid, process) else {
@@ -2724,7 +2729,7 @@ pub(super) fn finish_loading(
     let Some(elements) = prepared.proper_list() else {
         return Ok(BifResult::badarg());
     };
-    let mut references = Vec::with_capacity(elements.len());
+    let mut references = Vec::new();
     for element in elements {
         let Term::Reference(reference) = element else {
             return Ok(BifResult::badarg());
@@ -3075,13 +3080,14 @@ const HALT_MSG_SIZE: usize = 1023;
 /// assert!(!is_slogan(&Term::list_with_tail(vec![Term::Integer(65)], Term::static_atom("foo"))));
 /// ```
 fn is_slogan(status: &Term) -> bool {
-    let Some((elements, tail)) = status.list_cells() else {
+    let Some(mut elements) = status.list_iter() else {
         return false;
     };
-    let proper = tail.is_none();
-    let characters = elements.iter().take(HALT_MSG_SIZE).all(|element| {
+    let characters = elements.by_ref().take(HALT_MSG_SIZE).all(|element| {
         matches!(element, Term::Integer(code)
             if u32::try_from(*code).ok().and_then(char::from_u32).is_some())
     });
-    characters && (proper || elements.len() > HALT_MSG_SIZE)
+    // The rest is `[]` after the last element of a proper list, and a cons
+    // cell after 1023 elements of a longer list.
+    characters && elements.rest().is_list()
 }

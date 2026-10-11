@@ -70,14 +70,16 @@ const NAMES_LATIN1: &str = "[<<97,98,99,0>>,<<97,98,99,0>>,<<0>>,<<97,98,99,0>>,
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![Term::Binary(vec![97])])), "[<<97>>]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Binary(vec![97])])), "[<<97>>]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
         Term::Integer(value) => value.to_string(),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         Term::Binary(bytes) => {
             let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
@@ -198,12 +200,11 @@ fn isolated_find_executable() {
 /// Return the path as a list of its bytes, which is the character list of
 /// an ASCII path.
 fn characters(path: &Path) -> Term {
-    Term::List(
+    Term::list_from(
         path.as_os_str()
             .as_encoded_bytes()
             .iter()
-            .map(|&byte| Term::Integer(byte.into()))
-            .collect(),
+            .map(|&byte| Term::Integer(byte.into())),
     )
 }
 

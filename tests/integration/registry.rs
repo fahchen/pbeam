@@ -15,7 +15,7 @@ fn looks_up_registered_names_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("registry_probe", "names", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("named"),
             atom("undefined"),
             atom("undefined"),
@@ -55,10 +55,10 @@ fn unregisters_names_as_pinned_erts() {
         program
             .execute("registry_probe", "unregister", &[])
             .unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("true"),
             atom("undefined"),
-            Term::List(vec![]),
+            Term::nil(),
             atom("badarg"),
             atom("badarg"),
             atom("badarg"),
@@ -97,9 +97,9 @@ fn reads_the_registered_name_of_another_process_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("registry_probe", "info", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             Term::Tuple(vec![atom("registered_name"), atom("registry_probe_info")]),
-            Term::List(vec![]),
+            Term::nil(),
             atom("undefined"),
             atom("undefined"),
             atom("undefined"),
@@ -143,14 +143,14 @@ fn sends_to_registered_names_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("registry_probe", "send", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("to_self"),
             atom("received"),
             atom("to_echo"),
             atom("received"),
             atom("to_tuple"),
             atom("received"),
-            Term::List(errors.into_iter().map(atom).collect()),
+            Term::list_from(errors.into_iter().map(atom)),
             atom("empty"),
         ])
     );

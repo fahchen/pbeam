@@ -41,7 +41,7 @@ fn checks_unicode_io_of_a_pid_as_pinned_erts() {
         program
             .execute("io_fail_bif_probe", "unicode_io", &[])
             .unwrap(),
-        Term::List(vec![atom("true"), atom("true"), badarg.clone(), badarg])
+        Term::list_from(vec![atom("true"), atom("true"), badarg.clone(), badarg])
     );
     assert_eq!(
         reference("unicode_io"),
@@ -61,19 +61,19 @@ fn converts_chardata_to_a_list_as_pinned_erts() {
     let program = BeamProgram::load(&[IO_FAIL_BIF_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let int = Term::Integer;
-    let list = |code_points: &[i64]| Term::List(code_points.iter().copied().map(int).collect());
+    let list = |code_points: &[i64]| Term::list_from(code_points.iter().copied().map(int));
     let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
     let stopped =
         |reason, converted: &[i64], rest| Term::Tuple(vec![atom(reason), list(converted), rest]);
     let error = |converted, rest| stopped("error", converted, rest);
     let incomplete = |converted, rest| stopped("incomplete", converted, rest);
     let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
-    let improper = |elements, tail| Term::ImproperList(elements, Box::new(tail));
+    let improper = |elements, tail| Term::list_with_tail(elements, tail);
     assert_eq!(
         program
             .execute("io_fail_bif_probe", "to_list", &[])
             .unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             list(&[72, 101, 108, 108, 111]),
             error(&[97], binary(&[255, 98])),
             incomplete(&[97], binary(&[195])),
@@ -91,13 +91,13 @@ fn converts_chardata_to_a_list_as_pinned_erts() {
             list(&[195, 169]),
             list(&[233]),
             list(&[233]),
-            error(&[], Term::List(vec![binary(&[195]), list(&[97])])),
+            error(&[], Term::list_from(vec![binary(&[195]), list(&[97])])),
             incomplete(&[97], binary(&[195])),
             incomplete(&[97], binary(&[195])),
-            error(&[97], Term::List(vec![binary(&[255]), int(98)])),
+            error(&[97], Term::list_from(vec![binary(&[255]), int(98)])),
             error(
                 &[97, 98],
-                Term::List(vec![Term::List(vec![list(&[1114112, 99])]), int(100)])
+                Term::list_from(vec![Term::list_from(vec![list(&[1114112, 99])]), int(100)])
             ),
             error(&[], list(&[1 << 60])),
             error(&[], improper(vec![int(1 << 60)], atom("foo"))),
@@ -112,10 +112,13 @@ fn converts_chardata_to_a_list_as_pinned_erts() {
             list(&[97, 233]),
             error(
                 &[],
-                Term::List(vec![binary(&[195]), Term::List(vec![binary(&[65, 66])])])
+                Term::list_from(vec![
+                    binary(&[195]),
+                    Term::list_from(vec![binary(&[65, 66])])
+                ])
             ),
             incomplete(&[97], binary(&[192])),
-            error(&[97], Term::List(vec![binary(&[255]), int(1)])),
+            error(&[97], Term::list_from(vec![binary(&[255]), int(1)])),
             error(&[], improper(vec![list(&[-1])], binary(b"x"))),
             list(&[128512, 97]),
             error(&[], binary(&[128])),
@@ -151,18 +154,18 @@ fn converts_chardata_of_100000_characters_as_pinned_erts() {
     let summary = |reason, length, rest| Term::Tuple(vec![atom(reason), int(length), rest]);
     assert_eq!(
         program.execute("io_fail_bif_probe", "big", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             summary(
                 "error",
                 100_000,
-                Term::List(vec![Term::List(vec![int(-1), int(98)])])
+                Term::list_from(vec![Term::list_from(vec![int(-1), int(98)])])
             ),
             summary(
                 "error",
                 100_002,
-                Term::List(vec![
-                    Term::List(vec![
-                        Term::List(vec![Term::List(vec![binary(&[255]), int(1)])]),
+                Term::list_from(vec![
+                    Term::list_from(vec![
+                        Term::list_from(vec![Term::list_from(vec![binary(&[255]), int(1)])]),
                         int(2),
                     ]),
                     int(3),
@@ -172,13 +175,13 @@ fn converts_chardata_of_100000_characters_as_pinned_erts() {
             summary(
                 "error",
                 100_000,
-                Term::List(vec![binary(&[195]), Term::List(vec![int(7)])])
+                Term::list_from(vec![binary(&[195]), Term::list_from(vec![int(7)])])
             ),
             summary(
                 "error",
                 100_000,
-                Term::List(vec![
-                    Term::List(vec![Term::List(vec![int(-1), int(2)]), int(3)]),
+                Term::list_from(vec![
+                    Term::list_from(vec![Term::list_from(vec![int(-1), int(2)]), int(3)]),
                     int(4),
                 ])
             ),

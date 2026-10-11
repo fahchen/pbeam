@@ -456,7 +456,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let nil = || Term::List(vec![]);
+    /// let nil = || Term::nil();
     /// let map = Map::from_pairs(vec![(Term::Integer(2), nil()), (Term::Integer(1), nil())])?;
     /// let keys: Vec<_> = map.iter().map(|(key, _)| key.clone()).collect();
     /// assert_eq!(keys, [Term::Integer(1), Term::Integer(2)]);
@@ -897,8 +897,8 @@ impl Hamt {
                     let existing_hash = map_hash(existing).expect("a stored key has a hash");
                     let existing = (
                         existing_hash,
-                        std::mem::replace(existing, Term::List(Vec::new())),
-                        std::mem::replace(existing_value, Term::List(Vec::new())),
+                        std::mem::replace(existing, Term::nil()),
+                        std::mem::replace(existing_value, Term::nil()),
                     );
                     *child = Node::split(level + 1, existing, (hash, key, value));
                     self.size += 1;
@@ -1064,7 +1064,7 @@ impl Node {
 /// // true has index 1 and abs_path has index 26.
 /// let (abs_path, true_) = (Term::static_atom("abs_path"), Term::static_atom("true"));
 /// assert_eq!(flatmap_order(&true_, &abs_path)?, Ordering::Less);
-/// let list = |atom: &Term| Term::List(vec![atom.clone()]);
+/// let list = |atom: &Term| Term::list_from([atom.clone()]);
 /// assert_eq!(flatmap_order(&list(&true_), &list(&abs_path))?, Ordering::Greater);
 /// assert_eq!(flatmap_order(&Term::Integer(1), &true_)?, Ordering::Less);
 /// ```
@@ -1180,14 +1180,14 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert_eq!(map_hash(&Term::Integer(1)), Some(7938660269479274665));
 /// // true has index 1, so its word is 0x4B.
 /// assert_eq!(map_hash(&Term::static_atom("true")), Some(14558535449716669319));
-/// assert_eq!(map_hash(&Term::List(vec![])), Some(internal_hash(&Term::List(vec![]))));
-/// assert!(map_hash(&Term::List(vec![Term::Integer(97)])).is_some());
+/// assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
+/// assert!(map_hash(&Term::list_from([Term::Integer(97)])).is_some());
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
 /// assert_eq!(map_hash(&Term::Tuple(vec![])), Some(4510301282025278020));
 /// assert_eq!(map_hash(&Term::Binary(vec![])), Some(10873612744977862784));
-/// assert_eq!(map_hash(&Term::List(vec![Term::Binary(vec![])])), None);
+/// assert_eq!(map_hash(&Term::list_from([Term::Binary(vec![])])), None);
 /// assert_eq!(map_hash(&Term::Tuple(vec![Term::Binary(vec![])])), None);
-/// let improper = |tail| Term::ImproperList(vec![Term::Integer(1)], Box::new(tail));
+/// let improper = |tail| Term::cons(Term::Integer(1), tail);
 /// assert!(map_hash(&improper(Term::Integer(2))).is_some());
 /// assert_eq!(map_hash(&improper(Term::Map(Map::new()))), None);
 /// ```
@@ -1198,9 +1198,9 @@ fn map_hash(key: &Term) -> Option<u64> {
     let mut pending = vec![key];
     while let Some(term) = pending.pop() {
         match term {
-            Term::Atom(_) => {}
-            Term::List(elements) | Term::Tuple(elements) => pending.extend(elements),
-            Term::ImproperList(elements, tail) => pending.extend(elements.iter().chain([&**tail])),
+            Term::Atom(_) | Term::Nil => {}
+            Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
+            Term::Tuple(elements) => pending.extend(elements),
             _ => {
                 term.small_integer()?;
             }

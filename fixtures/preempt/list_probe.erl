@@ -17,8 +17,8 @@
 %% folding a constant.
 id(X) -> X.
 
-%% A list of N ones. Each '++' doubles the list, so that PBeam, which
-%% copies a list at each cons, builds a long list in O(N log N).
+%% A list of N ones. Each '++' doubles the list. The probe has this form
+%% from the time when PBeam copied a list at each cons (before #458).
 ones(0) -> [];
 ones(N) when N rem 2 =:= 0 ->
     Half = ones(N div 2),

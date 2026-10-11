@@ -48,18 +48,16 @@ enum Step {
 /// `ErtsIOListCopyState`: the current term `obj` and a stack of the tails
 /// of the lists above it.
 struct Walk<'a> {
-    /// The cells of the current list that the walk did not read yet. A term
-    /// that is not a list has no cells.
-    cells: &'a [Term],
-    /// The tail after `cells`: `None` for `[]`, or the term after the last
-    /// cell. A term that is not a list is its own tail.
-    tail: Option<&'a Term>,
-    /// The bytes of the binary `tail` that a copy took before a yield, as
-    /// `from_offset` (`erl_iolist.c:365-373`, `402-410`).
+    /// The current term: the cons cell that the walk reads next, or the
+    /// term after the last cell of the current list. A term that is not a
+    /// list is its own tail.
+    current: &'a Term,
+    /// The bytes of the binary `current` that a copy took before a yield,
+    /// as `from_offset` (`erl_iolist.c:365-373`, `402-410`).
     offset: usize,
-    /// The cells and the tails of the lists above the current list, as the
-    /// `ESTACK` of the walk.
-    stack: Vec<(&'a [Term], Option<&'a Term>)>,
+    /// The rests of the lists above the current list, as the `ESTACK` of
+    /// the walk.
+    stack: Vec<&'a Term>,
 }
 
 impl<'a> Walk<'a> {
@@ -70,15 +68,13 @@ impl<'a> Walk<'a> {
     ///
     /// ```rust,ignore
     /// let walk = Walk::new(&Term::Binary(vec![1]), &[]);
-    /// assert!(walk.cells.is_empty() && walk.stack.is_empty());
+    /// assert!(walk.stack.is_empty());
     /// ```
-    fn new(term: &'a Term, stack: &'a [Term]) -> Self {
-        let (cells, tail) = parts(term);
+    fn new(term: &'a Term, stack: &[&'a Term]) -> Self {
         Walk {
-            cells,
-            tail,
+            current: term,
             offset: 0,
-            stack: stack.iter().map(parts).collect(),
+            stack: stack.to_vec(),
         }
     }
 
@@ -108,7 +104,7 @@ impl<'a> Walk<'a> {
         mut leaf: impl FnMut(&'a Term, usize, &mut i64) -> Option<usize>,
     ) -> Step {
         loop {
-            while let Some((head, rest)) = self.cells.split_first() {
+            while let Some((head, rest)) = self.current.cons_cell() {
                 *steps -= 1;
                 if *steps <= 0 {
                     return Step::Yield;
@@ -116,42 +112,42 @@ impl<'a> Walk<'a> {
                 match head {
                     _ if head.is_nil() => {}
                     _ if head.is_list() => {
-                        self.stack.push((rest, self.tail));
-                        (self.cells, self.tail) = parts(head);
+                        self.stack.push(rest);
+                        self.current = head;
                         continue;
                     }
                     Term::Integer(0..=255) | Term::Binary(_) => {
                         if let Some(taken) = leaf(head, 0, steps) {
                             // The rest of the binary comes first when the walk
                             // continues (`erl_iolist.c:528-537`).
-                            self.stack.push((rest, self.tail));
-                            (self.cells, self.tail, self.offset) = (&[], Some(head), taken);
+                            self.stack.push(rest);
+                            (self.current, self.offset) = (head, taken);
                             return Step::Yield;
                         }
                     }
                     _ => return Step::BadArg,
                 }
-                self.cells = rest;
+                self.current = rest;
             }
             *steps -= 1;
             if *steps <= 0 {
                 return Step::Yield;
             }
-            match self.tail {
-                None => {}
-                Some(binary @ Term::Binary(_)) => {
+            match self.current {
+                tail if tail.is_nil() => {}
+                binary @ Term::Binary(_) => {
                     if let Some(taken) = leaf(binary, self.offset, steps) {
                         self.offset += taken;
                         return Step::Yield;
                     }
                 }
-                Some(_) => return Step::BadArg,
+                _ => return Step::BadArg,
             }
             self.offset = 0;
-            let Some((cells, tail)) = self.stack.pop() else {
+            let Some(rest) = self.stack.pop() else {
                 return Step::Done;
             };
-            (self.cells, self.tail) = (cells, tail);
+            self.current = rest;
         }
     }
 
@@ -167,31 +163,13 @@ impl<'a> Walk<'a> {
     /// assert_eq!(walk.term(), (list.clone(), Term::nil()));
     /// ```
     fn term(&self) -> (Term, Term) {
-        let current = match self.tail {
-            Some(Term::Binary(bytes)) if self.offset > 0 => {
-                Term::Binary(bytes[self.offset..].to_vec())
-            }
-            tail => list_rest(self.cells, tail),
+        let current = match self.current {
+            Term::Binary(bytes) if self.offset > 0 => Term::Binary(bytes[self.offset..].to_vec()),
+            current => current.clone(),
         };
-        let stack = self
-            .stack
-            .iter()
-            .map(|(cells, tail)| list_rest(cells, *tail));
+        let stack = self.stack.iter().map(|&rest| rest.clone());
         (current, Term::list_from(stack))
     }
-}
-
-/// Return the cells and the tail of a term: the elements of a list and its
-/// tail, or no cells and the term itself for a term that is not a list.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(matches!(parts(&Term::nil()), ([], None)));
-/// assert!(matches!(parts(&Term::Binary(vec![])), ([], Some(Term::Binary(_)))));
-/// ```
-fn parts(term: &Term) -> (&[Term], Option<&Term>) {
-    term.list_cells().unwrap_or((&[], Some(term)))
 }
 
 /// Return the reductions of a walk that used `init - steps` steps and did
@@ -259,7 +237,7 @@ pub(super) fn iolist_size(process: &mut ProcessState, term: &Term) -> Result<Bif
 pub(super) fn iolist_size_continue(
     process: &mut ProcessState,
     term: &Term,
-    stack: &[Term],
+    stack: &[&Term],
     mut size: usize,
 ) -> Result<BifResult, BeamError> {
     let init = STEPS_PER_RED * process.bif_reductions_left()? as i64;
@@ -313,10 +291,12 @@ pub(super) fn iolist_to_iovec(
     match term {
         Term::Binary(bytes) if bytes.is_empty() => Ok(Value(Term::nil())),
         Term::Binary(_) => Ok(Value(Term::list_from(vec![term.clone()]))),
-        _ => match term.list_cells() {
-            Some(([], None)) => Ok(Value(Term::nil())),
-            Some(([Term::Binary(bytes)], None)) if bytes.is_empty() => Ok(Value(Term::nil())),
-            Some(([Term::Binary(_)], None)) => Ok(Value(term.clone())),
+        _ if term.is_nil() => Ok(Value(Term::nil())),
+        _ => match term.cons_cell() {
+            Some((Term::Binary(bytes), tail)) if tail.is_nil() && bytes.is_empty() => {
+                Ok(Value(Term::nil()))
+            }
+            Some((Term::Binary(_), tail)) if tail.is_nil() => Ok(Value(term.clone())),
             Some(_) => iovec_size(process, term, term, &[]),
             None => Ok(BifResult::badarg()),
         },
@@ -353,7 +333,7 @@ pub(super) fn iovec_size(
     process: &mut ProcessState,
     arg: &Term,
     term: &Term,
-    stack: &[Term],
+    stack: &[&Term],
 ) -> Result<BifResult, BeamError> {
     let reds_left = process.bif_reductions_left()? as i64;
     let init = STEPS_PER_RED * reds_left;
@@ -415,7 +395,7 @@ pub(super) fn iovec_copy(
     process: &mut ProcessState,
     reds_left: i64,
     term: &Term,
-    stack: &[Term],
+    stack: &[&Term],
     mut iovec: Vec<Term>,
     mut merged: Vec<u8>,
 ) -> BifResult {
@@ -605,9 +585,11 @@ fn list_to_bitstring(
     }
     reds_left = reds_left.max(L2B_MIN_REDS);
     let process = scheduler.current_process_mut();
-    match term.list_cells() {
-        Some(([], None)) => Ok(Value(Term::Binary(Vec::new()))),
-        Some(([binary @ Term::Binary(_)], None)) => Ok(Value(binary.clone())),
+    if term.is_nil() {
+        return Ok(Value(Term::Binary(Vec::new())));
+    }
+    match term.cons_cell() {
+        Some((binary @ Term::Binary(_), tail)) if tail.is_nil() => Ok(Value(binary.clone())),
         Some(_) => Ok(l2b_size(process, reds_left, term, term, &[], 0)),
         None => Ok(BifResult::badarg()),
     }
@@ -645,7 +627,7 @@ pub(super) fn l2b_size(
     reds_left: i64,
     arg: &Term,
     term: &Term,
-    stack: &[Term],
+    stack: &[&Term],
     mut size: usize,
 ) -> BifResult {
     let init = STEPS_PER_RED * reds_left;
@@ -713,7 +695,7 @@ pub(super) fn l2b_copy(
     process: &mut ProcessState,
     reds_left: i64,
     term: &Term,
-    stack: &[Term],
+    stack: &[&Term],
     size: usize,
     mut bytes: Vec<u8>,
 ) -> BifResult {

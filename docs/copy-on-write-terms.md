@@ -97,7 +97,7 @@ Expected result (analysis): the tuple, list, nested, and send benchmarks go from
 | Integer, pid, port, reference | `i64` or `u64` in the enum | No change | Immediate | None |
 | Atom | `Atom { index: u32, name: String }` | No inline `String`: for example an `Arc<str>`, or only the index | Immutable; a clone does not allocate | #460 |
 | Tuple | `Tuple(Vec<Term>)` | `Tuple(Arc<Vec<Term>>)` newtype with `Deref<Target = [Term]>` and constructors | `set_tuple_element` and `setelement/3` use `Arc::make_mut`: a shared tuple is copied (O(n), as `setelement/3` on ERTS), an unshared tuple changes in place | #454 |
-| List | `List(Vec<Term>)` and `ImproperList(Vec<Term>, Box<Term>)` | `Nil` or `Cons(Arc<Cons>)`; a cons holds a head and a tail; `ImproperList` is removed | `put_list` makes a new cons in O(1) time and shares the tail; `get_list`, `get_hd`, and `get_tl` read in O(1) time | #457 (API), #458 (cons cells) |
+| List | `List(Vec<Term>)` and `ImproperList(Vec<Term>, Box<Term>)` | `Nil` or `Cons(ConsRef)`, where a `ConsRef` holds an `Arc<Cons>` (see [Drop rule](#drop-rule)); a cons holds a head and a tail; `ImproperList` is removed (#458) | `put_list` makes a new cons in O(1) time and shares the tail; `get_list`, `get_hd`, and `get_tl` read the cell in O(1) time. The copy of the head or the tail into a register is O(1) for a list, a map, or an immediate, but a tuple, a fun, or a binary is still a deep copy until #454, #455, and #456 | #457 (API), #458 (cons cells) |
 | Binary | `Binary(Vec<u8>)` | `Arc<[u8]>` with an offset and a length | The bytes do not change after construction. `binary_part/3`, `bs_get_binary2`, `bs_get_tail`, and `binary:split/2,3` return views of the same bytes | #456 |
 | Map | `Map { repr: Rc<Repr> }`; HAMT nodes by value | `Arc<Repr>`; each HAMT node in `Arc` | `Arc::make_mut` on each node of the path; a flatmap is copied whole | #453 |
 | Fun | `Fun { target, free: Vec<Term> }` | `Fun(Arc<FunThing>)` | Immutable | #455 |
@@ -107,26 +107,29 @@ After #454, #455, #456, and #458, `Term::clone` is a shallow copy. Then #459 rem
 
 ## List API
 
-Task #457 adds the list API in `src/term/list.rs`. Code outside the term module reads and builds a list only through these functions of `Term`, and it does not match `Term::List` or `Term::ImproperList`. Only `src/term.rs` and the files in `src/term/` match these variants. The representation does not change in #457.
+Task #457 added the list API in `src/term/list.rs`, and #458 changed the representation to cons cells. A list is `Term::Nil` or `Term::Cons(ConsRef)`. A `ConsRef` holds the `Arc` of a `Cons`, which has a head and a tail (see [Drop rule](#drop-rule)). Code outside the term module reads and builds a list only through these functions of `Term`, and it does not match `Term::Nil` or `Term::Cons`. Only `src/term.rs` and the files in `src/term/` match these variants.
 
-| Function | Use |
-| --- | --- |
-| `nil()` | Build `[]`. |
-| `list_from(elements)` | Build a proper list from an iterator. |
-| `list_with_tail(elements, tail)` | Build a list of elements followed by a tail, in the one form of each list. |
-| `is_nil()`, `is_list()`, `is_nonempty_list()` | Test for `[]`, for `[]` or a cons cell, and for a cons cell, as the `is_nil`, `is_list`, and `is_nonempty_list` instructions do. |
-| `list_cells()` | Read the elements of a list and the tail of an improper list. |
-| `proper_list()` | Read the elements of a proper list. |
-| `list_head()` | Read the head of a cons cell (`hd/1`, `get_hd`). |
-| `split_cons()` | Move a cons cell into its head and tail (`get_list`, `get_tl`). |
-| `take_list_elements()` | Move the elements of a list out for an apply. |
+| Function | Use | Time |
+| --- | --- | --- |
+| `nil()` | Build `[]`. | O(1) |
+| `cons(head, tail)` | Build one cons cell that shares `tail` (`put_list`). | O(1) |
+| `list_from(elements)` | Build a proper list from an iterator. | O(n) |
+| `list_with_tail(elements, tail)` | Build a cons cell for each element, with `tail` after the last one. | O(n) |
+| `is_nil()`, `is_list()`, `is_nonempty_list()` | Test for `[]`, for `[]` or a cons cell, and for a cons cell, as the `is_nil`, `is_list`, and `is_nonempty_list` instructions do. | O(1) |
+| `cons_cell()` | Read the head and the tail of a cons cell (`get_list`, `get_tl`, `tl/1`). | O(1) |
+| `list_head()` | Read the head of a cons cell (`hd/1`, `get_hd`). | O(1) |
+| `list_iter()` | Walk the elements of a list. `ListIter::rest` gives the part that the walk did not read: a cons cell, `[]`, or the tail of an improper list. | O(1) to start |
+| `list_cells()` | Walk a list to its end, and give an iterator of its elements and the tail of an improper list. | O(n) |
+| `proper_list()` | Walk a list to its end, and give an iterator of its elements when the list is proper. | O(n) |
+| `list_elements()` | Copy the elements of a list into a vector for an apply, and tell whether the list is proper. | O(n) |
 
-`list_cells()` and `proper_list()` give the elements as a slice. Callers that index or measure the slice, for example the trap states of `length/1`, `++`, `lists:keyfind/3`, `lists:member/2`, and `lists:reverse/2`, and the iodata walk, keep the positions that they use on main. #458 changes these readers and their callers to a walk of cons cells, and it keeps the reductions.
+A trap of a list BIF keeps the rest of its list as a term in O(1) time: `length/1`, `lists:keyfind/3`, `lists:keymember/3`, `lists:member/2`, and `lists:reverse/2` trap with `ListIter::rest`, and `++` traps to `erlang:'++'/3` with the original lists and the rest of the left list, as the ERTS append state keeps its iterator (`erl_bif_lists.c:47-55`). The iodata walk and the chardata walks keep the rest of each list on their stacks. The reductions and the chunk sizes do not change.
 
 ## Drop rule
 
 - `Drop` keeps the work stack, so a deep term or a long list does not overflow the Rust stack.
 - For each `Arc` node, `Drop` calls `Arc::into_inner`. When it returns the inner value, this holder was the last one, and the nested terms go on the work stack. When it returns `None`, another holder keeps the node, and nothing goes on the stack.
+- A cons cell puts its tail and then its head on the work stack, so the head comes off first, and the stack stays short for a long list. `Term` has a `Drop`, so a drop cannot move the `Arc` out of a `Term::Cons`. Thus `Term::Cons` holds a `ConsRef`, a wrapper of `Option<Arc<Cons>>`: the drop takes the `Arc` out of the `Option` and calls `Arc::into_inner`. The `Option` is empty only after this, and every other reader finds a cell. A replacement `Arc` would need one more allocation for each dropped cell (#458).
 - `Arc::into_inner` is in `impl<T, A: Allocator> Arc<T, A>`, which has an implicit `T: Sized` bound. Thus each `Arc` that holds terms has a sized payload. A tuple is `Arc<Vec<Term>>`, not `Arc<[Term]>`: the cost is a second allocation for each tuple and one more pointer step for each element read. A thin `Arc` of a header and an inline slice needs `unsafe` code, so this design does not use it. A binary `Arc<[u8]>` holds no terms, so its usual drop does not recurse.
 - Do not use `Arc::get_mut` or `Arc::try_unwrap` for this. When two threads drop the last two holders at the same time, both calls can fail, and the drop of the last `Arc` then drops the inner value recursively. The standard library guarantees that, of concurrent `Arc::into_inner` calls on all clones, exactly one call returns the inner value.
 - `Map::drain_into` changes from `Rc::get_mut` to `Arc::into_inner` in #453.
@@ -265,7 +268,7 @@ Each task is one PR. The native blocked-by links of the issues are the source of
 9. [#459](https://github.com/fahchen/pbeam/issues/459) Make terms Send and Sync and share them between processes. Blocked by #454, #455, #456, and #458. #10 is blocked by this task.
 10. [#460](https://github.com/fahchen/pbeam/issues/460) Clone an atom without a heap allocation. Blocked by #454.
 
-The backlog entry "Build a list cons and a map update without a copy" goes away in two parts: #453 removes the map part, and #458 removes the rest.
+The backlog entry "Build a list cons and a map update without a copy" went away in two parts: #453 removed the map part, and #458 removed the rest.
 
 ## Owner decisions
 
@@ -283,5 +286,5 @@ These are the decisions of 2026-10-11 in Suikou review 01a1282e.
 ## Limits and open points
 
 - Analysis of this document: the target of #460, `size_of::<Term>()` at most 24 bytes, needs each enum payload to be at most 16 bytes. A fat `Arc<[u8]>` (16 bytes) with an inline `usize` offset and length is 32 bytes. Thus #456 keeps the offset and the length behind one pointer (for example an `Arc` that holds a sub-binary header), or #460 changes its target. A smaller offset or length type adds a binary size limit that ERTS does not have, so it is not permitted.
-- Analysis of this document: `length/1` and `lists:nth/2` take O(n) time on cons cells, as on ERTS. Code on main that gets the length of a list in O(1) time from its `Vec` changes to a walk in #458.
+- `length/1` and `lists:nth/2` take O(n) time on cons cells, as on ERTS. Since #458, code that needs the length of a list walks it.
 - The drop of the last holder of a term still takes O(size) time, as on main.

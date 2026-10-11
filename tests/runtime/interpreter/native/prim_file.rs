@@ -39,7 +39,7 @@ fn checks_the_follow_flag_and_then_the_path_as_erts() {
             "Raise { class: Error, reason: Atom(\"badarg\") }",
         ),
         (
-            Term::List(vec![Term::Integer(47), Term::Integer(0)]),
+            Term::list_from(vec![Term::Integer(47), Term::Integer(0)]),
             Term::Integer(1),
             "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
         ),
@@ -97,7 +97,7 @@ fn gives_einval_for_a_path_that_is_not_marshaled_as_erts() {
         for path in [
             Term::Binary(b"/".to_vec()),
             Term::Binary(b"/\0a\0".to_vec()),
-            Term::List(vec![Term::Integer(47), Term::Integer(0)]),
+            Term::list_from(vec![Term::Integer(47), Term::Integer(0)]),
         ] {
             let result = (binding.run)(&mut scheduler, std::slice::from_ref(&path)).unwrap();
             assert_eq!(format!("{result:?}"), einval, "{name} {path:?}");

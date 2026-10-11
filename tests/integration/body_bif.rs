@@ -23,11 +23,10 @@ fn reference(call: &str) -> Vec<u8> {
 
 /// Return the list of the atoms `true` and `false` for `values`.
 fn booleans(program: &BeamProgram, values: &[bool]) -> Term {
-    Term::List(
+    Term::list_from(
         values
             .iter()
-            .map(|&value| Term::Atom(program.atom(if value { "true" } else { "false" }).unwrap()))
-            .collect(),
+            .map(|&value| Term::Atom(program.atom(if value { "true" } else { "false" }).unwrap())),
     )
 }
 
@@ -43,7 +42,7 @@ fn runs_max_less_and_equal_in_body_position_as_pinned_erts() {
     let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
     assert_eq!(
         program.execute("body_bif_probe", "max", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             Term::Integer(2),
             Term::Integer(2),
             Term::Integer(-3),
@@ -54,11 +53,11 @@ fn runs_max_less_and_equal_in_body_position_as_pinned_erts() {
             atom("a"),
             atom("b"),
             atom("b"),
-            Term::List(vec![Term::Integer(1)]),
-            Term::List(vec![Term::Integer(1), Term::Integer(2)]),
+            Term::list_from(vec![Term::Integer(1)]),
+            Term::list_from(vec![Term::Integer(1), Term::Integer(2)]),
             binary(b"a"),
             Term::Tuple(vec![Term::Integer(1), Term::Integer(2)]),
-            Term::List(Vec::new()),
+            Term::nil(),
             Term::Tuple(Vec::new()),
             Term::Tuple(vec![Term::Integer(1), atom("a")]),
             binary(b"ab"),
@@ -122,7 +121,7 @@ fn negates_integers_in_body_position_as_pinned_erts() {
     expected.extend(std::iter::repeat_n(badarith, 3));
     assert_eq!(
         program.execute("body_bif_probe", "neg", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("neg()"),
@@ -173,7 +172,7 @@ fn ands_integers_bitwise_as_pinned_erts() {
     expected.extend(std::iter::repeat_n(atom("badarith"), 3));
     assert_eq!(
         program.execute("body_bif_probe", "bit_and", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("bit_and()"),
@@ -227,7 +226,7 @@ fn calls_the_bifs_externally_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("body_bif_probe", "externals", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("a"),
             atom("false"),
             atom("true"),
@@ -256,7 +255,7 @@ fn charges_a_bignum_operand_as_pinned_erts() {
         |value, reductions| Term::Tuple(vec![Term::Integer(value), Term::Integer(reductions)]);
     assert_eq!(
         program.execute("body_bif_probe", "costs", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             pair(8, 1),
             pair(576_460_752_303_423_488, 2),
             pair(i64::MAX, 2),

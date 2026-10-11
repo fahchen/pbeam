@@ -74,14 +74,16 @@ const EXITS: &str = "[{{timers,1,3766},[{{down,normal},1},{{seen,false},1},{b,20
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
         Term::Integer(value) => value.to_string(),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         other => panic!("unexpected term {other:?}"),
     }
@@ -116,7 +118,7 @@ fn cases(program: &BeamProgram) -> Term {
             )
         })
         .collect();
-    let cases = Term::List(cases);
+    let cases = Term::list_from(cases);
     assert_eq!(text(&cases), CASES);
     cases
 }
@@ -125,11 +127,7 @@ fn cases(program: &BeamProgram) -> Term {
 fn charges_the_exit_items_as_pinned_erts_with_one_scheduler() {
     let program = BeamProgram::load(&[EXIT_PROBE]).unwrap();
     let exits = program
-        .execute(
-            "exit_probe",
-            "exits",
-            &[cases(&program), Term::List(vec![])],
-        )
+        .execute("exit_probe", "exits", &[cases(&program), Term::nil()])
         .unwrap();
     assert_eq!(text(&exits), EXITS);
 

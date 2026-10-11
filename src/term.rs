@@ -14,6 +14,7 @@ pub(crate) use atom::{AtomTable, MAX_ATOM_CHARACTERS};
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target};
 pub(crate) use hash::internal_hash;
+use list::{Cons, ConsRef};
 pub use map::Map;
 pub(crate) use map::{Direction, from_list_units};
 pub use match_context::MatchContext;
@@ -38,16 +39,13 @@ pub enum Term {
     Atom(Atom),
     Binary(Vec<u8>),
     Integer(i64),
-    /// A proper list of BEAM terms.
-    List(Vec<Term>),
-    /// An improper list: its elements and the tail after the last element,
-    /// for example `[1, 2 | x]`. Its canonical form holds at least one
-    /// element and a tail that is not `List` or `ImproperList`, so each
-    /// improper list has one form. The runtime builds each improper list
-    /// in this form with `Term::list_with_tail`. The type does not enforce
-    /// the form: a caller that gives an argument to an `execute` function
-    /// must use it, because equality, order, and map keys compare the form.
-    ImproperList(Vec<Term>, Box<Term>),
+    /// The empty list `[]`.
+    Nil,
+    /// A cons cell of a list: a head and a tail, for example `[1 | T]`. A
+    /// proper list ends in `[]`, and an improper list ends in another term,
+    /// for example `[1, 2 | x]`. Copies of a list share its cells. Code
+    /// outside the term module uses the list API of `src/term/list.rs`.
+    Cons(ConsRef),
     /// A BEAM tuple.
     Tuple(Vec<Term>),
     /// A BEAM map: a flatmap up to 32 keys and a hashmap above 32 keys, as
@@ -81,21 +79,17 @@ pub enum Term {
     MatchContext(Rc<RefCell<MatchContext>>),
 }
 
-/// The kind of a term that contains other terms. A fun keeps the entry of
-/// the source fun.
+/// The kind of a term that a clone copies element by element. A fun keeps
+/// the entry of the source fun.
 #[derive(Clone, Copy)]
 enum Kind<'a> {
-    List,
-    /// An improper list. Its last nested term is the tail.
-    ImproperList,
     Tuple,
     Fun(&'a Target),
 }
 
-/// The nested terms of a list, tuple, or fun, in order. An improper list
-/// gives its elements and then its tail, and a fun gives its free
+/// The nested terms of a tuple or fun, in order. A fun gives its free
 /// variables.
-type Nested<'a> = Box<dyn Iterator<Item = &'a Term> + 'a>;
+type Nested<'a> = std::slice::Iter<'a, Term>;
 
 impl Kind<'_> {
     /// Build a term of this kind from its nested terms.
@@ -104,16 +98,9 @@ impl Kind<'_> {
     ///
     /// ```rust,ignore
     /// assert_eq!(Kind::Tuple.build(vec![]), Term::Tuple(vec![]));
-    /// let improper = Kind::ImproperList.build(vec![Term::Integer(1), Term::static_atom("x")]);
-    /// assert_eq!(improper, Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x"))));
     /// ```
-    fn build(self, mut terms: Vec<Term>) -> Term {
+    fn build(self, terms: Vec<Term>) -> Term {
         match self {
-            Kind::List => Term::List(terms),
-            Kind::ImproperList => {
-                let tail = terms.pop().expect("an improper list copy has a tail");
-                Term::ImproperList(terms, Box::new(tail))
-            }
             Kind::Tuple => Term::Tuple(terms),
             Kind::Fun(target) => Term::Fun(Fun {
                 target: target.clone(),
@@ -169,18 +156,18 @@ impl Term {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(!Term::List(vec![Term::Integer(1)]).contains_fun());
-    /// assert!(Term::Tuple(vec![Term::List(vec![fun])]).contains_fun());
+    /// assert!(!Term::list_from(vec![Term::Integer(1)]).contains_fun());
+    /// assert!(Term::Tuple(vec![Term::list_from(vec![fun])]).contains_fun());
     /// ```
     pub(crate) fn contains_fun(&self) -> bool {
         let mut pending = vec![self];
         while let Some(term) = pending.pop() {
             match term {
                 Term::Fun(_) => return true,
-                Term::List(elements) | Term::Tuple(elements) => pending.extend(elements),
-                Term::ImproperList(elements, tail) => {
-                    pending.extend(elements);
-                    pending.push(tail);
+                Term::Tuple(elements) => pending.extend(elements),
+                Term::Cons(cell) => {
+                    pending.push(&cell.tail);
+                    pending.push(&cell.head);
                 }
                 Term::Map(map) => pending.extend(map.iter().flat_map(|(key, value)| [key, value])),
                 _ => {}
@@ -190,32 +177,25 @@ impl Term {
     }
 
     /// Copy a term that has no nested terms. A map copy shares the form of
-    /// the map, so it does not copy the pairs. For a list, tuple, or fun,
-    /// return its nested terms, kind, and count instead, so the caller
-    /// copies them.
+    /// the map, and a list copy shares its cons cells, so they do not copy
+    /// the nested terms. For a tuple or fun, return its nested terms, kind,
+    /// and count instead, so the caller copies them.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(Term::Integer(1).shallow_clone().ok(), Some(Term::Integer(1)));
     /// assert!(Term::Map(Map::new()).shallow_clone().is_ok());
-    /// assert!(Term::List(vec![]).shallow_clone().is_err());
+    /// assert!(Term::list_from([Term::Integer(1)]).shallow_clone().is_ok());
+    /// assert!(Term::Tuple(vec![]).shallow_clone().is_err());
     /// ```
     fn shallow_clone(&self) -> Result<Term, (Nested<'_>, Kind<'_>, usize)> {
         match self {
-            Term::List(elements) => Err((Box::new(elements.iter()), Kind::List, elements.len())),
-            Term::ImproperList(elements, tail) => Err((
-                Box::new(elements.iter().chain([&**tail])),
-                Kind::ImproperList,
-                elements.len() + 1,
-            )),
-            Term::Tuple(elements) => Err((Box::new(elements.iter()), Kind::Tuple, elements.len())),
+            Term::Nil => Ok(Term::Nil),
+            Term::Cons(cell) => Ok(Term::Cons(cell.clone())),
+            Term::Tuple(elements) => Err((elements.iter(), Kind::Tuple, elements.len())),
             Term::Map(map) => Ok(Term::Map(map.clone())),
-            Term::Fun(fun) => Err((
-                Box::new(fun.free.iter()),
-                Kind::Fun(&fun.target),
-                fun.free.len(),
-            )),
+            Term::Fun(fun) => Err((fun.free.iter(), Kind::Fun(&fun.target), fun.free.len())),
             Term::Atom(atom) => Ok(Term::Atom(atom.clone())),
             Term::Binary(bytes) => Ok(Term::Binary(bytes.clone())),
             Term::Integer(value) => Ok(Term::Integer(*value)),
@@ -227,7 +207,10 @@ impl Term {
     }
 
     /// Move the nested terms of a list, tuple, map, or fun onto a work stack
-    /// and leave the term empty. An improper list leaves `[]` as its tail.
+    /// and leave the term empty. A cons term gives up its cell
+    /// ([`ConsRef::take_last`]), and only the last holder of the cell moves
+    /// its tail and then its head onto the stack. The head comes off the
+    /// stack first, so a long list keeps the stack short.
     ///
     /// # Examples
     ///
@@ -238,10 +221,11 @@ impl Term {
     /// ```
     fn take_nested(&mut self, pending: &mut Vec<Term>) {
         match self {
-            Term::List(elements) | Term::Tuple(elements) => pending.append(elements),
-            Term::ImproperList(elements, tail) => {
-                pending.append(elements);
-                pending.push(std::mem::replace(&mut **tail, Term::List(vec![])));
+            Term::Tuple(elements) => pending.append(elements),
+            Term::Cons(cell) => {
+                if let Some(Cons { head, tail }) = cell.take_last() {
+                    pending.extend([tail, head]);
+                }
             }
             Term::Fun(fun) => pending.append(&mut fun.free),
             Term::Map(map) => map.drain_into(pending),
@@ -270,13 +254,14 @@ impl Drop for Term {
 }
 
 impl Clone for Term {
-    /// Copy a term with a work stack of partly copied lists, tuples, and
-    /// funs. A map copy shares the form of the map.
+    /// Copy a term with a work stack of partly copied tuples and funs. A
+    /// map copy shares the form of the map, and a list copy shares its cons
+    /// cells.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let term = Term::Tuple(vec![Term::List(vec![Term::Integer(1)])]);
+    /// let term = Term::Tuple(vec![Term::list_from([Term::Integer(1)])]);
     /// assert_eq!(term.clone(), term);
     /// ```
     fn clone(&self) -> Self {
@@ -307,9 +292,10 @@ impl Clone for Term {
 }
 
 impl PartialEq for Term {
-    /// Compare two terms pair by pair with a work stack. Two improper lists
-    /// are equal when their elements and their tails are equal, as `eq` in
-    /// `utils.c:1137-1162` compares each head and then the last tail. Two maps are equal
+    /// Compare two terms pair by pair with a work stack. Two cons cells are
+    /// equal when their heads and their tails are equal, as `eq` in
+    /// `utils.c:1137-1162` compares each head and then the last tail. Two
+    /// terms that share one cons cell are equal with no walk. Two maps are equal
     /// when their pairs in canonical order are equal, as the structural ERTS
     /// comparison of two flatmaps or two hashmaps is. Two local funs are
     /// equal when their fun entries and their free variables are equal, and
@@ -319,21 +305,25 @@ impl PartialEq for Term {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Term::List(vec![Term::Integer(1)]), Term::List(vec![Term::Integer(1)]));
-    /// assert_ne!(Term::List(vec![]), Term::Tuple(vec![]));
+    /// assert_eq!(Term::list_from([Term::Integer(1)]), Term::list_from([Term::Integer(1)]));
+    /// assert_ne!(Term::nil(), Term::Tuple(vec![]));
     /// ```
     fn eq(&self, other: &Self) -> bool {
         let mut pairs = vec![(self, other)];
         while let Some(pair) = pairs.pop() {
             let equal = match pair {
-                (Term::List(left), Term::List(right)) | (Term::Tuple(left), Term::Tuple(right)) => {
+                (Term::Tuple(left), Term::Tuple(right)) => {
                     pairs.extend(left.iter().zip(right));
                     left.len() == right.len()
                 }
-                (Term::ImproperList(left, left_tail), Term::ImproperList(right, right_tail)) => {
-                    pairs.extend(left.iter().zip(right));
-                    pairs.push((left_tail, right_tail));
-                    left.len() == right.len()
+                (Term::Nil, Term::Nil) => true,
+                (Term::Cons(left), Term::Cons(right)) => {
+                    // The tails go on the stack first, so the heads come off
+                    // first and a long list keeps the stack short.
+                    if !left.same_cell(right) {
+                        pairs.extend([(&left.tail, &right.tail), (&left.head, &right.head)]);
+                    }
+                    true
                 }
                 (Term::Fun(left), Term::Fun(right)) => {
                     pairs.extend(left.free.iter().zip(&right.free));
@@ -371,15 +361,18 @@ impl PartialEq for Term {
 impl Eq for Term {}
 
 impl fmt::Debug for Term {
-    /// Write the same text as a derived `Debug`, for example
-    /// `Tuple([Atom("undef"), List([])])`, `ImproperList([Integer(1)], Atom("x"))`,
-    /// or `Map([(Atom("a"), Integer(1))])`, with a work stack. A fun writes its entry and its free variables, for
-    /// example `Fun(Local(Lambda { .. }), [Atom("tag")])`.
+    /// Write the text of a derived `Debug`, for example
+    /// `Tuple([Atom("undef"), Integer(1)])` or `Map([(Atom("a"), Integer(1))])`,
+    /// with a work stack. A list writes its elements: a proper list as
+    /// `List([Integer(1)])` and `[]` as `List([])`, and an improper list
+    /// with its tail as `ImproperList([Integer(1)], Atom("x"))`. A fun
+    /// writes its entry and its free variables, for example
+    /// `Fun(Local(Lambda { .. }), [Atom("tag")])`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let term = Term::Tuple(vec![Term::static_atom("undef"), Term::List(vec![])]);
+    /// let term = Term::Tuple(vec![Term::static_atom("undef"), Term::nil()]);
     /// assert_eq!(format!("{term:?}"), "Tuple([Atom(\"undef\"), List([])])");
     /// ```
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -406,23 +399,34 @@ impl fmt::Debug for Term {
                 Term::MatchContext(context) => {
                     write!(formatter, "MatchContext({:?})", context.borrow())?
                 }
-                Term::List(elements)
-                | Term::ImproperList(elements, _)
-                | Term::Tuple(elements)
-                | Term::Fun(Fun { free: elements, .. }) => {
+                Term::Nil | Term::Cons(_) => {
+                    let (elements, tail) = term.list_cells().expect("the term is a list");
+                    let elements: Vec<_> = elements.collect();
+                    match tail {
+                        None => {
+                            formatter.write_str("List([")?;
+                            items.push(Item::Text("])"));
+                        }
+                        Some(tail) => {
+                            formatter.write_str("ImproperList([")?;
+                            items.push(Item::Text(")"));
+                            items.push(Item::Term(tail));
+                            items.push(Item::Text("], "));
+                        }
+                    }
+                    for (index, element) in elements.into_iter().enumerate().rev() {
+                        items.push(Item::Term(element));
+                        if index > 0 {
+                            items.push(Item::Text(", "));
+                        }
+                    }
+                }
+                Term::Tuple(elements) | Term::Fun(Fun { free: elements, .. }) => {
                     match term {
-                        Term::List(_) => formatter.write_str("List([")?,
-                        Term::ImproperList(..) => formatter.write_str("ImproperList([")?,
                         Term::Fun(fun) => write!(formatter, "Fun({:?}, [", fun.target)?,
                         _ => formatter.write_str("Tuple([")?,
                     }
-                    if let Term::ImproperList(_, tail) = term {
-                        items.push(Item::Text(")"));
-                        items.push(Item::Term(tail));
-                        items.push(Item::Text("], "));
-                    } else {
-                        items.push(Item::Text("])"));
-                    }
+                    items.push(Item::Text("])"));
                     for (index, element) in elements.iter().enumerate().rev() {
                         items.push(Item::Term(element));
                         if index > 0 {

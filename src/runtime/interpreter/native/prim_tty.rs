@@ -894,6 +894,7 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
         return Ok(BifResult::DirtyWrite(write));
     };
     let improper = tail.is_some();
+    let elements: Vec<&Term> = elements.collect();
     let mut groups = elements.chunks(MAXIOV).peekable();
     while let Some(group) = groups.next() {
         // The group of the last element reads the tail after it.
@@ -901,7 +902,7 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
             return Ok(BifResult::DirtyWrite(write));
         }
         let mut buffers = Vec::with_capacity(group.len());
-        for element in group {
+        for &element in group {
             match element {
                 Term::Binary(bytes) if bytes.is_empty() => {}
                 Term::Binary(bytes) => buffers.push(bytes.clone()),

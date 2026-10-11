@@ -18,7 +18,7 @@ fn atom(name: &str) -> Term {
 }
 
 fn integers(values: &[i64]) -> Term {
-    Term::List(values.iter().map(|value| Term::Integer(*value)).collect())
+    Term::list_from(values.iter().map(|value| Term::Integer(*value)))
 }
 
 fn map(pairs: impl IntoIterator<Item = (Term, Term)>) -> Term {
@@ -26,7 +26,7 @@ fn map(pairs: impl IntoIterator<Item = (Term, Term)>) -> Term {
 }
 
 fn improper(cells: Vec<Term>, tail: Term) -> Term {
-    Term::ImproperList(cells, Box::new(tail))
+    Term::list_with_tail(cells, tail)
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn hashes_each_term_kind_as_pinned_erts() {
         (atom("ok"), 4036026909208831136),
         (Term::Integer(1), 7938660269479274665),
         (Term::Integer(-1), 7256831767414464289),
-        (Term::List(vec![]), 16046243290777390298),
+        (Term::nil(), 16046243290777390298),
         (tuple(vec![]), 4510301282025278020),
         (
             tuple(vec![atom("ok"), Term::Integer(1)]),
@@ -54,23 +54,23 @@ fn hashes_each_term_kind_as_pinned_erts() {
             tuple(vec![Term::Integer(1), tuple(vec![Term::Integer(2)])]),
             15167167310543595139,
         ),
-        (Term::List(vec![atom("ok")]), 466713979249896199),
+        (Term::list_from(vec![atom("ok")]), 466713979249896199),
         (
             integers(b"hello".map(i64::from).as_slice()),
             5671500630603279798,
         ),
         (integers(&[300]), 15858254366034436735),
         (
-            Term::List(vec![tuple(vec![atom("ok")])]),
+            Term::list_from(vec![tuple(vec![atom("ok")])]),
             15994800526372216946,
         ),
-        (Term::List(vec![Term::List(vec![])]), 7939938580689537527),
+        (Term::list_from(vec![Term::nil()]), 7939938580689537527),
         (
-            Term::List(vec![Term::Binary(vec![]), Term::Integer(2)]),
+            Term::list_from(vec![Term::Binary(vec![]), Term::Integer(2)]),
             2437268029134553953,
         ),
         (
-            Term::List(vec![Term::Integer(1), tuple(vec![]), Term::Integer(2)]),
+            Term::list_from(vec![Term::Integer(1), tuple(vec![]), Term::Integer(2)]),
             11634306265473751121,
         ),
         (Term::Binary(vec![]), 10873612744977862784),
@@ -94,7 +94,7 @@ fn hashes_each_term_kind_as_pinned_erts() {
         (map([]), 9376759162891905861),
         (
             map([
-                (atom("ok"), Term::List(vec![])),
+                (atom("ok"), Term::nil()),
                 (Term::Integer(1), Term::Binary(vec![])),
             ]),
             13992029790355293803,
@@ -158,7 +158,7 @@ fn hashes_local_funs_as_pinned_erts() {
             map([(atom("ok"), free), (Term::Integer(1), zero())]),
             14001711515840955162,
         ),
-        (Term::List(vec![negative()]), 1176312308706464788),
+        (Term::list_from(vec![negative()]), 1176312308706464788),
     ];
     for (term, hash) in cases {
         assert_eq!(internal_hash(&term), hash, "{term:?}");
@@ -281,7 +281,7 @@ fn hashes_collision_nodes_as_pinned_erts() {
             243852246011044368,
         ),
         (
-            with((a, integers(&[120, 121])), (b, Term::List(vec![]))),
+            with((a, integers(&[120, 121])), (b, Term::nil())),
             2185849235149492526,
         ),
         (
@@ -297,9 +297,9 @@ fn hashes_collision_nodes_as_pinned_erts() {
 #[test]
 fn hashes_a_deep_term_without_recursion() {
     let deep = |levels: usize| {
-        (0..levels).fold(Term::List(vec![]), |inner, level| match level % 5 {
+        (0..levels).fold(Term::nil(), |inner, level| match level % 5 {
             0 => Term::Tuple(vec![inner, Term::Binary(vec![])]),
-            1 => Term::List(vec![inner, Term::Integer(1)]),
+            1 => Term::list_from(vec![inner, Term::Integer(1)]),
             2 => map([(atom("ok"), inner)]),
             3 => improper(vec![inner], Term::Integer(1)),
             _ => local(0, 7, 1, vec![inner, Term::Integer(1)]),

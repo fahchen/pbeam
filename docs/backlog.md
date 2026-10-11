@@ -240,13 +240,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** an owner decision to make the CI test time shorter again, or a consumer with large ETS tables.
 - **Source:** PR for #355.
 
-### Build a list cons and a map update without a copy
-
-- A `Term::List` holds its elements in one `Vec`, so a cons copies the tail. The probes build long lists with `++` of two halves, in O(N log N) time. ERTS makes a cons in constant time. #453 removed the map part: a map update copies only the HAMT nodes on the path of the key, in O(log N) time, as ERTS does.
-- **Evidence:** on PBeam, `pairs(1, 100000)` of `bif_cost_probe` takes about 1.5 s (#355).
-- **Trigger:** an owner decision to make the CI test time shorter again, or a consumer that builds long lists.
-- **Source:** PR for #355.
-
 ### Share map nodes in the results of the map BIFs
 
 - `maps:remove/2`, `maps:take/2`, and `maps:merge/2` build their result map again with `Map::from_pairs`, so the result holds no node of an argument. An update that puts the value that the key already has makes a new map. ERTS shares the nodes in each of these cases, so `maps:merge/2` of such a result and its argument uses more reductions on PBeam. The row "Map merge reductions" of `docs/erts-differences.md` records this difference, and this entry owns it.

@@ -16,9 +16,9 @@ fn fun(index: i32, free: Vec<Term>) -> Term {
 }
 
 fn deep(levels: usize) -> Term {
-    (0..levels).fold(Term::List(vec![]), |inner, level| match level % 4 {
+    (0..levels).fold(Term::nil(), |inner, level| match level % 4 {
         0 => Term::Tuple(vec![inner]),
-        1 => Term::List(vec![Term::Integer(1), inner]),
+        1 => Term::list_from(vec![Term::Integer(1), inner]),
         2 => map(vec![(atom("k"), inner)]),
         _ => fun(0, vec![inner]),
     })
@@ -43,8 +43,8 @@ fn clones_compares_formats_and_drops_deep_improper_lists_without_recursion() {
     // Each level nests through the tail or through the first element.
     let deep = |levels: usize| {
         (0..levels).fold(atom("x"), |inner, level| match level % 2 {
-            0 => Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Tuple(vec![inner]))),
-            _ => Term::ImproperList(vec![inner], Box::new(atom("t"))),
+            0 => Term::list_with_tail(vec![Term::Integer(1)], Term::Tuple(vec![inner])),
+            _ => Term::list_with_tail(vec![inner], atom("t")),
         })
     };
     let term = deep(1_000_000);
@@ -63,19 +63,19 @@ fn compares_and_formats_improper_lists_by_elements_and_tail() {
     // ERTS 29.1.1: [1|x] =:= [1|x] is true, and [1,2|a] =:= [1,2|b],
     // [1|a] =:= [1], and [1|2] =:= [1|x] are false (`eq`, `utils.c:1137-1162`).
     let improper = |elements: &[i64], tail| {
-        Term::ImproperList(
+        Term::list_with_tail(
             elements
                 .iter()
                 .map(|element| Term::Integer(*element))
                 .collect(),
-            Box::new(tail),
+            tail,
         )
     };
     assert_eq!(improper(&[1], atom("x")), improper(&[1], atom("x")).clone());
     assert_ne!(improper(&[1, 2], atom("a")), improper(&[1, 2], atom("b")));
     assert_ne!(
         improper(&[1], atom("a")),
-        Term::List(vec![Term::Integer(1)])
+        Term::list_from(vec![Term::Integer(1)])
     );
     assert_ne!(improper(&[1], Term::Integer(2)), improper(&[1], atom("x")));
     assert_ne!(improper(&[1], atom("x")), improper(&[1, 2], atom("x")));
@@ -94,25 +94,25 @@ fn builds_each_list_in_its_one_form() {
     let one = || vec![Term::Integer(1)];
     let x = || Box::new(atom("x"));
     assert_eq!(
-        Term::list_with_tail(one(), Term::List(vec![Term::Integer(2)])),
-        Term::List(vec![Term::Integer(1), Term::Integer(2)])
+        Term::list_with_tail(one(), Term::list_from(vec![Term::Integer(2)])),
+        Term::list_from(vec![Term::Integer(1), Term::Integer(2)])
     );
     assert_eq!(
-        Term::list_with_tail(one(), Term::List(vec![])),
-        Term::List(one())
+        Term::list_with_tail(one(), Term::nil()),
+        Term::list_from(one())
     );
     assert_eq!(
-        Term::list_with_tail(one(), Term::ImproperList(vec![Term::Integer(2)], x())),
-        Term::ImproperList(vec![Term::Integer(1), Term::Integer(2)], x())
+        Term::list_with_tail(one(), Term::list_with_tail(vec![Term::Integer(2)], *x())),
+        Term::cons(Term::Integer(1), Term::cons(Term::Integer(2), *x()))
     );
     assert_eq!(
         Term::list_with_tail(one(), *x()),
-        Term::ImproperList(one(), x())
+        Term::cons(Term::Integer(1), *x())
     );
     assert_eq!(Term::list_with_tail(vec![], *x()), *x());
     assert_eq!(
-        Term::list_with_tail(vec![], Term::List(one())),
-        Term::List(one())
+        Term::list_with_tail(vec![], Term::list_from(one())),
+        Term::list_from(one())
     );
 }
 
@@ -171,7 +171,7 @@ fn matches_the_derived_debug_text_and_compares_every_variant() {
         Term::Reference(Reference(5)),
         Term::MatchContext(Rc::new(RefCell::new(MatchContext::new(&[6])))),
     ];
-    let term = Term::Tuple(vec![Term::List(leaves.to_vec()), Term::List(vec![])]);
+    let term = Term::Tuple(vec![Term::list_from(leaves.to_vec()), Term::nil()]);
     assert_eq!(
         format!("{term:?}"),
         "Tuple([List([Atom(\"ok\"), Binary([1, 2]), Integer(-3), Pid(ProcessId(4)), \
@@ -182,8 +182,8 @@ fn matches_the_derived_debug_text_and_compares_every_variant() {
         assert_eq!(leaf, &leaf.clone());
         assert_ne!(leaf, &leaves[(index + 1) % leaves.len()]);
     }
-    assert_ne!(Term::List(vec![]), Term::Tuple(vec![]));
-    assert_ne!(Term::List(vec![]), Term::List(vec![Term::Integer(1)]));
+    assert_ne!(Term::nil(), Term::Tuple(vec![]));
+    assert_ne!(Term::nil(), Term::list_from(vec![Term::Integer(1)]));
     assert_ne!(Term::Tuple(vec![atom("a")]), Term::Tuple(vec![atom("b")]));
 }
 
@@ -199,12 +199,7 @@ fn formats_and_compares_maps_by_their_pairs() {
         "b" => b.clone(),
         _ => crate::term::test_atom(name),
     };
-    let pairs = || {
-        vec![
-            (atom("a"), Term::Integer(1)),
-            (atom("b"), Term::List(vec![])),
-        ]
-    };
+    let pairs = || vec![(atom("a"), Term::Integer(1)), (atom("b"), Term::nil())];
     let sorted = map(pairs());
     assert_eq!(
         format!("{sorted:?}"),
@@ -221,7 +216,7 @@ fn formats_and_compares_maps_by_their_pairs() {
         map(vec![(atom("a"), Term::Integer(1))]),
         map(vec![(atom("b"), Term::Integer(1))])
     );
-    assert_ne!(map(vec![]), Term::List(vec![]));
+    assert_ne!(map(vec![]), Term::nil());
     // Pairs in any order give the same map and the same text.
     let reversed = map(pairs().into_iter().rev().collect());
     assert_eq!(reversed, sorted);
@@ -269,7 +264,7 @@ fn clones_compares_and_formats_ports() {
 
 #[test]
 fn finds_a_fun_at_any_depth_without_recursion() {
-    let element = |term| Term::List(vec![Term::Integer(1), term]);
+    let element = |term| Term::list_from(vec![Term::Integer(1), term]);
     assert!(!Term::Integer(1).contains_fun());
     assert!(!deep(3).contains_fun());
     assert!(deep(4).contains_fun());
@@ -277,10 +272,10 @@ fn finds_a_fun_at_any_depth_without_recursion() {
     assert!(element(Term::Tuple(vec![fun(0, vec![])])).contains_fun());
     assert!(map(vec![(atom("k"), fun(0, vec![]))]).contains_fun());
     assert!(!map(vec![(atom("k"), atom("v"))]).contains_fun());
-    let improper = |tail| Term::ImproperList(vec![Term::Integer(1)], Box::new(tail));
+    let improper = |tail| Term::list_with_tail(vec![Term::Integer(1)], tail);
     assert!(improper(fun(0, vec![])).contains_fun());
     assert!(!improper(atom("x")).contains_fun());
-    assert!(Term::ImproperList(vec![fun(0, vec![])], Box::new(atom("x"))).contains_fun());
+    assert!(Term::list_with_tail(vec![fun(0, vec![])], atom("x")).contains_fun());
     let nested = (0..1_000_000).fold(fun(0, vec![]), |inner, _| Term::Tuple(vec![inner]));
     assert!(nested.contains_fun());
     let nested = (0..1_000_000).fold(Term::Integer(1), |inner, _| element(inner));

@@ -106,7 +106,10 @@ fn io_request_permitted(sender: ProcessId, security: &SecurityContext, message: 
                     && !arguments.contains_fun()
                     && writes()
             }
-            [Term::Atom(tag), Term::List(requests)] if tag.name() == "requests" => {
+            [Term::Atom(tag), requests] if tag.name() == "requests" => {
+                let Some(requests) = requests.proper_list() else {
+                    return false;
+                };
                 pending.extend(requests);
                 true
             }
