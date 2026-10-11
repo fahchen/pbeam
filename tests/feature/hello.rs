@@ -140,14 +140,14 @@ fn fails_visibly_for_a_missing_entry_through_the_boot() {
     // (init.erl:678-679, 710-712). The `pbeam` binary accepts only an
     // argument atom that a loaded module holds: `start` is an atom of
     // `pbeam_boot`, and `Elixir.String.Chars` is an atom of `Elixir.IO`.
-    // For a missing export, PBeam raises `undef` with the stack trace
-    // `[{'Elixir.Hello',start,[],[]}]`: the first frame of ERTS and no
-    // caller frames (rows "Exception stack trace" and "Undefined
-    // functions"). PBeam writes its own report of the root exit (row "Run
-    // end"). For a module that the run does not load, PBeam stops at the
-    // call with a runtime error and no root exit (row "Undefined
-    // functions"). Without `ERL_CRASH_DUMP_SECONDS=0`, ERTS writes
-    // `erl_crash.dump` into the working directory.
+    // A missing export of a loaded module and a call of a module that the
+    // run does not load both raise `undef` through
+    // `error_handler:undefined_function/3` (`error_handler.erl:85-98`,
+    // `165-178`). PBeam gives the first frame of ERTS and no caller frames,
+    // and it writes its own report of the root exit (rows "Exception stack
+    // trace", "Undefined functions", and "Run end"). Without
+    // `ERL_CRASH_DUMP_SECONDS=0`, ERTS writes `erl_crash.dump` into the
+    // working directory.
     let io = elixir_io_path();
     let beams = hello_beams("Elixir.Hello", &io);
     for (module, function, erts_stderr, pbeam_stderr) in [
@@ -155,16 +155,22 @@ fn fails_visibly_for_a_missing_entry_through_the_boot() {
             "Elixir.Hello",
             "start",
             "Error! Failed to eval: 'Elixir.Hello':start(), halt().\r\n\r\nRuntime terminating during boot ({undef,[{'Elixir.Hello',start,[],[]},{erl_eval,do_apply,7,[{file,\"erl_eval.erl\"},{line,1044}]},{erl_eval,exprs,6,[{file,\"erl_eval.erl\"},{line,276}]},{init,start_it,1,[]},{init,start_em,1,[]},{init,do_boot,3,[]}]})\r\n",
-            // PBeam adds the frame of `pbeam_boot:start/3`, which calls the
-            // entry function after its boot. ERTS runs the entry function
-            // from `erl_eval`, so the caller frames differ.
-            "pbeam: root process exited with {undef,[{'Elixir.Hello',start,[],[]},{pbeam_boot,start,3,[]}]}\n",
+            // The entry function is the last call of `pbeam_boot:start/3`,
+            // so the export entry enters the error handler with the stack of
+            // that frame and the `undef` holds the first frame only. ERTS
+            // runs the entry function from `erl_eval`, so its caller frames
+            // differ.
+            "pbeam: root process exited with {undef,[{'Elixir.Hello',start,[],[]}]}\n",
         ),
         (
             "Elixir.String.Chars",
             "main",
             "Error! Failed to eval: 'Elixir.String.Chars':main(), halt().\r\n\r\nRuntime terminating during boot ({undef,[{'Elixir.String.Chars',main,[],[]},{erl_eval,do_apply,7,[{file,\"erl_eval.erl\"},{line,1044}]},{erl_eval,exprs,6,[{file,\"erl_eval.erl\"},{line,276}]},{init,start_it,1,[]},{init,start_em,1,[]},{init,do_boot,3,[]}]})\r\n",
-            "pbeam: root process exited with {undef,[{'Elixir.String.Chars',main,[],[]},{pbeam_boot,start,3,[]}]}\n",
+            // The module is not loaded, and the atom is an argument of
+            // `pbeam_boot:start/3`, so this call is not the last call of that
+            // function. The handler enters with the stack of the frame of the
+            // call, and the `undef` holds the first frame only.
+            "pbeam: root process exited with {undef,[{'Elixir.String.Chars',main,[],[]}]}\n",
         ),
     ] {
         let erts = run_dumb_utf8(
