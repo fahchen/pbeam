@@ -63,7 +63,7 @@ The steps showed `Count: 0` with `j/k to change, q to quit`, then `Count: 1`, `C
 
 In the inventory run, `main/0` wrote `{:ok, 1}` before the restore sequence, so the result went to the alternate screen. That run loads the modules before the run, as PBeam does, and the "Code loading" row of [ERTS Differences](erts-differences.md) gives this order for that case. Each other check passed.
 
-The same harness ran the PBeam binary of this branch with `bash scripts/example.sh terra_counter --no-build` on 2026-10-11. Each check passed, and the result went to the alternate screen, as in the inventory run. Task #21 owns the comparison of the PBeam run with this inventory.
+The same harness ran the PBeam binary of this branch with `bash scripts/example.sh terra_counter --no-build` on 2026-10-11. Each check passed, and the result went to the alternate screen, as in the inventory run. Task #21 owns the comparison of the PBeam run with this inventory. #448 gives the PBeam run the start set of the build, so the `main` process waits for its module loads as in the reference run, and the restore sequence comes before the result.
 
 The fixture disassembly of the entry, `mise run disasm target/examples/terra_counter/Elixir.TerraCounter.beam main/0`, gives `io:setopts/2` with `[binary]` on `standard_io`, an `is_eq_exact` test of `ok`, `'Elixir.Terra':run/1` with `'Elixir.Counter'`, and `'Elixir.IO':inspect/1` as the last call.
 
@@ -73,7 +73,7 @@ The fixture disassembly of the entry, `mise run disasm target/examples/terra_cou
 
 ### Required modules
 
-Static candidates: the BEAM list `target/examples/terra_counter/pbeam.beams` has 427 modules. `scripts/example_beams.exs` makes this list from the imports chunks of the example, `pbeam_boot`, and the boot modules, directly or through other modules. By origin: `erts` 20, `kernel` 61, `stdlib` 70, `compiler` 33, `elixir` 198, `iex` 7, `logger` 6, `mix` 1, `consolidated` 5, `terra` 23, and `example` 3 (`Counter`, `TerraCounter`, `pbeam_boot`). `target/examples/terra_counter/pbeam.unloaded` gives 14 more called modules that the list does not have, with the reason: `Dict`, `HashDict`, and `HashSet` have no BEAM file, `code_server` has no PBeam code server, and the PBeam loader does not load the other 10 (see "Code loading" in [ERTS Differences](erts-differences.md)).
+Static candidates: the BEAM list `target/examples/terra_counter/pbeam.beams` has each module that the example calls, directly or through other modules. `scripts/example_beams.exs` makes this list from the imports chunks of the example, `pbeam_boot`, and the boot modules. The pbeam run starts with a smaller start set (`target/examples/terra_counter/pbeam.start`), and loads each other module on demand through the pinned `error_handler` and `code_server`, as an interactive-mode ERTS run does (see "Code loading" in [ERTS Differences](erts-differences.md)). `target/examples/terra_counter/pbeam.unloaded` gives each called module that the PBeam loader does not load, with the reason: `Dict`, `HashDict`, and `HashSet` have no BEAM file, and the PBeam loader does not load the other modules.
 
 Exercised: 76 modules have a called function. Each of them is in the BEAM list.
 

@@ -20,6 +20,17 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
+## 20261011: Verify a benchmark probe after compilation
+
+**Problem:** The `funcopy` probe of `docs/copy-on-write-terms.md` did not measure the tuple construction and `element/2` work that it claimed. The compiler reduced `fc_loop/2` to a zero test, a decrement, and a tail call.
+
+**Root Cause:** The probe was timed from its source without a look at the compiled instructions, so the runtime could remove the work that the benchmark claims to measure.
+
+**Fix:** Write a probe whose compiled instructions retain the measured work, disassemble the compiled function, and publish the timing only after the instructions show the work.
+
+**Guardrail:** Before a timing is published, disassemble each compiled probe and confirm that the timed instructions retain the work that the benchmark claims to measure.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/492#issuecomment-6108464523>
 
 ## 20261011: Qualify behavior claims by execution mode
 

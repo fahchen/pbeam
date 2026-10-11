@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::{ATOM_LIMIT, Atom, AtomTable, STATIC_ATOM_NAMES};
 
 #[test]
@@ -45,4 +47,21 @@ fn stops_at_the_erts_atom_limit() {
         "no more index entries in atom_tab (max=1048576)"
     );
     assert_eq!(table.indices.len(), ATOM_LIMIT);
+}
+
+#[test]
+fn shares_the_name_of_a_copied_atom_and_keeps_the_name_out_of_line() {
+    // ERTS makes an atom term one tagged word that holds the atom-table
+    // index (`make_atom` and `_unchecked_atom_val` in `erl_term.h:300`,
+    // `:303`), and the table holds the name (`atom.c:38`). Thus a copy of
+    // an atom allocates nothing. PBeam keeps the name with the atom, so a
+    // copy must share it. `size_of::<Atom>()` is 24 bytes: a fat
+    // `Arc<str>` of 16 bytes and a 4-byte index, where an inline `String`
+    // needs 32 bytes.
+    let table = AtomTable::new();
+    let atom = table.get("ok").unwrap();
+    let copy = atom.clone();
+    assert_eq!(atom, copy);
+    assert!(Arc::ptr_eq(&atom.name, &copy.name));
+    assert!(size_of::<Atom>() <= 24);
 }

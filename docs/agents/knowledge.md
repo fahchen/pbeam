@@ -132,3 +132,7 @@ Discover generated inputs from the current build set, not from a persistent outp
 ## Complexity claims omit hidden work
 
 Expand every documented complexity claim into its complete operation sequence. Include copying, sorting, allocation, traversal, and deterministic-order steps that can grow with input size. State the cost of each operand or phase when constant-time access also performs size-dependent work.
+
+## Arguments are checked after capability authorization
+
+Validate arguments before capability checks. Preserve invalid-input errors.

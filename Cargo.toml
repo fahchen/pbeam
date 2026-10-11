@@ -33,6 +33,10 @@ name = "dirty_io"
 path = "tests/feature/dirty_io.rs"
 
 [[test]]
+name = "error_handler_feature"
+path = "tests/feature/error_handler.rs"
+
+[[test]]
 name = "example"
 path = "tests/feature/example.rs"
 
@@ -396,6 +400,10 @@ path = "tests/integration/timer.rs"
 [[test]]
 name = "undef"
 path = "tests/integration/undef.rs"
+
+[[test]]
+name = "error_handler"
+path = "tests/integration/error_handler.rs"
 
 [[test]]
 name = "unique_integer"

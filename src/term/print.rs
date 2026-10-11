@@ -21,7 +21,7 @@
 //! | pid | `<0.Number.Serial>` |
 //! | reference | `#Ref<0.N2.N1.N0>` |
 
-use super::{Fun, Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
+use super::{Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
 
 /// The number of low bits of the pid data that ERTS prints as the pid
 /// number (`_PID_NUM_SIZE`, `erl_term.h:646-656`). The higher bits are the
@@ -125,33 +125,28 @@ pub(crate) fn print_term(term: &Term) -> Vec<u8> {
                     }
                 }
             }
-            Term::Fun(Fun {
-                target: Target::Local(lambda),
-                ..
-            }) => text.extend_from_slice(
-                format!(
-                    "#Fun<{}.{}.{}>",
-                    lambda.module().name(),
-                    lambda.index,
-                    lambda.old_unique
-                )
-                .as_bytes(),
-            ),
-            Term::Fun(Fun {
-                target:
-                    Target::External {
-                        module,
-                        function,
-                        arity,
-                    },
-                ..
-            }) => {
-                text.extend_from_slice(b"fun ");
-                print_atom(module.name(), &mut text);
-                text.push(b':');
-                print_atom(function.name(), &mut text);
-                text.extend_from_slice(format!("/{arity}").as_bytes());
-            }
+            Term::Fun(fun) => match fun.target() {
+                Target::Local(lambda) => text.extend_from_slice(
+                    format!(
+                        "#Fun<{}.{}.{}>",
+                        lambda.module().name(),
+                        lambda.index,
+                        lambda.old_unique
+                    )
+                    .as_bytes(),
+                ),
+                Target::External {
+                    module,
+                    function,
+                    arity,
+                } => {
+                    text.extend_from_slice(b"fun ");
+                    print_atom(module.name(), &mut text);
+                    text.push(b':');
+                    print_atom(function.name(), &mut text);
+                    text.extend_from_slice(format!("/{arity}").as_bytes());
+                }
+            },
             Term::Pid(pid) => {
                 let data = pid.0;
                 text.extend_from_slice(
