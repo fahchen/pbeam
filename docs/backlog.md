@@ -425,14 +425,21 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the task that implements `erlang:list_to_pid/1`.
 - **Source:** Suikou review 01a12608 (#368).
 
-### Give a guest less authority than the boot
+### Permit the other IO requests at the IO service entry
 
-- After #338, the guest of an example runs in the root process of `pbeam_boot`, as `erl -eval` runs in the boot process of ERTS (`erts/preloaded/src/init.erl:1192-1217` at `OTP-29.1.1`). Each process of the OTP IO path gets a copy of the delegable capabilities of the root process. Thus the policy `RestrictedGuest.Policy` of `examples/restricted_guest` must give the guest each capability that the boot uses: the `terminal` operations of the IO servers, `signal` `handle` of `sigcont` and `sigwinch`, `runtime` `system_flag` and `load_nif`, `persistent_term` `read` and `write`, `process` `inspect`, and the spawn of `pbeam_boot`, `proc_lib`, and `erlang` (section "Decisions of #338" of `docs/capability-security-migration.md`). A delegable copy is also a copy that its holder can use, so the root process cannot keep a capability for its children only.
-- **Evidence:** a run of the example without one of these operations does not write the output of the guest. For example, it stops with `unsupported erlang:process_info/2 arguments` without `process` `inspect`.
-- **Option:** the kernel process of `pbeam_boot` requests the capabilities of the OTP IO path with `pbeam_cap:request/2` before it starts `user_sup`, and the root process gets only the capabilities of the guest. `logger_server`, which the root process starts, would then need its own grant. Another option is a boot that starts the guest in a child with the option `{capabilities, Map}`, which changes the root process of the run.
-- **Reason:** no consumer must deny the guest a capability that the OTP IO path needs, for example `terminal` `raw_mode`.
-- **Trigger:** a policy that must deny such a capability to a guest, or the launcher of M8.
-- **Source:** implementation of #338.
+- After #463, the IO service entry of `user` and `standard_error` permits only the output requests of a runtime process: `{put_chars, Encoding, Chars}`, `{put_chars, Encoding, io_lib, Function, Arguments}` for `format`, `fwrite`, and `write`, and `{requests, Requests}` of such requests (row "Boot authority" of `docs/erts-differences.md`). It denies each other request, for example `{get_line, Encoding, Prompt}` of `io:get_line/1`, `{setopts, Options}`, `getopts`, and `{get_geometry, Geometry}`.
+- **Option:** permit the input requests (`get_chars`, `get_line`, `get_until`) for a sender that holds `terminal` `read`, and `getopts` and `get_geometry` for a sender that holds `terminal` `query`. A request with an MFA, such as `get_until`, needs the same protection as the `io_lib` MFA of `put_chars`, because `group` applies it in its own process.
+- **Reason:** no restricted guest reads from the terminal or reads its options yet. The design denies each request that has no consumer (Suikou review 01a1282e).
+- **Trigger:** a policy run whose guest reads from the terminal, or reads the terminal options or geometry.
+- **Source:** design of #461, implementation of #463.
+
+### Add a service entry for `file_server_2`
+
+- After #462, the runtime to boot gate denies each message from a runtime process to `file_server_2`, a boot process. Thus `file:read_file_info/1` and `os:find_executable/1`, which call `file_server_2` (`lib/kernel/src/file.erl:665-666`, `3024-3029` at `OTP-29.1.1`), exit in a restricted guest: `gen_server:call/3` exits with `{{capability_denied, Stack}, {gen_server, call, Arguments}}` (`lib/stdlib/src/gen_server.erl:1296-1302`).
+- **Option:** register `file_server_2` with `pbeam_cap:serve/2` as a file service, and permit each request whose file operation the `file` capability of the sender permits.
+- **Reason:** the `file` capability kind does not exist yet (#390).
+- **Trigger:** the `file` capability kind.
+- **Source:** design of #461, implementation of #463.
 
 ### Give a trusted guest direct access to boot processes
 

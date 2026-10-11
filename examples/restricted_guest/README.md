@@ -10,7 +10,7 @@ From the repository root, this command builds the example and runs it with the `
 mise run example restricted_guest --policy Elixir.RestrictedGuest.Policy
 ```
 
-The task gives `--policy Elixir.RestrictedGuest.Policy` to the `pbeam` binary, so each effect entry checks the capabilities of its caller. Add `--erts` without `--policy` to run the same entry on the pinned ERTS, which has no policy:
+The task gives `--boot --policy Elixir.RestrictedGuest.Policy` to the `pbeam` binary. The boot of `pbeam_boot` runs with the boot authority, and the guest runs with the capabilities of the policy, so each effect entry checks the capabilities of its caller. Add `--erts` without `--policy` to run the same entry on the pinned ERTS, which has no policy:
 
 ```sh
 mise run example restricted_guest --erts
@@ -27,12 +27,9 @@ main: 3 workers done
 
 ## Policy
 
-`initial/1` gives the root process of `pbeam_boot:start/2` its capabilities, and each child gets a copy of them. The guest runs in this root process, and the OTP IO servers that write its output are its descendants. Thus the policy gives the capabilities that the boot and the guest use, and no other:
+The boot processes of `pbeam_boot`, for example `init`, `logger`, and the OTP IO servers `user` and `standard_error`, run with the boot authority, not under the policy. Before `pbeam_boot` calls `RestrictedGuest.main/0`, it registers `user` and `standard_error` as IO services with `pbeam_cap:serve/2`, and the root process enters the runtime with `pbeam_cap:enter_runtime/2`. Then `initial/1` gives the root process its capabilities, and each worker gets a copy of them. The policy gives only the capabilities that the guest uses:
 
-- `process`: `spawn` of `RestrictedGuest.Worker` and of the start wrappers `pbeam_boot`, `proc_lib`, and `erlang`, and `link`, `monitor`, `send`, and `inspect`.
-- `terminal`: `write`, `read`, `raw_mode`, `window_size`, `setup`, and `query`, for `user_drv` and `prim_tty`.
-- `signal`: `handle` of `sigcont` and `sigwinch`.
-- `runtime`: `system_flag` and `load_nif`.
-- `persistent_term`: `read` and `write`.
+- `process`: `spawn` of `RestrictedGuest.Worker`, `send`, and `monitor`. A worker sends `{:done, pid}` to the root process, and `io` monitors the IO server and sends it an IO request.
+- `terminal`: `write`. The IO service entry of `user` passes an output request only from a process that holds `terminal` `write`, so the IO server writes the output of the guest with the authority of the guest.
 
-The root process gets no `env` and no `port` capability, and no `exit_other`, `group_leader`, or `halt` operation. `initial/1` returns `deny` for a root process that is not `pbeam_boot:start/2`, and `grant/3` denies each request of `pbeam_cap:request/2`. An operation that the policy does not permit raises `error:capability_denied`. The test `runs_restricted_guest_with_its_policy_as_pinned_erts_and_denies_other_operations` of `tests/feature/example.rs` runs `restricted_guest_probe:denied/0` of `fixtures/policy` with this policy and shows each denial. See "Decisions of #338" in the [capability security migration](../../docs/capability-security-migration.md) for the reasons.
+A run without one of these operations, without the `modules` name `RestrictedGuest.Worker`, or with `delegable: false` for both capabilities does not write the output of the guest. The root process gets no other capability. A message from the guest to a boot process that is not an IO request that its capabilities permit raises `error:capability_denied`, for example a call of `logger` or of `supervisor:start_child/2` for `logger_sup`. `initial/1` returns `deny` for another entry, and `grant/3` denies each request of `pbeam_cap:request/2`. An operation that the policy does not permit raises `error:capability_denied`. The test `runs_restricted_guest_with_its_strict_policy_as_pinned_erts_and_denies_other_operations` of `tests/feature/example.rs` runs `restricted_guest_probe:denied/0` of `fixtures/policy` with the capabilities of this policy and shows each denial. See "Decisions of #338" and "Decisions of #463" in the [capability security migration](../../docs/capability-security-migration.md) for the reasons.
