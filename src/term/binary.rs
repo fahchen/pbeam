@@ -164,8 +164,10 @@ impl Binary {
     /// assert_eq!(bytes.take_bytes(), b"ab".to_vec());
     /// ```
     pub(crate) fn take_bytes(mut self) -> Vec<u8> {
-        let whole =
-            self.offset.is_multiple_of(BITS_PER_BYTE) && self.size.is_multiple_of(BITS_PER_BYTE);
+        // The array moves out only when the view is all of it. A sub-binary
+        // gives only its own bytes, also when it owns the array of its
+        // source.
+        let whole = self.offset == 0 && self.size == self.bytes.len() * BITS_PER_BYTE;
         if self.packed.is_none()
             && whole
             && Arc::strong_count(&self.bytes) == 1

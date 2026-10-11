@@ -200,6 +200,12 @@ fn takes_the_bytes_of_the_last_holder_with_no_copy() {
     // An empty binary is the value of the state after the take.
     assert!(Binary::default().is_empty());
     assert_eq!(Binary::default(), Binary::from(Vec::new()));
+    // A sub-binary that owns the array of its source gives only its own
+    // bytes.
+    let source = Binary::from(b"abc".to_vec());
+    let part = source.bits(8, 16);
+    drop(source);
+    assert_eq!(part.take_bytes(), b"b".to_vec());
     // A view whose bytes are not whole bytes packs them, so it copies the
     // packed vector.
     let source = Binary::from(&[0xC3]);
