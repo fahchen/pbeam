@@ -4,7 +4,7 @@
 # Usage: bash scripts/example.sh <name> [--erts] [--no-build] [--policy <module>]
 # The example is the Elixir sources examples/<name>/*.ex. The entry is main/0 of the module with the camel-case name of the example, for example HelloWorld for hello_world.
 # The script has two steps, the build and the run. The build writes all the files that a run needs into target/examples/<name>/. The run starts only erl or the pbeam binary. With --no-build, the script does not build: it reads a list of the last build and runs it. Thus the tests build each example once, and the ERTS run and the pbeam run execute the same compiled modules.
-# The build compiles the example modules and pbeam_boot.beam into target/examples/<name>/, and consolidates the Elixir protocols into target/examples/<name>/consolidated/, as `mix run` consolidates them (scripts/example_beams.exs). It finds each OTP and Elixir module that the example calls, directly or through other modules (scripts/example_beams.exs). It then writes the code path of the ERTS run into target/examples/<name>/erts.paths and the BEAM files of the pbeam run into target/examples/<name>/pbeam.beams, one for each line. It writes each called module that the pbeam run does not get, with the reason, into target/examples/<name>/pbeam.unloaded.
+# The build compiles the example modules and pbeam_boot.beam into target/examples/<name>/, and consolidates the Elixir protocols into target/examples/<name>/consolidated/, as `mix run` consolidates them (scripts/example_beams.exs). It then writes the code path of the ERTS run into target/examples/<name>/erts.paths, one directory for each line. It writes the start set of the pbeam run into target/examples/<name>/pbeam.start, one BEAM file for each line: the boot modules, the example modules, pbeam_boot.beam, the preloaded modules of ERTS, and the consolidated protocols. The pbeam run loads each other module on demand through error_handler and code_server, as an interactive-mode ERTS run does. A policy run gives the whole list of the build (target/examples/<name>/pbeam.beams) instead, because the boot gate denies a message of a runtime process to a boot process. The build writes each called module that the PBeam loader does not load, with the reason, into target/examples/<name>/pbeam.unloaded.
 # The terra_counter example also compiles the Terra sources of the pinned commit, which scripts/terra.sh downloads or finds in PBEAM_TERRA_SRC.
 # With --policy <module>, the pbeam run gives --boot --policy <module> to the pbeam binary. The boot of pbeam_boot then runs with the boot authority, and the policy module of the build gives the capabilities of the entry when pbeam_boot enters the runtime (docs/capability-security-migration.md, section "Decisions of #463"). The ERTS run has no policy, so the script rejects --policy with --erts.
 # PBEAM_BIN selects the pbeam binary. Without it, the script runs the binary with cargo run.
@@ -54,37 +54,51 @@ done
 output=target/examples/$name
 consolidated=$output/consolidated
 
-# Run the example on the pinned ERTS with the code path in the arguments, or on the pbeam binary with the BEAM files in the arguments. The function does not return.
+# Run the example on the pinned ERTS with the code path directories, or on the pbeam binary with the code path directories, the start set of BEAM files, and the root directory. The code path directories are in the global list `paths`. The function does not return.
 run() {
   if [[ $erts == true ]]; then
-    local paths=()
-    for path in "$@"; do
-      paths+=(-pa "$path")
+    local options=()
+    for path in "${paths[@]}"; do
+      options+=(-pa "$path")
     done
     step "Run ${entry#Elixir.}.main/0 on the pinned ERTS (erl +S 1)"
-    exec erl +S 1 -noshell "${paths[@]}" -eval "'$entry':main(), halt()."
+    exec erl +S 1 -noshell "${options[@]}" -eval "'$entry':main(), halt()."
   fi
-  # The pbeam run gives the root directory of the pinned OTP, which erl gives to init with -root, so that pbeam_boot starts code_server (code.erl:1686).
+  # The pbeam run gives the root directory of the pinned OTP, which erl gives to init with -root, so that pbeam_boot starts code_server (code.erl:1686), and the code path directories as --pa, so that error_handler and code_server load each other module on demand.
   local root
   root=$(erl -noshell -eval 'io:put_chars(code:root_dir()), halt().')
+  local options=()
+  for path in "${paths[@]}"; do
+    options+=(--pa "$path")
+  done
   if [[ -n ${PBEAM_BIN:-} ]]; then
     step "Run ${entry#Elixir.}.main/0 on $PBEAM_BIN with $# BEAM files"
-    exec "$PBEAM_BIN" ${policy[@]+"${policy[@]}"} pbeam_boot start "$entry" main --root "$root" -- "$@"
+    exec "$PBEAM_BIN" ${policy[@]+"${policy[@]}"} pbeam_boot start "$entry" main --root "$root" ${options[@]+"${options[@]}"} -- "$@"
   fi
   step "Build pbeam and run ${entry#Elixir.}.main/0 with $# BEAM files"
-  exec cargo run --quiet --locked --bin pbeam -- ${policy[@]+"${policy[@]}"} pbeam_boot start "$entry" main --root "$root" -- "$@"
+  exec cargo run --quiet --locked --bin pbeam -- ${policy[@]+"${policy[@]}"} pbeam_boot start "$entry" main --root "$root" ${options[@]+"${options[@]}"} -- "$@"
 }
 
-# With --no-build, run the last build with the list that it wrote.
+# With --no-build, run the last build with the lists that it wrote: the start set of BEAM files, and the code path directories. A policy run loads each other module of the run before the entry: the boot gate denies a message of a runtime process to a boot process (docs/capability-security-migration.md), so a policy run gives the whole list of the build.
 if [[ $build == false ]]; then
-  list=$output/pbeam.beams
-  if [[ $erts == true ]]; then list=$output/erts.paths; fi
-  [[ -f $list ]] || fail "$list does not exist. Build the example first: run the script without --no-build"
-  items=()
+  list=$output/pbeam.start
+  path_list=$output/erts.paths
+  if [[ ${#policy[@]} -gt 0 ]]; then
+    list=$output/pbeam.beams
+    [[ -f $list ]] || fail "$list does not exist. Build the example first: run the script without --no-build"
+  fi
+  for required in "$list" "$path_list"; do
+    [[ -f $required ]] || fail "$required does not exist. Build the example first: run the script without --no-build"
+  done
+  beams=()
   while IFS= read -r item; do
-    items+=("$item")
+    beams+=("$item")
   done <"$list"
-  run "${items[@]}"
+  paths=()
+  while IFS= read -r item; do
+    paths+=("$item")
+  done <"$path_list"
+  run "${beams[@]}"
 fi
 
 # The build tools elixirc and elixir start the elixir application, which writes a warning to stderr when the file name encoding is latin1. ERTS on Linux selects latin1 in the C locale. The example files have ASCII names, so the build uses UTF-8 file names in each locale. The erl runs of the example are not changed.
@@ -93,7 +107,7 @@ export ELIXIR_ERL_OPTIONS="${ELIXIR_ERL_OPTIONS:-} +fnu"
 # Compile into a directory of this run, then rename each file into the output directory. A rename replaces a file atomically, so a run or a test that reads a file at the same time reads a complete file. erlc deletes its output file first and writes through the fixed temporary file pbeam_boot.bea# (compile.erl remove_file/2 and save_binary_1/2), so two compilations into one directory can collide.
 mkdir -p "$output"
 # Remove the lists of the last build before the build changes a file, so that a run with --no-build never uses an old list with the files of a build that did not complete.
-rm -f "$output/erts.paths" "$output/pbeam.beams" "$output/pbeam.unloaded"
+rm -f "$output/erts.paths" "$output/pbeam.beams" "$output/pbeam.start" "$output/pbeam.unloaded"
 work=$(mktemp -d "$output/compile.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 # The terra_counter example calls the Terra library and its Counter application. The repository has no Terra source, so compile them from the pinned Terra commit (scripts/terra.sh) first. The Elixir compiler runs the macros of the Terra sources. The Terra sources do not get --warnings-as-errors, because they are third-party code.
@@ -119,34 +133,40 @@ for beam in "$work"/*.beam; do
   [[ $file == pbeam_boot.beam ]] || examples+=("$output/$file")
 done
 
-# The boot modules that pbeam_boot starts, and the modules that these modules start with a module name in a variable, for example the child modules of a supervisor. The imports chunks do not give these modules.
-boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error file_server supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal erl_prim_loader prim_file"
-# The pbeam binary loads only the BEAM files that it gets. Give it each OTP and Elixir module that the example, pbeam_boot, and the boot modules call, directly or through other modules (scripts/example_beams.exs). The script writes each called module that the pbeam run does not get, and the reason, into pbeam.unloaded.
-# A command substitution, not a process substitution, so that set -e stops the run when the command fails.
-step "Consolidate the Elixir protocols and find the OTP and Elixir modules that the example calls"
+# The boot modules that pbeam_boot starts, and the modules that these modules start with a module name in a variable, for example the child modules of a supervisor. The imports chunks do not give these modules. The start set of the pbeam run is these modules, the example modules, pbeam_boot.beam, the preloaded modules of ERTS, and the consolidated protocols (scripts/example_beams.exs). The pbeam run gives the code path of the ERTS run with --pa and the root directory of the pinned OTP with --root, so error_handler and code_server load each other module on demand.
+boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error file_server supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal erl_prim_loader prim_file error_handler"
+# A command substitution, not a process substitution, so that set -e stops the run when the command fails. The script prints one line for each start module (`pbeam <file>`), one line for each other called module (`called <file>`), and then one line for each code path directory of the ERTS run (`erts <directory>`).
+step "Consolidate the Elixir protocols and find the start set of the pbeam run"
 called_list=$(elixir scripts/example_beams.exs "$consolidated" "$work/pbeam.unloaded" "$boot_modules" "${examples[@]}" "$output/pbeam_boot.beam")
 # The code path of the ERTS run. Each -pa option puts its directory before the directories of the previous -pa options (erl -pa A -pa B gives the code path B, A, and then OTP), so the last option puts the consolidated protocols before the unconsolidated protocols of Elixir.
-paths=("$output")
+start_beams=()
 called_beams=()
+path_directories=()
 while read -r kind item; do
   case $kind in
-    pbeam) called_beams+=("$item") ;;
-    erts) paths+=("$item") ;;
+    pbeam) start_beams+=("$item") ;;
+    called) called_beams+=("$item") ;;
+    erts) path_directories+=("$item") ;;
   esac
 done <<<"$called_list"
-paths+=("$consolidated")
-printf '%s\n' "${paths[@]}" >"$work/erts.paths"
 
-# The BEAM files of the pbeam run.
-beams=("${examples[@]}" ${called_beams[@]+"${called_beams[@]}"} "$output/pbeam_boot.beam")
+# The start set of the pbeam run. Each other module of the build loads on demand from the code path (docs/erts-differences.md, row "Code loading").
+start=("${examples[@]}" ${start_beams[@]+"${start_beams[@]}"} "$output/pbeam_boot.beam")
+printf '%s\n' "${start[@]}" >"$work/pbeam.start"
+# Each called module that the PBeam loader loads, before the run. A policy run gives this whole list, because the boot gate denies a message of a runtime process to a boot process.
+beams=("${start[@]}" ${called_beams[@]+"${called_beams[@]}"})
 printf '%s\n' "${beams[@]}" >"$work/pbeam.beams"
+printf '%s\n' "${path_directories[@]}" >"$work/erts.paths"
 
 # Rename the lists last, each atomically. When a run with --no-build finds a list, each file of the list is complete.
 mv -f "$work/pbeam.unloaded" "$output/pbeam.unloaded"
 mv -f "$work/erts.paths" "$output/erts.paths"
 mv -f "$work/pbeam.beams" "$output/pbeam.beams"
+mv -f "$work/pbeam.start" "$output/pbeam.start"
 rm -rf "$work"
 trap - EXIT
 
-if [[ $erts == true ]]; then run "${paths[@]}"; fi
-run "${beams[@]}"
+paths=("${path_directories[@]}")
+# A policy run gives the whole list: the runtime-to-boot gate denies the load call of a runtime process to `code_server`.
+if [[ ${#policy[@]} -gt 0 ]]; then run "${beams[@]}"; fi
+run "${start[@]}"

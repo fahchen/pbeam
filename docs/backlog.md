@@ -58,6 +58,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path loads a local fun literal, calls one of the three BIFs, or formats a fun.
 - **Source:** PR #120 (#109).
 
+### Cache the decoded modules of a run
+
+- Each run decodes the BEAM bytes of its start set, and each module that loads on demand decodes its bytes again at the load (`erts_internal:prepare_loading/2`, `src/beam/code.rs`). A run that loads the same module more than one time, for example a second run of an example in one OS process, decodes it again.
+- **Trigger:** the start time of Terra Counter, or of another example, is slower than on `main` after the start set of #448. #448 gives the PBeam run the start set of the build and loads each other module on demand, so it decodes fewer modules at the start and each on-demand module at its first call.
+- **Source:** #448, `docs/code-loading.md` section 8 (Q9).
+
 ## Runtime
 
 ### Model the process heap for GC reductions and the message copy cost
