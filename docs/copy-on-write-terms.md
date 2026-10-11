@@ -204,14 +204,16 @@ A second probe of the same day isolates the remaining `tuple` time: `tuple_size/
 
 ### Fun benchmark (#455)
 
-Release build, Apple Silicon macOS, revision `31f765b` (origin/main) before the fun change and the branch of #455 after it. Each value is the median of five interleaved runs in microseconds. The host was shared with other work, so the spread is wide: each `funsend` value of the branch is below each `funsend` value of the revision before the change, and four of the five `funcopy` values of the branch are below the lowest `funcopy` value of that revision. The probe module is the [Benchmark module](#benchmark-module) at `/tmp/dsh/cow455/cowb.erl`, and the commands are the commands above with that directory and the revision before the change in a second worktree.
+Release build, Apple Silicon macOS, revision `31f765b` (origin/main) before the fun change and the branch of #455 after it. Each value is the median of five interleaved runs in microseconds. The host was shared with other work, so the spread is wide: each value of the branch is below each value of the revision before the change for both probes. The probe module is the [Benchmark module](#benchmark-module) at `/tmp/dsh/cow455/cowb.erl`, and the commands are the commands above with that directory and the revision before the change in a second worktree.
 
 | Probe | ERTS µs | Before µs | After µs |
 | --- | --- | --- | --- |
-| `funcopy`: put a fun with a 1000-element free variable into a tuple, 20000 times | 34 | 13734 | 12971 |
+| `funput`: put a fun with a 1000-element free variable into the process dictionary and read it back, 20000 times | 213 | 43189 | 30109 |
 | `funsend`: send that fun to the process itself, 2000 times | 178 | 4807 | 3061 |
 
-The design benchmarks (`tuple`, `list`, `send`, `send2`, `map_get`, `map_put`, and `nested`) do not copy a fun. Their medians moved within the spread of the shared host, which is wider than the effect of this change, so this run does not separate them. #454 and #458 already made the nested terms of a fun an O(1) copy. Thus the change removes the free-variable vector and the copy of the entry of an unshared fun. The remaining time of `funcopy` and `funsend` is the BIF call, the tuple or message work, and the loop.
+A first probe put the fun into a tuple and read it back with `element/2`. `beam_disasm` shows that the compiler removes the tuple: `fc_loop/2` holds only the test, the decrement, and the tail call. That probe does not measure a copy, so the document does not use it. A `put/2` call and a `send` instruction each clone the fun, and the two probes above measure those copies.
+
+The design benchmarks (`tuple`, `list`, `send`, `send2`, `map_get`, `map_put`, and `nested`) do not copy a fun. Their medians moved within the spread of the shared host, which is wider than the effect of this change, so this run does not separate them. #454 and #458 already made the nested terms of a fun an O(1) copy. Thus the change removes the free-variable vector and the copy of the entry of an unshared fun. The remaining time of `funput` and `funsend` is the BIF or message work and the loop.
 
 ### Rust micro-benchmark
 
@@ -235,7 +237,7 @@ The design run of 2026-10-11 on main (revision not recorded; this task did not r
 
 ```erlang
 -module(cowb).
--export([send/0, send2/0, sink/2, tuple/0, list/0, map_get/0, map_put/0, nested/0, funcopy/0, funsend/0]).
+-export([send/0, send2/0, sink/2, tuple/0, list/0, map_get/0, map_put/0, nested/0, funput/0, funsend/0]).
 
 %% Each benchmark exits with {Name, Microseconds}.
 time(Name, F) ->
@@ -276,10 +278,10 @@ nested() -> T = list_to_tuple([seq(1, 100) || _ <- seq(1, 100)]), time(nested, f
 nested_loop(_, 0, A) -> A;
 nested_loop(T, N, A) -> nested_loop(T, N - 1, A + hd(element(50, T))).
 
-%% Put a fun with a 1000-element free variable into a tuple, 20000 times.
-funcopy() -> A = seq(1, 1000), F = fun() -> A end, time(funcopy, fun() -> fc_loop(F, 20000) end).
-fc_loop(_, 0) -> ok;
-fc_loop(F, N) -> T = {F, N}, fc_loop(element(1, T), N - 1).
+%% Put a fun with a 1000-element free variable into the process dictionary and read it back, 20000 times.
+funput() -> A = seq(1, 1000), F = fun() -> A end, time(funput, fun() -> fp_loop(F, 20000, 0) end).
+fp_loop(_, 0, A) -> A;
+fp_loop(F, N, _) -> put(cowv, F), _ = get(cowv), fp_loop(F, N - 1, 0).
 
 %% Self-send of a fun with a 1000-element free variable, 2000 times.
 funsend() -> A = seq(1, 1000), F = fun() -> A end, time(funsend, fun() -> fs_loop(F, 2000) end).
