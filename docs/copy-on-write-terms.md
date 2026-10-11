@@ -86,7 +86,7 @@ The owner selected option A (round 1). The work adds an API layer first and chan
 4. Drop keeps the work stack and uses `Arc::into_inner` for each `Arc` node. See [Drop rule](#drop-rule).
 5. A match context is `Arc<MatchState>`. Its bytes are a shared binary (no copy in `MatchContext::new`). Its position and its `position_known` flag are in one `AtomicU64`: 63 bits for the bit position and 1 bit for the flag. Only the owner process uses it, so `Relaxed` order is sufficient, and it needs no `RefCell` and no `Mutex`.
 6. `PartialEq` has an `Arc::ptr_eq` fast path. A compile-time assertion checks `Term: Send + Sync`.
-7. A map and its HAMT nodes are in `Arc`. An update copies only the path (O(log N)), as `erl_map.c:2477` does. A flatmap of at most 32 pairs is copied whole, as `erts_maps_put` does. Shared subtrees make the steps of `maps:merge/2` the same as on ERTS (`erl_map.c:1608-1612`). This is a reduction change, so #453 measures it against the pinned ERTS.
+7. A map and its HAMT nodes are in `Arc`. An update copies only the path (O(log N)), as `erl_map.c:2477` does. A flatmap of at most 32 pairs is copied whole, as `erts_maps_put` does. Shared subtrees make the steps of `maps:merge/2` the same as on ERTS (`erl_map.c:1608-1612`). This is a reduction change, so #453 measures it against the pinned ERTS. Result of #453: the steps are the same as on ERTS for a map and an update of it. They are different for the results of the other map BIFs and for a map from a send, ETS, or `persistent_term` (row "Map merge reductions" of `docs/erts-differences.md`).
 
 Expected result (analysis): the tuple, list, nested, and send benchmarks go from milliseconds to microseconds. `size_of::<Term>()` goes from 96 bytes to at most 24 bytes after #460. See [Limits and open points](#limits-and-open-points) for the binary layout that this target needs.
 
@@ -104,6 +104,24 @@ Expected result (analysis): the tuple, list, nested, and send benchmarks go from
 | Match context | `Rc<RefCell<MatchContext>>`; bytes copied into an `Arc<[u8]>` | `Arc<MatchState>`; bytes are the shared binary; position and `position_known` in one `AtomicU64` | `Relaxed` atomic store by the owner process | #456 (bytes), #459 (`Arc` and atomic) |
 
 After #454, #455, #456, and #458, `Term::clone` is a shallow copy. Then #459 removes the work-stack branch of `shallow_clone`, and only the work stack of `Drop` stays.
+
+## List API
+
+Task #457 adds the list API in `src/term/list.rs`. Code outside the term module reads and builds a list only through these functions of `Term`, and it does not match `Term::List` or `Term::ImproperList`. Only `src/term.rs` and the files in `src/term/` match these variants. The representation does not change in #457.
+
+| Function | Use |
+| --- | --- |
+| `nil()` | Build `[]`. |
+| `list_from(elements)` | Build a proper list from an iterator. |
+| `list_with_tail(elements, tail)` | Build a list of elements followed by a tail, in the one form of each list. |
+| `is_nil()`, `is_list()`, `is_nonempty_list()` | Test for `[]`, for `[]` or a cons cell, and for a cons cell, as the `is_nil`, `is_list`, and `is_nonempty_list` instructions do. |
+| `list_cells()` | Read the elements of a list and the tail of an improper list. |
+| `proper_list()` | Read the elements of a proper list. |
+| `list_head()` | Read the head of a cons cell (`hd/1`, `get_hd`). |
+| `split_cons()` | Move a cons cell into its head and tail (`get_list`, `get_tl`). |
+| `take_list_elements()` | Move the elements of a list out for an apply. |
+
+`list_cells()` and `proper_list()` give the elements as a slice. Callers that index or measure the slice, for example the trap states of `length/1`, `++`, `lists:keyfind/3`, `lists:member/2`, and `lists:reverse/2`, and the iodata walk, keep the positions that they use on main. #458 changes these readers and their callers to a walk of cons cells, and it keeps the reductions.
 
 ## Drop rule
 
@@ -258,7 +276,7 @@ These are the decisions of 2026-10-11 in Suikou review 01a1282e.
 - A send shares a term (R3; design question 3). #10 changes its wording to "process mutable state is exclusive; terms are shared and immutable".
 - The epic is `[m5-e4]` in the milestone `[m5] Interactive host I/O` (R4; design question 8). The design draft named it `[m5-e3]`; the code loading epic took that number. The first implementation task is the borrowed read (#452).
 - The mutable state of a match context is an `AtomicU64` with `Relaxed` order, not a `Mutex` (design question 4).
-- #453 measures the steps of `maps:merge/2` against the pinned ERTS (design question 5).
+- #453 measures the steps of `maps:merge/2` against the pinned ERTS (design question 5). The row "Map merge reductions" of `docs/erts-differences.md` records the result.
 - PBeam does not track the literal origin of a term now (design question 6).
 - No benchmark is committed. Each PR records the measurement commands and results (design question 7).
 

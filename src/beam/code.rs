@@ -666,7 +666,7 @@ fn parse_literals(data: &[u8], atom_table: &mut AtomTable) -> Result<Vec<Option<
 /// // [flush]
 /// let bytes = [131, 108, 0, 0, 0, 1, 119, 5, b'f', b'l', b'u', b's', b'h', 106];
 /// let list = read_literal(&bytes, &mut atoms)?;
-/// assert_eq!(list, Some(Term::List(vec![Term::static_atom("flush")])));
+/// assert_eq!(list, Some(Term::list_from(vec![Term::static_atom("flush")])));
 /// ```
 fn read_literal(data: &[u8], atom_table: &mut AtomTable) -> Result<Option<Term>, BeamError> {
     if data.first() != Some(&ETF_VERSION) {
@@ -740,11 +740,10 @@ fn read_external_term(
                 let size = u16::from_be_bytes([size_bytes[0], size_bytes[1]]) as usize;
                 let characters = take(data, cursor, size)?
                     .iter()
-                    .map(|&byte| Term::Integer(i64::from(byte)))
-                    .collect();
-                Term::List(characters)
+                    .map(|&byte| Term::Integer(i64::from(byte)));
+                Term::list_from(characters)
             }
-            ETF_NIL_EXT => Term::List(Vec::new()),
+            ETF_NIL_EXT => Term::nil(),
             ETF_EXPORT_EXT => {
                 // `dec_term` (`external.c:5006-5041`) reads two atoms and a
                 // non-negative integer, else the decode fails. The arity can
@@ -937,7 +936,7 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[Atom]) -> Result<Term, B
         TAG_ATOM => {
             let index = read_operand(data, cursor, TAG_ATOM)? as usize;
             if index == 0 {
-                return Ok(Term::List(Vec::new()));
+                return Ok(Term::nil());
             }
             Ok(Term::Atom(atom_at(atoms, index)?.clone()))
         }

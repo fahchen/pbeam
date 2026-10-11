@@ -66,7 +66,11 @@ const COSTS: &[(&str, &[Cost])] = &[
     ),
     // Two flatmaps, and an empty flatmap with a hashmap, cost nothing. Each
     // other pair costs one reduction for each 8 steps of `hashmap_merge`
-    // (`erl_map.c:1507`, `1736`, `1823`). The last pair traps.
+    // (`erl_map.c:1507`, `1736`, `1823`). A map and the map itself cost
+    // nothing, and their merge gives the map (`erl_map.c:1258-1262`). A
+    // node that both maps hold costs no step (`erl_map.c:1608-1612`), so a
+    // map and a change of it cost only the steps of the paths of the
+    // changed keys. The pair of 40000 keys traps.
     (
         "maps_merge",
         &[
@@ -80,6 +84,11 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("{{1,1000},{500,1500}}", 174),
             ("{{1,10000},{5000,15000}}", 1844),
             ("{{1,40000},{20000,60000}}", 7034),
+            ("{same,{1,1000}}", 0),
+            ("{self_merge,{1,1000}}", 0),
+            ("{put,{1,1000},[500]}", 5),
+            ("{put,{1,1000},[2000]}", 5),
+            ("{put,{1,1000},[1,2,3,4,5,6,7,8]}", 23),
         ],
     ),
     // A flatmap costs nothing. A hashmap call takes at most `3997 / 4`

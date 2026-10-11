@@ -2265,7 +2265,10 @@ fn read_binary_match_commands(
                     .checked_mul(read_operand(data, cursor, TAG_UNSIGNED)?)
                     .ok_or_else(|| error(format!("BEAM bs_match {kind} size overflow")))?;
                 let destination = read_register(data, cursor)?;
-                let Operand::Value(Term::List(flags)) = &flags else {
+                let Some(flags) = (match &flags {
+                    Operand::Value(flags) => flags.proper_list(),
+                    _ => None,
+                }) else {
                     return Err(error(format!(
                         "unsupported BEAM bs_match {kind} flags {flags:?}"
                     )));
@@ -2406,13 +2409,13 @@ fn read_binary_segments(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(is_little_endian(&Operand::Value(Term::List(vec![Term::static_atom("native")]))));
-/// assert!(!is_little_endian(&Operand::Value(Term::List(Vec::new()))));
+/// assert!(is_little_endian(&Operand::Value(Term::list_from(vec![Term::static_atom("native")]))));
+/// assert!(!is_little_endian(&Operand::Value(Term::nil())));
 /// ```
 fn is_little_endian(flags: &Operand) -> bool {
-    matches!(flags, Operand::Value(Term::List(items)) if items.iter().any(|item| {
+    matches!(flags, Operand::Value(flags) if flags.proper_list().is_some_and(|items| items.iter().any(|item| {
         matches!(item, Term::Atom(atom) if matches!(atom.name(), "little" | "native"))
-    }))
+    })))
 }
 
 /// Read the extended list of `update_record`: an unsigned 1-based position
@@ -2825,7 +2828,7 @@ fn read_move_operand(
         TAG_LITERAL => {
             let subtag = read_integer(data, cursor, TAG_LITERAL)?;
             match subtag {
-                1 => Ok(Operand::Value(Term::List(Vec::new()))),
+                1 => Ok(Operand::Value(Term::nil())),
                 2 => read_move_operand(data, cursor, atoms, literals),
                 4 => {
                     let literal_index = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)

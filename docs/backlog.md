@@ -71,9 +71,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Model the process heap for GC reductions and the message copy cost
 
-- PBeam has no process heap, and its terms keep no sharing and no literal origin. Thus PBeam charges no garbage collection reductions and no message copy cost, and `maps:merge/2` counts the steps of a subtree that both maps share. A change of the `message_queue_data` process flag does not move the messages and sends no adjust signal. The "Garbage collection reductions", "Scheduling", and "Process flags" rows of `docs/erts-differences.md` record these differences, and this entry owns them.
-- **Evidence:** a garbage collection costs the process at least 1 reduction, more for a large heap (`erl_gc.c:218-230`). A local send of a message of more than 64 heap words bumps one reduction for each 64 copied words (`erl_message.c:881-886`), and an alias send does the same (`erl_proc_sig_queue.c:2284-2290`). The copy counts each shared subterm once and no literal (`SHCOPY_SEND`). Measured: a send of a list of 10000 integers costs 313 reductions on pinned ERTS and 1 on PBeam. During #233, `lists:reverse/2` and `erlang:'++'/2` copy 60 elements for each reduction only while the heap has free words, and then 40 elements for each reduction to a heap fragment (`erl_bif_lists.c:111-174`, `1144-1192`). Measured: `lists:reverse/2` of 10000 elements costs 166 with a heap of 2000000 words and 2386 with the default heap. `maps:merge/2` takes a subtree that both maps share in memory, and two equal arguments, with no step (`erl_map.c:1258-1263`, `1608-1612`). A change of `message_queue_data` to `off_heap` sends an adjust signal to the process after thread progress (`erl_message.c:1008-1019`, `1022-1135`; `erl_proc_sig_queue.c:3487-3518`).
-- The work: a process heap with its size, garbage collection with the ERTS reductions, the heap-fragment fallback of the list BIFs, the shared and literal parts of a term for the send copy and for `maps:merge/2`, and the message place and the adjust signal of `message_queue_data`.
+- PBeam has no process heap, and its terms keep no literal origin. A message, an ETS table, and `persistent_term` share each map with the sender, and do not copy it. Thus PBeam charges no garbage collection reductions and no message copy cost, and `maps:merge/2` of a map and its copy from a send, ETS, or `persistent_term` takes their shared nodes with no step. A change of the `message_queue_data` process flag does not move the messages and sends no adjust signal. The "Garbage collection reductions", "Scheduling", "Process flags", and "Map merge reductions" rows of `docs/erts-differences.md` record these differences, and this entry owns them.
+- **Evidence:** a garbage collection costs the process at least 1 reduction, more for a large heap (`erl_gc.c:218-230`). A local send of a message of more than 64 heap words bumps one reduction for each 64 copied words (`erl_message.c:881-886`), and an alias send does the same (`erl_proc_sig_queue.c:2284-2290`). The copy counts each shared subterm once and no literal (`SHCOPY_SEND`). Measured: a send of a list of 10000 integers costs 313 reductions on pinned ERTS and 1 on PBeam. During #233, `lists:reverse/2` and `erlang:'++'/2` copy 60 elements for each reduction only while the heap has free words, and then 40 elements for each reduction to a heap fragment (`erl_bif_lists.c:111-174`, `1144-1192`). Measured: `lists:reverse/2` of 10000 elements costs 166 with a heap of 2000000 words and 2386 with the default heap. `maps:merge/2` takes a subtree that both maps share in memory, and two equal arguments, with no step (`erl_map.c:1258-1263`, `1608-1612`). Measured: `maps:merge/2` of a hashmap of 1000 keys and its copy from a send to another process and back costs 213 reductions on pinned ERTS and 0 on PBeam (#453). A change of `message_queue_data` to `off_heap` sends an adjust signal to the process after thread progress (`erl_message.c:1008-1019`, `1022-1135`; `erl_proc_sig_queue.c:3487-3518`).
+- The work: a process heap with its size, garbage collection with the ERTS reductions, the heap-fragment fallback of the list BIFs, the shared and literal parts of a term for the send copy, the copy of a term in a send, ETS, and `persistent_term` for `maps:merge/2`, and the message place and the adjust signal of `message_queue_data`.
 - **Trigger:** a consumer that needs exact interleaving with large messages or with processes that allocate much, or a task that adds a heap-size limit (row "Heap limit").
 - **Source:** owner decision on PR #249 (#245).
 
@@ -242,10 +242,17 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Build a list cons and a map update without a copy
 
-- A `Term::List` holds its elements in one `Vec`, so a cons copies the tail. A copy of a map shares the form of the map in O(1) time (#427), but a map update `M#{K => V}` of a shared map copies the whole form once (`Rc::make_mut`), in O(N) time. The probes build long lists with `++` of two halves, in O(N log N) time. ERTS makes a cons and a HAMT path update in constant and O(log N) time.
-- **Evidence:** on PBeam, `pairs(1, 100000)` of `bif_cost_probe` takes about 1.5 s, and a loop of 100000 updates `M#{N => N}` did not end in 10 minutes (#355). Before #427, the read of the register rebuilt the map with `Map::from_pairs`, which hashes each key again. Since #427, the update copies the shared form once, and that copy does not hash its keys again. The update still hashes the new key, and a change from 32 to 33 keys hashes each key.
-- **Trigger:** an owner decision to make the CI test time shorter again, or a consumer that builds long lists or large maps.
+- A `Term::List` holds its elements in one `Vec`, so a cons copies the tail. The probes build long lists with `++` of two halves, in O(N log N) time. ERTS makes a cons in constant time. #453 removed the map part: a map update copies only the HAMT nodes on the path of the key, in O(log N) time, as ERTS does.
+- **Evidence:** on PBeam, `pairs(1, 100000)` of `bif_cost_probe` takes about 1.5 s (#355).
+- **Trigger:** an owner decision to make the CI test time shorter again, or a consumer that builds long lists.
 - **Source:** PR for #355.
+
+### Share map nodes in the results of the map BIFs
+
+- `maps:remove/2`, `maps:take/2`, and `maps:merge/2` build their result map again with `Map::from_pairs`, so the result holds no node of an argument. An update that puts the value that the key already has makes a new map. ERTS shares the nodes in each of these cases, so `maps:merge/2` of such a result and its argument uses more reductions on PBeam. The row "Map merge reductions" of `docs/erts-differences.md` records this difference, and this entry owns it.
+- **Evidence:** `hashmap_delete` copies only the path of the key (`erl_map.c:2881-3184`). `hashmap_merge` gives a node with keys from only one argument as the result (`erl_map.c:1768-1778`). An update returns the same map for a key that already has the same value word (`erl_map.c:2083`, `2219-2222`, `2523-2526`, `2608-2611`). Measured on the pinned ERTS for a hashmap `M` of the keys 1..1000, in reductions of `maps:merge/2`, ERTS then PBeam: `M` and `maps:remove(500, M)`: 5 and 213; `M` and `maps:merge(M, #{2000 => x})`: 5 and 213; `M` and `M#{500 => 500}`: 0 and 5 (#453).
+- **Trigger:** a consumer that needs the exact reductions of `maps:merge/2` on such maps, or that removes keys of a large map in a loop.
+- **Source:** PR for #453.
 
 ### Transfer an ETS table to a live heir
 
@@ -426,6 +433,22 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Reason:** no consumer must deny the guest a capability that the OTP IO path needs, for example `terminal` `raw_mode`.
 - **Trigger:** a policy that must deny such a capability to a guest, or the launcher of M8.
 - **Source:** implementation of #338.
+
+### Give a trusted guest direct access to boot processes
+
+- After #462, the runtime to boot gate denies each message from a runtime process to a boot process by its pid or its name, and each link, exit signal, group leader change, inspection, timer, and `erlang:unregister/1` that targets a boot process (row "Boot authority" of `docs/erts-differences.md`). Only a monitor and a message to an alias of a boot process pass. Thus a guest in a run with `--boot` cannot call a boot service that has no service entry, for example `init:get_argument/1`, which sends a request to `init`, or `logger`, which calls `logger_server`.
+- **Option:** a capability, for example of a new kind `boot`, that permits a trusted guest the operations of the gate on boot processes.
+- **Reason:** the owner decided that the gate denies by default (Suikou review 01a1282e, R2), and no policy run needs such a service yet.
+- **Trigger:** a policy run needs a boot service that has no entry, such as `init:get_argument/1` or `logger`.
+- **Source:** design of #461, implementation of #462.
+
+### Spawn a runtime process from a boot process
+
+- After #462, a boot process that spawns with the option `{capabilities, Map}` gets `error:capability_denied` (`SecurityContext::delegate` in `src/runtime/capability.rs`). A boot process has no capability copies to reduce, and only `pbeam_cap:enter_runtime/2` of the root process makes a runtime process.
+- **Option:** the boot spawn makes a runtime child with the capabilities of `Map`, with the source `launcher`, so that a launcher can start more than one application root.
+- **Reason:** no consumer needs it yet. The design keeps the denial fail-closed (Suikou review 01a1282e).
+- **Trigger:** the launcher of [m8].
+- **Source:** design of #461, implementation of #462.
 
 ## Tests and tooling
 
