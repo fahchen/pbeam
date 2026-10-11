@@ -443,7 +443,7 @@ impl Mailbox {
             let node = self.append(Entry::Marker);
             self.received = self.last;
             self.markers.push_back(Marker {
-                id: Some(Term::List(Vec::new())),
+                id: Some(Term::nil()),
                 node,
                 pass: 0,
                 set_save: true,

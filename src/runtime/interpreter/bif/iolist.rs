@@ -96,7 +96,7 @@ impl<'a> Walk<'a> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![2])]);
+    /// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![2])]);
     /// let mut walk = Walk::new(&list, &[]);
     /// let mut steps = 8;
     /// assert_eq!(walk.run(&mut steps, |_, _, _| None), Step::Done);
@@ -114,8 +114,8 @@ impl<'a> Walk<'a> {
                     return Step::Yield;
                 }
                 match head {
-                    Term::List(inner) if inner.is_empty() => {}
-                    Term::List(_) | Term::ImproperList(..) => {
+                    _ if head.is_nil() => {}
+                    _ if head.is_list() => {
                         self.stack.push((rest, self.tail));
                         (self.cells, self.tail) = parts(head);
                         continue;
@@ -162,9 +162,9 @@ impl<'a> Walk<'a> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let list = Term::List(vec![Term::Integer(1)]);
+    /// let list = Term::list_from(vec![Term::Integer(1)]);
     /// let walk = Walk::new(&list, &[]);
-    /// assert_eq!(walk.term(), (list.clone(), Term::List(vec![])));
+    /// assert_eq!(walk.term(), (list.clone(), Term::nil()));
     /// ```
     fn term(&self) -> (Term, Term) {
         let current = match self.tail {
@@ -177,7 +177,7 @@ impl<'a> Walk<'a> {
             .stack
             .iter()
             .map(|(cells, tail)| list_rest(cells, *tail));
-        (current, Term::List(stack.collect()))
+        (current, Term::list_from(stack))
     }
 }
 
@@ -187,11 +187,11 @@ impl<'a> Walk<'a> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(parts(&Term::List(vec![])), ([], None)));
+/// assert!(matches!(parts(&Term::nil()), ([], None)));
 /// assert!(matches!(parts(&Term::Binary(vec![])), ([], Some(Term::Binary(_)))));
 /// ```
 fn parts(term: &Term) -> (&[Term], Option<&Term>) {
-    list_cells(term).unwrap_or((&[], Some(term)))
+    term.list_cells().unwrap_or((&[], Some(term)))
 }
 
 /// Return the reductions of a walk that used `init - steps` steps and did
@@ -246,7 +246,7 @@ pub(super) fn iolist_size(process: &mut ProcessState, term: &Term) -> Result<Bif
 ///
 /// ```rust,ignore
 /// process.fcalls = 1;
-/// let ones = Term::List(vec![Term::Integer(1); 8]);
+/// let ones = Term::list_from(vec![Term::Integer(1); 8]);
 /// let trap = iolist_size_continue(&mut process, &ones, &[], 0)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "iolist_size_continue", .. }));
 /// assert_eq!(process.fcalls, 0);
@@ -298,7 +298,7 @@ pub(super) fn iolist_size_continue(
 ///
 /// ```rust,ignore
 /// let hello = Term::Binary(b"Hello".to_vec());
-/// assert!(matches!(iolist_to_iovec(&mut process, &hello)?, BifResult::Value(Term::List(iovec)) if iovec == [hello]));
+/// assert!(matches!(iolist_to_iovec(&mut process, &hello)?, BifResult::Value(iovec) if iovec == Term::list_from([hello])));
 /// assert!(matches!(iolist_to_iovec(&mut process, &Term::static_atom("foo"))?, BifResult::Raise { .. }));
 /// ```
 ///
@@ -311,16 +311,15 @@ pub(super) fn iolist_to_iovec(
     term: &Term,
 ) -> Result<BifResult, BeamError> {
     match term {
-        Term::Binary(bytes) if bytes.is_empty() => Ok(Value(Term::List(Vec::new()))),
-        Term::Binary(_) => Ok(Value(Term::List(vec![term.clone()]))),
-        Term::List(elements) => match elements.as_slice() {
-            [] => Ok(Value(Term::List(Vec::new()))),
-            [Term::Binary(bytes)] if bytes.is_empty() => Ok(Value(Term::List(Vec::new()))),
-            [Term::Binary(_)] => Ok(Value(term.clone())),
-            _ => iovec_size(process, term, term, &[]),
+        Term::Binary(bytes) if bytes.is_empty() => Ok(Value(Term::nil())),
+        Term::Binary(_) => Ok(Value(Term::list_from(vec![term.clone()]))),
+        _ => match term.list_cells() {
+            Some(([], None)) => Ok(Value(Term::nil())),
+            Some(([Term::Binary(bytes)], None)) if bytes.is_empty() => Ok(Value(Term::nil())),
+            Some(([Term::Binary(_)], None)) => Ok(Value(term.clone())),
+            Some(_) => iovec_size(process, term, term, &[]),
+            None => Ok(BifResult::badarg()),
         },
-        Term::ImproperList(..) => iovec_size(process, term, term, &[]),
-        _ => Ok(BifResult::badarg()),
     }
 }
 
@@ -340,9 +339,9 @@ pub(super) fn iolist_to_iovec(
 ///
 /// ```rust,ignore
 /// process.fcalls = 10;
-/// let list = Term::List(vec![Term::Integer(1)]);
+/// let list = Term::list_from(vec![Term::Integer(1)]);
 /// let iovec = iovec_size(&mut process, &list, &list, &[])?;
-/// assert!(matches!(iovec, BifResult::Value(Term::List(binaries)) if binaries == [Term::Binary(vec![1])]));
+/// assert!(matches!(iovec, BifResult::Value(binaries) if binaries == Term::list_from([Term::Binary(vec![1])])));
 /// assert_eq!(process.fcalls, 8);
 /// ```
 ///
@@ -379,7 +378,7 @@ pub(super) fn iovec_size(
     let reds_left = reds_left - i64::from(cost);
     if reds_left <= 0 {
         process.bump_all_reductions();
-        let start = copy_state(arg, Term::List(Vec::new()), Vec::new(), Vec::new());
+        let start = copy_state(arg, Term::nil(), Vec::new(), Vec::new());
         return Ok(iovec_trap(start));
     }
     Ok(iovec_copy(
@@ -408,9 +407,9 @@ pub(super) fn iovec_size(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![0; 513])]);
+/// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![0; 513])]);
 /// let iovec = iovec_copy(&mut process, 10, &list, &[], Vec::new(), Vec::new());
-/// assert!(matches!(iovec, BifResult::Value(Term::List(binaries)) if binaries.len() == 2));
+/// assert!(matches!(iovec, BifResult::Value(binaries) if binaries.proper_list().is_some_and(|binaries| binaries.len() == 2)));
 /// ```
 pub(super) fn iovec_copy(
     process: &mut ProcessState,
@@ -449,7 +448,7 @@ pub(super) fn iovec_copy(
     if !merged.is_empty() {
         iovec.push(Term::Binary(merged));
     }
-    Value(Term::List(iovec))
+    Value(Term::list_from(iovec))
 }
 
 /// Return the trap arguments of the copy walk: the phase `copy`, the current
@@ -458,7 +457,7 @@ pub(super) fn iovec_copy(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let state = copy_state(&Term::List(vec![]), Term::List(vec![]), Vec::new(), vec![1]);
+/// let state = copy_state(&Term::nil(), Term::nil(), Vec::new(), vec![1]);
 /// assert_eq!(state[4], Term::Binary(vec![1]));
 /// ```
 fn copy_state(term: &Term, stack: Term, iovec: Vec<Term>, merged: Vec<u8>) -> Vec<Term> {
@@ -466,7 +465,7 @@ fn copy_state(term: &Term, stack: Term, iovec: Vec<Term>, merged: Vec<u8>) -> Ve
         Term::static_atom("copy"),
         term.clone(),
         stack,
-        Term::List(iovec),
+        Term::list_from(iovec),
         Term::Binary(merged),
     ]
 }
@@ -523,7 +522,7 @@ fn copy_bytes(bytes: &mut Vec<u8>, rest: &[u8], steps: &mut i64) -> Option<usize
 ///
 /// ```rust,ignore
 /// scheduler.current_process_mut().fcalls = 4000;
-/// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![2])]);
+/// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![2])]);
 /// assert!(matches!(iolist_to_binary(&mut scheduler, &list)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
 /// assert!(matches!(iolist_to_binary(&mut scheduler, &Term::Binary(vec![1]))?, BifResult::Value(Term::Binary(bytes)) if bytes == [1]));
 /// ```
@@ -549,7 +548,7 @@ pub(super) fn iolist_to_binary(
 ///
 /// ```rust,ignore
 /// scheduler.current_process_mut().fcalls = 4000;
-/// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![2])]);
+/// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![2])]);
 /// assert!(matches!(list_to_binary(&mut scheduler, &list)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
 /// assert!(matches!(list_to_binary(&mut scheduler, &Term::Binary(vec![1]))?, BifResult::Raise { .. }));
 /// ```
@@ -579,7 +578,7 @@ pub(super) fn list_to_binary(
 ///
 /// ```rust,ignore
 /// scheduler.current_process_mut().fcalls = 4000;
-/// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![2])]);
+/// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![2])]);
 /// assert!(matches!(list_to_bitstring(&mut scheduler, &list, "list_to_binary")?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
 /// assert!(matches!(list_to_bitstring(&mut scheduler, &Term::static_atom("a"), "iolist_to_binary")?, BifResult::Raise { .. }));
 /// ```
@@ -606,14 +605,11 @@ fn list_to_bitstring(
     }
     reds_left = reds_left.max(L2B_MIN_REDS);
     let process = scheduler.current_process_mut();
-    match term {
-        Term::List(elements) => match elements.as_slice() {
-            [] => Ok(Value(Term::Binary(Vec::new()))),
-            [binary @ Term::Binary(_)] => Ok(Value(binary.clone())),
-            _ => Ok(l2b_size(process, reds_left, term, term, &[], 0)),
-        },
-        Term::ImproperList(..) => Ok(l2b_size(process, reds_left, term, term, &[], 0)),
-        _ => Ok(BifResult::badarg()),
+    match term.list_cells() {
+        Some(([], None)) => Ok(Value(Term::Binary(Vec::new()))),
+        Some(([binary @ Term::Binary(_)], None)) => Ok(Value(binary.clone())),
+        Some(_) => Ok(l2b_size(process, reds_left, term, term, &[], 0)),
+        None => Ok(BifResult::badarg()),
     }
 }
 
@@ -639,7 +635,7 @@ fn list_to_bitstring(
 ///
 /// ```rust,ignore
 /// process.fcalls = 4000;
-/// let list = Term::List(vec![Term::Integer(1)]);
+/// let list = Term::list_from(vec![Term::Integer(1)]);
 /// let binary = l2b_size(&mut process, 4000, &list, &list, &[], 0);
 /// assert!(matches!(binary, BifResult::Value(Term::Binary(bytes)) if bytes == [1]));
 /// assert_eq!(process.fcalls, 3998);
@@ -687,7 +683,7 @@ pub(super) fn l2b_size(
         return l2b_trap(vec![
             Term::static_atom("copy"),
             arg.clone(),
-            Term::List(Vec::new()),
+            Term::nil(),
             Term::Integer(size as i64),
             Term::Binary(Vec::new()),
         ]);
@@ -709,7 +705,7 @@ pub(super) fn l2b_size(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let list = Term::List(vec![Term::Integer(1), Term::Binary(vec![0; 600])]);
+/// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![0; 600])]);
 /// let binary = l2b_copy(&mut process, 10, &list, &[], 601, Vec::new());
 /// assert!(matches!(binary, BifResult::Value(Term::Binary(bytes)) if bytes.len() == 601));
 /// ```
@@ -775,7 +771,7 @@ fn l2b_trap(arguments: Vec<Term>) -> BifResult {
 /// ```rust,ignore
 /// assert_eq!(iodata_bytes(&Term::Binary(b"ab".to_vec())), Some(b"ab".to_vec()));
 /// // [$a|<<"b">>] gives <<"ab">>, and [$a|x] is not iodata.
-/// let tail = |tail| Term::ImproperList(vec![Term::Integer(97)], Box::new(tail));
+/// let tail = |tail| Term::list_with_tail(vec![Term::Integer(97)], tail);
 /// assert_eq!(iodata_bytes(&tail(Term::Binary(b"b".to_vec()))), Some(b"ab".to_vec()));
 /// assert_eq!(iodata_bytes(&tail(Term::static_atom("x"))), None);
 /// assert_eq!(iodata_bytes(&Term::static_atom("foo")), None);

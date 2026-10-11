@@ -499,9 +499,9 @@ impl ProcessState {
         };
         let value = match (name.name(), &self.registered_name) {
             // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
-            ("current_stacktrace", _) if caller => Term::List(Vec::new()),
+            ("current_stacktrace", _) if caller => Term::nil(),
             ("registered_name", Some(registered)) => Term::Atom(registered.clone()),
-            ("registered_name", None) => return Ok(Some(Term::List(Vec::new()))),
+            ("registered_name", None) => return Ok(Some(Term::nil())),
             ("message_queue_len", _) => Term::Integer(messages as i64),
             ("reductions", _) => Term::Integer(
                 i64::try_from(self.reductions + current)

@@ -40,7 +40,7 @@ pub(super) fn native_name_encoding(encoding: FilenameEncoding) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let name = Term::List(vec![Term::Integer(97), Term::List(vec![Term::Integer(98)])]);
+/// let name = Term::list_from(vec![Term::Integer(97), Term::list_from(vec![Term::Integer(98)])]);
 /// assert!(matches!(internal_name2native(&name), BifResult::Value(Term::Binary(bytes)) if bytes == b"ab\0"));
 /// assert!(matches!(internal_name2native(&Term::Binary(b"a".to_vec())), BifResult::Value(Term::Binary(bytes)) if bytes == b"a\0"));
 /// assert!(matches!(internal_name2native(&Term::Binary(b"a\0".to_vec())), BifResult::Raise { .. }));

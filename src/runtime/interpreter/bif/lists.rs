@@ -21,12 +21,12 @@ use crate::runtime::scheduler::CONTEXT_REDS;
 ///
 /// ```rust,ignore
 /// let entry = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
-/// let found = keyfind(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::List(vec![entry.clone()]));
+/// let found = keyfind(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::list_from(vec![entry.clone()]));
 /// assert!(matches!(found, BifResult::Value(term) if term == entry));
-/// let missing = keyfind(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::List(vec![]));
+/// let missing = keyfind(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::nil());
 /// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
-/// assert!(matches!(keyfind(&mut process, &Term::Integer(1), &Term::Integer(0), &Term::List(vec![])), BifResult::Raise { .. }));
-/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x")));
+/// assert!(matches!(keyfind(&mut process, &Term::Integer(1), &Term::Integer(0), &Term::nil()), BifResult::Raise { .. }));
+/// let improper = Term::list_with_tail(vec![Term::Integer(1)], Term::static_atom("x"));
 /// assert!(matches!(keyfind(&mut process, &Term::Integer(1), &Term::Integer(1), &improper), BifResult::Raise { .. }));
 /// ```
 pub(super) fn keyfind(
@@ -48,11 +48,11 @@ pub(super) fn keyfind(
 ///
 /// ```rust,ignore
 /// let entry = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
-/// let found = keymember(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::List(vec![entry]));
+/// let found = keymember(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::list_from(vec![entry]));
 /// assert!(matches!(found, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let missing = keymember(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::List(vec![]));
+/// let missing = keymember(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::nil());
 /// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
-/// assert!(matches!(keymember(&mut process, &Term::Integer(1), &Term::Integer(0), &Term::List(vec![])), BifResult::Raise { .. }));
+/// assert!(matches!(keymember(&mut process, &Term::Integer(1), &Term::Integer(0), &Term::nil()), BifResult::Raise { .. }));
 /// ```
 pub(super) fn keymember(
     process: &mut ProcessState,
@@ -73,7 +73,7 @@ pub(super) fn keymember(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let missing = key_search(&mut process, "keyfind", &Term::Integer(1), &Term::Integer(1), &Term::List(vec![]));
+/// let missing = key_search(&mut process, "keyfind", &Term::Integer(1), &Term::Integer(1), &Term::nil());
 /// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
 /// ```
 fn key_search(
@@ -87,7 +87,7 @@ fn key_search(
         .small_integer()
         .and_then(|position| usize::try_from(position).ok())
         .and_then(|position| position.checked_sub(1));
-    let (Some(index), Some((elements, tail))) = (index, list_cells(list)) else {
+    let (Some(index), Some((elements, tail))) = (index, list.list_cells()) else {
         return BifResult::badarg();
     };
     let max_iter = 10 * CONTEXT_REDS as usize;
@@ -129,9 +129,9 @@ fn key_search(
 ///
 /// ```rust,ignore
 /// let x = Term::static_atom("x");
-/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x.clone()));
+/// let improper = Term::list_with_tail(vec![Term::Integer(1)], x.clone());
 /// assert!(matches!(member(&mut process, &Term::Integer(1), &improper)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(member(&mut process, &Term::Integer(2), &Term::List(vec![]))?, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(member(&mut process, &Term::Integer(2), &Term::nil())?, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
 /// assert!(matches!(member(&mut process, &Term::Integer(2), &improper)?, BifResult::Raise { .. }));
 /// assert!(matches!(member(&mut process, &Term::Integer(2), &x)?, BifResult::Raise { .. }));
 /// ```
@@ -145,7 +145,7 @@ pub(super) fn member(
     element: &Term,
     list: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some((elements, tail)) = list_cells(list) else {
+    let Some((elements, tail)) = list.list_cells() else {
         return Ok(BifResult::badarg());
     };
     let reds_left = process.bif_reductions_left()?;
@@ -195,12 +195,12 @@ pub(super) fn member(
 ///
 /// ```rust,ignore
 /// let x = Term::static_atom("x");
-/// assert!(matches!(reverse(&mut process, &Term::List(vec![]), &x)?, BifResult::Value(term) if term == x));
-/// let list = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
-/// let reversed = reverse(&mut process, &list, &Term::List(vec![Term::Integer(3)]))?;
-/// assert!(matches!(reversed, BifResult::Value(Term::List(elements)) if elements == [2, 1, 3].map(Term::Integer)));
-/// assert!(matches!(reverse(&mut process, &list, &x)?, BifResult::Value(Term::ImproperList(..))));
-/// assert!(matches!(reverse(&mut process, &x, &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// assert!(matches!(reverse(&mut process, &Term::nil(), &x)?, BifResult::Value(term) if term == x));
+/// let list = Term::list_from(vec![Term::Integer(1), Term::Integer(2)]);
+/// let reversed = reverse(&mut process, &list, &Term::list_from(vec![Term::Integer(3)]))?;
+/// assert!(matches!(reversed, BifResult::Value(list) if list == Term::list_from([2, 1, 3].map(Term::Integer))));
+/// assert!(matches!(reverse(&mut process, &list, &x)?, BifResult::Value(list) if list.list_cells().is_some_and(|(_, tail)| tail.is_some())));
+/// assert!(matches!(reverse(&mut process, &x, &Term::nil())?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -212,7 +212,7 @@ pub(super) fn reverse(
     list: &Term,
     tail: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some((elements, list_tail)) = list_cells(list) else {
+    let Some((elements, list_tail)) = list.list_cells() else {
         return Ok(BifResult::badarg());
     };
     let max_cells = 60 * process.bif_reductions_left()?;

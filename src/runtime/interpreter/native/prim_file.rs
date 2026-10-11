@@ -110,7 +110,7 @@ const MAX_FILETIME: i64 = 253_402_300_799;
 /// let result = read_info_nif(&mut scheduler, &Term::Binary(b"/bin/sh".to_vec()), &Term::Integer(1))?;
 /// // {error, einval}
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(fields)) if fields.len() == 2));
-/// assert!(matches!(read_info_nif(&mut scheduler, &Term::Binary(vec![0]), &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// assert!(matches!(read_info_nif(&mut scheduler, &Term::Binary(vec![0]), &Term::nil())?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors

@@ -30,8 +30,8 @@ use crate::runtime::unicode::{filename_from_native, native_filename};
 ///
 /// ```rust,ignore
 /// // PBEAM_GETENV_ASCII=yes
-/// let name = Term::List(b"PBEAM_GETENV_ASCII".iter().map(|&byte| Term::Integer(byte.into())).collect());
-/// assert!(matches!(getenv(&mut scheduler, &name)?, BifResult::Value(Term::List(_))));
+/// let name = Term::list_from(b"PBEAM_GETENV_ASCII".iter().map(|&byte| Term::Integer(byte.into())));
+/// assert!(matches!(getenv(&mut scheduler, &name)?, BifResult::Value(value) if value.is_list()));
 /// assert!(matches!(getenv(&mut scheduler, &Term::static_atom("HOME"))?, BifResult::Raise { .. }));
 /// assert!(matches!(getenv(&mut scheduler, &Term::Binary(b"HOME".to_vec()))?, BifResult::Raise { .. }));
 /// ```

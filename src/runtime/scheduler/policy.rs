@@ -431,13 +431,11 @@ impl Scheduler {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(initial_capabilities(&Term::List(vec![])), Some(vec![]));
+/// assert_eq!(initial_capabilities(&Term::nil()), Some(vec![]));
 /// assert_eq!(initial_capabilities(&Term::static_atom("all")), None);
 /// ```
 fn initial_capabilities(value: &Term) -> Option<Vec<Capability>> {
-    let Term::List(capabilities) = value else {
-        return None;
-    };
+    let capabilities = value.proper_list()?;
     capabilities.iter().map(capability::capability).collect()
 }
 
