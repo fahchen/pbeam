@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 43] = [
+const PROBES: [(&str, &str, &str); 46] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -103,6 +103,13 @@ const PROBES: [(&str, &str, &str); 43] = [
         "tty_window_size",
     ),
     ("prim_tty:write_nif/2", "terminal:write", "write_nif"),
+    ("erlang:finish_loading/1", "code:load", "finish_loading"),
+    ("erlang:module_loaded/1", "code:inspect", "module_loaded"),
+    (
+        "erlang:get_module_info/2",
+        "code:inspect",
+        "get_module_info",
+    ),
 ];
 
 /// A test policy: the root process gets these capabilities.
@@ -116,7 +123,7 @@ impl Policy for Grants {
 
 /// The kind and the operation of each `kind:operation` name of the
 /// inventory.
-const OPERATIONS: [(&str, CapabilityKind, Operation); 26] = [
+const OPERATIONS: [(&str, CapabilityKind, Operation); 28] = [
     ("process:spawn", CapabilityKind::Process, Operation::Spawn),
     ("process:link", CapabilityKind::Process, Operation::Link),
     (
@@ -183,6 +190,8 @@ const OPERATIONS: [(&str, CapabilityKind, Operation); 26] = [
         CapabilityKind::PersistentTerm,
         Operation::Write,
     ),
+    ("code:load", CapabilityKind::Code, Operation::Load),
+    ("code:inspect", CapabilityKind::Code, Operation::Inspect),
 ];
 
 /// Return the kind and the operation of `kind:operation`.
@@ -195,7 +204,7 @@ fn operation(name: &str) -> (CapabilityKind, Operation) {
 }
 
 /// The capability kinds.
-const KINDS: [CapabilityKind; 7] = [
+const KINDS: [CapabilityKind; 8] = [
     CapabilityKind::Process,
     CapabilityKind::Terminal,
     CapabilityKind::Port,
@@ -203,6 +212,7 @@ const KINDS: [CapabilityKind; 7] = [
     CapabilityKind::Signal,
     CapabilityKind::Runtime,
     CapabilityKind::PersistentTerm,
+    CapabilityKind::Code,
 ];
 
 /// Return a policy with a delegable capability of each kind: one of `kind`
@@ -277,10 +287,7 @@ const AMBIENT: [&str; 28] = [
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `later`: it has no check until its named task adds one.
 /// `effect_probe:ambient/0` also calls each entry once.
-const LATER: [&str; 7] = [
-    "erlang:finish_loading/1",
-    "erlang:get_module_info/2",
-    "erlang:module_loaded/1",
+const LATER: [&str; 4] = [
     "prim_file:get_cwd_nif/0",
     "prim_file:list_dir_nif/1",
     "prim_file:read_file_nif/1",
@@ -395,7 +402,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
     let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
-                    nonode@nohost,nonode@nohost,true,true,effect_probe,{error,badfile},ok,false,\
+                    nonode@nohost,nonode@nohost,true,{error,badfile},false,\
                     effect_probe_ambient_atom,ok,effect_probe_ambient,true,[{key,value}],value,\
                     true,true,reference,atom,2,ok,1,error,ok,error,ok]";
     assert_eq!(text(&run(&program, "ambient", &Grants(vec![]))), expected);
@@ -509,6 +516,40 @@ fn needs_both_signal_operations_for_the_default_disposition() {
         run(&program, "signals", &policy),
         atoms(&program, &["ok", "denied"])
     );
+}
+
+#[test]
+fn compares_the_module_name_of_a_code_entry() {
+    // The `modules` constraint of `code` compares the module atom of
+    // `erlang:module_loaded/1` and `erlang:get_module_info/2`, and each
+    // module of the list of `erlang:finish_loading/1`. An empty list has no
+    // module name, so it needs the `load` operation only.
+    let program = program();
+    let policy = grants(
+        CapabilityKind::Code,
+        CapabilityKind::Code.operations(),
+        only(&["effect_probe"]),
+    );
+    assert_eq!(
+        run(&program, "code_names", &policy),
+        atoms(&program, &["ok", "denied", "ok", "denied", "ok"])
+    );
+}
+
+#[test]
+fn checks_the_key_of_get_module_info_before_the_code_capability() {
+    // The argument checks of `erlang:get_module_info/2` come before its
+    // capability check, as they do in `erlang:process_info/2` (row
+    // "Capability checks" of `docs/erts-differences.md`): a key that is not
+    // an atom raises `badarg` in a process with no capability. Pinned ERTS
+    // raises `badarg` for it too (`erl_bif_info.c:5986-6008`).
+    let program = program();
+    let expected = "{error,badarg}";
+    assert_eq!(
+        text(&run(&program, "code_badarg", &Grants(vec![]))),
+        expected
+    );
+    assert_eq!(erts_with_stand_in("code_badarg"), format!("{expected}\n"));
 }
 
 /// Return the `~w` text of `effect_probe:Function()` on the pinned ERTS

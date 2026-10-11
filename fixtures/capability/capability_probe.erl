@@ -92,7 +92,8 @@ malformed() ->
                 port => #{operations => [spawn, command, close, inspect], executables => ["/bin/echo"]},
                 env => #{operations => [read, write], names => ["HOME", ""]},
                 signal => #{operations => [handle, ignore], signals => [sighup]},
-                persistent_term => #{operations => [read, write]}
+                persistent_term => #{operations => [read, write]},
+                code => #{operations => [load, inspect], modules => [capability_probe]}
             }}
         ])
     ].

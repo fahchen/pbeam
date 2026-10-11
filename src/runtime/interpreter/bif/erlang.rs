@@ -2699,8 +2699,13 @@ pub(super) fn function_exported(
 /// `finish_loading_1` (`beam_bif_load.c:340-508`) does. A term that is not a
 /// proper list, an element that is not a reference, and a reference with
 /// no prepared code raise `badarg`, also a reference whose code loaded
-/// already. A list that names one module more than one time returns
-/// `{duplicated, Modules}` and keeps each prepared entry (see
+/// already. Then the caller needs a `code` capability that permits `load`
+/// for each module of the list (row "Capability checks" of
+/// `docs/erts-differences.md`), after the argument checks and before any
+/// module loads: a denied call loads no module and gives
+/// `error:capability_denied`. An empty list needs the `load` operation and
+/// compares no module name. A list that names one module more than one time
+/// returns `{duplicated, Modules}` and keeps each prepared entry (see
 /// [`CodeTable::finish`]). Else each module goes into the code table of
 /// the run, and the BIF returns `ok` after the calling process switches
 /// out: ERTS suspends the caller until the new code is committed and then
@@ -2718,7 +2723,9 @@ pub(super) fn function_exported(
 /// # Errors
 ///
 /// A module that is loaded already gives the runtime error of
-/// [`CodeTable::finish`]: PBeam has no code replacement.
+/// [`CodeTable::finish`]: PBeam has no code replacement. A new
+/// `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
 pub(super) fn finish_loading(
     scheduler: &mut Scheduler,
     prepared: &Term,
@@ -2733,7 +2740,24 @@ pub(super) fn finish_loading(
         };
         references.push(*reference);
     }
-    match scheduler.code.finish(&references)? {
+    let Some(names) = scheduler.code.prepared_names(&references) else {
+        return Ok(BifResult::badarg());
+    };
+    if let Some(denied) = denial(scheduler, CapabilityKind::Code, Operation::Load, None)? {
+        return Ok(denied);
+    }
+    for name in &names {
+        let check = denial(
+            scheduler,
+            CapabilityKind::Code,
+            Operation::Load,
+            Some(name.as_bytes()),
+        );
+        if let Some(denied) = check? {
+            return Ok(denied);
+        }
+    }
+    match scheduler.code.finish(&references, names)? {
         Finish::Loaded => Ok(BifResult::YieldReturn(Term::static_atom("ok"))),
         Finish::Duplicated(names) => {
             let mut modules = Vec::with_capacity(names.len());
@@ -2745,7 +2769,6 @@ pub(super) fn finish_loading(
                 Term::list_from(modules),
             ])))
         }
-        Finish::NotPrepared => Ok(BifResult::badarg()),
     }
 }
 
@@ -2753,22 +2776,46 @@ pub(super) fn finish_loading(
 /// (`beam_bif_load.c:738-755`) does: return `true` when `module` has current
 /// code and no `-on_load` function waits to run, and `false` for an atom
 /// that names no loaded module. A `module` that is not an atom raises
-/// `badarg`. The PBeam loader does not load a module that has an `on_load`
+/// `badarg`. Then the caller needs a `code` capability that permits
+/// `inspect` for the module name (row "Capability checks" of
+/// `docs/erts-differences.md`), after the atom check and before the code
+/// table lookup. The PBeam loader does not load a module that has an `on_load`
 /// instruction (`unsupported BEAM opcode 149`), so each loaded module counts.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let loaded = module_loaded(&scheduler.code, &Term::static_atom("erlang"));
+/// let loaded = module_loaded(&mut context, &Term::static_atom("erlang"))?;
 /// assert!(matches!(loaded, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(module_loaded(&scheduler.code, &Term::Integer(1)), BifResult::Raise { .. }));
+/// assert!(matches!(module_loaded(&mut context, &Term::Integer(1))?, BifResult::Raise { .. }));
 /// ```
-pub(super) fn module_loaded(code: &CodeTable, module: &Term) -> BifResult {
+///
+/// # Errors
+///
+/// A new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn module_loaded(
+    context: &mut BifContext<'_>,
+    module: &Term,
+) -> Result<BifResult, BeamError> {
     let Term::Atom(module) = module else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
-    let loaded = code.get(module.name()).is_some();
-    Value(Term::static_atom(if loaded { "true" } else { "false" }))
+    let check = denial(
+        context.scheduler,
+        CapabilityKind::Code,
+        Operation::Inspect,
+        Some(module.name().as_bytes()),
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    let loaded = context.scheduler.code.get(module.name()).is_some();
+    Ok(Value(Term::static_atom(if loaded {
+        "true"
+    } else {
+        "false"
+    })))
 }
 
 /// The preloaded modules of ERTS, in the order of `PRELOAD_BEAM` and
@@ -2830,34 +2877,50 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 /// atom or that names no loaded module raises `badarg`. The key `module`
 /// returns `Module`. A term that is not a key of `get_module_info/3`
 /// (`md5`, `exports`, `functions`, `nifs`, `attributes`, `compile`,
-/// `native_addresses`, `native`, or `module`) raises `badarg`.
+/// `native_addresses`, `native`, or `module`) raises `badarg`. The caller
+/// needs a `code` capability that permits `inspect` for the module name
+/// (row "Capability checks" of `docs/erts-differences.md`), after the atom
+/// checks of `Module` and `What` and before the code table lookup, so a
+/// denied call does not tell whether a module is loaded. This entry of the
+/// inventory was `later` until #465.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let lists = Term::static_atom("lists");
-/// let info = get_module_info(&scheduler.code, &lists, &Term::static_atom("module"))?;
+/// let info = get_module_info(&mut context, &lists, &Term::static_atom("module"))?;
 /// assert!(matches!(info, BifResult::Value(Term::Atom(atom)) if atom.name() == "lists"));
 /// ```
 ///
 /// # Errors
 ///
 /// Each other key of `get_module_info/3` is the runtime error
-/// `erlang:get_module_info/2 key K is not implemented`.
+/// `erlang:get_module_info/2 key K is not implemented`. A new
+/// `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
 pub(super) fn get_module_info(
-    code: &CodeTable,
+    context: &mut BifContext<'_>,
     module: &Term,
     what: &Term,
 ) -> Result<BifResult, BeamError> {
     let Term::Atom(name) = module else {
         return Ok(BifResult::badarg());
     };
-    if code.get(name.name()).is_none() {
-        return Ok(BifResult::badarg());
-    }
     let Term::Atom(key) = what else {
         return Ok(BifResult::badarg());
     };
+    let check = denial(
+        context.scheduler,
+        CapabilityKind::Code,
+        Operation::Inspect,
+        Some(name.name().as_bytes()),
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    if context.scheduler.code.get(name.name()).is_none() {
+        return Ok(BifResult::badarg());
+    }
     match key.name() {
         "module" => Ok(Value(module.clone())),
         key @ ("md5" | "exports" | "functions" | "nifs" | "attributes" | "compile"

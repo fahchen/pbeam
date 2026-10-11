@@ -84,6 +84,7 @@ fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
         CapabilityKind::Signal,
         CapabilityKind::Runtime,
         CapabilityKind::PersistentTerm,
+        CapabilityKind::Code,
     ];
     // With the checks, a root process with no capability cannot spawn.
     let mut checked = Scheduler::new(AtomTable::new());
