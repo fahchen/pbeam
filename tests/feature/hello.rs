@@ -155,13 +155,16 @@ fn fails_visibly_for_a_missing_entry_through_the_boot() {
             "Elixir.Hello",
             "start",
             "Error! Failed to eval: 'Elixir.Hello':start(), halt().\r\n\r\nRuntime terminating during boot ({undef,[{'Elixir.Hello',start,[],[]},{erl_eval,do_apply,7,[{file,\"erl_eval.erl\"},{line,1044}]},{erl_eval,exprs,6,[{file,\"erl_eval.erl\"},{line,276}]},{init,start_it,1,[]},{init,start_em,1,[]},{init,do_boot,3,[]}]})\r\n",
-            "pbeam: root process exited with {undef,[{'Elixir.Hello',start,[],[]}]}\n",
+            // PBeam adds the frame of `pbeam_boot:start/3`, which calls the
+            // entry function after its boot. ERTS runs the entry function
+            // from `erl_eval`, so the caller frames differ.
+            "pbeam: root process exited with {undef,[{'Elixir.Hello',start,[],[]},{pbeam_boot,start,3,[]}]}\n",
         ),
         (
             "Elixir.String.Chars",
             "main",
             "Error! Failed to eval: 'Elixir.String.Chars':main(), halt().\r\n\r\nRuntime terminating during boot ({undef,[{'Elixir.String.Chars',main,[],[]},{erl_eval,do_apply,7,[{file,\"erl_eval.erl\"},{line,1044}]},{erl_eval,exprs,6,[{file,\"erl_eval.erl\"},{line,276}]},{init,start_it,1,[]},{init,start_em,1,[]},{init,do_boot,3,[]}]})\r\n",
-            "pbeam: unresolved external MFA Elixir.String.Chars:main/0\n",
+            "pbeam: root process exited with {undef,[{'Elixir.String.Chars',main,[],[]},{pbeam_boot,start,3,[]}]}\n",
         ),
     ] {
         let erts = run_dumb_utf8(

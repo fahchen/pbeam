@@ -39,7 +39,6 @@ pub(super) fn node(term: &Term) -> Result<BifResult, BeamError> {
 /// The tuple `{monitor_nodes, Options}` is also such a flag.
 const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
     "async_dist",
-    "error_handler",
     "priority",
     "scheduler",
     "fullsweep_after",
@@ -52,23 +51,28 @@ const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
 ];
 
 /// Run `erlang:process_flag(Flag, Value)` as ERTS `process_flag_2`
-/// (`bif.c:2028-2237`) does for the flags `trap_exit` and
-/// `message_queue_data`: set the flag of the calling process and return the
-/// old value. `trap_exit` takes `true` or `false`. `message_queue_data`
-/// takes `on_heap` or `off_heap` (`erts_change_message_queue_management`,
-/// `erl_message.c:1022-1100`), and its start value is `on_heap`. Each other
-/// value raises `badarg`. A flag that ERTS does not know raises `badarg`,
-/// also a tuple that is not `{monitor_nodes, Options}`.
+/// (`bif.c:2028-2237`) does for the flags `trap_exit`,
+/// `message_queue_data`, and `error_handler`: set the flag of the calling
+/// process and return the old value. `trap_exit` takes `true` or `false`.
+/// `message_queue_data` takes `on_heap` or `off_heap`
+/// (`erts_change_message_queue_management`, `erl_message.c:1022-1100`), and
+/// its start value is `on_heap`. `error_handler` takes an atom and sets the
+/// module that the export entry calls for a function that a module does not
+/// export (`process_flag_aux`, `bif.c:2094-2101`;
+/// `erts_proc_set_error_handler`, `erl_process.h:2453-2465`); its start
+/// value is the atom `error_handler`. Each other value raises `badarg`. A
+/// flag that ERTS does not know raises `badarg`, also a tuple that is not
+/// `{monitor_nodes, Options}`.
 ///
 /// Each flag of `UNSUPPORTED_PROCESS_FLAGS` except `max_heap_size` first
 /// checks its value as ERTS does, and raises `badarg` for a value that is
 /// not valid: `async_dist`, `sensitive`, and `monitor_nodes` take a boolean
-/// (`erts_monitor_nodes`, `dist.c:6740-6741`), `error_handler` takes an
-/// atom, `priority` takes `low`, `normal`, `high`, or `max`
-/// (`erts_set_process_priority`, `erl_process.c:9460-9466`), `save_calls`
-/// takes a small integer from 0 to 10000 (`process_flag_aux`,
-/// `bif.c:1907-1915`), and `scheduler`, `fullsweep_after`, `min_heap_size`,
-/// and `min_bin_vheap_size` take a small integer of 0 or more.
+/// (`erts_monitor_nodes`, `dist.c:6740-6741`), `priority` takes `low`,
+/// `normal`, `high`, or `max` (`erts_set_process_priority`,
+/// `erl_process.c:9460-9466`), `save_calls` takes a small integer from 0 to
+/// 10000 (`process_flag_aux`, `bif.c:1907-1915`), and `scheduler`,
+/// `fullsweep_after`, `min_heap_size`, and `min_bin_vheap_size` take a small
+/// integer of 0 or more.
 ///
 /// PBeam has no process heap, so `message_queue_data` does not change where
 /// the messages are kept.
@@ -80,6 +84,8 @@ const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
 /// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
 /// let old = process_flag(&mut context, &Term::static_atom("message_queue_data"), &Term::static_atom("off_heap"))?;
 /// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "on_heap"));
+/// let old = process_flag(&mut context, &Term::static_atom("error_handler"), &Term::static_atom("lists"))?;
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "error_handler"));
 /// assert!(matches!(process_flag(&mut context, &foo, &Term::static_atom("true"))?, BifResult::Raise { .. }));
 /// assert!(process_flag(&mut context, &Term::static_atom("priority"), &Term::static_atom("high")).is_err());
 /// ```
@@ -125,13 +131,36 @@ pub(super) fn process_flag(
             }
             Value(old)
         }
+        Term::Atom(flag) if flag.name() == "error_handler" => {
+            // `process_flag_aux` takes an atom for `error_handler` and gives
+            // `badarg` for each other value (`bif.c:2094-2101`), and
+            // `erts_proc_set_error_handler` returns the old handler
+            // (`erl_process.h:2453-2465`).
+            let Some(value) = value else {
+                return Ok(BifResult::badarg());
+            };
+            // The name of the old handler goes into the atom table of the
+            // run, which holds the name of a handler that a module gives.
+            let (name, handler) = {
+                let process = context.scheduler.current_process_mut();
+                (
+                    process
+                        .error_handler
+                        .clone()
+                        .unwrap_or_else(|| "error_handler".to_owned()),
+                    (value != "error_handler").then(|| value.to_owned()),
+                )
+            };
+            let old = Term::Atom(context.scheduler.atoms.put(&name)?);
+            context.scheduler.current_process_mut().error_handler = handler;
+            Value(old)
+        }
         Term::Atom(flag) if UNSUPPORTED_PROCESS_FLAGS.contains(&flag.name()) => {
             let small = term.small_integer();
             let valid = match flag.name() {
                 "async_dist" | "sensitive" | "monitor_nodes" => {
                     matches!(value, Some("true" | "false"))
                 }
-                "error_handler" => value.is_some(),
                 "priority" => matches!(value, Some("low" | "normal" | "high" | "max")),
                 "save_calls" => small.is_some_and(|calls| (0..=10_000).contains(&calls)),
                 "max_heap_size" => true,
@@ -480,11 +509,23 @@ pub(super) fn error_2(
     } else {
         Term::Integer(arity.into())
     };
-    let frame = Term::Tuple(vec![module, function, args, Term::nil()]);
+    // ERTS saves the current frame and at most `backtrace_depth - 1` caller
+    // frames of the process when the exception starts
+    // (`save_stacktrace`, `beam_common.c:885-935`), and the frame of the
+    // function that calls the BIF gets `Args`
+    // (`beam_common.c:454-495`, `1011-1027`; `erts_build_mfa_item`,
+    // `utils.c:3448-3455`). The stack trace of the exception keeps at most
+    // `backtrace_depth` frames, and one frame for the depth 0
+    // (`bif.c:1626-1637`). `error_handler:crash/1` calls `tl/1` on this
+    // stack trace (`error_handler.erl:172-178`).
+    let depth = context.scheduler.backtrace_depth;
+    let mut frames = mfa_stacktrace(context.scheduler)?;
+    frames.truncate(depth.max(1));
+    frames[0] = Term::Tuple(vec![module, function, args, Term::nil()]);
     Ok(BifResult::RaiseWithStacktrace {
         class: ExceptionClass::Error,
         reason: reason.clone(),
-        stacktrace: Term::list_from(vec![frame]),
+        stacktrace: Term::list_from(frames),
     })
 }
 

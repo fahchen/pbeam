@@ -9,6 +9,7 @@
 %% '$handle_undefined_function'/2, so error_handler calls it instead
 %% (error_handler.erl:206-213).
 calls() ->
+    init_server(),
     M = id(undef_target),
     F = id(missing),
     [try undef_target:missing(a) catch C1:R1:S1 -> first(C1, R1, S1) end,
@@ -29,8 +30,20 @@ calls() ->
 %% Return the DOWN reason of a process that starts at a function that the
 %% module does not export.
 down(Module, Function, Arguments) ->
+    init_server(),
     {Pid, Ref} = spawn_monitor(Module, Function, Arguments),
     receive {'DOWN', Ref, process, Pid, Reason} -> Reason end.
+
+%% Start the init process of `fixtures/undef/undef_init` when the run has
+%% no boot (see `undef_init`). A call of `undef_init:serve/0` in a run
+%% without that module is an undefined function: the export entry of the
+%% call then raises `undef` again and again. `erlang:function_exported/3`
+%% stops that, and the atom `undef_init` exists before the first call.
+init_server() ->
+    case erlang:function_exported(undef_init, start, 0) of
+        true -> undef_init:start();
+        false -> ok
+    end.
 
 id(X) -> X.
 

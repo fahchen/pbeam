@@ -9,6 +9,7 @@ use pbeam_runtime::{BeamProgram, Term};
 const UNDEF_PROBE: &[u8] = include_bytes!("../../fixtures/undef/undef_probe.beam");
 const UNDEF_TARGET: &[u8] = include_bytes!("../../fixtures/undef/undef_target.beam");
 const UNDEF_HANDLER: &[u8] = include_bytes!("../../fixtures/undef/undef_handler.beam");
+const UNDEF_INIT: &[u8] = include_bytes!("../../fixtures/undef/undef_init.beam");
 
 #[test]
 fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
@@ -18,8 +19,17 @@ fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
     // `{undef_target, missing, Args, []}` (`error_handler.erl:165-178`).
     // `undef_handler` exports `'$handle_undefined_function'/2`, so the call
     // goes to it (`error_handler.erl:206-213`).
-    let erlang = pinned_beam("erlang");
-    let program = BeamProgram::load(&[&erlang, UNDEF_PROBE, UNDEF_TARGET, UNDEF_HANDLER]).unwrap();
+    let (erlang, error_handler) = (pinned_beam("erlang"), pinned_beam("error_handler"));
+    let program = BeamProgram::load(&[
+        &erlang,
+        &error_handler,
+        &pinned_beam("init"),
+        UNDEF_INIT,
+        UNDEF_PROBE,
+        UNDEF_TARGET,
+        UNDEF_HANDLER,
+    ])
+    .unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let list = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
     let frame = |arguments: &[&str]| {
@@ -90,8 +100,17 @@ fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
     // `missing/2` or `stop/2` when it first runs. It exits with the `undef`
     // of `error_handler:crash/1`, or calls the handler of `undef_handler`,
     // which exits with its arguments.
-    let erlang = pinned_beam("erlang");
-    let program = BeamProgram::load(&[&erlang, UNDEF_PROBE, UNDEF_TARGET, UNDEF_HANDLER]).unwrap();
+    let (erlang, error_handler) = (pinned_beam("erlang"), pinned_beam("error_handler"));
+    let program = BeamProgram::load(&[
+        &erlang,
+        &error_handler,
+        &pinned_beam("init"),
+        UNDEF_INIT,
+        UNDEF_PROBE,
+        UNDEF_TARGET,
+        UNDEF_HANDLER,
+    ])
+    .unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let arguments = Term::list_from(vec![atom("a"), atom("b")]);
     let down = |module: &str, function: &str| {
@@ -152,8 +171,17 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
     // export (`beam_common.c:1501-1513`). Thus 1023 arguments go to the
     // `undef` of the export entry, and 1024 arguments raise `system_limit`,
     // also for a module that is not loaded.
-    let erlang = pinned_beam("erlang");
-    let program = BeamProgram::load(&[&erlang, UNDEF_PROBE, UNDEF_TARGET, UNDEF_HANDLER]).unwrap();
+    let (erlang, error_handler) = (pinned_beam("erlang"), pinned_beam("error_handler"));
+    let program = BeamProgram::load(&[
+        &erlang,
+        &error_handler,
+        &pinned_beam("init"),
+        UNDEF_INIT,
+        UNDEF_PROBE,
+        UNDEF_TARGET,
+        UNDEF_HANDLER,
+    ])
+    .unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let arguments = |count: usize| Term::list_from(vec![atom("x"); count]);
     let down = |module: &str, count: usize| {

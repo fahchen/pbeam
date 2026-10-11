@@ -42,7 +42,7 @@ impl LinkId {
 }
 
 /// One active function call: its module, code position, and Y registers.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct Frame {
     /// Name of the module that owns the code.
     pub(super) module: String,
@@ -74,7 +74,7 @@ pub(super) enum Start {
 }
 
 /// One Y register of a frame.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum StackSlot {
     /// Allocated, but no instruction wrote it yet.
     Empty,
@@ -243,6 +243,13 @@ pub(super) struct ProcessState {
     /// Name that `erlang:register/2` gave this process, as
     /// `common.u.alive.reg` in ERTS.
     pub(super) registered_name: Option<Atom>,
+    /// The module that the export entry calls for a function that a module
+    /// does not export, as the process-specific error handler of
+    /// `erts_proc_get_error_handler` (`erl_process.h:2441-2449`). `None`
+    /// means the default `error_handler`: ERTS keeps the default in the
+    /// process specific data also as a `NULL` pointer
+    /// (`erts_proc_set_error_handler`, `erl_process.h:2453-2465`).
+    pub(super) error_handler: Option<String>,
     /// The reductions that remain in the current turn, as `p->fcalls` and
     /// the JIT `FCALLS` register. `Scheduler::schedule_next` sets it to
     /// `CONTEXT_REDS`. A cost point subtracts from it, and the process
@@ -389,6 +396,7 @@ impl ProcessState {
             group_leader: id,
             dictionary: Vec::new(),
             registered_name: None,
+            error_handler: None,
             fcalls: 0,
             reductions: 0,
             pending_bif: None,
