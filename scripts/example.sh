@@ -117,7 +117,7 @@ for beam in "$work"/*.beam; do
 done
 
 # The boot modules that pbeam_boot starts, and the modules that these modules start with a module name in a variable, for example the child modules of a supervisor. The imports chunks do not give these modules.
-boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error file_server supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal"
+boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error file_server supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal erl_prim_loader prim_file"
 # The pbeam binary loads only the BEAM files that it gets. Give it each OTP and Elixir module that the example, pbeam_boot, and the boot modules call, directly or through other modules (scripts/example_beams.exs). The script writes each called module that the pbeam run does not get, and the reason, into pbeam.unloaded.
 # A command substitution, not a process substitution, so that set -e stops the run when the command fails.
 step "Consolidate the Elixir protocols and find the OTP and Elixir modules that the example calls"
