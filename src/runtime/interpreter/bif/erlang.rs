@@ -2881,9 +2881,9 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 /// `native_addresses`, `native`, or `module`) raises `badarg`. The caller
 /// needs a `code` capability that permits `inspect` for the module name
 /// (row "Capability checks" of `docs/erts-differences.md`), after the atom
-/// check and before the code table lookup, so a denied call does not tell
-/// whether a module is loaded. This entry of the inventory was `later`
-/// until #465.
+/// checks of `Module` and `What` and before the code table lookup, so a
+/// denied call does not tell whether a module is loaded. This entry of the
+/// inventory was `later` until #465.
 ///
 /// # Examples
 ///
@@ -2907,6 +2907,9 @@ pub(super) fn get_module_info(
     let Term::Atom(name) = module else {
         return Ok(BifResult::badarg());
     };
+    let Term::Atom(key) = what else {
+        return Ok(BifResult::badarg());
+    };
     if let Some(denied) = denial(
         context.scheduler,
         CapabilityKind::Code,
@@ -2918,9 +2921,6 @@ pub(super) fn get_module_info(
     if context.scheduler.code.get(name.name()).is_none() {
         return Ok(BifResult::badarg());
     }
-    let Term::Atom(key) = what else {
-        return Ok(BifResult::badarg());
-    };
     match key.name() {
         "module" => Ok(Value(module.clone())),
         key @ ("md5" | "exports" | "functions" | "nifs" | "attributes" | "compile"

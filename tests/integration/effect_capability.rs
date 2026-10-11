@@ -536,6 +536,22 @@ fn compares_the_module_name_of_a_code_entry() {
     );
 }
 
+#[test]
+fn checks_the_key_of_get_module_info_before_the_code_capability() {
+    // The argument checks of `erlang:get_module_info/2` come before its
+    // capability check, as they do in `erlang:process_info/2` (row
+    // "Capability checks" of `docs/erts-differences.md`): a key that is not
+    // an atom raises `badarg` in a process with no capability. Pinned ERTS
+    // raises `badarg` for it too (`erl_bif_info.c:5986-6008`).
+    let program = program();
+    let expected = "{error,badarg}";
+    assert_eq!(
+        text(&run(&program, "code_badarg", &Grants(vec![]))),
+        expected
+    );
+    assert_eq!(erts_with_stand_in("code_badarg"), format!("{expected}\n"));
+}
+
 /// Return the `~w` text of `effect_probe:Function()` on the pinned ERTS
 /// with the stand-in `prim_tty`. The load of the stand-in stops the
 /// standard output of ERTS, so the result goes through a file.

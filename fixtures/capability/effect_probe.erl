@@ -73,6 +73,7 @@
     get_module_info/0,
     finish_loading/0,
     code_names/0,
+    code_badarg/0,
     ambient/0,
     child/2,
     value_child/2,
@@ -712,6 +713,12 @@ code_names() ->
         attempt(fun() -> erlang:get_module_info(lists, module) end),
         attempt(fun() -> erlang:finish_loading([]) end)
     ].
+
+%% The argument checks of `erlang:get_module_info/2` come before its
+%% capability check, as they do in `erlang:process_info/2`: a key that is
+%% not an atom raises `badarg`, also in a process with no capability.
+code_badarg() ->
+    attempt(fun() -> erlang:get_module_info(?MODULE, 1) end).
 
 %% A denied port_close/1 keeps the port open.
 close_kept() ->
