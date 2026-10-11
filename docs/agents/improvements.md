@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261011: Qualify behavior claims by execution mode
+
+**Problem:** Documentation stated that a denied `initial/1` call means that the root process does not start, but boot mode starts the root process before that call.
+
+**Root Cause:** The statement did not name the execution mode that controls the observed behavior.
+
+**Fix:** Limit the no-start statement to runs without boot mode. State that boot-mode denial stops the existing run.
+
+**Guardrail:** When behavior depends on an execution mode, document each relevant mode and its observable result separately.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/474#issuecomment-6104568265>
+
 ## 20261011: Reject guest callbacks before a privileged call
 
 **Problem:** Formatting and map-order options could execute guest functions with boot authority, because the allowlist checked the MFA shape but did not reject nested callback values.
@@ -42,8 +54,6 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Fix:** Record the original caller when a trusted relay forwards a request and authenticate that caller at the receiving boundary. Create the application root with the authority that `initial/1` defines.
 
 **Guardrail:** Define each authority change at the runtime boundary that creates or forwards a request. Do not infer authority from parent-child inheritance when the runtime creates a new application boundary.
-
-**Reference:** <https://github.com/fahchen/pbeam/pull/466#issuecomment-6104226874>
 
 ## 20261011: Stop a timed step at its deadline before reading queued input
 
