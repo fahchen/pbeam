@@ -23,9 +23,13 @@
 //! maps, funs, pids, and references, which PBeam does not have yet. So does
 //! a list or a tuple with a binary element, for example `[<<>>]` and
 //! `{<<>>}`.
+#![expect(
+    clippy::arc_with_non_send_sync,
+    reason = "a term is not Send and Sync until #459, and a map uses Arc now so that #459 does not change it again"
+)]
 
 use std::cmp::Ordering;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::{Term, hash::internal_hash};
 use crate::error::{BeamError, error};
@@ -102,14 +106,16 @@ enum Entry<'a> {
 /// A copy of a map shares the form of the map, as an ERTS copy of a map
 /// term in a register or a stack slot is the same boxed pointer. A change
 /// through one copy first copies a shared form, so the other copies do not
-/// change.
+/// change. A hashmap copies only the HAMT nodes on the path of the key, and
+/// the new map shares each other node with the old map, as
+/// `erts_hashmap_insert` does (`erl_map.c:2477-2503`).
 #[derive(Clone)]
 pub struct Map {
     /// The flatmap or hashmap form of the map. All copies of the map own
     /// one reference to it. `insert` and `get_mut` copy it first when
-    /// another copy also holds it (`Rc::make_mut`). The last copy that drops
-    /// releases it.
-    repr: Rc<Repr>,
+    /// another copy also holds it (`Arc::make_mut`). The last copy that
+    /// drops releases it.
+    repr: Arc<Repr>,
 }
 
 /// The two forms of a map. The number of keys selects the form.
@@ -139,7 +145,9 @@ pub(super) enum Form<'a> {
 }
 
 /// A HAMT node. Bit `i` of `bitmap` is set when slot `i` holds a child.
-/// `children` holds one child per set bit, in ascending slot order.
+/// `children` holds one child per set bit, in ascending slot order. A copy
+/// of a node copies the keys and values of its leaves, and shares its child
+/// nodes.
 #[derive(Clone)]
 pub(super) struct Node {
     /// The occupied slots.
@@ -153,8 +161,11 @@ pub(super) struct Node {
 pub(super) enum Child {
     /// A key and its value.
     Leaf(Term, Term),
-    /// A node one level down.
-    Node(Node),
+    /// A node one level down. Each map that holds the node owns one
+    /// reference to it. A change copies it first when another map also
+    /// holds it (`Arc::make_mut`), so a change copies only the nodes on the
+    /// path of its key.
+    Node(Arc<Node>),
     /// The pairs of two or more keys with equal hashes, sorted in the term
     /// order. Only a node at the last level (`HAMT_MAX_LEVEL - 1`) holds a
     /// collision child, as an ERTS collision node is at level 16
@@ -172,7 +183,7 @@ impl Map {
     /// ```
     pub(crate) fn new() -> Self {
         Map {
-            repr: Rc::new(Repr::Flat(Vec::new())),
+            repr: Arc::new(Repr::Flat(Vec::new())),
         }
     }
 
@@ -294,7 +305,8 @@ impl Map {
     /// Return the value of a key for a change in place, or `None` when the
     /// map does not hold the key. The key lookup is the one of `get`. When
     /// another copy also holds the form of the map, copy the form first, so
-    /// the change does not show in the other copy.
+    /// the change does not show in the other copy. A hashmap copies only
+    /// the shared nodes on the path of the key.
     ///
     /// # Examples
     ///
@@ -305,7 +317,7 @@ impl Map {
     /// assert!(map.get_mut(&Term::Integer(2)).is_none());
     /// ```
     pub(crate) fn get_mut(&mut self, key: &Term) -> Option<&mut Term> {
-        let hamt = match Rc::make_mut(&mut self.repr) {
+        let hamt = match Arc::make_mut(&mut self.repr) {
             Repr::Flat(pairs) => {
                 return pairs
                     .iter_mut()
@@ -320,7 +332,7 @@ impl Map {
         loop {
             match node.child_mut(slot(hash, level))? {
                 Child::Leaf(existing, value) => return (existing == key).then_some(value),
-                Child::Node(inner) => node = inner,
+                Child::Node(inner) => node = Arc::make_mut(inner),
                 Child::Collision(pairs) => {
                     return pairs
                         .iter_mut()
@@ -375,7 +387,10 @@ impl Map {
     /// Set a key to a value. Replace the value when the key exists. A
     /// flatmap that gets its 33rd key becomes a hashmap, as in ERTS. When
     /// another copy also holds the form of the map, copy the form first, so
-    /// the change does not show in the other copy.
+    /// the change does not show in the other copy: a flatmap copies all its
+    /// pairs, as `erts_maps_put` does (`erl_map.c:2105-2229`), and a hashmap
+    /// copies only the shared nodes on the path of the key, in O(log N)
+    /// time, as `erts_hashmap_insert` does (`erl_map.c:2477-2503`).
     ///
     /// # Examples
     ///
@@ -394,7 +409,7 @@ impl Map {
     /// Return the first key that the map form does not support yet. The map
     /// does not change.
     pub(crate) fn insert(&mut self, key: Term, value: Term) -> Result<(), Term> {
-        let pairs = match Rc::make_mut(&mut self.repr) {
+        let pairs = match Arc::make_mut(&mut self.repr) {
             Repr::Flat(pairs) => pairs,
             Repr::Hash(hamt) => {
                 let Some(hash) = map_hash(&key) else {
@@ -427,7 +442,7 @@ impl Map {
                 for (hash, (key, value)) in hashes.into_iter().zip(pairs) {
                     hamt.insert(hash, key, value);
                 }
-                self.repr = Rc::new(Repr::Hash(hamt));
+                self.repr = Arc::new(Repr::Hash(hamt));
             }
         }
         Ok(())
@@ -471,9 +486,10 @@ impl Map {
     }
 
     /// Move every key and value onto a work stack and leave the map empty.
-    /// When another copy also holds the form of the map, move nothing: the
-    /// last copy moves the pairs. `Term` uses this to drop a deep map
-    /// without recursion.
+    /// Take the pairs of the form and of each HAMT node only from its last
+    /// holder: a form or a node that another map also holds stays with that
+    /// map, which moves the pairs when it drops last. `Term` uses this to
+    /// drop a deep map without recursion.
     ///
     /// # Examples
     ///
@@ -488,11 +504,14 @@ impl Map {
     /// assert_eq!(pending, [Term::Integer(1), Term::Integer(2)]);
     /// ```
     pub(crate) fn drain_into(&mut self, pending: &mut Vec<Term>) {
-        // A shared representation stays with its other copies; the last copy drains it.
-        let Some(repr) = Rc::get_mut(&mut self.repr) else {
+        let repr = std::mem::replace(&mut self.repr, Arc::new(Repr::Flat(Vec::new())));
+        // Of the holders that drop an `Arc` at the same time, exactly one gets the value
+        // (`Arc::into_inner`). `Arc::get_mut` can fail for each of them, so the last drop
+        // would then recurse into the value.
+        let Some(repr) = Arc::into_inner(repr) else {
             return;
         };
-        let root = match std::mem::replace(repr, Repr::Flat(Vec::new())) {
+        let root = match repr {
             Repr::Flat(pairs) => {
                 pending.extend(pairs.into_iter().flat_map(|(key, value)| [key, value]));
                 return;
@@ -504,7 +523,9 @@ impl Map {
             for child in children {
                 match child {
                     Child::Leaf(key, value) => pending.extend([key, value]),
-                    Child::Node(node) => nodes.push(node.children),
+                    Child::Node(node) => {
+                        nodes.extend(Arc::into_inner(node).map(|node| node.children))
+                    }
                     Child::Collision(pairs) => {
                         pending.extend(pairs.into_iter().flat_map(|(key, value)| [key, value]));
                     }
@@ -643,8 +664,7 @@ impl Map {
 ///   (`erl_map.c:1742-1766`).
 ///
 /// ERTS also takes a subtree that both maps share in memory with no step
-/// (`erl_map.c:1608-1612`). PBeam terms share no memory, so PBeam walks such
-/// a subtree.
+/// (`erl_map.c:1608-1612`). PBeam walks such a subtree.
 ///
 /// # Examples
 ///
@@ -829,7 +849,7 @@ impl Hamt {
             }
             let child = &mut node.children[index];
             match child {
-                Child::Node(inner) => node = inner,
+                Child::Node(inner) => node = Arc::make_mut(inner),
                 Child::Leaf(existing, existing_value) => {
                     if *existing == key {
                         *existing_value = value;
@@ -977,16 +997,16 @@ impl Node {
             } else {
                 (second, first)
             };
-            Child::Node(Node {
+            Child::Node(Arc::new(Node {
                 bitmap: (1 << first_slot) | (1 << second_slot),
                 children: vec![Child::Leaf(low.1, low.2), Child::Leaf(high.1, high.2)],
-            })
+            }))
         };
         for depth in (level..depth).rev() {
-            child = Child::Node(Node {
+            child = Child::Node(Arc::new(Node {
                 bitmap: 1 << slot(path, depth),
                 children: vec![child],
-            });
+            }));
         }
         child
     }
