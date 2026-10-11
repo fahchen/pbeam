@@ -362,7 +362,7 @@ In the decisions of #338, the guest runs in the root process of `pbeam_boot`. Ea
 
 The kernel tree and the application tree are separate supervision trees. Their authority is controlled separately:
 
-- The kernel tree has no capability check. It contains `init`, `erl_prim_loader`, `application_controller`, the kernel `application_master`, and the full `kernel_sup` tree, with `code_server`. These processes are the boot processes. The launcher trusts them as it trusts itself.
+- The kernel tree has no capability check. It contains `init`, `erl_prim_loader`, `application_controller`, the kernel `application_master`, and the full `kernel_sup` tree, with `code_server` and `error_handler`. These processes are the boot processes. The launcher trusts them as it trusts itself. `error_handler` answers the export entry of a function that a module does not export (#447), and it reads the code path through `code_server` or `init`.
 - The policy controls the application tree. The application tree is the `application_master` of the user application, its top supervisor, and their descendants. The code of `-eval` and `-s` is also in the application tree. The policy `initial/1` gives the capabilities of the application root. After that, the existing rules of check, delegation, and revocation apply.
 - When an application process calls a kernel service, for example the IO server that writes to the terminal, the runtime checks the capabilities of the caller (see [Runtime-to-boot gate](#runtime-to-boot-gate) and [IO service entry](#io-service-entry)).
 
