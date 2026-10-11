@@ -64,8 +64,8 @@ that only select code or optimize execution.
 ## Task scope expands beyond measured behavior
 
 Implement only behavior that the task owns and that the measured path requires.
-Leave other instructions and BIFs on the unsupported path until their task
-owns them. Update the task scope and follow-up ownership before adding shared
+Leave other instructions and BIFs on the unsupported path until their task owns
+them. Update the task scope and follow-up ownership before adding shared
 decoding or fixture coverage.
 
 ## Changes exceed the measured task path
