@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::{Child, Direction, HAMT_MAX_LEVEL, Hamt, Map, Node, Repr, encode_path, map_hash};
 use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom};
@@ -103,7 +103,7 @@ fn orders_atoms_in_list_keys_by_name_in_a_flatmap() {
     let mut table = AtomTable::new();
     let mut atom = |name: &str| Term::Atom(table.put(name).unwrap());
     let (z, a, v) = (atom("z"), atom("a"), atom("v"));
-    let list = |term: &Term| Term::List(vec![term.clone()]);
+    let list = |term: &Term| Term::list_from(vec![term.clone()]);
     let map = Map::from_pairs(vec![
         (list(&z), v.clone()),
         (a.clone(), v.clone()),
@@ -123,11 +123,8 @@ fn hashes_tuple_keys_with_the_internal_hash() {
     let keys = [
         Term::Tuple(vec![]),
         tuple,
-        Term::List(vec![Term::Tuple(vec![])]),
-        Term::ImproperList(
-            vec![Term::Integer(1)],
-            Box::new(Term::Tuple(vec![Term::Integer(2)])),
-        ),
+        Term::list_from(vec![Term::Tuple(vec![])]),
+        Term::list_with_tail(vec![Term::Integer(1)], Term::Tuple(vec![Term::Integer(2)])),
     ];
     for key in keys {
         assert_eq!(map_hash(&key), Some(internal_hash(&key)));
@@ -137,25 +134,22 @@ fn hashes_tuple_keys_with_the_internal_hash() {
 
 #[test]
 fn rejects_list_and_tuple_keys_with_unsupported_elements() {
-    assert_eq!(
-        map_hash(&Term::List(vec![])),
-        Some(internal_hash(&Term::List(vec![])))
-    );
+    assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
     let empty_map = || Term::Map(Map::new());
     let unsupported = [
-        Term::List(vec![Term::Integer(1), empty_map()]),
-        Term::List(vec![Term::List(vec![empty_map()])]),
-        Term::List(vec![Term::Integer(1 << 59)]),
+        Term::list_from(vec![Term::Integer(1), empty_map()]),
+        Term::list_from(vec![Term::list_from(vec![empty_map()])]),
+        Term::list_from(vec![Term::Integer(1 << 59)]),
         // {<<>>}, {1, #{}}, and {[1 bsl 59]}: a tuple with an element that is not supported.
         Term::Tuple(vec![Term::Binary(vec![])]),
         Term::Tuple(vec![Term::Integer(1), empty_map()]),
-        Term::Tuple(vec![Term::List(vec![Term::Integer(1 << 59)])]),
+        Term::Tuple(vec![Term::list_from(vec![Term::Integer(1 << 59)])]),
         // [1|#{}], [1|<<>>], and [[1|#{}]]: an improper list tail that is not supported.
-        Term::ImproperList(vec![Term::Integer(1)], Box::new(empty_map())),
-        Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Binary(vec![]))),
-        Term::List(vec![Term::ImproperList(
+        Term::list_with_tail(vec![Term::Integer(1)], empty_map()),
+        Term::list_with_tail(vec![Term::Integer(1)], Term::Binary(vec![])),
+        Term::list_from(vec![Term::list_with_tail(
             vec![Term::Integer(1)],
-            Box::new(empty_map()),
+            empty_map(),
         )]),
     ];
     for key in unsupported {
@@ -174,15 +168,15 @@ fn rejects_list_and_tuple_keys_with_unsupported_elements() {
 fn hashes_improper_list_keys_with_their_tail_as_erts() {
     // ERTS 29.1.1: maps:keys of #{[1|2] => v, [1,2|3] => v, [[1|2]|3] => v,
     // [true|false] => v, [256|1] => v, [[1]|2] => v, [[]|-1] => v, 1 => v, ..., 26 => v}.
-    let improper = |elements: Vec<Term>, tail| Term::ImproperList(elements, Box::new(tail));
+    let improper = |elements: Vec<Term>, tail| Term::list_with_tail(elements, tail);
     let int = Term::Integer;
     let one_two = || improper(vec![int(1)], int(2));
     let one_two_three = || improper(vec![int(1), int(2)], int(3));
     let nested = || improper(vec![one_two()], int(3));
     let booleans = || improper(vec![Term::static_atom("true")], Term::static_atom("false"));
     let large = || improper(vec![int(256)], int(1));
-    let list_head = || improper(vec![Term::List(vec![int(1)])], int(2));
-    let nil_head = || improper(vec![Term::List(vec![])], int(-1));
+    let list_head = || improper(vec![Term::list_from(vec![int(1)])], int(2));
+    let nil_head = || improper(vec![Term::nil()], int(-1));
     let lists = [
         one_two(),
         one_two_three(),
@@ -394,16 +388,14 @@ fn shares_the_form_of_a_map_between_the_copies_of_a_term() {
     // A copy of the term, also a copy of a term that holds the map, gets the same form.
     for size in [2, 40] {
         let map = Term::Map(integers(1..=size));
-        let tuple = Term::Tuple(vec![Term::List(vec![map.clone()])]);
+        let tuple = Term::Tuple(vec![Term::list_from(vec![map.clone()])]);
         let tuple = tuple.clone();
         let Term::Tuple(copied) = &tuple else {
             unreachable!()
         };
-        let Term::List(copied) = &copied[0] else {
-            unreachable!()
-        };
-        for copy in [&map.clone(), &copied[0]] {
-            assert!(Rc::ptr_eq(&map_of(&map).repr, &map_of(copy).repr));
+        let copied = copied[0].list_head().unwrap();
+        for copy in [&map.clone(), copied] {
+            assert!(Arc::ptr_eq(&map_of(&map).repr, &map_of(copy).repr));
             assert_eq!(copy, &map);
         }
     }
@@ -416,14 +408,14 @@ fn copies_a_shared_form_before_a_change() {
             let map = integers(1..=size);
             let mut copy = map.clone();
             change(&mut copy);
-            assert!(!Rc::ptr_eq(&map.repr, &copy.repr));
+            assert!(!Arc::ptr_eq(&map.repr, &copy.repr));
             assert_eq!(keys(&map), keys(&integers(1..=size)));
             assert!(map.iter().all(|(_, value)| *value == atom("v")));
             assert_eq!(map.is_hashmap(), size > 32);
             // The copy that changed is only owner of its form now, so a second change does not copy it.
-            let form = Rc::as_ptr(&copy.repr);
+            let form = Arc::as_ptr(&copy.repr);
             change(&mut copy);
-            assert_eq!(Rc::as_ptr(&copy.repr), form);
+            assert_eq!(Arc::as_ptr(&copy.repr), form);
         }
     };
     change(|map| *map.get_mut(&Term::Integer(1)).unwrap() = atom("w"));
@@ -437,6 +429,53 @@ fn copies_a_shared_form_before_a_change() {
     grown.insert(Term::Integer(33), atom("v")).unwrap();
     assert_eq!((flat.len(), flat.is_hashmap()), (32, false));
     assert_eq!((grown.len(), grown.is_hashmap()), (33, true));
+}
+
+/// Check that `copy` holds a new node for each node of `map` on the path of
+/// `hash`, and the same node for each node of `map` off the path. Return the
+/// number of shared nodes.
+fn check_path_copy(map: &Node, copy: &Node, hash: u64, level: u32) -> usize {
+    let mut shared = 0;
+    for slot in 0..16 {
+        let (Some(Child::Node(old)), Some(Child::Node(new))) = (map.child(slot), copy.child(slot))
+        else {
+            continue;
+        };
+        if slot == super::slot(hash, level) {
+            assert!(!Arc::ptr_eq(old, new), "level {level} slot {slot}");
+            shared += check_path_copy(old, new, hash, level + 1);
+        } else {
+            assert!(Arc::ptr_eq(old, new), "level {level} slot {slot}");
+            shared += 1;
+        }
+    }
+    shared
+}
+
+#[test]
+fn copies_only_the_hashmap_nodes_on_the_path_of_a_change() {
+    // ERTS 29.1.1 `erts_hashmap_insert` copies the nodes on the path of the key, and the new
+    // map holds each other node of the old map (`erl_map.c:2477-2503`, `2659-2792`).
+    let map = integers(1..=1000);
+    let change = |key: i64, shared: usize, change: fn(&mut Map, Term)| {
+        let mut copy = map.clone();
+        change(&mut copy, Term::Integer(key));
+        let (Repr::Hash(old), Repr::Hash(new)) = (&*map.repr, &*copy.repr) else {
+            panic!("not a hashmap")
+        };
+        let hash = map_hash(&Term::Integer(key)).unwrap();
+        // The keys 1..1000 fill the 16 slots of the root with nodes: 15 are off the path. The
+        // other shared nodes are below the root.
+        assert_eq!(check_path_copy(&old.root, &new.root, hash, 0), shared);
+        assert_eq!(
+            map.get(&Term::Integer(key)),
+            (key <= 1000).then_some(&atom("v"))
+        );
+        assert_eq!(copy.get(&Term::Integer(key)), Some(&atom("w")));
+    };
+    change(500, 28, |map, key| map.insert(key, atom("w")).unwrap());
+    change(2000, 29, |map, key| map.insert(key, atom("w")).unwrap());
+    change(500, 28, |map, key| *map.get_mut(&key).unwrap() = atom("w"));
 }
 
 #[test]
@@ -455,6 +494,18 @@ fn drains_the_pairs_of_a_map_only_from_the_last_copy() {
         assert_eq!(copy.len(), 0);
         pending.clear();
     }
+
+    // A change shares the nodes off its path. The map that drains first takes only the pairs
+    // of the nodes that it holds alone, and the last holder of a shared node takes its pairs.
+    let mut map = integers(1..=1000);
+    let mut copy = map.clone();
+    copy.insert(Term::Integer(2000), atom("w")).unwrap();
+    map.drain_into(&mut pending);
+    assert_eq!(pending.len(), 2 * 6);
+    drop(map);
+    pending.clear();
+    copy.drain_into(&mut pending);
+    assert_eq!(pending.len(), 2 * 1001);
 }
 
 #[test]
@@ -480,7 +531,7 @@ fn sorts_pairs_by_the_flatmap_key_order() {
     // {badkey,{abs}}: in a tuple, atoms compare by name. A tuple comes
     // before a map, and a map before [].
     let mut compound = vec![
-        (Term::List(vec![]), Term::Integer(1)),
+        (Term::nil(), Term::Integer(1)),
         (Term::Map(Map::new()), Term::Integer(2)),
         (
             Term::Tuple(vec![Term::static_atom("value")]),
@@ -525,24 +576,33 @@ fn builds_the_same_map_from_pairs_in_any_order() {
 fn splits_a_leaf_into_nodes_until_the_hashes_differ() {
     let leaf = |key: i64| (key as u64, Term::Integer(key), Term::Integer(key));
     // 0x101 and 0x201 select the same slot at levels 0 and 1, and slots 1 and 2 at level 2.
+    let child = Node::split(0, leaf(0x201), leaf(0x101));
+    let (bitmap, children) = node_of(&child);
+    assert_eq!((bitmap, children.len()), (0b10, 1));
+    let (bitmap, children) = node_of(&children[0]);
+    assert_eq!((bitmap, children.len()), (1, 1));
+    let (bitmap, children) = node_of(&children[0]);
+    assert_eq!(bitmap, 0b110);
     assert!(matches!(
-        Node::split(0, leaf(0x201), leaf(0x101)),
-        Child::Node(Node { bitmap: 0b10, children }) if matches!(
-        &children[..],
-        [Child::Node(Node { bitmap: 1, children })] if matches!(
-            &children[..],
-            [Child::Node(Node { bitmap: 0b110, children })] if matches!(
-                &children[..],
-                [Child::Leaf(Term::Integer(0x101), _), Child::Leaf(Term::Integer(0x201), _)]
-            )
-        )
-        )
+        children,
+        [
+            Child::Leaf(Term::Integer(0x101), _),
+            Child::Leaf(Term::Integer(0x201), _)
+        ]
     ));
+}
+
+/// Return the bitmap and the children of a node child.
+fn node_of(child: &Child) -> (u16, &[Child]) {
+    let Child::Node(node) = child else {
+        panic!("not a node child")
+    };
+    (node.bitmap, &node.children)
 }
 
 #[test]
 fn keeps_keys_with_equal_hashes_in_a_collision_child() {
-    let key = |element: i64| Term::List(vec![Term::Integer(element)]);
+    let key = |element: i64| Term::list_from(vec![Term::Integer(element)]);
     // Two keys with equal hashes at the last level give a collision child in the term order.
     let child = Node::split(
         HAMT_MAX_LEVEL,
@@ -602,8 +662,8 @@ fn keeps_keys_with_equal_hashes_in_a_collision_child() {
     );
 
     // ERTS 29.1.1: these two lists have equal map hashes.
-    let first = Term::List(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
-    let second = Term::List(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
+    let first = Term::list_from(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
+    let second = Term::list_from(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
     assert_eq!(map_hash(&first), map_hash(&second));
     let mut map = integers(1..=32);
     map.insert(first.clone(), Term::Integer(1)).unwrap();
@@ -632,8 +692,8 @@ fn takes_a_whole_collision_node_in_a_chunk() {
     // `walks_collision_nodes_and_bignum_paths_as_pinned_erts` in
     // `tests/integration/logger_start.rs` checks these maps and paths against the pinned ERTS.
     // ERTS 29.1.1: these two lists have equal map hashes, so they share a collision node.
-    let a = Term::List(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
-    let b = Term::List(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
+    let a = Term::list_from(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
+    let b = Term::list_from(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
     let before = [
         19, 213, 340, 110, 91, 164, 399, 139, 361, 212, 41, 114, 100, 29, 347, 365, 171, 140, 13,
         42, 149, 55, 2, 146, 372, 317, 191, 316, 202, 192, 233,
@@ -775,8 +835,8 @@ fn counts_the_steps_of_the_erts_hashmap_merge() {
 
     // ERTS 29.1.1: these two lists have equal map hashes, so the walk
     // reaches the collision level 16 for them.
-    let first = Term::List(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
-    let second = Term::List(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
+    let first = Term::list_from(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
+    let second = Term::list_from(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
     let with = |key: &Term| {
         let mut map = range(1, 32);
         map.insert(key.clone(), Term::Integer(1)).unwrap();
@@ -786,6 +846,30 @@ fn counts_the_steps_of_the_erts_hashmap_merge() {
         (with(&first), with(&second), 10),
         (with(&first), range(1, 33), 6),
         (with(&first), with(&first), 7),
+    ];
+    for (map, other, cost) in costs {
+        assert_eq!(map.merge_steps(&other).map(|steps| steps / 8), Some(cost));
+    }
+
+    // ERTS 29.1.1: a node that both maps hold costs no step (`erl_map.c:1608-1612`), and two
+    // copies of one map hold one root. A change shares the nodes off its path.
+    let map = range(1, 1000);
+    let changed = |map: &Map, keys: &[i64]| {
+        let mut copy = map.clone();
+        for key in keys {
+            copy.insert(Term::Integer(*key), atom("x")).unwrap();
+        }
+        copy
+    };
+    let twice = changed(&changed(&map, &[500]), &[600]);
+    let costs = [
+        (map.clone(), changed(&map, &[500]), 5),
+        (changed(&map, &[500]), map.clone(), 5),
+        (map.clone(), changed(&map, &[2000]), 5),
+        (map.clone(), changed(&map, &[1, 2, 3, 4, 5, 6, 7, 8]), 23),
+        (changed(&map, &[500]), twice, 9),
+        (map.clone(), map.clone(), 0),
+        (map.clone(), range(1, 1000), 213),
     ];
     for (map, other, cost) in costs {
         assert_eq!(map.merge_steps(&other).map(|steps| steps / 8), Some(cost));

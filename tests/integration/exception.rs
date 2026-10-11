@@ -81,7 +81,7 @@ fn adds_the_stack_trace_to_a_caught_error() {
         program
             .execute("exception_probe", "catch_stub", &[])
             .unwrap(),
-        pair(atom("EXIT"), pair(atom("undef"), Term::List(Vec::new())))
+        pair(atom("EXIT"), pair(atom("undef"), Term::nil()))
     );
 }
 
@@ -105,7 +105,7 @@ fn raises_the_first_argument_of_error_3_as_an_error() {
     let error = |reason| pair(atom("error"), reason);
     assert_eq!(
         program.execute("exception_probe", "error3", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             error(atom("badarg")),
             error(pair(atom("my"), atom("reason"))),
             error(atom("x")),

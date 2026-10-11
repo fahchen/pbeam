@@ -17,7 +17,7 @@ fn matches_erts_demonitor_options_and_argument_errors() {
     let erts_internal = pinned_beam("erts_internal");
     let program = BeamProgram::load(&[&erlang, &erts_internal, DEMONITOR_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let atoms = |names: &[&str]| Term::List(names.iter().map(|name| atom(name)).collect());
+    let atoms = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
     let removed = ["true", "true", "false", "false", "false", "false"];
     let fired = [
         ("true", "down"),
@@ -37,11 +37,10 @@ fn matches_erts_demonitor_options_and_argument_errors() {
             atom("true"),
             atoms(&removed),
             atoms(&removed),
-            Term::List(
+            Term::list_from(
                 fired
                     .iter()
                     .map(|(result, down)| Term::Tuple(vec![atom(result), atom(down)]))
-                    .collect()
             ),
         ])
     );

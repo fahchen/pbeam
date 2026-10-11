@@ -108,7 +108,7 @@ const CASES: &[(&str, &str)] = &[
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![])), "[]");
+/// assert_eq!(text(&Term::nil()), "[]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
@@ -126,7 +126,9 @@ fn text(term: &Term) -> String {
             }
         }
         Term::Integer(value) => value.to_string(),
-        Term::List(elements) => format!("[{}]", join(elements)),
+        _ if let Some(elements) = term.proper_list() => {
+            format!("[{}]", join(&elements.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(elements) => format!("{{{}}}", join(elements)),
         // The expected results hold no pid and no reference. A wrong result
         // can hold one, so the text shows it for the failure message.

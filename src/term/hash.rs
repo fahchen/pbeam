@@ -100,9 +100,8 @@ pub(crate) fn internal_hash(term: &Term) -> u64 {
 enum Shape<'a> {
     /// The word of an atom, a small integer, `[]`, or a pid.
     Immediate(u64),
-    /// The cells of a list that is not empty, and the tail of an improper
-    /// list (`None` is `[]`).
-    List(&'a [Term], Option<&'a Term>),
+    /// The cells of a list that is not empty.
+    List(Cells<'a>),
     Tuple(&'a [Term]),
     Map(&'a Map),
     Binary(&'a [u8]),
@@ -118,7 +117,7 @@ enum Shape<'a> {
 ///
 /// ```rust,ignore
 /// assert!(matches!(shape(&Term::static_atom("true")), Shape::Immediate(0x4B)));
-/// assert!(matches!(shape(&Term::List(vec![])), Shape::Immediate(0x3B)));
+/// assert!(matches!(shape(&Term::nil()), Shape::Immediate(0x3B)));
 /// assert!(matches!(shape(&Term::Integer(1 << 59)), Shape::Bignum(_)));
 /// ```
 fn shape(term: &Term) -> Shape<'_> {
@@ -126,9 +125,11 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Atom(atom) => Shape::Immediate(atom_word(atom.index())),
         Term::Pid(ProcessId(number)) => Shape::Immediate((number << IMMED1_TAG_BITS) | PID_TAG),
         Term::Port(PortId(number)) => Shape::Immediate((number << IMMED1_TAG_BITS) | PORT_TAG),
-        Term::List(cells) if cells.is_empty() => Shape::Immediate(NIL),
-        Term::List(cells) => Shape::List(cells, None),
-        Term::ImproperList(cells, tail) => Shape::List(cells, Some(tail)),
+        Term::Nil => Shape::Immediate(NIL),
+        Term::Cons(_) => Shape::List(Cells {
+            first: None,
+            rest: term,
+        }),
         Term::Integer(value) => match term.small_integer() {
             Some(small) => {
                 Shape::Immediate(((small as u64) << IMMED1_TAG_BITS) | SMALL_INTEGER_TAG)
@@ -199,14 +200,56 @@ fn pair(low: u64, high: u64) -> u64 {
     low | (high << 32)
 }
 
+/// The ERTS cons cells of a list from one cell on: the head `first`, when
+/// it is `Some`, and then the cons cells of `rest`. The term after the last
+/// cell is the tail: `[]` for a proper list. `first` is `Some` only for the
+/// `[Key | Value]` cell of a collision node, where `rest` is the value.
+#[derive(Clone, Copy)]
+struct Cells<'a> {
+    first: Option<&'a Term>,
+    rest: &'a Term,
+}
+
+impl<'a> Cells<'a> {
+    /// Return the head of the next cell and the cells after it, or the tail
+    /// when no cell is left.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let value = Term::list_from([Term::Integer(120)]);
+    /// let cells = Cells { first: Some(&Term::Integer(1)), rest: &value };
+    /// let Ok((head, cells)) = cells.split() else { unreachable!() };
+    /// assert_eq!(head, &Term::Integer(1));
+    /// assert!(matches!(cells.split(), Ok((Term::Integer(120), _))));
+    /// assert!(matches!(Cells { first: None, rest: &Term::nil() }.split(), Err(Term::Nil)));
+    /// ```
+    fn split(self) -> Result<(&'a Term, Cells<'a>), &'a Term> {
+        let (head, rest) = match self.first {
+            Some(head) => (head, self.rest),
+            None => self.rest.cons_cell().ok_or(self.rest)?,
+        };
+        Ok((head, Cells { first: None, rest }))
+    }
+
+    /// Return true when no cell is left.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Cells { first: None, rest: &Term::Integer(1) }.is_empty());
+    /// ```
+    fn is_empty(self) -> bool {
+        self.split().is_err()
+    }
+}
+
 /// One step of the `make_internal_hash` work stack.
 enum Item<'a> {
     /// A term to hash.
     Term(&'a Term),
-    /// The cells of a list from one element, and the tail after them: `None`
-    /// is `[]`. A tail is `Some` only in the `[Key | Value]` cell of a
-    /// collision node.
-    Cells(&'a [Term], Option<&'a Term>),
+    /// The cells of a list from one cell on, and the tail after them.
+    Cells(Cells<'a>),
     /// A hashmap collision node, which ERTS hashes as the tuple of its
     /// `[Key | Value]` cells.
     Collision(&'a [(Term, Term)]),
@@ -392,7 +435,7 @@ fn make_internal_hash(term: &Term) -> u64 {
         };
         match item {
             Item::Term(term) => next = state.mix_term(&mut stack, term),
-            Item::Cells(cells, tail) => next = state.mix_cells(&mut stack, cells, tail),
+            Item::Cells(cells) => next = state.mix_cells(&mut stack, cells),
             Item::Collision(pairs) => next = state.mix_collision(&mut stack, pairs),
             Item::Node(node) => {
                 state.mix_alpha(TYPE_HASHMAP_NODE);
@@ -419,7 +462,7 @@ impl State {
     fn mix_term<'a>(&mut self, stack: &mut Vec<Item<'a>>, term: &'a Term) -> Option<Item<'a>> {
         match shape(term) {
             Shape::Immediate(word) => self.mix_immediate(word),
-            Shape::List(cells, tail) => return self.mix_cells(stack, cells, tail),
+            Shape::List(cells) => return self.mix_cells(stack, cells),
             Shape::Tuple(elements) => {
                 self.mix_alpha(TYPE_TUPLE);
                 self.mix_beta(elements.len() as u64);
@@ -505,60 +548,55 @@ impl State {
         None
     }
 
-    /// Mix the cells of a list from one element, with the tail after them
-    /// (`None` is `[]`), as the list path of `make_internal_hash` does
+    /// Mix the cells of a list from one cell on, with the tail after them,
+    /// as the list path of `make_internal_hash` does
     /// (`erl_term_hashing.c:1783-1841`): first the bytes in 4-byte string
     /// chunks, then one element that is not a byte. Return the item that
     /// continues at once.
     ///
     /// An immediate head is mixed at once, and the tail continues. A boxed
     /// head continues, and the tail waits on the work stack, after a CDR
-    /// mark when the tail is not a list. With no cells, `[]` mixes as an
-    /// immediate, and another tail continues as a term
+    /// mark when the tail is not a list. With no cells, the tail continues
+    /// as a term, so `[]` mixes as an immediate
     /// (`erl_term_hashing.c:2211-2213`, 2247-2251).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let (mut state, mut stack) = (State::default(), Vec::new());
-    /// let cells = [Term::Integer(104), Term::Tuple(vec![])];
-    /// assert!(matches!(state.mix_cells(&mut stack, &cells, None), Some(Item::Term(_))));
-    /// assert!(matches!(stack[..], [Item::Cells([], None), Item::CdrMarker]));
+    /// let list = Term::list_from([Term::Integer(104), Term::Tuple(vec![])]);
+    /// let cells = Cells { first: None, rest: &list };
+    /// assert!(matches!(state.mix_cells(&mut stack, cells), Some(Item::Term(_))));
+    /// assert!(matches!(stack[..], [Item::Cells(_), Item::CdrMarker]));
     /// // The `[Key | Value]` cell of a collision node with the value {}.
-    /// let tail = Term::Tuple(vec![]);
-    /// let next = state.mix_cells(&mut stack, &[], Some(&tail));
-    /// assert!(matches!(next, Some(Item::Term(Term::Tuple(_)))));
+    /// let (key, value) = (Term::Integer(1), Term::Tuple(vec![]));
+    /// let next = state.mix_cells(&mut stack, Cells { first: Some(&key), rest: &value });
+    /// assert!(matches!(next, Some(Item::Cells(_))));
     /// ```
     fn mix_cells<'a>(
         &mut self,
         stack: &mut Vec<Item<'a>>,
-        cells: &'a [Term],
-        tail: Option<&'a Term>,
+        mut cells: Cells<'a>,
     ) -> Option<Item<'a>> {
-        let (mut cells, mut tail) = rest(cells, tail);
         let (mut chunk, mut count) = (0, 0);
-        while let Some(value) = cells.first().and_then(byte) {
+        while let Ok((head, after)) = cells.split()
+            && let Some(value) = byte(head)
+        {
             chunk = (chunk << 8) | value;
             count += 1;
             if count == STRING_CHUNK {
                 self.mix_alpha(pair(TYPE_STRING | (count << 8), chunk));
                 (chunk, count) = (0, 0);
             }
-            (cells, tail) = rest(&cells[1..], tail);
+            cells = after;
         }
         if count > 0 {
             self.mix_alpha(pair(TYPE_STRING | (count << 8), chunk));
         }
-        let Some((head, cells)) = cells.split_first() else {
-            return match tail {
-                None => {
-                    self.mix_immediate(NIL);
-                    None
-                }
-                Some(tail) => Some(Item::Term(tail)),
-            };
+        let (head, cells) = match cells.split() {
+            Ok(split) => split,
+            Err(tail) => return Some(Item::Term(tail)),
         };
-        let (cells, tail) = rest(cells, tail);
         match shape(head) {
             Shape::Immediate(word) => {
                 self.mix_alpha(pair(TYPE_IMMEDIATE, TYPE_CAR));
@@ -566,10 +604,10 @@ impl State {
                 if cells.is_empty() {
                     self.mix_alpha(TYPE_CDR);
                 }
-                Some(Item::Cells(cells, tail))
+                Some(Item::Cells(cells))
             }
             _ => {
-                stack.push(Item::Cells(cells, tail));
+                stack.push(Item::Cells(cells));
                 if cells.is_empty() {
                     stack.push(Item::CdrMarker);
                 }
@@ -594,8 +632,8 @@ impl State {
     /// let next = state.mix_collision(&mut stack, &pairs);
     /// // The tuple mixes its type and arity, then one array element.
     /// assert_eq!(state.ticks, 3);
-    /// assert!(matches!(stack[..], [Item::Cells(_, Some(Term::Integer(100)))]));
-    /// assert!(matches!(next, Some(Item::Cells(_, Some(Term::Integer(200))))));
+    /// assert!(matches!(stack[..], [Item::Cells(Cells { rest: Term::Integer(100), .. })]));
+    /// assert!(matches!(next, Some(Item::Cells(Cells { rest: Term::Integer(200), .. }))));
     /// ```
     fn mix_collision<'a>(
         &mut self,
@@ -604,8 +642,12 @@ impl State {
     ) -> Option<Item<'a>> {
         self.mix_alpha(TYPE_TUPLE);
         self.mix_beta(pairs.len() as u64);
-        let cell =
-            |(key, value): &'a (Term, Term)| Item::Cells(std::slice::from_ref(key), Some(value));
+        let cell = |(key, value): &'a (Term, Term)| {
+            Item::Cells(Cells {
+                first: Some(key),
+                rest: value,
+            })
+        };
         let (last, pairs) = pairs.split_last()?;
         for pair in pairs {
             self.mix_alpha(TYPE_ARRAY_ELEMENT);
@@ -613,33 +655,6 @@ impl State {
         }
         Some(cell(last))
     }
-}
-
-/// Follow a list tail into its cells while no cells are left, so the next
-/// cell is the next ERTS cons cell. A tail is a list that is not empty only
-/// in the `[Key | Value]` cell of a collision node, when the value is such a
-/// list or an improper list. A tail `[]` stays, and mixes as an immediate.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let value = Term::List(vec![Term::Integer(120)]);
-/// let (cells, tail) = rest(&[], Some(&value));
-/// assert!(matches!((cells, tail), ([Term::Integer(120)], None)));
-/// let value = Term::ImproperList(vec![Term::Integer(120)], Box::new(Term::Integer(1)));
-/// let (cells, tail) = rest(&[], Some(&value));
-/// assert!(matches!((cells, tail), ([Term::Integer(120)], Some(Term::Integer(1)))));
-/// let tail = Term::Tuple(vec![]);
-/// assert!(matches!(rest(&[], Some(&tail)), ([], Some(Term::Tuple(_)))));
-/// ```
-fn rest<'a>(mut cells: &'a [Term], mut tail: Option<&'a Term>) -> (&'a [Term], Option<&'a Term>) {
-    while cells.is_empty() {
-        let Some(Shape::List(next, end)) = tail.map(shape) else {
-            break;
-        };
-        (cells, tail) = (next, end);
-    }
-    (cells, tail)
 }
 
 #[cfg(test)]

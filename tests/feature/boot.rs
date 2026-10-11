@@ -125,7 +125,7 @@ fn isolated_logger_boot() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let registered = |name: &str, value: &str| Term::Tuple(vec![atom(name), atom(value)]);
     let expected = Term::Tuple(vec![
-        Term::List(vec![atom("default")]),
+        Term::list_from(vec![atom("default")]),
         atom("notice"),
         Term::Map(
             Map::from_pairs(vec![
@@ -135,7 +135,7 @@ fn isolated_logger_boot() {
             ])
             .unwrap(),
         ),
-        Term::List(vec![
+        Term::list_from(vec![
             registered("application_controller", "true"),
             registered("logger", "true"),
             registered("logger_sup", "true"),
@@ -250,9 +250,9 @@ fn run_isolated(name: &str) {
 #[test]
 fn stops_the_boot_at_the_first_missing_otp_module() {
     // Without the pinned OTP modules, the boot process calls
-    // `logger_server:start_link/0` first, as start_clean.boot starts the
-    // kernel process `logger` first after `heart` (init.erl:1348-1350), and
-    // the run stops there.
+    // `erl_prim_loader:start/0` first, as the `init` boot process starts the
+    // loader before it runs start_clean.boot (init.erl:1196-1202), and the
+    // run stops there.
     let output = Command::new(env!("CARGO_BIN_EXE_pbeam"))
         .args([
             "pbeam_boot",
@@ -275,7 +275,7 @@ fn stops_the_boot_at_the_first_missing_otp_module() {
         ),
         (
             &b""[..],
-            &b"pbeam: unresolved external MFA logger_server:start_link/0\n"[..],
+            &b"pbeam: unresolved external MFA erl_prim_loader:start/0\n"[..],
             Some(1)
         )
     );

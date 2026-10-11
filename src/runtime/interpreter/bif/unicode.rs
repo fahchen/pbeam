@@ -82,13 +82,13 @@ fn cost_to_proc(process: &mut ProcessState, steps: i64) {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let chardata = Term::List(vec![Term::Integer(104), Term::Integer(105)]);
+/// let chardata = Term::list_from(vec![Term::Integer(104), Term::Integer(105)]);
 /// let result = characters_to_binary(&mut process, &chardata, &Term::static_atom("unicode"))?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes == b"hi"));
 /// let latin1 = Term::Binary(vec![200]);
 /// let result = characters_to_binary(&mut process, &latin1, &Term::static_atom("latin1"))?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes == [195, 136]));
-/// let foo = Term::List(vec![Term::static_atom("foo")]);
+/// let foo = Term::list_from(vec![Term::static_atom("foo")]);
 /// assert!(matches!(characters_to_binary(&mut process, &foo, &Term::static_atom("unicode"))?, BifResult::Raise { .. }));
 /// assert!(characters_to_binary(&mut process, &chardata, &Term::static_atom("utf16")).is_err());
 /// ```
@@ -114,8 +114,8 @@ pub(super) fn characters_to_binary(
             )));
         }
     };
-    let subject = match chardata {
-        Term::List(elements) if matches!(elements.as_slice(), [Term::Binary(_)]) => &elements[0],
+    let subject = match chardata.cons_cell() {
+        Some((binary @ Term::Binary(_), tail)) if tail.is_nil() => binary,
         _ => chardata,
     };
     let Some(cost) = utf8_need(subject, latin1) else {
@@ -170,7 +170,7 @@ fn utf8_turn(
     let start = left;
     let (rest, failed) = build_utf8(chardata, &mut left, latin1, &mut output);
     cost_to_proc(process, start - left);
-    let done = rest == Term::List(Vec::new());
+    let done = rest == Term::nil();
     if failed || (done && !output.leftover.is_empty()) {
         return Err(error(
             "unsupported unicode:characters_to_binary/2 result: ERTS returns an error or \
@@ -230,8 +230,8 @@ pub(super) fn utf8_trap(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let rest = leftover_before(vec![195], Term::List(vec![Term::Integer(97)]));
-/// assert_eq!(rest, Term::List(vec![Term::Binary(vec![195]), Term::Integer(97)]));
+/// let rest = leftover_before(vec![195], Term::list_from(vec![Term::Integer(97)]));
+/// assert_eq!(rest, Term::list_from(vec![Term::Binary(vec![195]), Term::Integer(97)]));
 /// ```
 fn leftover_before(leftover: Vec<u8>, rest: Term) -> Term {
     if leftover.is_empty() {
@@ -260,7 +260,7 @@ fn leftover_before(leftover: Vec<u8>, rest: Term) -> Term {
 /// ```rust,ignore
 /// let chardata = Term::Binary(b"hi".to_vec());
 /// let result = characters_to_list(&mut process, &chardata, &Term::static_atom("utf8"))?;
-/// assert!(matches!(result, BifResult::Value(Term::List(list)) if list == [Term::Integer(104), Term::Integer(105)]));
+/// assert!(matches!(result, BifResult::Value(list) if list == Term::list_from([Term::Integer(104), Term::Integer(105)])));
 /// let foo = Term::static_atom("foo");
 /// assert!(matches!(characters_to_list(&mut process, &foo, &Term::static_atom("latin1"))?, BifResult::Raise { .. }));
 /// let result = characters_to_list(&mut process, &chardata, &Term::static_atom("utf16"))?;
@@ -319,9 +319,9 @@ pub(super) fn characters_to_list(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let chardata = Term::List(vec![Term::Integer(97)]);
+/// let chardata = Term::list_from(vec![Term::Integer(97)]);
 /// let result = list_turn(&mut process, Utf8Output::default(), &chardata, 100, false);
-/// assert!(matches!(result, BifResult::Value(Term::List(_))));
+/// assert!(matches!(result, BifResult::Value(list) if list.is_list()));
 /// ```
 fn list_turn(
     process: &mut ProcessState,
@@ -334,12 +334,12 @@ fn list_turn(
     let (rest, failed) = build_utf8(chardata, &mut left, latin1, &mut output);
     cost_to_proc(process, start - left);
     let leftover = std::mem::take(&mut output.leftover);
-    let nil = Term::List(Vec::new());
+    let nil = Term::nil();
     let (reason, rest) = if failed {
         let rest = if leftover.is_empty() {
             rest
         } else {
-            Term::List(vec![Term::Binary(leftover), rest])
+            Term::list_from(vec![Term::Binary(leftover), rest])
         };
         (Some("error"), rest)
     } else if rest == nil && !leftover.is_empty() {
@@ -390,8 +390,8 @@ fn list_turn(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = list_trap(&mut process, b"a".to_vec(), 1, &Term::List(vec![Term::Integer(98)]), false)?;
-/// assert!(matches!(result, BifResult::Value(Term::List(list)) if list.len() == 2));
+/// let result = list_trap(&mut process, b"a".to_vec(), 1, &Term::list_from(vec![Term::Integer(98)]), false)?;
+/// assert!(matches!(result, BifResult::Value(list) if list.proper_list().is_some_and(|list| list.len() == 2)));
 /// ```
 ///
 /// # Errors
@@ -430,7 +430,7 @@ pub(super) fn list_trap(
 ///
 /// ```rust,ignore
 /// let result = analyze_turn(&mut process, b"hi", 0, 0)?;
-/// assert!(matches!(result, BifResult::Value(Term::List(list)) if list.len() == 2));
+/// assert!(matches!(result, BifResult::Value(list) if list.proper_list().is_some_and(|list| list.len() == 2)));
 /// ```
 ///
 /// # Errors
@@ -501,7 +501,7 @@ pub(super) fn analyze_turn(
 ///
 /// ```rust,ignore
 /// process.fcalls = 3;
-/// let trap = finish_list(&mut process, Term::List(vec![]), 40, 30, "characters_to_list_trap_2");
+/// let trap = finish_list(&mut process, Term::nil(), 40, 30, "characters_to_list_trap_2");
 /// assert!(matches!(trap, BifResult::TrapBif { arguments, .. } if arguments[1] == Term::Integer(10)));
 /// ```
 pub(super) fn finish_list(
@@ -539,7 +539,7 @@ pub(super) fn finish_list(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = finish_trap(&mut process, Term::List(vec![]), 5, "characters_to_list_trap_2")?;
+/// let result = finish_trap(&mut process, Term::nil(), 5, "characters_to_list_trap_2")?;
 /// assert!(matches!(result, BifResult::Value(_)));
 /// ```
 ///

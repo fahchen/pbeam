@@ -115,17 +115,21 @@ fn raises_badarg_with_the_erts_error_info_for_a_term_that_is_not_a_binary() {
             atom("bs_create_bin_probe"),
             atom("prefix"),
             Term::Integer(1),
-            Term::List(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::Tuple(vec![
                 atom("error_info"),
                 Term::Map(error_info),
             ])]),
         ]);
-        Term::Tuple(vec![atom("error"), atom("badarg"), Term::List(vec![frame])])
+        Term::Tuple(vec![
+            atom("error"),
+            atom("badarg"),
+            Term::list_from(vec![frame]),
+        ])
     };
     let values = [
         atom("other"),
         Term::Integer(1),
-        Term::List(Vec::new()),
+        Term::nil(),
         Term::Tuple(vec![atom("other")]),
     ];
     for value in values {
@@ -383,12 +387,16 @@ fn raises_badarg_with_the_erts_error_info_for_an_append_segment() {
             atom("bs_create_bin_append_probe"),
             atom(function),
             Term::Integer(2),
-            Term::List(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::Tuple(vec![
                 atom("error_info"),
                 Term::Map(error_info),
             ])]),
         ]);
-        Term::Tuple(vec![atom("error"), atom("badarg"), Term::List(vec![frame])])
+        Term::Tuple(vec![
+            atom("error"),
+            atom("badarg"),
+            Term::list_from(vec![frame]),
+        ])
     };
     let cases = [
         ("two", atom("other"), binary(b""), 1, "type", atom("other")),
@@ -400,14 +408,7 @@ fn raises_badarg_with_the_erts_error_info_for_an_append_segment() {
             "type",
             Term::Integer(1),
         ),
-        (
-            "two",
-            Term::List(Vec::new()),
-            binary(b""),
-            1,
-            "type",
-            Term::List(Vec::new()),
-        ),
+        ("two", Term::nil(), binary(b""), 1, "type", Term::nil()),
         ("two", binary(b"a"), atom("ab"), 2, "type", atom("ab")),
         ("two", atom("other"), atom("ab"), 2, "type", atom("ab")),
         (
@@ -1072,7 +1073,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
             atom("bs_create_bin_integer_probe"),
             atom(function),
             Term::Integer(arity as i64),
-            Term::List(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::Tuple(vec![
                 atom("error_info"),
                 Term::Map(error_info),
             ])]),
@@ -1090,7 +1091,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
             run_integer(
                 &program,
                 "catch_call",
-                &[atom(function), Term::List(arguments.clone())]
+                &[atom(function), Term::list_from(arguments.clone())]
             ),
             caught(function, arguments.len(), reason, cause),
             "{function}{arguments:?}"

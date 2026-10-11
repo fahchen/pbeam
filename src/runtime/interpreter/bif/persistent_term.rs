@@ -24,7 +24,7 @@ use crate::runtime::capability::{CapabilityKind, Operation};
 /// ```rust,ignore
 /// process.fcalls = 10;
 /// let all = get_all(&mut context)?;
-/// assert!(matches!(all, BifResult::Value(Term::List(pairs)) if pairs.is_empty()));
+/// assert!(matches!(all, BifResult::Value(pairs) if pairs.is_nil()));
 /// ```
 ///
 /// # Errors
@@ -46,7 +46,7 @@ pub(super) fn get_all(context: &mut BifContext<'_>) -> Result<BifResult, BeamErr
     let entries = pairs.len();
     Ok(get_all_trap(
         scheduler.current_process_mut(),
-        Term::List(pairs),
+        Term::list_from(pairs),
         entries,
     ))
 }
@@ -113,9 +113,9 @@ pub(super) fn get(
 ///
 /// ```rust,ignore
 /// process.fcalls = 10;
-/// assert!(matches!(get_all_trap(&mut process, Term::List(vec![]), 4), BifResult::Value(_)));
+/// assert!(matches!(get_all_trap(&mut process, Term::nil(), 4), BifResult::Value(_)));
 /// assert_eq!(process.fcalls, 6);
-/// let trap = get_all_trap(&mut process, Term::List(vec![]), 7);
+/// let trap = get_all_trap(&mut process, Term::nil(), 7);
 /// assert!(matches!(trap, BifResult::TrapBif { function: "get_all_trap", arguments, .. } if arguments[1] == Term::Integer(1)));
 /// assert_eq!(process.fcalls, 0);
 /// ```

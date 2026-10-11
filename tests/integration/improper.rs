@@ -38,7 +38,7 @@ fn integers(elements: &[i64]) -> Vec<Term> {
 
 /// Return an improper list of elements and a tail.
 fn improper(elements: Vec<Term>, tail: Term) -> Term {
-    Term::ImproperList(elements, Box::new(tail))
+    Term::list_with_tail(elements, tail)
 }
 
 #[test]
@@ -51,13 +51,13 @@ fn loads_compares_and_hashes_improper_list_literals_as_pinned_erts() {
     // (`make_internal_hash`, `erl_term_hashing.c:1783-1841`).
     let program = BeamProgram::load(&[IMPROPER_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let atoms = |names: &str| Term::List(names.split(',').map(atom).collect());
+    let atoms = |names: &str| Term::list_from(names.split(',').map(atom));
     let int = Term::Integer;
     let one_two = || improper(vec![int(1)], int(2));
     let nested = || improper(vec![one_two()], int(3));
     let hash_keys = [
         int(18),
-        improper(vec![Term::List(vec![int(1)])], int(2)),
+        improper(vec![Term::list_from(vec![int(1)])], int(2)),
         nested(),
         int(4),
         improper(vec![int(256)], int(1)),
@@ -71,9 +71,9 @@ fn loads_compares_and_hashes_improper_list_literals_as_pinned_erts() {
     ])
     .chain([improper(integers(&[1, 2]), int(3))])
     .chain(integers(&[1, 25, 20, 6, 11, 17, 24, 14]))
-    .chain([improper(vec![Term::List(vec![])], int(-1))])
+    .chain([improper(vec![Term::nil()], int(-1))])
     .chain(integers(&[3, 16, 21, 5, 26, 22]))
-    .collect();
+    .collect::<Vec<_>>();
     assert_eq!(
         program.execute("improper_probe", "literals", &[]).unwrap(),
         Term::Tuple(vec![
@@ -86,14 +86,14 @@ fn loads_compares_and_hashes_improper_list_literals_as_pinned_erts() {
             atoms("lt,ge,lt,lt,lt,lt,lt,ge,lt"),
             atoms("false,false,false,false,false,false,false,true,false"),
             atoms("false,true,false,false,false,false,false,true,false"),
-            Term::List(vec![
+            Term::list_from(vec![
                 atom("x"),
                 improper(vec![int(1)], atom("x")),
-                Term::List(vec![int(1)]),
+                Term::list_from(vec![int(1)]),
                 nested(),
             ]),
             atom("d"),
-            Term::List(hash_keys),
+            Term::list_from(hash_keys),
             atom("v"),
         ])
     );
@@ -123,7 +123,7 @@ fn builds_and_matches_improper_lists_as_pinned_erts() {
         program
             .execute("improper_probe", "instructions", &[])
             .unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("reply"),
             imp(),
             two(),
@@ -135,7 +135,7 @@ fn builds_and_matches_improper_lists_as_pinned_erts() {
             atom("nonempty"),
             atom("nil"),
             atom("other"),
-            Term::List(vec![two()]),
+            Term::list_from(vec![two()]),
             atom("true"),
         ])
     );
@@ -174,7 +174,7 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
     let imp = || improper(vec![int(1)], x());
     assert_eq!(
         program.execute("improper_probe", "list_bifs", &[]).unwrap(),
-        Term::List(
+        Term::list_from(
             [
                 imp(),
                 improper(integers(&[1, 2]), x()),
@@ -208,7 +208,6 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
                 badarg(),
                 badarg(),
             ])
-            .collect()
         )
     );
     assert_eq!(
@@ -240,9 +239,9 @@ fn gives_the_iodata_and_chardata_results_of_pinned_erts_for_improper_lists() {
     let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
     assert_eq!(
         program.execute("improper_probe", "iodata", &[]).unwrap(),
-        Term::List(vec![
-            Term::List(vec![binary(b"ab")]),
-            Term::List(vec![binary(b"abc")]),
+        Term::list_from(vec![
+            Term::list_from(vec![binary(b"ab")]),
+            Term::list_from(vec![binary(b"abc")]),
             badarg(),
             atom("ok"),
             badarg(),

@@ -155,14 +155,16 @@ const EXITS: &str = "[{3845,[{down,0,normal},{seen,false},{done,1000}]},\
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
         Term::Integer(value) => value.to_string(),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         Term::Binary(bytes) => {
             let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
@@ -182,7 +184,7 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
                 .unwrap(),
         )
     };
-    let options = [Term::List(vec![])];
+    let options = [Term::nil()];
     assert_eq!(run("puts", &options), PUTS);
     assert_eq!(run("put_trap", &[]), PUT_TRAP);
     assert_eq!(run("costs", &options), COSTS);

@@ -50,7 +50,7 @@ fn gives_the_byte_size_like_erts() {
     expected.extend(std::iter::repeat_n(badarg, 5));
     assert_eq!(
         program.execute("byte_size_probe", "main", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
 
     assert_eq!(

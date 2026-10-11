@@ -4,7 +4,7 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::host::{FilenameEncoding, filename_encoding};
-use crate::runtime::unicode::native_filename;
+use crate::runtime::unicode::{name_from_native, native_filename};
 
 /// Run `file:native_name_encoding()` for the file name encoding of the
 /// host, `encoding`: return `latin1` for Latin-1, else `utf8`, as
@@ -40,7 +40,7 @@ pub(super) fn native_name_encoding(encoding: FilenameEncoding) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let name = Term::List(vec![Term::Integer(97), Term::List(vec![Term::Integer(98)])]);
+/// let name = Term::list_from(vec![Term::Integer(97), Term::list_from(vec![Term::Integer(98)])]);
 /// assert!(matches!(internal_name2native(&name), BifResult::Value(Term::Binary(bytes)) if bytes == b"ab\0"));
 /// assert!(matches!(internal_name2native(&Term::Binary(b"a".to_vec())), BifResult::Value(Term::Binary(bytes)) if bytes == b"a\0"));
 /// assert!(matches!(internal_name2native(&Term::Binary(b"a\0".to_vec())), BifResult::Raise { .. }));
@@ -59,6 +59,46 @@ pub(super) fn internal_name2native(name: &Term) -> BifResult {
         }
         None => BifResult::badarg(),
     }
+}
+
+/// Run `prim_file:internal_native2name(Name)` for the file name encoding of
+/// the host, `encoding`: return the characters of the native bytes `Name`,
+/// as `prim_file_internal_native2name_1` (`erl_unicode.c:2735-2824`) does
+/// on a host that is not Windows (see [`name_from_native`]).
+///
+/// A term that is not a binary raises `badarg`, and `<<>>` gives `[]`
+/// (`erl_unicode.c:2750-2756`). Bytes that are not valid UTF-8 in a UTF-8
+/// encoding give `{error, warning}`: PBeam has no `+fn` emulator flag, so
+/// the warning type is the ERTS default (`erl_unicode.c:2774-2788`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [97, 233]
+/// let result = internal_native2name(&Term::Binary(b"a\xc3\xa9".to_vec()), FilenameEncoding::Utf8)?;
+/// // {error, warning}
+/// let result = internal_native2name(&Term::Binary(b"a\xff".to_vec()), FilenameEncoding::Utf8)?;
+/// assert!(matches!(internal_native2name(&Term::static_atom("a"), FilenameEncoding::Utf8)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// The runtime error of [`name_from_native`] for a composition on macOS.
+pub(super) fn internal_native2name(
+    name: &Term,
+    encoding: FilenameEncoding,
+) -> Result<BifResult, BeamError> {
+    let Term::Binary(bytes) = name else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(name_from_native(bytes, encoding)?.unwrap_or_else(
+        || {
+            Term::Tuple(vec![
+                Term::static_atom("error"),
+                Term::static_atom("warning"),
+            ])
+        },
+    )))
 }
 
 #[cfg(test)]

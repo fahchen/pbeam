@@ -5,7 +5,7 @@
 # `mix run` runs Mix.Tasks.Compile.Protocols, which consolidates each protocol of the code path that is not in OTP, with the implementations of the same code path (Mix.Compilers.Protocol, Elixir 1.20.4 lib/mix/lib/mix/compilers/protocol.ex:107-170). This script does the same step over the directory of the example and the Elixir code path, and writes each consolidated protocol to the consolidated directory. A consolidated protocol finds its implementation with a pattern match. An unconsolidated protocol calls Code.ensure_compiled/1, which calls code:ensure_loaded/1 (Elixir 1.20.4 lib/elixir/lib/protocol.ex:956-975).
 # The script consolidates only the protocols of Elixir. A protocol of the example stays unconsolidated.
 #
-# A module is called when it is a boot module, or when it is in the imports chunk of an example BEAM file or of a called module (beam_lib:chunks/2). Each implementation of a called consolidated protocol is also called, because the protocol calls the implementation that it finds at run time. The pbeam binary loads only the BEAM files that it gets, so it needs this transitive closure, not only the modules that the example imports. The imports chunk does not have the modules that a run calls with a module name in a variable, for example the child modules of a supervisor. The boot modules give these modules for the boot.
+# A module is called when it is a boot module, or when it is in the imports chunk of an example BEAM file or of a called module (beam_lib:chunks/2). A module of PBeam BIFs, such as pbeam_cap, is not a called module: the pbeam binary runs its functions, and no BEAM file defines it. Each implementation of a called consolidated protocol is also called, because the protocol calls the implementation that it finds at run time. The pbeam binary loads only the BEAM files that it gets, so it needs this transitive closure, not only the modules that the example imports. The imports chunk does not have the modules that a run calls with a module name in a variable, for example the child modules of a supervisor. The boot modules give these modules for the boot.
 # A called module is not given to the pbeam binary when the code path has no BEAM file for it, when the PBeam loader does not load its BEAM file (@not_loaded), or when PBeam does not give the ERTS result of the module (@not_given). The script does not search the imports of such a module. It writes each one to the unloaded list, one line for each module: the module, the BEAM file (empty when there is none), and the reason, with a tab between them. A call to such a module stops the pbeam run with the runtime error `unresolved external MFA`.
 #
 # The script prints one line for each called module that is not an example module, sorted by the module name. A line `pbeam <file>` gives the BEAM file for the pbeam run. For a consolidated protocol, it is the file in the consolidated directory. A line `erts <directory>` follows the first BEAM file of each directory that is not in OTP and not the consolidated directory. The ERTS run needs these directories in its code path.
@@ -29,6 +29,9 @@ defmodule ExampleBeams do
   @not_given %{
     :code_server => "PBeam has no code server"
   }
+
+  # Each module of PBeam BIFs that ERTS does not have. No BEAM file defines it: the pbeam binary runs its functions. pbeam_boot calls pbeam_cap:serve/2 and pbeam_cap:enter_runtime/2.
+  @pbeam_modules [:pbeam_cap]
 
   def called(path) do
     {:ok, {_module, [imports: imports]}} = :beam_lib.chunks(path, [:imports])
@@ -57,7 +60,7 @@ defmodule ExampleBeams do
   def closure([], found, unloaded, _consolidated), do: {found, unloaded}
 
   def closure([module | rest], found, unloaded, consolidated) do
-    if Map.has_key?(found, module) or Map.has_key?(unloaded, module) do
+    if Map.has_key?(found, module) or Map.has_key?(unloaded, module) or module in @pbeam_modules do
       closure(rest, found, unloaded, consolidated)
     else
       case {consolidated, beam_file(module)} do

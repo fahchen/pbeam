@@ -90,7 +90,7 @@ fn reads_only_supported_move_literals() {
     ));
     assert!(matches!(
         &read_move_operand(&[0x17, 0x10], &mut 0, &[], &literals).unwrap(),
-        Operand::Value(Term::List(values)) if values.is_empty()
+        Operand::Value(values) if values.is_nil()
     ));
     // erlc 29.1.1 writes {integer,18446744073709551616} as 0xF9, the
     // extra byte count 0, and nine payload bytes. It loads as an
@@ -106,10 +106,7 @@ fn reads_only_supported_move_literals() {
     assert!(read_move_operand(&[0x47, 0x20], &mut 0, &[], &literals).is_err());
     assert!(read_move_operand(&[0x27, 0x00], &mut 0, &[], &literals).is_err());
     assert!(read_move_operand(&[0x06], &mut 0, &[], &literals).is_err());
-    assert_eq!(
-        read_value(&[0x02], &mut 0, &[]).unwrap(),
-        Term::List(Vec::new())
-    );
+    assert_eq!(read_value(&[0x02], &mut 0, &[]).unwrap(), Term::nil());
 }
 
 #[test]
@@ -177,10 +174,10 @@ fn decodes_raise_with_a_raw_stack_trace_and_a_reason() {
             },
             Instruction::Raise {
                 trace: Operand::Y(0),
-                value: Operand::Value(Term::List(values)),
+                value: Operand::Value(values),
             },
             Instruction::End,
-        ] if values.is_empty()
+        ] if values.is_nil()
     ));
 }
 
@@ -223,10 +220,10 @@ fn decodes_the_error_path_instructions() {
             Instruction::RawRaise,
             Instruction::TaggedError {
                 tag: "case_clause",
-                value: Operand::Value(Term::List(values)),
+                value: Operand::Value(values),
             },
             Instruction::End,
-        ] if values.is_empty()
+        ] if values.is_nil()
     ));
 }
 
@@ -881,7 +878,7 @@ fn reads_each_bs_match_command_and_rejects_bad_command_lists() {
         "signed",
     ];
     let atoms: Vec<Atom> = names.iter().map(|name| table.put(name).unwrap()).collect();
-    let literals = vec![Some(Term::List(vec![
+    let literals = vec![Some(Term::list_from(vec![
         Term::Atom(atoms[8].clone()),
         Term::Atom(atoms[9].clone()),
     ]))];
@@ -1239,7 +1236,7 @@ fn decodes_the_list_record_and_receive_wait_instructions_of_pinned_gen_statem() 
         ] if matches!(copy.as_slice(), [(5, Operand::Y(2))])
             && matches!(
                 inplace.as_slice(),
-                [(4, Operand::X(3)), (5, Operand::Value(Term::List(nil)))] if nil.is_empty()
+                [(4, Operand::X(3)), (5, Operand::Value(nil))] if nil.is_nil()
             )
     ));
 }
@@ -1952,8 +1949,8 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
         .map(|name| Atom::from_static(name).unwrap())
         .collect();
     let literals = [
-        Some(Term::List(vec![Term::static_atom("little")])),
-        Some(Term::List(vec![
+        Some(Term::list_from(vec![Term::static_atom("little")])),
+        Some(Term::list_from(vec![
             Term::static_atom("signed"),
             Term::static_atom("native"),
         ])),

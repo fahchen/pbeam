@@ -42,7 +42,7 @@ fn makes_tables_and_raises_badarg_as_pinned_erts() {
     let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program.execute("ets_probe", "new", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("reference"),
             atom("ets_probe_named"),
             badarg(),
@@ -51,7 +51,7 @@ fn makes_tables_and_raises_badarg_as_pinned_erts() {
             atom("reference"),
             atom("reference"),
             atom("reference"),
-            Term::List(vec![badarg(); 19]),
+            Term::list_from(vec![badarg(); 19]),
         ])
     );
     assert_eq!(
@@ -72,7 +72,7 @@ fn deletes_the_tables_of_an_owner_before_its_down_message_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("ets_probe", "owner_exit", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             Term::Tuple(vec![atom("error"), atom("badarg")]),
             atom("stopped"),
             atom("ets_probe_owned"),
@@ -100,14 +100,14 @@ fn inserts_objects_as_pinned_erts() {
     let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program.execute("ets_probe", "insert", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("true"),
             atom("true"),
             atom("true"),
             atom("true"),
             atom("true"),
-            Term::List(vec![badarg(); 9]),
-            Term::List(vec![atom("v1"), atom("v4"), atom("v3"), atom("d")]),
+            Term::list_from(vec![badarg(); 9]),
+            Term::list_from(vec![atom("v1"), atom("v4"), atom("v3"), atom("d")]),
             atom("v"),
         ])
     );
@@ -132,7 +132,7 @@ fn looks_up_elements_as_pinned_erts() {
     let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program.execute("ets_probe", "lookup", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("v"),
             atom("x"),
             atom("d"),
@@ -142,7 +142,7 @@ fn looks_up_elements_as_pinned_erts() {
             badarg(),
             atom("true"),
             atom("d"),
-            Term::List(vec![badarg(); 8]),
+            Term::list_from(vec![badarg(); 8]),
         ])
     );
     assert_eq!(
@@ -165,8 +165,8 @@ fn checks_table_access_as_pinned_erts() {
     let none = || Term::Tuple(vec![badarg(), badarg(), badarg()]);
     assert_eq!(
         program.execute("ets_probe", "access", &[]).unwrap(),
-        Term::List(vec![
-            Term::List(vec![
+        Term::list_from(vec![
+            Term::list_from(vec![
                 all(),
                 Term::Tuple(vec![atom("owner"), badarg(), badarg()]),
                 none(),
@@ -179,7 +179,7 @@ fn checks_table_access_as_pinned_erts() {
             badarg(),
             atom("ets_probe_owned"),
             atom("d"),
-            Term::List(vec![atom("stopped"); 5]),
+            Term::list_from(vec![atom("stopped"); 5]),
             badarg(),
         ])
     );
@@ -207,7 +207,7 @@ fn reads_the_application_environment_from_ac_tab_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("ets_probe", "main", &[]).unwrap(),
-        Term::List(vec![atom("default"), atom("true"), atom("value")])
+        Term::list_from(vec![atom("default"), atom("true"), atom("value")])
     );
     let output = Command::new("erl")
         .args([

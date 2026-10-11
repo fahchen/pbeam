@@ -31,7 +31,7 @@ fn runs_receive_timeouts_as_pinned_erts() {
     let elapsed = start.elapsed();
     assert_eq!(
         receive_after,
-        Term::List(vec![
+        Term::list_from(vec![
             atom("timeout"),
             atom("early"),
             atom("timeout"),
@@ -54,7 +54,7 @@ fn runs_receive_timeouts_as_pinned_erts() {
         program
             .execute("timer_probe", "timeout_values", &[])
             .unwrap(),
-        Term::List(timeout_values)
+        Term::list_from(timeout_values)
     );
 
     // A timer of 4294967295 ms and `infinity` both wait for a message.
@@ -62,7 +62,7 @@ fn runs_receive_timeouts_as_pinned_erts() {
         program
             .execute("timer_probe", "receive_limits", &[])
             .unwrap(),
-        Term::List(vec![atom("ok"), atom("ok"), atom("other"), atom("none")])
+        Term::list_from(vec![atom("ok"), atom("ok"), atom("other"), atom("none")])
     );
 
     let reference = Command::new("erl")
@@ -89,7 +89,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     let program = BeamProgram::load(&[&erlang, TIMER_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let badargs = |count| {
-        Term::List(vec![
+        Term::list_from(vec![
             Term::Tuple(vec![atom("error"), atom("badarg")]);
             count
         ])
@@ -103,7 +103,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     // `1814-1815`).
     assert_eq!(
         run("start_timer"),
-        Term::List(vec![atom("true"), atom("true"), atom("none"), badargs(7)])
+        Term::list_from(vec![atom("true"), atom("true"), atom("none"), badargs(7)])
     );
 
     // `cancel_timer/2` gives the time left, `false`, or `ok`, and sends
@@ -114,7 +114,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     // raise `badarg` (`erl_hl_timer.c:2237-2398`).
     assert_eq!(
         run("cancel_timer"),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("true"),
             atom("false"),
             atom("ok"),
@@ -138,7 +138,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     // name that no process has drops the message (`erl_hl_timer.c:1165-1171`).
     assert_eq!(
         run("receiver_exit"),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("false"),
             atom("false"),
             atom("named"),
@@ -150,7 +150,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     let order = [1, 2, 3, 4, 40, 50, 60].map(Term::Integer).to_vec();
     assert_eq!(
         run("order"),
-        Term::List(vec![Term::List(order), atom("recv"), atom("bif")])
+        Term::list_from(vec![Term::list_from(order), atom("recv"), atom("bif")])
     );
 
     // An end after `ERTS_MONOTONIC_END` and a 64-bit overflow raise `badarg`
@@ -158,7 +158,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         run("timer_limits"),
-        Term::List(vec![atom("ok"), atom("ok"), badarg.clone(), badarg])
+        Term::list_from(vec![atom("ok"), atom("ok"), badarg.clone(), badarg])
     );
 
     let reference = Command::new("erl")

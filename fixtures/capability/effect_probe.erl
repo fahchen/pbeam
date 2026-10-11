@@ -367,6 +367,8 @@ ambient() ->
         erlang:node(Self),
         erlang:function_exported(?MODULE, ambient, 0),
         erlang:module_loaded(?MODULE),
+        erts_internal:prepare_loading(effect_probe_missing, <<"FOR1">>),
+        erlang:finish_loading([]),
         erlang:cancel_timer(make_ref(), []),
         erlang:list_to_atom("effect_probe_ambient_atom"),
         element(1, re:compile("a", [])),
@@ -379,7 +381,12 @@ ambient() ->
         reference(ets:whereis(Name)),
         atom(file:native_name_encoding()),
         byte_size(prim_file:internal_name2native("a")),
-        element(1, prim_file:read_file_info("/"))
+        element(1, prim_file:read_file_info("/")),
+        length(prim_file:internal_native2name(<<"a">>)),
+        element(1, prim_file:read_file("/")),
+        element(1, prim_file:list_dir("/")),
+        element(1, prim_file:read_link("/")),
+        element(1, prim_file:get_cwd())
     ].
 
 %% Guard tests, so the compiler does not call a BIF.

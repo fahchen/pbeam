@@ -186,11 +186,11 @@ fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
     let program = BeamProgram::load(&beams).unwrap();
     let badarg = Term::Tuple(vec![
         Term::Atom(program.atom("badarg").unwrap()),
-        Term::List(vec![]),
+        Term::nil(),
     ]);
     assert_eq!(
         program.execute("prim_tty_probe", "main", &[]).unwrap(),
-        Term::List(vec![badarg.clone(), badarg.clone(), badarg.clone(), badarg])
+        Term::list_from(vec![badarg.clone(), badarg.clone(), badarg.clone(), badarg])
     );
 }
 
