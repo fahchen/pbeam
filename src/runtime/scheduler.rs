@@ -191,8 +191,9 @@ pub(super) struct Scheduler {
     /// run starts with a copy of the program table, and a BIF such as
     /// `erlang:list_to_atom/1` adds its new atoms here.
     pub(super) atoms: AtomTable,
-    /// The code table of the run. The launcher puts the start modules of the
-    /// program into it before the root process starts.
+    /// The code table of the run, with its prepared code. The launcher puts
+    /// the start modules of the program into it before the root process
+    /// starts, and `erlang:finish_loading/1` adds a new module.
     pub(super) code: CodeTable,
     /// The modules whose NIF library `erlang:load_nif/2` loaded in the run,
     /// as the `nif` field of the ERTS module instance

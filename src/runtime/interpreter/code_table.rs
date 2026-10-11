@@ -3,19 +3,47 @@ use crate::{
     beam::BeamModule,
     error::{BeamError, error},
     runtime::process::Frame,
+    term::Reference,
 };
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 /// The code table of one run, as the ERTS module table with the export
 /// table of the active code index (`module.c`, `export.c`). Every module
 /// lookup of the run reads it. A run starts with the modules of the
-/// program. No operation removes a module or changes its code, so a module
-/// that a lookup gives stays the code of its name for the whole run.
+/// program, and `erlang:finish_loading/1` adds a new module. No operation
+/// removes a module or changes its code, so a module that a lookup gives
+/// stays the code of its name for the whole run.
 #[derive(Debug, Default)]
 pub(in crate::runtime) struct CodeTable {
     /// The loaded modules by name. The program owns the start modules too,
     /// and each run shares them through the `Rc`.
     modules: HashMap<String, Rc<BeamModule>>,
+    /// The prepared code of `erts_internal:prepare_loading/2` by its
+    /// reference, as the magic binary of the ERTS loader state
+    /// (`beam_bif_load.c:250-265`). `erlang:finish_loading/1` takes an
+    /// entry when it loads the module. An entry that does not finish stays
+    /// until the run ends; ERTS frees it when the garbage collector frees
+    /// the last copy of the reference.
+    prepared: HashMap<Reference, BeamModule>,
+}
+
+/// The result of [`CodeTable::finish`].
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum Finish {
+    /// Each module is in the code table now.
+    Loaded,
+    /// The list names one module more than one time. The names are the
+    /// modules of the second and later entries, in the reverse order of the
+    /// list, as `exception_list` (`beam_bif_load.c:322-337`) gives them.
+    /// No module loads, and each entry stays prepared.
+    Duplicated(Vec<String>),
+    /// A reference of the list has no prepared code
+    /// ([`CodeTable::prepared_module`]), so the call raises `badarg`
+    /// (`beam_bif_load.c:385-392`). No module loads.
+    NotPrepared,
 }
 
 impl CodeTable {
@@ -28,7 +56,10 @@ impl CodeTable {
     /// assert!(code.get("erlang").is_some());
     /// ```
     pub(in crate::runtime) fn new(modules: HashMap<String, Rc<BeamModule>>) -> Self {
-        CodeTable { modules }
+        CodeTable {
+            modules,
+            prepared: HashMap::new(),
+        }
     }
 
     /// Return the loaded module `name`, or `None` when no module of the run
@@ -170,6 +201,92 @@ impl CodeTable {
         arity: u32,
     ) -> Result<Frame, BeamError> {
         frame(self.module(module)?, label, arity)
+    }
+
+    /// Keep the prepared code `module` under `reference` until
+    /// [`CodeTable::finish`] loads it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// code.prepare(reference, module);
+    /// assert_eq!(code.prepared_module(&reference), Some("load_target"));
+    /// ```
+    pub(in crate::runtime) fn prepare(&mut self, reference: Reference, module: BeamModule) {
+        self.prepared.insert(reference, module);
+    }
+
+    /// Return the module name of the prepared code of `reference`, or
+    /// `None` when the reference has no prepared code, as
+    /// `erts_module_for_prepared_code` (`beam_load.c:353-370`) gives `NIL`
+    /// for a reference that is not prepared code or that finished.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(code.prepared_module(&reference), Some("load_target"));
+    /// assert_eq!(code.prepared_module(&other), None);
+    /// ```
+    pub(in crate::runtime) fn prepared_module(&self, reference: &Reference) -> Option<&str> {
+        self.prepared
+            .get(reference)
+            .map(|module| module.name.as_str())
+    }
+
+    /// Load the prepared code of `references`, as `finish_loading_1`
+    /// (`beam_bif_load.c:381-507`) does for a list of references. A
+    /// reference with no prepared code gives [`Finish::NotPrepared`]. Then
+    /// a module that the list names more than one time gives
+    /// [`Finish::Duplicated`]. Else each module goes into the code table,
+    /// and its prepared entry ends.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(code.finish(&[first, again])?, Finish::Duplicated(vec!["load_target".into()]));
+    /// assert_eq!(code.finish(&[first])?, Finish::Loaded);
+    /// assert_eq!(code.finish(&[first])?, Finish::NotPrepared);
+    /// assert!(code.get("load_target").is_some());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A module that is loaded already is the runtime error
+    /// `erlang:finish_loading/1 cannot replace the loaded module M`. ERTS
+    /// makes the current code old and loads the new code
+    /// (`beam_load.c:258-262`). PBeam has no old code.
+    pub(in crate::runtime) fn finish(
+        &mut self,
+        references: &[Reference],
+    ) -> Result<Finish, BeamError> {
+        let mut names = Vec::with_capacity(references.len());
+        for reference in references {
+            let Some(name) = self.prepared_module(reference) else {
+                return Ok(Finish::NotPrepared);
+            };
+            names.push(name.to_owned());
+        }
+        let mut seen = HashSet::with_capacity(names.len());
+        let mut duplicated = Vec::new();
+        for name in &names {
+            if !seen.insert(name) {
+                duplicated.push(name.clone());
+            }
+        }
+        if !duplicated.is_empty() {
+            duplicated.reverse();
+            return Ok(Finish::Duplicated(duplicated));
+        }
+        if let Some(name) = names.iter().find(|name| self.modules.contains_key(*name)) {
+            return Err(error(format!(
+                "erlang:finish_loading/1 cannot replace the loaded module {name}"
+            )));
+        }
+        for (reference, name) in references.iter().zip(names) {
+            let module = self.prepared.remove(reference).expect("checked above");
+            self.modules.insert(name, Rc::new(module));
+        }
+        Ok(Finish::Loaded)
     }
 }
 

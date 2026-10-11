@@ -217,6 +217,86 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// A malformed or unsupported module is an error. A new atom when the atom
 /// table is full is an error, as in ERTS.
 pub(crate) fn parse(bytes: &[u8], atom_table: &mut AtomTable) -> Result<BeamModule, BeamError> {
+    let chunks = read_chunks(bytes)?;
+    let atoms = parse_atoms(required_chunk(&chunks, b"AtU8")?, atom_table)?;
+    decode(&chunks, atoms, atom_table)
+}
+
+/// Why [`prepare`] gives no module.
+#[derive(Debug)]
+pub(crate) enum PrepareError {
+    /// ERTS gives `{error, badfile}` for these bytes.
+    BadFile,
+    /// The PBeam loader cannot decode the bytes. ERTS can load such a module
+    /// or give `{error, badfile}`, so the caller stops the run.
+    Unsupported(BeamError),
+}
+
+/// Parse the BEAM bytes of the module `module` for
+/// `erts_internal:prepare_loading/2`, as [`parse`] does. Bytes that are not
+/// an IFF form give [`PrepareError::BadFile`], as `iff_init`
+/// (`beam_file.c:2040-2058`) fails for them: fewer than 8 bytes, a first
+/// word other than `FOR1`, or a form size that is negative or larger than
+/// the bytes after it. A first atom other than `module` also gives
+/// [`PrepareError::BadFile`], as `erts_prepare_loading` gives `badfile` when
+/// the module name in the object code is not the given name
+/// (`beam_load.c:185-187`). ERTS also gives `badfile` for the other chunk
+/// errors, but the PBeam loader cannot tell a corrupt chunk from a form that
+/// it does not decode yet, so each other error is
+/// [`PrepareError::Unsupported`]. The atoms of the `AtU8` chunk go into
+/// `atom_table` also when a later step fails, as `parse_atom_chunk` puts
+/// them into the ERTS atom table before the name check.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut atoms = AtomTable::new();
+/// assert_eq!(prepare(LOAD_TARGET, "load_target", &mut atoms)?.name, "load_target");
+/// assert!(matches!(prepare(LOAD_TARGET, "other", &mut atoms), Err(PrepareError::BadFile)));
+/// assert!(matches!(prepare(b"FOR1bad", "load_target", &mut atoms), Err(PrepareError::BadFile)));
+/// assert!(matches!(prepare(LOAD_ON_LOAD, "load_on_load", &mut atoms), Err(PrepareError::Unsupported(_))));
+/// ```
+pub(crate) fn prepare(
+    bytes: &[u8],
+    module: &str,
+    atom_table: &mut AtomTable,
+) -> Result<BeamModule, PrepareError> {
+    let form_size = bytes
+        .get(WORD_SIZE..WORD_SIZE * 2)
+        .map(|size| i32::from_be_bytes(size.try_into().expect("a 4-byte slice")));
+    let is_form = bytes.starts_with(b"FOR1")
+        && form_size.is_some_and(|size| {
+            usize::try_from(size).is_ok_and(|size| size <= bytes.len() - WORD_SIZE * 2)
+        });
+    if !is_form {
+        return Err(PrepareError::BadFile);
+    }
+    let chunks = read_chunks(bytes).map_err(PrepareError::Unsupported)?;
+    let atoms = required_chunk(&chunks, b"AtU8")
+        .and_then(|data| parse_atoms(data, atom_table))
+        .map_err(PrepareError::Unsupported)?;
+    if atoms.first().map(Atom::name) != Some(module) {
+        return Err(PrepareError::BadFile);
+    }
+    decode(&chunks, atoms, atom_table).map_err(PrepareError::Unsupported)
+}
+
+/// Read the chunks of a BEAM container by chunk ID, as the grammar of
+/// [`parse`] gives them.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let chunks = read_chunks(&beam_bytes)?;
+/// assert!(chunks.contains_key(b"Code".as_slice()));
+/// assert!(read_chunks(b"FOR1bad").is_err());
+/// ```
+///
+/// # Errors
+///
+/// A container header that is not valid, a chunk outside the container,
+/// and a duplicate chunk ID are errors.
+fn read_chunks(bytes: &[u8]) -> Result<HashMap<Vec<u8>, &[u8]>, BeamError> {
     if bytes.len() < CONTAINER_HEADER_SIZE || &bytes[..WORD_SIZE] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
     }
@@ -251,10 +331,26 @@ pub(crate) fn parse(bytes: &[u8], atom_table: &mut AtomTable) -> Result<BeamModu
         }
         cursor = padded_end;
     }
+    Ok(chunks)
+}
 
-    let atoms = parse_atoms(required_chunk(&chunks, b"AtU8")?, atom_table)?;
-    let exports = parse_exports(required_chunk(&chunks, b"ExpT")?, &atoms)?;
-    let code = required_chunk(&chunks, b"Code")?;
+/// Decode the module of the chunks of a BEAM container, with the atoms of
+/// its `AtU8` chunk, as [`parse`] describes.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let chunks = read_chunks(&beam_bytes)?;
+/// let atoms = parse_atoms(required_chunk(&chunks, b"AtU8")?, &mut table)?;
+/// assert_eq!(decode(&chunks, atoms, &mut table)?.name, "Elixir.Hello");
+/// ```
+fn decode(
+    chunks: &HashMap<Vec<u8>, &[u8]>,
+    atoms: Vec<Atom>,
+    atom_table: &mut AtomTable,
+) -> Result<BeamModule, BeamError> {
+    let exports = parse_exports(required_chunk(chunks, b"ExpT")?, &atoms)?;
+    let code = required_chunk(chunks, b"Code")?;
     let name = atoms
         .first()
         .ok_or_else(|| error("empty BEAM atom table"))?
@@ -902,7 +998,7 @@ fn atom_at(atoms: &[Atom], index: usize) -> Result<&Atom, BeamError> {
 /// ```rust,ignore
 /// let payload = [0x03];
 /// let chunks = HashMap::from([(b"Code".to_vec(), &payload[..])]);
-/// assert_eq!(required_chunk(&chunks, b"Code")?, &payload);
+/// assert_eq!(required_chunk(chunks, b"Code")?, &payload);
 /// ```
 fn required_chunk<'a>(
     chunks: &HashMap<Vec<u8>, &'a [u8]>,
