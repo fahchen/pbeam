@@ -381,7 +381,7 @@ bifs! {
     erts_internal:ets_raw_first/1 => unsupported,
     erts_internal:ets_raw_next/2 => unsupported,
     erts_internal:ets_super_user/1 => unsupported,
-    erts_internal:garbage_collect/1 => unsupported,
+    erts_internal:garbage_collect/1 => |_, [kind]| Ok(match kind { Term::Atom(atom) if matches!(atom.name(), "minor" | "major") => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     erts_internal:gather_alloc_histograms/1 => unsupported,
     erts_internal:gather_carrier_info/1 => unsupported,
     erts_internal:get_creation/0 => unsupported,

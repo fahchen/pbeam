@@ -31,7 +31,8 @@ const RESULT: &str = "PBEAM_FIND_EXECUTABLE_RESULT";
 /// The pinned OTP modules that `find_executable_probe:main/0` calls after
 /// the boot: `os:find_executable/1,2` calls `filename`, and
 /// `file:read_file_info/1` calls `file_server_2`, which calls `prim_file`.
-const FILE_MODULES: [&str; 3] = ["file", "filename", "prim_file"];
+/// `BOOT_MODULES` has `prim_file` for `erl_prim_loader`.
+const FILE_MODULES: [&str; 2] = ["file", "filename"];
 
 /// An Erlang fun `T` for the `-eval` of an ERTS run: it gives the text of a
 /// term as [`text`] does.
