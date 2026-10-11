@@ -1,17 +1,15 @@
-use std::{cell::RefCell, rc::Rc};
+use std::sync::Arc;
 
 use super::{internal_hash, mix64};
-use crate::term::{
-    Atom, Binary, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
-};
+use crate::term::{Atom, Binary, Fun, Lambda, Map, MatchState, PortId, ProcessId, Reference, Term};
 
 #[test]
 #[should_panic(expected = "a match context reached a term operation")]
 fn panics_for_a_match_context() {
     // The interpreter gives a runtime error before a match context can
     // reach a term operation.
-    internal_hash(&Term::MatchContext(Rc::new(RefCell::new(
-        MatchContext::new(Binary::from(b"a")),
+    internal_hash(&Term::MatchContext(Arc::new(MatchState::new(
+        Binary::from(b"a"),
     ))));
 }
 

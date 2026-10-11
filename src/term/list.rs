@@ -8,10 +8,6 @@
 //! cons cell shares the list of its tail. Thus `put_list`, `get_list`,
 //! `get_hd`, and `get_tl` take O(1) time, as on ERTS. Only this module and
 //! the other parts of the term module match `Term::Nil` and `Term::Cons`.
-#![expect(
-    clippy::arc_with_non_send_sync,
-    reason = "a term is not Send and Sync until #459, and a list uses Arc now so that #459 does not change it again"
-)]
 
 use std::{ops::Deref, sync::Arc};
 

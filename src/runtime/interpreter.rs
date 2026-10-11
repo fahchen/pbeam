@@ -12,11 +12,11 @@ use crate::{
     },
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Fun, Map, MatchContext, Target, Term, print_term, segment_equals,
+        Atom, AtomTable, Fun, Map, MatchState, Target, Term, print_term, segment_equals,
         segment_integer,
     },
 };
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, rc::Rc};
+use std::{borrow::Cow, collections::HashMap, rc::Rc, sync::Arc};
 
 mod bif;
 mod bits;
@@ -1105,9 +1105,8 @@ impl BeamProgram {
                     destination,
                 } => match read_any(process, source)? {
                     Term::Binary(ref bytes) => {
-                        let context = MatchContext::new(bytes.clone());
-                        let context = Term::MatchContext(Rc::new(RefCell::new(context)));
-                        write(process, destination, context)?;
+                        let state = MatchState::new(bytes.clone());
+                        write(process, destination, Term::MatchContext(Arc::new(state)))?;
                     }
                     context @ Term::MatchContext(_) => write(process, destination, context)?,
                     other if *fail_label == 0 => {
@@ -1140,7 +1139,6 @@ impl BeamProgram {
                     destination,
                 } => {
                     let state = match_context(process, context)?;
-                    let state = state.borrow();
                     let bits = state.remaining_bits();
                     let Some(tail) = state.tail() else {
                         return Err(error(format!(
@@ -1171,7 +1169,7 @@ impl BeamProgram {
                     // so the view needs no copy. The position moves before
                     // the size check, as the `Fail` jump does.
                     let bytes = binary_field_size(read_ref(process, size)?, *unit)
-                        .and_then(|bits| Some((bits, state.borrow_mut().advance(bits)?)));
+                        .and_then(|bits| Some((bits, state.advance(bits)?)));
                     match bytes {
                         Some((bits, ())) => {
                             if !bits.is_multiple_of(8) {
@@ -1179,13 +1177,10 @@ impl BeamProgram {
                                     "unsupported bs_get_binary2 of {bits} bits: needs a bitstring term"
                                 )));
                             }
-                            let position = state.borrow().position();
-                            let bytes = state
-                                .borrow()
-                                .bits_at(position - bits as usize, position)
-                                .expect(
-                                    "the size of a bs_get_binary2 view is a whole number of bytes",
-                                );
+                            let position = state.position();
+                            let bytes = state.bits_at(position - bits as usize, position).expect(
+                                "the size of a bs_get_binary2 view is a whole number of bytes",
+                            );
                             write(process, destination, Term::Binary(bytes))?;
                         }
                         None => jump(module, process, *fail_label)?,
@@ -1197,7 +1192,7 @@ impl BeamProgram {
                     context,
                     destination,
                 } => {
-                    let position = match_context(process, context)?.borrow().position();
+                    let position = match_context(process, context)?.position();
                     write(process, destination, Term::Integer(position as i64))?;
                 }
                 // ERTS `bs_set_position` sets `sb->start` to the unsigned
@@ -1207,7 +1202,7 @@ impl BeamProgram {
                     let state = any_match_context(process, context)?;
                     match read_ref(process, position)? {
                         Term::Integer(value) if let Ok(value) = usize::try_from(*value) => {
-                            state.borrow_mut().set_position(value);
+                            state.set_position(value);
                         }
                         other => {
                             return Err(error(format!(
@@ -1225,7 +1220,7 @@ impl BeamProgram {
                     context,
                     destination,
                 } => {
-                    let code_point = match_context(process, context)?.borrow_mut().get_utf8();
+                    let code_point = match_context(process, context)?.get_utf8();
                     match code_point {
                         Some(code_point) => {
                             write(process, destination, Term::Integer(code_point.into()))?;
@@ -2755,7 +2750,7 @@ fn read_ref<'a>(process: &'a ProcessState, operand: &'a Operand) -> Result<&'a T
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// let context = Arc::new(MatchState::new(b"a"));
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
 /// assert!(matches!(read_any(&process, &Operand::X(0))?, Term::MatchContext(_)));
 /// ```
@@ -2769,7 +2764,7 @@ fn read_any(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// let context = Arc::new(MatchState::new(b"a"));
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
 /// assert!(matches!(read_any_ref(&process, &Operand::X(0))?, Term::MatchContext(_)));
 /// ```
@@ -2791,14 +2786,11 @@ fn read_any_ref<'a>(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// let context = Arc::new(MatchState::new(b"a"));
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
-/// assert_eq!(match_context(&process, &Operand::X(0))?.borrow().position(), 0);
+/// assert_eq!(match_context(&process, &Operand::X(0))?.position(), 0);
 /// ```
-fn match_context(
-    process: &ProcessState,
-    operand: &Operand,
-) -> Result<Rc<RefCell<MatchContext>>, BeamError> {
+fn match_context(process: &ProcessState, operand: &Operand) -> Result<Arc<MatchState>, BeamError> {
     let context = any_match_context(process, operand)?;
     check_known_position(&context, operand)?;
     Ok(context)
@@ -2811,16 +2803,13 @@ fn match_context(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// let context = Arc::new(MatchState::new(b"a"));
 /// assert!(check_known_position(&context, &Operand::X(0)).is_ok());
-/// context.borrow_mut().forget_position();
+/// context.forget_position();
 /// assert!(check_known_position(&context, &Operand::X(0)).is_err());
 /// ```
-fn check_known_position(
-    context: &RefCell<MatchContext>,
-    operand: &Operand,
-) -> Result<(), BeamError> {
-    if context.borrow().position_known() {
+fn check_known_position(context: &MatchState, operand: &Operand) -> Result<(), BeamError> {
+    if context.position_known() {
         Ok(())
     } else {
         Err(error(format!(
@@ -2847,8 +2836,8 @@ fn check_known_position(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = Rc::new(RefCell::new(MatchContext::new(b"abc")));
-/// context.borrow_mut().skip(4);
+/// let context = Arc::new(MatchState::new(b"abc"));
+/// context.skip(4);
 /// let values = [Term::MatchContext(context)];
 /// let size = match_context_byte_size("erlang", "byte_size", &[Operand::X(0)], &values)?;
 /// assert_eq!(size, Some(Term::Integer(3)));
@@ -2862,7 +2851,7 @@ fn match_context_byte_size(
 ) -> Result<Option<Term>, BeamError> {
     if let (("erlang", "byte_size"), [Term::MatchContext(context)]) = ((module, name), values) {
         check_known_position(context, &arguments[0])?;
-        let bits = context.borrow().remaining_bits();
+        let bits = context.remaining_bits();
         return Ok(Some(Term::Integer(bits.div_ceil(8) as i64)));
     }
     match values
@@ -2882,17 +2871,17 @@ fn match_context_byte_size(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// let context = Arc::new(MatchState::new(b"a"));
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
-/// assert_eq!(any_match_context(&process, &Operand::X(0))?.borrow().position(), 0);
+/// assert_eq!(any_match_context(&process, &Operand::X(0))?.position(), 0);
 /// assert!(any_match_context(&process, &Operand::Value(Term::Integer(1))).is_err());
 /// ```
 fn any_match_context(
     process: &ProcessState,
     operand: &Operand,
-) -> Result<Rc<RefCell<MatchContext>>, BeamError> {
+) -> Result<Arc<MatchState>, BeamError> {
     match &read_any(process, operand)? {
-        Term::MatchContext(context) => Ok(Rc::clone(context)),
+        Term::MatchContext(context) => Ok(Arc::clone(context)),
         other => Err(error(format!(
             "invariant error: {operand:?} holds {other:?}, not a match context"
         ))),
@@ -3038,7 +3027,7 @@ fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, B
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// let context = Arc::new(MatchState::new(b"a"));
 /// let registers = vec![Some(Term::MatchContext(context))];
 /// assert!(check_local_call_arguments(&registers, 1).is_ok());
 /// assert!(check_local_call_arguments(&registers, 2).is_err());
@@ -3058,7 +3047,7 @@ fn check_local_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// let context = Arc::new(MatchState::new(b"a"));
 /// let registers = vec![Some(Term::MatchContext(context))];
 /// assert!(check_remote_call_arguments(&registers, 1).is_err());
 /// assert!(check_remote_call_arguments(&[Some(Term::Integer(1))], 1).is_ok());
@@ -3080,7 +3069,7 @@ fn check_remote_call_arguments(registers: &[Option<Term>], arity: u32) -> Result
 /// `MAX_SMALL / unit`. The compiler gives a unit from 1 to 256
 /// (`type_to_record` in erl_bits.erl:93), so such a size is always more
 /// bits than a binary has, and `erts_bs_get_binary_2` then fails
-/// (erl_bits.c:400-424). Thus `MatchContext::read_bits` gives the same
+/// (erl_bits.c:400-424). Thus `MatchState::read_bits` gives the same
 /// result for it.
 ///
 /// # Examples
@@ -3134,7 +3123,7 @@ fn match_context_escape(operand: &Operand) -> BeamError {
 ///   the compiler puts an `ensure_at_least` or `ensure_exactly` for their
 ///   bits first (beam_ssa_codegen.erl:2759-2868).
 /// - `=:=` fails when the bits are not its value. The position is then
-///   not known (`MatchContext::forget_position`).
+///   not known (`MatchState::forget_position`).
 ///
 /// # Errors
 ///
@@ -3147,7 +3136,7 @@ fn match_context_escape(operand: &Operand) -> BeamError {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let context = Rc::new(RefCell::new(MatchContext::new(&[7, 8])));
+/// let context = Arc::new(MatchState::new(&[7, 8]));
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
 /// let unit = NonZeroU64::new(8).unwrap();
 /// let byte = BinaryMatchCommand::Integer { size: 8, little: false, signed: false, destination: Operand::X(1) };
@@ -3161,7 +3150,7 @@ fn binary_match(
     commands: &[BinaryMatchCommand],
 ) -> Result<bool, BeamError> {
     let context = match_context(process, context)?;
-    let mut state = context.borrow_mut();
+    let state = &*context;
     // A binary of `size` bits, or a runtime error for a bitstring.
     let binary_size = |command: &str, size: u64| {
         if size.is_multiple_of(8) {

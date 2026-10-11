@@ -1,15 +1,15 @@
-use std::{cell::RefCell, rc::Rc};
+use std::sync::Arc;
 
 use super::print_term;
-use crate::term::{Binary, MatchContext, PortId, ProcessId, Reference, Term};
+use crate::term::{Binary, MatchState, PortId, ProcessId, Reference, Term};
 
 #[test]
 #[should_panic(expected = "a match context reached a term operation")]
 fn panics_for_a_match_context() {
     // The interpreter gives a runtime error before a match context can
     // reach a term operation.
-    print_term(&Term::MatchContext(Rc::new(RefCell::new(
-        MatchContext::new(Binary::from(b"a")),
+    print_term(&Term::MatchContext(Arc::new(MatchState::new(
+        Binary::from(b"a"),
     ))));
 }
 

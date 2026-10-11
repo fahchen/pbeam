@@ -11,10 +11,6 @@
 //! `Drop`: the drop cannot move the `Arc` out of the term, so it takes the
 //! `Arc` out of the `Option` and calls `Arc::into_inner` (see
 //! [`Tuple::take_last`]). Each other reader finds the array.
-#![expect(
-    clippy::arc_with_non_send_sync,
-    reason = "a term is not Send and Sync until #459, and a tuple uses Arc now so that #459 does not change it again"
-)]
 
 use std::{ops::Deref, sync::Arc};
 

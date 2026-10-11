@@ -1,11 +1,10 @@
 use std::{
-    cell::RefCell,
     cmp::Ordering::{Equal, Greater, Less},
-    rc::Rc,
+    sync::Arc,
 };
 
 use super::super::{
-    Atom, AtomTable, Binary, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
+    Atom, AtomTable, Binary, Fun, Lambda, Map, MatchState, PortId, ProcessId, Reference, Term,
     test_atom as atom,
 };
 
@@ -14,7 +13,7 @@ use super::super::{
 fn panics_for_a_match_context() {
     // The interpreter gives a runtime error before a match context can
     // reach a term operation.
-    let _ = Term::MatchContext(Rc::new(RefCell::new(MatchContext::new(Binary::from(b"a")))))
+    let _ = Term::MatchContext(Arc::new(MatchState::new(Binary::from(b"a"))))
         .compare(&Term::Integer(1));
 }
 
