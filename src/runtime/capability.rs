@@ -43,6 +43,9 @@ pub enum CapabilityKind {
     Runtime,
     /// The global persistent term store of the node.
     PersistentTerm,
+    /// The code of the run: the load of prepared code and the inspection of
+    /// the loaded modules.
+    Code,
 }
 
 /// An operation that a capability can permit. Each kind permits only its
@@ -80,7 +83,7 @@ pub enum Operation {
     /// `port`: close a port.
     Close,
     /// `process`: read the state of another process. `port`: read the
-    /// information of a port.
+    /// information of a port. `code`: read the state of a loaded module.
     Inspect,
     /// `process`: set the group leader of another process.
     GroupLeader,
@@ -94,6 +97,8 @@ pub enum Operation {
     SystemFlag,
     /// `runtime`: load a NIF library.
     LoadNif,
+    /// `code`: load prepared code into the code table of the run.
+    Load,
 }
 
 /// The value form of the names in a constraint field, in the term of the
@@ -121,7 +126,7 @@ struct KindSpec {
 
 /// The kinds of the design table (section "Capability kinds" of
 /// `docs/capability-security-migration.md`).
-const KINDS: [KindSpec; 7] = [
+const KINDS: [KindSpec; 8] = [
     KindSpec {
         kind: CapabilityKind::Process,
         name: "process",
@@ -184,10 +189,16 @@ const KINDS: [KindSpec; 7] = [
         operations: &[Operation::Read, Operation::Write],
         constraint: None,
     },
+    KindSpec {
+        kind: CapabilityKind::Code,
+        name: "code",
+        operations: &[Operation::Load, Operation::Inspect],
+        constraint: Some(("modules", NameForm::Atom)),
+    },
 ];
 
 /// The atom of each operation in the `{capabilities, Map}` option.
-const OPERATION_NAMES: [(Operation, &str); 20] = [
+const OPERATION_NAMES: [(Operation, &str); 21] = [
     (Operation::Spawn, "spawn"),
     (Operation::Link, "link"),
     (Operation::Monitor, "monitor"),
@@ -208,6 +219,7 @@ const OPERATION_NAMES: [(Operation, &str); 20] = [
     (Operation::Halt, "halt"),
     (Operation::SystemFlag, "system_flag"),
     (Operation::LoadNif, "load_nif"),
+    (Operation::Load, "load"),
 ];
 
 impl CapabilityKind {
@@ -447,7 +459,7 @@ pub trait Policy {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(AllowAll.initial().len(), 7);
+    /// assert_eq!(AllowAll.initial().len(), 8);
     /// ```
     fn initial(&self) -> Vec<Capability>;
 
@@ -488,7 +500,7 @@ impl Policy for AllowAll {
     ///
     /// ```rust,ignore
     /// let capabilities = AllowAll.initial();
-    /// assert_eq!(capabilities.len(), 7);
+    /// assert_eq!(capabilities.len(), 8);
     /// let process = Capability::new(CapabilityKind::Process, CapabilityKind::Process.operations(), Constraint::Any, true)?;
     /// assert_eq!(capabilities[0], process);
     /// ```
@@ -671,7 +683,7 @@ impl SecurityContext {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(parent.delegate(None)?.len(), 7);
+    /// assert_eq!(parent.delegate(None)?.len(), 8);
     /// assert_eq!(SecurityContext::default().delegate(Some(&restrictions)), Err(Denied));
     /// assert_eq!(SecurityContext::boot().delegate(Some(&restrictions)), Err(Denied));
     /// ```
@@ -1018,7 +1030,8 @@ impl Restriction {
 
 /// Read the value of the `spawn_opt` option `{capabilities, Map}`. Each key
 /// of `Map` is a kind atom: `process`, `terminal`, `port`, `env`, `signal`,
-/// `runtime`, or `persistent_term`. Each value is a map with the optional
+/// `runtime`, `persistent_term`, or `code`. Each value is a map with the
+/// optional
 /// keys `operations` (a proper list of operation atoms of the kind),
 /// `delegable` (`true` or `false`), and the constraint field of the kind:
 /// `modules` (atoms), `executables` (strings), `names` (strings), or

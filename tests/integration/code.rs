@@ -1,11 +1,34 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
 
 use common::pinned_beam;
+
+/// A test policy: the root process gets these capabilities.
+struct Grants(Vec<Capability>);
+
+impl Policy for Grants {
+    fn initial(&self) -> Vec<Capability> {
+        self.0.clone()
+    }
+}
+
+/// Return the policy of one `code` capability that permits `operations`
+/// within `modules`.
+fn code_capability(operations: &[Operation], modules: &[&str]) -> Grants {
+    Grants(vec![
+        Capability::new(
+            CapabilityKind::Code,
+            operations,
+            Constraint::Only(modules.iter().map(|&module| module.to_owned()).collect()),
+            false,
+        )
+        .unwrap(),
+    ])
+}
 
 const CODE_PROBE: &[u8] = include_bytes!("../../fixtures/code/code_probe.beam");
 
@@ -233,6 +256,36 @@ fn stops_the_run_for_code_replacement() {
     assert_eq!(
         load_reference("replace", "load_target"),
         "[{module,load_target},{module,load_target}]\n"
+    );
+}
+
+#[test]
+fn compares_the_module_name_of_code_load() {
+    // The `modules` constraint of the `code` `load` capability compares the
+    // module name of each element of the list of `erlang:finish_loading/1`
+    // (`beam_bif_load.c:381-394`), after the argument checks and before any
+    // module loads. An empty list has no module name.
+    let program = load_program();
+    let expected = |name| Term::Atom(program.atom(name).unwrap());
+    let code = Term::Binary(LOAD_TARGET.to_vec());
+    let permitted = code_capability(&[Operation::Load], &["load_target"]);
+    assert_eq!(
+        program
+            .execute_with_policy(
+                "load_probe",
+                "constraint",
+                std::slice::from_ref(&code),
+                &permitted
+            )
+            .unwrap(),
+        expected("ok")
+    );
+    let denied = code_capability(&[Operation::Load], &["other_module"]);
+    assert_eq!(
+        program
+            .execute_with_policy("load_probe", "constraint", &[code], &denied)
+            .unwrap(),
+        expected("denied")
     );
 }
 

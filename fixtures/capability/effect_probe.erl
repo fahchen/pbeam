@@ -69,6 +69,10 @@
     inspect_permitted/0,
     inspect_closed/0,
     inspect_names/0,
+    module_loaded/0,
+    get_module_info/0,
+    finish_loading/0,
+    code_names/0,
     ambient/0,
     child/2,
     value_child/2,
@@ -345,6 +349,15 @@ inspect_names() ->
         in_child(#{port => #{executables => ["/bin/sh"]}, process => #{}}, Info)
     ].
 
+%% One call of each code entry. `erlang:finish_loading/1` checks the `code`
+%% capability with `load`, and `erlang:module_loaded/1` and
+%% `erlang:get_module_info/2` check it with `inspect` for the module name.
+module_loaded() -> attempt(fun() -> erlang:module_loaded(?MODULE) end).
+
+get_module_info() -> attempt(fun() -> erlang:get_module_info(?MODULE, module) end).
+
+finish_loading() -> attempt(fun() -> erlang:finish_loading([]) end).
+
 %% One call of each ambient and later entry, which has no capability check. A
 %% process with no capability gets the same result as on ERTS. Each value that
 %% depends on the host or on the run is reduced to a stable sign.
@@ -366,10 +379,7 @@ ambient() ->
         erlang:node(),
         erlang:node(Self),
         erlang:function_exported(?MODULE, ambient, 0),
-        erlang:module_loaded(?MODULE),
-        erlang:get_module_info(?MODULE, module),
         erts_internal:prepare_loading(effect_probe_missing, <<"FOR1">>),
-        erlang:finish_loading([]),
         erlang:cancel_timer(make_ref(), []),
         erlang:list_to_atom("effect_probe_ambient_atom"),
         element(1, re:compile("a", [])),
@@ -689,6 +699,18 @@ signals() ->
     [
         attempt(fun() -> os:set_signal(sigusr2, default) end),
         attempt(fun() -> os:set_signal(sighup, default) end)
+    ].
+
+%% The `modules` constraint of `code` compares the module atom of the
+%% `inspect` entries, and each module of the list of the `load` entry. An
+%% empty list has no module name, so it only needs the `load` operation.
+code_names() ->
+    [
+        attempt(fun() -> erlang:module_loaded(?MODULE) end),
+        attempt(fun() -> erlang:module_loaded(lists) end),
+        attempt(fun() -> erlang:get_module_info(?MODULE, module) end),
+        attempt(fun() -> erlang:get_module_info(lists, module) end),
+        attempt(fun() -> erlang:finish_loading([]) end)
     ].
 
 %% A denied port_close/1 keeps the port open.
