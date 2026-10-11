@@ -2750,12 +2750,13 @@ pub(super) fn finish_loading(
         return Ok(denied);
     }
     for name in &names {
-        if let Some(denied) = denial(
+        let check = denial(
             scheduler,
             CapabilityKind::Code,
             Operation::Load,
             Some(name.as_bytes()),
-        )? {
+        );
+        if let Some(denied) = check? {
             return Ok(denied);
         }
     }
@@ -2803,12 +2804,13 @@ pub(super) fn module_loaded(
     let Term::Atom(module) = module else {
         return Ok(BifResult::badarg());
     };
-    if let Some(denied) = denial(
+    let check = denial(
         context.scheduler,
         CapabilityKind::Code,
         Operation::Inspect,
         Some(module.name().as_bytes()),
-    )? {
+    );
+    if let Some(denied) = check? {
         return Ok(denied);
     }
     let loaded = context.scheduler.code.get(module.name()).is_some();
@@ -2910,12 +2912,13 @@ pub(super) fn get_module_info(
     let Term::Atom(key) = what else {
         return Ok(BifResult::badarg());
     };
-    if let Some(denied) = denial(
+    let check = denial(
         context.scheduler,
         CapabilityKind::Code,
         Operation::Inspect,
         Some(name.name().as_bytes()),
-    )? {
+    );
+    if let Some(denied) = check? {
         return Ok(denied);
     }
     if context.scheduler.code.get(name.name()).is_none() {
