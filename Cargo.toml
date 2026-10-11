@@ -25,6 +25,10 @@ name = "boot"
 path = "tests/feature/boot.rs"
 
 [[test]]
+name = "code_server"
+path = "tests/feature/code_server.rs"
+
+[[test]]
 name = "dirty_io"
 path = "tests/feature/dirty_io.rs"
 
@@ -202,6 +206,10 @@ name = "float_test"
 path = "tests/integration/float_test.rs"
 
 [[test]]
+name = "from_keys"
+path = "tests/integration/from_keys.rs"
+
+[[test]]
 name = "funs"
 path = "tests/integration/funs.rs"
 
@@ -270,6 +278,10 @@ name = "list_reductions"
 path = "tests/integration/list_reductions.rs"
 
 [[test]]
+name = "list_to_integer"
+path = "tests/integration/list_to_integer.rs"
+
+[[test]]
 name = "literal"
 path = "tests/integration/literal.rs"
 
@@ -280,6 +292,10 @@ path = "tests/integration/logger_start.rs"
 [[test]]
 name = "map"
 path = "tests/integration/map.rs"
+
+[[test]]
+name = "module_info"
+path = "tests/integration/module_info.rs"
 
 [[test]]
 name = "nif_error"
@@ -366,6 +382,10 @@ name = "statem"
 path = "tests/integration/statem.rs"
 
 [[test]]
+name = "subtract"
+path = "tests/integration/subtract.rs"
+
+[[test]]
 name = "time"
 path = "tests/integration/time.rs"
 
@@ -376,6 +396,10 @@ path = "tests/integration/timer.rs"
 [[test]]
 name = "undef"
 path = "tests/integration/undef.rs"
+
+[[test]]
+name = "unique_integer"
+path = "tests/integration/unique_integer.rs"
 
 [[test]]
 name = "user_drv"

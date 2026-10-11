@@ -38,14 +38,28 @@ struct Cli {
     #[arg(long, requires = "policy")]
     boot: bool,
     /// A code path directory of the boot, as `erl -pa DIR` gives. Repeat it
-    /// for more directories. With one or more `--pa`, the function gets one
-    /// more argument after the atoms: the boot flag list `[{pa, [Dir]}]`, one
-    /// tuple for each `--pa` in the command line order, with each directory
-    /// as a binary of its bytes, as `init:parse_boot_args/1` gives the flags.
-    /// The `pbeam_boot` module of `examples/hello_world` takes this list as
-    /// the third argument of `start/3`.
+    /// for more directories. With one or more `--pa`, or with `--root`, the
+    /// function gets one more argument after the atoms: the boot flag list,
+    /// with one `{pa, [Dir]}` tuple for each `--pa` in the command line
+    /// order, and each value as a binary of its bytes, as
+    /// `init:parse_boot_args/1` gives the flags. The `pbeam_boot` module of
+    /// `examples/hello_world` takes this list as the third argument of
+    /// `start/3`.
     #[arg(long = "pa", value_name = "DIR")]
     code_path: Vec<OsString>,
+    /// The root directory of the OTP installation, as `erl` gives it to
+    /// `init` with `-root DIR`. It has no default. With it, the boot flag
+    /// list starts with `{root, [Dir]}`, and the `pbeam_boot` module sets
+    /// the code path of `start_clean.boot` and starts `code_server`, which
+    /// reads the root with `init:get_argument(root)`.
+    #[arg(long, value_name = "DIR")]
+    root: Option<OsString>,
+    /// The code loading mode, as `erl -mode MODE` gives it. Without it, the
+    /// mode is `interactive`, as for `erl`. With it, the boot flag list ends
+    /// with `{mode, [Mode]}`. It needs `--root`: only `code_server` reads
+    /// it.
+    #[arg(long, value_name = "MODE", value_parser = ["interactive", "embedded"], requires = "root")]
+    mode: Option<String>,
     /// BEAM files to load, after `--`.
     #[arg(value_name = "BEAM_FILE", required = true, num_args = 1.., last = true)]
     beam_files: Vec<PathBuf>,
@@ -109,7 +123,8 @@ impl From<String> for Exit {
 
 /// Set the signal dispositions of the ERTS emulator start, read and load
 /// the BEAM files, and run `Module:Function(Atoms...)` as the root process,
-/// or `Module:Function(Atoms..., Flags)` with the boot flag list of `--pa`.
+/// or `Module:Function(Atoms..., Flags)` with the boot flag list of
+/// `--root`, `--pa`, and `--mode` (see [`boot_flags`]).
 /// With `--policy Policy`, the policy module `Policy` gives the
 /// capabilities (see [`BeamProgram::execute_with_policy_module`]), in boot
 /// mode with `--boot`. Without
@@ -126,8 +141,8 @@ impl From<String> for Exit {
 /// # Errors
 ///
 /// A file that cannot be read, a BEAM file that does not load, an argument
-/// or the boot flag name `pa` that is not an atom of the loaded modules, and
-/// the errors of
+/// or a boot flag name that is not an atom of the loaded modules, and the
+/// errors of
 /// [`BeamProgram::execute`] and [`BeamProgram::execute_with_policy_module`].
 /// A halt of the run gives [`Exit::Halt`].
 fn run(arguments: Cli) -> Result<(), Exit> {
@@ -152,8 +167,13 @@ fn run(arguments: Cli) -> Result<(), Exit> {
                 .ok_or_else(|| format!("argument {name} is not an atom of the loaded modules"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if !arguments.code_path.is_empty() {
-        atoms.push(boot_flags(&program, &arguments.code_path)?);
+    if arguments.root.is_some() || !arguments.code_path.is_empty() {
+        atoms.push(boot_flags(
+            &program,
+            arguments.root.as_ref(),
+            &arguments.code_path,
+            arguments.mode.as_ref(),
+        )?);
     }
     let (module, function) = (&arguments.module, &arguments.function);
     let result = match &arguments.policy {
@@ -169,31 +189,52 @@ fn run(arguments: Cli) -> Result<(), Exit> {
     }
 }
 
-/// Make the boot flag list of the `--pa` directories: one `{pa, [Dir]}`
-/// tuple for each directory, in the command line order, with the bytes of
-/// the directory as a binary. ERTS gives the same list for `erl -pa D1 -pa
-/// D2`: the emulator gives each boot argument to `init` as a binary of its
-/// bytes (`erl_init.c:373-384`), and `init:parse_boot_args/1` makes one flag
-/// tuple for each `-pa` (`init.erl:1699-1702`, `1724`).
+/// Make the boot flag list of the `--root`, `--pa`, and `--mode` options:
+/// `{root, [Root]}` first, then one `{pa, [Dir]}` tuple for each directory
+/// in the command line order, then `{mode, [Mode]}`, with each value a
+/// binary of its bytes. ERTS gives the same tuples for `erl -pa D1 -pa D2
+/// -mode embedded`: `erlexec` gives `-root` before the user flags, the
+/// emulator gives each boot argument to `init` as a binary of its bytes
+/// (`erl_init.c:373-384`), and `init:parse_boot_args/1` makes one flag tuple
+/// for each flag (`init.erl:1699-1702`, `1724`). A flag that the command
+/// line does not have gives no tuple.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let flags = boot_flags(&program, &[OsString::from("d1")])?;
-/// // [{pa, [<<"d1">>]}]
+/// let flags = boot_flags(&program, Some(&OsString::from("/otp")), &[OsString::from("d1")], None)?;
+/// // [{root, [<<"/otp">>]}, {pa, [<<"d1">>]}]
 /// ```
 ///
 /// # Errors
 ///
-/// The atom `pa` is not an atom of the loaded modules. The pinned `init`
-/// module has it.
-fn boot_flags(program: &BeamProgram, code_path: &[OsString]) -> Result<Term, String> {
-    let pa = program
-        .atom("pa")
-        .ok_or("boot flag pa is not an atom of the loaded modules")?;
-    let flags = code_path.iter().map(|directory| {
-        let value = Term::Binary(directory.as_bytes().to_vec());
-        Term::Tuple(vec![Term::Atom(pa.clone()), Term::list_from(vec![value])])
-    });
+/// A flag name `root`, `pa`, or `mode` that is not an atom of the loaded
+/// modules. The pinned `init` module has each of them.
+fn boot_flags(
+    program: &BeamProgram,
+    root: Option<&OsString>,
+    code_path: &[OsString],
+    mode: Option<&String>,
+) -> Result<Term, String> {
+    let flags = root
+        .map(|root| ("root", root.as_bytes()))
+        .into_iter()
+        .chain(
+            code_path
+                .iter()
+                .map(|directory| ("pa", directory.as_bytes())),
+        )
+        .chain(mode.map(|mode| ("mode", mode.as_bytes())))
+        .map(|(name, value)| {
+            let flag = program
+                .atom(name)
+                .ok_or_else(|| format!("boot flag {name} is not an atom of the loaded modules"))?;
+            let value = Term::Binary(value.to_vec());
+            Ok(Term::Tuple(vec![
+                Term::Atom(flag),
+                Term::list_from(vec![value]),
+            ]))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(Term::list_from(flags))
 }

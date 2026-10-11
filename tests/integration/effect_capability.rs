@@ -277,8 +277,9 @@ const AMBIENT: [&str; 28] = [
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `later`: it has no check until its named task adds one.
 /// `effect_probe:ambient/0` also calls each entry once.
-const LATER: [&str; 6] = [
+const LATER: [&str; 7] = [
     "erlang:finish_loading/1",
+    "erlang:get_module_info/2",
     "erlang:module_loaded/1",
     "prim_file:get_cwd_nif/0",
     "prim_file:list_dir_nif/1",
@@ -394,7 +395,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
     let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
-                    nonode@nohost,nonode@nohost,true,true,{error,badfile},ok,false,\
+                    nonode@nohost,nonode@nohost,true,true,effect_probe,{error,badfile},ok,false,\
                     effect_probe_ambient_atom,ok,effect_probe_ambient,true,[{key,value}],value,\
                     true,true,reference,atom,2,ok,1,error,ok,error,ok]";
     assert_eq!(text(&run(&program, "ambient", &Grants(vec![]))), expected);

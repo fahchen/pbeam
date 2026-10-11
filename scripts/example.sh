@@ -64,12 +64,15 @@ run() {
     step "Run ${entry#Elixir.}.main/0 on the pinned ERTS (erl +S 1)"
     exec erl +S 1 -noshell "${paths[@]}" -eval "'$entry':main(), halt()."
   fi
+  # The pbeam run gives the root directory of the pinned OTP, which erl gives to init with -root, so that pbeam_boot starts code_server (code.erl:1686).
+  local root
+  root=$(erl -noshell -eval 'io:put_chars(code:root_dir()), halt().')
   if [[ -n ${PBEAM_BIN:-} ]]; then
     step "Run ${entry#Elixir.}.main/0 on $PBEAM_BIN with $# BEAM files"
-    exec "$PBEAM_BIN" ${policy[@]+"${policy[@]}"} pbeam_boot start "$entry" main -- "$@"
+    exec "$PBEAM_BIN" ${policy[@]+"${policy[@]}"} pbeam_boot start "$entry" main --root "$root" -- "$@"
   fi
   step "Build pbeam and run ${entry#Elixir.}.main/0 with $# BEAM files"
-  exec cargo run --quiet --locked --bin pbeam -- ${policy[@]+"${policy[@]}"} pbeam_boot start "$entry" main -- "$@"
+  exec cargo run --quiet --locked --bin pbeam -- ${policy[@]+"${policy[@]}"} pbeam_boot start "$entry" main --root "$root" -- "$@"
 }
 
 # With --no-build, run the last build with the list that it wrote.

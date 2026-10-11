@@ -60,15 +60,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Runtime
 
-### Run `code:ensure_loaded/1` as ERTS does
-
-- After #367, PBeam runs the pinned `code:ensure_loaded/1` and returns `{module, Module}` for a loaded module. For a module that is not loaded, the call stops the run with `unresolved external MFA code_server:get_mode/0` (row "Code loading" of `docs/erts-differences.md`). PBeam has no code server and no code path, so it cannot load a module on demand. An implementation must give the pinned ERTS result, including the code-path search and the load of a module that is not loaded yet; it needs code-loading support first. Until then the call stays a clear runtime error.
-- An unconsolidated protocol calls `code:ensure_loaded/1` through `Code.ensure_compiled/1` (Elixir 1.20.4 `lib/elixir/lib/protocol.ex:956-975`). #349 consolidates the protocols of the example runs at build time, as `mix run` does.
-- On-demand loading also changes the output order of processes that race. In interactive mode, the Terra Counter `main` process waits for 11 module loads at its first `IO.inspect/1` call, so the terminal owner writes the restore sequence before the result. PBeam loads all modules before the run, so `main` writes first (#428, row "Code loading" of `docs/erts-differences.md`).
-- The same work adds the capability check of `erlang:module_loaded/1`. Until then, its row in `docs/effect-inventory.md` is `later` ([#437](https://github.com/fahchen/pbeam/issues/437)).
-- **Trigger:** a supported program calls `code:ensure_loaded/1` for a module that is not loaded, or a program needs protocols that are not consolidated.
-- **Source:** the owner PBeam run of `mise run example terra_counter` on 2026-10-10 (#339, #367).
-
 ### Model the process heap for GC reductions and the message copy cost
 
 - PBeam has no process heap, and its terms keep no literal origin. A message, an ETS table, and `persistent_term` share each map with the sender, and do not copy it. Thus PBeam charges no garbage collection reductions and no message copy cost, and `maps:merge/2` of a map and its copy from a send, ETS, or `persistent_term` takes their shared nodes with no step. A change of the `message_queue_data` process flag does not move the messages and sends no adjust signal. The "Garbage collection reductions", "Scheduling", "Process flags", and "Map merge reductions" rows of `docs/erts-differences.md` record these differences, and this entry owns them.
@@ -77,12 +68,19 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer that needs exact interleaving with large messages or with processes that allocate much, or a task that adds a heap-size limit (row "Heap limit").
 - **Source:** owner decision on PR #249 (#245).
 
-### Keep the trap state of `maps:from_list/1` and `unicode:characters_to_list/2`
+### Keep the trap state of `maps:from_list/1`, `maps:from_keys/2`, and `unicode:characters_to_list/2`
 
-- At each trap, `maps:from_list/1` hashes, sorts, and walks the list again to get its YCF units, and then skips the units that it already used (`src/runtime/interpreter/bif/maps.rs`). `unicode:characters_to_list/2` builds the full list in its first call, and the traps only charge the build (`finish_list` in `src/runtime/interpreter/bif/unicode.rs`). ERTS keeps the YCF state in a magic reference (`utils.c:3733-3819`) and builds the list a part in each call (`erl_unicode.c:1342-1361`). The reductions, the trap points, and the results are the same, so only the host time changes.
-- **Evidence:** on a release build, `maps:from_list/1` of 5000, 10000, and 20000 pairs takes 3, 9, and 28 ms, and the tail-recursive build of the same lists takes 1058, 4125, and 16799 ms (measured on the head of PR #249). A list of n pairs traps about n / 16000 times.
+- At each trap, `maps:from_list/1` and `maps:from_keys/2` hash, sort, and walk the list again to get their YCF units, and then skip the units that they already used (`from_list` and `from_keys` in `src/runtime/interpreter/bif/maps.rs`). `unicode:characters_to_list/2` builds the full list in its first call, and the traps only charge the build (`finish_list` in `src/runtime/interpreter/bif/unicode.rs`). ERTS keeps the YCF state in a magic reference (`utils.c:3733-3819`) and builds the list a part in each call (`erl_unicode.c:1342-1361`). The reductions, the trap points, and the results are the same, so only the host time changes.
+- **Evidence:** on a release build, `maps:from_list/1` of 5000, 10000, and 20000 pairs takes 3, 9, and 28 ms, and the tail-recursive build of the same lists takes 1058, 4125, and 16799 ms (measured on the head of PR #249). A list of n pairs traps about n / 16000 times. `maps:from_keys/2` walks its key list in the same way, with one unit for each key (`erl_map.c:287-291`, `629-642`).
 - **Trigger:** a measured path converts inputs large enough that the host time of these BIFs matters, for example after a list term change makes the list build fast.
-- **Source:** Codex review of PR #249 (#245).
+- **Source:** Codex review of PR #249 (#245). The `maps:from_keys/2` walk comes from #445 (PR #486).
+
+### Use a balanced multiset in `erlang:'--'/2`
+
+- The set stages of `erlang:'--'/2` keep the multiset of the right elements in a sorted `Vec`, and `Vec::insert` and `Vec::remove` move each later element (`set_build` and `set_finish` in `src/runtime/interpreter/bif/subtract.rs`). ERTS inserts each right element into a red-black tree with one node for each element, and it removes a node when its count reaches 0 (`subtract_rbt_lookup_insert`, `erl_bif_lists.c:813-856`). Both count one insertion for each element, so the reductions, the trap points, and the results are the same. A right list of n distinct elements in descending order moves about n²/2 elements in PBeam, and these moves take no reduction. Each trap also converts the multiset and the result so far to lists for the trap state, and the next turn converts them back (`into_terms` and `from_terms`), which repeats this work for each trap.
+- **Evidence:** measured on pinned ERTS and on the debug build of PBeam, with the descending right list and the ascending left list, `lists:seq(1, N) -- lists:seq(N, 1, -1)`, where the wall time includes the start of each runtime: for N = 20000, ERTS 0.22 s and PBeam 1.0 s, and for N = 100000, ERTS 0.22 s and PBeam 23.4 s. The same call with the ascending right list and the descending left list, `lists:seq(N, 1, -1) -- lists:seq(1, N)`, takes 0.34 s on PBeam for N = 100000, because the `Vec::insert` and `Vec::remove` then work at its end. The fixture case `set_build_trap` of `subtract_probe` builds an ascending list, so it does not show the cost.
+- **Trigger:** a consumer subtracts two lists of more than about 10000 elements, or a measured run starts such a subtraction.
+- **Source:** Codex review of PR #486 (#445).
 
 ### Follow the endless trap of `maps:from_list/1` at each OTP pin change
 

@@ -12,7 +12,9 @@ start(Module, Function) ->
 %% binary. The boot process traps exits (init.erl:1197). It registers the
 %% init request process with the flags after {noshell, []}, as for
 %% erl -noshell. It starts erl_prim_loader with the code path of the pa and
-%% pz flags (init.erl:1200-1202). It then starts the kernel processes logger
+%% pz flags (init.erl:1200-1202). With a root flag, it then sets the code
+%% path of start_clean.boot (init.erl:1323-1332). It then starts the kernel
+%% processes logger
 %% and application_controller in the order of start_clean.boot
 %% (init.erl:1348-1350). It then runs the kernel part of kernel:start/2,
 %% and sets the registered user process as the group leader before it
@@ -29,6 +31,7 @@ start(Module, Function, Flags) ->
     Init = spawn(?MODULE, init, [self(), [{noshell, []} | Flags]]),
     true = register(init, Init),
     ok = start_prim_loader(Init, path_flags(Flags)),
+    ok = boot_path(get_flag_args(root, Flags), path_flags(Flags)),
     ok = start_in_kernel(Init, logger, logger_server, start_link, []),
     ok = start_in_kernel(Init, application_controller,
                          application_controller, start, [kernel_app()]),
@@ -56,6 +59,20 @@ start_prim_loader(Init, {Pa, Pz}) ->
             exit(Reason)
     end.
 
+%% Run the last path command of the pinned start_clean.boot,
+%% {path, ["$ROOT/lib/kernel-11.0.4/ebin", "$ROOT/lib/stdlib-8.1/ebin"]}, as
+%% init does when the boot has no -path flag: set the path to
+%% Pa ++ BootPath ++ Pz, with $ROOT replaced by the root flag
+%% (init.erl:1323-1332, 1417-1442). The default code_path_choice is strict,
+%% so the directories stay as they are (init.erl:645-655, 1450-1451). A boot
+%% without a root flag runs no boot script command: ERTS stops without it
+%% (init.erl:1226-1232).
+boot_path([[Root]], {Pa, Pz}) ->
+    Lib = b2s(Root) ++ "/lib/",
+    erl_prim_loader:set_path(Pa ++ [Lib ++ "kernel-11.0.4/ebin", Lib ++ "stdlib-8.1/ebin"] ++ Pz);
+boot_path([], _) ->
+    ok.
+
 %% init.erl:1259-1262. The last pa flag comes first.
 path_flags(Flags) ->
     Pa = append(reverse(get_flag_args(pa, Flags))),
@@ -80,7 +97,9 @@ add_to_kernel(Init, Server, Res) ->
 %% The init request process. It traps exits (init.erl:588), links to each
 %% kernel process that starts with {ok, Pid} (init.erl:768-772), and answers
 %% get_arguments and {get_argument, Arg} with the values as strings
-%% (init.erl:816-819). For init:stop/0
+%% (init.erl:816-819). It answers fetch_loaded with [] (init.erl:720-722):
+%% the boot loads no module with primLoad, because the pbeam binary loads
+%% the start modules. For init:stop/0
 %% it stops the kernel process and halts with status 0 (init.erl:536,
 %% 788-789, 924-945). It keeps other messages in its mailbox.
 init(Boot, Flags) ->
@@ -100,6 +119,9 @@ init_loop(Boot, Flags, Kernel) ->
             init_loop(Boot, Flags, Kernel);
         {From, {get_argument, Arg}} ->
             From ! {init, get_argument(Arg, Flags)},
+            init_loop(Boot, Flags, Kernel);
+        {From, fetch_loaded} ->
+            From ! {init, []},
             init_loop(Boot, Flags, Kernel);
         {stop, stop} ->
             stop(Kernel)
@@ -181,9 +203,10 @@ reverse([A, B | L]) ->
 %% Do the kernel part of kernel:start/2. Run logger:internal_init_logger/0
 %% (kernel.erl:37). Do not run os:internal_init_cmd_shell/0 (kernel.erl:38):
 %% only os:cmd/1,2 reads the shell that it puts in a persistent term
-%% (os.erl:602, 630-669). Start the kernel_sup children StdError, File,
-%% SigSrv, User, and LoggerSup in the order of kernel.erl:117-168, 188-194,
-%% and 222-225 for a node without -master. File is file_server_2, which
+%% (os.erl:602, 630-669). Start the kernel_sup children Code (only with a
+%% root flag, see start_code/1), StdError, File, SigSrv, User, and LoggerSup
+%% in the order of kernel.erl:110-168, 188-194, and 222-225 for a node
+%% without -master. File is file_server_2, which
 %% file:read_file_info/1 and os:find_executable/1 call. Then run
 %% erl_signal_handler:start/0 and logger:add_handlers(kernel)
 %% (kernel.erl:41-42). Trap exits, as a supervisor does
@@ -194,6 +217,7 @@ reverse([A, B | L]) ->
 kernel(Boot) ->
     process_flag(trap_exit, true),
     ok = logger:internal_init_logger(),
+    Code = start_code(init:get_argument(root)),
     {ok, StdError} = standard_error:start_link(),
     {ok, File} = file_server:start_link(),
     {ok, SigSrv} = gen_event:start_link({local, erl_signal_server}),
@@ -206,8 +230,17 @@ kernel(Boot) ->
         {_Init, stop} ->
             [shutdown(Pid, Time)
              || {Pid, Time} <- [{LoggerSup, infinity}, {User, 2000}, {SigSrv, 2000},
-                                {File, 2000}, {StdError, 2000}]]
+                                {File, 2000}, {StdError, 2000} | Code]]
     end.
+
+%% Start the code server, the first kernel_sup child (kernel.erl:110-115,
+%% 222), when the boot has a root flag: code:start_link/0 reads it
+%% (code.erl:1686). Return the child for shutdown/2, or no child.
+start_code({ok, _}) ->
+    {ok, Code} = code:start_link(),
+    [{Code, 2000}];
+start_code(error) ->
+    [].
 
 %% Shut down a child as supervisor:shutdown/1 does (supervisor.erl:1627-1656):
 %% send the exit signal shutdown, kill the child when it does not exit in

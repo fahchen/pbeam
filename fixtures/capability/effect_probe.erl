@@ -367,6 +367,7 @@ ambient() ->
         erlang:node(Self),
         erlang:function_exported(?MODULE, ambient, 0),
         erlang:module_loaded(?MODULE),
+        erlang:get_module_info(?MODULE, module),
         erts_internal:prepare_loading(effect_probe_missing, <<"FOR1">>),
         erlang:finish_loading([]),
         erlang:cancel_timer(make_ref(), []),
