@@ -191,11 +191,11 @@ pub(super) fn call(
 /// ```rust,ignore
 /// // x0 = "prim_tty", from prim_tty: the first call gives `ok`, the next
 /// // gives the `reload` error.
-/// assert!(matches!(load_nif(program, &mut scheduler, "prim_tty")?, BifResult::Value(_)));
+/// assert!(matches!(load_nif(&mut scheduler, "prim_tty")?, BifResult::Value(_)));
 /// // x0 = foo raises `error:badarg`.
-/// assert!(matches!(load_nif(program, &mut scheduler, "prim_tty")?, BifResult::Raise { .. }));
+/// assert!(matches!(load_nif(&mut scheduler, "prim_tty")?, BifResult::Raise { .. }));
 /// // x0 = "load_nif_probe", from load_nif_probe.
-/// assert!(load_nif(program, &mut scheduler, "load_nif_probe").is_err());
+/// assert!(load_nif(&mut scheduler, "load_nif_probe").is_err());
 /// ```
 ///
 /// # Errors
@@ -203,11 +203,7 @@ pub(super) fn call(
 /// A module without PBeam bindings gives a runtime error that names the
 /// module. A new error atom or a new `capability_denied` atom in a full
 /// atom table gives the error of `AtomTable::put`.
-pub(super) fn load_nif(
-    program: &BeamProgram,
-    scheduler: &mut Scheduler,
-    caller: &str,
-) -> Result<BifResult, BeamError> {
+pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifResult, BeamError> {
     let arguments = call_arguments(&scheduler.current_process_mut().registers, 2)?;
     if !is_native_filename(&arguments[0], filename_encoding()) {
         return Ok(BifResult::badarg());
@@ -228,7 +224,8 @@ pub(super) fn load_nif(
             "NIF library already loaded (reload disallowed since OTP 20).",
         );
     }
-    let instructions = &program.module(caller)?.instructions;
+    let module = Rc::clone(scheduler.code.module(caller)?);
+    let instructions = &module.instructions;
     let has_nifs = instructions
         .iter()
         .any(|instruction| matches!(instruction, Instruction::NifStart { .. }));

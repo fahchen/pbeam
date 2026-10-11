@@ -278,8 +278,6 @@ fn list_rest(elements: &[Term], tail: Option<&Term>) -> Term {
 
 /// The state that a BIF body can use.
 struct BifContext<'a> {
-    /// The loaded program, in which a spawn BIF finds the start function.
-    program: &'a BeamProgram,
     /// The scheduler that runs the calling process.
     scheduler: &'a mut Scheduler,
 }
@@ -416,10 +414,7 @@ impl BeamProgram {
             }
             _ => {}
         }
-        let mut context = BifContext {
-            program: self,
-            scheduler,
-        };
+        let mut context = BifContext { scheduler };
         table::dispatch(&mut context, module, name, &arguments)
     }
 
@@ -506,10 +501,7 @@ impl BeamProgram {
             ],
         ) = (module, function, arguments.as_slice())
         {
-            let mut context = BifContext {
-                program: self,
-                scheduler,
-            };
+            let mut context = BifContext { scheduler };
             return ets::insert_list(&mut context, *id, objects, *done as usize, *keypos as i32);
         }
         // The copy phase takes the result bytes out of the owned trap

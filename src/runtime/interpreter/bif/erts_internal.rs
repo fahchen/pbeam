@@ -3,6 +3,7 @@
 use super::BifResult::Value;
 use super::erlang::signals_return;
 use super::*;
+use crate::beam::code::PrepareError;
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
     host::{
@@ -701,4 +702,58 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
         (_, None) => Term::static_atom("badarg"),
     };
     Ok(signals_return(scheduler, port, info))
+}
+
+/// Run `erts_internal:prepare_loading(Module, Code)`, which
+/// `erlang:prepare_loading/2` calls, as `erts_internal_prepare_loading_2`
+/// (`beam_bif_load.c:231-266`) does. A `Module` that is not an atom, and
+/// then a `Code` that is not a binary, raise `badarg`. Bytes that ERTS
+/// rejects as a bad file, and a module name in the bytes that is not
+/// `Module`, return `{error, badfile}` (see [`code::prepare`]). Else the
+/// BIF returns a new reference, and the code table of the run keeps the
+/// prepared module under it until `erlang:finish_loading/1` loads it. ERTS
+/// returns a magic reference, for which `erlang:is_reference/1` is also
+/// `true`. The atoms of the bytes go into the atom table of the run. ERTS
+/// also sends an error report to the system logger for bad bytes
+/// (`beam_load_report_error`, `beam_load.c:372`); PBeam sends none (row
+/// "Code loading" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let prepared = prepare_loading(&mut context, &load_target, &Term::Binary(code))?;
+/// assert!(matches!(prepared, BifResult::Value(Term::Reference(_))));
+/// let bad = prepare_loading(&mut context, &load_target, &Term::Binary(b"bad".to_vec()))?;
+/// assert!(matches!(bad, BifResult::Value(Term::Tuple(_))));
+/// ```
+///
+/// # Errors
+///
+/// Bytes that the PBeam loader cannot decode, such as a module with an
+/// `-on_load` function (opcode 149), give the runtime error
+/// `erts_internal:prepare_loading/2 cannot load module M: <cause>`.
+pub(super) fn prepare_loading(
+    context: &mut BifContext<'_>,
+    module: &Term,
+    code: &Term,
+) -> Result<BifResult, BeamError> {
+    let (Term::Atom(module), Term::Binary(bytes)) = (module, code) else {
+        return Ok(BifResult::badarg());
+    };
+    let scheduler = &mut *context.scheduler;
+    match code::prepare(bytes, module.name(), &mut scheduler.atoms) {
+        Ok(prepared) => {
+            let reference = scheduler.make_ref()?;
+            scheduler.code.prepare(reference, prepared);
+            Ok(Value(Term::Reference(reference)))
+        }
+        Err(PrepareError::BadFile) => Ok(Value(Term::Tuple(vec![
+            Term::static_atom("error"),
+            Term::static_atom("badfile"),
+        ]))),
+        Err(PrepareError::Unsupported(cause)) => Err(error(format!(
+            "erts_internal:prepare_loading/2 cannot load module {}: {cause}",
+            module.name()
+        ))),
+    }
 }
