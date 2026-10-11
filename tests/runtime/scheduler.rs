@@ -902,3 +902,26 @@ fn does_not_run_the_queued_dirty_write_of_a_killed_writer() {
     runnable.sort();
     assert_eq!(runnable, (1..=11).map(ProcessId).collect::<Vec<_>>());
 }
+
+#[test]
+fn sends_a_message_that_shares_the_term_of_the_sender() {
+    // Owner decision R3 of #450: a send shares a term, and the receiver
+    // cannot see the difference (`docs/copy-on-write-terms.md`). ERTS
+    // copies the message to the heap of the receiver and expands shared
+    // subterms (`erl_message.c:834-861`), and a send to the process itself
+    // with the message queue on the heap does not copy (`:824-826`). PBeam
+    // reports no value that depends on the copy (row "Message copy" of
+    // docs/erts-differences.md).
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let message = Term::tuple(vec![Term::Integer(1), Term::tuple(vec![Term::Integer(2)])]);
+    // The interpreter copies the operand of `erlang:send/2` first, and the
+    // copy is shallow. `Scheduler::send_message` is the delivery step that
+    // `deliver_to` of `erlang:send/2` calls for a local pid.
+    scheduler.send_message(ProcessId(0), ProcessId(0), message.clone());
+    let received = messages(&scheduler, 0);
+    assert_eq!(received.len(), 1);
+    assert!(message.shares_storage_with(&received[0]));
+    // A term of another kind does not share its storage.
+    assert!(!Term::Integer(1).shares_storage_with(&Term::Integer(1)));
+}
