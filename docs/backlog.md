@@ -68,12 +68,19 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer that needs exact interleaving with large messages or with processes that allocate much, or a task that adds a heap-size limit (row "Heap limit").
 - **Source:** owner decision on PR #249 (#245).
 
-### Keep the trap state of `maps:from_list/1` and `unicode:characters_to_list/2`
+### Keep the trap state of `maps:from_list/1`, `maps:from_keys/2`, and `unicode:characters_to_list/2`
 
-- At each trap, `maps:from_list/1` hashes, sorts, and walks the list again to get its YCF units, and then skips the units that it already used (`src/runtime/interpreter/bif/maps.rs`). `unicode:characters_to_list/2` builds the full list in its first call, and the traps only charge the build (`finish_list` in `src/runtime/interpreter/bif/unicode.rs`). ERTS keeps the YCF state in a magic reference (`utils.c:3733-3819`) and builds the list a part in each call (`erl_unicode.c:1342-1361`). The reductions, the trap points, and the results are the same, so only the host time changes.
-- **Evidence:** on a release build, `maps:from_list/1` of 5000, 10000, and 20000 pairs takes 3, 9, and 28 ms, and the tail-recursive build of the same lists takes 1058, 4125, and 16799 ms (measured on the head of PR #249). A list of n pairs traps about n / 16000 times.
+- At each trap, `maps:from_list/1` and `maps:from_keys/2` hash, sort, and walk the list again to get their YCF units, and then skip the units that they already used (`from_list` and `from_keys` in `src/runtime/interpreter/bif/maps.rs`). `unicode:characters_to_list/2` builds the full list in its first call, and the traps only charge the build (`finish_list` in `src/runtime/interpreter/bif/unicode.rs`). ERTS keeps the YCF state in a magic reference (`utils.c:3733-3819`) and builds the list a part in each call (`erl_unicode.c:1342-1361`). The reductions, the trap points, and the results are the same, so only the host time changes.
+- **Evidence:** on a release build, `maps:from_list/1` of 5000, 10000, and 20000 pairs takes 3, 9, and 28 ms, and the tail-recursive build of the same lists takes 1058, 4125, and 16799 ms (measured on the head of PR #249). A list of n pairs traps about n / 16000 times. `maps:from_keys/2` walks its key list in the same way, with one unit for each key (`erl_map.c:287-291`, `629-642`).
 - **Trigger:** a measured path converts inputs large enough that the host time of these BIFs matters, for example after a list term change makes the list build fast.
-- **Source:** Codex review of PR #249 (#245).
+- **Source:** Codex review of PR #249 (#245). The `maps:from_keys/2` walk comes from #445 (PR #486).
+
+### Use a balanced multiset in `erlang:'--'/2`
+
+- The set stages of `erlang:'--'/2` keep the multiset of the right elements in a sorted `Vec`, and `Vec::insert` and `Vec::remove` move each later element (`set_build` and `set_finish` in `src/runtime/interpreter/bif/subtract.rs`). ERTS inserts each right element into a red-black tree with one node for each element, and it removes a node when its count reaches 0 (`subtract_rbt_lookup_insert`, `erl_bif_lists.c:813-856`). Both count one insertion for each element, so the reductions, the trap points, and the results are the same. A right list of n distinct elements in descending order moves about n²/2 elements in PBeam, and these moves take no reduction.
+- **Evidence:** measured on pinned ERTS and on the debug build of PBeam, with `lists:seq(N, 1, -1) -- lists:seq(1, N)`, where the wall time includes the start of each runtime: for N = 20000, ERTS 0.22 s and PBeam 1.0 s, and for N = 100000, ERTS 0.22 s and PBeam 23.4 s. The same call with the ascending right list `lists:seq(1, N)` and the descending left list takes 0.34 s on PBeam for N = 100000, because the `Vec::insert` and `Vec::remove` then work at its end. The fixture case `set_build_trap` of `subtract_probe` builds an ascending list, so it does not show the cost.
+- **Trigger:** a consumer subtracts two lists of more than about 10000 elements, or a measured run starts such a subtraction.
+- **Source:** Codex review of PR #486 (#445).
 
 ### Follow the endless trap of `maps:from_list/1` at each OTP pin change
 
