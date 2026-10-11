@@ -258,6 +258,78 @@ pub(super) fn from_list(
     }
 }
 
+/// Run `maps:from_keys(Keys, Value)`: return the map of each key of a list
+/// to `Value`, as ERTS `maps_from_keys_2_helper` does (`erl_map.c:279-311`).
+/// A term that is not a proper list raises `error:badarg`. A key that the
+/// list has more than one time gives one pair, and a list of more than 32
+/// keys with at most 32 distinct keys gives a flatmap.
+///
+/// ERTS runs the BIF as YCF code with 40 units for each reduction
+/// (`erl_map.c:629-642`; [`run_units`]), as for [`from_list`]: the size walk
+/// uses one unit for each element (`erl_map.c:287-291`). A list of at most
+/// 32 keys then builds a flatmap with no unit. A longer list adds the units
+/// of the hashmap build, which `maps:from_list/1` shares
+/// (`hashmap_from_validated_list`, `erl_map.c:482-560`;
+/// [`from_list_units`]). A yield traps to the export `maps:from_keys_trap/3`
+/// with the list, the value, and the units done. ERTS traps to
+/// `maps:from_keys/2` with a magic reference to the YCF state. An improper
+/// tail that the walk finds after a yield gives the runtime error of
+/// [`from_list`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let keys = Term::list_from(vec![Term::Integer(2), Term::Integer(1), Term::Integer(2)]);
+/// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::nil()), (Term::Integer(2), Term::nil())])?);
+/// assert!(matches!(from_keys(&mut process, &keys, &Term::nil(), 0)?, BifResult::Value(value) if value == map));
+/// assert!(matches!(from_keys(&mut process, &test_atom("foo"), &Term::nil(), 0)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when a key is of a type that the map form does
+/// not support yet, for example a map key. Also return the runtime error
+/// of [`ProcessState::bif_reductions_left`] for a negative budget.
+pub(super) fn from_keys(
+    process: &mut ProcessState,
+    keys: &Term,
+    value: &Term,
+    done: usize,
+) -> Result<BifResult, BeamError> {
+    /// `iterations_per_red` of `maps_from_keys_2` (`erl_map.c:630`).
+    const PER_REDUCTION: usize = 40;
+    /// `MAP_SMALL_MAP_LIMIT` in a release build (`erl_map.h:93-97`).
+    const SMALL_MAP_LIMIT: usize = 32;
+    let Some((elements, tail)) = keys.list_cells() else {
+        return Ok(BifResult::badarg());
+    };
+    let elements: Vec<&Term> = elements.collect();
+    let proper = tail.is_none();
+    let mut units = vec![1; elements.len()];
+    if proper && elements.len() > SMALL_MAP_LIMIT {
+        units.extend(from_list_units(&elements)?);
+    }
+    match run_units(process, PER_REDUCTION, &units, done)? {
+        YcfTurn::Yield(done) => Ok(BifResult::TrapBif {
+            module: "maps",
+            function: "from_keys_trap",
+            arguments: vec![keys.clone(), value.clone(), Term::Integer(done as i64)],
+        }),
+        YcfTurn::Done(_) if !proper && done > 0 => Err(error(
+            "unsupported maps:from_keys/2 call: maps:from_keys/2 finds an improper tail after a \
+             trap, and ERTS then traps again forever (row \"Scheduling\" in docs/erts-differences.md)",
+        )),
+        YcfTurn::Done(_) if !proper => Ok(BifResult::badarg()),
+        YcfTurn::Done(reductions) => {
+            process.bump_reductions(reductions);
+            let pairs = elements.into_iter().map(|key| (key.clone(), value.clone()));
+            let map = Map::from_pairs(pairs.collect())
+                .map_err(|key| error(format!("unsupported map key {key:?}")))?;
+            Ok(Value(Term::Map(map)))
+        }
+    }
+}
+
 /// Run `erlang:is_map_key/2`: return `true` when the map holds the key and
 /// `false` when it does not, as ERTS `maps_is_key_2` does
 /// (`erl_map.c:1185-1196`). A term that is not a map raises

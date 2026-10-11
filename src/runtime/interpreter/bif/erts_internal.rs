@@ -750,3 +750,101 @@ pub(super) fn prepare_loading(
         ))),
     }
 }
+
+/// The most digits of each base 2 to 36 that fit in a small integer with
+/// its sign, less one, on a 64-bit emulator (`digits_per_small_lookup`,
+/// `big.c:4114-4127`).
+const DIGITS_PER_SMALL: [u32; 35] = [
+    59, 37, 29, 25, 22, 21, 19, 18, 17, 17, 16, 15, 15, 15, 14, 14, 14, 13, 13, 13, 13, 13, 12, 12,
+    12, 12, 12, 12, 12, 11, 11, 11, 11, 11, 11,
+];
+
+/// Run `erts_internal:list_to_integer(String, Base)`, which
+/// `erlang:list_to_integer/1,2` calls, as
+/// `erts_internal_list_to_integer_2` (`big.c:4258-4354`) does. It reads an
+/// optional `-` or `+` and the longest prefix of digits of `Base`, and
+/// returns `{Integer, Rest}` with the rest of the list. It returns the atom
+/// `no_integer` for `[]` and for a list with no digit after the sign,
+/// `not_a_list` for a term that is not a list, `badarg` for a `Base` that is
+/// not a small integer from 2 to 36, and `big` when the digits after the
+/// leading zeros do not fit in a small integer; `erlang:list_to_integer/1,2`
+/// then reads the string as a binary. ERTS reads each element that is a
+/// small integer as its low 8 bits (`byte c = unsigned_val(...)`), so
+/// `[$1 + 256]` gives `{1, []}`. An element that is not a small integer ends
+/// the digits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // "-12a" with base 10 gives {-12, "a"}.
+/// let value = list_to_integer(&string("-12a"), &Term::Integer(10));
+/// // [] gives no_integer.
+/// let value = list_to_integer(&Term::Nil, &Term::Integer(10));
+/// ```
+pub(super) fn list_to_integer(list: &Term, base: &Term) -> BifResult {
+    let atom = |name| Value(Term::static_atom(name));
+    if list.is_nil() {
+        return atom("no_integer");
+    }
+    let Some((head, tail)) = list.cons_cell() else {
+        return atom("not_a_list");
+    };
+    let base = match base.small_integer() {
+        Some(base @ 2..=36) => base as u32,
+        _ => return atom("badarg"),
+    };
+    let byte = |term: &Term| term.small_integer().map(|value| value.to_le_bytes()[0]);
+    let digit = |byte: u8| char::from(byte).to_digit(base);
+    // ERTS compares the first element with the small integers `$-` and
+    // `$+`, not with its low 8 bits.
+    let (negative, mut rest) = match head.small_integer() {
+        Some(0x2d) => (true, tail),
+        Some(0x2b) => (false, tail),
+        _ => (false, list),
+    };
+    let mut zeros = 0;
+    while let Some((head, tail)) = rest.cons_cell() {
+        match byte(head) {
+            Some(b'0') => {
+                zeros += 1;
+                rest = tail;
+            }
+            Some(other) if digit(other).is_none() => {
+                return if zeros == 0 {
+                    atom("no_integer")
+                } else {
+                    Value(Term::tuple(vec![Term::Integer(0), rest.clone()]))
+                };
+            }
+            _ => break,
+        }
+    }
+    if !rest.is_nonempty_list() {
+        return if zeros == 0 {
+            atom("no_integer")
+        } else {
+            Value(Term::tuple(vec![Term::Integer(0), rest.clone()]))
+        };
+    }
+    let digits_per_small = DIGITS_PER_SMALL[base as usize - 2];
+    let (mut value, mut count) = (0_i64, 0);
+    while count <= digits_per_small {
+        let Some((head, tail)) = rest.cons_cell() else {
+            break;
+        };
+        let Some(next) = byte(head).and_then(digit) else {
+            break;
+        };
+        value = value * i64::from(base) + i64::from(next);
+        count += 1;
+        rest = tail;
+    }
+    if count == 0 {
+        atom("no_integer")
+    } else if count > digits_per_small {
+        atom("big")
+    } else {
+        let value = if negative { -value } else { value };
+        Value(Term::tuple(vec![Term::Integer(value), rest.clone()]))
+    }
+}

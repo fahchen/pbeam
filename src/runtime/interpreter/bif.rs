@@ -29,6 +29,7 @@ mod os;
 mod pbeam_cap;
 mod persistent_term;
 mod re;
+mod subtract;
 mod unicode;
 mod ycf;
 
@@ -440,6 +441,9 @@ impl BeamProgram {
     /// - `erlang:'++'/3`, with the original lists and the rest of the left
     ///   list. ERTS traps to `'++'/2` with a magic reference to the same state
     ///   (`erl_bif_lists.c:91-109`, `298-333`).
+    /// - `erlang:'--'/10`, with the stage and the state of a subtraction
+    ///   ([`subtract::continue_trap`]). ERTS traps to `'--'/2` with a magic
+    ///   reference to the state (`erl_bif_lists.c:1015-1024`).
     /// - `maps:merge_trap/2`, with the merged map and the steps that remain
     ///   ([`maps::merge_trap`]). ERTS traps to `maps:merge_trap/1` with a
     ///   magic reference to the walk state (`erl_map.c:134-136`).
@@ -447,6 +451,9 @@ impl BeamProgram {
     ///   and the YCF units done ([`maps::from_list`], [`maps::keys`]). ERTS
     ///   traps to `maps:from_list/1` and `maps:keys/1` with a magic
     ///   reference to the YCF state (`utils.c:3718-3731`).
+    /// - `maps:from_keys_trap/3`, with the keys, the value, and the YCF
+    ///   units done ([`maps::from_keys`]). ERTS traps to `maps:from_keys/2`
+    ///   with a magic reference to the YCF state.
     /// - `persistent_term:get_all_trap/2`, with the result and the number of
     ///   pairs that remain ([`persistent_term::get_all_trap`]). ERTS keeps
     ///   the table and the result so far (`erl_bif_persistent.c:263-265`).
@@ -541,11 +548,17 @@ impl BeamProgram {
             ("erlang", "++", [left, right, rest]) => {
                 erlang::append_chunk(process, left, right, rest)
             }
+            ("erlang", "--", state) if let Ok(state) = <&[Term; 10]>::try_from(state) => {
+                subtract::continue_trap(process, state)
+            }
             ("maps", "merge_trap", [merged, Term::Integer(steps)]) => {
                 maps::merge_trap(process, merged.clone(), *steps as usize)
             }
             ("maps", "from_list_trap", [list, Term::Integer(done)]) => {
                 maps::from_list(process, list, *done as usize)
+            }
+            ("maps", "from_keys_trap", [keys, value, Term::Integer(done)]) => {
+                maps::from_keys(process, keys, value, *done as usize)
             }
             ("maps", "keys_trap", [map, Term::Integer(done)]) => {
                 maps::keys(process, map, *done as usize)

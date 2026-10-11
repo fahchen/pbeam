@@ -33,7 +33,7 @@ use super::{
 use crate::{
     beam::BeamModule,
     error::{BeamError, error},
-    term::{Atom, AtomTable, ProcessId, Reference, Term},
+    term::{Atom, AtomTable, ProcessId, Reference, SMALL_INTEGER_MIN, Term},
 };
 
 /// The reduction budget of a process for one turn, as ERTS `CONTEXT_REDS`
@@ -170,6 +170,10 @@ pub(super) struct Scheduler {
     next_process_id: u64,
     /// Number for the next reference.
     next_reference: u64,
+    /// The unique integer counter of the scheduler, as `esdp->unique`
+    /// (`erl_bif_unique.c:574`, `812`): the number of
+    /// `erlang:unique_integer/0` calls so far.
+    unique: u64,
     /// Return value or exit reason of the root process. The root process
     /// records it when its exit starts, and the run ends only after the
     /// exit completes ([`Self::root_exited`]).
@@ -271,6 +275,7 @@ impl Scheduler {
             current_process: None,
             next_process_id: ROOT.0 + 1,
             next_reference: 0,
+            unique: 0,
             root_result: None,
             names: HashMap::new(),
             persistent_terms: PersistentTerms::default(),
@@ -1224,6 +1229,39 @@ impl Scheduler {
             Reference::ordinary(value).ok_or_else(|| error("process reference overflow"))?;
         self.next_reference = value + 1;
         Ok(reference)
+    }
+
+    /// Return the next value of `erlang:unique_integer/0`, as
+    /// `unique_integer_bif` and `bld_unique_integer_term`
+    /// (`erl_bif_unique.c:475-578`) make it from the thread id and the
+    /// counter of the scheduler. PBeam has one scheduler with thread id 1
+    /// and no dirty scheduler that runs Erlang code, so the maximum thread
+    /// id is 1, and the counter goes after 1 bit (`init_unique_integer`,
+    /// `erl_bif_unique.c:459-470`). The value is `MIN_SMALL` plus
+    /// `1 | (Counter << 1)`: `-(1 << 59) + 1` for the first call, and 2 more
+    /// for each later call, up to `MAX_SMALL`. ERTS gives other values: its
+    /// thread ids include the dirty schedulers of the host, and its boot
+    /// makes calls before the first call of the program.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.unique_integer()?, -(1 << 59) + 1);
+    /// assert_eq!(scheduler.unique_integer()?, -(1 << 59) + 3);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A value above `MAX_SMALL` is a runtime error after 2^59 calls: ERTS
+    /// then gives a bignum, which PBeam does not have.
+    pub(super) fn unique_integer(&mut self) -> Result<i64, BeamError> {
+        let value = i64::try_from((self.unique << 1) | 1)
+            .ok()
+            .and_then(|raw| SMALL_INTEGER_MIN.checked_add(raw))
+            .filter(|value| Term::Integer(*value).small_integer().is_some())
+            .ok_or_else(|| error("erlang:unique_integer/0 needs a bignum"))?;
+        self.unique += 1;
+        Ok(value)
     }
 
     /// Return whether the exit of the root process completed: the root

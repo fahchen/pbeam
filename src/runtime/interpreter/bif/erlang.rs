@@ -2771,6 +2771,103 @@ pub(super) fn module_loaded(code: &CodeTable, module: &Term) -> BifResult {
     Value(Term::static_atom(if loaded { "true" } else { "false" }))
 }
 
+/// The preloaded modules of ERTS, in the order of `PRELOAD_BEAM` and
+/// `ESOCK_PRELOAD_BEAM` (`erts/emulator/Makefile.in:804-828`).
+const PRELOADED: [&str; 22] = [
+    "erts_code_purger",
+    "erl_init",
+    "init",
+    "prim_buffer",
+    "prim_eval",
+    "prim_inet",
+    "prim_file",
+    "zlib",
+    "socket_registry",
+    "prim_socket",
+    "prim_net",
+    "prim_zip",
+    "erl_prim_loader",
+    "erlang",
+    "erts_internal",
+    "erl_tracer",
+    "erts_literal_area_collector",
+    "erts_trace_cleaner",
+    "erts_dirty_process_signal_handler",
+    "atomics",
+    "counters",
+    "persistent_term",
+];
+
+/// Run `erlang:pre_loaded/0`, as ERTS `pre_loaded_0` and `erts_preloaded`
+/// (`beam_bif_load.c:757-760`, `erl_init.c:459-484`) do: return the names
+/// of the preloaded modules of the emulator, with the last module of the
+/// preload list first. The list is fixed: PBeam has no module that is built
+/// into the runtime, and a run loads the files of these modules with the
+/// other start modules, so the BIF returns the ERTS list also when the run
+/// did not load one of them.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let BifResult::Value(modules) = pre_loaded(&mut scheduler)? else { unreachable!() };
+/// // [persistent_term, counters, atomics, ..., erl_init, erts_code_purger]
+/// ```
+///
+/// # Errors
+///
+/// The atom table cannot take a new module name.
+pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    let mut modules = Vec::with_capacity(PRELOADED.len());
+    for name in PRELOADED.iter().rev() {
+        modules.push(Term::Atom(scheduler.atoms.put(name)?));
+    }
+    Ok(Value(Term::list_from(modules)))
+}
+
+/// Run `erlang:get_module_info(Module, What)`, which `Module:module_info/1`
+/// calls, as ERTS `get_module_info_2` and `module_info_1`
+/// (`erl_bif_info.c:5918-5945`, `5986-6030`) do. A `Module` that is not an
+/// atom or that names no loaded module raises `badarg`. The key `module`
+/// returns `Module`. A term that is not a key of `get_module_info/3`
+/// (`md5`, `exports`, `functions`, `nifs`, `attributes`, `compile`,
+/// `native_addresses`, `native`, or `module`) raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let lists = Term::static_atom("lists");
+/// let info = get_module_info(&scheduler.code, &lists, &Term::static_atom("module"))?;
+/// assert!(matches!(info, BifResult::Value(Term::Atom(atom)) if atom.name() == "lists"));
+/// ```
+///
+/// # Errors
+///
+/// Each other key of `get_module_info/3` is the runtime error
+/// `erlang:get_module_info/2 key K is not implemented`.
+pub(super) fn get_module_info(
+    code: &CodeTable,
+    module: &Term,
+    what: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Atom(name) = module else {
+        return Ok(BifResult::badarg());
+    };
+    if code.get(name.name()).is_none() {
+        return Ok(BifResult::badarg());
+    }
+    let Term::Atom(key) = what else {
+        return Ok(BifResult::badarg());
+    };
+    match key.name() {
+        "module" => Ok(Value(module.clone())),
+        key @ ("md5" | "exports" | "functions" | "nifs" | "attributes" | "compile"
+        | "native_addresses" | "native") => Err(error(format!(
+            "erlang:get_module_info/2 key {key} is not implemented"
+        ))),
+        _ => Ok(BifResult::badarg()),
+    }
+}
+
 /// Run `erlang:start_timer(Time, Dest, Msg)`, as ERTS `start_timer_3` and
 /// `setup_bif_timer` (`erl_hl_timer.c:2605-2620`, `1804-1871`) do:
 ///
