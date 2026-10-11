@@ -147,7 +147,7 @@ Task #456 changed `Term::Binary` from `Binary(Vec<u8>)` to a `Binary` newtype in
 
 ## Equality and thread safety
 
-- `PartialEq` returns `true` for two terms that hold the same `Arc` (`Arc::ptr_eq`) before it compares their contents. Two different allocations with equal contents are still compared element by element, so the worst case stays O(size). #454 adds the fast path for a tuple and for a list cell, and #456 adds it for a binary for a tuple and #458 for a cons cell. #455 adds it for the free variables of a fun.
+- `PartialEq` returns `true` for two terms that hold the same `Arc` (`Arc::ptr_eq`) before it compares their contents. A binary also needs one offset and one size, because two views of one array can hold different bytes. Two different allocations with equal contents are still compared element by element, so the worst case stays O(size). #454 adds the fast path for a tuple, #458 for a cons cell, #455 for the free variables of a fun, and #456 for a binary.
 - A compile-time assertion checks `Term: Send + Sync` (#459). On main, `Rc<Repr>` of `Map` (`src/term/map.rs:112`) and `Rc<RefCell<MatchContext>>` (`src/term.rs:80`) are the parts that are not `Send`. #453 replaces the first, and #459 replaces the second.
 - Process mutable state stays exclusive to its process. Terms are shared and immutable. #459 changes the wording of #10 to this rule.
 
