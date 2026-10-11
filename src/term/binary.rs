@@ -354,13 +354,13 @@ impl From<Vec<u8>> for Binary {
 }
 
 impl fmt::Debug for Binary {
-    /// Write the bytes of the binary, for example `Binary([1, 2])`, as the
-    /// derived `Debug` of the `Term::Binary` variant wrote them.
+    /// Write the bytes of the binary as `[1, 2]`, so the derived `Debug` of
+    /// the `Term::Binary` variant writes `Binary([1, 2])`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(format!("{:?}", Binary::from(vec![1])), "Binary([1])");
+    /// assert_eq!(format!("{:?}", Binary::from(vec![1])), "[1]");
     /// ```
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{:?}", &**self)
