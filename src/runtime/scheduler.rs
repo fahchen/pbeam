@@ -7,7 +7,7 @@ use std::{
 use super::{
     capability::{
         Capability, CapabilityId, CapabilityKind, Delegations, Denied, Operation, Restriction,
-        Source,
+        SecurityContext, Source,
     },
     dirty_io::{Claim, Completion, DirtyIo},
     ets::EtsTables,
@@ -344,6 +344,47 @@ impl Scheduler {
         root.security = self.delegations.hold(id, issued);
         self.insert(root);
         Ok(())
+    }
+
+    /// Create the root process as [`Self::start`] does, with the boot
+    /// authority instead of capabilities, for a run in boot mode (see
+    /// `SecurityContext::boot`). The root process enters the runtime with
+    /// `pbeam_cap:enter_runtime/2`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.start_boot(frame, vec![]);
+    /// assert!(scheduler.process(ProcessId(0)).unwrap().security.is_boot());
+    /// ```
+    pub(super) fn start_boot(&mut self, frame: Frame, arguments: Vec<Term>) {
+        let mut root = ProcessState::new(ROOT, Start::Entry(frame), arguments);
+        root.security = SecurityContext::boot();
+        self.insert(root);
+    }
+
+    /// Return whether an operation of the current process on the process
+    /// `target` crosses from the runtime into the boot: the current process
+    /// is not a boot process, and `target` is a live or exiting boot
+    /// process. Only a run in boot mode has boot processes. The runtime to
+    /// boot gate of `erlang:send/2,3`, the `send` instruction,
+    /// `erlang:start_timer/3`, `erlang:link/1`, `erlang:exit/2`, the group
+    /// leader BIFs, the process inspection BIFs, and `erlang:unregister/1`
+    /// denies such an operation (row "Boot authority" of
+    /// `docs/erts-differences.md`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // The current process entered the runtime; `user` is a boot process.
+    /// assert!(scheduler.enters_boot(scheduler.whereis("user").unwrap()));
+    /// ```
+    pub(super) fn enters_boot(&self, target: ProcessId) -> bool {
+        !self.current_process().security.is_boot()
+            && self
+                .processes
+                .get(&target)
+                .is_some_and(|process| process.security.is_boot())
     }
 
     /// Store a process and add it to the end of the run queue.
@@ -1248,7 +1289,9 @@ impl Scheduler {
     /// `spawn` that permits the module of `start`, and with `link` and
     /// `monitor` when the spawn links or monitors. The child gets the
     /// delegable capabilities of the current process, reduced by
-    /// `restrictions` (see `SecurityContext::delegate`). A denied check or
+    /// `restrictions` (see `SecurityContext::delegate`). The child of a boot
+    /// process is a boot process, and a boot process with `restrictions` is
+    /// denied. A denied check or
     /// delegation gives `Ok(Err(Denied))` before the spawn takes a pid or a
     /// reference. In a run that skips the checks, the spawn has no check,
     /// and the child gets no copy and ignores `restrictions`.
@@ -1273,6 +1316,7 @@ impl Scheduler {
             Start::Undefined { module, .. } => module.name(),
         };
         let parent = &self.current_process().security;
+        let boot = parent.is_boot();
         let check = |needed: bool, operation: Operation, name: Option<&[u8]>| {
             if needed {
                 parent.check(CapabilityKind::Process, operation, name)
@@ -1294,7 +1338,11 @@ impl Scheduler {
         };
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = off_heap_message_queue;
-        child.security = self.delegations.hold(child.id, copies);
+        child.security = if boot {
+            SecurityContext::boot()
+        } else {
+            self.delegations.hold(child.id, copies)
+        };
         let parent = self.current_process_mut().id;
         child.parent = Some(parent);
         child.group_leader = self.current_process_mut().group_leader;

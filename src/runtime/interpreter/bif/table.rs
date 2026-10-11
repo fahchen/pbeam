@@ -336,7 +336,7 @@ bifs! {
     erlang:universaltime_to_localtime/1 => |_, [date]| Ok(erlang::universaltime_to_localtime(date)),
     erlang:universaltime_to_posixtime/1 => unsupported,
     erlang:unlink/1 => |cx, [target]| match target { Term::Pid(target) => { cx.scheduler.unlink(*target); Ok(Value(Term::static_atom("true"))) } Term::Port(_) => Err(unsupported_port("erlang:unlink/1")), _ => Ok(BifResult::badarg()) },
-    erlang:unregister/1 => |cx, [name]| Ok(if cx.scheduler.unregister(name) { Value(Term::static_atom("true")) } else { BifResult::badarg() }),
+    erlang:unregister/1 => |cx, [name]| erlang::unregister(cx.scheduler, name),
     erlang:whereis/1 => |cx, [name]| Ok(match name { Term::Atom(name) => Value(cx.scheduler.whereis(name.name()).map_or(Term::static_atom("undefined"), Term::Pid)), _ => BifResult::badarg() }),
     erlang:xor/2 => unsupported,
     error_logger:warning_map/0 => unsupported,

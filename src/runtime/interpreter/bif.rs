@@ -196,13 +196,42 @@ pub(super) fn denial(
     BifResult::capability_denied(&mut scheduler.atoms).map(Some)
 }
 
+/// Return the `error:capability_denied` exception when the current process
+/// is not a boot process and `target` is a boot process (see
+/// `Scheduler::enters_boot`): the runtime to boot gate. Else return
+/// `None`. An entry calls this after its capability check and before its
+/// first effect, so a denied call has no effect. Only a run in boot mode
+/// has boot processes (row "Boot authority" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The current process entered the runtime; `user` is a boot process.
+/// assert!(boot_denial(&mut scheduler, user)?.is_some());
+/// ```
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for a full atom table.
+pub(super) fn boot_denial(
+    scheduler: &mut Scheduler,
+    target: ProcessId,
+) -> Result<Option<BifResult>, BeamError> {
+    if scheduler.enters_boot(target) {
+        return BifResult::capability_denied(&mut scheduler.atoms).map(Some);
+    }
+    Ok(None)
+}
+
 /// Return the `error:capability_denied` exception when `target` is not the
 /// current process and no capability of the current process permits
-/// `operation` of the `process` kind (see [`denial`]). Else return `None`.
+/// `operation` of the `process` kind (see [`denial`]), or when the runtime
+/// to boot gate denies the call (see [`boot_denial`]). Else return `None`.
 /// The process inspection BIFs check `inspect` and the group leader BIFs
 /// check `group_leader` with this function after their argument checks and
 /// before the process lookup, so a denied call does not tell whether a
-/// process has the pid. A call for the caller has no check.
+/// process has the pid, except whether a live process is a boot process. A
+/// call for the caller has no check.
 ///
 /// # Examples
 ///
@@ -222,7 +251,10 @@ pub(super) fn other_process_denial(
     if target == scheduler.current_process().id {
         return Ok(None);
     }
-    denial(scheduler, CapabilityKind::Process, operation, None)
+    match denial(scheduler, CapabilityKind::Process, operation, None)? {
+        Some(denied) => Ok(Some(denied)),
+        None => boot_denial(scheduler, target),
+    }
 }
 
 /// Return the runtime error of a BIF that ERTS runs with a port argument
@@ -392,6 +424,9 @@ impl BeamProgram {
             }
             ("pbeam_cap", "policy_revoke", [holder, kind]) => {
                 return pbeam_cap::policy_revoke(scheduler, holder, kind);
+            }
+            ("pbeam_cap", "enter_runtime", [module, function]) => {
+                return pbeam_cap::enter_runtime(scheduler, module, function);
             }
             _ => {}
         }
@@ -652,7 +687,8 @@ impl BeamProgram {
 
 /// The PBeam BIFs: functions of PBeam modules that ERTS does not have. They
 /// are not `bif.tab` entries, and no BEAM module defines them.
-const PBEAM_BIFS: [(&str, &str, u32); 3] = [
+const PBEAM_BIFS: [(&str, &str, u32); 4] = [
+    ("pbeam_cap", "enter_runtime", 2),
     ("pbeam_cap", "policy_revoke", 2),
     ("pbeam_cap", "request", 2),
     ("pbeam_cap", "revoke", 2),

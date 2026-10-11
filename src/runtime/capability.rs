@@ -539,22 +539,60 @@ struct Held {
     capability: Capability,
 }
 
-/// The security context of a process: its copies of its capabilities. The
-/// process owns it. When the process leaves the process table, the
-/// [`Delegations`] tree releases the copies. No check finds a capability by
-/// a pid.
+/// The security context of a process: its copies of its capabilities, or
+/// the boot authority. The process owns it. When the process leaves the
+/// process table, the [`Delegations`] tree releases the copies. No check
+/// finds a capability by a pid.
 #[derive(Debug, Default)]
 pub(super) struct SecurityContext {
     /// The capabilities that the process can use. The delegable ones also
-    /// go to each child.
+    /// go to each child. A boot context has none.
     capabilities: Vec<Held>,
+    /// True for a boot process: a process of the trusted boot, as the
+    /// launcher, not under the policy (row "Boot authority" of
+    /// `docs/erts-differences.md`). Each check of a boot
+    /// process passes without copies, and a child that it spawns without
+    /// `{capabilities, Map}` is a boot process. Only the launcher makes a
+    /// boot root process, and only `pbeam_cap:enter_runtime/2` of the root
+    /// process clears the flag, one way.
+    boot: bool,
 }
 
 impl SecurityContext {
-    /// Check `operation` of `kind`: return `Err(Denied)` unless a capability
-    /// of the context permits it, and, when `name` is given, permits `name`
-    /// in its constraint. `name` is the bytes of a module or signal atom, or
-    /// the native bytes of an executable or variable name.
+    /// Return the context of a boot process: no copies, and each check
+    /// passes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let boot = SecurityContext::boot();
+    /// assert_eq!(boot.check(CapabilityKind::Runtime, Operation::Halt, None), Ok(()));
+    /// ```
+    pub(super) fn boot() -> Self {
+        Self {
+            capabilities: Vec::new(),
+            boot: true,
+        }
+    }
+
+    /// Return whether the context is the context of a boot process (see
+    /// [`Self::boot`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(SecurityContext::boot().is_boot());
+    /// assert!(!SecurityContext::default().is_boot());
+    /// ```
+    pub(super) fn is_boot(&self) -> bool {
+        self.boot
+    }
+
+    /// Check `operation` of `kind`: return `Err(Denied)` unless the context
+    /// is a boot context or a capability of the context permits it, and,
+    /// when `name` is given, permits `name` in its constraint. `name` is the
+    /// bytes of a module or signal atom, or the native bytes of an
+    /// executable or variable name.
     ///
     /// # Examples
     ///
@@ -569,10 +607,11 @@ impl SecurityContext {
         operation: Operation,
         name: Option<&[u8]>,
     ) -> Result<(), Denied> {
-        if self
-            .capabilities
-            .iter()
-            .any(|held| held.capability.permits(kind, operation, name))
+        if self.boot
+            || self
+                .capabilities
+                .iter()
+                .any(|held| held.capability.permits(kind, operation, name))
         {
             Ok(())
         } else {
@@ -586,18 +625,27 @@ impl SecurityContext {
     /// capability of a requested kind, and no other capability. A requested
     /// kind without a delegable capability, and a restriction that permits
     /// more than its capability, give `Err(Denied)`. [`Delegations::hold`]
-    /// makes the context of the child from the copies.
+    /// makes the context of the child from the copies. A boot context has
+    /// no copies, so it gives no copies, and its child is a boot process
+    /// (see `Scheduler::spawn`). It gives `Err(Denied)` for each
+    /// `restrictions`: a boot spawn with `{capabilities, Map}` has no
+    /// consumer yet (entry "Spawn a runtime process from a boot process" of
+    /// `docs/backlog.md`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(parent.delegate(None)?.len(), 7);
     /// assert_eq!(SecurityContext::default().delegate(Some(&restrictions)), Err(Denied));
+    /// assert_eq!(SecurityContext::boot().delegate(Some(&restrictions)), Err(Denied));
     /// ```
     pub(super) fn delegate(
         &self,
         restrictions: Option<&[Restriction]>,
     ) -> Result<Vec<(Source, Capability)>, Denied> {
+        if self.boot && restrictions.is_some() {
+            return Err(Denied);
+        }
         let delegable = || {
             self.capabilities
                 .iter()
@@ -738,7 +786,10 @@ impl Delegations {
                 Held { id, capability }
             })
             .collect();
-        SecurityContext { capabilities }
+        SecurityContext {
+            capabilities,
+            boot: false,
+        }
     }
 
     /// Return the copies that went from the copies `from` to the process

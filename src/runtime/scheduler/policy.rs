@@ -6,7 +6,10 @@
 //! The launcher makes the policy process before the root process. The
 //! policy process has no parent and no link, so it is outside each
 //! supervisor tree. Its first call is `initial/1` of the policy module,
-//! which gives the capabilities of the root process. Then it runs one
+//! which gives the capabilities of the root process. In boot mode, the
+//! root process starts with the boot authority, and the call of
+//! `initial/1` waits for `pbeam_cap:enter_runtime/2` of the root process
+//! (see [`Scheduler::request_runtime`]). Then it runs one
 //! `grant/3` call for each `pbeam_cap:request/2` call, in the order of the
 //! requests, and sends the answer to the requester as a grant signal. A
 //! call that does not give a grant form, that raises an exception, or that
@@ -22,13 +25,13 @@ use std::collections::VecDeque;
 
 use super::Scheduler;
 use crate::{
-    error::BeamError,
+    error::{BeamError, error},
     runtime::{
         capability::{self, AllowAll, Capability, CapabilityKind, Denied, Policy, Source},
         process::{Frame, ProcessState, Start},
         signal::Signal,
     },
-    term::{Map, ProcessId, Term, print_term},
+    term::{Atom, Map, ProcessId, Term, print_term},
 };
 
 /// The largest number of reductions of one call of the policy code. A
@@ -46,12 +49,14 @@ pub(in crate::runtime) struct PolicyProcess {
     /// The call of the policy code that runs now, or `None` while the
     /// process waits for a request.
     call: Option<PolicyCall>,
-    /// The requests that wait for their `grant/3` call, oldest first.
+    /// The requests that wait for their call, oldest first.
     requests: VecDeque<Request>,
     /// The reduction total of the process at the start of the call.
     start: u64,
     /// The result of `initial/1` until the launcher takes it: the
-    /// capabilities of the root process, or the cause of a denial.
+    /// capabilities of the root process, or the cause of a denial. The
+    /// launcher makes the root process with them, or, in boot mode, sends
+    /// them to the root process (see [`Scheduler::enter_runtime`]).
     initial: Option<Result<Vec<Capability>, String>>,
 }
 
@@ -64,13 +69,17 @@ enum PolicyCall {
     Grant(ProcessId),
 }
 
-/// A `pbeam_cap:request/2` call that waits for its `grant/3` call.
+/// A request that waits for its call of the policy code: a
+/// `pbeam_cap:request/2` call that waits for `grant/3`, or, in boot mode,
+/// the `pbeam_cap:enter_runtime/2` call of the root process that waits for
+/// `initial/1`.
 #[derive(Debug)]
 struct Request {
-    /// The process that waits for the answer.
-    requester: ProcessId,
-    /// The arguments of `grant/3`: the kind, the request, and the requester
-    /// map.
+    /// The process that waits for the answer of `grant/3`, or `None` for
+    /// `initial/1`, whose answer the launcher takes.
+    requester: Option<ProcessId>,
+    /// The arguments of the call: for `grant/3`, the kind, the request, and
+    /// the requester map; for `initial/1`, the requester map.
     arguments: Vec<Term>,
 }
 
@@ -90,12 +99,15 @@ impl Scheduler {
     /// Make the policy process, which calls `initial/1` of the policy
     /// module through `frame` with the requester map of the root process
     /// `Module:Function/Arity`. The launcher calls this before it makes the
-    /// root process, and the root process keeps the pid `<0.0.0>`.
+    /// root process, and the root process keeps the pid `<0.0.0>`. In boot
+    /// mode, `root` is `None`: the process waits for a request, and its
+    /// first call is the `initial/1` call of `pbeam_cap:enter_runtime/2`
+    /// (see [`Self::request_runtime`]).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.start_policy(frame, ("policy_probe", "main", 0))?;
+    /// scheduler.start_policy(frame, Some(("policy_probe", "main", 0)))?;
     /// ```
     ///
     /// # Errors
@@ -104,13 +116,17 @@ impl Scheduler {
     pub(in crate::runtime) fn start_policy(
         &mut self,
         frame: Frame,
-        root: (&str, &str, usize),
+        root: Option<(&str, &str, usize)>,
     ) -> Result<(), BeamError> {
-        let (module, function, arity) = root;
-        let initial_call = (module.to_owned(), function.to_owned(), arity);
-        let requester = self.requester(super::ROOT, None, &initial_call)?;
+        let arguments = match root {
+            Some((module, function, arity)) => {
+                let initial_call = (module.to_owned(), function.to_owned(), arity);
+                vec![self.requester(super::ROOT, None, &initial_call)?]
+            }
+            None => Vec::new(),
+        };
         let id = self.next_pid()?;
-        let mut process = ProcessState::new(id, Start::Entry(frame), vec![requester]);
+        let mut process = ProcessState::new(id, Start::Entry(frame), arguments);
         let issued = AllowAll.initial().into_iter();
         process.security = self
             .delegations
@@ -118,12 +134,80 @@ impl Scheduler {
         self.insert(process);
         self.policy = Some(PolicyProcess {
             id,
-            call: Some(PolicyCall::Initial),
+            call: root.map(|_| PolicyCall::Initial),
             requests: VecDeque::new(),
             start: 0,
             initial: None,
         });
         Ok(())
+    }
+
+    /// Queue the `initial/1` call of the policy process for
+    /// `pbeam_cap:enter_runtime(Module, Function)` of the current process,
+    /// a boot process, with the requester map `#{pid => Root, parent =>
+    /// none, initial_call => {Module, Function, 0}}`. The current process
+    /// sets its answer to `None` and waits. When the call ends, the launcher
+    /// takes its result (see [`Self::take_policy_initial`]): a denial stops
+    /// the run, and the capabilities go to the root process with the enter
+    /// runtime signal (see [`Self::enter_runtime`]). After the exit of the
+    /// policy process, the request stays in the queue, and the root process
+    /// waits until the run ends.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.request_runtime(&module, &function)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A boot process that is not the root process gives a runtime error:
+    /// the boot authority of another process is not implemented yet (row
+    /// "Boot authority" of `docs/erts-differences.md`). The atom table is
+    /// full.
+    pub(in crate::runtime) fn request_runtime(
+        &mut self,
+        module: &Atom,
+        function: &Atom,
+    ) -> Result<(), BeamError> {
+        if self.current_process().id != super::ROOT {
+            return Err(error(
+                "unsupported pbeam_cap:enter_runtime/2 in a boot process that is not the root process: see \"Boot authority\" in docs/erts-differences.md",
+            ));
+        }
+        let initial_call = (module.name().to_owned(), function.name().to_owned(), 0);
+        let requester = self.requester(super::ROOT, None, &initial_call)?;
+        self.current_process_mut().policy_reply = None;
+        let policy = self
+            .policy
+            .as_mut()
+            .expect("a boot run has a policy process");
+        policy.requests.push_back(Request {
+            requester: None,
+            arguments: vec![requester],
+        });
+        Ok(())
+    }
+
+    /// Send the capabilities that `initial/1` gave in boot mode to the root
+    /// process, from the policy process, as the enter runtime signal. The
+    /// root process replaces its boot authority with the copies when it
+    /// handles the signal, and its `pbeam_cap:enter_runtime/2` call returns.
+    /// A root process that exited drops the signal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.enter_runtime(capabilities);
+    /// ```
+    pub(in crate::runtime) fn enter_runtime(&mut self, capabilities: Vec<Capability>) {
+        let id = self
+            .policy
+            .as_ref()
+            .expect("a boot run has a policy process")
+            .id;
+        // A root process that exited drops the signal.
+        let _ = self.send_signal(Some(id), super::ROOT, Signal::EnterRuntime { capabilities });
     }
 
     /// Return the result of `initial/1` once, after the call ended: the
@@ -174,7 +258,7 @@ impl Scheduler {
         self.current_process_mut().policy_reply = None;
         let policy = self.policy.as_mut().expect("the policy process lives");
         policy.requests.push_back(Request {
-            requester: id,
+            requester: Some(id),
             arguments: vec![kind, request, requester],
         });
         Ok(Ok(()))
@@ -217,26 +301,35 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Start the `grant/3` call of the oldest request when the policy
-    /// process waits for a request, and return the arguments of the call.
-    /// The launcher then gives the frame of `grant/3` to
-    /// [`Self::begin_policy_call`].
+    /// Start the call of the oldest request when the policy process waits
+    /// for a request, and return the name of the function, `grant` or
+    /// `initial`, and the arguments of the call. The launcher then gives the
+    /// frame of the function to [`Self::begin_policy_call`].
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// if let Some(arguments) = scheduler.next_policy_request() {
+    /// if let Some((function, arguments)) = scheduler.next_policy_request() {
     ///     scheduler.begin_policy_call(frame, arguments);
     /// }
     /// ```
-    pub(in crate::runtime) fn next_policy_request(&mut self) -> Option<Vec<Term>> {
+    pub(in crate::runtime) fn next_policy_request(&mut self) -> Option<(&'static str, Vec<Term>)> {
         let policy = self
             .policy
             .as_mut()
             .filter(|policy| policy.call.is_none())?;
         let request = policy.requests.pop_front()?;
-        policy.call = Some(PolicyCall::Grant(request.requester));
-        Some(request.arguments)
+        policy.call = Some(
+            request
+                .requester
+                .map_or(PolicyCall::Initial, PolicyCall::Grant),
+        );
+        let function = if request.requester.is_some() {
+            "grant"
+        } else {
+            "initial"
+        };
+        Some((function, request.arguments))
     }
 
     /// Make the policy process run `frame` with `arguments`, and give it
@@ -361,7 +454,13 @@ impl Scheduler {
         let Some(policy) = self.policy.as_mut().filter(|policy| policy.id == id) else {
             return;
         };
-        let mut denied: Vec<_> = policy.requests.drain(..).map(|r| r.requester).collect();
+        // A request of `initial/1` gets no answer, so its root process stays
+        // a boot process and waits until the run ends.
+        let mut denied: Vec<_> = policy
+            .requests
+            .drain(..)
+            .filter_map(|r| r.requester)
+            .collect();
         match policy.call.take() {
             Some(PolicyCall::Initial) => {
                 let cause = format!("the policy process exited with {}", text(reason));
