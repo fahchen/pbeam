@@ -7,10 +7,20 @@
 //! module, its old unique value, and its arity. An external fun points to
 //! the export entry (`Export`) of a module, a function, and an arity, and
 //! has no free variables. Here `Lambda` is the fun entry, with the entry
-//! label of its code, `Target` is the entry of either kind, and `Fun` is the
-//! thing.
+//! label of its code, `Target` is the entry of either kind, and `FunThing`
+//! is the thing. All copies of a fun share one thing, as an ERTS register
+//! copy of a fun term is the same boxed pointer to the `ErlFunThing`.
+//!
+//! `Fun` owns that shared reference. It is in an `Option`, because `Term`
+//! has a `Drop`: the drop cannot move the `Arc` out of the term, so it
+//! takes the `Arc` out of the `Option` and calls `Arc::into_inner` (see
+//! [`Fun::take_last`]). Each other reader finds the thing.
+#![expect(
+    clippy::arc_with_non_send_sync,
+    reason = "a term is not Send and Sync until #459, and a fun uses Arc now so that #459 does not change it again"
+)]
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::Arc};
 
 use super::{Atom, Term};
 
@@ -216,10 +226,19 @@ impl Target {
     }
 }
 
-/// A fun: the entry that it points to and the values of its free
-/// variables. A fun can hold a term of any depth, so `Term` copies,
-/// compares, and drops the free variables on its work stacks. An external
-/// fun has no free variables.
+/// The thing of a fun, as the `ErlFunThing` of ERTS is: the entry that the
+/// fun points to and the values of its free variables. An external fun has
+/// no free variables.
+struct FunThing {
+    /// The entry of the fun.
+    target: Target,
+    /// The values of the free variables, in `FunT` order.
+    free: Vec<Term>,
+}
+
+/// A fun: a shared reference to its thing. All copies of the fun own one
+/// reference to the thing, so a copy takes O(1) time and shares the free
+/// variables. The last copy that drops releases the thing.
 ///
 /// # Examples
 ///
@@ -228,12 +247,9 @@ impl Target {
 /// assert_eq!(fun.free().len(), 1);
 /// assert!(Fun::external(module, function, 1).free().is_empty());
 /// ```
-pub struct Fun {
-    /// The entry of the fun.
-    pub(super) target: Target,
-    /// The values of the free variables, in `FunT` order.
-    pub(super) free: Vec<Term>,
-}
+#[derive(Clone)]
+#[repr(transparent)]
+pub struct Fun(Option<Arc<FunThing>>);
 
 impl Fun {
     /// Return a local fun of a lambda with the values of its free
@@ -246,10 +262,7 @@ impl Fun {
     /// assert!(fun.free().is_empty());
     /// ```
     pub(crate) fn new(lambda: Lambda, free: Vec<Term>) -> Self {
-        Self {
-            target: Target::Local(lambda),
-            free,
-        }
+        Self::of(Target::Local(lambda), free)
     }
 
     /// Return the external fun of `module:function/arity`, as
@@ -262,14 +275,26 @@ impl Fun {
     /// assert_eq!(fun.target().arity(), 1);
     /// ```
     pub(crate) fn external(module: Atom, function: Atom, arity: u32) -> Self {
-        Self {
-            target: Target::External {
+        Self::of(
+            Target::External {
                 module,
                 function,
                 arity,
             },
-            free: Vec::new(),
-        }
+            Vec::new(),
+        )
+    }
+
+    /// Make a fun of an entry and free variables.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let fun = Fun::of(Target::Local(lambda), vec![]);
+    /// assert_eq!(fun.free().len(), 0);
+    /// ```
+    fn of(target: Target, free: Vec<Term>) -> Self {
+        Fun(Some(Arc::new(FunThing { target, free })))
     }
 
     /// Return the entry of the fun.
@@ -280,7 +305,7 @@ impl Fun {
     /// assert_eq!(Fun::new(lambda.clone(), vec![]).target(), &Target::Local(lambda));
     /// ```
     pub(crate) fn target(&self) -> &Target {
-        &self.target
+        &self.arc().target
     }
 
     /// Return the values of the free variables.
@@ -291,6 +316,51 @@ impl Fun {
     /// assert_eq!(Fun::new(lambda, vec![Term::Integer(1)]).free(), &[Term::Integer(1)]);
     /// ```
     pub(crate) fn free(&self) -> &[Term] {
-        &self.free
+        &self.arc().free
+    }
+
+    /// Return true when the two funs share one thing, as two ERTS fun terms
+    /// with the same boxed pointer are the same fun.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let fun = Fun::new(lambda.clone(), vec![]);
+    /// assert!(fun.same_thing(&fun.clone()));
+    /// assert!(!fun.same_thing(&Fun::new(lambda, vec![])));
+    /// ```
+    pub(super) fn same_thing(&self, other: &Fun) -> bool {
+        Arc::ptr_eq(self.arc(), other.arc())
+    }
+
+    /// Take the thing out of the fun, and return its free variables when
+    /// this fun was the last holder of the thing. The function uses
+    /// `Arc::into_inner`, which gives the thing to exactly one of the
+    /// holders that drop at the same time.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut fun = Fun::new(lambda, vec![Term::Integer(1)]);
+    /// let mut copy = fun.clone();
+    /// assert!(fun.take_last().is_none());
+    /// assert_eq!(copy.take_last(), Some(vec![Term::Integer(1)]));
+    /// ```
+    pub(super) fn take_last(&mut self) -> Option<Vec<Term>> {
+        self.0
+            .take()
+            .and_then(Arc::into_inner)
+            .map(|thing| thing.free)
+    }
+
+    /// Return the shared thing of the fun.
+    fn arc(&self) -> &Arc<FunThing> {
+        self.0
+            .as_ref()
+            .expect("only the drop of a term takes its fun thing")
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/term/fun.rs"]
+mod tests;
