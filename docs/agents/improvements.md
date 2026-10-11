@@ -21,6 +21,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261011: Qualify behavior claims by execution mode
+
+**Problem:** Documentation stated that a denied `initial/1` call means that the root process does not start, but boot mode starts the root process before that call.
+
+**Root Cause:** The statement did not name the execution mode that controls the observed behavior.
+
+**Fix:** Limit the no-start statement to runs without boot mode. State that boot-mode denial stops the existing run.
+
+**Guardrail:** When behavior depends on an execution mode, document each relevant mode and its observable result separately.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/474#issuecomment-6104568265>
+
 ## 20261011: Stop a timed step at its deadline before reading queued input
 
 **Problem:** A step of the Terra reference harness read queued port data after its deadline and could still pass, and continuous output could keep a step running past its bound.
