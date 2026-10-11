@@ -204,12 +204,12 @@ A second probe of the same day isolates the remaining `tuple` time: `tuple_size/
 
 ### Fun benchmark (#455)
 
-Release build, Apple Silicon macOS, revision `31f765b` (origin/main) before the fun change and the branch of #455 after it. Each value is the median of five interleaved runs in microseconds. The host was shared with other work, so the spread is wide: each value of the branch is below each value of the revision before the change for both probes. The probe module is the [Benchmark module](#benchmark-module) at `/tmp/dsh/cow455/cowb.erl`, and the commands are the commands above with that directory and the revision before the change in a second worktree.
+Release build, Apple Silicon macOS, revision `31f765b` (origin/main) before the fun change and the branch of #455 after the merge of `origin/main`. Each value is the median of five interleaved runs in microseconds. The host was shared with other work, so the spread is wide and the two ranges overlap for `funsend`: the branch gives 3993, 4017, 4943, 6648, and 6673 µs against 5983, 6143, 6417, 6937, and 9036 µs before the change. Every `funput` value of the branch (32269, 35522, 37181, 38766, and 40301 µs) is below every value of the revision before the change (52108, 60712, 65798, 66348, and 66991 µs). The median of each probe is lower on the branch. The probe module is the [Benchmark module](#benchmark-module) at `/tmp/dsh/cow455/cowb.erl`, and the commands are the commands above with that directory and the revision before the change in a second worktree.
 
 | Probe | ERTS µs | Before µs | After µs |
 | --- | --- | --- | --- |
-| `funput`: put a fun with a 1000-element free variable into the process dictionary and read it back, 20000 times | 213 | 43189 | 30109 |
-| `funsend`: send that fun to the process itself, 2000 times | 178 | 4807 | 3061 |
+| `funput`: put a fun with a 1000-element free variable into the process dictionary and read it back, 20000 times | 260 | 65798 | 37181 |
+| `funsend`: send that fun to the process itself, 2000 times | 239 | 6417 | 4943 |
 
 A first probe put the fun into a tuple and read it back with `element/2`. `beam_disasm` shows that the compiler removes the tuple: `fc_loop/2` holds only the test, the decrement, and the tail call. That probe does not measure a copy, so the document does not use it. A `put/2` call and a `send` instruction each clone the fun, and the two probes above measure those copies.
 
