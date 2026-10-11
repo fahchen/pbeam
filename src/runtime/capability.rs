@@ -318,9 +318,8 @@ impl Constraint {
             NameForm::String => names.iter().any(|permitted| {
                 let characters = permitted
                     .chars()
-                    .map(|character| Term::Integer(u32::from(character).into()))
-                    .collect();
-                native_filename(&Term::List(characters), filename_encoding())
+                    .map(|character| Term::Integer(u32::from(character).into()));
+                native_filename(&Term::list_from(characters), filename_encoding())
                     .is_some_and(|permitted| permitted == name)
             }),
         }
@@ -1004,7 +1003,7 @@ fn restriction_fields<'a>(
             return None;
         };
         match (field.name(), value) {
-            ("operations", Term::List(operations)) => {
+            ("operations", _) if let Some(operations) = value.proper_list() => {
                 let mut set = 0;
                 for operation in operations {
                     let Term::Atom(operation) = operation else {
@@ -1080,19 +1079,19 @@ pub(super) fn capability(term: &Term) -> Option<Capability> {
 ///
 /// ```rust,ignore
 /// assert_eq!(constraint(NameForm::Atom, &Term::static_atom("any")), Some(Constraint::Any));
-/// assert_eq!(constraint(NameForm::String, &Term::List(vec![])), Some(Constraint::Only(BTreeSet::new())));
+/// assert_eq!(constraint(NameForm::String, &Term::nil()), Some(Constraint::Only(BTreeSet::new())));
 /// ```
 fn constraint(form: NameForm, value: &Term) -> Option<Constraint> {
     let names = match value {
         Term::Atom(any) if any.name() == "any" => return Some(Constraint::Any),
-        Term::List(names) => names,
-        _ => return None,
+        _ => value.proper_list()?,
     };
     names
         .iter()
         .map(|name| match (form, name) {
             (NameForm::Atom, Term::Atom(name)) => Some(name.name().to_owned()),
-            (NameForm::String, Term::List(characters)) => characters
+            (NameForm::String, _) => name
+                .proper_list()?
                 .iter()
                 .map(|character| match character {
                     Term::Integer(code) => u32::try_from(*code).ok().and_then(char::from_u32),

@@ -932,7 +932,6 @@ fn reply(reference: Reference, result: Term) -> Term {
 fn is_immediate(term: &Term) -> bool {
     match term {
         Term::Atom(_) | Term::Pid(_) => true,
-        Term::List(elements) => elements.is_empty(),
-        _ => term.small_integer().is_some(),
+        _ => term.is_nil() || term.small_integer().is_some(),
     }
 }
