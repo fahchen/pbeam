@@ -1087,12 +1087,10 @@ fn constraint(form: NameForm, value: &Term) -> Option<Constraint> {
         _ => value.proper_list()?,
     };
     names
-        .iter()
         .map(|name| match (form, name) {
             (NameForm::Atom, Term::Atom(name)) => Some(name.name().to_owned()),
             (NameForm::String, _) => name
                 .proper_list()?
-                .iter()
                 .map(|character| match character {
                     Term::Integer(code) => u32::try_from(*code).ok().and_then(char::from_u32),
                     _ => None,

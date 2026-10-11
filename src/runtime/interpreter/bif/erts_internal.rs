@@ -415,7 +415,7 @@ fn unsupported_option(name: &str) -> BeamError {
 /// ```
 fn port_args(args: &Term) -> Option<Vec<Vec<u8>>> {
     let elements = args.proper_list()?;
-    elements.iter().map(|arg| native_name(arg, true)).collect()
+    elements.map(|arg| native_name(arg, true)).collect()
 }
 
 /// Return the native bytes of the program of `{spawn_executable, Name}`,

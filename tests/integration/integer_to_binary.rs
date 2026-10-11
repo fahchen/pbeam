@@ -39,7 +39,7 @@ fn converts_integers_to_binaries_as_pinned_erts() {
         program
             .execute("integer_to_binary_probe", "main", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
 
     let reference = Command::new("erl")

@@ -22,13 +22,15 @@ const ELIXIR_POLICY: &[u8] = include_bytes!("../../fixtures/policy/Elixir.Elixir
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![])), "[]");
+/// assert_eq!(text(&Term::nil()), "[]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
-        Term::List(elements) => format!("[{}]", join(elements)),
+        _ if let Some(elements) = term.proper_list() => {
+            format!("[{}]", join(&elements.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(elements) => format!("{{{}}}", join(elements)),
         other => panic!("the probe returns no {other:?}"),
     }

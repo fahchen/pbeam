@@ -569,7 +569,6 @@ fn compile(pattern: &Term) -> Option<Pattern> {
         Term::Binary(needle) => vec![needle],
         _ => pattern
             .proper_list()?
-            .iter()
             .map(|needle| match needle {
                 Term::Binary(needle) => Some(needle.as_slice()),
                 _ => None,
@@ -605,8 +604,7 @@ fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
     let Some(options) = options else {
         return Some((flags, start, end));
     };
-    let (cells, _) = options.list_cells()?;
-    for cell in cells {
+    for cell in options.list_iter()? {
         match cell {
             Term::Atom(atom) if atom.name() == "global" => flags |= GLOBAL,
             Term::Atom(atom) if atom.name() == "trim" => flags |= TRIM,
@@ -792,10 +790,11 @@ impl Find {
     /// `binary:split/2,3` trap gives the state to the trap export.
     fn from_term(state: &[Term]) -> Find {
         let integer = |term: &Term| term.small_integer().expect("a state integer");
-        let list = |term| {
-            Term::list_cells(term)
+        let list = |term: &'_ Term| -> Vec<Term> {
+            term.proper_list()
                 .expect("a binary_find_trap state list")
-                .0
+                .cloned()
+                .collect()
         };
         let [
             flags,
@@ -818,7 +817,7 @@ impl Find {
         let build = (integer(head) >= -1).then(|| Build {
             head: integer(head),
             end_pos: integer(end_pos) as u64,
-            parts: list(parts).to_vec(),
+            parts: list(parts),
         });
         Find {
             flags: integer(flags) as u8,

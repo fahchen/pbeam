@@ -125,7 +125,7 @@ fn isolated_logger_boot() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let registered = |name: &str, value: &str| Term::Tuple(vec![atom(name), atom(value)]);
     let expected = Term::Tuple(vec![
-        Term::List(vec![atom("default")]),
+        Term::list_from(vec![atom("default")]),
         atom("notice"),
         Term::Map(
             Map::from_pairs(vec![
@@ -135,7 +135,7 @@ fn isolated_logger_boot() {
             ])
             .unwrap(),
         ),
-        Term::List(vec![
+        Term::list_from(vec![
             registered("application_controller", "true"),
             registered("logger", "true"),
             registered("logger_sup", "true"),

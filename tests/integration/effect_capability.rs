@@ -355,7 +355,7 @@ fn tuple(elements: &[Term]) -> Term {
 
 /// Return the list of the atoms `names` of the program.
 fn atoms(program: &BeamProgram, names: &[&str]) -> Term {
-    Term::List(names.iter().map(|&name| atom(program, name)).collect())
+    Term::list_from(names.iter().map(|&name| atom(program, name)))
 }
 
 #[test]
@@ -412,7 +412,7 @@ fn checks_the_send_instruction_once_with_erlang_send() {
 fn gives_the_erts_results_with_the_default_policy() {
     let program = program();
     let badarg = atom(&program, "badarg");
-    let expected = Term::List(vec![
+    let expected = Term::list_from(vec![
         atom(&program, "false"),
         atom(&program, "true"),
         atom(&program, "true"),
@@ -563,7 +563,7 @@ fn gives_the_erts_results_of_the_permitted_runtime_operations() {
         Constraint::Any,
     );
     let reload = b"NIF library already loaded (reload disallowed since OTP 20).";
-    let expected = Term::List(vec![
+    let expected = Term::list_from(vec![
         atom(&program, "undefined"),
         atom(&program, "true"),
         atom(&program, "ok"),
@@ -571,12 +571,7 @@ fn gives_the_erts_results_of_the_permitted_runtime_operations() {
             atom(&program, "error"),
             Term::Tuple(vec![
                 atom(&program, "reload"),
-                Term::List(
-                    reload
-                        .iter()
-                        .map(|&byte| Term::Integer(byte.into()))
-                        .collect(),
-                ),
+                Term::list_from(reload.iter().map(|&byte| Term::Integer(byte.into()))),
             ]),
         ]),
     ]);
@@ -613,7 +608,7 @@ fn gives_the_erts_results_of_the_permitted_runtime_operations() {
 fn checks_the_runtime_arguments_before_the_capability() {
     let program = program();
     let policy = grants(CapabilityKind::Runtime, &[], Constraint::Any);
-    let badargs = Term::List(vec![atom(&program, "badarg"); 6]);
+    let badargs = Term::list_from(vec![atom(&program, "badarg"); 6]);
     assert_eq!(run(&program, "runtime_badargs", &policy), badargs);
     assert_eq!(
         erts_with_stand_in("runtime_badargs"),
@@ -652,7 +647,7 @@ fn skips_each_effect_check_in_a_run_with_no_policy() {
     let stored = |value| tuple(&[ok.clone(), Term::Integer(value)]);
     assert_eq!(
         unchecked("persistent_term_kept"),
-        Term::List(vec![stored(1), stored(2)])
+        Term::list_from(vec![stored(1), stored(2)])
     );
 }
 
@@ -661,12 +656,12 @@ fn gives_the_erts_results_of_the_permitted_process_operations() {
     let program = program();
     let atom = |name| atom(&program, name);
     let ok = |sign| tuple(&[atom("ok"), atom(sign)]);
-    let expected = Term::List(vec![
+    let expected = Term::list_from(vec![
         ok("linked"),
-        Term::List(vec![ok("down"), ok("down")]),
+        Term::list_from(vec![ok("down"), ok("down")]),
         ok("killed"),
         ok("exit"),
-        Term::List(vec![
+        Term::list_from(vec![
             ok("got"),
             ok("got"),
             ok("got"),
@@ -686,7 +681,7 @@ fn gives_the_erts_results_of_the_permitted_process_operations() {
 fn checks_the_process_arguments_before_the_capability() {
     let program = program();
     let policy = grants(CapabilityKind::Process, &[], Constraint::Any);
-    let badargs = Term::List(vec![atom(&program, "badarg"); 8]);
+    let badargs = Term::list_from(vec![atom(&program, "badarg"); 8]);
     assert_eq!(run(&program, "process_badargs", &policy), badargs);
     assert_eq!(
         erts_with_stand_in("process_badargs"),
@@ -710,7 +705,7 @@ fn keeps_the_process_state_after_a_denied_call() {
             "monitor_kept",
             &without_process(Operation::Monitor)
         ),
-        Term::List(vec![denied("none"), denied("none")])
+        Term::list_from(vec![denied("none"), denied("none")])
     );
     assert_eq!(
         run(
@@ -723,7 +718,7 @@ fn keeps_the_process_state_after_a_denied_call() {
     let send = without_process(Operation::Send);
     assert_eq!(
         run(&program, "send_kept", &send),
-        Term::List(vec![
+        Term::list_from(vec![
             denied("none"),
             denied("none"),
             denied("none"),
@@ -775,7 +770,7 @@ fn gives_the_erts_results_of_the_permitted_process_inspection() {
 fn checks_the_inspection_arguments_before_the_capability() {
     let program = program();
     let policy = process_grants(&[Operation::Spawn, Operation::Monitor]);
-    let badargs = Term::List(vec![atom(&program, "badarg"); 9]);
+    let badargs = Term::list_from(vec![atom(&program, "badarg"); 9]);
     assert_eq!(run(&program, "process_inspect_badargs", &policy), badargs);
     assert_eq!(
         erts_with_stand_in("process_inspect_badargs"),
@@ -817,7 +812,7 @@ fn gives_the_erts_results_of_the_permitted_persistent_term_operations() {
     let program = program();
     let atom = |name| atom(&program, name);
     let key = tuple(&[atom("effect_probe"), atom("permitted")]);
-    let expected = Term::List(vec![
+    let expected = Term::list_from(vec![
         atom("none"),
         atom("badarg"),
         atom("ok"),
@@ -850,7 +845,7 @@ fn keeps_the_persistent_terms_after_a_denied_put() {
     let denied = atom(&program, "denied");
     assert_eq!(
         run(&program, "persistent_term_kept", &AllowAll),
-        Term::List(vec![
+        Term::list_from(vec![
             tuple(&[denied.clone(), atom(&program, "none")]),
             tuple(&[denied, Term::Integer(1)]),
         ])
@@ -863,14 +858,16 @@ fn keeps_the_persistent_terms_after_a_denied_put() {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![Term::static_atom("ok")])), "[ok]");
+/// assert_eq!(text(&Term::list_from(vec![Term::static_atom("ok")])), "[ok]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
         Term::Integer(integer) => integer.to_string(),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         other => panic!("unexpected term {other:?}"),
     }
@@ -899,7 +896,7 @@ fn gives_the_erts_results_of_the_permitted_terminal_setup_and_queries() {
 fn checks_the_terminal_fds_and_codes_before_the_capability() {
     let program = program();
     let policy = grants(CapabilityKind::Terminal, &[], Constraint::Any);
-    let badargs = Term::List(vec![atom(&program, "badarg"); 5]);
+    let badargs = Term::list_from(vec![atom(&program, "badarg"); 5]);
     assert_eq!(run(&program, "terminal_badargs", &policy), badargs);
     assert_eq!(
         erts_with_stand_in("terminal_badargs"),
@@ -938,7 +935,7 @@ fn gives_the_erts_results_of_the_permitted_port_information() {
     let program = program();
     let atom = |name| atom(&program, name);
     let item = |key, value| tuple(&[atom(key), value]);
-    let expected = Term::List(vec![
+    let expected = Term::list_from(vec![
         atoms(
             &program,
             &[
@@ -953,12 +950,7 @@ fn gives_the_erts_results_of_the_permitted_port_information() {
         ),
         item(
             "name",
-            Term::List(
-                b"/bin/cat"
-                    .iter()
-                    .map(|&byte| Term::Integer(byte.into()))
-                    .collect(),
-            ),
+            Term::list_from(b"/bin/cat".iter().map(|&byte| Term::Integer(byte.into()))),
         ),
         atom("true"),
         atom("true"),

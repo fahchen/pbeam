@@ -51,7 +51,7 @@ fn takes_the_tail_and_the_length_of_lists_as_pinned_erts() {
     // label, and the next clause runs.
     let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let list = |names: &[&str]| Term::List(names.iter().map(|name| atom(name)).collect());
+    let list = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
     let expected = vec![
         list(&["b", "c"]),
         list(&[]),
@@ -70,7 +70,7 @@ fn takes_the_tail_and_the_length_of_lists_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("io_start_probe", "lists", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("lists"),
@@ -95,7 +95,7 @@ fn negates_booleans_as_pinned_erts() {
     .map(atom);
     assert_eq!(
         program.execute("io_start_probe", "nots", &[]).unwrap(),
-        Term::List(expected.to_vec())
+        Term::list_from(expected.to_vec())
     );
     assert_eq!(
         reference("nots"),
@@ -120,7 +120,7 @@ fn conjoins_booleans_as_pinned_erts() {
     .map(atom);
     assert_eq!(
         program.execute("io_start_probe", "ands", &[]).unwrap(),
-        Term::List(expected.to_vec())
+        Term::list_from(expected.to_vec())
     );
     assert_eq!(
         reference("ands"),
@@ -149,7 +149,7 @@ fn finds_key_members_as_pinned_erts() {
         program
             .execute("io_start_probe", "keymembers", &[])
             .unwrap(),
-        Term::List(expected.to_vec())
+        Term::list_from(expected.to_vec())
     );
     assert_eq!(
         reference("keymembers"),
@@ -193,7 +193,7 @@ fn reads_and_updates_maps_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("io_start_probe", "maps", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("maps"),
@@ -231,7 +231,7 @@ fn reports_the_first_missing_map_key_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("io_start_probe", "map_keys", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("map_keys"),
@@ -277,7 +277,7 @@ fn merges_maps_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("io_start_probe", "merge", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("merge"),
@@ -302,10 +302,9 @@ fn converts_atoms_and_lists_as_pinned_erts() {
     let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let codes = |text: &str| {
-        Term::List(
+        Term::list_from(
             text.chars()
-                .map(|character| Term::Integer(i64::from(u32::from(character))))
-                .collect(),
+                .map(|character| Term::Integer(i64::from(u32::from(character)))),
         )
     };
     let expected = vec![
@@ -325,7 +324,7 @@ fn converts_atoms_and_lists_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("io_start_probe", "atoms", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("atoms"),
@@ -353,7 +352,7 @@ fn limits_atom_names_to_255_characters_as_pinned_erts() {
         program
             .execute("io_start_probe", "atom_limit", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("atom_limit"),
@@ -373,7 +372,10 @@ fn returns_the_host_os_type_as_pinned_erts() {
     let os = pinned_beam("os");
     let program = BeamProgram::load(&[IO_START_PROBE, &os]).unwrap();
     let result = program.execute("io_start_probe", "system", &[]).unwrap();
-    let Term::List(results) = &result else {
+    let Some(results) = result
+        .proper_list()
+        .map(|results| results.collect::<Vec<_>>())
+    else {
         panic!("io_start_probe:system/0 must return a list");
     };
     let [os_type, system_info] = results.as_slice() else {

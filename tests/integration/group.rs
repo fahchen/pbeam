@@ -20,7 +20,7 @@ fn takes_the_fail_labels_of_guard_bifs_and_is_ge_as_pinned_erts() {
     let other = Term::Atom(program.atom("other").unwrap());
     assert_eq!(
         program.execute("group_probe", "guards", &[]).unwrap(),
-        Term::List(vec![output, other.clone(), other])
+        Term::list_from(vec![output, other.clone(), other])
     );
 
     let reference = Command::new("erl")

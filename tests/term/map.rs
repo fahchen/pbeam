@@ -103,7 +103,7 @@ fn orders_atoms_in_list_keys_by_name_in_a_flatmap() {
     let mut table = AtomTable::new();
     let mut atom = |name: &str| Term::Atom(table.put(name).unwrap());
     let (z, a, v) = (atom("z"), atom("a"), atom("v"));
-    let list = |term: &Term| Term::List(vec![term.clone()]);
+    let list = |term: &Term| Term::list_from(vec![term.clone()]);
     let map = Map::from_pairs(vec![
         (list(&z), v.clone()),
         (a.clone(), v.clone()),
@@ -123,11 +123,8 @@ fn hashes_tuple_keys_with_the_internal_hash() {
     let keys = [
         Term::Tuple(vec![]),
         tuple,
-        Term::List(vec![Term::Tuple(vec![])]),
-        Term::ImproperList(
-            vec![Term::Integer(1)],
-            Box::new(Term::Tuple(vec![Term::Integer(2)])),
-        ),
+        Term::list_from(vec![Term::Tuple(vec![])]),
+        Term::list_with_tail(vec![Term::Integer(1)], Term::Tuple(vec![Term::Integer(2)])),
     ];
     for key in keys {
         assert_eq!(map_hash(&key), Some(internal_hash(&key)));
@@ -137,25 +134,22 @@ fn hashes_tuple_keys_with_the_internal_hash() {
 
 #[test]
 fn rejects_list_and_tuple_keys_with_unsupported_elements() {
-    assert_eq!(
-        map_hash(&Term::List(vec![])),
-        Some(internal_hash(&Term::List(vec![])))
-    );
+    assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
     let empty_map = || Term::Map(Map::new());
     let unsupported = [
-        Term::List(vec![Term::Integer(1), empty_map()]),
-        Term::List(vec![Term::List(vec![empty_map()])]),
-        Term::List(vec![Term::Integer(1 << 59)]),
+        Term::list_from(vec![Term::Integer(1), empty_map()]),
+        Term::list_from(vec![Term::list_from(vec![empty_map()])]),
+        Term::list_from(vec![Term::Integer(1 << 59)]),
         // {<<>>}, {1, #{}}, and {[1 bsl 59]}: a tuple with an element that is not supported.
         Term::Tuple(vec![Term::Binary(vec![])]),
         Term::Tuple(vec![Term::Integer(1), empty_map()]),
-        Term::Tuple(vec![Term::List(vec![Term::Integer(1 << 59)])]),
+        Term::Tuple(vec![Term::list_from(vec![Term::Integer(1 << 59)])]),
         // [1|#{}], [1|<<>>], and [[1|#{}]]: an improper list tail that is not supported.
-        Term::ImproperList(vec![Term::Integer(1)], Box::new(empty_map())),
-        Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Binary(vec![]))),
-        Term::List(vec![Term::ImproperList(
+        Term::list_with_tail(vec![Term::Integer(1)], empty_map()),
+        Term::list_with_tail(vec![Term::Integer(1)], Term::Binary(vec![])),
+        Term::list_from(vec![Term::list_with_tail(
             vec![Term::Integer(1)],
-            Box::new(empty_map()),
+            empty_map(),
         )]),
     ];
     for key in unsupported {
@@ -174,15 +168,15 @@ fn rejects_list_and_tuple_keys_with_unsupported_elements() {
 fn hashes_improper_list_keys_with_their_tail_as_erts() {
     // ERTS 29.1.1: maps:keys of #{[1|2] => v, [1,2|3] => v, [[1|2]|3] => v,
     // [true|false] => v, [256|1] => v, [[1]|2] => v, [[]|-1] => v, 1 => v, ..., 26 => v}.
-    let improper = |elements: Vec<Term>, tail| Term::ImproperList(elements, Box::new(tail));
+    let improper = |elements: Vec<Term>, tail| Term::list_with_tail(elements, tail);
     let int = Term::Integer;
     let one_two = || improper(vec![int(1)], int(2));
     let one_two_three = || improper(vec![int(1), int(2)], int(3));
     let nested = || improper(vec![one_two()], int(3));
     let booleans = || improper(vec![Term::static_atom("true")], Term::static_atom("false"));
     let large = || improper(vec![int(256)], int(1));
-    let list_head = || improper(vec![Term::List(vec![int(1)])], int(2));
-    let nil_head = || improper(vec![Term::List(vec![])], int(-1));
+    let list_head = || improper(vec![Term::list_from(vec![int(1)])], int(2));
+    let nil_head = || improper(vec![Term::nil()], int(-1));
     let lists = [
         one_two(),
         one_two_three(),
@@ -394,15 +388,13 @@ fn shares_the_form_of_a_map_between_the_copies_of_a_term() {
     // A copy of the term, also a copy of a term that holds the map, gets the same form.
     for size in [2, 40] {
         let map = Term::Map(integers(1..=size));
-        let tuple = Term::Tuple(vec![Term::List(vec![map.clone()])]);
+        let tuple = Term::Tuple(vec![Term::list_from(vec![map.clone()])]);
         let tuple = tuple.clone();
         let Term::Tuple(copied) = &tuple else {
             unreachable!()
         };
-        let Term::List(copied) = &copied[0] else {
-            unreachable!()
-        };
-        for copy in [&map.clone(), &copied[0]] {
+        let copied = copied[0].list_head().unwrap();
+        for copy in [&map.clone(), copied] {
             assert!(Rc::ptr_eq(&map_of(&map).repr, &map_of(copy).repr));
             assert_eq!(copy, &map);
         }
@@ -480,7 +472,7 @@ fn sorts_pairs_by_the_flatmap_key_order() {
     // {badkey,{abs}}: in a tuple, atoms compare by name. A tuple comes
     // before a map, and a map before [].
     let mut compound = vec![
-        (Term::List(vec![]), Term::Integer(1)),
+        (Term::nil(), Term::Integer(1)),
         (Term::Map(Map::new()), Term::Integer(2)),
         (
             Term::Tuple(vec![Term::static_atom("value")]),
@@ -542,7 +534,7 @@ fn splits_a_leaf_into_nodes_until_the_hashes_differ() {
 
 #[test]
 fn keeps_keys_with_equal_hashes_in_a_collision_child() {
-    let key = |element: i64| Term::List(vec![Term::Integer(element)]);
+    let key = |element: i64| Term::list_from(vec![Term::Integer(element)]);
     // Two keys with equal hashes at the last level give a collision child in the term order.
     let child = Node::split(
         HAMT_MAX_LEVEL,
@@ -602,8 +594,8 @@ fn keeps_keys_with_equal_hashes_in_a_collision_child() {
     );
 
     // ERTS 29.1.1: these two lists have equal map hashes.
-    let first = Term::List(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
-    let second = Term::List(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
+    let first = Term::list_from(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
+    let second = Term::list_from(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
     assert_eq!(map_hash(&first), map_hash(&second));
     let mut map = integers(1..=32);
     map.insert(first.clone(), Term::Integer(1)).unwrap();
@@ -632,8 +624,8 @@ fn takes_a_whole_collision_node_in_a_chunk() {
     // `walks_collision_nodes_and_bignum_paths_as_pinned_erts` in
     // `tests/integration/logger_start.rs` checks these maps and paths against the pinned ERTS.
     // ERTS 29.1.1: these two lists have equal map hashes, so they share a collision node.
-    let a = Term::List(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
-    let b = Term::List(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
+    let a = Term::list_from(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
+    let b = Term::list_from(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
     let before = [
         19, 213, 340, 110, 91, 164, 399, 139, 361, 212, 41, 114, 100, 29, 347, 365, 171, 140, 13,
         42, 149, 55, 2, 146, 372, 317, 191, 316, 202, 192, 233,
@@ -775,8 +767,8 @@ fn counts_the_steps_of_the_erts_hashmap_merge() {
 
     // ERTS 29.1.1: these two lists have equal map hashes, so the walk
     // reaches the collision level 16 for them.
-    let first = Term::List(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
-    let second = Term::List(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
+    let first = Term::list_from(list(&[246, 157, 203, 77, 19, 254, 19, 93]));
+    let second = Term::list_from(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
     let with = |key: &Term| {
         let mut map = range(1, 32);
         map.insert(key.clone(), Term::Integer(1)).unwrap();

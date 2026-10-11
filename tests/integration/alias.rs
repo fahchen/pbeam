@@ -43,7 +43,7 @@ fn monitors_a_process_by_pid_and_name_and_a_port_name_as_pinned_erts() {
     let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let tuple = Term::Tuple;
-    let list = Term::List;
+    let list = |elements: Vec<Term>| Term::list_from(elements);
     let badarg = || tuple(vec![atom("error"), atom("badarg")]);
     let named = |name: &str| tuple(vec![atom(name), atom("nonode@nohost")]);
     let falses = |count| list(vec![atom("false"); count]);
@@ -136,7 +136,7 @@ fn reads_the_options_of_monitor_3_before_the_type_as_pinned_erts() {
     // type and the target (bif.c:988-997).
     let (result, atom) = run("options");
     let tuple = Term::Tuple;
-    let list = Term::List;
+    let list = |elements: Vec<Term>| Term::list_from(elements);
     let badarg = || tuple(vec![atom("error"), atom("badarg")]);
     let ok = |value: &str| tuple(vec![atom("ok"), atom(value)]);
     let mut first: Vec<Term> = (0..9).map(|_| badarg()).collect();
@@ -160,9 +160,9 @@ fn tags_down_messages_with_the_tag_option_as_pinned_erts() {
     // a port name.
     let (result, atom) = run("tags");
     let tuple = Term::Tuple;
-    let list = Term::List;
+    let list = |elements: Vec<Term>| Term::list_from(elements);
     let named = |name: &str| tuple(vec![atom(name), atom("nonode@nohost")]);
-    let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Integer(2)));
+    let improper = Term::list_with_tail(vec![Term::Integer(1)], Term::Integer(2));
     assert_eq!(
         result,
         tuple(vec![
@@ -212,7 +212,7 @@ fn ends_each_alias_mode_as_pinned_erts() {
     // erl_proc_sig_queue.c:6026-6070). A monitor of the caller makes no
     // alias (bif.c:781-784), and the last alias option wins.
     let (result, atom) = run("modes");
-    let atoms = |names: &[&str]| Term::List(names.iter().map(|name| atom(name)).collect());
+    let atoms = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
     assert_eq!(
         result,
         Term::Tuple(vec![
@@ -233,7 +233,7 @@ fn ends_an_alias_at_the_down_message_unless_explicit_unalias_as_pinned_erts() {
     // for the noproc DOWN message (erl_proc_sig_queue.c:6463-6490).
     let (result, atom) = run("downs");
     let tuple = Term::Tuple;
-    let list = Term::List;
+    let list = |elements: Vec<Term>| Term::list_from(elements);
     let pair = |tag: &str| tuple(vec![atom(tag), atom("normal")]);
     let noproc = |kind: &str| tuple(vec![atom("DOWN"), atom(kind), atom("noproc")]);
     assert_eq!(
@@ -262,11 +262,11 @@ fn sends_an_exit_signal_through_an_active_alias_as_pinned_erts() {
     assert_eq!(
         result,
         Term::Tuple(vec![
-            Term::List(vec![atom("true"); 6]),
+            Term::list_from(vec![atom("true"); 6]),
             atom("alive"),
             atom("boom"),
             atom("true"),
-            Term::List(vec![]),
+            Term::nil(),
         ])
     );
     assert_eq!(
@@ -297,7 +297,7 @@ fn runs_erlang_send_2_and_send_3_as_pinned_erts() {
     // the alias drops `r2`.
     let (result, atom) = run("sends");
     let tuple = Term::Tuple;
-    let list = Term::List;
+    let list = |elements: Vec<Term>| Term::list_from(elements);
     let badarg = || tuple(vec![atom("error"), atom("badarg")]);
     let ok = |value: &str| tuple(vec![atom("ok"), atom(value)]);
     let mut send3: Vec<Term> = (0..4).map(|_| ok("ok")).collect();
@@ -347,7 +347,7 @@ fn replies_to_a_gen_server_call_through_an_alias_as_pinned_erts() {
     let echo = |value| Term::Tuple(vec![atom("echo"), Term::Integer(value)]);
     assert_eq!(
         program.execute("alias_probe", "call", &[]).unwrap(),
-        Term::List(vec![echo(1), echo(2), atom("timeout"), Term::List(vec![])])
+        Term::list_from(vec![echo(1), echo(2), atom("timeout"), Term::nil()])
     );
     assert_eq!(erl_reference("call()"), "[{echo,1},{echo,2},timeout,[]]\n");
 }

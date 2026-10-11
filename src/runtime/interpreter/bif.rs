@@ -242,21 +242,6 @@ fn unsupported_port(bif: &str) -> BeamError {
     ))
 }
 
-/// Return the list of `elements` and then `tail`, or `[]` when `tail` is
-/// `None`: the rest of a list from `Term::list_cells`, which a BIF trap gives to
-/// the export.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(list_rest(&[Term::Integer(2)], None), Term::list_from(vec![Term::Integer(2)]));
-/// ```
-fn list_rest(elements: &[Term], tail: Option<&Term>) -> Term {
-    // ponytail: the rest is a copy, O(n) with the `Vec` list model of #71.
-    let tail = tail.cloned().unwrap_or_else(Term::nil);
-    Term::list_with_tail(elements.to_vec(), tail)
-}
-
 /// The state that a BIF body can use.
 struct BifContext<'a> {
     /// The scheduler that runs the calling process.
@@ -409,8 +394,8 @@ impl BeamProgram {
     ///   ERTS traps to `erlang:length/3`, which also keeps the original list
     ///   for the stack trace of an error (`erl_bif_guard.c:48-55`, `226-247`).
     ///   PBeam gives a BIF error the stack trace `[]`.
-    /// - `erlang:'++'/3`, with the original lists and the number of elements
-    ///   done. ERTS traps to `'++'/2` with a magic reference to the same state
+    /// - `erlang:'++'/3`, with the original lists and the rest of the left
+    ///   list. ERTS traps to `'++'/2` with a magic reference to the same state
     ///   (`erl_bif_lists.c:91-109`, `298-333`).
     /// - `maps:merge_trap/2`, with the merged map and the steps that remain
     ///   ([`maps::merge_trap`]). ERTS traps to `maps:merge_trap/1` with a
@@ -500,7 +485,7 @@ impl BeamProgram {
                 process,
                 reds_left,
                 term,
-                stack,
+                &stack.collect::<Vec<_>>(),
                 *size as usize,
                 std::mem::take(bytes),
             ));
@@ -510,8 +495,8 @@ impl BeamProgram {
             ("erlang", "length", [list, Term::Integer(count)]) => {
                 erlang::length(process, list, *count)
             }
-            ("erlang", "++", [left, right, Term::Integer(done)]) => {
-                erlang::append_chunk(process, left, right, *done)
+            ("erlang", "++", [left, right, rest]) => {
+                erlang::append_chunk(process, left, right, rest)
             }
             ("maps", "merge_trap", [merged, Term::Integer(steps)]) => {
                 maps::merge_trap(process, merged.clone(), *steps as usize)
@@ -575,7 +560,12 @@ impl BeamProgram {
             ("erts_internal", "iolist_size_continue", [term, stack, Term::Integer(size)])
                 if let Some(stack) = stack.proper_list() =>
             {
-                iolist::iolist_size_continue(process, term, stack, *size as usize)
+                iolist::iolist_size_continue(
+                    process,
+                    term,
+                    &stack.collect::<Vec<_>>(),
+                    *size as usize,
+                )
             }
             (
                 "erts_internal",
@@ -584,7 +574,7 @@ impl BeamProgram {
             ) if phase.name() == "size"
                 && let Some(stack) = stack.proper_list() =>
             {
-                iolist::iovec_size(process, arg, term, stack)
+                iolist::iovec_size(process, arg, term, &stack.collect::<Vec<_>>())
             }
             (
                 "erts_internal",
@@ -598,8 +588,8 @@ impl BeamProgram {
                     process,
                     reds_left,
                     term,
-                    stack,
-                    iovec.to_vec(),
+                    &stack.collect::<Vec<_>>(),
+                    iovec.cloned().collect(),
                     merged.clone(),
                 ))
             }
@@ -616,7 +606,7 @@ impl BeamProgram {
                     reds_left,
                     arg,
                     term,
-                    stack,
+                    &stack.collect::<Vec<_>>(),
                     *size as usize,
                 ))
             }

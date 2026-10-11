@@ -476,14 +476,16 @@ fn longs_text() -> String {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
         Term::Integer(value) => value.to_string(),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         other => panic!("unexpected term {other:?}"),
     }
@@ -495,7 +497,7 @@ fn charges_and_traps_the_input_dependent_bifs_as_pinned_erts_with_one_scheduler(
     let run = |function| {
         text(
             &program
-                .execute("input_probe", function, &[Term::List(vec![])])
+                .execute("input_probe", function, &[Term::nil()])
                 .unwrap(),
         )
     };

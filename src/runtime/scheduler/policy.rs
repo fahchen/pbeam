@@ -436,7 +436,7 @@ impl Scheduler {
 /// ```
 fn initial_capabilities(value: &Term) -> Option<Vec<Capability>> {
     let capabilities = value.proper_list()?;
-    capabilities.iter().map(capability::capability).collect()
+    capabilities.map(capability::capability).collect()
 }
 
 /// Read the value of `grant/3`: the capability of `{grant, Capability}`,

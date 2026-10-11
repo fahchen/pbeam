@@ -39,7 +39,7 @@ fn checks_the_follow_flag_and_then_the_path_as_erts() {
             "Raise { class: Error, reason: Atom(\"badarg\") }",
         ),
         (
-            Term::List(vec![Term::Integer(47), Term::Integer(0)]),
+            Term::list_from(vec![Term::Integer(47), Term::Integer(0)]),
             Term::Integer(1),
             "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
         ),
