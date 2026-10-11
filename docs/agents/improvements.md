@@ -55,6 +55,18 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Guardrail:** Define each authority change at the runtime boundary that creates or forwards a request. Do not infer authority from parent-child inheritance when the runtime creates a new application boundary.
 
+## 20261011: Check planned representations against the type system
+
+**Problem:** The planned `Arc<[Term]>` tuple representation could not use the stated `Arc::into_inner` drop rule, because the slice is unsized.
+
+**Root Cause:** The design described a data representation without a check that the Rust type system accepts its stated operations.
+
+**Fix:** Use a representation that supports the stated drop rule, such as `Arc<Vec<Term>>`, or state the alternative explicitly.
+
+**Guardrail:** Before you document a planned data representation, compile its stated operations or check them against the type constraints. Do not describe an implementation that cannot compile or that relies on an unstated unsafe alternative.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/467#issuecomment-6104252355>
+
 ## 20261011: Stop a timed step at its deadline before reading queued input
 
 **Problem:** A step of the Terra reference harness read queued port data after its deadline and could still pass, and continuous output could keep a step running past its bound.
