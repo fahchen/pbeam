@@ -136,3 +136,7 @@ Expand every documented complexity claim into its complete operation sequence. I
 ## Arguments are checked after capability authorization
 
 Validate arguments before capability checks. Preserve invalid-input errors.
+
+## Benchmarks retain the measured work
+
+Disassemble each benchmark probe after compilation and confirm that the timed instructions retain the work that the benchmark claims to measure.
