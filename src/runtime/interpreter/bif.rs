@@ -5,7 +5,8 @@
 //! `lists`, `maps`, `os`, `re`, and `unicode` modules hold the BIF bodies
 //! that do not fit on one table line.
 //! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
-//! in `bif.tab`.
+//! in `bif.tab`. The `io_service` module holds the IO service entry of the
+//! runtime to boot gate.
 
 use super::*;
 use crate::runtime::{
@@ -20,6 +21,7 @@ mod erlang;
 mod erts_internal;
 mod ets;
 mod file;
+mod io_service;
 mod iolist;
 mod lists;
 mod maps;
@@ -431,6 +433,9 @@ impl BeamProgram {
             ("pbeam_cap", "enter_runtime", [module, function]) => {
                 return pbeam_cap::enter_runtime(scheduler, module, function);
             }
+            ("pbeam_cap", "serve", [pid, kind]) => {
+                return pbeam_cap::serve(scheduler, pid, kind);
+            }
             _ => {}
         }
         let mut context = BifContext { scheduler };
@@ -690,11 +695,12 @@ impl BeamProgram {
 
 /// The PBeam BIFs: functions of PBeam modules that ERTS does not have. They
 /// are not `bif.tab` entries, and no BEAM module defines them.
-const PBEAM_BIFS: [(&str, &str, u32); 4] = [
+const PBEAM_BIFS: [(&str, &str, u32); 5] = [
     ("pbeam_cap", "enter_runtime", 2),
     ("pbeam_cap", "policy_revoke", 2),
     ("pbeam_cap", "request", 2),
     ("pbeam_cap", "revoke", 2),
+    ("pbeam_cap", "serve", 2),
 ];
 
 /// Return whether an external call or a `bif` instruction goes to a BIF: the

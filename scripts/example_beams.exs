@@ -30,7 +30,7 @@ defmodule ExampleBeams do
     :code_server => "PBeam has no code server"
   }
 
-  # Each module of PBeam BIFs that ERTS does not have. No BEAM file defines it: the pbeam binary runs its functions. pbeam_boot calls pbeam_cap:enter_runtime/2.
+  # Each module of PBeam BIFs that ERTS does not have. No BEAM file defines it: the pbeam binary runs its functions. pbeam_boot calls pbeam_cap:serve/2 and pbeam_cap:enter_runtime/2.
   @pbeam_modules [:pbeam_cap]
 
   def called(path) do

@@ -393,6 +393,39 @@ impl Scheduler {
                 .is_some_and(|process| process.security.is_boot())
     }
 
+    /// Register the live boot process `target` as an IO service, for
+    /// `pbeam_cap:serve(Pid, io)` of a boot process (see
+    /// `SecurityContext::serve_io`). Return `false` and change nothing when
+    /// no live boot process has the pid `target`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // In boot mode, before the root process enters the runtime.
+    /// assert!(scheduler.serve_io(scheduler.whereis("user").unwrap()));
+    /// assert!(scheduler.serves_io(scheduler.whereis("user").unwrap()));
+    /// ```
+    pub(super) fn serve_io(&mut self, target: ProcessId) -> bool {
+        self.processes
+            .get_mut(&target)
+            .filter(|process| process.exiting.is_none())
+            .is_some_and(|process| process.security.serve_io())
+    }
+
+    /// Return whether the process `target` is an IO service (see
+    /// [`Self::serve_io`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!scheduler.serves_io(ProcessId(99)));
+    /// ```
+    pub(super) fn serves_io(&self, target: ProcessId) -> bool {
+        self.processes
+            .get(&target)
+            .is_some_and(|process| process.security.serves_io())
+    }
+
     /// Store a process and add it to the end of the run queue.
     ///
     /// # Examples

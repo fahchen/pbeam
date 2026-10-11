@@ -101,7 +101,7 @@ description = "Build an example of examples/ and run it on the pbeam binary, or 
 quiet = true
 usage = '''
 flag "--erts" help="Run the example with erl +S 1 -noshell on the pinned ERTS"
-flag "--policy <module>" help="Run the pbeam binary with this policy module of the example, such as Elixir.RestrictedGuest.Policy"
+flag "--policy <module>" help="Run the pbeam binary in boot mode (--boot) with this policy module of the example, such as Elixir.RestrictedGuest.Policy"
 arg "<name>" help="The directory of the example in examples/, such as hello_world"
 '''
 run = 'bash scripts/example.sh "$usage_name" ${usage_erts:+--erts} ${usage_policy:+--policy "$usage_policy"}'

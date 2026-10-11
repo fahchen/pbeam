@@ -292,15 +292,16 @@ fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts
 }
 
 #[test]
-fn runs_restricted_guest_with_its_policy_as_pinned_erts_and_denies_other_operations() {
-    // The `pbeam` run gives `--policy Elixir.RestrictedGuest.Policy`, so
-    // each effect entry checks the capabilities that `initial/1` of the
-    // Elixir policy gives to the root process of `pbeam_boot`. Each worker
-    // starts with `spawn/3` of `RestrictedGuest.Worker`, which the
-    // `modules` constraint permits, and writes to the terminal through the
-    // OTP IO path. The ERTS run has no policy. One test does all the runs,
-    // because a build of the example by a parallel test removes the lists
-    // of the build before it writes them again.
+fn runs_restricted_guest_with_its_strict_policy_as_pinned_erts_and_denies_other_operations() {
+    // The `pbeam` run gives `--boot --policy Elixir.RestrictedGuest.Policy`,
+    // so the boot of `pbeam_boot` runs with the boot authority, and the root
+    // process enters the runtime with the capabilities that `initial/1` of
+    // the strict Elixir policy gives `RestrictedGuest.main/0`: `process`
+    // `spawn` of `RestrictedGuest.Worker`, `send`, and `monitor`, and
+    // `terminal` `write`. Each worker writes to the terminal through the IO
+    // service entry of `user`. The ERTS run has no policy. One test does
+    // all the runs, because a build of the example by a parallel test
+    // removes the lists of the build before it writes them again.
     let erts = run_example(&["restricted_guest", "--erts"], None);
     let pbeam = run_example(
         &[
@@ -330,16 +331,35 @@ fn runs_restricted_guest_with_its_policy_as_pinned_erts_and_denies_other_operati
     assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
 
     // `restricted_guest_probe:denied/0` runs in the root process of
-    // `pbeam_boot` with the policy of the example. Its spawn of
+    // `pbeam_boot` after it enters the runtime, with the capabilities of
+    // the strict policy (`restricted_guest_probe_policy`). Its spawn of
     // `RestrictedGuest.Worker` is permitted, and the worker writes to the
-    // terminal. Each other operation needs a capability that the policy
-    // does not give, so it raises `error:capability_denied`.
-    let probe = run_restricted_guest(&["pbeam_boot", "start", "restricted_guest_probe", "denied"]);
+    // terminal. The IO requests that `terminal` `write` permits write to
+    // `user` and `standard_error`. Each other operation raises
+    // `error:capability_denied`: an operation that needs a capability that
+    // the policy does not give, an IO request with a false `From`, an MFA
+    // that is not `io_lib` `format`, `fwrite`, or `write`, an `io_lib` MFA
+    // with a fun in its arguments, an input or option request, a message
+    // that is not an IO request, a message to a boot process that is not an
+    // IO service, also after `pbeam_cap:serve/2` of a runtime process, and
+    // the output after the policy revokes `terminal`.
+    let probe = run_restricted_guest(
+        "restricted_guest_probe_policy",
+        &["pbeam_boot", "start", "restricted_guest_probe", "denied"],
+    );
     assert_eq!(
         parts(&probe),
         (
-            "worker 0: hello\\n".to_owned(),
             concat!(
+                "worker 0: hello\\n",
+                "puts: permitted\\n",
+                "format: permitted\\n",
+                "permitted\\n",
+                "requests: permitted\\n",
+            )
+            .to_owned(),
+            concat!(
+                "standard_error: permitted\\n",
                 "pbeam: root process exited with {result,[",
                 "{spawn_own_module,done},",
                 "{spawn_other_module,denied},",
@@ -348,9 +368,35 @@ fn runs_restricted_guest_with_its_policy_as_pinned_erts_and_denies_other_operati
                 "{halt,denied},",
                 "{handle_other_signal,denied},",
                 "{ignore_signal,denied},",
-                "{exit_other,denied},",
+                "{exit_user,denied},",
                 "{group_leader_other,denied},",
-                "{request,denied}",
+                "{request,denied},",
+                "{puts,ok},",
+                "{standard_error,ok},",
+                "{format,ok},",
+                "{write,ok},",
+                "{nl,ok},",
+                "{requests,ok},",
+                "{empty_requests,ok},",
+                "{false_from,denied},",
+                "{lists_mfa,denied},",
+                "{io_lib_nl,denied},",
+                "{format_fun,denied},",
+                "{write_fun,denied},",
+                "{get_line,denied},",
+                "{setopts,denied},",
+                "{requests_get_line,denied},",
+                "{requests_not_list,denied},",
+                "{request_atom,denied},",
+                "{message_atom,denied},",
+                "{message_tuple,denied},",
+                "{message_tag,denied},",
+                "{serve_logger,ok},",
+                "{request_logger,denied},",
+                "{start_child,denied},",
+                "{add_handler,denied},",
+                "{revoke,denied},",
+                "{puts_after_revoke,denied}",
                 "]}\\n",
             )
             .to_owned(),
@@ -359,43 +405,72 @@ fn runs_restricted_guest_with_its_policy_as_pinned_erts_and_denies_other_operati
         "denied operations"
     );
 
-    // `initial/1` gives capabilities only to the root process of the boot.
-    // For another root process it returns `deny`, so the run stops before
-    // the root process starts.
-    let other_root = run_restricted_guest(&["Elixir.RestrictedGuest", "main"]);
+    // Without `terminal` `write`, `IO.puts/1` raises
+    // `error:capability_denied`: the IO service entry of `user` denies the
+    // request.
+    let no_terminal = run_restricted_guest(
+        "restricted_guest_probe_policy",
+        &[
+            "pbeam_boot",
+            "start",
+            "restricted_guest_probe",
+            "no_terminal",
+        ],
+    );
     assert_eq!(
-        parts(&other_root),
+        parts(&no_terminal),
+        (
+            String::new(),
+            "pbeam: root process exited with {result,[{puts,denied}]}\\n".to_owned(),
+            Some(1)
+        ),
+        "no terminal capability"
+    );
+
+    // The strict policy gives capabilities only to `RestrictedGuest.main/0`.
+    // For another entry, `initial/1` returns `deny`, so the run stops when
+    // the root process enters the runtime.
+    let other_entry = run_restricted_guest(
+        "Elixir.RestrictedGuest.Policy",
+        &["pbeam_boot", "start", "restricted_guest_probe", "denied"],
+    );
+    assert_eq!(
+        parts(&other_entry),
         (
             String::new(),
             "pbeam: the policy denied the root process: initial/1 returned deny\\n".to_owned(),
             Some(1)
         ),
-        "another root process"
+        "another entry"
     );
 }
 
-/// Run the `pbeam` binary of this test build with
-/// `--policy Elixir.RestrictedGuest.Policy`, the `arguments`, and the BEAM
-/// files of the last build of `restricted_guest` and of
-/// `restricted_guest_probe`.
+/// Run the `pbeam` binary of this test build with `--boot --policy
+/// <policy>`, the `arguments`, and the BEAM files of the last build of
+/// `restricted_guest`, of `restricted_guest_probe`, and of
+/// `restricted_guest_probe_policy`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let output = run_restricted_guest(&["pbeam_boot", "start", "restricted_guest_probe", "denied"]);
+/// let output = run_restricted_guest(
+///     "restricted_guest_probe_policy",
+///     &["pbeam_boot", "start", "restricted_guest_probe", "denied"],
+/// );
 /// assert_eq!(output.status.code(), Some(1));
 /// ```
-fn run_restricted_guest(arguments: &[&str]) -> Output {
+fn run_restricted_guest(policy: &str, arguments: &[&str]) -> Output {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let beams =
         std::fs::read_to_string(root.join("target/examples/restricted_guest/pbeam.beams")).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
-        .args(["--policy", "Elixir.RestrictedGuest.Policy"])
+        .args(["--boot", "--policy", policy])
         .args(arguments)
         .arg("--")
         .args(beams.lines())
         .arg("fixtures/policy/restricted_guest_probe.beam")
+        .arg("fixtures/policy/restricted_guest_probe_policy.beam")
         .current_dir(root);
     run_with_time_limit(&mut command, Stdio::piped(), RUN_TIME_LIMIT)
 }

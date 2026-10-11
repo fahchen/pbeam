@@ -210,6 +210,25 @@ fn runs_the_boot_with_boot_authority_and_enters_the_runtime_with_the_policy_capa
         results.join(",")
     );
     assert_eq!(boot("main"), (Some(1), String::new(), exited));
+    // `pbeam_cap:serve/2` registers a live boot process as an IO service.
+    // The IO service entry then passes an IO request of a runtime process
+    // only when its capabilities permit it: `boot_policy` gives no
+    // `terminal` capability.
+    let results = [
+        "{serve_not_pid,{error,badarg}}",
+        "{serve_not_io,{error,badarg}}",
+        "{serve_dead,{error,badarg}}",
+        "{serve,ok}",
+        "{serve_again,ok}",
+        "{put_chars,{error,capability_denied}}",
+        "{empty_requests,sent}",
+        "{runtime_serve_not_io,{error,badarg}}",
+    ];
+    let exited = format!(
+        "pbeam: root process exited with {{result,[{}]}}\n",
+        results.join(",")
+    );
+    assert_eq!(boot("serve"), (Some(1), String::new(), exited));
     // A denial of `initial/1` in boot mode gives the error text of a denial
     // without boot mode.
     assert_eq!(
