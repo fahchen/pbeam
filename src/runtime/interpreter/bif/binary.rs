@@ -567,14 +567,13 @@ fn ac_all(trie: &[AcNode], find: &mut Find, haystack: &[u8], reds: &mut u64) -> 
 fn compile(pattern: &Term) -> Option<Pattern> {
     let needles: Vec<&[u8]> = match pattern {
         Term::Binary(needle) => vec![needle],
-        Term::List(needles) => needles
-            .iter()
+        _ => pattern
+            .proper_list()?
             .map(|needle| match needle {
                 Term::Binary(needle) => Some(needle.as_slice()),
                 _ => None,
             })
             .collect::<Option<_>>()?,
-        _ => return None,
     };
     if needles.is_empty() || needles.iter().any(|needle| needle.is_empty()) {
         return None;
@@ -598,15 +597,14 @@ fn compile(pattern: &Term) -> Option<Pattern> {
 ///
 /// ```rust,ignore
 /// let scope = Term::Tuple(vec![Term::static_atom("scope"), Term::Tuple(vec![Term::Integer(3), Term::Integer(-2)])]);
-/// assert_eq!(options(Some(&Term::List(vec![scope])), 3), Some((0, 1, 3)));
+/// assert_eq!(options(Some(&Term::list_from(vec![scope])), 3), Some((0, 1, 3)));
 /// ```
 fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
     let (mut flags, mut start, mut end) = (0, 0, size);
     let Some(options) = options else {
         return Some((flags, start, end));
     };
-    let (cells, _) = list_cells(options)?;
-    for cell in cells {
+    for cell in options.list_iter()? {
         match cell {
             Term::Atom(atom) if atom.name() == "global" => flags |= GLOBAL,
             Term::Atom(atom) if atom.name() == "trim" => flags |= TRIM,
@@ -649,14 +647,14 @@ fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(not_found(0, b"ab"), Term::List(vec![Term::Binary(b"ab".to_vec())]));
-/// assert_eq!(not_found(TRIM, b""), Term::List(vec![]));
+/// assert_eq!(not_found(0, b"ab"), Term::list_from(vec![Term::Binary(b"ab".to_vec())]));
+/// assert_eq!(not_found(TRIM, b""), Term::nil());
 /// ```
 fn not_found(flags: u8, subject: &[u8]) -> Term {
     if flags & (TRIM | TRIM_ALL) != 0 && subject.is_empty() {
-        return Term::List(Vec::new());
+        return Term::nil();
     }
-    Term::List(vec![Term::Binary(subject.to_vec())])
+    Term::list_from(vec![Term::Binary(subject.to_vec())])
 }
 
 /// Return the result of the first match at `pos` with `len` bytes, as
@@ -670,16 +668,16 @@ fn not_found(flags: u8, subject: &[u8]) -> Term {
 ///
 /// ```rust,ignore
 /// let parts = split_once(0, b"a,b", 1, 1);
-/// assert_eq!(parts, Term::List(vec![Term::Binary(b"a".to_vec()), Term::Binary(b"b".to_vec())]));
+/// assert_eq!(parts, Term::list_from(vec![Term::Binary(b"a".to_vec()), Term::Binary(b"b".to_vec())]));
 /// ```
 fn split_once(flags: u8, subject: &[u8], pos: u64, len: u64) -> Term {
     let (pos, after) = (pos as usize, (pos + len) as usize);
     let first = Term::Binary(subject[..pos].to_vec());
     if flags & (TRIM | TRIM_ALL) != 0 && after == subject.len() {
-        return Term::List(if pos > 0 { vec![first] } else { Vec::new() });
+        return Term::list_from(if pos > 0 { vec![first] } else { Vec::new() });
     }
     let rest = Term::Binary(subject[after..].to_vec());
-    Term::List(if flags & TRIM_ALL != 0 && pos == 0 {
+    Term::list_from(if flags & TRIM_ALL != 0 && pos == 0 {
         vec![rest]
     } else {
         vec![first, rest]
@@ -699,7 +697,7 @@ fn split_once(flags: u8, subject: &[u8], pos: u64, len: u64) -> Term {
 /// ```rust,ignore
 /// find.matches = vec![(1, 1)];
 /// let mut reds = 100;
-/// assert_eq!(split_all(&mut find, b"a,b", &mut reds), Some(Term::List(vec![Term::Binary(b"a".to_vec()), Term::Binary(b"b".to_vec())])));
+/// assert_eq!(split_all(&mut find, b"a,b", &mut reds), Some(Term::list_from(vec![Term::Binary(b"a".to_vec()), Term::Binary(b"b".to_vec())])));
 /// ```
 fn split_all(find: &mut Find, subject: &[u8], reds: &mut u64) -> Option<Term> {
     let matches = &find.matches;
@@ -734,7 +732,7 @@ fn split_all(find: &mut Find, subject: &[u8], reds: &mut u64) -> Option<Term> {
     }
     let mut parts = std::mem::take(&mut build.parts);
     parts.reverse();
-    Some(Term::List(parts))
+    Some(Term::list_from(parts))
 }
 
 impl Find {
@@ -772,8 +770,8 @@ impl Find {
             end_pos as i64,
         ];
         let mut fields: Vec<Term> = integers.into_iter().map(Term::Integer).collect();
-        fields.push(Term::List(matches.collect()));
-        fields.push(Term::List(parts));
+        fields.push(Term::list_from(matches));
+        fields.push(Term::list_from(parts));
         Term::Tuple(fields)
     }
 
@@ -792,7 +790,12 @@ impl Find {
     /// `binary:split/2,3` trap gives the state to the trap export.
     fn from_term(state: &[Term]) -> Find {
         let integer = |term: &Term| term.small_integer().expect("a state integer");
-        let list = |term| list_cells(term).expect("a binary_find_trap state list").0;
+        let list = |term: &'_ Term| -> Vec<Term> {
+            term.proper_list()
+                .expect("a binary_find_trap state list")
+                .cloned()
+                .collect()
+        };
         let [
             flags,
             end,
@@ -814,7 +817,7 @@ impl Find {
         let build = (integer(head) >= -1).then(|| Build {
             head: integer(head),
             end_pos: integer(end_pos) as u64,
-            parts: list(parts).to_vec(),
+            parts: list(parts),
         });
         Find {
             flags: integer(flags) as u8,
@@ -839,7 +842,7 @@ impl Find {
 ///
 /// ```rust,ignore
 /// let parts = split(&mut process, &Term::Binary(b"a,b".to_vec()), &Term::Binary(b",".to_vec()), None)?;
-/// assert!(matches!(parts, BifResult::Value(Term::List(parts)) if parts.len() == 2));
+/// assert!(matches!(parts, BifResult::Value(parts) if parts.proper_list().is_some_and(|parts| parts.len() == 2)));
 /// ```
 ///
 /// # Errors

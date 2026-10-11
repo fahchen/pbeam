@@ -59,19 +59,12 @@ fn converts_integers_to_lists_as_pinned_erts() {
         "9223372036854775807",
         "-9223372036854775808",
     ]
-    .map(|digits| {
-        Term::List(
-            digits
-                .bytes()
-                .map(|byte| Term::Integer(byte.into()))
-                .collect(),
-        )
-    })
+    .map(|digits| Term::list_from(digits.bytes().map(|byte| Term::Integer(byte.into()))))
     .into();
     expected.extend(errors(&program, "badarg", 4));
     assert_eq!(
         program.execute("event_bif_probe", "to_list", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("to_list"),
@@ -96,7 +89,7 @@ fn counts_iolist_bytes_as_pinned_erts() {
     expected.extend(errors(&program, "badarg", 8));
     assert_eq!(
         program.execute("event_bif_probe", "size", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("size"),
@@ -121,7 +114,7 @@ fn takes_integer_remainders_as_pinned_erts() {
         program
             .execute("event_bif_probe", "remainder", &[])
             .unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("remainder"),
@@ -141,7 +134,7 @@ fn selects_the_minimum_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("event_bif_probe", "minimum", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             Term::Integer(1),
             Term::Integer(1),
             Term::Integer(1),
@@ -206,7 +199,7 @@ fn checks_process_liveness_as_pinned_erts() {
     expected.extend(errors(&program, "badarg", 5));
     assert_eq!(
         program.execute("event_bif_probe", "alive", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("alive"),
@@ -233,7 +226,7 @@ fn counts_queued_messages_as_pinned_erts() {
         program
             .execute("event_bif_probe", "queue_len", &[])
             .unwrap(),
-        Term::List(expected.into())
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("queue_len"),
@@ -253,7 +246,7 @@ fn gets_persistent_terms_as_pinned_erts() {
     expected.extend(errors(&program, "badarg", 1));
     assert_eq!(
         program.execute("event_bif_probe", "term", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(reference("term"), b"[value,{error,badarg}]\n");
 }

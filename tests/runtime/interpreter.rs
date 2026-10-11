@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use super::bif::BIFS;
 use super::{
-    BeamProgram, Outcome, Scheduler, call_arguments, function_at_label, read_operand, write_operand,
+    BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
+    read_operand, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -28,11 +29,11 @@ fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
     BeamProgram {
         modules: HashMap::from([(
             "fixture".into(),
-            BeamModule {
+            Rc::new(BeamModule {
                 name: "fixture".into(),
                 exports: HashMap::from([(("main".into(), 0), 2)]),
                 instructions,
-            },
+            }),
         )]),
         atoms: AtomTable::new(),
     }
@@ -55,7 +56,7 @@ fn atom(name: &str) -> Operand {
 /// Run `main/0` with a `child/1` function that calls `erlang:exit/1`.
 fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
     let mut program = make_program(body, 0);
-    let module = program.modules.get_mut("fixture").unwrap();
+    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
     module.exports.insert(("child".into(), 1), 11);
     module.instructions.extend([
         Instruction::FunctionInfo {
@@ -175,7 +176,8 @@ fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
         BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
     let label = program.modules["fun_probe"].exports[&("tail_wait".to_owned(), 1)];
     let mut scheduler = Scheduler::new(program.atoms.clone());
-    let frame = program.frame("fun_probe", label, 1).unwrap();
+    scheduler.code = CodeTable::new(program.modules.clone());
+    let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
     scheduler
         .start(frame, vec![Term::Integer(1)], Vec::new())
         .unwrap();
@@ -258,14 +260,14 @@ fn reports_process_exits_and_link_exits() {
         ])
         .contains("root process exited with {undef,[]}")
     );
-    let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
+    let mut body = spawn_link_child(Term::list_from(vec![Term::Integer(1)]));
     body.extend(wait_forever());
     // The link exit signal of the child ends the root process.
     assert_eq!(error(body), "root process exited with 1");
-    let mut body = spawn_link_child(Term::List(vec![test_atom("normal")]));
+    let mut body = spawn_link_child(Term::list_from(vec![test_atom("normal")]));
     body.extend(wait_forever());
     assert!(error(body).contains("waits for a message that cannot arrive"));
-    let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
+    let mut body = spawn_link_child(Term::list_from(vec![Term::Integer(1)]));
     body.push(Instruction::Return);
     assert!(matches!(run_with_child(body), Ok(Term::Pid(_))));
     // ERTS 29.1.1: spawn_link(M, F, 1) raises badarg.
@@ -288,10 +290,10 @@ fn reports_process_exits_and_link_exits() {
 #[test]
 fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
     let spawn_opt_body = |reason: Term, options: Vec<Term>| {
-        let mut body = spawn_link_child(Term::List(vec![reason]));
+        let mut body = spawn_link_child(Term::list_from(vec![reason]));
         body.pop();
         body.push(Instruction::Move(
-            Operand::Value(Term::List(options)),
+            Operand::Value(Term::list_from(options)),
             Operand::X(3),
         ));
         body.push(erlang_call("spawn_opt", 4, false));
@@ -490,9 +492,7 @@ fn recognizes_runtime_process_identifiers_as_pids() {
         ],
         1,
     );
-    program
-        .modules
-        .get_mut("fixture")
+    Rc::get_mut(program.modules.get_mut("fixture").unwrap())
         .unwrap()
         .exports
         .insert(("main".into(), 1), 2);
@@ -749,7 +749,7 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
     let pair = Term::Tuple(vec![Term::Map(Map::new()), Term::Integer(0)]);
     let from_list = make_program(
         vec![
-            Instruction::Move(Operand::Value(Term::List(vec![pair])), Operand::X(0)),
+            Instruction::Move(Operand::Value(Term::list_from(vec![pair])), Operand::X(0)),
             Instruction::CallExternal {
                 arity: 1,
                 module: "maps".into(),
@@ -822,12 +822,12 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
     let a = test_atom("a");
     assert_eq!(
         keys(map(vec![a.clone(), Term::Integer(2), Term::Integer(1)])).unwrap(),
-        Term::List(vec![Term::Integer(1), Term::Integer(2), a])
+        Term::list_from(vec![Term::Integer(1), Term::Integer(2), a])
     );
     // ERTS 29.1.1: maps:keys(#{true => V, abs_path => V, 1 => V}) is [1,true,abs_path].
     assert_eq!(
         keys(map(vec![atom("abs_path"), atom("true"), Term::Integer(1)])).unwrap(),
-        Term::List(vec![Term::Integer(1), atom("true"), atom("abs_path")])
+        Term::list_from(vec![Term::Integer(1), atom("true"), atom("abs_path")])
     );
     assert_eq!(
         keys(atom("ok")).unwrap_err().to_string(),
@@ -856,7 +856,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
     );
     program.modules.insert(
         "maps".into(),
-        BeamModule {
+        Rc::new(BeamModule {
             name: "maps".into(),
             exports: HashMap::from([(("keys".into(), 1), 1)]),
             instructions: vec![
@@ -869,13 +869,13 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
                 Instruction::Move(atom("module_code"), Operand::X(0)),
                 Instruction::Return,
             ],
-        },
+        }),
     );
     // The BIF returns the keys of the empty map. The module code would
     // return `module_code`.
     assert_eq!(
         program.execute("fixture", "main", &[]).unwrap(),
-        Term::List(Vec::new())
+        Term::nil()
     );
 }
 
@@ -885,7 +885,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
         vec![
             Instruction::Move(atom("a"), Operand::X(0)),
             Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(1)),
-            Instruction::Move(Operand::Value(Term::List(Vec::new())), Operand::X(2)),
+            Instruction::Move(Operand::Value(Term::nil()), Operand::X(2)),
             Instruction::CallExternal {
                 arity: 3,
                 module: "lists".into(),
@@ -899,7 +899,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
     );
     program.modules.insert(
         "lists".into(),
-        BeamModule {
+        Rc::new(BeamModule {
             name: "lists".into(),
             exports: HashMap::from([(("keysearch".into(), 3), 1)]),
             instructions: vec![
@@ -912,7 +912,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
                 Instruction::Move(atom("stub"), Operand::X(0)),
                 Instruction::Return,
             ],
-        },
+        }),
     );
     // `lists:keysearch/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
     // BIF, so the BEAM stub body of the loaded `lists` module must not run.
@@ -982,7 +982,7 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
         )
         .execute("fixture", "main", &[])
     };
-    let chardata = || Term::List(vec![Term::Binary(b"Hello".to_vec()), Term::Integer(10)]);
+    let chardata = || Term::list_from(vec![Term::Binary(b"Hello".to_vec()), Term::Integer(10)]);
     assert_eq!(
         convert(chardata(), "unicode").unwrap(),
         Term::Binary(b"Hello\n".to_vec())
@@ -1008,7 +1008,7 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
         Term::Binary(b"Hello\n".to_vec())
     );
     assert_eq!(
-        convert(Term::List(vec![Term::Binary(vec![233])]), "latin1").unwrap(),
+        convert(Term::list_from(vec![Term::Binary(vec![233])]), "latin1").unwrap(),
         Term::Binary(vec![195, 169])
     );
     assert_eq!(
@@ -1023,7 +1023,7 @@ fn builds_a_proper_and_an_improper_list() {
         vec![
             Instruction::PutList {
                 head: Operand::Value(Term::Integer(10)),
-                tail: Operand::Value(Term::List(Vec::new())),
+                tail: Operand::Value(Term::nil()),
                 destination: Operand::X(0),
             },
             Instruction::Return,
@@ -1032,7 +1032,7 @@ fn builds_a_proper_and_an_improper_list() {
     );
     assert_eq!(
         list.execute("fixture", "main", &[]).unwrap(),
-        Term::List(vec![Term::Integer(10)])
+        Term::list_from(vec![Term::Integer(10)])
     );
 
     // ERTS: [10 | 0] is the improper list [10|0].
@@ -1049,7 +1049,7 @@ fn builds_a_proper_and_an_improper_list() {
     );
     assert_eq!(
         improper.execute("fixture", "main", &[]).unwrap(),
-        Term::ImproperList(vec![Term::Integer(10)], Box::new(Term::Integer(0)))
+        Term::list_with_tail(vec![Term::Integer(10)], Term::Integer(0))
     );
 }
 
@@ -1059,7 +1059,7 @@ fn builds_a_proper_and_an_improper_list() {
 /// `nil([]) -> nil; nil([_ | _]) -> nonempty; nil(_) -> other.`
 #[test]
 fn reads_and_tests_lists_as_pinned_erts() {
-    let list = |names: &[&str]| Term::List(names.iter().map(|name| test_atom(name)).collect());
+    let list = |names: &[&str]| Term::list_from(names.iter().map(|name| test_atom(name)));
     let run = |argument: Term, body: Vec<Instruction>| {
         let mut instructions = vec![Instruction::Move(Operand::Value(argument), Operand::X(0))];
         instructions.extend(body);
@@ -1109,9 +1109,9 @@ fn reads_and_tests_lists_as_pinned_erts() {
     // ERTS: lst([a|x]) is {a,x}, lst([a,b|x]) is {a,[b|x]}, and
     // hd1([x|y]) is x.
     let improper = |names: &[&str], tail: &str| {
-        Term::ImproperList(
+        Term::list_with_tail(
             names.iter().map(|name| test_atom(name)).collect(),
-            Box::new(test_atom(tail)),
+            test_atom(tail),
         )
     };
     assert_eq!(
@@ -1255,11 +1255,11 @@ fn updates_record_positions_as_pinned_erts() {
 #[test]
 fn waits_or_continues_at_a_receive_timeout_and_raises_timeout_value() {
     let wait = |timeout: Term| {
-        let mut body = spawn_link_child(Term::List(vec![Term::Integer(1)]));
+        let mut body = spawn_link_child(Term::list_from(vec![Term::Integer(1)]));
         body.pop();
         body.extend([
             Instruction::Move(
-                Operand::Value(Term::List(vec![test_atom("monitor")])),
+                Operand::Value(Term::list_from(vec![test_atom("monitor")])),
                 Operand::X(3),
             ),
             erlang_call("spawn_opt", 4, false),
@@ -1317,15 +1317,12 @@ fn raises_class_error_for_the_raw_stack_trace_nil() {
         .unwrap_err()
         .to_string()
     };
-    assert_eq!(
-        raise(Term::List(Vec::new())),
-        "root process exited with {r,[]}"
-    );
+    assert_eq!(raise(Term::nil()), "root process exited with {r,[]}");
     // Compiled code gives `raise` only a raw stack trace. ERTS reads each
     // other term as a raw stack trace with no check.
     for trace in [
         test_atom("foo"),
-        Term::Tuple(vec![test_atom("foo"), Term::List(Vec::new())]),
+        Term::Tuple(vec![test_atom("foo"), Term::nil()]),
     ] {
         assert_eq!(
             raise(trace.clone()),
@@ -1368,7 +1365,7 @@ fn raw_raise_writes_badarg_for_a_class_that_is_not_valid() {
             vec![
                 Instruction::Move(atom(class), Operand::X(0)),
                 Instruction::Move(atom("r"), Operand::X(1)),
-                Instruction::Move(Operand::Value(Term::List(Vec::new())), Operand::X(2)),
+                Instruction::Move(Operand::Value(Term::nil()), Operand::X(2)),
                 Instruction::RawRaise,
                 Instruction::Return,
             ],
@@ -1475,18 +1472,18 @@ fn rejects_unresolved_exports_and_function_labels() {
         instructions: vec![],
     };
     let program = BeamProgram {
-        modules: HashMap::from([("external".into(), module)]),
+        modules: HashMap::from([("external".into(), Rc::new(module))]),
         atoms: AtomTable::new(),
     };
     assert!(
-        program
+        CodeTable::new(program.modules.clone())
             .mfa_frame("missing", "run", 0)
             .unwrap_err()
             .to_string()
             .contains("unresolved external MFA missing:run/0")
     );
     assert!(
-        program
+        CodeTable::new(program.modules.clone())
             .mfa_frame("external", "missing", 0)
             .unwrap_err()
             .to_string()
@@ -1535,7 +1532,7 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         body.extend(rest);
         // `child/1` does not read its argument.
         let mut program = make_program(body, 0);
-        let module = program.modules.get_mut("fixture").unwrap();
+        let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
         module.exports.insert(("child".into(), 1), 11);
         module.instructions.extend([
             Instruction::FunctionInfo {
@@ -1904,7 +1901,7 @@ fn handles_register_values_and_reports_invalid_registers() {
     let mut registers = vec![Some(Term::Integer(7))];
     assert_eq!(
         read_operand(&Operand::X(0), &registers, &[]).unwrap(),
-        Term::Integer(7)
+        &Term::Integer(7)
     );
     assert!(read_operand(&Operand::X(1), &registers, &[]).is_err());
     assert!(read_operand(&Operand::Y(0), &registers, &[]).is_err());
@@ -1929,6 +1926,26 @@ fn handles_register_values_and_reports_invalid_registers() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn borrows_literal_and_register_operands_without_a_copy() {
+    // A read-only instruction gets a reference to the literal or the
+    // register itself, so a large tuple is not copied.
+    let tuple = || Term::Tuple(vec![Term::Integer(1); 1000]);
+    let literal = Operand::Value(tuple());
+    let registers = vec![Some(tuple())];
+    let stack = vec![StackSlot::Term(tuple())];
+    let (Operand::Value(literal_term), Some(x0), StackSlot::Term(y0)) =
+        (&literal, &registers[0], &stack[0])
+    else {
+        unreachable!("the fixture holds terms");
+    };
+    let read =
+        |operand: &Operand| read_operand(operand, &registers, &stack).unwrap() as *const Term;
+    assert_eq!(read(&literal), literal_term as *const Term);
+    assert_eq!(read(&Operand::X(0)), x0 as *const Term);
+    assert_eq!(read(&Operand::Y(0)), y0 as *const Term);
 }
 
 #[test]
@@ -1991,11 +2008,10 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
     let mut program = make_program(
         vec![
             Instruction::Move(
-                Operand::Value(Term::List(
+                Operand::Value(Term::list_from(
                     "pbeam_alpha"
                         .bytes()
-                        .map(|byte| Term::Integer(i64::from(byte)))
-                        .collect(),
+                        .map(|byte| Term::Integer(i64::from(byte))),
                 )),
                 Operand::X(0),
             ),
@@ -2032,13 +2048,13 @@ fn returns_the_iovec_of_a_binary_and_of_a_list() {
         .unwrap()
     };
     let hello = Term::Binary(b"Hello".to_vec());
-    assert_eq!(run(hello.clone()), Term::List(vec![hello]));
+    assert_eq!(run(hello.clone()), Term::list_from(vec![hello]));
     assert_eq!(
-        run(Term::List(vec![
+        run(Term::list_from(vec![
             Term::Integer(1),
-            Term::List(vec![Term::Binary(vec![2])]),
+            Term::list_from(vec![Term::Binary(vec![2])]),
         ])),
-        Term::List(vec![Term::Binary(vec![1, 2])])
+        Term::list_from(vec![Term::Binary(vec![1, 2])])
     );
 }
 
@@ -2067,7 +2083,7 @@ fn finds_a_live_catch_tag_after_other_slots_and_skips_a_cleared_tag() {
         run(body).unwrap(),
         Term::Tuple(vec![
             Term::static_atom("EXIT"),
-            Term::Tuple(vec![Term::static_atom("undef"), Term::List(Vec::new())]),
+            Term::Tuple(vec![Term::static_atom("undef"), Term::nil()]),
         ])
     );
     // `try_end` writes `[]` over the tag, so the exception is not caught.
@@ -2143,7 +2159,7 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
         element(1).unwrap(),
         Term::Tuple(vec![
             test_atom("EXIT"),
-            Term::Tuple(vec![test_atom("badarg"), Term::List(Vec::new())]),
+            Term::Tuple(vec![test_atom("badarg"), Term::nil()]),
         ])
     );
     // Without a catch, the exception exits the process.
@@ -2168,7 +2184,7 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
             name: "demonitor".into(),
             arguments: vec![
                 Operand::X(0),
-                Operand::Value(Term::List(vec![test_atom("flush")])),
+                Operand::Value(Term::list_from(vec![test_atom("flush")])),
             ],
             destination: Operand::X(0),
         },
@@ -2229,7 +2245,7 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
         vec![
             erlang_call("make_ref", 0, false),
             Instruction::Move(
-                Operand::Value(Term::List(vec![test_atom("flush")])),
+                Operand::Value(Term::list_from(vec![test_atom("flush")])),
                 Operand::X(1),
             ),
             erlang_call("demonitor", 2, true),
@@ -2239,7 +2255,7 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
     );
     program.modules.insert(
         "erts_internal".into(),
-        BeamModule {
+        Rc::new(BeamModule {
             name: "erts_internal".into(),
             exports: HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
             instructions: vec![
@@ -2253,7 +2269,7 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
                 Instruction::Move(Operand::X(2), Operand::X(0)),
                 Instruction::Return,
             ],
-        },
+        }),
     );
     assert_eq!(
         program.execute("fixture", "main", &[]).unwrap(),
@@ -2266,7 +2282,7 @@ fn removes_an_active_monitor_without_a_trap() {
     // monitor(process, Child), then demonitor(Ref, [flush]) before the
     // child runs: the monitor is still active, so ERTS returns true
     // without flushing.
-    let mut body = spawn_link_child(Term::List(vec![test_atom("normal")]));
+    let mut body = spawn_link_child(Term::list_from(vec![test_atom("normal")]));
     body.pop();
     body.push(erlang_call("spawn", 3, false));
     body.extend([
@@ -2274,7 +2290,7 @@ fn removes_an_active_monitor_without_a_trap() {
         Instruction::Move(atom("process"), Operand::X(0)),
         erlang_call("monitor", 2, false),
         Instruction::Move(
-            Operand::Value(Term::List(vec![test_atom("flush")])),
+            Operand::Value(Term::list_from(vec![test_atom("flush")])),
             Operand::X(1),
         ),
         erlang_call("demonitor", 2, true),
@@ -2294,7 +2310,7 @@ fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamErr
 /// Return the program of `run_with_apply_targets`.
 fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
     let mut program = make_program(body, 0);
-    let module = program.modules.get_mut("fixture").unwrap();
+    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
     module.exports.extend([
         (("zero".into(), 0), 11),
         (("id".into(), 3), 12),
@@ -2419,7 +2435,7 @@ fn applies_module_functions_and_bifs_as_pinned_erts() {
 
 #[test]
 fn applies_erlang_apply_3_as_the_i_apply_instruction() {
-    let xyz = || Term::List(vec![test_atom("x"), test_atom("y"), test_atom("z")]);
+    let xyz = || Term::list_from(vec![test_atom("x"), test_atom("y"), test_atom("z")]);
     let apply_of = |module: Term, function: Term, arguments: Term| {
         vec![
             Instruction::Move(Operand::Value(module), Operand::X(0)),
@@ -2439,7 +2455,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
     let mut body = apply_of(
         test_atom("erlang"),
         test_atom("apply"),
-        Term::List(vec![test_atom("fixture"), test_atom("id"), xyz()]),
+        Term::list_from(vec![test_atom("fixture"), test_atom("id"), xyz()]),
     );
     body.push(erlang_call("apply", 3, true));
     assert_eq!(run_with_apply_targets(body).unwrap(), tuple);
@@ -2449,7 +2465,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
     let mut body = apply_of(
         test_atom("erlang"),
         test_atom("apply"),
-        Term::List(vec![test_atom("fixture"), test_atom("id")]),
+        Term::list_from(vec![test_atom("fixture"), test_atom("id")]),
     );
     body.push(erlang_call("apply", 3, true));
     assert_eq!(
@@ -2463,7 +2479,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
     let mut body = apply_of(
         test_atom("fixture"),
         test_atom("missing"),
-        Term::List(vec![test_atom("x"); 1023]),
+        Term::list_from(vec![test_atom("x"); 1023]),
     );
     body.push(erlang_call("apply", 3, true));
     let mut program = apply_targets_program(body);
@@ -2491,7 +2507,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
     let mut body = apply_of(
         test_atom("fixture"),
         test_atom("missing"),
-        Term::List(vec![test_atom("x"); 1024]),
+        Term::list_from(vec![test_atom("x"); 1024]),
     );
     body.push(erlang_call("apply", 3, true));
     assert_eq!(
@@ -2612,16 +2628,16 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
         erlang_call("put", 2, false),
         Instruction::Move(atom("fixture"), Operand::X(0)),
         Instruction::Move(atom("fresh"), Operand::X(1)),
-        Instruction::Move(Operand::Value(Term::List(Vec::new())), Operand::X(2)),
+        Instruction::Move(Operand::Value(Term::nil()), Operand::X(2)),
         Instruction::Move(
-            Operand::Value(Term::List(vec![test_atom("monitor")])),
+            Operand::Value(Term::list_from(vec![test_atom("monitor")])),
             Operand::X(3),
         ),
         erlang_call("spawn_opt", 4, false),
     ];
     body.extend(wait_forever());
     let mut program = make_program(body, 0);
-    let module = program.modules.get_mut("fixture").unwrap();
+    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
     module.exports.insert(("fresh".into(), 0), 11);
     module.instructions.extend([
         Instruction::FunctionInfo {
@@ -2645,13 +2661,10 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
 
 #[test]
 fn appends_lists_as_pinned_erts() {
-    let integers = |values: &[i64]| Term::List(values.iter().copied().map(Term::Integer).collect());
+    let integers = |values: &[i64]| Term::list_from(values.iter().copied().map(Term::Integer));
     let append = |left: Term, right: Term| call_ext_with("erlang", "++", vec![left, right]);
     // ERTS 29.1.1: [] ++ x is x, and [1,2] ++ [3] is [1,2,3].
-    assert_eq!(
-        append(Term::List(Vec::new()), test_atom("x")).unwrap(),
-        test_atom("x")
-    );
+    assert_eq!(append(Term::nil(), test_atom("x")).unwrap(), test_atom("x"));
     assert_eq!(
         append(integers(&[1, 2]), integers(&[3])).unwrap(),
         integers(&[1, 2, 3])
@@ -2660,9 +2673,9 @@ fn appends_lists_as_pinned_erts() {
     // and a ++ x raise badarg.
     assert_eq!(
         append(integers(&[1]), test_atom("x")).unwrap(),
-        Term::ImproperList(vec![Term::Integer(1)], Box::new(test_atom("x")))
+        Term::list_with_tail(vec![Term::Integer(1)], test_atom("x"))
     );
-    for right in [Term::List(Vec::new()), test_atom("x")] {
+    for right in [Term::nil(), test_atom("x")] {
         assert_eq!(
             append(test_atom("a"), right).unwrap_err().to_string(),
             BADARG_EXIT
@@ -2676,11 +2689,11 @@ fn reverses_a_list_onto_a_tail_that_is_not_a_list() {
     let reverse = call_ext_with(
         "lists",
         "reverse",
-        vec![Term::List(vec![test_atom("a")]), test_atom("x")],
+        vec![Term::list_from(vec![test_atom("a")]), test_atom("x")],
     );
     assert_eq!(
         reverse.unwrap(),
-        Term::ImproperList(vec![test_atom("a")], Box::new(test_atom("x")))
+        Term::list_with_tail(vec![test_atom("a")], test_atom("x"))
     );
 }
 
@@ -2688,7 +2701,11 @@ fn reverses_a_list_onto_a_tail_that_is_not_a_list() {
 fn finds_key_tuples_as_pinned_erts() {
     let tuple = |elements: Vec<Term>| Term::Tuple(elements);
     let keyfind = |key: Term, position: Term, list: Vec<Term>| {
-        call_ext_with("lists", "keyfind", vec![key, position, Term::List(list)])
+        call_ext_with(
+            "lists",
+            "keyfind",
+            vec![key, position, Term::list_from(list)],
+        )
     };
     let badarg = |key: Term, position: Term, list: Term| {
         call_ext_with("lists", "keyfind", vec![key, position, list])
@@ -2744,7 +2761,7 @@ fn finds_key_tuples_as_pinned_erts() {
     );
     // ERTS 29.1.1 raises badarg for the positions 0, -1, x, and the
     // bignum 1 bsl 59, and for the lists a and {a}.
-    let one = Term::List(vec![tuple(vec![a.clone()])]);
+    let one = Term::list_from(vec![tuple(vec![a.clone()])]);
     for position in [
         Term::Integer(0),
         Term::Integer(-1),
@@ -2764,11 +2781,11 @@ fn finds_list_members_as_pinned_erts() {
     // ERTS 29.1.1: lists:member(a, []) is false, and lists:member(1, [1])
     // is true.
     assert_eq!(
-        member(test_atom("a"), Term::List(Vec::new())).unwrap(),
+        member(test_atom("a"), Term::nil()).unwrap(),
         Term::static_atom("false")
     );
     assert_eq!(
-        member(Term::Integer(1), Term::List(vec![Term::Integer(1)])).unwrap(),
+        member(Term::Integer(1), Term::list_from(vec![Term::Integer(1)])).unwrap(),
         Term::static_atom("true")
     );
     // ERTS 29.1.1: lists:member(a, x) raises badarg.
@@ -2821,7 +2838,7 @@ fn reads_tuple_elements_as_pinned_erts() {
         (Term::Integer(2), one.clone()),
         (Term::Integer(-1), one.clone()),
         (a.clone(), one),
-        (Term::Integer(1), Term::List(vec![a])),
+        (Term::Integer(1), Term::list_from(vec![a])),
     ] {
         assert_eq!(element(index, tuple).unwrap_err().to_string(), BADARG_EXIT);
     }
@@ -2889,15 +2906,12 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
         Instruction::Return,
     ];
     // ERTS 29.1.1 gives the frames of the caller; PBeam records none.
-    let stacktrace = Term::Tuple(vec![
-        test_atom("current_stacktrace"),
-        Term::List(Vec::new()),
-    ]);
+    let stacktrace = Term::Tuple(vec![test_atom("current_stacktrace"), Term::nil()]);
     assert_eq!(
         make_program(body, 0)
             .execute("fixture", "main", &[])
             .unwrap(),
-        Term::Tuple(vec![stacktrace, Term::List(Vec::new())])
+        Term::Tuple(vec![stacktrace, Term::nil()])
     );
     let process_info =
         |process: Term, item: Term| call_ext_with("erlang", "process_info", vec![process, item]);
@@ -2916,7 +2930,7 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
         (root(), Term::Integer(5)),
         (
             root(),
-            Term::List(vec![test_atom("registered_name"), test_atom("bogus")]),
+            Term::list_from(vec![test_atom("registered_name"), test_atom("bogus")]),
         ),
         (
             root(),
@@ -2932,7 +2946,7 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
     // valid item, also a list of items (`erl_bif_info.c:1384-1386`).
     for item in [
         test_atom("current_stacktrace"),
-        Term::List(vec![test_atom("registered_name")]),
+        Term::list_from(vec![test_atom("registered_name")]),
     ] {
         assert_eq!(
             process_info(Term::Pid(crate::ProcessId(99)), item).unwrap(),
@@ -2945,7 +2959,7 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
     // {status, running}. PBeam does not implement them yet.
     for (process, item) in [
         (root(), dictionary()),
-        (root(), Term::List(vec![test_atom("registered_name")])),
+        (root(), Term::list_from(vec![test_atom("registered_name")])),
         (root(), test_atom("status")),
     ] {
         assert_eq!(
@@ -2964,7 +2978,7 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
             vec![Term::Pid(crate::ProcessId(0)), test_atom("registered_name")]
         )
         .unwrap(),
-        Term::List(Vec::new())
+        Term::nil()
     );
 }
 
@@ -2976,7 +2990,7 @@ fn rejects_the_current_stacktrace_of_another_process() {
         Instruction::Move(atom("fixture"), Operand::X(0)),
         Instruction::Move(atom("child"), Operand::X(1)),
         Instruction::Move(
-            Operand::Value(Term::List(vec![test_atom("normal")])),
+            Operand::Value(Term::list_from(vec![test_atom("normal")])),
             Operand::X(2),
         ),
         erlang_call("spawn", 3, false),
@@ -3089,9 +3103,9 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
         let body = vec![
             Instruction::Move(atom("fixture"), Operand::X(0)),
             Instruction::Move(atom("burner"), Operand::X(1)),
-            Instruction::Move(Operand::Value(Term::List(Vec::new())), Operand::X(2)),
+            Instruction::Move(Operand::Value(Term::nil()), Operand::X(2)),
             Instruction::Move(
-                Operand::Value(Term::List(vec![test_atom("monitor")])),
+                Operand::Value(Term::list_from(vec![test_atom("monitor")])),
                 Operand::X(3),
             ),
             erlang_call("spawn_opt", 4, false),
@@ -3104,7 +3118,7 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
             },
             Instruction::PutList {
                 head: Operand::X(1),
-                tail: Operand::Value(Term::List(Vec::new())),
+                tail: Operand::Value(Term::nil()),
                 destination: Operand::X(2),
             },
             Instruction::Move(atom("fixture"), Operand::X(0)),
@@ -3112,7 +3126,7 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
             erlang_call("spawn", 3, false),
         ];
         let mut program = make_program([body, wait_forever()].concat(), 0);
-        let module = program.modules.get_mut("fixture").unwrap();
+        let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
         module.exports.insert(("burner".into(), 0), 21);
         module.exports.insert(("sender".into(), 1), 25);
         let function = |name: &str, arity, label| {

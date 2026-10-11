@@ -111,14 +111,16 @@ const TTYS: &str = "[{{10,10,false,3842},[{{down,normal},3},{{b,false,0},444},{\
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
         Term::Integer(value) => value.to_string(),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         other => panic!("unexpected term {other:?}"),
     }
@@ -161,7 +163,7 @@ fn parse(program: &BeamProgram, cases: &str) -> Term {
         }
         text.next();
         if close == ']' {
-            Term::List(elements)
+            Term::list_from(elements)
         } else {
             Term::Tuple(elements)
         }
@@ -178,7 +180,7 @@ fn deletes_the_owned_tables_as_pinned_erts_with_one_scheduler() {
         .execute(
             "exit_owned_probe",
             "tables",
-            &[parse(&program, TABLE_CASES), Term::List(vec![])],
+            &[parse(&program, TABLE_CASES), Term::nil()],
         )
         .unwrap();
     assert_eq!(text(&tables), TABLES);
@@ -217,7 +219,7 @@ fn runs_the_tty_monitors_in_the_order_of_pinned_erts() {
         .execute(
             "exit_owned_probe",
             "ttys",
-            &[parse(&program, TTY_CASES), Term::List(vec![])],
+            &[parse(&program, TTY_CASES), Term::nil()],
         )
         .unwrap();
     assert_eq!(text(&ttys), TTYS);

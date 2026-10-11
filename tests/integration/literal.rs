@@ -11,7 +11,7 @@ fn decodes_tuple_and_list_literals_and_builds_lists_on_the_empty_list() {
     assert_eq!(
         program.execute("literal_probe", "main", &[]).unwrap(),
         Term::Tuple(vec![
-            Term::List(vec![atom("flush")]),
+            Term::list_from(vec![atom("flush")]),
             Term::Tuple(vec![atom("error"), atom("enotsup")]),
             atom("same"),
         ])

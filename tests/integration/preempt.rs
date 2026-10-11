@@ -59,18 +59,13 @@ const CALLS: &[(&str, &[i64])] = &[
 fn runs_term(program: &BeamProgram, loops: &[(&str, &[i64])]) -> Term {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let run = |tag: &str, length: i64| Term::Tuple(vec![atom(tag), Term::Integer(length)]);
-    Term::List(
-        loops
+    Term::list_from(loops.iter().map(|(name, lengths)| {
+        let runs: Vec<_> = lengths
             .iter()
-            .map(|(name, lengths)| {
-                let runs = lengths
-                    .iter()
-                    .flat_map(|&length| [run("a", length), run("b", length)])
-                    .collect();
-                Term::Tuple(vec![atom(name), Term::List(runs)])
-            })
-            .collect(),
-    )
+            .flat_map(|&length| [run("a", length), run("b", length)])
+            .collect();
+        Term::Tuple(vec![atom(name), Term::list_from(runs)])
+    }))
 }
 
 /// Return the result of `sends/0` or `calls/0` as `io:format("~w")` prints
@@ -179,18 +174,10 @@ const ORDERS: &[(&str, [[&str; 3]; 2])] = &[
 /// ```
 fn orders_term(program: &BeamProgram) -> Term {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let order = |names: &[&str; 3]| Term::List(names.iter().map(|name| atom(name)).collect());
-    Term::List(
-        ORDERS
-            .iter()
-            .map(|(kind, orders)| {
-                Term::Tuple(vec![
-                    atom(kind),
-                    Term::List(orders.iter().map(order).collect()),
-                ])
-            })
-            .collect(),
-    )
+    let order = |names: &[&str; 3]| Term::list_from(names.iter().map(|name| atom(name)));
+    Term::list_from(ORDERS.iter().map(|(kind, orders)| {
+        Term::Tuple(vec![atom(kind), Term::list_from(orders.iter().map(order))])
+    }))
 }
 
 /// Return [`ORDERS`] as `io:format("~w")` prints it.
@@ -269,7 +256,7 @@ fn charges_the_receive_reductions_as_pinned_erts_with_one_scheduler() {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
@@ -279,7 +266,9 @@ fn text(term: &Term) -> String {
             name => name.to_owned(),
         },
         Term::Integer(value) => value.to_string(),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         other => panic!("unexpected term {other:?}"),
     }

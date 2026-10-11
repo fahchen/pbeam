@@ -21,13 +21,13 @@ fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, UNDEF_PROBE, UNDEF_TARGET, UNDEF_HANDLER]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let list = |names: &[&str]| Term::List(names.iter().map(|name| atom(name)).collect());
+    let list = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
     let frame = |arguments: &[&str]| {
         Term::Tuple(vec![
             atom("undef_target"),
             atom("missing"),
             list(arguments),
-            Term::List(Vec::new()),
+            Term::nil(),
         ])
     };
     let caught =
@@ -43,7 +43,7 @@ fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
     // handler through `call_ext` (m) and `apply` (n, o).
     assert_eq!(
         program.execute("undef_probe", "calls", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             caught(&["a"]),
             caught(&["b"]),
             caught(&["c"]),
@@ -93,7 +93,7 @@ fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, UNDEF_PROBE, UNDEF_TARGET, UNDEF_HANDLER]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let arguments = Term::List(vec![atom("a"), atom("b")]);
+    let arguments = Term::list_from(vec![atom("a"), atom("b")]);
     let down = |module: &str, function: &str| {
         program
             .execute(
@@ -107,11 +107,11 @@ fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
         down("undef_target", "missing"),
         Term::Tuple(vec![
             atom("undef"),
-            Term::List(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::Tuple(vec![
                 atom("undef_target"),
                 atom("missing"),
                 arguments.clone(),
-                Term::List(Vec::new()),
+                Term::nil(),
             ])]),
         ])
     );
@@ -155,7 +155,7 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, UNDEF_PROBE, UNDEF_TARGET, UNDEF_HANDLER]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let arguments = |count: usize| Term::List(vec![atom("x"); count]);
+    let arguments = |count: usize| Term::list_from(vec![atom("x"); count]);
     let down = |module: &str, count: usize| {
         program
             .execute(
@@ -169,18 +169,18 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
         down("undef_target", 1023),
         Term::Tuple(vec![
             atom("undef"),
-            Term::List(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::Tuple(vec![
                 atom("undef_target"),
                 atom("missing"),
                 arguments(1023),
-                Term::List(Vec::new()),
+                Term::nil(),
             ])]),
         ])
     );
     // PBeam gives the stack trace `[]` (row "Exception stack trace"). ERTS
     // gives `[{erlang, apply, [Module, missing, Args], ErrorInfo}]`, so the
     // reference compares only the reason.
-    let system_limit = Term::Tuple(vec![atom("system_limit"), Term::List(Vec::new())]);
+    let system_limit = Term::Tuple(vec![atom("system_limit"), Term::nil()]);
     assert_eq!(down("undef_target", 1024), system_limit);
     // `missing` is not a loaded module.
     assert_eq!(down("missing", 1024), system_limit);

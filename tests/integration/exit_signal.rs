@@ -57,7 +57,7 @@ fn sends_exit_signals_with_exit_2_as_erts_does() {
     let pair = |tag: &str, value: &str| Term::Tuple(vec![atom(tag), atom(value)]);
     assert_eq!(
         program.execute("exit_probe", "main", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             atom("normal"),
             atom("boom"),
             atom("killed"),

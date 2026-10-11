@@ -32,22 +32,17 @@ fn compares_terms_exactly_as_pinned_erts() {
         true, false, true, false,
     ];
     let atoms = |negate: bool| {
-        Term::List(
-            exact
-                .iter()
-                .map(|&equal| {
-                    Term::Atom(
-                        program
-                            .atom(if equal != negate { "true" } else { "false" })
-                            .unwrap(),
-                    )
-                })
-                .collect(),
-        )
+        Term::list_from(exact.iter().map(|&equal| {
+            Term::Atom(
+                program
+                    .atom(if equal != negate { "true" } else { "false" })
+                    .unwrap(),
+            )
+        }))
     };
     assert_eq!(
         program.execute("compare_probe", "exact", &[]).unwrap(),
-        Term::List(vec![atoms(false), atoms(true)])
+        Term::list_from(vec![atoms(false), atoms(true)])
     );
     assert_eq!(
         reference("exact"),
@@ -69,11 +64,10 @@ fn runs_the_is_eq_test_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("compare_probe", "equal", &[]).unwrap(),
-        Term::List(
+        Term::list_from(
             equal
                 .iter()
                 .map(|&equal| Term::Atom(program.atom(&equal.to_string()).unwrap()))
-                .collect()
         )
     );
     assert_eq!(
@@ -97,11 +91,10 @@ fn runs_the_is_ne_test_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("compare_probe", "not_equal", &[]).unwrap(),
-        Term::List(
+        Term::list_from(
             not_equal
                 .iter()
                 .map(|&value| Term::Atom(program.atom(&value.to_string()).unwrap()))
-                .collect()
         )
     );
     assert_eq!(
@@ -121,10 +114,10 @@ fn runs_the_is_lt_is_integer_and_is_boolean_tests_as_pinned_erts() {
     // do. 2^59 is an ERTS bignum and passes `is_integer`.
     let program = BeamProgram::load(&[COMPARE_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let atoms = |names: &[&str]| Term::List(names.iter().map(|&name| atom(name)).collect());
+    let atoms = |names: &[&str]| Term::list_from(names.iter().map(|&name| atom(name)));
     let pair = |tag, value| Term::Tuple(vec![atom(tag), Term::Integer(value)]);
-    let expected = Term::List(vec![
-        Term::List(vec![
+    let expected = Term::list_from(vec![
+        Term::list_from(vec![
             pair("pos", 2),
             pair("nonpos", 0),
             atom("other"),

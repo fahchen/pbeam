@@ -21,12 +21,12 @@ use crate::runtime::scheduler::CONTEXT_REDS;
 ///
 /// ```rust,ignore
 /// let entry = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
-/// let found = keyfind(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::List(vec![entry.clone()]));
+/// let found = keyfind(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::list_from(vec![entry.clone()]));
 /// assert!(matches!(found, BifResult::Value(term) if term == entry));
-/// let missing = keyfind(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::List(vec![]));
+/// let missing = keyfind(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::nil());
 /// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
-/// assert!(matches!(keyfind(&mut process, &Term::Integer(1), &Term::Integer(0), &Term::List(vec![])), BifResult::Raise { .. }));
-/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x")));
+/// assert!(matches!(keyfind(&mut process, &Term::Integer(1), &Term::Integer(0), &Term::nil()), BifResult::Raise { .. }));
+/// let improper = Term::list_with_tail(vec![Term::Integer(1)], Term::static_atom("x"));
 /// assert!(matches!(keyfind(&mut process, &Term::Integer(1), &Term::Integer(1), &improper), BifResult::Raise { .. }));
 /// ```
 pub(super) fn keyfind(
@@ -48,11 +48,11 @@ pub(super) fn keyfind(
 ///
 /// ```rust,ignore
 /// let entry = Term::Tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
-/// let found = keymember(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::List(vec![entry]));
+/// let found = keymember(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::list_from(vec![entry]));
 /// assert!(matches!(found, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let missing = keymember(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::List(vec![]));
+/// let missing = keymember(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::nil());
 /// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
-/// assert!(matches!(keymember(&mut process, &Term::Integer(1), &Term::Integer(0), &Term::List(vec![])), BifResult::Raise { .. }));
+/// assert!(matches!(keymember(&mut process, &Term::Integer(1), &Term::Integer(0), &Term::nil()), BifResult::Raise { .. }));
 /// ```
 pub(super) fn keymember(
     process: &mut ProcessState,
@@ -73,7 +73,7 @@ pub(super) fn keymember(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let missing = key_search(&mut process, "keyfind", &Term::Integer(1), &Term::Integer(1), &Term::List(vec![]));
+/// let missing = key_search(&mut process, "keyfind", &Term::Integer(1), &Term::Integer(1), &Term::nil());
 /// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
 /// ```
 fn key_search(
@@ -87,30 +87,26 @@ fn key_search(
         .small_integer()
         .and_then(|position| usize::try_from(position).ok())
         .and_then(|position| position.checked_sub(1));
-    let (Some(index), Some((elements, tail))) = (index, list_cells(list)) else {
+    let (Some(index), Some(mut elements)) = (index, list.list_iter()) else {
         return BifResult::badarg();
     };
     let max_iter = 10 * CONTEXT_REDS as usize;
-    let chunk = &elements[..elements.len().min(max_iter)];
-    let found = chunk.iter().find(
+    let found = elements.by_ref().take(max_iter).find(
         |element| matches!(element, Term::Tuple(elements) if elements.get(index) == Some(key)),
     );
-    match (found, tail) {
-        (Some(found), _) => Value(found.clone()),
-        (None, _) if chunk.len() < elements.len() => {
+    let rest = elements.rest();
+    match found {
+        Some(found) => Value(found.clone()),
+        None if rest.is_nonempty_list() => {
             process.bump_all_reductions();
             BifResult::TrapBif {
                 module: "lists",
                 function,
-                arguments: vec![
-                    key.clone(),
-                    position.clone(),
-                    list_rest(&elements[max_iter..], tail),
-                ],
+                arguments: vec![key.clone(), position.clone(), rest.clone()],
             }
         }
-        (None, None) => Value(Term::static_atom("false")),
-        (None, Some(_)) => BifResult::badarg(),
+        None if rest.is_nil() => Value(Term::static_atom("false")),
+        None => BifResult::badarg(),
     }
 }
 
@@ -129,9 +125,9 @@ fn key_search(
 ///
 /// ```rust,ignore
 /// let x = Term::static_atom("x");
-/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x.clone()));
+/// let improper = Term::list_with_tail(vec![Term::Integer(1)], x.clone());
 /// assert!(matches!(member(&mut process, &Term::Integer(1), &improper)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(member(&mut process, &Term::Integer(2), &Term::List(vec![]))?, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(member(&mut process, &Term::Integer(2), &Term::nil())?, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
 /// assert!(matches!(member(&mut process, &Term::Integer(2), &improper)?, BifResult::Raise { .. }));
 /// assert!(matches!(member(&mut process, &Term::Integer(2), &x)?, BifResult::Raise { .. }));
 /// ```
@@ -145,31 +141,35 @@ pub(super) fn member(
     element: &Term,
     list: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some((elements, tail)) = list_cells(list) else {
+    let Some(mut elements) = list.list_iter() else {
         return Ok(BifResult::badarg());
     };
     let reds_left = process.bif_reductions_left()?;
     let max_iter = 16 * reds_left;
-    let chunk = &elements[..elements.len().min(max_iter)];
     // `BIF_RET2` and `BUMP_REDS` with `reds_left - max_iter / 16`, where
     // `max_iter` counts down for each compared element.
     let cost = |compared: usize| (reds_left - (max_iter - compared) / 16) as i32;
-    if let Some(index) = chunk.iter().position(|item| item == element) {
-        process.bump_reductions(cost(index + 1));
-        return Ok(Value(Term::static_atom("true")));
+    let mut compared = 0;
+    for item in elements.by_ref().take(max_iter) {
+        compared += 1;
+        if item == element {
+            process.bump_reductions(cost(compared));
+            return Ok(Value(Term::static_atom("true")));
+        }
     }
-    if chunk.len() < elements.len() {
+    let rest = elements.rest();
+    if rest.is_nonempty_list() {
         process.bump_all_reductions();
         return Ok(BifResult::TrapBif {
             module: "lists",
             function: "member",
-            arguments: vec![element.clone(), list_rest(&elements[max_iter..], tail)],
+            arguments: vec![element.clone(), rest.clone()],
         });
     }
-    process.bump_reductions(cost(chunk.len()));
-    Ok(match tail {
-        Some(_) => BifResult::badarg(),
-        None => Value(Term::static_atom("false")),
+    process.bump_reductions(cost(compared));
+    Ok(match rest.is_nil() {
+        true => Value(Term::static_atom("false")),
+        false => BifResult::badarg(),
     })
 }
 
@@ -195,12 +195,12 @@ pub(super) fn member(
 ///
 /// ```rust,ignore
 /// let x = Term::static_atom("x");
-/// assert!(matches!(reverse(&mut process, &Term::List(vec![]), &x)?, BifResult::Value(term) if term == x));
-/// let list = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
-/// let reversed = reverse(&mut process, &list, &Term::List(vec![Term::Integer(3)]))?;
-/// assert!(matches!(reversed, BifResult::Value(Term::List(elements)) if elements == [2, 1, 3].map(Term::Integer)));
-/// assert!(matches!(reverse(&mut process, &list, &x)?, BifResult::Value(Term::ImproperList(..))));
-/// assert!(matches!(reverse(&mut process, &x, &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// assert!(matches!(reverse(&mut process, &Term::nil(), &x)?, BifResult::Value(term) if term == x));
+/// let list = Term::list_from(vec![Term::Integer(1), Term::Integer(2)]);
+/// let reversed = reverse(&mut process, &list, &Term::list_from(vec![Term::Integer(3)]))?;
+/// assert!(matches!(reversed, BifResult::Value(list) if list == Term::list_from([2, 1, 3].map(Term::Integer))));
+/// assert!(matches!(reverse(&mut process, &list, &x)?, BifResult::Value(list) if list.proper_list().is_none()));
+/// assert!(matches!(reverse(&mut process, &x, &Term::nil())?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -212,26 +212,28 @@ pub(super) fn reverse(
     list: &Term,
     tail: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some((elements, list_tail)) = list_cells(list) else {
+    let Some(mut elements) = list.list_iter() else {
         return Ok(BifResult::badarg());
     };
     let max_cells = 60 * process.bif_reductions_left()?;
-    let walked = elements.len().min(max_cells);
+    let mut walked = 0_usize;
+    let mut reversed = tail.clone();
+    for element in elements.by_ref().take(max_cells) {
+        walked += 1;
+        reversed = Term::cons(element.clone(), reversed);
+    }
     process.bump_reductions((walked / 60) as i32);
-    let reversed = Term::list_with_tail(
-        elements[..walked].iter().rev().cloned().collect(),
-        tail.clone(),
-    );
-    if walked < elements.len() {
+    let rest = elements.rest();
+    if rest.is_nonempty_list() {
         process.bump_all_reductions();
         return Ok(BifResult::TrapBif {
             module: "lists",
             function: "reverse",
-            arguments: vec![list_rest(&elements[walked..], list_tail), reversed],
+            arguments: vec![rest.clone(), reversed],
         });
     }
-    Ok(match list_tail {
-        Some(_) => BifResult::badarg(),
-        None => Value(reversed),
+    Ok(match rest.is_nil() {
+        true => Value(reversed),
+        false => BifResult::badarg(),
     })
 }

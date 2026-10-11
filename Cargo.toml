@@ -61,6 +61,10 @@ name = "policy_option"
 path = "tests/feature/policy_option.rs"
 
 [[test]]
+name = "prim_loader"
+path = "tests/feature/prim_loader.rs"
+
+[[test]]
 name = "run_end"
 path = "tests/feature/run_end.rs"
 
@@ -202,6 +206,10 @@ name = "funs"
 path = "tests/integration/funs.rs"
 
 [[test]]
+name = "garbage_collect"
+path = "tests/integration/garbage_collect.rs"
+
+[[test]]
 name = "getenv"
 path = "tests/integration/getenv.rs"
 
@@ -310,6 +318,10 @@ name = "preempt"
 path = "tests/integration/preempt.rs"
 
 [[test]]
+name = "prim_file_read"
+path = "tests/integration/prim_file_read.rs"
+
+[[test]]
 name = "prim_tty"
 path = "tests/integration/prim_tty.rs"
 
@@ -344,6 +356,10 @@ path = "tests/integration/signal.rs"
 [[test]]
 name = "signal_queue"
 path = "tests/integration/signal_queue.rs"
+
+[[test]]
+name = "stack_trace"
+path = "tests/integration/stack_trace.rs"
 
 [[test]]
 name = "statem"

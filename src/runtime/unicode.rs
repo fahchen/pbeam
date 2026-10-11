@@ -56,12 +56,12 @@ pub(super) enum Utf8State {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let list = Term::List(vec![Term::Integer(97), Term::Binary(vec![195, 169])]);
+/// let list = Term::list_from(vec![Term::Integer(97), Term::Binary(vec![195, 169])]);
 /// assert_eq!(utf8_need(&list, false), Some(2));
 /// assert_eq!(utf8_need(&list, true), Some(5));
 /// assert_eq!(utf8_need(&Term::static_atom("foo"), false), None);
 /// // [1 bsl 60 | x]: the walk stops at the big integer.
-/// assert_eq!(utf8_need(&Term::ImproperList(vec![Term::Integer(1 << 60)], Box::new(Term::static_atom("x"))), false), Some(0));
+/// assert_eq!(utf8_need(&Term::list_with_tail(vec![Term::Integer(1 << 60)], Term::static_atom("x")), false), Some(0));
 /// ```
 pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
     let binary_cost = |bytes: &[u8]| {
@@ -71,27 +71,30 @@ pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
             1
         }
     };
+    // Each frame is the rest of a list: its next cons cell, or its tail.
     let mut frames = match chardata {
         Term::Binary(bytes) => return Some(binary_cost(bytes)),
-        _ => vec![list_parts(chardata)?],
+        _ if chardata.is_list() => vec![chardata],
+        _ => return None,
     };
     let mut cost = 0;
-    while let Some((elements, index, tail)) = frames.last_mut() {
-        let Some(element) = elements.get(*index) else {
-            match tail {
-                Some(Term::Binary(bytes)) => cost += binary_cost(bytes),
-                Some(_) => return None,
-                None => {}
+    while let Some(frame) = frames.last_mut() {
+        let Some((element, rest)) = frame.cons_cell() else {
+            match frame {
+                Term::Binary(bytes) => cost += binary_cost(bytes),
+                tail if tail.is_nil() => {}
+                _ => return None,
             }
             frames.pop();
             continue;
         };
-        *index += 1;
+        *frame = rest;
         match element {
             Term::Integer(_) if element.small_integer().is_none() => return Some(cost),
             Term::Integer(_) => cost += 1,
             Term::Binary(bytes) => cost += binary_cost(bytes),
-            _ => frames.push(list_parts(element)?),
+            _ if element.is_list() => frames.push(element),
+            _ => return None,
         }
     }
     Some(cost)
@@ -118,9 +121,9 @@ pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
 /// ```rust,ignore
 /// let mut output = Utf8Output::default();
 /// let mut left = 2;
-/// let list = Term::List(vec![Term::Integer(97), Term::Integer(98), Term::Integer(99)]);
+/// let list = Term::list_from(vec![Term::Integer(97), Term::Integer(98), Term::Integer(99)]);
 /// let (rest, error) = build_utf8(&list, &mut left, false, &mut output);
-/// assert_eq!((rest, error, left), (Term::List(vec![Term::Integer(99)]), false, 0));
+/// assert_eq!((rest, error, left), (Term::list_from(vec![Term::Integer(99)]), false, 0));
 /// assert_eq!(output.bytes, b"ab");
 /// ```
 pub(super) fn build_utf8(
@@ -129,36 +132,29 @@ pub(super) fn build_utf8(
     latin1: bool,
     output: &mut Utf8Output,
 ) -> (Term, bool) {
-    let nil = || Term::List(Vec::new());
+    let nil = || Term::nil();
     if *left <= 0 || *chardata == nil() {
         return (chardata.clone(), false);
     }
+    // Each frame is the rest of a list: its next cons cell, or its tail.
     let mut frames = match chardata {
         Term::Binary(bytes) => return build_binary(bytes, left, latin1, output),
-        _ => match list_parts(chardata) {
-            Some(frame) => vec![frame],
-            None => return (chardata.clone(), true),
-        },
-    };
-    let rest_from = |(elements, index, tail): (&[Term], usize, Option<&Term>)| {
-        Term::list_with_tail(
-            elements[index..].to_vec(),
-            tail.cloned().unwrap_or_else(nil),
-        )
+        _ if chardata.is_list() => vec![chardata],
+        _ => return (chardata.clone(), true),
     };
     let (rest, error) = loop {
         let top = frames.len() - 1;
-        let (elements, index, tail) = frames[top];
-        let Some(element) = elements.get(index) else {
-            match tail {
-                Some(Term::Binary(bytes)) => {
+        let frame = frames[top];
+        let Some((element, after)) = frame.cons_cell() else {
+            match frame {
+                Term::Binary(bytes) => {
                     let (rest, error) = build_binary(bytes, left, latin1, output);
                     if error || *left == 0 {
                         break (rest, error);
                     }
                 }
-                Some(tail) => break (tail.clone(), true),
-                None => {}
+                tail if tail.is_nil() => {}
+                tail => break (tail.clone(), true),
             }
             frames.pop();
             if frames.is_empty() {
@@ -166,13 +162,12 @@ pub(super) fn build_utf8(
             }
             continue;
         };
-        let after = (elements, index + 1, tail);
         match element {
             Term::Binary(bytes) => {
-                frames[top].1 += 1;
+                frames[top] = after;
                 let (rest, error) = build_binary(bytes, left, latin1, output);
                 if error || rest != nil() {
-                    break (Term::list_with_tail(vec![rest], rest_from(after)), error);
+                    break (Term::cons(rest, after.clone()), error);
                 }
             }
             Term::Integer(_) => {
@@ -182,51 +177,32 @@ pub(super) fn build_utf8(
                     .and_then(|value| u32::try_from(value).ok())
                     .and_then(char::from_u32);
                 let Some(character) = character else {
-                    break (rest_from(frames[top]), true);
+                    break (frame.clone(), true);
                 };
-                frames[top].1 += 1;
+                frames[top] = after;
                 output
                     .bytes
                     .extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes());
                 output.characters += 1;
                 *left -= 1;
             }
-            _ => match list_parts(element) {
-                Some(frame) => {
-                    frames[top].1 += 1;
-                    frames.push(frame);
-                    continue;
-                }
-                None => break (rest_from(frames[top]), true),
-            },
+            _ if element.is_list() => {
+                frames[top] = after;
+                frames.push(element);
+                continue;
+            }
+            _ => break (frame.clone(), true),
         }
         if *left == 0 {
-            break (rest_from(after), false);
+            break (after.clone(), false);
         }
     };
     frames.pop();
-    let rest = frames.into_iter().rev().fold(rest, |rest, frame| {
-        Term::list_with_tail(vec![rest], rest_from(frame))
-    });
+    let rest = frames
+        .into_iter()
+        .rev()
+        .fold(rest, |rest, frame| Term::cons(rest, frame.clone()));
     (rest, error)
-}
-
-/// Return the elements, the start position, and the tail of a list as a
-/// frame of a walk, or `None` for a term that is not a list.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let list = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Binary(vec![])));
-/// assert!(matches!(list_parts(&list), Some(([Term::Integer(1)], 0, Some(Term::Binary(_))))));
-/// assert!(list_parts(&Term::Integer(1)).is_none());
-/// ```
-fn list_parts(list: &Term) -> Option<(&[Term], usize, Option<&Term>)> {
-    match list {
-        Term::List(elements) => Some((elements, 0, None)),
-        Term::ImproperList(elements, tail) => Some((elements, 0, Some(tail))),
-        _ => None,
-    }
 }
 
 /// Convert a binary with a budget of `left` loop steps, as the binary part
@@ -258,7 +234,7 @@ fn build_binary(
             *left += 1;
         }
     }
-    let mut rest = Term::List(Vec::new());
+    let mut rest = Term::nil();
     if size as i64 > *left {
         rest = Term::Binary(bytes[*left as usize..].to_vec());
         size = *left as usize;
@@ -392,14 +368,13 @@ pub(super) fn analyze_utf8(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(code_points("aé".as_bytes()), Term::List(vec![Term::Integer(97), Term::Integer(233)]));
+/// assert_eq!(code_points("aé".as_bytes()), Term::list_from(vec![Term::Integer(97), Term::Integer(233)]));
 /// ```
 pub(super) fn code_points(bytes: &[u8]) -> Term {
     let text = std::str::from_utf8(bytes).expect("the walks write valid UTF-8");
-    Term::List(
+    Term::list_from(
         text.chars()
-            .map(|character| Term::Integer(u32::from(character).into()))
-            .collect(),
+            .map(|character| Term::Integer(u32::from(character).into())),
     )
 }
 
@@ -477,11 +452,11 @@ fn utf8_sequence(bytes: &[u8]) -> Utf8Sequence {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let name = Term::List(vec![Term::List(vec![Term::Integer(97)]), Term::List(vec![]), Term::Integer(256)]);
+/// let name = Term::list_from(vec![Term::list_from(vec![Term::Integer(97)]), Term::nil(), Term::Integer(256)]);
 /// assert!(is_native_filename(&name, FilenameEncoding::Utf8));
 /// assert!(!is_native_filename(&name, FilenameEncoding::Latin1));
 /// assert!(is_native_filename(&Term::Binary(vec![97, 0]), FilenameEncoding::Latin1));
-/// assert!(!is_native_filename(&Term::List(vec![Term::Integer(0)]), FilenameEncoding::Utf8));
+/// assert!(!is_native_filename(&Term::list_from(vec![Term::Integer(0)]), FilenameEncoding::Utf8));
 /// ```
 pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> bool {
     matches!(name, Term::Binary(_)) || native_filename(name, encoding).is_some()
@@ -505,25 +480,23 @@ pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> boo
 /// # Examples
 ///
 /// ```rust,ignore
-/// let name = Term::List(vec![Term::List(vec![Term::Integer(97)]), Term::List(vec![]), Term::Integer(233)]);
+/// let name = Term::list_from(vec![Term::list_from(vec![Term::Integer(97)]), Term::nil(), Term::Integer(233)]);
 /// assert_eq!(native_filename(&name, FilenameEncoding::Latin1), Some(vec![97, 233]));
 /// assert_eq!(native_filename(&name, FilenameEncoding::Utf8), Some(vec![97, 195, 169]));
-/// assert_eq!(native_filename(&Term::List(vec![Term::Integer(256)]), FilenameEncoding::Latin1), None);
+/// assert_eq!(native_filename(&Term::list_from(vec![Term::Integer(256)]), FilenameEncoding::Latin1), None);
 /// assert_eq!(native_filename(&Term::Binary(vec![97]), FilenameEncoding::Utf8), None);
 /// ```
 pub(super) fn native_filename(name: &Term, encoding: FilenameEncoding) -> Option<Vec<u8>> {
-    let Term::List(elements) = name else {
-        return None;
-    };
+    let elements = name.proper_list()?;
     let mut bytes = Vec::new();
-    let mut pending = vec![elements.iter()];
+    let mut pending = vec![elements];
     while let Some(elements) = pending.last_mut() {
         let Some(element) = elements.next() else {
             pending.pop();
             continue;
         };
-        if let Term::List(nested) = element {
-            pending.push(nested.iter());
+        if let Some(nested) = element.proper_list() {
+            pending.push(nested);
             continue;
         }
         let character = u32::try_from(element.small_integer()?)
@@ -554,11 +527,38 @@ const COMPOSITION_CANDIDATES: [u32; 61] = [
 
 /// Convert the native bytes of a name to a list of characters, as
 /// `erts_convert_native_to_filename` does (`erl_unicode.c:2164-2220`). In
-/// Latin-1, and in UTF-8 when the bytes are not valid UTF-8
-/// (`erts_analyze_utf8` in `erl_unicode.c:1180-1270`), each byte is one
-/// character. Valid UTF-8 gives its code points. The UTF-8 check of ERTS
-/// rejects overlong forms, surrogates, code points above `0x10FFFF`, and an
-/// incomplete sequence, as [`std::str::from_utf8`] does.
+/// Latin-1, and in UTF-8 when the bytes are not valid UTF-8, each byte is
+/// one character. Else the result is the one of [`name_from_native`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // ERTS on macOS: a\xc3\xa9 gives [97,233], and a\xff gives [97,255].
+/// let list = |characters: &[i64]| Term::list_from(characters.iter().copied().map(Term::Integer));
+/// assert_eq!(filename_from_native(b"a\xc3\xa9", FilenameEncoding::Utf8Mac)?, list(&[97, 233]));
+/// assert_eq!(filename_from_native(b"a\xc3\xa9", FilenameEncoding::Latin1)?, list(&[97, 195, 169]));
+/// assert_eq!(filename_from_native(b"a\xff", FilenameEncoding::Utf8)?, list(&[97, 255]));
+/// assert!(filename_from_native(b"ae\xcc\x81", FilenameEncoding::Utf8Mac).is_err());
+/// ```
+///
+/// # Errors
+///
+/// The runtime error of [`name_from_native`].
+pub(super) fn filename_from_native(
+    bytes: &[u8],
+    encoding: FilenameEncoding,
+) -> Result<Term, BeamError> {
+    Ok(name_from_native(bytes, encoding)?.unwrap_or_else(|| byte_list(bytes)))
+}
+
+/// Convert the native bytes of a file name to a list of characters, as
+/// `prim_file_internal_native2name_1` does (`erl_unicode.c:2735-2824`), or
+/// return `None` when the bytes are not valid UTF-8 in a UTF-8 encoding. In
+/// Latin-1, each byte is one character. In UTF-8, valid UTF-8 gives its
+/// code points. The UTF-8 check of ERTS (`erts_analyze_utf8` in
+/// `erl_unicode.c:1180-1270`) rejects overlong forms, surrogates, code
+/// points above `0x10FFFF`, and an incomplete sequence, as
+/// [`std::str::from_utf8`] does.
 ///
 /// In `Utf8Mac`, ERTS composes the code points (`do_utf8_to_list_normalize`
 /// in `erl_unicode.c:1569-1630`). PBeam has no composition table, so valid
@@ -569,28 +569,28 @@ const COMPOSITION_CANDIDATES: [u32; 61] = [
 /// # Examples
 ///
 /// ```rust,ignore
-/// // ERTS on macOS: a\xc3\xa9 gives [97,233], and a\xff gives [97,255].
-/// let list = |characters: &[i64]| Term::List(characters.iter().copied().map(Term::Integer).collect());
-/// assert_eq!(filename_from_native(b"a\xc3\xa9", FilenameEncoding::Utf8Mac)?, list(&[97, 233]));
-/// assert_eq!(filename_from_native(b"a\xc3\xa9", FilenameEncoding::Latin1)?, list(&[97, 195, 169]));
-/// assert_eq!(filename_from_native(b"a\xff", FilenameEncoding::Utf8)?, list(&[97, 255]));
-/// assert!(filename_from_native(b"ae\xcc\x81", FilenameEncoding::Utf8Mac).is_err());
+/// let list = |characters: &[i64]| Term::list_from(characters.iter().copied().map(Term::Integer));
+/// assert_eq!(name_from_native(b"a\xc3\xa9", FilenameEncoding::Utf8)?, Some(list(&[97, 233])));
+/// assert_eq!(name_from_native(b"a\xff", FilenameEncoding::Latin1)?, Some(list(&[97, 255])));
+/// assert_eq!(name_from_native(b"a\xff", FilenameEncoding::Utf8)?, None);
+/// assert!(name_from_native(b"ae\xcc\x81", FilenameEncoding::Utf8Mac).is_err());
 /// ```
-pub(super) fn filename_from_native(
+///
+/// # Errors
+///
+/// In `Utf8Mac`, valid UTF-8 with a composition candidate.
+pub(super) fn name_from_native(
     bytes: &[u8],
     encoding: FilenameEncoding,
-) -> Result<Term, BeamError> {
+) -> Result<Option<Term>, BeamError> {
     let text = match encoding {
-        FilenameEncoding::Latin1 => None,
-        FilenameEncoding::Utf8 | FilenameEncoding::Utf8Mac => std::str::from_utf8(bytes).ok(),
-    };
-    let Some(text) = text else {
-        return Ok(Term::List(
-            bytes
-                .iter()
-                .map(|&byte| Term::Integer(byte.into()))
-                .collect(),
-        ));
+        FilenameEncoding::Latin1 => return Ok(Some(byte_list(bytes))),
+        FilenameEncoding::Utf8 | FilenameEncoding::Utf8Mac => {
+            let Ok(text) = std::str::from_utf8(bytes) else {
+                return Ok(None);
+            };
+            text
+        }
     };
     if encoding == FilenameEncoding::Utf8Mac
         && let Some(candidate) = text.chars().find(|&character| {
@@ -604,11 +604,14 @@ pub(super) fn filename_from_native(
             u32::from(candidate)
         )));
     }
-    Ok(Term::List(
-        text.chars()
-            .map(|character| Term::Integer(u32::from(character).into()))
-            .collect(),
-    ))
+    Ok(Some(Term::list_from(text.chars().map(|character| {
+        Term::Integer(u32::from(character).into())
+    }))))
+}
+
+/// Return the list of the bytes of `bytes`, each as one character.
+fn byte_list(bytes: &[u8]) -> Term {
+    Term::list_from(bytes.iter().map(|&byte| Term::Integer(byte.into())))
 }
 
 #[cfg(test)]

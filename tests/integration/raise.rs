@@ -46,14 +46,14 @@ fn raises_an_exception_again_with_raise_as_pinned_erts() {
     let program = BeamProgram::load(&[RAISE_PROBE, &erlang]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let tuple = Term::Tuple;
-    let empty = || Term::List(Vec::new());
+    let empty = || Term::nil();
     let reason = |class: &str| tuple(vec![atom("reason"), atom(class)]);
     let caught = |class: &str| tuple(vec![atom(class), reason(class), empty()]);
     let exit = |reason: Term| tuple(vec![atom("EXIT"), reason]);
     assert_eq!(
         program.execute("raise_probe", "main", &[]).unwrap(),
         tuple(vec![
-            Term::List(vec![
+            Term::list_from(vec![
                 tuple(vec![
                     caught("error"),
                     exit(tuple(vec![reason("error"), empty()])),

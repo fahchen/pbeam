@@ -22,7 +22,7 @@ fn runs_the_pinned_unicode_characters_to_binary_as_pinned_erts() {
             .execute(
                 "unicode",
                 "characters_to_binary",
-                &[Term::List(vec![
+                &[Term::list_from(vec![
                     Term::Binary(b"Hello".to_vec()),
                     Term::Integer(10),
                 ])],
@@ -51,9 +51,9 @@ fn runs_iolist_to_iovec_of_terms_that_are_not_lists_as_pinned_erts() {
     let program = BeamProgram::load(&[USER_DRV_PROBE]).unwrap();
     assert_eq!(
         program.execute("user_drv_probe", "iovec", &[]).unwrap(),
-        Term::List(vec![
-            Term::List(vec![]),
-            Term::List(vec![]),
+        Term::list_from(vec![
+            Term::nil(),
+            Term::nil(),
             Term::Atom(program.atom("badarg").unwrap()),
         ])
     );
@@ -92,40 +92,40 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
         Term::Binary(bytes)
     };
     let huge = Term::Binary(vec![0; 100_000]);
-    let deep = (0..100_000).fold(Term::List(vec![Term::Integer(1)]), |list, _| {
-        Term::List(vec![list])
+    let deep = (0..100_000).fold(Term::list_from(vec![Term::Integer(1)]), |list, _| {
+        Term::list_from(vec![list])
     });
-    let expected = Term::List(vec![
-        Term::List(vec![]),
-        Term::List(vec![]),
-        Term::List(vec![bytes(&[1, 2])]),
-        Term::List(vec![bytes(b"ab\x03")]),
-        Term::List(vec![bytes(&[1])]),
-        Term::List(vec![]),
-        Term::List(vec![bytes(&[1, 2, 3, 4, 5, 6])]),
-        Term::List(vec![ones(64)]),
-        Term::List(vec![merged(&[1], 64)]),
-        Term::List(vec![ones(512)]),
-        Term::List(vec![merged(&[1], 512)]),
-        Term::List(vec![ones(1024)]),
-        Term::List(vec![ones(513)]),
-        Term::List(vec![bytes(&[1]), ones(513)]),
-        Term::List(vec![bytes(&[1]), ones(513), bytes(&[2])]),
-        Term::List(vec![ones(513), ones(513)]),
-        Term::List(vec![ones(513), bytes(&[1, 2]), ones(513)]),
-        Term::List(vec![ones(513)]),
-        Term::List(vec![ones(513)]),
-        Term::List(vec![huge.clone()]),
-        Term::List(vec![bytes(&[1]), huge.clone(), bytes(b"ab")]),
-        Term::List(vec![bytes(&[1])]),
+    let expected = Term::list_from(vec![
+        Term::nil(),
+        Term::nil(),
+        Term::list_from(vec![bytes(&[1, 2])]),
+        Term::list_from(vec![bytes(b"ab\x03")]),
+        Term::list_from(vec![bytes(&[1])]),
+        Term::nil(),
+        Term::list_from(vec![bytes(&[1, 2, 3, 4, 5, 6])]),
+        Term::list_from(vec![ones(64)]),
+        Term::list_from(vec![merged(&[1], 64)]),
+        Term::list_from(vec![ones(512)]),
+        Term::list_from(vec![merged(&[1], 512)]),
+        Term::list_from(vec![ones(1024)]),
+        Term::list_from(vec![ones(513)]),
+        Term::list_from(vec![bytes(&[1]), ones(513)]),
+        Term::list_from(vec![bytes(&[1]), ones(513), bytes(&[2])]),
+        Term::list_from(vec![ones(513), ones(513)]),
+        Term::list_from(vec![ones(513), bytes(&[1, 2]), ones(513)]),
+        Term::list_from(vec![ones(513)]),
+        Term::list_from(vec![ones(513)]),
+        Term::list_from(vec![huge.clone()]),
+        Term::list_from(vec![bytes(&[1]), huge.clone(), bytes(b"ab")]),
+        Term::list_from(vec![bytes(&[1])]),
         badarg.clone(),
         badarg.clone(),
         badarg.clone(),
         badarg.clone(),
         badarg.clone(),
         badarg,
-        Term::List(vec![ones(64)]),
-        Term::List(vec![ones(513)]),
+        Term::list_from(vec![ones(64)]),
+        Term::list_from(vec![ones(513)]),
     ]);
     assert_eq!(
         program
@@ -170,14 +170,16 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let term = Term::List(vec![Term::Binary(vec![1, 2])]);
+/// let term = Term::list_from(vec![Term::Binary(vec![1, 2])]);
 /// assert_eq!(erl_w(&term), "[<<1,2>>]");
 /// ```
 fn erl_w(term: &Term) -> String {
     let join = |items: Vec<String>| items.join(",");
     match term {
         Term::Binary(bytes) => format!("<<{}>>", join(bytes.iter().map(u8::to_string).collect())),
-        Term::List(items) => format!("[{}]", join(items.iter().map(erl_w).collect())),
+        _ if let Some(items) = term.proper_list() => {
+            format!("[{}]", join(items.map(erl_w).collect()))
+        }
         Term::Atom(atom) => atom.name().to_owned(),
         other => panic!("no ~w format for {other:?}"),
     }
@@ -194,7 +196,7 @@ fn runs_is_ne_exact_in_an_orelse_guard_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("user_drv_probe", "ne", &[]).unwrap(),
-        Term::List(vec![atom("match"), atom("match"), atom("no_match")])
+        Term::list_from(vec![atom("match"), atom("match"), atom("no_match")])
     );
 
     let reference = Command::new("erl")
@@ -241,7 +243,7 @@ fn executes_the_pinned_user_drv_server_for_one_put_chars_sync_request() {
     assert_eq!(
         program.execute("user_drv_probe", "main", &[]).unwrap(),
         Term::Tuple(vec![
-            Term::List(vec![Term::Binary(b"Hello, world!\n".to_vec())]),
+            Term::list_from(vec![Term::Binary(b"Hello, world!\n".to_vec())]),
             Term::Atom(program.atom("ok").unwrap()),
         ])
     );

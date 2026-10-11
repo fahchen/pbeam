@@ -97,7 +97,7 @@ fn rejects_zero_a_negative_integer_and_each_other_term() {
         Term::Integer(i64::MIN),
         Term::static_atom("ok"),
         Term::Tuple(vec![]),
-        Term::List(vec![]),
+        Term::nil(),
     ] {
         assert_eq!(time_unit_conversion(5, 1, &unit), TimeValue::Badarg);
         assert_eq!(time_unit_conversion(5, 0, &unit), TimeValue::Badarg);
@@ -137,7 +137,7 @@ fn reads_only_a_date_tuple_of_small_integers() {
         triple(2026, 1, 1),
         Term::Tuple(vec![triple(2026, 1, 1)]),
         Term::Tuple(vec![triple(2026, 1, 1), triple(0, 0, 0), triple(0, 0, 0)]),
-        date(Term::List(vec![]), triple(0, 0, 0)),
+        date(Term::nil(), triple(0, 0, 0)),
         date(triple(2026, 1, 1), Term::Integer(0)),
         date(
             Term::Tuple(vec![Term::Integer(2026), Term::Integer(1)]),

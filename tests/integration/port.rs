@@ -34,7 +34,9 @@ fn text(term: &Term) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         other => panic!("unexpected term {other:?}"),
     }
@@ -220,7 +222,7 @@ fn charges_the_port_bifs_as_pinned_erts() {
         format!("{expected}\n")
     );
     let result = load()
-        .execute("port_probe", "costs", &[Term::List(vec![])])
+        .execute("port_probe", "costs", &[Term::nil()])
         .unwrap();
     assert_eq!(text(&result), expected);
 }

@@ -1,12 +1,13 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    rc::Rc,
     time::Duration,
 };
 
 use super::{
     capability::{
         Capability, CapabilityId, CapabilityKind, Delegations, Denied, Operation, Restriction,
-        Source,
+        SecurityContext, Source,
     },
     dirty_io::{Claim, Completion, DirtyIo},
     ets::EtsTables,
@@ -15,6 +16,7 @@ use super::{
         output::IovecWrite,
         signal,
     },
+    interpreter::CodeTable,
     local_node,
     persistent_term::PersistentTerms,
     port::Ports,
@@ -29,6 +31,7 @@ use super::{
     tty::Ttys,
 };
 use crate::{
+    beam::BeamModule,
     error::{BeamError, error},
     term::{Atom, AtomTable, ProcessId, Reference, Term},
 };
@@ -188,6 +191,10 @@ pub(super) struct Scheduler {
     /// run starts with a copy of the program table, and a BIF such as
     /// `erlang:list_to_atom/1` adds its new atoms here.
     pub(super) atoms: AtomTable,
+    /// The code table of the run, with its prepared code. The launcher puts
+    /// the start modules of the program into it before the root process
+    /// starts, and `erlang:finish_loading/1` adds a new module.
+    pub(super) code: CodeTable,
     /// The modules whose NIF library `erlang:load_nif/2` loaded in the run,
     /// as the `nif` field of the ERTS module instance
     /// (`beam/erl_nif.c:4774-4777`, `4990-4997`). PBeam has one instance of
@@ -216,6 +223,11 @@ pub(super) struct Scheduler {
     /// `undefined`, or a pid, as `system_logger` in `erl_trace.c`. The start
     /// value is `logger` (`erl_trace.c:339`).
     pub(super) system_logger: Term,
+    /// The maximum number of frames that `erlang:raise/3` keeps, as
+    /// `erts_backtrace_depth`. The start value is 8 (`DEFAULT_BACKTRACE_SIZE`,
+    /// `error.h:207`, `erl_init.c:805`), and
+    /// `erlang:system_flag(backtrace_depth, Depth)` changes it.
+    pub(super) backtrace_depth: usize,
     /// The virtual reductions of the current turn, as `esdp->virtual_reds`.
     /// They use the budget, but the reduction total does not count them
     /// (`bif.h:85-96`). Each switch out sets them to 0
@@ -265,12 +277,14 @@ impl Scheduler {
             ets: EtsTables::default(),
             resources,
             atoms,
+            code: CodeTable::default(),
             nif_libraries: HashSet::new(),
             timers: Timers::new(),
             alias_owners: HashMap::new(),
             pending_monitor: None,
             next_unlink_id: 1,
             system_logger: Term::static_atom("logger"),
+            backtrace_depth: 8,
             virtual_reductions: 0,
             dirty_io: DirtyIo::new(),
             delegations: Delegations::default(),
@@ -336,6 +350,80 @@ impl Scheduler {
         root.security = self.delegations.hold(id, issued);
         self.insert(root);
         Ok(())
+    }
+
+    /// Create the root process as [`Self::start`] does, with the boot
+    /// authority instead of capabilities, for a run in boot mode (see
+    /// `SecurityContext::boot`). The root process enters the runtime with
+    /// `pbeam_cap:enter_runtime/2`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.start_boot(frame, vec![]);
+    /// assert!(scheduler.process(ProcessId(0)).unwrap().security.is_boot());
+    /// ```
+    pub(super) fn start_boot(&mut self, frame: Frame, arguments: Vec<Term>) {
+        let mut root = ProcessState::new(ROOT, Start::Entry(frame), arguments);
+        root.security = SecurityContext::boot();
+        self.insert(root);
+    }
+
+    /// Return whether an operation of the current process on the process
+    /// `target` crosses from the runtime into the boot: the current process
+    /// is not a boot process, and `target` is a live or exiting boot
+    /// process. Only a run in boot mode has boot processes. The runtime to
+    /// boot gate of `erlang:send/2,3`, the `send` instruction,
+    /// `erlang:start_timer/3`, `erlang:link/1`, `erlang:exit/2`, the group
+    /// leader BIFs, the process inspection BIFs, and `erlang:unregister/1`
+    /// denies such an operation (row "Boot authority" of
+    /// `docs/erts-differences.md`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // The current process entered the runtime; `user` is a boot process.
+    /// assert!(scheduler.enters_boot(scheduler.whereis("user").unwrap()));
+    /// ```
+    pub(super) fn enters_boot(&self, target: ProcessId) -> bool {
+        !self.current_process().security.is_boot()
+            && self
+                .processes
+                .get(&target)
+                .is_some_and(|process| process.security.is_boot())
+    }
+
+    /// Register the live boot process `target` as an IO service, for
+    /// `pbeam_cap:serve(Pid, io)` of a boot process (see
+    /// `SecurityContext::serve_io`). Return `false` and change nothing when
+    /// no live boot process has the pid `target`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // In boot mode, before the root process enters the runtime.
+    /// assert!(scheduler.serve_io(scheduler.whereis("user").unwrap()));
+    /// assert!(scheduler.serves_io(scheduler.whereis("user").unwrap()));
+    /// ```
+    pub(super) fn serve_io(&mut self, target: ProcessId) -> bool {
+        self.processes
+            .get_mut(&target)
+            .filter(|process| process.exiting.is_none())
+            .is_some_and(|process| process.security.serve_io())
+    }
+
+    /// Return whether the process `target` is an IO service (see
+    /// [`Self::serve_io`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!scheduler.serves_io(ProcessId(99)));
+    /// ```
+    pub(super) fn serves_io(&self, target: ProcessId) -> bool {
+        self.processes
+            .get(&target)
+            .is_some_and(|process| process.security.serves_io())
     }
 
     /// Store a process and add it to the end of the run queue.
@@ -906,6 +994,28 @@ impl Scheduler {
             .expect("the scheduler has a current process")
     }
 
+    /// Return the module of the active frame of the current process from
+    /// the code table of the run.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.current_module()?.name, "process_probe");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A module that is not loaded is the error `missing BEAM module M`.
+    pub(super) fn current_module(&self) -> Result<&Rc<BeamModule>, BeamError> {
+        // ponytail: only the run loop calls this, for a process with an active frame.
+        let frame = self
+            .current_process
+            .and_then(|id| self.processes.get(&id))
+            .and_then(|process| process.frames.last())
+            .expect("the current process has an active frame");
+        self.code.module(&frame.module)
+    }
+
     /// Return the process `id` of the process table, also the current
     /// process and an exiting process, as `erts_proc_lookup_raw`
     /// (`erl_process_lock.h:1135-1148`) finds it. Return `None` when no
@@ -1218,7 +1328,9 @@ impl Scheduler {
     /// `spawn` that permits the module of `start`, and with `link` and
     /// `monitor` when the spawn links or monitors. The child gets the
     /// delegable capabilities of the current process, reduced by
-    /// `restrictions` (see `SecurityContext::delegate`). A denied check or
+    /// `restrictions` (see `SecurityContext::delegate`). The child of a boot
+    /// process is a boot process, and a boot process with `restrictions` is
+    /// denied. A denied check or
     /// delegation gives `Ok(Err(Denied))` before the spawn takes a pid or a
     /// reference. In a run that skips the checks, the spawn has no check,
     /// and the child gets no copy and ignores `restrictions`.
@@ -1243,6 +1355,7 @@ impl Scheduler {
             Start::Undefined { module, .. } => module.name(),
         };
         let parent = &self.current_process().security;
+        let boot = parent.is_boot();
         let check = |needed: bool, operation: Operation, name: Option<&[u8]>| {
             if needed {
                 parent.check(CapabilityKind::Process, operation, name)
@@ -1264,7 +1377,11 @@ impl Scheduler {
         };
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = off_heap_message_queue;
-        child.security = self.delegations.hold(child.id, copies);
+        child.security = if boot {
+            SecurityContext::boot()
+        } else {
+            self.delegations.hold(child.id, copies)
+        };
         let parent = self.current_process_mut().id;
         child.parent = Some(parent);
         child.group_leader = self.current_process_mut().group_leader;
