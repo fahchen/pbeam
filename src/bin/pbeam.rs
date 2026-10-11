@@ -31,6 +31,12 @@ struct Cli {
     // and `clap` rejects the flag with `--policy`.
     #[arg(long = "no-capability-checks", conflicts_with = "policy")]
     _no_capability_checks: bool,
+    /// Run in boot mode, only with `--policy`: the root process starts with
+    /// the boot authority, which the policy does not check, and
+    /// `pbeam_cap:enter_runtime(Module, Function)` gives it the
+    /// capabilities of `initial/1` of the policy module, one way.
+    #[arg(long, requires = "policy")]
+    boot: bool,
     /// BEAM files to load, after `--`.
     #[arg(value_name = "BEAM_FILE", required = true, num_args = 1.., last = true)]
     beam_files: Vec<PathBuf>,
@@ -94,7 +100,8 @@ impl From<String> for Exit {
 /// Set the signal dispositions of the ERTS emulator start, read and load
 /// the BEAM files, and run `Module:Function(Atoms...)` as the root process.
 /// With `--policy Policy`, the policy module `Policy` gives the
-/// capabilities (see [`BeamProgram::execute_with_policy_module`]). Without
+/// capabilities (see [`BeamProgram::execute_with_policy_module`]), in boot
+/// mode with `--boot`. Without
 /// it, and with `--no-capability-checks`, the run skips each capability
 /// check (see [`BeamProgram::execute`]).
 ///
@@ -135,7 +142,9 @@ fn run(arguments: Cli) -> Result<(), Exit> {
         .collect::<Result<Vec<_>, _>>()?;
     let (module, function) = (&arguments.module, &arguments.function);
     let result = match &arguments.policy {
-        Some(policy) => program.execute_with_policy_module(module, function, &atoms, policy),
+        Some(policy) => {
+            program.execute_with_policy_module(module, function, &atoms, policy, arguments.boot)
+        }
         None => program.execute(module, function, &atoms),
     };
     match result {

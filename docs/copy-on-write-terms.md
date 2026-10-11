@@ -86,7 +86,7 @@ The owner selected option A (round 1). The work adds an API layer first and chan
 4. Drop keeps the work stack and uses `Arc::into_inner` for each `Arc` node. See [Drop rule](#drop-rule).
 5. A match context is `Arc<MatchState>`. Its bytes are a shared binary (no copy in `MatchContext::new`). Its position and its `position_known` flag are in one `AtomicU64`: 63 bits for the bit position and 1 bit for the flag. Only the owner process uses it, so `Relaxed` order is sufficient, and it needs no `RefCell` and no `Mutex`.
 6. `PartialEq` has an `Arc::ptr_eq` fast path. A compile-time assertion checks `Term: Send + Sync`.
-7. A map and its HAMT nodes are in `Arc`. An update copies only the path (O(log N)), as `erl_map.c:2477` does. A flatmap of at most 32 pairs is copied whole, as `erts_maps_put` does. Shared subtrees make the steps of `maps:merge/2` the same as on ERTS (`erl_map.c:1608-1612`). This is a reduction change, so #453 measures it against the pinned ERTS.
+7. A map and its HAMT nodes are in `Arc`. An update copies only the path (O(log N)), as `erl_map.c:2477` does. A flatmap of at most 32 pairs is copied whole, as `erts_maps_put` does. Shared subtrees make the steps of `maps:merge/2` the same as on ERTS (`erl_map.c:1608-1612`). This is a reduction change, so #453 measures it against the pinned ERTS. Result of #453: the steps are the same as on ERTS for a map and an update of it. They are different for the results of the other map BIFs and for a map from a send, ETS, or `persistent_term` (row "Map merge reductions" of `docs/erts-differences.md`).
 
 Expected result (analysis): the tuple, list, nested, and send benchmarks go from milliseconds to microseconds. `size_of::<Term>()` goes from 96 bytes to at most 24 bytes after #460. See [Limits and open points](#limits-and-open-points) for the binary layout that this target needs.
 
@@ -268,7 +268,7 @@ Each task is one PR. The native blocked-by links of the issues are the source of
 9. [#459](https://github.com/fahchen/pbeam/issues/459) Make terms Send and Sync and share them between processes. Blocked by #454, #455, #456, and #458. #10 is blocked by this task.
 10. [#460](https://github.com/fahchen/pbeam/issues/460) Clone an atom without a heap allocation. Blocked by #454.
 
-Task #458 removed the backlog entry "Build a list cons and a map update without a copy". Its map part is the scope of #453.
+The backlog entry "Build a list cons and a map update without a copy" went away in two parts: #453 removed the map part, and #458 removed the rest.
 
 ## Owner decisions
 
@@ -279,7 +279,7 @@ These are the decisions of 2026-10-11 in Suikou review 01a1282e.
 - A send shares a term (R3; design question 3). #10 changes its wording to "process mutable state is exclusive; terms are shared and immutable".
 - The epic is `[m5-e4]` in the milestone `[m5] Interactive host I/O` (R4; design question 8). The design draft named it `[m5-e3]`; the code loading epic took that number. The first implementation task is the borrowed read (#452).
 - The mutable state of a match context is an `AtomicU64` with `Relaxed` order, not a `Mutex` (design question 4).
-- #453 measures the steps of `maps:merge/2` against the pinned ERTS (design question 5).
+- #453 measures the steps of `maps:merge/2` against the pinned ERTS (design question 5). The row "Map merge reductions" of `docs/erts-differences.md` records the result.
 - PBeam does not track the literal origin of a term now (design question 6).
 - No benchmark is committed. Each PR records the measurement commands and results (design question 7).
 

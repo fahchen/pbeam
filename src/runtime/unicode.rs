@@ -527,17 +527,8 @@ const COMPOSITION_CANDIDATES: [u32; 61] = [
 
 /// Convert the native bytes of a name to a list of characters, as
 /// `erts_convert_native_to_filename` does (`erl_unicode.c:2164-2220`). In
-/// Latin-1, and in UTF-8 when the bytes are not valid UTF-8
-/// (`erts_analyze_utf8` in `erl_unicode.c:1180-1270`), each byte is one
-/// character. Valid UTF-8 gives its code points. The UTF-8 check of ERTS
-/// rejects overlong forms, surrogates, code points above `0x10FFFF`, and an
-/// incomplete sequence, as [`std::str::from_utf8`] does.
-///
-/// In `Utf8Mac`, ERTS composes the code points (`do_utf8_to_list_normalize`
-/// in `erl_unicode.c:1569-1630`). PBeam has no composition table, so valid
-/// UTF-8 with a code point of [`COMPOSITION_CANDIDATES`] returns a runtime
-/// error (see "OS environment" in `docs/erts-differences.md`). ERTS changes
-/// no other value.
+/// Latin-1, and in UTF-8 when the bytes are not valid UTF-8, each byte is
+/// one character. Else the result is the one of [`name_from_native`].
 ///
 /// # Examples
 ///
@@ -549,18 +540,57 @@ const COMPOSITION_CANDIDATES: [u32; 61] = [
 /// assert_eq!(filename_from_native(b"a\xff", FilenameEncoding::Utf8)?, list(&[97, 255]));
 /// assert!(filename_from_native(b"ae\xcc\x81", FilenameEncoding::Utf8Mac).is_err());
 /// ```
+///
+/// # Errors
+///
+/// The runtime error of [`name_from_native`].
 pub(super) fn filename_from_native(
     bytes: &[u8],
     encoding: FilenameEncoding,
 ) -> Result<Term, BeamError> {
+    Ok(name_from_native(bytes, encoding)?.unwrap_or_else(|| byte_list(bytes)))
+}
+
+/// Convert the native bytes of a file name to a list of characters, as
+/// `prim_file_internal_native2name_1` does (`erl_unicode.c:2735-2824`), or
+/// return `None` when the bytes are not valid UTF-8 in a UTF-8 encoding. In
+/// Latin-1, each byte is one character. In UTF-8, valid UTF-8 gives its
+/// code points. The UTF-8 check of ERTS (`erts_analyze_utf8` in
+/// `erl_unicode.c:1180-1270`) rejects overlong forms, surrogates, code
+/// points above `0x10FFFF`, and an incomplete sequence, as
+/// [`std::str::from_utf8`] does.
+///
+/// In `Utf8Mac`, ERTS composes the code points (`do_utf8_to_list_normalize`
+/// in `erl_unicode.c:1569-1630`). PBeam has no composition table, so valid
+/// UTF-8 with a code point of [`COMPOSITION_CANDIDATES`] returns a runtime
+/// error (see "OS environment" in `docs/erts-differences.md`). ERTS changes
+/// no other value.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = |characters: &[i64]| Term::list_from(characters.iter().copied().map(Term::Integer));
+/// assert_eq!(name_from_native(b"a\xc3\xa9", FilenameEncoding::Utf8)?, Some(list(&[97, 233])));
+/// assert_eq!(name_from_native(b"a\xff", FilenameEncoding::Latin1)?, Some(list(&[97, 255])));
+/// assert_eq!(name_from_native(b"a\xff", FilenameEncoding::Utf8)?, None);
+/// assert!(name_from_native(b"ae\xcc\x81", FilenameEncoding::Utf8Mac).is_err());
+/// ```
+///
+/// # Errors
+///
+/// In `Utf8Mac`, valid UTF-8 with a composition candidate.
+pub(super) fn name_from_native(
+    bytes: &[u8],
+    encoding: FilenameEncoding,
+) -> Result<Option<Term>, BeamError> {
     let text = match encoding {
-        FilenameEncoding::Latin1 => None,
-        FilenameEncoding::Utf8 | FilenameEncoding::Utf8Mac => std::str::from_utf8(bytes).ok(),
-    };
-    let Some(text) = text else {
-        return Ok(Term::list_from(
-            bytes.iter().map(|&byte| Term::Integer(byte.into())),
-        ));
+        FilenameEncoding::Latin1 => return Ok(Some(byte_list(bytes))),
+        FilenameEncoding::Utf8 | FilenameEncoding::Utf8Mac => {
+            let Ok(text) = std::str::from_utf8(bytes) else {
+                return Ok(None);
+            };
+            text
+        }
     };
     if encoding == FilenameEncoding::Utf8Mac
         && let Some(candidate) = text.chars().find(|&character| {
@@ -574,9 +604,14 @@ pub(super) fn filename_from_native(
             u32::from(candidate)
         )));
     }
-    Ok(Term::list_from(text.chars().map(|character| {
+    Ok(Some(Term::list_from(text.chars().map(|character| {
         Term::Integer(u32::from(character).into())
-    })))
+    }))))
+}
+
+/// Return the list of the bytes of `bytes`, each as one character.
+fn byte_list(bytes: &[u8]) -> Term {
+    Term::list_from(bytes.iter().map(|&byte| Term::Integer(byte.into())))
 }
 
 #[cfg(test)]

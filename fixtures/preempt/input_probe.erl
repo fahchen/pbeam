@@ -35,13 +35,18 @@ inputs() ->
       [{small, 2}, {max_small, 2}, {min_big, 2}, {max_negative_big, 2}, {max_64, 2},
        {min_64, 2}, {max_64, 10}, {max_64, 36}]},
      %% Two maps of the keys First..Last: two flatmaps, an empty flatmap
-     %% and a hashmap, a flatmap and a hashmap, and two hashmaps. The
-     %% last pair traps.
+     %% and a hashmap, a flatmap and a hashmap, and two hashmaps. The pair
+     %% of 40000 keys traps. Then {same, Range}, a map and the map itself;
+     %% {self_merge, Range}, the result of maps:merge/2 of a map and the map
+     %% itself, which is the map, and the map; and {put, Range, Keys}, a map
+     %% and the map with each key put, which holds the nodes of the map off
+     %% the paths of the keys.
      {maps_merge,
       [{{1, 10}, {5, 20}}, {{1, 0}, {1, 40}}, {{1, 10}, {100, 140}}, {{100, 140}, {1, 10}},
        {{1, 40}, {41, 80}}, {{1, 40}, {1, 40}}, {{1, 100}, {50, 150}},
-       {{1, 1000}, {500, 1500}}, {{1, 10000}, {5000, 15000}},
-       {{1, 40000}, {20000, 60000}}]},
+       {{1, 1000}, {500, 1500}}, {{1, 10000}, {5000, 15000}}, {{1, 40000}, {20000, 60000}},
+       {same, {1, 1000}}, {self_merge, {1, 1000}}, {put, {1, 1000}, [500]}, {put, {1, 1000}, [2000]},
+       {put, {1, 1000}, [1, 2, 3, 4, 5, 6, 7, 8]}]},
      %% {Size, Path, Acc} for a map of the keys 1..Size, and
      %% {ordered, Size, Keys} for an ordered iterator path of the keys
      %% 1..Keys.
@@ -119,6 +124,10 @@ keys(First, Last) -> [Key || {Key, _} <- pairs(First, Last)].
 
 map({First, Last}) -> maps:from_list(pairs(First, Last)).
 
+%% The map with each key put to x, one key at a time.
+put_keys(Map, []) -> Map;
+put_keys(Map, [Key | Keys]) -> put_keys(Map#{Key => x}, Keys).
+
 %% The integers of integer_to_list/1 and integer_to_binary/1,2. A bignum
 %% literal is not a PBeam literal, so the arithmetic builds each bignum.
 integer(small) -> id(12345);
@@ -134,6 +143,15 @@ integer(min_64) -> id(-576460752303423488) * 16.
 arg(integer_to_list, Name) -> integer(Name);
 arg(integer_to_binary, Name) -> integer(Name);
 arg(integer_to_binary_2, {Name, Base}) -> {integer(Name), Base};
+arg(maps_merge, {same, Range}) ->
+    Map = map(Range),
+    {Map, Map};
+arg(maps_merge, {self_merge, Range}) ->
+    Map = map(Range),
+    {maps:merge(Map, Map), Map};
+arg(maps_merge, {put, Range, Keys}) ->
+    Map = map(Range),
+    {Map, put_keys(Map, Keys)};
 arg(maps_merge, {First, Second}) -> {map(First), map(Second)};
 arg(map_next, {ordered, Size, Keys}) -> {keys(1, Keys), map({1, Size}), iterator};
 arg(map_next, {Size, Path, Acc}) -> {Path, map({1, Size}), Acc};

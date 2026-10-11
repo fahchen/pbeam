@@ -243,7 +243,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 27] = [
+const AMBIENT: [&str; 28] = [
     "erlang:cancel_timer/2",
     "erlang:demonitor/1",
     "erlang:demonitor/2",
@@ -269,6 +269,7 @@ const AMBIENT: [&str; 27] = [
     "file:native_name_encoding/0",
     "os:system_time/1",
     "prim_file:internal_name2native/1",
+    "prim_file:internal_native2name/1",
     "prim_file:read_info_nif/2",
     "re:compile/2",
 ];
@@ -276,7 +277,14 @@ const AMBIENT: [&str; 27] = [
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `later`: it has no check until its named task adds one.
 /// `effect_probe:ambient/0` also calls each entry once.
-const LATER: [&str; 2] = ["erlang:finish_loading/1", "erlang:module_loaded/1"];
+const LATER: [&str; 6] = [
+    "erlang:finish_loading/1",
+    "erlang:module_loaded/1",
+    "prim_file:get_cwd_nif/0",
+    "prim_file:list_dir_nif/1",
+    "prim_file:read_file_nif/1",
+    "prim_file:read_link_nif/1",
+];
 
 /// Return the entry and the cell of the column "Capability" of each row of
 /// the sections "BIFs" and "Native bindings" of the effect inventory.
@@ -329,7 +337,8 @@ fn inventory_marked(value: &str) -> BTreeSet<&'static str> {
 /// Load the probe, the stand-in `prim_tty`, the pinned `erlang.beam`, which
 /// has `erlang:open_port/2`, `erlang:port_command/2`, `erlang:port_close/1`,
 /// and `erlang:port_info/1`, and the pinned `prim_file.beam`, whose
-/// `read_file_info/1` calls `prim_file:read_info_nif/2`.
+/// `read_file_info/1`, `read_file/1`, `list_dir/1`, `read_link/1`, and
+/// `get_cwd/0` call the `prim_file` native bindings.
 fn program() -> BeamProgram {
     let erlang = pinned_beam("erlang");
     let prim_file = pinned_beam("prim_file");
@@ -387,7 +396,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
                     nonode@nohost,nonode@nohost,true,true,{error,badfile},ok,false,\
                     effect_probe_ambient_atom,ok,effect_probe_ambient,true,[{key,value}],value,\
-                    true,true,reference,atom,2,ok]";
+                    true,true,reference,atom,2,ok,1,error,ok,error,ok]";
     assert_eq!(text(&run(&program, "ambient", &Grants(vec![]))), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }

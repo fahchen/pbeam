@@ -68,7 +68,7 @@ fn program() -> BeamProgram {
 /// ```
 fn pbeam(function: &str, policy: &str) -> Result<String, String> {
     program()
-        .execute_with_policy_module("policy_probe", function, &[], policy)
+        .execute_with_policy_module("policy_probe", function, &[], policy, false)
         .map(|result| text(&result))
         .map_err(|error| error.to_string())
 }
@@ -209,7 +209,10 @@ fn stops_the_run_when_initial_denies_the_root_process() {
     let cases = [
         ("bad_initial", "initial/1 returned [#{kind=>process}]"),
         ("atom_initial", "initial/1 returned all"),
-        ("raise_initial", "initial/1 exited with {policy_bug,[]}"),
+        (
+            "raise_initial",
+            "initial/1 exited with {policy_bug,[{erl_policy,initial,1,[]}]}",
+        ),
         ("loop_initial", "initial/1 used more than 100000 reductions"),
         ("exit_initial", "the policy process exited with killed"),
     ];

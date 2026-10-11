@@ -62,7 +62,14 @@ enum Issuer<'a> {
     /// A Rust policy of the host.
     Host(&'a dyn Policy),
     /// A policy module in BEAM code, which the policy process runs.
-    Module(&'a str),
+    Module {
+        /// The name of the policy module.
+        policy: &'a str,
+        /// True in boot mode: the root process starts with the boot
+        /// authority and enters the runtime with
+        /// `pbeam_cap:enter_runtime/2`.
+        boot: bool,
+    },
 }
 
 /// Why a process stopped running on the scheduler.
@@ -292,10 +299,25 @@ impl BeamProgram {
     /// `error:capability_denied`. The policy code runs with all
     /// capabilities.
     ///
+    /// With `boot`, the run is in boot mode (row "Boot authority" of
+    /// `docs/erts-differences.md`). The root process starts at
+    /// once with the boot authority: each of its checks passes without
+    /// copies, and each process that it spawns without `{capabilities,
+    /// Map}` is a boot process too. A call of
+    /// `pbeam_cap:enter_runtime(Module, Function)` in the root process
+    /// calls `policy:initial(Requester)` with `#{pid => <0.0.0>, parent =>
+    /// none, initial_call => {Module, Function, 0}}`, and the root process
+    /// replaces its boot authority with the capabilities of the value, one
+    /// way. A process that is not a boot process gets
+    /// `error:capability_denied` for a message, a link, an exit signal, a
+    /// group leader change, an inspection, or `erlang:unregister/1` that
+    /// targets a boot process. A monitor of a boot process and a message to
+    /// an alias of a boot process are permitted.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let result = program.execute_with_policy_module("policy_probe", "main", &[], "erl_policy")?;
+    /// let result = program.execute_with_policy_module("policy_probe", "main", &[], "erl_policy", false)?;
     /// ```
     ///
     /// # Errors
@@ -308,15 +330,21 @@ impl BeamProgram {
     /// policy process, the run gives the error `the policy denied the root
     /// process: <cause>`, and the root process does not start. When the
     /// call waits and no process can run, the run gives the error `the
-    /// policy process waits in initial/1`.
+    /// policy process waits in initial/1`. In boot mode, the denial stops
+    /// the run when the call of `pbeam_cap:enter_runtime/2` ends, and a
+    /// call that waits gives the error of a root process that waits. A
+    /// boot process that is not the root process gives a runtime error
+    /// for `pbeam_cap:enter_runtime/2`.
     pub fn execute_with_policy_module(
         &self,
         module: &str,
         function: &str,
         arguments: &[Term],
         policy: &str,
+        boot: bool,
     ) -> Result<Term, BeamError> {
-        self.execute_issued(module, function, arguments, Issuer::Module(policy))
+        let issuer = Issuer::Module { policy, boot };
+        self.execute_issued(module, function, arguments, issuer)
     }
 
     /// Run an exported function as the root process with the initial
@@ -338,7 +366,7 @@ impl BeamProgram {
         let initial_mode = InitialMode::read();
         let mut scheduler = match issuer {
             Issuer::Unchecked => Scheduler::without_checks(self.atoms.clone()),
-            Issuer::Host(_) | Issuer::Module(_) => Scheduler::new(self.atoms.clone()),
+            Issuer::Host(_) | Issuer::Module { .. } => Scheduler::new(self.atoms.clone()),
         };
         scheduler.code = CodeTable::new(self.modules.clone());
         let run = self.run_root(&mut scheduler, module, function, arguments, issuer);
@@ -365,9 +393,11 @@ impl BeamProgram {
     /// revokes the initial capabilities of each kind that
     /// `Policy::revocations` gives before each scheduling step. With a
     /// policy module, the launcher makes the policy process first and the
-    /// root process when `initial/1` returns. Before each scheduling step,
-    /// it starts the `grant/3` call of the next request when the policy
-    /// process waits (see `Scheduler::next_policy_request`).
+    /// root process when `initial/1` returns. In boot mode, it makes both at
+    /// once, the root process with the boot authority, and sends the value
+    /// of `initial/1` to the root process (see `Scheduler::enter_runtime`).
+    /// Before each scheduling step, it starts the call of the next request
+    /// when the policy process waits (see `Scheduler::next_policy_request`).
     ///
     /// # Examples
     ///
@@ -404,12 +434,19 @@ impl BeamProgram {
                 scheduler.start(frame, arguments.to_vec(), policy.initial())?;
                 None
             }
-            Issuer::Module(policy) => {
+            Issuer::Module { policy, boot } => {
                 scheduler.code.entry_label(policy, "grant", 3)?;
                 let initial = scheduler.code.entry_label(policy, "initial", 1)?;
                 let initial = scheduler.code.frame(policy, initial, 1)?;
-                scheduler.start_policy(initial, (module, function, arguments.len()))?;
-                Some(frame)
+                if boot {
+                    scheduler.start_policy(initial, None)?;
+                    scheduler.start_boot(frame, arguments.to_vec());
+                    None
+                } else {
+                    let root = (module, function, arguments.len());
+                    scheduler.start_policy(initial, Some(root))?;
+                    Some(frame)
+                }
             }
         };
         while !scheduler.root_exited() {
@@ -417,8 +454,10 @@ impl BeamProgram {
                 let capabilities = initial.map_err(|cause| {
                     error(format!("the policy denied the root process: {cause}"))
                 })?;
-                let frame = root.take().expect("initial/1 returns once");
-                scheduler.start(frame, arguments.to_vec(), capabilities)?;
+                match root.take() {
+                    Some(frame) => scheduler.start(frame, arguments.to_vec(), capabilities)?,
+                    None => scheduler.enter_runtime(capabilities),
+                }
             }
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
@@ -426,9 +465,10 @@ impl BeamProgram {
             match issuer {
                 Issuer::Unchecked => {}
                 Issuer::Host(policy) => scheduler.revoke_issued(&policy.revocations()),
-                Issuer::Module(policy) => {
-                    if let Some(arguments) = scheduler.next_policy_request() {
-                        let frame = scheduler.code.mfa_frame(policy, "grant", 3)?;
+                Issuer::Module { policy, .. } => {
+                    if let Some((function, arguments)) = scheduler.next_policy_request() {
+                        let arity = arguments.len() as u32;
+                        let frame = scheduler.code.mfa_frame(policy, function, arity)?;
                         scheduler.begin_policy_call(frame, arguments);
                     }
                 }
@@ -1914,8 +1954,11 @@ impl BeamProgram {
             Target::Local(lambda) => lambda,
             Target::External {
                 module, function, ..
-            } if tail && (module.name(), function.name(), arity) == ("erlang", "error", 2) => {
-                return self.tail_call_error_2(scheduler);
+            } if tail
+                && (module.name(), function.name()) == ("erlang", "error")
+                && matches!(arity, 1 | 2) =>
+            {
+                return self.tail_call_error(scheduler, arity);
             }
             Target::External {
                 module, function, ..
@@ -1932,7 +1975,8 @@ impl BeamProgram {
         Ok(None)
     }
 
-    /// Run a tail call of the fun `fun erlang:error/2`. ERTS
+    /// Run a tail call of the fun `fun erlang:error/1` or
+    /// `fun erlang:error/2`, with the arity `arity`. ERTS
     /// `i_call_fun_last` removes the frame before it calls the fun
     /// (`emit_i_call_fun2_last` in `jit/arm/instr_fun.cpp:425-455`). Only an
     /// apply puts the calling function back for an error BIF
@@ -1948,15 +1992,19 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // `tail(F) -> F(r, [a]).` as the start of a process.
-    /// let outcome = program.tail_call_error_2(&mut scheduler)?;
+    /// let outcome = program.tail_call_error(&mut scheduler, 2)?;
     /// // The process exits with {r, [{Module, tail, 1, []}]}.
     /// assert!(matches!(outcome, Some(Outcome::Exit { .. })));
     /// ```
-    fn tail_call_error_2(&self, scheduler: &mut Scheduler) -> Result<Option<Outcome>, BeamError> {
+    fn tail_call_error(
+        &self,
+        scheduler: &mut Scheduler,
+        arity: u32,
+    ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         process.frames.pop();
         if !process.frames.is_empty() {
-            return self.call_mfa(scheduler, "erlang", "error", 2, false);
+            return self.call_mfa(scheduler, "erlang", "error", arity, false);
         }
         let reason = read(process, &Operand::X(0))?;
         let (module, function, arity) = process.initial_call.clone();
@@ -2025,12 +2073,11 @@ impl BeamProgram {
                 Ok(Some(Outcome::Yield))
             }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
-            BifResult::ErrorWithStacktrace { reason, stacktrace } => Ok(raise_with_stacktrace(
-                process,
-                ExceptionClass::Error,
+            BifResult::RaiseWithStacktrace {
+                class,
                 reason,
                 stacktrace,
-            )),
+            } => Ok(raise_with_stacktrace(process, class, reason, stacktrace)),
             BifResult::Trap {
                 module,
                 function,
