@@ -67,6 +67,28 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** <https://github.com/fahchen/pbeam/pull/467#issuecomment-6104252355>
 
+## 20261011: Verify failed operations preserve their prepared state
+
+**Problem:** The documentation said that `finish_loading/1` always removed prepared entries, but pinned ERTS preserves them when validation fails, modules are duplicated, or code is not purged.
+
+**Root Cause:** The documentation treated the operation as an unconditional consume instead of checking the state transition for each failure result.
+
+**Fix:** State that a prepared entry is removed only when the code is installed.
+
+**Guardrail:** For each operation that consumes prepared state, compare success and failure sequences with pinned ERTS and document which results preserve the state.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/468#issuecomment-6104264100>
+
+## 20261011: Trace logger destinations separately from caller routing
+
+**Problem:** The documentation said that loader error reports went to the caller's group leader, but pinned ERTS sends them to the system logger and stores the group leader only in the `gl` metadata.
+
+**Root Cause:** The documentation inferred the message destination from a related metadata field instead of tracing the actual dispatch path.
+
+**Fix:** State the system logger as the destination and the group leader as metadata.
+
+**Guardrail:** When documenting runtime-generated messages, verify the destination and each metadata field independently against pinned ERTS behavior.
+
 ## 20261011: Stop a timed step at its deadline before reading queued input
 
 **Problem:** A step of the Terra reference harness read queued port data after its deadline and could still pass, and continuous output could keep a step running past its bound.
