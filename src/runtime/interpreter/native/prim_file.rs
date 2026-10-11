@@ -133,7 +133,7 @@ const MAX_FILETIME: i64 = 253_402_300_799;
 /// let result = read_info_nif(&mut scheduler, &Term::Binary(b"/bin/sh".to_vec()), &Term::Integer(1))?;
 /// // {error, einval}
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(fields)) if fields.len() == 2));
-/// assert!(matches!(read_info_nif(&mut scheduler, &Term::Binary(vec![0]), &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// assert!(matches!(read_info_nif(&mut scheduler, &Term::Binary(vec![0]), &Term::nil())?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -213,7 +213,7 @@ fn list_dir_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamErr
         return error_tuple(atoms, "einval");
     };
     let names = file::list_dir(path)
-        .map(|names| Term::List(names.into_iter().rev().map(Term::Binary).collect()));
+        .map(|names| Term::list_from(names.into_iter().rev().map(Term::Binary)));
     ok_tuple(atoms, names)
 }
 

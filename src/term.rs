@@ -1,6 +1,7 @@
 mod atom;
 mod fun;
 mod hash;
+mod list;
 mod map;
 mod match_context;
 mod order;
@@ -157,40 +158,6 @@ impl Term {
                 Some(*value)
             }
             _ => None,
-        }
-    }
-
-    /// Build a list of `elements` followed by `tail`, in the one form of
-    /// each list: a proper list tail gives a proper list, an improper list
-    /// tail gives an improper list with its tail, and no elements give the
-    /// tail itself. Each other tail gives an improper list.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let one = || vec![Term::Integer(1)];
-    /// let x = Term::static_atom("x");
-    /// assert_eq!(Term::list_with_tail(one(), Term::List(vec![Term::Integer(2)])), Term::List(vec![Term::Integer(1), Term::Integer(2)]));
-    /// assert_eq!(Term::list_with_tail(one(), x.clone()), Term::ImproperList(one(), Box::new(x.clone())));
-    /// assert_eq!(Term::list_with_tail(vec![], x.clone()), x);
-    /// ```
-    pub(crate) fn list_with_tail(mut elements: Vec<Term>, mut tail: Term) -> Term {
-        if elements.is_empty() {
-            return tail;
-        }
-        match &mut tail {
-            Term::List(rest) => {
-                elements.append(rest);
-                Term::List(elements)
-            }
-            Term::ImproperList(rest, end) => {
-                elements.append(rest);
-                Term::ImproperList(
-                    elements,
-                    std::mem::replace(end, Box::new(Term::List(vec![]))),
-                )
-            }
-            _ => Term::ImproperList(elements, Box::new(tail)),
         }
     }
 

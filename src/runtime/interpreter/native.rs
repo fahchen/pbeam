@@ -273,13 +273,10 @@ pub(super) fn load_nif_error(
     kind: &str,
     text: &str,
 ) -> Result<BifResult, BeamError> {
-    let text = text
-        .bytes()
-        .map(|byte| Term::Integer(byte.into()))
-        .collect();
+    let text = text.bytes().map(|byte| Term::Integer(byte.into()));
     Ok(BifResult::Value(Term::Tuple(vec![
         Term::static_atom("error"),
-        Term::Tuple(vec![Term::Atom(atoms.put(kind)?), Term::List(text)]),
+        Term::Tuple(vec![Term::Atom(atoms.put(kind)?), Term::list_from(text)]),
     ])))
 }
 

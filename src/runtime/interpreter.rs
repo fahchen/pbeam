@@ -62,7 +62,14 @@ enum Issuer<'a> {
     /// A Rust policy of the host.
     Host(&'a dyn Policy),
     /// A policy module in BEAM code, which the policy process runs.
-    Module(&'a str),
+    Module {
+        /// The name of the policy module.
+        policy: &'a str,
+        /// True in boot mode: the root process starts with the boot
+        /// authority and enters the runtime with
+        /// `pbeam_cap:enter_runtime/2`.
+        boot: bool,
+    },
 }
 
 /// Why a process stopped running on the scheduler.
@@ -292,10 +299,25 @@ impl BeamProgram {
     /// `error:capability_denied`. The policy code runs with all
     /// capabilities.
     ///
+    /// With `boot`, the run is in boot mode (row "Boot authority" of
+    /// `docs/erts-differences.md`). The root process starts at
+    /// once with the boot authority: each of its checks passes without
+    /// copies, and each process that it spawns without `{capabilities,
+    /// Map}` is a boot process too. A call of
+    /// `pbeam_cap:enter_runtime(Module, Function)` in the root process
+    /// calls `policy:initial(Requester)` with `#{pid => <0.0.0>, parent =>
+    /// none, initial_call => {Module, Function, 0}}`, and the root process
+    /// replaces its boot authority with the capabilities of the value, one
+    /// way. A process that is not a boot process gets
+    /// `error:capability_denied` for a message, a link, an exit signal, a
+    /// group leader change, an inspection, or `erlang:unregister/1` that
+    /// targets a boot process. A monitor of a boot process and a message to
+    /// an alias of a boot process are permitted.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let result = program.execute_with_policy_module("policy_probe", "main", &[], "erl_policy")?;
+    /// let result = program.execute_with_policy_module("policy_probe", "main", &[], "erl_policy", false)?;
     /// ```
     ///
     /// # Errors
@@ -308,15 +330,21 @@ impl BeamProgram {
     /// policy process, the run gives the error `the policy denied the root
     /// process: <cause>`, and the root process does not start. When the
     /// call waits and no process can run, the run gives the error `the
-    /// policy process waits in initial/1`.
+    /// policy process waits in initial/1`. In boot mode, the denial stops
+    /// the run when the call of `pbeam_cap:enter_runtime/2` ends, and a
+    /// call that waits gives the error of a root process that waits. A
+    /// boot process that is not the root process gives a runtime error
+    /// for `pbeam_cap:enter_runtime/2`.
     pub fn execute_with_policy_module(
         &self,
         module: &str,
         function: &str,
         arguments: &[Term],
         policy: &str,
+        boot: bool,
     ) -> Result<Term, BeamError> {
-        self.execute_issued(module, function, arguments, Issuer::Module(policy))
+        let issuer = Issuer::Module { policy, boot };
+        self.execute_issued(module, function, arguments, issuer)
     }
 
     /// Run an exported function as the root process with the initial
@@ -338,7 +366,7 @@ impl BeamProgram {
         let initial_mode = InitialMode::read();
         let mut scheduler = match issuer {
             Issuer::Unchecked => Scheduler::without_checks(self.atoms.clone()),
-            Issuer::Host(_) | Issuer::Module(_) => Scheduler::new(self.atoms.clone()),
+            Issuer::Host(_) | Issuer::Module { .. } => Scheduler::new(self.atoms.clone()),
         };
         scheduler.code = CodeTable::new(self.modules.clone());
         let run = self.run_root(&mut scheduler, module, function, arguments, issuer);
@@ -365,9 +393,11 @@ impl BeamProgram {
     /// revokes the initial capabilities of each kind that
     /// `Policy::revocations` gives before each scheduling step. With a
     /// policy module, the launcher makes the policy process first and the
-    /// root process when `initial/1` returns. Before each scheduling step,
-    /// it starts the `grant/3` call of the next request when the policy
-    /// process waits (see `Scheduler::next_policy_request`).
+    /// root process when `initial/1` returns. In boot mode, it makes both at
+    /// once, the root process with the boot authority, and sends the value
+    /// of `initial/1` to the root process (see `Scheduler::enter_runtime`).
+    /// Before each scheduling step, it starts the call of the next request
+    /// when the policy process waits (see `Scheduler::next_policy_request`).
     ///
     /// # Examples
     ///
@@ -404,12 +434,19 @@ impl BeamProgram {
                 scheduler.start(frame, arguments.to_vec(), policy.initial())?;
                 None
             }
-            Issuer::Module(policy) => {
+            Issuer::Module { policy, boot } => {
                 scheduler.code.entry_label(policy, "grant", 3)?;
                 let initial = scheduler.code.entry_label(policy, "initial", 1)?;
                 let initial = scheduler.code.frame(policy, initial, 1)?;
-                scheduler.start_policy(initial, (module, function, arguments.len()))?;
-                Some(frame)
+                if boot {
+                    scheduler.start_policy(initial, None)?;
+                    scheduler.start_boot(frame, arguments.to_vec());
+                    None
+                } else {
+                    let root = (module, function, arguments.len());
+                    scheduler.start_policy(initial, Some(root))?;
+                    Some(frame)
+                }
             }
         };
         while !scheduler.root_exited() {
@@ -417,8 +454,10 @@ impl BeamProgram {
                 let capabilities = initial.map_err(|cause| {
                     error(format!("the policy denied the root process: {cause}"))
                 })?;
-                let frame = root.take().expect("initial/1 returns once");
-                scheduler.start(frame, arguments.to_vec(), capabilities)?;
+                match root.take() {
+                    Some(frame) => scheduler.start(frame, arguments.to_vec(), capabilities)?,
+                    None => scheduler.enter_runtime(capabilities),
+                }
             }
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
@@ -426,9 +465,10 @@ impl BeamProgram {
             match issuer {
                 Issuer::Unchecked => {}
                 Issuer::Host(policy) => scheduler.revoke_issued(&policy.revocations()),
-                Issuer::Module(policy) => {
-                    if let Some(arguments) = scheduler.next_policy_request() {
-                        let frame = scheduler.code.mfa_frame(policy, "grant", 3)?;
+                Issuer::Module { policy, .. } => {
+                    if let Some((function, arguments)) = scheduler.next_policy_request() {
+                        let arity = arguments.len() as u32;
+                        let frame = scheduler.code.mfa_frame(policy, function, arity)?;
                         scheduler.begin_policy_call(frame, arguments);
                     }
                 }
@@ -847,14 +887,9 @@ impl BeamProgram {
                         // improper list passes (emu `instrs.tab:879-891`; JIT
                         // `emit_is_list` and `emit_is_nonempty_list` in
                         // `jit/arm/instr_common.cpp:1118-1364`).
-                        TestKind::List => matches!(value, Term::List(_) | Term::ImproperList(..)),
-                        TestKind::Nil => matches!(value, Term::List(values) if values.is_empty()),
-                        TestKind::NonEmptyList => {
-                            matches!(
-                                value,
-                                Term::List(values) if !values.is_empty()
-                            ) || matches!(value, Term::ImproperList(..))
-                        }
+                        TestKind::List => value.is_list(),
+                        TestKind::Nil => value.is_nil(),
+                        TestKind::NonEmptyList => value.is_nonempty_list(),
                         TestKind::Binary => matches!(value, Term::Binary(_)),
                         // `is_bitstr` loads as `is_bitstring`, which passes for
                         // each boxed term with a bitstring header (emu
@@ -1307,18 +1342,13 @@ impl BeamProgram {
                     destination,
                 } => {
                     // `get_hd` reads only the head, so only the head is copied.
-                    let head = match read_ref(process, source)? {
-                        Term::List(values) | Term::ImproperList(values, _)
-                            if let Some(head) = values.first() =>
-                        {
-                            head.clone()
-                        }
-                        list => {
-                            return Err(error(format!(
-                                "BEAM list source {list:?} is not a nonempty list"
-                            )));
-                        }
+                    let list = read_ref(process, source)?;
+                    let Some(head) = list.list_head() else {
+                        return Err(error(format!(
+                            "BEAM list source {list:?} is not a nonempty list"
+                        )));
                     };
+                    let head = head.clone();
                     write(process, destination, head)?;
                 }
                 Instruction::GetTail {
@@ -1751,25 +1781,20 @@ impl BeamProgram {
             .code
             .export_frame(module, "$handle_undefined_function", 2)?;
         let process = scheduler.current_process_mut();
-        let arguments = Term::List(call_arguments(&process.registers, arity)?);
+        let arguments = Term::list_from(call_arguments(&process.registers, arity)?);
         if let Some(handler) = handler {
             enter_frame(process, handler, tail);
             write(process, &Operand::X(0), function_atom)?;
             write(process, &Operand::X(1), arguments)?;
             return Ok(None);
         }
-        let frame = Term::Tuple(vec![
-            module_atom,
-            function_atom,
-            arguments,
-            Term::List(Vec::new()),
-        ]);
+        let frame = Term::Tuple(vec![module_atom, function_atom, arguments, Term::nil()]);
         let undef = Term::static_atom("undef");
         Ok(raise_with_stacktrace(
             process,
             ExceptionClass::Error,
             undef,
-            Term::List(vec![frame]),
+            Term::list_from(vec![frame]),
         ))
     }
 
@@ -1806,7 +1831,7 @@ impl BeamProgram {
                 let badarg = Term::static_atom("badarg");
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
-            let Some((arguments, proper)) = take_list_elements(list) else {
+            let Some((arguments, proper)) = list.take_list_elements() else {
                 let badarg = Term::static_atom("badarg");
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
@@ -1859,7 +1884,7 @@ impl BeamProgram {
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         let mut list = read(process, &Operand::X(1))?;
-        let Some((arguments, proper)) = take_list_elements(&mut list) else {
+        let Some((arguments, proper)) = list.take_list_elements() else {
             let badarg = Term::static_atom("badarg");
             return Ok(raise(process, ExceptionClass::Error, badarg));
         };
@@ -1913,7 +1938,7 @@ impl BeamProgram {
             FunCall::Enter { target, free } => (target, free),
             FunCall::BadArity(fun) => {
                 let arguments = call_arguments(&process.registers, arity)?;
-                let call = Term::Tuple(vec![fun, Term::List(arguments)]);
+                let call = Term::Tuple(vec![fun, Term::list_from(arguments)]);
                 let reason = Term::Tuple(vec![Term::static_atom("badarity"), call]);
                 return Ok(raise(process, ExceptionClass::Error, reason));
             }
@@ -1976,10 +2001,10 @@ impl BeamProgram {
             Term::Atom(scheduler.atoms.put(&module)?),
             Term::Atom(scheduler.atoms.put(&function)?),
             Term::Integer(arity as i64),
-            Term::List(Vec::new()),
+            Term::nil(),
         ]);
         let process = scheduler.current_process_mut();
-        let stacktrace = Term::List(vec![frame]);
+        let stacktrace = Term::list_from(vec![frame]);
         Ok(raise_with_stacktrace(
             process,
             ExceptionClass::Error,
@@ -2144,27 +2169,6 @@ fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
     }
 }
 
-/// Take the elements of a list term for an apply, and tell whether the list
-/// is proper. `[]` gives no elements. Return `None` for a term that is not a
-/// list. The elements of an improper list come before its tail, so a caller
-/// can count them first, as ERTS `apply` does.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let mut list = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x")));
-/// assert_eq!(take_list_elements(&mut list), Some((vec![Term::Integer(1)], false)));
-/// assert_eq!(take_list_elements(&mut Term::List(vec![])), Some((vec![], true)));
-/// assert_eq!(take_list_elements(&mut Term::static_atom("x")), None);
-/// ```
-fn take_list_elements(list: &mut Term) -> Option<(Vec<Term>, bool)> {
-    match list {
-        Term::List(elements) => Some((std::mem::take(elements), true)),
-        Term::ImproperList(elements, _) => Some((std::mem::take(elements), false)),
-        _ => None,
-    }
-}
-
 /// The spawn options that this runtime supports, as the flags of ERTS
 /// `ErlSpawnOpts`, and the PBeam option `{capabilities, Map}`.
 #[derive(Default)]
@@ -2198,11 +2202,11 @@ struct SpawnOptions {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = create_process(&mut scheduler, &module, &function, &Term::List(vec![]), SpawnOptions::default())?;
+/// let result = create_process(&mut scheduler, &module, &function, &Term::nil(), SpawnOptions::default())?;
 /// assert!(matches!(result, BifResult::Value(Term::Pid(_))));
 /// let result = create_process(&mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default())?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
-/// let result = create_process(&mut scheduler, &Term::Integer(1), &function, &Term::List(vec![]), SpawnOptions::default())?;
+/// let result = create_process(&mut scheduler, &Term::Integer(1), &function, &Term::nil(), SpawnOptions::default())?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 fn create_process(
@@ -2212,12 +2216,12 @@ fn create_process(
     arguments: &Term,
     options: SpawnOptions,
 ) -> Result<BifResult, BeamError> {
-    let (Term::Atom(module), Term::Atom(function), Term::List(arguments)) =
-        (module, function, arguments)
+    let (Term::Atom(module), Term::Atom(function), Some(arguments)) =
+        (module, function, arguments.proper_list())
     else {
         return Ok(BifResult::badarg());
     };
-    let arguments = arguments.clone();
+    let arguments = arguments.to_vec();
     let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
     // A function that the loaded module does not export gives an undefined
     // start, which goes to `undefined_function` when the process first
@@ -2436,7 +2440,7 @@ fn map_values<'a>(
 /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
 /// ```
 fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Option<Outcome> {
-    raise_with_stacktrace(process, class, reason, Term::List(Vec::new()))
+    raise_with_stacktrace(process, class, reason, Term::nil())
 }
 
 /// Raise an exception in the process, as ERTS `handle_error` does: continue
@@ -2457,9 +2461,9 @@ fn raise(process: &mut ProcessState, class: ExceptionClass, reason: Term) -> Opt
 /// # Examples
 ///
 /// ```rust,ignore
-/// let frame = Term::Tuple(vec![module, function, Term::List(vec![]), Term::List(vec![])]);
+/// let frame = Term::Tuple(vec![module, function, Term::nil(), Term::nil()]);
 /// let undef = Term::static_atom("undef");
-/// let outcome = raise_with_stacktrace(&mut process, ExceptionClass::Error, undef, Term::List(vec![frame]));
+/// let outcome = raise_with_stacktrace(&mut process, ExceptionClass::Error, undef, Term::list_from(vec![frame]));
 /// // With no catch tag, the exit reason is `{undef, [Frame]}`.
 /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
 /// ```
@@ -2500,7 +2504,7 @@ fn raise_with_stacktrace(
     };
     process.frames.truncate(depth + 1);
     let frame = current_frame(process);
-    frame.stack[slot] = StackSlot::Term(Term::List(Vec::new()));
+    frame.stack[slot] = StackSlot::Term(Term::nil());
     frame.next_instruction = handler;
     process
         .registers
@@ -2529,9 +2533,9 @@ fn raise_with_stacktrace(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let raw = Term::Tuple(vec![Term::static_atom("exit"), Term::List(vec![])]);
-/// assert!(matches!(raw_stacktrace(&raw)?, (ExceptionClass::Exit, Term::List(_))));
-/// assert!(matches!(raw_stacktrace(&Term::List(vec![]))?, (ExceptionClass::Error, _)));
+/// let raw = Term::Tuple(vec![Term::static_atom("exit"), Term::nil()]);
+/// assert!(matches!(raw_stacktrace(&raw)?, (ExceptionClass::Exit, stack) if stack.is_nil()));
+/// assert!(matches!(raw_stacktrace(&Term::nil())?, (ExceptionClass::Error, _)));
 /// ```
 ///
 /// # Errors
@@ -2545,12 +2549,12 @@ fn raw_stacktrace(raw: &Term) -> Result<(ExceptionClass, Term), BeamError> {
     {
         return Ok((class, stack.clone()));
     }
-    match raw {
-        Term::List(stack) if stack.is_empty() => Ok((ExceptionClass::Error, raw.clone())),
-        _ => Err(error(format!(
-            "invariant error: {raw:?} is not a raw stack trace"
-        ))),
+    if raw.is_nil() {
+        return Ok((ExceptionClass::Error, raw.clone()));
     }
+    Err(error(format!(
+        "invariant error: {raw:?} is not a raw stack trace"
+    )))
 }
 
 /// Clear the catch tag in a Y register of the active frame. The register
@@ -2560,10 +2564,10 @@ fn raw_stacktrace(raw: &Term) -> Result<(ExceptionClass, Term), BeamError> {
 ///
 /// ```rust,ignore
 /// try_end(&mut process, 0)?;
-/// assert_eq!(read(&process, &Operand::Y(0))?, Term::List(Vec::new()));
+/// assert_eq!(read(&process, &Operand::Y(0))?, Term::nil());
 /// ```
 fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
-    write(process, &Operand::Y(register), Term::List(Vec::new()))
+    write(process, &Operand::Y(register), Term::nil())
 }
 
 /// Return the head and the tail of a nonempty proper or improper list,
@@ -2576,30 +2580,15 @@ fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
 ///
 /// ```rust,ignore
 /// let x = || Term::static_atom("x");
-/// let list = Term::List(vec![Term::Integer(1), Term::Integer(2)]);
-/// assert_eq!(nonempty_list(list)?, (Term::Integer(1), Term::List(vec![Term::Integer(2)])));
-/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(x()));
+/// let list = Term::list_from(vec![Term::Integer(1), Term::Integer(2)]);
+/// assert_eq!(nonempty_list(list)?, (Term::Integer(1), Term::list_from(vec![Term::Integer(2)])));
+/// let improper = Term::list_with_tail(vec![Term::Integer(1)], x());
 /// assert_eq!(nonempty_list(improper)?, (Term::Integer(1), x()));
-/// assert!(nonempty_list(Term::List(vec![])).is_err());
+/// assert!(nonempty_list(Term::nil()).is_err());
 /// ```
-fn nonempty_list(mut list: Term) -> Result<(Term, Term), BeamError> {
-    let (mut values, tail) = match &mut list {
-        Term::List(values) if !values.is_empty() => {
-            (std::mem::take(values), Term::List(Vec::new()))
-        }
-        Term::ImproperList(values, tail) => (
-            std::mem::take(values),
-            std::mem::replace(&mut **tail, Term::List(Vec::new())),
-        ),
-        _ => {
-            return Err(error(format!(
-                "BEAM list source {list:?} is not a nonempty list"
-            )));
-        }
-    };
-    // ponytail: the tail is a copy of the rest, O(n) with the `Vec` list model of #71.
-    let head = values.remove(0);
-    Ok((head, Term::list_with_tail(values, tail)))
+fn nonempty_list(list: Term) -> Result<(Term, Term), BeamError> {
+    list.split_cons()
+        .map_err(|list| error(format!("BEAM list source {list:?} is not a nonempty list")))
 }
 
 /// Continue execution after a label in the active module.
@@ -3569,13 +3558,13 @@ fn raise_binary_failure(
         module_atom,
         function_atom,
         Term::Integer(arity.into()),
-        Term::List(vec![location]),
+        Term::list_from(vec![location]),
     ]);
     Ok(raise_with_stacktrace(
         scheduler.current_process_mut(),
         ExceptionClass::Error,
         Term::static_atom(failure.reason),
-        Term::List(vec![frame]),
+        Term::list_from(vec![frame]),
     ))
 }
 

@@ -50,13 +50,13 @@ const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = new(&mut context, &test_atom("ac_tab"), &Term::List(vec![test_atom("named_table")]))?;
+/// let result = new(&mut context, &test_atom("ac_tab"), &Term::list_from(vec![test_atom("named_table")]))?;
 /// assert!(matches!(result, BifResult::Value(name) if name == test_atom("ac_tab")));
-/// let result = new(&mut context, &test_atom("ac_tab"), &Term::List(vec![]))?;
+/// let result = new(&mut context, &test_atom("ac_tab"), &Term::nil())?;
 /// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
-/// let result = new(&mut context, &test_atom("ac_tab"), &Term::List(vec![test_atom("bogus")]))?;
+/// let result = new(&mut context, &test_atom("ac_tab"), &Term::list_from(vec![test_atom("bogus")]))?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
-/// assert!(new(&mut context, &test_atom("ac_tab"), &Term::List(vec![test_atom("bag")])).is_err());
+/// assert!(new(&mut context, &test_atom("ac_tab"), &Term::list_from(vec![test_atom("bag")])).is_err());
 /// ```
 ///
 /// # Errors
@@ -68,7 +68,7 @@ pub(super) fn new(
     name: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    let (Term::Atom(name), Term::List(options)) = (name, options) else {
+    let (Term::Atom(name), Some(options)) = (name, options.proper_list()) else {
         return Ok(BifResult::badarg());
     };
     let mut table_type = "set";
@@ -162,7 +162,7 @@ pub(super) fn new(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let table = new(&mut context, &test_atom("t"), &Term::List(vec![]))?;
+/// let table = new(&mut context, &test_atom("t"), &Term::nil())?;
 /// let BifResult::Value(table) = table else { unreachable!() };
 /// let object = Term::Tuple(vec![test_atom("k"), test_atom("v")]);
 /// assert!(matches!(insert(&mut context, &table, &object)?, BifResult::Value(_)));
@@ -179,8 +179,9 @@ pub(super) fn insert(
     table: &Term,
     objects: &Term,
 ) -> Result<BifResult, BeamError> {
-    if matches!(objects, Term::List(list) if list.len() > 1)
-        || matches!(objects, Term::ImproperList(..))
+    if objects
+        .list_cells()
+        .is_some_and(|(list, tail)| list.len() > 1 || tail.is_some())
     {
         let Some((id, found)) = context.scheduler.ets.find(table) else {
             return Ok(BifResult::badarg());
@@ -192,10 +193,9 @@ pub(super) fn insert(
     let Some(table) = context.scheduler.ets.table(table, caller, Operation::Write) else {
         return Ok(BifResult::badarg());
     };
-    let objects = match objects {
-        Term::List(objects) => objects.as_slice(),
-        object => std::slice::from_ref(object),
-    };
+    let objects = objects
+        .proper_list()
+        .unwrap_or(std::slice::from_ref(objects));
     let keypos = table.keypos();
     let Some(tuples) = valid_objects(objects, keypos) else {
         return Ok(BifResult::badarg());
@@ -248,7 +248,7 @@ pub(super) fn insert(
 ///
 /// ```rust,ignore
 /// process.fcalls = 10;
-/// let objects = Term::List(vec![Term::Tuple(vec![test_atom("k")]); 8]);
+/// let objects = Term::list_from(vec![Term::Tuple(vec![test_atom("k")]); 8]);
 /// // 8 units of the check and 16 units of the insert: 3 reductions.
 /// assert!(matches!(insert_list(&mut context, id, &objects, 0, 1)?, BifResult::Value(_)));
 /// assert_eq!(context.scheduler.current_process_mut().fcalls, 7);
@@ -268,7 +268,7 @@ pub(super) fn insert_list(
 ) -> Result<BifResult, BeamError> {
     /// `ITERATIONS_PER_RED` (`erl_db.c:2152`).
     const ITERATIONS_PER_RED: i64 = 8;
-    let (elements, tail) = list_cells(objects).expect("a list insert has a list");
+    let (elements, tail) = objects.list_cells().expect("a list insert has a list");
     let count = elements.len();
     let table = Term::Reference(id);
     let insert_phase = 2 * count < done && done <= 4 * count;
@@ -508,7 +508,7 @@ pub(super) fn lookup_element(
 ///
 /// ```rust,ignore
 /// let result = lookup(&mut context, &table, &test_atom("k"));
-/// assert!(matches!(result, BifResult::Value(Term::List(objects)) if objects.len() == 1));
+/// assert!(matches!(result, BifResult::Value(objects) if objects.proper_list().is_some_and(|objects| objects.len() == 1)));
 /// assert!(matches!(lookup(&mut context, &test_atom("missing"), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
 pub(super) fn lookup(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
@@ -517,7 +517,7 @@ pub(super) fn lookup(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
         return BifResult::badarg();
     };
     let object = table.object(key).map(|object| Term::Tuple(object.to_vec()));
-    Value(Term::List(object.into_iter().collect()))
+    Value(Term::list_from(object))
 }
 
 /// Run `ets:member(Table, Key)` on a `set` table, as ERTS `ets_member_2`
@@ -554,7 +554,7 @@ pub(super) fn member(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
 /// ```rust,ignore
 /// let result = delete(&mut context, &table, &test_atom("k"));
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
-/// assert!(matches!(delete(&mut context, &Term::List(vec![]), &test_atom("k")), BifResult::Raise { .. }));
+/// assert!(matches!(delete(&mut context, &Term::nil(), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
 pub(super) fn delete(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
     let caller = context.scheduler.current_process_mut().id;

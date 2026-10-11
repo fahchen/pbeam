@@ -733,7 +733,7 @@ fn tigetflag_nif(scheduler: &mut Scheduler, code: &Term) -> Result<BifResult, Be
 /// # Examples
 ///
 /// ```rust,ignore
-/// let code = Term::List(vec![Term::Binary(b"c".to_vec()), Term::Integer(b'o'.into()), Term::Integer(0)]);
+/// let code = Term::list_from(vec![Term::Binary(b"c".to_vec()), Term::Integer(b'o'.into()), Term::Integer(0)]);
 /// assert_eq!(termcap_code(&code), Some(c"co".to_owned()));
 /// assert_eq!(termcap_code(&Term::Binary(b"co\0x".to_vec())), Some(c"co".to_owned()));
 /// assert_eq!(termcap_code(&Term::static_atom("co")), None);
@@ -863,11 +863,11 @@ const MAXIOV: usize = libc::UIO_MAXIOV as usize;
 /// # Examples
 ///
 /// ```rust,ignore
-/// let iovec = Term::List(vec![Term::Binary(b"Hello, ".to_vec()), Term::Binary(b"world!\n".to_vec())]);
+/// let iovec = Term::list_from(vec![Term::Binary(b"Hello, ".to_vec()), Term::Binary(b"world!\n".to_vec())]);
 /// // Writes "Hello, world!\n" to the output fd of the TTY.
 /// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec)?, BifResult::DirtyWrite(_)));
 /// // [<<"h">> | <<"i">>] writes nothing, then raises badarg.
-/// let improper = Term::ImproperList(vec![Term::Binary(b"h".to_vec())], Box::new(Term::Binary(b"i".to_vec())));
+/// let improper = Term::list_with_tail(vec![Term::Binary(b"h".to_vec())], Term::Binary(b"i".to_vec()));
 /// assert!(matches!(write_nif(&mut scheduler, &tty, &improper)?, BifResult::DirtyWrite(_)));
 /// ```
 ///
@@ -890,11 +890,10 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
         return Ok(denied);
     }
     write.fd = ofd;
-    let (elements, improper) = match iovec {
-        Term::List(elements) => (elements, false),
-        Term::ImproperList(elements, _) => (elements, true),
-        _ => return Ok(BifResult::DirtyWrite(write)),
+    let Some((elements, tail)) = iovec.list_cells() else {
+        return Ok(BifResult::DirtyWrite(write));
     };
+    let improper = tail.is_some();
     let mut groups = elements.chunks(MAXIOV).peekable();
     while let Some(group) = groups.next() {
         // The group of the last element reads the tail after it.

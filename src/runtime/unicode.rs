@@ -56,12 +56,12 @@ pub(super) enum Utf8State {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let list = Term::List(vec![Term::Integer(97), Term::Binary(vec![195, 169])]);
+/// let list = Term::list_from(vec![Term::Integer(97), Term::Binary(vec![195, 169])]);
 /// assert_eq!(utf8_need(&list, false), Some(2));
 /// assert_eq!(utf8_need(&list, true), Some(5));
 /// assert_eq!(utf8_need(&Term::static_atom("foo"), false), None);
 /// // [1 bsl 60 | x]: the walk stops at the big integer.
-/// assert_eq!(utf8_need(&Term::ImproperList(vec![Term::Integer(1 << 60)], Box::new(Term::static_atom("x"))), false), Some(0));
+/// assert_eq!(utf8_need(&Term::list_with_tail(vec![Term::Integer(1 << 60)], Term::static_atom("x")), false), Some(0));
 /// ```
 pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
     let binary_cost = |bytes: &[u8]| {
@@ -118,9 +118,9 @@ pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
 /// ```rust,ignore
 /// let mut output = Utf8Output::default();
 /// let mut left = 2;
-/// let list = Term::List(vec![Term::Integer(97), Term::Integer(98), Term::Integer(99)]);
+/// let list = Term::list_from(vec![Term::Integer(97), Term::Integer(98), Term::Integer(99)]);
 /// let (rest, error) = build_utf8(&list, &mut left, false, &mut output);
-/// assert_eq!((rest, error, left), (Term::List(vec![Term::Integer(99)]), false, 0));
+/// assert_eq!((rest, error, left), (Term::list_from(vec![Term::Integer(99)]), false, 0));
 /// assert_eq!(output.bytes, b"ab");
 /// ```
 pub(super) fn build_utf8(
@@ -129,7 +129,7 @@ pub(super) fn build_utf8(
     latin1: bool,
     output: &mut Utf8Output,
 ) -> (Term, bool) {
-    let nil = || Term::List(Vec::new());
+    let nil = || Term::nil();
     if *left <= 0 || *chardata == nil() {
         return (chardata.clone(), false);
     }
@@ -217,16 +217,13 @@ pub(super) fn build_utf8(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let list = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Binary(vec![])));
+/// let list = Term::list_with_tail(vec![Term::Integer(1)], Term::Binary(vec![]));
 /// assert!(matches!(list_parts(&list), Some(([Term::Integer(1)], 0, Some(Term::Binary(_))))));
 /// assert!(list_parts(&Term::Integer(1)).is_none());
 /// ```
 fn list_parts(list: &Term) -> Option<(&[Term], usize, Option<&Term>)> {
-    match list {
-        Term::List(elements) => Some((elements, 0, None)),
-        Term::ImproperList(elements, tail) => Some((elements, 0, Some(tail))),
-        _ => None,
-    }
+    let (elements, tail) = list.list_cells()?;
+    Some((elements, 0, tail))
 }
 
 /// Convert a binary with a budget of `left` loop steps, as the binary part
@@ -258,7 +255,7 @@ fn build_binary(
             *left += 1;
         }
     }
-    let mut rest = Term::List(Vec::new());
+    let mut rest = Term::nil();
     if size as i64 > *left {
         rest = Term::Binary(bytes[*left as usize..].to_vec());
         size = *left as usize;
@@ -392,14 +389,13 @@ pub(super) fn analyze_utf8(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(code_points("aé".as_bytes()), Term::List(vec![Term::Integer(97), Term::Integer(233)]));
+/// assert_eq!(code_points("aé".as_bytes()), Term::list_from(vec![Term::Integer(97), Term::Integer(233)]));
 /// ```
 pub(super) fn code_points(bytes: &[u8]) -> Term {
     let text = std::str::from_utf8(bytes).expect("the walks write valid UTF-8");
-    Term::List(
+    Term::list_from(
         text.chars()
-            .map(|character| Term::Integer(u32::from(character).into()))
-            .collect(),
+            .map(|character| Term::Integer(u32::from(character).into())),
     )
 }
 
@@ -477,11 +473,11 @@ fn utf8_sequence(bytes: &[u8]) -> Utf8Sequence {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let name = Term::List(vec![Term::List(vec![Term::Integer(97)]), Term::List(vec![]), Term::Integer(256)]);
+/// let name = Term::list_from(vec![Term::list_from(vec![Term::Integer(97)]), Term::nil(), Term::Integer(256)]);
 /// assert!(is_native_filename(&name, FilenameEncoding::Utf8));
 /// assert!(!is_native_filename(&name, FilenameEncoding::Latin1));
 /// assert!(is_native_filename(&Term::Binary(vec![97, 0]), FilenameEncoding::Latin1));
-/// assert!(!is_native_filename(&Term::List(vec![Term::Integer(0)]), FilenameEncoding::Utf8));
+/// assert!(!is_native_filename(&Term::list_from(vec![Term::Integer(0)]), FilenameEncoding::Utf8));
 /// ```
 pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> bool {
     matches!(name, Term::Binary(_)) || native_filename(name, encoding).is_some()
@@ -505,16 +501,14 @@ pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> boo
 /// # Examples
 ///
 /// ```rust,ignore
-/// let name = Term::List(vec![Term::List(vec![Term::Integer(97)]), Term::List(vec![]), Term::Integer(233)]);
+/// let name = Term::list_from(vec![Term::list_from(vec![Term::Integer(97)]), Term::nil(), Term::Integer(233)]);
 /// assert_eq!(native_filename(&name, FilenameEncoding::Latin1), Some(vec![97, 233]));
 /// assert_eq!(native_filename(&name, FilenameEncoding::Utf8), Some(vec![97, 195, 169]));
-/// assert_eq!(native_filename(&Term::List(vec![Term::Integer(256)]), FilenameEncoding::Latin1), None);
+/// assert_eq!(native_filename(&Term::list_from(vec![Term::Integer(256)]), FilenameEncoding::Latin1), None);
 /// assert_eq!(native_filename(&Term::Binary(vec![97]), FilenameEncoding::Utf8), None);
 /// ```
 pub(super) fn native_filename(name: &Term, encoding: FilenameEncoding) -> Option<Vec<u8>> {
-    let Term::List(elements) = name else {
-        return None;
-    };
+    let elements = name.proper_list()?;
     let mut bytes = Vec::new();
     let mut pending = vec![elements.iter()];
     while let Some(elements) = pending.last_mut() {
@@ -522,7 +516,7 @@ pub(super) fn native_filename(name: &Term, encoding: FilenameEncoding) -> Option
             pending.pop();
             continue;
         };
-        if let Term::List(nested) = element {
+        if let Some(nested) = element.proper_list() {
             pending.push(nested.iter());
             continue;
         }
@@ -561,7 +555,7 @@ const COMPOSITION_CANDIDATES: [u32; 61] = [
 ///
 /// ```rust,ignore
 /// // ERTS on macOS: a\xc3\xa9 gives [97,233], and a\xff gives [97,255].
-/// let list = |characters: &[i64]| Term::List(characters.iter().copied().map(Term::Integer).collect());
+/// let list = |characters: &[i64]| Term::list_from(characters.iter().copied().map(Term::Integer));
 /// assert_eq!(filename_from_native(b"a\xc3\xa9", FilenameEncoding::Utf8Mac)?, list(&[97, 233]));
 /// assert_eq!(filename_from_native(b"a\xc3\xa9", FilenameEncoding::Latin1)?, list(&[97, 195, 169]));
 /// assert_eq!(filename_from_native(b"a\xff", FilenameEncoding::Utf8)?, list(&[97, 255]));
@@ -596,7 +590,7 @@ pub(super) fn filename_from_native(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let list = |characters: &[i64]| Term::List(characters.iter().copied().map(Term::Integer).collect());
+/// let list = |characters: &[i64]| Term::list_from(characters.iter().copied().map(Term::Integer));
 /// assert_eq!(name_from_native(b"a\xc3\xa9", FilenameEncoding::Utf8)?, Some(list(&[97, 233])));
 /// assert_eq!(name_from_native(b"a\xff", FilenameEncoding::Latin1)?, Some(list(&[97, 255])));
 /// assert_eq!(name_from_native(b"a\xff", FilenameEncoding::Utf8)?, None);
@@ -631,21 +625,14 @@ pub(super) fn name_from_native(
             u32::from(candidate)
         )));
     }
-    Ok(Some(Term::List(
-        text.chars()
-            .map(|character| Term::Integer(u32::from(character).into()))
-            .collect(),
-    )))
+    Ok(Some(Term::list_from(text.chars().map(|character| {
+        Term::Integer(u32::from(character).into())
+    }))))
 }
 
 /// Return the list of the bytes of `bytes`, each as one character.
 fn byte_list(bytes: &[u8]) -> Term {
-    Term::List(
-        bytes
-            .iter()
-            .map(|&byte| Term::Integer(byte.into()))
-            .collect(),
-    )
+    Term::list_from(bytes.iter().map(|&byte| Term::Integer(byte.into())))
 }
 
 #[cfg(test)]

@@ -196,13 +196,42 @@ pub(super) fn denial(
     BifResult::capability_denied(&mut scheduler.atoms).map(Some)
 }
 
+/// Return the `error:capability_denied` exception when the current process
+/// is not a boot process and `target` is a boot process (see
+/// `Scheduler::enters_boot`): the runtime to boot gate. Else return
+/// `None`. An entry calls this after its capability check and before its
+/// first effect, so a denied call has no effect. Only a run in boot mode
+/// has boot processes (row "Boot authority" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The current process entered the runtime; `user` is a boot process.
+/// assert!(boot_denial(&mut scheduler, user)?.is_some());
+/// ```
+///
+/// # Errors
+///
+/// The errors of `AtomTable::put` for a full atom table.
+pub(super) fn boot_denial(
+    scheduler: &mut Scheduler,
+    target: ProcessId,
+) -> Result<Option<BifResult>, BeamError> {
+    if scheduler.enters_boot(target) {
+        return BifResult::capability_denied(&mut scheduler.atoms).map(Some);
+    }
+    Ok(None)
+}
+
 /// Return the `error:capability_denied` exception when `target` is not the
 /// current process and no capability of the current process permits
-/// `operation` of the `process` kind (see [`denial`]). Else return `None`.
+/// `operation` of the `process` kind (see [`denial`]), or when the runtime
+/// to boot gate denies the call (see [`boot_denial`]). Else return `None`.
 /// The process inspection BIFs check `inspect` and the group leader BIFs
 /// check `group_leader` with this function after their argument checks and
 /// before the process lookup, so a denied call does not tell whether a
-/// process has the pid. A call for the caller has no check.
+/// process has the pid, except whether a live process is a boot process. A
+/// call for the caller has no check.
 ///
 /// # Examples
 ///
@@ -222,7 +251,10 @@ pub(super) fn other_process_denial(
     if target == scheduler.current_process().id {
         return Ok(None);
     }
-    denial(scheduler, CapabilityKind::Process, operation, None)
+    match denial(scheduler, CapabilityKind::Process, operation, None)? {
+        Some(denied) => Ok(Some(denied)),
+        None => boot_denial(scheduler, target),
+    }
 }
 
 /// Return the runtime error of a BIF that ERTS runs with a port argument
@@ -242,37 +274,18 @@ fn unsupported_port(bif: &str) -> BeamError {
     ))
 }
 
-/// Split a list into its elements and the tail of an improper list. `[]`
-/// gives no elements and no tail. A term that is not a list gives `None`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let improper = Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::static_atom("x")));
-/// assert!(matches!(list_cells(&improper), Some(([Term::Integer(1)], Some(Term::Atom(_))))));
-/// assert!(matches!(list_cells(&Term::List(vec![])), Some(([], None))));
-/// assert!(list_cells(&Term::Integer(1)).is_none());
-/// ```
-fn list_cells(list: &Term) -> Option<(&[Term], Option<&Term>)> {
-    match list {
-        Term::List(elements) => Some((elements, None)),
-        Term::ImproperList(elements, tail) => Some((elements, Some(tail))),
-        _ => None,
-    }
-}
-
 /// Return the list of `elements` and then `tail`, or `[]` when `tail` is
-/// `None`: the rest of a list from [`list_cells`], which a BIF trap gives to
+/// `None`: the rest of a list from `Term::list_cells`, which a BIF trap gives to
 /// the export.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(list_rest(&[Term::Integer(2)], None), Term::List(vec![Term::Integer(2)]));
+/// assert_eq!(list_rest(&[Term::Integer(2)], None), Term::list_from(vec![Term::Integer(2)]));
 /// ```
 fn list_rest(elements: &[Term], tail: Option<&Term>) -> Term {
     // ponytail: the rest is a copy, O(n) with the `Vec` list model of #71.
-    let tail = tail.cloned().unwrap_or_else(|| Term::List(Vec::new()));
+    let tail = tail.cloned().unwrap_or_else(Term::nil);
     Term::list_with_tail(elements.to_vec(), tail)
 }
 
@@ -353,7 +366,7 @@ macro_rules! bifs {
         ///
         /// ```rust,ignore
         /// let result = dispatch(&mut context, "maps", "keys", &[Term::Map(Map::new())])?;
-        /// assert!(matches!(result, BifResult::Value(Term::List(_))));
+        /// assert!(matches!(result, BifResult::Value(keys) if keys.is_nil()));
         /// ```
         pub(super) fn dispatch(
             context: &mut BifContext<'_>,
@@ -411,6 +424,9 @@ impl BeamProgram {
             }
             ("pbeam_cap", "policy_revoke", [holder, kind]) => {
                 return pbeam_cap::policy_revoke(scheduler, holder, kind);
+            }
+            ("pbeam_cap", "enter_runtime", [module, function]) => {
+                return pbeam_cap::enter_runtime(scheduler, module, function);
             }
             _ => {}
         }
@@ -479,7 +495,7 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let rest = Term::List(vec![Term::Integer(1)]);
+    /// let rest = Term::list_from(vec![Term::Integer(1)]);
     /// let result = program.bif_trap(&mut scheduler, "erlang", "length", vec![rest, Term::Integer(64000)])?;
     /// assert!(matches!(result, BifResult::Value(Term::Integer(64001))));
     /// ```
@@ -509,14 +525,9 @@ impl BeamProgram {
         if let (
             "erts_internal",
             "list_to_bitstring_continue",
-            [
-                _,
-                term,
-                Term::List(stack),
-                Term::Integer(size),
-                Term::Binary(bytes),
-            ],
+            [_, term, stack, Term::Integer(size), Term::Binary(bytes)],
         ) = (module, function, arguments.as_mut_slice())
+            && let Some(stack) = stack.proper_list()
         {
             let process = scheduler.current_process_mut();
             let reds_left = process.bif_reductions_left()? as i64;
@@ -596,48 +607,44 @@ impl BeamProgram {
             ("persistent_term", "put_common_trap", [Term::Integer(copied)]) => {
                 persistent_term::put_trap(process, *copied as usize)
             }
-            (
-                "erts_internal",
-                "iolist_size_continue",
-                [term, Term::List(stack), Term::Integer(size)],
-            ) => iolist::iolist_size_continue(process, term, stack, *size as usize),
-            (
-                "erts_internal",
-                "iolist_to_iovec_continue",
-                [Term::Atom(phase), arg, term, Term::List(stack)],
-            ) if phase.name() == "size" => iolist::iovec_size(process, arg, term, stack),
+            ("erts_internal", "iolist_size_continue", [term, stack, Term::Integer(size)])
+                if let Some(stack) = stack.proper_list() =>
+            {
+                iolist::iolist_size_continue(process, term, stack, *size as usize)
+            }
             (
                 "erts_internal",
                 "iolist_to_iovec_continue",
-                [
-                    _,
-                    term,
-                    Term::List(stack),
-                    Term::List(iovec),
-                    Term::Binary(merged),
-                ],
-            ) => {
+                [Term::Atom(phase), arg, term, stack],
+            ) if phase.name() == "size"
+                && let Some(stack) = stack.proper_list() =>
+            {
+                iolist::iovec_size(process, arg, term, stack)
+            }
+            (
+                "erts_internal",
+                "iolist_to_iovec_continue",
+                [_, term, stack, iovec, Term::Binary(merged)],
+            ) if let Some(stack) = stack.proper_list()
+                && let Some(iovec) = iovec.proper_list() =>
+            {
                 let reds_left = process.bif_reductions_left()? as i64;
                 Ok(iolist::iovec_copy(
                     process,
                     reds_left,
                     term,
                     stack,
-                    iovec.clone(),
+                    iovec.to_vec(),
                     merged.clone(),
                 ))
             }
             (
                 "erts_internal",
                 "list_to_bitstring_continue",
-                [
-                    Term::Atom(phase),
-                    arg,
-                    term,
-                    Term::List(stack),
-                    Term::Integer(size),
-                ],
-            ) if phase.name() == "size" => {
+                [Term::Atom(phase), arg, term, stack, Term::Integer(size)],
+            ) if phase.name() == "size"
+                && let Some(stack) = stack.proper_list() =>
+            {
                 let reds_left = process.bif_reductions_left()? as i64;
                 Ok(iolist::l2b_size(
                     process,
@@ -680,7 +687,8 @@ impl BeamProgram {
 
 /// The PBeam BIFs: functions of PBeam modules that ERTS does not have. They
 /// are not `bif.tab` entries, and no BEAM module defines them.
-const PBEAM_BIFS: [(&str, &str, u32); 3] = [
+const PBEAM_BIFS: [(&str, &str, u32); 4] = [
+    ("pbeam_cap", "enter_runtime", 2),
     ("pbeam_cap", "policy_revoke", 2),
     ("pbeam_cap", "request", 2),
     ("pbeam_cap", "revoke", 2),

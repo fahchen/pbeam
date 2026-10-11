@@ -66,7 +66,7 @@ fn program() -> BeamProgram {
 /// ```
 fn pbeam(function: &str, policy: &str) -> Result<String, String> {
     program()
-        .execute_with_policy_module("policy_probe", function, &[], policy)
+        .execute_with_policy_module("policy_probe", function, &[], policy, false)
         .map(|result| text(&result))
         .map_err(|error| error.to_string())
 }
