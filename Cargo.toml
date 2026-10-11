@@ -202,6 +202,10 @@ name = "funs"
 path = "tests/integration/funs.rs"
 
 [[test]]
+name = "garbage_collect"
+path = "tests/integration/garbage_collect.rs"
+
+[[test]]
 name = "getenv"
 path = "tests/integration/getenv.rs"
 
