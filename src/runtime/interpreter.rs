@@ -1320,8 +1320,13 @@ impl BeamProgram {
                         return Err(error("BEAM update_record source is not a tuple"));
                     };
                     // ERTS reads each value before it writes the destination, which can be a value register.
-                    // A tuple that another copy shares is copied first (`Arc::make_mut`),
-                    // as the `set_tuple_element` instruction changes a new tuple in place.
+                    // `read` gives the source a copy that shares the element array, so the source
+                    // holds the array too, and `Arc::make_mut` copies the array before each write.
+                    // Thus the source keeps its tuple, as for the ERTS `copy` hint:
+                    // `i_update_record_copy` copies the whole record (emu `instrs.tab:785-802`;
+                    // JIT `jit/arm/instr_common.cpp:893-998`). The `inplace` hint overwrites the
+                    // record only when the compiler proves that it is a fresh young tuple
+                    // (emu `instrs.tab:804-834`), so both hints give the same result.
                     let fields = std::sync::Arc::make_mut(fields.arc_mut());
                     for (position, value) in updates {
                         let value = read(process, value)?;

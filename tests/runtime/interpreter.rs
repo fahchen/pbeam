@@ -1247,6 +1247,46 @@ fn updates_record_positions_as_pinned_erts() {
     );
 }
 
+/// The source operand keeps its tuple when `update_record` writes another
+/// register. `read` gives the source a copy that shares the element array, so
+/// the source holds the array too, and `Arc::make_mut` copies the array before
+/// the write. ERTS copies the whole record for the `copy` hint
+/// (`i_update_record_copy`, emu `instrs.tab:785-802`; JIT `emit_update_record`,
+/// `jit/arm/instr_common.cpp:893-998`), so the source survives there as well.
+#[test]
+fn keeps_the_source_record_of_update_record_as_pinned_erts() {
+    let record = |values: &[i64]| {
+        let mut elements = vec![test_atom("r")];
+        elements.extend(values.iter().copied().map(Term::Integer));
+        Term::tuple(elements)
+    };
+    let result = make_program(
+        vec![
+            Instruction::Move(Operand::Value(record(&[1, 2, 3])), Operand::X(0)),
+            Instruction::Move(Operand::Value(Term::Integer(9)), Operand::X(1)),
+            Instruction::UpdateRecord {
+                source: Operand::X(0),
+                destination: Operand::X(1),
+                updates: vec![(3, Operand::X(1))],
+            },
+            // Both the source and the result leave the run, so the test reads
+            // each one.
+            Instruction::PutTuple {
+                elements: vec![Operand::X(0), Operand::X(1)],
+                destination: Operand::X(0),
+            },
+            Instruction::Return,
+        ],
+        0,
+    )
+    .execute("fixture", "main", &[])
+    .unwrap();
+    assert_eq!(
+        result,
+        Term::tuple(vec![record(&[1, 2, 3]), record(&[1, 9, 3])])
+    );
+}
+
 /// ERTS 29.1.1 `beam_jit_wait_timeout` (`jit/beam_jit_common.cpp:1208-1240`):
 /// `infinity` waits as `wait` does, so the `DOWN` message of a monitored
 /// child continues the receive at its label. `0` continues at once at
