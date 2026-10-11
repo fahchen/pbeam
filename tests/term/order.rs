@@ -46,8 +46,8 @@ fn orders_terms_of_different_types_by_type() {
         Term::Pid(ProcessId(0)),
         Term::Tuple(vec![]),
         map(vec![]),
-        Term::List(vec![]),
-        Term::List(vec![atom("a")]),
+        Term::nil(),
+        Term::list_from(vec![atom("a")]),
         Term::Binary(vec![]),
     ];
     for (index, left) in sorted.iter().enumerate() {
@@ -79,7 +79,7 @@ fn orders_atoms_by_name_and_not_by_index() {
 
 #[test]
 fn orders_nested_terms_as_pinned_erts() {
-    let list = |names: &[&str]| Term::List(names.iter().map(|name| atom(name)).collect());
+    let list = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
     let tuple = |names: &[&str]| Term::Tuple(names.iter().map(|name| atom(name)).collect());
     let pairs = [
         (tuple(&["b"]), tuple(&["a", "a"]), Less),
@@ -127,7 +127,7 @@ fn orders_nested_terms_as_pinned_erts() {
             "{left:?} and {right:?}"
         );
     }
-    let deep = |levels| (0..levels).fold(Term::List(vec![]), |inner, _| Term::List(vec![inner]));
+    let deep = |levels| (0..levels).fold(Term::nil(), |inner, _| Term::list_from(vec![inner]));
     assert_eq!(deep(1_000_000).compare(&deep(999_999)).unwrap(), Greater);
 }
 
@@ -136,14 +136,14 @@ fn orders_improper_lists_by_elements_then_tails_as_pinned_erts() {
     // ERTS 29.1.1 (`erts_cmp_compound`, `utils.c:1827-1851`): with equal
     // lengths the tails compare, and a proper list has the tail []. The
     // tail of a shorter list compares with a list that is not empty.
-    let list = |elements: &[i64]| Term::List(elements.iter().map(|e| Term::Integer(*e)).collect());
+    let list = |elements: &[i64]| Term::list_from(elements.iter().map(|e| Term::Integer(*e)));
     let improper = |elements: &[i64], tail| {
-        Term::ImproperList(
+        Term::list_with_tail(
             elements
                 .iter()
                 .map(|element| Term::Integer(*element))
                 .collect(),
-            Box::new(tail),
+            tail,
         )
     };
     let tuple = |name| Term::Tuple(vec![atom(name)]);

@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, process::ExitCode};
+use std::{ffi::OsString, fs, os::unix::ffi::OsStrExt, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use pbeam_runtime::{BeamError, BeamProgram, Term, install_start_dispositions};
@@ -31,6 +31,21 @@ struct Cli {
     // and `clap` rejects the flag with `--policy`.
     #[arg(long = "no-capability-checks", conflicts_with = "policy")]
     _no_capability_checks: bool,
+    /// Run in boot mode, only with `--policy`: the root process starts with
+    /// the boot authority, which the policy does not check, and
+    /// `pbeam_cap:enter_runtime(Module, Function)` gives it the
+    /// capabilities of `initial/1` of the policy module, one way.
+    #[arg(long, requires = "policy")]
+    boot: bool,
+    /// A code path directory of the boot, as `erl -pa DIR` gives. Repeat it
+    /// for more directories. With one or more `--pa`, the function gets one
+    /// more argument after the atoms: the boot flag list `[{pa, [Dir]}]`, one
+    /// tuple for each `--pa` in the command line order, with each directory
+    /// as a binary of its bytes, as `init:parse_boot_args/1` gives the flags.
+    /// The `pbeam_boot` module of `examples/hello_world` takes this list as
+    /// the third argument of `start/3`.
+    #[arg(long = "pa", value_name = "DIR")]
+    code_path: Vec<OsString>,
     /// BEAM files to load, after `--`.
     #[arg(value_name = "BEAM_FILE", required = true, num_args = 1.., last = true)]
     beam_files: Vec<PathBuf>,
@@ -44,8 +59,9 @@ struct Cli {
 ///   term text (`print_term`, erl_printf_term.c:352-811). ERTS also exits
 ///   with status 1 when a boot process exit halts the runtime.
 /// - 1: a runtime error, a file that cannot be read, a BEAM file that does
-///   not load, or an argument that is not an atom of the loaded modules. The
-///   binary writes the one stderr line `pbeam: <message>`.
+///   not load, or an argument or a boot flag name that is not an atom of the
+///   loaded modules. The binary writes the one stderr line
+///   `pbeam: <message>`.
 /// - the low 8 bits of the status code of `erlang:halt/2`, as the C `exit`
 ///   of ERTS gives (`bif.c:4346-4362`). The binary writes nothing to
 ///   stderr.
@@ -92,9 +108,11 @@ impl From<String> for Exit {
 }
 
 /// Set the signal dispositions of the ERTS emulator start, read and load
-/// the BEAM files, and run `Module:Function(Atoms...)` as the root process.
+/// the BEAM files, and run `Module:Function(Atoms...)` as the root process,
+/// or `Module:Function(Atoms..., Flags)` with the boot flag list of `--pa`.
 /// With `--policy Policy`, the policy module `Policy` gives the
-/// capabilities (see [`BeamProgram::execute_with_policy_module`]). Without
+/// capabilities (see [`BeamProgram::execute_with_policy_module`]), in boot
+/// mode with `--boot`. Without
 /// it, and with `--no-capability-checks`, the run skips each capability
 /// check (see [`BeamProgram::execute`]).
 ///
@@ -108,7 +126,8 @@ impl From<String> for Exit {
 /// # Errors
 ///
 /// A file that cannot be read, a BEAM file that does not load, an argument
-/// that is not an atom of the loaded modules, and the errors of
+/// or the boot flag name `pa` that is not an atom of the loaded modules, and
+/// the errors of
 /// [`BeamProgram::execute`] and [`BeamProgram::execute_with_policy_module`].
 /// A halt of the run gives [`Exit::Halt`].
 fn run(arguments: Cli) -> Result<(), Exit> {
@@ -123,7 +142,7 @@ fn run(arguments: Cli) -> Result<(), Exit> {
     let module_slices = modules.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let program = BeamProgram::load(&module_slices)
         .map_err(|load_error| format!("cannot load BEAM modules: {load_error}"))?;
-    let atoms = arguments
+    let mut atoms = arguments
         .arguments
         .iter()
         .map(|name| {
@@ -133,9 +152,14 @@ fn run(arguments: Cli) -> Result<(), Exit> {
                 .ok_or_else(|| format!("argument {name} is not an atom of the loaded modules"))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if !arguments.code_path.is_empty() {
+        atoms.push(boot_flags(&program, &arguments.code_path)?);
+    }
     let (module, function) = (&arguments.module, &arguments.function);
     let result = match &arguments.policy {
-        Some(policy) => program.execute_with_policy_module(module, function, &atoms, policy),
+        Some(policy) => {
+            program.execute_with_policy_module(module, function, &atoms, policy, arguments.boot)
+        }
         None => program.execute(module, function, &atoms),
     };
     match result {
@@ -143,4 +167,33 @@ fn run(arguments: Cli) -> Result<(), Exit> {
         Err(BeamError::Halt(status)) => Err(Exit::Halt(status)),
         Err(execution_error) => Err(Exit::Error(execution_error.to_string())),
     }
+}
+
+/// Make the boot flag list of the `--pa` directories: one `{pa, [Dir]}`
+/// tuple for each directory, in the command line order, with the bytes of
+/// the directory as a binary. ERTS gives the same list for `erl -pa D1 -pa
+/// D2`: the emulator gives each boot argument to `init` as a binary of its
+/// bytes (`erl_init.c:373-384`), and `init:parse_boot_args/1` makes one flag
+/// tuple for each `-pa` (`init.erl:1699-1702`, `1724`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let flags = boot_flags(&program, &[OsString::from("d1")])?;
+/// // [{pa, [<<"d1">>]}]
+/// ```
+///
+/// # Errors
+///
+/// The atom `pa` is not an atom of the loaded modules. The pinned `init`
+/// module has it.
+fn boot_flags(program: &BeamProgram, code_path: &[OsString]) -> Result<Term, String> {
+    let pa = program
+        .atom("pa")
+        .ok_or("boot flag pa is not an atom of the loaded modules")?;
+    let flags = code_path.iter().map(|directory| {
+        let value = Term::Binary(directory.as_bytes().to_vec());
+        Term::Tuple(vec![Term::Atom(pa.clone()), Term::list_from(vec![value])])
+    });
+    Ok(Term::list_from(flags))
 }

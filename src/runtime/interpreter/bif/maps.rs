@@ -21,7 +21,7 @@ use crate::term::{Direction, from_list_units};
 ///
 /// ```rust,ignore
 /// let result = keys(&mut process, &Term::Map(map_of_a_to_1), 0)?;
-/// assert!(matches!(result, BifResult::Value(Term::List(keys)) if keys == vec![test_atom("a")]));
+/// assert!(matches!(result, BifResult::Value(keys) if keys == Term::list_from([test_atom("a")])));
 /// assert!(keys(&mut process, &Term::Integer(1), 0).is_err());
 /// ```
 ///
@@ -51,8 +51,8 @@ pub(super) fn keys(
     match run_units(process, PER_REDUCTION, &units, done)? {
         YcfTurn::Done(reductions) => {
             process.bump_reductions(reductions);
-            Ok(Value(Term::List(
-                entries.iter().map(|(key, _)| key.clone()).collect(),
+            Ok(Value(Term::list_from(
+                entries.iter().map(|(key, _)| key.clone()),
             )))
         }
         YcfTurn::Yield(done) => Ok(BifResult::TrapBif {
@@ -186,7 +186,7 @@ pub(super) fn put(key: &Term, value: &Term, map: &Term) -> Result<BifResult, Bea
 ///
 /// ```rust,ignore
 /// let pair = |key: i64, value: &str| Term::Tuple(vec![Term::Integer(key), test_atom(value)]);
-/// let list = Term::List(vec![pair(2, "b"), pair(1, "a"), pair(2, "c")]);
+/// let list = Term::list_from(vec![pair(2, "b"), pair(1, "a"), pair(2, "c")]);
 /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), test_atom("a")), (Term::Integer(2), test_atom("c"))])?);
 /// assert!(matches!(from_list(&mut process, &list, 0)?, BifResult::Value(value) if value == map));
 /// assert!(matches!(from_list(&mut process, &test_atom("foo"), 0)?, BifResult::Raise { .. }));
@@ -206,18 +206,21 @@ pub(super) fn from_list(
     const PER_REDUCTION: usize = 40;
     /// `MAP_SMALL_MAP_LIMIT` in a release build (`erl_map.h:93-97`).
     const SMALL_MAP_LIMIT: usize = 32;
-    let (elements, proper) = match list {
-        Term::List(elements) => (elements.as_slice(), true),
-        Term::ImproperList(elements, _) => (elements.as_slice(), false),
-        _ => return Ok(BifResult::badarg()),
+    let Some((elements, tail)) = list.list_cells() else {
+        return Ok(BifResult::badarg());
     };
+    let elements: Vec<&Term> = elements.collect();
+    let proper = tail.is_none();
     fn pair(element: &Term) -> Option<(&Term, &Term)> {
         match element {
             Term::Tuple(pair) if pair.len() == 2 => Some((&pair[0], &pair[1])),
             _ => None,
         }
     }
-    let pairs = elements.iter().map(pair).collect::<Option<Vec<_>>>();
+    let pairs = elements
+        .iter()
+        .map(|element| pair(element))
+        .collect::<Option<Vec<_>>>();
     let checked = elements
         .iter()
         .position(|element| pair(element).is_none())
@@ -313,8 +316,8 @@ pub(super) fn is_key(key: &Term, map: &Term) -> BifResult {
 /// ```rust,ignore
 /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), test_atom("a"))])?);
 /// let pair = Term::Tuple(vec![Term::Integer(1), test_atom("a")]);
-/// assert!(matches!(map_next(&mut process, &Term::Integer(0), &map, &Term::List(vec![]))?, BifResult::Value(Term::List(pairs)) if pairs == [pair]));
-/// assert!(matches!(map_next(&mut process, &Term::Integer(2), &map, &Term::List(vec![]))?, BifResult::Raise { .. }));
+/// assert!(matches!(map_next(&mut process, &Term::Integer(0), &map, &Term::nil())?, BifResult::Value(pairs) if pairs == Term::list_from([pair])));
+/// assert!(matches!(map_next(&mut process, &Term::Integer(2), &map, &Term::nil())?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -335,18 +338,12 @@ pub(super) fn map_next(
         return Ok(BifResult::badarg());
     };
     let direction = match acc {
-        Term::List(_) | Term::ImproperList(..) => Direction::Backward,
+        _ if acc.is_list() => Direction::Backward,
         _ if *acc == Term::static_atom("iterator") => Direction::Forward,
         _ => return Ok(BifResult::badarg()),
     };
-    match (direction, path) {
-        (Direction::Forward, Term::List(keys)) => {
-            return ordered_next(process, keys, None, entries, map);
-        }
-        (Direction::Forward, Term::ImproperList(keys, tail)) => {
-            return ordered_next(process, keys, Some(tail), entries, map);
-        }
-        _ => {}
+    if direction == Direction::Forward && path.is_list() {
+        return ordered_next(process, path, entries, map);
     }
     let budget = (process.bif_reductions_left()? / PAIR_REDUCTIONS).max(1);
     let Some(chunk) = entries.chunk(path, budget, direction)? else {
@@ -374,8 +371,8 @@ pub(super) fn map_next(
 }
 
 /// Run the ordered iterator of `erts_internal:map_next/3`
-/// (`erl_map.c:3655-3707`) for a list path of `keys` and the `tail` of an
-/// improper list path: take the keys in order, up to `MAX(1, reductions /
+/// (`erl_map.c:3655-3707`) for a list path of keys, proper or improper:
+/// take the keys in order, up to `MAX(1, reductions /
 /// ORDERED_ITER_FACTOR)` keys, where the factor is 32. When the path ends
 /// in the chunk, the call costs 32 for each key. When keys remain, it uses
 /// all reductions. A key that the map does not hold, and a tail that is not
@@ -388,9 +385,10 @@ pub(super) fn map_next(
 /// let Term::Map(entries) = &map else { unreachable!() };
 /// process.fcalls = 40;
 /// let first = Term::Tuple(vec![Term::Integer(1), test_atom("a"), test_atom("none")]);
-/// assert!(matches!(ordered_next(&mut process, &[Term::Integer(1)], None, entries, &map)?, BifResult::Value(value) if value == first));
+/// let path = |key| Term::list_from([Term::Integer(key)]);
+/// assert!(matches!(ordered_next(&mut process, &path(1), entries, &map)?, BifResult::Value(value) if value == first));
 /// assert_eq!(process.fcalls, 8);
-/// assert!(matches!(ordered_next(&mut process, &[Term::Integer(2)], None, entries, &map)?, BifResult::Raise { .. }));
+/// assert!(matches!(ordered_next(&mut process, &path(2), entries, &map)?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -399,31 +397,28 @@ pub(super) fn map_next(
 /// negative budget.
 fn ordered_next(
     process: &mut ProcessState,
-    keys: &[Term],
-    tail: Option<&Term>,
+    path: &Term,
     entries: &Map,
     map: &Term,
 ) -> Result<BifResult, BeamError> {
     /// `ORDERED_ITER_FACTOR` in a release build (`erl_map.c:3657-3661`).
     const ORDERED_ITER_FACTOR: usize = 32;
     let budget = (process.bif_reductions_left()? / ORDERED_ITER_FACTOR).max(1);
-    let (taken, rest) = keys.split_at(keys.len().min(budget));
-    let next = match (rest, tail) {
-        ([], None) => Term::static_atom("none"),
-        ([], Some(_)) => return Ok(BifResult::badarg()),
-        (rest, tail) => {
-            let tail = tail.cloned().unwrap_or(Term::List(Vec::new()));
-            let rest = Term::list_with_tail(rest.to_vec(), tail);
-            Term::list_with_tail(vec![rest], map.clone())
-        }
+    let mut keys = path.list_iter().expect("an ordered map path is a list");
+    let taken: Vec<&Term> = keys.by_ref().take(budget).collect();
+    let rest = keys.rest();
+    let next = match rest {
+        _ if rest.is_nil() => Term::static_atom("none"),
+        _ if rest.is_nonempty_list() => Term::cons(rest.clone(), map.clone()),
+        _ => return Ok(BifResult::badarg()),
     };
     let pairs = taken
         .iter()
-        .map(|key| entries.get(key).map(|value| (key, value)));
+        .map(|&key| entries.get(key).map(|value| (key, value)));
     let Some(pairs) = pairs.collect::<Option<Vec<_>>>() else {
         return Ok(BifResult::badarg());
     };
-    if rest.is_empty() {
+    if !rest.is_nonempty_list() {
         process.bump_reductions((ORDERED_ITER_FACTOR * taken.len()) as i32);
     } else {
         process.bump_all_reductions();
@@ -452,9 +447,10 @@ fn iterator_pairs<'a>(
 
 /// Run `maps:merge/2`: return the first map with each pair of the second
 /// map put into it, so the values of the second map win, as ERTS
-/// `maps_merge_2` does (`erl_map.c:1257-1284`). When the first argument is
-/// not a map, raise `error:{badmap, First}`; else when the second argument
-/// is not a map, raise `error:{badmap, Second}`.
+/// `maps_merge_2` does (`erl_map.c:1257-1284`). Two copies of one map give
+/// the first argument with no cost (`erl_map.c:1258-1262`). When the first
+/// argument is not a map, raise `error:{badmap, First}`; else when the
+/// second argument is not a map, raise `error:{badmap, Second}`.
 ///
 /// Two flatmaps merge with no cost. Each other pair runs the steps of the
 /// ERTS hashmap merge ([`Map::merge_steps`]) through [`merge_trap`].
@@ -480,6 +476,9 @@ pub(super) fn merge(
     second: &Term,
 ) -> Result<BifResult, BeamError> {
     match (first, second) {
+        (Term::Map(first_map), Term::Map(second_map)) if first_map.same_form(second_map) => {
+            Ok(Value(first.clone()))
+        }
         (Term::Map(first), Term::Map(second)) => {
             let pairs = first.iter().chain(second.iter());
             let pairs = pairs.map(|(key, value)| (key.clone(), value.clone()));

@@ -46,9 +46,9 @@ enum Item<'a> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let term = Term::Tuple(vec![Term::static_atom("undef"), Term::List(vec![])]);
+/// let term = Term::Tuple(vec![Term::static_atom("undef"), Term::nil()]);
 /// assert_eq!(print_term(&term), b"{undef,[]}");
-/// let string = Term::List(b"ab\n".iter().map(|&byte| Term::Integer(byte.into())).collect());
+/// let string = Term::list_from(b"ab\n".iter().map(|&byte| Term::Integer(byte.into())));
 /// assert_eq!(print_term(&string), b"\"ab\\n\"");
 /// assert_eq!(print_term(&Term::Binary(vec![1, 2])), b"<<1,2>>");
 /// ```
@@ -66,8 +66,11 @@ pub(crate) fn print_term(term: &Term) -> Vec<u8> {
         match term {
             Term::Atom(atom) => print_atom(atom.name(), &mut text),
             Term::Integer(value) => text.extend_from_slice(value.to_string().as_bytes()),
-            Term::List(elements) if elements.is_empty() => text.extend_from_slice(b"[]"),
-            Term::List(elements) if let Some(bytes) = printable_string(elements) => {
+            Term::Nil => text.extend_from_slice(b"[]"),
+            Term::Cons(_)
+                if let Some(elements) = term.proper_list()
+                    && let Some(bytes) = printable_string(elements) =>
+            {
                 text.push(b'"');
                 for byte in bytes {
                     match byte {
@@ -78,14 +81,15 @@ pub(crate) fn print_term(term: &Term) -> Vec<u8> {
                 }
                 text.push(b'"');
             }
-            Term::List(elements) | Term::ImproperList(elements, _) => {
+            Term::Cons(_) => {
+                let (elements, tail) = term.list_cells().expect("the term is a list");
                 text.push(b'[');
                 items.push(Item::Text("]"));
-                if let Term::ImproperList(_, tail) = term {
+                if let Some(tail) = tail {
                     items.push(Item::Term(tail));
                     items.push(Item::Text("|"));
                 }
-                push_separated(&mut items, elements.iter());
+                push_separated(&mut items, elements.collect::<Vec<_>>().into_iter());
             }
             Term::Tuple(elements) => {
                 text.push(b'{');
@@ -204,9 +208,9 @@ fn push_separated<'a>(
 /// assert_eq!(printable_string(&list(&[128])), None);
 /// assert_eq!(printable_string(&list(&[300])), None);
 /// ```
-fn printable_string(elements: &[Term]) -> Option<Vec<u8>> {
+fn printable_string<'a>(elements: impl IntoIterator<Item = &'a Term>) -> Option<Vec<u8>> {
     elements
-        .iter()
+        .into_iter()
         .map(|element| match element {
             Term::Integer(value) => u8::try_from(*value)
                 .ok()

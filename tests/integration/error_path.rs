@@ -64,7 +64,7 @@ fn raises_the_exceptions_of_the_error_path_instructions_as_pinned_erts() {
     assert_eq!(
         program.execute("error_path_probe", "main", &[]).unwrap(),
         tuple(vec![
-            Term::List(vec![
+            Term::list_from(vec![
                 error(tagged("badmatch")),
                 error(tagged("badmatch")),
                 error(tagged("case_clause")),
@@ -91,30 +91,30 @@ fn raises_the_exceptions_of_the_error_path_instructions_as_pinned_erts() {
             tuple(vec![atom("nocatch"), r()]),
             // The first frame of erlang:error/2 has the arguments, or the
             // arity of the caller for `none` (`utils.c:3448-3455`).
-            Term::List(vec![
-                frame("error_2_tail", Term::List(vec![atom("a")])),
+            Term::list_from(vec![
+                frame("error_2_tail", Term::list_from(vec![atom("a")])),
                 frame("error_2_tail", Term::Integer(1)),
                 frame(
                     "error_2_tail",
-                    Term::ImproperList(vec![atom("a")], Box::new(atom("b"))),
+                    Term::list_with_tail(vec![atom("a")], atom("b")),
                 ),
-                frame("error_2_tail", Term::List(Vec::new())),
-                frame("error_2_body", Term::List(vec![atom("a")])),
+                frame("error_2_tail", Term::nil()),
+                frame("error_2_body", Term::list_from(vec![atom("a")])),
                 // A tail call of a fun removes the frame first
                 // (`instr_fun.cpp:425-455`), and a tail apply keeps it
                 // (`beam_common.c:1345-1431`).
-                frame("error_2_fun_caller", Term::List(vec![atom("b")])),
-                frame("error_2_apply_tail", Term::List(vec![atom("c")])),
+                frame("error_2_fun_caller", Term::list_from(vec![atom("b")])),
+                frame("error_2_apply_tail", Term::list_from(vec![atom("c")])),
             ]),
             // With no caller frame, the first frame is the initial call with
             // its arity (`beam_common.c:1245-1248`).
             tuple(vec![
                 r(),
-                Term::List(vec![tuple(vec![
+                Term::list_from(vec![tuple(vec![
                     atom("error_path_probe"),
                     atom("error_2_fun_tail"),
                     Term::Integer(1),
-                    Term::List(Vec::new()),
+                    Term::nil(),
                 ])]),
             ]),
         ])

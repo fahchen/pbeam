@@ -41,24 +41,20 @@ fn runs_the_bifs_of_io_inspect_of_a_tuple_as_pinned_erts() {
     let program = BeamProgram::load(&[INSPECT_BIF_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
-    let expected = Term::List(vec![
-        Term::List(vec![
-            Term::List(vec![]),
-            Term::List(vec![atom("ok"), Term::Integer(1)]),
-            Term::List(vec![
+    let expected = Term::list_from(vec![
+        Term::list_from(vec![
+            Term::nil(),
+            Term::list_from(vec![atom("ok"), Term::Integer(1)]),
+            Term::list_from(vec![
                 atom("a"),
                 Term::Tuple(vec![atom("b")]),
-                Term::List(vec![atom("c")]),
+                Term::list_from(vec![atom("c")]),
                 Term::Binary(b"d".to_vec()),
             ]),
         ]),
-        Term::List(vec![badarg.clone(); 5]),
-        Term::List(
-            DIGITS
-                .map(|digits| Term::Binary(digits.as_bytes().to_vec()))
-                .into(),
-        ),
-        Term::List(vec![badarg; 9]),
+        Term::list_from(vec![badarg.clone(); 5]),
+        Term::list_from(DIGITS.map(|digits| Term::Binary(digits.as_bytes().to_vec()))),
+        Term::list_from(vec![badarg; 9]),
     ]);
     assert_eq!(
         program.execute("inspect_bif_probe", "main", &[]).unwrap(),
@@ -97,7 +93,9 @@ fn text(term: &Term) -> String {
             let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
             format!("<<{}>>", bytes.join(","))
         }
-        Term::List(elements) => format!("[{}]", join(elements)),
+        _ if let Some(elements) = term.proper_list() => {
+            format!("[{}]", join(&elements.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(elements) => format!("{{{}}}", join(elements)),
         other => panic!("the probe gives no such term: {other:?}"),
     }

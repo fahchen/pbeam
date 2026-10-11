@@ -22,10 +22,7 @@ fn convert(chardata: &Term) -> (Vec<u8>, Term, bool, Vec<u8>) {
 fn valid(chardata: Term) -> Vec<u8> {
     assert!(utf8_need(&chardata, false).is_some(), "{chardata:?}");
     let (bytes, rest, error, leftover) = convert(&chardata);
-    assert_eq!(
-        (rest, error, leftover),
-        (Term::List(Vec::new()), false, Vec::new())
-    );
+    assert_eq!((rest, error, leftover), (Term::nil(), false, Vec::new()));
     bytes
 }
 
@@ -35,16 +32,16 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
     // with the `unicode` encoding on ERTS 29.1.1.
     assert_eq!(valid(binary(b"Hello, world!\n")), b"Hello, world!\n");
     assert_eq!(
-        valid(Term::List(vec![
+        valid(Term::list_from(vec![
             binary(b"Hello, world!"),
             Term::Integer(10)
         ])),
         b"Hello, world!\n"
     );
-    assert_eq!(valid(Term::List(Vec::new())), b"");
+    assert_eq!(valid(Term::nil()), b"");
     assert_eq!(
-        valid(Term::List(vec![
-            Term::List(vec![binary(b""), Term::List(vec![Term::Integer(104)])]),
+        valid(Term::list_from(vec![
+            Term::list_from(vec![binary(b""), Term::list_from(vec![Term::Integer(104)])]),
             Term::Integer(105),
         ])),
         b"hi"
@@ -55,29 +52,32 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
         (128512, &[240, 159, 152, 128]),
         (1114111, &[244, 143, 191, 191]),
     ] {
-        assert_eq!(valid(Term::List(vec![Term::Integer(code_point)])), expected);
+        assert_eq!(
+            valid(Term::list_from(vec![Term::Integer(code_point)])),
+            expected
+        );
     }
     // A UTF-8 sequence can continue in the next binary, also across
     // nested and empty lists and empty binaries.
     assert_eq!(
-        valid(Term::List(vec![
+        valid(Term::list_from(vec![
             binary(&[226]),
-            Term::List(vec![binary(&[130]), Term::List(Vec::new())]),
+            Term::list_from(vec![binary(&[130]), Term::nil()]),
             binary(b""),
-            Term::List(vec![binary(&[172])]),
+            Term::list_from(vec![binary(&[172])]),
         ])),
         [226, 130, 172]
     );
     // A binary tail comes after the elements of its list, and a run of
     // binaries continues across it: ERTS gives <<"ab">> for
     // [97|<<"b">>] and <<"é"/utf8>> for [[<<195>>|<<169>>]].
-    let improper = |elements: Vec<Term>, tail: Term| Term::ImproperList(elements, Box::new(tail));
+    let improper = |elements: Vec<Term>, tail: Term| Term::list_with_tail(elements, tail);
     assert_eq!(
         valid(improper(vec![Term::Integer(97)], binary(b"b"))),
         b"ab"
     );
     assert_eq!(
-        valid(Term::List(vec![improper(
+        valid(Term::list_from(vec![improper(
             vec![binary(&[195])],
             binary(&[169])
         )])),
@@ -85,7 +85,7 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
     );
     assert_eq!(
         code_points("aé€".as_bytes()),
-        Term::List(vec![
+        Term::list_from(vec![
             Term::Integer(97),
             Term::Integer(233),
             Term::Integer(8364)
@@ -95,9 +95,9 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
 
 #[test]
 fn converts_deeply_nested_lists_without_recursion() {
-    let mut chardata = Term::List(vec![Term::Integer(97)]);
+    let mut chardata = Term::list_from(vec![Term::Integer(97)]);
     for _ in 0..100_000 {
-        chardata = Term::List(vec![chardata]);
+        chardata = Term::list_from(vec![chardata]);
     }
     assert_eq!(utf8_need(&chardata, false), Some(1));
     assert_eq!(valid(chardata), b"a");
@@ -107,7 +107,7 @@ fn converts_deeply_nested_lists_without_recursion() {
 fn stops_at_chardata_that_erts_does_not_convert() {
     // ERTS 29.1.1 returns {error, <<>>, [Value]} for these code points.
     for code_point in [-1, 55296, 1114112, 1 << 60] {
-        let chardata = Term::List(vec![Term::Integer(code_point)]);
+        let chardata = Term::list_from(vec![Term::Integer(code_point)]);
         assert_eq!(
             convert(&chardata),
             (Vec::new(), chardata.clone(), true, Vec::new())
@@ -118,8 +118,8 @@ fn stops_at_chardata_that_erts_does_not_convert() {
     // tuple for [1 bsl 60 | x] and [1 bsl 60, foo], not badarg.
     let big = || Term::Integer(1 << 60);
     for chardata in [
-        Term::ImproperList(vec![big()], Box::new(test_atom("x"))),
-        Term::List(vec![big(), test_atom("foo")]),
+        Term::list_with_tail(vec![big()], test_atom("x")),
+        Term::list_from(vec![big(), test_atom("foo")]),
     ] {
         assert_eq!(utf8_need(&chardata, false), Some(0));
         assert_eq!(
@@ -134,24 +134,21 @@ fn stops_at_chardata_that_erts_does_not_convert() {
         convert(&binary(&[255])),
         (Vec::new(), binary(&[255]), true, Vec::new())
     );
-    let overlong = Term::List(vec![binary(&[192, 128])]);
+    let overlong = Term::list_from(vec![binary(&[192, 128])]);
     assert_eq!(
         convert(&overlong),
         (Vec::new(), overlong.clone(), true, Vec::new())
     );
-    let short = Term::List(vec![binary(&[195])]);
-    assert_eq!(
-        convert(&short),
-        (Vec::new(), Term::List(Vec::new()), false, vec![195])
-    );
+    let short = Term::list_from(vec![binary(&[195])]);
+    assert_eq!(convert(&short), (Vec::new(), Term::nil(), false, vec![195]));
     // An integer after the start of a sequence stops the walk: ERTS
     // returns {error, <<>>, [<<195>>, [97]]}.
-    let mixed = Term::List(vec![binary(&[195]), Term::Integer(97)]);
+    let mixed = Term::list_from(vec![binary(&[195]), Term::Integer(97)]);
     assert_eq!(
         convert(&mixed),
         (
             Vec::new(),
-            Term::List(vec![Term::Integer(97)]),
+            Term::list_from(vec![Term::Integer(97)]),
             true,
             vec![195]
         )
@@ -163,17 +160,17 @@ fn stops_the_walk_at_a_term_that_is_not_chardata() {
     // `utf8_need` rejects these terms first, but the walk of
     // `do_build_utf8` also stops at them with an error
     // (`erl_unicode.c:597-600`, `713-716`, `722-733`).
-    let improper = Term::ImproperList(vec![Term::Integer(97)], Box::new(test_atom("x")));
+    let improper = Term::list_with_tail(vec![Term::Integer(97)], test_atom("x"));
     assert_eq!(
         convert(&improper),
         (b"a".to_vec(), test_atom("x"), true, Vec::new())
     );
-    let list = Term::List(vec![Term::Integer(97), test_atom("foo")]);
+    let list = Term::list_from(vec![Term::Integer(97), test_atom("foo")]);
     assert_eq!(
         convert(&list),
         (
             b"a".to_vec(),
-            Term::List(vec![test_atom("foo")]),
+            Term::list_from(vec![test_atom("foo")]),
             true,
             Vec::new()
         )
@@ -188,15 +185,18 @@ fn stops_the_walk_at_a_term_that_is_not_chardata() {
 fn splits_the_walk_where_the_steps_end() {
     // A list that a step limit splits gives the rest of each entered list
     // as a cell before the rest of the enclosing list.
-    let inner = Term::List(vec![Term::Integer(97), Term::Integer(98)]);
-    let chardata = Term::List(vec![inner, Term::Integer(99)]);
+    let inner = Term::list_from(vec![Term::Integer(97), Term::Integer(98)]);
+    let chardata = Term::list_from(vec![inner, Term::Integer(99)]);
     let mut output = Utf8Output::default();
     let mut left = 1;
     let (rest, error) = build_utf8(&chardata, &mut left, false, &mut output);
     assert_eq!(
         (rest, error, output.bytes),
         (
-            Term::List(vec![Term::List(vec![Term::Integer(98)]), Term::Integer(99)]),
+            Term::list_from(vec![
+                Term::list_from(vec![Term::Integer(98)]),
+                Term::Integer(99)
+            ]),
             false,
             b"a".to_vec()
         )
@@ -243,17 +243,20 @@ fn finds_terms_that_are_not_chardata_before_the_conversion() {
     // a list, an element that is not an integer, a binary, or a list,
     // and a tail that is not a binary, also after a code point that is
     // not valid and after invalid UTF-8.
-    let improper = |elements: Vec<Term>, tail: Term| Term::ImproperList(elements, Box::new(tail));
+    let improper = |elements: Vec<Term>, tail: Term| Term::list_with_tail(elements, tail);
     for chardata in [
         Term::Integer(97),
         test_atom("foo"),
-        Term::List(vec![test_atom("foo")]),
-        Term::List(vec![Term::Integer(-1), Term::Tuple(vec![])]),
-        Term::List(vec![binary(&[255]), Term::List(vec![test_atom("foo")])]),
+        Term::list_from(vec![test_atom("foo")]),
+        Term::list_from(vec![Term::Integer(-1), Term::Tuple(vec![])]),
+        Term::list_from(vec![
+            binary(&[255]),
+            Term::list_from(vec![test_atom("foo")]),
+        ]),
         improper(vec![Term::Integer(97)], test_atom("x")),
         improper(vec![Term::Integer(-1)], test_atom("x")),
         improper(vec![Term::Integer(97)], Term::Integer(98)),
-        Term::List(vec![
+        Term::list_from(vec![
             improper(vec![binary(b"a")], test_atom("x")),
             Term::Integer(97),
         ]),
@@ -261,15 +264,14 @@ fn finds_terms_that_are_not_chardata_before_the_conversion() {
         assert_eq!(utf8_need(&chardata, false), None, "{chardata:?}");
     }
     // A binary costs 1, or with latin1 the bytes of its UTF-8 form.
-    let list = Term::List(vec![Term::Integer(97), binary(&[233, 97])]);
+    let list = Term::list_from(vec![Term::Integer(97), binary(&[233, 97])]);
     assert_eq!(utf8_need(&list, false), Some(2));
     assert_eq!(utf8_need(&list, true), Some(4));
 }
 
 #[test]
 fn accepts_the_file_names_that_erts_accepts_in_each_encoding() {
-    let list =
-        |characters: &[i64]| Term::List(characters.iter().copied().map(Term::Integer).collect());
+    let list = |characters: &[i64]| Term::list_from(characters.iter().copied().map(Term::Integer));
     // UTF-8 with composition checks a name as UTF-8 does, so it must
     // give the same result as UTF-8.
     let check = |name: &Term| {
@@ -288,9 +290,9 @@ fn accepts_the_file_names_that_erts_accepts_in_each_encoding() {
         binary(b"prim_tty"),
         binary(b"a\0b"),
         binary(&[255]),
-        Term::List(vec![]),
+        Term::nil(),
         list(&[97, 1, 255]),
-        Term::List(vec![list(&[97]), Term::List(vec![]), Term::Integer(98)]),
+        Term::list_from(vec![list(&[97]), Term::nil(), Term::Integer(98)]),
     ] {
         assert_eq!(check(&name), [true, true], "{name:?}");
     }
@@ -306,15 +308,18 @@ fn accepts_the_file_names_that_erts_accepts_in_each_encoding() {
     // that is not a binary or a list, is not valid.
     for name in [
         list(&[1 << 59]),
-        Term::List(vec![binary(b"a")]),
-        Term::ImproperList(vec![Term::Integer(97)], Box::new(binary(b"b"))),
-        Term::List(vec![Term::ImproperList(
+        Term::list_from(vec![binary(b"a")]),
+        Term::list_with_tail(vec![Term::Integer(97)], binary(b"b")),
+        Term::list_from(vec![Term::list_with_tail(
             vec![Term::Integer(97)],
-            Box::new(Term::Integer(98)),
+            Term::Integer(98),
         )]),
-        Term::List(vec![Term::Integer(97), test_atom("foo")]),
-        Term::List(vec![Term::Tuple(vec![])]),
-        Term::List(vec![Term::List(vec![Term::Integer(97), Term::Integer(0)])]),
+        Term::list_from(vec![Term::Integer(97), test_atom("foo")]),
+        Term::list_from(vec![Term::Tuple(vec![])]),
+        Term::list_from(vec![Term::list_from(vec![
+            Term::Integer(97),
+            Term::Integer(0),
+        ])]),
         test_atom("foo"),
         Term::Integer(97),
         Term::Tuple(vec![]),
@@ -325,17 +330,16 @@ fn accepts_the_file_names_that_erts_accepts_in_each_encoding() {
 
 #[test]
 fn checks_deeply_nested_file_names_without_recursion() {
-    let mut name = Term::List(vec![Term::Integer(97)]);
+    let mut name = Term::list_from(vec![Term::Integer(97)]);
     for _ in 0..100_000 {
-        name = Term::List(vec![name, Term::List(vec![])]);
+        name = Term::list_from(vec![name, Term::nil()]);
     }
     assert!(is_native_filename(&name, FilenameEncoding::Latin1));
 }
 
 #[test]
 fn writes_the_native_bytes_of_a_file_name_in_each_encoding() {
-    let list =
-        |characters: &[i64]| Term::List(characters.iter().copied().map(Term::Integer).collect());
+    let list = |characters: &[i64]| Term::list_from(characters.iter().copied().map(Term::Integer));
     let bytes = |name: &Term| {
         [
             FilenameEncoding::Latin1,
@@ -349,7 +353,7 @@ fn writes_the_native_bytes_of_a_file_name_in_each_encoding() {
     let some = |bytes: &[u8]| Some(bytes.to_vec());
     assert_eq!(bytes(&list(&[])), [some(b""), some(b""), some(b"")]);
     assert_eq!(
-        bytes(&Term::List(vec![
+        bytes(&Term::list_from(vec![
             list(&[80]),
             list(&[]),
             Term::Integer(233)
@@ -374,8 +378,7 @@ fn writes_the_native_bytes_of_a_file_name_in_each_encoding() {
 
 #[test]
 fn converts_native_bytes_to_a_file_name_in_each_encoding() {
-    let list =
-        |characters: &[i64]| Term::List(characters.iter().copied().map(Term::Integer).collect());
+    let list = |characters: &[i64]| Term::list_from(characters.iter().copied().map(Term::Integer));
     let convert = |bytes: &[u8], encoding| filename_from_native(bytes, encoding);
     // Each expected list comes from erl_unicode.c:2164-2220. Measured on
     // ERTS 29.1.1 on macOS: a\xc3\xa9 gives [97,233], a\xff gives

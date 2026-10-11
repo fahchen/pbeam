@@ -48,7 +48,7 @@ fn applies_module_functions_as_pinned_erts() {
     expected.push(atom("system_limit"));
     assert_eq!(
         program.execute("fun_probe", "mfas", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("mfas"),
@@ -81,14 +81,14 @@ fn makes_and_calls_local_funs_as_pinned_erts() {
         Term::Tuple(vec![
             atom("badarity"),
             atom("same"),
-            Term::List(vec![Term::Integer(1), Term::Integer(2)]),
+            Term::list_from(vec![Term::Integer(1), Term::Integer(2)]),
         ]),
         pair("badfun", atom("notfun")),
         pair("badfun", pair("fun_probe", atom("id"))),
     ];
     assert_eq!(
         program.execute("fun_probe", "locals", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("locals"),
@@ -109,7 +109,7 @@ fn tests_funs_with_is_function_as_pinned_erts() {
     let lists = pinned_beam("lists");
     let program = BeamProgram::load(&[&lists, FUN_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let mut expected = vec![Term::List(vec![atom("a"), atom("b")])];
+    let mut expected = vec![Term::list_from(vec![atom("a"), atom("b")])];
     expected.extend(
         [
             "one", "any", "none", "true", "false", "true", "false", "false", "true", "false",
@@ -119,7 +119,7 @@ fn tests_funs_with_is_function_as_pinned_erts() {
     );
     assert_eq!(
         program.execute("fun_probe", "tests", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("tests"),
@@ -150,13 +150,13 @@ fn applies_funs_as_pinned_erts() {
         atom("badarg"),
         pair("badfun", "notfun"),
         atom("badarg"),
-        badarity(Term::List(vec![Term::Integer(1), Term::Integer(2)])),
+        badarity(Term::list_from(vec![Term::Integer(1), Term::Integer(2)])),
         badarity(atom("same")),
         atom("system_limit"),
     ];
     assert_eq!(
         program.execute("fun_probe", "applies", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("applies"),
@@ -178,7 +178,7 @@ fn spawns_a_fun_at_erlang_apply_2_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("fun_probe", "spawned", &[]).unwrap(),
-        Term::List(vec![atom("spawned"), atom("badarg")])
+        Term::list_from(vec![atom("spawned"), atom("badarg")])
     );
     assert_eq!(reference("spawned"), b"[spawned,badarg]\n");
 }
@@ -216,13 +216,13 @@ fn makes_and_calls_external_funs_as_pinned_erts() {
     expected.push(Term::Tuple(vec![
         atom("badarity"),
         atom("same"),
-        Term::List(vec![Term::Integer(1), Term::Integer(2)]),
+        Term::list_from(vec![Term::Integer(1), Term::Integer(2)]),
     ]));
     expected.extend(std::iter::repeat_n(atom("badarg"), 5));
     expected.extend(["same", "lit", "same"].map(atom));
     assert_eq!(
         program.execute("fun_probe", "externals", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("externals"),
@@ -254,7 +254,7 @@ fn releases_the_frame_before_a_tail_apply_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("tail_catch", "run", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference_of("tail_catch", "run"),

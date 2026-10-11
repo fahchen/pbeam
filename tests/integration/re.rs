@@ -54,7 +54,7 @@ fn compile_error(program: &BeamProgram, message: &str, offset: i64) -> Term {
     let message = message.bytes().map(|byte| Term::Integer(byte.into()));
     Term::Tuple(vec![
         Term::Atom(program.atom("error").unwrap()),
-        Term::Tuple(vec![Term::List(message.collect()), Term::Integer(offset)]),
+        Term::Tuple(vec![Term::list_from(message), Term::Integer(offset)]),
     ])
 }
 
@@ -75,7 +75,7 @@ fn compiles_the_ansi_regexp_of_prim_tty_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("re_probe", "main", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             Term::Integer(0),
             Term::Integer(1),
             Term::Integer(0),
@@ -96,7 +96,7 @@ fn returns_the_compile_result_of_each_option_as_pinned_erts() {
     let program = program();
     assert_eq!(
         program.execute("re_probe", "options", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             info(0, 0, 0),
             info(2, 0, 0),
             info(0, 1, 0),
@@ -145,11 +145,10 @@ fn returns_the_pcre2_message_and_offset_of_each_compile_error_as_pinned_erts() {
     ];
     assert_eq!(
         program.execute("re_probe", "errors", &[]).unwrap(),
-        Term::List(
+        Term::list_from(
             errors
                 .iter()
                 .map(|&(message, offset)| compile_error(&program, message, offset))
-                .collect()
         )
     );
     let texts: Vec<String> = errors
@@ -172,7 +171,7 @@ fn raises_badarg_for_bad_options_and_patterns_as_pinned_erts() {
     ]);
     assert_eq!(
         program.execute("re_probe", "badarg", &[]).unwrap(),
-        Term::List(vec![badarg; 26])
+        Term::list_from(vec![badarg; 26])
     );
     assert_eq!(
         reference("badarg"),
@@ -188,7 +187,7 @@ fn compiles_iodata_patterns_as_pinned_erts() {
     let program = program();
     assert_eq!(
         program.execute("re_probe", "iodata", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             info(1, 0, 0),
             info(2, 0, 0),
             info(0, 0, 0),
@@ -207,7 +206,7 @@ fn compiles_unicode_character_lists_through_re_ucompile_as_pinned_erts() {
     let program = program();
     assert_eq!(
         program.execute("re_probe", "unicode_list", &[]).unwrap(),
-        Term::List(vec![
+        Term::list_from(vec![
             info(1, 1, 0),
             info(2, 1, 0),
             compile_error(&program, "missing closing parenthesis", 1),
@@ -239,12 +238,15 @@ fn exports_compiled_patterns_as_pinned_erts() {
     let program = program();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let result = program.execute("re_probe", "export", &[]).unwrap();
-    let Term::List(results) = &result else {
+    let Some(results) = result
+        .proper_list()
+        .map(|results| results.collect::<Vec<_>>())
+    else {
         panic!("export/0 returns a list, got {result:?}");
     };
     let (failure, results) = results.split_last().unwrap();
     assert_eq!(
-        failure,
+        *failure,
         &compile_error(&program, "missing closing parenthesis", 1)
     );
     let mut expected = vec![
@@ -284,13 +286,16 @@ fn exports_compiled_patterns_as_pinned_erts() {
     assert_eq!(results.len(), expected.len());
     let mut bytes = Vec::new();
     for (result, (source, options, unicode)) in results.iter().zip(expected) {
-        let Term::List(elements) = result else {
+        let Some(elements) = result
+            .proper_list()
+            .map(|elements| elements.collect::<Vec<_>>())
+        else {
             panic!("expected [Header, Source, Options, Encoded], got {result:?}");
         };
         let [
             Term::Binary(header),
             Term::Binary(pattern),
-            Term::List(given),
+            given,
             Term::Binary(encoded),
         ] = elements.as_slice()
         else {
@@ -300,7 +305,7 @@ fn exports_compiled_patterns_as_pinned_erts() {
         assert_eq!(&header[..8], b"re-PCRE2");
         assert_eq!(header[12..], [1, unicode]);
         assert_eq!(pattern.as_slice(), source);
-        assert_eq!(given, &options);
+        assert_eq!(**given, Term::list_from(options));
         bytes.push([header, pattern, encoded]);
     }
     // Each compile option changes `Encoded`. `bsr_unicode` is the default,
@@ -347,9 +352,11 @@ fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
     // `unicode:characters_to_binary/2`, takes the first frame of
     // `erlang:error(new_stacktrace, [RE, Options])`, and raises `badarg`
     // again with `erlang:raise/3` (`re.erl:1742-1751`). PBeam gives
-    // `erlang:error/2` this first frame, so the match succeeds. The
-    // exception has the stack trace `[]`, as each `erlang:raise/3` in PBeam
-    // (row "Exception stack trace" in `docs/erts-differences.md`).
+    // `erlang:error/2` this first frame, so the match succeeds.
+    // `erlang:raise/3` keeps the frame `{re, compile, [RE, Options], []}`
+    // (`bif.c:1626-1687`). ERTS also gives the location of the frame and the
+    // caller frames; PBeam gives neither (row "Exception stack trace" in
+    // `docs/erts-differences.md`).
     let program = program();
     let error = program
         .execute(
@@ -358,7 +365,10 @@ fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
             &[Term::Atom(program.atom("chardata").unwrap())],
         )
         .unwrap_err();
-    assert_eq!(error.to_string(), "root process exited with {badarg,[]}");
+    assert_eq!(
+        error.to_string(),
+        "root process exited with {badarg,[{re,compile,[foo,[unicode]],[]}]}"
+    );
     assert_eq!(
         reference_of("try re_probe:unsupported(chardata) catch error:R -> R end"),
         "badarg\n"

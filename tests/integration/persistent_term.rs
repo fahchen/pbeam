@@ -42,7 +42,7 @@ fn keeps_persistent_terms_for_all_processes_as_pinned_erts() {
             atom("ok"),
             Term::Tuple(vec![
                 atom("value"),
-                Term::List(vec![atom("a"), Term::Binary(b"b".to_vec())]),
+                Term::list_from(vec![atom("a"), Term::Binary(b"b".to_vec())]),
             ]),
             atom("undefined"),
         ])
@@ -93,10 +93,10 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
     let pair = |key: Term, value: i64| Term::Tuple(vec![key, Term::Integer(value)]);
     let ok_tuple = Term::Tuple(vec![atom("ok")]);
     let binary = Term::Binary(b"0123456789abcdefg".to_vec());
-    let string = Term::List(b"abc".iter().map(|&c| Term::Integer(c.into())).collect());
+    let string = Term::list_from(b"abc".iter().map(|&c| Term::Integer(c.into())));
     let small_map = Term::Map(
         Map::from_pairs(vec![
-            (atom("ok"), Term::List(vec![])),
+            (atom("ok"), Term::nil()),
             (Term::Integer(1), Term::Binary(vec![])),
         ])
         .unwrap(),
@@ -114,14 +114,14 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
             .execute("persistent_term_probe", "table", &[])
             .unwrap(),
         Term::Tuple(vec![
-            Term::List(vec![]),
-            Term::List(vec![
+            Term::nil(),
+            Term::list_from(vec![
                 pair(atom("true"), 1),
                 pair(Term::Integer(7), 4),
                 pair(atom("ok"), 3),
                 pair(Term::Integer(39), 2),
             ]),
-            Term::List(vec![
+            Term::list_from(vec![
                 pair(Term::Integer(39), 2),
                 pair(Term::Integer(1 << 60), 8),
                 pair(ok_tuple.clone(), 5),
@@ -131,18 +131,18 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
                 pair(binary.clone(), 6),
                 pair(atom("ok"), 3),
             ]),
-            Term::List(vec![
+            Term::list_from(vec![
                 pair(Term::Integer(39), 2),
-                pair(Term::List(vec![]), 9),
+                pair(Term::nil(), 9),
                 pair(large_map, 13),
                 pair(ok_tuple, 5),
                 pair(string, 7),
                 pair(binary, 6),
                 pair(small_map, 12),
-                pair(Term::List(vec![atom("ok"), Term::Tuple(vec![])]), 10),
+                pair(Term::list_from(vec![atom("ok"), Term::Tuple(vec![])]), 10),
                 pair(Term::Integer(1 << 60), 8),
                 pair(
-                    Term::ImproperList(vec![Term::Integer(1)], Box::new(Term::Integer(2))),
+                    Term::list_with_tail(vec![Term::Integer(1)], Term::Integer(2)),
                     14,
                 ),
                 pair(atom("true"), 1),
