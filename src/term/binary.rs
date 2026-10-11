@@ -152,6 +152,30 @@ impl Binary {
         Arc::ptr_eq(&self.bytes, &other.bytes)
     }
 
+    /// Take the bytes of this binary as an owned vector. The function moves
+    /// the array out when this binary was its last holder, and else it
+    /// copies the bytes of the view. A view with packed bits copies its
+    /// packed vector, because those bits are not whole bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let bytes = Binary::from(b"ab".to_vec());
+    /// assert_eq!(bytes.take_bytes(), b"ab".to_vec());
+    /// ```
+    pub(crate) fn take_bytes(mut self) -> Vec<u8> {
+        let whole =
+            self.offset.is_multiple_of(BITS_PER_BYTE) && self.size.is_multiple_of(BITS_PER_BYTE);
+        if self.packed.is_none()
+            && whole
+            && Arc::strong_count(&self.bytes) == 1
+            && let Some(bytes) = Arc::into_inner(std::mem::take(&mut self.bytes))
+        {
+            return bytes;
+        }
+        self.to_bytes()
+    }
+
     /// Return the bytes of this binary as an owned vector. A size that is
     /// not a whole number of bytes gives the extra bits in the high bits of
     /// the last byte, as [`MatchContext::read_bits`] packs them. The
@@ -168,8 +192,23 @@ impl Binary {
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         // The bytes are copied, because a term cannot give up the array of a
         // binary: `Term` has a `Drop`, and the binary lives until the term
-        // drops. No supported path needs the array of the source.
+        // drops. `take_bytes` moves the array out when the caller owns the
+        // binary.
         self[..].to_vec()
+    }
+}
+
+impl Default for Binary {
+    /// Make a binary with no byte, for the trap state that takes its bytes
+    /// out and leaves the state empty.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Binary::default().is_empty());
+    /// ```
+    fn default() -> Self {
+        Binary::from(Vec::new())
     }
 }
 

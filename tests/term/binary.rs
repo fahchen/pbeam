@@ -180,3 +180,28 @@ fn copies_a_view_whose_size_is_not_a_whole_number_of_bytes_in_o1_time() {
     let copied = copy.packed().expect("the bits of the copy are packed");
     assert!(Arc::ptr_eq(packed, copied));
 }
+
+#[test]
+fn takes_the_bytes_of_the_last_holder_with_no_copy() {
+    // `Binary::take_bytes` moves the array out when the binary is its last
+    // holder, and else it copies the view. The trap state of
+    // `list_to_bitstring_continue` takes the bytes that a turn collected, so
+    // a later turn does not copy them again.
+    let binary = Binary::from(b"ab".to_vec());
+    let array = binary.bytes().as_ptr();
+    let bytes = binary.take_bytes();
+    assert_eq!(bytes, b"ab".to_vec());
+    assert_eq!(bytes.as_ptr(), array);
+    // A shared binary copies its bytes, and the other holder keeps them.
+    let binary = Binary::from(b"ab".to_vec());
+    let copy = binary.clone();
+    assert_eq!(binary.take_bytes(), b"ab".to_vec());
+    assert_eq!(copy, Binary::from(b"ab".to_vec()));
+    // An empty binary is the value of the state after the take.
+    assert!(Binary::default().is_empty());
+    assert_eq!(Binary::default(), Binary::from(Vec::new()));
+    // A view whose bytes are not whole bytes packs them, so it copies the
+    // packed vector.
+    let source = Binary::from(&[0xC3]);
+    assert_eq!(source.bits(4, 8).take_bytes(), vec![0b0011_0000]);
+}

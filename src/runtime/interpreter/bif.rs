@@ -521,7 +521,8 @@ impl BeamProgram {
             return ets::insert_list(&mut context, *id, objects, *done as usize, *keypos as i32);
         }
         // The copy phase takes the result bytes out of the owned trap
-        // arguments, so that no turn copies them again.
+        // arguments, so that no turn copies the bytes of an earlier turn
+        // again.
         if let (
             "erts_internal",
             "list_to_bitstring_continue",
@@ -529,6 +530,7 @@ impl BeamProgram {
         ) = (module, function, arguments.as_mut_slice())
             && let Some(stack) = stack.proper_list()
         {
+            let bytes = std::mem::take(bytes).take_bytes();
             let process = scheduler.current_process_mut();
             let reds_left = process.bif_reductions_left()? as i64;
             return Ok(iolist::l2b_copy(
@@ -537,7 +539,7 @@ impl BeamProgram {
                 term,
                 &stack.collect::<Vec<_>>(),
                 *size as usize,
-                bytes.clone().to_bytes(),
+                bytes,
             ));
         }
         let process = scheduler.current_process_mut();
