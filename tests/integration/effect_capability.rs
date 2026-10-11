@@ -243,7 +243,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 27] = [
+const AMBIENT: [&str; 28] = [
     "erlang:cancel_timer/2",
     "erlang:demonitor/1",
     "erlang:demonitor/2",
@@ -258,6 +258,7 @@ const AMBIENT: [&str; 27] = [
     "erlang:unlink/1",
     "erlang:unregister/1",
     "erlang:whereis/1",
+    "erts_internal:prepare_loading/2",
     "ets:delete/2",
     "ets:insert/2",
     "ets:lookup/2",
@@ -276,7 +277,8 @@ const AMBIENT: [&str; 27] = [
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `later`: it has no check until its named task adds one.
 /// `effect_probe:ambient/0` also calls each entry once.
-const LATER: [&str; 5] = [
+const LATER: [&str; 6] = [
+    "erlang:finish_loading/1",
     "erlang:module_loaded/1",
     "prim_file:get_cwd_nif/0",
     "prim_file:list_dir_nif/1",
@@ -392,9 +394,9 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
     let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
-                    nonode@nohost,nonode@nohost,true,true,false,effect_probe_ambient_atom,ok,\
-                    effect_probe_ambient,true,[{key,value}],value,true,true,reference,atom,2,ok,1,error,ok,\
-                    error,ok]";
+                    nonode@nohost,nonode@nohost,true,true,{error,badfile},ok,false,\
+                    effect_probe_ambient_atom,ok,effect_probe_ambient,true,[{key,value}],value,\
+                    true,true,reference,atom,2,ok,1,error,ok,error,ok]";
     assert_eq!(text(&run(&program, "ambient", &Grants(vec![]))), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }

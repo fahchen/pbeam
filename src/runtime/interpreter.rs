@@ -20,7 +20,10 @@ use std::{borrow::Cow, cell::RefCell, collections::HashMap, rc::Rc};
 
 mod bif;
 mod bits;
+mod code_table;
 mod native;
+
+pub(super) use code_table::CodeTable;
 
 use bif::{BifResult, is_bif, is_function, is_heavy_bif, send};
 use bits::BitWriter;
@@ -42,8 +45,9 @@ const BITS_PER_REDUCTION: usize = 8 * 1024;
 
 #[derive(Debug)]
 pub struct BeamProgram {
-    /// The loaded modules by name.
-    modules: HashMap<String, BeamModule>,
+    /// The start modules by name. Each run starts its code table with them
+    /// (see [`CodeTable`]).
+    modules: HashMap<String, Rc<BeamModule>>,
     /// The atom table of the loaded modules. ERTS has one atom table for
     /// each emulator, so each run starts its own table from a copy of it.
     atoms: AtomTable,
@@ -148,7 +152,7 @@ impl BeamProgram {
         for bytes in modules {
             let module = code::parse(bytes, &mut atoms)?;
             let name = module.name.clone();
-            if loaded.insert(name.clone(), module).is_some() {
+            if loaded.insert(name.clone(), Rc::new(module)).is_some() {
                 return Err(error(format!("duplicate BEAM module {name}")));
             }
         }
@@ -336,6 +340,7 @@ impl BeamProgram {
             Issuer::Unchecked => Scheduler::without_checks(self.atoms.clone()),
             Issuer::Host(_) | Issuer::Module(_) => Scheduler::new(self.atoms.clone()),
         };
+        scheduler.code = CodeTable::new(self.modules.clone());
         let run = self.run_root(&mut scheduler, module, function, arguments, issuer);
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
@@ -353,7 +358,8 @@ impl BeamProgram {
 
     /// Run `Module:Function(Arguments...)` as the root process with the
     /// initial capabilities of `issuer` on `scheduler` until the run ends, as
-    /// `BeamProgram::execute` describes. With no issuer, the root process
+    /// `BeamProgram::execute` describes. `scheduler` holds the code table of
+    /// the run (see `CodeTable`). With no issuer, the root process
     /// gets no capability, and `scheduler` must skip the checks (see
     /// `Scheduler::without_checks`). With a Rust policy, the launcher
     /// revokes the initial capabilities of each kind that
@@ -367,6 +373,7 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// let mut scheduler = Scheduler::new(program.atoms.clone());
+    /// scheduler.code = CodeTable::new(program.modules.clone());
     /// program.run_root(&mut scheduler, "process_probe", "main", &[], Issuer::Host(&AllowAll))?;
     /// assert!(scheduler.into_root_result().is_some());
     /// ```
@@ -386,8 +393,8 @@ impl BeamProgram {
     ) -> Result<(), BeamError> {
         let arity =
             u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-        let label = self.entry_label(module, function, arity)?;
-        let frame = self.frame(module, label, arity)?;
+        let label = scheduler.code.entry_label(module, function, arity)?;
+        let frame = scheduler.code.frame(module, label, arity)?;
         let mut root = match issuer {
             Issuer::Unchecked => {
                 scheduler.start(frame, arguments.to_vec(), Vec::new())?;
@@ -398,9 +405,9 @@ impl BeamProgram {
                 None
             }
             Issuer::Module(policy) => {
-                self.entry_label(policy, "grant", 3)?;
-                let initial = self.entry_label(policy, "initial", 1)?;
-                let initial = self.frame(policy, initial, 1)?;
+                scheduler.code.entry_label(policy, "grant", 3)?;
+                let initial = scheduler.code.entry_label(policy, "initial", 1)?;
+                let initial = scheduler.code.frame(policy, initial, 1)?;
                 scheduler.start_policy(initial, (module, function, arguments.len()))?;
                 Some(frame)
             }
@@ -421,7 +428,7 @@ impl BeamProgram {
                 Issuer::Host(policy) => scheduler.revoke_issued(&policy.revocations()),
                 Issuer::Module(policy) => {
                     if let Some(arguments) = scheduler.next_policy_request() {
-                        let frame = self.mfa_frame(policy, "grant", 3)?;
+                        let frame = scheduler.code.mfa_frame(policy, "grant", 3)?;
                         scheduler.begin_policy_call(frame, arguments);
                     }
                 }
@@ -460,127 +467,6 @@ impl BeamProgram {
             return Err(error("the policy process waits in initial/1"));
         }
         Ok(())
-    }
-
-    /// Return the entry label of an exported function that a run starts
-    /// from.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let label = program.entry_label("process_probe", "main", 0)?;
-    /// assert!(program.entry_label("process_probe", "missing", 0).is_err());
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// A module that is not loaded is the error `missing BEAM module M`. A
-    /// function that the module does not export is the error
-    /// `missing export M:F/A`.
-    fn entry_label(&self, module: &str, function: &str, arity: u32) -> Result<u32, BeamError> {
-        let loaded = self
-            .modules
-            .get(module)
-            .ok_or_else(|| error(format!("missing BEAM module {module}")))?;
-        loaded
-            .exports
-            .get(&(function.to_owned(), arity))
-            .copied()
-            .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))
-    }
-
-    /// Create the frame for an exported function of a loaded module. Return
-    /// `None` when the module does not export the function: ERTS then runs
-    /// the export entry of the function, which calls the error handler
-    /// (`call_error_handler` in `beam_common.c:1294-1342`).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(program.export_frame("undef_handler", "$handle_undefined_function", 2)?.is_some());
-    /// assert!(program.export_frame("undef_target", "missing", 1)?.is_none());
-    /// assert!(program.export_frame("nomod", "missing", 1).is_err());
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// A module that is not loaded is the runtime error
-    /// `unresolved external MFA M:F/A`. ERTS loads it from the code path.
-    fn export_frame(
-        &self,
-        module: &str,
-        function: &str,
-        arity: u32,
-    ) -> Result<Option<Frame>, BeamError> {
-        let loaded = self.modules.get(module).ok_or_else(|| {
-            error(format!(
-                "unresolved external MFA {module}:{function}/{arity}"
-            ))
-        })?;
-        loaded
-            .exports
-            .get(&(function.to_owned(), arity))
-            .map(|label| self.frame(module, *label, arity))
-            .transpose()
-    }
-
-    /// Create the frame for an exported function, such as the target of a
-    /// BIF trap.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let frame = program.mfa_frame("external", "effect", 1)?;
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// A module that is not loaded or a function that the module does not
-    /// export is the runtime error `unresolved external MFA M:F/A`.
-    fn mfa_frame(&self, module: &str, function: &str, arity: u32) -> Result<Frame, BeamError> {
-        self.export_frame(module, function, arity)?.ok_or_else(|| {
-            error(format!(
-                "unresolved external MFA {module}:{function}/{arity}"
-            ))
-        })
-    }
-
-    /// Create the frame for the function at an entry label.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let frame = program.frame("fixture", 2, 0)?;
-    /// assert_eq!(frame.function, "main");
-    /// ```
-    fn frame(&self, module_name: &str, label: u32, arity: u32) -> Result<Frame, BeamError> {
-        let module = self.module(module_name)?;
-        let function = function_at_label(module, label)?;
-        if function.arity != arity {
-            return Err(error(format!(
-                "call arity does not match {module_name}:{}",
-                function.name
-            )));
-        }
-        Ok(Frame {
-            module: module_name.to_owned(),
-            function: function.name.to_owned(),
-            next_instruction: function.start,
-            stack: Vec::new(),
-        })
-    }
-
-    /// Return a loaded module by name.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(program.module("fixture")?.name, "fixture");
-    /// ```
-    fn module(&self, name: &str) -> Result<&BeamModule, BeamError> {
-        self.modules
-            .get(name)
-            .ok_or_else(|| error(format!("missing BEAM module {name}")))
     }
 
     /// Run the current process until it waits for a message, calls
@@ -630,7 +516,7 @@ impl BeamProgram {
         }) = scheduler.current_process_mut().dirty_write.take()
         {
             let result = native::dirty_write_result(&mut scheduler.atoms, written)?;
-            if let Some(outcome) = self.finish_bif(scheduler.current_process_mut(), result, tail)? {
+            if let Some(outcome) = self.finish_bif(scheduler, result, tail)? {
                 return Ok(outcome);
             }
         }
@@ -644,7 +530,7 @@ impl BeamProgram {
         }) = scheduler.current_process_mut().pending_bif.take()
         {
             let result = self.bif_trap(scheduler, module, function, arguments)?;
-            if let Some(outcome) = self.finish_bif(scheduler.current_process_mut(), result, tail)? {
+            if let Some(outcome) = self.finish_bif(scheduler, result, tail)? {
                 return Ok(outcome);
             }
         }
@@ -652,10 +538,19 @@ impl BeamProgram {
         if process.frames.is_empty() {
             return normal_exit(process);
         }
+        // A frame names its module, and the code of a module name does not
+        // change in a run (see `CodeTable`). Thus the loop keeps the module
+        // of the last instruction and looks up the code table only when the
+        // active frame is in another module.
+        let mut current = Rc::clone(scheduler.current_module()?);
         loop {
             let process = scheduler.current_process_mut();
             let frame = current_frame(process);
-            let module = self.module(&frame.module)?;
+            if frame.module != current.name {
+                current = Rc::clone(scheduler.current_module()?);
+                continue;
+            }
+            let module: &BeamModule = &current;
             let Some(instruction) = module.instructions.get(frame.next_instruction) else {
                 return Err(error(format!(
                     "function {}:{} did not return",
@@ -697,12 +592,12 @@ impl BeamProgram {
                 }
                 Instruction::Call { arity, label } => {
                     check_local_call_arguments(&process.registers, *arity)?;
-                    let frame = self.frame(&module.name, *label, *arity)?;
+                    let frame = code_table::frame(module, *label, *arity)?;
                     process.frames.push(frame);
                 }
                 Instruction::CallOnly { arity, label } => {
                     check_local_call_arguments(&process.registers, *arity)?;
-                    *current_frame(process) = self.frame(&module.name, *label, *arity)?;
+                    *current_frame(process) = code_table::frame(module, *label, *arity)?;
                 }
                 Instruction::CallLast {
                     arity,
@@ -713,7 +608,7 @@ impl BeamProgram {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     check_local_call_arguments(&process.registers, *arity)?;
-                    *current_frame(process) = self.frame(&module.name, *label, *arity)?;
+                    *current_frame(process) = code_table::frame(module, *label, *arity)?;
                 }
                 Instruction::TestArity {
                     fail_label,
@@ -721,7 +616,7 @@ impl BeamProgram {
                     arity,
                 } => {
                     let passed = matches!(
-                        &read(process, value)?,
+                        read_ref(process, value)?,
                         Term::Tuple(elements) if elements.len() == *arity as usize
                     );
                     if !passed {
@@ -733,7 +628,7 @@ impl BeamProgram {
                     value,
                     arity,
                 } => {
-                    let result = is_function(&read(process, value)?, &read(process, arity)?);
+                    let result = is_function(read_ref(process, value)?, read_ref(process, arity)?);
                     // The `badarg` of the check fails the test and raises
                     // nothing.
                     let passed = matches!(
@@ -749,7 +644,7 @@ impl BeamProgram {
                     fail_label,
                     choices,
                 } => {
-                    let target = match &read(process, value)? {
+                    let target = match read_ref(process, value)? {
                         Term::Tuple(elements) => choices
                             .iter()
                             .find(|(arity, _)| *arity as usize == elements.len())
@@ -818,14 +713,14 @@ impl BeamProgram {
                     tail,
                     deallocate,
                 } => {
-                    let fun = read(process, function)?;
+                    let call = FunCall::new(read_ref(process, function)?, *arity);
                     if *tail {
                         // `i_call_fun_last` releases the frame before it
                         // tests the fun (`emit_i_call_fun2_last` in
                         // `jit/arm/instr_fun.cpp:425-462`).
                         release_frame(process, *deallocate)?;
                     }
-                    if let Some(outcome) = self.call_fun(scheduler, &fun, *arity, *tail)? {
+                    if let Some(outcome) = self.call_fun(scheduler, call, *arity, *tail)? {
                         return Ok(outcome);
                     }
                 }
@@ -921,11 +816,14 @@ impl BeamProgram {
                     // Stack}}`, and an exit gives `{'EXIT', Reason}` (emu
                     // `instrs.tab:1187-1212`).
                     if matches!(process.registers.first(), Some(None)) {
-                        let class = read(process, &Operand::X(3))?;
+                        let class = read_ref(process, &Operand::X(3))?;
+                        let throw = *class == Term::static_atom("throw");
+                        let error_class = *class == Term::static_atom("error");
                         let mut reason = read(process, &Operand::X(1))?;
-                        if class != Term::static_atom("throw") {
-                            if class == Term::static_atom("error") {
-                                let (_, stack) = raw_stacktrace(&read(process, &Operand::X(2))?)?;
+                        if !throw {
+                            if error_class {
+                                let (_, stack) =
+                                    raw_stacktrace(read_ref(process, &Operand::X(2))?)?;
                                 reason = Term::Tuple(vec![reason, stack]);
                             }
                             reason = Term::Tuple(vec![Term::static_atom("EXIT"), reason]);
@@ -938,7 +836,7 @@ impl BeamProgram {
                     fail_label,
                     value,
                 } => {
-                    let value = read(process, value)?;
+                    let value = read_ref(process, value)?;
                     let passed = match kind {
                         TestKind::Atom => matches!(value, Term::Atom(_)),
                         TestKind::Pid => matches!(value, Term::Pid(_)),
@@ -950,10 +848,10 @@ impl BeamProgram {
                         // `emit_is_list` and `emit_is_nonempty_list` in
                         // `jit/arm/instr_common.cpp:1118-1364`).
                         TestKind::List => matches!(value, Term::List(_) | Term::ImproperList(..)),
-                        TestKind::Nil => matches!(&value, Term::List(values) if values.is_empty()),
+                        TestKind::Nil => matches!(value, Term::List(values) if values.is_empty()),
                         TestKind::NonEmptyList => {
                             matches!(
-                                &value,
+                                value,
                                 Term::List(values) if !values.is_empty()
                             ) || matches!(value, Term::ImproperList(..))
                         }
@@ -976,7 +874,7 @@ impl BeamProgram {
                         // float term, so the test fails for each term.
                         TestKind::Float => false,
                         TestKind::Boolean => {
-                            matches!(&value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
+                            matches!(value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
                         }
                     };
                     if !passed {
@@ -989,6 +887,8 @@ impl BeamProgram {
                     pairs,
                 } => match map_values(process, map, pairs.iter().map(|(key, _)| key))? {
                     Some(values) => {
+                        // The destinations store the values, so they get copies.
+                        let values: Vec<Term> = values.into_iter().cloned().collect();
                         for ((_, destination), value) in pairs.iter().zip(values) {
                             write(process, destination, value)?;
                         }
@@ -1074,7 +974,7 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if read(process, left)? != read(process, right)? {
+                    if read_ref(process, left)? != read_ref(process, right)? {
                         jump(module, process, *fail_label)?;
                     }
                 }
@@ -1093,7 +993,7 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if read(process, left)? == read(process, right)? {
+                    if read_ref(process, left)? == read_ref(process, right)? {
                         jump(module, process, *fail_label)?;
                     }
                 }
@@ -1102,8 +1002,8 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if !read(process, left)?
-                        .compare(&read(process, right)?)?
+                    if !read_ref(process, left)?
+                        .compare(read_ref(process, right)?)?
                         .is_lt()
                     {
                         jump(module, process, *fail_label)?;
@@ -1114,8 +1014,8 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if read(process, left)?
-                        .compare(&read(process, right)?)?
+                    if read_ref(process, left)?
+                        .compare(read_ref(process, right)?)?
                         .is_lt()
                     {
                         jump(module, process, *fail_label)?;
@@ -1128,7 +1028,7 @@ impl BeamProgram {
                     tag,
                 } => {
                     let passed = matches!(
-                        &read(process, value)?,
+                        read_ref(process, value)?,
                         Term::Tuple(fields)
                             if fields.len() == *arity as usize
                                 && fields.first() == Some(tag)
@@ -1220,7 +1120,7 @@ impl BeamProgram {
                     destination,
                 } => {
                     let state = match_context(process, context)?;
-                    let bytes = binary_field_size(&read(process, size)?, *unit)
+                    let bytes = binary_field_size(read_ref(process, size)?, *unit)
                         .and_then(|bits| Some((bits, state.borrow_mut().read_bits(bits)?)));
                     match bytes {
                         Some((bits, bytes)) => {
@@ -1248,8 +1148,8 @@ impl BeamProgram {
                 // compiler gives it a position that `bs_get_position` made.
                 Instruction::BinarySetPosition { context, position } => {
                     let state = any_match_context(process, context)?;
-                    match read(process, position)? {
-                        Term::Integer(value) if let Ok(value) = usize::try_from(value) => {
+                    match read_ref(process, position)? {
+                        Term::Integer(value) if let Ok(value) = usize::try_from(*value) => {
                             state.borrow_mut().set_position(value);
                         }
                         other => {
@@ -1316,7 +1216,7 @@ impl BeamProgram {
                 // PBeam has no float register and no float or bignum term,
                 // so an integer stops the run.
                 Instruction::FloatConvert { source } => {
-                    if let Term::Integer(_) = read(process, source)? {
+                    if let Term::Integer(_) = read_ref(process, source)? {
                         return Err(error("unsupported BEAM opcode 97"));
                     }
                     let badarith = Term::static_atom("badarith");
@@ -1329,10 +1229,10 @@ impl BeamProgram {
                     fail_label,
                     choices,
                 } => {
-                    let value = read(process, value)?;
+                    let value = read_ref(process, value)?;
                     let target = choices
                         .iter()
-                        .find(|(choice, _)| choice == &value)
+                        .find(|(choice, _)| choice == value)
                         .map_or(*fail_label, |(_, label)| *label);
                     jump(module, process, target)?;
                 }
@@ -1364,15 +1264,16 @@ impl BeamProgram {
                     index,
                     destination,
                 } => {
-                    let mut tuple = read(process, tuple)?;
-                    let Term::Tuple(fields) = &mut tuple else {
+                    let Term::Tuple(fields) = read_ref(process, tuple)? else {
                         return Err(error("BEAM tuple element source is not a tuple"));
                     };
                     let index = *index as usize;
-                    if index >= fields.len() {
+                    let Some(field) = fields.get(index) else {
                         return Err(error(format!("BEAM tuple has no element {index}")));
-                    }
-                    write(process, destination, fields.swap_remove(index))?;
+                    };
+                    // The destination stores the element, so it gets a copy.
+                    let field = field.clone();
+                    write(process, destination, field)?;
                 }
                 Instruction::UpdateRecord {
                     source,
@@ -1405,8 +1306,20 @@ impl BeamProgram {
                     source,
                     destination,
                 } => {
-                    let (first, _) = nonempty_list(read(process, source)?)?;
-                    write(process, destination, first)?;
+                    // `get_hd` reads only the head, so only the head is copied.
+                    let head = match read_ref(process, source)? {
+                        Term::List(values) | Term::ImproperList(values, _)
+                            if let Some(head) = values.first() =>
+                        {
+                            head.clone()
+                        }
+                        list => {
+                            return Err(error(format!(
+                                "BEAM list source {list:?} is not a nonempty list"
+                            )));
+                        }
+                    };
+                    write(process, destination, head)?;
                 }
                 Instruction::GetTail {
                     source,
@@ -1425,9 +1338,7 @@ impl BeamProgram {
                     let to = read(process, &Operand::X(0))?;
                     let message = read(process, &Operand::X(1))?;
                     let result = send(scheduler, &to, message)?;
-                    if let Some(outcome) =
-                        self.finish_bif(scheduler.current_process_mut(), result, false)?
-                    {
+                    if let Some(outcome) = self.finish_bif(scheduler, result, false)? {
                         return Ok(outcome);
                     }
                 }
@@ -1546,8 +1457,7 @@ impl BeamProgram {
                     // without a binding runs its BEAM stub body.
                     let arguments = call_arguments(&process.registers, *arity)?;
                     if let Some(result) = native::call(scheduler, &module.name, name, &arguments)
-                        && let Some(outcome) =
-                            self.finish_bif(scheduler.current_process_mut(), result?, true)?
+                        && let Some(outcome) = self.finish_bif(scheduler, result?, true)?
                     {
                         return Ok(outcome);
                     }
@@ -1573,7 +1483,7 @@ impl BeamProgram {
                 // `jit/arm/instr_common.cpp:3046-3056`). The compiler moves
                 // it from `x2` first.
                 Instruction::BuildStacktrace => {
-                    let (_, stack) = raw_stacktrace(&read(process, &Operand::X(0))?)?;
+                    let (_, stack) = raw_stacktrace(read_ref(process, &Operand::X(0))?)?;
                     write(process, &Operand::X(0), stack)?;
                 }
                 // ERTS `i_raise` raises the reason again with the class and
@@ -1583,7 +1493,7 @@ impl BeamProgram {
                 // `jit/x86/instr_common.cpp:3138-3164`;
                 // `erts_sanitize_freason` in `beam_common.c:1089-1097`).
                 Instruction::Raise { trace, value } => {
-                    let (class, stack) = raw_stacktrace(&read(process, trace)?)?;
+                    let (class, stack) = raw_stacktrace(read_ref(process, trace)?)?;
                     let value = read(process, value)?;
                     if let Some(outcome) = raise_with_stacktrace(process, class, value, stack) {
                         return Ok(outcome);
@@ -1614,10 +1524,10 @@ impl BeamProgram {
                 // `badarg` to `x0` and continues (emu `instrs.tab:1253-1263`;
                 // `raw_raise` in `beam_common.c:1148-1179`).
                 Instruction::RawRaise => {
-                    let (_, stack) = raw_stacktrace(&read(process, &Operand::X(2))?)?;
-                    let class = read(process, &Operand::X(0))?;
+                    let (_, stack) = raw_stacktrace(read_ref(process, &Operand::X(2))?)?;
+                    let class = ExceptionClass::from_term(read_ref(process, &Operand::X(0))?);
                     let value = read(process, &Operand::X(1))?;
-                    match ExceptionClass::from_term(&class) {
+                    match class {
                         Some(class) => {
                             if let Some(outcome) =
                                 raise_with_stacktrace(process, class, value, stack)
@@ -1717,8 +1627,8 @@ impl BeamProgram {
         }
         if (module, name, arity) == ("erlang", "load_nif", 2) {
             let caller = current_frame(process).module.clone();
-            let result = native::load_nif(self, scheduler, &caller)?;
-            return self.finish_bif(scheduler.current_process_mut(), result, false);
+            let result = native::load_nif(scheduler, &caller)?;
+            return self.finish_bif(scheduler, result, false);
         }
         if is_bif(module, name, arity) {
             if !is_heavy_bif(module, name, arity) && light_bif_switch(process) {
@@ -1726,7 +1636,7 @@ impl BeamProgram {
             }
             let arguments = call_arguments(&process.registers, arity)?;
             let result = self.bif(scheduler, module, name, arguments)?;
-            return self.finish_bif(scheduler.current_process_mut(), result, false);
+            return self.finish_bif(scheduler, result, false);
         }
         self.call_mfa(scheduler, module, name, arity, tail)
     }
@@ -1769,10 +1679,11 @@ impl BeamProgram {
         if is_bif(module, name, arity) {
             let arguments = call_arguments(&process.registers, arity)?;
             let result = self.bif(scheduler, module, name, arguments)?;
-            return self.finish_bif(scheduler.current_process_mut(), result, tail);
+            return self.finish_bif(scheduler, result, tail);
         }
-        match self.export_frame(module, name, arity)? {
+        match scheduler.code.export_frame(module, name, arity)? {
             Some(frame) => {
+                let process = scheduler.current_process_mut();
                 check_remote_call_arguments(&process.registers, arity)?;
                 enter_frame(process, frame, tail);
                 Ok(None)
@@ -1836,9 +1747,12 @@ impl BeamProgram {
                 .ok_or_else(|| error(format!("atom table does not hold {name}")))
         };
         let (module_atom, function_atom) = (atom(module)?, atom(function)?);
+        let handler = scheduler
+            .code
+            .export_frame(module, "$handle_undefined_function", 2)?;
         let process = scheduler.current_process_mut();
         let arguments = Term::List(call_arguments(&process.registers, arity)?);
-        if let Some(handler) = self.export_frame(module, "$handle_undefined_function", 2)? {
+        if let Some(handler) = handler {
             enter_frame(process, handler, tail);
             write(process, &Operand::X(0), function_atom)?;
             write(process, &Operand::X(1), arguments)?;
@@ -1944,7 +1858,6 @@ impl BeamProgram {
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
-        let fun = read(process, &Operand::X(0))?;
         let mut list = read(process, &Operand::X(1))?;
         let Some((arguments, proper)) = take_list_elements(&mut list) else {
             let badarg = Term::static_atom("badarg");
@@ -1959,13 +1872,15 @@ impl BeamProgram {
             return Ok(raise(process, ExceptionClass::Error, badarg));
         }
         let arity = arguments.len() as u32;
+        // The arguments replace the fun in x0, so the call reads the fun first.
+        let call = FunCall::new(read_ref(process, &Operand::X(0))?, arity);
         for (index, argument) in (0..).zip(arguments) {
             write(process, &Operand::X(index), argument)?;
         }
-        self.call_fun(scheduler, &fun, arity, tail)
+        self.call_fun(scheduler, call, arity, tail)
     }
 
-    /// Call `fun` with the arguments in `x0` to `x(arity - 1)`, as ERTS
+    /// Call the fun that `call` holds with the arguments in `x0` to `x(arity - 1)`, as ERTS
     /// `call_fun` (`beam_common.c:1605-1731`) does for `call_fun` and
     /// `call_fun2`. A term that is not a fun raises `error:{badfun, Term}`. A
     /// fun of another arity raises `error:{badarity, {Fun, Arguments}}`,
@@ -1979,34 +1894,35 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // x0 = one and fun(X) -> {Tag, X} end enters the lambda with x1 = Tag.
-    /// assert!(program.call_fun(&mut scheduler, &pair, 1, false)?.is_none());
+    /// assert!(program.call_fun(&mut scheduler, FunCall::new(&pair, 1), 1, false)?.is_none());
     /// // fun erlang:self/0 runs the `self/0` BIF.
-    /// assert!(program.call_fun(&mut scheduler, &self_fun, 0, false)?.is_none());
+    /// assert!(program.call_fun(&mut scheduler, FunCall::new(&self_fun, 0), 0, false)?.is_none());
     /// // An atom raises `error:{badfun, notfun}`.
-    /// assert!(program.call_fun(&mut scheduler, &Term::static_atom("notfun"), 0, false)?.is_some());
+    /// let notfun = Term::static_atom("notfun");
+    /// assert!(program.call_fun(&mut scheduler, FunCall::new(&notfun, 0), 0, false)?.is_some());
     /// ```
     fn call_fun(
         &self,
         scheduler: &mut Scheduler,
-        fun: &Term,
+        call: FunCall,
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
-        let fun = match fun {
-            Term::Fun(fun) if fun.target().arity() == arity => fun,
-            Term::Fun(_) => {
+        let (target, free) = match call {
+            FunCall::Enter { target, free } => (target, free),
+            FunCall::BadArity(fun) => {
                 let arguments = call_arguments(&process.registers, arity)?;
-                let call = Term::Tuple(vec![fun.clone(), Term::List(arguments)]);
+                let call = Term::Tuple(vec![fun, Term::List(arguments)]);
                 let reason = Term::Tuple(vec![Term::static_atom("badarity"), call]);
                 return Ok(raise(process, ExceptionClass::Error, reason));
             }
-            _ => {
-                let reason = Term::Tuple(vec![Term::static_atom("badfun"), fun.clone()]);
+            FunCall::BadFun(fun) => {
+                let reason = Term::Tuple(vec![Term::static_atom("badfun"), fun]);
                 return Ok(raise(process, ExceptionClass::Error, reason));
             }
         };
-        let lambda = match fun.target() {
+        let lambda = match &target {
             Target::Local(lambda) => lambda,
             Target::External {
                 module, function, ..
@@ -2017,12 +1933,14 @@ impl BeamProgram {
                 module, function, ..
             } => return self.call_mfa(scheduler, module.name(), function.name(), arity, tail),
         };
-        for (register, value) in (arity..).zip(fun.free()) {
-            write(process, &Operand::X(register), value.clone())?;
+        let total_arity = arity + free.len() as u32;
+        for (register, value) in (arity..).zip(free) {
+            write(process, &Operand::X(register), value)?;
         }
-        let total_arity = arity + fun.free().len() as u32;
-        let frame = self.frame(lambda.module().name(), lambda.label(), total_arity)?;
-        enter_frame(process, frame, tail);
+        let frame = scheduler
+            .code
+            .frame(lambda.module().name(), lambda.label(), total_arity)?;
+        enter_frame(scheduler.current_process_mut(), frame, tail);
         Ok(None)
     }
 
@@ -2087,18 +2005,19 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // A value in a body call stays in the frame.
-    /// let outcome = program.finish_bif(process, BifResult::Value(Term::static_atom("ok")), false)?;
+    /// let outcome = program.finish_bif(&mut scheduler, BifResult::Value(Term::static_atom("ok")), false)?;
     /// assert!(outcome.is_none());
     /// // `exit(normal)` with no catch tag exits the process.
     /// let raise = BifResult::Raise { class: ExceptionClass::Exit, reason: Term::static_atom("normal") };
-    /// assert!(matches!(program.finish_bif(process, raise, true)?, Some(Outcome::Exit { .. })));
+    /// assert!(matches!(program.finish_bif(&mut scheduler, raise, true)?, Some(Outcome::Exit { .. })));
     /// ```
     fn finish_bif(
         &self,
-        process: &mut ProcessState,
+        scheduler: &mut Scheduler,
         result: BifResult,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
         match result {
             BifResult::Value(value) => {
                 write(process, &Operand::X(0), value)?;
@@ -2131,10 +2050,12 @@ impl BeamProgram {
             } => {
                 let arity = u32::try_from(arguments.len())
                     .map_err(|_| error("arity exceeds BEAM limit"))?;
+                let frame = scheduler.code.mfa_frame(module, function, arity)?;
+                let process = scheduler.current_process_mut();
                 for (index, argument) in (0..).zip(arguments) {
                     write(process, &Operand::X(index), argument)?;
                 }
-                enter_frame(process, self.mfa_frame(module, function, arity)?, tail);
+                enter_frame(process, frame, tail);
                 // A BIF trap always switches out the process
                 // (`context_switch_simplified` in `jit/arm/instr_bif.cpp:525-536`,
                 // `676-701`). The process enters the target when it runs
@@ -2212,7 +2133,7 @@ fn policy_turn(scheduler: &mut Scheduler, outcome: Outcome) -> Outcome {
 /// # Examples
 ///
 /// ```rust,ignore
-/// enter_frame(&mut process, program.mfa_frame("external", "effect", 1)?, false);
+/// enter_frame(&mut process, scheduler.code.mfa_frame("external", "effect", 1)?, false);
 /// assert_eq!(process.frames.len(), 2);
 /// ```
 fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
@@ -2277,15 +2198,14 @@ struct SpawnOptions {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = create_process(&program, &mut scheduler, &module, &function, &Term::List(vec![]), SpawnOptions::default())?;
+/// let result = create_process(&mut scheduler, &module, &function, &Term::List(vec![]), SpawnOptions::default())?;
 /// assert!(matches!(result, BifResult::Value(Term::Pid(_))));
-/// let result = create_process(&program, &mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default())?;
+/// let result = create_process(&mut scheduler, &module, &function, &Term::Integer(1), SpawnOptions::default())?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
-/// let result = create_process(&program, &mut scheduler, &Term::Integer(1), &function, &Term::List(vec![]), SpawnOptions::default())?;
+/// let result = create_process(&mut scheduler, &Term::Integer(1), &function, &Term::List(vec![]), SpawnOptions::default())?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 fn create_process(
-    program: &BeamProgram,
     scheduler: &mut Scheduler,
     module: &Term,
     function: &Term,
@@ -2309,7 +2229,9 @@ fn create_process(
     let export = if arguments.len() > APPLY_MAX_ARGUMENTS {
         None
     } else {
-        program.export_frame(module.name(), function.name(), arity)?
+        scheduler
+            .code
+            .export_frame(module.name(), function.name(), arity)?
     };
     let start = match export {
         Some(frame) => Start::Entry(frame),
@@ -2384,7 +2306,7 @@ fn release_frame(process: &mut ProcessState, deallocate: u32) -> Result<(), Beam
 /// assert!(return_from_frame(&mut process)?.is_some());
 /// ```
 fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, BeamError> {
-    read(process, &Operand::X(0)).map_err(|_| error("return before setting x0"))?;
+    read_ref(process, &Operand::X(0)).map_err(|_| error("return before setting x0"))?;
     process.frames.pop();
     if !process.frames.is_empty() {
         return Ok(None);
@@ -2403,7 +2325,8 @@ fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, Beam
 /// ```
 fn normal_exit(process: &ProcessState) -> Result<Outcome, BeamError> {
     let result = read_operand(&Operand::X(0), &process.registers, &[])
-        .map_err(|_| error("return before setting x0"))?;
+        .map_err(|_| error("return before setting x0"))?
+        .clone();
     Ok(Outcome::Exit {
         reason: Term::static_atom("normal"),
         result: Some(result),
@@ -2472,16 +2395,16 @@ fn update_map_exact(
     Ok(Ok(map))
 }
 
-/// Read the value of each key in the map of a `get_map_elements` or
+/// Borrow the value of each key in the map of a `get_map_elements` or
 /// `has_map_fields` instruction, or return `None` at the first key that the
-/// map does not hold.
+/// map does not hold. The read copies neither the map nor a value.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // x0 holds #{output => raw}.
 /// let output = Operand::Value(Term::static_atom("output"));
-/// assert_eq!(map_values(&process, &Operand::X(0), [&output])?, Some(vec![Term::static_atom("raw")]));
+/// assert_eq!(map_values(&process, &Operand::X(0), [&output])?, Some(vec![&Term::static_atom("raw")]));
 /// let input = Operand::Value(Term::static_atom("input"));
 /// assert_eq!(map_values(&process, &Operand::X(0), [&output, &input])?, None);
 /// ```
@@ -2491,16 +2414,15 @@ fn update_map_exact(
 /// Return a runtime error when the source is not a map. The compiler puts an
 /// `is_map` test before each of these instructions.
 fn map_values<'a>(
-    process: &ProcessState,
-    map: &Operand,
+    process: &'a ProcessState,
+    map: &'a Operand,
     keys: impl IntoIterator<Item = &'a Operand>,
-) -> Result<Option<Vec<Term>>, BeamError> {
-    let map = read(process, map)?;
-    let Term::Map(map) = &map else {
+) -> Result<Option<Vec<&'a Term>>, BeamError> {
+    let Term::Map(map) = read_ref(process, map)? else {
         return Err(error("BEAM get_map_elements source is not a map"));
     };
     keys.into_iter()
-        .map(|key| Ok(map.get(&read(process, key)?).cloned()))
+        .map(|key| Ok(map.get(read_ref(process, key)?)))
         .collect()
 }
 
@@ -2710,7 +2632,8 @@ fn label_index(module: &BeamModule, label: u32) -> Result<usize, BeamError> {
         .ok_or_else(|| error(format!("missing BEAM label {label}")))
 }
 
-/// Read an operand from the process registers or the active frame. A
+/// Read a copy of an operand from the process registers or the active
+/// frame, for an instruction that stores the value in another place. A
 /// match context is a runtime invariant error: only the binary-match
 /// instructions read it, with `read_any` or `match_context`.
 ///
@@ -2720,14 +2643,29 @@ fn label_index(module: &BeamModule, label: u32) -> Result<usize, BeamError> {
 /// assert_eq!(read(&process, &Operand::Value(Term::Integer(1)))?, Term::Integer(1));
 /// ```
 fn read(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
-    match read_any(process, operand)? {
+    read_ref(process, operand).cloned()
+}
+
+/// Borrow an operand from the process registers or the active frame, for
+/// an instruction that only reads the value. The reference points to the
+/// literal or the register, so the read copies no term. A match context is
+/// a runtime invariant error, as for `read`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write(&mut process, &Operand::X(0), Term::Tuple(vec![Term::Integer(1)]))?;
+/// assert!(matches!(read_ref(&process, &Operand::X(0))?, Term::Tuple(_)));
+/// ```
+fn read_ref<'a>(process: &'a ProcessState, operand: &'a Operand) -> Result<&'a Term, BeamError> {
+    match read_any_ref(process, operand)? {
         Term::MatchContext(_) => Err(match_context_escape(operand)),
         value => Ok(value),
     }
 }
 
-/// Read an operand from the process registers or the active frame, also
-/// when it is a match context.
+/// Read a copy of an operand from the process registers or the active
+/// frame, also when it is a match context.
 ///
 /// # Examples
 ///
@@ -2737,6 +2675,23 @@ fn read(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
 /// assert!(matches!(read_any(&process, &Operand::X(0))?, Term::MatchContext(_)));
 /// ```
 fn read_any(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
+    read_any_ref(process, operand).cloned()
+}
+
+/// Borrow an operand from the process registers or the active frame, also
+/// when it is a match context.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let context = Rc::new(RefCell::new(MatchContext::new(b"a")));
+/// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
+/// assert!(matches!(read_any_ref(&process, &Operand::X(0))?, Term::MatchContext(_)));
+/// ```
+fn read_any_ref<'a>(
+    process: &'a ProcessState,
+    operand: &'a Operand,
+) -> Result<&'a Term, BeamError> {
     let stack = process.frames.last().map_or(&[][..], |frame| &frame.stack);
     read_operand(operand, &process.registers, stack)
 }
@@ -2873,6 +2828,49 @@ fn write(process: &mut ProcessState, operand: &Operand, value: Term) -> Result<(
         .expect("a running process has an active frame")
         .stack;
     write_operand(operand, value, &mut process.registers, stack)
+}
+
+/// The parts of a fun term that `call_fun` uses. The call reads them
+/// before it writes the argument registers or releases the frame, because
+/// the fun can be in one of these registers. Only the free variables, which
+/// the call stores in X registers, and the entry are copies. A term that
+/// the call cannot enter is copied for the exception reason only.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let call = FunCall::new(&Term::static_atom("notfun"), 0);
+/// assert!(matches!(call, FunCall::BadFun(Term::Atom(_))));
+/// ```
+enum FunCall {
+    /// A fun of the called arity: its entry and its free variables.
+    Enter { target: Target, free: Vec<Term> },
+    /// A fun of another arity, for the reason `{badarity, {Fun, Arguments}}`.
+    BadArity(Term),
+    /// A term that is not a fun, for the reason `{badfun, Term}`.
+    BadFun(Term),
+}
+
+impl FunCall {
+    /// Read the parts of `fun` that a call with `arity` arguments uses, as
+    /// ERTS `call_fun` tests them (`beam_common.c:1605-1731`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let call = FunCall::new(&Term::Fun(Fun::new(lambda, vec![tag])), 1);
+    /// assert!(matches!(call, FunCall::Enter { .. }));
+    /// ```
+    fn new(fun: &Term, arity: u32) -> Self {
+        match fun {
+            Term::Fun(fun) if fun.target().arity() == arity => FunCall::Enter {
+                target: fun.target().clone(),
+                free: fun.free().to_vec(),
+            },
+            Term::Fun(_) => FunCall::BadArity(fun.clone()),
+            _ => FunCall::BadFun(fun.clone()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -3626,22 +3624,24 @@ fn current_function(
     Ok((atom(module_name)?, atom(name)?, arity))
 }
 
-/// Read a literal, an X register, or a Y register.
+/// Borrow a literal, an X register, or a Y register. The reference points
+/// to the literal of the instruction or to the register, so the read
+/// copies no term.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let registers = vec![Some(Term::Integer(7))];
-/// assert_eq!(read_operand(&Operand::X(0), &registers, &[])?, Term::Integer(7));
+/// assert_eq!(read_operand(&Operand::X(0), &registers, &[])?, &Term::Integer(7));
 /// assert!(read_operand(&Operand::Y(0), &registers, &[]).is_err());
 /// ```
-fn read_operand(
-    operand: &Operand,
-    registers: &[Option<Term>],
-    stack: &[StackSlot],
-) -> Result<Term, BeamError> {
+fn read_operand<'a>(
+    operand: &'a Operand,
+    registers: &'a [Option<Term>],
+    stack: &'a [StackSlot],
+) -> Result<&'a Term, BeamError> {
     match operand {
-        Operand::Value(value) => Ok(value.clone()),
+        Operand::Value(value) => Ok(value),
         Operand::UnsupportedLiteral(index) => {
             Err(error(format!("unsupported BEAM literal index {index}")))
         }
@@ -3650,10 +3650,10 @@ fn read_operand(
         )),
         Operand::X(index) => registers
             .get(*index as usize)
-            .and_then(Clone::clone)
+            .and_then(Option::as_ref)
             .ok_or_else(|| error(format!("register x{index} is unset"))),
         Operand::Y(index) => match stack.get(*index as usize) {
-            Some(StackSlot::Term(value)) => Ok(value.clone()),
+            Some(StackSlot::Term(value)) => Ok(value),
             // The BEAM validator never lets an instruction read a catch tag.
             Some(StackSlot::Catch(_)) => {
                 Err(error(format!("stack register y{index} holds a catch tag")))
