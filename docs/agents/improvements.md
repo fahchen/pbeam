@@ -32,7 +32,6 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** <https://github.com/fahchen/pbeam/pull/492#issuecomment-6108464523>
 
-
 ## 20261011: Qualify behavior claims by execution mode
 
 **Problem:** Documentation stated that a denied `initial/1` call means that the root process does not start, but boot mode starts the root process before that call.
