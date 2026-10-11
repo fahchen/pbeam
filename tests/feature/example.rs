@@ -77,89 +77,6 @@ fn runs_hello_world_with_one_command_as_pinned_erts() {
 }
 
 #[test]
-fn loads_a_module_that_is_not_in_the_start_set_on_demand() {
-    // The build gives the `pbeam` run a start set, not the closure of each
-    // module that the example calls (`scripts/example_beams.exs`). The
-    // example `called_modules` calls `Elixir.String.length/1` and
-    // `string:length/1`, and each one calls `unicode_util`. None of the
-    // three modules is in the start set. Thus the run loads each one from
-    // the code path at its first call, through the pinned `error_handler`
-    // and `code_server`, and the run gives the same output as the pinned
-    // ERTS (see `gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts`).
-    // The ERTS run builds the example and writes the start set and the code
-    // path of the build.
-    let erts = run_example(&["called_modules", "--erts"], None);
-    assert_eq!(
-        parts(&erts),
-        (
-            "String.length: 5\\n:string.length: 5\\n".to_owned(),
-            String::new(),
-            Some(0)
-        ),
-        "ERTS"
-    );
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let output = root.join("target/examples/called_modules");
-    let start = std::fs::read_to_string(output.join("pbeam.start")).unwrap();
-    let paths = std::fs::read_to_string(output.join("erts.paths")).unwrap();
-    // Each module of the calls under test is not in the start set, so the run
-    // loads each one on demand. A build that gives the whole closure fails
-    // this assertion, and the run then loads nothing.
-    for module in ["Elixir.String.beam", "string.beam", "unicode_util.beam"] {
-        assert!(
-            !start
-                .lines()
-                .any(|line| line.ends_with(&format!("/{module}"))),
-            "{module} is in the start set"
-        );
-    }
-    let root_dir = Command::new("erl")
-        .args([
-            "-noshell",
-            "-eval",
-            "io:put_chars(code:root_dir()), halt().",
-        ])
-        .output()
-        .unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
-    command
-        .args([
-            "pbeam_boot",
-            "start",
-            "Elixir.CalledModules",
-            "main",
-            "--root",
-        ])
-        .arg(String::from_utf8(root_dir.stdout).unwrap().trim_end())
-        .current_dir(root);
-    for path in paths.lines() {
-        command.args(["--pa", path]);
-    }
-    // The start set of the build holds the example modules and
-    // `pbeam_boot.beam`, so the run needs no other BEAM file.
-    let files = start
-        .lines()
-        .map(Path::new)
-        .map(Path::to_path_buf)
-        .collect::<Vec<_>>();
-    command.arg("--").args(&files);
-
-    let output = run_with_time_limit(&mut command, Stdio::piped(), RUN_TIME_LIMIT);
-    assert_eq!(
-        parts(&output),
-        (
-            // `unicode_util:gc/1` loads at the first `Elixir.String.length/1`
-            // call, and the output names it.
-            "String.length: 5\\n:string.length: 5\\n".to_owned(),
-            String::new(),
-            Some(0)
-        ),
-        "start set of {} BEAM files",
-        files.len()
-    );
-}
-
-#[test]
 fn runs_fairness_as_pinned_erts_with_one_scheduler() {
     // `examples/fairness` spawns the busy processes `a` and `b`. Each one
     // counts to 20000 with no receive and reports each 10 steps. On one
@@ -285,12 +202,24 @@ fn dispatches_consolidated_protocols_as_pinned_erts() {
 }
 
 #[test]
-fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts() {
+fn runs_the_called_modules_of_an_example_on_demand_as_pinned_erts() {
     // `CalledModules.main/0` calls `String.length/1` of Elixir and
     // `string:length/1` of OTP, and each one calls `unicode_util:gc/1`. The
     // example does not import `unicode_util`. With only the modules that
     // the example imports, the `pbeam` run stops with
     // `unresolved external MFA unicode_util:gc/1` and status 1.
+    //
+    // The build gives the `pbeam` run a start set, not the closure of each
+    // module that the example calls (`scripts/example_beams.exs`). None of
+    // `Elixir.String`, `string`, and `unicode_util` is in the start set, so
+    // the run loads each one from the code path at its first call, through
+    // the pinned `error_handler` and `code_server`, and gives the ERTS
+    // output.
+    //
+    // One test builds `called_modules` and does each run. The build removes
+    // the lists of the last build before it writes them again, so a second
+    // test of the same example would read a list while this build holds it
+    // away.
     let erts = run_example(&["called_modules", "--erts"], None);
     let pbeam = run_example(&["called_modules", "--no-build"], None);
 
@@ -305,13 +234,74 @@ fn gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts
     );
     assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
 
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = root.join("target/examples/called_modules");
+
+    // The ERTS run built the example, so the lists of the build are
+    // complete now. The start set holds the example modules and
+    // `pbeam_boot.beam`, and the `pbeam` run needs no other BEAM file.
+    let start = std::fs::read_to_string(output.join("pbeam.start")).unwrap();
+    let paths = std::fs::read_to_string(output.join("erts.paths")).unwrap();
+
+    // Each module of the calls under test is not in the start set, so the
+    // run loads each one on demand. A build that gives the whole closure
+    // fails this assertion, and the run then loads nothing.
+    for module in ["Elixir.String.beam", "string.beam", "unicode_util.beam"] {
+        assert!(
+            !start
+                .lines()
+                .any(|line| line.ends_with(&format!("/{module}"))),
+            "{module} is in the start set"
+        );
+    }
+
+    let root_dir = Command::new("erl")
+        .args([
+            "-noshell",
+            "-eval",
+            "io:put_chars(code:root_dir()), halt().",
+        ])
+        .output()
+        .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    command
+        .args([
+            "pbeam_boot",
+            "start",
+            "Elixir.CalledModules",
+            "main",
+            "--root",
+        ])
+        .arg(String::from_utf8(root_dir.stdout).unwrap().trim_end())
+        .current_dir(root);
+    for path in paths.lines() {
+        command.args(["--pa", path]);
+    }
+    let files = start
+        .lines()
+        .map(Path::new)
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    command.arg("--").args(&files);
+
+    let on_demand = run_with_time_limit(&mut command, Stdio::piped(), RUN_TIME_LIMIT);
+    assert_eq!(
+        parts(&on_demand),
+        (
+            // `unicode_util:gc/1` loads at the first `Elixir.String.length/1`
+            // call, and the output names it.
+            "String.length: 5\\n:string.length: 5\\n".to_owned(),
+            String::new(),
+            Some(0)
+        ),
+        "start set of {} BEAM files",
+        files.len()
+    );
+
     // The build writes each called module that the `pbeam` run does not get
     // into `pbeam.unloaded`: the code path has no BEAM file for it, or the
     // PBeam loader does not load its BEAM file.
-    let unloaded = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/examples/called_modules/pbeam.unloaded"),
-    )
-    .unwrap();
+    let unloaded = std::fs::read_to_string(output.join("pbeam.unloaded")).unwrap();
     let entries = unloaded
         .lines()
         .map(|line| {
