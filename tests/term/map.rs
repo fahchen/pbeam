@@ -141,12 +141,12 @@ fn rejects_list_and_tuple_keys_with_unsupported_elements() {
         Term::list_from(vec![Term::list_from(vec![empty_map()])]),
         Term::list_from(vec![Term::Integer(1 << 59)]),
         // {<<>>}, {1, #{}}, and {[1 bsl 59]}: a tuple with an element that is not supported.
-        Term::tuple(vec![Term::Binary(vec![])]),
+        Term::tuple(vec![Term::binary(vec![])]),
         Term::tuple(vec![Term::Integer(1), empty_map()]),
         Term::tuple(vec![Term::list_from(vec![Term::Integer(1 << 59)])]),
         // [1|#{}], [1|<<>>], and [[1|#{}]]: an improper list tail that is not supported.
         Term::list_with_tail(vec![Term::Integer(1)], empty_map()),
-        Term::list_with_tail(vec![Term::Integer(1)], Term::Binary(vec![])),
+        Term::list_with_tail(vec![Term::Integer(1)], Term::binary(vec![])),
         Term::list_from(vec![Term::list_with_tail(
             vec![Term::Integer(1)],
             empty_map(),

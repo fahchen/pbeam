@@ -433,7 +433,7 @@ fn gives_the_erts_results_with_the_default_policy() {
         atom(&program, "false"),
         atom(&program, "true"),
         atom(&program, "true"),
-        Term::Binary(b"x".to_vec()),
+        Term::binary(b"x".to_vec()),
         atom(&program, "true"),
         badarg.clone(),
         badarg.clone(),

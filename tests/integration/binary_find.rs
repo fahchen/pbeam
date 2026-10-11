@@ -59,7 +59,7 @@ const COSTS: &str = "[{10,0,1,nomatch,1},{10,1,1,{10,1},1},{100000,0,1,nomatch,1
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::Binary(vec![97])])), "[<<97>>]");
+/// assert_eq!(text(&Term::list_from(vec![Term::binary(vec![97])])), "[<<97>>]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");

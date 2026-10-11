@@ -67,7 +67,7 @@ impl<'a> Walk<'a> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let walk = Walk::new(&Term::Binary(vec![1]), &[]);
+    /// let walk = Walk::new(&Term::binary(vec![1]), &[]);
     /// assert!(walk.stack.is_empty());
     /// ```
     fn new(term: &'a Term, stack: &[&'a Term]) -> Self {
@@ -92,7 +92,7 @@ impl<'a> Walk<'a> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![2])]);
+    /// let list = Term::list_from(vec![Term::Integer(1), Term::binary(vec![2])]);
     /// let mut walk = Walk::new(&list, &[]);
     /// let mut steps = 8;
     /// assert_eq!(walk.run(&mut steps, |_, _, _| None), Step::Done);
@@ -164,7 +164,7 @@ impl<'a> Walk<'a> {
     /// ```
     fn term(&self) -> (Term, Term) {
         let current = match self.current {
-            Term::Binary(bytes) if self.offset > 0 => Term::Binary(bytes[self.offset..].to_vec()),
+            Term::Binary(bytes) if self.offset > 0 => Term::binary(bytes[self.offset..].to_vec()),
             current => current.clone(),
         };
         let stack = self.stack.iter().map(|&rest| rest.clone());
@@ -194,7 +194,7 @@ fn walk_cost(init: i64, steps: i64) -> i32 {
 ///
 /// ```rust,ignore
 /// process.fcalls = 10;
-/// assert!(matches!(iolist_size(&mut process, &Term::Binary(b"abc".to_vec()))?, BifResult::Value(Term::Integer(3))));
+/// assert!(matches!(iolist_size(&mut process, &Term::binary(b"abc".to_vec()))?, BifResult::Value(Term::Integer(3))));
 /// assert_eq!(process.fcalls, 9);
 /// ```
 ///
@@ -275,7 +275,7 @@ pub(super) fn iolist_size_continue(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let hello = Term::Binary(b"Hello".to_vec());
+/// let hello = Term::binary(b"Hello".to_vec());
 /// assert!(matches!(iolist_to_iovec(&mut process, &hello)?, BifResult::Value(iovec) if iovec == Term::list_from([hello])));
 /// assert!(matches!(iolist_to_iovec(&mut process, &Term::static_atom("foo"))?, BifResult::Raise { .. }));
 /// ```
@@ -321,7 +321,7 @@ pub(super) fn iolist_to_iovec(
 /// process.fcalls = 10;
 /// let list = Term::list_from(vec![Term::Integer(1)]);
 /// let iovec = iovec_size(&mut process, &list, &list, &[])?;
-/// assert!(matches!(iovec, BifResult::Value(binaries) if binaries == Term::list_from([Term::Binary(vec![1])])));
+/// assert!(matches!(iovec, BifResult::Value(binaries) if binaries == Term::list_from([Term::binary(vec![1])])));
 /// assert_eq!(process.fcalls, 8);
 /// ```
 ///
@@ -387,7 +387,7 @@ pub(super) fn iovec_size(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![0; 513])]);
+/// let list = Term::list_from(vec![Term::Integer(1), Term::binary(vec![0; 513])]);
 /// let iovec = iovec_copy(&mut process, 10, &list, &[], Vec::new(), Vec::new());
 /// assert!(matches!(iovec, BifResult::Value(binaries) if binaries.proper_list().is_some_and(|binaries| binaries.len() == 2)));
 /// ```
@@ -412,7 +412,7 @@ pub(super) fn iovec_copy(
         }
         large => {
             if !merged.is_empty() {
-                iovec.push(Term::Binary(std::mem::take(&mut merged)));
+                iovec.push(Term::binary(std::mem::take(&mut merged)));
             }
             iovec.push(large.clone());
             None
@@ -426,7 +426,7 @@ pub(super) fn iovec_copy(
     assert_eq!(step, Step::Done, "the size walk checked the iodata");
     process.bump_reductions(walk_cost(init, steps));
     if !merged.is_empty() {
-        iovec.push(Term::Binary(merged));
+        iovec.push(Term::binary(merged));
     }
     Value(Term::list_from(iovec))
 }
@@ -438,7 +438,7 @@ pub(super) fn iovec_copy(
 ///
 /// ```rust,ignore
 /// let state = copy_state(&Term::nil(), Term::nil(), Vec::new(), vec![1]);
-/// assert_eq!(state[4], Term::Binary(vec![1]));
+/// assert_eq!(state[4], Term::binary(vec![1]));
 /// ```
 fn copy_state(term: &Term, stack: Term, iovec: Vec<Term>, merged: Vec<u8>) -> Vec<Term> {
     vec![
@@ -446,7 +446,7 @@ fn copy_state(term: &Term, stack: Term, iovec: Vec<Term>, merged: Vec<u8>) -> Ve
         term.clone(),
         stack,
         Term::list_from(iovec),
-        Term::Binary(merged),
+        Term::binary(merged),
     ]
 }
 
@@ -502,9 +502,9 @@ fn copy_bytes(bytes: &mut Vec<u8>, rest: &[u8], steps: &mut i64) -> Option<usize
 ///
 /// ```rust,ignore
 /// scheduler.current_process_mut().fcalls = 4000;
-/// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![2])]);
+/// let list = Term::list_from(vec![Term::Integer(1), Term::binary(vec![2])]);
 /// assert!(matches!(iolist_to_binary(&mut scheduler, &list)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
-/// assert!(matches!(iolist_to_binary(&mut scheduler, &Term::Binary(vec![1]))?, BifResult::Value(Term::Binary(bytes)) if bytes == [1]));
+/// assert!(matches!(iolist_to_binary(&mut scheduler, &Term::binary(vec![1]))?, BifResult::Value(Term::Binary(bytes)) if bytes == [1]));
 /// ```
 ///
 /// # Errors
@@ -528,9 +528,9 @@ pub(super) fn iolist_to_binary(
 ///
 /// ```rust,ignore
 /// scheduler.current_process_mut().fcalls = 4000;
-/// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![2])]);
+/// let list = Term::list_from(vec![Term::Integer(1), Term::binary(vec![2])]);
 /// assert!(matches!(list_to_binary(&mut scheduler, &list)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
-/// assert!(matches!(list_to_binary(&mut scheduler, &Term::Binary(vec![1]))?, BifResult::Raise { .. }));
+/// assert!(matches!(list_to_binary(&mut scheduler, &Term::binary(vec![1]))?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -558,7 +558,7 @@ pub(super) fn list_to_binary(
 ///
 /// ```rust,ignore
 /// scheduler.current_process_mut().fcalls = 4000;
-/// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![2])]);
+/// let list = Term::list_from(vec![Term::Integer(1), Term::binary(vec![2])]);
 /// assert!(matches!(list_to_bitstring(&mut scheduler, &list, "list_to_binary")?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
 /// assert!(matches!(list_to_bitstring(&mut scheduler, &Term::static_atom("a"), "iolist_to_binary")?, BifResult::Raise { .. }));
 /// ```
@@ -586,7 +586,7 @@ fn list_to_bitstring(
     reds_left = reds_left.max(L2B_MIN_REDS);
     let process = scheduler.current_process_mut();
     if term.is_nil() {
-        return Ok(Value(Term::Binary(Vec::new())));
+        return Ok(Value(Term::binary(Vec::new())));
     }
     match term.cons_cell() {
         Some((binary @ Term::Binary(_), tail)) if tail.is_nil() => Ok(Value(binary.clone())),
@@ -657,7 +657,7 @@ pub(super) fn l2b_size(
         return BifResult::badarg();
     }
     if size == 0 {
-        return Value(Term::Binary(Vec::new()));
+        return Value(Term::binary(Vec::new()));
     }
     let reds_left = reds_left - i64::from(cost);
     if reds_left <= 0 {
@@ -667,7 +667,7 @@ pub(super) fn l2b_size(
             arg.clone(),
             Term::nil(),
             Term::Integer(size as i64),
-            Term::Binary(Vec::new()),
+            Term::binary(Vec::new()),
         ]);
     }
     l2b_copy(process, reds_left, arg, &[], size, Vec::new())
@@ -687,7 +687,7 @@ pub(super) fn l2b_size(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let list = Term::list_from(vec![Term::Integer(1), Term::Binary(vec![0; 600])]);
+/// let list = Term::list_from(vec![Term::Integer(1), Term::binary(vec![0; 600])]);
 /// let binary = l2b_copy(&mut process, 10, &list, &[], 601, Vec::new());
 /// assert!(matches!(binary, BifResult::Value(Term::Binary(bytes)) if bytes.len() == 601));
 /// ```
@@ -719,11 +719,11 @@ pub(super) fn l2b_copy(
             term,
             stack,
             Term::Integer(size as i64),
-            Term::Binary(bytes),
+            Term::binary(bytes),
         ]);
     }
     process.bump_reductions(walk_cost(init, steps));
-    Value(Term::Binary(bytes))
+    Value(Term::binary(bytes))
 }
 
 /// Return the trap of [`list_to_bitstring`] to the export
@@ -751,10 +751,10 @@ fn l2b_trap(arguments: Vec<Term>) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(iodata_bytes(&Term::Binary(b"ab".to_vec())), Some(b"ab".to_vec()));
+/// assert_eq!(iodata_bytes(&Term::binary(b"ab".to_vec())), Some(b"ab".to_vec()));
 /// // [$a|<<"b">>] gives <<"ab">>, and [$a|x] is not iodata.
 /// let tail = |tail| Term::list_with_tail(vec![Term::Integer(97)], tail);
-/// assert_eq!(iodata_bytes(&tail(Term::Binary(b"b".to_vec()))), Some(b"ab".to_vec()));
+/// assert_eq!(iodata_bytes(&tail(Term::binary(b"b".to_vec()))), Some(b"ab".to_vec()));
 /// assert_eq!(iodata_bytes(&tail(Term::static_atom("x"))), None);
 /// assert_eq!(iodata_bytes(&Term::static_atom("foo")), None);
 /// ```

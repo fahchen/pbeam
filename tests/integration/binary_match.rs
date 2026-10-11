@@ -92,7 +92,7 @@ fn run_each_in(
         .iter()
         .map(|input| {
             program
-                .execute(module, function, &[Term::Binary(input.to_vec())])
+                .execute(module, function, &[Term::binary(input.to_vec())])
                 .map_err(|error| error.to_string())
         })
         .collect()
@@ -122,7 +122,7 @@ fn runs_bs_start_match3_of_a_binary_as_pinned_erts() {
             .execute(
                 "binary_match_probe",
                 "first",
-                &[Term::Binary(vec![195, 169])]
+                &[Term::binary(vec![195, 169])]
             )
             .unwrap(),
         Term::tuple(vec![utf8, Term::Integer(233)])
@@ -402,7 +402,7 @@ fn runs_the_equal_and_get_tail_commands_as_pinned_erts() {
     let tagged = |tag: &str, rest: &[u8]| {
         Ok(Term::tuple(vec![
             probe_atom(tag),
-            Term::Binary(rest.to_vec()),
+            Term::binary(rest.to_vec()),
         ]))
     };
     assert_eq!(
@@ -449,9 +449,9 @@ fn runs_the_skip_and_binary_commands_as_pinned_erts() {
         results,
         [
             Ok(Term::list_from(vec![
-                Term::Binary(vec![1, 2]),
-                Term::Binary(vec![0xBC]),
-                Term::Binary(vec![3, 4, 5, 6, 7, 8, 9, 10, 11])
+                Term::binary(vec![1, 2]),
+                Term::binary(vec![0xBC]),
+                Term::binary(vec![3, 4, 5, 6, 7, 8, 9, 10, 11])
             ])),
             Ok(probe_atom("false"))
         ]
@@ -461,7 +461,7 @@ fn runs_the_skip_and_binary_commands_as_pinned_erts() {
     let (results, erts) = bs_match_each("tail", &tail);
     assert_eq!(
         results,
-        [Ok(Term::Binary(vec![2, 3])), Ok(probe_atom("false"))]
+        [Ok(Term::binary(vec![2, 3])), Ok(probe_atom("false"))]
     );
     assert_eq!(erts, b"[<<2,3>>,false]\n");
 }
@@ -549,8 +549,8 @@ fn bs_get_atom(name: &str) -> Term {
 /// The tuple `{Head, Tail}` of two binaries.
 fn halves(head: &[u8], tail: &[u8]) -> Result<Term, String> {
     Ok(Term::tuple(vec![
-        Term::Binary(head.to_vec()),
-        Term::Binary(tail.to_vec()),
+        Term::binary(head.to_vec()),
+        Term::binary(tail.to_vec()),
     ]))
 }
 
@@ -562,14 +562,14 @@ fn runs_bs_start_match4_bs_get_binary2_and_bs_get_tail_as_pinned_erts() {
     // field size check (`emit_bs_get_field_size`, jit/arm/instr_bs.cpp:
     // 38-116). A size larger than the rest fails in
     // `erts_bs_get_binary_2` (erl_bits.c:400-424). 2^59 is an ERTS bignum.
-    let bytes = || Term::Binary(vec![1, 2, 3]);
+    let bytes = || Term::binary(vec![1, 2, 3]);
     let calls = [
         vec![bytes(), Term::Integer(0)],
         vec![bytes(), Term::Integer(1)],
         vec![bytes(), Term::Integer(3)],
         vec![bytes(), Term::Integer(4)],
-        vec![Term::Binary(Vec::new()), Term::Integer(0)],
-        vec![Term::Binary(Vec::new()), Term::Integer(1)],
+        vec![Term::binary(Vec::new()), Term::Integer(0)],
+        vec![Term::binary(Vec::new()), Term::Integer(1)],
         vec![bytes(), Term::Integer(-1)],
         vec![bytes(), bs_get_atom("short")],
         vec![bytes(), Term::Integer(1 << 59)],
@@ -606,9 +606,9 @@ fn runs_bs_start_match4_bs_get_binary2_and_bs_get_tail_as_pinned_erts() {
 fn multiplies_the_bs_get_binary2_size_by_its_unit_as_pinned_erts() {
     // `bs_get_probe:split_units/2` runs `bs_get_binary2` with unit 16.
     let calls = [
-        vec![Term::Binary(vec![1, 2, 3]), Term::Integer(1)],
-        vec![Term::Binary(vec![1, 2, 3, 4]), Term::Integer(2)],
-        vec![Term::Binary(vec![1, 2, 3]), Term::Integer(2)],
+        vec![Term::binary(vec![1, 2, 3]), Term::Integer(1)],
+        vec![Term::binary(vec![1, 2, 3, 4]), Term::Integer(2)],
+        vec![Term::binary(vec![1, 2, 3]), Term::Integer(2)],
     ];
     assert_eq!(
         bs_get_each("split_units", &calls),
@@ -634,7 +634,7 @@ fn stops_at_a_bs_get_binary2_that_needs_a_bitstring() {
     // term, so it stops the run (row "Binary matching").
     let calls: Vec<Vec<Term>> = [8, 16, 17, 3]
         .into_iter()
-        .map(|size| vec![Term::Binary(vec![1, 2]), Term::Integer(size)])
+        .map(|size| vec![Term::binary(vec![1, 2]), Term::Integer(size)])
         .collect();
     assert_eq!(
         bs_get_each("split_bits", &calls),
@@ -659,12 +659,12 @@ fn resumes_a_match_context_and_reads_its_tail_as_pinned_erts() {
     // bitstring in ERTS, so PBeam stops the run (row "Binary matching").
     let calls: Vec<Vec<Term>> = [&b"a"[..], b"a\x12\xF3", b"a\x1F\x23", b"a\x12", b"b"]
         .into_iter()
-        .map(|input| vec![Term::Binary(input.to_vec())])
+        .map(|input| vec![Term::binary(input.to_vec())])
         .collect();
     let nibbles = |values: &[i64], tail: &[u8]| {
         Ok(Term::tuple(vec![
             Term::list_from(values.iter().copied().map(Term::Integer)),
-            Term::Binary(tail.to_vec()),
+            Term::binary(tail.to_vec()),
         ]))
     };
     assert_eq!(

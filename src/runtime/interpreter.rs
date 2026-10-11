@@ -1105,7 +1105,7 @@ impl BeamProgram {
                     destination,
                 } => match read_any(process, source)? {
                     Term::Binary(ref bytes) => {
-                        let context = MatchContext::new(bytes);
+                        let context = MatchContext::new(bytes.clone());
                         let context = Term::MatchContext(Rc::new(RefCell::new(context)));
                         write(process, destination, context)?;
                     }
@@ -1142,12 +1142,12 @@ impl BeamProgram {
                     let state = match_context(process, context)?;
                     let state = state.borrow();
                     let bits = state.remaining_bits();
-                    if !bits.is_multiple_of(8) {
+                    let Some(tail) = state.tail() else {
                         return Err(error(format!(
                             "unsupported bs_get_tail of {bits} bits: needs a bitstring term"
                         )));
-                    }
-                    write(process, destination, Term::Binary(state.tail()))?;
+                    };
+                    write(process, destination, Term::Binary(tail))?;
                 }
                 // ERTS `i_bs_get_binary2` checks the size
                 // (`binary_field_size`), then reads the bits as a
@@ -1165,15 +1165,27 @@ impl BeamProgram {
                     destination,
                 } => {
                     let state = match_context(process, context)?;
+                    // ERTS writes a sub-bitstring that refers to the
+                    // original binary and moves the position past the
+                    // segment (`erts_bs_get_binary_2`, `erl_bits.c:400-424`),
+                    // so the view needs no copy. The position moves before
+                    // the size check, as the `Fail` jump does.
                     let bytes = binary_field_size(read_ref(process, size)?, *unit)
-                        .and_then(|bits| Some((bits, state.borrow_mut().read_bits(bits)?)));
+                        .and_then(|bits| Some((bits, state.borrow_mut().advance(bits)?)));
                     match bytes {
-                        Some((bits, bytes)) => {
+                        Some((bits, ())) => {
                             if !bits.is_multiple_of(8) {
                                 return Err(error(format!(
                                     "unsupported bs_get_binary2 of {bits} bits: needs a bitstring term"
                                 )));
                             }
+                            let position = state.borrow().position();
+                            let bytes = state
+                                .borrow()
+                                .bits_at(position - bits as usize, position)
+                                .expect(
+                                    "the size of a bs_get_binary2 view is a whole number of bytes",
+                                );
                             write(process, destination, Term::Binary(bytes))?;
                         }
                         None => jump(module, process, *fail_label)?,
@@ -1246,7 +1258,7 @@ impl BeamProgram {
                     destination,
                     segments,
                 } => match create_binary(process, segments)? {
-                    Ok(bytes) => write(process, destination, Term::Binary(bytes))?,
+                    Ok(bytes) => write(process, destination, Term::binary(bytes))?,
                     Err(_) if *fail_label != 0 => jump(module, process, *fail_label)?,
                     Err(failure) => {
                         if let Some(outcome) = raise_binary_failure(scheduler, module, failure)? {
@@ -3194,8 +3206,14 @@ fn binary_match(
                 write(process, destination, Term::Integer(value))?;
             }
             BinaryMatchCommand::Binary { size, destination } => {
+                // `binary_size` gives the runtime error for a size that is
+                // not a whole number of bytes, which is a bitstring. ERTS
+                // also reads a binary segment at a bit position that is not
+                // on a byte boundary (`GET_BITSTRING`,
+                // jit/arm/instr_bs.cpp:3136-3176), and `read_bytes` gives
+                // such a segment a view of its bits.
                 binary_size("binary", *size)?;
-                let bytes = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
+                let bytes = state.read_bytes(*size).ok_or_else(|| too_few_bits(size))?;
                 write(process, destination, Term::Binary(bytes))?;
             }
             BinaryMatchCommand::Equal { size, value } => {
@@ -3207,8 +3225,17 @@ fn binary_match(
                 }
             }
             BinaryMatchCommand::GetTail { destination } => {
+                // `binary_size` gives the runtime error for a size that is
+                // not a whole number of bytes, which is a bitstring. ERTS
+                // writes the bits after the position as a sub-bitstring
+                // (`emit_bs_get_tail_shared`, jit/arm/instr_bs.cpp:407-439),
+                // and a position that is not on a byte boundary gives a
+                // bitstring, which PBeam does not have.
                 binary_size("get_tail", remaining)?;
-                write(process, destination, Term::Binary(state.tail()))?;
+                let tail = state
+                    .tail()
+                    .expect("binary_size checked the size of a get_tail");
+                write(process, destination, Term::Binary(tail))?;
             }
             BinaryMatchCommand::Skip { size } => {
                 state.skip(*size).ok_or_else(|| too_few_bits(size))?;
@@ -3426,7 +3453,7 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 /// # Examples
 ///
 /// ```rust,ignore
-/// write(&mut process, &Operand::X(0), Term::Binary(b"3".to_vec()))?;
+/// write(&mut process, &Operand::X(0), Term::binary(b"3".to_vec()))?;
 /// let segments = [
 ///     BinarySegment::String(b"count: ".to_vec()),
 ///     BinarySegment::BinaryAll { segment: 2, source: Operand::X(0) },
@@ -3476,7 +3503,7 @@ fn create_binary(
                 };
                 let reductions = bytes.len() * 8 / BITS_PER_REDUCTION;
                 parts.push(BinaryPart::Bytes(
-                    Cow::Owned(std::mem::take(bytes)),
+                    Cow::Owned(bytes.clone().to_bytes()),
                     reductions,
                 ));
             }
@@ -3552,7 +3579,7 @@ fn create_binary(
             if let Some(index) = parts.iter().position(|part| part.type_failure().is_some()) {
                 return Ok(Err(integer_type_failure(&parts, index)));
             }
-            return Ok(Ok(std::mem::take(start)));
+            return Ok(Ok(start.clone().to_bytes()));
         }
         let reductions = start.len() * 8 / BITS_PER_REDUCTION;
         process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));

@@ -71,7 +71,7 @@ const NAMES_LATIN1: &str = "[<<97,98,99,0>>,<<97,98,99,0>>,<<0>>,<<97,98,99,0>>,
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::Binary(vec![97])])), "[<<97>>]");
+/// assert_eq!(text(&Term::list_from(vec![Term::binary(vec![97])])), "[<<97>>]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");

@@ -90,7 +90,7 @@ impl Scheduler {
         match event {
             PortEvent::Data(bytes) => {
                 port.input += bytes.len() as u64;
-                self.deliver(owner, port_message(id, "data", Term::Binary(bytes)));
+                self.deliver(owner, port_message(id, "data", Term::binary(bytes)));
             }
             PortEvent::EndOfFile if port.exit_status => port.end_of_file = true,
             PortEvent::EndOfFile => self.close_port(id, Term::static_atom("normal")),

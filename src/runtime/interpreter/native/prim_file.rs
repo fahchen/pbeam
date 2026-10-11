@@ -128,12 +128,12 @@ const MAX_FILETIME: i64 = 253_402_300_799;
 ///
 /// ```rust,ignore
 /// // {file_info,166576,regular,read,{...},{...},{...},33261,1,16777229,0,727681,0,0}
-/// let result = read_info_nif(&mut scheduler, &Term::Binary(b"/bin/sh\0".to_vec()), &Term::Integer(1))?;
+/// let result = read_info_nif(&mut scheduler, &Term::binary(b"/bin/sh\0".to_vec()), &Term::Integer(1))?;
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(fields)) if fields.len() == 14));
-/// let result = read_info_nif(&mut scheduler, &Term::Binary(b"/bin/sh".to_vec()), &Term::Integer(1))?;
+/// let result = read_info_nif(&mut scheduler, &Term::binary(b"/bin/sh".to_vec()), &Term::Integer(1))?;
 /// // {error, einval}
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(fields)) if fields.len() == 2));
-/// assert!(matches!(read_info_nif(&mut scheduler, &Term::Binary(vec![0]), &Term::nil())?, BifResult::Raise { .. }));
+/// assert!(matches!(read_info_nif(&mut scheduler, &Term::binary(vec![0]), &Term::nil())?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -171,9 +171,9 @@ fn read_info_nif(
 ///
 /// ```rust,ignore
 /// // {ok, <<>>}
-/// let result = read_file_nif(&mut atoms, &Term::Binary(b"/dev/null\0".to_vec()))?;
+/// let result = read_file_nif(&mut atoms, &Term::binary(b"/dev/null\0".to_vec()))?;
 /// // {error, eisdir}
-/// let result = read_file_nif(&mut atoms, &Term::Binary(b"/\0".to_vec()))?;
+/// let result = read_file_nif(&mut atoms, &Term::binary(b"/\0".to_vec()))?;
 /// ```
 ///
 /// # Errors
@@ -184,7 +184,7 @@ fn read_file_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamEr
     let Some(path) = marshal_path(path) else {
         return error_tuple(atoms, "einval");
     };
-    ok_tuple(atoms, file::read_file(path).map(Term::Binary))
+    ok_tuple(atoms, file::read_file(path).map(Term::binary))
 }
 
 /// Run `prim_file:list_dir_nif(Path)`, as the ERTS NIF `list_dir_nif`
@@ -199,9 +199,9 @@ fn read_file_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamEr
 ///
 /// ```rust,ignore
 /// // {ok, [<<"b">>, <<"a">>]} when readdir gives "a", then "b"
-/// let result = list_dir_nif(&mut atoms, &Term::Binary(b"/tmp/dir\0".to_vec()))?;
+/// let result = list_dir_nif(&mut atoms, &Term::binary(b"/tmp/dir\0".to_vec()))?;
 /// // {error, enoent}
-/// let result = list_dir_nif(&mut atoms, &Term::Binary(b"/pbeam-missing\0".to_vec()))?;
+/// let result = list_dir_nif(&mut atoms, &Term::binary(b"/pbeam-missing\0".to_vec()))?;
 /// ```
 ///
 /// # Errors
@@ -213,7 +213,7 @@ fn list_dir_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamErr
         return error_tuple(atoms, "einval");
     };
     let names = file::list_dir(path)
-        .map(|names| Term::list_from(names.into_iter().rev().map(Term::Binary)));
+        .map(|names| Term::list_from(names.into_iter().rev().map(Term::binary)));
     ok_tuple(atoms, names)
 }
 
@@ -227,9 +227,9 @@ fn list_dir_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamErr
 ///
 /// ```rust,ignore
 /// // {ok, <<"target">>} for a symbolic link to "target"
-/// let result = read_link_nif(&mut atoms, &Term::Binary(b"/tmp/link\0".to_vec()))?;
+/// let result = read_link_nif(&mut atoms, &Term::binary(b"/tmp/link\0".to_vec()))?;
 /// // {error, einval}
-/// let result = read_link_nif(&mut atoms, &Term::Binary(b"/\0".to_vec()))?;
+/// let result = read_link_nif(&mut atoms, &Term::binary(b"/\0".to_vec()))?;
 /// ```
 ///
 /// # Errors
@@ -240,7 +240,7 @@ fn read_link_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamEr
     let Some(path) = marshal_path(path) else {
         return error_tuple(atoms, "einval");
     };
-    ok_tuple(atoms, file::read_link(path).map(Term::Binary))
+    ok_tuple(atoms, file::read_link(path).map(Term::binary))
 }
 
 /// Run `prim_file:get_cwd_nif()`, as the ERTS NIF `get_cwd_nif`
@@ -259,7 +259,7 @@ fn read_link_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamEr
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn get_cwd_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
-    ok_tuple(atoms, file::get_cwd().map(Term::Binary))
+    ok_tuple(atoms, file::get_cwd().map(Term::binary))
 }
 
 /// Return `{ok, Value}` for `Ok(Value)`, as `enif_make_tuple2(env, am_ok,
@@ -269,7 +269,7 @@ fn get_cwd_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
 ///
 /// ```rust,ignore
 /// // {ok, <<>>}
-/// let result = ok_tuple(&mut atoms, Ok(Term::Binary(vec![])))?;
+/// let result = ok_tuple(&mut atoms, Ok(Term::binary(vec![])))?;
 /// // {error, enoent}
 /// let result = ok_tuple(&mut atoms, Err(libc::ENOENT))?;
 /// ```
@@ -296,9 +296,9 @@ fn ok_tuple(atoms: &mut AtomTable, result: Result<Term, c_int>) -> Result<BifRes
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(marshal_path(&Term::Binary(b"/tmp\0\0".to_vec())), Some(c"/tmp"));
-/// assert_eq!(marshal_path(&Term::Binary(b"/tmp".to_vec())), None);
-/// assert_eq!(marshal_path(&Term::Binary(b"/a\0b\0".to_vec())), None);
+/// assert_eq!(marshal_path(&Term::binary(b"/tmp\0\0".to_vec())), Some(c"/tmp"));
+/// assert_eq!(marshal_path(&Term::binary(b"/tmp".to_vec())), None);
+/// assert_eq!(marshal_path(&Term::binary(b"/a\0b\0".to_vec())), None);
 /// ```
 fn marshal_path(path: &Term) -> Option<&CStr> {
     let Term::Binary(bytes) = path else {

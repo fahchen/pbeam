@@ -26,7 +26,7 @@ fn converts_atoms_to_binaries_as_pinned_erts() {
     let error = Term::Atom(program.atom("error").unwrap());
     let badarg = Term::Atom(program.atom("badarg").unwrap());
     let raised = Term::tuple(vec![error, badarg]);
-    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     let ok = binary(b"ok");
     let utf8 = binary("h\u{e9}llo".as_bytes());
     let pi = binary(&[207, 128]);

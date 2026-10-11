@@ -84,7 +84,7 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
         program
             .execute("otp_io_calls", "prim_tty_call", &[])
             .unwrap(),
-        Term::Binary(ANSI_REGEXP.to_vec())
+        Term::binary(ANSI_REGEXP.to_vec())
     );
 }
 

@@ -42,7 +42,7 @@ fn keeps_persistent_terms_for_all_processes_as_pinned_erts() {
             atom("ok"),
             Term::tuple(vec![
                 atom("value"),
-                Term::list_from(vec![atom("a"), Term::Binary(b"b".to_vec())]),
+                Term::list_from(vec![atom("a"), Term::binary(b"b".to_vec())]),
             ]),
             atom("undefined"),
         ])
@@ -92,12 +92,12 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let pair = |key: Term, value: i64| Term::tuple(vec![key, Term::Integer(value)]);
     let ok_tuple = Term::tuple(vec![atom("ok")]);
-    let binary = Term::Binary(b"0123456789abcdefg".to_vec());
+    let binary = Term::binary(b"0123456789abcdefg".to_vec());
     let string = Term::list_from(b"abc".iter().map(|&c| Term::Integer(c.into())));
     let small_map = Term::Map(
         Map::from_pairs(vec![
             (atom("ok"), Term::nil()),
-            (Term::Integer(1), Term::Binary(vec![])),
+            (Term::Integer(1), Term::binary(vec![])),
         ])
         .unwrap(),
     );

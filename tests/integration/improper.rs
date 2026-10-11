@@ -236,7 +236,7 @@ fn gives_the_iodata_and_chardata_results_of_pinned_erts_for_improper_lists() {
     let program = BeamProgram::load(&[IMPROPER_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
-    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     assert_eq!(
         program.execute("improper_probe", "iodata", &[]).unwrap(),
         Term::list_from(vec![

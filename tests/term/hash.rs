@@ -1,7 +1,9 @@
 use std::{cell::RefCell, rc::Rc};
 
 use super::{internal_hash, mix64};
-use crate::term::{Atom, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term};
+use crate::term::{
+    Atom, Binary, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
+};
 
 #[test]
 #[should_panic(expected = "a match context reached a term operation")]
@@ -9,7 +11,7 @@ fn panics_for_a_match_context() {
     // The interpreter gives a runtime error before a match context can
     // reach a term operation.
     internal_hash(&Term::MatchContext(Rc::new(RefCell::new(
-        MatchContext::new(b"a"),
+        MatchContext::new(Binary::from(b"a")),
     ))));
 }
 
@@ -66,25 +68,25 @@ fn hashes_each_term_kind_as_pinned_erts() {
         ),
         (Term::list_from(vec![Term::nil()]), 7939938580689537527),
         (
-            Term::list_from(vec![Term::Binary(vec![]), Term::Integer(2)]),
+            Term::list_from(vec![Term::binary(vec![]), Term::Integer(2)]),
             2437268029134553953,
         ),
         (
             Term::list_from(vec![Term::Integer(1), tuple(vec![]), Term::Integer(2)]),
             11634306265473751121,
         ),
-        (Term::Binary(vec![]), 10873612744977862784),
-        (Term::Binary(vec![1, 2, 3]), 3963608694498431467),
+        (Term::binary(vec![]), 10873612744977862784),
+        (Term::binary(vec![1, 2, 3]), 3963608694498431467),
         (
-            Term::Binary(b"0123456789abcde".to_vec()),
+            Term::binary(b"0123456789abcde".to_vec()),
             13603490536549166064,
         ),
         (
-            Term::Binary(b"0123456789abcdef".to_vec()),
+            Term::binary(b"0123456789abcdef".to_vec()),
             8513549014846254092,
         ),
         (
-            Term::Binary(b"0123456789abcdefg".to_vec()),
+            Term::binary(b"0123456789abcdefg".to_vec()),
             11292494362027136432,
         ),
         (Term::Integer(1 << 59), 10054563828903259082),
@@ -95,7 +97,7 @@ fn hashes_each_term_kind_as_pinned_erts() {
         (
             map([
                 (atom("ok"), Term::nil()),
-                (Term::Integer(1), Term::Binary(vec![])),
+                (Term::Integer(1), Term::binary(vec![])),
             ]),
             13992029790355293803,
         ),
@@ -145,7 +147,7 @@ fn hashes_local_funs_as_pinned_erts() {
     // index, the old index, the old unique value, and the free variables.
     let zero = || local(0, 7, 1, vec![]);
     let free = local(0, 7, 1, vec![Term::Integer(1), Term::tuple(vec![])]);
-    let negative = || local(3, -5, 2, vec![Term::Binary(b"ab".to_vec()), atom("ok")]);
+    let negative = || local(3, -5, 2, vec![Term::binary(b"ab".to_vec()), atom("ok")]);
     let cases = [
         (zero(), 16900316212850717680),
         (free.clone(), 15970829942560899780),
@@ -222,7 +224,7 @@ fn hashes_improper_lists_as_pinned_erts() {
             6434836968081835632,
         ),
         (
-            improper(vec![integers(&[1])], Term::Binary(vec![])),
+            improper(vec![integers(&[1])], Term::binary(vec![])),
             465555062996238064,
         ),
         (
@@ -298,7 +300,7 @@ fn hashes_collision_nodes_as_pinned_erts() {
 fn hashes_a_deep_term_without_recursion() {
     let deep = |levels: usize| {
         (0..levels).fold(Term::nil(), |inner, level| match level % 5 {
-            0 => Term::tuple(vec![inner, Term::Binary(vec![])]),
+            0 => Term::tuple(vec![inner, Term::binary(vec![])]),
             1 => Term::list_from(vec![inner, Term::Integer(1)]),
             2 => map([(atom("ok"), inner)]),
             3 => improper(vec![inner], Term::Integer(1)),

@@ -85,7 +85,7 @@ fn cost_to_proc(process: &mut ProcessState, steps: i64) {
 /// let chardata = Term::list_from(vec![Term::Integer(104), Term::Integer(105)]);
 /// let result = characters_to_binary(&mut process, &chardata, &Term::static_atom("unicode"))?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes == b"hi"));
-/// let latin1 = Term::Binary(vec![200]);
+/// let latin1 = Term::binary(vec![200]);
 /// let result = characters_to_binary(&mut process, &latin1, &Term::static_atom("latin1"))?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes == [195, 136]));
 /// let foo = Term::list_from(vec![Term::static_atom("foo")]);
@@ -149,7 +149,7 @@ pub(super) fn characters_to_binary(
 /// ```rust,ignore
 /// process.fcalls = 3;
 /// let unicode = Term::static_atom("unicode");
-/// let trap = utf8_turn(&mut process, Utf8Output::default(), &Term::Binary(vec![97; 100]), 64, &unicode)?;
+/// let trap = utf8_turn(&mut process, Utf8Output::default(), &Term::binary(vec![97; 100]), 64, &unicode)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "characters_to_utf8_trap", .. }));
 /// assert_eq!(process.fcalls, 0);
 /// ```
@@ -178,14 +178,14 @@ fn utf8_turn(
         ));
     }
     if done {
-        return Ok(Value(Term::Binary(output.bytes)));
+        return Ok(Value(Term::binary(output.bytes)));
     }
     process.bump_all_reductions();
     Ok(TrapBif {
         module: "erlang",
         function: "characters_to_utf8_trap",
         arguments: vec![
-            Term::Binary(output.bytes),
+            Term::binary(output.bytes),
             leftover_before(output.leftover, rest),
             encoding.clone(),
         ],
@@ -201,7 +201,7 @@ fn utf8_turn(
 ///
 /// ```rust,ignore
 /// let utf8 = Term::static_atom("utf8");
-/// let result = utf8_trap(&mut process, b"ab".to_vec(), &Term::Binary(b"c".to_vec()), &utf8)?;
+/// let result = utf8_trap(&mut process, b"ab".to_vec(), &Term::binary(b"c".to_vec()), &utf8)?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes == b"abc"));
 /// ```
 ///
@@ -231,13 +231,13 @@ pub(super) fn utf8_trap(
 ///
 /// ```rust,ignore
 /// let rest = leftover_before(vec![195], Term::list_from(vec![Term::Integer(97)]));
-/// assert_eq!(rest, Term::list_from(vec![Term::Binary(vec![195]), Term::Integer(97)]));
+/// assert_eq!(rest, Term::list_from(vec![Term::binary(vec![195]), Term::Integer(97)]));
 /// ```
 fn leftover_before(leftover: Vec<u8>, rest: Term) -> Term {
     if leftover.is_empty() {
         return rest;
     }
-    Term::list_with_tail(vec![Term::Binary(leftover)], rest)
+    Term::list_with_tail(vec![Term::binary(leftover)], rest)
 }
 
 /// Run `unicode:characters_to_list/2`: convert `chardata` to a list of code
@@ -258,7 +258,7 @@ fn leftover_before(leftover: Vec<u8>, rest: Term) -> Term {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let chardata = Term::Binary(b"hi".to_vec());
+/// let chardata = Term::binary(b"hi".to_vec());
 /// let result = characters_to_list(&mut process, &chardata, &Term::static_atom("utf8"))?;
 /// assert!(matches!(result, BifResult::Value(list) if list == Term::list_from([Term::Integer(104), Term::Integer(105)])));
 /// let foo = Term::static_atom("foo");
@@ -339,7 +339,7 @@ fn list_turn(
         let rest = if leftover.is_empty() {
             rest
         } else {
-            Term::list_from(vec![Term::Binary(leftover), rest])
+            Term::list_from(vec![Term::binary(leftover), rest])
         };
         (Some("error"), rest)
     } else if rest == nil && !leftover.is_empty() {
@@ -348,14 +348,14 @@ fn list_turn(
         } else {
             "error"
         };
-        (Some(reason), Term::Binary(leftover))
+        (Some(reason), Term::binary(leftover))
     } else if rest != nil {
         process.bump_all_reductions();
         return TrapBif {
             module: "erlang",
             function: "characters_to_list_trap_1",
             arguments: vec![
-                Term::Binary(output.bytes),
+                Term::binary(output.bytes),
                 Term::Integer(output.characters as i64),
                 leftover_before(leftover, rest),
                 Term::static_atom(if latin1 { "latin1" } else { "unicode" }),
@@ -453,7 +453,7 @@ pub(super) fn analyze_turn(
             module: "erlang",
             function: "characters_to_list_trap_3",
             arguments: vec![
-                Term::Binary(bytes.to_vec()),
+                Term::binary(bytes.to_vec()),
                 Term::Integer(end as i64),
                 Term::Integer(characters as i64),
             ],
@@ -470,7 +470,7 @@ pub(super) fn analyze_turn(
         Some(reason) => Term::tuple(vec![
             Term::static_atom(reason),
             converted,
-            Term::Binary(rest.to_vec()),
+            Term::binary(rest.to_vec()),
         ]),
         None => converted,
     };

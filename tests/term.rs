@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use super::{
-    AtomTable, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
+    AtomTable, Binary, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
     test_atom as atom,
 };
 
@@ -192,11 +192,11 @@ fn prints_each_free_variable_of_a_fun() {
 fn matches_the_derived_debug_text_and_compares_every_variant() {
     let leaves = [
         atom("ok"),
-        Term::Binary(vec![1, 2]),
+        Term::binary(vec![1, 2]),
         Term::Integer(-3),
         Term::Pid(ProcessId(4)),
         Term::Reference(Reference(5)),
-        Term::MatchContext(Rc::new(RefCell::new(MatchContext::new(&[6])))),
+        Term::MatchContext(Rc::new(RefCell::new(MatchContext::new(Binary::from(&[6]))))),
     ];
     let term = Term::tuple(vec![Term::list_from(leaves.to_vec()), Term::nil()]);
     assert_eq!(

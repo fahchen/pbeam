@@ -67,7 +67,7 @@ fn rejects_an_unsupported_io_device_with_a_function_clause_error() {
         .execute(
             "Elixir.IO",
             "puts",
-            &[Term::Integer(7), Term::Binary(b"message".to_vec())],
+            &[Term::Integer(7), Term::binary(b"message".to_vec())],
         )
         .unwrap_err();
 

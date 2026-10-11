@@ -982,10 +982,10 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
         )
         .execute("fixture", "main", &[])
     };
-    let chardata = || Term::list_from(vec![Term::Binary(b"Hello".to_vec()), Term::Integer(10)]);
+    let chardata = || Term::list_from(vec![Term::binary(b"Hello".to_vec()), Term::Integer(10)]);
     assert_eq!(
         convert(chardata(), "unicode").unwrap(),
-        Term::Binary(b"Hello\n".to_vec())
+        Term::binary(b"Hello\n".to_vec())
     );
     // ERTS 29.1.1 raises badarg for a term that is not chardata.
     assert_eq!(
@@ -998,18 +998,18 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
     // is <<"Hello\n">>.
     assert_eq!(
         convert(chardata(), "utf8").unwrap(),
-        Term::Binary(b"Hello\n".to_vec())
+        Term::binary(b"Hello\n".to_vec())
     );
     // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], latin1)
     // is <<"Hello\n">>, and unicode:characters_to_binary([<<233>>], latin1)
     // is <<195,169>>.
     assert_eq!(
         convert(chardata(), "latin1").unwrap(),
-        Term::Binary(b"Hello\n".to_vec())
+        Term::binary(b"Hello\n".to_vec())
     );
     assert_eq!(
-        convert(Term::list_from(vec![Term::Binary(vec![233])]), "latin1").unwrap(),
-        Term::Binary(vec![195, 169])
+        convert(Term::list_from(vec![Term::binary(vec![233])]), "latin1").unwrap(),
+        Term::binary(vec![195, 169])
     );
     assert_eq!(
         convert(chardata(), "utf16").unwrap_err().to_string(),
@@ -1562,7 +1562,7 @@ fn rejects_unresolved_exports_and_function_labels() {
 fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
     let run = |rest: Vec<Instruction>| {
         let mut body = vec![
-            Instruction::Move(Operand::Value(Term::Binary(b"a".to_vec())), Operand::X(0)),
+            Instruction::Move(Operand::Value(Term::binary(b"a".to_vec())), Operand::X(0)),
             Instruction::BinaryMatchStart {
                 fail_label: 1,
                 source: Operand::X(0),
@@ -1664,7 +1664,7 @@ fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
     let run = |copy: Instruction, to: Operand| {
         let body = vec![
             Instruction::Allocate { stack_size: 1 },
-            Instruction::Move(Operand::Value(Term::Binary(b"ab".to_vec())), Operand::X(0)),
+            Instruction::Move(Operand::Value(Term::binary(b"ab".to_vec())), Operand::X(0)),
             Instruction::BinaryMatchStart {
                 fail_label: 1,
                 source: Operand::X(0),
@@ -1742,7 +1742,7 @@ fn run_binary_match(
     then: Vec<Instruction>,
 ) -> Result<Term, String> {
     let mut body = vec![
-        Instruction::Move(Operand::Value(Term::Binary(bytes.to_vec())), Operand::X(0)),
+        Instruction::Move(Operand::Value(Term::binary(bytes.to_vec())), Operand::X(0)),
         Instruction::BinaryMatchStart {
             fail_label: 1,
             source: Operand::X(0),
@@ -1820,7 +1820,7 @@ fn gives_a_runtime_error_for_a_read_after_a_failed_equal_command() {
     // x1 at the fail label, as the compiler restores the position.
     let restore = |rest: Vec<Instruction>| {
         let mut body = vec![
-            Instruction::Move(Operand::Value(Term::Binary(vec![7, 8])), Operand::X(0)),
+            Instruction::Move(Operand::Value(Term::binary(vec![7, 8])), Operand::X(0)),
             Instruction::BinaryMatchStart {
                 fail_label: 1,
                 source: Operand::X(0),
@@ -2087,14 +2087,14 @@ fn returns_the_iovec_of_a_binary_and_of_a_list() {
         .execute("fixture", "main", &[])
         .unwrap()
     };
-    let hello = Term::Binary(b"Hello".to_vec());
+    let hello = Term::binary(b"Hello".to_vec());
     assert_eq!(run(hello.clone()), Term::list_from(vec![hello]));
     assert_eq!(
         run(Term::list_from(vec![
             Term::Integer(1),
-            Term::list_from(vec![Term::Binary(vec![2])]),
+            Term::list_from(vec![Term::binary(vec![2])]),
         ])),
-        Term::list_from(vec![Term::Binary(vec![1, 2])])
+        Term::list_from(vec![Term::binary(vec![1, 2])])
     );
 }
 

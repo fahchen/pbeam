@@ -23,12 +23,12 @@ fn runs_the_pinned_unicode_characters_to_binary_as_pinned_erts() {
                 "unicode",
                 "characters_to_binary",
                 &[Term::list_from(vec![
-                    Term::Binary(b"Hello".to_vec()),
+                    Term::binary(b"Hello".to_vec()),
                     Term::Integer(10),
                 ])],
             )
             .unwrap(),
-        Term::Binary(b"Hello\n".to_vec())
+        Term::binary(b"Hello\n".to_vec())
     );
 
     let reference = Command::new("erl")
@@ -84,14 +84,14 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
     // bare binary that is not empty gives `[Bin]` at every size.
     let program = BeamProgram::load(&[USER_DRV_PROBE]).unwrap();
     let badarg = Term::Atom(program.atom("badarg").unwrap());
-    let ones = |size| Term::Binary(vec![255; size]);
-    let bytes = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let ones = |size| Term::binary(vec![255; size]);
+    let bytes = |bytes: &[u8]| Term::binary(bytes.to_vec());
     let merged = |head: &[u8], size| {
         let mut bytes = head.to_vec();
         bytes.resize(head.len() + size, 255);
-        Term::Binary(bytes)
+        Term::binary(bytes)
     };
-    let huge = Term::Binary(vec![0; 100_000]);
+    let huge = Term::binary(vec![0; 100_000]);
     let deep = (0..100_000).fold(Term::list_from(vec![Term::Integer(1)]), |list, _| {
         Term::list_from(vec![list])
     });
@@ -170,7 +170,7 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let term = Term::list_from(vec![Term::Binary(vec![1, 2])]);
+/// let term = Term::list_from(vec![Term::binary(vec![1, 2])]);
 /// assert_eq!(erl_w(&term), "[<<1,2>>]");
 /// ```
 fn erl_w(term: &Term) -> String {
@@ -243,7 +243,7 @@ fn executes_the_pinned_user_drv_server_for_one_put_chars_sync_request() {
     assert_eq!(
         program.execute("user_drv_probe", "main", &[]).unwrap(),
         Term::tuple(vec![
-            Term::list_from(vec![Term::Binary(b"Hello, world!\n".to_vec())]),
+            Term::list_from(vec![Term::binary(b"Hello, world!\n".to_vec())]),
             Term::Atom(program.atom("ok").unwrap()),
         ])
     );

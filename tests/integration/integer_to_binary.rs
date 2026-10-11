@@ -32,7 +32,7 @@ fn converts_integers_to_binaries_as_pinned_erts() {
         Term::Atom(program.atom("badarg").unwrap()),
     ]);
     let mut expected: Vec<Term> = DIGITS
-        .map(|digits| Term::Binary(digits.as_bytes().to_vec()))
+        .map(|digits| Term::binary(digits.as_bytes().to_vec()))
         .into();
     expected.extend(std::iter::repeat_n(error, 5));
     assert_eq!(

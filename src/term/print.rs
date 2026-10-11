@@ -50,7 +50,7 @@ enum Item<'a> {
 /// assert_eq!(print_term(&term), b"{undef,[]}");
 /// let string = Term::list_from(b"ab\n".iter().map(|&byte| Term::Integer(byte.into())));
 /// assert_eq!(print_term(&string), b"\"ab\\n\"");
-/// assert_eq!(print_term(&Term::Binary(vec![1, 2])), b"<<1,2>>");
+/// assert_eq!(print_term(&Term::binary(vec![1, 2])), b"<<1,2>>");
 /// ```
 pub(crate) fn print_term(term: &Term) -> Vec<u8> {
     let mut text = Vec::new();
@@ -100,7 +100,7 @@ pub(crate) fn print_term(term: &Term) -> Vec<u8> {
                 if !bytes.is_empty() && bytes.iter().all(|byte| (32..127).contains(byte)) =>
             {
                 text.extend_from_slice(b"<<\"");
-                for &byte in bytes {
+                for &byte in bytes.iter() {
                     if byte == b'"' {
                         text.push(b'\\');
                     }

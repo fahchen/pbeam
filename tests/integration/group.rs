@@ -105,7 +105,7 @@ fn executes_the_pinned_group_server_for_one_put_chars_request() {
             atom("ok"),
             Term::tuple(vec![
                 atom("unicode"),
-                Term::Binary(b"Hello, world!\n".to_vec()),
+                Term::binary(b"Hello, world!\n".to_vec()),
             ]),
             atom("noise_ok"),
         ])

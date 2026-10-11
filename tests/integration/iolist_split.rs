@@ -34,7 +34,7 @@ const EXPECTED: &str = "[{iolist_to_binary,[<<1,2,3>>,<<>>,<<>>,<<>>,<<97,98,99>
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::Binary(vec![1, 2])), "<<1,2>>");
+/// assert_eq!(text(&Term::binary(vec![1, 2])), "<<1,2>>");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");

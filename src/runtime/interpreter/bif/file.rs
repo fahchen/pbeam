@@ -42,20 +42,20 @@ pub(super) fn native_name_encoding(encoding: FilenameEncoding) -> BifResult {
 /// ```rust,ignore
 /// let name = Term::list_from(vec![Term::Integer(97), Term::list_from(vec![Term::Integer(98)])]);
 /// assert!(matches!(internal_name2native(&name), BifResult::Value(Term::Binary(bytes)) if bytes == b"ab\0"));
-/// assert!(matches!(internal_name2native(&Term::Binary(b"a".to_vec())), BifResult::Value(Term::Binary(bytes)) if bytes == b"a\0"));
-/// assert!(matches!(internal_name2native(&Term::Binary(b"a\0".to_vec())), BifResult::Raise { .. }));
+/// assert!(matches!(internal_name2native(&Term::binary(b"a".to_vec())), BifResult::Value(Term::Binary(bytes)) if bytes == b"a\0"));
+/// assert!(matches!(internal_name2native(&Term::binary(b"a\0".to_vec())), BifResult::Raise { .. }));
 /// assert!(matches!(internal_name2native(&Term::static_atom("a")), BifResult::Raise { .. }));
 /// ```
 pub(super) fn internal_name2native(name: &Term) -> BifResult {
     let bytes = match name {
         Term::Atom(_) => None,
-        Term::Binary(bytes) => (!bytes.contains(&0)).then(|| bytes.clone()),
+        Term::Binary(bytes) => (!bytes.contains(&0)).then(|| bytes.to_vec()),
         _ => native_filename(name, filename_encoding()),
     };
     match bytes {
         Some(mut bytes) => {
             bytes.push(0);
-            Value(Term::Binary(bytes))
+            Value(Term::binary(bytes))
         }
         None => BifResult::badarg(),
     }
@@ -75,9 +75,9 @@ pub(super) fn internal_name2native(name: &Term) -> BifResult {
 ///
 /// ```rust,ignore
 /// // [97, 233]
-/// let result = internal_native2name(&Term::Binary(b"a\xc3\xa9".to_vec()), FilenameEncoding::Utf8)?;
+/// let result = internal_native2name(&Term::binary(b"a\xc3\xa9".to_vec()), FilenameEncoding::Utf8)?;
 /// // {error, warning}
-/// let result = internal_native2name(&Term::Binary(b"a\xff".to_vec()), FilenameEncoding::Utf8)?;
+/// let result = internal_native2name(&Term::binary(b"a\xff".to_vec()), FilenameEncoding::Utf8)?;
 /// assert!(matches!(internal_native2name(&Term::static_atom("a"), FilenameEncoding::Utf8)?, BifResult::Raise { .. }));
 /// ```
 ///

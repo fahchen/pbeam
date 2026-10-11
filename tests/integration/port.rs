@@ -16,7 +16,7 @@ const PORT_PROBE: &[u8] = include_bytes!("../../fixtures/port/port_probe.beam");
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::Binary(b"hi".to_vec())), "<<104,105>>");
+/// assert_eq!(text(&Term::binary(b"hi".to_vec())), "<<104,105>>");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");

@@ -229,7 +229,7 @@ fn boot_flags(
             let flag = program
                 .atom(name)
                 .ok_or_else(|| format!("boot flag {name} is not an atom of the loaded modules"))?;
-            let value = Term::Binary(value.to_vec());
+            let value = Term::binary(value.to_vec());
             Ok(Term::tuple(vec![
                 Term::Atom(flag),
                 Term::list_from(vec![value]),

@@ -521,7 +521,8 @@ impl BeamProgram {
             return ets::insert_list(&mut context, *id, objects, *done as usize, *keypos as i32);
         }
         // The copy phase takes the result bytes out of the owned trap
-        // arguments, so that no turn copies them again.
+        // arguments, so that no turn copies the bytes of an earlier turn
+        // again.
         if let (
             "erts_internal",
             "list_to_bitstring_continue",
@@ -529,6 +530,7 @@ impl BeamProgram {
         ) = (module, function, arguments.as_mut_slice())
             && let Some(stack) = stack.proper_list()
         {
+            let bytes = std::mem::take(bytes).take_bytes();
             let process = scheduler.current_process_mut();
             let reds_left = process.bif_reductions_left()? as i64;
             return Ok(iolist::l2b_copy(
@@ -537,7 +539,7 @@ impl BeamProgram {
                 term,
                 &stack.collect::<Vec<_>>(),
                 *size as usize,
-                std::mem::take(bytes),
+                bytes,
             ));
         }
         let process = scheduler.current_process_mut();
@@ -567,7 +569,7 @@ impl BeamProgram {
                 persistent_term::get_all_trap(process, all.clone(), *entries as usize),
             ),
             ("erlang", "characters_to_utf8_trap", [Term::Binary(bytes), rest, encoding]) => {
-                unicode::utf8_trap(process, bytes.clone(), rest, encoding)
+                unicode::utf8_trap(process, bytes.clone().to_bytes(), rest, encoding)
             }
             (
                 "erlang",
@@ -580,7 +582,7 @@ impl BeamProgram {
                 ],
             ) => unicode::list_trap(
                 process,
-                bytes.clone(),
+                bytes.clone().to_bytes(),
                 *characters as usize,
                 rest,
                 encoding.name() == "latin1",
@@ -646,7 +648,7 @@ impl BeamProgram {
                     term,
                     &stack.collect::<Vec<_>>(),
                     iovec.cloned().collect(),
-                    merged.clone(),
+                    merged.clone().to_bytes(),
                 ))
             }
             (
