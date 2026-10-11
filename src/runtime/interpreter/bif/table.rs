@@ -154,7 +154,7 @@ bifs! {
     erlang:element/2 => |_, [index, tuple]| Ok(erlang::element(index, tuple)),
     erlang:erase/0 => unsupported,
     erlang:erase/1 => unsupported,
-    erlang:error/1 => |_, [reason]| Ok(Raise { class: ExceptionClass::Error, reason: reason.clone() }),
+    erlang:error/1 => |cx, [reason]| erlang::error_1(cx, reason),
     erlang:error/2 => |cx, [reason, args]| erlang::error_2(cx, reason, args),
     erlang:error/3 => |_, [reason, _, _]| Ok(Raise { class: ExceptionClass::Error, reason: reason.clone() }),
     erlang:exit/1 => |_, [reason]| Ok(Raise { class: ExceptionClass::Exit, reason: reason.clone() }),

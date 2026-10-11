@@ -410,6 +410,34 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
     }
 }
 
+/// Run `erlang:error(Reason)` as ERTS `error_1` (`bif.c:1436-1440`) does:
+/// raise an exception of class `error` with `Reason`. The first frame of
+/// the stack trace is the frame of the function that calls the BIF, with
+/// its arity: ERTS `handle_error` starts with the arguments `am_true`
+/// (`beam_common.c:454`), and `erts_build_mfa_item` puts the arity in the
+/// frame when the arguments are not a list (`utils.c:3448-3455`). Thus
+/// this is [`error_2`] with arguments that are not a list.
+///
+/// `error_handler:crash/1` calls `tl/1` on this stack trace
+/// (`error_handler.erl:172-178`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // In `tail/1`: erlang:error(r).
+/// let result = error_1(context, &Term::static_atom("r"))?;
+/// // The stack trace is [{Module, tail, 1, []}].
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A caller instruction with no `func_info` before it is a runtime
+/// invariant error.
+pub(super) fn error_1(context: &mut BifContext<'_>, reason: &Term) -> Result<BifResult, BeamError> {
+    error_2(context, reason, &Term::static_atom("true"))
+}
+
 /// Run `erlang:error(Reason, Args)` as ERTS `error_2` (`bif.c:1448-1454`)
 /// does: raise an exception of class `error` with `Reason`. ERTS puts
 /// `Args` in the first frame of the stack trace, the frame of the function

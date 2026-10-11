@@ -1,5 +1,5 @@
 -module(stack_trace_probe).
--export([main/0, raise_uncaught/2]).
+-export([main/0, error_1_fun_tail/1, raise_uncaught/2]).
 
 %% The fixture has no line table, so ERTS gives each frame of this module
 %% the location []. main/0 sets backtrace_depth for the node, so it runs
@@ -12,8 +12,18 @@ main() ->
         catch_class(fun() -> erlang:system_flag(backtrace_depth, id(1 bsl 59)) end),
         erlang:system_flag(backtrace_depth, 1)
     ],
+    %% With the depth 1, the stack trace of erlang:error/1 is only the frame
+    %% of its caller, also on ERTS.
+    Error1 = [
+        stack(fun() -> error_1_body(id(r)) end),
+        stack(fun() -> error_1_tail(id(r)) end),
+        stack(fun error_1_fun_caller/0),
+        stack(fun() -> error_1_apply_tail(id(erlang)) end),
+        stack(fun() -> crash({m, f, [a]}) end),
+        error_1_spawned()
+    ],
     Raise = [raise_frames(D) || D <- [0, 2, 8]],
-    {Depth, Raise, raise_rethrow(), raise_down(error), raise_down(throw)}.
+    {Depth, Error1, Raise, raise_rethrow(), raise_down(error), raise_down(throw)}.
 
 id(X) -> X.
 
@@ -27,6 +37,44 @@ stack(F) ->
 
 funless({F, Args, Location}) when is_function(F) -> {'fun', Args, Location};
 funless(Frame) -> Frame.
+
+error_1_body(X) ->
+    erlang:error(X),
+    id(X).
+
+error_1_tail(X) ->
+    erlang:error(X).
+
+%% A tail call of a fun removes the frame before erlang:error/1 runs, so the
+%% first frame is the caller. A tail apply keeps the frame of the caller of
+%% the apply.
+error_1_fun_caller() ->
+    X = error_1_fun_tail(id(fun erlang:error/1)),
+    id(X).
+
+error_1_fun_tail(F) ->
+    F(r).
+
+error_1_apply_tail(M) ->
+    M:error(r).
+
+%% With no caller frame, the first frame is the initial call of the process
+%% with its arity.
+error_1_spawned() ->
+    {Pid, Ref} = spawn_monitor(?MODULE, error_1_fun_tail, [fun erlang:error/1]),
+    receive
+        {'DOWN', Ref, process, Pid, Reason} -> Reason
+    end.
+
+%% As error_handler:crash/1 (error_handler.erl:172-178) does.
+crash(Tuple) ->
+    try
+        erlang:error(undef)
+    catch
+        error:undef:Stacktrace ->
+            Stk = [Tuple | tl(Stacktrace)],
+            erlang:raise(error, undef, Stk)
+    end.
 
 frames() ->
     [{m, f, 1}, {m, f, [x], [{file, "m.erl"}, {line, 3}]}, {fun id/1, [x]}, {fun id/1, [x], [x]},
