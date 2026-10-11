@@ -84,34 +84,6 @@ pub enum Term {
     MatchContext(Rc<RefCell<MatchContext>>),
 }
 
-/// The kind of a term that a clone copies element by element. A fun keeps
-/// the entry of the source fun.
-#[derive(Clone, Copy)]
-enum Kind<'a> {
-    Fun(&'a Target),
-}
-
-/// The nested terms of a fun, in order: its free variables.
-type Nested<'a> = std::slice::Iter<'a, Term>;
-
-impl Kind<'_> {
-    /// Build a term of this kind from its nested terms.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(matches!(Kind::Fun(&target).build(vec![]), Term::Fun(_)));
-    /// ```
-    fn build(self, terms: Vec<Term>) -> Term {
-        match self {
-            Kind::Fun(target) => Term::Fun(Fun {
-                target: target.clone(),
-                free: terms,
-            }),
-        }
-    }
-}
-
 impl Term {
     /// Return the term of a static atom, such as `true` or `normal`. A
     /// static atom has the same index in every atom table.
@@ -194,35 +166,34 @@ impl Term {
         false
     }
 
-    /// Copy a term that has no nested terms. A tuple copy shares its
-    /// element array, a map copy shares the form of the map, and a list copy
-    /// shares its cons cells, so they do not copy the nested terms. For a
-    /// fun, return its free variables, kind, and count instead, so the
-    /// caller copies them.
+    /// Copy a term without a walk of its nested terms. A tuple copy shares
+    /// its element array, a map copy shares the form of the map, a list copy
+    /// shares its cons cells, and a fun copy shares its free variables, so
+    /// they take O(1) time. A binary copy still copies its bytes (#456).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Term::Integer(1).shallow_clone().ok(), Some(Term::Integer(1)));
-    /// assert!(Term::Map(Map::new()).shallow_clone().is_ok());
-    /// assert!(Term::list_from([Term::Integer(1)]).shallow_clone().is_ok());
-    /// assert!(Term::tuple(vec![]).shallow_clone().is_ok());
-    /// assert!(fun.shallow_clone().is_err());
+    /// assert_eq!(Term::Integer(1).shallow_clone(), Term::Integer(1));
+    /// assert_eq!(Term::Map(Map::new()).shallow_clone(), Term::Map(Map::new()));
+    /// assert_eq!(Term::list_from([Term::Integer(1)]).shallow_clone(), Term::list_from([Term::Integer(1)]));
+    /// assert_eq!(Term::tuple(vec![]).shallow_clone(), Term::tuple(vec![]));
+    /// assert_eq!(fun.shallow_clone(), fun);
     /// ```
-    fn shallow_clone(&self) -> Result<Term, (Nested<'_>, Kind<'_>, usize)> {
+    fn shallow_clone(&self) -> Term {
         match self {
-            Term::Nil => Ok(Term::Nil),
-            Term::Cons(cell) => Ok(Term::Cons(cell.clone())),
-            Term::Tuple(elements) => Ok(Term::Tuple(elements.clone())),
-            Term::Map(map) => Ok(Term::Map(map.clone())),
-            Term::Fun(fun) => Err((fun.free.iter(), Kind::Fun(&fun.target), fun.free.len())),
-            Term::Atom(atom) => Ok(Term::Atom(atom.clone())),
-            Term::Binary(bytes) => Ok(Term::Binary(bytes.clone())),
-            Term::Integer(value) => Ok(Term::Integer(*value)),
-            Term::Pid(pid) => Ok(Term::Pid(*pid)),
-            Term::Port(port) => Ok(Term::Port(*port)),
-            Term::Reference(reference) => Ok(Term::Reference(*reference)),
-            Term::MatchContext(context) => Ok(Term::MatchContext(context.clone())),
+            Term::Nil => Term::Nil,
+            Term::Cons(cell) => Term::Cons(cell.clone()),
+            Term::Tuple(elements) => Term::Tuple(elements.clone()),
+            Term::Map(map) => Term::Map(map.clone()),
+            Term::Fun(fun) => Term::Fun(fun.clone()),
+            Term::Atom(atom) => Term::Atom(atom.clone()),
+            Term::Binary(bytes) => Term::Binary(bytes.clone()),
+            Term::Integer(value) => Term::Integer(*value),
+            Term::Pid(pid) => Term::Pid(*pid),
+            Term::Port(port) => Term::Port(*port),
+            Term::Reference(reference) => Term::Reference(*reference),
+            Term::MatchContext(context) => Term::MatchContext(context.clone()),
         }
     }
 
@@ -249,7 +220,7 @@ impl Term {
                     pending.extend([tail, head]);
                 }
             }
-            Term::Fun(fun) => pending.append(&mut fun.free),
+            Term::Fun(fun) => pending.extend(fun.take_last().unwrap_or_default()),
             Term::Map(map) => map.drain_into(pending),
             _ => {}
         }
@@ -276,9 +247,10 @@ impl Drop for Term {
 }
 
 impl Clone for Term {
-    /// Copy a term with a work stack of partly copied funs. A tuple copy
-    /// shares its element array, a map copy shares the form of the map, and
-    /// a list copy shares its cons cells.
+    /// Copy a term without a walk of its nested terms. A tuple copy shares
+    /// its element array, a map copy shares the form of the map, a list copy
+    /// shares its cons cells, and a fun copy shares its free variables, so
+    /// they take O(1) time.
     ///
     /// # Examples
     ///
@@ -287,29 +259,7 @@ impl Clone for Term {
     /// assert_eq!(term.clone(), term);
     /// ```
     fn clone(&self) -> Self {
-        let (nested, kind, count) = match self.shallow_clone() {
-            Ok(term) => return term,
-            Err(container) => container,
-        };
-        let mut stack = vec![(nested, kind, Vec::with_capacity(count))];
-        loop {
-            let (source, _, copied) = stack.last_mut().expect("the clone stack is not empty");
-            if let Some(term) = source.next() {
-                match term.shallow_clone() {
-                    Ok(term) => copied.push(term),
-                    Err((nested, kind, count)) => {
-                        stack.push((nested, kind, Vec::with_capacity(count)));
-                    }
-                }
-                continue;
-            }
-            let (_, kind, copied) = stack.pop().expect("the clone stack is not empty");
-            let term = kind.build(copied);
-            match stack.last_mut() {
-                Some((_, _, parent)) => parent.push(term),
-                None => return term,
-            }
-        }
+        self.shallow_clone()
     }
 }
 
@@ -355,8 +305,14 @@ impl PartialEq for Term {
                     true
                 }
                 (Term::Fun(left), Term::Fun(right)) => {
-                    pairs.extend(left.free.iter().zip(&right.free));
-                    left.target == right.target && left.free.len() == right.free.len()
+                    // Two funs that hold one thing are equal with no walk,
+                    // as `eq` compares the two boxed pointers first.
+                    if left.same_thing(right) {
+                        true
+                    } else {
+                        pairs.extend(left.free().iter().zip(right.free()));
+                        left.target() == right.target() && left.free().len() == right.free().len()
+                    }
                 }
                 (Term::Map(left), Term::Map(right)) => {
                     for ((left_key, left_value), (right_key, right_value)) in
@@ -460,7 +416,8 @@ impl fmt::Debug for Term {
                         }
                     }
                 }
-                Term::Fun(Fun { target, free }) => {
+                Term::Fun(fun) => {
+                    let (target, free) = (fun.target(), fun.free());
                     write!(formatter, "Fun({target:?}, [")?;
                     items.push(Item::Text("])"));
                     for (index, element) in free.iter().enumerate().rev() {
