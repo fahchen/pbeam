@@ -162,6 +162,20 @@ fn compares_external_funs_by_their_mfa() {
 }
 
 #[test]
+fn prints_each_free_variable_of_a_fun() {
+    // The `Debug` walk writes the free variables of a fun and separates them
+    // with `, `. A tuple and a fun shared one arm of the walk before #454, and
+    // the test of a tuple with two elements covered the separator. The arm of
+    // a fun needs this test of its own.
+    let term = fun(0, vec![Term::Integer(1), Term::Integer(2)]);
+    assert_eq!(
+        format!("{term:?}"),
+        "Fun(Local(Lambda { module: Atom { index: 971, name: \"lists\" }, index: 0, \
+         old_unique: 7, label: 53, arity: 1 }), [Integer(1), Integer(2)])"
+    );
+}
+
+#[test]
 fn matches_the_derived_debug_text_and_compares_every_variant() {
     let leaves = [
         atom("ok"),
