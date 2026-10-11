@@ -4,6 +4,7 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::runtime::capability;
 use crate::runtime::host;
+use crate::runtime::interpreter::code_table::Finish;
 use crate::runtime::local_node;
 use crate::runtime::process::LinkId;
 use crate::runtime::process::{Flush, TimerReference};
@@ -429,8 +430,8 @@ pub(super) fn error_2(
     let caller = current_frame(context.scheduler.current_process_mut())
         .module
         .clone();
-    let (module, function, arity) =
-        current_function(context.scheduler, context.program.module(&caller)?)?;
+    let module = Rc::clone(context.scheduler.code.module(&caller)?);
+    let (module, function, arity) = current_function(context.scheduler, &module)?;
     let args = match args {
         Term::List(_) | Term::ImproperList(..) => args.clone(),
         _ => Term::Integer(arity.into()),
@@ -850,7 +851,6 @@ pub(super) fn spawn(
     arguments: &Term,
 ) -> Result<BifResult, BeamError> {
     create_process(
-        context.program,
         context.scheduler,
         module,
         function,
@@ -878,14 +878,7 @@ pub(super) fn spawn_link(
         link: true,
         ..SpawnOptions::default()
     };
-    create_process(
-        context.program,
-        context.scheduler,
-        module,
-        function,
-        arguments,
-        options,
-    )
+    create_process(context.scheduler, module, function, arguments, options)
 }
 
 /// Run `erlang:spawn_opt/4`, which `erlang:spawn_monitor/3` in `erlang.beam`
@@ -947,7 +940,6 @@ pub(super) fn spawn_opt(
         }
     }
     create_process(
-        context.program,
         context.scheduler,
         module,
         function,
@@ -2609,13 +2601,13 @@ pub(super) fn signals_return(scheduler: &mut Scheduler, from: &Term, value: Term
 ///
 /// ```rust,ignore
 /// let erlang = Term::static_atom("erlang");
-/// let exported = function_exported(&program, &erlang, &Term::static_atom("self"), &Term::Integer(0));
+/// let exported = function_exported(&scheduler.code, &erlang, &Term::static_atom("self"), &Term::Integer(0));
 /// assert!(matches!(exported, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let exported = function_exported(&program, &erlang, &Term::static_atom("self"), &Term::Integer(1 << 59));
+/// let exported = function_exported(&scheduler.code, &erlang, &Term::static_atom("self"), &Term::Integer(1 << 59));
 /// assert!(matches!(exported, BifResult::Raise { .. }));
 /// ```
 pub(super) fn function_exported(
-    program: &BeamProgram,
+    code: &CodeTable,
     module: &Term,
     name: &Term,
     arity: &Term,
@@ -2626,9 +2618,7 @@ pub(super) fn function_exported(
     };
     let (module, name) = (module.name(), name.name());
     let exported = u32::try_from(arity as i32).is_ok_and(|arity| {
-        program
-            .modules
-            .get(module)
+        code.get(module)
             .is_some_and(|loaded| loaded.exports.contains_key(&(name.to_owned(), arity)))
             || is_bif(module, name, arity)
             // `erts_is_builtin` (`beam_common.c`) also counts these
@@ -2641,6 +2631,60 @@ pub(super) fn function_exported(
     Value(Term::static_atom(if exported { "true" } else { "false" }))
 }
 
+/// Run `erlang:finish_loading(PreparedCodeList)`, as ERTS
+/// `finish_loading_1` (`beam_bif_load.c:340-508`) does. A term that is not a
+/// proper list, an element that is not a reference, and a reference with
+/// no prepared code raise `badarg`, also a reference whose code loaded
+/// already. A list that names one module more than one time returns
+/// `{duplicated, Modules}` and keeps each prepared entry (see
+/// [`CodeTable::finish`]). Else each module goes into the code table of
+/// the run, and the BIF returns `ok` after the calling process switches
+/// out: ERTS suspends the caller until the new code is committed and then
+/// returns the value (`beam_bif_load.c:555-566`). An empty list also
+/// returns `ok` this way.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let loaded = finish_loading(&mut scheduler, &Term::List(vec![Term::Reference(prepared)]))?;
+/// assert!(matches!(loaded, BifResult::YieldReturn(_)));
+/// assert!(matches!(finish_loading(&mut scheduler, &Term::List(vec![test_atom("a")]))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A module that is loaded already gives the runtime error of
+/// [`CodeTable::finish`]: PBeam has no code replacement.
+pub(super) fn finish_loading(
+    scheduler: &mut Scheduler,
+    prepared: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::List(elements) = prepared else {
+        return Ok(BifResult::badarg());
+    };
+    let mut references = Vec::with_capacity(elements.len());
+    for element in elements {
+        let Term::Reference(reference) = element else {
+            return Ok(BifResult::badarg());
+        };
+        references.push(*reference);
+    }
+    match scheduler.code.finish(&references)? {
+        Finish::Loaded => Ok(BifResult::YieldReturn(Term::static_atom("ok"))),
+        Finish::Duplicated(names) => {
+            let mut modules = Vec::with_capacity(names.len());
+            for name in names {
+                modules.push(Term::Atom(scheduler.atoms.put(&name)?));
+            }
+            Ok(Value(Term::Tuple(vec![
+                Term::static_atom("duplicated"),
+                Term::List(modules),
+            ])))
+        }
+        Finish::NotPrepared => Ok(BifResult::badarg()),
+    }
+}
+
 /// Run `erlang:module_loaded/1`, as ERTS `module_loaded_1`
 /// (`beam_bif_load.c:738-755`) does: return `true` when `module` has current
 /// code and no `-on_load` function waits to run, and `false` for an atom
@@ -2651,15 +2695,15 @@ pub(super) fn function_exported(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let loaded = module_loaded(&program, &Term::static_atom("erlang"));
+/// let loaded = module_loaded(&scheduler.code, &Term::static_atom("erlang"));
 /// assert!(matches!(loaded, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(module_loaded(&program, &Term::Integer(1)), BifResult::Raise { .. }));
+/// assert!(matches!(module_loaded(&scheduler.code, &Term::Integer(1)), BifResult::Raise { .. }));
 /// ```
-pub(super) fn module_loaded(program: &BeamProgram, module: &Term) -> BifResult {
+pub(super) fn module_loaded(code: &CodeTable, module: &Term) -> BifResult {
     let Term::Atom(module) = module else {
         return BifResult::badarg();
     };
-    let loaded = program.modules.contains_key(module.name());
+    let loaded = code.get(module.name()).is_some();
     Value(Term::static_atom(if loaded { "true" } else { "false" }))
 }
 
