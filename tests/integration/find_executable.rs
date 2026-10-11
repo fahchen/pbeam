@@ -31,7 +31,8 @@ const RESULT: &str = "PBEAM_FIND_EXECUTABLE_RESULT";
 /// The pinned OTP modules that `find_executable_probe:main/0` calls after
 /// the boot: `os:find_executable/1,2` calls `filename`, and
 /// `file:read_file_info/1` calls `file_server_2`, which calls `prim_file`.
-const FILE_MODULES: [&str; 3] = ["file", "filename", "prim_file"];
+/// `BOOT_MODULES` has `prim_file` for `erl_prim_loader`.
+const FILE_MODULES: [&str; 2] = ["file", "filename"];
 
 /// An Erlang fun `T` for the `-eval` of an ERTS run: it gives the text of a
 /// term as [`text`] does.
@@ -70,14 +71,16 @@ const NAMES_LATIN1: &str = "[<<97,98,99,0>>,<<97,98,99,0>>,<<0>>,<<97,98,99,0>>,
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![Term::Binary(vec![97])])), "[<<97>>]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Binary(vec![97])])), "[<<97>>]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
         Term::Integer(value) => value.to_string(),
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         Term::Binary(bytes) => {
             let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
@@ -198,12 +201,11 @@ fn isolated_find_executable() {
 /// Return the path as a list of its bytes, which is the character list of
 /// an ASCII path.
 fn characters(path: &Path) -> Term {
-    Term::List(
+    Term::list_from(
         path.as_os_str()
             .as_encoded_bytes()
             .iter()
-            .map(|&byte| Term::Integer(byte.into()))
-            .collect(),
+            .map(|&byte| Term::Integer(byte.into())),
     )
 }
 

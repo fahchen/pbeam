@@ -6,7 +6,7 @@
 # The script has two steps, the build and the run. The build writes all the files that a run needs into target/examples/<name>/. The run starts only erl or the pbeam binary. With --no-build, the script does not build: it reads a list of the last build and runs it. Thus the tests build each example once, and the ERTS run and the pbeam run execute the same compiled modules.
 # The build compiles the example modules and pbeam_boot.beam into target/examples/<name>/, and consolidates the Elixir protocols into target/examples/<name>/consolidated/, as `mix run` consolidates them (scripts/example_beams.exs). It finds each OTP and Elixir module that the example calls, directly or through other modules (scripts/example_beams.exs). It then writes the code path of the ERTS run into target/examples/<name>/erts.paths and the BEAM files of the pbeam run into target/examples/<name>/pbeam.beams, one for each line. It writes each called module that the pbeam run does not get, with the reason, into target/examples/<name>/pbeam.unloaded.
 # The terra_counter example also compiles the Terra sources of the pinned commit, which scripts/terra.sh downloads or finds in PBEAM_TERRA_SRC.
-# With --policy <module>, the pbeam run gives --policy <module> to the pbeam binary, so the policy module of the build gives the capabilities of the run (docs/capability-security-migration.md, section "Decisions of #338"). The ERTS run has no policy, so the script rejects --policy with --erts.
+# With --policy <module>, the pbeam run gives --boot --policy <module> to the pbeam binary. The boot of pbeam_boot then runs with the boot authority, and the policy module of the build gives the capabilities of the entry when pbeam_boot enters the runtime (docs/capability-security-migration.md, section "Decisions of #463"). The ERTS run has no policy, so the script rejects --policy with --erts.
 # PBEAM_BIN selects the pbeam binary. Without it, the script runs the binary with cargo run.
 # The commands are those of the Run section of examples/hello_world/README.md.
 set -euo pipefail
@@ -34,7 +34,7 @@ while [[ $# -gt 0 ]]; do
     --no-build) build=false ;;
     --policy)
       [[ $# -ge 2 ]] || fail "$usage"
-      policy=(--policy "$2")
+      policy=(--boot --policy "$2")
       shift
       ;;
     *) fail "unknown option $1" ;;
@@ -117,7 +117,7 @@ for beam in "$work"/*.beam; do
 done
 
 # The boot modules that pbeam_boot starts, and the modules that these modules start with a module name in a variable, for example the child modules of a supervisor. The imports chunks do not give these modules.
-boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error file_server supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal"
+boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error file_server supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal erl_prim_loader prim_file"
 # The pbeam binary loads only the BEAM files that it gets. Give it each OTP and Elixir module that the example, pbeam_boot, and the boot modules call, directly or through other modules (scripts/example_beams.exs). The script writes each called module that the pbeam run does not get, and the reason, into pbeam.unloaded.
 # A command substitution, not a process substitution, so that set -e stops the run when the command fails.
 step "Consolidate the Elixir protocols and find the OTP and Elixir modules that the example calls"

@@ -1,21 +1,34 @@
 -module(pbeam_boot).
--export([start/2, init/2, kernel/1]).
+-export([start/2, start/3, init/2, kernel/1]).
+
+%% Run the boot with no boot flags.
+start(Module, Function) ->
+    start(Module, Function, []).
 
 %% Run the boot and then Module:Function(), as the init boot process runs
-%% start_clean.boot and then -eval (init.erl:1192-1217). The boot process
-%% traps exits (init.erl:1197). It registers the init request process, and
-%% starts the kernel processes logger and application_controller in the
-%% order of start_clean.boot (init.erl:1348-1350). It then runs the kernel
-%% part of kernel:start/2, and sets the registered user process as the
-%% group leader before it starts -eval (init.erl:1539-1546). In a pbeam run
-%% in boot mode (--boot), the process then enters the runtime: it drops the
+%% start_clean.boot and then -eval (init.erl:1192-1217). Flags are the boot
+%% flags of the command line, as init:parse_boot_args/1 gives them
+%% (init.erl:1668-1709): a list of {Flag, Values}, with each value a
+%% binary. The boot process traps exits (init.erl:1197). It registers the
+%% init request process with the flags after {noshell, []}, as for
+%% erl -noshell. It starts erl_prim_loader with the code path of the pa and
+%% pz flags (init.erl:1200-1202). It then starts the kernel processes logger
+%% and application_controller in the order of start_clean.boot
+%% (init.erl:1348-1350). It then runs the kernel part of kernel:start/2,
+%% and sets the registered user process as the group leader before it
+%% starts -eval (init.erl:1539-1546). In a pbeam run in boot mode (--boot),
+%% the process then registers the IO servers user and standard_error as IO
+%% services, so that a runtime process can send them the IO requests that
+%% its terminal capability permits, and enters the runtime: it drops the
 %% boot authority and gets the capabilities that the policy gives
-%% Module:Function/0. In each other run, pbeam_cap:enter_runtime/2 returns
-%% ok and has no effect. ERTS has no pbeam_cap module.
-start(Module, Function) ->
+%% Module:Function/0. In each other run, pbeam_cap:serve/2 and
+%% pbeam_cap:enter_runtime/2 return ok and have no effect. ERTS has no
+%% pbeam_cap module.
+start(Module, Function, Flags) ->
     process_flag(trap_exit, true),
-    Init = spawn(?MODULE, init, [self(), [{noshell, []}]]),
+    Init = spawn(?MODULE, init, [self(), [{noshell, []} | Flags]]),
     true = register(init, Init),
+    ok = start_prim_loader(Init, path_flags(Flags)),
     ok = start_in_kernel(Init, logger, logger_server, start_link, []),
     ok = start_in_kernel(Init, application_controller,
                          application_controller, start, [kernel_app()]),
@@ -23,12 +36,40 @@ start(Module, Function) ->
     receive {Kernel, started} -> ok end,
     Init ! {self(), kernel, Kernel},
     group_leader(whereis(user), self()),
+    ok = pbeam_cap:serve(whereis(user), io),
+    ok = pbeam_cap:serve(whereis(standard_error), io),
     ok = pbeam_cap:enter_runtime(Module, Function),
     Module:Function().
+
+%% Start the pinned erl_prim_loader with the path Pa ++ Pz ++ ["."], and
+%% give its link to init (init.erl:1164-1184). PBeam has no -path flag, so
+%% the path is always made from the pa and pz flags (init.erl:1165-1166,
+%% 1200).
+start_prim_loader(Init, {Pa, Pz}) ->
+    Path = Pa ++ Pz ++ ["."],
+    case erl_prim_loader:start() of
+        {ok, Pid} ->
+            erl_prim_loader:set_path(Path),
+            add_to_kernel(Init, erl_prim_loader, {ok, Pid});
+        {error, Reason} ->
+            erlang:display({"cannot start loader", Reason}),
+            exit(Reason)
+    end.
+
+%% init.erl:1259-1262. The last pa flag comes first.
+path_flags(Flags) ->
+    Pa = append(reverse(get_flag_args(pa, Flags))),
+    Pz = append(get_flag_args(pz, Flags)),
+    {bs2ss(Pa), bs2ss(Pz)}.
 
 %% Start a kernel process and give its link to init (init.erl:1519-1528).
 start_in_kernel(Init, Server, Mod, Fun, Args) ->
     Res = apply(Mod, Fun, Args),
+    add_to_kernel(Init, Server, Res).
+
+%% Give the start result of a kernel process to init, which links to it, and
+%% remove the link of the boot process (init.erl:1178-1184, 1521-1528).
+add_to_kernel(Init, Server, Res) ->
     Init ! {self(), started, {Server, Res}},
     receive
         {Init, ok, Pid} ->
@@ -38,7 +79,8 @@ start_in_kernel(Init, Server, Mod, Fun, Args) ->
 
 %% The init request process. It traps exits (init.erl:588), links to each
 %% kernel process that starts with {ok, Pid} (init.erl:768-772), and answers
-%% get_arguments and {get_argument, Arg} (init.erl:816-819). For init:stop/0
+%% get_arguments and {get_argument, Arg} with the values as strings
+%% (init.erl:816-819). For init:stop/0
 %% it stops the kernel process and halts with status 0 (init.erl:536,
 %% 788-789, 924-945). It keeps other messages in its mailbox.
 init(Boot, Flags) ->
@@ -54,7 +96,7 @@ init_loop(Boot, Flags, Kernel) ->
         {Boot, kernel, Pid} ->
             init_loop(Boot, Flags, Pid);
         {From, get_arguments} ->
-            From ! {init, Flags},
+            From ! {init, get_arguments(Flags)},
             init_loop(Boot, Flags, Kernel);
         {From, {get_argument, Arg}} ->
             From ! {init, get_argument(Arg, Flags)},
@@ -76,16 +118,65 @@ stop(Kernel) ->
     Kernel ! {self(), stop},
     receive {'DOWN', Ref, process, Kernel, _} -> halt() end.
 
-%% init.erl:1808-1819. The flag values are already strings.
+%% init.erl:1790-1819.
+get_flag_args(F, Flags) -> get_flag_args(F, Flags, []).
+
+get_flag_args(F, [{F, V} | Flags], Acc) ->
+    get_flag_args(F, Flags, [V | Acc]);
+get_flag_args(F, [_ | Flags], Acc) ->
+    get_flag_args(F, Flags, Acc);
+get_flag_args(_, [], Acc) ->
+    reverse(Acc).
+
+get_arguments([{F, V} | Flags]) ->
+    [{F, to_strings(V)} | get_arguments(Flags)];
+get_arguments([]) ->
+    [].
+
+to_strings([H | T]) when is_atom(H) -> [atom_to_list(H) | to_strings(T)];
+to_strings([H | T]) when is_binary(H) -> [b2s(H) | to_strings(T)];
+to_strings([]) -> [].
+
 get_argument(Arg, Flags) ->
     case get_argument1(Arg, Flags) of
         [] -> error;
         Value -> {ok, Value}
     end.
 
-get_argument1(Arg, [{Arg, V} | Args]) -> [V | get_argument1(Arg, Args)];
+get_argument1(Arg, [{Arg, V} | Args]) -> [to_strings(V) | get_argument1(Arg, Args)];
 get_argument1(Arg, [_ | Args]) -> get_argument1(Arg, Args);
 get_argument1(_, []) -> [].
+
+%% init.erl:435-438, with a list comprehension in place of map/2.
+bs2ss(L0) when is_list(L0) ->
+    [b2s(B) || B <- L0];
+bs2ss(L) ->
+    L.
+
+%% init.erl:630-637.
+b2s(Bin) when is_binary(Bin) ->
+    try
+        unicode:characters_to_list(Bin, file:native_name_encoding())
+    catch
+        _:_ -> binary_to_list(Bin)
+    end;
+b2s(L) when is_list(L) ->
+    L.
+
+%% init.erl:1828-1840.
+append([E]) -> E;
+append([H | T]) ->
+    H ++ append(T);
+append([]) -> [].
+
+reverse([] = L) ->
+    L;
+reverse([_] = L) ->
+    L;
+reverse([A, B]) ->
+    [B, A];
+reverse([A, B | L]) ->
+    lists:reverse(L, [B, A]).
 
 %% Do the kernel part of kernel:start/2. Run logger:internal_init_logger/0
 %% (kernel.erl:37). Do not run os:internal_init_cmd_shell/0 (kernel.erl:38):

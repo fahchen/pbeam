@@ -40,7 +40,7 @@ fn fails_the_bs_start_match3_test_for_each_term_that_is_not_a_binary() {
     let other = Term::Atom(program.atom("other").unwrap());
     assert_eq!(
         program.execute("binary_match_probe", "kinds", &[]).unwrap(),
-        Term::List(vec![other; 11])
+        Term::list_from(vec![other; 11])
     );
     assert_eq!(
         reference("binary_match_probe:kinds()"),
@@ -60,16 +60,10 @@ fn runs_string_uppercase_of_a_list_as_pinned_erts() {
     let unicode_util = pinned_beam("unicode_util");
     let program =
         BeamProgram::load(&[&erlang, &lists, &string, &unicode_util, BINARY_MATCH_PROBE]).unwrap();
-    let text = |text: &[u8]| {
-        Term::List(
-            text.iter()
-                .map(|&byte| Term::Integer(byte.into()))
-                .collect(),
-        )
-    };
+    let text = |text: &[u8]| Term::list_from(text.iter().map(|&byte| Term::Integer(byte.into())));
     assert_eq!(
         program.execute("binary_match_probe", "upper", &[]).unwrap(),
-        Term::List(vec![text(b"ERROR"), text(b"NOTICE"), text(b"R")])
+        Term::list_from(vec![text(b"ERROR"), text(b"NOTICE"), text(b"R")])
     );
     assert_eq!(
         reference("binary_match_probe:upper()"),
@@ -277,7 +271,7 @@ fn probe_atom(name: &str) -> Term {
 
 /// A list of integers.
 fn integers(values: &[i64]) -> Term {
-    Term::List(values.iter().copied().map(Term::Integer).collect())
+    Term::list_from(values.iter().copied().map(Term::Integer))
 }
 
 #[test]
@@ -454,7 +448,7 @@ fn runs_the_skip_and_binary_commands_as_pinned_erts() {
     assert_eq!(
         results,
         [
-            Ok(Term::List(vec![
+            Ok(Term::list_from(vec![
                 Term::Binary(vec![1, 2]),
                 Term::Binary(vec![0xBC]),
                 Term::Binary(vec![3, 4, 5, 6, 7, 8, 9, 10, 11])
@@ -669,7 +663,7 @@ fn resumes_a_match_context_and_reads_its_tail_as_pinned_erts() {
         .collect();
     let nibbles = |values: &[i64], tail: &[u8]| {
         Ok(Term::Tuple(vec![
-            Term::List(values.iter().copied().map(Term::Integer).collect()),
+            Term::list_from(values.iter().copied().map(Term::Integer)),
             Term::Binary(tail.to_vec()),
         ]))
     };
@@ -720,7 +714,7 @@ fn shares_a_match_context_that_move_copies_as_pinned_erts() {
     let lists = pinned_beam("lists");
     let program = BeamProgram::load(&[&erlang, &lists, MATCH_COPY_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    let invalid = || Term::List(vec![atom("invalid")]);
+    let invalid = || Term::list_from(vec![atom("invalid")]);
     assert_eq!(
         run_each_in(&program, "match_copy_probe", "parse", &inputs),
         [
@@ -728,8 +722,8 @@ fn shares_a_match_context_that_move_copies_as_pinned_erts() {
             Ok(integers(&[97, 98])),
             Ok(integers(&[97, 233, 98])),
             Ok(integers(&[8364, 128_512, 122])),
-            Ok(Term::List(vec![Term::Integer(97), atom("incomplete")])),
-            Ok(Term::List(vec![atom("incomplete")])),
+            Ok(Term::list_from(vec![Term::Integer(97), atom("incomplete")])),
+            Ok(Term::list_from(vec![atom("incomplete")])),
             Ok(invalid()),
             Ok(invalid()),
             Ok(invalid()),

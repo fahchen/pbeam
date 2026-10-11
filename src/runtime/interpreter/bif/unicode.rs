@@ -114,8 +114,8 @@ pub(super) fn characters_to_binary(
             )));
         }
     };
-    let subject = match chardata.proper_list() {
-        Some([binary @ Term::Binary(_)]) => binary,
+    let subject = match chardata.cons_cell() {
+        Some((binary @ Term::Binary(_), tail)) if tail.is_nil() => binary,
         _ => chardata,
     };
     let Some(cost) = utf8_need(subject, latin1) else {

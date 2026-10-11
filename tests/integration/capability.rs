@@ -57,15 +57,10 @@ fn program() -> BeamProgram {
 /// `denied`, or `{error, badarg}`.
 fn results(program: &BeamProgram, names: &[&str]) -> Term {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    Term::List(
-        names
-            .iter()
-            .map(|&name| match name {
-                "badarg" => Term::Tuple(vec![atom("error"), atom("badarg")]),
-                name => atom(name),
-            })
-            .collect(),
-    )
+    Term::list_from(names.iter().map(|&name| match name {
+        "badarg" => Term::Tuple(vec![atom("error"), atom("badarg")]),
+        name => atom(name),
+    }))
 }
 
 /// Run `capability_probe:Function()` with `policy`.

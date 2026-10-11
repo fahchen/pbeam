@@ -179,10 +179,9 @@ pub(super) fn insert(
     table: &Term,
     objects: &Term,
 ) -> Result<BifResult, BeamError> {
-    if objects
-        .list_cells()
-        .is_some_and(|(list, tail)| list.len() > 1 || tail.is_some())
-    {
+    // A cons cell with a tail that is not `[]`: at least two objects, or an
+    // improper list.
+    if objects.cons_cell().is_some_and(|(_, tail)| !tail.is_nil()) {
         let Some((id, found)) = context.scheduler.ets.find(table) else {
             return Ok(BifResult::badarg());
         };
@@ -193,9 +192,10 @@ pub(super) fn insert(
     let Some(table) = context.scheduler.ets.table(table, caller, Operation::Write) else {
         return Ok(BifResult::badarg());
     };
-    let objects = objects
-        .proper_list()
-        .unwrap_or(std::slice::from_ref(objects));
+    let objects: Vec<&Term> = match objects.proper_list() {
+        Some(objects) => objects.collect(),
+        None => vec![objects],
+    };
     let keypos = table.keypos();
     let Some(tuples) = valid_objects(objects, keypos) else {
         return Ok(BifResult::badarg());
@@ -269,6 +269,7 @@ pub(super) fn insert_list(
     /// `ITERATIONS_PER_RED` (`erl_db.c:2152`).
     const ITERATIONS_PER_RED: i64 = 8;
     let (elements, tail) = objects.list_cells().expect("a list insert has a list");
+    let elements: Vec<&Term> = elements.collect();
     let count = elements.len();
     let table = Term::Reference(id);
     let insert_phase = 2 * count < done && done <= 4 * count;
@@ -279,7 +280,7 @@ pub(super) fn insert_list(
     let caller = process.id;
     let budget = ITERATIONS_PER_RED * process.bif_reductions_left()? as i64;
     let mut units = Units { left: budget };
-    let tuples = valid_objects(elements, keypos).filter(|_| tail.is_none());
+    let tuples = valid_objects(elements.iter().copied(), keypos).filter(|_| tail.is_none());
     // After a failed copy, the units of the removal of the copies follow
     // `4 * count`, and a removal that yields leaves `done` above it.
     let mut removal = done > 4 * count;
@@ -289,9 +290,7 @@ pub(super) fn insert_list(
             let check_end = match &tuples {
                 Some(_) => count,
                 None => (elements.iter())
-                    .position(|object| {
-                        valid_objects(std::slice::from_ref(object), keypos).is_none()
-                    })
+                    .position(|object| valid_objects([*object], keypos).is_none())
                     .map_or(count, |index| index + 1),
             };
             if !units.run(&mut done, check_end) {
@@ -427,14 +426,17 @@ fn put_objects(table: &mut Table, tuples: &[&Vec<Term>], keypos: i32) -> Result<
 ///
 /// ```rust,ignore
 /// let object = Term::Tuple(vec![test_atom("k")]);
-/// assert!(valid_objects(&[object.clone()], 1).is_some());
-/// assert!(valid_objects(&[object.clone()], 2).is_none());
-/// assert!(valid_objects(&[object], -1).is_none());
+/// assert!(valid_objects([&object], 1).is_some());
+/// assert!(valid_objects([&object], 2).is_none());
+/// assert!(valid_objects([&object], -1).is_none());
 /// ```
-fn valid_objects(objects: &[Term], keypos: i32) -> Option<Vec<&Vec<Term>>> {
+fn valid_objects<'a>(
+    objects: impl IntoIterator<Item = &'a Term>,
+    keypos: i32,
+) -> Option<Vec<&'a Vec<Term>>> {
     let keypos = i64::from(keypos) as u64;
     objects
-        .iter()
+        .into_iter()
         .map(|object| match object {
             Term::Tuple(elements) if elements.len() as u64 >= keypos => Some(elements),
             _ => None,
@@ -508,7 +510,7 @@ pub(super) fn lookup_element(
 ///
 /// ```rust,ignore
 /// let result = lookup(&mut context, &table, &test_atom("k"));
-/// assert!(matches!(result, BifResult::Value(objects) if objects.proper_list().is_some_and(|objects| objects.len() == 1)));
+/// assert!(matches!(result, BifResult::Value(objects) if objects.proper_list().is_some_and(|objects| objects.count() == 1)));
 /// assert!(matches!(lookup(&mut context, &test_atom("missing"), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
 pub(super) fn lookup(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {

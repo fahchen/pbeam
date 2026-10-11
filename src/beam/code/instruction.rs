@@ -2274,7 +2274,7 @@ fn read_binary_match_commands(
                     )));
                 };
                 let has = |names: &[&str]| {
-                    flags.iter().any(
+                    flags.clone().any(
                         |flag| matches!(flag, Term::Atom(atom) if names.contains(&atom.name())),
                     )
                 };
@@ -2413,7 +2413,7 @@ fn read_binary_segments(
 /// assert!(!is_little_endian(&Operand::Value(Term::nil())));
 /// ```
 fn is_little_endian(flags: &Operand) -> bool {
-    matches!(flags, Operand::Value(flags) if flags.proper_list().is_some_and(|items| items.iter().any(|item| {
+    matches!(flags, Operand::Value(flags) if flags.proper_list().is_some_and(|mut items| items.any(|item| {
         matches!(item, Term::Atom(atom) if matches!(atom.name(), "little" | "native"))
     })))
 }

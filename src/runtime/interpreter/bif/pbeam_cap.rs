@@ -180,6 +180,48 @@ pub(super) fn enter_runtime(
     Ok(BifResult::AwaitGrant)
 }
 
+/// Run `pbeam_cap:serve(Pid, io)`: in a boot process, register the live
+/// boot process `Pid` as an IO service, by its pid, and return `ok`. The
+/// runtime to boot gate then permits a message from a runtime process to
+/// `Pid` when it is an IO request that the sender may make (see
+/// `io_service::send_denial`). ERTS has no such BIF (row "Boot authority"
+/// of `docs/erts-differences.md`).
+///
+/// A `Pid` that is not a pid, and a second argument that is not the atom
+/// `io`, raise `error:badarg`. A process that is not a boot process, also
+/// each process of a run with no policy, gets `ok` with no effect, so
+/// `pbeam_boot` calls it in each run and a runtime process gets no entry
+/// from it. In a boot process, a `Pid` that is not a live boot process
+/// raises `error:badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The current process is the boot root process.
+/// let result = serve(&mut scheduler, &Term::Pid(user), &Term::static_atom("io"))?;
+/// assert!(matches!(result, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// None: the result is always `Ok`.
+pub(super) fn serve(
+    scheduler: &mut Scheduler,
+    pid: &Term,
+    kind: &Term,
+) -> Result<BifResult, BeamError> {
+    let (Term::Pid(pid), Term::Atom(kind)) = (pid, kind) else {
+        return Ok(BifResult::badarg());
+    };
+    if kind.name() != "io" {
+        return Ok(BifResult::badarg());
+    }
+    if scheduler.current_process().security.is_boot() && !scheduler.serve_io(*pid) {
+        return Ok(BifResult::badarg());
+    }
+    Ok(Value(Term::static_atom("ok")))
+}
+
 /// Run the export `pbeam_cap:await_grant/0` of a waiting
 /// `pbeam_cap:request/2` or `pbeam_cap:enter_runtime/2` call: return `ok`
 /// after a grant, raise `error:capability_denied` after a denial, or wait

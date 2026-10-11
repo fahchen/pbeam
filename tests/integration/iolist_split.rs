@@ -45,7 +45,9 @@ fn text(term: &Term) -> String {
             let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
             format!("<<{}>>", bytes.join(","))
         }
-        Term::List(terms) => format!("[{}]", join(terms)),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         other => panic!("unexpected term {other:?}"),
     }

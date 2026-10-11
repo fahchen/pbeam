@@ -18,7 +18,7 @@ fn runs_erlang_hibernate_as_the_pinned_erts_instruction() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, HIBERNATE_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let list = |names: &[&str]| Term::List(names.iter().map(|name| atom(name)).collect());
+    let list = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
     let run = |function| program.execute("hibernate_probe", function, &[]).unwrap();
 
     // A message in the queue before the call: the call returns at once.

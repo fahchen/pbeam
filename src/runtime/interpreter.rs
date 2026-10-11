@@ -1282,7 +1282,7 @@ impl BeamProgram {
                     // `jit/arm/instr_common.cpp:707-721`).
                     let head = read(process, head)?;
                     let tail = read(process, tail)?;
-                    write(process, destination, Term::list_with_tail(vec![head], tail))?;
+                    write(process, destination, Term::cons(head, tail))?;
                 }
                 Instruction::PutTuple {
                     elements,
@@ -1333,7 +1333,8 @@ impl BeamProgram {
                     write(process, destination, record)?;
                 }
                 Instruction::GetList { source, head, tail } => {
-                    let (first, rest) = nonempty_list(read(process, source)?)?;
+                    let (first, rest) = nonempty_list(read_ref(process, source)?)?;
+                    let (first, rest) = (first.clone(), rest.clone());
                     write(process, head, first)?;
                     write(process, tail, rest)?;
                 }
@@ -1355,7 +1356,9 @@ impl BeamProgram {
                     source,
                     destination,
                 } => {
-                    let (_, rest) = nonempty_list(read(process, source)?)?;
+                    // `get_tl` reads only the tail, so only the tail is copied.
+                    let (_, rest) = nonempty_list(read_ref(process, source)?)?;
+                    let rest = rest.clone();
                     write(process, destination, rest)?;
                 }
                 Instruction::Send => {
@@ -1831,7 +1834,7 @@ impl BeamProgram {
                 let badarg = Term::static_atom("badarg");
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
-            let Some((arguments, proper)) = list.take_list_elements() else {
+            let Some((arguments, proper)) = list.list_elements() else {
                 let badarg = Term::static_atom("badarg");
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
@@ -1883,8 +1886,8 @@ impl BeamProgram {
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
-        let mut list = read(process, &Operand::X(1))?;
-        let Some((arguments, proper)) = list.take_list_elements() else {
+        let list = read(process, &Operand::X(1))?;
+        let Some((arguments, proper)) = list.list_elements() else {
             let badarg = Term::static_atom("badarg");
             return Ok(raise(process, ExceptionClass::Error, badarg));
         };
@@ -1951,8 +1954,11 @@ impl BeamProgram {
             Target::Local(lambda) => lambda,
             Target::External {
                 module, function, ..
-            } if tail && (module.name(), function.name(), arity) == ("erlang", "error", 2) => {
-                return self.tail_call_error_2(scheduler);
+            } if tail
+                && (module.name(), function.name()) == ("erlang", "error")
+                && matches!(arity, 1 | 2) =>
+            {
+                return self.tail_call_error(scheduler, arity);
             }
             Target::External {
                 module, function, ..
@@ -1969,7 +1975,8 @@ impl BeamProgram {
         Ok(None)
     }
 
-    /// Run a tail call of the fun `fun erlang:error/2`. ERTS
+    /// Run a tail call of the fun `fun erlang:error/1` or
+    /// `fun erlang:error/2`, with the arity `arity`. ERTS
     /// `i_call_fun_last` removes the frame before it calls the fun
     /// (`emit_i_call_fun2_last` in `jit/arm/instr_fun.cpp:425-455`). Only an
     /// apply puts the calling function back for an error BIF
@@ -1985,15 +1992,19 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // `tail(F) -> F(r, [a]).` as the start of a process.
-    /// let outcome = program.tail_call_error_2(&mut scheduler)?;
+    /// let outcome = program.tail_call_error(&mut scheduler, 2)?;
     /// // The process exits with {r, [{Module, tail, 1, []}]}.
     /// assert!(matches!(outcome, Some(Outcome::Exit { .. })));
     /// ```
-    fn tail_call_error_2(&self, scheduler: &mut Scheduler) -> Result<Option<Outcome>, BeamError> {
+    fn tail_call_error(
+        &self,
+        scheduler: &mut Scheduler,
+        arity: u32,
+    ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         process.frames.pop();
         if !process.frames.is_empty() {
-            return self.call_mfa(scheduler, "erlang", "error", 2, false);
+            return self.call_mfa(scheduler, "erlang", "error", arity, false);
         }
         let reason = read(process, &Operand::X(0))?;
         let (module, function, arity) = process.initial_call.clone();
@@ -2062,12 +2073,11 @@ impl BeamProgram {
                 Ok(Some(Outcome::Yield))
             }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
-            BifResult::ErrorWithStacktrace { reason, stacktrace } => Ok(raise_with_stacktrace(
-                process,
-                ExceptionClass::Error,
+            BifResult::RaiseWithStacktrace {
+                class,
                 reason,
                 stacktrace,
-            )),
+            } => Ok(raise_with_stacktrace(process, class, reason, stacktrace)),
             BifResult::Trap {
                 module,
                 function,
@@ -2221,7 +2231,7 @@ fn create_process(
     else {
         return Ok(BifResult::badarg());
     };
-    let arguments = arguments.to_vec();
+    let arguments: Vec<Term> = arguments.cloned().collect();
     let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
     // A function that the loaded module does not export gives an undefined
     // start, which goes to `undefined_function` when the process first
@@ -2570,8 +2580,8 @@ fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
     write(process, &Operand::Y(register), Term::nil())
 }
 
-/// Return the head and the tail of a nonempty proper or improper list,
-/// which `get_list`, `get_hd`, and `get_tl` read as the `CAR` and the `CDR`
+/// Return the head and the tail of a nonempty proper or improper list, in
+/// O(1) time, which `get_list` and `get_tl` read as the `CAR` and the `CDR`
 /// of the first cons cell (emu `instrs.tab:389-407`; JIT
 /// `jit/arm/instr_common.cpp:274-318`). The BEAM validator makes sure that
 /// the source is a nonempty list.
@@ -2581,14 +2591,14 @@ fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
 /// ```rust,ignore
 /// let x = || Term::static_atom("x");
 /// let list = Term::list_from(vec![Term::Integer(1), Term::Integer(2)]);
-/// assert_eq!(nonempty_list(list)?, (Term::Integer(1), Term::list_from(vec![Term::Integer(2)])));
+/// assert_eq!(nonempty_list(&list)?, (&Term::Integer(1), &Term::list_from(vec![Term::Integer(2)])));
 /// let improper = Term::list_with_tail(vec![Term::Integer(1)], x());
-/// assert_eq!(nonempty_list(improper)?, (Term::Integer(1), x()));
-/// assert!(nonempty_list(Term::nil()).is_err());
+/// assert_eq!(nonempty_list(&improper)?, (&Term::Integer(1), &x()));
+/// assert!(nonempty_list(&Term::nil()).is_err());
 /// ```
-fn nonempty_list(list: Term) -> Result<(Term, Term), BeamError> {
-    list.split_cons()
-        .map_err(|list| error(format!("BEAM list source {list:?} is not a nonempty list")))
+fn nonempty_list(list: &Term) -> Result<(&Term, &Term), BeamError> {
+    list.cons_cell()
+        .ok_or_else(|| error(format!("BEAM list source {list:?} is not a nonempty list")))
 }
 
 /// Continue execution after a label in the active module.

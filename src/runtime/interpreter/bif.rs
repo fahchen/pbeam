@@ -5,7 +5,8 @@
 //! `lists`, `maps`, `os`, `re`, and `unicode` modules hold the BIF bodies
 //! that do not fit on one table line.
 //! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
-//! in `bif.tab`.
+//! in `bif.tab`. The `io_service` module holds the IO service entry of the
+//! runtime to boot gate.
 
 use super::*;
 use crate::runtime::{
@@ -20,6 +21,7 @@ mod erlang;
 mod erts_internal;
 mod ets;
 mod file;
+mod io_service;
 mod iolist;
 mod lists;
 mod maps;
@@ -45,10 +47,13 @@ pub(super) enum BifResult {
         /// Reason of the exception, without a stack trace.
         reason: Term,
     },
-    /// The BIF raises an exception of class `error` with this stack trace
-    /// in the calling process, as `erlang:error/2` does with the frame of
-    /// its caller (`EXC_ERROR_2`, `beam_common.c:478-495`).
-    ErrorWithStacktrace {
+    /// The BIF raises an exception with this stack trace in the calling
+    /// process, as `erlang:error/2` does with the frame of its caller
+    /// (`EXC_ERROR_2`, `beam_common.c:478-495`) and `erlang:raise/3` does
+    /// with the frames that it gets (`bif.c:1626-1692`).
+    RaiseWithStacktrace {
+        /// Class of the exception.
+        class: ExceptionClass,
         /// Reason of the exception.
         reason: Term,
         /// Stack trace of the exception.
@@ -274,21 +279,6 @@ fn unsupported_port(bif: &str) -> BeamError {
     ))
 }
 
-/// Return the list of `elements` and then `tail`, or `[]` when `tail` is
-/// `None`: the rest of a list from `Term::list_cells`, which a BIF trap gives to
-/// the export.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(list_rest(&[Term::Integer(2)], None), Term::list_from(vec![Term::Integer(2)]));
-/// ```
-fn list_rest(elements: &[Term], tail: Option<&Term>) -> Term {
-    // ponytail: the rest is a copy, O(n) with the `Vec` list model of #71.
-    let tail = tail.cloned().unwrap_or_else(Term::nil);
-    Term::list_with_tail(elements.to_vec(), tail)
-}
-
 /// The state that a BIF body can use.
 struct BifContext<'a> {
     /// The scheduler that runs the calling process.
@@ -428,6 +418,9 @@ impl BeamProgram {
             ("pbeam_cap", "enter_runtime", [module, function]) => {
                 return pbeam_cap::enter_runtime(scheduler, module, function);
             }
+            ("pbeam_cap", "serve", [pid, kind]) => {
+                return pbeam_cap::serve(scheduler, pid, kind);
+            }
             _ => {}
         }
         let mut context = BifContext { scheduler };
@@ -444,8 +437,8 @@ impl BeamProgram {
     ///   ERTS traps to `erlang:length/3`, which also keeps the original list
     ///   for the stack trace of an error (`erl_bif_guard.c:48-55`, `226-247`).
     ///   PBeam gives a BIF error the stack trace `[]`.
-    /// - `erlang:'++'/3`, with the original lists and the number of elements
-    ///   done. ERTS traps to `'++'/2` with a magic reference to the same state
+    /// - `erlang:'++'/3`, with the original lists and the rest of the left
+    ///   list. ERTS traps to `'++'/2` with a magic reference to the same state
     ///   (`erl_bif_lists.c:91-109`, `298-333`).
     /// - `maps:merge_trap/2`, with the merged map and the steps that remain
     ///   ([`maps::merge_trap`]). ERTS traps to `maps:merge_trap/1` with a
@@ -535,7 +528,7 @@ impl BeamProgram {
                 process,
                 reds_left,
                 term,
-                stack,
+                &stack.collect::<Vec<_>>(),
                 *size as usize,
                 std::mem::take(bytes),
             ));
@@ -545,8 +538,8 @@ impl BeamProgram {
             ("erlang", "length", [list, Term::Integer(count)]) => {
                 erlang::length(process, list, *count)
             }
-            ("erlang", "++", [left, right, Term::Integer(done)]) => {
-                erlang::append_chunk(process, left, right, *done)
+            ("erlang", "++", [left, right, rest]) => {
+                erlang::append_chunk(process, left, right, rest)
             }
             ("maps", "merge_trap", [merged, Term::Integer(steps)]) => {
                 maps::merge_trap(process, merged.clone(), *steps as usize)
@@ -610,7 +603,12 @@ impl BeamProgram {
             ("erts_internal", "iolist_size_continue", [term, stack, Term::Integer(size)])
                 if let Some(stack) = stack.proper_list() =>
             {
-                iolist::iolist_size_continue(process, term, stack, *size as usize)
+                iolist::iolist_size_continue(
+                    process,
+                    term,
+                    &stack.collect::<Vec<_>>(),
+                    *size as usize,
+                )
             }
             (
                 "erts_internal",
@@ -619,7 +617,7 @@ impl BeamProgram {
             ) if phase.name() == "size"
                 && let Some(stack) = stack.proper_list() =>
             {
-                iolist::iovec_size(process, arg, term, stack)
+                iolist::iovec_size(process, arg, term, &stack.collect::<Vec<_>>())
             }
             (
                 "erts_internal",
@@ -633,8 +631,8 @@ impl BeamProgram {
                     process,
                     reds_left,
                     term,
-                    stack,
-                    iovec.to_vec(),
+                    &stack.collect::<Vec<_>>(),
+                    iovec.cloned().collect(),
                     merged.clone(),
                 ))
             }
@@ -651,7 +649,7 @@ impl BeamProgram {
                     reds_left,
                     arg,
                     term,
-                    stack,
+                    &stack.collect::<Vec<_>>(),
                     *size as usize,
                 ))
             }
@@ -687,11 +685,12 @@ impl BeamProgram {
 
 /// The PBeam BIFs: functions of PBeam modules that ERTS does not have. They
 /// are not `bif.tab` entries, and no BEAM module defines them.
-const PBEAM_BIFS: [(&str, &str, u32); 4] = [
+const PBEAM_BIFS: [(&str, &str, u32); 5] = [
     ("pbeam_cap", "enter_runtime", 2),
     ("pbeam_cap", "policy_revoke", 2),
     ("pbeam_cap", "request", 2),
     ("pbeam_cap", "revoke", 2),
+    ("pbeam_cap", "serve", 2),
 ];
 
 /// Return whether an external call or a `bif` instruction goes to a BIF: the

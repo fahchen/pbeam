@@ -53,7 +53,7 @@ fn gives_the_binary_part_like_erts() {
     expected.extend(std::iter::repeat_n(badarg, 12));
     assert_eq!(
         program.execute("binary_part_probe", "main", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
 
     assert_eq!(

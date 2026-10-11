@@ -45,7 +45,7 @@ fn reads_the_monotonic_and_the_system_clock_as_pinned_erts() {
     // for `os:system_time/1` on the host `CLOCK_REALTIME`
     // (`erl_time_sup.c:2595-2599`, `sys_time.c:469-497`).
     let program = program();
-    let truths = Term::List(vec![Term::Atom(program.atom("true").unwrap()); 16]);
+    let truths = Term::list_from(vec![Term::Atom(program.atom("true").unwrap()); 16]);
     for function in ["monotonic", "system"] {
         assert_eq!(
             program.execute("time_probe", function, &[]).unwrap(),
@@ -64,10 +64,10 @@ fn raises_badarg_for_a_unit_that_is_not_valid_as_pinned_erts() {
     // positive integer raise `badarg` (`erl_time_sup.c:2328-2341`).
     let program = program();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    let badargs = Term::List(vec![Term::Tuple(vec![atom("error"), atom("badarg")]); 10]);
+    let badargs = Term::list_from(vec![Term::Tuple(vec![atom("error"), atom("badarg")]); 10]);
     assert_eq!(
         program.execute("time_probe", "units", &[]).unwrap(),
-        Term::List(vec![badargs.clone(), badargs])
+        Term::list_from(vec![badargs.clone(), badargs])
     );
     let badargs = ["{error,badarg}"; 10].join(",");
     assert_eq!(
@@ -87,7 +87,7 @@ fn converts_the_time_unit_in_the_pinned_erlang_beam() {
     let program = program();
     assert_eq!(
         program.execute("time_probe", "convert", &[]).unwrap(),
-        Term::List(
+        Term::list_from(
             [
                 1_000_000_000,
                 -1_729_382_256,
@@ -100,7 +100,6 @@ fn converts_the_time_unit_in_the_pinned_erlang_beam() {
                 -9,
             ]
             .map(Term::Integer)
-            .into()
         )
     );
     assert_eq!(
@@ -177,7 +176,7 @@ fn gives_the_date_of_a_posix_time_as_pinned_erts() {
     expected.extend([badarg.clone(), badarg.clone(), badarg]);
     assert_eq!(
         program.execute("time_probe", "posix", &[]).unwrap(),
-        Term::List(expected)
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("posix"),
@@ -200,7 +199,7 @@ fn raises_badarg_for_a_date_that_is_not_valid_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("time_probe", "local_badarg", &[]).unwrap(),
-        Term::List(vec![Term::Tuple(vec![atom("error"), atom("badarg")]); 23])
+        Term::list_from(vec![Term::Tuple(vec![atom("error"), atom("badarg")]); 23])
     );
     assert_eq!(
         reference("local_badarg"),

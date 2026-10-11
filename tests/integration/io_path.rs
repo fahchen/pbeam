@@ -60,7 +60,7 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
             atom("noise_ok"),
             atom("normal"),
             atom("normal"),
-            Term::Tuple(vec![atom("badarg"), Term::List(vec![])]),
+            Term::Tuple(vec![atom("badarg"), Term::nil()]),
         ])
     );
 

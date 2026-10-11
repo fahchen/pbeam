@@ -157,8 +157,8 @@ pub(super) fn process_flag(
 
 /// The items of ERTS `system_flag_2` (`bif.c:4972-5304`) that need a
 /// subsystem that PBeam does not have: schedulers, the garbage collector,
-/// stack traces, tracing, the time offset, statistics, the CPU topology,
-/// and the memory allocators.
+/// tracing, the time offset, statistics, the CPU topology, and the memory
+/// allocators.
 const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
     "multi_scheduling",
     "schedulers_online",
@@ -166,7 +166,6 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
     "min_heap_size",
     "min_bin_vheap_size",
     "max_heap_size",
-    "backtrace_depth",
     "trace_control_word",
     "sequential_tracer",
     "reset_seq_trace",
@@ -187,13 +186,21 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// neither, so the value stays 233.
 const MIN_HEAP_SIZE: i64 = 233;
 
+/// The largest value of `backtrace_depth`, `MAX_BACKTRACE_SIZE` of ERTS
+/// (`error.h:206`). `system_flag(backtrace_depth, Depth)` sets a larger
+/// depth to this value (`bif.c:5108-5115`).
+const MAX_BACKTRACE_SIZE: i64 = 64;
+
 /// Run `erlang:system_flag(Item, Value)` as ERTS `system_flag_2`
-/// (`bif.c:4972-5304`) does for the items `system_logger` and
-/// `debug_flags`. `system_logger` takes `logger`, `undefined`, or a local
-/// pid, sets the node value, and returns the old value
+/// (`bif.c:4972-5304`) does for the items `system_logger`, `debug_flags`,
+/// and `backtrace_depth`. `system_logger` takes `logger`, `undefined`, or a
+/// local pid, sets the node value, and returns the old value
 /// (`erts_set_system_logger`, `erl_trace.c:2486-2491`). The start value is
 /// `logger` (`erl_trace.c:339`). Each other value raises `badarg`.
-/// `debug_flags` returns `true` for each value. An item that ERTS does not
+/// `debug_flags` returns `true` for each value. `backtrace_depth` takes a
+/// small integer of 0 or more, sets the depth of the run to at most 64, and
+/// returns the old depth (`bif.c:5108-5115`). Each other value raises
+/// `badarg`. An item that ERTS does not
 /// know raises `badarg`, also `time_offset` with a value that is not
 /// `finalize`. Each item of `UNSUPPORTED_SYSTEM_FLAGS` first checks its
 /// value as ERTS does (`unsupported_system_flag_value`), and raises
@@ -216,9 +223,11 @@ const MIN_HEAP_SIZE: i64 = 233;
 /// let old = system_flag(&mut context, &Term::static_atom("system_logger"), &Term::Pid(pid))?;
 /// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "logger"));
 /// assert!(matches!(system_flag(&mut context, &foo, &Term::Integer(1))?, BifResult::Raise { .. }));
-/// assert!(system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::Integer(8)).is_err());
+/// let depth = system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::Integer(100))?;
+/// assert!(matches!(depth, BifResult::Value(Term::Integer(8))));
 /// let depth = system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::static_atom("foo"))?;
 /// assert!(matches!(depth, BifResult::Raise { .. }));
+/// assert!(system_flag(&mut context, &Term::static_atom("trace_control_word"), &Term::Integer(0)).is_err());
 /// ```
 ///
 /// # Errors
@@ -243,6 +252,7 @@ pub(super) fn system_flag(
     let valid = match (item.name(), value) {
         ("system_logger", _) => logger,
         ("debug_flags", _) => true,
+        ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
         ("time_offset", Term::Atom(finalize)) => finalize.name() == "finalize",
         (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
             unsupported_system_flag_value(name, value)
@@ -262,13 +272,18 @@ pub(super) fn system_flag(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    Ok(match item.name() {
-        "system_logger" => Value(std::mem::replace(
+    Ok(match (item.name(), value.small_integer()) {
+        ("system_logger", _) => Value(std::mem::replace(
             &mut scheduler.system_logger,
             value.clone(),
         )),
-        "debug_flags" => Value(Term::static_atom("true")),
-        name => {
+        ("debug_flags", _) => Value(Term::static_atom("true")),
+        ("backtrace_depth", Some(depth)) => {
+            let depth = depth.min(MAX_BACKTRACE_SIZE) as usize;
+            let old = std::mem::replace(&mut scheduler.backtrace_depth, depth);
+            Value(Term::Integer(old as i64))
+        }
+        (name, _) => {
             return Err(error(format!(
                 "unsupported erlang:system_flag/2 item {name}"
             )));
@@ -285,8 +300,8 @@ pub(super) fn system_flag(
 /// - `schedulers_online` and `dirty_cpu_schedulers_online` take a small
 ///   integer of 1 or more (`erts_set_schedulers_online`,
 ///   `erl_process.c:8241-8242`).
-/// - `fullsweep_after`, `min_heap_size`, `min_bin_vheap_size`, and
-///   `backtrace_depth` take a small integer of 0 or more.
+/// - `fullsweep_after`, `min_heap_size`, and `min_bin_vheap_size` take a
+///   small integer of 0 or more.
 /// - `trace_control_word` takes an integer from 0 to `u32::MAX`
 ///   (`db_set_trace_control_word`, `erl_db_util.c:1091-1103`).
 /// - `sequential_tracer` takes `false`, a pid, or `{Module, State}` with an
@@ -317,8 +332,8 @@ pub(super) fn system_flag(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(!unsupported_system_flag_value("backtrace_depth", &Term::static_atom("foo")));
-/// assert!(unsupported_system_flag_value("backtrace_depth", &Term::Integer(8)));
+/// assert!(!unsupported_system_flag_value("min_heap_size", &Term::static_atom("foo")));
+/// assert!(unsupported_system_flag_value("min_heap_size", &Term::Integer(8)));
 /// assert!(!unsupported_system_flag_value("schedulers_online", &Term::Integer(0)));
 /// ```
 fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
@@ -345,7 +360,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
         "schedulers_online" | "dirty_cpu_schedulers_online" => {
             small.is_some_and(|count| count >= 1)
         }
-        "fullsweep_after" | "min_heap_size" | "min_bin_vheap_size" | "backtrace_depth" => {
+        "fullsweep_after" | "min_heap_size" | "min_bin_vheap_size" => {
             small.is_some_and(|size| size >= 0)
         }
         "trace_control_word" => integer.is_some_and(|word| u32::try_from(word).is_ok()),
@@ -361,7 +376,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
         }
         "scheduling_statistics" => matches!(atom, Some("disable" | "enable" | "clear")),
         "internal_cpu_topology" => match value.proper_list() {
-            Some(cpus) => !cpus.is_empty() && cpus.iter().all(cpu),
+            Some(cpus) => !value.is_nil() && cpus.clone().all(cpu),
             None => atom == Some("undefined"),
         },
         "erts_alloc" => match value {
@@ -396,6 +411,34 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
     }
 }
 
+/// Run `erlang:error(Reason)` as ERTS `error_1` (`bif.c:1436-1440`) does:
+/// raise an exception of class `error` with `Reason`. The first frame of
+/// the stack trace is the frame of the function that calls the BIF, with
+/// its arity: ERTS `handle_error` starts with the arguments `am_true`
+/// (`beam_common.c:454`), and `erts_build_mfa_item` puts the arity in the
+/// frame when the arguments are not a list (`utils.c:3448-3455`). Thus
+/// this is [`error_2`] with arguments that are not a list.
+///
+/// `error_handler:crash/1` calls `tl/1` on this stack trace
+/// (`error_handler.erl:172-178`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // In `tail/1`: erlang:error(r).
+/// let result = error_1(context, &Term::static_atom("r"))?;
+/// // The stack trace is [{Module, tail, 1, []}].
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A caller instruction with no `func_info` before it is a runtime
+/// invariant error.
+pub(super) fn error_1(context: &mut BifContext<'_>, reason: &Term) -> Result<BifResult, BeamError> {
+    error_2(context, reason, &Term::static_atom("true"))
+}
+
 /// Run `erlang:error(Reason, Args)` as ERTS `error_2` (`bif.c:1448-1454`)
 /// does: raise an exception of class `error` with `Reason`. ERTS puts
 /// `Args` in the first frame of the stack trace, the frame of the function
@@ -415,7 +458,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
 /// // In `tail/1`: erlang:error(r, [a]) and erlang:error(r, none).
 /// let result = error_2(context, &Term::static_atom("r"), &args)?;
 /// // The stack trace is [{Module, tail, [a], []}] or [{Module, tail, 1, []}].
-/// assert!(matches!(result, BifResult::ErrorWithStacktrace { .. }));
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { .. }));
 /// ```
 ///
 /// # Errors
@@ -438,7 +481,8 @@ pub(super) fn error_2(
         Term::Integer(arity.into())
     };
     let frame = Term::Tuple(vec![module, function, args, Term::nil()]);
-    Ok(BifResult::ErrorWithStacktrace {
+    Ok(BifResult::RaiseWithStacktrace {
+        class: ExceptionClass::Error,
         reason: reason.clone(),
         stacktrace: Term::list_from(vec![frame]),
     })
@@ -453,18 +497,23 @@ pub(super) fn error_2(
 /// `{M, F, A, Location}`, where `Fun` is a fun, `M` and `F` are atoms, and
 /// `Location` is a list.
 ///
-/// PBeam records no stack frames (row "Exception stack trace" in
-/// `docs/erts-differences.md`), so the exception gets the stack trace `[]`.
+/// The exception gets the frames of `Stacktrace`. When the list has more
+/// frames than `depth`, the run value of `backtrace_depth`, it keeps the
+/// first `depth` frames, and one frame for the depth 0
+/// (`bif.c:1626-1637`). A `{Fun, Args}` frame becomes `{Fun, Args, []}`,
+/// and a `{M, F, A}` frame becomes `{M, F, A, []}` (`bif.c:1661-1687`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = raise(&Term::static_atom("throw"), &reason, &Term::nil());
-/// assert!(matches!(result, BifResult::Raise { class: ExceptionClass::Throw, .. }));
-/// let result = raise(&Term::static_atom("foo"), &reason, &Term::nil());
+/// let frames = Term::list_from(vec![mfa]); // [{m, f, 1}]
+/// let result = raise(8, &Term::static_atom("throw"), &reason, &frames);
+/// // The stack trace is [{m, f, 1, []}].
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { class: ExceptionClass::Throw, .. }));
+/// let result = raise(8, &Term::static_atom("foo"), &reason, &Term::nil());
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "badarg"));
 /// ```
-pub(super) fn raise(class: &Term, reason: &Term, stacktrace: &Term) -> BifResult {
+pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term) -> BifResult {
     let Some(class) = ExceptionClass::from_term(class) else {
         return Value(Term::static_atom("badarg"));
     };
@@ -479,12 +528,31 @@ pub(super) fn raise(class: &Term, reason: &Term, stacktrace: &Term) -> BifResult
         },
         _ => false,
     };
-    match stacktrace.proper_list() {
-        Some(frames) if frames.iter().all(frame) => Raise {
-            class,
-            reason: reason.clone(),
-        },
-        _ => Value(Term::static_atom("badarg")),
+    let Some(frames) = stacktrace.proper_list() else {
+        return Value(Term::static_atom("badarg"));
+    };
+    if !frames.clone().all(frame) {
+        return Value(Term::static_atom("badarg"));
+    }
+    let count = frames.clone().count();
+    let kept = if depth < count { depth.max(1) } else { count };
+    let frames = frames.take(kept).map(|frame| match frame {
+        Term::Tuple(elements)
+            if matches!(
+                elements.as_slice(),
+                [Term::Fun(_), _] | [Term::Atom(_), _, _]
+            ) =>
+        {
+            let mut elements = elements.clone();
+            elements.push(Term::nil());
+            Term::Tuple(elements)
+        }
+        _ => frame.clone(),
+    });
+    BifResult::RaiseWithStacktrace {
+        class,
+        reason: reason.clone(),
+        stacktrace: Term::list_from(frames),
     }
 }
 
@@ -1008,7 +1076,7 @@ pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
 /// let x = Term::static_atom("x");
 /// assert!(matches!(append(&mut process, &Term::nil(), &x)?, BifResult::Value(term) if term == x));
 /// let list = append(&mut process, &Term::list_from(vec![Term::Integer(1)]), &x)?;
-/// assert!(matches!(list, BifResult::Value(list) if matches!(list.list_cells(), Some((elements, Some(_))) if elements.len() == 1)));
+/// assert!(matches!(list, BifResult::Value(list) if list == Term::cons(Term::Integer(1), x.clone())));
 /// assert!(matches!(append(&mut process, &x, &Term::nil())?, BifResult::Raise { .. }));
 /// ```
 ///
@@ -1023,20 +1091,26 @@ pub(super) fn append(
 ) -> Result<BifResult, BeamError> {
     match left {
         _ if left.is_nil() => Ok(Value(right.clone())),
-        _ if left.is_list() => append_chunk(process, left, right, 0),
+        _ if left.is_list() => append_chunk(process, left, right, left),
         _ => Ok(BifResult::badarg()),
     }
 }
 
-/// Copy the next chunk of `left` after its first `done` elements, as ERTS
-/// `append_continue` does (`erl_bif_lists.c:237-251`). For a `right` of `[]`,
-/// `append_empty_rhs` only walks the list, 32 elements for each reduction
+/// Walk the next chunk of `left` from `rest`, the cons cell after the
+/// elements done, as ERTS `append_continue` does
+/// (`erl_bif_lists.c:237-251`). For a `right` of `[]`, `append_empty_rhs`
+/// only walks the list, 32 elements for each reduction
 /// (`erl_bif_lists.c:61-89`). Else `lists_append_onheap` copies 60 elements
 /// for each reduction (`erl_bif_lists.c:176-235`). Each chunk takes as many
 /// elements as the budget permits, and bumps the reductions for the
 /// elements that it took. When elements remain, the BIF traps to its export
-/// with the number of elements done (`erl_bif_lists.c:282-289`, `316-320`).
-/// At the end, an improper `left` raises `badarg`.
+/// with the rest of `left`, as the ERTS state keeps its `iterator`
+/// (`erl_bif_lists.c:47-55`, `282-289`, `316-320`). At the end, an improper
+/// `left` raises `badarg`. Else a `right` of `[]` gives `left` itself, as
+/// `append_empty_rhs` gives `lhs_original`, and another `right` gives a copy
+/// of the elements of `left` with the tail `right`. PBeam makes the copy at
+/// the end, in O(n) time, because a cons cell does not change after it is
+/// made.
 ///
 /// ERTS copies on the heap only while the heap has free words. When the
 /// heap is full, it continues in `lists_append_alloc` with 40 elements for
@@ -1050,7 +1124,7 @@ pub(super) fn append(
 /// ```rust,ignore
 /// process.fcalls = 1;
 /// let left = Term::list_from((0..61).map(Term::Integer));
-/// let trap = append_chunk(&mut process, &left, &Term::list_from(vec![Term::Integer(61)]), 0)?;
+/// let trap = append_chunk(&mut process, &left, &Term::list_from(vec![Term::Integer(61)]), &left)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "++", .. }));
 /// assert_eq!(process.fcalls, 0);
 /// ```
@@ -1063,29 +1137,31 @@ pub(super) fn append_chunk(
     process: &mut ProcessState,
     left: &Term,
     right: &Term,
-    done: i64,
+    rest: &Term,
 ) -> Result<BifResult, BeamError> {
-    let (elements, tail) = left.list_cells().expect("'++' appends to a nonempty list");
-    let done = usize::try_from(done).expect("'++' counts the elements that it copied");
+    let mut elements = rest.list_iter().expect("'++' walks a list");
     let per_reduction = if right.is_nil() { 32 } else { 60 };
     let budget = per_reduction * process.bif_reductions_left()?;
-    let rest = elements.len() - done;
-    let walked = rest.min(budget);
+    let walked = elements.by_ref().take(budget).count();
     process.bump_reductions((walked / per_reduction) as i32);
-    if walked < rest {
+    let rest = elements.rest();
+    if rest.is_nonempty_list() {
         return Ok(BifResult::TrapBif {
             module: "erlang",
             function: "++",
-            arguments: vec![
-                left.clone(),
-                right.clone(),
-                Term::Integer((done + walked) as i64),
-            ],
+            arguments: vec![left.clone(), right.clone(), rest.clone()],
         });
     }
-    Ok(match tail {
-        Some(_) => BifResult::badarg(),
-        None => Value(Term::list_with_tail(elements.to_vec(), right.clone())),
+    Ok(match rest {
+        _ if !rest.is_nil() => BifResult::badarg(),
+        _ if right.is_nil() => Value(left.clone()),
+        _ => {
+            let elements = left.list_iter().expect("'++' appends to a list");
+            Value(Term::list_with_tail(
+                elements.cloned().collect(),
+                right.clone(),
+            ))
+        }
     })
 }
 
@@ -1120,26 +1196,25 @@ pub(super) fn length(
     list: &Term,
     count: i64,
 ) -> Result<BifResult, BeamError> {
-    let Some((elements, tail)) = list.list_cells() else {
+    let Some(mut elements) = list.list_iter() else {
         return Ok(BifResult::badarg());
     };
     let max_iter = 16 * process.bif_reductions_left()?;
-    if elements.len() > max_iter {
+    let counted = elements.by_ref().take(max_iter).count();
+    let rest = elements.rest();
+    if rest.is_nonempty_list() {
         process.bump_all_reductions();
         return Ok(BifResult::TrapBif {
             module: "erlang",
             function: "length",
-            arguments: vec![
-                list_rest(&elements[max_iter..], tail),
-                Term::Integer(count + max_iter as i64),
-            ],
+            arguments: vec![rest.clone(), Term::Integer(count + counted as i64)],
         });
     }
-    if tail.is_some() {
+    if !rest.is_nil() {
         return Ok(BifResult::badarg());
     }
-    process.bump_reductions((elements.len() / 16) as i32);
-    Ok(Value(Term::Integer(count + elements.len() as i64)))
+    process.bump_reductions((counted / 16) as i32);
+    Ok(Value(Term::Integer(count + counted as i64)))
 }
 
 /// Run `erlang:binary_part/3`: return the `length` bytes of a binary from
@@ -1231,10 +1306,10 @@ pub(super) fn byte_size(term: &Term) -> BifResult {
 /// assert!(matches!(tl(&Term::nil()), BifResult::Raise { .. }));
 /// ```
 pub(super) fn tl(list: &Term) -> BifResult {
-    let Some(([_, rest @ ..], tail)) = list.list_cells() else {
-        return BifResult::badarg();
-    };
-    Value(list_rest(rest, tail))
+    match list.cons_cell() {
+        Some((_, tail)) => Value(tail.clone()),
+        None => BifResult::badarg(),
+    }
 }
 
 /// Run `erlang:split_binary/2`: return `{Left, Right}`, the bytes of a
@@ -1552,12 +1627,11 @@ pub(super) fn atom_to_binary(term: &Term, encoding: &Term) -> BifResult {
 /// A new atom in a full atom table gives the error of `AtomTable::put`,
 /// where ERTS stops the emulator.
 pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResult, BeamError> {
-    let Some((elements, tail)) = term.list_cells() else {
+    let Some(mut elements) = term.list_iter() else {
         return Ok(BifResult::badarg());
     };
-    let proper = tail.is_none();
     let mut name = String::new();
-    for (count, element) in elements.iter().enumerate() {
+    for (count, element) in elements.by_ref().enumerate() {
         if count == MAX_ATOM_CHARACTERS {
             return Ok(Raise {
                 class: ExceptionClass::Error,
@@ -1573,7 +1647,7 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
         };
         name.push(character);
     }
-    if !proper {
+    if !elements.rest().is_nil() {
         return Ok(BifResult::badarg());
     }
     Ok(Value(Term::Atom(atoms.put(&name)?)))
@@ -1830,7 +1904,9 @@ pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> B
 /// ```
 pub(super) fn list_to_tuple(list: &Term) -> BifResult {
     match list.proper_list() {
-        Some(elements) if elements.len() <= MAX_TUPLE_SIZE => Value(Term::Tuple(elements.to_vec())),
+        Some(elements) if elements.clone().count() <= MAX_TUPLE_SIZE => {
+            Value(Term::Tuple(elements.cloned().collect()))
+        }
         _ => BifResult::badarg(),
     }
 }
@@ -2186,9 +2262,11 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
 ///   nothing. The check comes before the name lookup, so a denied send
 ///   gives the same result for each name.
 /// - After the lookup, the runtime to boot gate denies a message to a boot
-///   process, by its pid or its name, in the same way (see `boot_denial`).
-///   A message to an alias has no gate: the owner gave the alias as a reply
-///   channel, for example for the reply of `gen:call/4`.
+///   process, by its pid or its name, in the same way, unless the boot
+///   process is an IO service and the message is an IO request that the
+///   caller may make (see `io_service::send_denial`). A message to an alias
+///   has no gate: the owner gave the alias as a reply channel, for example
+///   for the reply of `gen:call/4`.
 /// - A pid gets the message from the caller (see
 ///   [`Scheduler::send_message`]). ERTS drops a message to a process that
 ///   does not exist or exits.
@@ -2244,7 +2322,7 @@ fn deliver_to(
         Destination::Port => return Err(unsupported_port(bif)),
     };
     if let Some(target) = target {
-        if let Some(denied) = boot_denial(scheduler, target)? {
+        if let Some(denied) = io_service::send_denial(scheduler, target, &message)? {
             return Ok(Err(denied));
         }
         let caller = scheduler.current_process_mut().id;
@@ -2430,7 +2508,7 @@ pub(super) fn process_info(
     item: &Term,
 ) -> Result<BifResult, BeamError> {
     let valid = match item.proper_list() {
-        Some(items) => items.iter().all(is_process_info_item),
+        Some(items) => items.clone().all(is_process_info_item),
         None => is_process_info_item(item),
     };
     let (true, Term::Pid(id)) = (valid, process) else {
@@ -2651,7 +2729,7 @@ pub(super) fn finish_loading(
     let Some(elements) = prepared.proper_list() else {
         return Ok(BifResult::badarg());
     };
-    let mut references = Vec::with_capacity(elements.len());
+    let mut references = Vec::new();
     for element in elements {
         let Term::Reference(reference) = element else {
             return Ok(BifResult::badarg());
@@ -3002,13 +3080,14 @@ const HALT_MSG_SIZE: usize = 1023;
 /// assert!(!is_slogan(&Term::list_with_tail(vec![Term::Integer(65)], Term::static_atom("foo"))));
 /// ```
 fn is_slogan(status: &Term) -> bool {
-    let Some((elements, tail)) = status.list_cells() else {
+    let Some(mut elements) = status.list_iter() else {
         return false;
     };
-    let proper = tail.is_none();
-    let characters = elements.iter().take(HALT_MSG_SIZE).all(|element| {
+    let characters = elements.by_ref().take(HALT_MSG_SIZE).all(|element| {
         matches!(element, Term::Integer(code)
             if u32::try_from(*code).ok().and_then(char::from_u32).is_some())
     });
-    characters && (proper || elements.len() > HALT_MSG_SIZE)
+    // The rest is `[]` after the last element of a proper list, and a cons
+    // cell after 1023 elements of a longer list.
+    characters && elements.rest().is_list()
 }

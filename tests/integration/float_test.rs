@@ -20,13 +20,12 @@ fn runs_the_is_float_test_as_pinned_erts() {
     let lists = pinned_beam("lists");
     let program = BeamProgram::load(&[&erlang, &lists, FLOAT_TEST_PROBE]).unwrap();
     let other = Term::Atom(program.atom("other").unwrap());
-    let restarting = Term::List(
+    let restarting = Term::list_from(
         b"logger_std_h_default_restarting"
             .iter()
-            .map(|&byte| Term::Integer(byte.into()))
-            .collect(),
+            .map(|&byte| Term::Integer(byte.into())),
     );
-    let expected = Term::List(std::iter::repeat_n(other, 12).chain([restarting]).collect());
+    let expected = Term::list_from(std::iter::repeat_n(other, 12).chain([restarting]));
     assert_eq!(
         program.execute("float_test_probe", "kinds", &[]).unwrap(),
         expected
@@ -97,7 +96,7 @@ fn raises_badarith_when_fconv_gets_a_term_that_is_not_a_number() {
     let badarith = Term::Atom(program.atom("badarith").unwrap());
     assert_eq!(
         program.execute("float_test_probe", "halves", &[]).unwrap(),
-        Term::List(vec![badarith.clone(); 10])
+        Term::list_from(vec![badarith.clone(); 10])
     );
     // Without a catch, the exception ends the root process. PBeam gives each
     // `error` exception the stack trace `[]` (row "Exception stack trace" in

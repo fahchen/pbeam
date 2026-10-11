@@ -129,7 +129,7 @@ fn reads_uncompressed_binary_literals() {
     assert!(read_literal(&[131, 109], &mut atoms).is_err());
     assert_eq!(
         read_literal(&[131, 107, 0, 1, b'\n'], &mut atoms).unwrap(),
-        Some(Term::List(vec![Term::Integer(10)]))
+        Some(Term::list_from(vec![Term::Integer(10)]))
     );
     assert!(read_literal(&[131, 107], &mut atoms).is_err());
     assert!(read_literal(&[131, 107, 0, 2, b'x'], &mut atoms).is_err());
@@ -182,10 +182,7 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
     .unwrap();
     assert_eq!(
         read(&[131, 104, 2, 119, 2, b'o', b'k', 106]).unwrap(),
-        Some(Term::Tuple(vec![
-            Term::static_atom("ok"),
-            Term::List(vec![])
-        ]))
+        Some(Term::Tuple(vec![Term::static_atom("ok"), Term::nil()]))
     );
     // NEW_FLOAT_EXT (70) 1.0 inside a tuple, inside a list, and as a list tail.
     let float = [70, 63, 240, 0, 0, 0, 0, 0, 0];
@@ -211,7 +208,7 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
     let proper = read(&[131, 108, 0, 0, 0, 2, 119, 1, b'a', 119, 1, b'b', 106]).unwrap();
     assert_eq!(
         read(&[131, 108, 0, 0, 0, 0, 106]).unwrap(),
-        Some(Term::List(vec![]))
+        Some(Term::nil())
     );
 
     // #{b => [], a => {}} keeps its pairs in flatmap key order. The first literal made a
@@ -283,18 +280,18 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
     let term = read(&deep).unwrap().unwrap();
     assert!(format!("{term:?}").starts_with("Tuple([Tuple(["));
 
-    let list = Some(Term::List(vec![atom(&atoms, "a"), atom(&atoms, "b")]));
+    let list = Some(Term::list_from(vec![atom(&atoms, "a"), atom(&atoms, "b")]));
     assert_eq!(nested, list);
     let t = || Box::new(atom(&atoms, "t"));
     assert_eq!(
         nil_head,
-        Some(Term::ImproperList(vec![Term::List(vec![])], t()))
+        Some(Term::list_with_tail(vec![Term::nil()], *t()))
     );
     assert_eq!(
         list_tail,
-        Some(Term::ImproperList(
+        Some(Term::list_with_tail(
             vec![atom(&atoms, "a"), atom(&atoms, "b")],
-            t()
+            *t()
         ))
     );
     assert_eq!(empty, Some(*t()));

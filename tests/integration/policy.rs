@@ -22,13 +22,15 @@ const ELIXIR_POLICY: &[u8] = include_bytes!("../../fixtures/policy/Elixir.Elixir
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::List(vec![])), "[]");
+/// assert_eq!(text(&Term::nil()), "[]");
 /// ```
 fn text(term: &Term) -> String {
     let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
     match term {
         Term::Atom(atom) => atom.name().to_owned(),
-        Term::List(elements) => format!("[{}]", join(elements)),
+        _ if let Some(elements) = term.proper_list() => {
+            format!("[{}]", join(&elements.cloned().collect::<Vec<_>>()))
+        }
         Term::Tuple(elements) => format!("{{{}}}", join(elements)),
         other => panic!("the probe returns no {other:?}"),
     }
@@ -207,7 +209,10 @@ fn stops_the_run_when_initial_denies_the_root_process() {
     let cases = [
         ("bad_initial", "initial/1 returned [#{kind=>process}]"),
         ("atom_initial", "initial/1 returned all"),
-        ("raise_initial", "initial/1 exited with {policy_bug,[]}"),
+        (
+            "raise_initial",
+            "initial/1 exited with {policy_bug,[{erl_policy,initial,1,[]}]}",
+        ),
         ("loop_initial", "initial/1 used more than 100000 reductions"),
         ("exit_initial", "the policy process exited with killed"),
     ];
