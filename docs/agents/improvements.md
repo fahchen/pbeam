@@ -21,6 +21,40 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261011: Qualify behavior claims by execution mode
+
+**Problem:** Documentation stated that a denied `initial/1` call means that the root process does not start, but boot mode starts the root process before that call.
+
+**Root Cause:** The statement did not name the execution mode that controls the observed behavior.
+
+**Fix:** Limit the no-start statement to runs without boot mode. State that boot-mode denial stops the existing run.
+
+**Guardrail:** When behavior depends on an execution mode, document each relevant mode and its observable result separately.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/474#issuecomment-6104568265>
+
+## 20261011: Reject guest callbacks before a privileged call
+
+**Problem:** Formatting and map-order options could execute guest functions with boot authority, because the allowlist checked the MFA shape but did not reject nested callback values.
+
+**Root Cause:** The check validated the called function but did not validate the full argument terms that the privileged API executes.
+
+**Fix:** Validate the full option term before the privileged call. Reject a fun in a formatting comparator or a map-order option and return a denial before any callback can run.
+
+**Guardrail:** Before a privileged API runs, validate all arguments recursively and reject guest-controlled functions, comparators, and callbacks, including ones nested inside options or containers.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/466#issuecomment-6104226874>
+
+## 20261011: Define authority at each runtime transition
+
+**Problem:** The proposed sender check rejected the normal application-master relay, and boot-child inheritance granted boot authority across the application boundary.
+
+**Root Cause:** The design inferred authority from the immediate sender and from parent-child inheritance instead of from the runtime transition that creates or forwards the request.
+
+**Fix:** Record the original caller when a trusted relay forwards a request and authenticate that caller at the receiving boundary. Create the application root with the authority that `initial/1` defines.
+
+**Guardrail:** Define each authority change at the runtime boundary that creates or forwards a request. Do not infer authority from parent-child inheritance when the runtime creates a new application boundary.
+
 ## 20261011: Check planned representations against the type system
 
 **Problem:** The planned `Arc<[Term]>` tuple representation could not use the stated `Arc::into_inner` drop rule, because the slice is unsized.

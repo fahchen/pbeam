@@ -128,3 +128,7 @@ Serialize cache creation before moving a downloaded or generated directory into 
 ## Persistent build outputs contaminate discovery
 
 Discover generated inputs from the current build set, not from a persistent output directory. Remove stale artifacts or isolate each build before scanning.
+
+## Complexity claims omit hidden work
+
+Expand every documented complexity claim into its complete operation sequence. Include copying, sorting, allocation, traversal, and deterministic-order steps that can grow with input size. State the cost of each operand or phase when constant-time access also performs size-dependent work.
