@@ -79,3 +79,28 @@ fn checks_the_follow_flag_and_then_the_path_as_erts() {
         "{result:?}"
     );
 }
+
+#[test]
+fn gives_einval_for_a_path_that_is_not_marshaled_as_erts() {
+    // `prim_file` does not export the NIFs, and its callers give the bytes
+    // of `internal_name2native/1` (prim_file.erl:564-568, 593-594, 611-612),
+    // which always end with one NUL. Thus no BEAM code reaches the
+    // `efile_marshal_path` error of `read_file_nif`, `list_dir_nif`, and
+    // `read_link_nif` (prim_file_nif.c:1115-1147, 1354-1366).
+    let mut scheduler = scheduler();
+    let einval = "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))";
+    for name in ["read_file_nif", "list_dir_nif", "read_link_nif"] {
+        let binding = BINDINGS
+            .iter()
+            .find(|binding| (binding.name, binding.arity) == (name, 1))
+            .unwrap();
+        for path in [
+            Term::Binary(b"/".to_vec()),
+            Term::Binary(b"/\0a\0".to_vec()),
+            Term::List(vec![Term::Integer(47), Term::Integer(0)]),
+        ] {
+            let result = (binding.run)(&mut scheduler, std::slice::from_ref(&path)).unwrap();
+            assert_eq!(format!("{result:?}"), einval, "{name} {path:?}");
+        }
+    }
+}
