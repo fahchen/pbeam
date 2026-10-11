@@ -92,7 +92,7 @@ Secure execution also requires bounded loader input and a complete inventory of 
 
 ## 6. Terms and binary ownership
 
-The initial memory model uses shared immutable values backed by `Arc<Value>`, with immediate representations where appropriate. Processes may share immutable term storage; mutable execution state remains owned by the executing process.
+The memory model uses shared immutable values backed by `Arc<Value>`, with immediate representations where appropriate. A copy of a compound term increments a reference count, and every term is `Send` and `Sync`. Processes may share immutable term storage; mutable execution state remains owned by the executing process. Thus a message, an ETS insert and lookup, and `persistent_term` share the stored term and do not copy it. A binary match context holds its shared binary and its bit position in one atomic word, and only the process that owns it changes the position.
 
 Binary handling has its own representation for binaries, sub-binaries, and bitstrings. Construction and matching must retain the distinctions between byte length, bit length, and slice offsets. A binary cannot be reduced to an undifferentiated general value wrapper.
 
