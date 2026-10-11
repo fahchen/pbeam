@@ -732,15 +732,11 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
     // The ERTS run builds the example. The PBeam run uses that build, so the
     // two runs write the same bytes and end with the same order.
     //
-    // A host that does not permit a pseudo-terminal, for example a sandbox
-    // that denies `/dev/ptmx`, cannot run this test: the test then ends
-    // without a result, and the operator runs it on a host that permits one.
-    if let Ok((master, slave)) = open_terminal() {
-        drop((master, slave));
-    } else {
-        println!("the host does not permit a pseudo-terminal: the test does not run");
-        return;
-    }
+    // This test checks the acceptance condition of #448, so it must fail when
+    // it cannot check it. A host that does not permit a pseudo-terminal, for
+    // example a sandbox that denies `/dev/ptmx`, fails the test in
+    // `run_terra_counter_in_terminal`, with the same `a pseudo-terminal`
+    // message as the other pseudo-terminal tests of this suite.
     let (erts, erts_status) = run_terra_counter_in_terminal(&["terra_counter", "--erts"]);
     let (pbeam, pbeam_status) = run_terra_counter_in_terminal(&["terra_counter", "--no-build"]);
     assert_eq!(erts_status, pbeam_status, "status");
