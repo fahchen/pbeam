@@ -818,14 +818,14 @@ impl BeamProgram {
                     tail,
                     deallocate,
                 } => {
-                    let fun = read(process, function)?;
+                    let call = FunCall::new(read_ref(process, function)?, *arity);
                     if *tail {
                         // `i_call_fun_last` releases the frame before it
                         // tests the fun (`emit_i_call_fun2_last` in
                         // `jit/arm/instr_fun.cpp:425-462`).
                         release_frame(process, *deallocate)?;
                     }
-                    if let Some(outcome) = self.call_fun(scheduler, &fun, *arity, *tail)? {
+                    if let Some(outcome) = self.call_fun(scheduler, call, *arity, *tail)? {
                         return Ok(outcome);
                     }
                 }
@@ -1962,7 +1962,6 @@ impl BeamProgram {
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
-        let fun = read(process, &Operand::X(0))?;
         let mut list = read(process, &Operand::X(1))?;
         let Some((arguments, proper)) = take_list_elements(&mut list) else {
             let badarg = Term::static_atom("badarg");
@@ -1977,13 +1976,15 @@ impl BeamProgram {
             return Ok(raise(process, ExceptionClass::Error, badarg));
         }
         let arity = arguments.len() as u32;
+        // The arguments replace the fun in x0, so the call reads the fun first.
+        let call = FunCall::new(read_ref(process, &Operand::X(0))?, arity);
         for (index, argument) in (0..).zip(arguments) {
             write(process, &Operand::X(index), argument)?;
         }
-        self.call_fun(scheduler, &fun, arity, tail)
+        self.call_fun(scheduler, call, arity, tail)
     }
 
-    /// Call `fun` with the arguments in `x0` to `x(arity - 1)`, as ERTS
+    /// Call the fun that `call` holds with the arguments in `x0` to `x(arity - 1)`, as ERTS
     /// `call_fun` (`beam_common.c:1605-1731`) does for `call_fun` and
     /// `call_fun2`. A term that is not a fun raises `error:{badfun, Term}`. A
     /// fun of another arity raises `error:{badarity, {Fun, Arguments}}`,
@@ -1997,34 +1998,35 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // x0 = one and fun(X) -> {Tag, X} end enters the lambda with x1 = Tag.
-    /// assert!(program.call_fun(&mut scheduler, &pair, 1, false)?.is_none());
+    /// assert!(program.call_fun(&mut scheduler, FunCall::new(&pair, 1), 1, false)?.is_none());
     /// // fun erlang:self/0 runs the `self/0` BIF.
-    /// assert!(program.call_fun(&mut scheduler, &self_fun, 0, false)?.is_none());
+    /// assert!(program.call_fun(&mut scheduler, FunCall::new(&self_fun, 0), 0, false)?.is_none());
     /// // An atom raises `error:{badfun, notfun}`.
-    /// assert!(program.call_fun(&mut scheduler, &Term::static_atom("notfun"), 0, false)?.is_some());
+    /// let notfun = Term::static_atom("notfun");
+    /// assert!(program.call_fun(&mut scheduler, FunCall::new(&notfun, 0), 0, false)?.is_some());
     /// ```
     fn call_fun(
         &self,
         scheduler: &mut Scheduler,
-        fun: &Term,
+        call: FunCall,
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
-        let fun = match fun {
-            Term::Fun(fun) if fun.target().arity() == arity => fun,
-            Term::Fun(_) => {
+        let (target, free) = match call {
+            FunCall::Enter { target, free } => (target, free),
+            FunCall::BadArity(fun) => {
                 let arguments = call_arguments(&process.registers, arity)?;
-                let call = Term::Tuple(vec![fun.clone(), Term::List(arguments)]);
+                let call = Term::Tuple(vec![fun, Term::List(arguments)]);
                 let reason = Term::Tuple(vec![Term::static_atom("badarity"), call]);
                 return Ok(raise(process, ExceptionClass::Error, reason));
             }
-            _ => {
-                let reason = Term::Tuple(vec![Term::static_atom("badfun"), fun.clone()]);
+            FunCall::BadFun(fun) => {
+                let reason = Term::Tuple(vec![Term::static_atom("badfun"), fun]);
                 return Ok(raise(process, ExceptionClass::Error, reason));
             }
         };
-        let lambda = match fun.target() {
+        let lambda = match &target {
             Target::Local(lambda) => lambda,
             Target::External {
                 module, function, ..
@@ -2035,10 +2037,10 @@ impl BeamProgram {
                 module, function, ..
             } => return self.call_mfa(scheduler, module.name(), function.name(), arity, tail),
         };
-        for (register, value) in (arity..).zip(fun.free()) {
-            write(process, &Operand::X(register), value.clone())?;
+        let total_arity = arity + free.len() as u32;
+        for (register, value) in (arity..).zip(free) {
+            write(process, &Operand::X(register), value)?;
         }
-        let total_arity = arity + fun.free().len() as u32;
         let frame = self.frame(lambda.module().name(), lambda.label(), total_arity)?;
         enter_frame(process, frame, tail);
         Ok(None)
@@ -2924,6 +2926,49 @@ fn write(process: &mut ProcessState, operand: &Operand, value: Term) -> Result<(
         .expect("a running process has an active frame")
         .stack;
     write_operand(operand, value, &mut process.registers, stack)
+}
+
+/// The parts of a fun term that `call_fun` uses. The call reads them
+/// before it writes the argument registers or releases the frame, because
+/// the fun can be in one of these registers. Only the free variables, which
+/// the call stores in X registers, and the entry are copies. A term that
+/// the call cannot enter is copied for the exception reason only.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let call = FunCall::new(&Term::static_atom("notfun"), 0);
+/// assert!(matches!(call, FunCall::BadFun(Term::Atom(_))));
+/// ```
+enum FunCall {
+    /// A fun of the called arity: its entry and its free variables.
+    Enter { target: Target, free: Vec<Term> },
+    /// A fun of another arity, for the reason `{badarity, {Fun, Arguments}}`.
+    BadArity(Term),
+    /// A term that is not a fun, for the reason `{badfun, Term}`.
+    BadFun(Term),
+}
+
+impl FunCall {
+    /// Read the parts of `fun` that a call with `arity` arguments uses, as
+    /// ERTS `call_fun` tests them (`beam_common.c:1605-1731`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let call = FunCall::new(&Term::Fun(Fun::new(lambda, vec![tag])), 1);
+    /// assert!(matches!(call, FunCall::Enter { .. }));
+    /// ```
+    fn new(fun: &Term, arity: u32) -> Self {
+        match fun {
+            Term::Fun(fun) if fun.target().arity() == arity => FunCall::Enter {
+                target: fun.target().clone(),
+                free: fun.free().to_vec(),
+            },
+            Term::Fun(_) => FunCall::BadArity(fun.clone()),
+            _ => FunCall::BadFun(fun.clone()),
+        }
+    }
 }
 
 #[derive(Debug)]
