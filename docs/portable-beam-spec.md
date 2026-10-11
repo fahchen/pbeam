@@ -29,7 +29,7 @@ The [Hello World contract](hello-world-target.md) is the first target: PBeam exe
 | Security authority | Host-issued, process-scoped grants with distinct use and delegation authority. Protected requests and resource handles bind authority to runtime-authenticated identity. |
 | Native trust | All in-process native code and dependencies are part of the trusted computing base. Static linking and Rust type safety do not establish extension isolation. |
 | Security profiles | Trusted application and secure guest profiles use the same authorization path. Secure execution remains unavailable until its coverage and bypass acceptance gates pass. |
-| Code loading | Bundle-defined code loaded at startup; shared code remains effectively immutable afterward. |
+| Code loading | The bundle defines the loadable module set. Interactive mode loads a module on demand; embedded mode loads all modules at startup. Loaded code does not change (no code replacement). See [code loading](code-loading.md). |
 | Packaging | One application bundle embedded in a Rust launcher with `include_bytes!`. |
 | Validation order | Hello World, then Terra Counter. |
 
@@ -45,7 +45,7 @@ The initial scope excludes:
 
 - A compiler frontend, Core/Kernel/SSA pipeline, LLVM/MLIR, AOT, and JIT.
 - Arena allocation or a replacement process heap/GC implementation.
-- Hot code upgrades, dynamic module loading, code purge, and multiple versions of a module.
+- Hot code upgrades, code replacement, code purge, multiple versions of a module, and loading a module from outside the loadable module set.
 - Traditional `erl_nif`/Rustler ABI compatibility and dynamically loaded native extension libraries.
 - Post-link bundle appending or platform-specific executable section manipulation.
 - Complete OTP compatibility as a prerequisite for the first application.
@@ -78,7 +78,7 @@ Protected VM operations use the same authority model without going through an OS
 
 ## 5. Loading and interpretation
 
-The loader reads the bundle, validates its metadata and modules, and decodes supported BEAM instructions into executable internal instructions. The code server resolves modules and functions from that startup-loaded set.
+The loader reads the bundle, validates its metadata and modules, and decodes supported BEAM instructions into executable internal instructions. The bundle defines the loadable module set. In interactive mode, the code server loads a module of that set on demand. In embedded mode, the loader loads all modules of that set at startup. Loaded code does not change: there is no code replacement.
 
 An external-call instruction such as `call_ext` identifies an imported MFA. It does not mean that the call leaves the BEAM VM. Resolve the target first. If the target has BEAM code, execute that code in the interpreter. Implement only the VM instructions, scheduler, process operations, BIFs, and native boundaries required by the executed path. Do not replace a BEAM function with a Rust shortcut.
 
@@ -236,7 +236,7 @@ Capability manifest entries request authority; the trusted launcher grants only 
 
 Use one embedded bundle rather than generating a separate `include_bytes!` declaration for every module. Bundle parsing is independent of executable embedding so an external-bundle runner can be added later without changing the application representation.
 
-At startup the launcher loads and validates the embedded bundle, initializes atom/code/native tables, registers linked native modules, starts the scheduler pool, and spawns the entry MFA. Required initialization must finish before application code runs.
+At startup the launcher loads and validates the embedded bundle, initializes atom/code/native tables from the start set (all modules in embedded mode), registers linked native modules, starts the scheduler pool, and spawns the entry MFA. Required initialization must finish before application code runs.
 
 The delivered executable must not require installed `erl`, `elixir`, external BEAM files, or separately distributed native extension libraries. Build-time Erlang/Elixir and Rust toolchains are still required.
 
