@@ -204,7 +204,7 @@ A second probe of the same day isolates the remaining `tuple` time: `tuple_size/
 
 ### Fun benchmark (#455)
 
-Release build, Apple Silicon macOS, revision `31f765b` (origin/main) before the fun change and the branch of #455 after it. Each value is the median of five interleaved runs in microseconds. The host was shared with other work, so the spread is wide. Each `after` value of the two probes below is lower than each `before` value of the same probe. The probe module is the [Benchmark module](#benchmark-module) at `/tmp/dsh/cow455/cowb.erl`, and the commands are the commands above with that directory and the revision before the change in a second worktree.
+Release build, Apple Silicon macOS, revision `31f765b` (origin/main) before the fun change and the branch of #455 after it. Each value is the median of five interleaved runs in microseconds. The host was shared with other work, so the spread is wide: each `funsend` value of the branch is below each `funsend` value of the revision before the change, and four of the five `funcopy` values of the branch are below the lowest `funcopy` value of that revision. The probe module is the [Benchmark module](#benchmark-module) at `/tmp/dsh/cow455/cowb.erl`, and the commands are the commands above with that directory and the revision before the change in a second worktree.
 
 | Probe | ERTS µs | Before µs | After µs |
 | --- | --- | --- | --- |
