@@ -30,9 +30,9 @@ fn matches_erts_demonitor_options_and_argument_errors() {
 
     assert_eq!(
         program.execute("demonitor_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
-            Term::Tuple(vec![atom("badarg"); 5]),
-            Term::Tuple(vec![atom("value"), atom("false")]),
+        Term::tuple(vec![
+            Term::tuple(vec![atom("badarg"); 5]),
+            Term::tuple(vec![atom("value"), atom("false")]),
             atoms(&["true"; 6]),
             atom("true"),
             atoms(&removed),
@@ -40,7 +40,7 @@ fn matches_erts_demonitor_options_and_argument_errors() {
             Term::list_from(
                 fired
                     .iter()
-                    .map(|(result, down)| Term::Tuple(vec![atom(result), atom(down)]))
+                    .map(|(result, down)| Term::tuple(vec![atom(result), atom(down)]))
             ),
         ])
     );

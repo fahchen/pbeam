@@ -153,7 +153,7 @@ fn builds_matches_and_compares_maps_like_erts() {
     let atom = |name: &str| atom(&program, name);
     assert_eq!(
         program.execute("map_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("raw"),
             map(
                 &program,
@@ -189,7 +189,7 @@ fn uses_a_flatmap_up_to_32_keys_and_a_hashmap_above_like_erts() {
     let atom = |name: &str| atom(&program, name);
     assert_eq!(
         program.execute("map_order_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             integers(&(1..=32).collect::<Vec<_>>()),
             integers(&hash33),
             integers(&hash33),
@@ -263,7 +263,7 @@ fn orders_and_hashes_atom_keys_by_the_erts_atom_index() {
     let atoms = |names: &str| atoms(&program, names);
     assert_eq!(
         program.execute("atom_map_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("pbeam_zeta"),
             // A hashmap of 40 static atoms: index order through the ERTS atom hash.
             atoms(
@@ -580,14 +580,14 @@ fn puts_binary_keys_into_maps_like_erts() {
         Term::list_from(
             pairs
                 .iter()
-                .map(|(key, value)| Term::Tuple(vec![binary(key), int(*value)])),
+                .map(|(key, value)| Term::tuple(vec![binary(key), int(*value)])),
         )
     };
     // `maps:put/3` puts `<<"ab">>` between `<<"a">>` and `<<"b">>` of a flatmap, and the 33rd key
     // changes a flatmap to a hashmap in the hash order.
     let grown = Term::list_from(
         BINARY_HASH_ORDER
-            .map(|key| Term::Tuple(vec![binary(&format!("k{key:02}")), int(key)]))
+            .map(|key| Term::tuple(vec![binary(&format!("k{key:02}")), int(key)]))
             .to_vec(),
     );
     assert_eq!(
@@ -624,7 +624,7 @@ fn gives_the_map_size_like_erts() {
     let atom = |name: &str| atom(&program, name);
     let int = Term::Integer;
     let badmap =
-        |term: Term| Term::Tuple(vec![atom("error"), Term::Tuple(vec![atom("badmap"), term])]);
+        |term: Term| Term::tuple(vec![atom("error"), Term::tuple(vec![atom("badmap"), term])]);
     assert_eq!(
         program.execute("map_size_probe", "main", &[]).unwrap(),
         Term::list_from(vec![
@@ -657,7 +657,7 @@ fn loads_and_updates_maps_with_tuple_keys_like_erts() {
     let program = BeamProgram::load(&[&maps, TUPLE_KEY_PROBE]).unwrap();
     let atom = |name: &str| atom(&program, name);
     let int = Term::Integer;
-    let tuple = Term::Tuple;
+    let tuple = Term::tuple;
     let pair = |key: Term, value: &str| tuple(vec![key, atom(value)]);
     // A flatmap orders two top-level atoms by atom index (value before abs) and each other two
     // keys in the term order: a tuple by its size, then by its elements, with atoms by name.
@@ -707,7 +707,7 @@ fn puts_tuple_keys_with_maps_put_like_erts() {
     let program = BeamProgram::load(&[TUPLE_KEY_PROBE]).unwrap();
     let atom = |name: &str| atom(&program, name);
     let int = Term::Integer;
-    let cell = |(row, col): (i64, i64)| Term::Tuple(vec![int(row), int(col)]);
+    let cell = |(row, col): (i64, i64)| Term::tuple(vec![int(row), int(col)]);
     let cells = |cells: &[(i64, i64)]| Term::list_from(cells.iter().copied().map(cell));
     // `maps:put/3` keeps a flatmap of 32 cells in the term order. The 33rd key, from `maps:put/3`
     // or from the 33rd cell, changes the flatmap to a hashmap in the ERTS hash order.
@@ -724,7 +724,7 @@ fn puts_tuple_keys_with_maps_put_like_erts() {
             int(55),
             int(36),
             int(55),
-            Term::Tuple(vec![atom("ok"), atom("grown")]),
+            Term::tuple(vec![atom("ok"), atom("grown")]),
         ])
     );
 
@@ -754,9 +754,9 @@ fn raises_badmap_and_badkey_for_tuple_keys_like_erts() {
     let program = BeamProgram::load(&[TUPLE_KEY_PROBE]).unwrap();
     let atom = |name: &str| atom(&program, name);
     let error = |tag: &str, term: Term| {
-        Term::Tuple(vec![atom("error"), Term::Tuple(vec![atom(tag), term])])
+        Term::tuple(vec![atom("error"), Term::tuple(vec![atom(tag), term])])
     };
-    let missing = || Term::Tuple(vec![Term::Integer(9), Term::Integer(9)]);
+    let missing = || Term::tuple(vec![Term::Integer(9), Term::Integer(9)]);
     assert_eq!(
         program.execute("tuple_key_probe", "errors", &[]).unwrap(),
         Term::list_from(vec![
@@ -799,7 +799,7 @@ fn keeps_each_copy_of_a_map_when_another_copy_changes_like_erts() {
             map(&[(1, "a"), (2, "e")]),
             map(&[(1, "a"), (2, "f"), (4, "g")]),
             map(&[(2, "b")]),
-            Term::Tuple(vec![atom("b"), map(&[(1, "a")])]),
+            Term::tuple(vec![atom("b"), map(&[(1, "a")])]),
             map(&[(1, "h"), (2, "b")]),
             map(&[(1, "a"), (2, "b")]),
             map(&[(1, "a"), (2, "i")]),
@@ -853,7 +853,7 @@ fn raises_badkey_and_keeps_the_shared_map_like_erts() {
     let atom = |name: &str| atom(&program, name);
     let int = Term::Integer;
     let badkey =
-        |key: Term| Term::Tuple(vec![atom("error"), Term::Tuple(vec![atom("badkey"), key])]);
+        |key: Term| Term::tuple(vec![atom("error"), Term::tuple(vec![atom("badkey"), key])]);
     assert_eq!(
         program.execute("map_share_probe", "errors", &[]).unwrap(),
         Term::list_from(vec![

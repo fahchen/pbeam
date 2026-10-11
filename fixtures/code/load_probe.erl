@@ -1,5 +1,5 @@
 -module(load_probe).
--export([load/1, prepared/1, errors/1, replace/1, on_load/1, order/1]).
+-export([load/1, prepared/1, errors/1, replace/1, on_load/1, order/1, constraint/1]).
 
 %% Load load_target from its BEAM bytes with erlang:load_module/2
 %% (erlang.erl:7513-7528), then call it. Read erlang:module_loaded/1 and
@@ -70,6 +70,17 @@ order(Code) ->
     Loaded = erlang:load_module(load_target, Code),
     Self ! loaded,
     [Loaded, receive First -> First end, receive Second -> Second end].
+
+%% Prepare load_target and finish it with a list of one module. The `modules`
+%% constraint of the `code` `load` capability compares the module name of
+%% each element of the list.
+constraint(Code) ->
+    Prepared = erlang:prepare_loading(load_target, Code),
+    try erlang:finish_loading([Prepared]) of
+        ok -> ok
+    catch
+        error:capability_denied -> denied
+    end.
 
 catch_error(Fun) ->
     try Fun() catch Class:Reason -> {Class, Reason} end.

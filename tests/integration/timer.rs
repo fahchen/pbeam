@@ -22,7 +22,7 @@ fn runs_receive_timeouts_as_pinned_erts() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, TIMER_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    let timeout_value = Term::Tuple(vec![atom("error"), atom("timeout_value")]);
+    let timeout_value = Term::tuple(vec![atom("error"), atom("timeout_value")]);
 
     let start = Instant::now();
     let receive_after = program
@@ -90,7 +90,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let badargs = |count| {
         Term::list_from(vec![
-            Term::Tuple(vec![atom("error"), atom("badarg")]);
+            Term::tuple(vec![atom("error"), atom("badarg")]);
             count
         ])
     };
@@ -155,7 +155,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
 
     // An end after `ERTS_MONOTONIC_END` and a 64-bit overflow raise `badarg`
     // (`erl_hl_timer.c:2549-2552`).
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         run("timer_limits"),
         Term::list_from(vec![atom("ok"), atom("ok"), badarg.clone(), badarg])

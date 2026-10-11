@@ -119,8 +119,8 @@ impl PersistentTerms {
     /// assert_eq!(
     ///     terms.get_all(),
     ///     [
-    ///         Term::Tuple(vec![Term::static_atom("true"), Term::Integer(1)]),
-    ///         Term::Tuple(vec![Term::Integer(7), Term::Integer(4)]),
+    ///         Term::tuple(vec![Term::static_atom("true"), Term::Integer(1)]),
+    ///         Term::tuple(vec![Term::Integer(7), Term::Integer(4)]),
     ///     ]
     /// );
     /// ```
@@ -129,7 +129,7 @@ impl PersistentTerms {
             .iter()
             .rev()
             .flatten()
-            .map(|(key, value)| Term::Tuple(vec![key.clone(), value.clone()]))
+            .map(|(key, value)| Term::tuple(vec![key.clone(), value.clone()]))
             .collect()
     }
 

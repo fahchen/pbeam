@@ -85,7 +85,7 @@ fn keeps_flatmap_keys_in_order_and_replaces_values() {
     );
     assert_eq!(map.get(&atom("a")), Some(&atom("a")));
     assert_eq!(map.get(&atom("b")), None);
-    assert_eq!(map.get(&Term::Tuple(vec![])), None);
+    assert_eq!(map.get(&Term::tuple(vec![])), None);
     map.insert(atom("z"), atom("new")).unwrap();
     assert_eq!(map.get(&atom("z")), Some(&atom("new")));
     assert_eq!(map.len(), 4);
@@ -119,17 +119,17 @@ fn orders_atoms_in_list_keys_by_name_in_a_flatmap() {
 #[test]
 fn hashes_tuple_keys_with_the_internal_hash() {
     // {}, {1, {a}}, [{}], and [1|{2}]: a tuple, also in a list or as an improper list tail.
-    let tuple = Term::Tuple(vec![Term::Integer(1), Term::Tuple(vec![atom("a")])]);
+    let tuple = Term::tuple(vec![Term::Integer(1), Term::tuple(vec![atom("a")])]);
     let keys = [
-        Term::Tuple(vec![]),
+        Term::tuple(vec![]),
         tuple,
-        Term::list_from(vec![Term::Tuple(vec![])]),
-        Term::list_with_tail(vec![Term::Integer(1)], Term::Tuple(vec![Term::Integer(2)])),
+        Term::list_from(vec![Term::tuple(vec![])]),
+        Term::list_with_tail(vec![Term::Integer(1)], Term::tuple(vec![Term::Integer(2)])),
     ];
     for key in keys {
         assert_eq!(map_hash(&key), Some(internal_hash(&key)));
     }
-    assert_eq!(map_hash(&Term::Tuple(vec![])), Some(4510301282025278020));
+    assert_eq!(map_hash(&Term::tuple(vec![])), Some(4510301282025278020));
 }
 
 #[test]
@@ -141,9 +141,9 @@ fn rejects_list_and_tuple_keys_with_unsupported_elements() {
         Term::list_from(vec![Term::list_from(vec![empty_map()])]),
         Term::list_from(vec![Term::Integer(1 << 59)]),
         // {<<>>}, {1, #{}}, and {[1 bsl 59]}: a tuple with an element that is not supported.
-        Term::Tuple(vec![Term::Binary(vec![])]),
-        Term::Tuple(vec![Term::Integer(1), empty_map()]),
-        Term::Tuple(vec![Term::list_from(vec![Term::Integer(1 << 59)])]),
+        Term::tuple(vec![Term::Binary(vec![])]),
+        Term::tuple(vec![Term::Integer(1), empty_map()]),
+        Term::tuple(vec![Term::list_from(vec![Term::Integer(1 << 59)])]),
         // [1|#{}], [1|<<>>], and [[1|#{}]]: an improper list tail that is not supported.
         Term::list_with_tail(vec![Term::Integer(1)], empty_map()),
         Term::list_with_tail(vec![Term::Integer(1)], Term::Binary(vec![])),
@@ -372,7 +372,7 @@ fn changes_the_value_of_an_existing_key_in_place() {
     assert!(hash.get_mut(&Term::Integer(65)).is_none());
     assert!(integers(1..=33).get_mut(&Term::Integer(34)).is_none());
     assert!(hash.get_mut(&Term::Integer(1 << 59)).is_none());
-    assert!(hash.get_mut(&Term::Tuple(vec![])).is_none());
+    assert!(hash.get_mut(&Term::tuple(vec![])).is_none());
 }
 
 /// Return the map of a `Map` term.
@@ -388,7 +388,7 @@ fn shares_the_form_of_a_map_between_the_copies_of_a_term() {
     // A copy of the term, also a copy of a term that holds the map, gets the same form.
     for size in [2, 40] {
         let map = Term::Map(integers(1..=size));
-        let tuple = Term::Tuple(vec![Term::list_from(vec![map.clone()])]);
+        let tuple = Term::tuple(vec![Term::list_from(vec![map.clone()])]);
         let tuple = tuple.clone();
         let Term::Tuple(copied) = &tuple else {
             unreachable!()
@@ -534,11 +534,11 @@ fn sorts_pairs_by_the_flatmap_key_order() {
         (Term::nil(), Term::Integer(1)),
         (Term::Map(Map::new()), Term::Integer(2)),
         (
-            Term::Tuple(vec![Term::static_atom("value")]),
+            Term::tuple(vec![Term::static_atom("value")]),
             Term::Integer(3),
         ),
         (
-            Term::Tuple(vec![Term::static_atom("abs")]),
+            Term::tuple(vec![Term::static_atom("abs")]),
             Term::Integer(4),
         ),
         (Term::static_atom("abs"), Term::Integer(5)),

@@ -569,7 +569,7 @@ impl Scheduler {
         };
         let kill = !linked && reason == Term::static_atom("kill");
         if active && !kill && process.trap_exit {
-            let message = Term::Tuple(vec![Term::static_atom("EXIT"), from.term(), reason]);
+            let message = Term::tuple(vec![Term::static_atom("EXIT"), from.term(), reason]);
             process.mailbox.convert(walk, node, message);
             self.activate(id);
             return Handled::Continue(1);
@@ -615,7 +615,7 @@ impl Scheduler {
             return 0;
         };
         let extra = if is_immediate(&reason) { 8 } else { 1 };
-        let down = Term::Tuple(vec![
+        let down = Term::tuple(vec![
             monitor.tag,
             Term::Reference(reference),
             Term::static_atom(monitor.kind),
@@ -929,7 +929,7 @@ pub(super) fn monitor_signal(monitor: Monitor) -> Signal {
 /// let message = reply(reference, Term::static_atom("true"));
 /// ```
 fn reply(reference: Reference, result: Term) -> Term {
-    Term::Tuple(vec![Term::Reference(reference), result])
+    Term::tuple(vec![Term::Reference(reference), result])
 }
 
 /// Return true for a term that ERTS keeps in one word (`is_immed`): an
@@ -940,7 +940,7 @@ fn reply(reference: Reference, result: Term) -> Term {
 ///
 /// ```rust,ignore
 /// assert!(is_immediate(&Term::static_atom("normal")));
-/// assert!(!is_immediate(&Term::Tuple(vec![])));
+/// assert!(!is_immediate(&Term::tuple(vec![])));
 /// ```
 fn is_immediate(term: &Term) -> bool {
     match term {

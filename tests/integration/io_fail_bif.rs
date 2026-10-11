@@ -36,7 +36,7 @@ fn checks_unicode_io_of_a_pid_as_pinned_erts() {
     // `dist.c:6670-6686`). PBeam has only local pids.
     let program = BeamProgram::load(&[IO_FAIL_BIF_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program
             .execute("io_fail_bif_probe", "unicode_io", &[])
@@ -64,10 +64,10 @@ fn converts_chardata_to_a_list_as_pinned_erts() {
     let list = |code_points: &[i64]| Term::list_from(code_points.iter().copied().map(int));
     let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
     let stopped =
-        |reason, converted: &[i64], rest| Term::Tuple(vec![atom(reason), list(converted), rest]);
+        |reason, converted: &[i64], rest| Term::tuple(vec![atom(reason), list(converted), rest]);
     let error = |converted, rest| stopped("error", converted, rest);
     let incomplete = |converted, rest| stopped("incomplete", converted, rest);
-    let badarg = || Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     let improper = |elements, tail| Term::list_with_tail(elements, tail);
     assert_eq!(
         program
@@ -151,7 +151,7 @@ fn converts_chardata_of_100000_characters_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let int = Term::Integer;
     let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
-    let summary = |reason, length, rest| Term::Tuple(vec![atom(reason), int(length), rest]);
+    let summary = |reason, length, rest| Term::tuple(vec![atom(reason), int(length), rest]);
     assert_eq!(
         program.execute("io_fail_bif_probe", "big", &[]).unwrap(),
         Term::list_from(vec![

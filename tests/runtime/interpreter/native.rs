@@ -95,8 +95,9 @@ const NO_EFFECT: [&str; 2] = ["`none`", "`process.self`"];
 /// has no effect, and its cell is `none`. Each other entry is an effect
 /// entry: its cell lists each `kind:operation` that it checks, is
 /// `` `ambient`: Reason `` with a reason when it has no check by decision,
-/// or is `` `later`: Task `` with the name of the later task that adds its
-/// check. The integration test `effect_capability` calls each listed entry
+/// or is `` `later`: Task `` with the name of the task, the epic, or, when
+/// no task exists, the capability kind that adds its check. The integration
+/// test `effect_capability` calls each listed entry
 /// without its operation and gets `error:capability_denied`, and calls each
 /// `ambient` and `later` entry with no capability and gets the pinned ERTS
 /// result.

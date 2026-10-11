@@ -55,12 +55,12 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("io_path_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
-            Term::Tuple(vec![atom("error"), atom("badarg")]),
+        Term::tuple(vec![
+            Term::tuple(vec![atom("error"), atom("badarg")]),
             atom("noise_ok"),
             atom("normal"),
             atom("normal"),
-            Term::Tuple(vec![atom("badarg"), Term::nil()]),
+            Term::tuple(vec![atom("badarg"), Term::nil()]),
         ])
     );
 

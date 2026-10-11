@@ -249,7 +249,7 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
             reader: None,
         },
     );
-    Ok(BifResult::Value(Term::Tuple(vec![
+    Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),
         Term::Reference(reference),
     ])))
@@ -292,9 +292,9 @@ fn tty_window_size(scheduler: &mut Scheduler, tty: &Term) -> Result<BifResult, B
     }
     let result = match terminal::window_size(ofd) {
         (-1, -1) => enotsup(&mut scheduler.atoms)?,
-        (columns, rows) => Term::Tuple(vec![
+        (columns, rows) => Term::tuple(vec![
             Term::static_atom("ok"),
-            Term::Tuple(vec![
+            Term::tuple(vec![
                 Term::Integer(columns.into()),
                 Term::Integer(rows.into()),
             ]),
@@ -551,7 +551,7 @@ fn read_nif(
     let size = usize::try_from(size.min(READ_LIMIT)).expect("1024 fits in usize");
     let bytes = match input::read(libc::STDIN_FILENO, size) {
         Ok(bytes) if bytes.is_empty() => {
-            let closed = Term::Tuple(vec![
+            let closed = Term::tuple(vec![
                 Term::static_atom("error"),
                 Term::static_atom("closed"),
             ]);
@@ -565,7 +565,7 @@ fn read_nif(
         }
     };
     select_input(scheduler, *tty, reference);
-    Ok(BifResult::Value(Term::Tuple(vec![
+    Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),
         Term::Binary(bytes),
     ])))
@@ -767,9 +767,9 @@ fn errno_error(
     function: &str,
     errno: libc::c_int,
 ) -> Result<Term, BeamError> {
-    Ok(Term::Tuple(vec![
+    Ok(Term::tuple(vec![
         Term::static_atom("error"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::Atom(atoms.put(function)?),
             Term::Atom(atoms.put(&errno_id(errno))?),
         ]),
@@ -791,7 +791,7 @@ fn errno_error(
 /// The atom `enotsup` in a full atom table gives the error of
 /// `AtomTable::put`.
 fn enotsup(atoms: &mut AtomTable) -> Result<Term, BeamError> {
-    Ok(Term::Tuple(vec![
+    Ok(Term::tuple(vec![
         Term::static_atom("error"),
         Term::Atom(atoms.put("enotsup")?),
     ]))
@@ -812,7 +812,7 @@ fn enotsup(atoms: &mut AtomTable) -> Result<Term, BeamError> {
 ///
 /// A new atom in a full atom table gives the error of `AtomTable::put`.
 fn error_errno(atoms: &mut AtomTable, errno: libc::c_int) -> Result<Term, BeamError> {
-    Ok(Term::Tuple(vec![
+    Ok(Term::tuple(vec![
         Term::static_atom("error"),
         Term::Atom(atoms.put(&errno_id(errno))?),
     ]))

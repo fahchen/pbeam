@@ -85,7 +85,7 @@ fn raises_undef_through_error_handler_beam_as_pinned_erts() {
     // `pbeam_boot:start/3` follows in a PBeam boot run.
     let program = program();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let frame = Term::Tuple(vec![
+    let frame = Term::tuple(vec![
         atom("error_handler_target"),
         atom("missing"),
         Term::list_from(vec![atom("a")]),
@@ -95,7 +95,7 @@ fn raises_undef_through_error_handler_beam_as_pinned_erts() {
         program
             .execute("error_handler_probe", "first", &[])
             .unwrap(),
-        Term::Tuple(vec![atom("error"), atom("undef"), frame])
+        Term::tuple(vec![atom("error"), atom("undef"), frame])
     );
     assert_eq!(
         reference("first"),
@@ -132,12 +132,12 @@ fn sets_the_error_handler_of_the_process_as_pinned_erts() {
     // not export (`error_handler.erl:85-98`).
     let program = program();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
-    let undef = Term::Tuple(vec![
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
+    let undef = Term::tuple(vec![
         atom("EXIT"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("undef"),
-            Term::list_from(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::tuple(vec![
                 atom("error_handler_target"),
                 atom("missing"),
                 Term::list_from(vec![atom("b")]),
@@ -147,7 +147,7 @@ fn sets_the_error_handler_of_the_process_as_pinned_erts() {
     ]);
     assert_eq!(
         program.execute("error_handler_probe", "flag", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("error_handler"),
             atom("error_handler_custom"),
             undef,
@@ -187,11 +187,11 @@ fn sets_the_error_handler_for_an_unloaded_module_as_pinned_erts() {
     // `docs/erts-differences.md`).
     let program = program();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let undef = Term::Tuple(vec![
+    let undef = Term::tuple(vec![
         atom("EXIT"),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("undef"),
-            Term::list_from(vec![Term::Tuple(vec![
+            Term::list_from(vec![Term::tuple(vec![
                 atom("error_handler_unloaded"),
                 atom("value"),
                 Term::list_from(vec![atom("a")]),
@@ -203,7 +203,7 @@ fn sets_the_error_handler_for_an_unloaded_module_as_pinned_erts() {
         program
             .execute("error_handler_probe", "flag_unloaded", &[])
             .unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("error_handler"),
             atom("error_handler_custom"),
             undef,
@@ -235,7 +235,7 @@ fn charges_the_reductions_of_error_handler_beam_as_pinned_erts() {
     };
     let expected = ["plain", "handled"]
         .into_iter()
-        .map(|name| Term::Tuple(vec![atom(name), Term::Integer(reductions(name).into())]))
+        .map(|name| Term::tuple(vec![atom(name), Term::Integer(reductions(name).into())]))
         .collect::<Vec<_>>();
     assert_eq!(
         program

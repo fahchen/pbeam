@@ -40,7 +40,7 @@ fn reference_of(expression: &str) -> String {
 
 /// Return `{Count, Unicode, Crlf}`, the `info/1` result of the fixture.
 fn info(count: i64, unicode: i64, crlf: i64) -> Term {
-    Term::Tuple(vec![
+    Term::tuple(vec![
         Term::Integer(count),
         Term::Integer(unicode),
         Term::Integer(crlf),
@@ -52,9 +52,9 @@ fn info(count: i64, unicode: i64, crlf: i64) -> Term {
 /// it.
 fn compile_error(program: &BeamProgram, message: &str, offset: i64) -> Term {
     let message = message.bytes().map(|byte| Term::Integer(byte.into()));
-    Term::Tuple(vec![
+    Term::tuple(vec![
         Term::Atom(program.atom("error").unwrap()),
-        Term::Tuple(vec![Term::list_from(message), Term::Integer(offset)]),
+        Term::tuple(vec![Term::list_from(message), Term::Integer(offset)]),
     ])
 }
 
@@ -165,7 +165,7 @@ fn raises_badarg_for_bad_options_and_patterns_as_pinned_erts() {
     // also with `unicode`, and each pattern that is not iodata
     // (erl_bif_re.c:927-929). A bad option raises before a bad pattern.
     let program = program();
-    let badarg = Term::Tuple(vec![
+    let badarg = Term::tuple(vec![
         Term::Atom(program.atom("error").unwrap()),
         Term::Atom(program.atom("badarg").unwrap()),
     ]);

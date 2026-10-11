@@ -40,14 +40,14 @@ fn runs_the_bifs_of_io_inspect_of_a_tuple_as_pinned_erts() {
     // and the reason.
     let program = BeamProgram::load(&[INSPECT_BIF_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let expected = Term::list_from(vec![
         Term::list_from(vec![
             Term::nil(),
             Term::list_from(vec![atom("ok"), Term::Integer(1)]),
             Term::list_from(vec![
                 atom("a"),
-                Term::Tuple(vec![atom("b")]),
+                Term::tuple(vec![atom("b")]),
                 Term::list_from(vec![atom("c")]),
                 Term::Binary(b"d".to_vec()),
             ]),

@@ -683,7 +683,7 @@ impl Scheduler {
             let ttys = self.resources.borrow_mut::<Ttys>();
             let select = ttys.take_input_select().expect("fd 0 has a select");
             if readiness != Readiness::Invalid {
-                let message = Term::Tuple(vec![
+                let message = Term::tuple(vec![
                     Term::static_atom("select"),
                     Term::Reference(select.tty),
                     select.reference,
@@ -747,7 +747,7 @@ impl Scheduler {
                 signal::signal_name(number).expect("a handler is set only for a named signal");
             if let Some(server) = self.whereis("erl_signal_server") {
                 let message =
-                    Term::Tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
+                    Term::tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
                 self.deliver(server, message);
             }
         }
@@ -2154,10 +2154,10 @@ impl Scheduler {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(named_item(&name), Term::Tuple(vec![Term::Atom(name.clone()), local_node()]));
+/// assert_eq!(named_item(&name), Term::tuple(vec![Term::Atom(name.clone()), local_node()]));
 /// ```
 fn named_item(name: &Atom) -> Term {
-    Term::Tuple(vec![Term::Atom(name.clone()), local_node()])
+    Term::tuple(vec![Term::Atom(name.clone()), local_node()])
 }
 
 mod policy;

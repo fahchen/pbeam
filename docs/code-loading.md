@@ -106,8 +106,9 @@ These cases stop the run with a clear runtime error. `docs/erts-differences.md` 
 ## 9. Authorization
 
 - `erlang:prepare_loading/2` has no capability check. It only decodes the module and makes atoms, as `erlang:list_to_atom/1` does (`runtime.atom`).
-- The authorization points are `erlang:finish_loading/1` (`code:load`) and the read of a code file (`file:read`). `erlang:module_loaded/1` gets the operation `code:inspect`. Until then, its inventory value is `later` (#437).
-- The processes of the kernel tree, which include `erl_prim_loader` and `code_server`, have no check. [#465](https://github.com/fahchen/pbeam/issues/465) of [m6] Capability security adds the `code` kind. It waits for #445 and the boot authority task [#462](https://github.com/fahchen/pbeam/issues/462).
+- The authorization points are `erlang:finish_loading/1` (`code:load`) and the read of a code file (`file:read`).
+- [#465](https://github.com/fahchen/pbeam/issues/465) of [m6] Capability security added the `code` kind (section 9 of `docs/capability-security-migration.md`). The kind has the operations `load` and `inspect` and the constraint `modules`. `erlang:finish_loading/1` checks `load` for each module of the list; `erlang:module_loaded/1` and `erlang:get_module_info/2` check `inspect` for the module name. The read of a code file waits for the `file` kind.
+- The processes of the kernel tree, which include `erl_prim_loader` and `code_server`, have no check.
 
 ## 10. Specification change
 

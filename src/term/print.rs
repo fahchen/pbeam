@@ -46,7 +46,7 @@ enum Item<'a> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let term = Term::Tuple(vec![Term::static_atom("undef"), Term::nil()]);
+/// let term = Term::tuple(vec![Term::static_atom("undef"), Term::nil()]);
 /// assert_eq!(print_term(&term), b"{undef,[]}");
 /// let string = Term::list_from(b"ab\n".iter().map(|&byte| Term::Integer(byte.into())));
 /// assert_eq!(print_term(&string), b"\"ab\\n\"");

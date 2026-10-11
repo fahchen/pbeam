@@ -86,7 +86,7 @@ const EXPORT_FUNCTION_SHIFT: u32 = 20;
 ///
 /// ```rust,ignore
 /// assert_eq!(internal_hash(&Term::Integer(1)), 7938660269479274665);
-/// assert_eq!(internal_hash(&Term::Tuple(vec![])), 4510301282025278020);
+/// assert_eq!(internal_hash(&Term::tuple(vec![])), 4510301282025278020);
 /// ```
 pub(crate) fn internal_hash(term: &Term) -> u64 {
     match shape(term) {
@@ -323,7 +323,7 @@ impl State {
     /// let (mut state, mut stack) = (State::default(), Vec::new());
     /// state.push_term(&mut stack, &Term::Integer(1));
     /// assert!(stack.is_empty());
-    /// state.push_term(&mut stack, &Term::Tuple(vec![]));
+    /// state.push_term(&mut stack, &Term::tuple(vec![]));
     /// assert_eq!(stack.len(), 1);
     /// ```
     fn push_term<'a>(&mut self, stack: &mut Vec<Item<'a>>, term: &'a Term) {
@@ -455,7 +455,7 @@ impl State {
     ///
     /// ```rust,ignore
     /// let (mut state, mut stack) = (State::default(), Vec::new());
-    /// let term = Term::Tuple(vec![Term::Tuple(vec![]), Term::Integer(1)]);
+    /// let term = Term::tuple(vec![Term::tuple(vec![]), Term::Integer(1)]);
     /// assert!(matches!(state.mix_term(&mut stack, &term), Some(Item::Term(Term::Integer(1)))));
     /// assert_eq!(stack.len(), 1);
     /// ```
@@ -564,12 +564,12 @@ impl State {
     ///
     /// ```rust,ignore
     /// let (mut state, mut stack) = (State::default(), Vec::new());
-    /// let list = Term::list_from([Term::Integer(104), Term::Tuple(vec![])]);
+    /// let list = Term::list_from([Term::Integer(104), Term::tuple(vec![])]);
     /// let cells = Cells { first: None, rest: &list };
     /// assert!(matches!(state.mix_cells(&mut stack, cells), Some(Item::Term(_))));
     /// assert!(matches!(stack[..], [Item::Cells(_), Item::CdrMarker]));
     /// // The `[Key | Value]` cell of a collision node with the value {}.
-    /// let (key, value) = (Term::Integer(1), Term::Tuple(vec![]));
+    /// let (key, value) = (Term::Integer(1), Term::tuple(vec![]));
     /// let next = state.mix_cells(&mut stack, Cells { first: Some(&key), rest: &value });
     /// assert!(matches!(next, Some(Item::Cells(_))));
     /// ```

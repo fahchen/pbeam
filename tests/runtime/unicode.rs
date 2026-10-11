@@ -248,7 +248,7 @@ fn finds_terms_that_are_not_chardata_before_the_conversion() {
         Term::Integer(97),
         test_atom("foo"),
         Term::list_from(vec![test_atom("foo")]),
-        Term::list_from(vec![Term::Integer(-1), Term::Tuple(vec![])]),
+        Term::list_from(vec![Term::Integer(-1), Term::tuple(vec![])]),
         Term::list_from(vec![
             binary(&[255]),
             Term::list_from(vec![test_atom("foo")]),
@@ -315,14 +315,14 @@ fn accepts_the_file_names_that_erts_accepts_in_each_encoding() {
             Term::Integer(98),
         )]),
         Term::list_from(vec![Term::Integer(97), test_atom("foo")]),
-        Term::list_from(vec![Term::Tuple(vec![])]),
+        Term::list_from(vec![Term::tuple(vec![])]),
         Term::list_from(vec![Term::list_from(vec![
             Term::Integer(97),
             Term::Integer(0),
         ])]),
         test_atom("foo"),
         Term::Integer(97),
-        Term::Tuple(vec![]),
+        Term::tuple(vec![]),
     ] {
         assert_eq!(check(&name), [false, false], "{name:?}");
     }

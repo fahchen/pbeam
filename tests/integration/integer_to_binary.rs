@@ -27,7 +27,7 @@ fn converts_integers_to_binaries_as_pinned_erts() {
     // (`integer_to_binary_1`, `binary.c:119-145`). PBeam gives the stack
     // trace `[]`, so the probe catches only the class and the reason.
     let program = BeamProgram::load(&[INTEGER_TO_BINARY_PROBE]).unwrap();
-    let error = Term::Tuple(vec![
+    let error = Term::tuple(vec![
         Term::Atom(program.atom("error").unwrap()),
         Term::Atom(program.atom("badarg").unwrap()),
     ]);

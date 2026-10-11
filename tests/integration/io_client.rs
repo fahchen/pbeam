@@ -36,7 +36,7 @@ fn returns_badarg_from_erts_internal_group_leader_for_a_dead_target_or_a_non_pid
         program
             .execute("io_client_probe", "group_leader_badarg", &[])
             .unwrap(),
-        Term::Tuple(vec![badarg.clone(), badarg])
+        Term::tuple(vec![badarg.clone(), badarg])
     );
 
     let reference = Command::new("erl")
@@ -67,10 +67,10 @@ fn assert_probe_matches_erts(function: &str) {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("io_client_probe", function, &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             atom("ok"),
-            Term::Tuple(vec![
-                Term::Tuple(vec![
+            Term::tuple(vec![
+                Term::tuple(vec![
                     atom("put_chars"),
                     atom("unicode"),
                     Term::Binary(b"Hello, world!\n".to_vec()),
@@ -79,7 +79,7 @@ fn assert_probe_matches_erts(function: &str) {
             ]),
             atom("noise_ok"),
             atom("none"),
-            Term::Tuple(vec![atom("true"), atom("no_down")]),
+            Term::tuple(vec![atom("true"), atom("no_down")]),
         ])
     );
 

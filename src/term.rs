@@ -6,6 +6,7 @@ mod map;
 mod match_context;
 mod order;
 mod print;
+mod tuple;
 
 pub use atom::Atom;
 #[cfg(test)]
@@ -20,6 +21,7 @@ pub(crate) use map::{Direction, from_list_units};
 pub use match_context::MatchContext;
 pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
+use tuple::Tuple;
 
 use std::{cell::RefCell, fmt, rc::Rc};
 
@@ -46,8 +48,11 @@ pub enum Term {
     /// for example `[1, 2 | x]`. Copies of a list share its cells. Code
     /// outside the term module uses the list API of `src/term/list.rs`.
     Cons(ConsRef),
-    /// A BEAM tuple.
-    Tuple(Vec<Term>),
+    /// A BEAM tuple: one array of elements. Copies of the tuple share the
+    /// array, as an ERTS copy of a tuple term is the same boxed pointer. A
+    /// change copies a shared array first (`Tuple::arc_mut`). Code outside
+    /// the term module builds a tuple with [`Term::tuple`].
+    Tuple(Tuple),
     /// A BEAM map: a flatmap up to 32 keys and a hashmap above 32 keys, as
     /// in ERTS. `Map` keeps each map in its canonical form, so two maps with
     /// the same pairs are equal. A key is a binary, an atom, a small integer,
@@ -83,12 +88,10 @@ pub enum Term {
 /// the entry of the source fun.
 #[derive(Clone, Copy)]
 enum Kind<'a> {
-    Tuple,
     Fun(&'a Target),
 }
 
-/// The nested terms of a tuple or fun, in order. A fun gives its free
-/// variables.
+/// The nested terms of a fun, in order: its free variables.
 type Nested<'a> = std::slice::Iter<'a, Term>;
 
 impl Kind<'_> {
@@ -97,11 +100,10 @@ impl Kind<'_> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Kind::Tuple.build(vec![]), Term::Tuple(vec![]));
+    /// assert!(matches!(Kind::Fun(&target).build(vec![]), Term::Fun(_)));
     /// ```
     fn build(self, terms: Vec<Term>) -> Term {
         match self {
-            Kind::Tuple => Term::Tuple(terms),
             Kind::Fun(target) => Term::Fun(Fun {
                 target: target.clone(),
                 free: terms,
@@ -125,6 +127,22 @@ impl Term {
     /// Panic when the name is not a static atom. Callers pass a fixed name.
     pub(crate) fn static_atom(name: &str) -> Term {
         Term::Atom(Atom::from_static(name).expect("the name is a static atom"))
+    }
+
+    /// Build a tuple of `elements`. The array of the tuple holds the
+    /// elements, and copies of the tuple share it. Code outside the term
+    /// module builds a tuple with this function, and it does not name
+    /// `Term::Tuple`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let tuple = Term::tuple(vec![Term::Integer(1), Term::Integer(2)]);
+    /// assert_eq!(tuple, Term::tuple(vec![Term::Integer(1), Term::Integer(2)]));
+    /// assert_ne!(tuple, Term::tuple(vec![Term::Integer(1)]));
+    /// ```
+    pub fn tuple(elements: Vec<Term>) -> Term {
+        Term::Tuple(elements.into())
     }
 
     /// Return the value of an integer in the ERTS small-integer range,
@@ -157,14 +175,14 @@ impl Term {
     ///
     /// ```rust,ignore
     /// assert!(!Term::list_from(vec![Term::Integer(1)]).contains_fun());
-    /// assert!(Term::Tuple(vec![Term::list_from(vec![fun])]).contains_fun());
+    /// assert!(Term::tuple(vec![Term::list_from(vec![fun])]).contains_fun());
     /// ```
     pub(crate) fn contains_fun(&self) -> bool {
         let mut pending = vec![self];
         while let Some(term) = pending.pop() {
             match term {
                 Term::Fun(_) => return true,
-                Term::Tuple(elements) => pending.extend(elements),
+                Term::Tuple(elements) => pending.extend(elements.iter()),
                 Term::Cons(cell) => {
                     pending.push(&cell.tail);
                     pending.push(&cell.head);
@@ -176,10 +194,11 @@ impl Term {
         false
     }
 
-    /// Copy a term that has no nested terms. A map copy shares the form of
-    /// the map, and a list copy shares its cons cells, so they do not copy
-    /// the nested terms. For a tuple or fun, return its nested terms, kind,
-    /// and count instead, so the caller copies them.
+    /// Copy a term that has no nested terms. A tuple copy shares its
+    /// element array, a map copy shares the form of the map, and a list copy
+    /// shares its cons cells, so they do not copy the nested terms. For a
+    /// fun, return its free variables, kind, and count instead, so the
+    /// caller copies them.
     ///
     /// # Examples
     ///
@@ -187,13 +206,14 @@ impl Term {
     /// assert_eq!(Term::Integer(1).shallow_clone().ok(), Some(Term::Integer(1)));
     /// assert!(Term::Map(Map::new()).shallow_clone().is_ok());
     /// assert!(Term::list_from([Term::Integer(1)]).shallow_clone().is_ok());
-    /// assert!(Term::Tuple(vec![]).shallow_clone().is_err());
+    /// assert!(Term::tuple(vec![]).shallow_clone().is_ok());
+    /// assert!(fun.shallow_clone().is_err());
     /// ```
     fn shallow_clone(&self) -> Result<Term, (Nested<'_>, Kind<'_>, usize)> {
         match self {
             Term::Nil => Ok(Term::Nil),
             Term::Cons(cell) => Ok(Term::Cons(cell.clone())),
-            Term::Tuple(elements) => Err((elements.iter(), Kind::Tuple, elements.len())),
+            Term::Tuple(elements) => Ok(Term::Tuple(elements.clone())),
             Term::Map(map) => Ok(Term::Map(map.clone())),
             Term::Fun(fun) => Err((fun.free.iter(), Kind::Fun(&fun.target), fun.free.len())),
             Term::Atom(atom) => Ok(Term::Atom(atom.clone())),
@@ -207,7 +227,9 @@ impl Term {
     }
 
     /// Move the nested terms of a list, tuple, map, or fun onto a work stack
-    /// and leave the term empty. A cons term gives up its cell
+    /// and leave the term empty. A tuple gives up its array
+    /// ([`Tuple::take_last`]), and only the last holder of the array moves
+    /// its elements onto the stack. A cons term gives up its cell
     /// ([`ConsRef::take_last`]), and only the last holder of the cell moves
     /// its tail and then its head onto the stack. The head comes off the
     /// stack first, so a long list keeps the stack short.
@@ -216,12 +238,12 @@ impl Term {
     ///
     /// ```rust,ignore
     /// let mut pending = Vec::new();
-    /// Term::Tuple(vec![Term::Integer(1)]).take_nested(&mut pending);
+    /// Term::tuple(vec![Term::Integer(1)]).take_nested(&mut pending);
     /// assert_eq!(pending, vec![Term::Integer(1)]);
     /// ```
     fn take_nested(&mut self, pending: &mut Vec<Term>) {
         match self {
-            Term::Tuple(elements) => pending.append(elements),
+            Term::Tuple(elements) => pending.extend(elements.take_last().unwrap_or_default()),
             Term::Cons(cell) => {
                 if let Some(Cons { head, tail }) = cell.take_last() {
                     pending.extend([tail, head]);
@@ -241,7 +263,7 @@ impl Drop for Term {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let deep = (0..1_000_000).fold(Term::Tuple(vec![]), |inner, _| Term::Tuple(vec![inner]));
+    /// let deep = (0..1_000_000).fold(Term::tuple(vec![]), |inner, _| Term::tuple(vec![inner]));
     /// drop(deep);
     /// ```
     fn drop(&mut self) {
@@ -254,14 +276,14 @@ impl Drop for Term {
 }
 
 impl Clone for Term {
-    /// Copy a term with a work stack of partly copied tuples and funs. A
-    /// map copy shares the form of the map, and a list copy shares its cons
-    /// cells.
+    /// Copy a term with a work stack of partly copied funs. A tuple copy
+    /// shares its element array, a map copy shares the form of the map, and
+    /// a list copy shares its cons cells.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let term = Term::Tuple(vec![Term::list_from([Term::Integer(1)])]);
+    /// let term = Term::tuple(vec![Term::list_from([Term::Integer(1)])]);
     /// assert_eq!(term.clone(), term);
     /// ```
     fn clone(&self) -> Self {
@@ -292,28 +314,35 @@ impl Clone for Term {
 }
 
 impl PartialEq for Term {
-    /// Compare two terms pair by pair with a work stack. Two cons cells are
-    /// equal when their heads and their tails are equal, as `eq` in
-    /// `utils.c:1137-1162` compares each head and then the last tail. Two
-    /// terms that share one cons cell are equal with no walk. Two maps are equal
-    /// when their pairs in canonical order are equal, as the structural ERTS
-    /// comparison of two flatmaps or two hashmaps is. Two local funs are
-    /// equal when their fun entries and their free variables are equal, and
-    /// two external funs are equal when their modules, functions, and
-    /// arities are equal, as `eq` in `utils.c:1241-1276` gives.
+    /// Compare two terms pair by pair with a work stack. Two tuples that
+    /// hold one element array are equal with no walk. Two other tuples are
+    /// equal when their lengths are equal and each pair of elements is
+    /// equal. Two terms that share one cons cell are equal with no walk, and
+    /// two other cons cells are equal when their heads and their tails are
+    /// equal, as `eq` in `utils.c:1137-1162` compares each head and then the
+    /// last tail. Two maps are equal when their pairs in canonical order are
+    /// equal, as the structural ERTS comparison of two flatmaps or two
+    /// hashmaps is. Two local funs are equal when their fun entries and
+    /// their free variables are equal, and two external funs are equal when
+    /// their modules, functions, and arities are equal, as `eq` in
+    /// `utils.c:1241-1276` gives.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(Term::list_from([Term::Integer(1)]), Term::list_from([Term::Integer(1)]));
-    /// assert_ne!(Term::nil(), Term::Tuple(vec![]));
+    /// assert_ne!(Term::nil(), Term::tuple(vec![]));
     /// ```
     fn eq(&self, other: &Self) -> bool {
         let mut pairs = vec![(self, other)];
         while let Some(pair) = pairs.pop() {
             let equal = match pair {
                 (Term::Tuple(left), Term::Tuple(right)) => {
-                    pairs.extend(left.iter().zip(right));
+                    // Two tuples that hold one array are equal with no walk,
+                    // as `eq` compares the two boxed pointers first.
+                    if !left.same_array(right) {
+                        pairs.extend(left.iter().zip(right.iter()));
+                    }
                     left.len() == right.len()
                 }
                 (Term::Nil, Term::Nil) => true,
@@ -372,7 +401,7 @@ impl fmt::Debug for Term {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let term = Term::Tuple(vec![Term::static_atom("undef"), Term::nil()]);
+    /// let term = Term::tuple(vec![Term::static_atom("undef"), Term::nil()]);
     /// assert_eq!(format!("{term:?}"), "Tuple([Atom(\"undef\"), List([])])");
     /// ```
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -414,20 +443,27 @@ impl fmt::Debug for Term {
                             items.push(Item::Text("], "));
                         }
                     }
-                    for (index, element) in elements.into_iter().enumerate().rev() {
+                    for (index, element) in elements.iter().enumerate().rev() {
                         items.push(Item::Term(element));
                         if index > 0 {
                             items.push(Item::Text(", "));
                         }
                     }
                 }
-                Term::Tuple(elements) | Term::Fun(Fun { free: elements, .. }) => {
-                    match term {
-                        Term::Fun(fun) => write!(formatter, "Fun({:?}, [", fun.target)?,
-                        _ => formatter.write_str("Tuple([")?,
-                    }
+                Term::Tuple(elements) => {
+                    formatter.write_str("Tuple([")?;
                     items.push(Item::Text("])"));
                     for (index, element) in elements.iter().enumerate().rev() {
+                        items.push(Item::Term(element));
+                        if index > 0 {
+                            items.push(Item::Text(", "));
+                        }
+                    }
+                }
+                Term::Fun(Fun { target, free }) => {
+                    write!(formatter, "Fun({target:?}, [")?;
+                    items.push(Item::Text("])"));
+                    for (index, element) in free.iter().enumerate().rev() {
                         items.push(Item::Term(element));
                         if index > 0 {
                             items.push(Item::Text(", "));

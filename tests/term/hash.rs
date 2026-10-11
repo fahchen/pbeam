@@ -39,7 +39,7 @@ fn mixes_a_word_as_erts_ihash_mix64() {
 #[test]
 fn hashes_each_term_kind_as_pinned_erts() {
     // Each value is erts_debug:get_internal_state({internal_hash, Term}) on ERTS 29.1.1.
-    let tuple = |elements: Vec<Term>| Term::Tuple(elements);
+    let tuple = |elements: Vec<Term>| Term::tuple(elements);
     let cases = [
         (atom("ok"), 4036026909208831136),
         (Term::Integer(1), 7938660269479274665),
@@ -144,14 +144,14 @@ fn hashes_local_funs_as_pinned_erts() {
     // for a fun that binary_to_term/1 makes from NEW_FUN_EXT with the module lists, the
     // index, the old index, the old unique value, and the free variables.
     let zero = || local(0, 7, 1, vec![]);
-    let free = local(0, 7, 1, vec![Term::Integer(1), Term::Tuple(vec![])]);
+    let free = local(0, 7, 1, vec![Term::Integer(1), Term::tuple(vec![])]);
     let negative = || local(3, -5, 2, vec![Term::Binary(b"ab".to_vec()), atom("ok")]);
     let cases = [
         (zero(), 16900316212850717680),
         (free.clone(), 15970829942560899780),
         (negative(), 12860429061993126401),
         (
-            Term::Tuple(vec![zero(), Term::Integer(1)]),
+            Term::tuple(vec![zero(), Term::Integer(1)]),
             9006137623669004246,
         ),
         (
@@ -207,11 +207,11 @@ fn hashes_improper_lists_as_pinned_erts() {
             6406651010506344343,
         ),
         (
-            improper(vec![Term::Tuple(vec![])], atom("ok")),
+            improper(vec![Term::tuple(vec![])], atom("ok")),
             10451236899705497869,
         ),
         (
-            improper(vec![Term::Integer(1)], Term::Tuple(vec![])),
+            improper(vec![Term::Integer(1)], Term::tuple(vec![])),
             4641139002621691555,
         ),
         (
@@ -231,7 +231,7 @@ fn hashes_improper_lists_as_pinned_erts() {
         ),
         (
             improper(
-                vec![Term::Integer(1), Term::Tuple(vec![])],
+                vec![Term::Integer(1), Term::tuple(vec![])],
                 Term::Integer(2),
             ),
             502573382164607531,
@@ -276,7 +276,7 @@ fn hashes_collision_nodes_as_pinned_erts() {
                     a.clone(),
                     improper(vec![Term::Integer(1)], Term::Integer(2)),
                 ),
-                (b.clone(), Term::Tuple(vec![])),
+                (b.clone(), Term::tuple(vec![])),
             ),
             243852246011044368,
         ),
@@ -285,7 +285,7 @@ fn hashes_collision_nodes_as_pinned_erts() {
             2185849235149492526,
         ),
         (
-            with((c, Term::Integer(1000)), (d, Term::Tuple(vec![]))),
+            with((c, Term::Integer(1000)), (d, Term::tuple(vec![]))),
             3981912085379260197,
         ),
     ];
@@ -298,7 +298,7 @@ fn hashes_collision_nodes_as_pinned_erts() {
 fn hashes_a_deep_term_without_recursion() {
     let deep = |levels: usize| {
         (0..levels).fold(Term::nil(), |inner, level| match level % 5 {
-            0 => Term::Tuple(vec![inner, Term::Binary(vec![])]),
+            0 => Term::tuple(vec![inner, Term::Binary(vec![])]),
             1 => Term::list_from(vec![inner, Term::Integer(1)]),
             2 => map([(atom("ok"), inner)]),
             3 => improper(vec![inner], Term::Integer(1)),

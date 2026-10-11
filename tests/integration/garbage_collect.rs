@@ -20,7 +20,7 @@ fn runs_garbage_collect_as_pinned_erts() {
     // `[true,true,true,{error,badarg},{error,badarg}]`.
     let program = BeamProgram::load(&[&pinned_beam("erlang"), GARBAGE_COLLECT_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
         program
             .execute("garbage_collect_probe", "main", &[])

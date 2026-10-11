@@ -64,7 +64,7 @@ fn raises_badarg_for_a_unit_that_is_not_valid_as_pinned_erts() {
     // positive integer raise `badarg` (`erl_time_sup.c:2328-2341`).
     let program = program();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    let badargs = Term::list_from(vec![Term::Tuple(vec![atom("error"), atom("badarg")]); 10]);
+    let badargs = Term::list_from(vec![Term::tuple(vec![atom("error"), atom("badarg")]); 10]);
     assert_eq!(
         program.execute("time_probe", "units", &[]).unwrap(),
         Term::list_from(vec![badargs.clone(), badargs])
@@ -148,12 +148,12 @@ fn gives_the_date_of_a_posix_time_as_pinned_erts() {
     let program = program();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let date = |[year, month, day, hour, minute, second]: [i64; 6]| {
-        Term::Tuple(vec![
-            Term::Tuple([year, month, day].map(Term::Integer).into()),
-            Term::Tuple([hour, minute, second].map(Term::Integer).into()),
+        Term::tuple(vec![
+            Term::tuple([year, month, day].map(Term::Integer).to_vec()),
+            Term::tuple([hour, minute, second].map(Term::Integer).to_vec()),
         ])
     };
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let mut expected: Vec<Term> = [
         [1970, 1, 1, 0, 0, 0],
         [1969, 12, 31, 23, 59, 59],
@@ -199,7 +199,7 @@ fn raises_badarg_for_a_date_that_is_not_valid_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("time_probe", "local_badarg", &[]).unwrap(),
-        Term::list_from(vec![Term::Tuple(vec![atom("error"), atom("badarg")]); 23])
+        Term::list_from(vec![Term::tuple(vec![atom("error"), atom("badarg")]); 23])
     );
     assert_eq!(
         reference("local_badarg"),

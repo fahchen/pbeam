@@ -25,9 +25,9 @@ fn runs_a_gen_statem_server_entered_with_enter_loop() {
     // reason is `normal`.
     assert_eq!(
         program.execute("statem_probe", "main", &[]).unwrap(),
-        Term::Tuple(vec![
+        Term::tuple(vec![
             Term::Integer(1),
-            Term::Tuple(vec![Term::Integer(1)]),
+            Term::tuple(vec![Term::Integer(1)]),
             Term::Atom(program.atom("normal").unwrap()),
         ])
     );

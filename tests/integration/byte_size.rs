@@ -34,7 +34,7 @@ fn gives_the_byte_size_like_erts() {
     let program = BeamProgram::load(&[BYTE_SIZE_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let int = Term::Integer;
-    let badarg = Term::Tuple(vec![atom("error"), atom("badarg")]);
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = vec![
         int(0),
         int(1),

@@ -2,7 +2,7 @@ use super::PersistentTerms;
 use crate::term::{Term, test_atom as atom};
 
 fn logger_config(name: &str) -> Term {
-    Term::Tuple(vec![atom("logger_config"), atom(name)])
+    Term::tuple(vec![atom("logger_config"), atom(name)])
 }
 
 /// Return the slot of each stored key, by slot.
@@ -29,7 +29,7 @@ fn puts_and_gets_values_by_exactly_equal_keys() {
     );
     assert_eq!(terms.get(&logger_config("other")), Some(&Term::Integer(2)));
     assert_eq!(terms.get(&Term::Integer(1)), Some(&Term::Integer(3)));
-    assert_eq!(terms.get(&Term::Tuple(vec![atom("logger_config")])), None);
+    assert_eq!(terms.get(&Term::tuple(vec![atom("logger_config")])), None);
     // An equal key replaces the value and adds no key. The same value
     // changes nothing.
     assert_eq!(terms.put(&logger_config("other"), &Term::Integer(2)), None);
@@ -60,12 +60,12 @@ fn keeps_the_erts_slots_through_collisions_and_a_resize() {
     );
     assert_eq!(terms.get(&Term::Integer(39)), Some(&Term::Integer(2)));
     // A missing key that hashes to slot 7 walks past the end to the free slot 2.
-    assert_eq!(terms.get(&Term::Tuple(vec![ok.clone()])), None);
+    assert_eq!(terms.get(&Term::tuple(vec![ok.clone()])), None);
 
     // The fifth key finds the table half full and doubles it. The old keys go
     // again in old slot order: 39, ok, 7, true. {ok} and true both hash to slot 7.
     // The copy goes through the 16 new and the 8 old slots.
-    let ok_tuple = Term::Tuple(vec![ok.clone()]);
+    let ok_tuple = Term::tuple(vec![ok.clone()]);
     assert_eq!(terms.put(&ok_tuple, &Term::Integer(5)), Some(24));
     assert_eq!(terms.buckets.len(), 16);
     assert_eq!(

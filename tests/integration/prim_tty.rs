@@ -184,7 +184,7 @@ fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
     let mut beams = vec![PRIM_TTY_PROBE];
     beams.extend(modules.iter().map(Vec::as_slice));
     let program = BeamProgram::load(&beams).unwrap();
-    let badarg = Term::Tuple(vec![
+    let badarg = Term::tuple(vec![
         Term::Atom(program.atom("badarg").unwrap()),
         Term::nil(),
     ]);

@@ -45,7 +45,7 @@ fn raises_an_exception_again_with_raise_as_pinned_erts() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[RAISE_PROBE, &erlang]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let tuple = Term::Tuple;
+    let tuple = Term::tuple;
     let empty = || Term::nil();
     let reason = |class: &str| tuple(vec![atom("reason"), atom(class)]);
     let caught = |class: &str| tuple(vec![atom(class), reason(class), empty()]);

@@ -64,6 +64,6 @@ fn runs_the_nif_error_fallback_of_a_nif_without_a_binding() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         program.execute("nif_error_probe", "nif", &[]).unwrap(),
-        Term::Tuple(vec![atom("error"), atom("undef")])
+        Term::tuple(vec![atom("error"), atom("undef")])
     );
 }
