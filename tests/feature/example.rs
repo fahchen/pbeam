@@ -11,11 +11,21 @@
 //! in its own process, so a test run builds each example once. The script
 //! renames each file of the build into `target/examples/<name>/`, so a
 //! parallel build of the same example cannot give a partial file.
+//!
+//! The build gives the `pbeam` run a start set and the code path of the
+//! pinned OTP and Elixir (row "Code loading" of `docs/erts-differences.md`).
+//! Each other module loads on demand through the pinned `error_handler` and
+//! `code_server`, so the output order of two processes that race is the
+//! order of an interactive-mode ERTS run (#428).
 
 use std::{
+    io::{Read, Write},
+    os::fd::{FromRawFd, OwnedFd},
     path::Path,
     process::{Command, Output, Stdio},
-    time::Duration,
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 #[expect(
@@ -30,6 +40,12 @@ use run::run_with_time_limit;
 /// The build compiles the example and `pbeam_boot`, and starts `elixir` and
 /// `erl`. The run starts the runtime of the example.
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(60);
+
+/// The build of the `terra_counter` example compiles the Terra sources of
+/// the pinned commit, and the first run downloads them. The run starts the
+/// runtime of the example in a pseudo-terminal.
+#[cfg(target_os = "macos")]
+const TERRA_TIME_LIMIT: Duration = Duration::from_secs(600);
 
 #[test]
 fn runs_hello_world_with_one_command_as_pinned_erts() {
@@ -55,6 +71,78 @@ fn runs_hello_world_with_one_command_as_pinned_erts() {
         );
         assert_eq!(parts(&pbeam), parts(&erts), "PBeam with LC_ALL {locale:?}");
     }
+}
+
+#[test]
+fn loads_a_module_that_is_not_in_the_start_set_on_demand() {
+    // The build gives the `pbeam` run a start set, not the closure of each
+    // module that the example calls (`scripts/example_beams.exs`). The
+    // example `called_modules` calls `Elixir.String.length/1` and
+    // `string:length/1`, and each one calls `unicode_util`. None of the
+    // three modules is in the start set. Thus the run loads each one from
+    // the code path at its first call, through the pinned `error_handler`
+    // and `code_server`, and the run gives the same output as the pinned
+    // ERTS (see `gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts`).
+    // The ERTS run builds the example and writes the start set and the code
+    // path of the build.
+    let erts = run_example(&["called_modules", "--erts"], None);
+    assert_eq!(
+        parts(&erts),
+        (
+            "String.length: 5\\n:string.length: 5\\n".to_owned(),
+            String::new(),
+            Some(0)
+        ),
+        "ERTS"
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = root.join("target/examples/called_modules");
+    let start = std::fs::read_to_string(output.join("pbeam.start")).unwrap();
+    let paths = std::fs::read_to_string(output.join("erts.paths")).unwrap();
+    let root_dir = Command::new("erl")
+        .args([
+            "-noshell",
+            "-eval",
+            "io:put_chars(code:root_dir()), halt().",
+        ])
+        .output()
+        .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    command
+        .args([
+            "pbeam_boot",
+            "start",
+            "Elixir.CalledModules",
+            "main",
+            "--root",
+        ])
+        .arg(String::from_utf8(root_dir.stdout).unwrap().trim_end())
+        .current_dir(root);
+    for path in paths.lines() {
+        command.args(["--pa", path]);
+    }
+    // The start set of the build holds the example modules and
+    // `pbeam_boot.beam`, so the run needs no other BEAM file.
+    let files = start
+        .lines()
+        .map(Path::new)
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    command.arg("--").args(&files);
+
+    let output = run_with_time_limit(&mut command, Stdio::piped(), RUN_TIME_LIMIT);
+    assert_eq!(
+        parts(&output),
+        (
+            // `unicode_util:gc/1` loads at the first `Elixir.String.length/1`
+            // call, and the output names it.
+            "String.length: 5\\n:string.length: 5\\n".to_owned(),
+            String::new(),
+            Some(0)
+        ),
+        "start set of {} BEAM files",
+        files.len()
+    );
 }
 
 #[test]
@@ -451,6 +539,10 @@ fn runs_restricted_guest_with_its_strict_policy_as_pinned_erts_and_denies_other_
 /// ```
 fn run_restricted_guest(policy: &str, arguments: &[&str]) -> Output {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // A policy run gives the whole list of the build, because the boot gate
+    // denies a message of a runtime process to a boot process. The list
+    // holds the example modules, `pbeam_boot.beam`, and each called module
+    // that the PBeam loader loads.
     let beams =
         std::fs::read_to_string(root.join("target/examples/restricted_guest/pbeam.beams")).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
@@ -463,6 +555,199 @@ fn run_restricted_guest(policy: &str, arguments: &[&str]) -> Output {
         .arg("fixtures/policy/restricted_guest_probe_policy.beam")
         .current_dir(root);
     run_with_time_limit(&mut command, Stdio::piped(), RUN_TIME_LIMIT)
+}
+
+/// Run `scripts/example.sh terra_counter` with `arguments` in a
+/// pseudo-terminal, wait until the screen shows the counter prompt, then
+/// type `q`. Return the bytes that the run wrote and a text of its exit
+/// status.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (bytes, status) = run_terra_counter_in_terminal(&["terra_counter", "--erts", "--no-build"]);
+/// assert!(status.starts_with("exit status: 0"));
+/// ```
+#[cfg(target_os = "macos")]
+fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
+    let (master, slave) = open_terminal().expect("a pseudo-terminal");
+    let mut command = Command::new("bash");
+    command
+        .arg("scripts/example.sh")
+        .args(arguments)
+        .env("PBEAM_BIN", env!("CARGO_BIN_EXE_pbeam"))
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()));
+    let mut child = command.spawn().unwrap();
+    // The child holds its own copies of the slave fds after the spawn, so
+    // the test closes its slave and keeps the master for the reads and the
+    // writes.
+    drop(slave);
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let output = Arc::clone(&output);
+        let mut source = std::fs::File::from(master.try_clone().unwrap());
+        thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            while let Ok(count @ 1..) = source.read(&mut buffer) {
+                output.lock().unwrap().extend_from_slice(&buffer[..count]);
+            }
+        })
+    };
+    let start = Instant::now();
+    while !output
+        .lock()
+        .unwrap()
+        .windows(4)
+        .any(|window| window == b"to q")
+    {
+        assert!(
+            start.elapsed() < TERRA_TIME_LIMIT,
+            "the screen of terra_counter did not appear: {:?}",
+            String::from_utf8_lossy(&output.lock().unwrap())
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    // The counter waits for a key. Type `q`, so that the runtime restores the
+    // terminal and `main/0` writes its result.
+    std::fs::File::from(master.try_clone().unwrap())
+        .write_all(b"q")
+        .unwrap();
+    let (status, ret) = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break (status, String::new());
+        }
+        assert!(
+            start.elapsed() < TERRA_TIME_LIMIT,
+            "terra_counter did not end: {:?}",
+            String::from_utf8_lossy(&output.lock().unwrap())
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    drop(master);
+    reader.join().unwrap();
+    let bytes = output.lock().unwrap().clone();
+    (bytes, format!("{status} {ret}"))
+}
+
+/// Return the write-back of the terminal owner: the restore sequence of the
+/// alternate screen, and the result that `main/0` writes after it. Return
+/// the two parts, or panic when the run does not write them in this order.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (restore, result) = restore_before_result(&bytes);
+/// assert!(result.starts_with(b"{:ok, "));
+/// ```
+#[cfg(target_os = "macos")]
+fn restore_before_result(bytes: &[u8]) -> (&[u8], &[u8]) {
+    let restore = b"\x1b[0m\x1b[?25h\x1b[?1049l";
+    let at = bytes
+        .windows(restore.len())
+        .position(|window| window == restore)
+        .unwrap_or_else(|| {
+            panic!(
+                "the run wrote no restore sequence: {:?}",
+                String::from_utf8_lossy(bytes)
+            )
+        });
+    let before = &bytes[..at];
+    let after = &bytes[at + restore.len()..];
+    assert!(
+        after.starts_with(b"{:ok, "),
+        "the result of main/0 is not after the restore sequence: {:?}",
+        String::from_utf8_lossy(after)
+    );
+    (before, after)
+}
+
+/// Open a pseudo-terminal with the 80 columns and 24 rows of the Terra
+/// Counter reference run.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (master, slave) = open_terminal().unwrap();
+/// ```
+#[cfg(target_os = "macos")]
+fn open_terminal() -> Result<(OwnedFd, OwnedFd), std::io::Error> {
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: `openpty` writes two new fds to `master` and `slave`, and
+    // accepts a null name and mode. `fcntl` changes only the fd flags. Each
+    // `OwnedFd` takes one new fd.
+    let mut win = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    unsafe {
+        let result = libc::openpty(
+            &raw mut master,
+            &raw mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut win,
+        );
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        for fd in [master, slave] {
+            assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
+        }
+        Ok((OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)))
+    }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts() {
+    // Terra Counter sends its result to `main/0` after its terminal owner
+    // restores the terminal (Terra `30dea566` `lib/terra/runtime.ex:282-288`,
+    // `356-359`). In an interactive-mode ERTS run, the first `IO.inspect/1`
+    // call of `main/0` loads 11 modules through `error_handler` and
+    // `code_server`, and the terminal owner writes the restore sequence
+    // while `main/0` waits (row "Code loading" of
+    // `docs/erts-differences.md`). The PBeam run gives the same start set,
+    // so it loads the same modules at the same call and writes the restore
+    // sequence before the result (#428). A run that loads each called module
+    // before the entry writes the result first, and the result goes to the
+    // alternate screen.
+    //
+    // The ERTS run builds the example. The PBeam run uses that build, so the
+    // two runs write the same bytes and end with the same order.
+    //
+    // A host that does not permit a pseudo-terminal, for example a sandbox
+    // that denies `/dev/ptmx`, cannot run this test: the test then ends
+    // without a result, and the operator runs it on a host that permits one.
+    let Ok((master, slave)) = open_terminal() else {
+        eprintln!("the host does not permit a pseudo-terminal: the test does not run");
+        return;
+    };
+    drop((master, slave));
+    let (erts, erts_status) = run_terra_counter_in_terminal(&["terra_counter", "--erts"]);
+    let (pbeam, pbeam_status) = run_terra_counter_in_terminal(&["terra_counter", "--no-build"]);
+    assert_eq!(erts_status, pbeam_status, "status");
+    assert!(erts_status.starts_with("exit status: 0"), "{erts_status}");
+    let (erts_before, erts_result) = restore_before_result(&erts);
+    let (pbeam_before, pbeam_result) = restore_before_result(&pbeam);
+    assert_eq!(erts_result, pbeam_result, "result");
+    // The write before the restore sequence is the last screen, so a run
+    // that writes the result first puts the result before the restore
+    // sequence, and this assertion fails.
+    assert!(
+        !erts_before.ends_with(b"{:ok, 0}")
+            && !erts_before.windows(6).any(|window| window == b"{:ok, "),
+        "ERTS wrote the result before the restore sequence: {:?}",
+        String::from_utf8_lossy(erts_before)
+    );
+    assert!(
+        !pbeam_before.windows(6).any(|window| window == b"{:ok, "),
+        "PBeam wrote the result before the restore sequence: {:?}",
+        String::from_utf8_lossy(pbeam_before)
+    );
 }
 
 #[test]

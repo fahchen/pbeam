@@ -1,14 +1,14 @@
-# Consolidate the Elixir protocols for the given example BEAM files, and find the BEAM file of each OTP and Elixir module that the example and the boot modules call, directly or through other modules.
-# Usage: elixir scripts/example_beams.exs <consolidated directory> <unloaded list> <boot modules> <example BEAM file>...
+# Consolidate the Elixir protocols for the given example BEAM files, print the start set of the pbeam run, and write the code path of the ERTS run.
+# Usage: elixir scripts/example_beams.exs <consolidated directory> <unloaded list> <erts path list> <boot modules> <example BEAM file>...
 # The example BEAM files, with pbeam_boot.beam, are in one directory. The boot modules are one argument, with a space between two module names.
 #
 # `mix run` runs Mix.Tasks.Compile.Protocols, which consolidates each protocol of the code path that is not in OTP, with the implementations of the same code path (Mix.Compilers.Protocol, Elixir 1.20.4 lib/mix/lib/mix/compilers/protocol.ex:107-170). This script does the same step over the directory of the example and the Elixir code path, and writes each consolidated protocol to the consolidated directory. A consolidated protocol finds its implementation with a pattern match. An unconsolidated protocol calls Code.ensure_compiled/1, which calls code:ensure_loaded/1 (Elixir 1.20.4 lib/elixir/lib/protocol.ex:956-975).
 # The script consolidates only the protocols of Elixir. A protocol of the example stays unconsolidated.
 #
-# A module is called when it is a boot module, or when it is in the imports chunk of an example BEAM file or of a called module (beam_lib:chunks/2). A module of PBeam BIFs, such as pbeam_cap, is not a called module: the pbeam binary runs its functions, and no BEAM file defines it. Each implementation of a called consolidated protocol is also called, because the protocol calls the implementation that it finds at run time. The pbeam binary loads only the BEAM files that it gets, so it needs this transitive closure, not only the modules that the example imports. The imports chunk does not have the modules that a run calls with a module name in a variable, for example the child modules of a supervisor. The boot modules give these modules for the boot.
-# A called module is not given to the pbeam binary when the code path has no BEAM file for it, or when the PBeam loader does not load its BEAM file (@not_loaded). The script does not search the imports of such a module. It writes each one to the unloaded list, one line for each module: the module, the BEAM file (empty when there is none), and the reason, with a tab between them. A call to such a module stops the pbeam run with the runtime error `unresolved external MFA`.
+# The pbeam run gets a start set and loads each other module on demand through the pinned error_handler and code_server, as an interactive-mode ERTS run does. The command line gives the example modules and pbeam_boot.beam to the run, and the start set adds each boot module, each preloaded module of ERTS that PBeam loads from a BEAM file (preloaded/0, lib/sasl/src/systools_make.erl:1582-1589), and each consolidated protocol. The script prints each start file as a line `pbeam <file>`.
+# The script writes the code path of the ERTS run into <erts path list>, one directory for each line: each directory of a called module that is not in OTP, in the order of the modules, and the consolidated directory last, so that a consolidated protocol comes before the unconsolidated protocol of the same name. The pbeam run gets the same directories with `--pa`, so the load on demand finds each module.
 #
-# The script prints one line for each called module that is not an example module, sorted by the module name. A line `pbeam <file>` gives the BEAM file for the pbeam run. For a consolidated protocol, it is the file in the consolidated directory. A line `erts <directory>` follows the first BEAM file of each directory that is not in OTP and not the consolidated directory. The ERTS run needs these directories in its code path.
+# The script writes the unloaded list: each called module that the PBeam loader does not load, with its BEAM file and the reason, one line for each module, with a tab between the fields. A called module is a boot module, or a module in the imports chunk of an example BEAM file or of a called module (beam_lib:chunks/2), directly or through other modules. A module of PBeam BIFs, such as pbeam_cap, is not a called module: the pbeam binary runs its functions, and no BEAM file defines it. Each implementation of a called consolidated protocol is also called, because the protocol calls the implementation that it finds at run time. The script does not search the imports of a module that it does not load. A call to an unloaded module stops the pbeam run with the runtime error `unresolved external MFA`, unless the code path has the module: then error_handler loads it on demand. The test gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts of tests/feature/example.rs checks this list.
 
 defmodule ExampleBeams do
   # Each module of the pinned OTP and Elixir that the PBeam loader does not load, with the load error. The loader stops at the first instruction that it cannot decode (src/beam/code/instruction.rs, skip_unsupported_instruction). The test gives_the_modules_that_the_example_calls_through_other_modules_as_pinned_erts of tests/feature/example.rs loads each file with the pbeam binary and compares the error. Remove a module when the loader learns its instruction.
@@ -27,6 +27,9 @@ defmodule ExampleBeams do
 
   # Each module of PBeam BIFs that ERTS does not have. No BEAM file defines it: the pbeam binary runs its functions. pbeam_boot calls pbeam_cap:serve/2 and pbeam_cap:enter_runtime/2.
   @pbeam_modules [:pbeam_cap]
+
+  # The modules that ERTS preloads (preloaded/0, lib/sasl/src/systools_make.erl:1582-1589) and that the PBeam loader loads from a BEAM file. The other preloaded modules are PBeam native functions with no BEAM file (erlang, erts_internal, prim_file) or modules that PBeam does not run (erts_dirty_process_signal_handler, erts_literal_area_collector, erts_trace_cleaner, socket_registry, and the ESOCK modules). ERTS preloads init and erl_prim_loader, so code:which/1 gives preloaded for them and the start set resolves their file in the ebin directory of erts.
+  @preloaded [:init, :erl_prim_loader]
 
   def called(path) do
     {:ok, {_module, [imports: imports]}} = :beam_lib.chunks(path, [:imports])
@@ -87,14 +90,71 @@ defmodule ExampleBeams do
     end
   end
 
-  # The BEAM file of a module, as code:which/1 gives it. A preloaded module of ERTS, such as erlang, has its file in the ebin directory of erts.
+  # The BEAM file of a module, as code:which/1 gives it. ERTS preloads init and erl_prim_loader, so code:which/1 gives preloaded for them and the file is in the ebin directory of erts.
   defp beam_file(module) do
     case :code.which(module) do
-      :preloaded -> :filename.join([:code.lib_dir(:erts), ~c"ebin", ~c"#{module}.beam"])
+      :preloaded -> preloaded_file(module)
+      :non_existing -> nil
       path when is_list(path) -> path
       _ -> nil
     end
   end
+
+  defp preloaded_file(module) do
+    path = :filename.join([:code.lib_dir(:erts), ~c"ebin", ~c"#{module}.beam"])
+    if File.exists?(path), do: path, else: nil
+  end
+
+  # Return the start set of the pbeam run: the modules that load before the run. The start set is each boot module, each preloaded module of ERTS that PBeam loads from a BEAM file, and each consolidated protocol that a called module refers to. The example modules and pbeam_boot.beam are already on the command line of the run, so they are not in this list. A module with no BEAM file gives `nil`.
+  def start(boot, consolidated, found) do
+    boot_modules = Enum.map(String.split(boot), &String.to_atom/1)
+
+    protocols = for module <- Map.keys(consolidated), Map.has_key?(found, module), do: module
+
+    (boot_modules ++ @preloaded ++ protocols)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.map(fn module ->
+      case Map.fetch(consolidated, module) do
+        {:ok, {path, _impls}} -> {module, path}
+        :error -> {module, beam_file(module)}
+      end
+    end)
+  end
+
+  # Return the code path directories of the ERTS run: each directory that is not in OTP and not the consolidated directory, in the order of the files, with the consolidated directory last. `files` holds each start file and each BEAM file of a called module.
+  def erts_paths(files, otp, consolidated_dir) do
+    directories =
+      for path <- files,
+          directory = :filename.dirname(path),
+          directory != consolidated_dir,
+          not :lists.prefix(otp, path),
+          do: directory
+
+    Enum.uniq(directories) ++ [consolidated_dir]
+  end
+
+  # Return the lines of the build output: one line `pbeam <file>` for each start module, one line `called <file>` for each other called module, and then one line `erts <directory>` for each code path directory of the ERTS run: the directory of the example BEAM files first, then each directory of a called module. The caller reads the lines in order.
+  def lines(start, found, own, example_dir, otp, consolidated_dir) do
+    start_files = for {_module, path} <- start, path != nil, do: path
+
+    called_files =
+      for {module, path} <- found, not Map.has_key?(own, module), not start_member(start, module) do
+        path
+      end
+
+    start_lines = for path <- start_files, do: "pbeam #{path}"
+    called_lines = for path <- called_files, do: "called #{path}"
+
+    erts_lines =
+      for directory <-
+            [example_dir | erts_paths(start_files ++ called_files, otp, consolidated_dir)],
+          do: "erts #{directory}"
+
+    start_lines ++ called_lines ++ erts_lines
+  end
+
+  defp start_member(start, module), do: Enum.any?(start, fn {name, _path} -> name == module end)
 end
 
 [output, unloaded_list, boot | examples] = System.argv()
@@ -117,28 +177,21 @@ roots =
   Enum.flat_map(Map.values(own), &ExampleBeams.called/1) ++
     Enum.map(String.split(boot), &String.to_atom/1)
 
+start = ExampleBeams.start(boot, consolidated, %{})
+
 {found, unloaded} = ExampleBeams.closure(roots, own, %{}, consolidated)
 
-lines =
+unloadable =
+  for {module, nil} <- start do
+    [Atom.to_string(module), ?\t, ~c"", ?\t, "no BEAM file in the code path", ?\n]
+  end
+
+unloaded_lines =
   for {module, {path, reason}} <- Enum.sort(unloaded),
       do: [Atom.to_string(module), ?\t, path, ?\t, reason, ?\n]
 
-File.write!(unloaded_list, lines)
+File.write!(unloaded_list, unloaded_lines ++ unloadable)
 
-consolidated_dir = String.to_charlist(output)
-
-found
-|> Map.drop(Map.keys(own))
-|> Enum.sort()
-|> Enum.reduce(MapSet.new(), fn {_module, path}, directories ->
-  IO.puts("pbeam #{path}")
-  directory = :filename.dirname(path)
-
-  if directory == consolidated_dir or MapSet.member?(directories, directory) or
-       :lists.prefix(otp, path) do
-    directories
-  else
-    IO.puts("erts #{directory}")
-    MapSet.put(directories, directory)
-  end
-end)
+for line <- ExampleBeams.lines(start, found, own, example_dir, otp, String.to_charlist(output)) do
+  IO.puts(line)
+end
