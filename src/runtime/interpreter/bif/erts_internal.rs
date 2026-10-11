@@ -410,7 +410,7 @@ fn unsupported_option(name: &str) -> BeamError {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let args = Term::list_from(vec![Term::Binary(b"-c".to_vec()), Term::nil()]);
+/// let args = Term::list_from(vec![Term::binary(b"-c".to_vec()), Term::nil()]);
 /// assert_eq!(port_args(&args), Some(vec![b"-c".to_vec(), Vec::new()]));
 /// ```
 fn port_args(args: &Term) -> Option<Vec<Vec<u8>>> {
@@ -426,7 +426,7 @@ fn port_args(args: &Term) -> Option<Vec<Vec<u8>>> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let name = Term::tuple(vec![Term::static_atom("spawn_executable"), Term::Binary(b"/bin/sh".to_vec())]);
+/// let name = Term::tuple(vec![Term::static_atom("spawn_executable"), Term::binary(b"/bin/sh".to_vec())]);
 /// assert_eq!(spawn_executable(&name)?, Some(b"/bin/sh".to_vec()));
 /// ```
 ///
@@ -463,7 +463,7 @@ fn spawn_executable(name: &Term) -> Result<Option<Vec<u8>>, BeamError> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(native_name(&Term::Binary(b"/bin/sh\0x".to_vec()), false), Some(b"/bin/sh".to_vec()));
+/// assert_eq!(native_name(&Term::binary(b"/bin/sh\0x".to_vec()), false), Some(b"/bin/sh".to_vec()));
 /// assert_eq!(native_name(&Term::static_atom("ok"), false), Some(b"ok".to_vec()));
 /// assert_eq!(native_name(&Term::nil(), false), None);
 /// assert_eq!(native_name(&Term::nil(), true), Some(Vec::new()));
@@ -525,7 +525,7 @@ fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = port_command(&mut context, &Term::Port(port), &Term::Binary(b"hi".to_vec()), &Term::nil())?;
+/// let result = port_command(&mut context, &Term::Port(port), &Term::binary(b"hi".to_vec()), &Term::nil())?;
 /// ```
 ///
 /// # Errors
@@ -716,7 +716,7 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
 /// ```rust,ignore
 /// let prepared = prepare_loading(&mut context, &load_target, &Term::Binary(code))?;
 /// assert!(matches!(prepared, BifResult::Value(Term::Reference(_))));
-/// let bad = prepare_loading(&mut context, &load_target, &Term::Binary(b"bad".to_vec()))?;
+/// let bad = prepare_loading(&mut context, &load_target, &Term::binary(b"bad".to_vec()))?;
 /// assert!(matches!(bad, BifResult::Value(Term::Tuple(_))));
 /// ```
 ///

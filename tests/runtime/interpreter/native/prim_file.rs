@@ -21,7 +21,7 @@ fn checks_the_follow_flag_and_then_the_path_as_erts() {
     // first, then `efile_marshal_path` with `has_invalid_null_termination`
     // (unix_prim_file.c:71-101).
     let mut scheduler = scheduler();
-    let path = Term::Binary(b"/\0".to_vec());
+    let path = Term::binary(b"/\0".to_vec());
     for (path, follow, expected) in [
         (
             path.clone(),
@@ -44,27 +44,27 @@ fn checks_the_follow_flag_and_then_the_path_as_erts() {
             "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
         ),
         (
-            Term::Binary(vec![]),
+            Term::binary(vec![]),
             Term::Integer(1),
             "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
         ),
         (
-            Term::Binary(b"/".to_vec()),
+            Term::binary(b"/".to_vec()),
             Term::Integer(1),
             "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
         ),
         (
-            Term::Binary(b"/\0a\0".to_vec()),
+            Term::binary(b"/\0a\0".to_vec()),
             Term::Integer(1),
             "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
         ),
         (
-            Term::Binary(b"/pbeam-missing\0\0".to_vec()),
+            Term::binary(b"/pbeam-missing\0\0".to_vec()),
             Term::Integer((1 << 31) - 1),
             "Value(Tuple([Atom(\"error\"), Atom(\"enoent\")]))",
         ),
         (
-            Term::Binary(b"\0".to_vec()),
+            Term::binary(b"\0".to_vec()),
             Term::Integer(-(1 << 31)),
             "Value(Tuple([Atom(\"error\"), Atom(\"enoent\")]))",
         ),
@@ -95,8 +95,8 @@ fn gives_einval_for_a_path_that_is_not_marshaled_as_erts() {
             .find(|binding| (binding.name, binding.arity) == (name, 1))
             .unwrap();
         for path in [
-            Term::Binary(b"/".to_vec()),
-            Term::Binary(b"/\0a\0".to_vec()),
+            Term::binary(b"/".to_vec()),
+            Term::binary(b"/\0a\0".to_vec()),
             Term::list_from(vec![Term::Integer(47), Term::Integer(0)]),
         ] {
             let result = (binding.run)(&mut scheduler, std::slice::from_ref(&path)).unwrap();

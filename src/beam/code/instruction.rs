@@ -2805,7 +2805,7 @@ fn read_register(data: &[u8], cursor: &mut usize) -> Result<Operand, BeamError> 
 /// # Examples
 ///
 /// ```rust,ignore
-/// let literals = vec![Some(Term::Binary(b"ok".to_vec()))];
+/// let literals = vec![Some(Term::binary(b"ok".to_vec()))];
 /// let mut cursor = 0;
 /// let operand = read_move_operand(&[0x47, 0], &mut cursor, &[], &literals)?;
 /// assert!(matches!(operand, Operand::Value(Term::Binary(bytes)) if bytes == b"ok"));

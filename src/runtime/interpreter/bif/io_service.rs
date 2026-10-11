@@ -67,7 +67,7 @@ pub(super) fn send_denial(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let put_chars = Term::tuple(vec![Term::static_atom("put_chars"), unicode, Term::Binary(b"hi\n".to_vec())]);
+/// let put_chars = Term::tuple(vec![Term::static_atom("put_chars"), unicode, Term::binary(b"hi\n".to_vec())]);
 /// let request = Term::tuple(vec![io_request, Term::Pid(sender), reply_as, put_chars]);
 /// assert!(io_request_permitted(sender, &security, &request));
 /// ```

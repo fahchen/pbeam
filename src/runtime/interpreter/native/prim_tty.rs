@@ -567,7 +567,7 @@ fn read_nif(
     select_input(scheduler, *tty, reference);
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),
-        Term::Binary(bytes),
+        Term::binary(bytes),
     ])))
 }
 
@@ -660,7 +660,7 @@ fn setupterm_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
 ///
 /// ```rust,ignore
 /// // TERM=vt100, after setupterm_nif()
-/// let code = Term::Binary(b"co\0".to_vec());
+/// let code = Term::binary(b"co\0".to_vec());
 /// assert!(matches!(tigetnum_nif(&mut scheduler, &code)?, BifResult::Value(Term::Integer(80))));
 /// assert!(matches!(tigetnum_nif(&mut scheduler, &Term::static_atom("co"))?, BifResult::Raise { .. }));
 /// ```
@@ -695,7 +695,7 @@ fn tigetnum_nif(scheduler: &mut Scheduler, code: &Term) -> Result<BifResult, Bea
 ///
 /// ```rust,ignore
 /// // TERM=vt100, after setupterm_nif()
-/// let code = Term::Binary(b"xn\0".to_vec());
+/// let code = Term::binary(b"xn\0".to_vec());
 /// assert!(matches!(tigetflag_nif(&mut scheduler, &code)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
 /// assert!(matches!(tigetflag_nif(&mut scheduler, &Term::static_atom("xn"))?, BifResult::Raise { .. }));
 /// ```
@@ -733,9 +733,9 @@ fn tigetflag_nif(scheduler: &mut Scheduler, code: &Term) -> Result<BifResult, Be
 /// # Examples
 ///
 /// ```rust,ignore
-/// let code = Term::list_from(vec![Term::Binary(b"c".to_vec()), Term::Integer(b'o'.into()), Term::Integer(0)]);
+/// let code = Term::list_from(vec![Term::binary(b"c".to_vec()), Term::Integer(b'o'.into()), Term::Integer(0)]);
 /// assert_eq!(termcap_code(&code), Some(c"co".to_owned()));
-/// assert_eq!(termcap_code(&Term::Binary(b"co\0x".to_vec())), Some(c"co".to_owned()));
+/// assert_eq!(termcap_code(&Term::binary(b"co\0x".to_vec())), Some(c"co".to_owned()));
 /// assert_eq!(termcap_code(&Term::static_atom("co")), None);
 /// ```
 fn termcap_code(term: &Term) -> Option<CString> {
@@ -863,11 +863,11 @@ const MAXIOV: usize = libc::UIO_MAXIOV as usize;
 /// # Examples
 ///
 /// ```rust,ignore
-/// let iovec = Term::list_from(vec![Term::Binary(b"Hello, ".to_vec()), Term::Binary(b"world!\n".to_vec())]);
+/// let iovec = Term::list_from(vec![Term::binary(b"Hello, ".to_vec()), Term::binary(b"world!\n".to_vec())]);
 /// // Writes "Hello, world!\n" to the output fd of the TTY.
 /// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec)?, BifResult::DirtyWrite(_)));
 /// // [<<"h">> | <<"i">>] writes nothing, then raises badarg.
-/// let improper = Term::list_with_tail(vec![Term::Binary(b"h".to_vec())], Term::Binary(b"i".to_vec()));
+/// let improper = Term::list_with_tail(vec![Term::binary(b"h".to_vec())], Term::binary(b"i".to_vec()));
 /// assert!(matches!(write_nif(&mut scheduler, &tty, &improper)?, BifResult::DirtyWrite(_)));
 /// ```
 ///
@@ -905,7 +905,7 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
         for &element in group {
             match element {
                 Term::Binary(bytes) if bytes.is_empty() => {}
-                Term::Binary(bytes) => buffers.push(bytes.clone()),
+                Term::Binary(bytes) => buffers.push(bytes.to_vec()),
                 _ => return Ok(BifResult::DirtyWrite(write)),
             }
         }

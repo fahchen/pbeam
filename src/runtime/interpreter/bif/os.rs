@@ -33,7 +33,7 @@ use crate::runtime::unicode::{filename_from_native, native_filename};
 /// let name = Term::list_from(b"PBEAM_GETENV_ASCII".iter().map(|&byte| Term::Integer(byte.into())));
 /// assert!(matches!(getenv(&mut scheduler, &name)?, BifResult::Value(value) if value.is_list()));
 /// assert!(matches!(getenv(&mut scheduler, &Term::static_atom("HOME"))?, BifResult::Raise { .. }));
-/// assert!(matches!(getenv(&mut scheduler, &Term::Binary(b"HOME".to_vec()))?, BifResult::Raise { .. }));
+/// assert!(matches!(getenv(&mut scheduler, &Term::binary(b"HOME".to_vec()))?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors

@@ -49,7 +49,7 @@ fn runs_the_is_bitstr_test_as_pinned_erts() {
     // that is not a bitstring.
     let program = load();
     let other = Term::Atom(program.atom("other").unwrap());
-    let binaries = [&b"b"[..], b"", b"ab"].map(|bytes| Term::Binary(bytes.to_vec()));
+    let binaries = [&b"b"[..], b"", b"ab"].map(|bytes| Term::binary(bytes.to_vec()));
     let expected = Term::list_from(binaries.into_iter().chain(std::iter::repeat_n(other, 12)));
     assert_eq!(
         program.execute("bitstr_probe", "kinds", &[]).unwrap(),

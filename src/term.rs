@@ -1,4 +1,5 @@
 mod atom;
+mod binary;
 mod fun;
 mod hash;
 mod list;
@@ -12,6 +13,7 @@ pub use atom::Atom;
 #[cfg(test)]
 pub(crate) use atom::test_atom;
 pub(crate) use atom::{AtomTable, MAX_ATOM_CHARACTERS};
+pub use binary::Binary;
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target};
 pub(crate) use hash::internal_hash;
@@ -39,7 +41,11 @@ pub(crate) const MAX_TUPLE_SIZE: usize = (1 << 24) - 1;
 pub enum Term {
     /// An atom: its index in the atom table of the program, and its name.
     Atom(Atom),
-    Binary(Vec<u8>),
+    /// A binary: its bytes in a shared array, and the offset and the length
+    /// of its view. A copy of a binary increments the reference count of the
+    /// array, and a sub-binary keeps the array and the offset of its bytes
+    /// (`docs/portable-beam-spec.md:97`).
+    Binary(Binary),
     Integer(i64),
     /// The empty list `[]`.
     Nil,

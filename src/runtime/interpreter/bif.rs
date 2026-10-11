@@ -537,7 +537,7 @@ impl BeamProgram {
                 term,
                 &stack.collect::<Vec<_>>(),
                 *size as usize,
-                std::mem::take(bytes),
+                bytes.clone().to_bytes(),
             ));
         }
         let process = scheduler.current_process_mut();
@@ -567,7 +567,7 @@ impl BeamProgram {
                 persistent_term::get_all_trap(process, all.clone(), *entries as usize),
             ),
             ("erlang", "characters_to_utf8_trap", [Term::Binary(bytes), rest, encoding]) => {
-                unicode::utf8_trap(process, bytes.clone(), rest, encoding)
+                unicode::utf8_trap(process, bytes.clone().to_bytes(), rest, encoding)
             }
             (
                 "erlang",
@@ -580,7 +580,7 @@ impl BeamProgram {
                 ],
             ) => unicode::list_trap(
                 process,
-                bytes.clone(),
+                bytes.clone().to_bytes(),
                 *characters as usize,
                 rest,
                 encoding.name() == "latin1",
@@ -646,7 +646,7 @@ impl BeamProgram {
                     term,
                     &stack.collect::<Vec<_>>(),
                     iovec.cloned().collect(),
-                    merged.clone(),
+                    merged.clone().to_bytes(),
                 ))
             }
             (

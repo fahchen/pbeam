@@ -662,7 +662,7 @@ fn parse_literals(data: &[u8], atom_table: &mut AtomTable) -> Result<Vec<Option<
 /// ```rust,ignore
 /// let mut atoms = AtomTable::new();
 /// let term = read_literal(&[131, 109, 0, 0, 0, 2, b'o', b'k'], &mut atoms)?;
-/// assert_eq!(term, Some(Term::Binary(b"ok".to_vec())));
+/// assert_eq!(term, Some(Term::binary(b"ok".to_vec())));
 /// // [flush]
 /// let bytes = [131, 108, 0, 0, 0, 1, 119, 5, b'f', b'l', b'u', b's', b'h', 106];
 /// let list = read_literal(&bytes, &mut atoms)?;
@@ -733,7 +733,7 @@ fn read_external_term(
         let mut term = match take(data, cursor, 1)?[0] {
             ETF_BINARY_EXT => {
                 let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
-                Term::Binary(take(data, cursor, size)?.to_vec())
+                Term::binary(take(data, cursor, size)?.to_vec())
             }
             ETF_STRING_EXT => {
                 let size_bytes = take(data, cursor, 2)?;

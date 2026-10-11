@@ -49,11 +49,11 @@ fn runs_the_bifs_of_io_inspect_of_a_tuple_as_pinned_erts() {
                 atom("a"),
                 Term::tuple(vec![atom("b")]),
                 Term::list_from(vec![atom("c")]),
-                Term::Binary(b"d".to_vec()),
+                Term::binary(b"d".to_vec()),
             ]),
         ]),
         Term::list_from(vec![badarg.clone(); 5]),
-        Term::list_from(DIGITS.map(|digits| Term::Binary(digits.as_bytes().to_vec()))),
+        Term::list_from(DIGITS.map(|digits| Term::binary(digits.as_bytes().to_vec()))),
         Term::list_from(vec![badarg; 9]),
     ]);
     assert_eq!(

@@ -427,7 +427,7 @@ fn formats_the_empty_noshell_slogan_as_pinned_erts() {
     let program = BeamProgram::load(&beams).unwrap();
     assert_eq!(
         program.execute("io_start_probe", "format", &[]).unwrap(),
-        Term::Binary(Vec::new())
+        Term::binary(Vec::new())
     );
     assert_eq!(reference("format"), b"<<>>\n");
 }

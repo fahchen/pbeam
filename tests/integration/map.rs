@@ -533,7 +533,7 @@ fn loads_map_literals_with_binary_keys_like_erts() {
     let program = BeamProgram::load(&[BINARY_KEY_PROBE]).unwrap();
     let atom = |name: &str| atom(&program, name);
     let int = Term::Integer;
-    let binary = |text: &str| Term::Binary(text.as_bytes().to_vec());
+    let binary = |text: &str| Term::binary(text.as_bytes().to_vec());
     // A flatmap orders binary keys in the term order, after the numbers, atoms, and lists. A
     // hashmap orders them by the ERTS internal hash of each binary.
     let hash_keys = BINARY_HASH_ORDER.map(|key| binary(&format!("k{key:02}")));
@@ -575,7 +575,7 @@ fn puts_binary_keys_into_maps_like_erts() {
     let maps = pinned_beam("maps");
     let program = BeamProgram::load(&[&maps, BINARY_KEY_PROBE]).unwrap();
     let int = Term::Integer;
-    let binary = |text: &str| Term::Binary(text.as_bytes().to_vec());
+    let binary = |text: &str| Term::binary(text.as_bytes().to_vec());
     let pairs = |pairs: &[(&str, i64)]| {
         Term::list_from(
             pairs
@@ -640,7 +640,7 @@ fn gives_the_map_size_like_erts() {
             atom("other"),
             badmap(atom("foo")),
             badmap(Term::list_from(vec![int(1)])),
-            badmap(Term::Binary(b"ab".to_vec())),
+            badmap(Term::binary(b"ab".to_vec())),
         ])
     );
 

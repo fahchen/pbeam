@@ -143,7 +143,7 @@ fn selects_the_minimum_as_pinned_erts() {
             atom("a"),
             Term::tuple(vec![Term::Integer(1)]),
             Term::tuple(vec![Term::Integer(1)]),
-            Term::Binary(b"a".to_vec()),
+            Term::binary(b"a".to_vec()),
             atom("true"),
             atom("a"),
             Term::tuple(vec![]),

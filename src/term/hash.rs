@@ -423,7 +423,7 @@ impl State {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(make_internal_hash(&Term::Binary(vec![])), 10873612744977862784);
+/// assert_eq!(make_internal_hash(&Term::binary(vec![])), 10873612744977862784);
 /// ```
 fn make_internal_hash(term: &Term) -> u64 {
     let mut state = State::default();

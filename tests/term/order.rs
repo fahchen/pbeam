@@ -5,7 +5,7 @@ use std::{
 };
 
 use super::super::{
-    Atom, AtomTable, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
+    Atom, AtomTable, Binary, Fun, Lambda, Map, MatchContext, PortId, ProcessId, Reference, Term,
     test_atom as atom,
 };
 
@@ -14,7 +14,7 @@ use super::super::{
 fn panics_for_a_match_context() {
     // The interpreter gives a runtime error before a match context can
     // reach a term operation.
-    let _ = Term::MatchContext(Rc::new(RefCell::new(MatchContext::new(b"a"))))
+    let _ = Term::MatchContext(Rc::new(RefCell::new(MatchContext::new(Binary::from(b"a")))))
         .compare(&Term::Integer(1));
 }
 
@@ -48,7 +48,7 @@ fn orders_terms_of_different_types_by_type() {
         map(vec![]),
         Term::nil(),
         Term::list_from(vec![atom("a")]),
-        Term::Binary(vec![]),
+        Term::binary(vec![]),
     ];
     for (index, left) in sorted.iter().enumerate() {
         for (other, right) in sorted.iter().enumerate() {
@@ -87,9 +87,9 @@ fn orders_nested_terms_as_pinned_erts() {
         (list(&["a", "b"]), list(&["a", "c"]), Less),
         (list(&["a", "b"]), list(&["a"]), Greater),
         (list(&["b"]), list(&["a", "z"]), Greater),
-        (Term::Binary(vec![1, 2]), Term::Binary(vec![1, 3]), Less),
-        (Term::Binary(vec![1, 2]), Term::Binary(vec![1]), Greater),
-        (Term::Binary(vec![2]), Term::Binary(vec![1, 9]), Greater),
+        (Term::binary(vec![1, 2]), Term::binary(vec![1, 3]), Less),
+        (Term::binary(vec![1, 2]), Term::binary(vec![1]), Greater),
+        (Term::binary(vec![2]), Term::binary(vec![1, 9]), Greater),
         (Term::Pid(ProcessId(2)), Term::Pid(ProcessId(1)), Greater),
         (
             map(vec![(atom("a"), Term::Integer(1))]),
@@ -149,7 +149,7 @@ fn orders_improper_lists_by_elements_then_tails_as_pinned_erts() {
     let tuple = |name| Term::tuple(vec![atom(name)]);
     let pairs = [
         (improper(&[1], atom("x")), list(&[1, 2]), Less),
-        (improper(&[1], Term::Binary(vec![])), list(&[1, 2]), Greater),
+        (improper(&[1], Term::binary(vec![])), list(&[1, 2]), Greater),
         (
             improper(&[1, 2], atom("a")),
             improper(&[1, 2], atom("b")),
@@ -170,7 +170,7 @@ fn orders_improper_lists_by_elements_then_tails_as_pinned_erts() {
         (improper(&[1], tuple("a")), improper(&[1], tuple("b")), Less),
         (
             improper(&[1, 2], atom("x")),
-            improper(&[1], Term::Binary(vec![])),
+            improper(&[1], Term::binary(vec![])),
             Less,
         ),
         (improper(&[2], atom("x")), list(&[1, 2]), Greater),

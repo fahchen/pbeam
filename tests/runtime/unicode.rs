@@ -5,7 +5,7 @@ use super::{
 use crate::term::{Term, test_atom};
 
 fn binary(bytes: &[u8]) -> Term {
-    Term::Binary(bytes.to_vec())
+    Term::binary(bytes.to_vec())
 }
 
 /// Convert chardata with a budget that does not end, and return the bytes,

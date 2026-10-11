@@ -119,7 +119,7 @@ fn reads_uncompressed_binary_literals() {
     table.extend([131, 109, 0, 0, 0, 2, b'o', b'k']);
     assert_eq!(
         parse_literals(&table, &mut atoms).unwrap(),
-        vec![Some(Term::Binary(b"ok".to_vec()))]
+        vec![Some(Term::binary(b"ok".to_vec()))]
     );
     assert_eq!(
         parse_literals(&[0, 0, 0, 0, 0, 0, 0, 0], &mut atoms).unwrap(),

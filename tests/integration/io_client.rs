@@ -73,7 +73,7 @@ fn assert_probe_matches_erts(function: &str) {
                 Term::tuple(vec![
                     atom("put_chars"),
                     atom("unicode"),
-                    Term::Binary(b"Hello, world!\n".to_vec()),
+                    Term::binary(b"Hello, world!\n".to_vec()),
                 ]),
                 atom("same"),
             ]),

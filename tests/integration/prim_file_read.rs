@@ -60,7 +60,7 @@ const NAMES_LATIN1: &str = "[[],[97,98,99],[99,97,102,195,169],[97,255],[97,0,98
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::Binary(vec![97])])), "[<<97>>]");
+/// assert_eq!(text(&Term::list_from(vec![Term::binary(vec![97])])), "[<<97>>]");
 /// ```
 fn text(term: &Term) -> String {
     let join =

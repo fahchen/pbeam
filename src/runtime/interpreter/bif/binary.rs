@@ -561,16 +561,16 @@ fn ac_all(trie: &[AcNode], find: &mut Find, haystack: &[u8], reds: &mut u64) -> 
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(compile(&Term::Binary(b",".to_vec())), Some(Pattern::Bm(_))));
-/// assert!(compile(&Term::Binary(Vec::new())).is_none());
+/// assert!(matches!(compile(&Term::binary(b",".to_vec())), Some(Pattern::Bm(_))));
+/// assert!(compile(&Term::binary(Vec::new())).is_none());
 /// ```
 fn compile(pattern: &Term) -> Option<Pattern> {
     let needles: Vec<&[u8]> = match pattern {
-        Term::Binary(needle) => vec![needle],
+        Term::Binary(needle) => vec![&needle[..]],
         _ => pattern
             .proper_list()?
             .map(|needle| match needle {
-                Term::Binary(needle) => Some(needle.as_slice()),
+                Term::Binary(needle) => Some(&needle[..]),
                 _ => None,
             })
             .collect::<Option<_>>()?,
@@ -647,14 +647,14 @@ fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(not_found(0, b"ab"), Term::list_from(vec![Term::Binary(b"ab".to_vec())]));
+/// assert_eq!(not_found(0, b"ab"), Term::list_from(vec![Term::binary(b"ab".to_vec())]));
 /// assert_eq!(not_found(TRIM, b""), Term::nil());
 /// ```
 fn not_found(flags: u8, subject: &[u8]) -> Term {
     if flags & (TRIM | TRIM_ALL) != 0 && subject.is_empty() {
         return Term::nil();
     }
-    Term::list_from(vec![Term::Binary(subject.to_vec())])
+    Term::list_from(vec![Term::binary(subject.to_vec())])
 }
 
 /// Return the result of the first match at `pos` with `len` bytes, as
@@ -668,15 +668,15 @@ fn not_found(flags: u8, subject: &[u8]) -> Term {
 ///
 /// ```rust,ignore
 /// let parts = split_once(0, b"a,b", 1, 1);
-/// assert_eq!(parts, Term::list_from(vec![Term::Binary(b"a".to_vec()), Term::Binary(b"b".to_vec())]));
+/// assert_eq!(parts, Term::list_from(vec![Term::binary(b"a".to_vec()), Term::binary(b"b".to_vec())]));
 /// ```
 fn split_once(flags: u8, subject: &[u8], pos: u64, len: u64) -> Term {
     let (pos, after) = (pos as usize, (pos + len) as usize);
-    let first = Term::Binary(subject[..pos].to_vec());
+    let first = Term::binary(subject[..pos].to_vec());
     if flags & (TRIM | TRIM_ALL) != 0 && after == subject.len() {
         return Term::list_from(if pos > 0 { vec![first] } else { Vec::new() });
     }
-    let rest = Term::Binary(subject[after..].to_vec());
+    let rest = Term::binary(subject[after..].to_vec());
     Term::list_from(if flags & TRIM_ALL != 0 && pos == 0 {
         vec![rest]
     } else {
@@ -697,7 +697,7 @@ fn split_once(flags: u8, subject: &[u8], pos: u64, len: u64) -> Term {
 /// ```rust,ignore
 /// find.matches = vec![(1, 1)];
 /// let mut reds = 100;
-/// assert_eq!(split_all(&mut find, b"a,b", &mut reds), Some(Term::list_from(vec![Term::Binary(b"a".to_vec()), Term::Binary(b"b".to_vec())])));
+/// assert_eq!(split_all(&mut find, b"a,b", &mut reds), Some(Term::list_from(vec![Term::binary(b"a".to_vec()), Term::binary(b"b".to_vec())])));
 /// ```
 fn split_all(find: &mut Find, subject: &[u8], reds: &mut u64) -> Option<Term> {
     let matches = &find.matches;
@@ -719,7 +719,7 @@ fn split_all(find: &mut Find, subject: &[u8], reds: &mut u64) -> Option<Term> {
         let (pos, len) = matches[build.head as usize];
         let part = &subject[(pos + len) as usize..build.end_pos as usize];
         if !(part.is_empty() && trim != 0) {
-            build.parts.push(Term::Binary(part.to_vec()));
+            build.parts.push(Term::binary(part.to_vec()));
             trim &= !TRIM;
         }
         build.end_pos = pos;
@@ -728,7 +728,7 @@ fn split_all(find: &mut Find, subject: &[u8], reds: &mut u64) -> Option<Term> {
     *reds = steps;
     let first = &subject[..matches[0].0 as usize];
     if !(first.is_empty() && trim != 0) {
-        build.parts.push(Term::Binary(first.to_vec()));
+        build.parts.push(Term::binary(first.to_vec()));
     }
     let mut parts = std::mem::take(&mut build.parts);
     parts.reverse();
@@ -841,7 +841,7 @@ impl Find {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let parts = split(&mut process, &Term::Binary(b"a,b".to_vec()), &Term::Binary(b",".to_vec()), None)?;
+/// let parts = split(&mut process, &Term::binary(b"a,b".to_vec()), &Term::binary(b",".to_vec()), None)?;
 /// assert!(matches!(parts, BifResult::Value(parts) if parts.proper_list().is_some_and(|parts| parts.len() == 2)));
 /// ```
 ///
@@ -873,9 +873,9 @@ pub(super) fn split(
 ///
 /// ```rust,ignore
 /// // {1, 2}
-/// let result = match_2(&mut process, &Term::Binary(b"abcab".to_vec()), &Term::Binary(b"bc".to_vec()))?;
+/// let result = match_2(&mut process, &Term::binary(b"abcab".to_vec()), &Term::binary(b"bc".to_vec()))?;
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
-/// assert!(matches!(match_2(&mut process, &Term::Binary(b"ab".to_vec()), &Term::Binary(vec![]))?, BifResult::Raise { .. }));
+/// assert!(matches!(match_2(&mut process, &Term::binary(b"ab".to_vec()), &Term::binary(vec![]))?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors

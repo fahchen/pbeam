@@ -28,17 +28,17 @@ fn converts_native_name_bytes_or_gives_the_warning_tuple_in_each_encoding() {
     let warning = "Ok(Value(Tuple([Atom(\"error\"), Atom(\"warning\")])))";
     for (name, latin1, utf8) in [
         (
-            Term::Binary(vec![]),
+            Term::binary(vec![]),
             "Ok(Value(List([])))",
             "Ok(Value(List([])))",
         ),
         (
-            Term::Binary(b"a\xc3\xa9".to_vec()),
+            Term::binary(b"a\xc3\xa9".to_vec()),
             "Ok(Value(List([Integer(97), Integer(195), Integer(169)])))",
             "Ok(Value(List([Integer(97), Integer(233)])))",
         ),
         (
-            Term::Binary(b"a\xff".to_vec()),
+            Term::binary(b"a\xff".to_vec()),
             "Ok(Value(List([Integer(97), Integer(255)])))",
             warning,
         ),
@@ -55,7 +55,7 @@ fn converts_native_name_bytes_or_gives_the_warning_tuple_in_each_encoding() {
     // ERTS on macOS composes ae\xcc\x81 to [97,233], and PBeam has no
     // composition table.
     let composed = internal_native2name(
-        &Term::Binary(b"ae\xcc\x81".to_vec()),
+        &Term::binary(b"ae\xcc\x81".to_vec()),
         FilenameEncoding::Utf8Mac,
     );
     assert!(

@@ -139,7 +139,7 @@ fn load_program() -> BeamProgram {
 /// the `~w` text of the result.
 fn load_run(function: &str, code: &[u8]) -> String {
     let result = load_program()
-        .execute("load_probe", function, &[Term::Binary(code.to_vec())])
+        .execute("load_probe", function, &[Term::binary(code.to_vec())])
         .unwrap();
     format!("{}\n", text(&result))
 }
@@ -247,7 +247,7 @@ fn stops_the_run_for_code_replacement() {
             .execute(
                 "load_probe",
                 "replace",
-                &[Term::Binary(LOAD_TARGET.to_vec())]
+                &[Term::binary(LOAD_TARGET.to_vec())]
             )
             .unwrap_err()
             .to_string(),
@@ -267,7 +267,7 @@ fn compares_the_module_name_of_code_load() {
     // module loads. An empty list has no module name.
     let program = load_program();
     let expected = |name| Term::Atom(program.atom(name).unwrap());
-    let code = Term::Binary(LOAD_TARGET.to_vec());
+    let code = Term::binary(LOAD_TARGET.to_vec());
     let permitted = code_capability(&[Operation::Load], &["load_target"]);
     assert_eq!(
         program
@@ -300,7 +300,7 @@ fn stops_the_run_for_a_module_with_an_on_load_function() {
             .execute(
                 "load_probe",
                 "on_load",
-                &[Term::Binary(LOAD_ON_LOAD.to_vec())]
+                &[Term::binary(LOAD_ON_LOAD.to_vec())]
             )
             .unwrap_err()
             .to_string(),

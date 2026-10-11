@@ -133,7 +133,7 @@ fn lookup(table: &[(&str, u32)], name: &str) -> Option<u32> {
 ///
 /// ```rust,ignore
 /// let unicode = Term::list_from(vec![Term::static_atom("unicode")]);
-/// let result = compile(&mut context, &Term::Binary(b"(a)".to_vec()), &unicode)?;
+/// let result = compile(&mut context, &Term::binary(b"(a)".to_vec()), &unicode)?;
 /// // {ok, {re_pattern, 1, 1, 0, Ref}}
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
 /// let result = compile(&mut context, &Term::list_from(vec![Term::Integer(256)]), &unicode)?;
@@ -243,10 +243,10 @@ fn export(code: &pcre2::Code, unicode: bool, source: Vec<u8>, options: &Term) ->
         Term::static_atom("ok"),
         Term::tuple(vec![
             Term::static_atom("re_exported_pattern"),
-            Term::Binary(header),
-            Term::Binary(source),
+            Term::binary(header),
+            Term::binary(source),
             options.clone(),
-            Term::Binary(encoded),
+            Term::binary(encoded),
         ]),
     ])
 }

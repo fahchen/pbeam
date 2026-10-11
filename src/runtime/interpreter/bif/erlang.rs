@@ -1232,7 +1232,7 @@ pub(super) fn length(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let hello = Term::Binary(b"hello".to_vec());
+/// let hello = Term::binary(b"hello".to_vec());
 /// let part = binary_part(&hello, &Term::Integer(5), &Term::Integer(-2));
 /// assert!(matches!(part, BifResult::Value(Term::Binary(bytes)) if bytes == b"lo"));
 /// let past = binary_part(&hello, &Term::Integer(1), &Term::Integer(5));
@@ -1262,7 +1262,7 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
     if end > bytes.len() as u64 {
         return BifResult::badarg();
     }
-    Value(Term::Binary(bytes[start as usize..end as usize].to_vec()))
+    Value(Term::binary(bytes[start as usize..end as usize].to_vec()))
 }
 
 /// Run `erlang:byte_size/1`: return the number of bytes of a binary, as
@@ -1276,7 +1276,7 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
 /// # Examples
 ///
 /// ```rust,ignore
-/// let hello = Term::Binary(b"hello".to_vec());
+/// let hello = Term::binary(b"hello".to_vec());
 /// assert!(matches!(byte_size(&hello), BifResult::Value(Term::Integer(5))));
 /// assert!(matches!(byte_size(&Term::static_atom("foo")), BifResult::Raise { .. }));
 /// ```
@@ -1317,17 +1317,17 @@ pub(super) fn tl(list: &Term) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let pair = split_binary(&Term::Binary(b"abc".to_vec()), &Term::Integer(1));
-/// assert!(matches!(pair, BifResult::Value(Term::Tuple(parts)) if parts == [Term::Binary(b"a".to_vec()), Term::Binary(b"bc".to_vec())]));
-/// assert!(matches!(split_binary(&Term::Binary(vec![]), &Term::Integer(1)), BifResult::Raise { .. }));
+/// let pair = split_binary(&Term::binary(b"abc".to_vec()), &Term::Integer(1));
+/// assert!(matches!(pair, BifResult::Value(Term::Tuple(parts)) if parts == [Term::binary(b"a".to_vec()), Term::binary(b"bc".to_vec())]));
+/// assert!(matches!(split_binary(&Term::binary(vec![]), &Term::Integer(1)), BifResult::Raise { .. }));
 /// ```
 pub(super) fn split_binary(binary: &Term, position: &Term) -> BifResult {
     match (binary, position) {
         (Term::Binary(bytes), Term::Integer(at)) if (0..=bytes.len() as i64).contains(at) => {
             let (left, right) = bytes.split_at(*at as usize);
             Value(Term::tuple(vec![
-                Term::Binary(left.to_vec()),
-                Term::Binary(right.to_vec()),
+                Term::binary(left.to_vec()),
+                Term::binary(right.to_vec()),
             ]))
         }
         _ => BifResult::badarg(),
@@ -1395,7 +1395,7 @@ pub(super) fn integer_to_binary(
     let Some(digits) = integer_digits(process, term, 10, "integer_to_binary/1")? else {
         return Ok(BifResult::badarg());
     };
-    Ok(Value(Term::Binary(digits.into_bytes())))
+    Ok(Value(Term::binary(digits.into_bytes())))
 }
 
 /// Run `erlang:integer_to_binary/2`: return the characters of an integer in
@@ -1435,7 +1435,7 @@ pub(super) fn integer_to_binary_2(
     let Some(digits) = integer_digits(process, term, base, "integer_to_binary/2")? else {
         return Ok(BifResult::badarg());
     };
-    Ok(Value(Term::Binary(digits.into_bytes())))
+    Ok(Value(Term::binary(digits.into_bytes())))
 }
 
 /// Return the characters of an integer in `base`, from 2 to 36, for the BIF
@@ -1583,13 +1583,13 @@ pub(super) fn atom_to_binary(term: &Term, encoding: &Term) -> BifResult {
         return BifResult::badarg();
     };
     match encoding.name() {
-        "utf8" | "unicode" => Value(Term::Binary(atom.name().as_bytes().to_vec())),
+        "utf8" | "unicode" => Value(Term::binary(atom.name().as_bytes().to_vec())),
         "latin1" => atom
             .name()
             .chars()
             .map(|character| u8::try_from(u32::from(character)).ok())
             .collect::<Option<Vec<u8>>>()
-            .map_or_else(BifResult::badarg, |bytes| Value(Term::Binary(bytes))),
+            .map_or_else(BifResult::badarg, |bytes| Value(Term::binary(bytes))),
         _ => BifResult::badarg(),
     }
 }

@@ -62,7 +62,7 @@ fn converts_chardata_to_a_list_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let int = Term::Integer;
     let list = |code_points: &[i64]| Term::list_from(code_points.iter().copied().map(int));
-    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     let stopped =
         |reason, converted: &[i64], rest| Term::tuple(vec![atom(reason), list(converted), rest]);
     let error = |converted, rest| stopped("error", converted, rest);
@@ -150,7 +150,7 @@ fn converts_chardata_of_100000_characters_as_pinned_erts() {
     let program = BeamProgram::load(&[IO_FAIL_BIF_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let int = Term::Integer;
-    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     let summary = |reason, length, rest| Term::tuple(vec![atom(reason), int(length), rest]);
     assert_eq!(
         program.execute("io_fail_bif_probe", "big", &[]).unwrap(),

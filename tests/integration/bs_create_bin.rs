@@ -47,7 +47,7 @@ fn builds_string_and_binary_segments_as_pinned_erts() {
     // " crashed">>`. The empty binary and the bytes that are not ASCII
     // are copied as they are.
     let program = BeamProgram::load(&[BS_CREATE_BIN_PROBE]).unwrap();
-    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     assert_eq!(
         [
             run(&program, "prefix", binary(b"3")),
@@ -82,8 +82,8 @@ fn jumps_to_the_fail_label_for_a_term_that_is_not_a_binary() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
         [
-            run(&program, "guard", Term::Binary(b"b".to_vec())),
-            run(&program, "guard", Term::Binary(b"bc".to_vec())),
+            run(&program, "guard", Term::binary(b"b".to_vec())),
+            run(&program, "guard", Term::binary(b"bc".to_vec())),
             run(&program, "guard", atom("other")),
         ],
         [atom("ab"), atom("other"), atom("other")]
@@ -188,10 +188,10 @@ fn uses_one_reduction_for_each_1024_bytes_of_a_binary_segment() {
         let mut expected = vec![b'x'];
         expected.extend(std::iter::repeat_n(1, size));
         assert_eq!(
-            run(&program, "cost", Term::Binary(vec![1; size])),
+            run(&program, "cost", Term::binary(vec![1; size])),
             Term::tuple(vec![
                 Term::Integer(1 + size as i64 / 1024),
-                Term::Binary(expected)
+                Term::binary(expected)
             ])
         );
     }
@@ -234,13 +234,13 @@ fn loads_an_allocation_list_as_the_alloc_operand() {
             .execute(
                 "bs_create_bin_alloc_probe",
                 "run",
-                &[Term::Binary(bytes.to_vec())],
+                &[Term::binary(bytes.to_vec())],
             )
             .unwrap()
     };
     assert_eq!(
         [run(b"bc"), run(b"")],
-        [Term::Binary(b"abc".to_vec()), Term::Binary(b"a".to_vec())]
+        [Term::binary(b"abc".to_vec()), Term::binary(b"a".to_vec())]
     );
     assert_eq!(
         reference(
@@ -288,7 +288,7 @@ fn builds_an_append_segment_as_pinned_erts() {
     // an `append` built. `unit16/2` and `bits/2` have an `append` segment
     // of unit 16 and unit 1.
     let program = BeamProgram::load(&[BS_CREATE_BIN_APPEND_PROBE]).unwrap();
-    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     assert_eq!(
         [
             run_append(&program, "two", &[binary(b"ab"), binary(b"cd")]),
@@ -333,7 +333,7 @@ fn jumps_to_the_fail_label_for_an_append_segment_that_fails() {
     // segment and the fail label of the next clause.
     let program = BeamProgram::load(&[BS_CREATE_BIN_APPEND_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     let cases = [
         (binary(b"a"), binary(b"b")),
         (binary(b"ab"), binary(b"")),
@@ -369,7 +369,7 @@ fn raises_badarg_with_the_erts_error_info_for_an_append_segment() {
     // with the reason `unit`.
     let program = BeamProgram::load(&[BS_CREATE_BIN_APPEND_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let binary = |bytes: &[u8]| Term::Binary(bytes.to_vec());
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     let caught = |function: &str, segment: i64, reason: &str, value: Term| {
         let cause = Term::tuple(vec![
             Term::Integer(segment),
@@ -510,7 +510,7 @@ fn uses_one_reduction_for_each_1024_bytes_of_an_appended_binary() {
             run_append(
                 &program,
                 "cost",
-                &[Term::Binary(vec![1; a]), Term::Binary(vec![2; b])],
+                &[Term::binary(vec![1; a]), Term::binary(vec![2; b])],
             ),
             Term::tuple(vec![Term::Integer(reductions), Term::Integer(size)]),
             "cost(<<1:{a}/unit:8>>, <<2:{b}/unit:8>>)"
@@ -555,7 +555,7 @@ fn copies_a_binary_that_an_append_built_where_erts_appends_in_place() {
             run_append(
                 &program,
                 "cost_again",
-                &[Term::Binary(vec![1; a]), Term::Binary(vec![2; b])],
+                &[Term::binary(vec![1; a]), Term::binary(vec![2; b])],
             ),
             Term::tuple(vec![Term::Integer(reductions), Term::Integer(size)]),
             "cost_again(<<1:{a}/unit:8>>, <<2:{b}/unit:8>>)"
@@ -664,18 +664,18 @@ fn builds_integer_and_utf8_segments_as_pinned_erts() {
         ("little_pair", vec![int(1), int(2)], vec![1, 2]),
         (
             "before_binary",
-            vec![int(1), Term::Binary(vec![2, 3])],
+            vec![int(1), Term::binary(vec![2, 3])],
             vec![1, 2, 3],
         ),
         (
             "append",
-            vec![Term::Binary(vec![1, 2]), int(3)],
+            vec![Term::binary(vec![1, 2]), int(3)],
             vec![1, 2, 3],
         ),
-        ("append", vec![Term::Binary(Vec::new()), int(300)], vec![44]),
+        ("append", vec![Term::binary(Vec::new()), int(300)], vec![44]),
         (
             "append_sized",
-            vec![Term::Binary(vec![1, 2]), int(5), int(0)],
+            vec![Term::binary(vec![1, 2]), int(5), int(0)],
             vec![1, 2],
         ),
         ("code", vec![int(0)], vec![0]),
@@ -691,7 +691,7 @@ fn builds_integer_and_utf8_segments_as_pinned_erts() {
         ("code_tail", vec![int(0xE9)], vec![0xC3, 0xA9, b'!']),
         (
             "code_append",
-            vec![Term::Binary(vec![1]), int(0x1_F600)],
+            vec![Term::binary(vec![1]), int(0x1_F600)],
             vec![1, 0xF0, 0x9F, 0x98, 0x80],
         ),
         (
@@ -708,13 +708,13 @@ fn builds_integer_and_utf8_segments_as_pinned_erts() {
     for (function, arguments, bytes) in &cases {
         assert_eq!(
             run_integer(&program, function, arguments),
-            Term::Binary(bytes.clone()),
+            Term::binary(bytes.clone()),
             "{function}{arguments:?}"
         );
     }
     let expected: Vec<String> = cases
         .iter()
-        .map(|(_, _, bytes)| render(&Term::Binary(bytes.clone())))
+        .map(|(_, _, bytes)| render(&Term::binary(bytes.clone())))
         .collect();
     assert_eq!(
         reference(&integer_calls(cases.iter().map(
@@ -792,12 +792,12 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
         ),
         (
             "byte",
-            vec![Term::Binary(vec![1])],
+            vec![Term::binary(vec![1])],
             "badarg",
             1,
             "integer",
             "type",
-            Term::Binary(vec![1]),
+            Term::binary(vec![1]),
         ),
         (
             "sized",
@@ -954,7 +954,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
         ),
         (
             "before_binary",
-            vec![other.clone(), Term::Binary(Vec::new())],
+            vec![other.clone(), Term::binary(Vec::new())],
             "badarg",
             1,
             "integer",
@@ -972,7 +972,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
         ),
         (
             "append",
-            vec![Term::Binary(Vec::new()), one.clone()],
+            vec![Term::binary(Vec::new()), one.clone()],
             "badarg",
             2,
             "integer",
@@ -981,7 +981,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
         ),
         (
             "append_sized",
-            vec![Term::Binary(vec![1]), other.clone(), int(0)],
+            vec![Term::binary(vec![1]), other.clone(), int(0)],
             "badarg",
             2,
             "integer",

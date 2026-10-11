@@ -56,7 +56,7 @@ pub(super) enum Utf8State {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let list = Term::list_from(vec![Term::Integer(97), Term::Binary(vec![195, 169])]);
+/// let list = Term::list_from(vec![Term::Integer(97), Term::binary(vec![195, 169])]);
 /// assert_eq!(utf8_need(&list, false), Some(2));
 /// assert_eq!(utf8_need(&list, true), Some(5));
 /// assert_eq!(utf8_need(&Term::static_atom("foo"), false), None);
@@ -220,7 +220,7 @@ pub(super) fn build_utf8(
 /// let mut left = 1;
 /// let (rest, error) = build_binary(&[195, 169, 97], &mut left, false, &mut output);
 /// // The split moves past the continuation byte 169.
-/// assert_eq!((rest, error, left), (Term::Binary(vec![97]), false, 0));
+/// assert_eq!((rest, error, left), (Term::binary(vec![97]), false, 0));
 /// ```
 fn build_binary(
     bytes: &[u8],
@@ -236,7 +236,7 @@ fn build_binary(
     }
     let mut rest = Term::nil();
     if size as i64 > *left {
-        rest = Term::Binary(bytes[*left as usize..].to_vec());
+        rest = Term::binary(bytes[*left as usize..].to_vec());
         size = *left as usize;
     }
     if latin1 {
@@ -248,7 +248,7 @@ fn build_binary(
             output.characters += 1;
         }
     } else if let Err(position) = copy_utf8_bin(&bytes[..size], output) {
-        return (Term::Binary(bytes[position..].to_vec()), true);
+        return (Term::binary(bytes[position..].to_vec()), true);
     }
     *left -= size as i64;
     (rest, false)
@@ -455,7 +455,7 @@ fn utf8_sequence(bytes: &[u8]) -> Utf8Sequence {
 /// let name = Term::list_from(vec![Term::list_from(vec![Term::Integer(97)]), Term::nil(), Term::Integer(256)]);
 /// assert!(is_native_filename(&name, FilenameEncoding::Utf8));
 /// assert!(!is_native_filename(&name, FilenameEncoding::Latin1));
-/// assert!(is_native_filename(&Term::Binary(vec![97, 0]), FilenameEncoding::Latin1));
+/// assert!(is_native_filename(&Term::binary(vec![97, 0]), FilenameEncoding::Latin1));
 /// assert!(!is_native_filename(&Term::list_from(vec![Term::Integer(0)]), FilenameEncoding::Utf8));
 /// ```
 pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> bool {
@@ -484,7 +484,7 @@ pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> boo
 /// assert_eq!(native_filename(&name, FilenameEncoding::Latin1), Some(vec![97, 233]));
 /// assert_eq!(native_filename(&name, FilenameEncoding::Utf8), Some(vec![97, 195, 169]));
 /// assert_eq!(native_filename(&Term::list_from(vec![Term::Integer(256)]), FilenameEncoding::Latin1), None);
-/// assert_eq!(native_filename(&Term::Binary(vec![97]), FilenameEncoding::Utf8), None);
+/// assert_eq!(native_filename(&Term::binary(vec![97]), FilenameEncoding::Utf8), None);
 /// ```
 pub(super) fn native_filename(name: &Term, encoding: FilenameEncoding) -> Option<Vec<u8>> {
     let elements = name.proper_list()?;

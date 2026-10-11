@@ -1184,9 +1184,9 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert!(map_hash(&Term::list_from([Term::Integer(97)])).is_some());
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
 /// assert_eq!(map_hash(&Term::tuple(vec![])), Some(4510301282025278020));
-/// assert_eq!(map_hash(&Term::Binary(vec![])), Some(10873612744977862784));
-/// assert_eq!(map_hash(&Term::list_from([Term::Binary(vec![])])), None);
-/// assert_eq!(map_hash(&Term::tuple(vec![Term::Binary(vec![])])), None);
+/// assert_eq!(map_hash(&Term::binary(vec![])), Some(10873612744977862784));
+/// assert_eq!(map_hash(&Term::list_from([Term::binary(vec![])])), None);
+/// assert_eq!(map_hash(&Term::tuple(vec![Term::binary(vec![])])), None);
 /// let improper = |tail| Term::cons(Term::Integer(1), tail);
 /// assert!(map_hash(&improper(Term::Integer(2))).is_some());
 /// assert_eq!(map_hash(&improper(Term::Map(Map::new()))), None);
