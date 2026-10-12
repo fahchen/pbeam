@@ -11,11 +11,7 @@
 //! nothing at all. A term whose walk needs a stack keeps its allocation, and
 //! the report prints the count and names the structure that keeps it.
 
-use std::{
-    alloc::System,
-    hint::black_box,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::{alloc::System, cell::Cell, hint::black_box};
 
 use pbeam_runtime::{Map, Term};
 
@@ -31,20 +27,26 @@ const LIST_ALLOCATIONS: usize = 1;
 /// pairs and the node stack of the HAMT walk of `Map::drain_into`.
 const HASHMAP_ALLOCATIONS: usize = 10;
 
-/// The allocator of the process, with a count of the allocations.
+/// The allocator of the process, with a count of the allocations of each
+/// thread.
 struct CountingAllocator;
 
-/// The number of allocations of the process.
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// The number of allocations of the current thread. The count is for each
+    /// thread, so a test that runs beside this one changes no number of this
+    /// test. The `Cell` has a constant value and no destructor, so the
+    /// allocator reads it without an allocation of its own.
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
 
 // SAFETY: the allocator forwards each operation to `System`, which is a
-// valid allocator, and it only adds a count.
+// valid allocator, and it only adds a count of the current thread.
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count_one();
         // SAFETY: the caller gives a valid layout, as `GlobalAlloc` requires.
         unsafe { System.alloc(layout) }
     }
@@ -55,13 +57,26 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count_one();
         // SAFETY: the pointer and the layout come from `alloc` of `System`.
         unsafe { System.realloc(pointer, layout, size) }
     }
 }
 
-/// Return the number of allocations of the process.
+/// Add one to the allocation count of the current thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let before = allocations();
+/// count_one();
+/// assert_eq!(allocations(), before + 1);
+/// ```
+fn count_one() {
+    ALLOCATIONS.with(|count| count.set(count.get().wrapping_add(1)));
+}
+
+/// Return the number of allocations of the current thread.
 ///
 /// # Examples
 ///
@@ -69,7 +84,7 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
 /// assert!(allocations() > 0);
 /// ```
 fn allocations() -> usize {
-    ALLOCATIONS.load(Ordering::Relaxed)
+    ALLOCATIONS.with(Cell::get)
 }
 
 /// Drop `term` and return the number of allocations of the drop. The terms of
