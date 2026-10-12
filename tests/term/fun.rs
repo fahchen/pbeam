@@ -135,6 +135,9 @@ fn prints_the_cost_of_a_fun_payload() {
     // `docs/interpreter-dispatch-measurements.md`. The payload type is
     // private to this module, so the measurement lives here, and the timing
     // and report helpers live in `term::costs`.
+    //
+    // The target and the free variables are prepared once, so the timed copy
+    // measures the copy of the normal fun storage and no static atom lookup.
     let lambda = Lambda::new(Atom::from_static("lists").unwrap(), 0, 7, 53, 1);
     let free = vec![Term::Integer(1), Term::Integer(2)];
     let arc: Arc<FunThing> = Arc::new(FunThing {
@@ -142,24 +145,15 @@ fn prints_the_cost_of_a_fun_payload() {
         free: free.clone(),
     });
     let rc: Rc<FunThing> = Rc::new(FunThing {
-        target: Target::Local(lambda),
-        free,
+        target: Target::Local(lambda.clone()),
+        free: free.clone(),
     });
     let costs = super::super::costs::HANDLE_OPERATIONS;
     super::super::costs::clone_drop("arc_clone_drop_fun_payload", &arc, costs);
     super::super::costs::clone_drop("rc_clone_drop_fun_payload", &rc, costs);
     super::super::costs::deep_copy(
-        "deep_copy_fun_payload",
+        "deep_copy_fun_2_free",
         super::super::costs::FUN_COPY_OPERATIONS,
-        || FunThing {
-            target: Target::Local(Lambda::new(
-                Atom::from_static("lists").unwrap(),
-                0,
-                7,
-                53,
-                1,
-            )),
-            free: vec![Term::Integer(1), Term::Integer(2)],
-        },
+        || Fun::new(lambda.clone(), free.clone()),
     );
 }

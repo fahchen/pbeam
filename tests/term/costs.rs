@@ -35,14 +35,18 @@ pub(super) const RUNS: usize = 9;
 /// The number of operations of one timed run of a shared handle.
 pub(super) const HANDLE_OPERATIONS: usize = 200_000;
 
-/// The number of operations of one timed run of a small deep copy.
-const SMALL_COPY_OPERATIONS: usize = 2_000;
+/// The number of operations of one timed run of a small deep copy. The
+/// copies stay alive until the timer stops, so this count bounds the memory
+/// of one run.
+const SMALL_COPY_OPERATIONS: usize = 500;
 
 /// The number of operations of one timed run of the fun deep copy.
 pub(super) const FUN_COPY_OPERATIONS: usize = 20_000;
 
-/// The number of operations of one timed run of a large deep copy.
-pub(super) const LARGE_COPY_OPERATIONS: usize = 100;
+/// The number of operations of one timed run of a large deep copy. The
+/// copies stay alive until the timer stops, so this count bounds the memory
+/// of one run.
+pub(super) const LARGE_COPY_OPERATIONS: usize = 200;
 
 /// Print one measured line: the name of the operation and the nanosecond for
 /// each operation.
@@ -52,12 +56,16 @@ pub(super) fn report(name: &str, ns: f64) {
 
 /// Return the nanoseconds for each operation of `body`, as the minimum of
 /// `runs` timed runs. The caller performs exactly `operations` operations.
-fn measure(runs: usize, operations: usize, mut body: impl FnMut()) -> f64 {
+/// The timer stops before the value of `body` drops, so a measured copy does
+/// not hold the release of its result.
+fn measure<T>(runs: usize, operations: usize, mut body: impl FnMut() -> T) -> f64 {
     let mut best = f64::INFINITY;
     for _ in 0..runs {
         let start = Instant::now();
-        body();
+        let kept = body();
         let elapsed = start.elapsed().as_nanos() as f64;
+        black_box(&kept);
+        drop(kept);
         best = best.min(elapsed / operations as f64);
     }
     black_box(best)
@@ -77,13 +85,17 @@ pub(super) fn clone_drop<T: Clone>(name: &str, held: &T, operations: usize) {
     report(name, ns);
 }
 
-/// Measure the deep copy that `copy` builds, and print the line. The result
-/// is consumed, so the compiler cannot remove the copy.
+/// Measure the deep copy that `copy` builds, and print the line. The copies
+/// stay alive in a container until the timer stops, so the number holds the
+/// copy alone and not the release of the copies. The container drops after
+/// the timer stops.
 pub(super) fn deep_copy<T>(name: &str, operations: usize, mut copy: impl FnMut() -> T) {
     let ns = measure(RUNS, operations, || {
+        let mut kept = Vec::with_capacity(operations);
         for _ in 0..operations {
-            black_box(copy());
+            kept.push(copy());
         }
+        kept
     });
     report(name, ns);
 }
