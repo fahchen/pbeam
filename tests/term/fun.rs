@@ -1,5 +1,7 @@
 //! Unit tests of the fun newtype of `src/term/fun.rs`.
 
+use std::rc::Rc;
+
 use super::*;
 
 /// Return a local fun with the free variables `free`.
@@ -125,4 +127,39 @@ fn drains_the_free_variables_of_a_fun_with_the_work_stack() {
         unreachable!()
     };
     assert_eq!(fun.take_last(), None);
+}
+
+#[test]
+fn prints_the_cost_of_a_fun_payload() {
+    // The committed measurement of the fun payload of the term cost table of
+    // `docs/interpreter-dispatch-measurements.md`. The payload type is
+    // private to this module, so the measurement lives here, and the timing
+    // and report helpers live in `term::costs`.
+    let lambda = Lambda::new(Atom::from_static("lists").unwrap(), 0, 7, 53, 1);
+    let free = vec![Term::Integer(1), Term::Integer(2)];
+    let arc: Arc<FunThing> = Arc::new(FunThing {
+        target: Target::Local(lambda.clone()),
+        free: free.clone(),
+    });
+    let rc: Rc<FunThing> = Rc::new(FunThing {
+        target: Target::Local(lambda),
+        free,
+    });
+    let costs = super::super::costs::HANDLE_OPERATIONS;
+    super::super::costs::clone_drop("arc_clone_drop_fun_payload", &arc, costs);
+    super::super::costs::clone_drop("rc_clone_drop_fun_payload", &rc, costs);
+    super::super::costs::deep_copy(
+        "deep_copy_fun_payload",
+        super::super::costs::FUN_COPY_OPERATIONS,
+        || FunThing {
+            target: Target::Local(Lambda::new(
+                Atom::from_static("lists").unwrap(),
+                0,
+                7,
+                53,
+                1,
+            )),
+            free: vec![Term::Integer(1), Term::Integer(2)],
+        },
+    );
 }

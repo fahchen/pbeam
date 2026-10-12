@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::{Child, Direction, HAMT_MAX_LEVEL, Hamt, Map, Node, Repr, encode_path, map_hash};
@@ -874,4 +875,61 @@ fn counts_the_steps_of_the_erts_hashmap_merge() {
     for (map, other, cost) in costs {
         assert_eq!(map.merge_steps(&other).map(|steps| steps / 8), Some(cost));
     }
+}
+
+/// Return the deep copy of a map form: every node of the trie is a new node,
+/// and each leaf, collision pair, and pair of a flatmap copies its terms.
+fn deep_repr(repr: &Repr) -> Repr {
+    match repr {
+        Repr::Flat(pairs) => Repr::Flat(pairs.clone()),
+        Repr::Hash(hamt) => Repr::Hash(Hamt {
+            root: deep_node(&hamt.root),
+            size: hamt.size,
+        }),
+    }
+}
+
+/// Return the deep copy of one node of the trie.
+fn deep_node(node: &Node) -> Node {
+    Node {
+        bitmap: node.bitmap,
+        children: node.children.iter().map(deep_child).collect(),
+    }
+}
+
+/// Return the deep copy of one child of a node.
+fn deep_child(child: &Child) -> Child {
+    match child {
+        Child::Leaf(key, value) => Child::Leaf(key.clone(), value.clone()),
+        Child::Node(node) => Child::Node(Arc::new(deep_node(node))),
+        Child::Collision(pairs) => Child::Collision(pairs.clone()),
+    }
+}
+
+#[test]
+fn prints_the_cost_of_a_map_payload() {
+    // The committed measurement of the map payload of the term cost table of
+    // `docs/interpreter-dispatch-measurements.md`. The form type is private
+    // to this module, so the measurement lives here, and the timing and
+    // report helpers live in `term::costs`.
+    let map = integers(0..1_000);
+    let arc: Arc<Repr> = Arc::clone(&map.repr);
+    let rc: Rc<Repr> = Rc::new((*map.repr).clone());
+    let costs = super::super::costs::HANDLE_OPERATIONS;
+    super::super::costs::clone_drop("arc_clone_drop_map_payload", &arc, costs);
+    super::super::costs::clone_drop("rc_clone_drop_map_payload", &rc, costs);
+    super::super::costs::deep_copy(
+        "deep_copy_map_payload",
+        super::super::costs::LARGE_COPY_OPERATIONS,
+        || deep_repr(&map.repr),
+    );
+    super::super::costs::deep_copy(
+        "deep_copy_tuple_with_map_1000",
+        super::super::costs::LARGE_COPY_OPERATIONS,
+        || {
+            Term::tuple(vec![Term::Map(Map {
+                repr: Arc::new(deep_repr(&map.repr)),
+            })])
+        },
+    );
 }

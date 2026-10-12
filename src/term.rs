@@ -596,5 +596,9 @@ impl PartialOrd for Reference {
 }
 
 #[cfg(test)]
+#[path = "../tests/term/costs.rs"]
+mod costs;
+
+#[cfg(test)]
 #[path = "../tests/term.rs"]
 mod tests;
