@@ -136,3 +136,11 @@ Expand every documented complexity claim into its complete operation sequence. I
 ## Arguments are checked after capability authorization
 
 Validate arguments before capability checks. Preserve invalid-input errors.
+
+## Benchmark measurements lose the measured work
+
+Keep benchmark setup outside timed runs and isolate counters to the measuring thread. Consume inputs and outputs with `black_box`, and verify compiled probes retain the work before publishing results.
+
+## Structural tests become stale after enum growth
+
+Make structural tests fail to compile when the represented enum gains a variant. Match every variant and name every field instead of using `..` or a fallback.
