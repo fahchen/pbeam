@@ -4,7 +4,7 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use super::code::{self, Instruction, Operand};
+use super::code::{self, Instruction, Operand, combine_pairs};
 use crate::{
     error::{BeamError, error},
     term::{AtomTable, Term},
@@ -263,9 +263,13 @@ impl ModuleTables {
 
 impl BeamModule {
     /// Return the module `name` with `exports` and the decoded
-    /// `instructions`, and build the side tables of the stream. Each export
-    /// name goes into the name table of the module, so its name lives in one
-    /// place.
+    /// `instructions`, combine the measured instruction pairs of the stream,
+    /// and build the side tables of the stream. Each export name goes into
+    /// the name table of the module, so its name lives in one place.
+    ///
+    /// The tables come from the decoded stream before the combination,
+    /// which changes no index and no label. A later jump and a later frame
+    /// creation therefore read the same entry as without the combination.
     ///
     /// # Examples
     ///
@@ -276,9 +280,10 @@ impl BeamModule {
     pub(crate) fn new(
         name: String,
         exports: HashMap<(String, u32), u32>,
-        instructions: Vec<Instruction>,
+        mut instructions: Vec<Instruction>,
     ) -> Self {
         let mut tables = ModuleTables::build(&name, &instructions, NameTable::default());
+        combine_pairs(&mut instructions, &tables.jump_targets);
         let exports = exports
             .into_iter()
             .map(|((function, arity), label)| ((tables.names.intern(&function), arity), label))

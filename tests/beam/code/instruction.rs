@@ -13,7 +13,10 @@ use super::{
     unsupported_opcode_operand_count,
 };
 use crate::{
-    beam::code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
+    beam::{
+        code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind, combine_pairs},
+        module::LabelMap,
+    },
     runtime::BifId,
     term::{Atom, AtomTable, Lambda, Term},
 };
@@ -2052,6 +2055,22 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
                 + size_of_val(arguments)
                 + size_of_val(destination)
         }
+        Instruction::TestCompareBif {
+            compare,
+            left,
+            right,
+            resume,
+            bif,
+        } => {
+            size_of_val(compare)
+                + size_of_val(left)
+                + size_of_val(right)
+                + size_of_val(resume)
+                + size_of_val(bif)
+        }
+        Instruction::BifCall { bif, arity, label } => {
+            size_of_val(bif) + size_of_val(arity) + size_of_val(label)
+        }
         Instruction::MakeFun {
             lambda,
             free,
@@ -2379,4 +2398,25 @@ fn records_the_decoded_form_layout() {
     );
     assert_eq!(arm_field_bytes(&arms[3].1), 72, "the fields of `Bif`");
     assert_eq!(arm_field_bytes(&arms[6].1), 80, "the fields of `Move`");
+}
+
+/// A comparison test whose fail label names no instruction of the stream
+/// keeps its own instruction: the pass that combines the pairs does not
+/// change it, and the run then reports the missing label, as it did before
+/// that pass.
+#[test]
+fn keeps_a_comparison_test_whose_fail_label_is_absent() {
+    let mut instructions = vec![
+        Instruction::TestExactEqual {
+            fail_label: 9,
+            left: Operand::X(0),
+            right: Operand::X(1),
+        },
+        Instruction::End,
+    ];
+    combine_pairs(&mut instructions, &LabelMap::default());
+    assert!(matches!(
+        instructions[0],
+        Instruction::TestExactEqual { fail_label: 9, .. }
+    ));
 }

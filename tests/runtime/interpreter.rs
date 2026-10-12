@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     BeamModule, Map, Term,
-    beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind},
+    beam::code::{BinaryMatchCommand, Instruction, Operand, TestCompare, TestKind},
     runtime::{
         capability::{AllowAll, Capability, Policy},
         ets::{Access, Table},
@@ -2389,6 +2389,129 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
     );
 }
 
+/// Run a combined pair whose BIF reads a match context, so that the pair
+/// reaches the shared body of the `bif` instruction and its pairs.
+#[test]
+fn reads_a_match_context_in_a_combined_pair() {
+    // `byte_size/1` of a match context reads the remaining bits with no BIF
+    // call (`match_context_byte_size`). The comparison test always fails, so
+    // the pair runs the BIF of its fail label.
+    let body = vec![
+        Instruction::BinaryMatchStart {
+            fail_label: 0,
+            source: Operand::Value(Term::binary(b"abc".to_vec())),
+            destination: Operand::X(0),
+        },
+        Instruction::Label(7),
+        Instruction::TestExactEqual {
+            fail_label: 8,
+            left: Operand::Value(Term::Integer(1)),
+            right: Operand::Value(Term::Integer(2)),
+        },
+        Instruction::Return,
+        Instruction::Label(8),
+        Instruction::Bif {
+            fail_label: 0,
+            bif: BifId::ErlangByteSize1,
+            arguments: vec![Operand::X(0)],
+            destination: Operand::X(0),
+        },
+        Instruction::Return,
+    ];
+    assert_eq!(
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap(),
+        Term::Integer(3)
+    );
+}
+
+/// Run a combined pair whose BIF raises with no catch tag, so that the pair
+/// stops the process and the caller gets the exit reason.
+#[test]
+fn exits_at_a_raise_of_a_combined_pair() {
+    let body = vec![
+        Instruction::Label(7),
+        Instruction::TestExactEqual {
+            fail_label: 8,
+            left: Operand::Value(Term::Integer(1)),
+            right: Operand::Value(Term::Integer(2)),
+        },
+        Instruction::Return,
+        Instruction::Label(8),
+        Instruction::Bif {
+            fail_label: 0,
+            bif: BifId::ErlangPlus2,
+            arguments: vec![Operand::Value(Term::Integer(1)), atom("foo")],
+            destination: Operand::X(0),
+        },
+        Instruction::Return,
+    ];
+    assert_eq!(
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+        "root process exited with {badarith,[]}"
+    );
+}
+
+/// Run a combined pair whose BIF cannot give a value or raise, so that the
+/// pair reaches the same error body as the `bif` instruction.
+#[test]
+fn reports_an_unsupported_result_of_a_combined_pair() {
+    // `demonitor(Ref, [flush])` of a reference with no monitor traps. No
+    // compiler emits it as a `bif` instruction. This body names the BIF
+    // from the fail label of a comparison test, so the loader combines the
+    // two into `TestCompareBif`.
+    let trap = || Instruction::Bif {
+        fail_label: 0,
+        bif: BifId::ErlangDemonitor2,
+        arguments: vec![
+            Operand::X(0),
+            Operand::Value(Term::list_from(vec![test_atom("flush")])),
+        ],
+        destination: Operand::X(0),
+    };
+    let never = || Operand::Value(test_atom("never"));
+    let body = vec![
+        erlang_call("make_ref", 0, false),
+        Instruction::Label(7),
+        Instruction::TestExactEqual {
+            fail_label: 8,
+            left: Operand::X(0),
+            right: never(),
+        },
+        Instruction::Return,
+        Instruction::Label(8),
+        trap(),
+        Instruction::Return,
+    ];
+    assert!(
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string()
+            .starts_with("unsupported erlang:demonitor/2 result Trap")
+    );
+
+    // The same BIF directly before a `call_only` becomes `BifCall`, and it
+    // reaches the same error.
+    let body = vec![
+        erlang_call("make_ref", 0, false),
+        trap(),
+        Instruction::CallOnly { arity: 0, label: 1 },
+        Instruction::Return,
+    ];
+    assert!(
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string()
+            .starts_with("unsupported erlang:demonitor/2 result Trap")
+    );
+}
+
 #[test]
 fn returns_the_local_node_for_node_0_and_a_pid() {
     let node = |bif: BifId, arguments: Vec<Operand>| {
@@ -3496,15 +3619,16 @@ fn rejects_a_bif_name_that_no_table_entry_holds() {
 
 /// The decoded slots that one iteration of the loop `function` retires in
 /// `module`: the entry (`TestYield` and the clause test) and the loop clause
-/// that the fail label of that test names up to its tail call. A `Label` is
-/// not dispatched, and the `Return` that the loader puts after a tail call
-/// is not reached.
+/// up to its tail call. The loader of step 9 combines the entry clause test
+/// with the `Bif` of its fail label, so the clause starts after that `Bif`.
+/// A `Label` is not dispatched, and the `Return` that the loader puts after a
+/// tail call is not reached.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let probe = program.modules["dispatch_probe"].clone();
-/// assert_eq!(loop_body(&probe, "floor_loop").len(), 4);
+/// assert_eq!(loop_body(&probe, "floor_loop").len(), 3);
 /// ```
 fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
     let instructions = &module.instructions;
@@ -3522,15 +3646,17 @@ fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
         "the function entry of {function} is not `TestYield`: {:?}",
         instructions[start]
     );
-    let fail_label = match &instructions[start + 1] {
-        Instruction::TestExactEqual { fail_label, .. } => *fail_label,
+    let clause = match &instructions[start + 1] {
+        // The combined pair runs the `Bif` of the fail label, so the clause
+        // of the loop starts at the instruction after that `Bif`.
+        Instruction::TestCompareBif { resume, .. } => *resume,
+        Instruction::TestExactEqual { fail_label, .. } => *module
+            .tables
+            .jump_targets
+            .get(fail_label)
+            .unwrap_or_else(|| panic!("the loader records the jump target of label {fail_label}")),
         other => panic!("the entry clause test of {function} is not `is_eq_exact`: {other:?}"),
     };
-    let clause = *module
-        .tables
-        .jump_targets
-        .get(&fail_label)
-        .unwrap_or_else(|| panic!("the loader records the jump target of label {fail_label}"));
     let end = (clause..instructions.len())
         .find(|index| {
             matches!(
@@ -3539,13 +3665,15 @@ fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
             )
         })
         .expect("the function ends before the stream does");
-    // The clause ends with the tail call of the loop. A `Return` after a
+    // The clause ends with the tail call of the loop, which the loader of
+    // step 9 combines with the `Bif` directly before it. A `Return` after a
     // tail call is dead, because the call replaces the frame.
     let tail = (clause..end)
         .find(|index| {
             matches!(
                 instructions[*index],
-                Instruction::Call { .. }
+                Instruction::BifCall { .. }
+                    | Instruction::Call { .. }
                     | Instruction::CallOnly { .. }
                     | Instruction::CallExternal { .. }
                     | Instruction::CallLast { .. }
@@ -3561,10 +3689,11 @@ fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
 }
 
 /// The bytes of the heap operands of the instructions of `slots`: the
-/// argument vector of a `Bif` and the two names of a `CallExternal`. The
-/// first number counts the operands that the instruction reads, and the
-/// second counts the storage that the loader allocated for them. Every other
-/// operand lives inside the 136-byte slot of its instruction.
+/// argument vector of a `Bif` or of a combined pair, and the two names of a
+/// `CallExternal`. The first number counts the operands that the instruction
+/// reads, and the second counts the storage that the loader allocated for
+/// them. Every other operand lives inside the 136-byte slot of its
+/// instruction.
 ///
 /// # Examples
 ///
@@ -3576,19 +3705,139 @@ fn heap_operand_bytes(module: &BeamModule, slots: &[usize]) -> (usize, usize) {
     let mut read = 0;
     let mut allocated = 0;
     for index in slots {
-        match &module.instructions[*index] {
-            Instruction::Bif { arguments, .. } => {
-                read += arguments.len() * std::mem::size_of::<Operand>();
-                allocated += arguments.capacity() * std::mem::size_of::<Operand>();
-            }
+        let arguments = match &module.instructions[*index] {
+            Instruction::Bif { arguments, .. } => Some(arguments),
+            Instruction::TestCompareBif { bif, .. } => Some(&bif.arguments),
+            Instruction::BifCall { bif, .. } => Some(&bif.arguments),
             Instruction::CallExternal { module, name, .. } => {
                 read += module.len() + name.len();
                 allocated += module.capacity() + name.capacity();
+                None
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some(arguments) = arguments {
+            read += arguments.len() * std::mem::size_of::<Operand>();
+            allocated += arguments.capacity() * std::mem::size_of::<Operand>();
         }
     }
     (read, allocated)
+}
+
+/// The comparison and the BIF of the entry clause test of `function` in
+/// `module`, which the loader must have combined with the BIF of its fail
+/// label. The check also states that the `Bif` at the fail target keeps its
+/// own identity in the stream.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let probe = program.modules["combined_probe"].clone();
+/// assert_eq!(combined_pair(&probe, "eq"), (TestCompare::Equal, BifId::ErlangMinus2));
+/// ```
+fn combined_pair(module: &BeamModule, function: &str) -> (TestCompare, BifId) {
+    let instructions = &module.instructions;
+    let info = instructions
+        .iter()
+        .position(
+            |instruction| matches!(instruction, Instruction::FunctionInfo { name, .. } if name == function),
+        )
+        .unwrap_or_else(|| panic!("the module has no {function}"));
+    match &instructions[info + 3] {
+        Instruction::TestCompareBif {
+            compare,
+            resume,
+            bif,
+            ..
+        } => {
+            let Instruction::Bif { bif: target, .. } = &instructions[*resume - 1] else {
+                panic!(
+                    "the pair of {function} has no `Bif` before resume {}",
+                    *resume
+                );
+            };
+            assert_eq!(
+                *target, bif.bif,
+                "the BIF of the pair of {function} and the BIF of the stream"
+            );
+            (*compare, bif.bif)
+        }
+        other => panic!("the entry clause test of {function} is not a combined pair: {other:?}"),
+    }
+}
+
+/// The number of `BifCall` instructions of `function` in `module`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let probe = program.modules["combined_probe"].clone();
+/// assert_eq!(combined_calls(&probe, "len_call"), 1);
+/// ```
+fn combined_calls(module: &BeamModule, function: &str) -> usize {
+    let instructions = &module.instructions;
+    let info = instructions
+        .iter()
+        .position(
+            |instruction| matches!(instruction, Instruction::FunctionInfo { name, .. } if name == function),
+        )
+        .unwrap_or_else(|| panic!("the module has no {function}"));
+    let end = (info + 1..instructions.len())
+        .find(|index| {
+            matches!(
+                instructions[*index],
+                Instruction::FunctionInfo { .. } | Instruction::End
+            )
+        })
+        .expect("the function ends before the stream does");
+    (info + 1..end)
+        .filter(|index| matches!(instructions[*index], Instruction::BifCall { .. }))
+        .count()
+}
+
+/// Check that the loader builds the measured pairs of
+/// `fixtures/combined/combined_probe.beam`: the comparison of the entry
+/// clause test of each loop and the BIF of its fail label, and the `BifCall`
+/// of the second pair. The behaviour test
+/// `tests/integration/combined_pairs.rs` runs these loops, and this check
+/// proves that the loops hold the combined instructions and not the two
+/// instructions that they replace.
+#[test]
+fn combines_the_measured_instruction_pairs() {
+    const COMBINED_PROBE: &[u8] = include_bytes!("../../fixtures/combined/combined_probe.beam");
+    let program = BeamProgram::load(&[COMBINED_PROBE]).unwrap();
+    let module = &program.modules["combined_probe"];
+
+    // Pair 1: the comparison of the clause test, and the BIF of its fail
+    // label.
+    for (function, pair) in [
+        ("eq", (TestCompare::Equal, BifId::ErlangMinus2)),
+        ("ne", (TestCompare::NotEqual, BifId::ErlangPlus2)),
+        ("lt", (TestCompare::Less, BifId::ErlangPlus2)),
+        ("ge", (TestCompare::GreaterEqual, BifId::ErlangPlus2)),
+        ("raise_error", (TestCompare::Equal, BifId::ErlangPlus2)),
+        ("guard_fail", (TestCompare::Equal, BifId::ErlangPlus2)),
+        ("len_pair", (TestCompare::Equal, BifId::ErlangLength1)),
+    ] {
+        assert_eq!(
+            combined_pair(module, function),
+            pair,
+            "the pair of {function}"
+        );
+    }
+
+    // Pair 2: the `Bif` and the `call_only` after it.
+    assert_eq!(
+        combined_calls(module, "len_call"),
+        1,
+        "the pair of len_call"
+    );
+    assert_eq!(
+        combined_calls(module, "bad_tail"),
+        1,
+        "the pair of bad_tail"
+    );
+    assert_eq!(combined_calls(module, "eq"), 0, "no pair on the call of eq");
 }
 
 /// Record the decoded form that one iteration of each measured loop retires:
@@ -3604,15 +3853,18 @@ fn records_the_decoded_loop_body() {
         include_bytes!("../../fixtures/dispatch/dispatch_position_probe.beam");
     let program = BeamProgram::load(&[DISPATCH_PROBE, POSITION_PROBE]).unwrap();
 
+    // Step 9 combines the clause test with the `Bif` of its fail label and a
+    // `Bif` with the `call_only` after it, so one iteration of each loop
+    // retires three instructions.
     let shapes = [
-        ("dispatch_probe", "floor_ext_loop", 4),
-        ("dispatch_probe", "floor_loop", 4),
-        ("dispatch_position_probe", "floor_loop", 4),
-        ("dispatch_probe", "plus_loop", 5),
-        ("dispatch_probe", "tuple_size_loop", 5),
-        ("dispatch_probe", "element_loop", 5),
-        ("dispatch_probe", "hd_loop", 5),
-        ("dispatch_probe", "map_get_loop", 5),
+        ("dispatch_probe", "floor_ext_loop", 3),
+        ("dispatch_probe", "floor_loop", 3),
+        ("dispatch_position_probe", "floor_loop", 3),
+        ("dispatch_probe", "plus_loop", 3),
+        ("dispatch_probe", "tuple_size_loop", 3),
+        ("dispatch_probe", "element_loop", 3),
+        ("dispatch_probe", "hd_loop", 3),
+        ("dispatch_probe", "map_get_loop", 3),
     ];
 
     println!(

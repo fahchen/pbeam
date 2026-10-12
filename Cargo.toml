@@ -102,6 +102,10 @@ name = "badarg"
 path = "tests/integration/badarg.rs"
 
 [[test]]
+name = "combined_pairs"
+path = "tests/integration/combined_pairs.rs"
+
+[[test]]
 name = "bif_audit"
 path = "tests/integration/bif_audit.rs"
 

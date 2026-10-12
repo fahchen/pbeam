@@ -8,7 +8,9 @@ use super::{
 use crate::{
     beam::{
         BeamModule, NameId,
-        code::{self, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
+        code::{
+            self, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestCompare, TestKind,
+        },
     },
     error::{BeamError, error},
     term::{
@@ -864,6 +866,51 @@ impl BeamProgram {
                         }
                     }
                 }
+                Instruction::TestCompareBif {
+                    compare,
+                    left,
+                    right,
+                    resume,
+                    bif,
+                } => {
+                    // The pair keeps the branch of the test and the body of
+                    // the BIF. The test passes without a BIF, and the BIF
+                    // runs in this dispatch step when the test fails.
+                    if !compare_passes(process, *compare, left, right)? {
+                        cursor.position = *resume;
+                        let outcome = self.run_pair(
+                            scheduler,
+                            &mut cursor.position,
+                            module,
+                            bif.fail_label,
+                            bif.bif,
+                            &bif.arguments,
+                            &bif.destination,
+                            None,
+                        )?;
+                        if let Some(outcome) = outcome {
+                            return Ok(outcome);
+                        }
+                    }
+                }
+                Instruction::BifCall { bif, arity, label } => {
+                    // The pair keeps the BIF and the local call. The BIF
+                    // writes its destination first, as the two instructions
+                    // do, and the call replaces the frame after it.
+                    let outcome = self.run_pair(
+                        scheduler,
+                        &mut cursor.position,
+                        module,
+                        bif.fail_label,
+                        bif.bif,
+                        &bif.arguments,
+                        &bif.destination,
+                        Some((*arity, *label)),
+                    )?;
+                    if let Some(outcome) = outcome {
+                        return Ok(outcome);
+                    }
+                }
                 Instruction::Jump(label) => cursor.position = label_index(module, *label)?,
                 Instruction::Catch { register, label } => {
                     // ERTS also counts `c_p->catches` here. PBeam finds a live
@@ -1047,7 +1094,7 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if read_ref(process, left)? != read_ref(process, right)? {
+                    if !compare_passes(process, TestCompare::Equal, left, right)? {
                         cursor.position = label_index(module, *fail_label)?;
                     }
                 }
@@ -1066,7 +1113,7 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if read_ref(process, left)? == read_ref(process, right)? {
+                    if !compare_passes(process, TestCompare::NotEqual, left, right)? {
                         cursor.position = label_index(module, *fail_label)?;
                     }
                 }
@@ -1075,10 +1122,7 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if !read_ref(process, left)?
-                        .compare(read_ref(process, right)?)?
-                        .is_lt()
-                    {
+                    if !compare_passes(process, TestCompare::Less, left, right)? {
                         cursor.position = label_index(module, *fail_label)?;
                     }
                 }
@@ -1087,10 +1131,7 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if read_ref(process, left)?
-                        .compare(read_ref(process, right)?)?
-                        .is_lt()
-                    {
+                    if !compare_passes(process, TestCompare::GreaterEqual, left, right)? {
                         cursor.position = label_index(module, *fail_label)?;
                     }
                 }
@@ -2173,6 +2214,127 @@ impl BeamProgram {
         ))
     }
 
+    /// Run the BIF of an instruction and apply its result, as the `bif`
+    /// instruction of the ERTS loader does. The single instruction
+    /// [`Instruction::Bif`] and the combined pairs
+    /// [`Instruction::TestCompareBif`] and [`Instruction::BifCall`] all
+    /// reach this function, so the pair and the two instructions charge the
+    /// same reductions at the same points and raise the same exception.
+    ///
+    /// A `bif` instruction with fail label 0 raises the exception of the
+    /// BIF, as `handle_error` does in ERTS (`bif_instrs.tab`). Another fail
+    /// label jumps to the label and raises nothing (`$FAIL($Fail)` in
+    /// `i_bif.call`).
+    ///
+    /// The guard BIF `length/1` runs as `i_length`
+    /// (`jit/arm/ops.tab:1329-1333`). At a trap, it keeps its trap state,
+    /// switches out, and runs again when the process runs again
+    /// (`jit/arm/instr_bif.cpp:253-272`). The argument `Vec<Term>` of a
+    /// `bif` instruction is one of the two allocations that remain on the
+    /// call path (step 3 of the plan), so the pure leaf path reads its terms
+    /// into a `BifArguments` and passes the borrowed slice. The loader gives
+    /// a `bif` instruction at most [`MAX_BORROWED_ARGUMENTS`] arguments, so
+    /// the path covers every `bif` instruction.
+    ///
+    /// `call` is the `(arity, label)` of the local call that the loader
+    /// joined with the BIF, or `None` for a BIF that stands alone. The BIF
+    /// writes its destination before the call, and the call replaces the
+    /// frame, as the two instructions do. A BIF that fails or raises never
+    /// reaches the call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // x0 holds 2.
+    /// let outcome = program.run_pair(&mut scheduler, &mut cursor.position, &module,
+    ///     0, BifId::ErlangPlus2, &[Operand::X(0), Operand::Value(Term::Integer(1))],
+    ///     &Operand::X(0), None)?;
+    /// assert!(outcome.is_none());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A BIF result that the compiler does not put in a `bif` instruction,
+    /// an unset argument, and a label that the module does not hold.
+    // Eight parameters keep one body for the `bif` instruction and for its
+    // two combined pairs. A struct of the four BIF fields would copy the
+    // argument vector of every `bif` instruction.
+    #[inline]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one body for the BIF and its pairs"
+    )]
+    fn run_pair(
+        &self,
+        scheduler: &mut Scheduler,
+        position: &mut usize,
+        module: &BeamModule,
+        fail_label: u32,
+        bif: BifId,
+        arguments: &[Operand],
+        destination: &Operand,
+        call: Option<(u32, u32)>,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        let result = if let Some(state) = process.length_trap.take() {
+            self.bif_trap(scheduler, "erlang", "length", state)?
+        } else {
+            let values = read_bif_arguments(process, arguments)?;
+            commit_position(process, *position);
+            let size = values.with(|terms| match_context_byte_size(bif, arguments, terms))?;
+            match size {
+                Some(size) => BifResult::Value(size),
+                None => values.with(|terms| self.bif_slice(scheduler, bif, terms))?,
+            }
+        };
+        let process = scheduler.current_process_mut();
+        match result {
+            BifResult::Value(value) => {
+                write(process, destination, value)?;
+                if let Some((arity, label)) = call {
+                    check_local_call_arguments(&process.registers, arity)?;
+                    let frame = code_table::frame(module, label, arity)?;
+                    *position = frame.next_instruction;
+                    *current_frame(process) = frame;
+                }
+                Ok(None)
+            }
+            BifResult::TrapBif {
+                module: "erlang",
+                function: "length",
+                arguments,
+            } => {
+                process.length_trap = Some(arguments);
+                // The position is the instruction after the `Bif` of the
+                // pair, so the step back names a `Bif` when the pair holds
+                // one and the pair itself when it does not. Both run the
+                // trap again with the state that this arm kept.
+                *position -= 1;
+                commit_position(process, *position);
+                Ok(Some(Outcome::Yield))
+            }
+            BifResult::Raise { .. } if fail_label != 0 => {
+                *position = label_index(module, fail_label)?;
+                Ok(None)
+            }
+            BifResult::Raise { class, reason } => {
+                if let Some(outcome) = raise(process, class, reason) {
+                    return Ok(Some(outcome));
+                }
+                *position = active_position(scheduler);
+                Ok(None)
+            }
+            // The compiler emits a `bif` instruction only for a BIF that
+            // does not trap or end the caller.
+            trap => {
+                let (module, name, arity) = mfa(bif);
+                Err(error(format!(
+                    "unsupported {module}:{name}/{arity} result {trap:?}"
+                )))
+            }
+        }
+    }
+
     /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
     /// does for BIFs and NIFs (`emu/bif_instrs.tab:604-636`; JIT
     /// `emit_bif_nif_epilogue` in `jit/arm/instr_bif.cpp:631-719`). A value
@@ -2507,7 +2669,7 @@ impl Cursor {
     /// assert_eq!(current_frame(process).next_instruction, cursor.position);
     /// ```
     fn commit(&self, process: &mut ProcessState) {
-        current_frame(process).next_instruction = self.position;
+        commit_position(process, self.position);
     }
 }
 
@@ -2520,6 +2682,22 @@ impl Cursor {
 /// ```
 fn active_position(scheduler: &mut Scheduler) -> usize {
     current_frame(scheduler.current_process_mut()).next_instruction
+}
+
+/// Write the resume position of the active frame, so that the process
+/// resumes there and a diagnostic reads it. [`Cursor::commit`] and the
+/// combined pair of [`Instruction::TestCompareBif`] or
+/// [`Instruction::BifCall`] both reach this function, so the position of a
+/// pair and the position of a single instruction are written in one place.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// commit_position(&mut process, 7);
+/// assert_eq!(current_frame(&mut process).next_instruction, 7);
+/// ```
+fn commit_position(process: &mut ProcessState, position: usize) {
+    current_frame(process).next_instruction = position;
 }
 
 /// Return the active frame of a running process.
@@ -2895,6 +3073,42 @@ fn read_ref<'a>(process: &'a ProcessState, operand: &'a Operand) -> Result<&'a T
         Term::MatchContext(_) => Err(match_context_escape(operand)),
         value => Ok(value),
     }
+}
+
+/// Return whether the comparison test `compare` of `left` and `right`
+/// passes. The single instructions `test,is_eq_exact`,
+/// `test,is_ne_exact`, `test,is_eq`, `test,is_ne`, `test,is_lt`, and
+/// `test,is_ge` and the combined pair [`Instruction::TestCompareBif`] all
+/// reach this function, so the pair and the two instructions branch the same
+/// way.
+///
+/// ERTS `is_eq` and `is_ne` use the arithmetic order and `is_eq_exact` and
+/// `is_ne_exact` use the exact order (`emu/instrs.tab:1089-1119`). PBeam has
+/// no float term, so exact equality gives the ERTS result for both.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let one = Operand::Value(Term::Integer(1));
+/// assert!(compare_passes(&process, TestCompare::Equal, &one, &one)?);
+/// assert!(!compare_passes(&process, TestCompare::Less, &one, &one)?);
+/// ```
+#[inline]
+fn compare_passes(
+    process: &ProcessState,
+    compare: TestCompare,
+    left: &Operand,
+    right: &Operand,
+) -> Result<bool, BeamError> {
+    let left = read_ref(process, left)?;
+    let right = read_ref(process, right)?;
+    let passed = match compare {
+        TestCompare::Equal => left == right,
+        TestCompare::NotEqual => left != right,
+        TestCompare::Less => left.compare(right)?.is_lt(),
+        TestCompare::GreaterEqual => !left.compare(right)?.is_lt(),
+    };
+    Ok(passed)
 }
 
 /// Read a copy of an operand from the process registers or the active

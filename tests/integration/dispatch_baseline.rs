@@ -677,9 +677,13 @@ const DECODED_STRIDE: usize = 136;
 const PREPARED_STRIDE: usize = 32;
 
 /// The records that one iteration of the floor loop reads. The loop retires
-/// 4 instructions (see `records_the_decoded_loop_body` in
+/// 3 instructions (see `records_the_decoded_loop_body` in
 /// `tests/runtime/interpreter.rs`), and each instruction occupies one record.
-const FLOOR_LOOP_RECORDS: usize = 4;
+/// Step 9 combined the clause test with the `Bif` of its fail label, so the
+/// count fell from the 4 of the step 6 record to 3. The loop still spans the
+/// six 136-byte slots of [`STREAM_RECORDS`], because the combination changes
+/// no instruction index.
+const FLOOR_LOOP_RECORDS: usize = 3;
 
 /// The target record reads of one measurement and the runs of each
 /// measurement. Each working set is read about the same number of times, so a
@@ -739,8 +743,8 @@ fn walk(buffer: &[u8], stride: usize, rounds: usize) -> u64 {
 /// the memory cost of the two record strides, and it is not a bound on the
 /// gain of a compact form in the interpreter.
 ///
-/// One iteration of the floor loop retires 4 instructions and reads 4
-/// records, so the last column multiplies the per-record difference by 4.
+/// One iteration of the floor loop retires 3 instructions and reads 3
+/// records, so the last column multiplies the per-record difference by 3.
 #[test]
 fn records_the_instruction_stream_cache_proxy() {
     println!(

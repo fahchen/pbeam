@@ -362,6 +362,53 @@ pub(crate) enum Instruction {
         /// Register for the BIF value.
         destination: Operand,
     },
+    /// A comparison test whose fail label names a [`Instruction::Bif`], so
+    /// the BIF body runs in the same dispatch step as the test. The loader
+    /// combines the pair from a comparison test and the `Bif` at the target
+    /// of its fail label. The test keeps its branch and the BIF keeps its
+    /// fail label, its exception, and its reduction charge.
+    ///
+    /// The `Bif` at the fail target stays in the stream, so another
+    /// instruction that names that label still runs the BIF alone. The
+    /// loader combines one BIF with one test only when the pair is the
+    /// measured shape of `docs/interpreter-dispatch-plan.md`, section 9: the
+    /// comparison tests `is_eq_exact`, `is_ne_exact`, `is_eq`, `is_ne`,
+    /// `is_lt`, and `is_ge`.
+    ///
+    /// Encoding: no BEAM opcode. The loader builds the instruction from the
+    /// decoded pair. Erlang: `f(0) -> 0; f(N) -> f(N - 1).` compiles to
+    /// `{test,is_eq_exact,{f,6},[{x,0},{integer,0}]}`, a `return`, and the
+    /// `gc_bif` at label 6, so the pair is one instruction of this form.
+    TestCompareBif {
+        /// The comparison of the test.
+        compare: TestCompare,
+        /// The left operand of the comparison.
+        left: Operand,
+        /// The right operand of the comparison.
+        right: Operand,
+        /// The index of the instruction that follows the `Bif` of the pair.
+        resume: usize,
+        /// The BIF that runs when the test fails. The box keeps the size of
+        /// `Instruction` at the stride of its largest arm.
+        bif: Box<PairBif>,
+    },
+    /// A [`Instruction::Bif`] that the loader joined with the `call_only`
+    /// that follows it, so the local call runs in the same dispatch step as
+    /// the BIF. The `call_only` stays in the stream, so another instruction
+    /// that names its label still runs the call alone.
+    ///
+    /// Encoding: no BEAM opcode. The loader builds the instruction from the
+    /// decoded pair. Erlang: `f(0) -> 0; f(N) -> g(N - 1).` ends the loop
+    /// clause with `{gc_bif,'-',...}` and `{call_only,1,{f,...}}`, so the
+    /// pair is one instruction of this form.
+    BifCall {
+        /// The BIF of the pair and its fail label.
+        bif: PairBif,
+        /// The arity of the local call.
+        arity: u32,
+        /// The entry label of the local call.
+        label: u32,
+    },
     /// Makes a fun of a lambda with the values of `free` as its free
     /// variables (`make_fun3`, opcode 171), and writes it to `destination`.
     /// The loader resolves the `FunT` entry of the lambda number.
@@ -1252,6 +1299,41 @@ pub(crate) enum Instruction {
     End,
 }
 
+/// The BIF of a combined pair of [`Instruction::TestCompareBif`] or
+/// [`Instruction::BifCall`]. The fields are the fields of the
+/// [`Instruction::Bif`] that the loader combined.
+#[derive(Debug, Clone)]
+pub(crate) struct PairBif {
+    /// Label to jump to when the BIF fails, or 0 to raise the exception.
+    pub(crate) fail_label: u32,
+    /// The BIF of the import that the instruction calls.
+    pub(crate) bif: BifId,
+    /// Argument operands of the BIF, in argument order.
+    pub(crate) arguments: Vec<Operand>,
+    /// Register for the BIF value.
+    pub(crate) destination: Operand,
+}
+
+/// The comparison of a `test` instruction that the loader combines with a
+/// BIF. The ERTS emulator decides each one with the action of the encoded
+/// subtag (`emu/instrs.tab:1089-1119`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestCompare {
+    /// `is_eq` and `is_eq_exact`: the test passes when the two terms are
+    /// equal (`EQ_ACTION`, `erl_utils.h:130-131`).
+    Equal,
+    /// `is_ne` and `is_ne_exact`: the test passes when the two terms are not
+    /// equal (`CMP_NE_ACTION`, `erl_utils.h:134-135`).
+    NotEqual,
+    /// `is_lt`: the test passes when the left term is less than the right
+    /// term in the arithmetic term order (`CMP_LT_ACTION`, `erl_utils.h:136-137`).
+    Less,
+    /// `is_ge`: the test passes when the left term is not less than the
+    /// right term in the arithmetic term order (`CMP_GE_ACTION`,
+    /// `erl_utils.h:142-143`).
+    GreaterEqual,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum TestKind {
     Atom,
@@ -2138,6 +2220,154 @@ pub(super) fn parse_code(
             }
         };
         instructions.push(instruction);
+    }
+}
+
+/// Combine the measured instruction pairs of a decoded stream, so that the
+/// pair runs in one dispatch step. The pairs are the shapes of
+/// `docs/interpreter-dispatch-plan.md`, section 9, and the benchmark target
+/// `tests/integration/dispatch_baseline.rs` measures both:
+///
+/// - A comparison test whose fail label names a `Bif` becomes
+///   [`Instruction::TestCompareBif`] with that BIF. The test decides the
+///   branch, and the BIF runs in the same step when the test fails.
+/// - A `Bif` that the first pair does not hold and that the `call_only`
+///   directly after it follows becomes [`Instruction::BifCall`]. The BIF
+///   runs first, and the local call runs in the same step after it.
+///
+/// The instruction at the fail target of the first pair and the `call_only`
+/// of the second pair stay in the stream. Thus a label that another
+/// instruction names keeps its own instruction, and this pass changes no
+/// index of the stream and no entry of `jump_targets` or `function_starts`.
+/// A caller must build those tables from the stream and may combine after
+/// that build.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut instructions = vec![
+///     Instruction::TestExactEqual { fail_label: 2, left: Operand::X(0), right: Operand::X(1) },
+///     Instruction::Noop,
+///     Instruction::Label(2),
+///     Instruction::Bif { fail_label: 0, bif: BifId::ErlangPlus2, arguments: vec![], destination: Operand::X(0) },
+///     Instruction::CallOnly { arity: 1, label: 3 },
+///     Instruction::Bif { fail_label: 0, bif: BifId::ErlangMinus2, arguments: vec![], destination: Operand::X(1) },
+///     Instruction::CallOnly { arity: 1, label: 3 },
+/// ];
+/// let mut jump_targets = LabelMap::default();
+/// jump_targets.insert(2, 3);
+/// combine_pairs(&mut instructions, &jump_targets);
+/// // The test and the BIF of its fail label are one pair, and the BIF stays.
+/// assert!(matches!(instructions[0], Instruction::TestCompareBif { compare: TestCompare::Equal, .. }));
+/// assert!(matches!(instructions[3], Instruction::Bif { bif: BifId::ErlangPlus2, .. }));
+/// // The second BIF and the `call_only` after it are the other pair.
+/// assert!(matches!(instructions[5], Instruction::BifCall { arity: 1, .. }));
+/// ```
+pub(crate) fn combine_pairs(
+    instructions: &mut [Instruction],
+    jump_targets: &crate::beam::module::LabelMap<usize>,
+) {
+    // The first pair holds a `Bif` that a comparison test names. A BIF that
+    // the first pair holds does not also start a second pair, so that one
+    // BIF body stays in one place.
+    let mut held = vec![false; instructions.len()];
+    for index in 0..instructions.len() {
+        // The operands of a comparison test. The fallback arm runs for each
+        // other instruction of the stream, which is most of it.
+        let (compare, test_fail_label, left, right) = match &instructions[index] {
+            Instruction::TestEqual {
+                fail_label,
+                left,
+                right,
+            } => (TestCompare::Equal, *fail_label, left, right),
+            Instruction::TestExactEqual {
+                fail_label,
+                left,
+                right,
+            } => (TestCompare::Equal, *fail_label, left, right),
+            Instruction::TestNotEqual {
+                fail_label,
+                left,
+                right,
+            } => (TestCompare::NotEqual, *fail_label, left, right),
+            Instruction::TestExactNotEqual {
+                fail_label,
+                left,
+                right,
+            } => (TestCompare::NotEqual, *fail_label, left, right),
+            Instruction::TestLess {
+                fail_label,
+                left,
+                right,
+            } => (TestCompare::Less, *fail_label, left, right),
+            Instruction::TestGreaterEqual {
+                fail_label,
+                left,
+                right,
+            } => (TestCompare::GreaterEqual, *fail_label, left, right),
+            _ => continue,
+        };
+        // A fail label that the stream does not hold keeps the test alone.
+        // The run then reports the missing label, as it does without this
+        // pass.
+        let Some(&target) = jump_targets.get(&test_fail_label) else {
+            continue;
+        };
+        let Instruction::Bif {
+            fail_label,
+            bif,
+            arguments,
+            destination,
+        } = &instructions[target]
+        else {
+            continue;
+        };
+        // The pair holds a copy of the BIF, and the run reads the argument
+        // slice of the pair with no lookup.
+        let pair = Box::new(PairBif {
+            fail_label: *fail_label,
+            bif: *bif,
+            arguments: arguments.clone(),
+            destination: destination.clone(),
+        });
+        instructions[index] = Instruction::TestCompareBif {
+            compare,
+            left: left.clone(),
+            right: right.clone(),
+            resume: target + 1,
+            bif: pair,
+        };
+        held[target] = true;
+    }
+    // The second pair holds a `Bif` and the `call_only` directly after it.
+    for index in 0..instructions.len().saturating_sub(1) {
+        if held[index] {
+            continue;
+        }
+        let Instruction::CallOnly { arity, label } = &instructions[index + 1] else {
+            continue;
+        };
+        let (arity, label) = (*arity, *label);
+        let Instruction::Bif {
+            fail_label,
+            bif,
+            arguments,
+            destination,
+        } = &mut instructions[index]
+        else {
+            continue;
+        };
+        let pair = PairBif {
+            fail_label: *fail_label,
+            bif: *bif,
+            arguments: std::mem::take(arguments),
+            destination: std::mem::replace(destination, Operand::X(0)),
+        };
+        instructions[index] = Instruction::BifCall {
+            bif: pair,
+            arity,
+            label,
+        };
     }
 }
 
