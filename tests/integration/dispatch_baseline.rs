@@ -663,10 +663,11 @@ fn records_the_interpreter_dispatch_baseline() {
 }
 
 /// The working sets of the cache proxy, in records: the six 136-byte slots
-/// that the floor loop spans, then sets that cross the measured L1
-/// instruction cache of the host (131072 bytes, or 963 records of 136
-/// bytes) and the measured L2 cache, up to the estimated 280000 instructions
-/// of one Terra Counter redraw frame.
+/// that the floor loop spans, then sets that cross the measured L1 data cache
+/// of the host (65536 bytes for the efficiency cores, or 482 records of 136
+/// bytes, and 131072 bytes for the performance cores) and the measured L2
+/// cache, up to the estimated 280000 instructions of one Terra Counter redraw
+/// frame.
 const STREAM_RECORDS: [usize; 5] = [6, 1_000, 10_000, 100_000, 300_000];
 
 /// The bytes of one record of the decoded form, measured by
@@ -674,6 +675,11 @@ const STREAM_RECORDS: [usize; 5] = [6, 1_000, 10_000, 100_000, 300_000];
 /// bytes of one record of the prepared form that the plan names.
 const DECODED_STRIDE: usize = 136;
 const PREPARED_STRIDE: usize = 32;
+
+/// The records that one iteration of the floor loop reads. The loop retires
+/// 4 instructions (see `records_the_decoded_loop_body` in
+/// `tests/runtime/interpreter.rs`), and each instruction occupies one record.
+const FLOOR_LOOP_RECORDS: usize = 4;
 
 /// The record reads of one measurement and the runs of each measurement.
 /// Each working set is read the same number of times, so a difference
@@ -722,20 +728,27 @@ fn walk(buffer: &[u8], stride: usize, rounds: usize) -> u64 {
 /// The record count is the same for both strides, and the minimum of
 /// [`STREAM_RUNS`] runs is the reported number.
 ///
-/// The proxy measures the memory system of this host for a sequential read
-/// of a repeated stream. It does not measure the interpreter's dispatch, and
-/// it does not model the dependent work between two instructions.
+/// The proxy covers one byte of each record of a contiguous byte stream, in
+/// order, with the hardware prefetch that a sequential read gets. It omits
+/// the other field loads of an instruction arm, the heap operand vectors and
+/// the name strings of an instruction, the dependent work between two
+/// instructions, and the interpreter's own access pattern. Thus it compares
+/// the memory cost of the two record strides, and it is not a bound on the
+/// gain of a compact form in the interpreter.
+///
+/// One iteration of the floor loop retires 4 instructions and reads 4
+/// records, so the last column multiplies the per-record difference by 4.
 #[test]
 fn records_the_instruction_stream_cache_proxy() {
     println!(
-        "Instruction stream cache proxy: {} record reads for each measurement, minimum of {STREAM_RUNS} runs.",
+        "Instruction stream cache proxy: {} record reads for each measurement, minimum of {STREAM_RUNS} runs. One floor-loop iteration reads {FLOOR_LOOP_RECORDS} records.",
         STREAM_VISITS
     );
     println!();
     println!(
-        "| records | decoded bytes | decoded ns for each record | prepared bytes | prepared ns for each record | difference ns for each record |"
+        "| records | decoded bytes | decoded ns for each record | prepared bytes | prepared ns for each record | difference ns for each record | difference ns for each floor-loop iteration |"
     );
-    println!("| --- | --- | --- | --- | --- | --- |");
+    println!("| --- | --- | --- | --- | --- | --- | --- |");
     for records in STREAM_RECORDS {
         let mut measured = Vec::new();
         for stride in [DECODED_STRIDE, PREPARED_STRIDE] {
@@ -751,13 +764,14 @@ fn records_the_instruction_stream_cache_proxy() {
             }
             measured.push(best);
         }
+        let difference = measured[0] - measured[1];
         println!(
-            "| {records} | {} | {:.2} | {} | {:.2} | {:.2} |",
+            "| {records} | {} | {:.2} | {} | {:.2} | {difference:.2} | {:.2} |",
             records * DECODED_STRIDE,
             measured[0],
             records * PREPARED_STRIDE,
             measured[1],
-            measured[0] - measured[1],
+            difference * FLOOR_LOOP_RECORDS as f64,
         );
     }
     println!();
