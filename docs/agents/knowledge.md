@@ -136,3 +136,7 @@ Expand every documented complexity claim into its complete operation sequence. I
 ## Arguments are checked after capability authorization
 
 Validate arguments before capability checks. Preserve invalid-input errors.
+
+## Benchmark measurements lose the measured work
+
+Keep benchmark setup outside timed runs and isolate counters to the measuring thread. Consume inputs and outputs with `black_box`, and verify compiled probes retain the work before publishing results.
