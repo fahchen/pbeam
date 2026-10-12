@@ -1989,3 +1989,394 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
     assert!(read(&[0x17, 0x10, 0x12], b"").is_err());
     assert!(read(&[0x17, 0x60, 0x12, 0x00, 0x80, 0x02, 0x00, 0x71], b"short").is_err());
 }
+
+/// Return the bytes of the fields of the arm of `instruction`.
+///
+/// Each pattern names every field of its variant, and no pattern uses `..`.
+/// Thus the compiler refuses this function when a field is added, removed, or
+/// renamed, and the layout table of [`records_the_decoded_form_layout`]
+/// cannot go stale without a compile error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(arm_field_bytes(&Instruction::Label(1)), size_of::<u32>());
+/// ```
+fn arm_field_bytes(instruction: &Instruction) -> usize {
+    use std::mem::size_of_val;
+    match instruction {
+        Instruction::Label(field_0) => size_of_val(field_0),
+        Instruction::FunctionInfo {
+            module,
+            name,
+            arity,
+        } => size_of_val(module) + size_of_val(name) + size_of_val(arity),
+        Instruction::Move(field_0, field_1) => size_of_val(field_0) + size_of_val(field_1),
+        Instruction::Call { arity, label } => size_of_val(arity) + size_of_val(label),
+        Instruction::CallLast {
+            arity,
+            label,
+            deallocate,
+        } => size_of_val(arity) + size_of_val(label) + size_of_val(deallocate),
+        Instruction::CallOnly { arity, label } => size_of_val(arity) + size_of_val(label),
+        Instruction::CallExternal {
+            arity,
+            module,
+            name,
+            bif,
+            tail,
+            deallocate,
+        } => {
+            size_of_val(arity)
+                + size_of_val(module)
+                + size_of_val(name)
+                + size_of_val(bif)
+                + size_of_val(tail)
+                + size_of_val(deallocate)
+        }
+        Instruction::Hibernate => 0,
+        Instruction::Yield => 0,
+        Instruction::Apply {
+            arity,
+            tail,
+            deallocate,
+        } => size_of_val(arity) + size_of_val(tail) + size_of_val(deallocate),
+        Instruction::Bif {
+            fail_label,
+            bif,
+            arguments,
+            destination,
+        } => {
+            size_of_val(fail_label)
+                + size_of_val(bif)
+                + size_of_val(arguments)
+                + size_of_val(destination)
+        }
+        Instruction::MakeFun {
+            lambda,
+            free,
+            destination,
+        } => size_of_val(lambda) + size_of_val(free) + size_of_val(destination),
+        Instruction::CallFun {
+            arity,
+            function,
+            tail,
+            deallocate,
+        } => {
+            size_of_val(arity) + size_of_val(function) + size_of_val(tail) + size_of_val(deallocate)
+        }
+        Instruction::Unsupported(field_0) => size_of_val(field_0),
+        Instruction::Catch { register, label } => size_of_val(register) + size_of_val(label),
+        Instruction::TryEnd { register } => size_of_val(register),
+        Instruction::TryCase { register } => size_of_val(register),
+        Instruction::CatchEnd { register } => size_of_val(register),
+        Instruction::Raise { trace, value } => size_of_val(trace) + size_of_val(value),
+        // `tag` is a reference field, so `size_of_val(tag)` measures the
+        // reference. Name the field and write the size of its type.
+        Instruction::TaggedError { tag: _, value } => {
+            std::mem::size_of::<&'static str>() + size_of_val(value)
+        }
+        Instruction::IfEnd => 0,
+        Instruction::RawRaise => 0,
+        Instruction::BuildStacktrace => 0,
+        Instruction::Allocate { stack_size } => size_of_val(stack_size),
+        Instruction::Deallocate { stack_size } => size_of_val(stack_size),
+        Instruction::Trim { count, remaining } => size_of_val(count) + size_of_val(remaining),
+        Instruction::Jump(field_0) => size_of_val(field_0),
+        Instruction::Test {
+            kind,
+            fail_label,
+            value,
+        } => size_of_val(kind) + size_of_val(fail_label) + size_of_val(value),
+        Instruction::TestFunctionArity {
+            fail_label,
+            value,
+            arity,
+        } => size_of_val(fail_label) + size_of_val(value) + size_of_val(arity),
+        Instruction::TestArity {
+            fail_label,
+            value,
+            arity,
+        } => size_of_val(fail_label) + size_of_val(value) + size_of_val(arity),
+        Instruction::SelectTupleArity {
+            value,
+            fail_label,
+            choices,
+        } => size_of_val(value) + size_of_val(fail_label) + size_of_val(choices),
+        Instruction::SelectValue {
+            value,
+            fail_label,
+            choices,
+        } => size_of_val(value) + size_of_val(fail_label) + size_of_val(choices),
+        Instruction::GetMapElements {
+            fail_label,
+            map,
+            pairs,
+        } => size_of_val(fail_label) + size_of_val(map) + size_of_val(pairs),
+        Instruction::HasMapFields {
+            fail_label,
+            map,
+            keys,
+        } => size_of_val(fail_label) + size_of_val(map) + size_of_val(keys),
+        Instruction::PutMapAssoc {
+            map,
+            destination,
+            pairs,
+        } => size_of_val(map) + size_of_val(destination) + size_of_val(pairs),
+        Instruction::PutMapExact {
+            fail_label,
+            map,
+            destination,
+            pairs,
+        } => {
+            size_of_val(fail_label)
+                + size_of_val(map)
+                + size_of_val(destination)
+                + size_of_val(pairs)
+        }
+        Instruction::Swap(field_0, field_1) => size_of_val(field_0) + size_of_val(field_1),
+        Instruction::PutList {
+            head,
+            tail,
+            destination,
+        } => size_of_val(head) + size_of_val(tail) + size_of_val(destination),
+        Instruction::PutTuple {
+            elements,
+            destination,
+        } => size_of_val(elements) + size_of_val(destination),
+        Instruction::UpdateRecord {
+            source,
+            destination,
+            updates,
+        } => size_of_val(source) + size_of_val(destination) + size_of_val(updates),
+        Instruction::GetList { source, head, tail } => {
+            size_of_val(source) + size_of_val(head) + size_of_val(tail)
+        }
+        Instruction::GetHead {
+            source,
+            destination,
+        } => size_of_val(source) + size_of_val(destination),
+        Instruction::GetTail {
+            source,
+            destination,
+        } => size_of_val(source) + size_of_val(destination),
+        Instruction::GetTupleElement {
+            tuple,
+            index,
+            destination,
+        } => size_of_val(tuple) + size_of_val(index) + size_of_val(destination),
+        Instruction::TestExactEqual {
+            fail_label,
+            left,
+            right,
+        } => size_of_val(fail_label) + size_of_val(left) + size_of_val(right),
+        Instruction::TestEqual {
+            fail_label,
+            left,
+            right,
+        } => size_of_val(fail_label) + size_of_val(left) + size_of_val(right),
+        Instruction::TestNotEqual {
+            fail_label,
+            left,
+            right,
+        } => size_of_val(fail_label) + size_of_val(left) + size_of_val(right),
+        Instruction::TestExactNotEqual {
+            fail_label,
+            left,
+            right,
+        } => size_of_val(fail_label) + size_of_val(left) + size_of_val(right),
+        Instruction::TestLess {
+            fail_label,
+            left,
+            right,
+        } => size_of_val(fail_label) + size_of_val(left) + size_of_val(right),
+        Instruction::TestGreaterEqual {
+            fail_label,
+            left,
+            right,
+        } => size_of_val(fail_label) + size_of_val(left) + size_of_val(right),
+        Instruction::TestTaggedTuple {
+            fail_label,
+            value,
+            arity,
+            tag,
+        } => size_of_val(fail_label) + size_of_val(value) + size_of_val(arity) + size_of_val(tag),
+        Instruction::BinaryMatchStart {
+            fail_label,
+            source,
+            destination,
+        } => size_of_val(fail_label) + size_of_val(source) + size_of_val(destination),
+        Instruction::BinaryMatchResume {
+            source,
+            destination,
+        } => size_of_val(source) + size_of_val(destination),
+        Instruction::BinaryGetTail {
+            context,
+            destination,
+        } => size_of_val(context) + size_of_val(destination),
+        Instruction::BinaryGetBinary {
+            fail_label,
+            context,
+            size,
+            unit,
+            destination,
+        } => {
+            size_of_val(fail_label)
+                + size_of_val(context)
+                + size_of_val(size)
+                + size_of_val(unit)
+                + size_of_val(destination)
+        }
+        Instruction::BinaryGetPosition {
+            context,
+            destination,
+        } => size_of_val(context) + size_of_val(destination),
+        Instruction::BinarySetPosition { context, position } => {
+            size_of_val(context) + size_of_val(position)
+        }
+        Instruction::BinaryGetUtf8 {
+            fail_label,
+            context,
+            destination,
+        } => size_of_val(fail_label) + size_of_val(context) + size_of_val(destination),
+        Instruction::BinaryMatch {
+            fail_label,
+            context,
+            commands,
+        } => size_of_val(fail_label) + size_of_val(context) + size_of_val(commands),
+        Instruction::BinaryCreate {
+            fail_label,
+            destination,
+            segments,
+        } => size_of_val(fail_label) + size_of_val(destination) + size_of_val(segments),
+        Instruction::FloatConvert { source } => size_of_val(source),
+        Instruction::Send => 0,
+        Instruction::RemoveMessage => 0,
+        Instruction::LoopReceive {
+            fail_label,
+            destination,
+        } => size_of_val(fail_label) + size_of_val(destination),
+        Instruction::LoopReceiveEnd(field_0) => size_of_val(field_0),
+        Instruction::Wait(field_0) => size_of_val(field_0),
+        Instruction::WaitTimeout { label, source } => size_of_val(label) + size_of_val(source),
+        Instruction::Timeout => 0,
+        Instruction::ReceiveMarkerReserve(field_0) => size_of_val(field_0),
+        Instruction::ReceiveMarkerBind { marker, reference } => {
+            size_of_val(marker) + size_of_val(reference)
+        }
+        Instruction::ReceiveMarkerUse(field_0) => size_of_val(field_0),
+        Instruction::ReceiveMarkerClear(field_0) => size_of_val(field_0),
+        Instruction::NifStart { name, arity } => size_of_val(name) + size_of_val(arity),
+        Instruction::TestYield => 0,
+        Instruction::Noop => 0,
+        Instruction::Return => 0,
+        Instruction::End => 0,
+    }
+}
+
+/// Record the layout of the decoded form with the pinned rustc with the pinned rustc: the size of
+/// [`Instruction`], the size of the field types that dominate it, and the
+/// bytes of the fields of each large arm. A change of a field type or of an
+/// arm fails the assertions, and a change of the fields of any arm fails the
+/// compile of [`arm_field_bytes`].
+#[test]
+fn records_the_decoded_form_layout() {
+    use std::mem::size_of;
+
+    let arms: [(&str, Instruction); 8] = [
+        (
+            "`BinaryGetBinary`",
+            Instruction::BinaryGetBinary {
+                fail_label: 0,
+                context: Operand::X(0),
+                size: Operand::X(1),
+                unit: 8,
+                destination: Operand::X(2),
+            },
+        ),
+        (
+            "`GetList`",
+            Instruction::GetList {
+                source: Operand::X(0),
+                head: Operand::X(1),
+                tail: Operand::X(2),
+            },
+        ),
+        (
+            "`PutList`",
+            Instruction::PutList {
+                head: Operand::X(0),
+                tail: Operand::X(1),
+                destination: Operand::X(2),
+            },
+        ),
+        (
+            "`Bif`",
+            Instruction::Bif {
+                fail_label: 0,
+                bif: BifId::ErlangPlus2,
+                arguments: vec![Operand::X(0), Operand::X(1)],
+                destination: Operand::X(0),
+            },
+        ),
+        (
+            "`CallExternal`",
+            Instruction::CallExternal {
+                arity: 1,
+                module: "dispatch_probe".to_owned(),
+                name: "floor_ext_loop".to_owned(),
+                bif: None,
+                tail: true,
+                deallocate: 0,
+            },
+        ),
+        (
+            "`SelectValue`",
+            Instruction::SelectValue {
+                value: Operand::X(0),
+                fail_label: 0,
+                choices: vec![(Term::Integer(1), 1)],
+            },
+        ),
+        (
+            "`Move`",
+            Instruction::Move(Operand::X(0), Operand::Value(Term::Integer(1))),
+        ),
+        ("`Label`", Instruction::Label(1)),
+    ];
+
+    println!("| decoded form item | bytes |");
+    println!("| --- | --- |");
+    println!("| `Instruction` | {} |", size_of::<Instruction>());
+    println!("| `Operand` | {} |", size_of::<Operand>());
+    println!("| `Term` | {} |", size_of::<Term>());
+    println!("| `String` | {} |", size_of::<String>());
+    println!("| `Vec<Operand>` | {} |", size_of::<Vec<Operand>>());
+    println!("| `BifId` | {} |", size_of::<BifId>());
+    println!("| `Option<BifId>` | {} |", size_of::<Option<BifId>>());
+    println!("| `u64` | {} |", size_of::<u64>());
+    println!("| `u32` | {} |", size_of::<u32>());
+    println!();
+    println!("| arm | bytes of the fields |");
+    println!("| --- | --- |");
+    for (name, instruction) in &arms {
+        println!("| {name} | {} |", arm_field_bytes(instruction));
+    }
+
+    assert_eq!(size_of::<Instruction>(), 136, "the size of `Instruction`");
+    assert_eq!(size_of::<Operand>(), 40, "the size of `Operand`");
+    assert_eq!(size_of::<Term>(), 40, "the size of `Term`");
+    assert_eq!(size_of::<String>(), 24, "the size of `String`");
+    assert_eq!(size_of::<Vec<Operand>>(), 24, "the size of `Vec<Operand>`");
+    // The arm that sets the size of `Instruction`, and the arm of the floor
+    // loop. The plan records `BinaryGetBinary` at 132 bytes and `Bif` at 124
+    // bytes at the baseline revision; step 4 removed the two `String` fields
+    // from `Bif`.
+    assert_eq!(
+        arm_field_bytes(&arms[0].1),
+        132,
+        "the fields of `BinaryGetBinary`"
+    );
+    assert_eq!(arm_field_bytes(&arms[3].1), 72, "the fields of `Bif`");
+    assert_eq!(arm_field_bytes(&arms[6].1), 80, "the fields of `Move`");
+}

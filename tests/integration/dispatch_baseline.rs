@@ -661,3 +661,122 @@ fn records_the_interpreter_dispatch_baseline() {
     }
     println!();
 }
+
+/// The working sets of the cache proxy, in records: the six 136-byte slots
+/// that the floor loop spans, then sets that cross the measured L1 data cache
+/// of the host (65536 bytes for the efficiency cores, or 482 records of 136
+/// bytes, and 131072 bytes for the performance cores) and the measured L2
+/// cache, up to the estimated 280000 instructions of one Terra Counter redraw
+/// frame.
+const STREAM_RECORDS: [usize; 5] = [6, 1_000, 10_000, 100_000, 300_000];
+
+/// The bytes of one record of the decoded form, measured by
+/// `size_of::<Instruction>()` in `tests/runtime/interpreter.rs`, and the
+/// bytes of one record of the prepared form that the plan names.
+const DECODED_STRIDE: usize = 136;
+const PREPARED_STRIDE: usize = 32;
+
+/// The records that one iteration of the floor loop reads. The loop retires
+/// 4 instructions (see `records_the_decoded_loop_body` in
+/// `tests/runtime/interpreter.rs`), and each instruction occupies one record.
+const FLOOR_LOOP_RECORDS: usize = 4;
+
+/// The target record reads of one measurement and the runs of each
+/// measurement. Each working set is read about the same number of times, so a
+/// difference between two working sets is not a difference of the work. The
+/// actual count is the largest multiple of the record count that is at or
+/// below the target, and the table prints it: 1999998 reads for the 6-record
+/// set and 1800000 reads for the 300000-record set.
+const STREAM_VISITS: usize = 2_000_000;
+const STREAM_RUNS: usize = 5;
+
+/// Return a buffer of `records` records of `stride` bytes with a
+/// deterministic content, so the walk cannot fold the bytes to a constant.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(stream_buffer(2, 4).len(), 8);
+/// ```
+fn stream_buffer(records: usize, stride: usize) -> Vec<u8> {
+    (0..records * stride)
+        .map(|index| (index % 251) as u8)
+        .collect()
+}
+
+/// Read the first byte of each record of `buffer` at `stride` for `rounds`
+/// passes and return the sum. The loaded byte goes through [`black_box`], so
+/// the compiler keeps the loads.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(walk(&[1, 2, 3, 4], 2, 1), 1 + 3);
+/// ```
+fn walk(buffer: &[u8], stride: usize, rounds: usize) -> u64 {
+    let mut sum = 0u64;
+    for _ in 0..rounds {
+        let mut index = 0;
+        while index < buffer.len() {
+            sum = sum.wrapping_add(u64::from(black_box(buffer[index])));
+            index += stride;
+        }
+    }
+    black_box(sum)
+}
+
+/// Measure the cache proxy of the decoded form: the time to read one record
+/// of a stream that a loop visits again and again, at the 136-byte stride of
+/// `Instruction` and at the 32-byte stride of the prepared form of step 8.
+/// The record count is the same for both strides, and the minimum of
+/// [`STREAM_RUNS`] runs is the reported number.
+///
+/// The proxy covers one byte of each record of a contiguous byte stream, in
+/// order, with the hardware prefetch that a sequential read gets. It omits
+/// the other field loads of an instruction arm, the heap operand vectors and
+/// the name strings of an instruction, the dependent work between two
+/// instructions, and the interpreter's own access pattern. Thus it compares
+/// the memory cost of the two record strides, and it is not a bound on the
+/// gain of a compact form in the interpreter.
+///
+/// One iteration of the floor loop retires 4 instructions and reads 4
+/// records, so the last column multiplies the per-record difference by 4.
+#[test]
+fn records_the_instruction_stream_cache_proxy() {
+    println!(
+        "Instruction stream cache proxy: target of {STREAM_VISITS} record reads for each measurement, minimum of {STREAM_RUNS} runs. One floor-loop iteration reads {FLOOR_LOOP_RECORDS} records."
+    );
+    println!();
+    println!(
+        "| records | reads | decoded bytes | decoded ns for each record | prepared bytes | prepared ns for each record | difference ns for each record | difference ns for each floor-loop iteration |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for records in STREAM_RECORDS {
+        let mut measured = Vec::new();
+        for stride in [DECODED_STRIDE, PREPARED_STRIDE] {
+            let buffer = stream_buffer(records, stride);
+            let rounds = (STREAM_VISITS / records).max(1);
+            let reads = rounds * records;
+            let mut best = f64::MAX;
+            for _ in 0..STREAM_RUNS {
+                let start = Instant::now();
+                let sum = walk(&buffer, stride, rounds);
+                let elapsed = start.elapsed().as_nanos() as f64;
+                black_box(sum);
+                best = best.min(elapsed / reads as f64);
+            }
+            measured.push(best);
+        }
+        let difference = measured[0] - measured[1];
+        let reads = (STREAM_VISITS / records).max(1) * records;
+        println!(
+            "| {records} | {reads} | {} | {:.2} | {} | {:.2} | {difference:.2} | {:.2} |",
+            records * DECODED_STRIDE,
+            measured[0],
+            records * PREPARED_STRIDE,
+            measured[1],
+            difference * FLOOR_LOOP_RECORDS as f64,
+        );
+    }
+    println!();
+}
