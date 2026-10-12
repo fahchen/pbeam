@@ -888,21 +888,33 @@ const MAP_COST_RUNS: usize = 9;
 /// runs; the report numbers come from the release profile.
 const MAP_COST_ROUNDS: usize = if cfg!(debug_assertions) { 20 } else { 200 };
 
+/// The number of keys of the map of [`records_the_map_operation_cost`].
+const MAP_COST_KEYS: i64 = 1000;
+
+/// The sum of the keys 1 to [`MAP_COST_KEYS`]. The map of the measurement
+/// holds each key as its value, so this sum is the sum of the values of one
+/// round of a read or of a walk.
+const MAP_COST_KEY_SUM: i64 = MAP_COST_KEYS * (MAP_COST_KEYS + 1) / 2;
+
 /// Print the cost of one call of `body`, in nanosecond, as the minimum of
-/// [`MAP_COST_RUNS`] runs. `calls` is the number of calls of one run.
+/// [`MAP_COST_RUNS`] runs. `calls` is the number of calls of one run, and
+/// `expected` is the sum that one run must give, so that a body that reads no
+/// value and visits no pair cannot report a number.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// cost("get", 1.0, || 0);
+/// cost("nothing", 1.0, 0, || 0);
 /// ```
-fn cost(name: &str, calls: f64, body: impl Fn() -> i64) {
+fn cost(name: &str, calls: f64, expected: i64, body: impl Fn() -> i64) {
     let mut best = f64::MAX;
     for _ in 0..MAP_COST_RUNS {
         let start = Instant::now();
-        let sum = body();
+        // The sum goes to `black_box`, so the compiler cannot remove the work
+        // that the timer measures.
+        let sum = black_box(body());
         let elapsed = start.elapsed().as_nanos() as f64;
-        black_box(sum);
+        assert_eq!(sum, expected, "{name} must consume every result");
         best = best.min(elapsed);
     }
     println!("{name}: {:.2} ns for each call", best / calls);
@@ -910,50 +922,129 @@ fn cost(name: &str, calls: f64, body: impl Fn() -> i64) {
 
 /// Record the cost of the map operations that the step 7 gate of
 /// `docs/interpreter-dispatch-plan.md` names: a read of a 1000-key hashmap, a
-/// put on a copy of it, and an iteration over it. Each number is the minimum
-/// of [`MAP_COST_RUNS`] runs, in nanosecond for each call.
+/// put on a copy of it, an update in place of `put_map_exact`, an iteration
+/// over it, and a walk of `erts_internal:map_next/3`. Each number is the
+/// minimum of [`MAP_COST_RUNS`] runs, in nanosecond for each call.
 #[test]
 fn records_the_map_operation_cost() {
-    let hashmap = integers(1..=1000);
-    let keys: Vec<Term> = (1..=1000).map(Term::Integer).collect();
+    // Each key is its own value, so a read and a walk consume an integer and
+    // the sum of a round is known.
+    let hashmap = Map::from_pairs(
+        (1..=MAP_COST_KEYS)
+            .map(|key| (Term::Integer(key), Term::Integer(key)))
+            .collect(),
+    )
+    .unwrap();
     println!(
         "map operation cost: minimum of {MAP_COST_RUNS} runs of {MAP_COST_ROUNDS} rounds, in nanosecond for each call"
     );
-    // The read of a 1000-key hashmap walks the HAMT of the map.
-    cost("get", (MAP_COST_ROUNDS * keys.len()) as f64, || {
-        let mut sum = 0;
-        for _ in 0..MAP_COST_ROUNDS {
-            for key in &keys {
-                if let Some(Term::Integer(value)) = hashmap.get(key) {
-                    sum += *value;
+    // The read of the map walks the HAMT for each key and consumes its value.
+    cost(
+        "get",
+        (MAP_COST_ROUNDS as i64 * MAP_COST_KEYS) as f64,
+        MAP_COST_ROUNDS as i64 * MAP_COST_KEY_SUM,
+        || {
+            let mut sum = 0;
+            for _ in 0..MAP_COST_ROUNDS {
+                for key in 1..=MAP_COST_KEYS {
+                    if let Some(Term::Integer(value)) = hashmap.get(&Term::Integer(key)) {
+                        sum += black_box(*value);
+                    }
                 }
             }
-        }
-        sum
-    });
+            sum
+        },
+    );
     // The put of a key that is not in the map: `Map::clone` shares the form
     // and the put copies the nodes on the path of the key, as the interpreter
-    // does.
-    cost("put", MAP_COST_ROUNDS as f64, || {
-        let mut sum = 0;
-        for key in 0..MAP_COST_ROUNDS {
-            let mut copy = hashmap.clone();
-            copy.insert(Term::Integer(1001 + key as i64), Term::Integer(1))
+    // does for `put`.
+    cost(
+        "put",
+        MAP_COST_ROUNDS as f64,
+        MAP_COST_ROUNDS as i64 * (MAP_COST_KEYS + 1),
+        || {
+            let mut sum = 0;
+            for key in 0..MAP_COST_ROUNDS {
+                let mut copy = hashmap.clone();
+                copy.insert(
+                    Term::Integer(MAP_COST_KEYS + 1 + key as i64),
+                    Term::Integer(1),
+                )
                 .unwrap();
-            sum += copy.len() as i64;
-        }
-        sum
-    });
+                sum += black_box(copy.len() as i64);
+            }
+            sum
+        },
+    );
+    // The update in place of `put_map_exact`: `Map::sort_pairs` sorts the one
+    // pair and `Map::get_mut` changes the value in the copy that the
+    // instruction read. This is the map work of `update_map_exact`
+    // (`src/runtime/interpreter.rs:2640`).
+    cost(
+        "put_map_exact",
+        MAP_COST_ROUNDS as f64,
+        MAP_COST_ROUNDS as i64 * MAP_COST_KEYS,
+        || {
+            let mut sum = 0;
+            for key in 0..MAP_COST_ROUNDS {
+                let mut pairs = vec![(Term::Integer(1 + key as i64), Term::Integer(2))];
+                Map::sort_pairs(&mut pairs).unwrap();
+                let mut map = hashmap.clone();
+                for (key, value) in pairs {
+                    *map.get_mut(&key).unwrap() = value;
+                }
+                sum += black_box(map.len() as i64);
+            }
+            sum
+        },
+    );
     // The iteration over the pairs of the map in the map order.
-    cost("iterate", (MAP_COST_ROUNDS * 1000) as f64, || {
-        let mut sum = 0;
-        for _ in 0..MAP_COST_ROUNDS {
-            for (_, value) in hashmap.iter() {
-                if let Term::Integer(value) = value {
-                    sum += *value;
+    cost(
+        "iterate",
+        (MAP_COST_ROUNDS as i64 * MAP_COST_KEYS) as f64,
+        MAP_COST_ROUNDS as i64 * MAP_COST_KEY_SUM,
+        || {
+            let mut sum = 0;
+            for _ in 0..MAP_COST_ROUNDS {
+                for (_, value) in hashmap.iter() {
+                    if let Term::Integer(value) = value {
+                        sum += black_box(*value);
+                    }
                 }
             }
-        }
-        sum
-    });
+            sum
+        },
+    );
+    // The walk of `erts_internal:map_next/3`: `Map::chunk` from the path 0
+    // until no pair remains, with the budget of a full reduction budget (4
+    // reductions for each pair), which is the map work of `maps::map_next`
+    // (`src/runtime/interpreter/bif/maps.rs:400`).
+    cost(
+        "map_next",
+        (MAP_COST_ROUNDS as i64 * MAP_COST_KEYS) as f64,
+        MAP_COST_ROUNDS as i64 * 2 * MAP_COST_KEY_SUM,
+        || {
+            let mut sum = 0;
+            for _ in 0..MAP_COST_ROUNDS {
+                let mut path = 0;
+                loop {
+                    let chunk = hashmap
+                        .chunk(&Term::Integer(path), 1000, Direction::Forward)
+                        .unwrap()
+                        .unwrap();
+                    for (key, value) in chunk.pairs {
+                        let (Term::Integer(key), Term::Integer(value)) = (key, value) else {
+                            unreachable!()
+                        };
+                        sum += black_box(*key + *value);
+                    }
+                    match chunk.next {
+                        Some(next) => path = next,
+                        None => break,
+                    }
+                }
+            }
+            sum
+        },
+    );
 }
