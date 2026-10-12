@@ -105,13 +105,18 @@ enum Entry<'a> {
 /// change. A hashmap copies only the HAMT nodes on the path of the key, and
 /// the new map shares each other node with the old map, as
 /// `erts_hashmap_insert` does (`erl_map.c:2477-2503`).
+///
+/// `Map` owns that form. It is in an `Option`, because `Term` has a `Drop`:
+/// the drop cannot move the `Arc` out of the term, so it takes the `Arc` out
+/// of the `Option` and calls `Arc::into_inner` (see [`Map::drain_into`]).
+/// Each other reader finds the form.
 #[derive(Clone)]
 pub struct Map {
     /// The flatmap or hashmap form of the map. All copies of the map own
     /// one reference to it. `insert` and `get_mut` copy it first when
     /// another copy also holds it (`Arc::make_mut`). The last copy that
     /// drops releases it.
-    repr: Arc<Repr>,
+    repr: Option<Arc<Repr>>,
 }
 
 /// The two forms of a map. The number of keys selects the form.
@@ -179,8 +184,47 @@ impl Map {
     /// ```
     pub(crate) fn new() -> Self {
         Map {
-            repr: Arc::new(Repr::Flat(Vec::new())),
+            repr: Some(Arc::new(Repr::Flat(Vec::new()))),
         }
+    }
+
+    /// Return the handle of the form of the map.
+    ///
+    /// # Panics
+    ///
+    /// Panic when the map has no form, which only the drop of its term
+    /// gives.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(&**Map::new().arc(), Repr::Flat(pairs) if pairs.is_empty()));
+    /// ```
+    fn arc(&self) -> &Arc<Repr> {
+        self.repr
+            .as_ref()
+            .expect("only the drop of a term takes the form of a map")
+    }
+
+    /// Return the handle of the form for a change. This is the receiver of
+    /// `Arc::make_mut`: the caller copies the form first when another copy
+    /// also holds it.
+    ///
+    /// # Panics
+    ///
+    /// Panic when the map has no form, which only the drop of its term
+    /// gives.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::new();
+    /// assert!(Arc::strong_count(map.arc_mut()) == 1);
+    /// ```
+    fn arc_mut(&mut self) -> &mut Arc<Repr> {
+        self.repr
+            .as_mut()
+            .expect("only the drop of a term takes the form of a map")
     }
 
     /// Build a map from pairs in any order. Insert the pairs one by one;
@@ -220,7 +264,7 @@ impl Map {
     /// assert_eq!(map.len(), 1);
     /// ```
     pub(crate) fn len(&self) -> usize {
-        match &*self.repr {
+        match &**self.arc() {
             Repr::Flat(pairs) => pairs.len(),
             Repr::Hash(hamt) => hamt.size,
         }
@@ -234,7 +278,7 @@ impl Map {
     /// assert!(!Map::new().is_hashmap());
     /// ```
     pub(crate) fn is_hashmap(&self) -> bool {
-        matches!(*self.repr, Repr::Hash(_))
+        matches!(**self.arc(), Repr::Hash(_))
     }
 
     /// Return the flatmap pairs or the hashmap root, so that the ERTS
@@ -247,7 +291,7 @@ impl Map {
     /// assert!(matches!(map.form(), Form::Flat([(Term::Integer(1), Term::Integer(2))])));
     /// ```
     pub(super) fn form(&self) -> Form<'_> {
-        match &*self.repr {
+        match &**self.arc() {
             Repr::Flat(pairs) => Form::Flat(pairs),
             Repr::Hash(hamt) => Form::Hash {
                 size: hamt.size,
@@ -269,7 +313,7 @@ impl Map {
     /// assert_eq!(map.get(&Term::tuple(vec![])), None);
     /// ```
     pub(crate) fn get(&self, key: &Term) -> Option<&Term> {
-        let hamt = match &*self.repr {
+        let hamt = match &**self.arc() {
             Repr::Flat(pairs) => {
                 return pairs
                     .iter()
@@ -313,7 +357,7 @@ impl Map {
     /// assert!(map.get_mut(&Term::Integer(2)).is_none());
     /// ```
     pub(crate) fn get_mut(&mut self, key: &Term) -> Option<&mut Term> {
-        let hamt = match Arc::make_mut(&mut self.repr) {
+        let hamt = match Arc::make_mut(self.arc_mut()) {
             Repr::Flat(pairs) => {
                 return pairs
                     .iter_mut()
@@ -405,7 +449,7 @@ impl Map {
     /// Return the first key that the map form does not support yet. The map
     /// does not change.
     pub(crate) fn insert(&mut self, key: Term, value: Term) -> Result<(), Term> {
-        let pairs = match Arc::make_mut(&mut self.repr) {
+        let pairs = match Arc::make_mut(self.arc_mut()) {
             Repr::Flat(pairs) => pairs,
             Repr::Hash(hamt) => {
                 let Some(hash) = map_hash(&key) else {
@@ -438,7 +482,7 @@ impl Map {
                 for (hash, (key, value)) in hashes.into_iter().zip(pairs) {
                     hamt.insert(hash, key, value);
                 }
-                self.repr = Arc::new(Repr::Hash(hamt));
+                self.repr = Some(Arc::new(Repr::Hash(hamt)));
             }
         }
         Ok(())
@@ -459,7 +503,7 @@ impl Map {
     /// ```
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Term, &Term)> {
         // `pairs` holds the flatmap pairs, or the pairs of the current collision child.
-        let (mut pairs, mut nodes) = match &*self.repr {
+        let (mut pairs, mut nodes) = match &**self.arc() {
             Repr::Flat(pairs) => (pairs.iter(), Vec::new()),
             Repr::Hash(hamt) => (Default::default(), vec![hamt.root.children.iter()]),
         };
@@ -481,11 +525,20 @@ impl Map {
         })
     }
 
-    /// Move every key and value onto a work stack and leave the map empty.
-    /// Take the pairs of the form and of each HAMT node only from its last
-    /// holder: a form or a node that another map also holds stays with that
-    /// map, which moves the pairs when it drops last. `Term` uses this to
-    /// drop a deep map without recursion.
+    /// Move every key and value onto a work stack and leave the map with no
+    /// form. Take the pairs of the form and of each HAMT node only from its
+    /// last holder: a form or a node that another map also holds stays with
+    /// that map, which moves the pairs when it drops last. `Term` uses this
+    /// to drop a deep map without recursion.
+    ///
+    /// The form leaves the map before `Arc::into_inner` reads the handle, so
+    /// the drop of a shared map builds no placeholder form. A second call
+    /// finds no form and moves nothing, as the second [`Tuple::take_last`]
+    /// of a tuple gives no elements: the drop of a map that a tuple or a
+    /// list holds walks the map one time and then drops the empty term. Of
+    /// the holders that drop an `Arc` at the same time, exactly one gets the
+    /// value (`Arc::into_inner`). `Arc::get_mut` can fail for each of them,
+    /// so the last drop would then recurse into the value.
     ///
     /// # Examples
     ///
@@ -500,10 +553,9 @@ impl Map {
     /// assert_eq!(pending, [Term::Integer(1), Term::Integer(2)]);
     /// ```
     pub(crate) fn drain_into(&mut self, pending: &mut Vec<Term>) {
-        let repr = std::mem::replace(&mut self.repr, Arc::new(Repr::Flat(Vec::new())));
-        // Of the holders that drop an `Arc` at the same time, exactly one gets the value
-        // (`Arc::into_inner`). `Arc::get_mut` can fail for each of them, so the last drop
-        // would then recurse into the value.
+        let Some(repr) = self.repr.take() else {
+            return;
+        };
         let Some(repr) = Arc::into_inner(repr) else {
             return;
         };
@@ -573,7 +625,7 @@ impl Map {
         budget: usize,
         direction: Direction,
     ) -> Result<Option<Chunk<'_>>, BeamError> {
-        let hamt = match &*self.repr {
+        let hamt = match &**self.arc() {
             Repr::Flat(pairs) => {
                 let size = pairs.len() as u64;
                 let path = path.small_integer().map(unsigned_val);
@@ -614,7 +666,7 @@ impl Map {
     /// assert!(!map.same_form(&Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?));
     /// ```
     pub(crate) fn same_form(&self, other: &Map) -> bool {
-        Arc::ptr_eq(&self.repr, &other.repr)
+        Arc::ptr_eq(self.arc(), other.arc())
     }
 
     /// Return the number of steps of the ERTS hashmap merge for
@@ -642,7 +694,10 @@ impl Map {
     /// assert_eq!(big.merge_steps(&big.clone()), Some(0));
     /// ```
     pub(crate) fn merge_steps(&self, other: &Map) -> Option<usize> {
-        let both_flat = matches!((&*self.repr, &*other.repr), (Repr::Flat(_), Repr::Flat(_)));
+        let both_flat = matches!(
+            (&**self.arc(), &**other.arc()),
+            (Repr::Flat(_), Repr::Flat(_))
+        );
         if both_flat || self.len() == 0 || other.len() == 0 {
             return None;
         }
@@ -657,7 +712,7 @@ impl Map {
                 .collect()
         }
         // The tree of a flatmap is new (`map_merge_mixed`), so it shares no node.
-        let roots = match (&*self.repr, &*other.repr) {
+        let roots = match (&**self.arc(), &**other.arc()) {
             (Repr::Hash(first), Repr::Hash(second)) => Some((&first.root, &second.root)),
             _ => None,
         };

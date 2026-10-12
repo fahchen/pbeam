@@ -38,6 +38,51 @@ fn holds_no_inline_atom_name_in_a_term() {
 }
 
 #[test]
+fn drops_a_term_with_many_nested_terms_without_recursion() {
+    // The walk of `Term::drop` is iterative. A tuple and a fun give the array
+    // that they own to the walk, and a map holds its pairs on a vector, so a
+    // tuple, a fun, and a map with many nested terms walk every one of them
+    // without a Rust stack overflow.
+    let wide = Term::tuple((0..100).map(Term::Integer).collect());
+    assert_eq!(wide, Term::tuple((0..100).map(Term::Integer).collect()));
+    drop(wide);
+
+    let fun = fun(0, (0..100).map(Term::Integer).collect());
+    drop(fun);
+
+    let big = map((0..100)
+        .map(|key| (Term::Integer(key), Term::Integer(key)))
+        .collect());
+    drop(big);
+}
+
+#[test]
+fn drops_a_shared_map_and_a_cloned_map_with_the_same_values() {
+    let form = || {
+        map(vec![
+            (atom("k"), Term::Integer(1)),
+            (Term::Integer(2), Term::list_from([atom("v")])),
+        ])
+    };
+    // A shared map: the drop of one holder moves no pair, and the other
+    // holder keeps every pair.
+    let shared = form();
+    let copy = shared.clone();
+    assert!(shared.shares_storage_with(&copy));
+    drop(shared);
+    assert_eq!(copy, form());
+    drop(copy);
+
+    // A clone whose original has dropped: the clone is the last holder of
+    // the form, so its drop moves every pair.
+    let original = form();
+    let clone = original.clone();
+    drop(original);
+    assert_eq!(clone, form());
+    drop(clone);
+}
+
+#[test]
 fn clones_compares_formats_and_drops_deep_terms_without_recursion() {
     let term = deep(1_000_000);
     let copy = term.clone();

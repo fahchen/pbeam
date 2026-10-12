@@ -242,7 +242,10 @@ impl Term {
 
 impl Drop for Term {
     /// Move nested terms onto a work stack, so dropping a deep term does not
-    /// recurse.
+    /// recurse. A tuple and a fun give the array that they already own to the
+    /// walk, so their drop allocates nothing and a term that shares its array
+    /// needs no walk. A list and a map give one nested term at a time, and
+    /// their walk holds them on a vector.
     ///
     /// # Examples
     ///
@@ -251,11 +254,44 @@ impl Drop for Term {
     /// drop(deep);
     /// ```
     fn drop(&mut self) {
-        let mut pending = Vec::new();
-        self.take_nested(&mut pending);
-        while let Some(mut term) = pending.pop() {
-            term.take_nested(&mut pending);
+        match self {
+            Term::Tuple(elements) => {
+                if let Some(pending) = elements.take_last() {
+                    drop_nested(pending);
+                }
+            }
+            Term::Fun(fun) => {
+                if let Some(pending) = fun.take_last() {
+                    drop_nested(pending);
+                }
+            }
+            Term::Cons(cell) => {
+                if let Some(Cons { head, tail }) = cell.take_last() {
+                    drop_nested(vec![tail, head]);
+                }
+            }
+            Term::Map(map) => {
+                let mut pending = Vec::new();
+                map.drain_into(&mut pending);
+                drop_nested(pending);
+            }
+            _ => {}
         }
+    }
+}
+
+/// Drop each term of `pending`, and then each nested term that it gives. The
+/// walk is iterative, so dropping a deep term does not recurse on the Rust
+/// stack.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// drop_nested(vec![Term::Integer(1)]);
+/// ```
+fn drop_nested(mut pending: Vec<Term>) {
+    while let Some(mut term) = pending.pop() {
+        term.take_nested(&mut pending);
     }
 }
 
