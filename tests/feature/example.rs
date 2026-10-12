@@ -8,9 +8,14 @@
 //! and runs it. Each other run of the test gives `--no-build`, so it uses
 //! that build, and the ERTS run and the `pbeam` run execute the same
 //! compiled modules. Each example has one test, and nextest runs each test
-//! in its own process, so a test run builds each example once. The script
-//! renames each file of the build into `target/examples/<name>/`, so a
-//! parallel build of the same example cannot give a partial file.
+//! in its own process, so a test run builds each example once. The
+//! `terra_counter` example has two more tests, of the check of its Terra
+//! source: they stop `scripts/example.sh` in `scripts/terra.sh` before it
+//! compiles a file, and that script removes the lists of the last build only
+//! before it renames a file into the output directory, so a build that stops
+//! early keeps the lists and the files of the last complete build. The
+//! script renames each file of the build into `target/examples/<name>/`, so
+//! a parallel build of the same example cannot give a partial file.
 //!
 //! The build gives the `pbeam` run a start set and the code path of the
 //! pinned OTP and Elixir (row "Code loading" of `docs/erts-differences.md`).
@@ -46,9 +51,16 @@ const RUN_TIME_LIMIT: Duration = Duration::from_secs(60);
 
 /// The build of the `terra_counter` example compiles the Terra sources of
 /// the pinned commit, and the first run downloads them. The run starts the
-/// runtime of the example in a pseudo-terminal.
+/// runtime of the example in a pseudo-terminal. The limit covers the build
+/// and the first screen, and the wait reports a child that ends earlier.
 #[cfg(target_os = "macos")]
 const TERRA_TIME_LIMIT: Duration = Duration::from_secs(600);
+
+/// The time that the child of the pseudo-terminal run has to take the
+/// terminal as its controlling terminal. The kernel does the assignment in
+/// the child, after the spawn of the test returns.
+#[cfg(target_os = "macos")]
+const TERMINAL_SETUP_LIMIT: Duration = Duration::from_secs(10);
 
 #[test]
 fn runs_hello_world_with_one_command_as_pinned_erts() {
@@ -566,6 +578,18 @@ fn run_restricted_guest(policy: &str, arguments: &[&str]) -> Output {
 /// type `q`. Return the bytes that the run wrote and a text of its exit
 /// status.
 ///
+/// The child owns the pseudo-terminal as its controlling terminal. Terra
+/// Counter needs that ownership, because it enters raw mode with
+/// `:shell.start_interactive({:noshell, :raw})` and then reads each key with
+/// `IO.binread(:stdio, 1)` (Terra `30dea566`
+/// `lib/terra/terminal/tty.ex:68-73`, `lib/terra/input/tty.ex:19`). Terra
+/// reaches the terminal of the VM through the controlling terminal of its
+/// session, and its TTY backend records that `/dev/tty` is not reachable from
+/// a port child when the VM has no controlling terminal to hand it
+/// (`lib/terra/terminal/tty.ex:8-9`). Measured on macOS: without that
+/// assignment, a run of the pinned ERTS ends with status 1 after the step
+/// line of `scripts/example.sh` and draws no screen (#505).
+///
 /// # Examples
 ///
 /// ```rust,ignore
@@ -575,6 +599,8 @@ fn run_restricted_guest(policy: &str, arguments: &[&str]) -> Output {
 #[cfg(target_os = "macos")]
 fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
     use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
     use std::sync::{Arc, Mutex};
 
     let (master, slave) = open_terminal().expect("a pseudo-terminal");
@@ -583,15 +609,62 @@ fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
         .arg("scripts/example.sh")
         .args(arguments)
         .env("PBEAM_BIN", env!("CARGO_BIN_EXE_pbeam"))
+        // Terra Counter is an interactive program of the Terra target, which
+        // is a terminal of the type xterm-256color (examples/terra_counter/README.md).
+        // With `TERM=dumb` or without `TERM`, the run draws the screen, but
+        // the runtime keeps the terminal in cooked mode and ignores each key,
+        // so the counter never ends (measured on macOS).
+        .env("TERM", "xterm-256color")
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::from(slave.try_clone().unwrap()))
         .stderr(Stdio::from(slave.try_clone().unwrap()));
-    let mut child = command.spawn().unwrap();
+    // The child must own the pseudo-terminal as its controlling terminal.
+    // Without that assignment, the run of the pinned ERTS ends with status 1
+    // after the step line of `scripts/example.sh` and draws no screen, and
+    // Terra Counter cannot read a key (#505). `setsid` makes the child a
+    // session leader with no controlling terminal, and `TIOCSCTTY` makes its
+    // stdin, the slave, the controlling terminal.
+    //
+    // SAFETY: the hook runs in the child before `exec`, after the standard
+    // streams are the slave. `setsid` and `ioctl` change only the session and
+    // the terminal of the calling process, and both are async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY.into(), 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap_or_else(|error| {
+        panic!("the host did not give the child the pseudo-terminal as its controlling terminal: {error}")
+    });
     // `spawn` gives each `Stdio` to the child and closes the copies of the
     // test, so the test drops the command and its slave. It keeps the master
     // for the reads and the writes.
     drop(command);
     drop(slave);
+    // The kernel assigns the terminal in the child, so the parent waits for
+    // the result here. This check stops the test with the environment
+    // condition when the host denies the assignment, and it also fails a
+    // later change that removes the `pre_exec` step above.
+    let setup = Instant::now();
+    loop {
+        // SAFETY: `tcgetpgrp` reads the foreground process group of the
+        // terminal of `master` and changes no state.
+        let group = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
+        if group == child.id() as libc::pid_t {
+            break;
+        }
+        assert!(
+            setup.elapsed() < TERMINAL_SETUP_LIMIT,
+            "the host did not make the pseudo-terminal the controlling terminal of the child: \
+             the foreground process group of the terminal is {group}, and the process of the child is {}. \
+             The child starts a session with `setsid` and takes the terminal with `TIOCSCTTY`; this host denies one of the two calls.",
+            child.id()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     let output = Arc::new(Mutex::new(Vec::new()));
     let reader = {
         let output = Arc::clone(&output);
@@ -604,15 +677,26 @@ fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
         })
     };
     let start = Instant::now();
-    while !output
-        .lock()
-        .unwrap()
-        .windows(4)
-        .any(|window| window == b"to q")
-    {
+    loop {
+        if visible(&output.lock().unwrap())
+            .windows(4)
+            .any(|window| window == b"to q")
+        {
+            break;
+        }
+        // A run that ends before the screen reports the condition at once,
+        // instead of the full build limit.
+        if let Some(status) = child.try_wait().unwrap() {
+            thread::sleep(Duration::from_millis(100));
+            panic!(
+                "the run ended before the screen of terra_counter appeared: {status}: {:?}",
+                String::from_utf8_lossy(&output.lock().unwrap())
+            );
+        }
         assert!(
             start.elapsed() < TERRA_TIME_LIMIT,
-            "the screen of terra_counter did not appear: {:?}",
+            "the screen of terra_counter did not appear within {TERRA_TIME_LIMIT:?}, and the child \
+             holds the pseudo-terminal as its controlling terminal: {:?}",
             String::from_utf8_lossy(&output.lock().unwrap())
         );
         thread::sleep(Duration::from_millis(10));
@@ -622,13 +706,16 @@ fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
     std::fs::File::from(master.try_clone().unwrap())
         .write_all(b"q")
         .unwrap();
+    // The screen is up, so this wait does not cover the build. A run that
+    // does not end after the key uses the limit of the other runs.
+    let quit = Instant::now();
     let (status, ret) = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break (status, String::new());
         }
         assert!(
-            start.elapsed() < TERRA_TIME_LIMIT,
-            "terra_counter did not end: {:?}",
+            quit.elapsed() < RUN_TIME_LIMIT,
+            "terra_counter did not end within {RUN_TIME_LIMIT:?} after the key q: {:?}",
             String::from_utf8_lossy(&output.lock().unwrap())
         );
         thread::sleep(Duration::from_millis(10));
@@ -637,6 +724,44 @@ fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
     reader.join().unwrap();
     let bytes = output.lock().unwrap().clone();
     (bytes, format!("{status} {ret}"))
+}
+
+/// Return `source` without the control sequences, so that the test can find
+/// the text of a screen in the output of Terra. Terra writes the style of
+/// each character before the character and a reset after it
+/// (`Terra.Renderer.Style.to_ansi/1`), so a text of a screen is not a
+/// contiguous run of bytes in the write of the run.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(visible(b"\x1b[32mCount\x1b[0m"), b"Count");
+/// ```
+#[cfg(target_os = "macos")]
+fn visible(source: &[u8]) -> Vec<u8> {
+    let mut text = Vec::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(&byte) = rest.first() {
+        if byte != 0x1b {
+            text.push(byte);
+            rest = &rest[1..];
+            continue;
+        }
+        match rest.get(1) {
+            // A control sequence ends with a byte in `0x40..=0x7e`.
+            Some(b'[') => {
+                let end = rest[2..]
+                    .iter()
+                    .position(|byte| (0x40..=0x7e).contains(byte))
+                    .map_or(rest.len(), |at| at + 3);
+                rest = &rest[end..];
+            }
+            // `ESC (` and `ESC )` select a character set and take one byte.
+            Some(b'(' | b')') => rest = &rest[3.min(rest.len())..],
+            _ => rest = &rest[1..],
+        }
+    }
+    text
 }
 
 /// Return the write-back of the terminal owner: the restore sequence of the
@@ -737,6 +862,11 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
     // example a sandbox that denies `/dev/ptmx`, fails the test in
     // `run_terra_counter_in_terminal`, with the same `a pseudo-terminal`
     // message as the other pseudo-terminal tests of this suite.
+    //
+    // The child of each run owns the pseudo-terminal as its controlling
+    // terminal. Terra Counter needs that ownership to read a key, so a host
+    // that denies it fails the test at once with the condition of the host,
+    // and not after the build limit (#505).
     let (erts, erts_status) = run_terra_counter_in_terminal(&["terra_counter", "--erts"]);
     let (pbeam, pbeam_status) = run_terra_counter_in_terminal(&["terra_counter", "--no-build"]);
     assert_eq!(erts_status, pbeam_status, "status");
