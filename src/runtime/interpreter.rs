@@ -4044,3 +4044,11 @@ fn write_operand(
 #[cfg(test)]
 #[path = "../../tests/runtime/interpreter.rs"]
 mod tests;
+
+/// The micro-measurement of the instruction attribution of task
+/// [#546](https://github.com/fahchen/pbeam/issues/546). It lives beside the
+/// interpreter, because it reads the private operand, label, frame,
+/// reduction, and BIF argument helpers.
+#[cfg(test)]
+#[path = "../../tests/runtime/interpreter/dispatch_attribution_costs.rs"]
+mod dispatch_attribution_costs;
