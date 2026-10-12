@@ -254,6 +254,7 @@ impl Scheduler {
         if !live {
             return Ok(Err(Denied));
         }
+        let initial_call = self.code.initial_call_names(&initial_call)?;
         let requester = self.requester(id, parent, &initial_call)?;
         self.current_process_mut().policy_reply = None;
         let policy = self.policy.as_mut().expect("the policy process lives");

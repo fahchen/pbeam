@@ -1010,7 +1010,7 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// A module that is not loaded is the error `missing BEAM module M`.
+    /// An identity that no loaded module has is a runtime invariant error.
     pub(super) fn current_module(&self) -> Result<&Rc<BeamModule>, BeamError> {
         // ponytail: only the run loop calls this, for a process with an active frame.
         let frame = self
@@ -1018,7 +1018,7 @@ impl Scheduler {
             .and_then(|id| self.processes.get(&id))
             .and_then(|process| process.frames.last())
             .expect("the current process has an active frame");
-        self.code.module(&frame.module)
+        self.code.module_by_id(frame.module_id)
     }
 
     /// Return the process `id` of the process table, also the current
@@ -1389,7 +1389,7 @@ impl Scheduler {
         restrictions: Option<&[Restriction]>,
     ) -> Result<Result<(ProcessId, Option<Reference>), Denied>, BeamError> {
         let module = match &start {
-            Start::Entry(frame) => frame.module.as_str(),
+            Start::Entry(frame) => self.code.module_by_id(frame.module_id)?.name.as_str(),
             Start::Undefined { module, .. } => module.name(),
         };
         let parent = &self.current_process().security;

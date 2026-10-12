@@ -5,10 +5,13 @@ use crate::runtime::host::output::{IovecWrite, IovecWritten};
 use crate::term::test_atom;
 use crate::{
     runtime::ets::{Access, Table},
-    runtime::process::{ReceiveTimer, Start, TimerReference, tests::frame},
+    runtime::process::{
+        ReceiveTimer, Start, TimerReference,
+        tests::{frame, test_scheduler, test_scheduler_without_checks},
+    },
     runtime::signal::Signal,
     runtime::timer::{Receiver, Timer},
-    term::{Atom, AtomTable, ProcessId, Reference, Term},
+    term::{Atom, ProcessId, Reference, Term},
 };
 use std::{
     io::{PipeReader, PipeWriter, Read, Write},
@@ -44,7 +47,7 @@ fn current(scheduler: &mut Scheduler) -> ProcessId {
 
 #[test]
 fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(current(&mut scheduler), ProcessId(0));
@@ -87,7 +90,7 @@ fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
         CapabilityKind::Code,
     ];
     // With the checks, a root process with no capability cannot spawn.
-    let mut checked = Scheduler::new(AtomTable::new());
+    let mut checked = test_scheduler();
     assert!(!checked.skips_checks());
     checked.start(frame(), vec![], Vec::new()).unwrap();
     checked.schedule_next().unwrap();
@@ -99,7 +102,7 @@ fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
     );
     // Without the checks, it spawns with a monitor and a link, the child
     // gets no copy, and a revocation has no effect.
-    let mut scheduler = Scheduler::without_checks(AtomTable::new());
+    let mut scheduler = test_scheduler_without_checks();
     assert!(scheduler.skips_checks());
     scheduler.start(frame(), vec![], Vec::new()).unwrap();
     scheduler.schedule_next().unwrap();
@@ -118,7 +121,7 @@ fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
 
 #[test]
 fn switches_out_to_the_end_of_the_run_queue_with_a_new_budget() {
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler
@@ -140,7 +143,7 @@ fn switches_out_to_the_end_of_the_run_queue_with_a_new_budget() {
 
 #[test]
 fn sends_down_and_exit_signals_and_records_the_root_result() {
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     scheduler.current_process_mut().trap_exit = true;
@@ -190,7 +193,7 @@ fn ends_the_run_only_after_the_exit_of_the_root_process_completes() {
     // root result is recorded, but the run continues until the next turn
     // of the root process sends its link exit signal.
     for fcalls in [100, 150] {
-        let mut scheduler = Scheduler::new(AtomTable::new());
+        let mut scheduler = test_scheduler();
         scheduler.start(frame(), vec![], allow_all()).unwrap();
         scheduler.schedule_next().unwrap();
         let (child, _) = scheduler
@@ -217,7 +220,7 @@ fn ends_the_run_only_after_the_exit_of_the_root_process_completes() {
 
 #[test]
 fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
@@ -270,7 +273,7 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
 
 #[test]
 fn ends_a_linked_process_and_rejects_counter_overflow() {
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     scheduler
@@ -285,7 +288,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
     assert_eq!(scheduler.into_root_result(), Some(Err(atom("boom"))));
 
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     scheduler.finish_current(atom("boom"), Some(atom("ok")));
@@ -294,7 +297,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     let mut scheduler = Scheduler {
         next_process_id: u64::MAX,
         next_reference: u64::MAX,
-        ..Scheduler::new(AtomTable::new())
+        ..test_scheduler()
     };
     // The root process has the fixed pid 0, so the overflow comes at the
     // first spawn.
@@ -309,7 +312,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
 fn sends_the_pending_monitor_signal_before_a_demonitor_signal() {
     // `proc_queue_signal` sends the pending monitor signal first when the
     // next signal goes to the same target (`erl_proc_sig_queue.c:1146-1170`).
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
@@ -334,7 +337,7 @@ fn creates_no_monitor_of_the_caller_and_sends_noproc_for_a_missing_target() {
     // (`bif.c:781-784`). A port name gives the noproc signal at once, and a
     // pid that no process has gives it when the pending signal goes, at the
     // switch out.
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let own = scheduler
@@ -377,7 +380,7 @@ fn creates_no_monitor_of_the_caller_and_sends_noproc_for_a_missing_target() {
 fn frees_the_name_of_a_process_when_it_exits() {
     // ERTS 29.1.1: after a named process exits, register(Name, self())
     // in another process is true.
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
@@ -410,7 +413,7 @@ fn deletes_the_tables_of_a_process_when_it_exits() {
     // ERTS 29.1.1: after the owner of a named table exits, ets:new/2
     // with the same name in the monitor process is valid when the DOWN
     // message arrives (erl_process.c:14360-14368).
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, monitor) = scheduler
@@ -449,7 +452,7 @@ fn resumes_after_wait_timeout_when_the_timer_expires_after_a_message() {
     // then expires stays in the run queue once, and it continues at the
     // instruction after `wait_timeout` with `F_TIMO`
     // (`erl_hl_timer.c:692-706`, `erl_process.c:10451-10458`).
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(100), 7));
@@ -480,7 +483,7 @@ fn resumes_after_wait_timeout_when_the_timer_expires_after_a_message() {
 
 #[test]
 fn wakes_a_waiting_process_and_stops_receive_timers_at_cancel_and_exit() {
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
@@ -502,7 +505,7 @@ fn continues_the_exit_timer_walk_at_its_next_timer() {
     // the position of the next timer (erl_rbtree.h:1392-1396). A turn that
     // walked the tree again from its start would cancel no new timer for
     // the reductions of each timer that an earlier turn cancelled.
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     for _ in 0..60 {
@@ -550,7 +553,7 @@ fn rejects_receive_timeouts_as_erts_set_proc_timer_term() {
     // `erts_set_proc_timer_term` (`erl_hl_timer.c:2786-2805`) accepts an
     // integer from 0 to 4294967295 whose end is not after
     // `ERTS_MONOTONIC_END`.
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     for timeout in [Term::Integer(-1), Term::Integer(4_294_967_296), atom("foo")] {
@@ -593,7 +596,7 @@ fn resumes_a_dirty_write_once_when_it_completes_before_the_next_poll() {
     // thread gets it. The completion is in the inbox before the scheduler
     // takes it; the scheduler resumes the process once.
     let (mut reader, writer) = std::io::pipe().unwrap();
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.start_dirty_write(dirty_write(writer.as_raw_fd(), b"hi\n"), true);
@@ -640,7 +643,7 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
     while (&writer).write(&[0; 4096]).is_ok() {}
     // SAFETY: as above.
     unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler
@@ -780,7 +783,7 @@ fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
     // exit of a killed process while its dirty NIF runs. The completion of
     // the write then arrives after the exit, and the scheduler drops it.
     let (reader, writer) = std::io::pipe().unwrap();
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     let bytes = vec![b'w'; WAITING_WRITE];
     let references = start_dirty_writers(&mut scheduler, 1, |_| writer.as_raw_fd(), &bytes);
     wait_write_started(&reader);
@@ -825,7 +828,7 @@ fn drops_the_completion_that_arrives_before_the_exit_of_a_killed_dirty_writer() 
     // completes before the exit turn of the writer. The completion does not
     // resume the exiting writer, and the writer exits without its result.
     let (reader, writer) = std::io::pipe().unwrap();
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     let bytes = vec![b'w'; WAITING_WRITE];
     let references = start_dirty_writers(&mut scheduler, 1, |_| writer.as_raw_fd(), &bytes);
     wait_write_started(&reader);
@@ -851,7 +854,7 @@ fn exits_without_the_result_of_a_dirty_write_that_completed_before_a_kill() {
     // kill then arrives before its turn: the turn handles the kill at
     // schedule-in, and the writer exits without its result.
     let (mut reader, writer) = std::io::pipe().unwrap();
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     let references = start_dirty_writers(&mut scheduler, 1, |_| writer.as_raw_fd(), b"done");
     let mut bytes = [0; 4];
     reader.read_exact(&mut bytes).unwrap();
@@ -877,7 +880,7 @@ fn does_not_run_the_queued_dirty_write_of_a_killed_writer() {
     // process (erl_process.c:10252-10258).
     let (reader, writer) = full_pipe();
     let (queued_reader, queued_writer) = std::io::pipe().unwrap();
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     let fd = |id| {
         if id == 11 {
             queued_writer.as_raw_fd()
@@ -912,7 +915,7 @@ fn sends_a_message_that_shares_the_term_of_the_sender() {
     // with the message queue on the heap does not copy (`:824-826`). PBeam
     // reports no value that depends on the copy (row "Message copy" of
     // docs/erts-differences.md).
-    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     let message = Term::tuple(vec![Term::Integer(1), Term::tuple(vec![Term::Integer(2)])]);
     // The interpreter copies the operand of `erlang:send/2` first, and the

@@ -1,17 +1,58 @@
+use std::{collections::HashMap, rc::Rc};
+
 use super::{Frame, ProcessState, ReceiveTimer, Start};
 use crate::{
-    beam::ModuleId,
-    term::{Atom, ProcessId, Term},
+    BeamModule,
+    beam::code::Instruction,
+    runtime::{interpreter::CodeTable, scheduler::Scheduler},
+    term::{Atom, AtomTable, ProcessId, Term},
 };
 
+thread_local! {
+    /// The module of the frames of the tests. A test scheduler loads it, so
+    /// a frame of [`frame`] names a module of its code table.
+    static MODULE: Rc<BeamModule> = Rc::new(BeamModule::new(
+        "fixture".into(),
+        HashMap::new(),
+        vec![
+            Instruction::FunctionInfo {
+                module: "fixture".into(),
+                name: "main".into(),
+                arity: 0,
+            },
+            Instruction::Label(1),
+        ],
+    ));
+}
+
+/// Return the module of the frames of the tests.
+pub(in crate::runtime) fn module() -> Rc<BeamModule> {
+    MODULE.with(Rc::clone)
+}
+
+/// Return the entry frame of the tests: `fixture:main/0`.
 pub(in crate::runtime) fn frame() -> Frame {
     Frame {
-        module: "fixture".into(),
-        module_id: ModuleId::next(),
-        function: "main".into(),
+        module_id: MODULE.with(|module| module.id),
+        function: MODULE.with(|module| module.tables.name_id("main").unwrap()),
         next_instruction: 0,
         stack: Vec::new(),
     }
+}
+
+/// Return a scheduler with the module of the frames of the tests loaded.
+pub(in crate::runtime) fn test_scheduler() -> Scheduler {
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    scheduler.code = CodeTable::new(HashMap::from([("fixture".into(), module())]));
+    scheduler
+}
+
+/// Return a scheduler that skips the capability checks, with the module of
+/// the frames of the tests loaded.
+pub(in crate::runtime) fn test_scheduler_without_checks() -> Scheduler {
+    let mut scheduler = Scheduler::without_checks(AtomTable::new());
+    scheduler.code = CodeTable::new(HashMap::from([("fixture".into(), module())]));
+    scheduler
 }
 
 #[test]

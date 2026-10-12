@@ -1,8 +1,8 @@
 use super::function_at_label;
 use crate::{
-    beam::BeamModule,
+    beam::{BeamModule, ModuleId},
     error::{BeamError, error},
-    runtime::process::Frame,
+    runtime::process::{Frame, InitialCall},
     term::Reference,
 };
 use std::{
@@ -21,6 +21,9 @@ pub(in crate::runtime) struct CodeTable {
     /// The loaded modules by name. The program owns the start modules too,
     /// and each run shares them through the `Rc`.
     modules: HashMap<String, Rc<BeamModule>>,
+    /// The loaded modules by their identity, for a frame that names its
+    /// module by [`ModuleId`] and not by name.
+    by_id: HashMap<ModuleId, Rc<BeamModule>>,
     /// The prepared code of `erts_internal:prepare_loading/2` by its
     /// reference, as the magic binary of the ERTS loader state
     /// (`beam_bif_load.c:250-265`). `erlang:finish_loading/1` takes an
@@ -52,10 +55,78 @@ impl CodeTable {
     /// assert!(code.get("erlang").is_some());
     /// ```
     pub(in crate::runtime) fn new(modules: HashMap<String, Rc<BeamModule>>) -> Self {
+        let by_id = modules
+            .values()
+            .map(|module| (module.id, Rc::clone(module)))
+            .collect();
         CodeTable {
             modules,
+            by_id,
             prepared: HashMap::new(),
         }
+    }
+
+    /// Return the loaded module of `id`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let module = code.get("erlang").unwrap();
+    /// assert_eq!(code.module_by_id(module.id)?.name, "erlang");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An identity that no loaded module of the run has is a runtime
+    /// invariant error.
+    pub(in crate::runtime) fn module_by_id(
+        &self,
+        id: ModuleId,
+    ) -> Result<&Rc<BeamModule>, BeamError> {
+        self.by_id.get(&id).ok_or_else(|| {
+            error(format!(
+                "invariant error: no loaded module has identity {id:?}"
+            ))
+        })
+    }
+
+    /// Return the module name, the function name, and the arity of the start
+    /// MFA `initial_call`, from the loader tables.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (module, function, arity) = code.initial_call_names(&process.initial_call)?;
+    /// assert_eq!((module.as_str(), arity), ("erlang", 0));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An identity that no loaded module of the run has is a runtime
+    /// invariant error.
+    pub(in crate::runtime) fn initial_call_names(
+        &self,
+        initial_call: &InitialCall,
+    ) -> Result<(String, String, usize), BeamError> {
+        Ok(match initial_call {
+            InitialCall::Entry {
+                module,
+                function,
+                arity,
+            } => {
+                let loaded = self.module_by_id(*module)?;
+                (
+                    loaded.name.clone(),
+                    loaded.tables.name(*function).to_owned(),
+                    *arity,
+                )
+            }
+            InitialCall::Undefined {
+                module,
+                function,
+                arity,
+            } => (module.name().to_owned(), function.name().to_owned(), *arity),
+        })
     }
 
     /// Return the loaded module `name`, or `None` when no module of the run
@@ -109,9 +180,11 @@ impl CodeTable {
         function: &str,
         arity: u32,
     ) -> Result<u32, BeamError> {
-        self.module(module)?
-            .exports
-            .get(&(function.to_owned(), arity))
+        let loaded = self.module(module)?;
+        loaded
+            .tables
+            .name_id(function)
+            .and_then(|id| loaded.exports.get(&(id, arity)))
             .copied()
             .ok_or_else(|| error(format!("missing export {module}:{function}/{arity}")))
     }
@@ -145,8 +218,9 @@ impl CodeTable {
         self.get(module)
             .and_then(|loaded| {
                 loaded
-                    .exports
-                    .get(&(function.to_owned(), arity))
+                    .tables
+                    .name_id(function)
+                    .and_then(|id| loaded.exports.get(&(id, arity)))
                     .map(|label| frame(loaded, *label, arity))
             })
             .transpose()
@@ -185,7 +259,7 @@ impl CodeTable {
     ///
     /// ```rust,ignore
     /// let frame = code.frame("fixture", 2, 0)?;
-    /// assert_eq!(frame.function, "main");
+    /// assert_eq!(frame.module_id, module.id);
     /// ```
     ///
     /// # Errors
@@ -302,7 +376,9 @@ impl CodeTable {
                 .prepared
                 .remove(reference)
                 .expect("checked by prepared_names");
-            self.modules.insert(name, Rc::new(module));
+            let module = Rc::new(module);
+            self.by_id.insert(module.id, Rc::clone(&module));
+            self.modules.insert(name, module);
         }
         Ok(Finish::Loaded)
     }
@@ -314,7 +390,7 @@ impl CodeTable {
 ///
 /// ```rust,ignore
 /// let frame = frame(&module, 2, 0)?;
-/// assert_eq!(frame.function, "main");
+/// assert_eq!(module.tables.name(frame.function), "main");
 /// ```
 ///
 /// # Errors
@@ -330,14 +406,18 @@ pub(in crate::runtime) fn frame(
     if function.arity != arity {
         return Err(error(format!(
             "call arity does not match {}:{}",
-            module.name, function.name
+            module.name,
+            module.tables.name(function.name)
         )));
     }
     Ok(Frame {
-        module: module.name.clone(),
         module_id: module.id,
-        function: function.name.to_owned(),
+        function: function.name,
         next_instruction: function.start,
         stack: Vec::new(),
     })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/interpreter/code_table.rs"]
+mod tests;

@@ -67,7 +67,6 @@ fn atom(name: &str) -> Operand {
 fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
     let mut program = make_program(body, 0);
     let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-    module.exports.insert(("child".into(), 1), 11);
     module.instructions.extend([
         Instruction::FunctionInfo {
             module: "fixture".into(),
@@ -78,6 +77,8 @@ fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
         erlang_call("exit", 1, true),
     ]);
     module.reindex();
+    let child = module.tables.name_id("child").unwrap();
+    module.exports.insert((child, 1), 11);
     program.execute("fixture", "main", &[])
 }
 
@@ -185,7 +186,13 @@ fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
     // frames of the scheduler, which `tests/` cannot see.
     let program =
         BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
-    let label = program.modules["fun_probe"].exports[&("tail_wait".to_owned(), 1)];
+    let label = program.modules["fun_probe"].exports[&(
+        program.modules["fun_probe"]
+            .tables
+            .name_id("tail_wait")
+            .unwrap(),
+        1,
+    )];
     let mut scheduler = Scheduler::new(program.atoms.clone());
     scheduler.code = CodeTable::new(program.modules.clone());
     let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
@@ -199,7 +206,9 @@ fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
     ));
     let frames = &scheduler.current_process_mut().frames;
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].function, "-tail_wait/1-fun-0-");
+    let (module_id, function) = (frames[0].module_id, frames[0].function);
+    let module = scheduler.code.module_by_id(module_id).unwrap();
+    assert_eq!(module.tables.name(function), "-tail_wait/1-fun-0-");
 }
 
 #[test]
@@ -459,12 +468,57 @@ fn rejects_missing_modules_exports_and_function_arities() {
             .to_string()
             .contains("missing export")
     );
-    assert!(
+    assert_eq!(
         make_program(vec![Instruction::Return], 1)
             .execute("fixture", "main", &[])
             .unwrap_err()
-            .to_string()
-            .contains("arity does not match")
+            .to_string(),
+        "call arity does not match fixture:main"
+    );
+}
+
+/// A module name and a function name that hold a non-ASCII character print
+/// as the pinned ERTS prints the atoms of the same names. The pinned ERTS
+/// prints `~p` of the atom `list_to_atom([109, 228, 105, 110])` as the UTF-8
+/// bytes of `mäin` (measured with `mise run erts-eval`), and a Rust `String`
+/// holds those bytes.
+#[test]
+fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
+    let instructions = vec![
+        Instruction::FunctionInfo {
+            module: "mäin_module".into(),
+            name: "mäin".into(),
+            arity: 0,
+        },
+        Instruction::Label(1),
+        Instruction::Label(2),
+        Instruction::End,
+    ];
+    let exports = HashMap::from([(("mäin".into(), 0), 2)]);
+    let module = BeamModule::new("mäin_module".into(), exports, instructions);
+    let mut program = BeamProgram {
+        modules: HashMap::from([("mäin_module".into(), Rc::new(module))]),
+        atoms: AtomTable::new(),
+    };
+    assert_eq!(
+        program
+            .execute("mäin_module", "mäin", &[])
+            .unwrap_err()
+            .to_string(),
+        "function mäin_module:mäin did not return"
+    );
+    // The export names arity 1 and the function holds arity 0, so the frame
+    // creation gives the arity error.
+    let module = Rc::get_mut(program.modules.get_mut("mäin_module").unwrap()).unwrap();
+    module
+        .exports
+        .insert((module.tables.name_id("mäin").unwrap(), 1), 2);
+    assert_eq!(
+        program
+            .execute("mäin_module", "mäin", &[Term::Integer(1)])
+            .unwrap_err()
+            .to_string(),
+        "call arity does not match mäin_module:mäin"
     );
 }
 
@@ -503,10 +557,9 @@ fn recognizes_runtime_process_identifiers_as_pids() {
         ],
         1,
     );
-    Rc::get_mut(program.modules.get_mut("fixture").unwrap())
-        .unwrap()
-        .exports
-        .insert(("main".into(), 1), 2);
+    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
+    let main = module.tables.name_id("main").unwrap();
+    module.exports.insert((main, 1), 2);
 
     assert_eq!(
         program
@@ -1487,12 +1540,12 @@ fn rejects_call_stack_and_return_errors() {
             .to_string()
             .contains("return before setting x0")
     );
-    assert!(
+    assert_eq!(
         make_program(vec![Instruction::End], 0)
             .execute("fixture", "main", &[])
             .unwrap_err()
-            .to_string()
-            .contains("did not return")
+            .to_string(),
+        "function fixture:main did not return"
     );
     assert!(
         make_program(vec![Instruction::Unsupported(6)], 0)
@@ -1607,7 +1660,6 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         // `child/1` does not read its argument.
         let mut program = make_program(body, 0);
         let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-        module.exports.insert(("child".into(), 1), 11);
         module.instructions.extend([
             Instruction::FunctionInfo {
                 module: "fixture".into(),
@@ -1619,6 +1671,8 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
             Instruction::Return,
         ]);
         module.reindex();
+        let child = module.tables.name_id("child").unwrap();
+        module.exports.insert((child, 1), 11);
         program
             .execute("fixture", "main", &[])
             .unwrap_err()
@@ -2386,11 +2440,6 @@ fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamErr
 fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
     let mut program = make_program(body, 0);
     let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-    module.exports.extend([
-        (("zero".into(), 0), 11),
-        (("id".into(), 3), 12),
-        (("last".into(), 2), 13),
-    ]);
     let function = |name: &str, arity, label| {
         [
             Instruction::FunctionInfo {
@@ -2427,6 +2476,12 @@ fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
         },
     ]);
     module.reindex();
+    let zero = module.tables.name_id("zero").unwrap();
+    let id = module.tables.name_id("id").unwrap();
+    let last = module.tables.name_id("last").unwrap();
+    module
+        .exports
+        .extend([((zero, 0), 11), ((id, 3), 12), ((last, 2), 13)]);
     program
 }
 
@@ -2714,7 +2769,6 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
     body.extend(wait_forever());
     let mut program = make_program(body, 0);
     let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-    module.exports.insert(("fresh".into(), 0), 11);
     module.instructions.extend([
         Instruction::FunctionInfo {
             module: "fixture".into(),
@@ -2726,6 +2780,8 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
         erlang_call("exit", 1, true),
     ]);
     module.reindex();
+    let fresh = module.tables.name_id("fresh").unwrap();
+    module.exports.insert((fresh, 0), 11);
     // ERTS 29.1.1: after put(k, parent), a spawned process gets
     // undefined for get(k).
     assert!(matches!(
@@ -3204,8 +3260,6 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
         ];
         let mut program = make_program([body, wait_forever()].concat(), 0);
         let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-        module.exports.insert(("burner".into(), 0), 21);
-        module.exports.insert(("sender".into(), 1), 25);
         let function = |name: &str, arity, label| {
             [
                 Instruction::FunctionInfo {
@@ -3240,6 +3294,10 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
             Instruction::Return,
         ]);
         module.reindex();
+        let burner = module.tables.name_id("burner").unwrap();
+        let sender = module.tables.name_id("sender").unwrap();
+        module.exports.insert((burner, 0), 21);
+        module.exports.insert((sender, 1), 25);
         program.execute("fixture", "main", &[]).unwrap()
     };
     // 3998 entries, the entry of `inner`, and its return leave 0. The
