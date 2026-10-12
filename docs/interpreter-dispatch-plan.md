@@ -1,6 +1,6 @@
 # Interpreter dispatch plan
 
-Owning epic: #506. Step tasks: #507 to #518.
+Owning epic: #506. Step tasks: #508 to #518.
 
 Status: plan for owner review. This document covers the interpreter dispatch work only. The term representation work has its own design documents (`docs/term-performance-design-codex-v2.md`, `docs/term-performance-design-deepseek-v2.md`).
 
@@ -195,7 +195,7 @@ Each step is one focused PR with one acceptance test, one measurement, and one g
 | 9 | Combined instruction pairs | Every exit from each pair, its exception state, its reduction charge, and its message order against pinned ERTS. | Floor loop per original instruction; Terra redraw. | The floor loop is at most 150 ns for each iteration. |
 | 10 | Process heap with `Box` and `Rc`; binary `Arc<[u8]>`; shared module `Arc` | Send, ETS, persistent term, timer, and exit reason values; cross-thread release; a deep send. | Arc and Rc clone/drop counts for each original instruction; floor loop; Terra key latency. | At least a 15 percent floor-loop gain over step 9 with no value change. If the counts stay below 20 percent of loop time, stop and report the ceiling. |
 
-The order matters in these places. Step 1 must come before step 2, because the cursor needs the tables. Step 4 must come before step 5, because the borrowed path needs the resolved identifier. Step 6 decides whether steps 7 and 8 are worth their risk. Step 10 must come after step 9, because a measured dispatch cost decides whether the ownership work can pay.
+The order matters in these places. Step 1 must come before step 2, because the cursor needs the tables. Step 4 must come before step 5, because the borrowed path needs the resolved identifier. Step 6 decides whether step 8 is worth its risk. Step 7 is independent of the instruction representation. Step 10 must come after step 9, because a measured dispatch cost decides whether the ownership work can pay.
 
 ## 8. Targets and falsifiers
 
