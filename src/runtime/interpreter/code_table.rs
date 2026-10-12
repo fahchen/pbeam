@@ -335,6 +335,7 @@ pub(in crate::runtime) fn frame(
     }
     Ok(Frame {
         module: module.name.clone(),
+        module_id: module.id,
         function: function.name.to_owned(),
         next_instruction: function.start,
         stack: Vec::new(),

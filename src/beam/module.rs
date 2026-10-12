@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     hash::{BuildHasherDefault, Hasher},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use super::code::{self, Instruction, Operand};
@@ -47,9 +48,33 @@ impl Default for LabelHasher {
     }
 }
 
+/// The identity of a loaded module. [`BeamModule::new`] gives each module a
+/// number, and the run loop compares two numbers instead of two module names.
+/// The loader owns the number for the whole life of the module, so a frame
+/// that names a module stays valid in each run that shares the code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ModuleId(u32);
+
+impl ModuleId {
+    /// Return the number of a new module, which no other module of this
+    /// runtime has.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_ne!(ModuleId::next(), ModuleId::next());
+    /// ```
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        ModuleId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 #[derive(Debug)]
 pub struct BeamModule {
     pub(crate) name: String,
+    /// The identity of the module, for the run loop.
+    pub(crate) id: ModuleId,
     pub(crate) exports: HashMap<(String, u32), u32>,
     pub(crate) instructions: Vec<Instruction>,
     /// The side tables of `instructions`, which the loader builds once (see
@@ -154,6 +179,7 @@ impl BeamModule {
         let tables = ModuleTables::build(&name, &instructions);
         BeamModule {
             name,
+            id: ModuleId::next(),
             exports,
             instructions,
             tables,
