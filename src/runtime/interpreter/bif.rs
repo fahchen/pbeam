@@ -286,6 +286,89 @@ struct BifContext<'a> {
     scheduler: &'a mut Scheduler,
 }
 
+/// The largest number of arguments that the borrowed BIF path holds.
+///
+/// The path holds the arguments in this struct, so it needs no `Vec<Term>`
+/// for one call. The instruction set gives a `bif` instruction at most the
+/// three arguments of `gc_bif3`, so the path covers every `bif`
+/// instruction.
+pub(super) const MAX_BORROWED_ARGUMENTS: usize = 3;
+
+/// The argument terms of one BIF call of at most
+/// [`MAX_BORROWED_ARGUMENTS`] terms.
+///
+/// The caller reads the arguments into this struct one time, and [`Self::with`]
+/// passes them to a body as a borrowed slice. The body may borrow the
+/// scheduler at the same time, because the slice borrows this struct and not
+/// the scheduler. A body that stores the arguments for a later turn copies
+/// them (see [`BifResult::TrapBif`]).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut arguments = BifArguments::new();
+/// arguments.push(Term::Integer(1));
+/// arguments.push(Term::Integer(2));
+/// assert_eq!(arguments.with(|terms| terms.to_vec()), vec![Term::Integer(1), Term::Integer(2)]);
+/// ```
+pub(super) struct BifArguments {
+    /// The terms of the arguments. A slot at or above the length holds `nil`
+    /// and stays outside the slice of [`Self::with`].
+    terms: [Term; MAX_BORROWED_ARGUMENTS],
+    /// The number of terms that [`Self::push`] wrote.
+    len: usize,
+}
+
+impl BifArguments {
+    /// Return an empty argument list.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(BifArguments::new().with(|terms| terms.len()), 0);
+    /// ```
+    pub(super) fn new() -> Self {
+        Self {
+            terms: std::array::from_fn(|_| Term::nil()),
+            len: 0,
+        }
+    }
+
+    /// Add one argument term to the end of the list.
+    ///
+    /// # Panics
+    ///
+    /// The reader checks the count against [`MAX_BORROWED_ARGUMENTS`] before
+    /// it pushes, so a full list is a caller error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut arguments = BifArguments::new();
+    /// arguments.push(Term::Integer(1));
+    /// assert_eq!(arguments.with(|terms| terms.to_vec()), vec![Term::Integer(1)]);
+    /// ```
+    pub(super) fn push(&mut self, term: Term) {
+        self.terms[self.len] = term;
+        self.len += 1;
+    }
+
+    /// Call `body` with the arguments as a borrowed slice. The slice is valid
+    /// only for the call of `body`, which may borrow the scheduler at the
+    /// same time.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut arguments = BifArguments::new();
+    /// arguments.push(Term::Integer(1));
+    /// assert_eq!(arguments.with(|terms| terms.len()), 1);
+    /// ```
+    pub(super) fn with<R>(&self, body: impl FnOnce(&[Term]) -> R) -> R {
+        body(&self.terms[..self.len])
+    }
+}
+
 /// Build the BIF identities and the BIF dispatch from one table.
 ///
 /// Each entry is a `bif.tab` entry: `module:name/arity`, then `unsupported`
@@ -531,7 +614,7 @@ impl BeamProgram {
         arguments: Vec<Term>,
     ) -> Result<BifResult, BeamError> {
         let resolved = resolve(module, name, arguments.len() as u32);
-        self.call_bif(scheduler, module, name, resolved, arguments)
+        self.call_bif(scheduler, module, name, resolved, &arguments)
     }
 
     /// Run the BIF of an external call or an apply.
@@ -539,13 +622,14 @@ impl BeamProgram {
     /// `resolved` is the identity of the MFA when the caller holds one: the
     /// loader stores it in a `call_ext` instruction, and the identity lookup
     /// of the call gives it for a `bif` instruction. `None` selects the name
-    /// path of a PBeam BIF.
+    /// path of a PBeam BIF. The arguments are borrowed, so a caller that
+    /// holds them in a [`BifArguments`] passes them with no copy.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let resolved = resolve("erlang", "make_ref", 0);
-    /// let value = program.call_bif(&mut scheduler, "erlang", "make_ref", resolved, vec![])?;
+    /// let value = program.call_bif(&mut scheduler, "erlang", "make_ref", resolved, &[])?;
     /// assert!(matches!(value, BifResult::Value(Term::Reference(_))));
     /// ```
     pub(super) fn call_bif(
@@ -554,10 +638,10 @@ impl BeamProgram {
         module: &str,
         name: &str,
         resolved: Option<BifId>,
-        arguments: Vec<Term>,
+        arguments: &[Term],
     ) -> Result<BifResult, BeamError> {
         match resolved {
-            Some(id) => self.bif_resolved(scheduler, id, arguments),
+            Some(id) => self.bif_slice(scheduler, id, arguments),
             None => self.named_bif(scheduler, module, name, arguments),
         }
     }
@@ -572,8 +656,8 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let result = program.named_bif(&mut scheduler, "pbeam_cap", "revoke", vec![holder, kind])?;
-    /// let error = program.named_bif(&mut scheduler, "erlang", "date", vec![]).unwrap_err();
+    /// let result = program.named_bif(&mut scheduler, "pbeam_cap", "revoke", &[holder, kind])?;
+    /// let error = program.named_bif(&mut scheduler, "erlang", "date", &[]).unwrap_err();
     /// assert_eq!(error.to_string(), "unresolved external MFA erlang:date/0");
     /// ```
     fn named_bif(
@@ -581,9 +665,9 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         module: &str,
         name: &str,
-        arguments: Vec<Term>,
+        arguments: &[Term],
     ) -> Result<BifResult, BeamError> {
-        match (module, name, arguments.as_slice()) {
+        match (module, name, arguments) {
             ("pbeam_cap", "revoke", [holder, kind]) => pbeam_cap::revoke(scheduler, holder, kind),
             ("pbeam_cap", "request", [kind, request]) => {
                 pbeam_cap::request(scheduler, kind, request)
@@ -605,17 +689,17 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let value = program.bif_resolved(&mut scheduler, BifId::ErlangMakeRef0, vec![])?;
+    /// let value = program.bif_slice(&mut scheduler, BifId::ErlangMakeRef0, &[])?;
     /// assert!(matches!(value, BifResult::Value(Term::Reference(_))));
     /// ```
-    pub(super) fn bif_resolved(
+    pub(super) fn bif_slice(
         &self,
         scheduler: &mut Scheduler,
         id: BifId,
-        arguments: Vec<Term>,
+        arguments: &[Term],
     ) -> Result<BifResult, BeamError> {
         let mut context = BifContext { scheduler };
-        table::dispatch(&mut context, id, &arguments)
+        table::dispatch(&mut context, id, arguments)
     }
 
     /// Run the export of a BIF trap with the arguments of the trap, as the

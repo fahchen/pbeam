@@ -106,6 +106,10 @@ name = "bif_audit"
 path = "tests/integration/bif_audit.rs"
 
 [[test]]
+name = "bif_allocations"
+path = "tests/integration/bif_allocations.rs"
+
+[[test]]
 name = "bif_costs"
 path = "tests/integration/bif_costs.rs"
 

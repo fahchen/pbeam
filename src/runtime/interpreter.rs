@@ -25,7 +25,10 @@ mod native;
 
 pub(super) use code_table::CodeTable;
 
-use bif::{BifId, BifResult, is_function, is_heavy_bif, is_pbeam_bif, mfa, resolve, send};
+use bif::{
+    BifArguments, BifId, BifResult, MAX_BORROWED_ARGUMENTS, is_function, is_heavy_bif,
+    is_pbeam_bif, mfa, resolve, send,
+};
 use bits::BitWriter;
 
 /// The largest number of arguments of `erlang:apply/3`. ERTS `apply` copies
@@ -810,17 +813,23 @@ impl BeamProgram {
                     // (`jit/arm/ops.tab:1329-1333`). At a trap, it keeps
                     // its trap state, switches out, and runs again when the
                     // process runs again (`jit/arm/instr_bif.cpp:253-272`).
+                    // The argument `Vec<Term>` of a `bif` instruction is
+                    // one of the two allocations that remain on the call
+                    // path (step 3 of the plan), so the pure leaf path reads
+                    // its terms into a `BifArguments` and passes the
+                    // borrowed slice. The loader gives a `bif` instruction
+                    // at most `MAX_BORROWED_ARGUMENTS` arguments, so the
+                    // path covers every `bif` instruction.
                     let result = if let Some(state) = process.length_trap.take() {
                         self.bif_trap(scheduler, "erlang", "length", state)?
                     } else {
-                        let values = arguments
-                            .iter()
-                            .map(|argument| read_any(process, argument))
-                            .collect::<Result<Vec<_>, _>>()?;
+                        let values = read_bif_arguments(process, arguments)?;
                         cursor.commit(process);
-                        match match_context_byte_size(*bif, arguments, &values)? {
+                        let size =
+                            values.with(|terms| match_context_byte_size(*bif, arguments, terms))?;
+                        match size {
                             Some(size) => BifResult::Value(size),
-                            None => self.bif_resolved(scheduler, *bif, values)?,
+                            None => values.with(|terms| self.bif_slice(scheduler, *bif, terms))?,
                         }
                     };
                     let process = scheduler.current_process_mut();
@@ -1741,7 +1750,7 @@ impl BeamProgram {
                 return Ok(Some(Outcome::Yield));
             }
             let arguments = call_arguments(&process.registers, arity)?;
-            let result = self.call_bif(scheduler, module, name, bif, arguments)?;
+            let result = self.call_bif(scheduler, module, name, bif, &arguments)?;
             return self.finish_bif(scheduler, result, false);
         }
         // The loader classified the import, and an import that is not a BIF
@@ -1782,7 +1791,7 @@ impl BeamProgram {
         if resolved.is_some() || is_pbeam_bif(module, name, arity) {
             let process = scheduler.current_process_mut();
             let arguments = call_arguments(&process.registers, arity)?;
-            let result = self.call_bif(scheduler, module, name, resolved, arguments)?;
+            let result = self.call_bif(scheduler, module, name, resolved, &arguments)?;
             return self.finish_bif(scheduler, result, tail);
         }
         self.call_export(scheduler, module, name, arity, tail)
@@ -3123,6 +3132,41 @@ fn function_at_label(module: &BeamModule, target: u32) -> Result<Function, BeamE
             module.name
         ))),
     }
+}
+
+/// Read the argument operands of a `bif` instruction into a
+/// [`BifArguments`], which holds at most [`MAX_BORROWED_ARGUMENTS`] terms.
+/// Each operand must be set, and a match context is a runtime invariant
+/// error, as it is for a call argument. The loader gives a `bif`
+/// instruction at most [`MAX_BORROWED_ARGUMENTS`] arguments, so this
+/// function holds every argument of an instruction that the loader loads.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let arguments = read_bif_arguments(&process, &[Operand::X(0)])?;
+/// assert_eq!(arguments.with(|terms| terms.len()), 1);
+/// assert!(read_bif_arguments(&process, &[Operand::X(7)]).is_err());
+/// ```
+///
+/// # Errors
+///
+/// An unset operand, a match context, or a call with more than
+/// [`MAX_BORROWED_ARGUMENTS`] arguments.
+fn read_bif_arguments(
+    process: &ProcessState,
+    operands: &[Operand],
+) -> Result<BifArguments, BeamError> {
+    if operands.len() > MAX_BORROWED_ARGUMENTS {
+        return Err(error(format!(
+            "a BIF call holds more than {MAX_BORROWED_ARGUMENTS} borrowed arguments"
+        )));
+    }
+    let mut arguments = BifArguments::new();
+    for operand in operands {
+        arguments.push(read_any(process, operand)?);
+    }
+    Ok(arguments)
 }
 
 /// Copy the first `arity` X registers as call arguments. Each register

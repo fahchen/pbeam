@@ -3,7 +3,7 @@ use std::{collections::HashMap, rc::Rc};
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
     BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
-    read_operand, write_operand,
+    read_bif_arguments, read_operand, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -11,9 +11,9 @@ use crate::{
     runtime::{
         capability::{AllowAll, Capability, Policy},
         ets::{Access, Table},
-        process::tests::frame,
+        process::{ProcessState, Start, tests::frame},
     },
-    term::{Atom, AtomTable, Lambda, Reference, test_atom},
+    term::{Atom, AtomTable, Lambda, ProcessId, Reference, test_atom},
 };
 
 /// Return the initial capabilities of the default policy.
@@ -2093,6 +2093,27 @@ fn handles_register_values_and_reports_invalid_registers() {
             Term::Integer(1),
             &mut registers,
             &mut []
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn reads_bif_arguments_into_a_fixed_buffer_and_reports_invalid_operands() {
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    process.registers = vec![Some(Term::Integer(7))];
+    let arguments =
+        read_bif_arguments(&process, &[Operand::X(0), Operand::Value(Term::Integer(9))])
+            .expect("two set operands are valid arguments");
+    assert_eq!(
+        arguments.with(|terms| terms.to_vec()),
+        vec![Term::Integer(7), Term::Integer(9)]
+    );
+    assert!(read_bif_arguments(&process, &[Operand::X(1)]).is_err());
+    assert!(
+        read_bif_arguments(
+            &process,
+            &[Operand::X(0), Operand::X(0), Operand::X(0), Operand::X(0)]
         )
         .is_err()
     );
