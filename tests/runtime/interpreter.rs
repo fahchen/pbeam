@@ -1,6 +1,6 @@
 use std::{collections::HashMap, rc::Rc};
 
-use super::bif::{BIFS, BifResult};
+use super::bif::{BIFS, BifId, BifResult, resolve};
 use super::{
     BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
     read_operand, write_operand,
@@ -54,6 +54,7 @@ fn erlang_call(name: &str, arity: u32, tail: bool) -> Instruction {
         arity,
         module: "erlang".into(),
         name: name.into(),
+        bif: resolve("erlang", name, arity),
         tail,
         deallocate: 0,
     }
@@ -432,22 +433,11 @@ fn rejects_invalid_tuple_access_receives_and_bifs() {
     assert!(
         error(vec![Instruction::Bif {
             fail_label: 0,
-            module: "erlang".into(),
-            name: "date".into(),
+            bif: resolve("erlang", "date", 0).unwrap(),
             arguments: Vec::new(),
             destination: Operand::X(0),
         }])
         .contains("unresolved external MFA erlang:date/0")
-    );
-    assert!(
-        error(vec![Instruction::Bif {
-            fail_label: 0,
-            module: "lists".into(),
-            name: "node".into(),
-            arguments: Vec::new(),
-            destination: Operand::X(0),
-        }])
-        .contains("unsupported BIF lists:node/0")
     );
 }
 
@@ -793,6 +783,7 @@ fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
                 arity: 2,
                 module: "maps".into(),
                 name: "merge".into(),
+                bif: resolve("maps", "merge", 2),
                 tail: true,
                 deallocate: 0,
             },
@@ -818,6 +809,7 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
                 arity: 1,
                 module: "maps".into(),
                 name: "from_list".into(),
+                bif: resolve("maps", "from_list", 1),
                 tail: true,
                 deallocate: 0,
             },
@@ -844,6 +836,7 @@ fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
                 arity: 3,
                 module: "maps".into(),
                 name: "put".into(),
+                bif: resolve("maps", "put", 3),
                 tail: true,
                 deallocate: 0,
             },
@@ -865,6 +858,7 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
                     arity: 1,
                     module: "maps".into(),
                     name: "keys".into(),
+                    bif: resolve("maps", "keys", 1),
                     tail: true,
                     deallocate: 0,
                 },
@@ -911,6 +905,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
                 arity: 1,
                 module: "maps".into(),
                 name: "keys".into(),
+                bif: resolve("maps", "keys", 1),
                 tail: true,
                 deallocate: 0,
             },
@@ -954,6 +949,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
                 arity: 3,
                 module: "lists".into(),
                 name: "keysearch".into(),
+                bif: resolve("lists", "keysearch", 3),
                 tail: true,
                 deallocate: 0,
             },
@@ -1037,6 +1033,7 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
                     arity: 2,
                     module: "unicode".into(),
                     name: "characters_to_binary".into(),
+                    bif: resolve("unicode", "characters_to_binary", 2),
                     tail: true,
                     deallocate: 0,
                 },
@@ -1522,6 +1519,7 @@ fn rejects_call_stack_and_return_errors() {
                     arity: 0,
                     module: "absent".into(),
                     name: "run".into(),
+                    bif: resolve("absent", "run", 0),
                     tail: true,
                     deallocate: 0
                 }
@@ -1689,8 +1687,7 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
     assert_eq!(
         run(vec![Instruction::Bif {
             fail_label: 0,
-            module: "erlang".into(),
-            name: "hd".into(),
+            bif: BifId::ErlangHd1,
             arguments: vec![Operand::X(0)],
             destination: Operand::X(1),
         }]),
@@ -1702,6 +1699,7 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
             arity: 1,
             module: "fixture".into(),
             name: "child".into(),
+            bif: resolve("fixture", "child", 1),
             tail: false,
             deallocate: 0,
         }]),
@@ -1858,8 +1856,7 @@ fn run_binary_match(
 fn byte_size(argument: Operand) -> Instruction {
     Instruction::Bif {
         fail_label: 0,
-        module: "erlang".into(),
-        name: "byte_size".into(),
+        bif: BifId::ErlangByteSize1,
         arguments: vec![argument],
         destination: Operand::X(0),
     }
@@ -2309,8 +2306,7 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
         erlang_call("make_ref", 0, false),
         Instruction::Bif {
             fail_label: 0,
-            module: "erlang".into(),
-            name: "demonitor".into(),
+            bif: BifId::ErlangDemonitor2,
             arguments: vec![
                 Operand::X(0),
                 Operand::Value(Term::list_from(vec![test_atom("flush")])),
@@ -2330,20 +2326,18 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
 
 #[test]
 fn returns_the_local_node_for_node_0_and_a_pid() {
-    let node = |arguments: Vec<Operand>| {
+    let node = |bif: BifId, arguments: Vec<Operand>| {
         make_program(
             vec![
                 Instruction::Bif {
                     fail_label: 0,
-                    module: "erlang".into(),
-                    name: "self".into(),
+                    bif: BifId::ErlangSelf0,
                     arguments: Vec::new(),
                     destination: Operand::X(1),
                 },
                 Instruction::Bif {
                     fail_label: 0,
-                    module: "erlang".into(),
-                    name: "node".into(),
+                    bif,
                     arguments,
                     destination: Operand::X(0),
                 },
@@ -2355,15 +2349,17 @@ fn returns_the_local_node_for_node_0_and_a_pid() {
     };
     // ERTS 29.1.1 without distribution: node() and node(self()) are nonode@nohost.
     assert_eq!(
-        node(Vec::new()).unwrap(),
+        node(BifId::ErlangNode0, Vec::new()).unwrap(),
         Term::static_atom("nonode@nohost")
     );
     assert_eq!(
-        node(vec![Operand::X(1)]).unwrap(),
+        node(BifId::ErlangNode1, vec![Operand::X(1)]).unwrap(),
         Term::static_atom("nonode@nohost")
     );
     assert_eq!(
-        node(vec![atom("foo")]).unwrap_err().to_string(),
+        node(BifId::ErlangNode1, vec![atom("foo")])
+            .unwrap_err()
+            .to_string(),
         "unsupported erlang:node/1 argument Atom(\"foo\"): not a pid"
     );
 }
@@ -2692,6 +2688,7 @@ fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term,
         arity,
         module: module.into(),
         name: name.into(),
+        bif: resolve(module, name, arity),
         tail: true,
         deallocate: 0,
     });
@@ -2702,8 +2699,7 @@ fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term,
 fn get_bif(key: &str, destination: Operand) -> Instruction {
     Instruction::Bif {
         fail_label: 0,
-        module: "erlang".into(),
-        name: "get".into(),
+        bif: BifId::ErlangGet1,
         arguments: vec![atom(key)],
         destination,
     }
@@ -2933,8 +2929,7 @@ fn finds_list_members_as_pinned_erts() {
 fn element_bif(index: i64, tuple: Operand, destination: Operand) -> Instruction {
     Instruction::Bif {
         fail_label: 0,
-        module: "erlang".into(),
-        name: "element".into(),
+        bif: BifId::ErlangElement2,
         arguments: vec![Operand::Value(Term::Integer(index)), tuple],
         destination,
     }
@@ -3023,8 +3018,7 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
     let body = vec![
         Instruction::Bif {
             fail_label: 0,
-            module: "erlang".into(),
-            name: "self".into(),
+            bif: BifId::ErlangSelf0,
             arguments: Vec::new(),
             destination: Operand::X(0),
         },
@@ -3244,8 +3238,7 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
             erlang_call("spawn_opt", 4, false),
             Instruction::Bif {
                 fail_label: 0,
-                module: "erlang".into(),
-                name: "self".into(),
+                bif: BifId::ErlangSelf0,
                 arguments: Vec::new(),
                 destination: Operand::X(1),
             },
@@ -3324,14 +3317,16 @@ fn rejects_integer_conversions_of_a_bignum_with_no_reductions_left() {
     // has no reduction test. ERTS then runs `integer_to_list/1` and
     // `integer_to_binary/1` of a bignum on a dirty CPU scheduler
     // (`bif.c:3289-3296`, `binary.c:98-105`).
-    for name in ["integer_to_list", "integer_to_binary"] {
+    for (name, bif) in [
+        ("integer_to_list", BifId::ErlangIntegerToList1),
+        ("integer_to_binary", BifId::ErlangIntegerToBinary1),
+    ] {
         let body = vec![
             Instruction::Move(Operand::Value(Term::Integer(4000)), Operand::X(0)),
             erlang_call("bump_reductions", 1, false),
             Instruction::Bif {
                 fail_label: 0,
-                module: "erlang".into(),
-                name: name.into(),
+                bif,
                 arguments: vec![Operand::Value(Term::Integer(1 << 59))],
                 destination: Operand::X(0),
             },
@@ -3413,4 +3408,23 @@ fn shares_the_stored_term_of_a_persistent_term() {
         panic!("persistent_term:get/1 did not return a value");
     };
     assert!(value.shares_storage_with(&stored));
+}
+
+#[test]
+fn rejects_a_bif_name_that_no_table_entry_holds() {
+    // The name path of `BeamProgram::bif` runs a `bif.tab` entry or a PBeam
+    // BIF of `PBEAM_BIFS`. An MFA that neither holds gives the unresolved
+    // MFA error, which is the error that the run gave before the loader
+    // resolved the identity of a BIF.
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new(program.atoms.clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    assert_eq!(
+        program
+            .bif(&mut scheduler, "erlang", "no_such_bif", vec![])
+            .unwrap_err()
+            .to_string(),
+        "unresolved external MFA erlang:no_such_bif/0"
+    );
 }

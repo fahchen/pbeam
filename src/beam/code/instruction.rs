@@ -7,6 +7,7 @@ use super::{
     read_value,
 };
 use crate::error::{BeamError, error};
+use crate::runtime::{BifId, resolve_bif};
 use crate::term::{Atom, Lambda, Term};
 use std::num::NonZeroU64;
 
@@ -238,6 +239,11 @@ pub(crate) enum Instruction {
         arity: u32,
         module: String,
         name: String,
+        /// The BIF of the MFA when the import names a `bif.tab` entry. The
+        /// parser resolves it, as the ERTS loader binds the import of a BIF
+        /// to the BIF (`emu_load.c`), so a call that is not a BIF searches
+        /// no table. `None` is a call of module code and of a PBeam BIF.
+        bif: Option<BifId>,
         tail: bool,
         deallocate: u32,
     },
@@ -346,10 +352,11 @@ pub(crate) enum Instruction {
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
-        /// Module of the BIF, for example `erlang`.
-        module: String,
-        /// Name of the BIF, for example `node`.
-        name: String,
+        /// The BIF of the import that the instruction calls. The parser
+        /// resolves the MFA of the import to its identity, as the ERTS
+        /// loader binds the import of a BIF to the BIF (`emu_load.c`), so
+        /// the instruction holds no name and the run searches no table.
+        bif: BifId,
         /// Argument operands of the BIF, in argument order.
         arguments: Vec<Operand>,
         /// Register for the BIF value.
@@ -2025,13 +2032,17 @@ pub(super) fn parse_code(
                 instructions.push(match (module.as_str(), name.as_str(), arity) {
                     ("erlang", "hibernate", 0) => Instruction::Hibernate,
                     ("erlang", "yield", 0) => Instruction::Yield,
-                    _ => Instruction::CallExternal {
-                        arity,
-                        module: module.clone(),
-                        name: name.clone(),
-                        tail: opcode != OPCODE_CALL_EXT,
-                        deallocate,
-                    },
+                    _ => {
+                        let bif = resolve_bif(module, name, arity);
+                        Instruction::CallExternal {
+                            arity,
+                            module: module.clone(),
+                            name: name.clone(),
+                            bif,
+                            tail: opcode != OPCODE_CALL_EXT,
+                            deallocate,
+                        }
+                    }
                 });
                 if opcode == OPCODE_CALL_EXT_LAST {
                     instructions.push(Instruction::Deallocate {
@@ -2057,14 +2068,14 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_BIF0 => {
-                let (module, name) = bif_import(
+                let bif = bif_import(
                     imports,
                     read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
+                    0,
                 )?;
                 Instruction::Bif {
                     fail_label: 0,
-                    module,
-                    name,
+                    bif,
                     arguments: Vec::new(),
                     destination: read_register(data, &mut cursor)?,
                 }
@@ -2074,22 +2085,22 @@ pub(super) fn parse_code(
                 if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3) {
                     skip_live_registers(data, &mut cursor)?;
                 }
-                let (module, name) = bif_import(
-                    imports,
-                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
-                )?;
                 let argument_count = match opcode {
                     OPCODE_BIF1 | OPCODE_GC_BIF1 => 1,
                     OPCODE_GC_BIF3 => 3,
                     _ => 2,
                 };
+                let bif = bif_import(
+                    imports,
+                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
+                    argument_count,
+                )?;
                 let arguments = (0..argument_count)
                     .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
                     .collect::<Result<Vec<_>, _>>()?;
                 Instruction::Bif {
                     fail_label,
-                    module,
-                    name,
+                    bif,
                     arguments,
                     destination: read_register(data, &mut cursor)?,
                 }
@@ -2130,23 +2141,30 @@ pub(super) fn parse_code(
     }
 }
 
-/// Return the module and name of the import that a `bif` instruction calls.
+/// Return the identity of the BIF that import `index` of a `bif`
+/// instruction calls at `arity`.
+///
+/// The arity is the one of the opcode, which is the one of the call. The
+/// import index of a malformed module and the MFA of an import that no
+/// `bif.tab` entry names are loader errors.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let imports = vec![("erlang".to_owned(), "node".to_owned(), 0)];
-/// assert_eq!(bif_import(&imports, 0)?, ("erlang".to_owned(), "node".to_owned()));
-/// assert!(bif_import(&imports, 1).is_err());
+/// assert_eq!(bif_import(&imports, 0, 0)?, BifId::ErlangNode0);
+/// assert!(bif_import(&imports, 1, 0).is_err());
 /// ```
 fn bif_import(
     imports: &[(String, String, u32)],
     index: usize,
-) -> Result<(String, String), BeamError> {
+    arity: u32,
+) -> Result<BifId, BeamError> {
     let (module, name, _arity) = imports
         .get(index)
         .ok_or_else(|| error(format!("BEAM BIF import index {index} out of range")))?;
-    Ok((module.clone(), name.clone()))
+    resolve_bif(module, name, arity)
+        .ok_or_else(|| error(format!("unsupported BIF {module}:{name}/{arity}")))
 }
 
 /// Return the type checked by a BEAM type-test opcode.
