@@ -199,8 +199,8 @@ The local `call_only` floor loop at 200000 iterations is the reference. The step
 | The average for each instruction of the loop (computed: the floor-loop number divided by the 4 instructions that one iteration retires) | about 126 ns | about 41.9 ns |
 | The added delta of `gc_bif '+'` | 248.9 ns | 75.6 ns |
 | The added delta of the `bif` of `tuple_size/1` | 238.1 ns | 80.0 ns |
-| The added delta of the `bif` of `element/2` (the ERTS BIF `get_tuple_element`) | 242.7 ns | 81.8 ns |
-| The added delta of the `bif` of `hd/1` (the ERTS BIF `get_hd`) | 253.3 ns | 77.3 ns |
+| The added delta of the `bif` of `erlang:element/2` | 242.7 ns | 81.8 ns |
+| The added delta of the `bif` of `erlang:hd/1` | 253.3 ns | 77.3 ns |
 | The added delta of the `bif` of `map_get/2` on a 1000-key map | 358.9 ns | 159.2 ns |
 | The whole module-qualified `floor_ext_loop` (`call_ext_only`), for each iteration | 562.6 ns | 289.3 ns |
 
