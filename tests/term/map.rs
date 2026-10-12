@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{hint::black_box, sync::Arc, time::Instant};
 
 use super::{Child, Direction, HAMT_MAX_LEVEL, Hamt, Map, Node, Repr, encode_path, map_hash};
 use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom};
@@ -395,7 +395,7 @@ fn shares_the_form_of_a_map_between_the_copies_of_a_term() {
         };
         let copied = copied[0].list_head().unwrap();
         for copy in [&map.clone(), copied] {
-            assert!(Arc::ptr_eq(&map_of(&map).repr, &map_of(copy).repr));
+            assert!(Arc::ptr_eq(map_of(&map).arc(), map_of(copy).arc()));
             assert_eq!(copy, &map);
         }
     }
@@ -408,14 +408,14 @@ fn copies_a_shared_form_before_a_change() {
             let map = integers(1..=size);
             let mut copy = map.clone();
             change(&mut copy);
-            assert!(!Arc::ptr_eq(&map.repr, &copy.repr));
+            assert!(!Arc::ptr_eq(map.arc(), copy.arc()));
             assert_eq!(keys(&map), keys(&integers(1..=size)));
             assert!(map.iter().all(|(_, value)| *value == atom("v")));
             assert_eq!(map.is_hashmap(), size > 32);
             // The copy that changed is only owner of its form now, so a second change does not copy it.
-            let form = Arc::as_ptr(&copy.repr);
+            let form = Arc::as_ptr(copy.arc());
             change(&mut copy);
-            assert_eq!(Arc::as_ptr(&copy.repr), form);
+            assert_eq!(Arc::as_ptr(copy.arc()), form);
         }
     };
     change(|map| *map.get_mut(&Term::Integer(1)).unwrap() = atom("w"));
@@ -460,7 +460,7 @@ fn copies_only_the_hashmap_nodes_on_the_path_of_a_change() {
     let change = |key: i64, shared: usize, change: fn(&mut Map, Term)| {
         let mut copy = map.clone();
         change(&mut copy, Term::Integer(key));
-        let (Repr::Hash(old), Repr::Hash(new)) = (&*map.repr, &*copy.repr) else {
+        let (Repr::Hash(old), Repr::Hash(new)) = (&**map.arc(), &**copy.arc()) else {
             panic!("not a hashmap")
         };
         let hash = map_hash(&Term::Integer(key)).unwrap();
@@ -491,7 +491,9 @@ fn drains_the_pairs_of_a_map_only_from_the_last_copy() {
         drop(map);
         copy.drain_into(&mut pending);
         assert_eq!(pending.len(), 2 * size as usize);
-        assert_eq!(copy.len(), 0);
+        // The last holder takes the form, so the map has no form after the
+        // drain, as a tuple has no array after `Tuple::take_last`.
+        assert!(copy.repr.is_none());
         pending.clear();
     }
 
@@ -642,7 +644,7 @@ fn keeps_keys_with_equal_hashes_in_a_collision_child() {
     }
     assert_eq!(collision_levels, [HAMT_MAX_LEVEL]);
     let mut map = Map {
-        repr: Repr::Hash(hamt).into(),
+        repr: Some(Repr::Hash(hamt).into()),
     };
     let pairs: Vec<_> = map
         .iter()
@@ -874,4 +876,84 @@ fn counts_the_steps_of_the_erts_hashmap_merge() {
     for (map, other, cost) in costs {
         assert_eq!(map.merge_steps(&other).map(|steps| steps / 8), Some(cost));
     }
+}
+
+/// The number of timed runs of each map operation of
+/// [`records_the_map_operation_cost`]. The report gives the minimum of the
+/// runs.
+const MAP_COST_RUNS: usize = 9;
+
+/// The number of rounds of one timed run of a map operation. The test profile
+/// runs fewer rounds, because the check gate only proves that the measurement
+/// runs; the report numbers come from the release profile.
+const MAP_COST_ROUNDS: usize = if cfg!(debug_assertions) { 20 } else { 200 };
+
+/// Print the cost of one call of `body`, in nanosecond, as the minimum of
+/// [`MAP_COST_RUNS`] runs. `calls` is the number of calls of one run.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// cost("get", 1.0, || 0);
+/// ```
+fn cost(name: &str, calls: f64, body: impl Fn() -> i64) {
+    let mut best = f64::MAX;
+    for _ in 0..MAP_COST_RUNS {
+        let start = Instant::now();
+        let sum = body();
+        let elapsed = start.elapsed().as_nanos() as f64;
+        black_box(sum);
+        best = best.min(elapsed);
+    }
+    println!("{name}: {:.2} ns for each call", best / calls);
+}
+
+/// Record the cost of the map operations that the step 7 gate of
+/// `docs/interpreter-dispatch-plan.md` names: a read of a 1000-key hashmap, a
+/// put on a copy of it, and an iteration over it. Each number is the minimum
+/// of [`MAP_COST_RUNS`] runs, in nanosecond for each call.
+#[test]
+fn records_the_map_operation_cost() {
+    let hashmap = integers(1..=1000);
+    let keys: Vec<Term> = (1..=1000).map(Term::Integer).collect();
+    println!(
+        "map operation cost: minimum of {MAP_COST_RUNS} runs of {MAP_COST_ROUNDS} rounds, in nanosecond for each call"
+    );
+    // The read of a 1000-key hashmap walks the HAMT of the map.
+    cost("get", (MAP_COST_ROUNDS * keys.len()) as f64, || {
+        let mut sum = 0;
+        for _ in 0..MAP_COST_ROUNDS {
+            for key in &keys {
+                if let Some(Term::Integer(value)) = hashmap.get(key) {
+                    sum += *value;
+                }
+            }
+        }
+        sum
+    });
+    // The put of a key that is not in the map: `Map::clone` shares the form
+    // and the put copies the nodes on the path of the key, as the interpreter
+    // does.
+    cost("put", MAP_COST_ROUNDS as f64, || {
+        let mut sum = 0;
+        for key in 0..MAP_COST_ROUNDS {
+            let mut copy = hashmap.clone();
+            copy.insert(Term::Integer(1001 + key as i64), Term::Integer(1))
+                .unwrap();
+            sum += copy.len() as i64;
+        }
+        sum
+    });
+    // The iteration over the pairs of the map in the map order.
+    cost("iterate", (MAP_COST_ROUNDS * 1000) as f64, || {
+        let mut sum = 0;
+        for _ in 0..MAP_COST_ROUNDS {
+            for (_, value) in hashmap.iter() {
+                if let Term::Integer(value) = value {
+                    sum += *value;
+                }
+            }
+        }
+        sum
+    });
 }
