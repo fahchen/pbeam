@@ -7,6 +7,7 @@ use super::{
     scheduler::AliasMode, timer::TimerKey,
 };
 use crate::{
+    beam::ModuleId,
     error::{BeamError, error},
     term::{Atom, PortId, ProcessId, Reference, Term},
 };
@@ -46,6 +47,8 @@ impl LinkId {
 pub(super) struct Frame {
     /// Name of the module that owns the code.
     pub(super) module: String,
+    /// Identity of the module that owns the code, for the run loop.
+    pub(super) module_id: ModuleId,
     /// Name of the function, for error messages.
     pub(super) function: String,
     /// Index of the next instruction to run in the module code.

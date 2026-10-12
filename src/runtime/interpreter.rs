@@ -589,25 +589,27 @@ impl BeamProgram {
             return normal_exit(process);
         }
         // A frame names its module, and the code of a module name does not
-        // change in a run (see `CodeTable`). Thus the loop keeps the module
-        // of the last instruction and looks up the code table only when the
-        // active frame is in another module.
-        let mut current = Rc::clone(scheduler.current_module()?);
+        // change in a run (see `CodeTable`). Thus the cursor keeps the code
+        // of the active frame and looks up the code table only when the
+        // active frame is in another module. The identity of a module is an
+        // integer, so the test of the active module costs no name compare.
+        // Each exit that changes the frame refreshes the cursor.
+        let mut cursor = Cursor::new(scheduler)?;
         loop {
             let process = scheduler.current_process_mut();
-            let frame = current_frame(process);
-            if frame.module != current.name {
-                current = Rc::clone(scheduler.current_module()?);
+            if current_frame(process).module_id != cursor.module.id {
+                cursor.refresh(scheduler)?;
                 continue;
             }
-            let module: &BeamModule = &current;
-            let Some(instruction) = module.instructions.get(frame.next_instruction) else {
+            let module: &BeamModule = &cursor.module;
+            let Some(instruction) = module.instructions.get(cursor.position) else {
+                let frame = current_frame(process);
                 return Err(error(format!(
                     "function {}:{} did not return",
                     frame.module, frame.function
                 )));
             };
-            frame.next_instruction += 1;
+            cursor.position += 1;
             match instruction {
                 // ERTS `move` copies the word of the source to the
                 // destination (`emit_i_move`, jit/arm/instr_common.cpp:
@@ -642,12 +644,16 @@ impl BeamProgram {
                 }
                 Instruction::Call { arity, label } => {
                     check_local_call_arguments(&process.registers, *arity)?;
+                    cursor.commit(process);
                     let frame = code_table::frame(module, *label, *arity)?;
+                    cursor.position = frame.next_instruction;
                     process.frames.push(frame);
                 }
                 Instruction::CallOnly { arity, label } => {
                     check_local_call_arguments(&process.registers, *arity)?;
-                    *current_frame(process) = code_table::frame(module, *label, *arity)?;
+                    let frame = code_table::frame(module, *label, *arity)?;
+                    cursor.position = frame.next_instruction;
+                    *current_frame(process) = frame;
                 }
                 Instruction::CallLast {
                     arity,
@@ -658,7 +664,9 @@ impl BeamProgram {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     check_local_call_arguments(&process.registers, *arity)?;
-                    *current_frame(process) = code_table::frame(module, *label, *arity)?;
+                    let frame = code_table::frame(module, *label, *arity)?;
+                    cursor.position = frame.next_instruction;
+                    *current_frame(process) = frame;
                 }
                 Instruction::TestArity {
                     fail_label,
@@ -670,7 +678,7 @@ impl BeamProgram {
                         Term::Tuple(elements) if elements.len() == *arity as usize
                     );
                     if !passed {
-                        jump(module, process, *fail_label)?;
+                        cursor.position = label_index(module, *fail_label)?;
                     }
                 }
                 Instruction::TestFunctionArity {
@@ -686,7 +694,7 @@ impl BeamProgram {
                         BifResult::Value(value) if value == Term::static_atom("true")
                     );
                     if !passed {
-                        jump(module, process, *fail_label)?;
+                        cursor.position = label_index(module, *fail_label)?;
                     }
                 }
                 Instruction::SelectTupleArity {
@@ -701,7 +709,7 @@ impl BeamProgram {
                             .map_or(*fail_label, |(_, label)| *label),
                         _ => *fail_label,
                     };
-                    jump(module, process, target)?;
+                    cursor.position = label_index(module, target)?;
                 }
                 Instruction::CallExternal {
                     arity,
@@ -710,11 +718,13 @@ impl BeamProgram {
                     tail,
                     deallocate,
                 } => {
+                    cursor.commit(process);
                     if let Some(outcome) =
                         self.call_external(scheduler, module, name, *arity, *tail, *deallocate)?
                     {
                         return Ok(outcome);
                     }
+                    cursor.refresh(scheduler)?;
                 }
                 Instruction::Apply {
                     arity,
@@ -727,6 +737,7 @@ impl BeamProgram {
                         // (`emit_apply_last` in `jit/arm/instr_call.cpp:307-316`).
                         release_frame(process, *deallocate)?;
                     }
+                    cursor.commit(process);
                     let module = read(process, &Operand::X(*arity))?;
                     let name = read(process, &Operand::X(arity.saturating_add(1)))?;
                     // ERTS `fixed_apply` (`beam_common.c`) raises `badarg`
@@ -737,6 +748,7 @@ impl BeamProgram {
                         {
                             return Ok(outcome);
                         }
+                        cursor.position = active_position(scheduler);
                         continue;
                     };
                     if let Some(outcome) =
@@ -744,6 +756,7 @@ impl BeamProgram {
                     {
                         return Ok(outcome);
                     }
+                    cursor.refresh(scheduler)?;
                 }
                 Instruction::MakeFun {
                     lambda,
@@ -770,9 +783,11 @@ impl BeamProgram {
                         // `jit/arm/instr_fun.cpp:425-462`).
                         release_frame(process, *deallocate)?;
                     }
+                    cursor.commit(process);
                     if let Some(outcome) = self.call_fun(scheduler, call, *arity, *tail)? {
                         return Ok(outcome);
                     }
+                    cursor.refresh(scheduler)?;
                 }
                 Instruction::Bif {
                     fail_label,
@@ -804,6 +819,7 @@ impl BeamProgram {
                             .iter()
                             .map(|argument| read_any(process, argument))
                             .collect::<Result<Vec<_>, _>>()?;
+                        cursor.commit(process);
                         match match_context_byte_size(bif_module, name, arguments, &values)? {
                             Some(size) => BifResult::Value(size),
                             None => self.bif(scheduler, bif_module, name, values)?,
@@ -818,16 +834,18 @@ impl BeamProgram {
                             arguments,
                         } => {
                             process.length_trap = Some(arguments);
-                            current_frame(process).next_instruction -= 1;
+                            cursor.position -= 1;
+                            cursor.commit(process);
                             return Ok(Outcome::Yield);
                         }
                         BifResult::Raise { .. } if *fail_label != 0 => {
-                            jump(module, process, *fail_label)?
+                            cursor.position = label_index(module, *fail_label)?
                         }
                         BifResult::Raise { class, reason } => {
                             if let Some(outcome) = raise(process, class, reason) {
                                 return Ok(outcome);
                             }
+                            cursor.position = active_position(scheduler);
                         }
                         // The compiler emits a `bif` instruction only for a
                         // BIF that does not trap or end the caller.
@@ -839,7 +857,7 @@ impl BeamProgram {
                         }
                     }
                 }
-                Instruction::Jump(label) => jump(module, process, *label)?,
+                Instruction::Jump(label) => cursor.position = label_index(module, *label)?,
                 Instruction::Catch { register, label } => {
                     // ERTS also counts `c_p->catches` here. PBeam finds a live
                     // tag with a frame scan in `raise` and needs no counter.
@@ -923,7 +941,7 @@ impl BeamProgram {
                         }
                     };
                     if !passed {
-                        jump(module, process, *fail_label)?;
+                        cursor.position = label_index(module, *fail_label)?;
                     }
                 }
                 Instruction::GetMapElements {
@@ -938,7 +956,7 @@ impl BeamProgram {
                             write(process, destination, value)?;
                         }
                     }
-                    None => jump(module, process, *fail_label)?,
+                    None => cursor.position = label_index(module, *fail_label)?,
                 },
                 // ERTS loads `has_map_fields` as `get_map_elements` with
                 // scratch destinations (`generators.tab:230-253`).
@@ -948,7 +966,7 @@ impl BeamProgram {
                     keys,
                 } => {
                     if map_values(process, map, keys)?.is_none() {
-                        jump(module, process, *fail_label)?;
+                        cursor.position = label_index(module, *fail_label)?;
                     }
                 }
                 Instruction::PutMapAssoc {
@@ -987,11 +1005,14 @@ impl BeamProgram {
                     // (`jit/arm/instr_map.cpp:678-719`).
                     match update_map_exact(map, pairs)? {
                         Ok(map) => write(process, destination, map)?,
-                        Err(_) if *fail_label != 0 => jump(module, process, *fail_label)?,
+                        Err(_) if *fail_label != 0 => {
+                            cursor.position = label_index(module, *fail_label)?
+                        }
                         Err(reason) => {
                             if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
                                 return Ok(outcome);
                             }
+                            cursor.position = active_position(scheduler);
                         }
                     }
                 }
@@ -1020,7 +1041,7 @@ impl BeamProgram {
                     right,
                 } => {
                     if read_ref(process, left)? != read_ref(process, right)? {
-                        jump(module, process, *fail_label)?;
+                        cursor.position = label_index(module, *fail_label)?;
                     }
                 }
                 // ERTS `is_ne` (emu instrs.tab:1115-1119, JIT
@@ -1039,7 +1060,7 @@ impl BeamProgram {
                     right,
                 } => {
                     if read_ref(process, left)? == read_ref(process, right)? {
-                        jump(module, process, *fail_label)?;
+                        cursor.position = label_index(module, *fail_label)?;
                     }
                 }
                 Instruction::TestLess {
@@ -1051,7 +1072,7 @@ impl BeamProgram {
                         .compare(read_ref(process, right)?)?
                         .is_lt()
                     {
-                        jump(module, process, *fail_label)?;
+                        cursor.position = label_index(module, *fail_label)?;
                     }
                 }
                 Instruction::TestGreaterEqual {
@@ -1063,7 +1084,7 @@ impl BeamProgram {
                         .compare(read_ref(process, right)?)?
                         .is_lt()
                     {
-                        jump(module, process, *fail_label)?;
+                        cursor.position = label_index(module, *fail_label)?;
                     }
                 }
                 Instruction::TestTaggedTuple {
@@ -1079,7 +1100,7 @@ impl BeamProgram {
                                 && fields.first() == Some(tag)
                     );
                     if !passed {
-                        jump(module, process, *fail_label)?;
+                        cursor.position = label_index(module, *fail_label)?;
                     }
                 }
                 // ERTS `i_bs_start_match3` jumps to `Fail` for each term
@@ -1114,7 +1135,7 @@ impl BeamProgram {
                             "invariant error: bs_start_match3 with no fail label got {other:?}, not a binary or a match context"
                         )));
                     }
-                    _ => jump(module, process, *fail_label)?,
+                    _ => cursor.position = label_index(module, *fail_label)?,
                 },
                 // On a 64-bit system, ERTS loads `bs_start_match4` with
                 // `resume` as nothing when the source is the destination,
@@ -1183,7 +1204,7 @@ impl BeamProgram {
                             );
                             write(process, destination, Term::Binary(bytes))?;
                         }
-                        None => jump(module, process, *fail_label)?,
+                        None => cursor.position = label_index(module, *fail_label)?,
                     }
                 }
                 // ERTS `i_bs_get_position` writes `sb->start` as a small
@@ -1225,7 +1246,7 @@ impl BeamProgram {
                         Some(code_point) => {
                             write(process, destination, Term::Integer(code_point.into()))?;
                         }
-                        None => jump(module, process, *fail_label)?,
+                        None => cursor.position = label_index(module, *fail_label)?,
                     }
                 }
                 Instruction::BinaryMatch {
@@ -1234,7 +1255,7 @@ impl BeamProgram {
                     commands,
                 } => {
                     if !binary_match(process, context, commands)? {
-                        jump(module, process, *fail_label)?;
+                        cursor.position = label_index(module, *fail_label)?;
                     }
                 }
                 // The ERTS JIT `i_bs_create_bin` first checks that the term
@@ -1254,11 +1275,15 @@ impl BeamProgram {
                     segments,
                 } => match create_binary(process, segments)? {
                     Ok(bytes) => write(process, destination, Term::binary(bytes))?,
-                    Err(_) if *fail_label != 0 => jump(module, process, *fail_label)?,
+                    Err(_) if *fail_label != 0 => {
+                        cursor.position = label_index(module, *fail_label)?
+                    }
                     Err(failure) => {
+                        cursor.commit(process);
                         if let Some(outcome) = raise_binary_failure(scheduler, module, failure)? {
                             return Ok(outcome);
                         }
+                        cursor.position = active_position(scheduler);
                     }
                 },
                 // ERTS `fconv` converts a small integer, a bignum, or a float
@@ -1275,6 +1300,7 @@ impl BeamProgram {
                     if let Some(outcome) = raise(process, ExceptionClass::Error, badarith) {
                         return Ok(outcome);
                     }
+                    cursor.position = active_position(scheduler);
                 }
                 Instruction::SelectValue {
                     value,
@@ -1286,7 +1312,7 @@ impl BeamProgram {
                         .iter()
                         .find(|(choice, _)| choice == value)
                         .map_or(*fail_label, |(_, label)| *label);
-                    jump(module, process, target)?;
+                    cursor.position = label_index(module, target)?;
                 }
                 Instruction::PutList {
                     head,
@@ -1390,6 +1416,7 @@ impl BeamProgram {
                     // ERTS `send` calls `erl_send` as a light BIF and writes
                     // its result to x0, or raises (`emu/bif_instrs.tab:425-454`;
                     // JIT `emit_send` in `jit/arm/instr_bif.cpp:612-625`).
+                    cursor.commit(process);
                     if light_bif_switch(process) {
                         return Ok(Outcome::Yield);
                     }
@@ -1399,6 +1426,7 @@ impl BeamProgram {
                     if let Some(outcome) = self.finish_bif(scheduler, result, false)? {
                         return Ok(outcome);
                     }
+                    cursor.position = active_position(scheduler);
                 }
                 Instruction::LoopReceive {
                     fail_label,
@@ -1412,19 +1440,21 @@ impl BeamProgram {
                     // A process that the helper ends, or that used up its
                     // budget, switches out (`jit/arm/instr_msg.cpp:186-197`).
                     if process.fcalls <= 0 {
-                        current_frame(process).next_instruction -= 1;
+                        cursor.position -= 1;
+                        cursor.commit(process);
                         return Ok(Outcome::Yield);
                     }
                     if process.mailbox.current().is_none() {
+                        cursor.commit(process);
                         match scheduler.receive_helper()? {
                             Received::Message => {}
                             Received::Empty => {
-                                jump(module, scheduler.current_process_mut(), *fail_label)?;
+                                cursor.position = label_index(module, *fail_label)?;
                                 continue;
                             }
                             Received::Yield => {
-                                current_frame(scheduler.current_process_mut()).next_instruction -=
-                                    1;
+                                cursor.position -= 1;
+                                cursor.commit(scheduler.current_process_mut());
                                 return Ok(Outcome::Yield);
                             }
                             Received::Exited => return Ok(Outcome::Yield),
@@ -1441,7 +1471,7 @@ impl BeamProgram {
                         return Err(error("loop_rec_end without a current message"));
                     }
                     process.fcalls -= 1;
-                    jump(module, process, *label)?;
+                    cursor.position = label_index(module, *label)?;
                 }
                 Instruction::RemoveMessage => {
                     if !process.mailbox.remove_current() {
@@ -1450,7 +1480,8 @@ impl BeamProgram {
                     scheduler.cancel_receive_timer();
                 }
                 Instruction::Wait(label) => {
-                    jump(module, process, *label)?;
+                    cursor.position = label_index(module, *label)?;
+                    cursor.commit(process);
                     return Ok(Outcome::Wait);
                 }
                 Instruction::WaitTimeout { label, source } => {
@@ -1468,7 +1499,7 @@ impl BeamProgram {
                         if timeout == Term::static_atom("infinity") {
                             process.receive_timer = ReceiveTimer::Timo;
                         } else {
-                            let resume = current_frame(process).next_instruction;
+                            let resume = cursor.position;
                             let now = scheduler.timers.now();
                             if !scheduler.set_receive_timer(now, &timeout, resume) {
                                 let process = scheduler.current_process_mut();
@@ -1478,11 +1509,13 @@ impl BeamProgram {
                                 {
                                     return Ok(outcome);
                                 }
+                                cursor.position = active_position(scheduler);
                                 continue;
                             }
                         }
                     }
-                    jump(module, scheduler.current_process_mut(), *label)?;
+                    cursor.position = label_index(module, *label)?;
+                    cursor.commit(scheduler.current_process_mut());
                     return Ok(Outcome::Wait);
                 }
                 Instruction::Timeout => {
@@ -1514,17 +1547,20 @@ impl BeamProgram {
                     // (`beam/erl_nif.c:4922-4928`, `5050-5098`). A function
                     // without a binding runs its BEAM stub body.
                     let arguments = call_arguments(&process.registers, *arity)?;
+                    cursor.commit(process);
                     if let Some(result) = native::call(scheduler, &module.name, name, &arguments)
                         && let Some(outcome) = self.finish_bif(scheduler, result?, true)?
                     {
                         return Ok(outcome);
                     }
+                    cursor.position = active_position(scheduler);
                 }
                 Instruction::Hibernate => {
                     // `emit_i_hibernate` writes `ok` to `x0` and switches
                     // the context; the process keeps its frame
                     // (`jit/arm/instr_trace.cpp:222-238`).
                     write(process, &Operand::X(0), Term::static_atom("ok"))?;
+                    cursor.commit(process);
                     return Ok(Outcome::Hibernate);
                 }
                 Instruction::Yield => {
@@ -1533,6 +1569,7 @@ impl BeamProgram {
                     // frame (`jit/arm/instr_common.cpp:3121-3124`;
                     // `jit/arm/instr_call.cpp:30-36`).
                     write(process, &Operand::X(0), Term::static_atom("true"))?;
+                    cursor.commit(process);
                     return Ok(Outcome::Yield);
                 }
                 // ERTS `build_stacktrace` changes the raw stack trace in
@@ -1556,6 +1593,7 @@ impl BeamProgram {
                     if let Some(outcome) = raise_with_stacktrace(process, class, value, stack) {
                         return Ok(outcome);
                     }
+                    cursor.position = active_position(scheduler);
                 }
                 // ERTS `badmatch`, `case_end`, `try_case_end`, and
                 // `badrecord` raise class `error` with the reason
@@ -1566,6 +1604,7 @@ impl BeamProgram {
                     if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
                         return Ok(outcome);
                     }
+                    cursor.position = active_position(scheduler);
                 }
                 // ERTS `if_end` raises class `error` with the reason
                 // `if_clause` (emu `instrs.tab:1151-1155`;
@@ -1575,6 +1614,7 @@ impl BeamProgram {
                     if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
                         return Ok(outcome);
                     }
+                    cursor.position = active_position(scheduler);
                 }
                 // ERTS `raw_raise` raises `x1` with the class in `x0` and the
                 // stack trace of the raw stack trace in `x2`. For a class
@@ -1592,6 +1632,7 @@ impl BeamProgram {
                             {
                                 return Ok(outcome);
                             }
+                            cursor.position = active_position(scheduler);
                         }
                         None => write(process, &Operand::X(0), Term::static_atom("badarg"))?,
                     }
@@ -1601,6 +1642,7 @@ impl BeamProgram {
                     // `emit_i_test_yield` (`jit/arm/instr_common.cpp:3097-3119`).
                     process.fcalls -= 1;
                     if process.fcalls <= 0 {
+                        cursor.commit(process);
                         return Ok(Outcome::Yield);
                     }
                 }
@@ -1616,6 +1658,7 @@ impl BeamProgram {
                     if let Some(outcome) = exit {
                         return Ok(outcome);
                     }
+                    cursor.position = active_position(scheduler);
                 }
                 Instruction::End => {
                     let frame = current_frame(process);
@@ -2358,6 +2401,82 @@ fn create_process(
     }))
 }
 
+/// The execution position of the run loop: the code of the active frame and
+/// the index of the next instruction in it. The loop reads and writes this
+/// local on the straight-line path, so an instruction that no frame change
+/// follows does not touch the frame of the process. The loop refreshes the
+/// cursor at each exit that changes the frame.
+struct Cursor {
+    /// The code of the active frame.
+    module: Rc<BeamModule>,
+    /// The index of the next instruction in `module.instructions`.
+    position: usize,
+}
+
+impl Cursor {
+    /// Return the position of the active frame of the current process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let cursor = Cursor::new(&mut scheduler)?;
+    /// assert_eq!(cursor.position, 0);
+    /// ```
+    fn new(scheduler: &mut Scheduler) -> Result<Self, BeamError> {
+        let module = Rc::clone(scheduler.current_module()?);
+        Ok(Cursor {
+            module,
+            position: active_position(scheduler),
+        })
+    }
+
+    /// Replace the position with the position of the active frame. Replace
+    /// the code too when the active frame is in another module, which the
+    /// integer identity of the two modules decides.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// cursor.refresh(&mut scheduler)?;
+    /// assert_eq!(cursor.position, current_frame(scheduler.current_process_mut()).next_instruction);
+    /// ```
+    fn refresh(&mut self, scheduler: &mut Scheduler) -> Result<(), BeamError> {
+        let (module_id, position) = {
+            let frame = current_frame(scheduler.current_process_mut());
+            (frame.module_id, frame.next_instruction)
+        };
+        if module_id != self.module.id {
+            self.module = Rc::clone(scheduler.current_module()?);
+        }
+        self.position = position;
+        Ok(())
+    }
+
+    /// Write the position to the active frame, so that the process resumes
+    /// there and a diagnostic reads it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// cursor.commit(process);
+    /// assert_eq!(current_frame(process).next_instruction, cursor.position);
+    /// ```
+    fn commit(&self, process: &mut ProcessState) {
+        current_frame(process).next_instruction = self.position;
+    }
+}
+
+/// Return the index of the next instruction of the active frame.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(active_position(&mut scheduler), 0);
+/// ```
+fn active_position(scheduler: &mut Scheduler) -> usize {
+    current_frame(scheduler.current_process_mut()).next_instruction
+}
+
 /// Return the active frame of a running process.
 ///
 /// # Examples
@@ -2680,18 +2799,6 @@ fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
 fn nonempty_list(list: &Term) -> Result<(&Term, &Term), BeamError> {
     list.cons_cell()
         .ok_or_else(|| error(format!("BEAM list source {list:?} is not a nonempty list")))
-}
-
-/// Continue execution after a label in the active module.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// jump(module, &mut process, 3)?;
-/// ```
-fn jump(module: &BeamModule, process: &mut ProcessState, label: u32) -> Result<(), BeamError> {
-    current_frame(process).next_instruction = label_index(module, label)?;
-    Ok(())
 }
 
 /// Return the index of the first instruction after a label in a module, from

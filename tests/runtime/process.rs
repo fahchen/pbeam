@@ -1,9 +1,13 @@
 use super::{Frame, ProcessState, ReceiveTimer, Start};
-use crate::term::{Atom, ProcessId, Term};
+use crate::{
+    beam::ModuleId,
+    term::{Atom, ProcessId, Term},
+};
 
 pub(in crate::runtime) fn frame() -> Frame {
     Frame {
         module: "fixture".into(),
+        module_id: ModuleId::next(),
         function: "main".into(),
         next_instruction: 0,
         stack: Vec::new(),
