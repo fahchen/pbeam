@@ -136,3 +136,7 @@ Expand every documented complexity claim into its complete operation sequence. I
 ## Arguments are checked after capability authorization
 
 Validate arguments before capability checks. Preserve invalid-input errors.
+
+## Structural tests become stale after enum growth
+
+Make structural tests fail to compile when the represented enum gains a variant. Match every variant and name every field instead of using `..` or a fallback.
