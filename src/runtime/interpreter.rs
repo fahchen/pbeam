@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     beam::{
-        BeamModule,
+        BeamModule, NameId,
         code::{self, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
     },
     error::{BeamError, error},
@@ -606,7 +606,8 @@ impl BeamProgram {
                 let frame = current_frame(process);
                 return Err(error(format!(
                     "function {}:{} did not return",
-                    frame.module, frame.function
+                    module.name,
+                    module.tables.name(frame.function)
                 )));
             };
             cursor.position += 1;
@@ -1664,7 +1665,8 @@ impl BeamProgram {
                     let frame = current_frame(process);
                     return Err(error(format!(
                         "function {}:{} did not return",
-                        frame.module, frame.function
+                        cursor.module.name,
+                        cursor.module.tables.name(frame.function)
                     )));
                 }
                 Instruction::Unsupported(opcode) => {
@@ -1727,7 +1729,8 @@ impl BeamProgram {
             return Err(error("invalid BEAM tail-call stack size"));
         }
         if (module, name, arity) == ("erlang", "load_nif", 2) {
-            let caller = current_frame(process).module.clone();
+            let module_id = current_frame(process).module_id;
+            let caller = scheduler.code.module_by_id(module_id)?.name.clone();
             let result = native::load_nif(scheduler, &caller)?;
             return self.finish_bif(scheduler, result, false);
         }
@@ -2111,7 +2114,8 @@ impl BeamProgram {
             return self.call_mfa(scheduler, "erlang", "error", arity, false);
         }
         let reason = read(process, &Operand::X(0))?;
-        let (module, function, arity) = process.initial_call.clone();
+        let initial_call = process.initial_call.clone();
+        let (module, function, arity) = scheduler.code.initial_call_names(&initial_call)?;
         let frame = Term::tuple(vec![
             Term::Atom(scheduler.atoms.put(&module)?),
             Term::Atom(scheduler.atoms.put(&function)?),
@@ -3056,8 +3060,9 @@ impl FunCall {
 }
 
 #[derive(Debug)]
-struct Function<'a> {
-    name: &'a str,
+struct Function {
+    /// Identity of the function in the name table of its module.
+    name: NameId,
     arity: u32,
     start: usize,
 }
@@ -3069,14 +3074,14 @@ struct Function<'a> {
 ///
 /// ```rust,ignore
 /// let function = function_at_label(&module, 2)?;
-/// assert_eq!((function.name, function.arity), ("main", 0));
+/// assert_eq!((module.tables.name(function.name), function.arity), ("main", 0));
 /// ```
-fn function_at_label(module: &BeamModule, target: u32) -> Result<Function<'_>, BeamError> {
+fn function_at_label(module: &BeamModule, target: u32) -> Result<Function, BeamError> {
     match module.tables.function_starts.get(&target) {
         Some(Some(entry)) => {
             let (name, arity) = &module.tables.functions[entry.function];
             Ok(Function {
-                name,
+                name: *name,
                 arity: *arity,
                 start: entry.start,
             })
@@ -3857,7 +3862,7 @@ fn mfa_stacktrace(scheduler: &mut Scheduler) -> Result<Vec<Term>, BeamError> {
         .collect();
     let mut stacktrace = Vec::with_capacity(frames.len());
     for frame in frames {
-        let module = Rc::clone(scheduler.code.module(&frame.module)?);
+        let module = Rc::clone(scheduler.code.module_by_id(frame.module_id)?);
         let (_, function, arity) = frame_function(&module, &frame)?;
         // A loaded module put the names of its function info into the atom
         // table of the run, so each name is present.
@@ -3870,7 +3875,7 @@ fn mfa_stacktrace(scheduler: &mut Scheduler) -> Result<Vec<Term>, BeamError> {
             )
         };
         stacktrace.push(Term::tuple(vec![
-            atom(&frame.module),
+            atom(&module.name),
             atom(function),
             Term::Integer(arity.into()),
             Term::nil(),

@@ -7,7 +7,7 @@ use super::{
     scheduler::AliasMode, timer::TimerKey,
 };
 use crate::{
-    beam::ModuleId,
+    beam::{ModuleId, NameId},
     error::{BeamError, error},
     term::{Atom, PortId, ProcessId, Reference, Term},
 };
@@ -42,15 +42,17 @@ impl LinkId {
     }
 }
 
-/// One active function call: its module, code position, and Y registers.
+/// One active function call: its module, code position, and Y registers. The
+/// module and the function are identities, and the code table resolves their
+/// names when a diagnostic needs them.
 #[derive(Clone, Debug)]
 pub(super) struct Frame {
-    /// Name of the module that owns the code.
-    pub(super) module: String,
-    /// Identity of the module that owns the code, for the run loop.
+    /// Identity of the module that owns the code. The run loop compares it,
+    /// and the code table gives the name.
     pub(super) module_id: ModuleId,
-    /// Name of the function, for error messages.
-    pub(super) function: String,
+    /// Identity of the function in the name table of the module, for error
+    /// messages.
+    pub(super) function: NameId,
     /// Index of the next instruction to run in the module code.
     pub(super) next_instruction: usize,
     /// Y registers. `allocate` sets the size and `deallocate` clears them.
@@ -171,6 +173,33 @@ pub(super) enum Flush {
     Flushing,
     /// The handling reached the flush signal (`FS_FLUSHED_SIGS`).
     Flushed,
+}
+
+/// The start MFA of a process. An entry start keeps the identity of the
+/// loaded code, and a start that no loaded module exports keeps the atoms of
+/// its MFA. Thus the process creation reads no name, and a reader resolves
+/// the module name and the function name from the code table.
+#[derive(Debug, Clone)]
+pub(super) enum InitialCall {
+    /// The entry function of a loaded module.
+    Entry {
+        /// Identity of the module that owns the code.
+        module: ModuleId,
+        /// Identity of the function in the name table of the module.
+        function: NameId,
+        /// The number of start arguments.
+        arity: usize,
+    },
+    /// A start MFA that no loaded module exports, or a start with more than
+    /// `APPLY_MAX_ARGUMENTS` arguments.
+    Undefined {
+        /// The module of the start MFA.
+        module: Atom,
+        /// The function of the start MFA.
+        function: Atom,
+        /// The number of start arguments.
+        arity: usize,
+    },
 }
 
 /// The execution state and mailbox of one process.
@@ -307,10 +336,11 @@ pub(super) struct ProcessState {
     /// policy process, which the launcher makes. The policy module gets it
     /// in the requester map of `grant/3`.
     pub(super) parent: Option<ProcessId>,
-    /// The module, the function, and the arity of the start of the process,
-    /// as `p->u.initial` (`erl_process.c:12979-12981`). The policy module
-    /// gets it in the requester map of `initial/1` and `grant/3`.
-    pub(super) initial_call: (String, String, usize),
+    /// The start MFA of the process, and its arity, as `p->u.initial`
+    /// (`erl_process.c:12979-12981`). The policy module gets it in the
+    /// requester map of `initial/1` and `grant/3`. The code table resolves
+    /// the names of an entry start when a reader needs them.
+    pub(super) initial_call: InitialCall,
     /// The answer of the policy process to the `pbeam_cap:request/2` call
     /// of the process: `true` for a grant and `false` for a denial, or
     /// `None` while the call waits. The grant signal sets it, and the call
@@ -354,7 +384,8 @@ pub(super) struct DirtyWrite {
 impl ProcessState {
     /// Create a runnable process with argument registers. An entry start
     /// gives one frame. An undefined start gives no frame and keeps the
-    /// module and the function in `undefined_start`.
+    /// module and the function in `undefined_start`. The arity of the start
+    /// MFA is the number of argument registers.
     ///
     /// # Examples
     ///
@@ -366,18 +397,25 @@ impl ProcessState {
     /// assert_eq!(process.undefined_start, Some((module, function)));
     /// ```
     pub(super) fn new(id: ProcessId, start: Start, arguments: Vec<Term>) -> Self {
+        let arity = arguments.len();
         let (frames, undefined_start, initial_call) = match start {
             Start::Entry(frame) => {
-                let initial_call = (frame.module.clone(), frame.function.clone());
+                let initial_call = InitialCall::Entry {
+                    module: frame.module_id,
+                    function: frame.function,
+                    arity,
+                };
                 (vec![frame], None, initial_call)
             }
             Start::Undefined { module, function } => {
-                let initial_call = (module.name().to_owned(), function.name().to_owned());
+                let initial_call = InitialCall::Undefined {
+                    module: module.clone(),
+                    function: function.clone(),
+                    arity,
+                };
                 (Vec::new(), Some((module, function)), initial_call)
             }
         };
-        let (module, function) = initial_call;
-        let initial_call = (module, function, arguments.len());
         Self {
             id,
             frames,

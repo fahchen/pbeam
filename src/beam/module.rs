@@ -52,7 +52,7 @@ impl Default for LabelHasher {
 /// number, and the run loop compares two numbers instead of two module names.
 /// The loader owns the number for the whole life of the module, so a frame
 /// that names a module stays valid in each run that shares the code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ModuleId(u32);
 
 impl ModuleId {
@@ -70,12 +70,82 @@ impl ModuleId {
     }
 }
 
+/// The identity of one function name of a module. [`BeamModule::new`] gives
+/// each name of the module a number, and a frame, an export key, and a
+/// diagnostic use the number instead of the name. The loader owns the number
+/// for the whole life of the module, so a frame that names a function stays
+/// valid in each run that shares the code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct NameId(u32);
+
+/// The function names of one module and their identities. Each holder keeps
+/// only a [`NameId`], so a name is not copied for each use.
+#[derive(Debug, Default)]
+struct NameTable {
+    /// The name of each [`NameId`], in first-use order.
+    names: Vec<String>,
+    /// The identity of each name, for the lookup of an export by name.
+    ids: HashMap<String, NameId>,
+}
+
+impl NameTable {
+    /// Return the identity of `name`, and add the name when the module does
+    /// not hold it yet.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut names = NameTable::default();
+    /// assert_eq!(names.intern("main"), names.intern("main"));
+    /// assert_ne!(names.intern("main"), names.intern("other"));
+    /// ```
+    fn intern(&mut self, name: &str) -> NameId {
+        if let Some(id) = self.ids.get(name) {
+            return *id;
+        }
+        let id =
+            NameId(u32::try_from(self.names.len()).expect("a module has fewer than 2^32 names"));
+        self.names.push(name.to_owned());
+        self.ids.insert(name.to_owned(), id);
+        id
+    }
+
+    /// Return the identity of `name`, or `None` when the module has no
+    /// function of that name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut names = NameTable::default();
+    /// assert_eq!(names.get("main"), None);
+    /// assert_eq!(names.get("main"), Some(names.intern("main")));
+    /// ```
+    fn get(&self, name: &str) -> Option<NameId> {
+        self.ids.get(name).copied()
+    }
+
+    /// Return the name of `id`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut names = NameTable::default();
+    /// assert_eq!(names.name(names.intern("main")), "main");
+    /// ```
+    fn name(&self, id: NameId) -> &str {
+        &self.names[id.0 as usize]
+    }
+}
+
 #[derive(Debug)]
 pub struct BeamModule {
     pub(crate) name: String,
     /// The identity of the module, for the run loop.
     pub(crate) id: ModuleId,
-    pub(crate) exports: HashMap<(String, u32), u32>,
+    /// The entry label of each exported function, by the identity of its
+    /// name and its arity. The name itself stays in the name table of the
+    /// module tables.
+    pub(crate) exports: HashMap<(NameId, u32), u32>,
     pub(crate) instructions: Vec<Instruction>,
     /// The side tables of `instructions`, which the loader builds once (see
     /// [`ModuleTables`]).
@@ -98,9 +168,11 @@ pub(crate) struct ModuleTables {
     /// `None` is a label that no such `func_info` precedes. The first label
     /// of a number wins.
     pub(crate) function_starts: LabelMap<Option<FunctionStart>>,
+    /// The function names of the module and their identities.
+    names: NameTable,
     /// The name and the arity of each function of the module, in stream
     /// order. A `FunctionStart` names its entry in this vector.
-    pub(crate) functions: Vec<(String, u32)>,
+    pub(crate) functions: Vec<(NameId, u32)>,
 }
 
 /// The function that a label starts.
@@ -113,19 +185,46 @@ pub(crate) struct FunctionStart {
 }
 
 impl ModuleTables {
+    /// Return the identity of the function name `name`, or `None` when the
+    /// module has no function of that name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // [FunctionInfo(fixture, main, 0), Label(1), Return]
+    /// assert_eq!(tables.name(tables.name_id("main").unwrap()), "main");
+    /// assert_eq!(tables.name_id("missing"), None);
+    /// ```
+    pub(crate) fn name_id(&self, name: &str) -> Option<NameId> {
+        self.names.get(name)
+    }
+
+    /// Return the name of the function `id`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(tables.name(tables.name_id("main").unwrap()), "main");
+    /// ```
+    pub(crate) fn name(&self, id: NameId) -> &str {
+        self.names.name(id)
+    }
+
     /// Build the side tables of the instruction stream of the module `name`.
     /// The loader reads the stream once, so a later jump and a later frame
-    /// creation read one table entry each.
+    /// creation read one table entry each. `names` holds the identities of
+    /// the names that an earlier build of the same module gave, so a rebuild
+    /// keeps the identity of a name.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // [FunctionInfo, Label(1), Label(2), Return]
-    /// let tables = ModuleTables::build("fixture", &instructions);
+    /// let tables = ModuleTables::build("fixture", &instructions, NameTable::default());
     /// assert_eq!(tables.jump_targets.get(&2), Some(&3));
-    /// assert_eq!(tables.functions[0].0, "main");
+    /// assert_eq!(tables.name(tables.functions[0].0), "main");
     /// ```
-    fn build(name: &str, instructions: &[Instruction]) -> Self {
+    fn build(name: &str, instructions: &[Instruction], mut names: NameTable) -> Self {
         let mut jump_targets = LabelMap::default();
         let mut function_starts = LabelMap::default();
         let mut functions = Vec::new();
@@ -137,7 +236,7 @@ impl ModuleTables {
                     name: function_name,
                     arity,
                 } if module == name => {
-                    functions.push((function_name.clone(), *arity));
+                    functions.push((names.intern(function_name), *arity));
                     function = Some(functions.len() - 1);
                 }
                 Instruction::FunctionInfo { .. } => function = None,
@@ -156,6 +255,7 @@ impl ModuleTables {
         ModuleTables {
             jump_targets,
             function_starts,
+            names,
             functions,
         }
     }
@@ -163,7 +263,9 @@ impl ModuleTables {
 
 impl BeamModule {
     /// Return the module `name` with `exports` and the decoded
-    /// `instructions`, and build the side tables of the stream.
+    /// `instructions`, and build the side tables of the stream. Each export
+    /// name goes into the name table of the module, so its name lives in one
+    /// place.
     ///
     /// # Examples
     ///
@@ -176,7 +278,11 @@ impl BeamModule {
         exports: HashMap<(String, u32), u32>,
         instructions: Vec<Instruction>,
     ) -> Self {
-        let tables = ModuleTables::build(&name, &instructions);
+        let mut tables = ModuleTables::build(&name, &instructions, NameTable::default());
+        let exports = exports
+            .into_iter()
+            .map(|((function, arity), label)| ((tables.names.intern(&function), arity), label))
+            .collect();
         BeamModule {
             name,
             id: ModuleId::next(),
@@ -188,7 +294,8 @@ impl BeamModule {
 
     /// Rebuild the side tables from the current `instructions`. Only a test
     /// that changes the instructions of a module after its construction needs
-    /// this.
+    /// this. The identity of a name does not change, so an export key and a
+    /// frame stay valid.
     ///
     /// # Examples
     ///
@@ -198,7 +305,8 @@ impl BeamModule {
     /// ```
     #[cfg(test)]
     pub(crate) fn reindex(&mut self) {
-        self.tables = ModuleTables::build(&self.name, &self.instructions);
+        let names = std::mem::take(&mut self.tables.names);
+        self.tables = ModuleTables::build(&self.name, &self.instructions, names);
     }
 
     /// Parse one BEAM file into a module, with a new atom table.
@@ -225,8 +333,9 @@ impl BeamModule {
     pub fn execute(&self, function: &str, arguments: &[Term]) -> Result<Term, BeamError> {
         let arity = checked_arity(arguments.len())?;
         let entry = self
-            .exports
-            .get(&(function.to_owned(), arity))
+            .tables
+            .name_id(function)
+            .and_then(|id| self.exports.get(&(id, arity)))
             .ok_or_else(|| error(format!("missing export {}:{function}/{arity}", self.name)))?;
         let mut active = false;
         let mut label_matches = false;

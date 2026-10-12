@@ -500,10 +500,8 @@ pub(super) fn error_2(
     reason: &Term,
     args: &Term,
 ) -> Result<BifResult, BeamError> {
-    let caller = current_frame(context.scheduler.current_process_mut())
-        .module
-        .clone();
-    let module = Rc::clone(context.scheduler.code.module(&caller)?);
+    let module_id = current_frame(context.scheduler.current_process_mut()).module_id;
+    let module = Rc::clone(context.scheduler.code.module_by_id(module_id)?);
     let (module, function, arity) = current_function(context.scheduler, &module)?;
     let args = if args.is_list() {
         args.clone()
@@ -2730,8 +2728,13 @@ pub(super) fn function_exported(
     };
     let (module, name) = (module.name(), name.name());
     let exported = u32::try_from(arity as i32).is_ok_and(|arity| {
-        code.get(module)
-            .is_some_and(|loaded| loaded.exports.contains_key(&(name.to_owned(), arity)))
+        let exported_by_code = code.get(module).is_some_and(|loaded| {
+            loaded
+                .tables
+                .name_id(name)
+                .is_some_and(|id| loaded.exports.contains_key(&(id, arity)))
+        });
+        exported_by_code
             || is_bif(module, name, arity)
             // `erts_is_builtin` (`beam_common.c`) also counts these
             // instruction calls, which are not `bif.tab` entries.
