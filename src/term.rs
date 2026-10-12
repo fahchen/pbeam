@@ -103,6 +103,153 @@ pub enum Term {
 trait TermIsSendAndSync: Send + Sync {}
 impl TermIsSendAndSync for Term {}
 
+/// The number of pairs that the work stack of `Term::eq` holds in the frame
+/// of the comparison. The stack allocates only when a comparison holds more
+/// pending pairs than this count.
+const EQ_INLINE_PAIRS: usize = 8;
+
+/// The room that one comparison reserves when its work stack overflows the
+/// inline array. The reserve gives the heap vector of a large comparison its
+/// first capacity in one allocation, so the vector does not grow one
+/// doubling at a time until it holds a whole tuple or map.
+const EQ_SPILL_RESERVE: usize = 1024;
+
+/// The term that marks an empty slot of the inline array of [`EqStack`]. The
+/// comparison drops a pair of two `Nil` terms, so it never pushes this term
+/// as an operand of another pair: `(Nil, Nil)` is equal and gives no nested
+/// pair.
+static EQ_EMPTY_SLOT: Term = Term::Nil;
+
+/// Two terms whose equality `Term::eq` still has to check.
+struct EqPair<'a>(&'a Term, &'a Term);
+
+/// The work stack of `Term::eq`: the pairs whose equality the comparison
+/// still has to check, most recent first.
+///
+/// The stack holds the first [`EQ_INLINE_PAIRS`] pairs in an array in its
+/// own frame and moves every later pair to a heap vector. A comparison that
+/// holds at most that count allocates nothing. The comparison pays one
+/// vector allocation when it holds more, and the vector then grows as the
+/// old code grew it.
+struct EqStack<'a> {
+    /// The first pairs, in a slot each. A slot holds [`EQ_EMPTY_SLOT`] for
+    /// both terms of a pair when it holds no pair; only the slots below `len`
+    /// hold a pair. The slot is a type with no `Drop`, so the stack copies a
+    /// pair out of a slot without a move.
+    inline: [EqPair<'a>; EQ_INLINE_PAIRS],
+    /// The number of pairs in the inline array; [`EQ_INLINE_PAIRS`] after the
+    /// first spill. The slots below it hold a pair.
+    len: usize,
+    /// The pairs that the inline array cannot hold, in the order that they
+    /// arrive. Only the comparison reads and writes the tail of this vector.
+    spilled: Vec<EqPair<'a>>,
+}
+
+impl<'a> EqStack<'a> {
+    /// Return an empty work stack. The inline array holds no pair, so no
+    /// slot needs a term of its own.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = EqStack::new();
+    /// stack.push(&Term::nil(), &Term::nil());
+    /// assert!(stack.pop().is_some());
+    /// ```
+    fn new() -> Self {
+        EqStack {
+            inline: [(); EQ_INLINE_PAIRS].map(|()| EqPair(&EQ_EMPTY_SLOT, &EQ_EMPTY_SLOT)),
+            len: 0,
+            spilled: Vec::new(),
+        }
+    }
+
+    /// Push the pair `(left, right)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = EqStack::new();
+    /// stack.push(&Term::nil(), &Term::nil());
+    /// assert!(stack.pop().is_some());
+    /// ```
+    fn push(&mut self, left: &'a Term, right: &'a Term) {
+        if self.len < EQ_INLINE_PAIRS {
+            self.inline[self.len] = EqPair(left, right);
+            self.len += 1;
+        } else {
+            self.spill(left, right);
+        }
+    }
+
+    /// Move every pair of the full inline array to the heap vector, with
+    /// room for [`EQ_SPILL_RESERVE`] further pairs, and then push the pair
+    /// `(left, right)`. One reserve buys the room, so a comparison that
+    /// overflows the inline array pays one allocation for the first pairs of
+    /// a large group rather than one allocation for each doubling of the
+    /// vector.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = EqStack::new();
+    /// for _ in 0..EQ_INLINE_PAIRS {
+    ///     stack.push(&Term::nil(), &Term::nil());
+    /// }
+    /// stack.push(&Term::nil(), &Term::nil());
+    /// assert!(stack.spilled.capacity() >= EQ_INLINE_PAIRS + 1);
+    /// ```
+    fn spill(&mut self, left: &'a Term, right: &'a Term) {
+        let inline = std::mem::replace(
+            &mut self.inline,
+            [(); EQ_INLINE_PAIRS].map(|()| EqPair(&EQ_EMPTY_SLOT, &EQ_EMPTY_SLOT)),
+        );
+        self.spilled.reserve(EQ_SPILL_RESERVE);
+        for EqPair(left, right) in inline {
+            self.spilled.push(EqPair(left, right));
+        }
+        self.spilled.push(EqPair(left, right));
+    }
+
+    /// Push each pair of `pairs`, in order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = EqStack::new();
+    /// stack.extend([(&Term::nil(), &Term::nil())]);
+    /// assert!(stack.pop().is_some());
+    /// ```
+    fn extend(&mut self, pairs: impl IntoIterator<Item = (&'a Term, &'a Term)>) {
+        for (left, right) in pairs {
+            self.push(left, right);
+        }
+    }
+
+    /// Remove the most recent pair and return it, or return `None` when the
+    /// stack is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = EqStack::new();
+    /// stack.push(&Term::nil(), &Term::nil());
+    /// assert!(stack.pop().is_some());
+    /// assert!(stack.pop().is_none());
+    /// ```
+    fn pop(&mut self) -> Option<EqPair<'a>> {
+        if let Some(EqPair(left, right)) = self.spilled.pop() {
+            return Some(EqPair(left, right));
+        }
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        let EqPair(left, right) = self.inline[self.len];
+        Some(EqPair(left, right))
+    }
+}
+
 impl Term {
     /// Return the term of a static atom, such as `true` or `normal`. A
     /// static atom has the same index in every atom table.
@@ -331,7 +478,9 @@ impl Clone for Term {
 }
 
 impl PartialEq for Term {
-    /// Compare two terms pair by pair with a work stack. Two tuples that
+    /// Compare two terms pair by pair with a work stack. The stack holds the
+    /// first [`EQ_INLINE_PAIRS`] pairs in the frame of the comparison, so a
+    /// shallow or a shared comparison allocates nothing. Two tuples that
     /// hold one element array are equal with no walk. Two other tuples are
     /// equal when their lengths are equal and each pair of elements is
     /// equal. Two terms that share one cons cell are equal with no walk, and
@@ -351,9 +500,10 @@ impl PartialEq for Term {
     /// assert_ne!(Term::nil(), Term::tuple(vec![]));
     /// ```
     fn eq(&self, other: &Self) -> bool {
-        let mut pairs = vec![(self, other)];
-        while let Some(pair) = pairs.pop() {
-            let equal = match pair {
+        let mut pairs = EqStack::new();
+        pairs.push(self, other);
+        while let Some(EqPair(left, right)) = pairs.pop() {
+            let equal = match (left, right) {
                 (Term::Tuple(left), Term::Tuple(right)) => {
                     // Two tuples that hold one array are equal with no walk,
                     // as `eq` compares the two boxed pointers first.
@@ -367,7 +517,8 @@ impl PartialEq for Term {
                     // The tails go on the stack first, so the heads come off
                     // first and a long list keeps the stack short.
                     if !left.same_cell(right) {
-                        pairs.extend([(&left.tail, &right.tail), (&left.head, &right.head)]);
+                        pairs.push(&left.tail, &right.tail);
+                        pairs.push(&left.head, &right.head);
                     }
                     true
                 }
@@ -385,8 +536,8 @@ impl PartialEq for Term {
                     for ((left_key, left_value), (right_key, right_value)) in
                         left.iter().zip(right.iter())
                     {
-                        pairs.push((left_key, right_key));
-                        pairs.push((left_value, right_value));
+                        pairs.push(left_key, right_key);
+                        pairs.push(left_value, right_value);
                     }
                     left.len() == right.len()
                 }
@@ -638,3 +789,11 @@ mod costs;
 #[cfg(test)]
 #[path = "../tests/term.rs"]
 mod tests;
+
+/// The comparison cost and the allocation count of `Term`, the measurement
+/// of the pair-stack candidate of `docs/data-structure-audit.md` section
+/// 4.2. The module counts the allocations of the process, so it loads into
+/// the library test target.
+#[cfg(test)]
+#[path = "../tests/term/data_structure_costs.rs"]
+mod data_structure_costs;

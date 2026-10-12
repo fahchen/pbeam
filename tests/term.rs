@@ -353,3 +353,54 @@ fn finds_a_fun_at_any_depth_without_recursion() {
     let nested = (0..1_000_000).fold(Term::Integer(1), |inner, _| element(inner));
     assert!(!nested.contains_fun());
 }
+
+#[test]
+fn compares_a_deep_term_and_a_long_list_without_a_stack_overflow() {
+    // The work stack of the comparison is iterative, so a deep term and a
+    // long list compare on the heap rather than on the Rust stack. The two
+    // terms of each pair come from two builds, so they share no storage and
+    // the comparison walks every level or every cell.
+    let deep = (0..1_000_000).fold(Term::nil(), |inner, _| Term::tuple(vec![inner]));
+    let other_deep = (0..1_000_000).fold(Term::nil(), |inner, _| Term::tuple(vec![inner]));
+    assert_eq!(Term::Nil, Term::Nil);
+    assert_eq!(deep, other_deep);
+    assert_eq!(other_deep, deep);
+    let different = (0..1_000_001).fold(Term::nil(), |inner, _| Term::tuple(vec![inner]));
+    assert_ne!(deep, different);
+
+    let list = Term::list_from((0..1_000_000).map(Term::Integer));
+    let other_list = Term::list_from((0..1_000_000).map(Term::Integer));
+    assert_eq!(list, other_list);
+    assert_eq!(other_list, list);
+    let different = Term::list_from((0..999_999).map(Term::Integer));
+    assert_ne!(list, different);
+}
+
+#[test]
+fn compares_a_shared_term_and_an_equal_term_of_another_storage() {
+    // A copy of a compound term shares its storage, so the comparison of
+    // two copies reads one pointer. Two terms that hold equal content in
+    // different storage walk their elements.
+    let deep = (0..100).fold(Term::nil(), |inner, _| Term::tuple(vec![inner]));
+    assert_eq!(deep, deep.clone());
+    let other = (0..100).fold(Term::nil(), |inner, _| Term::tuple(vec![inner]));
+    assert_eq!(deep, other);
+    let list = Term::list_from((0..100).map(Term::Integer));
+    assert_eq!(list, list.clone());
+    assert_eq!(list, Term::list_from((0..100).map(Term::Integer)));
+    let held_map = map(vec![
+        (atom("a"), Term::Integer(1)),
+        (atom("b"), Term::Integer(2)),
+    ]);
+    assert_eq!(held_map, held_map.clone());
+    assert_eq!(
+        held_map,
+        map(vec![
+            (atom("a"), Term::Integer(1)),
+            (atom("b"), Term::Integer(2))
+        ])
+    );
+    let held = fun(0, vec![Term::Integer(1)]);
+    assert_eq!(held, held.clone());
+    assert_eq!(held, fun(0, vec![Term::Integer(1)]));
+}
