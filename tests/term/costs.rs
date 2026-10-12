@@ -85,19 +85,26 @@ pub(super) fn clone_drop<T: Clone>(name: &str, held: &T, operations: usize) {
     report(name, ns);
 }
 
-/// Measure the deep copy that `copy` builds, and print the line. The copies
-/// stay alive in a container until the timer stops, so the number holds the
-/// copy alone and not the release of the copies. The container drops after
-/// the timer stops.
+/// Measure the deep copy that `copy` builds, and print the line. The
+/// container of the copies is allocated before the timer and cleared between
+/// runs, so the timed region holds the copy, the push of the copy into the
+/// container, and the storage that the copy allocates itself, and no
+/// allocation of the container. The release of the copies is outside the
+/// timed region.
 pub(super) fn deep_copy<T>(name: &str, operations: usize, mut copy: impl FnMut() -> T) {
-    let ns = measure(RUNS, operations, || {
-        let mut kept = Vec::with_capacity(operations);
+    let mut kept: Vec<T> = Vec::with_capacity(operations);
+    let mut best = f64::INFINITY;
+    for _ in 0..RUNS {
+        kept.clear();
+        let start = Instant::now();
         for _ in 0..operations {
             kept.push(copy());
         }
-        kept
-    });
-    report(name, ns);
+        let elapsed = start.elapsed().as_nanos() as f64;
+        black_box(&kept);
+        best = best.min(elapsed / operations as f64);
+    }
+    report(name, black_box(best));
 }
 
 /// Return a lambda of the module `lists`, for the fun shapes. The fields
