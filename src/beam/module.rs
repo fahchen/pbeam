@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    hash::{BuildHasherDefault, Hasher},
+};
 
 use super::code::{self, Instruction, Operand};
 use crate::{
@@ -7,6 +10,42 @@ use crate::{
 };
 
 const X0_REGISTER: u32 = 0;
+
+/// The FNV-1a 64-bit offset basis (`FNV_OFFSET_BASIS`, the FNV reference).
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The FNV-1a 64-bit prime (`FNV_PRIME`, the FNV reference).
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// The label map of one module. The keys are the label numbers of one module,
+/// and the loader owns the key set, so the map does not need a hash that
+/// resists a chosen key. The default `RandomState` mixes each key with
+/// `SipHash`, and that cost is more than the short scan that the map replaces
+/// for a label near the start of a small module. The mixer of [`LabelHasher`]
+/// is cheaper for the `u32` keys of the loader.
+pub(crate) type LabelMap<Value> = HashMap<u32, Value, BuildHasherDefault<LabelHasher>>;
+
+/// The FNV-1a mixer of [`LabelMap`]. The standard `Hasher::write_u32` sends
+/// the bytes of the key to [`Hasher::write`], so each key uses this mixer.
+pub(crate) struct LabelHasher(u64);
+
+impl Hasher for LabelHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
+        }
+    }
+}
+
+impl Default for LabelHasher {
+    fn default() -> Self {
+        LabelHasher(FNV_OFFSET_BASIS)
+    }
+}
 
 #[derive(Debug)]
 pub struct BeamModule {
@@ -28,12 +67,12 @@ pub(crate) struct ModuleTables {
     /// The index of the instruction after each label, as the removed
     /// `label_index` scan gave it. The first label of a number wins, as
     /// `Iterator::position` decided.
-    pub(crate) jump_targets: HashMap<u32, usize>,
+    pub(crate) jump_targets: LabelMap<usize>,
     /// The function of each label: the `func_info` of the module that
     /// precedes the label, as the removed `function_at_label` scan found it.
     /// `None` is a label that no such `func_info` precedes. The first label
     /// of a number wins.
-    pub(crate) function_starts: HashMap<u32, Option<FunctionStart>>,
+    pub(crate) function_starts: LabelMap<Option<FunctionStart>>,
     /// The name and the arity of each function of the module, in stream
     /// order. A `FunctionStart` names its entry in this vector.
     pub(crate) functions: Vec<(String, u32)>,
@@ -62,8 +101,8 @@ impl ModuleTables {
     /// assert_eq!(tables.functions[0].0, "main");
     /// ```
     fn build(name: &str, instructions: &[Instruction]) -> Self {
-        let mut jump_targets = HashMap::new();
-        let mut function_starts = HashMap::new();
+        let mut jump_targets = LabelMap::default();
+        let mut function_starts = LabelMap::default();
         let mut functions = Vec::new();
         let mut function: Option<usize> = None;
         for (index, instruction) in instructions.iter().enumerate() {
