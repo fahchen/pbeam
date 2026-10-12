@@ -222,21 +222,25 @@ Each row is one part of one call or of one instruction. The "before" column give
 
 ### The term operations
 
-The numbers come from the design measurement of the copy-on-write epic at `a6b838c`, release build, on the host of the environment table, as the minimum of 27 runs (3 calls of 9 runs), at load 2.59 to 3.70. `src/term/` is unchanged from `a6b838c` to the current revision, so the numbers hold at the current revision. `docs/interpreter-dispatch-plan.md:21` and `docs/backlog.md:78` repeat some of them.
+The numbers come from the committed measurement of `mise run bench-term` at `ebfd447`, the head of the branch of this section, release build, on the host of the environment table, at load `{ 42.57 18.46 15.01 }`. Each measured number is the minimum of 9 timed runs of one operation, the record is `target/term-costs.txt`, and the test asserts no time. The runtime code of `src/term.rs` and `src/term/` is unchanged from `a6b838c` to `ebfd447` and to `origin/main` at `a26c1f3`; the branch adds only the `#[cfg(test)]` declaration of this measurement. The measurement replaces the earlier scratch numbers of the design measurement at `a6b838c`: 11.2 ns, 4.03 ns, 9.46 ns, 32.3 ns, 5102 ns, 132197 ns, 1811 ns, 58.4 ns, 28.9 ns, and 139840 ns.
 
-| Term operation | Cost for one operation |
-| --- | --- |
-| `Arc` clone and drop of one term | 11.2 ns; the payload does not change it (11.0 ns for a binary, 11.6 ns for a fun, and 11.1 ns for one cons cell) |
-| `Rc` clone and drop of one term | 4.03 ns; the two atomic operations of the `Arc` pair therefore cost 5.4 ns (the bare `Arc` of 9.46 ns less the `Rc` of 4.03 ns) |
-| Bare `Arc` clone and drop, without a term | 9.46 ns |
-| `Arc` clone and drop of a shared map | 32.3 ns, of which about 21 ns is the placeholder allocation of `Map::drain_into` (`src/term/map.rs:503`), which task [#515](https://github.com/fahchen/pbeam/issues/515) owns |
-| Deep copy of a 1000-element tuple | 5102 ns |
-| Deep copy of a 1000-key map | 132197 ns |
-| Deep copy of a 102400-byte binary | 1811 ns, which is 56.5 GB/s |
-| Deep copy of a fun with two free variables | 58.4 ns |
-| Deep copy of one cons cell | 28.9 ns |
-| Deep copy of a tuple that holds a 1000-key map | 139840 ns |
-| Drop of an immediate | no measurement yet; task [#515](https://github.com/fahchen/pbeam/issues/515) owns the drop path, and its acceptance includes this number |
+| Term operation | Cost for one operation | Kind |
+| --- | --- | --- |
+| `Arc` clone and drop of one term | 11.2 ns; the payload does not change it (a binary 11.2 ns, a fun with two free variables 11.8 ns, one cons cell 11.3 ns, and a tuple that holds a 1000-key map 11.2 ns) | measured |
+| `Arc` clone and drop of a shared map | 32.1 ns | measured |
+| The placeholder allocation of `Map::drain_into` (`src/term/map.rs:503`) in the drop of a shared map, which task [#515](https://github.com/fahchen/pbeam/issues/515) owns | about 21 ns | computed: 32.051 ns less 11.223 ns |
+| `Rc` clone and drop of the same plain payload | 3.83 ns to 4.08 ns (a tuple 3.832 ns, a binary 3.860 ns, one cons cell 3.834 ns, a fun with two free variables 3.991 ns, and a shared map 4.080 ns) | measured |
+| Bare `Arc` clone and drop | 9.590 ns | measured |
+| Bare `Rc` clone and drop | 3.910 ns | measured |
+| The two atomic operations of the `Arc` pair | about 5.7 ns | computed: 9.590 ns less 3.910 ns |
+| Deep copy of a 1000-element tuple | 7366 ns | measured |
+| Deep copy of a 1000-key map, which walks every node of the trie | 37783 ns | measured |
+| Deep copy of a 102400-byte binary | 1418 ns | measured |
+| The copy rate of the 102400-byte binary | 72.2 GB/s | computed: 102400 bytes divided by 1418.250 ns |
+| Deep copy of a fun with two free variables | 68.6 ns | measured |
+| Deep copy of one cons cell | 31.3 ns | measured |
+| Deep copy of a tuple that holds a 1000-key map | 46251 ns | measured |
+| Drop of an immediate | no measurement yet; task [#515](https://github.com/fahchen/pbeam/issues/515) owns the drop path, and its acceptance includes this number | not measured |
 
 ### The end-to-end runs
 
