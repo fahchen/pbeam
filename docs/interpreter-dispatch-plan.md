@@ -83,6 +83,8 @@ The risk to ERTS-exact diagnostics. A line number, an error term, and a stack tr
 
 Gate for step 8: measure the instructions retired, the cache misses on the hot loop, and the bytes per instruction with a hardware counter, or with an equivalent measured proxy. Adopt the prepared form only if the compact stream gives at least a 10 percent gain on the floor loop and on the Terra redraw, and no test of the error terms changes.
 
+Step 6 result, measured at `ea4dd13` with the pinned Rust 1.99.0 on an Apple M1 Max with 10 CPUs (task #514): the instruction bytes are not a measured part of the loop cost, so step 8 is skipped and step 9 comes next. `size_of::<Instruction>()` is 136 bytes and `size_of::<Operand>()` is 40 bytes, as the baseline revision records. One iteration of the `call_only` floor loop retires 4 instructions and touches 544 bytes of instruction slots, in an 816-byte slot range; the whole range is below the L1 instruction cache of the host (131072 bytes for the efficiency cores and 196608 bytes for the performance cores), so it stays resident after the first iteration. A measured proxy of the host memory system gives a difference of 0.00 ns to 0.02 ns for each record between a 136-byte and a 32-byte record at or below a 136000-byte stream, and 2.63 ns at the estimated 40800000-byte Terra stream. One added instruction on the same loop costs 77.6 ns to 154.0 ns. Thus a compact form cannot reach the 10 percent gate, and its risk to the error terms, the exception classes, and the stack traces is not worth a smaller recorded gain.
+
 ## 3. Operand and register access
 
 Decision: read an operand through one bounds-checked lookup that returns a reference, clone only where ownership demands it, and write by value with no clone.
