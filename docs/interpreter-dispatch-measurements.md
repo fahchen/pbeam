@@ -222,24 +222,24 @@ Each row is one part of one call or of one instruction. The "before" column give
 
 ### The term operations
 
-The numbers come from the committed measurement of `mise run bench-term` at `ebfd447`, the commit that adds the measurement, release build, on the host of the environment table, at load `{ 42.57 18.46 15.01 }`. Each measured number is the minimum of 9 timed runs of one operation, the record is `target/term-costs.txt`, and the test asserts no time. The runtime code of `src/term.rs` and `src/term/` is unchanged from `a6b838c` to `ebfd447` and to `origin/main` at `a26c1f3`; the branch adds only the `#[cfg(test)]` declaration of this measurement. The measurement replaces the earlier scratch numbers of the design measurement at `a6b838c`: 11.2 ns, 4.03 ns, 9.46 ns, 32.3 ns, 5102 ns, 132197 ns, 1811 ns, 58.4 ns, 28.9 ns, and 139840 ns.
+The numbers come from the committed measurement of `mise run bench-term` at `6fa5194`, the commit that adds the measurement, release build, on the host of the environment table, at load `{ 19.73 13.08 14.70 }`. Each measured number is the minimum of 9 timed runs of one operation, the record is `target/term-costs.txt`, and the test asserts no time. A deep-copy number holds the copy alone: the copies of one run stay alive until the timer stops, and the release of the copies is outside the measured region. The runtime code of `src/term.rs` and `src/term/` is unchanged from `a6b838c` to `6fa5194` and to `origin/main` at `a26c1f3`; the branch adds only the `#[cfg(test)]` declaration of this measurement. The measurement replaces the earlier scratch numbers of the design measurement at `a6b838c`: 11.2 ns, 4.03 ns, 9.46 ns, 32.3 ns, 5102 ns, 132197 ns, 1811 ns, 58.4 ns, 28.9 ns, and 139840 ns.
 
 | Term operation | Cost for one operation | Kind |
 | --- | --- | --- |
-| `Arc` clone and drop of one term | 11.2 ns; the payload does not change it (a binary 11.2 ns, a fun with two free variables 11.8 ns, one cons cell 11.3 ns, and a tuple that holds a 1000-key map 11.2 ns) | measured |
-| `Arc` clone and drop of a shared map | 32.1 ns | measured |
-| The placeholder allocation of `Map::drain_into` (`src/term/map.rs:503`) in the drop of a shared map, which task [#515](https://github.com/fahchen/pbeam/issues/515) owns | about 21 ns | computed: 32.051 ns less 11.223 ns |
-| `Rc` clone and drop of the same plain payload | 3.83 ns to 4.08 ns (a tuple 3.832 ns, a binary 3.860 ns, one cons cell 3.834 ns, a fun with two free variables 3.991 ns, and a shared map 4.080 ns) | measured |
-| Bare `Arc` clone and drop | 9.590 ns | measured |
-| Bare `Rc` clone and drop | 3.910 ns | measured |
-| The two atomic operations of the `Arc` pair | about 5.7 ns | computed: 9.590 ns less 3.910 ns |
-| Deep copy of a 1000-element tuple | 7366 ns | measured |
-| Deep copy of a 1000-key map, which walks every node of the trie | 37783 ns | measured |
-| Deep copy of a 102400-byte binary | 1418 ns | measured |
-| The copy rate of the 102400-byte binary | 72.2 GB/s | computed: 102400 bytes divided by 1418.250 ns |
-| Deep copy of a fun with two free variables | 68.6 ns | measured |
-| Deep copy of one cons cell | 31.3 ns | measured |
-| Deep copy of a tuple that holds a 1000-key map | 46251 ns | measured |
+| `Arc` clone and drop of one term | 11.4 ns; the payload does not change it (a binary 11.2 ns, a fun with two free variables 12.1 ns, one cons cell 11.3 ns, and a tuple that holds a 1000-key map 11.3 ns) | measured |
+| `Arc` clone and drop of a shared map | 32.2 ns | measured |
+| The placeholder allocation of `Map::drain_into` (`src/term/map.rs:503`) in the drop of a shared map, which task [#515](https://github.com/fahchen/pbeam/issues/515) owns | about 21 ns | computed: 32.199 ns less 11.377 ns |
+| `Rc` clone and drop of the same plain payload | 3.84 ns to 4.01 ns (a tuple 3.846 ns, a binary 3.836 ns, one cons cell 3.836 ns, a fun with two free variables 4.011 ns, and a shared map 3.971 ns) | measured |
+| Bare `Arc` clone and drop | 9.545 ns | measured |
+| Bare `Rc` clone and drop | 3.851 ns | measured |
+| The two atomic operations of the `Arc` pair | about 5.7 ns | computed: 9.545 ns less 3.851 ns |
+| Deep copy of a 1000-element tuple | 2706 ns | measured |
+| Deep copy of a 1000-key map, which walks every node of the trie | 17901 ns | measured |
+| Deep copy of a 102400-byte binary | 1761 ns | measured |
+| The copy rate of the 102400-byte binary | 58.1 GB/s | computed: 102400 bytes divided by 1761.250 ns |
+| Deep copy of a fun with two free variables | 26.7 ns | measured |
+| Deep copy of one cons cell | 11.3 ns | measured |
+| Deep copy of a tuple that holds a 1000-key map | 17932 ns | measured |
 | Drop of an immediate | no measurement yet; task [#515](https://github.com/fahchen/pbeam/issues/515) owns the drop path, and its acceptance includes this number | not measured |
 
 ### The end-to-end runs
