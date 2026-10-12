@@ -222,29 +222,29 @@ Each row is one part of one call or of one instruction. The "before" column give
 
 ### The term operations
 
-The numbers come from the committed measurement of `mise run bench-term` at `55d197d`, the merge commit of this branch with step 7 ([#535](https://github.com/fahchen/pbeam/pull/535), task [#515](https://github.com/fahchen/pbeam/issues/515)), release build, on the host of the environment table, at load `{ 6.94 8.63 12.05 }`. Each measured number is the minimum of 9 timed runs of one operation, the record is `target/term-costs.txt`, and the test asserts no time. A deep-copy number holds the copy alone: the copies of one run stay alive until the timer stops, and the release of the copies is outside the measured region. The drop of an immediate is the measurement of `mise run bench-drop` at the same revision, whose record is `target/drop-costs.txt`. Step 7 merged as `c6cfb3a` and changed the term drop path, so `src/term.rs` and `src/term/map.rs` differ from `a6b838c`; the table reports the cost at the merged revision. The measurement replaces the earlier scratch numbers of the design measurement at `a6b838c`: 11.2 ns, 4.03 ns, 9.46 ns, 32.3 ns, 5102 ns, 132197 ns, 1811 ns, 58.4 ns, 28.9 ns, and 139840 ns.
+The numbers come from the committed measurement of `mise run bench-term` at `ec935af`, the commit that moves the deep-copy container outside the timer, release build, on the host of the environment table, at load `{ 8.08 13.95 14.04 }`. Each measured number is the minimum of 9 timed runs of one operation, the record is `target/term-costs.txt`, and the test asserts no time. A deep-copy number holds the copy, the push of the copy into a container of the run, and the storage that the copy allocates itself; the container is allocated before the timer and cleared between runs, so no allocation of the container is in the timed region, and the release of the copies is outside it. The drop of an immediate is the measurement of `mise run bench-drop` at the same revision, at load `{ 10.56 14.36 14.19 }`, whose record is `target/drop-costs.txt`. Step 7 merged as `c6cfb3a` and changed the term drop path, so `src/term.rs` and `src/term/map.rs` differ from `a6b838c`; the table reports the cost at the merged revision. The measurement replaces the earlier scratch numbers of the design measurement at `a6b838c`: 11.2 ns, 4.03 ns, 9.46 ns, 32.3 ns, 5102 ns, 132197 ns, 1811 ns, 58.4 ns, 28.9 ns, and 139840 ns.
 
 | Term operation | Cost for one operation | Kind |
 | --- | --- | --- |
-| `Arc` clone and drop of one term | 10.2 ns; the payload does not change it (a binary 10.2 ns, a fun with two free variables 10.5 ns, one cons cell 10.1 ns, and a tuple that holds a 1000-key map 10.1 ns) | measured |
-| `Arc` clone and drop of a shared map | 12.1 ns; about 1.9 ns above the tuple, which is inside the 3 ns gate of step 7 | measured |
-| The placeholder allocation of `Map::drain_into` (`src/term/map.rs:503`) in the drop of a shared map, which step 7 ([#535](https://github.com/fahchen/pbeam/pull/535)) removed at `c6cfb3a` | none at `55d197d`; about 21 ns at `6fa5194` | computed before the removal: 32.199 ns less 11.377 ns; removed |
-| `Rc` clone and drop of the same plain payload | 3.94 ns to 4.11 ns (a tuple 3.943 ns, a binary 3.935 ns, one cons cell 3.994 ns, a fun with two free variables 4.106 ns, and a shared map 4.108 ns) | measured |
-| Bare `Arc` clone and drop | 9.770 ns | measured |
-| Bare `Rc` clone and drop | 3.859 ns | measured |
-| The two atomic operations of the `Arc` pair | about 5.9 ns | computed: 9.770 ns less 3.859 ns |
-| Deep copy of a 1000-element tuple | 2609 ns | measured |
-| Deep copy of a 1000-key map, which walks every node of the trie | 19935 ns | measured |
-| Deep copy of a 102400-byte binary | 1774 ns | measured |
-| The copy rate of the 102400-byte binary | 57.7 GB/s | computed: 102400 bytes divided by 1774.250 ns |
-| Deep copy of a fun with two free variables | 26.9 ns | measured |
-| Deep copy of one cons cell | 11.4 ns | measured |
-| Deep copy of a tuple that holds a 1000-key map | 20249 ns | measured |
-| Drop of an immediate | 2.24 ns | measured by `mise run bench-drop` at `55d197d` |
+| `Arc` clone and drop of one term | 10.3 ns; the payload does not change it (a binary 10.1 ns, a fun with two free variables 10.5 ns, one cons cell 10.3 ns, and a tuple that holds a 1000-key map 10.3 ns) | measured |
+| `Arc` clone and drop of a shared map | 12.3 ns; about 2.0 ns above the tuple, which is inside the 3 ns gate of step 7 | measured |
+| The placeholder allocation of `Map::drain_into` (`src/term/map.rs:503`) in the drop of a shared map, which step 7 ([#535](https://github.com/fahchen/pbeam/pull/535)) removed at `c6cfb3a` | none at `ec935af`; about 21 ns at `6fa5194` | computed before the removal: 32.199 ns less 11.377 ns; removed |
+| `Rc` clone and drop of the same plain payload | 3.90 ns to 4.06 ns (a tuple 3.897 ns, a binary 3.910 ns, one cons cell 3.926 ns, a fun with two free variables 4.058 ns, and a shared map 4.001 ns) | measured |
+| Bare `Arc` clone and drop | 9.801 ns | measured |
+| Bare `Rc` clone and drop | 3.979 ns | measured |
+| The two atomic operations of the `Arc` pair | about 5.8 ns | computed: 9.801 ns less 3.979 ns |
+| Deep copy of a 1000-element tuple | 2542 ns | measured |
+| Deep copy of a 1000-key map, which walks every node of the trie | 18968 ns | measured |
+| Deep copy of a 102400-byte binary | 1728 ns | measured |
+| The copy rate of the 102400-byte binary | 59.3 GB/s | computed: 102400 bytes divided by 1728.250 ns |
+| Deep copy of a fun with two free variables | 26.7 ns | measured |
+| Deep copy of one cons cell | 11.8 ns | measured |
+| Deep copy of a tuple that holds a 1000-key map | 20027 ns | measured |
+| Drop of an immediate | 2.26 ns | measured by `mise run bench-drop` at `ec935af` |
 
 ### The end-to-end runs
 
-The first two rows are the record of step 0 ([#520](https://github.com/fahchen/pbeam/pull/520)) at `078c119`. The last two rows are the record of section 3 of this document at `ea4dd13`, the head of `origin/main` at the time of that run. Step 6 (`d36f686`) changes no runtime code, so the number of `ea4dd13` holds at the current revision.
+The first two rows are the record of step 0 ([#520](https://github.com/fahchen/pbeam/pull/520)) at `078c119`. The last two rows are the record of section 3 of this document at `ea4dd13`, the head of `origin/main` at the time of that run, and they are historical: step 6 (`d36f686`) changes no runtime code, but step 7 ([#535](https://github.com/fahchen/pbeam/pull/535)) changes the term drop path, and the harness has not measured the end-to-end latency again after step 7. A later change re-measures them.
 
 | Mode | Revision | First frame | Key latency (the four keys) |
 | --- | --- | --- | --- |
@@ -255,7 +255,7 @@ The first two rows are the record of step 0 ([#520](https://github.com/fahchen/p
 
 The design measurement at `b52e297` splits one redraw frame: `render` 39.0 ms and `patch` 43.4 ms, against 0.25 ms for the patch walk on the pinned ERTS. The repository has not re-measured this split on PBeam, so the two numbers are the design record and not a run of the harness above.
 
-The four tables above have three limits. First, an added delta is measured inside one run against the floor loop of the same run, so it holds that instruction plus a small loop difference. Second, a call-path part is a cost for each call or for each instruction, and it is not a share of an end-to-end run; the parts overlap, so the sum of a column is not the cost of one key press. Third, the term table comes from the measurement at `55d197d`, whose term code is the code of `c6cfb3a`, and the end-to-end table comes from `078c119` and `ea4dd13`, so the two tables are not from the same revision.
+The four tables above have three limits. First, an added delta is measured inside one run against the floor loop of the same run, so it holds that instruction plus a small loop difference. Second, a call-path part is a cost for each call or for each instruction, and it is not a share of an end-to-end run; the parts overlap, so the sum of a column is not the cost of one key press. Third, the term table comes from the measurement at `ec935af`, whose term code is the code of `c6cfb3a`, and the end-to-end table comes from `078c119` and `ea4dd13`, so the two tables are not from the same revision.
 
 ## 4. What each step decided and what it left open
 
