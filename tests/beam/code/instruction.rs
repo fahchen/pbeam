@@ -2302,7 +2302,7 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
 fn records_the_decoded_form_layout() {
     use std::mem::size_of;
 
-    let arms: [(&str, Instruction); 8] = [
+    let arms: [(&str, Instruction); 10] = [
         (
             "`BinaryGetBinary`",
             Instruction::BinaryGetBinary {
@@ -2362,6 +2362,34 @@ fn records_the_decoded_form_layout() {
             Instruction::Move(Operand::X(0), Operand::Value(Term::Integer(1))),
         ),
         ("`Label`", Instruction::Label(1)),
+        (
+            "`TestCompareBif`",
+            Instruction::TestCompareBif {
+                compare: super::TestCompare::Equal,
+                left: Operand::X(0),
+                right: Operand::X(1),
+                resume: 2,
+                bif: Box::new(super::PairBif {
+                    fail_label: 0,
+                    bif: BifId::ErlangPlus2,
+                    arguments: vec![Operand::X(0), Operand::X(1)],
+                    destination: Operand::X(0),
+                }),
+            },
+        ),
+        (
+            "`BifCall`",
+            Instruction::BifCall {
+                bif: super::PairBif {
+                    fail_label: 0,
+                    bif: BifId::ErlangMinus2,
+                    arguments: vec![Operand::X(0), Operand::X(1)],
+                    destination: Operand::X(0),
+                },
+                arity: 1,
+                label: 3,
+            },
+        ),
     ];
 
     println!("| decoded form item | bytes |");
