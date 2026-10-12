@@ -76,6 +76,18 @@ fn three_tuple() -> Term {
     Term::tuple(vec![Term::Integer(1), Term::Integer(2), Term::Integer(3)])
 }
 
+/// Return a tuple term of one immediate element, which is the smallest
+/// compound term that the walk of `Term::drop` holds.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(one_tuple(), Term::tuple(vec![Term::Integer(1)]));
+/// ```
+fn one_tuple() -> Term {
+    Term::tuple(vec![Term::Integer(1)])
+}
+
 /// Return a list term of [`LIST_CELLS`] cells.
 ///
 /// # Examples
@@ -170,6 +182,30 @@ fn shared_tuple(count: usize) -> (Vec<Term>, Vec<Term>) {
     shared_storage(three_tuple, count)
 }
 
+/// Return the population of the one-element tuple shape whose term owns its
+/// array.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(one_tuple_population(10).0.len(), 10);
+/// ```
+fn one_tuple_population(count: usize) -> (Vec<Term>, Vec<Term>) {
+    own_storage(one_tuple, count)
+}
+
+/// Return the population of the one-element tuple shape whose array another
+/// term holds.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(shared_one_tuple(10).1.len(), 10);
+/// ```
+fn shared_one_tuple(count: usize) -> (Vec<Term>, Vec<Term>) {
+    shared_storage(one_tuple, count)
+}
+
 /// Return the population of the map shape whose term owns its form.
 ///
 /// # Examples
@@ -241,6 +277,18 @@ fn shapes() -> Vec<Shape> {
             terms: BATCH,
             runs: RUNS,
             prepare: shared_tuple,
+        },
+        Shape {
+            name: "tuple of one element, last holder",
+            terms: BATCH,
+            runs: RUNS,
+            prepare: one_tuple_population,
+        },
+        Shape {
+            name: "tuple of one element, shared holder",
+            terms: BATCH,
+            runs: RUNS,
+            prepare: shared_one_tuple,
         },
         Shape {
             name: "map, last holder",
