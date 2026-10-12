@@ -403,6 +403,8 @@ macro_rules! bifs {
         /// assert_eq!(resolve("io", "put_chars", 2), None);
         /// ```
         pub(crate) fn resolve(module: &str, name: &str, arity: u32) -> Option<BifId> {
+            #[cfg(test)]
+            super::RESOLVE_CALLS.with(|calls| calls.set(calls.get() + 1));
             let index = BIFS.binary_search(&(module, name, arity)).ok()?;
             Some(BIF_IDS[index].unwrap_or(BifId::Unimplemented(index as u16)))
         }
@@ -481,6 +483,30 @@ mod table;
 #[cfg(test)]
 pub(in crate::runtime::interpreter) use table::BIFS;
 pub(crate) use table::{BifId, mfa, resolve};
+
+#[cfg(test)]
+thread_local! {
+    /// The number of calls of [`table::resolve`] on this test thread.
+    ///
+    /// The result of a search does not show in the value of a run, so a test
+    /// of a path that must not search `BIFS` reads this counter. The counter
+    /// is per thread, because the test harness runs the tests of one binary
+    /// on parallel threads.
+    pub(in crate::runtime::interpreter) static RESOLVE_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Return the number of calls of [`table::resolve`] on this test thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(resolve_calls(), 0);
+/// ```
+#[cfg(test)]
+pub(in crate::runtime::interpreter) fn resolve_calls() -> usize {
+    RESOLVE_CALLS.with(std::cell::Cell::get)
+}
 
 impl BeamProgram {
     /// Run the BIF of `module:name/arity` with the arguments, resolving the

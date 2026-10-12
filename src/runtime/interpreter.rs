@@ -1744,7 +1744,9 @@ impl BeamProgram {
             let result = self.call_bif(scheduler, module, name, bif, arguments)?;
             return self.finish_bif(scheduler, result, false);
         }
-        self.call_mfa(scheduler, module, name, arity, tail)
+        // The loader classified the import, and an import that is not a BIF
+        // reaches the export lookup with no search of `BIFS`.
+        self.call_export(scheduler, module, name, arity, tail)
     }
 
     /// Call `module:name/arity` through its export with the arguments in
@@ -1776,17 +1778,44 @@ impl BeamProgram {
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        match (module, name, arity) {
-            ("erlang", "apply", 2) => return self.apply_fun(scheduler, tail),
-            ("erlang", "apply", 3) => return self.apply_mfa(scheduler, tail),
-            _ => {}
-        }
         let resolved = resolve(module, name, arity);
         if resolved.is_some() || is_pbeam_bif(module, name, arity) {
             let process = scheduler.current_process_mut();
             let arguments = call_arguments(&process.registers, arity)?;
             let result = self.call_bif(scheduler, module, name, resolved, arguments)?;
             return self.finish_bif(scheduler, result, tail);
+        }
+        self.call_export(scheduler, module, name, arity, tail)
+    }
+
+    /// Call the export of `module:name/arity` with the arguments in the X
+    /// registers, as `call_ext`, `apply`, and a fun call do. The calls of
+    /// `erlang:apply/2` and `erlang:apply/3` run as the ERTS `i_apply_fun`
+    /// and `i_apply` instructions. A function that a loaded module does not
+    /// export goes to [`BeamProgram::undefined_function`]. The caller
+    /// resolves the BIF of the MFA first when a load-time or a run-time fact
+    /// exists, so this function searches no table. Return the outcome when
+    /// the process stops.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // `fixture:main/0` enters the frame of the export.
+    /// let outcome = program.call_export(&mut scheduler, "fixture", "main", 0, false)?;
+    /// assert!(outcome.is_none());
+    /// ```
+    fn call_export(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        name: &str,
+        arity: u32,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        match (module, name, arity) {
+            ("erlang", "apply", 2) => return self.apply_fun(scheduler, tail),
+            ("erlang", "apply", 3) => return self.apply_mfa(scheduler, tail),
+            _ => {}
         }
         match scheduler.code.export_frame(module, name, arity)? {
             Some(frame) => {

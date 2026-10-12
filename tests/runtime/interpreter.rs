@@ -1,6 +1,6 @@
 use std::{collections::HashMap, rc::Rc};
 
-use super::bif::{BIFS, BifId, BifResult, resolve};
+use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
     BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
     read_operand, write_operand,
@@ -438,6 +438,50 @@ fn rejects_invalid_tuple_access_receives_and_bifs() {
             destination: Operand::X(0),
         }])
         .contains("unresolved external MFA erlang:date/0")
+    );
+}
+
+#[test]
+fn calls_a_module_export_without_a_bif_search() {
+    // A `call_ext` of module code holds the classification of its import,
+    // and that classification is `None` for an MFA that is not a BIF. The
+    // run then reaches the export lookup with no search of `BIFS`.
+    let body = vec![
+        Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
+        Instruction::CallExternal {
+            arity: 1,
+            module: "fixture".into(),
+            name: "guest".into(),
+            bif: resolve("fixture", "guest", 1),
+            tail: false,
+            deallocate: 0,
+        },
+        Instruction::Return,
+    ];
+    let mut program = make_program(body, 0);
+    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
+    module.instructions.extend([
+        Instruction::FunctionInfo {
+            module: "fixture".into(),
+            name: "guest".into(),
+            arity: 1,
+        },
+        Instruction::Label(11),
+        Instruction::Move(Operand::Value(Term::Integer(7)), Operand::X(0)),
+        Instruction::Return,
+    ]);
+    module.reindex();
+    let guest = module.tables.name_id("guest").unwrap();
+    module.exports.insert((guest, 1), 11);
+    let before = resolve_calls();
+    assert_eq!(
+        program.execute("fixture", "main", &[]).unwrap(),
+        Term::Integer(7)
+    );
+    assert_eq!(
+        resolve_calls(),
+        before,
+        "a `call_ext` of module code must reach the export lookup with no search of `BIFS`"
     );
 }
 
