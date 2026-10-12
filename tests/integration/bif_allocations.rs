@@ -7,7 +7,7 @@
 //! difference. The constant cost of one run cancels, so the result is the
 //! allocation count of one iteration.
 
-use std::{alloc::System, hint::black_box, sync::atomic::AtomicUsize};
+use std::{alloc::System, cell::Cell, hint::black_box};
 
 use pbeam_runtime::{BeamProgram, Term};
 
@@ -18,20 +18,33 @@ const DISPATCH_PROBE: &[u8] = include_bytes!("../../fixtures/dispatch/dispatch_p
 /// iteration.
 const LENGTHS: [usize; 2] = [20_000, 40_000];
 
-/// The allocator of the process, with a count of the allocations.
+/// The length of the warm-up run of each function. The first run of a
+/// function pays the one-off setup of the runtime, and the length of that
+/// setup does not grow with the length of the run, so the difference of the
+/// two measured runs cannot cancel it. The warm-up run pays it first.
+const WARM_UP: usize = 100;
+
+/// The allocator of the process, with a count of the allocations of each
+/// thread.
 struct CountingAllocator;
 
-/// The number of allocations of the process.
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// The number of allocations of the current thread. The count is for each
+    /// thread, so a thread of the harness or of the runtime that allocates
+    /// beside the measured run changes no number of this test. The `Cell` has
+    /// a constant value and no destructor, so the allocator reads it without
+    /// an allocation of its own.
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
 
 // SAFETY: the allocator forwards each operation to `System`, which is a
-// valid allocator, and it only adds a count.
+// valid allocator, and it only adds a count of the current thread.
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        count_one();
         // SAFETY: the caller gives a valid layout, as `GlobalAlloc` requires.
         unsafe { System.alloc(layout) }
     }
@@ -42,10 +55,34 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        count_one();
         // SAFETY: the pointer and the layout come from `alloc` of `System`.
         unsafe { System.realloc(pointer, layout, size) }
     }
+}
+
+/// Add one to the allocation count of the current thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let before = counted();
+/// count_one();
+/// assert_eq!(counted(), before + 1);
+/// ```
+fn count_one() {
+    ALLOCATIONS.with(|count| count.set(count.get().wrapping_add(1)));
+}
+
+/// Return the number of allocations of the current thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(counted(), 0);
+/// ```
+fn counted() -> usize {
+    ALLOCATIONS.with(Cell::get)
 }
 
 /// Run `function` at `length` and return the number of allocations of the
@@ -72,13 +109,13 @@ fn allocations(program: &BeamProgram, function: &str, length: usize) -> usize {
         ],
         other => panic!("unknown probe function {other}"),
     };
-    let start = ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed);
+    let start = counted();
     let result = program
         .execute("dispatch_probe", function, arguments)
         .unwrap();
-    let count = ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed) - start;
+    let difference = counted() - start;
     black_box(&result);
-    count
+    difference
 }
 
 /// Return the allocation count of one iteration of `function`, from the two
@@ -91,9 +128,18 @@ fn allocations(program: &BeamProgram, function: &str, length: usize) -> usize {
 /// assert!(per_iteration > 0);
 /// ```
 fn per_iteration(program: &BeamProgram, function: &str) -> usize {
+    // The first run of a function pays the one-off setup of the runtime,
+    // which the difference of the two runs cannot cancel. The warm-up run
+    // pays it first, outside the two measured runs.
+    let _ = allocations(program, function, WARM_UP);
     let first = allocations(program, function, LENGTHS[0]);
     let second = allocations(program, function, LENGTHS[1]);
-    (second - first) / (LENGTHS[1] - LENGTHS[0])
+    // Round the quotient. One allocation for each iteration is
+    // `LENGTHS[1] - LENGTHS[0]` allocations, so a stray allocation of the
+    // host moves no count of one iteration. The difference of the count of
+    // one iteration from the count of another function stays exact.
+    let difference = (second - first) + (LENGTHS[1] - LENGTHS[0]) / 2;
+    difference / (LENGTHS[1] - LENGTHS[0])
 }
 
 /// Check the allocation count of the borrowed BIF path: none of the added
