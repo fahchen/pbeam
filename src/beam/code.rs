@@ -391,11 +391,7 @@ fn decode(
             lambda.label()
         )));
     }
-    Ok(BeamModule {
-        name,
-        exports,
-        instructions,
-    })
+    Ok(BeamModule::new(name, exports, instructions))
 }
 
 /// Read the atoms of an `AtU8` chunk and put each one, in chunk order, into
