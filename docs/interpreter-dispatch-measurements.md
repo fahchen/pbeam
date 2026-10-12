@@ -22,7 +22,7 @@ One number in a benchmark table is the minimum of nine runs of one probe inside 
 ## How to read the tables
 
 - The floor loop holds `test`, `gc_bif '-'`, and one call. The benchmark measures three shapes: `call_ext_only` in `dispatch_probe`, `call_only` in `dispatch_probe`, and `call_only` in `dispatch_position_probe` after 20 guest functions.
-- The added rows hold the floor loop of `dispatch_probe` plus one instruction: `gc_bif '+'`, the `bif` of `tuple_size/1`, the `bif` of `element/2` (the ERTS BIF `get_tuple_element`), the `bif` of `hd/1` (the ERTS BIF `get_hd`), and the `bif` of `map_get/2` on a 1000-key map.
+- The added rows hold the floor loop of `dispatch_probe` plus one instruction: `gc_bif '+'`, the `bif` of `tuple_size/1`, the `bif` of `erlang:element/2`, the `bif` of `erlang:hd/1`, and the `bif` of `map_get/2` on a 1000-key map.
 - A ratio is the PBeam number divided by the pinned ERTS number of the same run and the same row. A ratio above one means that PBeam is slower.
 - Each step column comes from the runs of the step that owns the column, with the aggregation rule that the table states. Two neighbouring columns therefore come from different runs or different groups of runs, and their difference holds both the change of the code and the run-to-run noise of about 10 percent at 200000 iterations.
 
@@ -185,6 +185,78 @@ This is the only end-to-end effect in this document that a reader can compare wi
 
 The measurement covers one revision and one host. It does not isolate the dispatch work from the term work, the input handling, or the render, and the plan states that the redraw is 99.96 percent of one key press (`docs/interpreter-dispatch-plan.md:23`). It is one run of each mode, so it is weaker evidence than the minimum-of-nine floor-loop numbers above. The two modes ran at a load of `{ 4.14 4.57 6.08 }` and `{ 3.67 4.45 6.00 }`, which is not an idle host.
 
+## The cost of one operation, by kind
+
+This section answers one question: what does one operation cost, by kind? The four tables below hold the measured cost of one interpreter instruction, of one part of the call path, of one term operation, and of one end-to-end run. Each table names its revision and its source. Each number is measured, or the table marks it as computed.
+
+### The interpreter instructions
+
+The local `call_only` floor loop at 200000 iterations is the reference. The step 0 column is the before run of [#521](https://github.com/fahchen/pbeam/pull/521) at `211a645`, the merge of [#520](https://github.com/fahchen/pbeam/pull/520). Each number is the minimum of the nine sub-runs of a probe over three interleaved benchmark runs, and the load of the three runs is `{ 2.41 4.95 5.69 }`, `{ 3.57 5.07 5.71 }`, and `{ 3.53 4.96 5.66 }`. The current column is the run of [#527](https://github.com/fahchen/pbeam/pull/527) at `ea4dd13` at load `{ 3.67 4.38 5.93 }`, and each number is the minimum of the nine sub-runs of a probe.
+
+| Item | Step 0 `211a645` | Current `ea4dd13` |
+| --- | --- | --- |
+| The floor loop, for each iteration (the plan shape at the step 0 revision, and the local `call_only` shape at the current revision) | 505.6 ns | 167.4 ns |
+| The average for each instruction of the loop (computed: the floor-loop number divided by the 4 instructions that one iteration retires) | about 126 ns | about 41.9 ns |
+| The added delta of `gc_bif '+'` | 248.9 ns | 75.6 ns |
+| The added delta of the `bif` of `tuple_size/1` | 238.1 ns | 80.0 ns |
+| The added delta of the `bif` of `erlang:element/2` | 242.7 ns | 81.8 ns |
+| The added delta of the `bif` of `erlang:hd/1` | 253.3 ns | 77.3 ns |
+| The added delta of the `bif` of `map_get/2` on a 1000-key map | 358.9 ns | 159.2 ns |
+| The whole module-qualified `floor_ext_loop` (`call_ext_only`), for each iteration | 562.6 ns | 289.3 ns |
+
+The step 0 floor-loop number is the plan shape, the `call_only` floor loop of `dispatch_position_probe` after 20 guest functions. The current floor-loop number is the local `call_only` shape of `dispatch_probe`. The two shapes cost the same number after step 1, and [#527](https://github.com/fahchen/pbeam/pull/527) records the plan shape at 167.7 ns at `ea4dd13`.
+
+### The call-path parts
+
+Each row is one part of one call or of one instruction. The "before" column gives the measured cost at the revision that held the part, and the "now" column gives the state at the current revision.
+
+| Part of the call path | Measured cost before | State now |
+| --- | --- | --- |
+| The two `String` allocations of one call ([#524](https://github.com/fahchen/pbeam/pull/524)) | 45.8 ns to 49.7 ns for one pair, over three runs, each the minimum of 9 runs of 2000000 pairs | zero on the call path |
+| The BIF argument `Vec<Term>` ([#526](https://github.com/fahchen/pbeam/pull/526)) | 31.9 ns for each BIF (`docs/interpreter-dispatch-plan.md:124`) | zero on the pure leaf path; `Instruction::CallExternal` of a pure BIF keeps one `Vec<Term>` |
+| The 553-entry `BIFS` binary search of one BIF call ([#525](https://github.com/fahchen/pbeam/pull/525)) | one search at run time; the whole `is_bif` lookup is 76.5 ns for each call (`docs/interpreter-dispatch-plan.md:123`) | zero at run time |
+| The two failed 553-entry `BIFS` searches of the external call path ([#525](https://github.com/fahchen/pbeam/pull/525)) | about 124 ns together | zero |
+| The `function_at_label` scan of one frame creation ([#521](https://github.com/fahchen/pbeam/pull/521)) | about 12 ns for each preceding guest function, computed from the dummy-function series of [#520](https://github.com/fahchen/pbeam/pull/520): 385 ns at 6 preceding functions, 486 ns to 501 ns at 14, 535 ns at 18, and 672 ns at 30 | zero |
+| The module-name `String` comparison for each instruction ([#523](https://github.com/fahchen/pbeam/pull/523)) | one comparison for each instruction | zero; the loop compares the integer `ModuleId` |
+| The two small classification scans that stay ([#525](https://github.com/fahchen/pbeam/pull/525)) | `PBEAM_BIFS` with 5 entries at 1.24 ns for each scan, and `HEAVY_BIFS` with 7 entries at 2.80 ns to 3.22 ns for each scan | a `call_ext` of module code pays the `PBEAM_BIFS` scan, a `call_ext` of a BIF pays the `HEAVY_BIFS` scan, and a PBeam BIF path pays both at about 5.4 ns |
+
+### The term operations
+
+The numbers come from the committed measurement of `mise run bench-term` at `ec935af`, the commit that moves the deep-copy container outside the timer, release build, on the host of the environment table, at load `{ 8.08 13.95 14.04 }`. Each measured number is the minimum of 9 timed runs of one operation, the record is `target/term-costs.txt`, and the test asserts no time. A deep-copy number holds the copy, the push of the copy into a container of the run, and the storage that the copy allocates itself; the container is allocated before the timer and cleared between runs, so no allocation of the container is in the timed region, and the release of the copies is outside it. The drop of an immediate is the measurement of `mise run bench-drop` at the same revision, at load `{ 10.56 14.36 14.19 }`, whose record is `target/drop-costs.txt`. Step 7 merged as `c6cfb3a` and changed the term drop path, so `src/term.rs` and `src/term/map.rs` differ from `a6b838c`; the table reports the cost at the merged revision. The measurement replaces the earlier scratch numbers of the design measurement at `a6b838c`: 11.2 ns, 4.03 ns, 9.46 ns, 32.3 ns, 5102 ns, 132197 ns, 1811 ns, 58.4 ns, 28.9 ns, and 139840 ns.
+
+| Term operation | Cost for one operation | Kind |
+| --- | --- | --- |
+| `Arc` clone and drop of one term | 10.3 ns; the payload does not change it (a binary 10.1 ns, a fun with two free variables 10.5 ns, one cons cell 10.3 ns, and a tuple that holds a 1000-key map 10.3 ns) | measured |
+| `Arc` clone and drop of a shared map | 12.3 ns; about 2.0 ns above the tuple, which is inside the 3 ns gate of step 7 | measured |
+| The placeholder allocation of `Map::drain_into` (`src/term/map.rs:503`) in the drop of a shared map, which step 7 ([#535](https://github.com/fahchen/pbeam/pull/535)) removed at `c6cfb3a` | none at `ec935af`; about 21 ns at `6fa5194` | computed before the removal: 32.199 ns less 11.377 ns; removed |
+| `Rc` clone and drop of the same plain payload | 3.90 ns to 4.06 ns (a tuple 3.897 ns, a binary 3.910 ns, one cons cell 3.926 ns, a fun with two free variables 4.058 ns, and a shared map 4.001 ns) | measured |
+| Bare `Arc` clone and drop | 9.801 ns | measured |
+| Bare `Rc` clone and drop | 3.979 ns | measured |
+| The two atomic operations of the `Arc` pair | about 5.8 ns | computed: 9.801 ns less 3.979 ns |
+| Deep copy of a 1000-element tuple | 2542 ns | measured |
+| Deep copy of a 1000-key map, which walks every node of the trie | 18968 ns | measured |
+| Deep copy of a 102400-byte binary | 1728 ns | measured |
+| The copy rate of the 102400-byte binary | 59.3 GB/s | computed: 102400 bytes divided by 1728.250 ns |
+| Deep copy of a fun with two free variables | 26.7 ns | measured |
+| Deep copy of one cons cell | 11.8 ns | measured |
+| Deep copy of a tuple that holds a 1000-key map | 20027 ns | measured |
+| Drop of an immediate | 2.26 ns | measured by `mise run bench-drop` at `ec935af` |
+
+### The end-to-end runs
+
+The first two rows are the record of step 0 ([#520](https://github.com/fahchen/pbeam/pull/520)) at `078c119`. The last two rows are the record of section 3 of this document at `ea4dd13`, the head of `origin/main` at the time of that run, and they are historical: step 6 (`d36f686`) changes no runtime code, but step 7 ([#535](https://github.com/fahchen/pbeam/pull/535)) changes the term drop path, and the harness has not measured the end-to-end latency again after step 7. A later change re-measures them.
+
+| Mode | Revision | First frame | Key latency (the four keys) |
+| --- | --- | --- | --- |
+| PBeam release | `078c119` | 1.36 s | 0.087 s to 0.105 s |
+| Pinned ERTS, `erl +S 1` | `078c119` | 0.19 s | 0.003 s to 0.008 s |
+| PBeam release | `ea4dd13` | 0.57 s | 0.018 s to 0.039 s |
+| Pinned ERTS, `erl +S 1` | `ea4dd13` | 0.18 s | 0.003 s to 0.007 s |
+
+The design measurement at `b52e297` splits one redraw frame: `render` 39.0 ms and `patch` 43.4 ms, against 0.25 ms for the patch walk on the pinned ERTS. The repository has not re-measured this split on PBeam, so the two numbers are the design record and not a run of the harness above.
+
+The four tables above have three limits. First, an added delta is measured inside one run against the floor loop of the same run, so it holds that instruction plus a small loop difference. Second, a call-path part is a cost for each call or for each instruction, and it is not a share of an end-to-end run; the parts overlap, so the sum of a column is not the cost of one key press. Third, the term table comes from the measurement at `ec935af`, whose term code is the code of `c6cfb3a`, and the end-to-end table comes from `078c119` and `ea4dd13`, so the two tables are not from the same revision.
+
 ## 4. What each step decided and what it left open
 
 ### Step 0, [#520](https://github.com/fahchen/pbeam/pull/520)
@@ -227,7 +299,7 @@ The step decided to keep the decoded form and to skip step 8. The decision rests
 
 ## 6. What comes next
 
-Step 7 ([#515](https://github.com/fahchen/pbeam/issues/515)) removes the two measured allocations on the drop path: the placeholder handle of `Map::drain_into` and the unconditional work vector of `Term::drop`. Its acceptance is the drop cost of an immediate, a tuple, a shared map, and a deep list, before and after, with no drop regression and no map operation regression above 2 percent. Its blocked-by link to step 6 is satisfied, because step 6 is merged as `d36f686`.
+Step 7 ([#515](https://github.com/fahchen/pbeam/issues/515)) merged as `c6cfb3a` ([#535](https://github.com/fahchen/pbeam/pull/535)) and removed the two measured allocations on the drop path: the placeholder handle of `Map::drain_into` and the unconditional work vector of `Term::drop`. Its acceptance is the drop cost of an immediate, a tuple, a shared map, and a deep list, before and after, with no drop regression and no map operation regression above 2 percent. Its blocked-by link to step 6 is satisfied, because step 6 is merged as `d36f686`.
 
 Step 9 ([#517](https://github.com/fahchen/pbeam/issues/517)) adds combined instructions for the two measured pair shapes, `test` with `gc_bif` and `gc_bif` with `call_only`. Its gate is a floor loop at or below 150 ns for each iteration, and the target for the Terra key latency at that point is at most 10 ms, against the measured 0.018 s to 0.039 s of section 3.
 

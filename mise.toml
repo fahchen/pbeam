@@ -114,6 +114,10 @@ run = "bash scripts/dispatch_baseline.sh"
 description = "Measure the term drop cost on a release build and write target/drop-costs.txt"
 run = "bash scripts/drop_costs.sh"
 
+[tasks.bench-term]
+description = "Measure the cost of one term operation on a release build and write target/term-costs.txt"
+run = "bash scripts/term_costs.sh"
+
 [tasks.terra-reference]
 description = "Run the Terra Counter example on the pinned ERTS in a pseudo-terminal, check each screen and the terminal restore, and write the call inventory (macOS)"
 run = "bash scripts/terra_reference.sh"
