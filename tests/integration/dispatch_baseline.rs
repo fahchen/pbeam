@@ -4,9 +4,10 @@
 //! instruction on that loop. Each probe runs on PBeam and on the pinned
 //! ERTS, and the report gives the minimum of [`RUNS`] runs of each probe.
 //!
-//! The probes are in `fixtures/dispatch/dispatch_probe.erl`. The test
-//! consumes each result, and it checks the disassembly of each loop, so the
-//! interpreter cannot remove the work that the benchmark measures.
+//! The probes are in `fixtures/dispatch/dispatch_probe.erl` and
+//! `fixtures/dispatch/dispatch_position_probe.erl`. The test consumes each
+//! result, and it checks the disassembly of each loop, so the interpreter
+//! cannot remove the work that the benchmark measures.
 //!
 //! Run the release measurement with `mise run bench-dispatch`. The check
 //! gate runs the same test under the test profile, which measures slower
@@ -23,6 +24,8 @@ use std::{
 use pbeam_runtime::{BeamProgram, Term};
 
 const DISPATCH_PROBE: &[u8] = include_bytes!("../../fixtures/dispatch/dispatch_probe.beam");
+const POSITION_PROBE: &[u8] =
+    include_bytes!("../../fixtures/dispatch/dispatch_position_probe.beam");
 
 /// The number of timed runs of each probe. The report gives the minimum of
 /// the runs, as `docs/interpreter-dispatch-plan.md` does.
@@ -35,8 +38,14 @@ const FLOOR_LENGTHS: [usize; 2] = [20_000, 200_000];
 /// instruction is stable at this length.
 const DELTA_LENGTH: usize = 200_000;
 
-/// The fixture functions of the disassembly check, in module order. The
-/// module holds no other function that runs an instruction of a loop.
+/// The number of guest functions before `floor_loop/1` in
+/// `fixtures/dispatch/dispatch_position_probe.erl`. That module holds the
+/// floor loop after this many functions, so that the loop runs the
+/// `function_at_label` scan that the plan's quoted baseline runs.
+const POSITION_FUNCTIONS: usize = 20;
+
+/// The fixture functions of the disassembly check of
+/// `dispatch_probe.beam`, in module order.
 const LOOP_FUNCTIONS: [&str; 7] = [
     "floor_ext_loop",
     "floor_loop",
@@ -47,11 +56,12 @@ const LOOP_FUNCTIONS: [&str; 7] = [
     "map_get_loop",
 ];
 
-/// One probe of the benchmark: the fixture function, the instruction that
-/// the function adds to the floor loop, and the loop length.
+/// One probe of the benchmark: the module, the fixture function, the label
+/// of the shape in the report, and the loop length.
 struct Probe {
+    module: &'static str,
     function: &'static str,
-    instruction: &'static str,
+    shape: String,
     length: usize,
 }
 
@@ -61,17 +71,18 @@ impl Probe {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(probes()[0].key(), "floor_ext_loop-20000");
+    /// assert_eq!(probes()[0].key(), "dispatch_probe-floor_ext_loop-20000");
     /// ```
     fn key(&self) -> String {
-        format!("{}-{}", self.function, self.length)
+        format!("{}-{}-{}", self.module, self.function, self.length)
     }
 }
 
-/// The probe set: the two floor loops at both lengths, then the five
-/// added-instruction probes at [`DELTA_LENGTH`]. The plan names `call_only`
-/// for the floor loop and says that the loop "includes one external call",
-/// so the benchmark measures both call shapes.
+/// The probe set: the three floor-loop shapes at both lengths, then the
+/// five added-instruction probes at [`DELTA_LENGTH`]. The plan names
+/// `call_only` for the floor loop, says that the loop "includes one external
+/// call", and quotes a baseline from a module with about 20 functions, so
+/// the benchmark measures all three shapes.
 ///
 /// # Examples
 ///
@@ -80,20 +91,30 @@ impl Probe {
 /// ```
 fn probes() -> Vec<Probe> {
     let mut probes = Vec::new();
-    for (function, instruction) in [
-        (
-            "floor_ext_loop",
-            "the floor loop, with a module-qualified tail call (`call_ext_only`)",
-        ),
-        (
-            "floor_loop",
-            "the floor loop, with a local tail call (`call_only`)",
-        ),
-    ] {
-        for &length in &FLOOR_LENGTHS {
+    for &length in &FLOOR_LENGTHS {
+        for (module, function, shape) in [
+            (
+                "dispatch_probe",
+                "floor_ext_loop",
+                "`call_ext_only` floor loop in `dispatch_probe`".to_owned(),
+            ),
+            (
+                "dispatch_probe",
+                "floor_loop",
+                "`call_only` floor loop in `dispatch_probe`".to_owned(),
+            ),
+            (
+                "dispatch_position_probe",
+                "floor_loop",
+                format!(
+                    "`call_only` floor loop after {POSITION_FUNCTIONS} guest functions in `dispatch_position_probe`"
+                ),
+            ),
+        ] {
             probes.push(Probe {
+                module,
                 function,
-                instruction,
+                shape,
                 length,
             });
         }
@@ -109,23 +130,40 @@ fn probes() -> Vec<Probe> {
         ("map_get_loop", "the `bif` of `map_get/2` on a 1000-key map"),
     ] {
         probes.push(Probe {
+            module: "dispatch_probe",
             function,
-            instruction,
+            shape: format!("`call_only` floor loop plus {instruction}"),
             length: DELTA_LENGTH,
         });
     }
     probes
 }
 
-/// The path of the fixture, for the ERTS runs and the disassembly check.
+/// The path of a fixture, for the ERTS runs and the disassembly check.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(probe_path().ends_with("fixtures/dispatch/dispatch_probe.beam"));
+/// assert!(probe_path("dispatch_probe").ends_with("fixtures/dispatch/dispatch_probe.beam"));
 /// ```
-fn probe_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/dispatch/dispatch_probe.beam")
+fn probe_path(module: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/dispatch/{module}.beam"))
+}
+
+/// The Erlang variable of the loaded module `module` in
+/// [`erts_expression`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(erts_module("dispatch_probe"), "M");
+/// ```
+fn erts_module(module: &str) -> &'static str {
+    match module {
+        "dispatch_probe" => "M",
+        "dispatch_position_probe" => "P",
+        other => panic!("unknown probe module {other}"),
+    }
 }
 
 /// The arguments of one probe for the PBeam run.
@@ -224,6 +262,7 @@ fn text(term: &Term) -> String {
 fn erts_expression() -> String {
     let mut expression = String::from(
         "{module, M} = code:ensure_loaded(dispatch_probe), \
+         {module, P} = code:ensure_loaded(dispatch_position_probe), \
          jit = erlang:system_info(emu_flavor), \
          Map = M:map_1000(), Tuple = {a, b, c}, List = [a, b, c], Key = 500, \
          Run = fun(F) -> lists:min([begin \
@@ -232,22 +271,36 @@ fn erts_expression() -> String {
     );
     for probe in probes() {
         expression.push_str(&format!(
-            "io:format(\"result {} ~w~n\", [M:{}({})]), ",
+            "io:format(\"result {} ~w~n\", [{}]), ",
             probe.key(),
-            probe.function,
-            arguments_text(probe.function, probe.length)
+            call_text(&probe)
         ));
     }
     for probe in probes() {
         expression.push_str(&format!(
-            "io:format(\"time {} ~b~n\", [Run(fun() -> M:{}({}) end)]), ",
+            "io:format(\"time {} ~b~n\", [Run(fun() -> {} end)]), ",
             probe.key(),
-            probe.function,
-            arguments_text(probe.function, probe.length)
+            call_text(&probe)
         ));
     }
     expression.push_str("halt().");
     expression
+}
+
+/// The Erlang call of one probe, for example `M:floor_loop(20000)`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(call_text(&probes()[0]), "M:floor_ext_loop(20000)");
+/// ```
+fn call_text(probe: &Probe) -> String {
+    format!(
+        "{}:{}({})",
+        erts_module(probe.module),
+        probe.function,
+        arguments_text(probe.function, probe.length)
+    )
 }
 
 /// Measure one probe on PBeam and return the minimum of [`RUNS`] runs. The
@@ -257,14 +310,14 @@ fn erts_expression() -> String {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let best = measure_pbeam(&program, "floor_loop", &[Term::Integer(20_000)]);
+/// let best = measure_pbeam(&program, "dispatch_probe", "floor_loop", &[Term::Integer(20_000)]);
 /// assert!(best > Duration::ZERO);
 /// ```
-fn measure_pbeam(program: &BeamProgram, function: &str, args: &[Term]) -> Duration {
+fn measure_pbeam(program: &BeamProgram, module: &str, function: &str, args: &[Term]) -> Duration {
     let mut best = Duration::MAX;
     for _ in 0..RUNS {
         let start = Instant::now();
-        let result = program.execute("dispatch_probe", function, args).unwrap();
+        let result = program.execute(module, function, args).unwrap();
         let elapsed = start.elapsed();
         black_box(&result);
         best = best.min(elapsed);
@@ -279,16 +332,17 @@ fn measure_pbeam(program: &BeamProgram, function: &str, args: &[Term]) -> Durati
 ///
 /// ```rust,ignore
 /// let lines = run_erts();
-/// assert!(lines.iter().any(|line| line.starts_with("time floor_loop ")));
+/// assert!(lines.iter().any(|line| line.starts_with("time dispatch_probe-floor_loop-20000 ")));
 /// ```
 fn run_erts() -> Vec<String> {
+    let directory = probe_path("dispatch_probe").parent().unwrap().to_path_buf();
     let output = Command::new("erl")
         .args([
             "+S",
             "1",
             "-noshell",
             "-pa",
-            probe_path().parent().unwrap().to_str().unwrap(),
+            directory.to_str().unwrap(),
             "-eval",
             &erts_expression(),
         ])
@@ -305,18 +359,18 @@ fn run_erts() -> Vec<String> {
         .collect()
 }
 
-/// Return the `beam_disasm` instructions of each function of
-/// [`LOOP_FUNCTIONS`], without the `{line, _}` entries, as `mise run disasm`
-/// prints them. The result proves that each loop holds the work that the
-/// benchmark claims to measure.
+/// Return the `beam_disasm` instructions of each function of the fixture
+/// `module`, without the `{line, _}` entries, as `mise run disasm` prints
+/// them. The result proves that each loop holds the work that the benchmark
+/// claims to measure.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let loops = disassemble();
+/// let loops = disassemble("dispatch_probe");
 /// assert!(loops["floor_loop"].contains(&"{call_only,1,{dispatch_probe,floor_loop,1}}".to_owned()));
 /// ```
-fn disassemble() -> HashMap<String, Vec<String>> {
+fn disassemble(module: &str) -> HashMap<String, Vec<String>> {
     let expression = format!(
         "{{beam_file, _, _, _, _, Functions}} = beam_disasm:file(\"{}\"), \
          [begin \
@@ -325,7 +379,7 @@ fn disassemble() -> HashMap<String, Vec<String>> {
              [io:format(\"~p~n\", [Instruction]) || Instruction <- Instructions, \
               not is_tuple(Instruction) orelse element(1, Instruction) =/= line] \
           end || Function <- Functions], halt().",
-        probe_path().display()
+        probe_path(module).display()
     );
     let output = Command::new("erl")
         .args(["+S", "1", "-noshell", "-eval", &expression])
@@ -346,12 +400,6 @@ fn disassemble() -> HashMap<String, Vec<String>> {
             loops.get_mut(name).unwrap().push(line.to_owned());
         }
     }
-    for function in LOOP_FUNCTIONS {
-        assert!(
-            loops.contains_key(function),
-            "{function} is not in the fixture"
-        );
-    }
     loops
 }
 
@@ -362,7 +410,13 @@ fn disassemble() -> HashMap<String, Vec<String>> {
 /// other work.
 #[test]
 fn keeps_the_measured_instructions_in_each_loop() {
-    let loops = disassemble();
+    let loops = disassemble("dispatch_probe");
+    for function in LOOP_FUNCTIONS {
+        assert!(
+            loops.contains_key(function),
+            "{function} is not in dispatch_probe"
+        );
+    }
     assert_eq!(
         loops["floor_ext_loop"],
         [
@@ -464,6 +518,44 @@ fn keeps_the_measured_instructions_in_each_loop() {
             "{call_only,4,{dispatch_probe,map_get_loop,4}}",
         ]
     );
+
+    // The position probe holds the same floor loop after its guest
+    // functions. The guest entries before the loop are the scan work, so the
+    // first label of the loop asserts the position and the tail asserts the
+    // loop clause. The map holds one key for each distinct function name, so
+    // the two `module_info` clauses share one key.
+    let position = disassemble("dispatch_position_probe");
+    for index in 1..=POSITION_FUNCTIONS {
+        assert!(
+            position.contains_key(&format!("guest_{index}")),
+            "guest_{index} is not in dispatch_position_probe"
+        );
+    }
+    assert_eq!(
+        position.len(),
+        POSITION_FUNCTIONS + 2,
+        "the position probe must hold {POSITION_FUNCTIONS} guest functions, floor_loop/1, and module_info/0,1"
+    );
+    let instructions = &position["floor_loop"];
+    assert_eq!(instructions.len(), 8);
+    assert_eq!(
+        instructions[0],
+        format!("{{label,{}}}", 2 * POSITION_FUNCTIONS + 1),
+        "the floor loop must come after the {POSITION_FUNCTIONS} guest functions"
+    );
+    assert_eq!(
+        instructions[instructions.len() - 2..].to_vec(),
+        [
+            "{gc_bif,'-',{f,0},1,[{x,0},{integer,1}],{x,0}}",
+            "{call_only,1,{dispatch_position_probe,floor_loop,1}}",
+        ]
+    );
+    assert!(
+        instructions[3].starts_with("{test,is_eq_exact,")
+            && instructions[3].ends_with("[{x,0},{integer,0}]}"),
+        "the floor loop must start with the test of the counter: {}",
+        instructions[3]
+    );
 }
 
 /// Record the interpreter dispatch baseline: run each probe on PBeam and on
@@ -471,7 +563,7 @@ fn keeps_the_measured_instructions_in_each_loop() {
 /// tables. The minimum of [`RUNS`] runs is the reported number.
 #[test]
 fn records_the_interpreter_dispatch_baseline() {
-    let program = BeamProgram::load(&[DISPATCH_PROBE]).unwrap();
+    let program = BeamProgram::load(&[DISPATCH_PROBE, POSITION_PROBE]).unwrap();
     let tuple = program.execute("dispatch_probe", "tuple3", &[]).unwrap();
     let list = program.execute("dispatch_probe", "list3", &[]).unwrap();
     let map = program.execute("dispatch_probe", "map_1000", &[]).unwrap();
@@ -499,44 +591,51 @@ fn records_the_interpreter_dispatch_baseline() {
     for probe in probes() {
         let args = arguments(probe.function, probe.length, &tuple, &list, &map, &key);
         let result = program
-            .execute("dispatch_probe", probe.function, &args)
+            .execute(probe.module, probe.function, &args)
             .unwrap();
         assert_eq!(
             text(&result),
             text(&expected(&program, probe.function, probe.length)),
-            "{} at {} iterations",
+            "{}:{} at {} iterations",
+            probe.module,
             probe.function,
             probe.length
         );
         assert_eq!(
             text(&result),
             erts_result(&probe.key()),
-            "PBeam and ERTS differ for {} at {} iterations",
+            "PBeam and ERTS differ for {}:{} at {} iterations",
+            probe.module,
             probe.function,
             probe.length
         );
-        let pbeam = measure_pbeam(&program, probe.function, &args);
+        let pbeam = measure_pbeam(&program, probe.module, probe.function, &args);
         let erts = erts_nanos(&probe.key());
         rows.push((probe, pbeam.as_nanos(), erts));
     }
 
-    // The added cost of one instruction uses the local floor loop, because
-    // the plan and the task name `call_only` for the call of that loop.
+    // The added cost of one instruction uses the local `call_only` floor
+    // loop, because the plan and the task name `call_only` for the call of
+    // that loop.
     let floor = rows
         .iter()
-        .find(|(probe, _, _)| probe.function == "floor_loop" && probe.length == DELTA_LENGTH)
+        .find(|(probe, _, _)| {
+            probe.module == "dispatch_probe"
+                && probe.function == "floor_loop"
+                && probe.length == DELTA_LENGTH
+        })
         .unwrap();
 
     println!("Interpreter dispatch baseline: minimum of {RUNS} runs of each probe.");
     println!();
     println!(
-        "| probe | iterations | PBeam ns for each iteration | ERTS ns for each iteration | PBeam ns for the run | ERTS ns for the run |"
+        "| shape | iterations | PBeam ns for each iteration | ERTS ns for each iteration | PBeam ns for the run | ERTS ns for the run |"
     );
     println!("| --- | --- | --- | --- | --- | --- |");
     for (probe, pbeam, erts) in &rows {
         println!(
             "| {} | {} | {:.1} | {:.2} | {} | {} |",
-            probe.function,
+            probe.shape,
             probe.length,
             *pbeam as f64 / probe.length as f64,
             *erts as f64 / probe.length as f64,
@@ -555,7 +654,7 @@ fn records_the_interpreter_dispatch_baseline() {
         }
         println!(
             "| {} | {:.1} | {:.2} |",
-            probe.instruction,
+            probe.shape,
             (*pbeam as f64 - floor.1 as f64) / probe.length as f64,
             (*erts as f64 - floor.2 as f64) / probe.length as f64,
         );
