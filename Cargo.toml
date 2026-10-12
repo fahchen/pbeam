@@ -166,6 +166,10 @@ name = "demonitor"
 path = "tests/integration/demonitor.rs"
 
 [[test]]
+name = "dispatch_baseline"
+path = "tests/integration/dispatch_baseline.rs"
+
+[[test]]
 name = "effect_capability"
 path = "tests/integration/effect_capability.rs"
 
