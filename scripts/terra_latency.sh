@@ -41,13 +41,20 @@ case "$mode" in
     ;;
 esac
 
+# Cargo keeps the profiles in one output directory, and a `cargo test` run
+# replaces target/debug/pbeam with the test profile of `[profile.test]`, which
+# has opt-level 1. Thus a check for the file is not enough, and the build runs
+# for each requested mode. Cargo rebuilds only what is missing.
 build_binary() {
   local profile=$1
   shift
-  if [[ $rebuild == true || ! -x "target/$profile/pbeam" ]]; then
+  if [[ $rebuild == true ]]; then
+    echo "==> clean and build the $profile pbeam binary"
+    mise exec -- cargo clean --package pbeam-runtime
+  else
     echo "==> build the $profile pbeam binary"
-    mise exec -- cargo build --locked "$@"
   fi
+  mise exec -- cargo build --locked "$@"
 }
 
 # A run with --no-build reads the code path of the ERTS run and the start set of
