@@ -222,7 +222,7 @@ Each row is one part of one call or of one instruction. The "before" column give
 
 ### The term operations
 
-The numbers come from the committed measurement of `mise run bench-term` at `ebfd447`, the head of the branch of this section, release build, on the host of the environment table, at load `{ 42.57 18.46 15.01 }`. Each measured number is the minimum of 9 timed runs of one operation, the record is `target/term-costs.txt`, and the test asserts no time. The runtime code of `src/term.rs` and `src/term/` is unchanged from `a6b838c` to `ebfd447` and to `origin/main` at `a26c1f3`; the branch adds only the `#[cfg(test)]` declaration of this measurement. The measurement replaces the earlier scratch numbers of the design measurement at `a6b838c`: 11.2 ns, 4.03 ns, 9.46 ns, 32.3 ns, 5102 ns, 132197 ns, 1811 ns, 58.4 ns, 28.9 ns, and 139840 ns.
+The numbers come from the committed measurement of `mise run bench-term` at `ebfd447`, the commit that adds the measurement, release build, on the host of the environment table, at load `{ 42.57 18.46 15.01 }`. Each measured number is the minimum of 9 timed runs of one operation, the record is `target/term-costs.txt`, and the test asserts no time. The runtime code of `src/term.rs` and `src/term/` is unchanged from `a6b838c` to `ebfd447` and to `origin/main` at `a26c1f3`; the branch adds only the `#[cfg(test)]` declaration of this measurement. The measurement replaces the earlier scratch numbers of the design measurement at `a6b838c`: 11.2 ns, 4.03 ns, 9.46 ns, 32.3 ns, 5102 ns, 132197 ns, 1811 ns, 58.4 ns, 28.9 ns, and 139840 ns.
 
 | Term operation | Cost for one operation | Kind |
 | --- | --- | --- |
