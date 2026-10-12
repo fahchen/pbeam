@@ -61,5 +61,11 @@ mkdir -p "$(dirname "$out")"
 
 # The decoded form of the run loop is not public, so its layout and its
 # per-iteration bytes are unit tests of the library.
-cargo test --locked --release --lib records_the_decoded -- --nocapture 2>&1 | tee -a "$out"
-cargo test --locked --release --test dispatch_baseline -- --nocapture 2>&1 | tee -a "$out"
+cargo test --locked --release --lib records_the_decoded -- --nocapture --test-threads=1 2>&1 | tee -a "$out"
+
+# The cache proxy and the dispatch benchmark compete for the CPU and the
+# caches when they run together, and both numbers are then weaker. Run one
+# test for each command, and one thread for each harness.
+cargo test --locked --release --test dispatch_baseline records_the_instruction_stream_cache_proxy -- --nocapture --test-threads=1 2>&1 | tee -a "$out"
+cargo test --locked --release --test dispatch_baseline records_the_interpreter_dispatch_baseline -- --nocapture --test-threads=1 2>&1 | tee -a "$out"
+cargo test --locked --release --test dispatch_baseline keeps_the_measured_instructions_in_each_loop -- --nocapture --test-threads=1 2>&1 | tee -a "$out"
