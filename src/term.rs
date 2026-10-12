@@ -131,6 +131,10 @@ struct EqPair<'a>(&'a Term, &'a Term);
 /// holds at most that count allocates nothing. The comparison pays one
 /// vector allocation when it holds more, and the vector then grows as the
 /// old code grew it.
+///
+/// The comparison calls `push`, `pop`, and `extend` once for each pair, so
+/// those three stay in line, and the spill of the inline array stays out of
+/// line because it runs once for a large comparison.
 struct EqStack<'a> {
     /// The first pairs, in a slot each. A slot holds [`EQ_EMPTY_SLOT`] for
     /// both terms of a pair when it holds no pair; only the slots below `len`
@@ -166,6 +170,11 @@ impl<'a> EqStack<'a> {
 
     /// Push the pair `(left, right)`.
     ///
+    /// A pair goes to the inline array only while that array holds every
+    /// older pair, because a new pair is newer than every pair of the
+    /// vector. After the first spill the vector holds the older pairs, so
+    /// the new pairs go there too, and the comparison pops the vector first.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -173,8 +182,11 @@ impl<'a> EqStack<'a> {
     /// stack.push(&Term::nil(), &Term::nil());
     /// assert!(stack.pop().is_some());
     /// ```
+    #[inline]
     fn push(&mut self, left: &'a Term, right: &'a Term) {
-        if self.len < EQ_INLINE_PAIRS {
+        if !self.spilled.is_empty() {
+            self.spilled.push(EqPair(left, right));
+        } else if self.len < EQ_INLINE_PAIRS {
             self.inline[self.len] = EqPair(left, right);
             self.len += 1;
         } else {
@@ -187,7 +199,8 @@ impl<'a> EqStack<'a> {
     /// `(left, right)`. One reserve buys the room, so a comparison that
     /// overflows the inline array pays one allocation for the first pairs of
     /// a large group rather than one allocation for each doubling of the
-    /// vector.
+    /// vector. The array is then empty, so it holds no pair that the vector
+    /// already holds.
     ///
     /// # Examples
     ///
@@ -199,19 +212,50 @@ impl<'a> EqStack<'a> {
     /// stack.push(&Term::nil(), &Term::nil());
     /// assert!(stack.spilled.capacity() >= EQ_INLINE_PAIRS + 1);
     /// ```
+    #[cold]
+    #[inline(never)]
     fn spill(&mut self, left: &'a Term, right: &'a Term) {
+        self.spill_rest(std::iter::once((left, right)));
+    }
+
+    /// Move every pair of the full inline array to the heap vector, with
+    /// room for the whole of `rest`, and then push each pair of `rest`. The
+    /// reserve gives the vector its capacity in one allocation, so the first
+    /// pairs of a large tuple or map do not grow the vector one doubling at
+    /// a time. The array is then empty, so it holds no pair that the vector
+    /// already holds.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = EqStack::new();
+    /// for _ in 0..EQ_INLINE_PAIRS {
+    ///     stack.push(&Term::nil(), &Term::nil());
+    /// }
+    /// stack.extend([(&Term::nil(), &Term::nil())]);
+    /// assert!(stack.spilled.capacity() >= EQ_INLINE_PAIRS + 1);
+    /// ```
+    #[cold]
+    #[inline(never)]
+    fn spill_rest(&mut self, rest: impl Iterator<Item = (&'a Term, &'a Term)>) {
         let inline = std::mem::replace(
             &mut self.inline,
             [(); EQ_INLINE_PAIRS].map(|()| EqPair(&EQ_EMPTY_SLOT, &EQ_EMPTY_SLOT)),
         );
-        self.spilled.reserve(EQ_SPILL_RESERVE);
-        for EqPair(left, right) in inline {
-            self.spilled.push(EqPair(left, right));
+        self.len = 0;
+        self.spilled
+            .reserve(EQ_SPILL_RESERVE.max(EQ_INLINE_PAIRS + rest.size_hint().0));
+        for pair in inline {
+            self.spilled.push(pair);
         }
-        self.spilled.push(EqPair(left, right));
+        self.spilled
+            .extend(rest.map(|(left, right)| EqPair(left, right)));
     }
 
-    /// Push each pair of `pairs`, in order.
+    /// Push each pair of `pairs`, in order. A group that overflows the
+    /// inline array goes to the heap vector in one batch, so the comparison
+    /// of a large tuple or map pays one reserve and one tight write loop for
+    /// the group.
     ///
     /// # Examples
     ///
@@ -220,10 +264,24 @@ impl<'a> EqStack<'a> {
     /// stack.extend([(&Term::nil(), &Term::nil())]);
     /// assert!(stack.pop().is_some());
     /// ```
+    #[inline]
     fn extend(&mut self, pairs: impl IntoIterator<Item = (&'a Term, &'a Term)>) {
-        for (left, right) in pairs {
-            self.push(left, right);
+        if !self.spilled.is_empty() {
+            self.spilled
+                .extend(pairs.into_iter().map(|(left, right)| EqPair(left, right)));
+            return;
         }
+        let mut pairs = pairs.into_iter();
+        while self.len < EQ_INLINE_PAIRS {
+            match pairs.next() {
+                Some((left, right)) => {
+                    self.inline[self.len] = EqPair(left, right);
+                    self.len += 1;
+                }
+                None => return,
+            }
+        }
+        self.spill_rest(pairs);
     }
 
     /// Remove the most recent pair and return it, or return `None` when the
@@ -237,6 +295,7 @@ impl<'a> EqStack<'a> {
     /// assert!(stack.pop().is_some());
     /// assert!(stack.pop().is_none());
     /// ```
+    #[inline]
     fn pop(&mut self) -> Option<EqPair<'a>> {
         if let Some(EqPair(left, right)) = self.spilled.pop() {
             return Some(EqPair(left, right));

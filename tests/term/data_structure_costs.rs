@@ -30,6 +30,10 @@ const OPERATIONS: usize = 100_000;
 /// that share one array. The audit uses this count for the same row.
 const SHARED_OPERATIONS: usize = 200;
 
+/// The number of allocations that one comparison pays when its work stack
+/// overflows the inline array: the one reserve of the heap vector.
+const SPILL_ALLOCATIONS: usize = 1;
+
 /// The allocator of the process, with a count of the allocations of each
 /// thread.
 struct CountingAllocator;
@@ -97,10 +101,16 @@ fn report(name: &str, ns: f64) {
     println!("COST {name} {ns:.3} ns");
 }
 
-/// Print one measured line: the name of the shape and the allocations of one
-/// comparison of two terms of that shape.
-fn report_allocations(name: &str, count: usize) {
+/// Print one measured line for the shape: the allocations of one comparison
+/// of two terms of that shape, against the allocations that the branch
+/// claims. The check makes a change of a count visible, and it catches a work
+/// stack that keeps a pair after the comparison reads it.
+fn report_allocations(name: &str, count: usize, expected: usize) {
     println!("ALLOC {name} {count}");
+    assert_eq!(
+        count, expected,
+        "{name} allocates {count} times rather than {expected} times"
+    );
 }
 
 /// Return the nanoseconds for each operation of `body`, as the minimum of
@@ -204,8 +214,10 @@ fn reports_the_allocation_count_of_one_comparison() {
     let list_1000_copy = list_of(1000);
     let deep_list = list_of(1_000_000);
     let deep_list_copy = list_of(1_000_000);
-    let map_1000 = map_of(1000);
-    let map_1000_copy = map_of(1000);
+    let flatmap_32 = map_of(32);
+    let flatmap_32_copy = map_of(32);
+    let flatmap_4 = map_of(4);
+    let flatmap_4_copy = map_of(4);
     let integer = Term::Integer(1);
     let atom = Term::static_atom("ok");
     let tuple_3 = tuple_of(3);
@@ -221,47 +233,75 @@ fn reports_the_allocation_count_of_one_comparison() {
     let nested_4 = nested_tuple(4, 2);
     let nested_4_copy = nested_tuple(4, 2);
 
-    report_allocations("term_eq_integer", compared(&integer, &integer));
-    report_allocations("term_eq_atom", compared(&atom, &atom));
-    report_allocations("term_eq_tuple_3_equal", compared(&tuple_3, &tuple_3_copy));
-    report_allocations("term_eq_list_3_equal", compared(&list_3, &list_3_copy));
+    report_allocations("term_eq_integer", compared(&integer, &integer), 0);
+    report_allocations("term_eq_atom", compared(&atom, &atom), 0);
+    report_allocations(
+        "term_eq_tuple_3_equal",
+        compared(&tuple_3, &tuple_3_copy),
+        0,
+    );
+    report_allocations("term_eq_list_3_equal", compared(&list_3, &list_3_copy), 0);
     report_allocations(
         "term_eq_tuple_1000_shared",
         compared(&shared_tuple, &shared_tuple),
+        0,
     );
+    // The comparison of two tuples with equal content holds one pending pair
+    // for each element. The first eight pairs stay in the inline array, and
+    // the ninth pair spills them, so the comparison pays one allocation for
+    // the whole tuple.
     report_allocations(
         "term_eq_tuple_1000_equal",
         compared(&shared_tuple, &equal_tuple),
+        SPILL_ALLOCATIONS,
     );
     report_allocations(
         "term_eq_list_1000_equal",
         compared(&list_1000, &list_1000_copy),
+        0,
+    );
+    // A map holds one pending pair for each key and one for each value. A
+    // flatmap of four keys holds eight pairs, which the inline array keeps,
+    // and a flatmap of 32 keys holds 64 pairs, which spills once. The
+    // iterator of a hashmap allocates its own node stack
+    // (`src/term/map.rs:504-529`), so a hashmap row cannot isolate the work
+    // stack and this report measures a flatmap only.
+    report_allocations(
+        "term_eq_flatmap_4_equal",
+        compared(&flatmap_4, &flatmap_4_copy),
+        0,
     );
     report_allocations(
-        "term_eq_map_1000_equal",
-        compared(&map_1000, &map_1000_copy),
+        "term_eq_flatmap_32_equal",
+        compared(&flatmap_32, &flatmap_32_copy),
+        SPILL_ALLOCATIONS,
     );
     report_allocations(
         "term_eq_list_1000000_equal",
         compared(&deep_list, &deep_list_copy),
+        0,
     );
     report_allocations(
         "term_eq_nested_tuple_1",
         compared(&nested_1, &nested_1_copy),
+        0,
     );
     report_allocations(
         "term_eq_nested_tuple_2",
         compared(&nested_2, &nested_2_copy),
+        0,
     );
     report_allocations(
         "term_eq_nested_tuple_3",
         compared(&nested_3, &nested_3_copy),
+        0,
     );
     report_allocations(
         "term_eq_nested_tuple_4",
         compared(&nested_4, &nested_4_copy),
+        0,
     );
-    report_allocations("term_eq_nested_tuple_200", compared(&deep, &deep_copy));
+    report_allocations("term_eq_nested_tuple_200", compared(&deep, &deep_copy), 0);
 }
 
 /// Print the cost of the comparison rows of the audit, and of the compound
