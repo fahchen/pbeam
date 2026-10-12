@@ -126,32 +126,34 @@ struct EqPair<'a>(&'a Term, &'a Term);
 /// The work stack of `Term::eq`: the pairs whose equality the comparison
 /// still has to check, most recent first.
 ///
-/// The stack holds the first [`EQ_INLINE_PAIRS`] pairs in an array in its
-/// own frame and moves every later pair to a heap vector. A comparison that
-/// holds at most that count allocates nothing. The comparison pays one
-/// vector allocation when it holds more, and the vector then grows as the
-/// old code grew it.
+/// The stack holds the first [`EQ_INLINE_PAIRS`] pairs in an array at the
+/// bottom of its frame and every later pair in a heap vector above the
+/// array. A comparison that holds at most that count allocates nothing. The
+/// comparison pays one vector allocation when it holds more, and the vector
+/// then grows as the old code grew it.
 ///
 /// The comparison calls `push`, `pop`, and `extend` once for each pair, so
-/// those three stay in line, and the spill of the inline array stays out of
-/// line because it runs once for a large comparison.
+/// those three stay in line. The spill stays out of line, because the inline
+/// array covers a shallow or a shared comparison and the spill runs once for
+/// a large one.
 struct EqStack<'a> {
-    /// The first pairs, in a slot each. A slot holds [`EQ_EMPTY_SLOT`] for
-    /// both terms of a pair when it holds no pair; only the slots below `len`
-    /// hold a pair. The slot is a type with no `Drop`, so the stack copies a
-    /// pair out of a slot without a move.
+    /// The oldest pairs, in a slot each. A slot holds [`EQ_EMPTY_SLOT`] for
+    /// both terms of a pair before the first push writes it, and only the
+    /// slots below `len` hold a pending pair. The pair type has no `Drop`, so
+    /// the stack copies a pair out of a slot without a move.
     inline: [EqPair<'a>; EQ_INLINE_PAIRS],
-    /// The number of pairs in the inline array; [`EQ_INLINE_PAIRS`] after the
-    /// first spill. The slots below it hold a pair.
+    /// The number of pairs in the inline array. Only a pop of an empty
+    /// vector lowers it, so it is [`EQ_INLINE_PAIRS`] while the vector holds
+    /// a pair.
     len: usize,
-    /// The pairs that the inline array cannot hold, in the order that they
-    /// arrive. Only the comparison reads and writes the tail of this vector.
+    /// The pairs above the inline array, in the order that they arrive. Only
+    /// the comparison reads and writes the tail of this vector.
     spilled: Vec<EqPair<'a>>,
 }
 
 impl<'a> EqStack<'a> {
-    /// Return an empty work stack. The inline array holds no pair, so no
-    /// slot needs a term of its own.
+    /// Return an empty work stack. The inline array holds no pending pair,
+    /// so no slot needs a pair of its own.
     ///
     /// # Examples
     ///
@@ -170,10 +172,10 @@ impl<'a> EqStack<'a> {
 
     /// Push the pair `(left, right)`.
     ///
-    /// A pair goes to the inline array only while that array holds every
-    /// older pair, because a new pair is newer than every pair of the
-    /// vector. After the first spill the vector holds the older pairs, so
-    /// the new pairs go there too, and the comparison pops the vector first.
+    /// The pair goes to the inline array while the array has room. A full
+    /// array stays full until the vector above it is empty, so `len` is the
+    /// whole test of the common path. The reserve runs once for a
+    /// comparison, before the first pair of the vector.
     ///
     /// # Examples
     ///
@@ -184,78 +186,39 @@ impl<'a> EqStack<'a> {
     /// ```
     #[inline]
     fn push(&mut self, left: &'a Term, right: &'a Term) {
-        if !self.spilled.is_empty() {
-            self.spilled.push(EqPair(left, right));
-        } else if self.len < EQ_INLINE_PAIRS {
+        if self.len < EQ_INLINE_PAIRS {
             self.inline[self.len] = EqPair(left, right);
             self.len += 1;
         } else {
-            self.spill(left, right);
+            if self.spilled.is_empty() {
+                self.reserve_spill(1);
+            }
+            self.spilled.push(EqPair(left, right));
         }
     }
 
-    /// Move every pair of the full inline array to the heap vector, with
-    /// room for [`EQ_SPILL_RESERVE`] further pairs, and then push the pair
-    /// `(left, right)`. One reserve buys the room, so a comparison that
-    /// overflows the inline array pays one allocation for the first pairs of
-    /// a large group rather than one allocation for each doubling of the
-    /// vector. The array is then empty, so it holds no pair that the vector
-    /// already holds.
+    /// Reserve room in the heap vector for `rest` further pairs. The
+    /// function runs once for a comparison, before the first pair of the
+    /// vector, and it stays out of line so the reserve of the common path
+    /// costs no code.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut stack = EqStack::new();
-    /// for _ in 0..EQ_INLINE_PAIRS {
-    ///     stack.push(&Term::nil(), &Term::nil());
-    /// }
-    /// stack.push(&Term::nil(), &Term::nil());
-    /// assert!(stack.spilled.capacity() >= EQ_INLINE_PAIRS + 1);
+    /// stack.reserve_spill(1);
+    /// assert!(stack.spilled.capacity() >= EQ_SPILL_RESERVE);
     /// ```
     #[cold]
     #[inline(never)]
-    fn spill(&mut self, left: &'a Term, right: &'a Term) {
-        self.spill_rest(std::iter::once((left, right)));
-    }
-
-    /// Move every pair of the full inline array to the heap vector, with
-    /// room for the whole of `rest`, and then push each pair of `rest`. The
-    /// reserve gives the vector its capacity in one allocation, so the first
-    /// pairs of a large tuple or map do not grow the vector one doubling at
-    /// a time. The array is then empty, so it holds no pair that the vector
-    /// already holds.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut stack = EqStack::new();
-    /// for _ in 0..EQ_INLINE_PAIRS {
-    ///     stack.push(&Term::nil(), &Term::nil());
-    /// }
-    /// stack.extend([(&Term::nil(), &Term::nil())]);
-    /// assert!(stack.spilled.capacity() >= EQ_INLINE_PAIRS + 1);
-    /// ```
-    #[cold]
-    #[inline(never)]
-    fn spill_rest(&mut self, rest: impl Iterator<Item = (&'a Term, &'a Term)>) {
-        let inline = std::mem::replace(
-            &mut self.inline,
-            [(); EQ_INLINE_PAIRS].map(|()| EqPair(&EQ_EMPTY_SLOT, &EQ_EMPTY_SLOT)),
-        );
-        self.len = 0;
-        self.spilled
-            .reserve(EQ_SPILL_RESERVE.max(EQ_INLINE_PAIRS + rest.size_hint().0));
-        for pair in inline {
-            self.spilled.push(pair);
-        }
-        self.spilled
-            .extend(rest.map(|(left, right)| EqPair(left, right)));
+    fn reserve_spill(&mut self, rest: usize) {
+        self.spilled.reserve(EQ_SPILL_RESERVE.max(rest));
     }
 
     /// Push each pair of `pairs`, in order. A group that overflows the
     /// inline array goes to the heap vector in one batch, so the comparison
-    /// of a large tuple or map pays one reserve and one tight write loop for
-    /// the group.
+    /// of a large tuple or of the free variables of a fun pays one reserve
+    /// and one tight write loop for the group.
     ///
     /// # Examples
     ///
@@ -266,11 +229,6 @@ impl<'a> EqStack<'a> {
     /// ```
     #[inline]
     fn extend(&mut self, pairs: impl IntoIterator<Item = (&'a Term, &'a Term)>) {
-        if !self.spilled.is_empty() {
-            self.spilled
-                .extend(pairs.into_iter().map(|(left, right)| EqPair(left, right)));
-            return;
-        }
         let mut pairs = pairs.into_iter();
         while self.len < EQ_INLINE_PAIRS {
             match pairs.next() {
@@ -281,7 +239,27 @@ impl<'a> EqStack<'a> {
                 None => return,
             }
         }
-        self.spill_rest(pairs);
+        self.spill_batch(pairs);
+    }
+
+    /// Push each pair of the rest of a large group to the heap vector. The
+    /// function keeps the write loop of a whole tuple or fun out of line, so
+    /// the code of the common path stays small.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = EqStack::new();
+    /// stack.spill_batch([(&Term::nil(), &Term::nil())]);
+    /// assert!(stack.pop().is_some());
+    /// ```
+    #[inline(never)]
+    fn spill_batch(&mut self, rest: impl Iterator<Item = (&'a Term, &'a Term)>) {
+        if self.spilled.is_empty() {
+            self.reserve_spill(rest.size_hint().0);
+        }
+        self.spilled
+            .extend(rest.map(|(left, right)| EqPair(left, right)));
     }
 
     /// Remove the most recent pair and return it, or return `None` when the
@@ -297,8 +275,8 @@ impl<'a> EqStack<'a> {
     /// ```
     #[inline]
     fn pop(&mut self) -> Option<EqPair<'a>> {
-        if let Some(EqPair(left, right)) = self.spilled.pop() {
-            return Some(EqPair(left, right));
+        if let Some(pair) = self.spilled.pop() {
+            return Some(pair);
         }
         if self.len == 0 {
             return None;
@@ -560,8 +538,9 @@ impl PartialEq for Term {
     /// ```
     fn eq(&self, other: &Self) -> bool {
         let mut pairs = EqStack::new();
-        pairs.push(self, other);
-        while let Some(EqPair(left, right)) = pairs.pop() {
+        let mut left = self;
+        let mut right = other;
+        loop {
             let equal = match (left, right) {
                 (Term::Tuple(left), Term::Tuple(right)) => {
                     // Two tuples that hold one array are equal with no walk,
@@ -572,14 +551,20 @@ impl PartialEq for Term {
                     left.len() == right.len()
                 }
                 (Term::Nil, Term::Nil) => true,
-                (Term::Cons(left), Term::Cons(right)) => {
-                    // The tails go on the stack first, so the heads come off
-                    // first and a long list keeps the stack short.
-                    if !left.same_cell(right) {
-                        pairs.push(&left.tail, &right.tail);
-                        pairs.push(&left.head, &right.head);
+                (Term::Cons(left_cell), Term::Cons(right_cell)) => {
+                    // The comparison reads the head pair and then the tail
+                    // pair, as `eq` in `utils.c:1141-1162` reads each head and
+                    // then the last tail. The head pair becomes the current
+                    // pair, so a long list pushes one pair for each cell
+                    // rather than two and keeps the stack short.
+                    if left_cell.same_cell(right_cell) {
+                        true
+                    } else {
+                        pairs.push(&left_cell.tail, &right_cell.tail);
+                        left = &left_cell.head;
+                        right = &right_cell.head;
+                        continue;
                     }
-                    true
                 }
                 (Term::Fun(left), Term::Fun(right)) => {
                     // Two funs that hold one thing are equal with no walk,
@@ -615,8 +600,14 @@ impl PartialEq for Term {
             if !equal {
                 return false;
             }
+            match pairs.pop() {
+                Some(EqPair(next_left, next_right)) => {
+                    left = next_left;
+                    right = next_right;
+                }
+                None => return true,
+            }
         }
-        true
     }
 }
 
