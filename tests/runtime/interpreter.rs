@@ -39,11 +39,11 @@ fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
     BeamProgram {
         modules: HashMap::from([(
             "fixture".into(),
-            Rc::new(BeamModule {
-                name: "fixture".into(),
-                exports: HashMap::from([(("main".into(), 0), 2)]),
+            Rc::new(BeamModule::new(
+                "fixture".into(),
+                HashMap::from([(("main".into(), 0), 2)]),
                 instructions,
-            }),
+            )),
         )]),
         atoms: AtomTable::new(),
     }
@@ -77,6 +77,7 @@ fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
         Instruction::Label(11),
         erlang_call("exit", 1, true),
     ]);
+    module.reindex();
     program.execute("fixture", "main", &[])
 }
 
@@ -866,10 +867,10 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
     );
     program.modules.insert(
         "maps".into(),
-        Rc::new(BeamModule {
-            name: "maps".into(),
-            exports: HashMap::from([(("keys".into(), 1), 1)]),
-            instructions: vec![
+        Rc::new(BeamModule::new(
+            "maps".into(),
+            HashMap::from([(("keys".into(), 1), 1)]),
+            vec![
                 Instruction::FunctionInfo {
                     module: "maps".into(),
                     name: "keys".into(),
@@ -879,7 +880,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
                 Instruction::Move(atom("module_code"), Operand::X(0)),
                 Instruction::Return,
             ],
-        }),
+        )),
     );
     // The BIF returns the keys of the empty map. The module code would
     // return `module_code`.
@@ -909,10 +910,10 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
     );
     program.modules.insert(
         "lists".into(),
-        Rc::new(BeamModule {
-            name: "lists".into(),
-            exports: HashMap::from([(("keysearch".into(), 3), 1)]),
-            instructions: vec![
+        Rc::new(BeamModule::new(
+            "lists".into(),
+            HashMap::from([(("keysearch".into(), 3), 1)]),
+            vec![
                 Instruction::FunctionInfo {
                     module: "lists".into(),
                     name: "keysearch".into(),
@@ -922,7 +923,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
                 Instruction::Move(atom("stub"), Operand::X(0)),
                 Instruction::Return,
             ],
-        }),
+        )),
     );
     // `lists:keysearch/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
     // BIF, so the BEAM stub body of the loaded `lists` module must not run.
@@ -1514,13 +1515,36 @@ fn rejects_call_stack_and_return_errors() {
     );
 }
 
+/// The loader tables answer a bad label, a bad entry, and a bad register
+/// index with the error text of the removed scans.
+#[test]
+fn keeps_the_error_text_of_a_bad_label_entry_and_register() {
+    assert_eq!(
+        make_program(vec![Instruction::Jump(9)], 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+        "missing BEAM label 9"
+    );
+    assert_eq!(
+        make_program(vec![Instruction::Call { arity: 0, label: 9 }], 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+        "entry label 9 not found in fixture"
+    );
+    assert_eq!(
+        make_program(vec![Instruction::Move(Operand::X(1024), Operand::X(0))], 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+        "register x1024 is unset"
+    );
+}
+
 #[test]
 fn rejects_unresolved_exports_and_function_labels() {
-    let module = BeamModule {
-        name: "external".into(),
-        exports: HashMap::new(),
-        instructions: vec![],
-    };
+    let module = BeamModule::new("external".into(), HashMap::new(), vec![]);
     let program = BeamProgram {
         modules: HashMap::from([("external".into(), Rc::new(module))]),
         atoms: AtomTable::new(),
@@ -1539,10 +1563,10 @@ fn rejects_unresolved_exports_and_function_labels() {
             .to_string()
             .contains("external:missing/0")
     );
-    let module = BeamModule {
-        name: "fixture".into(),
-        exports: HashMap::new(),
-        instructions: vec![
+    let module = BeamModule::new(
+        "fixture".into(),
+        HashMap::new(),
+        vec![
             Instruction::FunctionInfo {
                 module: "other".into(),
                 name: "main".into(),
@@ -1550,7 +1574,7 @@ fn rejects_unresolved_exports_and_function_labels() {
             },
             Instruction::Label(2),
         ],
-    };
+    );
     assert!(
         function_at_label(&module, 2)
             .unwrap_err()
@@ -1594,6 +1618,7 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
             Instruction::Move(atom("ok"), Operand::X(0)),
             Instruction::Return,
         ]);
+        module.reindex();
         program
             .execute("fixture", "main", &[])
             .unwrap_err()
@@ -2305,10 +2330,10 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
     );
     program.modules.insert(
         "erts_internal".into(),
-        Rc::new(BeamModule {
-            name: "erts_internal".into(),
-            exports: HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
-            instructions: vec![
+        Rc::new(BeamModule::new(
+            "erts_internal".into(),
+            HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
+            vec![
                 Instruction::FunctionInfo {
                     module: "erts_internal".into(),
                     name: "flush_monitor_messages".into(),
@@ -2319,7 +2344,7 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
                 Instruction::Move(Operand::X(2), Operand::X(0)),
                 Instruction::Return,
             ],
-        }),
+        )),
     );
     assert_eq!(
         program.execute("fixture", "main", &[]).unwrap(),
@@ -2401,6 +2426,7 @@ fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
             deallocate: 0,
         },
     ]);
+    module.reindex();
     program
 }
 
@@ -2699,6 +2725,7 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
         get_bif("k", Operand::X(0)),
         erlang_call("exit", 1, true),
     ]);
+    module.reindex();
     // ERTS 29.1.1: after put(k, parent), a spawned process gets
     // undefined for get(k).
     assert!(matches!(
@@ -3212,6 +3239,7 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
             Instruction::Send,
             Instruction::Return,
         ]);
+        module.reindex();
         program.execute("fixture", "main", &[]).unwrap()
     };
     // 3998 entries, the entry of `inner`, and its return leave 0. The

@@ -9,10 +9,10 @@ fn reports_oversized_arity() {
 
 #[test]
 fn execution_skips_another_functions_labels_and_reports_missing_entry_label() {
-    let module = BeamModule {
-        name: "constant".into(),
-        exports: HashMap::from([(("main".into(), 0), 8)]),
-        instructions: vec![
+    let module = BeamModule::new(
+        "constant".into(),
+        HashMap::from([(("main".into(), 0), 8)]),
+        vec![
             Instruction::FunctionInfo {
                 module: "other".into(),
                 name: "main".into(),
@@ -27,7 +27,7 @@ fn execution_skips_another_functions_labels_and_reports_missing_entry_label() {
             Instruction::Label(7),
             Instruction::End,
         ],
-    };
+    );
     assert!(
         module
             .execute("main", &[])
@@ -39,10 +39,12 @@ fn execution_skips_another_functions_labels_and_reports_missing_entry_label() {
 
 #[test]
 fn rejects_unimplemented_entry_shapes() {
-    let module = |instructions| BeamModule {
-        name: "constant".into(),
-        exports: HashMap::from([(("main".into(), 0), 2)]),
-        instructions,
+    let module = |instructions| {
+        BeamModule::new(
+            "constant".into(),
+            HashMap::from([(("main".into(), 0), 2)]),
+            instructions,
+        )
     };
     let function = Instruction::FunctionInfo {
         module: "constant".into(),
@@ -71,11 +73,7 @@ fn rejects_unimplemented_entry_shapes() {
 
 #[test]
 fn rejects_empty_module_and_missing_export() {
-    let module = BeamModule {
-        name: String::new(),
-        exports: HashMap::new(),
-        instructions: vec![],
-    };
+    let module = BeamModule::new(String::new(), HashMap::new(), vec![]);
     assert!(module.execute("main", &[]).is_err());
     assert!(BeamModule::load(&assemble_empty_beam()).is_err());
 }

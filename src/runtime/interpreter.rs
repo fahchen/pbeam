@@ -2694,7 +2694,8 @@ fn jump(module: &BeamModule, process: &mut ProcessState, label: u32) -> Result<(
     Ok(())
 }
 
-/// Return the index of the first instruction after a label in a module.
+/// Return the index of the first instruction after a label in a module, from
+/// the loader table.
 ///
 /// # Examples
 ///
@@ -2705,10 +2706,10 @@ fn jump(module: &BeamModule, process: &mut ProcessState, label: u32) -> Result<(
 /// ```
 fn label_index(module: &BeamModule, label: u32) -> Result<usize, BeamError> {
     module
-        .instructions
-        .iter()
-        .position(|instruction| matches!(instruction, Instruction::Label(found) if *found == label))
-        .map(|index| index + 1)
+        .tables
+        .jump_targets
+        .get(&label)
+        .copied()
         .ok_or_else(|| error(format!("missing BEAM label {label}")))
 }
 
@@ -2954,8 +2955,8 @@ struct Function<'a> {
     start: usize,
 }
 
-/// Find the function whose entry label is `target`. The function starts
-/// after the label.
+/// Find the function whose entry label is `target`, from the loader table.
+/// The function starts after the label.
 ///
 /// # Examples
 ///
@@ -2964,37 +2965,21 @@ struct Function<'a> {
 /// assert_eq!((function.name, function.arity), ("main", 0));
 /// ```
 fn function_at_label(module: &BeamModule, target: u32) -> Result<Function<'_>, BeamError> {
-    let mut function = None;
-    for (index, instruction) in module.instructions.iter().enumerate() {
-        match instruction {
-            Instruction::FunctionInfo {
-                module: found_module,
+    match module.tables.function_starts.get(&target) {
+        Some(Some(entry)) => {
+            let (name, arity) = &module.tables.functions[entry.function];
+            Ok(Function {
                 name,
-                arity,
-            } if found_module == &module.name => {
-                function = Some(Function {
-                    name,
-                    arity: *arity,
-                    start: index + 1,
-                })
-            }
-            Instruction::Label(label) if *label == target => {
-                return function
-                    .take()
-                    .map(|mut function| {
-                        function.start = index + 1;
-                        function
-                    })
-                    .ok_or_else(|| error(format!("entry label {target} has no function info")));
-            }
-            Instruction::FunctionInfo { .. } => function = None,
-            _ => {}
+                arity: *arity,
+                start: entry.start,
+            })
         }
+        Some(None) => Err(error(format!("entry label {target} has no function info"))),
+        None => Err(error(format!(
+            "entry label {target} not found in {}",
+            module.name
+        ))),
     }
-    Err(error(format!(
-        "entry label {target} not found in {}",
-        module.name
-    )))
 }
 
 /// Copy the first `arity` X registers as call arguments. Each register
