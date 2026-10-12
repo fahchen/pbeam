@@ -964,3 +964,7 @@ const HEAVY_BIFS: [(&str, &str, u32); 7] = [
 pub(super) fn is_heavy_bif(module: &str, name: &str, arity: u32) -> bool {
     HEAVY_BIFS.contains(&(module, name, arity))
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/interpreter/bif.rs"]
+mod tests;
