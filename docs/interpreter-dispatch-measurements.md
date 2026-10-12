@@ -255,7 +255,7 @@ The first two rows are the record of step 0 ([#520](https://github.com/fahchen/p
 
 The design measurement at `b52e297` splits one redraw frame: `render` 39.0 ms and `patch` 43.4 ms, against 0.25 ms for the patch walk on the pinned ERTS. The repository has not re-measured this split on PBeam, so the two numbers are the design record and not a run of the harness above.
 
-The four tables above have three limits. First, an added delta is measured inside one run against the floor loop of the same run, so it holds that instruction plus a small loop difference. Second, a call-path part is a cost for each call or for each instruction, and it is not a share of an end-to-end run; the parts overlap, so the sum of a column is not the cost of one key press. Third, the term table comes from `a6b838c`, and the end-to-end table comes from `078c119` and `ea4dd13`, so the two tables are not from the same revision.
+The four tables above have three limits. First, an added delta is measured inside one run against the floor loop of the same run, so it holds that instruction plus a small loop difference. Second, a call-path part is a cost for each call or for each instruction, and it is not a share of an end-to-end run; the parts overlap, so the sum of a column is not the cost of one key press. Third, the term table comes from the measurement at `ebfd447`, whose term code is the code of `a6b838c`, and the end-to-end table comes from `078c119` and `ea4dd13`, so the two tables are not from the same revision.
 
 ## 4. What each step decided and what it left open
 
