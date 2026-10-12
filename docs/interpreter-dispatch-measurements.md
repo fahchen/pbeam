@@ -222,25 +222,25 @@ Each row is one part of one call or of one instruction. The "before" column give
 
 ### The term operations
 
-The numbers come from the committed measurement of `mise run bench-term` at `6fa5194`, the commit that adds the measurement, release build, on the host of the environment table, at load `{ 19.73 13.08 14.70 }`. Each measured number is the minimum of 9 timed runs of one operation, the record is `target/term-costs.txt`, and the test asserts no time. A deep-copy number holds the copy alone: the copies of one run stay alive until the timer stops, and the release of the copies is outside the measured region. The runtime code of `src/term.rs` and `src/term/` is unchanged from `a6b838c` to `6fa5194` and to `origin/main` at `a26c1f3`; the branch adds only the `#[cfg(test)]` declaration of this measurement. The measurement replaces the earlier scratch numbers of the design measurement at `a6b838c`: 11.2 ns, 4.03 ns, 9.46 ns, 32.3 ns, 5102 ns, 132197 ns, 1811 ns, 58.4 ns, 28.9 ns, and 139840 ns.
+The numbers come from the committed measurement of `mise run bench-term` at `55d197d`, the merge commit of this branch with step 7 ([#535](https://github.com/fahchen/pbeam/pull/535), task [#515](https://github.com/fahchen/pbeam/issues/515)), release build, on the host of the environment table, at load `{ 6.94 8.63 12.05 }`. Each measured number is the minimum of 9 timed runs of one operation, the record is `target/term-costs.txt`, and the test asserts no time. A deep-copy number holds the copy alone: the copies of one run stay alive until the timer stops, and the release of the copies is outside the measured region. The drop of an immediate is the measurement of `mise run bench-drop` at the same revision, whose record is `target/drop-costs.txt`. Step 7 merged as `c6cfb3a` and changed the term drop path, so `src/term.rs` and `src/term/map.rs` differ from `a6b838c`; the table reports the cost at the merged revision. The measurement replaces the earlier scratch numbers of the design measurement at `a6b838c`: 11.2 ns, 4.03 ns, 9.46 ns, 32.3 ns, 5102 ns, 132197 ns, 1811 ns, 58.4 ns, 28.9 ns, and 139840 ns.
 
 | Term operation | Cost for one operation | Kind |
 | --- | --- | --- |
-| `Arc` clone and drop of one term | 11.4 ns; the payload does not change it (a binary 11.2 ns, a fun with two free variables 12.1 ns, one cons cell 11.3 ns, and a tuple that holds a 1000-key map 11.3 ns) | measured |
-| `Arc` clone and drop of a shared map | 32.2 ns | measured |
-| The placeholder allocation of `Map::drain_into` (`src/term/map.rs:503`) in the drop of a shared map, which task [#515](https://github.com/fahchen/pbeam/issues/515) owns | about 21 ns | computed: 32.199 ns less 11.377 ns |
-| `Rc` clone and drop of the same plain payload | 3.84 ns to 4.01 ns (a tuple 3.846 ns, a binary 3.836 ns, one cons cell 3.836 ns, a fun with two free variables 4.011 ns, and a shared map 3.971 ns) | measured |
-| Bare `Arc` clone and drop | 9.545 ns | measured |
-| Bare `Rc` clone and drop | 3.851 ns | measured |
-| The two atomic operations of the `Arc` pair | about 5.7 ns | computed: 9.545 ns less 3.851 ns |
-| Deep copy of a 1000-element tuple | 2706 ns | measured |
-| Deep copy of a 1000-key map, which walks every node of the trie | 17901 ns | measured |
-| Deep copy of a 102400-byte binary | 1761 ns | measured |
-| The copy rate of the 102400-byte binary | 58.1 GB/s | computed: 102400 bytes divided by 1761.250 ns |
-| Deep copy of a fun with two free variables | 26.7 ns | measured |
-| Deep copy of one cons cell | 11.3 ns | measured |
-| Deep copy of a tuple that holds a 1000-key map | 17932 ns | measured |
-| Drop of an immediate | no measurement yet; task [#515](https://github.com/fahchen/pbeam/issues/515) owns the drop path, and its acceptance includes this number | not measured |
+| `Arc` clone and drop of one term | 10.2 ns; the payload does not change it (a binary 10.2 ns, a fun with two free variables 10.5 ns, one cons cell 10.1 ns, and a tuple that holds a 1000-key map 10.1 ns) | measured |
+| `Arc` clone and drop of a shared map | 12.1 ns; about 1.9 ns above the tuple, which is inside the 3 ns gate of step 7 | measured |
+| The placeholder allocation of `Map::drain_into` (`src/term/map.rs:503`) in the drop of a shared map, which step 7 ([#535](https://github.com/fahchen/pbeam/pull/535)) removed at `c6cfb3a` | none at `55d197d`; about 21 ns at `6fa5194` | computed before the removal: 32.199 ns less 11.377 ns; removed |
+| `Rc` clone and drop of the same plain payload | 3.94 ns to 4.11 ns (a tuple 3.943 ns, a binary 3.935 ns, one cons cell 3.994 ns, a fun with two free variables 4.106 ns, and a shared map 4.108 ns) | measured |
+| Bare `Arc` clone and drop | 9.770 ns | measured |
+| Bare `Rc` clone and drop | 3.859 ns | measured |
+| The two atomic operations of the `Arc` pair | about 5.9 ns | computed: 9.770 ns less 3.859 ns |
+| Deep copy of a 1000-element tuple | 2609 ns | measured |
+| Deep copy of a 1000-key map, which walks every node of the trie | 19935 ns | measured |
+| Deep copy of a 102400-byte binary | 1774 ns | measured |
+| The copy rate of the 102400-byte binary | 57.7 GB/s | computed: 102400 bytes divided by 1774.250 ns |
+| Deep copy of a fun with two free variables | 26.9 ns | measured |
+| Deep copy of one cons cell | 11.4 ns | measured |
+| Deep copy of a tuple that holds a 1000-key map | 20249 ns | measured |
+| Drop of an immediate | 2.24 ns | measured by `mise run bench-drop` at `55d197d` |
 
 ### The end-to-end runs
 
@@ -255,7 +255,7 @@ The first two rows are the record of step 0 ([#520](https://github.com/fahchen/p
 
 The design measurement at `b52e297` splits one redraw frame: `render` 39.0 ms and `patch` 43.4 ms, against 0.25 ms for the patch walk on the pinned ERTS. The repository has not re-measured this split on PBeam, so the two numbers are the design record and not a run of the harness above.
 
-The four tables above have three limits. First, an added delta is measured inside one run against the floor loop of the same run, so it holds that instruction plus a small loop difference. Second, a call-path part is a cost for each call or for each instruction, and it is not a share of an end-to-end run; the parts overlap, so the sum of a column is not the cost of one key press. Third, the term table comes from the measurement at `ebfd447`, whose term code is the code of `a6b838c`, and the end-to-end table comes from `078c119` and `ea4dd13`, so the two tables are not from the same revision.
+The four tables above have three limits. First, an added delta is measured inside one run against the floor loop of the same run, so it holds that instruction plus a small loop difference. Second, a call-path part is a cost for each call or for each instruction, and it is not a share of an end-to-end run; the parts overlap, so the sum of a column is not the cost of one key press. Third, the term table comes from the measurement at `55d197d`, whose term code is the code of `c6cfb3a`, and the end-to-end table comes from `078c119` and `ea4dd13`, so the two tables are not from the same revision.
 
 ## 4. What each step decided and what it left open
 
@@ -299,7 +299,7 @@ The step decided to keep the decoded form and to skip step 8. The decision rests
 
 ## 6. What comes next
 
-Step 7 ([#515](https://github.com/fahchen/pbeam/issues/515)) removes the two measured allocations on the drop path: the placeholder handle of `Map::drain_into` and the unconditional work vector of `Term::drop`. Its acceptance is the drop cost of an immediate, a tuple, a shared map, and a deep list, before and after, with no drop regression and no map operation regression above 2 percent. Its blocked-by link to step 6 is satisfied, because step 6 is merged as `d36f686`.
+Step 7 ([#515](https://github.com/fahchen/pbeam/issues/515)) merged as `c6cfb3a` ([#535](https://github.com/fahchen/pbeam/pull/535)) and removed the two measured allocations on the drop path: the placeholder handle of `Map::drain_into` and the unconditional work vector of `Term::drop`. Its acceptance is the drop cost of an immediate, a tuple, a shared map, and a deep list, before and after, with no drop regression and no map operation regression above 2 percent. Its blocked-by link to step 6 is satisfied, because step 6 is merged as `d36f686`.
 
 Step 9 ([#517](https://github.com/fahchen/pbeam/issues/517)) adds combined instructions for the two measured pair shapes, `test` with `gc_bif` and `gc_bif` with `call_only`. Its gate is a floor loop at or below 150 ns for each iteration, and the target for the Terra key latency at that point is at most 10 ms, against the measured 0.018 s to 0.039 s of section 3.
 
