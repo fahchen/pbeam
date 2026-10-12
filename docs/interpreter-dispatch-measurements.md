@@ -257,6 +257,73 @@ The design measurement at `b52e297` splits one redraw frame: `render` 39.0 ms an
 
 The four tables above have three limits. First, an added delta is measured inside one run against the floor loop of the same run, so it holds that instruction plus a small loop difference. Second, a call-path part is a cost for each call or for each instruction, and it is not a share of an end-to-end run; the parts overlap, so the sum of a column is not the cost of one key press. Third, the term table comes from the measurement at `ec935af`, whose term code is the code of `c6cfb3a`, and the end-to-end table comes from `078c119` and `ea4dd13`, so the two tables are not from the same revision.
 
+## The cost of one instruction, by part
+
+This section answers the question of issue [#546](https://github.com/fahchen/pbeam/issues/546): for the floor loop of `fixtures/dispatch/dispatch_probe.erl`, and for one instruction of it, how much of the cost belongs to each part?
+
+The numbers of this section wait for a quiet off-peak window. The measurement runs only outside the peak windows of the owner, which are 10:00 to 13:00 and 15:00 to 19:00 JST, and only when the one-minute load of the host is at or below 12. This section gives the design, the method of each row, and the name of every number that waits. A later session in a quiet window fills the table.
+
+The harness is the mise task `bench-attribution`, which runs `scripts/dispatch_attribution.sh`. One script call is one run of one build. The file `target/dispatch-attribution.txt` records the label of the build, the revision, the state of the working tree, the clock, the JST time, the host, the CPU count, the load, and the toolchain of that run.
+
+### The reference points
+
+The harness measures two numbers in every build:
+
+- `L`, the local `call_only` floor loop of `dispatch_probe` at 200000 iterations, in nanosecond for each iteration. The number is the minimum of the nine sub-runs of the probe.
+- `I`, the added cost of one `gc_bif '+'` on the same loop at 200000 iterations, in nanosecond for each iteration. The number is the `plus_loop/2` number of the same run less `L` of that run.
+
+The table uses `L` for the column "one floor-loop iteration" and `I` for the column "one instruction". The choice of `I` is the choice of `docs/interpreter-dispatch-plan.md` for the cost of one added instruction, and the floor loop holds the `test`, the `gc_bif '-'`, and the `call_only` that the parts name.
+
+### The method
+
+The main method is an ablation. A scratch build of `src/runtime/interpreter.rs` neutralises one sub-step, and the harness measures `L` and `I` in that build. The share of the sub-step is the difference between the variant and the base build of the same session. The scratch variants are not committed, and this section names each one.
+
+A micro-measurement covers a part that an ablation cannot separate. The micro-measurement is `prints_the_cost_of_every_instruction_part` in `tests/runtime/interpreter/dispatch_attribution_costs.rs`, which reads the private helpers beside the interpreter. Each micro number is the minimum of nine timed runs of 100000 operations, in nanosecond for one operation.
+
+| Variant | Scratch edit | Part |
+| --- | --- | --- |
+| base | none | The reference points `L` and `I` |
+| `V2` | Remove the per-iteration compare `current_frame(process).module_id != cursor.module.id` (`src/runtime/interpreter.rs:603`), because the floor loop keeps one module. | The module and frame cursor |
+| `V3` | Read the X slot with no bound check and no set check in `read_operand` (`src/runtime/interpreter.rs:3986-3989`), and write the X slot with no `resize` in `write_operand` (`src/runtime/interpreter.rs:4023-4027`). | The operand and register access |
+| `V4` | Resolve the `call_only` target to a `Frame` in the loader, so the run loop reads a stored frame and skips `function_at_label` from `code_table::frame` (`src/runtime/interpreter/code_table.rs:405`). | The function lookup of a frame creation |
+| `V5` | Run `erlang:'-'/2` on two immediate integers inline in the `Bif` arm (`src/runtime/interpreter.rs:800-866`), so the loop skips `read_bif_arguments`, `match_context_byte_size`, `bif_slice`, and the `BifResult` match. | The BIF call overhead |
+| `V6` | Replace the `vec![(self, other)]` of `Term::eq` (`src/term.rs:354`) with a fixed inline array, and keep the heap vector for a deeper term. This is the change of task [#541](https://github.com/fahchen/pbeam/issues/541). | The comparison pair stack |
+
+The dispatch and the branch have no variant. A build cannot remove the fetch of the record or the match of the opcode without a different loop, so the micro-measurement `dispatch_fetch_and_match` gives a lower bound.
+
+### The measurement plan
+
+The record of one build is one run of the harness, and every run records the clock, the JST hour, and the load. The plan is three interleaved runs of the base build and of each variant, in one quiet session. The reported number of a cell is the minimum of the three runs, and the spread is the largest number less the smallest number of the three runs.
+
+The numbers that wait are:
+
+- `L` and `I` of the base build, and `L` and `I` of `V2` to `V6`, with the load and the clock of every run.
+- The thirteen micro numbers: `dispatch_fetch_and_match`, `read_operand_x`, `read_operand_literal`, `write_operand_x`, `label_index`, `function_at_label`, `frame_creation`, `light_bif_switch`, `read_bif_arguments`, `bif_slice_minus`, `term_eq_integer`, `term_clone_drop_shared_tuple`, and `term_clone_drop_immediate`.
+
+### The parts
+
+The number in each cell is measured, or the cell reads `not measured`. The revision, the load, and the clock of every run go in the record of the pull request that fills the table.
+
+| Part | Method | ns for one instruction `I` | share of `I` | ns for one floor-loop iteration `L` | share of `L` | Run-to-run spread |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1. The dispatch and the branch: the fetch of the record, the match of the opcode, the branch | Micro-measurement `dispatch_fetch_and_match`; no ablation | not measured | not measured | not measured | not measured | not measured |
+| 2. The operand and register access: the read of an operand, the write of an X register, the bound and set checks | Ablation `V3`; micro-measurements `read_operand_x`, `read_operand_literal`, `write_operand_x` | not measured | not measured | not measured | not measured | not measured |
+| 3. The lookups: the module and frame cursor, the label, the function, the export, and the BIF identity | Ablations `V2` and `V4`; micro-measurements `label_index`, `function_at_label`, `frame_creation`, `bif_slice_minus` | not measured | not measured | not measured | not measured | not measured |
+| 4. The state: the frame position, the reduction accounting and the switch-out check, the process state, `fcalls` | Ablations `V2` and `V4`; micro-measurement `light_bif_switch` | not measured | not measured | not measured | not measured | not measured |
+| 5. The BIF call overhead: the borrowed argument path, the trap branch, the result handling | Ablation `V5`; micro-measurements `read_bif_arguments`, `bif_slice_minus` | not measured | not measured | not measured | not measured | not measured |
+| 6. The term work: the `Arc` clone, the drop, the allocation, the comparison pair stack | Ablation `V6`; micro-measurements `term_eq_integer`, `term_clone_drop_shared_tuple`, `term_clone_drop_immediate` | not measured | not measured | not measured | not measured | not measured |
+
+What a neutralised sub-step may hide, for each row:
+
+- Part 1: The micro-measurement walks the four records of the floor loop with a four-arm match. The run loop matches about 100 arms and holds the branch history of the loop, so the micro number is below the real dispatch cost. The taken branch of the loop is the `call_only` back edge, and it is inside parts 3 and 4.
+- Part 2: The error path of the bound check and the set check never runs in the floor loop, so `V3` measures the two checks and the tag test, and not the error text. The removal can also let the optimizer fold the operand match into the instruction arm. The floor loop writes only x0 of a register file that holds x0 and x1, so the `resize` is already a no-op and the growth path of a new register is not measured.
+- Part 3: The floor loop takes no fail label and no jump, so `label_index` does not run in the loop, and the micro number covers a path that resolves a label. `V2` removes the read of the active frame with the compare. `V4` also removes the arity compare of `code_table::frame`, and the `Frame` construction with the empty `stack` vector stays. The loader resolves the identity of the `bif` import one time, so the run of that instruction reads no table.
+- Part 4: The `Bif` arm and the `CallOnly` arm of the run loop do not call `light_bif_switch`; only the `call_ext` path and `send` do. Thus the floor loop has no reduction accounting and no switch-out check of a light BIF, and the `return` at the end of the loop charges one reduction for 200000 iterations. A store of the frame position is inside `V2` and `V4`, and no micro-measurement separates one store.
+- Part 5: `V5` removes the argument path, the identity dispatch, and the result match together, so the row is their sum and not each part. The inline path also removes the fail-label branch of the `Bif` arm.
+- Part 6: `V6` changes `Term::eq` for every caller, so the difference holds the whole comparison of the loop and not only its `test`, and the fallback branch of a deeper term stays. The floor loop holds immediate terms, so it performs no `Arc` clone; the two clone micro numbers are the pair for a loop that holds a compound term.
+
+The issue says that a part with a large share becomes its own task. No share is measured yet, so this section creates no task. The section is complete when the table holds the numbers, the load of each run, and the spread of each row.
+
 ## 4. What each step decided and what it left open
 
 ### Step 0, [#520](https://github.com/fahchen/pbeam/pull/520)
