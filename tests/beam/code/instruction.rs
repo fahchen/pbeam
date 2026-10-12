@@ -1989,3 +1989,92 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
     assert!(read(&[0x17, 0x10, 0x12], b"").is_err());
     assert!(read(&[0x17, 0x60, 0x12, 0x00, 0x80, 0x02, 0x00, 0x71], b"short").is_err());
 }
+
+/// Record the layout of the decoded form with the pinned rustc: the size of
+/// [`Instruction`], the size of the field types that dominate it, and the
+/// bytes of the fields of each large arm. A change of a field or of an arm
+/// fails the assertions, so the byte numbers of the step 6 measurement stay
+/// true for the measured revision.
+#[test]
+fn records_the_decoded_form_layout() {
+    use std::mem::size_of;
+
+    // The bytes of the fields of each arm, in field order. `Instruction` is
+    // the size of its largest arm plus the discriminant and the padding.
+    let arms: [(&str, &[usize]); 7] = [
+        (
+            "`BinaryGetBinary`",
+            &[
+                size_of::<u32>(),
+                size_of::<Operand>(),
+                size_of::<Operand>(),
+                size_of::<u64>(),
+                size_of::<Operand>(),
+            ],
+        ),
+        ("`GetList`, `PutList`", &[size_of::<Operand>(); 3]),
+        (
+            "`Bif`",
+            &[
+                size_of::<u32>(),
+                size_of::<BifId>(),
+                size_of::<Vec<Operand>>(),
+                size_of::<Operand>(),
+            ],
+        ),
+        (
+            "`CallExternal`",
+            &[
+                size_of::<u32>(),
+                size_of::<String>(),
+                size_of::<String>(),
+                size_of::<Option<BifId>>(),
+                size_of::<bool>(),
+                size_of::<u32>(),
+            ],
+        ),
+        (
+            "`SelectValue`",
+            &[
+                size_of::<Operand>(),
+                size_of::<u32>(),
+                size_of::<Vec<(Term, u32)>>(),
+            ],
+        ),
+        ("`Move`", &[size_of::<Operand>(); 2]),
+        ("`Label`", &[size_of::<u32>()]),
+    ];
+
+    let sum = |fields: &[usize]| fields.iter().sum::<usize>();
+
+    println!("| decoded form item | bytes |");
+    println!("| --- | --- |");
+    println!("| `Instruction` | {} |", size_of::<Instruction>());
+    println!("| `Operand` | {} |", size_of::<Operand>());
+    println!("| `Term` | {} |", size_of::<Term>());
+    println!("| `String` | {} |", size_of::<String>());
+    println!("| `Vec<Operand>` | {} |", size_of::<Vec<Operand>>());
+    println!("| `BifId` | {} |", size_of::<BifId>());
+    println!("| `Option<BifId>` | {} |", size_of::<Option<BifId>>());
+    println!("| `u64` | {} |", size_of::<u64>());
+    println!("| `u32` | {} |", size_of::<u32>());
+    println!();
+    println!("| arm | bytes of the fields |");
+    println!("| --- | --- |");
+    for (name, fields) in &arms {
+        println!("| {name} | {} |", sum(fields));
+    }
+
+    assert_eq!(size_of::<Instruction>(), 136, "the size of `Instruction`");
+    assert_eq!(size_of::<Operand>(), 40, "the size of `Operand`");
+    assert_eq!(size_of::<Term>(), 40, "the size of `Term`");
+    assert_eq!(size_of::<String>(), 24, "the size of `String`");
+    assert_eq!(size_of::<Vec<Operand>>(), 24, "the size of `Vec<Operand>`");
+    // The arm that sets the size of `Instruction`, and the arm of the floor
+    // loop. The plan records `BinaryGetBinary` at 132 bytes and `Bif` at 124
+    // bytes at the baseline revision; step 4 removed the two `String` fields
+    // from `Bif`.
+    assert_eq!(sum(arms[0].1), 132, "the fields of `BinaryGetBinary`");
+    assert_eq!(sum(arms[2].1), 72, "the fields of `Bif`");
+    assert_eq!(sum(arms[5].1), 80, "the fields of `Move`");
+}

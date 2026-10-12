@@ -3493,3 +3493,147 @@ fn rejects_a_bif_name_that_no_table_entry_holds() {
         "unresolved external MFA erlang:no_such_bif/0"
     );
 }
+
+/// The decoded slots that one iteration of the loop `function` retires in
+/// `module`: the entry (`TestYield` and the clause test) and the loop clause
+/// that the fail label of that test names up to its tail call. A `Label` is
+/// not dispatched, and the `Return` that the loader puts after a tail call
+/// is not reached.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let probe = program.modules["dispatch_probe"].clone();
+/// assert_eq!(loop_body(&probe, "floor_loop").len(), 4);
+/// ```
+fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
+    let instructions = &module.instructions;
+    let info = instructions
+        .iter()
+        .position(
+            |instruction| matches!(instruction, Instruction::FunctionInfo { name, .. } if name == function),
+        )
+        .unwrap_or_else(|| panic!("the module has no {function}"));
+    // The loader writes `func_info`, the entry `label`, and `TestYield`, so
+    // the function starts at `TestYield`.
+    let start = info + 2;
+    assert!(
+        matches!(instructions[start], Instruction::TestYield),
+        "the function entry of {function} is not `TestYield`: {:?}",
+        instructions[start]
+    );
+    let fail_label = match &instructions[start + 1] {
+        Instruction::TestExactEqual { fail_label, .. } => *fail_label,
+        other => panic!("the entry clause test of {function} is not `is_eq_exact`: {other:?}"),
+    };
+    let clause = *module
+        .tables
+        .jump_targets
+        .get(&fail_label)
+        .unwrap_or_else(|| panic!("the loader records the jump target of label {fail_label}"));
+    let end = (clause..instructions.len())
+        .find(|index| {
+            matches!(
+                instructions[*index],
+                Instruction::FunctionInfo { .. } | Instruction::End
+            )
+        })
+        .expect("the function ends before the stream does");
+    // The clause ends with the tail call of the loop. A `Return` after a
+    // tail call is dead, because the call replaces the frame.
+    let tail = (clause..end)
+        .find(|index| {
+            matches!(
+                instructions[*index],
+                Instruction::Call { .. }
+                    | Instruction::CallOnly { .. }
+                    | Instruction::CallExternal { .. }
+                    | Instruction::CallLast { .. }
+                    | Instruction::Apply { .. }
+                    | Instruction::CallFun { .. }
+            )
+        })
+        .unwrap_or(end);
+    (start..start + 2)
+        .chain(clause..=tail)
+        .filter(|index| !matches!(instructions[*index], Instruction::Label(_)))
+        .collect()
+}
+
+/// The bytes of the heap operands of the instructions of `slots`: the
+/// argument vector of a `Bif` and the two names of a `CallExternal`. The
+/// first number counts the operands that the instruction reads, and the
+/// second counts the storage that the loader allocated for them. Every other
+/// operand lives inside the 136-byte slot of its instruction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let slots = loop_body(&program.modules["dispatch_probe"], "floor_loop");
+/// assert_eq!(heap_operand_bytes(&program.modules["dispatch_probe"], &slots), (80, 160));
+/// ```
+fn heap_operand_bytes(module: &BeamModule, slots: &[usize]) -> (usize, usize) {
+    let mut read = 0;
+    let mut allocated = 0;
+    for index in slots {
+        match &module.instructions[*index] {
+            Instruction::Bif { arguments, .. } => {
+                read += arguments.len() * std::mem::size_of::<Operand>();
+                allocated += arguments.capacity() * std::mem::size_of::<Operand>();
+            }
+            Instruction::CallExternal { module, name, .. } => {
+                read += module.len() + name.len();
+                allocated += module.capacity() + name.capacity();
+            }
+            _ => {}
+        }
+    }
+    (read, allocated)
+}
+
+/// Record the decoded form that one iteration of each measured loop retires:
+/// the number of instructions, the bytes of their slots, the bytes of the
+/// heap operands that they read, and the bytes of the address range that
+/// their slots cover. A scratch build of the run loop prints `module.id` and
+/// the instruction index of each retired instruction, and its trace gives
+/// the slot set that this test derives from the compiled shape.
+#[test]
+fn records_the_decoded_loop_body() {
+    const DISPATCH_PROBE: &[u8] = include_bytes!("../../fixtures/dispatch/dispatch_probe.beam");
+    const POSITION_PROBE: &[u8] =
+        include_bytes!("../../fixtures/dispatch/dispatch_position_probe.beam");
+    let program = BeamProgram::load(&[DISPATCH_PROBE, POSITION_PROBE]).unwrap();
+
+    let shapes = [
+        ("dispatch_probe", "floor_ext_loop", 4),
+        ("dispatch_probe", "floor_loop", 4),
+        ("dispatch_position_probe", "floor_loop", 4),
+        ("dispatch_probe", "plus_loop", 5),
+        ("dispatch_probe", "tuple_size_loop", 5),
+        ("dispatch_probe", "element_loop", 5),
+        ("dispatch_probe", "hd_loop", 5),
+        ("dispatch_probe", "map_get_loop", 5),
+    ];
+
+    println!(
+        "| loop | instructions for each iteration | bytes of the slots | bytes of the heap operands read | bytes of the heap operand allocation | bytes of the slot range |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- |");
+    for (name, function, count) in shapes {
+        let module = &program.modules[name];
+        let slots = loop_body(module, function);
+        assert_eq!(
+            slots.len(),
+            count,
+            "the retired instruction count of {name}:{function}"
+        );
+        let first = *slots.first().unwrap();
+        let last = *slots.last().unwrap();
+        let range = (last - first + 1) * std::mem::size_of::<Instruction>();
+        let (read, allocated) = heap_operand_bytes(module, &slots);
+        println!(
+            "| `{name}`:`{function}` | {count} | {} | {read} | {allocated} | {range} |",
+            count * std::mem::size_of::<Instruction>(),
+        );
+    }
+}
