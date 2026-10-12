@@ -286,7 +286,7 @@ struct BifContext<'a> {
     scheduler: &'a mut Scheduler,
 }
 
-/// Build the BIF list and the BIF dispatch from one table.
+/// Build the BIF identities and the BIF dispatch from one table.
 ///
 /// Each entry is a `bif.tab` entry: `module:name/arity`, then `unsupported`
 /// or one `|context, [arguments]| body` pattern, never both and never neither:
@@ -296,10 +296,19 @@ struct BifContext<'a> {
 /// `Result<BifResult, BeamError>`. A name that is not a Rust identifier, such
 /// as the operator `+`, is a string literal: `erlang:"+"/2`.
 ///
-/// The macro expands into `BIFS`, the entries as
-/// `(module, name, arity)`, and `dispatch`, one `match` with an arm for each
-/// pattern in table order. A call that no arm matches gives an unresolved MFA
-/// error.
+/// An entry that the table implements names its [`BifId`] variant:
+/// `erlang:hd/1 as ErlangHd1 => |_, [list]| ...`. The name is the module,
+/// the function, and the arity in CamelCase, and it is unique in the table.
+/// An operator uses the name of its operation: `"+"` is `Plus`, `"++"` is
+/// `Append`, `"--"` is `Subtract`, `"=:="` is `ExactEqual`, and `"=/="` is
+/// `NotExactEqual`. An `unsupported` entry has no variant and resolves to
+/// [`BifId::Unimplemented`].
+///
+/// The macro expands into `BIFS`, the entries as `(module, name, arity)`,
+/// `BifId`, one variant for each implemented entry in table order,
+/// `resolve`, the MFA to identity lookup of the loader, and `dispatch`, one
+/// `match` arm for each implemented entry. A run reads no name and searches
+/// no table.
 ///
 /// Each arm runs its body in a closure. The closure body keeps the span of
 /// its table line, so line coverage measures each table pattern. A body in
@@ -310,15 +319,14 @@ struct BifContext<'a> {
 ///
 /// ```rust,ignore
 /// bifs! {
-///     erlang:"+"/2 => unsupported,
-///     erlang:self/0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().id))),
+///     erlang:"+"/2 as ErlangPlus2 => |_, [left, right]| erlang::arith("+", left, right, i64::checked_add),
+///     erlang:self/0 as ErlangSelf0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().id))),
 ///     lists:keyfind/3 => unsupported,
-///     maps:keys/1 => |_, [map]| maps::keys(map),
 /// }
-/// assert_eq!(
-///     BIFS,
-///     &[("erlang", "+", 2), ("erlang", "self", 0), ("lists", "keyfind", 3), ("maps", "keys", 1)]
-/// );
+/// assert_eq!(BIFS, &[("erlang", "+", 2), ("erlang", "self", 0), ("lists", "keyfind", 3)]);
+/// assert_eq!(resolve("erlang", "+", 2), Some(BifId::ErlangPlus2));
+/// assert_eq!(resolve("erlang", "self", 1), None);
+/// assert_eq!(resolve("lists", "keyfind", 3), Some(BifId::Unimplemented(2)));
 /// ```
 macro_rules! bifs {
     (@form unsupported) => {};
@@ -328,9 +336,11 @@ macro_rules! bifs {
     };
     (@name $name:literal) => { $name };
     (@name $name:ident) => { stringify!($name) };
+    (@identity $variant:ident) => { Some(BifId::$variant) };
+    (@identity) => { None };
     (
         $(
-            $module:ident : $name:tt / $arity:literal => $($unsupported:ident)?
+            $module:ident : $name:tt / $arity:literal $(as $variant:ident)? => $($unsupported:ident)?
             $( |$context:pat_param, $arguments:pat_param| $(where $guard:expr =>)? $body:expr )?
         ),* $(,)?
     ) => {
@@ -350,48 +360,162 @@ macro_rules! bifs {
             $( (stringify!($module), bifs!(@name $name), $arity), )*
         ];
 
-        /// Run the table pattern that matches a call, or report an
-        /// unresolved MFA.
+        /// The identity of one BIF operation.
+        ///
+        /// The table gives one variant to each entry that it implements, in
+        /// table order. The dispatch of a run matches on the variant, so a
+        /// BIF call costs one integer compare and no name compare.
+        /// [`BifId::Unimplemented`] names an entry that the table does not
+        /// implement; its value is the position of the entry in [`BIFS`],
+        /// for the error message of the run.
         ///
         /// # Examples
         ///
         /// ```rust,ignore
-        /// let result = dispatch(&mut context, "maps", "keys", &[Term::Map(Map::new())])?;
+        /// assert_eq!(resolve("erlang", "hd", 1), Some(BifId::ErlangHd1));
+        /// ```
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub(crate) enum BifId {
+            $( $($variant,)? )*
+            /// An entry of [`BIFS`] that the table does not implement, as
+            /// the position of the entry in `BIFS`.
+            Unimplemented(u16),
+        }
+
+        /// The identity of each entry of [`BIFS`], in the same order.
+        const BIF_IDS: &[Option<BifId>] = &[ $( bifs!(@identity $($variant)?), )* ];
+
+        /// Return the identity of the BIF `module:name/arity`, or `None`
+        /// when the MFA is not a `bif.tab` entry of [`BIFS`].
+        ///
+        /// The loader calls this once for each `bif` instruction and once
+        /// for each `call_ext` instruction that is not `hibernate/0` or
+        /// `yield/0`, and it stores the identity in the instruction, as the
+        /// ERTS loader binds the import of a BIF to the BIF (`emu_load.c`).
+        /// A `call_mfa` of an `apply` calls it once for each call. A run
+        /// then compares no name and searches no table.
+        ///
+        /// # Examples
+        ///
+        /// ```rust,ignore
+        /// assert_eq!(resolve("erlang", "hd", 1), Some(BifId::ErlangHd1));
+        /// assert_eq!(resolve("lists", "keyfind", 3).is_some(), true);
+        /// assert_eq!(resolve("io", "put_chars", 2), None);
+        /// ```
+        pub(crate) fn resolve(module: &str, name: &str, arity: u32) -> Option<BifId> {
+            #[cfg(test)]
+            super::RESOLVE_CALLS.with(|calls| calls.set(calls.get() + 1));
+            let index = BIFS.binary_search(&(module, name, arity)).ok()?;
+            Some(BIF_IDS[index].unwrap_or(BifId::Unimplemented(index as u16)))
+        }
+
+        /// Return the module, the name, and the arity of the entry of `id`.
+        ///
+        /// An identity of the table does not carry the position of its
+        /// entry, so a search finds it. Only an error message calls this
+        /// function.
+        ///
+        /// # Examples
+        ///
+        /// ```rust,ignore
+        /// assert_eq!(mfa(BifId::ErlangHd1), ("erlang", "hd", 1));
+        /// ```
+        pub(crate) fn mfa(id: BifId) -> (&'static str, &'static str, u32) {
+            if let BifId::Unimplemented(index) = id {
+                return BIFS[index as usize];
+            }
+            BIFS[BIF_IDS
+                .iter()
+                .position(|entry| *entry == Some(id))
+                .expect("an implemented BIF identity is an entry of BIFS")]
+        }
+
+        /// Run the table entry of `id`, or report an unresolved MFA.
+        ///
+        /// The loader gives an identity the arity of its table entry, so
+        /// the `match` of a call always reaches the arm of the entry. An
+        /// argument pattern that the call does not match, for example
+        /// `link/1` of a term that is not a pid, gives the unresolved MFA
+        /// error of the entry, as the name match of the dispatch did before
+        /// the identity existed.
+        ///
+        /// # Examples
+        ///
+        /// ```rust,ignore
+        /// let result = dispatch(&mut context, BifId::MapsKeys1, &[Term::Map(Map::new())])?;
         /// assert!(matches!(result, BifResult::Value(keys) if keys.is_nil()));
         /// ```
         pub(super) fn dispatch(
             context: &mut BifContext<'_>,
-            module: &str,
-            name: &str,
+            id: BifId,
             arguments: &[Term],
         ) -> Result<BifResult, BeamError> {
-            match (module, name, arguments.len(), arguments) {
+            match (id, arguments) {
                 $($(
-                    (stringify!($module), bifs!(@name $name), $arity, $arguments) $(if $guard)? => {
+                    (BifId::$variant, $arguments) $(if $guard)? => {
                         (|$context: &mut BifContext<'_>| $body)(context)
                     }
                 )?)*
-                _ => Err(error(format!(
-                    "unresolved external MFA {module}:{name}/{}",
-                    arguments.len()
-                ))),
+                (id, _) => {
+                    let (module, name, _) = mfa(id);
+                    Err(unresolved_mfa(module, name, arguments.len()))
+                }
             }
         }
     };
 }
 
+/// Return the runtime error of an MFA that the BIF table does not implement.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(unresolved_mfa("erlang", "date", 0).to_string(), "unresolved external MFA erlang:date/0");
+/// ```
+fn unresolved_mfa(module: &str, name: &str, arity: usize) -> BeamError {
+    error(format!("unresolved external MFA {module}:{name}/{arity}"))
+}
+
 mod table;
 
-pub(super) use table::BIFS;
+/// The `bif.tab` entries of [`table`], which the unit test of the BIF table
+/// reads. The run reads an entry through [`BifId`] only.
+#[cfg(test)]
+pub(in crate::runtime::interpreter) use table::BIFS;
+pub(crate) use table::{BifId, mfa, resolve};
+
+#[cfg(test)]
+thread_local! {
+    /// The number of calls of [`table::resolve`] on this test thread.
+    ///
+    /// The result of a search does not show in the value of a run, so a test
+    /// of a path that must not search `BIFS` reads this counter. The counter
+    /// is per thread, because the test harness runs the tests of one binary
+    /// on parallel threads.
+    pub(in crate::runtime::interpreter) static RESOLVE_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Return the number of calls of [`table::resolve`] on this test thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(resolve_calls(), 0);
+/// ```
+#[cfg(test)]
+pub(in crate::runtime::interpreter) fn resolve_calls() -> usize {
+    RESOLVE_CALLS.with(std::cell::Cell::get)
+}
 
 impl BeamProgram {
-    /// Run a BIF that the observed process path calls. The result
-    /// is a value, an exception, or a trap into BEAM code.
+    /// Run the BIF of `module:name/arity` with the arguments, resolving the
+    /// MFA of the name. The result is a value, an exception, or a trap into
+    /// BEAM code.
     ///
-    /// BIFs are native functions listed in the ERTS `bif.tab`, mostly in the
-    /// `erlang` module. The compiler emits guard BIFs such as `self/0` as
-    /// `bif` instructions and other BIFs as `call_ext` instructions. Both
-    /// forms come here.
+    /// The name path runs a `bif.tab` entry or a PBeam BIF of
+    /// [`PBEAM_BIFS`]. The trap export path and the test of the runtime call
+    /// it.
     ///
     /// # Examples
     ///
@@ -406,26 +530,92 @@ impl BeamProgram {
         name: &str,
         arguments: Vec<Term>,
     ) -> Result<BifResult, BeamError> {
+        let resolved = resolve(module, name, arguments.len() as u32);
+        self.call_bif(scheduler, module, name, resolved, arguments)
+    }
+
+    /// Run the BIF of an external call or an apply.
+    ///
+    /// `resolved` is the identity of the MFA when the caller holds one: the
+    /// loader stores it in a `call_ext` instruction, and the identity lookup
+    /// of the call gives it for a `bif` instruction. `None` selects the name
+    /// path of a PBeam BIF.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let resolved = resolve("erlang", "make_ref", 0);
+    /// let value = program.call_bif(&mut scheduler, "erlang", "make_ref", resolved, vec![])?;
+    /// assert!(matches!(value, BifResult::Value(Term::Reference(_))));
+    /// ```
+    pub(super) fn call_bif(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        name: &str,
+        resolved: Option<BifId>,
+        arguments: Vec<Term>,
+    ) -> Result<BifResult, BeamError> {
+        match resolved {
+            Some(id) => self.bif_resolved(scheduler, id, arguments),
+            None => self.named_bif(scheduler, module, name, arguments),
+        }
+    }
+
+    /// Run a BIF of a name that no [`BIFS`] entry holds: a PBeam BIF of
+    /// [`PBEAM_BIFS`], or the unresolved MFA error of the run.
+    ///
+    /// The trap export path reaches this function with the name of a
+    /// `TrapBif` target, and a `call_ext` of a PBeam BIF reaches it from
+    /// [`BeamProgram::call_bif`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let result = program.named_bif(&mut scheduler, "pbeam_cap", "revoke", vec![holder, kind])?;
+    /// let error = program.named_bif(&mut scheduler, "erlang", "date", vec![]).unwrap_err();
+    /// assert_eq!(error.to_string(), "unresolved external MFA erlang:date/0");
+    /// ```
+    fn named_bif(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        name: &str,
+        arguments: Vec<Term>,
+    ) -> Result<BifResult, BeamError> {
         match (module, name, arguments.as_slice()) {
-            ("pbeam_cap", "revoke", [holder, kind]) => {
-                return pbeam_cap::revoke(scheduler, holder, kind);
-            }
+            ("pbeam_cap", "revoke", [holder, kind]) => pbeam_cap::revoke(scheduler, holder, kind),
             ("pbeam_cap", "request", [kind, request]) => {
-                return pbeam_cap::request(scheduler, kind, request);
+                pbeam_cap::request(scheduler, kind, request)
             }
             ("pbeam_cap", "policy_revoke", [holder, kind]) => {
-                return pbeam_cap::policy_revoke(scheduler, holder, kind);
+                pbeam_cap::policy_revoke(scheduler, holder, kind)
             }
             ("pbeam_cap", "enter_runtime", [module, function]) => {
-                return pbeam_cap::enter_runtime(scheduler, module, function);
+                pbeam_cap::enter_runtime(scheduler, module, function)
             }
-            ("pbeam_cap", "serve", [pid, kind]) => {
-                return pbeam_cap::serve(scheduler, pid, kind);
-            }
-            _ => {}
+            ("pbeam_cap", "serve", [pid, kind]) => pbeam_cap::serve(scheduler, pid, kind),
+            _ => Err(unresolved_mfa(module, name, arguments.len())),
         }
+    }
+
+    /// Run the BIF of an identity that the loader resolved. A run of this
+    /// call compares no name and searches no table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let value = program.bif_resolved(&mut scheduler, BifId::ErlangMakeRef0, vec![])?;
+    /// assert!(matches!(value, BifResult::Value(Term::Reference(_))));
+    /// ```
+    pub(super) fn bif_resolved(
+        &self,
+        scheduler: &mut Scheduler,
+        id: BifId,
+        arguments: Vec<Term>,
+    ) -> Result<BifResult, BeamError> {
         let mut context = BifContext { scheduler };
-        table::dispatch(&mut context, module, name, &arguments)
+        table::dispatch(&mut context, id, &arguments)
     }
 
     /// Run the export of a BIF trap with the arguments of the trap, as the
@@ -725,8 +915,20 @@ const PBEAM_BIFS: [(&str, &str, u32); 5] = [
 /// assert!(!is_bif("io", "put_chars", 2));
 /// ```
 pub(super) fn is_bif(module: &str, name: &str, arity: u32) -> bool {
-    BIFS.binary_search(&(module, name, arity)).is_ok()
-        || PBEAM_BIFS.contains(&(module, name, arity))
+    resolve(module, name, arity).is_some() || is_pbeam_bif(module, name, arity)
+}
+
+/// Return whether an MFA is a PBeam BIF of [`PBEAM_BIFS`]: a function of a
+/// PBeam module that ERTS does not have.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_pbeam_bif("pbeam_cap", "revoke", 2));
+/// assert!(!is_pbeam_bif("erlang", "self", 0));
+/// ```
+pub(super) fn is_pbeam_bif(module: &str, name: &str, arity: u32) -> bool {
+    PBEAM_BIFS.contains(&(module, name, arity))
 }
 
 /// The heavy BIFs: the `hbif` entries of the ERTS `bif.tab`
@@ -762,3 +964,7 @@ const HEAVY_BIFS: [(&str, &str, u32); 7] = [
 pub(super) fn is_heavy_bif(module: &str, name: &str, arity: u32) -> bool {
     HEAVY_BIFS.contains(&(module, name, arity))
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/interpreter/bif.rs"]
+mod tests;

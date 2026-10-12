@@ -14,6 +14,7 @@ use super::{
 };
 use crate::{
     beam::code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
+    runtime::BifId,
     term::{Atom, AtomTable, Lambda, Term},
 };
 
@@ -387,34 +388,25 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
         [
             Instruction::Bif {
                 fail_label: 0,
-                module: node1_module,
-                name: node1,
+                bif: BifId::ErlangNode1,
                 arguments: node1_arguments,
                 destination: Operand::X(2),
             },
             Instruction::Bif {
                 fail_label: 0,
-                module: node0_module,
-                name: node0,
+                bif: BifId::ErlangNode0,
                 arguments: node0_arguments,
                 destination: Operand::X(5),
             },
             Instruction::Bif {
                 fail_label: 3,
-                module: guard_module,
-                name: guard,
+                bif: BifId::ErlangNode1,
                 arguments: guard_arguments,
                 destination: Operand::X(1),
             },
             Instruction::End,
-        ] if node1_module == "erlang"
-            && node1 == "node"
-            && matches!(node1_arguments.as_slice(), [Operand::X(0)])
-            && node0_module == "erlang"
-            && node0 == "node"
+        ] if matches!(node1_arguments.as_slice(), [Operand::X(0)])
             && node0_arguments.is_empty()
-            && guard_module == "erlang"
-            && guard == "node"
             && matches!(guard_arguments.as_slice(), [Operand::X(0)])
     ));
     for bif in [&[0x09, 0x20, 0x03][..], &[0x0A, 0x05, 0x20, 0x03, 0x03]] {
@@ -425,6 +417,16 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
                 .contains("BEAM BIF import index 2 out of range")
         );
     }
+    // `lists:node/0` is not a `bif.tab` entry, so the loader rejects the
+    // `bif` instruction of a malformed module with the error that the run
+    // gave before the instruction carried an identity.
+    let imports = vec![("lists".to_owned(), "node".to_owned(), 0)];
+    assert!(
+        parse_code(&code(&[0x09, 0x00, 0x53]), &[], &imports, &[], &[], &[])
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported BIF lists:node/0")
+    );
 }
 
 #[test]
@@ -449,27 +451,21 @@ fn decodes_bif2_into_a_bif_instruction_with_its_fail_label() {
         [
             Instruction::Bif {
                 fail_label: 0,
-                module,
-                name,
+                bif: BifId::ErlangElement2,
                 arguments,
                 destination: Operand::X(0),
             },
             Instruction::Bif {
                 fail_label: 46,
-                module: call_module,
-                name: call_name,
+                bif: BifId::ErlangElement2,
                 arguments: call_arguments,
                 destination: Operand::X(4),
             },
             Instruction::End,
-        ] if module == "erlang"
-            && name == "element"
-            && matches!(
+        ] if matches!(
                 arguments.as_slice(),
                 [Operand::Value(Term::Integer(2)), Operand::X(0)]
             )
-            && call_module == "erlang"
-            && call_name == "element"
             && matches!(
                 call_arguments.as_slice(),
                 [Operand::Value(Term::Integer(2)), Operand::X(0)]
@@ -1308,37 +1304,28 @@ fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction
         [
             Instruction::Bif {
                 fail_label: 58,
-                module: plus_module,
-                name: plus,
+                bif: BifId::ErlangPlus2,
                 arguments: plus_arguments,
                 destination: Operand::X(0),
             },
             Instruction::Bif {
                 fail_label: 0,
-                module: minus_module,
-                name: minus,
+                bif: BifId::ErlangMinus2,
                 arguments: minus_arguments,
                 destination: Operand::X(0),
             },
             Instruction::Bif {
                 fail_label: 55,
-                module: negate_module,
-                name: negate,
+                bif: BifId::ErlangMinus1,
                 arguments: negate_arguments,
                 destination: Operand::X(0),
             },
             Instruction::End,
-        ] if plus_module == "erlang"
-            && plus == "+"
-            && matches!(
+        ] if matches!(
                 plus_arguments.as_slice(),
                 [Operand::X(0), Operand::Value(Term::Integer(1))]
             )
-            && minus_module == "erlang"
-            && minus == "-"
             && matches!(minus_arguments.as_slice(), [Operand::Y(0), Operand::X(0)])
-            && negate_module == "erlang"
-            && negate == "-"
             && matches!(negate_arguments.as_slice(), [Operand::X(0)])
     ));
     // Without its destination and the end, the instruction is truncated.
@@ -1366,27 +1353,21 @@ fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
         [
             Instruction::Bif {
                 fail_label: 13,
-                module: guard_module,
-                name: guard_name,
+                bif: BifId::ErlangBinaryPart3,
                 arguments: guard_arguments,
                 destination: Operand::X(0),
             },
             Instruction::Bif {
                 fail_label: 0,
-                module: body_module,
-                name: body_name,
+                bif: BifId::ErlangBinaryPart3,
                 arguments: body_arguments,
                 destination: Operand::Y(22),
             },
             Instruction::End,
-        ] if guard_module == "erlang"
-            && guard_name == "binary_part"
-            && matches!(
+        ] if matches!(
                 guard_arguments.as_slice(),
                 [Operand::X(0), Operand::X(1), Operand::X(2)]
             )
-            && body_module == "erlang"
-            && body_name == "binary_part"
             && matches!(
                 body_arguments.as_slice(),
                 [Operand::Y(23), Operand::Y(22), Operand::X(0)]
@@ -1636,8 +1617,14 @@ fn puts_the_deallocate_and_the_return_of_a_tail_call_after_call_ext() {
     let whereis = |instruction: &Instruction, tail: bool, size: u32| {
         matches!(
             instruction,
-            Instruction::CallExternal { arity: 1, module, name, tail: found, deallocate }
-                if module == "erlang" && name == "whereis" && *found == tail && *deallocate == size
+            Instruction::CallExternal {
+                arity: 1,
+                module,
+                name,
+                bif: Some(BifId::ErlangWhereis1),
+                tail: found,
+                deallocate
+            } if module == "erlang" && name == "whereis" && *found == tail && *deallocate == size
         )
     };
     let call = decode(&[0x07, 0x10, 0x00]); // call_ext 1 import 0

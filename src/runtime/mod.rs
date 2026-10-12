@@ -20,6 +20,7 @@ mod unicode;
 pub use capability::{AllowAll, Capability, CapabilityKind, Constraint, Operation, Policy};
 pub use host::signal::install_start_dispositions;
 pub use interpreter::BeamProgram;
+pub(crate) use interpreter::bif::{BifId, resolve as resolve_bif};
 
 use crate::term::Term;
 

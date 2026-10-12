@@ -18,14 +18,14 @@ use crate::{
 };
 use std::{borrow::Cow, collections::HashMap, rc::Rc, sync::Arc};
 
-mod bif;
+pub(crate) mod bif;
 mod bits;
 mod code_table;
 mod native;
 
 pub(super) use code_table::CodeTable;
 
-use bif::{BifResult, is_bif, is_function, is_heavy_bif, send};
+use bif::{BifId, BifResult, is_function, is_heavy_bif, is_pbeam_bif, mfa, resolve, send};
 use bits::BitWriter;
 
 /// The largest number of arguments of `erlang:apply/3`. ERTS `apply` copies
@@ -716,12 +716,16 @@ impl BeamProgram {
                     arity,
                     module,
                     name,
+                    bif,
                     tail,
                     deallocate,
                 } => {
                     cursor.commit(process);
+                    // A tail form has Y registers to release; a body call
+                    // has none, and the parser writes 0 for it.
+                    let deallocate = tail.then_some(*deallocate);
                     if let Some(outcome) =
-                        self.call_external(scheduler, module, name, *arity, *tail, *deallocate)?
+                        self.call_external(scheduler, module, name, *bif, *arity, deallocate)?
                     {
                         return Ok(outcome);
                     }
@@ -792,17 +796,10 @@ impl BeamProgram {
                 }
                 Instruction::Bif {
                     fail_label,
-                    module: bif_module,
-                    name,
+                    bif,
                     arguments,
                     destination,
                 } => {
-                    if !is_bif(bif_module, name, arguments.len() as u32) {
-                        return Err(error(format!(
-                            "unsupported BIF {bif_module}:{name}/{}",
-                            arguments.len()
-                        )));
-                    }
                     // A `bif` instruction with fail label 0 raises the
                     // exception of the BIF, as `handle_error` does in ERTS
                     // (`bif_instrs.tab`). Another fail label jumps to the
@@ -821,9 +818,9 @@ impl BeamProgram {
                             .map(|argument| read_any(process, argument))
                             .collect::<Result<Vec<_>, _>>()?;
                         cursor.commit(process);
-                        match match_context_byte_size(bif_module, name, arguments, &values)? {
+                        match match_context_byte_size(*bif, arguments, &values)? {
                             Some(size) => BifResult::Value(size),
-                            None => self.bif(scheduler, bif_module, name, values)?,
+                            None => self.bif_resolved(scheduler, *bif, values)?,
                         }
                     };
                     let process = scheduler.current_process_mut();
@@ -851,9 +848,9 @@ impl BeamProgram {
                         // The compiler emits a `bif` instruction only for a
                         // BIF that does not trap or end the caller.
                         trap => {
+                            let (module, name, arity) = mfa(*bif);
                             return Err(error(format!(
-                                "unsupported {bif_module}:{name}/{} result {trap:?}",
-                                arguments.len()
+                                "unsupported {module}:{name}/{arity} result {trap:?}"
                             )));
                         }
                     }
@@ -1718,15 +1715,20 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         module: &str,
         name: &str,
+        bif: Option<BifId>,
         arity: u32,
-        tail: bool,
-        deallocate: u32,
+        deallocate: Option<u32>,
     ) -> Result<Option<Outcome>, BeamError> {
+        let tail = deallocate.is_some();
         let process = scheduler.current_process_mut();
-        if tail && matches!((module, name, arity), ("erlang", "apply", 2 | 3)) {
-            release_frame(process, deallocate)?;
-        } else if tail && deallocate as usize != current_frame(process).stack.len() {
-            return Err(error("invalid BEAM tail-call stack size"));
+        match deallocate {
+            Some(deallocate) if matches!((module, name, arity), ("erlang", "apply", 2 | 3)) => {
+                release_frame(process, deallocate)?;
+            }
+            Some(deallocate) if deallocate as usize != current_frame(process).stack.len() => {
+                return Err(error("invalid BEAM tail-call stack size"));
+            }
+            _ => {}
         }
         if (module, name, arity) == ("erlang", "load_nif", 2) {
             let module_id = current_frame(process).module_id;
@@ -1734,15 +1736,17 @@ impl BeamProgram {
             let result = native::load_nif(scheduler, &caller)?;
             return self.finish_bif(scheduler, result, false);
         }
-        if is_bif(module, name, arity) {
+        if bif.is_some() || is_pbeam_bif(module, name, arity) {
             if !is_heavy_bif(module, name, arity) && light_bif_switch(process) {
                 return Ok(Some(Outcome::Yield));
             }
             let arguments = call_arguments(&process.registers, arity)?;
-            let result = self.bif(scheduler, module, name, arguments)?;
+            let result = self.call_bif(scheduler, module, name, bif, arguments)?;
             return self.finish_bif(scheduler, result, false);
         }
-        self.call_mfa(scheduler, module, name, arity, tail)
+        // The loader classified the import, and an import that is not a BIF
+        // reaches the export lookup with no search of `BIFS`.
+        self.call_export(scheduler, module, name, arity, tail)
     }
 
     /// Call `module:name/arity` through its export with the arguments in
@@ -1774,16 +1778,44 @@ impl BeamProgram {
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
+        let resolved = resolve(module, name, arity);
+        if resolved.is_some() || is_pbeam_bif(module, name, arity) {
+            let process = scheduler.current_process_mut();
+            let arguments = call_arguments(&process.registers, arity)?;
+            let result = self.call_bif(scheduler, module, name, resolved, arguments)?;
+            return self.finish_bif(scheduler, result, tail);
+        }
+        self.call_export(scheduler, module, name, arity, tail)
+    }
+
+    /// Call the export of `module:name/arity` with the arguments in the X
+    /// registers, as `call_ext`, `apply`, and a fun call do. The calls of
+    /// `erlang:apply/2` and `erlang:apply/3` run as the ERTS `i_apply_fun`
+    /// and `i_apply` instructions. A function that a loaded module does not
+    /// export goes to [`BeamProgram::undefined_function`]. The caller
+    /// resolves the BIF of the MFA first when a load-time or a run-time fact
+    /// exists, so this function searches no table. Return the outcome when
+    /// the process stops.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // `fixture:main/0` enters the frame of the export.
+    /// let outcome = program.call_export(&mut scheduler, "fixture", "main", 0, false)?;
+    /// assert!(outcome.is_none());
+    /// ```
+    fn call_export(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        name: &str,
+        arity: u32,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
         match (module, name, arity) {
             ("erlang", "apply", 2) => return self.apply_fun(scheduler, tail),
             ("erlang", "apply", 3) => return self.apply_mfa(scheduler, tail),
             _ => {}
-        }
-        let process = scheduler.current_process_mut();
-        if is_bif(module, name, arity) {
-            let arguments = call_arguments(&process.registers, arity)?;
-            let result = self.bif(scheduler, module, name, arguments)?;
-            return self.finish_bif(scheduler, result, tail);
         }
         match scheduler.code.export_frame(module, name, arity)? {
             Some(frame) => {
@@ -2951,17 +2983,16 @@ fn check_known_position(context: &MatchState, operand: &Operand) -> Result<(), B
 /// let context = Arc::new(MatchState::new(b"abc"));
 /// context.skip(4);
 /// let values = [Term::MatchContext(context)];
-/// let size = match_context_byte_size("erlang", "byte_size", &[Operand::X(0)], &values)?;
+/// let size = match_context_byte_size(BifId::ErlangByteSize1, &[Operand::X(0)], &values)?;
 /// assert_eq!(size, Some(Term::Integer(3)));
-/// assert!(match_context_byte_size("erlang", "hd", &[Operand::X(0)], &values).is_err());
+/// assert!(match_context_byte_size(BifId::ErlangHd1, &[Operand::X(0)], &values).is_err());
 /// ```
 fn match_context_byte_size(
-    module: &str,
-    name: &str,
+    bif: BifId,
     arguments: &[Operand],
     values: &[Term],
 ) -> Result<Option<Term>, BeamError> {
-    if let (("erlang", "byte_size"), [Term::MatchContext(context)]) = ((module, name), values) {
+    if let (BifId::ErlangByteSize1, [Term::MatchContext(context)]) = (bif, values) {
         check_known_position(context, &arguments[0])?;
         let bits = context.remaining_bits();
         return Ok(Some(Term::Integer(bits.div_ceil(8) as i64)));
