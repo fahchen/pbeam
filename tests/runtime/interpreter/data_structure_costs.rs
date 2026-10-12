@@ -61,6 +61,12 @@ fn report_size_of<T>(name: &str, value: &T) {
     println!("STRUCT {name} {} bytes", std::mem::size_of_val(value));
 }
 
+/// Print the alignment of a type in bytes. The stride of an enum rounds the
+/// largest arm up to this value.
+fn report_align<T>(name: &str) {
+    println!("STRUCT {name} {} bytes", std::mem::align_of::<T>());
+}
+
 /// Return the nanoseconds for each operation of `body`, as the minimum of
 /// [`RUNS`] timed runs. The caller performs exactly `operations` operations.
 fn measure(operations: usize, mut body: impl FnMut() -> u64) -> f64 {
@@ -131,6 +137,130 @@ fn table_of(objects: usize) -> Table {
     table
 }
 
+/// A hashed index of the keys of a `set` table, in the shape that a hashed
+/// ETS store could use. The ERTS internal hash of a key selects a slot, and
+/// the slot holds the object index of every key with that slot. A lookup
+/// walks the slot and compares each stored key with the exact equality of
+/// `Term`.
+///
+/// The counterfactual must check the stored key. Pinned OTP compares the
+/// stored hash value first and then the stored key with `EQ`
+/// (`has_live_key` and `has_key`, `erl_db_hash.c:766-790`), so an index that
+/// compares hashes alone does not model one lookup of a `set` table.
+struct KeyIndex {
+    /// The object indexes of each slot.
+    slots: Vec<Vec<usize>>,
+    /// The stored key of each object index.
+    keys: Vec<Term>,
+}
+
+impl KeyIndex {
+    /// Return an empty index with `slots` slots, which a power of two makes
+    /// the mask of a slot one subtraction.
+    fn with_slots(slots: usize) -> Self {
+        KeyIndex {
+            slots: vec![Vec::new(); slots],
+            keys: Vec::new(),
+        }
+    }
+
+    /// Return the index of `keys` with `slots` slots.
+    fn of(keys: Vec<Term>, slots: usize) -> Self {
+        let mut index = KeyIndex::with_slots(slots);
+        for key in keys {
+            index.insert(key);
+        }
+        index
+    }
+
+    /// Return the slot of `key`: the ERTS internal hash of the key masked to
+    /// the slot count.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let index = KeyIndex::of(vec![Term::Integer(1)], 1024);
+    /// assert!(index.slot(&Term::Integer(1)) < 1024);
+    /// ```
+    fn slot(&self, key: &Term) -> usize {
+        internal_hash(key) as usize & (self.slots.len() - 1)
+    }
+
+    /// Store `key`, as `db_put_hash` does: an equal stored key keeps its
+    /// object, and a new key joins the slot of its hash.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut index = KeyIndex::with_slots(1024);
+    /// index.insert(Term::Integer(1));
+    /// index.insert(Term::Integer(1));
+    /// assert_eq!(index.keys.len(), 1);
+    /// ```
+    fn insert(&mut self, key: Term) {
+        if let Some(index) = self.get(&key) {
+            self.keys[index] = key;
+            return;
+        }
+        let slot = self.slot(&key);
+        self.keys.push(key);
+        self.slots[slot].push(self.keys.len() - 1);
+    }
+
+    /// Return the object index of an equal stored key, or `None` when no
+    /// stored key is equal. The walk compares every key of the slot, so a
+    /// slot with more than one key pays the equality of each of them.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut index = KeyIndex::with_slots(1024);
+    /// index.insert(Term::Integer(1));
+    /// assert_eq!(index.get(&Term::Integer(1)), Some(0));
+    /// assert_eq!(index.get(&Term::Integer(2)), None);
+    /// ```
+    fn get(&self, key: &Term) -> Option<usize> {
+        let slot = self.slot(key);
+        self.slots[slot]
+            .iter()
+            .copied()
+            .find(|index| self.keys[*index] == *key)
+    }
+
+    /// Return the key at `position` of the first slot that holds `count` or
+    /// more keys, so a lookup of it compares a key that is not equal first.
+    /// The caller makes sure that such a slot exists.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let index = KeyIndex::of((0..64).map(Term::Integer).collect(), 8);
+    /// assert!(index.get(&index.colliding_key(2)).is_some());
+    /// ```
+    fn colliding_key(&self, count: usize) -> Term {
+        let slot = self
+            .slots
+            .iter()
+            .position(|slot| slot.len() >= count)
+            .expect("the index holds a slot with enough keys");
+        self.keys[self.slots[slot][count - 1]].clone()
+    }
+}
+
+/// A model of the record stride of [`Instruction`]. The real type is 136
+/// bytes and its largest arm, `BinaryGetBinary`, takes 132 bytes of fields,
+/// so the discriminant takes 4 bytes. The model holds `ARM` bytes of arm
+/// fields, a 4-byte discriminant, and the alignment that the `align`
+/// attribute states. Use it to measure what a second `u32` field of the
+/// largest arm does to the stride of every instruction.
+#[repr(C, align(8))]
+struct StrideModel<const ARM: usize> {
+    /// The fields of the largest arm.
+    arm: [u8; ARM],
+    /// The discriminant of `Instruction`.
+    discriminant: u32,
+}
+
 /// Print the size of every structure of the runtime inventory.
 #[test]
 fn prints_the_size_of_every_structure() {
@@ -156,7 +286,11 @@ fn prints_the_size_of_every_structure() {
 
     // The loader and code tables.
     report_size::<Instruction>("instruction");
+    report_align::<Instruction>("instruction_alignment");
     report_size::<Operand>("operand");
+    report_align::<Operand>("operand_alignment");
+    report_size::<StrideModel<132>>("instruction_stride_model_132_arm");
+    report_size::<StrideModel<136>>("instruction_stride_model_136_arm");
     report_size::<BeamModule>("beam_module");
     report_size::<super::bif::BifId>("bif_id");
     report_size::<super::bif::BifArguments>("bif_arguments");
@@ -298,15 +432,17 @@ fn prints_the_cost_of_every_derivation() {
         );
     }
 
-    // The counterfactual of the ETS lookup: the ERTS internal hash of the
-    // key, and one probe of a `HashMap` keyed by that hash.
-    let mut index: HashMap<u64, usize> = HashMap::new();
-    for position in 0..1000u64 {
-        index.insert(
-            internal_hash(&Term::Integer(position as i64)),
-            position as usize,
-        );
-    }
+    // The counterfactual of the ETS lookup: a hashed index of the 1000 keys.
+    // One lookup pays the ERTS internal hash of the key, the slot probe, and
+    // the exact equality of each stored key of the slot, as `has_live_key`
+    // and `has_key` check the stored hash and then the stored key
+    // (`erl_db_hash.c:766-790`). The hash is inside the lookup, so no row
+    // adds it again.
+    let keys_1000: Vec<Term> = (0..1000).map(Term::Integer).collect();
+    let index_1000 = KeyIndex::of(keys_1000, 1024);
+    let hit_key = Term::Integer(999);
+    let miss_key = Term::Integer(-1);
+    let collision_key = index_1000.colliding_key(2);
     report(
         "internal_hash_integer",
         measure(OPERATIONS, || {
@@ -318,19 +454,44 @@ fn prints_the_cost_of_every_derivation() {
         }),
     );
     report(
-        "hash_index_probe_1000",
-        measure(OPERATIONS, || {
-            let mut sum = 0u64;
-            for value in 0..OPERATIONS {
-                let key = internal_hash(black_box(&Term::Integer((value % 1000) as i64)));
-                sum += index.get(black_box(&key)).copied().unwrap_or(0) as u64;
+        "hash_index_lookup_1000",
+        measure(ETS_OPERATIONS, || {
+            let mut hits = 0u64;
+            for _ in 0..ETS_OPERATIONS {
+                if index_1000.get(black_box(&hit_key)).is_some() {
+                    hits += 1;
+                }
             }
-            sum
+            hits
+        }),
+    );
+    report(
+        "hash_index_lookup_1000_miss",
+        measure(ETS_OPERATIONS, || {
+            let mut hits = 0u64;
+            for _ in 0..ETS_OPERATIONS {
+                if index_1000.get(black_box(&miss_key)).is_some() {
+                    hits += 1;
+                }
+            }
+            hits
+        }),
+    );
+    report(
+        "hash_index_lookup_1000_collision",
+        measure(ETS_OPERATIONS, || {
+            let mut hits = 0u64;
+            for _ in 0..ETS_OPERATIONS {
+                if index_1000.get(black_box(&collision_key)).is_some() {
+                    hits += 1;
+                }
+            }
+            hits
         }),
     );
 
     // The insert path of the same table: the walk to find the key, and the
-    // hash and the insert of the counterfactual. Each timed run starts with
+    // lookup and the insert of the counterfactual. Each timed run starts with
     // the table of 1000 objects and grows it to at most 1200, so the walk of
     // the current form is the cost of 1000 to 1200 key comparisons.
     report(
@@ -350,19 +511,10 @@ fn prints_the_cost_of_every_derivation() {
         "hash_index_insert_1000",
         measure_with(
             ETS_OPERATIONS,
-            || {
-                let mut index: HashMap<u64, usize> = HashMap::new();
-                for position in 0..1000u64 {
-                    index.insert(
-                        internal_hash(&Term::Integer(position as i64)),
-                        position as usize,
-                    );
-                }
-                index
-            },
+            || KeyIndex::of((0..1000).map(Term::Integer).collect(), 1024),
             |index| {
                 for round in 0..ETS_OPERATIONS {
-                    index.insert(internal_hash(&Term::Integer(-1 - round as i64)), 0);
+                    index.insert(Term::Integer(-1 - round as i64));
                 }
                 ETS_OPERATIONS as u64
             },
@@ -603,7 +755,10 @@ fn prints_the_cost_of_every_derivation() {
         &other_1000,
         &terms,
         &position,
-        &index,
+        &index_1000,
+        &hit_key,
+        &miss_key,
+        &collision_key,
         &map_1000,
         &flat_32,
         &flat_4,
