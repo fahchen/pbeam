@@ -60,9 +60,16 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
 /// ```
 fn allocations(program: &BeamProgram, function: &str, length: usize) -> usize {
     let counter = Term::Integer(length as i64);
+    let tuple = || Term::tuple(vec![Term::Integer(1), Term::Integer(2), Term::Integer(3)]);
     let arguments: &[Term] = match function {
         "floor_loop" => &[counter],
         "plus_loop" => &[counter, Term::Integer(0)],
+        "tuple_size_loop" | "element_loop" => &[counter, Term::Integer(0), tuple()],
+        "hd_loop" => &[
+            counter,
+            Term::Integer(0),
+            Term::list_from([Term::Integer(1)]),
+        ],
         other => panic!("unknown probe function {other}"),
     };
     let start = ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed);
@@ -89,19 +96,22 @@ fn per_iteration(program: &BeamProgram, function: &str) -> usize {
     (second - first) / (LENGTHS[1] - LENGTHS[0])
 }
 
-/// Check the allocation count of the pure leaf BIF path: one `gc_bif '+'`
-/// adds no allocation to the floor loop, so the path builds no `Vec<Term>`
-/// for one call. Step 3 of the plan measured two allocations for one
-/// iteration of the `call_only` floor loop: the argument `Vec<Term>` of the
-/// `gc_bif` and the pair stack of `Term::eq` in the `test` instruction.
+/// Check the allocation count of the borrowed BIF path: none of the added
+/// instructions of `docs/interpreter-dispatch-plan.md` adds an allocation to
+/// the floor loop, so the path builds no `Vec<Term>` for one call. Step 3 of
+/// the plan measured the argument `Vec<Term>` of the `gc_bif` as one of the
+/// two allocations of one iteration of the `call_only` floor loop, with the
+/// pair stack of `Term::eq` in the `test` instruction as the other.
 #[test]
 fn passes_borrowed_bif_arguments_with_no_allocation() {
     let program = BeamProgram::load(&[DISPATCH_PROBE]).unwrap();
     let floor = per_iteration(&program, "floor_loop");
-    let plus = per_iteration(&program, "plus_loop");
-    println!("allocations for one iteration: floor_loop {floor}, floor_loop plus `+` {plus}");
-    assert_eq!(
-        plus, floor,
-        "the `+` BIF must add no allocation to the floor loop"
-    );
+    for function in ["plus_loop", "tuple_size_loop", "element_loop", "hd_loop"] {
+        let added = per_iteration(&program, function);
+        println!("allocations for one iteration: floor_loop {floor}, {function} {added}");
+        assert_eq!(
+            added, floor,
+            "{function} must add no allocation to the floor loop"
+        );
+    }
 }
