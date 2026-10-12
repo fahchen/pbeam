@@ -110,6 +110,10 @@ run = 'bash scripts/example.sh "$usage_name" ${usage_erts:+--erts} ${usage_polic
 description = "Measure the interpreter dispatch baseline on a release build and write target/dispatch-baseline.txt"
 run = "bash scripts/dispatch_baseline.sh"
 
+[tasks.bench-drop]
+description = "Measure the term drop cost on a release build and write target/drop-costs.txt"
+run = "bash scripts/drop_costs.sh"
+
 [tasks.terra-reference]
 description = "Run the Terra Counter example on the pinned ERTS in a pseudo-terminal, check each screen and the terminal restore, and write the call inventory (macOS)"
 run = "bash scripts/terra_reference.sh"
