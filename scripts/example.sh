@@ -106,8 +106,6 @@ export ELIXIR_ERL_OPTIONS="${ELIXIR_ERL_OPTIONS:-} +fnu"
 
 # Compile into a directory of this run, then rename each file into the output directory. A rename replaces a file atomically, so a run or a test that reads a file at the same time reads a complete file. erlc deletes its output file first and writes through the fixed temporary file pbeam_boot.bea# (compile.erl remove_file/2 and save_binary_1/2), so two compilations into one directory can collide.
 mkdir -p "$output"
-# Remove the lists of the last build before the build changes a file, so that a run with --no-build never uses an old list with the files of a build that did not complete.
-rm -f "$output/erts.paths" "$output/pbeam.beams" "$output/pbeam.start" "$output/pbeam.unloaded"
 work=$(mktemp -d "$output/compile.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 # The terra_counter example calls the Terra library and its Counter application. The repository has no Terra source, so compile them from the pinned Terra commit (scripts/terra.sh) first. The Elixir compiler runs the macros of the Terra sources. The Terra sources do not get --warnings-as-errors, because they are third-party code.
@@ -126,6 +124,8 @@ elixirc --warnings-as-errors -o "$work" -pa "$work" "${sources[@]}"
 [[ -f $work/$entry.beam ]] || fail "examples/$name defines no module ${entry#Elixir.}"
 step "Compile examples/hello_world/pbeam_boot.erl"
 erlc +deterministic -o "$work" examples/hello_world/pbeam_boot.erl
+# Remove the lists of the last build before the first rename of a file into the output directory, so that a run with --no-build never uses an old list with the files of a build that did not complete. A build that stops before this point, for example a build without a Terra source, keeps the lists and the files of the last complete build.
+rm -f "$output/erts.paths" "$output/pbeam.beams" "$output/pbeam.start" "$output/pbeam.unloaded"
 examples=()
 for beam in "$work"/*.beam; do
   file=${beam##*/}
