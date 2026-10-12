@@ -681,9 +681,12 @@ const PREPARED_STRIDE: usize = 32;
 /// `tests/runtime/interpreter.rs`), and each instruction occupies one record.
 const FLOOR_LOOP_RECORDS: usize = 4;
 
-/// The record reads of one measurement and the runs of each measurement.
-/// Each working set is read the same number of times, so a difference
-/// between two working sets is not a difference of the work.
+/// The target record reads of one measurement and the runs of each
+/// measurement. Each working set is read about the same number of times, so a
+/// difference between two working sets is not a difference of the work. The
+/// actual count is the largest multiple of the record count that is at or
+/// below the target, and the table prints it: 1999998 reads for the 6-record
+/// set and 1800000 reads for the 300000-record set.
 const STREAM_VISITS: usize = 2_000_000;
 const STREAM_RUNS: usize = 5;
 
@@ -741,32 +744,33 @@ fn walk(buffer: &[u8], stride: usize, rounds: usize) -> u64 {
 #[test]
 fn records_the_instruction_stream_cache_proxy() {
     println!(
-        "Instruction stream cache proxy: {} record reads for each measurement, minimum of {STREAM_RUNS} runs. One floor-loop iteration reads {FLOOR_LOOP_RECORDS} records.",
-        STREAM_VISITS
+        "Instruction stream cache proxy: target of {STREAM_VISITS} record reads for each measurement, minimum of {STREAM_RUNS} runs. One floor-loop iteration reads {FLOOR_LOOP_RECORDS} records."
     );
     println!();
     println!(
-        "| records | decoded bytes | decoded ns for each record | prepared bytes | prepared ns for each record | difference ns for each record | difference ns for each floor-loop iteration |"
+        "| records | reads | decoded bytes | decoded ns for each record | prepared bytes | prepared ns for each record | difference ns for each record | difference ns for each floor-loop iteration |"
     );
-    println!("| --- | --- | --- | --- | --- | --- | --- |");
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
     for records in STREAM_RECORDS {
         let mut measured = Vec::new();
         for stride in [DECODED_STRIDE, PREPARED_STRIDE] {
             let buffer = stream_buffer(records, stride);
             let rounds = (STREAM_VISITS / records).max(1);
+            let reads = rounds * records;
             let mut best = f64::MAX;
             for _ in 0..STREAM_RUNS {
                 let start = Instant::now();
                 let sum = walk(&buffer, stride, rounds);
                 let elapsed = start.elapsed().as_nanos() as f64;
                 black_box(sum);
-                best = best.min(elapsed / (rounds * records) as f64);
+                best = best.min(elapsed / reads as f64);
             }
             measured.push(best);
         }
         let difference = measured[0] - measured[1];
+        let reads = (STREAM_VISITS / records).max(1) * records;
         println!(
-            "| {records} | {} | {:.2} | {} | {:.2} | {difference:.2} | {:.2} |",
+            "| {records} | {reads} | {} | {:.2} | {} | {:.2} | {difference:.2} | {:.2} |",
             records * DECODED_STRIDE,
             measured[0],
             records * PREPARED_STRIDE,
