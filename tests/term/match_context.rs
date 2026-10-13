@@ -175,3 +175,9 @@ fn reads_utf8_at_a_position_that_is_not_byte_aligned() {
     assert_eq!(context.get_utf8(), None);
     assert_eq!(context.position(), 4);
 }
+
+#[test]
+fn reports_the_binary_of_the_state() {
+    let context = MatchState::new(Binary::from(&[1, 2]));
+    assert_eq!(context.binary().to_vec(), vec![1, 2]);
+}

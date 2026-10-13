@@ -181,3 +181,13 @@ fn orders_link_ids_as_erts_words() {
     assert_eq!(port(2).compare(pid(1)), Ordering::Greater);
     assert_eq!(port(2).compare(port(2)), Ordering::Equal);
 }
+
+#[test]
+fn reports_the_bytes_of_the_tree_and_its_values() {
+    let mut tree = MonitorLinkTree::default();
+    assert_eq!(tree.allocated_bytes(), 0);
+    assert_eq!(tree.values().count(), 0);
+    tree.insert(ProcessId(1), 7u64);
+    assert!(tree.allocated_bytes() > 0);
+    assert_eq!(tree.values().copied().collect::<Vec<_>>(), vec![7]);
+}

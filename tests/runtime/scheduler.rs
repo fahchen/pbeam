@@ -1,4 +1,4 @@
-use super::{CONTEXT_REDS, LinkId, MonitorOptions, MonitorTarget, Scheduler, Turn};
+use super::{CONTEXT_REDS, ExitPhase, LinkId, MonitorOptions, MonitorTarget, Scheduler, Turn};
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
 use crate::runtime::host::output::{IovecWrite, IovecWritten};
@@ -927,4 +927,59 @@ fn sends_a_message_that_shares_the_term_of_the_sender() {
     assert!(message.shares_storage_with(&received[0]));
     // A term of another kind does not share its storage.
     assert!(!Term::Integer(1).shares_storage_with(&Term::Integer(1)));
+}
+
+#[test]
+fn reports_the_live_bytes_of_the_scheduler_state() {
+    let mut scheduler = test_scheduler();
+    assert_eq!(scheduler.live_bytes(), 0);
+    scheduler
+        .start(
+            frame(),
+            vec![Term::tuple(vec![Term::Integer(1)])],
+            Vec::new(),
+        )
+        .unwrap();
+    assert!(scheduler.live_bytes() > 0);
+}
+
+#[test]
+fn counts_the_exit_reason_of_a_freed_process() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], Vec::new()).unwrap();
+    let mut process = scheduler.processes.remove(&ProcessId(0)).unwrap();
+    process.exiting = Some(Term::tuple(vec![Term::Integer(1)]));
+    scheduler
+        .freed
+        .insert(ProcessId(0), (process, ExitPhase::Links(None)));
+    let with_reason = scheduler.live_bytes();
+    let (mut process, _) = scheduler.freed.remove(&ProcessId(0)).unwrap();
+    process.exiting = None;
+    scheduler
+        .freed
+        .insert(ProcessId(0), (process, ExitPhase::Links(None)));
+    assert!(with_reason > scheduler.live_bytes());
+}
+
+#[test]
+fn counts_the_persistent_terms_the_ets_objects_and_the_timer_messages() {
+    let mut scheduler = test_scheduler();
+    let before = scheduler.live_bytes();
+    let _ = scheduler
+        .persistent_terms
+        .put(&atom("key"), &Term::tuple(vec![Term::Integer(1)]));
+    assert!(scheduler.live_bytes() > before);
+    let mut table = Table::new(ProcessId(1), Access::Public, 1);
+    table.insert(vec![atom("key"), Term::tuple(vec![Term::Integer(2)])]);
+    scheduler.ets.create(Reference(1), None, table);
+    assert!(scheduler.live_bytes() > before);
+    scheduler.timers.start(
+        1100,
+        Timer::Bif {
+            reference: Reference(2),
+            receiver: Receiver::Process(ProcessId(1)),
+            message: Term::tuple(vec![Term::Integer(3)]),
+        },
+    );
+    assert!(scheduler.live_bytes() > before);
 }

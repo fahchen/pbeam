@@ -224,3 +224,30 @@ fn keeps_every_key_through_growth_and_a_delete_wave() {
         assert_eq!(table.object(&key), Some(std::slice::from_ref(&key)));
     }
 }
+
+#[test]
+fn counts_the_objects_of_the_tables() {
+    let mut tables = EtsTables::default();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    table.insert(vec![
+        crate::term::test_atom("k"),
+        Term::tuple(vec![Term::Integer(1)]),
+    ]);
+    tables.create(Reference(1), None, table);
+    let mut live = crate::term::LiveBytes::new();
+    tables.account_terms(&mut live);
+    assert!(live.bytes() > 0);
+}
+
+#[test]
+fn counts_the_object_array_of_immediate_elements() {
+    let mut tables = EtsTables::default();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    table.insert(vec![Term::Integer(1), Term::Integer(2)]);
+    let object = table.allocated_bytes();
+    assert!(object > 0);
+    tables.create(Reference(1), None, table);
+    let mut live = crate::term::LiveBytes::new();
+    tables.account_terms(&mut live);
+    assert_eq!(live.bytes(), object);
+}

@@ -1,7 +1,7 @@
 //! Persistent terms of the node, as the ERTS persistent term hash table
 //! (`erl_bif_persistent.c`). All processes of a run share one store.
 
-use crate::term::{Term, internal_hash};
+use crate::term::{LiveBytes, Term, internal_hash};
 
 /// The number of slots of a new table (`INITIAL_SIZE`).
 const INITIAL_SIZE: usize = 8;
@@ -59,6 +59,25 @@ impl PersistentTerms {
         self.buckets[self.lookup(key)]
             .as_ref()
             .map(|(_, value)| value)
+    }
+
+    /// Count the guest terms that the table holds: the key and the value of
+    /// each stored pair.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut terms = PersistentTerms::default();
+    /// terms.put(&Term::static_atom("key"), &Term::tuple(vec![Term::Integer(1)]));
+    /// let mut live = LiveBytes::new();
+    /// terms.account_terms(&mut live);
+    /// assert!(live.bytes() > 0);
+    /// ```
+    pub(super) fn account_terms(&self, live: &mut LiveBytes) {
+        for (key, value) in self.buckets.iter().flatten() {
+            live.term(key);
+            live.term(value);
+        }
     }
 
     /// Store `value` for `key`. A key that is exactly equal to a stored key

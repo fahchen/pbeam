@@ -9,7 +9,7 @@ use std::{
 };
 
 use super::time::MONOTONIC_BEGIN;
-use crate::term::{Atom, ProcessId, Reference, Term};
+use crate::term::{Atom, LiveBytes, ProcessId, Reference, Term};
 
 /// Native time units in one clock tick of 1 ms, as
 /// `ERTS_MONOTONIC_TO_CLKTCKS` divides with `SYS_CLOCK_RESOLUTION 1`
@@ -107,6 +107,30 @@ impl Timers {
     /// let timers = Timers::new();
     /// assert!(timers.now() <= timers.now());
     /// ```
+    /// Count the guest terms that the timer service holds: the message of
+    /// each active BIF timer. A receive timer holds no term.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut timers = Timers::new();
+    /// timers.start(1100, Timer::Bif {
+    ///     reference: Reference(1),
+    ///     receiver: Receiver::Process(ProcessId(0)),
+    ///     message: Term::tuple(vec![Term::Integer(1)]),
+    /// });
+    /// let mut live = LiveBytes::new();
+    /// timers.account_terms(&mut live);
+    /// assert!(live.bytes() > 0);
+    /// ```
+    pub(super) fn account_terms(&self, live: &mut LiveBytes) {
+        for timer in self.queue.values() {
+            if let Timer::Bif { message, .. } = timer {
+                live.term(message);
+            }
+        }
+    }
+
     pub(super) fn now(&self) -> i64 {
         i64::try_from(self.start.elapsed().as_nanos())
             .unwrap_or(i64::MAX)
