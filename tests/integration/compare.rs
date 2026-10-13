@@ -41,7 +41,7 @@ fn compares_terms_exactly_as_pinned_erts() {
         }))
     };
     assert_eq!(
-        program.execute("compare_probe", "exact", &[]).unwrap(),
+        program.execute("compare_probe", "exact", &[]).unwrap().term,
         Term::list_from(vec![atoms(false), atoms(true)])
     );
     assert_eq!(
@@ -63,7 +63,7 @@ fn runs_the_is_eq_test_as_pinned_erts() {
         true, false, true, false, true, false,
     ];
     assert_eq!(
-        program.execute("compare_probe", "equal", &[]).unwrap(),
+        program.execute("compare_probe", "equal", &[]).unwrap().term,
         Term::list_from(
             equal
                 .iter()
@@ -90,7 +90,10 @@ fn runs_the_is_ne_test_as_pinned_erts() {
         false, true, false, true, false, true, false,
     ];
     assert_eq!(
-        program.execute("compare_probe", "not_equal", &[]).unwrap(),
+        program
+            .execute("compare_probe", "not_equal", &[])
+            .unwrap()
+            .term,
         Term::list_from(
             not_equal
                 .iter()
@@ -134,7 +137,10 @@ fn runs_the_is_lt_is_integer_and_is_boolean_tests_as_pinned_erts() {
         ]),
     ]);
     assert_eq!(
-        program.execute("compare_probe", "guards", &[]).unwrap(),
+        program
+            .execute("compare_probe", "guards", &[])
+            .unwrap()
+            .term,
         expected
     );
     assert_eq!(

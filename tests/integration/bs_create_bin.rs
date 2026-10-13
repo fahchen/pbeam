@@ -248,7 +248,7 @@ fn loads_an_allocation_list_as_the_alloc_operand() {
             .unwrap()
     };
     assert_eq!(
-        [run(b"bc"), run(b"")],
+        [run(b"bc"), run(b"")].map(|host| host.term),
         [Term::binary(b"abc".to_vec()), Term::binary(b"a".to_vec())]
     );
     assert_eq!(

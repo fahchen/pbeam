@@ -52,7 +52,7 @@ fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
     // stack trace through `build_stacktrace`. Then `catch` (l), and the
     // handler through `call_ext` (m) and `apply` (n, o).
     assert_eq!(
-        program.execute("undef_probe", "calls", &[]).unwrap(),
+        program.execute("undef_probe", "calls", &[]).unwrap().term,
         Term::list_from(vec![
             caught(&["a"]),
             caught(&["b"]),
@@ -127,7 +127,8 @@ fn returns_the_value_of_a_handler_that_a_tail_call_runs() {
                     program.host_term(atom("a")),
                 ],
             )
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![
             atom("handled"),
             atom("missing"),
@@ -193,7 +194,7 @@ fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
             .unwrap()
     };
     assert_eq!(
-        down("undef_target", "missing"),
+        down("undef_target", "missing").term,
         Term::tuple(vec![
             atom("undef"),
             Term::list_from(vec![Term::tuple(vec![
@@ -205,7 +206,7 @@ fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
         ])
     );
     assert_eq!(
-        down("undef_handler", "stop"),
+        down("undef_handler", "stop").term,
         Term::tuple(vec![atom("handled"), atom("stop"), arguments.clone()])
     );
 
@@ -268,7 +269,7 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
             .unwrap()
     };
     assert_eq!(
-        down("undef_target", 1023),
+        down("undef_target", 1023).term,
         Term::tuple(vec![
             atom("undef"),
             Term::list_from(vec![Term::tuple(vec![
@@ -283,9 +284,9 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
     // gives `[{erlang, apply, [Module, missing, Args], ErrorInfo}]`, so the
     // reference compares only the reason.
     let system_limit = Term::tuple(vec![atom("system_limit"), Term::nil()]);
-    assert_eq!(down("undef_target", 1024), system_limit);
+    assert_eq!(down("undef_target", 1024).term, system_limit);
     // `missing` is not a loaded module.
-    assert_eq!(down("missing", 1024), system_limit);
+    assert_eq!(down("missing", 1024).term, system_limit);
 
     let reference = Command::new("erl")
         .args([

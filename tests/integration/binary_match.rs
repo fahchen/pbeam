@@ -39,7 +39,10 @@ fn fails_the_bs_start_match3_test_for_each_term_that_is_not_a_binary() {
     let program = BeamProgram::load(&[BINARY_MATCH_PROBE]).unwrap();
     let other = Term::Atom(program.atom("other").unwrap());
     assert_eq!(
-        program.execute("binary_match_probe", "kinds", &[]).unwrap(),
+        program
+            .execute("binary_match_probe", "kinds", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![other; 11])
     );
     assert_eq!(
@@ -62,7 +65,10 @@ fn runs_string_uppercase_of_a_list_as_pinned_erts() {
         BeamProgram::load(&[&erlang, &lists, &string, &unicode_util, BINARY_MATCH_PROBE]).unwrap();
     let text = |text: &[u8]| Term::list_from(text.iter().map(|&byte| Term::Integer(byte.into())));
     assert_eq!(
-        program.execute("binary_match_probe", "upper", &[]).unwrap(),
+        program
+            .execute("binary_match_probe", "upper", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![text(b"ERROR"), text(b"NOTICE"), text(b"R")])
     );
     assert_eq!(
@@ -129,7 +135,8 @@ fn runs_bs_start_match3_of_a_binary_as_pinned_erts() {
                 "first",
                 &[program.host_term(Term::binary(vec![195, 169]))]
             )
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![utf8, Term::Integer(233)])
     );
     assert_eq!(

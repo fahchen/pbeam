@@ -9,7 +9,7 @@ const EXTERNAL: &[u8] = include_bytes!("../../fixtures/calls/external.beam");
 fn executes_local_and_startup_loaded_external_calls_like_erts() {
     let program = BeamProgram::load(&[CALLS, EXTERNAL]).unwrap();
     assert_eq!(
-        program.execute("calls", "main", &[]).unwrap(),
+        program.execute("calls", "main", &[]).unwrap().term,
         Term::Integer(7)
     );
 

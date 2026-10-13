@@ -822,13 +822,15 @@ fn records_the_attribution_reference_points() {
     assert_eq!(
         program
             .execute("dispatch_probe", "floor_loop", &floor_arguments)
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::Integer(0)
     );
     assert_eq!(
         program
             .execute("dispatch_probe", "plus_loop", &plus_arguments)
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::Integer(length as i64)
     );
     let floor = measure_pbeam(&program, "dispatch_probe", "floor_loop", &floor_arguments);

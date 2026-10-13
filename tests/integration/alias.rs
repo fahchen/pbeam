@@ -49,7 +49,7 @@ fn monitors_a_process_by_pid_and_name_and_a_port_name_as_pinned_erts() {
     let falses = |count| list(vec![atom("false"); count]);
     let noproc = |kind: &str, item: Term| tuple(vec![atom(kind), item, atom("noproc")]);
     assert_eq!(
-        program.execute("alias_probe", "targets", &[]).unwrap(),
+        program.execute("alias_probe", "targets", &[]).unwrap().term,
         tuple(vec![
             list((0..12).map(|_| badarg()).collect()),
             falses(3),
@@ -346,7 +346,7 @@ fn replies_to_a_gen_server_call_through_an_alias_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let echo = |value| Term::tuple(vec![atom("echo"), Term::Integer(value)]);
     assert_eq!(
-        program.execute("alias_probe", "call", &[]).unwrap(),
+        program.execute("alias_probe", "call", &[]).unwrap().term,
         Term::list_from(vec![echo(1), echo(2), atom("timeout"), Term::nil()])
     );
     assert_eq!(erl_reference("call()"), "[{echo,1},{echo,2},timeout,[]]\n");

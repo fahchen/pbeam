@@ -20,7 +20,7 @@ fn makes_unique_integers_from_the_counter_of_the_scheduler() {
         .execute("unique_integer_probe", "main", &[])
         .unwrap();
     assert_eq!(
-        values,
+        values.term,
         Term::list_from([1, 3, 5, 7].map(|step| Term::Integer(MIN_SMALL + step)))
     );
 

@@ -38,7 +38,8 @@ fn converts_integers_to_binaries_as_pinned_erts() {
     assert_eq!(
         program
             .execute("integer_to_binary_probe", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
 

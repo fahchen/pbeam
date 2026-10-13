@@ -100,8 +100,8 @@ fn interleaves_two_busy_processes_as_pinned_erts_with_one_scheduler() {
     // alternate, and each run of tags is one turn.
     let program = BeamProgram::load(&[PREEMPT_PROBE]).unwrap();
     let run = |function| program.execute("preempt_probe", function, &[]).unwrap();
-    assert_eq!(run("sends"), runs_term(&program, SENDS));
-    assert_eq!(run("calls"), runs_term(&program, CALLS));
+    assert_eq!(run("sends").term, runs_term(&program, SENDS));
+    assert_eq!(run("calls").term, runs_term(&program, CALLS));
 
     // The reference run checks that the pinned `erl` is the JIT flavor, and
     // that no loop collects garbage: a collection costs reductions on ERTS
@@ -222,8 +222,8 @@ fn charges_the_receive_reductions_as_pinned_erts_with_one_scheduler() {
     // turn has no fetch.
     let program = BeamProgram::load(&[RECEIVE_PROBE]).unwrap();
     let run = |function| program.execute("receive_probe", function, &[]).unwrap();
-    assert_eq!(run("receives"), runs_term(&program, RECEIVES));
-    assert_eq!(run("orders"), orders_term(&program));
+    assert_eq!(run("receives").term, runs_term(&program, RECEIVES));
+    assert_eq!(run("orders").term, orders_term(&program));
 
     let reference = Command::new("erl")
         .args([
@@ -418,7 +418,7 @@ fn switches_the_process_at_each_bif_trap_to_erlang_code_as_pinned_erts() {
     let erts_internal = pinned_beam("erts_internal");
     let program = BeamProgram::load(&[&erts_internal, PREEMPT_PROBE]).unwrap();
     assert_eq!(
-        program.execute("preempt_probe", "traps", &[]).unwrap(),
+        program.execute("preempt_probe", "traps", &[]).unwrap().term,
         runs_term(&program, TRAPS)
     );
 

@@ -74,7 +74,7 @@ fn compiles_the_ansi_regexp_of_prim_tty_as_pinned_erts() {
     let program = program();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("re_probe", "main", &[]).unwrap(),
+        program.execute("re_probe", "main", &[]).unwrap().term,
         Term::list_from(vec![
             Term::Integer(0),
             Term::Integer(1),
@@ -95,7 +95,7 @@ fn returns_the_compile_result_of_each_option_as_pinned_erts() {
     // `newline` option applies.
     let program = program();
     assert_eq!(
-        program.execute("re_probe", "options", &[]).unwrap(),
+        program.execute("re_probe", "options", &[]).unwrap().term,
         Term::list_from(vec![
             info(0, 0, 0),
             info(2, 0, 0),
@@ -144,7 +144,7 @@ fn returns_the_pcre2_message_and_offset_of_each_compile_error_as_pinned_erts() {
         ("parentheses are too deeply nested", 30003),
     ];
     assert_eq!(
-        program.execute("re_probe", "errors", &[]).unwrap(),
+        program.execute("re_probe", "errors", &[]).unwrap().term,
         Term::list_from(
             errors
                 .iter()
@@ -170,7 +170,7 @@ fn raises_badarg_for_bad_options_and_patterns_as_pinned_erts() {
         Term::Atom(program.atom("badarg").unwrap()),
     ]);
     assert_eq!(
-        program.execute("re_probe", "badarg", &[]).unwrap(),
+        program.execute("re_probe", "badarg", &[]).unwrap().term,
         Term::list_from(vec![badarg; 26])
     );
     assert_eq!(
@@ -186,7 +186,7 @@ fn compiles_iodata_patterns_as_pinned_erts() {
     // (get_iolist_as_bytes, erl_bif_re.c:850-889).
     let program = program();
     assert_eq!(
-        program.execute("re_probe", "iodata", &[]).unwrap(),
+        program.execute("re_probe", "iodata", &[]).unwrap().term,
         Term::list_from(vec![
             info(1, 0, 0),
             info(2, 0, 0),
@@ -205,7 +205,10 @@ fn compiles_unicode_character_lists_through_re_ucompile_as_pinned_erts() {
     // that binary.
     let program = program();
     assert_eq!(
-        program.execute("re_probe", "unicode_list", &[]).unwrap(),
+        program
+            .execute("re_probe", "unicode_list", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             info(1, 1, 0),
             info(2, 1, 0),

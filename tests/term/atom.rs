@@ -278,8 +278,8 @@ fn compares_and_debug_prints_a_host_term() {
     };
     assert_eq!(host, same);
     assert_ne!(host, other);
-    assert_eq!(host, term);
-    assert_eq!(term, host);
+    assert_eq!(&host.term, &term);
+    assert_eq!(&term, &host.term);
     assert!(host.atom("ok").is_some());
     assert_eq!(host.atom("pbeam_unknown"), None);
     let printed = format!("{host:?}");

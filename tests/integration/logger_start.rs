@@ -66,7 +66,8 @@ fn reverses_lists_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "reverse", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -117,7 +118,8 @@ fn removes_map_keys_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "remove", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -153,7 +155,10 @@ fn takes_map_keys_as_pinned_erts() {
         Term::tuple(vec![atom("badmap"), atom("foo")]),
     ];
     assert_eq!(
-        program.execute("logger_start_probe", "take", &[]).unwrap(),
+        program
+            .execute("logger_start_probe", "take", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -185,7 +190,8 @@ fn removes_map_keys_through_maps_without() {
     assert_eq!(
         program
             .execute("logger_start_probe", "without", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -236,7 +242,10 @@ fn reads_and_deletes_ets_keys_as_pinned_erts() {
     ];
     expected.extend(std::iter::repeat_n(badarg, 8));
     assert_eq!(
-        program.execute("logger_start_probe", "ets", &[]).unwrap(),
+        program
+            .execute("logger_start_probe", "ets", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -273,7 +282,8 @@ fn checks_ets_access_rights_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "ets_access", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -306,7 +316,10 @@ fn finds_map_keys_as_pinned_erts() {
         badmap(Term::nil()),
     ];
     assert_eq!(
-        program.execute("logger_start_probe", "find", &[]).unwrap(),
+        program
+            .execute("logger_start_probe", "find", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -351,7 +364,8 @@ fn builds_maps_from_lists_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "from_list", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -387,7 +401,8 @@ fn tests_map_keys_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "is_key", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -418,7 +433,10 @@ fn takes_list_heads_as_pinned_erts() {
         badarg,
     ];
     assert_eq!(
-        program.execute("logger_start_probe", "hd", &[]).unwrap(),
+        program
+            .execute("logger_start_probe", "hd", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -477,7 +495,8 @@ fn lists_map_pairs_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "to_list", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     let text = format!(
@@ -526,7 +545,8 @@ fn walks_maps_with_a_path_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "map_next", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     let text = format!(
@@ -556,7 +576,10 @@ fn iterates_maps_as_pinned_erts() {
         atom("true"),
     ];
     assert_eq!(
-        program.execute("logger_start_probe", "next", &[]).unwrap(),
+        program
+            .execute("logger_start_probe", "next", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     let keys: Vec<_> = BIG_40_KEYS.iter().map(i64::to_string).collect();
@@ -594,7 +617,8 @@ fn iterates_maps_in_a_given_key_order_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "ordered", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     let keys: Vec<_> = (1..=40).rev().map(|key: i64| key.to_string()).collect();
@@ -625,7 +649,8 @@ fn returns_badarg_for_an_ordered_path_that_crashes_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "ordered_second_call_badarg", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![atom("error"), atom("badarg")])
     );
 }
@@ -675,7 +700,8 @@ fn removes_monitors_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "demonitor", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -708,7 +734,8 @@ fn removes_links_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "unlink", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -739,7 +766,8 @@ fn sets_the_system_logger_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "system_logger", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -765,7 +793,8 @@ fn rejects_system_flag_items_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "system_flag", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -803,7 +832,8 @@ fn sets_the_message_queue_data_flag_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "message_queue_data", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -829,7 +859,8 @@ fn rejects_process_flags_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "process_flag", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(vec![badarg; 20])
     );
     assert_eq!(
@@ -932,7 +963,10 @@ fn raises_exceptions_as_pinned_erts() {
     ];
     expected.extend(std::iter::repeat_n(atom("badarg"), 12));
     assert_eq!(
-        program.execute("logger_start_probe", "raise", &[]).unwrap(),
+        program
+            .execute("logger_start_probe", "raise", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -953,7 +987,8 @@ fn raises_class_throw_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "raise_throw", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![atom("throw"), atom("r")])
     );
     assert_eq!(reference("raise_throw"), b"{throw,r}\n");
@@ -1012,7 +1047,8 @@ fn walks_collision_nodes_and_bignum_paths_as_pinned_erts() {
     assert_eq!(
         program
             .execute("logger_start_probe", "map_paths", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     let text = |keys: &[i64]| {

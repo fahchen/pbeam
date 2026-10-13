@@ -44,7 +44,7 @@ fn adds_and_subtracts_integers_as_pinned_erts() {
     .into();
     expected.extend(std::iter::repeat_n(badarith, 4));
     assert_eq!(
-        program.execute("arith_probe", "arith", &[]).unwrap(),
+        program.execute("arith_probe", "arith", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -73,7 +73,7 @@ fn jumps_to_the_guard_fail_label_on_badarith_as_pinned_erts() {
         atom("other"),
     ];
     assert_eq!(
-        program.execute("arith_probe", "guards", &[]).unwrap(),
+        program.execute("arith_probe", "guards", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -89,7 +89,10 @@ fn calls_the_arithmetic_bifs_externally_as_pinned_erts() {
     // to the BIF as `call_ext` does.
     let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
     assert_eq!(
-        program.execute("arith_probe", "externals", &[]).unwrap(),
+        program
+            .execute("arith_probe", "externals", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             Term::Integer(3),
             Term::Integer(-2),
@@ -182,7 +185,7 @@ fn multiplies_and_divides_integers_as_pinned_erts() {
     .into();
     times.extend(std::iter::repeat_n(badarith.clone(), 3));
     assert_eq!(
-        program.execute("arith_probe", "times", &[]).unwrap(),
+        program.execute("arith_probe", "times", &[]).unwrap().term,
         Term::list_from(times)
     );
     assert_eq!(
@@ -204,7 +207,7 @@ fn multiplies_and_divides_integers_as_pinned_erts() {
     .into();
     quotients.extend(std::iter::repeat_n(badarith, 4));
     assert_eq!(
-        program.execute("arith_probe", "int_div", &[]).unwrap(),
+        program.execute("arith_probe", "int_div", &[]).unwrap().term,
         Term::list_from(quotients)
     );
     assert_eq!(

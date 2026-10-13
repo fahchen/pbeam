@@ -157,7 +157,8 @@ fn isolated_logger_boot() {
                     program.host_term(atom("main")),
                 ]
             )
-            .unwrap(),
+            .unwrap()
+            .term,
         expected
     );
 }

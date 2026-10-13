@@ -550,32 +550,6 @@ impl PartialEq for HostTerm {
 
 impl Eq for HostTerm {}
 
-impl PartialEq<Term> for HostTerm {
-    /// Compare the term of this host term with `other`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(program.host_term(Term::static_atom("ok")), Term::static_atom("ok"));
-    /// ```
-    fn eq(&self, other: &Term) -> bool {
-        self.term == *other
-    }
-}
-
-impl PartialEq<HostTerm> for Term {
-    /// Compare `self` with the term of `other`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(Term::static_atom("ok"), program.host_term(Term::static_atom("ok")));
-    /// ```
-    fn eq(&self, other: &HostTerm) -> bool {
-        *self == other.term
-    }
-}
-
 impl HostTerm {
     /// Return the atom of `name` in the atom table of this host term, or
     /// `None` when the table does not hold the name. A run adds each name

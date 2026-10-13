@@ -67,7 +67,7 @@ fn runs_code_ensure_loaded_for_a_loaded_module_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let module = |name: &str| Term::tuple(vec![atom("module"), atom(name)]);
     assert_eq!(
-        program.execute("code_probe", "loaded", &[]).unwrap(),
+        program.execute("code_probe", "loaded", &[]).unwrap().term,
         Term::list_from(vec![module("code_probe"), module("code"), module("erlang")])
     );
     assert_eq!(
@@ -86,7 +86,10 @@ fn runs_erlang_module_loaded_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
-        program.execute("code_probe", "module_loaded", &[]).unwrap(),
+        program
+            .execute("code_probe", "module_loaded", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             atom("true"),
             atom("true"),
@@ -283,7 +286,8 @@ fn compares_the_module_name_of_code_load() {
                 std::slice::from_ref(&program.host_term(code.clone())),
                 &permitted
             )
-            .unwrap(),
+            .unwrap()
+            .term,
         expected("ok")
     );
     let denied = code_capability(&[Operation::Load], &["other_module"]);
@@ -295,7 +299,8 @@ fn compares_the_module_name_of_code_load() {
                 &[program.host_term(code)],
                 &denied
             )
-            .unwrap(),
+            .unwrap()
+            .term,
         expected("denied")
     );
 }

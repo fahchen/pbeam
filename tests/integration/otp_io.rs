@@ -24,7 +24,10 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
     // (`io.erl:297-303`), as pinned ERTS does for a process that is its own
     // group leader. The result proves the call ran `io`'s own code.
     assert_eq!(
-        program.execute("otp_io_calls", "io_call", &[]).unwrap(),
+        program
+            .execute("otp_io_calls", "io_call", &[])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             Term::Atom(program.atom("error").unwrap()),
             Term::Atom(program.atom("enotsup").unwrap()),
@@ -83,7 +86,8 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
     assert_eq!(
         program
             .execute("otp_io_calls", "prim_tty_call", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::binary(ANSI_REGEXP.to_vec())
     );
 }

@@ -41,7 +41,7 @@ fn runs_max_less_and_equal_in_body_position_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     assert_eq!(
-        program.execute("body_bif_probe", "max", &[]).unwrap(),
+        program.execute("body_bif_probe", "max", &[]).unwrap().term,
         Term::list_from(vec![
             Term::Integer(2),
             Term::Integer(2),
@@ -69,7 +69,7 @@ fn runs_max_less_and_equal_in_body_position_as_pinned_erts() {
           {1,a},<<97,98>>]\n"
     );
     assert_eq!(
-        program.execute("body_bif_probe", "less", &[]).unwrap(),
+        program.execute("body_bif_probe", "less", &[]).unwrap().term,
         booleans(
             &program,
             &[
@@ -84,7 +84,10 @@ fn runs_max_less_and_equal_in_body_position_as_pinned_erts() {
           true,false,false]\n"
     );
     assert_eq!(
-        program.execute("body_bif_probe", "equal", &[]).unwrap(),
+        program
+            .execute("body_bif_probe", "equal", &[])
+            .unwrap()
+            .term,
         booleans(
             &program,
             &[
@@ -120,7 +123,7 @@ fn negates_integers_in_body_position_as_pinned_erts() {
     .into();
     expected.extend(std::iter::repeat_n(badarith, 3));
     assert_eq!(
-        program.execute("body_bif_probe", "neg", &[]).unwrap(),
+        program.execute("body_bif_probe", "neg", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -171,7 +174,10 @@ fn ands_integers_bitwise_as_pinned_erts() {
     .into();
     expected.extend(std::iter::repeat_n(atom("badarith"), 3));
     assert_eq!(
-        program.execute("body_bif_probe", "bit_and", &[]).unwrap(),
+        program
+            .execute("body_bif_probe", "bit_and", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -188,7 +194,8 @@ fn ands_integers_bitwise_as_pinned_erts() {
         assert_eq!(
             program
                 .execute("body_bif_probe", "executable", &[program.host_term(mode)])
-                .unwrap(),
+                .unwrap()
+                .term,
             atom(expected)
         );
         assert_eq!(
@@ -205,7 +212,10 @@ fn tests_binaries_in_body_position_as_pinned_erts() {
     // does (`is_binary_1`, `erl_bif_op.c:206-213`).
     let program = BeamProgram::load(&[BODY_BIF_PROBE]).unwrap();
     assert_eq!(
-        program.execute("body_bif_probe", "binary", &[]).unwrap(),
+        program
+            .execute("body_bif_probe", "binary", &[])
+            .unwrap()
+            .term,
         booleans(
             &program,
             &[true, true, false, false, false, false, false, false, false]
@@ -225,7 +235,10 @@ fn calls_the_bifs_externally_as_pinned_erts() {
     let program = BeamProgram::load(&[BODY_BIF_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("body_bif_probe", "externals", &[]).unwrap(),
+        program
+            .execute("body_bif_probe", "externals", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             atom("a"),
             atom("false"),
@@ -254,7 +267,10 @@ fn charges_a_bignum_operand_as_pinned_erts() {
     let pair =
         |value, reductions| Term::tuple(vec![Term::Integer(value), Term::Integer(reductions)]);
     assert_eq!(
-        program.execute("body_bif_probe", "costs", &[]).unwrap(),
+        program
+            .execute("body_bif_probe", "costs", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             pair(8, 1),
             pair(576_460_752_303_423_488, 2),
