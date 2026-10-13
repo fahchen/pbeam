@@ -220,6 +220,11 @@ impl<'a> EqStack<'a> {
     /// of a large tuple or of the free variables of a fun pays one reserve
     /// and one tight write loop for the group.
     ///
+    /// A group that fills the array exactly ends with no pair, and it
+    /// allocates nothing. The function reads one further pair before it
+    /// reserves the batch, because the reserve of an empty group would
+    /// allocate the heap vector for a comparison that the array covers.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -239,7 +244,9 @@ impl<'a> EqStack<'a> {
                 None => return,
             }
         }
-        self.spill_batch(pairs);
+        if let Some((left, right)) = pairs.next() {
+            self.spill_batch(std::iter::once((left, right)).chain(pairs));
+        }
     }
 
     /// Push each pair of the rest of a large group to the heap vector. The

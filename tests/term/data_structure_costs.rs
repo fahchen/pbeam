@@ -227,6 +227,12 @@ fn reports_the_allocation_count_of_one_comparison() {
     let atom = Term::static_atom("ok");
     let tuple_3 = tuple_of(3);
     let tuple_3_copy = tuple_of(3);
+    // The inline array holds eight pairs, so a tuple of eight elements fills
+    // it exactly and a tuple of nine elements spills one pair.
+    let tuple_8 = tuple_of(8);
+    let tuple_8_copy = tuple_of(8);
+    let tuple_9 = tuple_of(9);
+    let tuple_9_copy = tuple_of(9);
     let list_3 = list_of(3);
     let list_3_copy = list_of(3);
     let nested_1 = nested_tuple(1, 2);
@@ -249,6 +255,17 @@ fn reports_the_allocation_count_of_one_comparison() {
             "term_eq_tuple_3_equal",
             compared(&tuple_3, &tuple_3_copy),
             0,
+        ),
+        ("term_eq_tuple_8_shared", compared(&tuple_8, &tuple_8), 0),
+        (
+            "term_eq_tuple_8_equal",
+            compared(&tuple_8, &tuple_8_copy),
+            0,
+        ),
+        (
+            "term_eq_tuple_9_equal",
+            compared(&tuple_9, &tuple_9_copy),
+            SPILL_ALLOCATIONS,
         ),
         ("term_eq_list_3_equal", compared(&list_3, &list_3_copy), 0),
         (
@@ -323,6 +340,8 @@ fn prints_the_comparison_cost() {
     let right_list = list_of(1000);
     let left_tuple = tuple_of(3);
     let right_tuple = tuple_of(3);
+    let left_tuple_8 = tuple_of(8);
+    let right_tuple_8 = tuple_of(8);
     let left_list_3 = list_of(3);
     let right_list_3 = list_of(3);
 
@@ -396,6 +415,18 @@ fn prints_the_comparison_cost() {
             let mut hits = 0u64;
             for _ in 0..OPERATIONS {
                 if black_box(&left_tuple) == black_box(&right_tuple) {
+                    hits += 1;
+                }
+            }
+            hits
+        }),
+    );
+    report(
+        "term_eq_tuple_8_equal",
+        measure(OPERATIONS, || {
+            let mut hits = 0u64;
+            for _ in 0..OPERATIONS {
+                if black_box(&left_tuple_8) == black_box(&right_tuple_8) {
                     hits += 1;
                 }
             }
