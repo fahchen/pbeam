@@ -273,7 +273,7 @@ Row 6 holds two independent mechanisms, so it splits, as the rule of the proposa
 
 These numbers belong to `3b3a21d`, the revision of this record. The load of each run is stated.
 
-The floor loop, from `mise run bench-dispatch`, at load `{ 8.87 12.28 11.05 }` at the start of the run and `{ 12.62 12.91 11.31 }` at the end. Each number is the minimum of nine probe runs.
+The floor loop, from `mise run bench-dispatch`, at load `{ 8.87 12.28 11.05 }` at the start of the run and `{ 12.62 12.91 11.31 }` at the end. Each number is the minimum of nine probe runs. The script records the load before its release build, and the build then raised the load, so the load of the timed section is not below the recorded value. Each floor-loop number is therefore a floor under a higher load, and the same limit belongs to the earlier records (`docs/interpreter-dispatch-measurements.md`, section "The cost of one instruction, by part").
 
 | Shape, 200000 iterations | PBeam, ns for each iteration | Pinned ERTS, ns for each iteration |
 | --- | --- | --- |
@@ -292,11 +292,11 @@ The floor loop, from `mise run bench-dispatch`, at load `{ 8.87 12.28 11.05 }` a
 | the `bif` of `hd/1` | 75.6 |
 | the `bif` of `map_get/2` on a 1000-key map | 127.7 |
 
-The Terra Counter example, release build, from `bash scripts/terra_latency.sh release`. The first run is one run at load `{ 12.15 12.65 11.32 }`. The second run is one run at load `{ 6.94 18.96 18.36 }`, and it also samples the resident set size of the `pbeam` process every 50 ms.
+The Terra Counter example, release build, from `bash scripts/terra_latency.sh release`. The record uses a run as a control only when the one-minute load is below 12. The first run has a one-minute load of 12.15, which is above the bound, so the record discards it. The second run has a one-minute load of 6.94, and it also samples the resident set size of the `pbeam` process every 50 ms.
 
 | Run | Load | First frame | Key `j` | Key `j` | Key `k` | Key `q` | Peak resident set size |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `3b3a21d` | `{ 12.15 12.65 11.32 }` | 0.56 s | 0.016 s | 0.018 s | 0.020 s | 0.024 s | not measured |
-| `3b3a21d` | `{ 6.94 18.96 18.36 }` | 0.29 s | 0.021 s | 0.030 s | 0.015 s | 0.027 s | 62080 KB |
+| discarded run, `3b3a21d` | `{ 12.15 12.65 11.32 }` | 0.56 s | 0.016 s | 0.018 s | 0.020 s | 0.024 s | not measured |
+| control run, `3b3a21d` | `{ 6.94 18.96 18.36 }` | 0.29 s | 0.021 s | 0.030 s | 0.015 s | 0.027 s | 62080 KB |
 
-The peak resident set size is 62080 KB, which is 60.6 MiB, for a full scene of the release build. The method is a wrapper that samples `ps -o rss` of the `pbeam` process every 50 ms and keeps the maximum. The number includes the loaded BEAM code, the binary, and the allocator arenas, so it is an upper bound of the live guest bytes and not an exact live-heap measurement. The two Terra runs are single runs, and the four keys of a run carry the variance of a single sample.
+The peak resident set size is 62080 KB, which is 60.6 MiB, for a full scene of the release build. The method is a wrapper that samples `ps -o rss` of the `pbeam` process every 50 ms and keeps the maximum. The number includes the loaded BEAM code, the binary, and the allocator arenas, so it is an upper bound of the live guest bytes and not an exact live-heap measurement. The control run is a single run, and its four keys carry the variance of a single sample. The record keeps the discarded run only to show why the bound of the measurement plan matters.
