@@ -241,7 +241,7 @@ These estimates overlap. Do not multiply them to claim a final speedup. The bare
 
 Keep a Rust `match` as the first dispatch. Its code generation can already use a jump table. Compare it with a handler table on the same decoded instruction stream. A function-pointer table can lose inlining and add an indirect call. Rust has no stable C-style computed goto. Do not add a C execution loop only to obtain that syntax.
 
-Keep checked slice access first. A validated module can remove repeated semantic validation without unsafe indexing. A later local unchecked accessor needs proof of the register bound, initialized state, frame size, and lifetime at every dynamic entry. It also needs malformed-bytecode tests and sanitizer or Miri evidence. Adopt it only if bounds checks account for at least 10 percent of the remaining loop time and the measured gain is at least 10 percent.
+Keep checked access. A validated module can remove repeated semantic validation without unsafe indexing. The later local unchecked accessor is rejected under the no-unsafe constraint in `AGENTS.md`, and the runtime keeps checked access. A safe formulation needs a new measurement and an owner decision before it can be reconsidered.
 
 Use checked integer arithmetic directly for the small-small case. Use raw float registers only on BEAM float instructions that provide that contract. Keep term arithmetic on its type and overflow paths. Do not enable fast-math. Test signed zero, mixed integer/float comparison, conversion overflow, and invalid floating results against pinned ERTS before enabling a new numeric path.
 
@@ -396,7 +396,7 @@ The table covers the numbered decisions, the second design's proposals and measu
 | Other micro-costs and summed budget | Do not adopt as verified measurements | No reproduction of allocation, scan, search, word-copy, enum, register, or store probes. A real profile decides attribution. |
 | Dispatch and BIF failure gates | Keep earlier gates; add second-design experiment targets | Bare loop at most 300 ns after initial dispatch, then at most 120 ns; full Terra improvement at least 20 percent. Profile missed 60 percent call-cost or 100 ns map-read targets. |
 | Map take acceptance | Add experiment targets | Owned 1000-key put below 300 ns; shared put below 600 ns. Include hashing, allocation, release, and alias tests. |
-| Tree and unsafe-access gates | Keep | Reads or matching regress at most 10 percent. Unsafe access needs at least 10 percent measured gain and proof of all entry bounds. |
+| Tree and unsafe-access gates | Keep | Reads or matching regress at most 10 percent. Unsafe access is rejected under the no-unsafe constraint in `AGENTS.md`; the runtime keeps checked access. |
 | `Arc` failure gate | Change from ownership rejection to profile trigger | Remove temporary owners first. Keep merged ownership rules until the owner accepts a separate replacement design. |
 | Timing method | Keep stronger sampling plan | Quiet host, alternating runs, at least 30 samples, median, minimum, p95, and ratio confidence interval. Nine loaded-host minima are preliminary evidence only. |
 | Combined instructions | Keep after measured dispatch work | Preserve original positions, intermediate error state, and supported reduction and signal switch points. |
