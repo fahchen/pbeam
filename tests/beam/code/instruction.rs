@@ -2473,20 +2473,25 @@ fn records_the_decoded_form_layout() {
         println!("| {name} | {} |", arm_field_bytes(instruction));
     }
 
-    assert_eq!(size_of::<Instruction>(), 136, "the size of `Instruction`");
-    assert_eq!(size_of::<Operand>(), 40, "the size of `Operand`");
-    assert_eq!(size_of::<Term>(), 40, "the size of `Term`");
+    assert_eq!(size_of::<Instruction>(), 112, "the size of `Instruction`");
+    assert_eq!(size_of::<Operand>(), 32, "the size of `Operand`");
+    assert_eq!(size_of::<Term>(), 32, "the size of `Term`");
     assert_eq!(size_of::<String>(), 24, "the size of `String`");
     assert_eq!(size_of::<Vec<Operand>>(), 24, "the size of `Vec<Operand>`");
     // The arm that sets the size of `Instruction`, and the arm of the floor
     // loop. The plan records `BinaryGetBinary` at 132 bytes and `Bif` at 124
     // bytes at the baseline revision; step 4 removed the two `String` fields
-    // from `Bif`.
+    // from `Bif`. The boxed binary view of task [#571] takes `Term` from 40
+    // bytes to 32, and the two `Operand` fields and the `Term` field of
+    // `BinaryGetBinary` then lose 24 bytes. `Bif` holds the arguments of the
+    // call in one `Term` slot, so it loses the 8 bytes of one `Term`.
+    //
+    // [#571]: https://github.com/fahchen/pbeam/issues/571
     assert_eq!(
         arm_field_bytes(&arms[0].1),
-        132,
+        108,
         "the fields of `BinaryGetBinary`"
     );
-    assert_eq!(arm_field_bytes(&arms[3].1), 72, "the fields of `Bif`");
-    assert_eq!(arm_field_bytes(&arms[6].1), 80, "the fields of `Move`");
+    assert_eq!(arm_field_bytes(&arms[3].1), 64, "the fields of `Bif`");
+    assert_eq!(arm_field_bytes(&arms[6].1), 64, "the fields of `Move`");
 }
