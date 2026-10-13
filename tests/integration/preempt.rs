@@ -305,7 +305,14 @@ fn runs_erlang_yield_as_the_pinned_erts_instruction() {
 
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, PREEMPT_PROBE]).unwrap();
-    let run = |function| text(&program.execute("preempt_probe", function, &[]).unwrap());
+    let run = |function| {
+        text(
+            program
+                .execute("preempt_probe", function, &[])
+                .unwrap()
+                .term(),
+        )
+    };
     assert_eq!(run("yields"), yields);
 
     // The reference run checks that the pinned `erl` is the JIT flavor.
@@ -361,7 +368,14 @@ fn runs_bump_reductions_and_reads_the_reduction_total_as_pinned_erts() {
 
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, PREEMPT_PROBE]).unwrap();
-    let run = |function| text(&program.execute("preempt_probe", function, &[]).unwrap());
+    let run = |function| {
+        text(
+            program
+                .execute("preempt_probe", function, &[])
+                .unwrap()
+                .term(),
+        )
+    };
     assert_eq!(run("bumps"), bumps);
     assert_eq!(run("reductions"), reductions);
 

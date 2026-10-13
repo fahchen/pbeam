@@ -200,7 +200,10 @@ impl BeamProgram {
     /// an argument of [`BeamProgram::execute`],
     /// [`BeamProgram::execute_with_policy`], or
     /// [`BeamProgram::execute_with_policy_module`]. A copy of the result is
-    /// cheap: the term copy is O(1), and the table is shared.
+    /// cheap: the term copy is O(1), and the table is shared. The result of
+    /// a run is already a `HostTerm` that carries the table of the run, so
+    /// use this function for a term that the caller builds with
+    /// [`BeamProgram::atom`].
     ///
     /// # Precondition
     ///
@@ -288,7 +291,7 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arguments: &[HostTerm],
-    ) -> Result<Term, BeamError> {
+    ) -> Result<HostTerm, BeamError> {
         self.execute_issued(module, function, arguments, Issuer::Unchecked)
     }
 
@@ -316,7 +319,7 @@ impl BeamProgram {
         function: &str,
         arguments: &[HostTerm],
         policy: &dyn Policy,
-    ) -> Result<Term, BeamError> {
+    ) -> Result<HostTerm, BeamError> {
         self.execute_issued(module, function, arguments, Issuer::Host(policy))
     }
 
@@ -385,7 +388,7 @@ impl BeamProgram {
         arguments: &[HostTerm],
         policy: &str,
         boot: bool,
-    ) -> Result<Term, BeamError> {
+    ) -> Result<HostTerm, BeamError> {
         let issuer = Issuer::Module { policy, boot };
         self.execute_issued(module, function, arguments, issuer)
     }
@@ -405,7 +408,7 @@ impl BeamProgram {
         function: &str,
         arguments: &[HostTerm],
         issuer: Issuer,
-    ) -> Result<Term, BeamError> {
+    ) -> Result<HostTerm, BeamError> {
         let initial_mode = InitialMode::read();
         let mut scheduler = match issuer {
             Issuer::Unchecked => Scheduler::without_checks((*self.atoms).clone()),
@@ -424,8 +427,14 @@ impl BeamProgram {
         };
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
-        match scheduler.into_root_result() {
-            Some(Ok(result)) => Ok(result),
+        // The table of the run holds each name that the run created, so the
+        // host result can name every atom of the root result.
+        let (root, atoms) = scheduler.into_run_result();
+        match root {
+            Some(Ok(result)) => Ok(HostTerm {
+                term: result,
+                atoms: Arc::new(atoms),
+            }),
             Some(Err(reason)) => {
                 // `erlang:halt/1` writes each byte of the `%T` text as one code
                 // point (`bif.c:4372-4387`), so the text is valid UTF-8.

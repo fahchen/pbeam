@@ -64,7 +64,7 @@ fn timed(program: &BeamProgram, function: &str) -> Term {
         best = best.min(start.elapsed());
     }
     println!("COST ets_{function}_program {} ns", best.as_nanos());
-    result.unwrap()
+    result.unwrap().into_term()
 }
 
 #[test]

@@ -21,7 +21,7 @@ fn rejects_a_local_fun_of_another_program() {
     // The two programs share one module name and hold different code.
     let name = |program: &BeamProgram, function: &str| {
         let result = program.execute("host_term_probe", function, &[]).unwrap();
-        match &result {
+        match result.term() {
             Term::Atom(atom) => atom.name().to_owned(),
             other => panic!("expected an atom, got {other:?}"),
         }
@@ -34,7 +34,7 @@ fn rejects_a_local_fun_of_another_program() {
     // import rejects the local fun before the run starts.
     let local = first.execute("host_term_probe", "local_fun", &[]).unwrap();
     let error = second
-        .execute("host_term_probe", "accept", &[first.host_term(local)])
+        .execute("host_term_probe", "accept", &[local])
         .unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -46,7 +46,28 @@ fn rejects_a_local_fun_of_another_program() {
         .execute("host_term_probe", "external_fun", &[])
         .unwrap();
     let applied = second
-        .execute("host_term_probe", "accept", &[first.host_term(external)])
+        .execute("host_term_probe", "accept", &[external])
         .unwrap();
-    assert!(matches!(applied, Term::Fun(_)));
+    assert!(matches!(applied.term(), Term::Fun(_)));
+}
+
+#[test]
+fn imports_an_atom_that_the_run_created() {
+    let first = BeamProgram::load(&[FIRST]).unwrap();
+    let second = BeamProgram::load(&[SECOND]).unwrap();
+
+    // `created_atom/0` calls `erlang:list_to_atom/1`, so the name is in the
+    // atom table of the run and not in the table of the program. The host
+    // result of the run carries the table of the run, so the import of the
+    // second program resolves the name.
+    let created = first
+        .execute("host_term_probe", "created_atom", &[])
+        .unwrap();
+    let applied = second
+        .execute("host_term_probe", "accept", &[created])
+        .unwrap();
+    let Term::Atom(atom) = applied.term() else {
+        panic!("the second program returns the atom");
+    };
+    assert_eq!(atom.name(), "host_term_created");
 }

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use super::{ATOM_LIMIT, Atom, AtomTable, Fun, Lambda, Map, STATIC_ATOM_NAMES, Target, Term};
+use super::{
+    ATOM_LIMIT, Atom, AtomTable, Fun, HostTerm, Lambda, Map, STATIC_ATOM_NAMES, Target, Term,
+};
 
 #[test]
 fn starts_with_the_erts_static_atoms() {
@@ -214,4 +216,71 @@ fn fails_to_import_when_the_destination_table_is_full() {
             .to_string(),
         "no more index entries in atom_tab (max=1048576)"
     );
+}
+
+#[test]
+fn keeps_the_sharing_of_a_compound_that_the_source_holds_twice() {
+    // The source holds one tuple, one cons cell, one map, and one fun twice.
+    // The import remembers each compound by the identity of its storage and
+    // imports it one time, so each pair of elements of the imported tuple
+    // shares one allocation. Without the memory the walk would build one
+    // allocation for each occurrence.
+    let source = AtomTable::new();
+    let mut destination = source.clone();
+    let atom = source.get("ok").unwrap();
+    let tuple = Term::tuple(vec![Term::Atom(atom.clone()), Term::Integer(1)]);
+    let cell = Term::list_from([Term::Integer(2)]);
+    let map =
+        Term::Map(Map::from_pairs(vec![(Term::Atom(atom.clone()), Term::Integer(3))]).unwrap());
+    let fun = Term::Fun(Fun::new(Lambda::new(atom.clone(), 0, 1, 53, 1), Vec::new()));
+    let term = Term::tuple(vec![
+        tuple.clone(),
+        tuple.clone(),
+        cell.clone(),
+        cell.clone(),
+        map.clone(),
+        map.clone(),
+        fun.clone(),
+        fun.clone(),
+    ]);
+    let imported = destination.import_term(&source, &term).unwrap();
+    let Term::Tuple(elements) = &imported else {
+        panic!("the import of a tuple gives a tuple");
+    };
+    assert_eq!(elements.len(), 8);
+    // `shares_storage_with` covers a tuple, a cons cell, and a map.
+    for pair in elements[..6].chunks(2) {
+        assert!(pair[0].shares_storage_with(&pair[1]));
+    }
+    // Two funs share one thing instead.
+    let (Term::Fun(left), Term::Fun(right)) = (&elements[6], &elements[7]) else {
+        panic!("the import of a fun gives a fun");
+    };
+    assert!(left.same_thing(right));
+}
+
+#[test]
+fn compares_and_debug_prints_a_host_term() {
+    // The atom table of a host term is storage metadata, so two host terms
+    // compare by their terms. `Debug` writes the term and not the table.
+    let term = Term::tuple(vec![Term::Integer(1)]);
+    let host = HostTerm {
+        term: term.clone(),
+        atoms: Arc::new(AtomTable::new()),
+    };
+    let same = HostTerm {
+        term: term.clone(),
+        atoms: Arc::new(AtomTable::new()),
+    };
+    let other = HostTerm {
+        term: Term::Integer(2),
+        atoms: Arc::new(AtomTable::new()),
+    };
+    assert_eq!(host, same);
+    assert_ne!(host, other);
+    assert_eq!(host, term);
+    assert_eq!(term, host);
+    let printed = format!("{host:?}");
+    assert_eq!(printed, format!("{term:?}"));
+    assert_eq!(printed, "Tuple([Integer(1)])");
 }

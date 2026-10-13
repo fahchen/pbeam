@@ -314,7 +314,11 @@ fn orders_a_hashmap_of_all_static_atoms_like_erts() {
     let result = program
         .execute("atom_map_probe", "static_keys", &[])
         .unwrap();
-    let Some(keys) = result.proper_list().map(|keys| keys.collect::<Vec<_>>()) else {
+    let Some(keys) = result
+        .term()
+        .proper_list()
+        .map(|keys| keys.collect::<Vec<_>>())
+    else {
         panic!("maps:keys/1 returns a list");
     };
     let names: Vec<&str> = keys

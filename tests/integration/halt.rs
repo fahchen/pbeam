@@ -50,7 +50,9 @@ fn erts(function: &str) -> (Option<i32>, String) {
 fn pbeam(function: &str) -> Result<Term, BeamError> {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, HALT_PROBE]).unwrap();
-    program.execute("halt_probe", function, &[])
+    program
+        .execute("halt_probe", function, &[])
+        .map(|host| host.into_term())
 }
 
 #[test]

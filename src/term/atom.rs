@@ -18,6 +18,7 @@ mod static_names;
 
 use std::{
     collections::HashMap,
+    fmt,
     sync::{
         Arc, LazyLock,
         atomic::{AtomicU64, Ordering},
@@ -248,7 +249,10 @@ impl AtomTable {
     /// The walk remaps the `module` of a `Lambda` and the `module` and
     /// `function` of a `Target::External`, because their atoms are outside
     /// the free variables of the fun. It builds a new term and never
-    /// changes `source` or the term.
+    /// changes `source` or the term. It remembers each compound by the
+    /// identity of its storage, so a term that holds one subtree more than
+    /// once keeps that sharing in the imported term and the walk takes time
+    /// in the size of the term.
     ///
     /// # Errors
     ///
@@ -279,33 +283,65 @@ impl AtomTable {
         // The imported terms, in the order that the walk finishes them. A
         // node takes the results of its children from the end.
         let mut ready: Vec<Term> = Vec::new();
+        // The imported term of each shared compound, keyed by the identity
+        // of its storage. The same source compound is imported one time, so
+        // a term that holds one subtree twice keeps that sharing and the
+        // walk takes O(size) time.
+        let mut imported: HashMap<usize, Term> = HashMap::new();
         while let Some(step) = work.pop() {
             match step {
                 ImportStep::Term(term) => match term {
                     Term::Atom(atom) => ready.push(Term::Atom(self.import_atom(source, atom)?)),
                     Term::Tuple(elements) => {
-                        work.push(ImportStep::Tuple(elements.len()));
-                        work.extend(elements.iter().rev().map(ImportStep::Term));
+                        let key = elements.identity();
+                        if let Some(term) = imported.get(&key) {
+                            ready.push(term.clone());
+                        } else {
+                            work.push(ImportStep::Tuple {
+                                key,
+                                len: elements.len(),
+                            });
+                            work.extend(elements.iter().rev().map(ImportStep::Term));
+                        }
                     }
                     Term::Cons(cell) => {
-                        work.push(ImportStep::Cons);
-                        work.push(ImportStep::Term(&cell.tail));
-                        work.push(ImportStep::Term(&cell.head));
+                        let key = cell.identity();
+                        if let Some(term) = imported.get(&key) {
+                            ready.push(term.clone());
+                        } else {
+                            work.push(ImportStep::Cons { key });
+                            work.push(ImportStep::Term(&cell.tail));
+                            work.push(ImportStep::Term(&cell.head));
+                        }
                     }
                     Term::Map(map) => {
-                        work.push(ImportStep::Map(map.len()));
-                        for (key, value) in map.iter().collect::<Vec<_>>().into_iter().rev() {
-                            work.push(ImportStep::Term(value));
-                            work.push(ImportStep::Term(key));
+                        let key = map.identity();
+                        if let Some(term) = imported.get(&key) {
+                            ready.push(term.clone());
+                        } else {
+                            work.push(ImportStep::Map {
+                                key,
+                                len: map.len(),
+                            });
+                            for (key, value) in map.iter().collect::<Vec<_>>().into_iter().rev() {
+                                work.push(ImportStep::Term(value));
+                                work.push(ImportStep::Term(key));
+                            }
                         }
                     }
                     Term::Fun(fun) => {
-                        let target = self.import_target(source, fun.target())?;
-                        work.push(ImportStep::Fun {
-                            target,
-                            free: fun.free().len(),
-                        });
-                        work.extend(fun.free().iter().rev().map(ImportStep::Term));
+                        let key = fun.identity();
+                        if let Some(term) = imported.get(&key) {
+                            ready.push(term.clone());
+                        } else {
+                            let target = self.import_target(source, fun.target())?;
+                            work.push(ImportStep::Fun {
+                                key,
+                                target,
+                                free: fun.free().len(),
+                            });
+                            work.extend(fun.free().iter().rev().map(ImportStep::Term));
+                        }
                     }
                     Term::Binary(_)
                     | Term::Integer(_)
@@ -315,38 +351,46 @@ impl AtomTable {
                     | Term::Reference(_)
                     | Term::MatchContext(_) => ready.push(term.clone()),
                 },
-                ImportStep::Tuple(len) => {
+                ImportStep::Tuple { key, len } => {
                     let elements = ready.split_off(ready.len() - len);
-                    ready.push(Term::tuple(elements));
+                    let term = Term::tuple(elements);
+                    imported.insert(key, term.clone());
+                    ready.push(term);
                 }
-                ImportStep::Cons => {
+                ImportStep::Cons { key } => {
                     let tail = ready.pop().expect("a cons cell has a tail result");
                     let head = ready.pop().expect("a cons cell has a head result");
-                    ready.push(Term::cons(head, tail));
+                    let term = Term::cons(head, tail);
+                    imported.insert(key, term.clone());
+                    ready.push(term);
                 }
-                ImportStep::Fun { target, free } => {
+                ImportStep::Fun { key, target, free } => {
                     let values = ready.split_off(ready.len() - free);
-                    ready.push(Term::Fun(match target {
+                    let term = Term::Fun(match target {
                         Target::Local(lambda) => Fun::new(lambda, values),
                         Target::External {
                             module,
                             function,
                             arity,
                         } => Fun::external(module, function, arity),
-                    }));
+                    });
+                    imported.insert(key, term.clone());
+                    ready.push(term);
                 }
-                ImportStep::Map(len) => {
+                ImportStep::Map { key, len } => {
                     let flat = ready.split_off(ready.len() - 2 * len);
                     let mut pairs = Vec::with_capacity(len);
                     let mut values = flat.into_iter();
-                    while let (Some(key), Some(value)) = (values.next(), values.next()) {
-                        pairs.push((key, value));
+                    while let (Some(pair_key), Some(pair_value)) = (values.next(), values.next()) {
+                        pairs.push((pair_key, pair_value));
                     }
                     // The source map is canonical, so its keys are valid
                     // keys, and a key keeps its shape across the import.
                     let map = Map::from_pairs(pairs)
                         .expect("a canonical map of one table imports to a canonical map");
-                    ready.push(Term::Map(map));
+                    let term = Term::Map(map);
+                    imported.insert(key, term.clone());
+                    ready.push(term);
                 }
             }
         }
@@ -410,18 +454,26 @@ impl AtomTable {
 }
 
 /// One step of the import walk of [`AtomTable::import_term`]: import a term,
-/// or build a compound from the results of its children.
+/// or build a compound from the results of its children. Each build carries
+/// the identity of the source compound, so the walk remembers the imported
+/// term of a compound that it meets again.
 enum ImportStep<'a> {
     /// Import this term and push its result.
     Term(&'a Term),
-    /// Make a tuple of the last `len` results.
-    Tuple(usize),
-    /// Make a cons cell of the last two results.
-    Cons,
-    /// Make a fun of the last `free` results and this entry.
-    Fun { target: Target, free: usize },
-    /// Make a map of the last `len` pairs of results.
-    Map(usize),
+    /// Make a tuple of the last `len` results, and remember it at `key`.
+    Tuple { key: usize, len: usize },
+    /// Make a cons cell of the last two results, and remember it at `key`.
+    Cons { key: usize },
+    /// Make a fun of the last `free` results and this entry, and remember it
+    /// at `key`.
+    Fun {
+        key: usize,
+        target: Target,
+        free: usize,
+    },
+    /// Make a map of the last `len` pairs of results, and remember it at
+    /// `key`.
+    Map { key: usize, len: usize },
 }
 
 /// Return the error of an atom index that the source table does not hold.
@@ -448,7 +500,89 @@ pub struct HostTerm {
     pub(crate) atoms: Arc<AtomTable>,
 }
 
+impl fmt::Debug for HostTerm {
+    /// Write the term with the `Debug` text of [`Term`]. A run result keeps
+    /// the text that it had when the entry points returned a bare term, and
+    /// the atom table of the host term is not printed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(format!("{:?}", host_term), format!("{:?}", host_term.term()));
+    /// ```
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.term.fmt(formatter)
+    }
+}
+
+impl PartialEq for HostTerm {
+    /// Compare the terms of the two host terms. The atom table is storage
+    /// metadata and is not part of the value of a term, as the knowledge
+    /// rule "Equality uses semantic identity, not dispatch metadata" asks.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(program.host_term(Term::static_atom("ok")), program.host_term(Term::static_atom("ok")));
+    /// ```
+    fn eq(&self, other: &Self) -> bool {
+        self.term == other.term
+    }
+}
+
+impl Eq for HostTerm {}
+
+impl PartialEq<Term> for HostTerm {
+    /// Compare the term of this host term with `other`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(program.host_term(Term::static_atom("ok")), Term::static_atom("ok"));
+    /// ```
+    fn eq(&self, other: &Term) -> bool {
+        self.term == *other
+    }
+}
+
+impl PartialEq<HostTerm> for Term {
+    /// Compare `self` with the term of `other`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Term::static_atom("ok"), program.host_term(Term::static_atom("ok")));
+    /// ```
+    fn eq(&self, other: &HostTerm) -> bool {
+        *self == other.term
+    }
+}
+
 impl HostTerm {
+    /// Return the term of this host term.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(host_term.term(), &Term::static_atom("ok"));
+    /// ```
+    pub fn term(&self) -> &Term {
+        &self.term
+    }
+
+    /// Return the term and drop the atom table of this host term. Use it
+    /// when the caller reads the term and does not pass it to another
+    /// program.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(host_term.into_term(), Term::static_atom("ok"));
+    /// ```
+    pub fn into_term(self) -> Term {
+        self.term
+    }
+
     /// Return this term with every atom of its table replaced by the atom
     /// of the same name in `destination`, as
     /// [`AtomTable::import_term`] describes.

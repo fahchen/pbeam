@@ -46,7 +46,7 @@ fn gives_preloaded_modules_and_module_info_as_pinned_erts() {
     // module that `code_server` needs (code.erl:1699-1712).
     let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
     let result = program.execute("module_info_probe", "main", &[]).unwrap();
-    assert_eq!(text(&result), ERTS_RESULT);
+    assert_eq!(text(result.term()), ERTS_RESULT);
 
     let reference = Command::new("erl")
         .args([

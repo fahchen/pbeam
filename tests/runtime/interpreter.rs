@@ -80,7 +80,9 @@ fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
     module.reindex();
     let child = module.tables.name_id("child").unwrap();
     module.exports.insert((child, 1), 11);
-    program.execute("fixture", "main", &[])
+    program
+        .execute("fixture", "main", &[])
+        .map(|host| host.into_term())
 }
 
 fn spawn_link_child(arguments: Term) -> Vec<Instruction> {
@@ -2061,6 +2063,7 @@ fn run_binary_match(
     ]);
     make_program(body, 0)
         .execute("fixture", "main", &[])
+        .map(|host| host.into_term())
         .map_err(|error| error.to_string())
 }
 
@@ -2143,6 +2146,7 @@ fn gives_a_runtime_error_for_a_read_after_a_failed_equal_command() {
         body.extend(rest);
         make_program(body, 0)
             .execute("fixture", "main", &[])
+            .map(|host| host.into_term())
             .map_err(|error| error.to_string())
     };
     assert_eq!(
@@ -2389,7 +2393,7 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
     );
     for _ in 0..2 {
         assert!(matches!(
-            program.execute("fixture", "main", &[]).unwrap(),
+            program.execute("fixture", "main", &[]).unwrap().term,
             Term::Atom(ref alpha) if alpha.name() == "pbeam_alpha" && alpha.index() == 1151
         ));
     }
@@ -2669,7 +2673,9 @@ fn removes_an_active_monitor_without_a_trap() {
 /// `zero() -> zero.`, `id(A, B, C) -> {A, B, C}.`, and
 /// `last(M, F) -> M:F(bye).`, which compiles to `{apply_last,1,0}`.
 fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
-    apply_targets_program(body).execute("fixture", "main", &[])
+    apply_targets_program(body)
+        .execute("fixture", "main", &[])
+        .map(|host| host.into_term())
 }
 
 /// Return the program of `run_with_apply_targets`.
@@ -2933,7 +2939,9 @@ fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term,
         deallocate: 0,
     });
     body.push(Instruction::Return);
-    make_program(body, 0).execute("fixture", "main", &[])
+    make_program(body, 0)
+        .execute("fixture", "main", &[])
+        .map(|host| host.into_term())
 }
 
 fn get_bif(key: &str, destination: Operand) -> Instruction {
@@ -3021,7 +3029,7 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
     // ERTS 29.1.1: after put(k, parent), a spawned process gets
     // undefined for get(k).
     assert!(matches!(
-        program.execute("fixture", "main", &[]),
+        program.execute("fixture", "main", &[]).map(|host| host.into_term()),
         Ok(Term::Tuple(ref elements))
             if elements.first() == Some(&test_atom("DOWN"))
                 && elements.last() == Some(&Term::static_atom("undefined"))
@@ -3546,7 +3554,7 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
     assert_eq!(first_message(3847), test_atom("tag"));
     // With 151 reductions left, the exit sends the monitor signal at once.
     assert!(matches!(
-        first_message(3846),
+        first_message(3846).term,
         Term::Tuple(ref elements) if elements.first() == Some(&test_atom("DOWN"))
     ));
 }

@@ -358,6 +358,7 @@ fn run(program: &BeamProgram, function: &str, policy: &dyn Policy) -> Term {
     program
         .execute_with_policy("effect_probe", function, &[], policy)
         .unwrap()
+        .into_term()
 }
 
 /// Return the atom `name` of the program.

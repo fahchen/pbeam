@@ -79,7 +79,10 @@ fn charges_each_bif_with_a_body_as_pinned_erts_except_the_message_copy() {
             &[program.host_term(Term::nil())],
         )
         .unwrap();
-    assert_eq!(text(&costs), ERTS_COSTS.replace(SEND_COPY.0, SEND_COPY.1));
+    assert_eq!(
+        text(costs.term()),
+        ERTS_COSTS.replace(SEND_COPY.0, SEND_COPY.1)
+    );
 
     // The reference run checks that the pinned `erl` is the JIT flavor, and
     // that no measured process collects garbage. It first erases the

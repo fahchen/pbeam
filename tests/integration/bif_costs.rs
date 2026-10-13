@@ -179,9 +179,10 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     let program = BeamProgram::load(&[BIF_COST_PROBE]).unwrap();
     let run = |function, arguments: &[HostTerm]| {
         text(
-            &program
+            program
                 .execute("bif_cost_probe", function, arguments)
-                .unwrap(),
+                .unwrap()
+                .term(),
         )
     };
     let options = [program.host_term(Term::nil())];
@@ -270,7 +271,7 @@ fn switches_out_at_each_persistent_term_put() {
     // [{b,1334},{a,1},{b,1334},{a,1},{b,667},{a,1},{b,1665}] (row "Persistent terms" in
     // docs/erts-differences.md).
     assert_eq!(
-        text(&runs),
+        text(runs.term()),
         "[{b,667},{a,1},{b,667},{a,1},{b,667},{a,1},{b,2999}]"
     );
 }

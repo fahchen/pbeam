@@ -1287,15 +1287,20 @@ impl Scheduler {
             && !self.freed.contains_key(&root)
     }
 
-    /// Return the root result. `None` means the root process did not exit.
+    /// Return the root result and the atom table of the run together.
+    /// `None` means the root process did not exit. The table holds each name
+    /// that the run created, for example each name of
+    /// `erlang:list_to_atom/1`, so a host result that carries the table can
+    /// name every atom of the root result.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.into_root_result(), Some(Ok(Term::static_atom("ok"))));
+    /// let (root, atoms) = scheduler.into_run_result();
+    /// assert_eq!(root, Some(Ok(Term::static_atom("ok"))));
     /// ```
-    pub(super) fn into_root_result(self) -> Option<Result<Term, Term>> {
-        self.root_result
+    pub(super) fn into_run_result(self) -> (Option<Result<Term, Term>>, AtomTable) {
+        (self.root_result, self.atoms)
     }
 
     /// Deliver a message that no process sends, such as a timer message or

@@ -68,6 +68,7 @@ fn run(program: &BeamProgram, function: &str, policy: &dyn Policy) -> Term {
     program
         .execute_with_policy("capability_probe", function, &[], policy)
         .unwrap()
+        .into_term()
 }
 
 /// Run `capability_probe:Function()` on the pinned ERTS with one

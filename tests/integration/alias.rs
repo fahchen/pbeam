@@ -108,7 +108,7 @@ fn returns_a_runtime_error_for_a_time_offset_monitor() {
 fn run(function: &str) -> (Term, impl Fn(&str) -> Term) {
     let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
     let result = program.execute("alias_probe", function, &[]).unwrap();
-    (result, move |name: &str| {
+    (result.into_term(), move |name: &str| {
         Term::Atom(program.atom(name).unwrap())
     })
 }

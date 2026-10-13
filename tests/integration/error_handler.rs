@@ -108,6 +108,7 @@ fn raises_undef_through_error_handler_beam_as_pinned_erts() {
     let frames = program
         .execute("error_handler_probe", "frames", &[])
         .unwrap()
+        .term()
         .proper_list()
         .unwrap()
         .map(text)

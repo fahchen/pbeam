@@ -146,7 +146,7 @@ fn load_run(function: &str, code: &[u8]) -> String {
             &[program.host_term(Term::binary(code.to_vec()))],
         )
         .unwrap();
-    format!("{}\n", text(&result))
+    format!("{}\n", text(result.term()))
 }
 
 /// Run `load_probe:Function(Code)` on the pinned ERTS with one scheduler,

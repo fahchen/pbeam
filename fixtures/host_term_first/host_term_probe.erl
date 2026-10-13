@@ -3,7 +3,12 @@
 %% program and the module of `fixtures/host_term_second` into another program.
 -module(host_term_probe).
 
--export([external_fun/0, local_fun/0, value/0]).
+-export([created_atom/0, external_fun/0, local_fun/0, value/0]).
+
+%% Return an atom that the run creates with `erlang:list_to_atom/1`. The name
+%% is in the atom table of the run and not in the table of the program.
+created_atom() ->
+    list_to_atom("host_term_created").
 
 %% Return a local fun of this module. The fun holds the entry label of
 %% `value/0` in this program.

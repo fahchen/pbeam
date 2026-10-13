@@ -60,7 +60,7 @@ fn converts_iodata_and_splits_binaries_as_pinned_erts() {
     // trace `[]` (`erl_iolist.c:857-928`, `erl_bif_binary.c:1346-1645`).
     let program = BeamProgram::load(&[IOLIST_SPLIT_PROBE]).unwrap();
     let result = program.execute("iolist_split_probe", "main", &[]).unwrap();
-    assert_eq!(text(&result), EXPECTED);
+    assert_eq!(text(result.term()), EXPECTED);
 
     let reference = Command::new("erl")
         .args([

@@ -52,7 +52,7 @@ fn reads_integers_from_lists_as_pinned_erts() {
     let result = program
         .execute("list_to_integer_probe", "main", &[])
         .unwrap();
-    assert_eq!(text(&result), ERTS_RESULT);
+    assert_eq!(text(result.term()), ERTS_RESULT);
 
     let reference = Command::new("erl")
         .args([
