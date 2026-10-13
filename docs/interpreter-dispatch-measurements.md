@@ -170,16 +170,17 @@ The HAMT walk of `map_get/2` keeps its measured cost of about 34 ns from the bas
 
 ## 3. The end-to-end measurement at the current revision
 
-Command: `bash scripts/terra_latency.sh release target/terra-latency-progress.txt`. The measured revision is `ea4dd13`, which was the head of `origin/main` at the time of that run. The raw output is `target/terra-latency-progress.txt`. The harness appends each block with its label, the revision, the time, and the host load.
+Command: `bash scripts/terra_latency.sh release target/terra-latency-progress.txt`. The first measured revision is `ea4dd13`, and the second is `ea3e28a`; each was the head of `origin/main` at the time of its run. The raw output is `target/terra-latency-progress.txt`. The harness appends each block with its label, the revision, the time, and the host load.
 
 The harness runs each mode one time. The numbers below are one run of each mode, and not the minimum of several runs, so they carry the run-to-run variance that a single run has.
 
 | Mode | Revision | Load | First frame | Key `j` | Key `j` | Key `k` | Key `q` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | PBeam release | `ea4dd13` | `{ 4.14 4.57 6.08 }` | 0.57 s | 0.018 s | 0.038 s | 0.023 s | 0.039 s |
+| PBeam release | `ea3e28a` | `{ 6.31 7.12 10.28 }` | 0.55 s | 0.035 s | 0.015 s | 0.021 s | 0.015 s |
 | Pinned ERTS, `erl +S 1` | `ea4dd13` | `{ 3.67 4.45 6.00 }` | 0.18 s | 0.007 s | 0.003 s | 0.007 s | 0.004 s |
 
-The four key latencies of the release build are 0.018 s to 0.039 s. The pinned ERTS numbers of the same harness run are 0.003 s to 0.007 s. The first frame is 0.57 s on the release build and 0.18 s on ERTS.
+The four key latencies of the release build are 0.018 s to 0.039 s at `ea4dd13` and 0.015 s to 0.035 s at `ea3e28a`. The two runs agree inside the run-to-run variance of a single run, so the end-to-end key latency does not resolve the later dispatch work: the work between the two revisions, the term equality without the pair stack, the frame module and the cursor, the classified operand form, and the resolved jump and frame targets, is visible in the floor-loop and per-instruction numbers of this document and not in these two modes. The pinned ERTS numbers of the same harness run are 0.003 s to 0.007 s. The first frame is 0.57 s on the release build and 0.18 s on ERTS.
 
 This is the only end-to-end effect in this document that a reader can compare with other work. The harness sends the four keys two seconds apart (`KEY_GAP = 2.0`, `scripts/terra_latency.py:33`), which is the spacing of the design run below. The design record of the copy-on-write epic, `docs/copy-on-write-terms.md:292`, reports 0.13 s to 0.21 s for the same four keys at a revision that it does not name. The baseline record of step 0 reports 0.087 s to 0.105 s at `078c119`. The current measurement is below both ranges.
 
