@@ -499,18 +499,39 @@ impl Map {
     /// Return the first key that the map form does not support, or the first
     /// key that an [`Insert::Set`] does not find. The map does not change.
     pub(crate) fn update(&mut self, operations: Vec<(Insert, Term, Term)>) -> Result<(), Term> {
-        // The first pass reads the form and changes nothing. The change
+        // The first pass reads the form and changes nothing. `make_mut`
         // below copies a shared form, so this pass also keeps the size of
         // the private copy correct.
-        let form = (**self.arc()).clone();
-        match form {
-            Repr::Hash(_) => self.update_hash(operations),
-            Repr::Flat(_) => self.update_flat(operations),
+        if let Repr::Hash(_) = &**self.arc() {
+            return self.update_hash(operations);
+        }
+        let convert = {
+            let Repr::Flat(pairs) = &**self.arc() else {
+                unreachable!("the branch above read a flatmap")
+            };
+            let mut inserts = 0;
+            for (kind, key, _) in &operations {
+                if !matches!(key, Term::Integer(_)) && map_hash(key).is_none() {
+                    return Err(key.clone());
+                }
+                match kind {
+                    Insert::Set if !flatmap_holds(pairs, key) => return Err(key.clone()),
+                    Insert::Add if !flatmap_holds(pairs, key) => inserts += 1,
+                    _ => {}
+                }
+            }
+            pairs.len() + inserts > SMALL_MAP_LIMIT
+        };
+        if convert {
+            self.update_to_hash(operations)
+        } else {
+            self.update_flat(operations)
         }
     }
 
     /// Apply the operations of [`Map::update`] to a hashmap. The read path
-    /// checked every key of the operations.
+    /// checked every key of the operations, and it read the form of the map,
+    /// so the form is still a hashmap.
     ///
     /// # Errors
     ///
@@ -523,7 +544,7 @@ impl Map {
             .collect::<Vec<_>>();
         {
             let Repr::Hash(hamt) = &**self.arc() else {
-                unreachable!("the caller read a hashmap")
+                unreachable!("the caller read a hashmap");
             };
             for ((kind, key, _), hash) in operations.iter().zip(&hashes) {
                 if hash.is_none() || (*kind == Insert::Set && hamt.get(key).is_none()) {
@@ -542,49 +563,37 @@ impl Map {
         Ok(())
     }
 
-    /// Apply the operations of [`Map::update`] to a flatmap, or turn it
-    /// into a hashmap when an added key grows it past the flatmap limit.
-    /// The read path checked every key of the operations.
+    /// Apply the operations of [`Map::update`] to a flatmap whose new keys
+    /// stay within the flatmap limit. The read path checked every key of the
+    /// operations, and it read the form of the map, so the form is still a
+    /// flatmap.
+    fn update_flat(&mut self, operations: Vec<(Insert, Term, Term)>) -> Result<(), Term> {
+        let Repr::Flat(pairs) = Arc::make_mut(self.arc_mut()) else {
+            unreachable!("the caller read a flatmap, and `Arc::make_mut` keeps the form")
+        };
+        for (_, key, value) in operations {
+            match pairs.binary_search_by(|(existing, _)| {
+                flatmap_order(existing, &key).expect("supported map keys have a term order")
+            }) {
+                Ok(index) => pairs[index].1 = value,
+                Err(index) => pairs.insert(index, (key, value)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply the operations of [`Map::update`] to a flatmap that grows past
+    /// its limit, so it becomes a hashmap. The read path checked every key
+    /// of the operations, and it read the form of the map, so the form is
+    /// still a flatmap.
     ///
     /// # Errors
     ///
-    /// Return the first key that the map form does not support, or the first
-    /// key that an [`Insert::Set`] does not find.
-    fn update_flat(&mut self, operations: Vec<(Insert, Term, Term)>) -> Result<(), Term> {
-        let convert = {
-            let Repr::Flat(pairs) = &**self.arc() else {
-                unreachable!("the caller read a flatmap")
-            };
-            let mut inserts = 0;
-            for (kind, key, _) in &operations {
-                if !matches!(key, Term::Integer(_)) && map_hash(key).is_none() {
-                    return Err(key.clone());
-                }
-                match kind {
-                    Insert::Set if !flatmap_holds(pairs, key) => return Err(key.clone()),
-                    Insert::Add if !flatmap_holds(pairs, key) => inserts += 1,
-                    _ => {}
-                }
-            }
-            pairs.len() + inserts > SMALL_MAP_LIMIT
-        };
-        if !convert {
-            let Repr::Flat(pairs) = Arc::make_mut(self.arc_mut()) else {
-                unreachable!("the caller read a flatmap, and `Arc::make_mut` keeps the form")
-            };
-            for (_, key, value) in operations {
-                match pairs.binary_search_by(|(existing, _)| {
-                    flatmap_order(existing, &key).expect("supported map keys have a term order")
-                }) {
-                    Ok(index) => pairs[index].1 = value,
-                    Err(index) => pairs.insert(index, (key, value)),
-                }
-            }
-            return Ok(());
-        }
+    /// Return the first key that a hashmap form does not support.
+    fn update_to_hash(&mut self, operations: Vec<(Insert, Term, Term)>) -> Result<(), Term> {
         let mut keys = {
             let Repr::Flat(pairs) = &**self.arc() else {
-                unreachable!("the caller read a flatmap")
+                unreachable!("the caller read a flatmap");
             };
             pairs
                 .iter()
