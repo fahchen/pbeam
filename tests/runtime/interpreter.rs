@@ -4015,7 +4015,7 @@ fn drains_the_release_work_of_an_exited_process_while_the_root_waits() {
     // input with most of the graph retained, and the list would not drain.
     let erlang = common::pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, RELEASE_PROBE]).unwrap();
-    let mut scheduler = Scheduler::without_checks(program.atoms.clone());
+    let mut scheduler = Scheduler::without_checks((*program.atoms).clone());
     scheduler.code = CodeTable::new(program.modules.clone());
     program
         .run_root(

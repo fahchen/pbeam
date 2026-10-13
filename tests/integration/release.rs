@@ -33,26 +33,29 @@ fn releases_a_large_graph_on_each_path_as_pinned_erts_does() {
     // calls are BIFs and instructions.
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, RELEASE_PROBE]).unwrap();
-    let cells = Term::Integer(CELLS);
+    let cells = program.host_term(Term::Integer(CELLS));
     let ok = Term::Atom(program.atom("ok").unwrap());
     assert_eq!(
         program
             .execute("release_probe", "exits_with", std::slice::from_ref(&cells))
-            .unwrap(),
+            .unwrap()
+            .term,
         ok,
         "the exit of a process that owns the graph keeps the result"
     );
     assert_eq!(
         program
             .execute("release_probe", "shared", std::slice::from_ref(&cells))
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::Integer(CELLS),
         "the shared graph keeps every value after the sender exits"
     );
     assert_eq!(
         program
             .execute("release_probe", "shutdown", std::slice::from_ref(&cells))
-            .unwrap(),
+            .unwrap()
+            .term,
         ok,
         "the run ends while a child owns the graph"
     );
