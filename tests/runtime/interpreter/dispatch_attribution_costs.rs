@@ -25,7 +25,7 @@
 //! `cargo test --locked --release --lib -- dispatch_attribution_costs -- --nocapture --test-threads=1`
 //! and read the `COST` lines.
 
-use std::{collections::HashMap, hint::black_box, rc::Rc, time::Instant};
+use std::{collections::HashMap, hint::black_box, rc::Rc, sync::Arc, time::Instant};
 
 use super::{
     BeamProgram, CodeTable, Cursor, bif::BifId, code_table, current_frame, function_at_label,
@@ -403,7 +403,7 @@ fn prints_the_cost_of_every_instruction_part() {
     );
     let program = BeamProgram {
         modules: HashMap::new(),
-        atoms: AtomTable::new(),
+        atoms: Arc::new(AtomTable::new()),
     };
     let mut scheduler = Scheduler::new(AtomTable::new());
     let terms = [Term::Integer(7), Term::Integer(1)];

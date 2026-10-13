@@ -84,7 +84,7 @@ fn returns_a_runtime_error_for_a_time_offset_monitor() {
         .execute(
             "alias_probe",
             "unsupported",
-            &[Term::Atom(program.atom("time_offset").unwrap())],
+            &[program.host_term(Term::Atom(program.atom("time_offset").unwrap()))],
         )
         .unwrap_err();
     assert!(
@@ -124,7 +124,7 @@ fn unsupported(case: &str) -> String {
     let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
     let case = Term::Atom(program.atom(case).unwrap());
     program
-        .execute("alias_probe", "unsupported", &[case])
+        .execute("alias_probe", "unsupported", &[program.host_term(case)])
         .unwrap_err()
         .to_string()
 }

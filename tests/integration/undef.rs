@@ -121,7 +121,11 @@ fn returns_the_value_of_a_handler_that_a_tail_call_runs() {
             .execute(
                 "undef_probe",
                 "apply_last",
-                &[atom("undef_handler"), atom("missing"), atom("a")],
+                &[
+                    program.host_term(atom("undef_handler")),
+                    program.host_term(atom("missing")),
+                    program.host_term(atom("a")),
+                ],
             )
             .unwrap(),
         Term::tuple(vec![
@@ -180,7 +184,11 @@ fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
             .execute(
                 "undef_probe",
                 "down",
-                &[atom(module), atom(function), arguments.clone()],
+                &[
+                    program.host_term(atom(module)),
+                    program.host_term(atom(function)),
+                    program.host_term(arguments.clone()),
+                ],
             )
             .unwrap()
     };
@@ -251,7 +259,11 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
             .execute(
                 "undef_probe",
                 "down",
-                &[atom(module), atom("missing"), arguments(count)],
+                &[
+                    program.host_term(atom(module)),
+                    program.host_term(atom("missing")),
+                    program.host_term(arguments(count)),
+                ],
             )
             .unwrap()
     };

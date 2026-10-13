@@ -260,7 +260,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let scheduler = Scheduler::new(program.atoms.clone());
+    /// let scheduler = Scheduler::new((*program.atoms).clone());
     /// assert_eq!(scheduler.atoms.get("ok"), Atom::from_static("ok"));
     /// ```
     pub(super) fn new(atoms: AtomTable) -> Self {
@@ -308,7 +308,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let scheduler = Scheduler::without_checks(program.atoms.clone());
+    /// let scheduler = Scheduler::without_checks((*program.atoms).clone());
     /// assert!(scheduler.skips_checks());
     /// ```
     pub(super) fn without_checks(atoms: AtomTable) -> Self {

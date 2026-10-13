@@ -363,7 +363,7 @@ fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
         .execute(
             "re_probe",
             "unsupported",
-            &[Term::Atom(program.atom("chardata").unwrap())],
+            &[program.host_term(Term::Atom(program.atom("chardata").unwrap()))],
         )
         .unwrap_err();
     assert_eq!(

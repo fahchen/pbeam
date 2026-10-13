@@ -18,14 +18,18 @@ mod static_names;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use static_names::STATIC_ATOM_NAMES;
 
-use crate::error::{BeamError, error};
-#[cfg(test)]
-use crate::term::Term;
+use crate::{
+    error::{BeamError, error},
+    term::{Fun, Lambda, Map, Target, Term},
+};
 
 /// The largest number of atoms in the atom table (`ATOM_LIMIT` in `atom.h`,
 /// the default of the `+t` emulator flag).
@@ -99,11 +103,39 @@ impl Atom {
     }
 }
 
+/// The identity of the program that owns an [`AtomTable`]. Two tables have
+/// the same identity only when one is a copy of the other, and a copy keeps
+/// the identity of its source. The import between two tables compares the
+/// identity of the two programs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProgramId(u64);
+
+impl ProgramId {
+    /// Return the identity of a new program.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_ne!(ProgramId::next(), ProgramId::next());
+    /// ```
+    fn next() -> Self {
+        /// The number of programs that this process made.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        ProgramId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// The atom table of one program or one run (`erts_atom_table` in ERTS).
 #[derive(Debug, Clone)]
 pub(crate) struct AtomTable {
-    /// The index of each atom. The next new atom gets index `indices.len()`.
-    indices: HashMap<String, u32>,
+    /// The index of each atom, keyed by its name.
+    indices: HashMap<Arc<str>, u32>,
+    /// The name of each atom, by its index. The next new atom gets index
+    /// `names.len()`.
+    names: Vec<Arc<str>>,
+    /// The program that owns the table. A copy keeps the identity, and the
+    /// import compares it with the identity of the destination table.
+    program: ProgramId,
 }
 
 impl AtomTable {
@@ -117,11 +149,21 @@ impl AtomTable {
     /// assert_eq!(table.get("false"), Atom::from_static("false"));
     /// ```
     pub(crate) fn new() -> Self {
-        let indices = STATIC_INDICES
-            .iter()
-            .map(|(&name, &index)| (name.to_owned(), index))
-            .collect();
-        AtomTable { indices }
+        let mut indices = HashMap::with_capacity(STATIC_ATOM_NAMES.len());
+        let mut names = Vec::with_capacity(STATIC_ATOM_NAMES.len());
+        for (index, &name) in STATIC_ATOM_NAMES.iter().enumerate() {
+            let name: Arc<str> = Arc::from(name);
+            indices.insert(
+                Arc::clone(&name),
+                u32::try_from(index).expect("STATIC_ATOM_NAMES fits in u32"),
+            );
+            names.push(name);
+        }
+        AtomTable {
+            indices,
+            names,
+            program: ProgramId::next(),
+        }
     }
 
     /// Return the atom of a name. Create the atom with the next index when
@@ -146,17 +188,19 @@ impl AtomTable {
         if let Some(atom) = self.get(name) {
             return Ok(atom);
         }
-        let count = self.indices.len();
+        let count = self.names.len();
         if count >= ATOM_LIMIT {
             return Err(error(format!(
                 "no more index entries in atom_tab (max={ATOM_LIMIT})"
             )));
         }
         let index = u32::try_from(count).expect("ATOM_LIMIT fits in u32");
-        self.indices.insert(name.to_owned(), index);
+        let shared: Arc<str> = Arc::from(name);
+        self.indices.insert(Arc::clone(&shared), index);
+        self.names.push(Arc::clone(&shared));
         Ok(Atom {
             index,
-            name: Arc::from(name),
+            name: shared,
         })
     }
 
@@ -170,10 +214,260 @@ impl AtomTable {
     /// assert_eq!(table.get("pbeam_zeta"), None);
     /// ```
     pub(crate) fn get(&self, name: &str) -> Option<Atom> {
-        self.indices.get(name).map(|&index| Atom {
+        self.indices.get_key_value(name).map(|(name, &index)| Atom {
             index,
-            name: Arc::from(name),
+            name: Arc::clone(name),
         })
+    }
+
+    /// Return the name of the atom at `index`, or `None` when the table
+    /// holds no atom at that index. The import of a host term uses it to
+    /// resolve the index of an atom of the source table. The index is all
+    /// that an atom term holds, so an index outside the table is not a
+    /// value of the table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = AtomTable::new();
+    /// assert_eq!(table.name(506), Some("ok"));
+    /// assert_eq!(table.name(1048576), None);
+    /// ```
+    pub(crate) fn name(&self, index: u32) -> Option<&str> {
+        self.names
+            .get(usize::try_from(index).ok()?)
+            .map(Arc::as_ref)
+    }
+
+    /// Return the term of `source` with every atom of its source table
+    /// replaced by the atom of the same name in this table. The walk reads
+    /// each source atom through [`AtomTable::name`], so it also checks that
+    /// each index is a value of the source table. A `Term::Atom` of another
+    /// table enters this table only through this function.
+    ///
+    /// The walk remaps the `module` of a `Lambda` and the `module` and
+    /// `function` of a `Target::External`, because their atoms are outside
+    /// the free variables of the fun. It builds a new term and never
+    /// changes `source` or the term.
+    ///
+    /// # Errors
+    ///
+    /// * An atom index that the source table does not hold gives the error
+    ///   `atom index {index} is outside the atom table of the host term`.
+    /// * A `Target::Local` whose source program is not the program of this
+    ///   table gives `local fun of module {module} belongs to another
+    ///   program`, because a local fun holds the entry label of its
+    ///   function and this table can name a module that holds different
+    ///   code.
+    /// * A destination table at `ATOM_LIMIT` gives the error of
+    ///   [`AtomTable::put`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let source = AtomTable::new();
+    /// let mut destination = source.clone();
+    /// let term = Term::Atom(source.get("ok").unwrap());
+    /// assert_eq!(destination.import_term(&source, &term)?, Term::Atom(destination.get("ok").unwrap()));
+    /// ```
+    pub(crate) fn import_term(
+        &mut self,
+        source: &AtomTable,
+        term: &Term,
+    ) -> Result<Term, BeamError> {
+        let mut work = vec![ImportStep::Term(term)];
+        // The imported terms, in the order that the walk finishes them. A
+        // node takes the results of its children from the end.
+        let mut ready: Vec<Term> = Vec::new();
+        while let Some(step) = work.pop() {
+            match step {
+                ImportStep::Term(term) => match term {
+                    Term::Atom(atom) => ready.push(Term::Atom(self.import_atom(source, atom)?)),
+                    Term::Tuple(elements) => {
+                        work.push(ImportStep::Tuple(elements.len()));
+                        work.extend(elements.iter().rev().map(ImportStep::Term));
+                    }
+                    Term::Cons(cell) => {
+                        work.push(ImportStep::Cons);
+                        work.push(ImportStep::Term(&cell.tail));
+                        work.push(ImportStep::Term(&cell.head));
+                    }
+                    Term::Map(map) => {
+                        work.push(ImportStep::Map(map.len()));
+                        for (key, value) in map.iter().collect::<Vec<_>>().into_iter().rev() {
+                            work.push(ImportStep::Term(value));
+                            work.push(ImportStep::Term(key));
+                        }
+                    }
+                    Term::Fun(fun) => {
+                        let target = self.import_target(source, fun.target())?;
+                        work.push(ImportStep::Fun {
+                            target,
+                            free: fun.free().len(),
+                        });
+                        work.extend(fun.free().iter().rev().map(ImportStep::Term));
+                    }
+                    Term::Binary(_)
+                    | Term::Integer(_)
+                    | Term::Nil
+                    | Term::Pid(_)
+                    | Term::Port(_)
+                    | Term::Reference(_)
+                    | Term::MatchContext(_) => ready.push(term.clone()),
+                },
+                ImportStep::Tuple(len) => {
+                    let elements = ready.split_off(ready.len() - len);
+                    ready.push(Term::tuple(elements));
+                }
+                ImportStep::Cons => {
+                    let tail = ready.pop().expect("a cons cell has a tail result");
+                    let head = ready.pop().expect("a cons cell has a head result");
+                    ready.push(Term::cons(head, tail));
+                }
+                ImportStep::Fun { target, free } => {
+                    let values = ready.split_off(ready.len() - free);
+                    ready.push(Term::Fun(match target {
+                        Target::Local(lambda) => Fun::new(lambda, values),
+                        Target::External {
+                            module,
+                            function,
+                            arity,
+                        } => Fun::external(module, function, arity),
+                    }));
+                }
+                ImportStep::Map(len) => {
+                    let flat = ready.split_off(ready.len() - 2 * len);
+                    let mut pairs = Vec::with_capacity(len);
+                    let mut values = flat.into_iter();
+                    while let (Some(key), Some(value)) = (values.next(), values.next()) {
+                        pairs.push((key, value));
+                    }
+                    // The source map is canonical, so its keys are valid
+                    // keys, and a key keeps its shape across the import.
+                    let map = Map::from_pairs(pairs)
+                        .expect("a canonical map of one table imports to a canonical map");
+                    ready.push(Term::Map(map));
+                }
+            }
+        }
+        Ok(ready
+            .pop()
+            .expect("the import leaves the result of the root"))
+    }
+
+    /// Return the atom of `source` that the atom `atom` names, in this
+    /// table.
+    ///
+    /// # Errors
+    ///
+    /// An index that `source` does not hold gives the outside-table error,
+    /// and a full destination table gives the error of [`AtomTable::put`].
+    fn import_atom(&mut self, source: &AtomTable, atom: &Atom) -> Result<Atom, BeamError> {
+        let name = source
+            .name(atom.index())
+            .ok_or_else(|| outside_atom_table(atom.index()))?;
+        self.put(name)
+    }
+
+    /// Return the entry of `target` with each atom of its source table
+    /// resolved in this table.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`AtomTable::import_term`].
+    fn import_target(&mut self, source: &AtomTable, target: &Target) -> Result<Target, BeamError> {
+        match target {
+            Target::Local(lambda) => {
+                let module = lambda.module();
+                let name = source
+                    .name(module.index())
+                    .ok_or_else(|| outside_atom_table(module.index()))?;
+                if source.program != self.program {
+                    return Err(error(format!(
+                        "local fun of module {name} belongs to another program"
+                    )));
+                }
+                let module = self.put(name)?;
+                Ok(Target::Local(Lambda::new(
+                    module,
+                    lambda.index,
+                    lambda.old_unique,
+                    lambda.label(),
+                    lambda.arity(),
+                )))
+            }
+            Target::External {
+                module,
+                function,
+                arity,
+            } => Ok(Target::External {
+                module: self.import_atom(source, module)?,
+                function: self.import_atom(source, function)?,
+                arity: *arity,
+            }),
+        }
+    }
+}
+
+/// One step of the import walk of [`AtomTable::import_term`]: import a term,
+/// or build a compound from the results of its children.
+enum ImportStep<'a> {
+    /// Import this term and push its result.
+    Term(&'a Term),
+    /// Make a tuple of the last `len` results.
+    Tuple(usize),
+    /// Make a cons cell of the last two results.
+    Cons,
+    /// Make a fun of the last `free` results and this entry.
+    Fun { target: Target, free: usize },
+    /// Make a map of the last `len` pairs of results.
+    Map(usize),
+}
+
+/// Return the error of an atom index that the source table does not hold.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(outside_atom_table(1048576).to_string(), "atom index 1048576 is outside the atom table of the host term");
+/// ```
+fn outside_atom_table(index: u32) -> BeamError {
+    error(format!(
+        "atom index {index} is outside the atom table of the host term"
+    ))
+}
+
+/// A term of one program together with the atom table that owns each of its
+/// atoms. A host result and a host argument are `HostTerm` values. A copy is
+/// cheap: the term copy is O(1), and the table is shared through an `Arc`.
+#[derive(Clone)]
+pub struct HostTerm {
+    /// The term.
+    pub(crate) term: Term,
+    /// The atom table that owns each atom of the term, at any depth.
+    pub(crate) atoms: Arc<AtomTable>,
+}
+
+impl HostTerm {
+    /// Return this term with every atom of its table replaced by the atom
+    /// of the same name in `destination`, as
+    /// [`AtomTable::import_term`] describes.
+    ///
+    /// Use this function to pass a host term of one program to another
+    /// program. A term of the program that owns `destination` needs no
+    /// import.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`AtomTable::import_term`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let imported = host_term.import_into(&mut scheduler.atoms)?;
+    /// ```
+    pub(crate) fn import_into(&self, destination: &mut AtomTable) -> Result<Term, BeamError> {
+        destination.import_term(&self.atoms, &self.term)
     }
 }
 

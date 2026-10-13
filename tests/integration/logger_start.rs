@@ -904,7 +904,7 @@ fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
             .execute(
                 "logger_start_probe",
                 "unsupported_flag",
-                &[Term::Atom(program.atom(case).unwrap())],
+                &[program.host_term(Term::Atom(program.atom(case).unwrap()))],
             )
             .unwrap_err();
         assert!(error.to_string().contains(message), "{error}");

@@ -138,8 +138,13 @@ fn load_program() -> BeamProgram {
 /// Run `load_probe:Function(Code)` with the bytes of a fixture and return
 /// the `~w` text of the result.
 fn load_run(function: &str, code: &[u8]) -> String {
-    let result = load_program()
-        .execute("load_probe", function, &[Term::binary(code.to_vec())])
+    let program = load_program();
+    let result = program
+        .execute(
+            "load_probe",
+            function,
+            &[program.host_term(Term::binary(code.to_vec()))],
+        )
         .unwrap();
     format!("{}\n", text(&result))
 }
@@ -242,12 +247,13 @@ fn stops_the_run_for_code_replacement() {
     // ERTS makes the current code old and loads the new code
     // (`beam_load.c:258-262`). PBeam has no old code, so the second load
     // stops the run.
+    let program = load_program();
     assert_eq!(
-        load_program()
+        program
             .execute(
                 "load_probe",
                 "replace",
-                &[Term::binary(LOAD_TARGET.to_vec())]
+                &[program.host_term(Term::binary(LOAD_TARGET.to_vec()))]
             )
             .unwrap_err()
             .to_string(),
@@ -274,7 +280,7 @@ fn compares_the_module_name_of_code_load() {
             .execute_with_policy(
                 "load_probe",
                 "constraint",
-                std::slice::from_ref(&code),
+                std::slice::from_ref(&program.host_term(code.clone())),
                 &permitted
             )
             .unwrap(),
@@ -283,7 +289,12 @@ fn compares_the_module_name_of_code_load() {
     let denied = code_capability(&[Operation::Load], &["other_module"]);
     assert_eq!(
         program
-            .execute_with_policy("load_probe", "constraint", &[code], &denied)
+            .execute_with_policy(
+                "load_probe",
+                "constraint",
+                &[program.host_term(code)],
+                &denied
+            )
             .unwrap(),
         expected("denied")
     );
@@ -295,12 +306,13 @@ fn stops_the_run_for_a_module_with_an_on_load_function() {
     // `{on_load, [load_on_load]}`, and the module waits for its
     // `-on_load` function (`beam_load.c:239-241`, `beam_bif_load.c:738-755`).
     // The PBeam loader does not decode the `on_load` instruction.
+    let program = load_program();
     assert_eq!(
-        load_program()
+        program
             .execute(
                 "load_probe",
                 "on_load",
-                &[Term::binary(LOAD_ON_LOAD.to_vec())]
+                &[program.host_term(Term::binary(LOAD_ON_LOAD.to_vec()))]
             )
             .unwrap_err()
             .to_string(),

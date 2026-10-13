@@ -22,10 +22,10 @@ fn runs_the_pinned_unicode_characters_to_binary_as_pinned_erts() {
             .execute(
                 "unicode",
                 "characters_to_binary",
-                &[Term::list_from(vec![
+                &[program.host_term(Term::list_from(vec![
                     Term::binary(b"Hello".to_vec()),
                     Term::Integer(10),
-                ])],
+                ]))],
             )
             .unwrap(),
         Term::binary(b"Hello\n".to_vec())
@@ -133,13 +133,13 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
                 "user_drv_probe",
                 "iolists",
                 &[
-                    ones(64),
-                    ones(512),
-                    ones(513),
-                    huge,
-                    deep,
-                    Term::Integer(256),
-                    Term::Integer(-1),
+                    program.host_term(ones(64)),
+                    program.host_term(ones(512)),
+                    program.host_term(ones(513)),
+                    program.host_term(huge),
+                    program.host_term(deep),
+                    program.host_term(Term::Integer(256)),
+                    program.host_term(Term::Integer(-1)),
                 ],
             )
             .unwrap(),

@@ -187,7 +187,7 @@ fn ands_integers_bitwise_as_pinned_erts() {
     ] {
         assert_eq!(
             program
-                .execute("body_bif_probe", "executable", &[mode])
+                .execute("body_bif_probe", "executable", &[program.host_term(mode)])
                 .unwrap(),
             atom(expected)
         );

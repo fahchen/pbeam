@@ -185,14 +185,25 @@ fn isolated_find_executable() {
         .execute(
             "pbeam_boot",
             "start",
-            &[atom("find_executable_probe"), atom("main")],
+            &[
+                program.host_term(atom("find_executable_probe")),
+                program.host_term(atom("main")),
+            ],
         )
         .unwrap();
     let bifs = program
-        .execute("find_executable_probe", "bifs", &[characters(&directory)])
+        .execute(
+            "find_executable_probe",
+            "bifs",
+            &[program.host_term(characters(&directory))],
+        )
         .unwrap();
     let names = program
-        .execute("find_executable_probe", "names", &[Term::Integer(1 << 60)])
+        .execute(
+            "find_executable_probe",
+            "names",
+            &[program.host_term(Term::Integer(1 << 60))],
+        )
         .unwrap();
     let results = [main, bifs, names].map(|term| text(&term) + "\n");
     fs::write(env::var_os(RESULT).unwrap(), results.concat()).unwrap();

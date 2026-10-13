@@ -36,7 +36,11 @@ fn reference(expression: &str) -> String {
 /// Run `bs_create_bin_probe:Function/1` with one argument.
 fn run(program: &BeamProgram, function: &str, argument: Term) -> Term {
     program
-        .execute("bs_create_bin_probe", function, &[argument])
+        .execute(
+            "bs_create_bin_probe",
+            function,
+            &[program.host_term(argument)],
+        )
         .unwrap()
 }
 
@@ -159,7 +163,7 @@ fn exits_with_the_badarg_and_its_error_info_when_no_catch_holds_it() {
     let other = Term::Atom(program.atom("other").unwrap());
     assert_eq!(
         program
-            .execute("bs_create_bin_probe", "prefix", &[other])
+            .execute("bs_create_bin_probe", "prefix", &[program.host_term(other)])
             .unwrap_err()
             .to_string(),
         "root process exited with {badarg,[{bs_create_bin_probe,prefix,1,[{error_info,\
@@ -214,7 +218,11 @@ fn stops_at_a_segment_type_that_is_not_implemented() {
     let program = BeamProgram::load(&[BS_CREATE_BIN_PROBE]).unwrap();
     assert_eq!(
         program
-            .execute("bs_create_bin_probe", "utf16", &[Term::Integer(7)])
+            .execute(
+                "bs_create_bin_probe",
+                "utf16",
+                &[program.host_term(Term::Integer(7))],
+            )
             .unwrap_err()
             .to_string(),
         "unsupported bs_create_bin segment utf16"
@@ -234,7 +242,7 @@ fn loads_an_allocation_list_as_the_alloc_operand() {
             .execute(
                 "bs_create_bin_alloc_probe",
                 "run",
-                &[Term::binary(bytes.to_vec())],
+                &[program.host_term(Term::binary(bytes.to_vec()))],
             )
             .unwrap()
     };
@@ -274,8 +282,13 @@ fn rejects_an_allocation_list_that_erts_rejects() {
 
 /// Run `bs_create_bin_append_probe:Function` with its arguments.
 fn run_append(program: &BeamProgram, function: &str, arguments: &[Term]) -> Term {
+    let arguments = arguments
+        .iter()
+        .cloned()
+        .map(|term| program.host_term(term))
+        .collect::<Vec<_>>();
     program
-        .execute("bs_create_bin_append_probe", function, arguments)
+        .execute("bs_create_bin_append_probe", function, &arguments)
         .unwrap()
 }
 
@@ -590,8 +603,13 @@ fn render(term: &Term) -> String {
 
 /// Run `bs_create_bin_integer_probe:Function` with its arguments.
 fn run_integer(program: &BeamProgram, function: &str, arguments: &[Term]) -> Term {
+    let arguments = arguments
+        .iter()
+        .cloned()
+        .map(|term| program.host_term(term))
+        .collect::<Vec<_>>();
     program
-        .execute("bs_create_bin_integer_probe", function, arguments)
+        .execute("bs_create_bin_integer_probe", function, &arguments)
         .unwrap()
 }
 
@@ -1173,7 +1191,11 @@ fn stops_at_a_bitstring_that_is_not_a_binary() {
     let program = BeamProgram::load(&[BS_CREATE_BIN_INTEGER_PROBE]).unwrap();
     assert_eq!(
         program
-            .execute("bs_create_bin_integer_probe", "nibble", &[Term::Integer(1)])
+            .execute(
+                "bs_create_bin_integer_probe",
+                "nibble",
+                &[program.host_term(Term::Integer(1))],
+            )
             .unwrap_err()
             .to_string(),
         "unsupported bs_create_bin result: a bitstring of 4 bits, which is not a binary"

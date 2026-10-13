@@ -506,7 +506,7 @@ fn charges_and_traps_the_input_dependent_bifs_as_pinned_erts_with_one_scheduler(
     let run = |function| {
         text(
             &program
-                .execute("input_probe", function, &[Term::nil()])
+                .execute("input_probe", function, &[program.host_term(Term::nil())])
                 .unwrap(),
         )
     };

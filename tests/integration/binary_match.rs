@@ -92,7 +92,11 @@ fn run_each_in(
         .iter()
         .map(|input| {
             program
-                .execute(module, function, &[Term::binary(input.to_vec())])
+                .execute(
+                    module,
+                    function,
+                    &[program.host_term(Term::binary(input.to_vec()))],
+                )
                 .map_err(|error| error.to_string())
         })
         .collect()
@@ -122,7 +126,7 @@ fn runs_bs_start_match3_of_a_binary_as_pinned_erts() {
             .execute(
                 "binary_match_probe",
                 "first",
-                &[Term::binary(vec![195, 169])]
+                &[program.host_term(Term::binary(vec![195, 169]))]
             )
             .unwrap(),
         Term::tuple(vec![utf8, Term::Integer(233)])
@@ -533,8 +537,13 @@ fn bs_get_each(function: &str, calls: &[Vec<Term>]) -> Vec<Result<Term, String>>
     calls
         .iter()
         .map(|arguments| {
+            let imported = arguments
+                .iter()
+                .cloned()
+                .map(|term| program.host_term(term))
+                .collect::<Vec<_>>();
             program
-                .execute("bs_get_probe", function, arguments)
+                .execute("bs_get_probe", function, &imported)
                 .map_err(|error| error.to_string())
         })
         .collect()

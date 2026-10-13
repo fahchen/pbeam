@@ -10,6 +10,7 @@ mod print;
 mod tuple;
 
 pub use atom::Atom;
+pub use atom::HostTerm;
 #[cfg(test)]
 pub(crate) use atom::test_atom;
 pub(crate) use atom::{AtomTable, MAX_ATOM_CHARACTERS};

@@ -240,7 +240,7 @@ fn takes_the_badmap_path_when_add_gets_a_non_map() {
     // the caller frames.
     let program = BeamProgram::load(&[MAP_PROBE]).unwrap();
     let error = program
-        .execute("map_probe", "add", &[Term::Integer(1)])
+        .execute("map_probe", "add", &[program.host_term(Term::Integer(1))])
         .unwrap_err()
         .to_string();
     assert!(

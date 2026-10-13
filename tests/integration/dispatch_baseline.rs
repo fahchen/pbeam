@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{BeamProgram, HostTerm, Term};
 
 const DISPATCH_PROBE: &[u8] = include_bytes!("../../fixtures/dispatch/dispatch_probe.beam");
 const POSITION_PROBE: &[u8] =
@@ -171,27 +171,32 @@ fn erts_module(module: &str) -> &'static str {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let args = arguments("floor_loop", 20_000, &tuple, &list, &map, &key);
+/// let args = arguments(&program, "floor_loop", 20_000, &tuple, &list, &map, &key);
 /// assert_eq!(args.len(), 1);
 /// ```
 fn arguments(
+    program: &BeamProgram,
     function: &str,
     length: usize,
     tuple: &Term,
     list: &Term,
     map: &Term,
     key: &Term,
-) -> Vec<Term> {
+) -> Vec<HostTerm> {
     let counter = Term::Integer(length as i64);
     let zero = Term::Integer(0);
-    match function {
+    let terms = match function {
         "floor_ext_loop" | "floor_loop" => vec![counter],
         "plus_loop" => vec![counter, zero],
         "tuple_size_loop" | "element_loop" => vec![counter, zero, tuple.clone()],
         "hd_loop" => vec![counter, zero, list.clone()],
         "map_get_loop" => vec![counter, zero, map.clone(), key.clone()],
         other => panic!("unknown probe function {other}"),
-    }
+    };
+    terms
+        .into_iter()
+        .map(|term| program.host_term(term))
+        .collect()
 }
 
 /// The arguments of one probe as Erlang source for the ERTS run. The names
@@ -310,10 +315,15 @@ fn call_text(probe: &Probe) -> String {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let best = measure_pbeam(&program, "dispatch_probe", "floor_loop", &[Term::Integer(20_000)]);
+/// let best = measure_pbeam(&program, "dispatch_probe", "floor_loop", &[program.host_term(Term::Integer(20_000))]);
 /// assert!(best > Duration::ZERO);
 /// ```
-fn measure_pbeam(program: &BeamProgram, module: &str, function: &str, args: &[Term]) -> Duration {
+fn measure_pbeam(
+    program: &BeamProgram,
+    module: &str,
+    function: &str,
+    args: &[HostTerm],
+) -> Duration {
     let mut best = Duration::MAX;
     for _ in 0..RUNS {
         let start = Instant::now();
@@ -589,7 +599,15 @@ fn records_the_interpreter_dispatch_baseline() {
 
     let mut rows = Vec::new();
     for probe in probes() {
-        let args = arguments(probe.function, probe.length, &tuple, &list, &map, &key);
+        let args = arguments(
+            &program,
+            probe.function,
+            probe.length,
+            &tuple,
+            &list,
+            &map,
+            &key,
+        );
         let result = program
             .execute(probe.module, probe.function, &args)
             .unwrap();
@@ -796,8 +814,11 @@ fn records_the_instruction_stream_cache_proxy() {
 fn records_the_attribution_reference_points() {
     let program = BeamProgram::load(&[DISPATCH_PROBE]).unwrap();
     let length = DELTA_LENGTH;
-    let floor_arguments = [Term::Integer(length as i64)];
-    let plus_arguments = [Term::Integer(length as i64), Term::Integer(0)];
+    let floor_arguments = [program.host_term(Term::Integer(length as i64))];
+    let plus_arguments = [
+        program.host_term(Term::Integer(length as i64)),
+        program.host_term(Term::Integer(0)),
+    ];
     assert_eq!(
         program
             .execute("dispatch_probe", "floor_loop", &floor_arguments)

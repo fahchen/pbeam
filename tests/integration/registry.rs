@@ -198,7 +198,7 @@ fn exits_with_badarg_for_an_uncaught_send_to_a_missing_name() {
     let program = BeamProgram::load(&[REGISTRY_PROBE]).unwrap();
     let missing = Term::Atom(program.atom("registry_probe_missing").unwrap());
     let error = program
-        .execute("registry_probe", "send_to", &[missing])
+        .execute("registry_probe", "send_to", &[program.host_term(missing)])
         .unwrap_err();
     assert!(
         error

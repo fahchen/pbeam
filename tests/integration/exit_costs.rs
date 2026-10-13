@@ -127,7 +127,14 @@ fn cases(program: &BeamProgram) -> Term {
 fn charges_the_exit_items_as_pinned_erts_with_one_scheduler() {
     let program = BeamProgram::load(&[EXIT_PROBE]).unwrap();
     let exits = program
-        .execute("exit_probe", "exits", &[cases(&program), Term::nil()])
+        .execute(
+            "exit_probe",
+            "exits",
+            &[
+                program.host_term(cases(&program)),
+                program.host_term(Term::nil()),
+            ],
+        )
         .unwrap();
     assert_eq!(text(&exits), EXITS);
 

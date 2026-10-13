@@ -65,7 +65,11 @@ fn loads_the_float_register_instructions_and_stops_when_one_runs() {
         BeamProgram::load(&[&erlang, &lists, &string, &erl_scan, FLOAT_TEST_PROBE]).unwrap();
     assert_eq!(
         program
-            .execute("float_test_probe", "half", &[Term::Integer(8)])
+            .execute(
+                "float_test_probe",
+                "half",
+                &[program.host_term(Term::Integer(8))],
+            )
             .unwrap_err()
             .to_string(),
         "unsupported BEAM opcode 97"
@@ -102,7 +106,7 @@ fn raises_badarith_when_fconv_gets_a_term_that_is_not_a_number() {
     // `error` exception the stack trace `[]` (row "Exception stack trace" in
     // `docs/erts-differences.md`).
     let error = program
-        .execute("float_test_probe", "half", &[badarith])
+        .execute("float_test_probe", "half", &[program.host_term(badarith)])
         .unwrap_err()
         .to_string();
     assert!(
@@ -142,20 +146,34 @@ fn stops_at_a_float_register_instruction_before_the_fconv_that_raises_badarith()
     let a = Term::Atom(program.atom("a").unwrap());
     assert_eq!(
         program
-            .execute("float_test_probe", "divide", &[a.clone(), Term::Integer(8)])
+            .execute(
+                "float_test_probe",
+                "divide",
+                &[
+                    program.host_term(a.clone()),
+                    program.host_term(Term::Integer(8)),
+                ],
+            )
             .unwrap(),
         Term::Atom(program.atom("badarith").unwrap())
     );
     assert_eq!(
         program
-            .execute("float_test_probe", "divide", &[Term::Integer(8), a.clone()])
+            .execute(
+                "float_test_probe",
+                "divide",
+                &[
+                    program.host_term(Term::Integer(8)),
+                    program.host_term(a.clone()),
+                ],
+            )
             .unwrap_err()
             .to_string(),
         "unsupported BEAM opcode 97"
     );
     assert_eq!(
         program
-            .execute("float_test_probe", "two_over", &[a])
+            .execute("float_test_probe", "two_over", &[program.host_term(a)])
             .unwrap_err()
             .to_string(),
         "unsupported BEAM opcode 96"

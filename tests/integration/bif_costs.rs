@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{BeamProgram, HostTerm, Term};
 
 const BIF_COST_PROBE: &[u8] = include_bytes!("../../fixtures/preempt/bif_cost_probe.beam");
 
@@ -177,14 +177,14 @@ fn text(term: &Term) -> String {
 #[test]
 fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_scheduler() {
     let program = BeamProgram::load(&[BIF_COST_PROBE]).unwrap();
-    let run = |function, arguments: &[Term]| {
+    let run = |function, arguments: &[HostTerm]| {
         text(
             &program
                 .execute("bif_cost_probe", function, arguments)
                 .unwrap(),
         )
     };
-    let options = [Term::nil()];
+    let options = [program.host_term(Term::nil())];
     assert_eq!(run("puts", &options), PUTS);
     assert_eq!(run("put_trap", &[]), PUT_TRAP);
     assert_eq!(run("costs", &options), COSTS);

@@ -291,7 +291,7 @@ fn rejects_tables_that_pbeam_cannot_model() {
         let message = format!("unsupported ets:{detail}");
         let case = Term::Atom(program.atom(case).unwrap());
         let error = program
-            .execute("ets_probe", "unsupported", &[case])
+            .execute("ets_probe", "unsupported", &[program.host_term(case)])
             .unwrap_err();
         assert!(
             error.to_string().contains(&message),

@@ -67,7 +67,10 @@ fn rejects_an_unsupported_io_device_with_a_function_clause_error() {
         .execute(
             "Elixir.IO",
             "puts",
-            &[Term::Integer(7), Term::binary(b"message".to_vec())],
+            &[
+                program.host_term(Term::Integer(7)),
+                program.host_term(Term::binary(b"message".to_vec())),
+            ],
         )
         .unwrap_err();
 
@@ -87,7 +90,10 @@ fn reports_the_unavailable_string_conversion_for_non_binary_data() {
         .execute(
             "Elixir.IO",
             "puts",
-            &[Term::Atom(program.atom("stdio").unwrap()), Term::Integer(7)],
+            &[
+                program.host_term(Term::Atom(program.atom("stdio").unwrap())),
+                program.host_term(Term::Integer(7)),
+            ],
         )
         .unwrap_err();
 

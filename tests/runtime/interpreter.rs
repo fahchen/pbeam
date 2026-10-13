@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
@@ -45,7 +45,7 @@ fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
                 instructions,
             )),
         )]),
-        atoms: AtomTable::new(),
+        atoms: Arc::new(AtomTable::new()),
     }
 }
 
@@ -194,7 +194,7 @@ fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
             .unwrap(),
         1,
     )];
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.code = CodeTable::new(program.modules.clone());
     let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
     scheduler
@@ -692,7 +692,7 @@ fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
     let module = BeamModule::new("mäin_module".into(), exports, instructions);
     let mut program = BeamProgram {
         modules: HashMap::from([("mäin_module".into(), Rc::new(module))]),
-        atoms: AtomTable::new(),
+        atoms: Arc::new(AtomTable::new()),
     };
     assert_eq!(
         program
@@ -709,7 +709,11 @@ fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
         .insert((module.tables.name_id("mäin").unwrap(), 1), 2);
     assert_eq!(
         program
-            .execute("mäin_module", "mäin", &[Term::Integer(1)])
+            .execute(
+                "mäin_module",
+                "mäin",
+                &[program.host_term(Term::Integer(1))]
+            )
             .unwrap_err()
             .to_string(),
         "call arity does not match mäin_module:mäin"
@@ -757,13 +761,17 @@ fn recognizes_runtime_process_identifiers_as_pids() {
 
     assert_eq!(
         program
-            .execute("fixture", "main", &[Term::Pid(ProcessId(1))])
+            .execute(
+                "fixture",
+                "main",
+                &[program.host_term(Term::Pid(ProcessId(1)))]
+            )
             .unwrap(),
         test_atom("pid")
     );
     assert_eq!(
         program
-            .execute("fixture", "main", &[Term::Integer(1)])
+            .execute("fixture", "main", &[program.host_term(Term::Integer(1))])
             .unwrap(),
         test_atom("other")
     );
@@ -1802,7 +1810,7 @@ fn rejects_unresolved_exports_and_function_labels() {
     let module = BeamModule::new("external".into(), HashMap::new(), vec![]);
     let program = BeamProgram {
         modules: HashMap::from([("external".into(), Rc::new(module))]),
-        atoms: AtomTable::new(),
+        atoms: Arc::new(AtomTable::new()),
     };
     assert!(
         CodeTable::new(program.modules.clone())
@@ -2371,7 +2379,14 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
         ],
         0,
     );
-    assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1150);
+    assert_eq!(
+        Arc::get_mut(&mut program.atoms)
+            .unwrap()
+            .put("pbeam_zeta")
+            .unwrap()
+            .index(),
+        1150
+    );
     for _ in 0..2 {
         assert!(matches!(
             program.execute("fixture", "main", &[]).unwrap(),
@@ -2844,7 +2859,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
         "atom table does not hold fixture"
     );
     for name in ["fixture", "missing"] {
-        program.atoms.put(name).unwrap();
+        Arc::get_mut(&mut program.atoms).unwrap().put(name).unwrap();
     }
     assert_eq!(
         program
@@ -3577,7 +3592,7 @@ fn shares_the_stored_term_of_an_ets_lookup() {
     // `db_copy_from_comp`, `:3729`). PBeam shares the term by owner
     // decision R3 of #450 (row "Message copy" of docs/erts-differences.md).
     let program = make_program(vec![], 0);
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
@@ -3613,7 +3628,7 @@ fn shares_the_stored_term_of_a_persistent_term() {
     // copy (`:380-388`). PBeam shares the term by owner decision R3 of #450
     // (row "Message copy" of docs/erts-differences.md).
     let program = make_program(vec![], 0);
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let key = Term::tuple(vec![Term::Integer(7)]);
@@ -3642,7 +3657,7 @@ fn rejects_a_bif_name_that_no_table_entry_holds() {
     // MFA error, which is the error that the run gave before the loader
     // resolved the identity of a BIF.
     let program = make_program(vec![], 0);
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     assert_eq!(
