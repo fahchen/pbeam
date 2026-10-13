@@ -116,13 +116,13 @@ Measured: the `tuple_size/1` added row moves by 0.9 ns, and the change is inside
 
 Pull request [#527](https://github.com/fahchen/pbeam/pull/527) (task [#514](https://github.com/fahchen/pbeam/issues/514)), merged as `d36f686`. It changes no runtime behavior, so it adds no column to the tables below.
 
-Measured with the pinned rustc 1.99.0: `Instruction` is 136 bytes, `Operand` is 40 bytes, `Term` is 40 bytes, and `BifId` is 4 bytes. Each arm of `Instruction` has the 136-byte stride of the largest arm, `BinaryGetBinary`, whose fields take 132 bytes. One iteration of a floor loop retires 3 instructions and reads 408 bytes of slots inside an 816-byte range. One iteration of an added-instruction loop retires 4 instructions and reads 544 bytes inside a 1088-byte range.
+Measured with the pinned rustc 1.99.0: `Instruction` is 136 bytes, `Operand` is 40 bytes, `Term` is 40 bytes, and `BifId` is 4 bytes. Each arm of `Instruction` has the 136-byte stride of the largest arm, `BinaryGetBinary`, whose fields take 132 bytes. One iteration of a floor loop retires 4 instructions and reads 544 bytes of slots inside an 816-byte range. One iteration of an added-instruction loop retires 5 instructions and reads 680 bytes inside a 1088-byte range. The loader writes `TestYield` at the function entry and the loop returns to that entry, so the four are the `TestYield`, the clause test, the subtraction, and the `call_only`; `records_the_decoded_loop_body` (`tests/runtime/interpreter.rs`) asserts those counts, and `FLOOR_LOOP_RECORDS` (`tests/integration/dispatch_baseline.rs`) is four.
 
 Measured: the run loop performs no byte-code decode on a visit, because the loader decodes the whole `Code` chunk one time. The only encoding-dependent work of a visit is the bounds check of the instruction index.
 
-Measured estimate of the memory-system difference of the two record strides, as a proxy: the proxy runs as its own step of the benchmark script, without the dispatch benchmark beside it, and each number is the minimum of five runs. At 300000 records of 136 bytes, which is 40800000 bytes and the estimated size of one Terra redraw instruction stream, the difference is 2.09 ns for each record, or 6.27 ns for each floor-loop iteration with 3 retired instructions. That number is 3.7 percent of the measured 167.4 ns of one `call_only` floor-loop iteration.
+Measured estimate of the memory-system difference of the two record strides, as a proxy: the proxy runs as its own step of the benchmark script, without the dispatch benchmark beside it, and each number is the minimum of five runs. At 300000 records of 136 bytes, which is 40800000 bytes and the estimated size of one Terra redraw instruction stream, the difference is 2.09 ns for each record, or 8.38 ns for each floor-loop iteration with 4 retired instructions. That number is 5.0 percent of the measured 167.4 ns of one `call_only` floor-loop iteration.
 
-The decision of the step follows the step 8 gate of the plan: a compact form must give at least 10 percent on the floor loop and must measure at most 32 bytes for each instruction. The corrected 3.7 percent estimate is below the gate, and the 816-byte range of the floor loop is below 1.3 percent of the smaller L1 data cache of the host, so the loop is taken to be cache-resident. The step therefore keeps the decoded form and skips step 8. The residency is an assumption, and the host has no hardware counter to confirm it.
+The decision of the step follows the step 8 gate of the plan: a compact form must give at least 10 percent on the floor loop and must measure at most 32 bytes for each instruction. The 5.0 percent estimate is below the gate, and the 816-byte range of the floor loop is below 1.3 percent of the smaller L1 data cache of the host, so the loop is taken to be cache-resident. The step therefore keeps the decoded form and skips step 8. The residency is an assumption, and the host has no hardware counter to confirm it.
 
 ## 1. The cumulative effect on the floor shapes
 
@@ -196,7 +196,7 @@ The local `call_only` floor loop at 200000 iterations is the reference. The step
 | Item | Step 0 `211a645` | Current `ea4dd13` |
 | --- | --- | --- |
 | The floor loop, for each iteration (the plan shape at the step 0 revision, and the local `call_only` shape at the current revision) | 505.6 ns | 167.4 ns |
-| The average for each instruction of the loop (computed: the floor-loop number divided by the 3 instructions that one iteration retires) | about 168.5 ns | about 55.8 ns |
+| The average for each instruction of the loop (computed: the floor-loop number divided by the 4 instructions that one iteration retires) | about 126.4 ns | about 41.9 ns |
 | The added delta of `gc_bif '+'` | 248.9 ns | 75.6 ns |
 | The added delta of the `bif` of `tuple_size/1` | 238.1 ns | 80.0 ns |
 | The added delta of the `bif` of `erlang:element/2` | 242.7 ns | 81.8 ns |
@@ -279,9 +279,9 @@ Measured at `c2f0341`, the three base runs and their minimum and spread:
 | `L`, ns for each floor-loop iteration | 162.929 | 161.754 | 162.723 | 161.754 | 1.175 |
 | `I`, ns for each added `gc_bif '+'` | 70.643 | 72.136 | 71.281 | 70.643 | 1.493 |
 
-One iteration of the floor loop retires the 3 instructions `test is_eq_exact`, `gc_bif '-'`, and `call_only`. The function enters after the entry label, and `label_index` gives the position after the fail label. Thus the table below gives the share of one iteration for each part, and the same number divided by those 3 instructions for one instruction of the loop.
+One iteration of the floor loop retires the 4 instructions `TestYield`, `test is_eq_exact`, `gc_bif '-'`, and `call_only`. The function enters at the entry label, the loader writes `TestYield` after it, and `label_index` gives the position after the fail label. Thus the table below gives the share of one iteration for each part, and the same number divided by those 4 instructions for one instruction of the loop.
 
-An ablation of a part that both `floor_loop` and `plus_loop` hold is not a reliable attribution of `I`, because the two loops do not retire the same instructions: `plus_loop` retires four against the three of `floor_loop`, so `V2` removes a further comparison of the module and `V3` removes operand checks and a register resize from the added `+`. A change of either kind can therefore move `I`. The measured `I` of `V2` to `V6` is 67.774 ns to 72.373 ns against the base 70.643 ns, which is inside the 1.493 ns spread of the base `I` plus the noise of one run, so these runs do not resolve the contributions to `I`. The column "one instruction" is a computed division of the measured iteration number and not a second measurement.
+An ablation of a part that both `floor_loop` and `plus_loop` hold is not a reliable attribution of `I`, because the two loops do not retire the same instructions: `plus_loop` retires five against the four of `floor_loop`, so `V2` removes a further comparison of the module and `V3` removes operand checks and a register resize from the added `+`. A change of either kind can therefore move `I`. The measured `I` of `V2` to `V6` is 67.774 ns to 72.373 ns against the base 70.643 ns, which is inside the 1.493 ns spread of the base `I` plus the noise of one run, so these runs do not resolve the contributions to `I`. The column "one instruction" is a computed division of the measured iteration number and not a second measurement.
 
 ### The method
 
@@ -315,19 +315,19 @@ Task [#549](https://github.com/fahchen/pbeam/issues/549) measured the base floor
 
 The number in each cell is measured, or the cell reads `not measured`. A part with no ablation stays `not measured` for the iteration and for the instruction, and the micro-measurement column gives the cost of one operation of that part.
 
-| Part | Sub-step | Method | ns for one floor-loop iteration | share of the iteration | ns for one instruction of the loop (computed: the iteration number divided by 3) | Run-to-run spread of the iteration number | Micro-measurement, ns for one operation |
+| Part | Sub-step | Method | ns for one floor-loop iteration | share of the iteration | ns for one instruction of the loop (computed: the iteration number divided by 4) | Run-to-run spread of the iteration number | Micro-measurement, ns for one operation |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1. The dispatch and the branch | The fetch of the record, the match of the opcode, and the branch | Micro-measurement; no ablation | not measured | not measured | not measured | not measured | `dispatch_fetch_and_match` 1.506 |
-| 2. The operand and register access | The operand read, the X write, the bound check, and the set check | Ablation `V3` | -2.499 | -1.5 percent | -0.833 | 2.000 | `read_operand_x` 2.014, `read_operand_literal` 1.654, `write_operand_x` 5.750 |
-| 3. The lookups | The module of the active frame and the cursor | Ablation `V2` | 9.182 | 5.7 percent | 3.061 | 4.474 | none |
-| 3. The lookups | The function lookup of a frame creation | Ablation `V4` | 1.762 | 1.1 percent | 0.587 | 1.700 | `function_at_label` 2.678, `frame_creation` 6.340 |
+| 2. The operand and register access | The operand read, the X write, the bound check, and the set check | Ablation `V3` | -2.499 | -1.5 percent | -0.625 | 2.000 | `read_operand_x` 2.014, `read_operand_literal` 1.654, `write_operand_x` 5.750 |
+| 3. The lookups | The module of the active frame and the cursor | Ablation `V2` | 9.182 | 5.7 percent | 2.296 | 4.474 | none |
+| 3. The lookups | The function lookup of a frame creation | Ablation `V4` | 1.762 | 1.1 percent | 0.441 | 1.700 | `function_at_label` 2.678, `frame_creation` 6.340 |
 | 3. The lookups | The label lookup of the `test` fail label | Present in the loop; no ablation removes it | not measured | not measured | not measured | not measured | `label_index` 2.418 |
 | 3. The lookups | The export lookup and the BIF identity | Not present in the run loop; the loader resolves them one time | not measured | not measured | not measured | not measured | none; the lookup cost is not measured |
 | 4. The state | The frame position | Inside `V2` and `V5`; not separated | not measured | not measured | not measured | not measured | none |
 | 4. The state | The reduction accounting and the switch-out check | Not present in the floor loop | not measured | not measured | not measured | not measured | `light_bif_switch` 0.426 |
 | 4. The state | The process state and `fcalls` | Not present in the floor loop | not measured | not measured | not measured | not measured | none |
-| 5. The BIF call overhead | The `Bif` call path of the loop's `gc_bif '-'`: the borrowed argument path, the identity dispatch, and the result match, with the cursor commit and the checked subtraction kept | Ablation `V5b`, isolated | 33.925 | 21.0 percent | 11.308 | 0.784 | `read_bif_arguments` 20.255; `bif_slice_minus` 5.815, which is the dispatch of the resolved `BifId` plus the subtraction and not a lookup |
-| 6. The term work | The comparison pair stack of `Term::eq` | Ablation `V6` | 13.257 | 8.2 percent | 4.419 | 6.893 | `term_eq_integer` 21.522 |
+| 5. The BIF call overhead | The `Bif` call path of the loop's `gc_bif '-'`: the borrowed argument path, the identity dispatch, and the result match, with the cursor commit and the checked subtraction kept | Ablation `V5b`, isolated | 33.925 | 21.0 percent | 8.481 | 0.784 | `read_bif_arguments` 20.255; `bif_slice_minus` 5.815, which is the dispatch of the resolved `BifId` plus the subtraction and not a lookup |
+| 6. The term work | The comparison pair stack of `Term::eq` | Ablation `V6` | 13.257 | 8.2 percent | 3.314 | 6.893 | `term_eq_integer` 21.522 |
 | 6. The term work | The `Arc` clone and drop | Not present in the floor loop | not measured | not measured | not measured | not measured | `term_clone_drop_shared_tuple` 9.610, `term_clone_drop_immediate` 3.472 |
 
 The measured rows sum to 34.5 percent of one iteration: 21.0 percent for the `V5b` row, 8.2 percent for the comparison pair stack, 5.7 percent for the module of the active frame and the cursor, 1.1 percent for the function lookup, and -1.5 percent for the operand and register access. The combined variant `V5` gives 34.606 ns, or 21.4 percent, as an upper bound that also holds the cursor commit and the arithmetic check; the two edits change the number by 0.681 ns, which is inside the 0.784 ns spread of `V5b`. The rest of one iteration is the part with no ablation, the label lookup, the frame position, the body of the `test` and of the `call_only` after the ablations, and the arithmetic of the `gc_bif '-'`. Those parts are not measured, so the sum of the table is not the cost of one iteration.
