@@ -1,6 +1,8 @@
 use std::{hint::black_box, rc::Rc, sync::Arc, time::Instant};
 
-use super::{Child, Direction, HAMT_MAX_LEVEL, Hamt, Map, Node, Repr, encode_path, map_hash};
+use super::{
+    Child, Direction, HAMT_MAX_LEVEL, Hamt, Insert, Map, Node, Repr, encode_path, map_hash,
+};
 use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom};
 
 fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
@@ -357,24 +359,6 @@ fn puts_atom_keys_in_a_hashmap_and_rejects_large_integers() {
     assert_eq!(map.len(), 32);
 }
 
-#[test]
-fn changes_the_value_of_an_existing_key_in_place() {
-    let mut flat = integers([1, 2]);
-    *flat.get_mut(&Term::Integer(2)).unwrap() = Term::Integer(0);
-    assert_eq!(flat.get(&Term::Integer(2)), Some(&Term::Integer(0)));
-    assert!(flat.get_mut(&Term::Integer(3)).is_none());
-    // Each root slot of 1..64 is used, so a key can be in a node below the root.
-    let mut hash = integers(1..=64);
-    for key in 1..=64 {
-        *hash.get_mut(&Term::Integer(key)).unwrap() = Term::Integer(-key);
-    }
-    assert!((1..=64).all(|key| hash.get(&Term::Integer(key)) == Some(&Term::Integer(-key))));
-    assert!(hash.get_mut(&Term::Integer(65)).is_none());
-    assert!(integers(1..=33).get_mut(&Term::Integer(34)).is_none());
-    assert!(hash.get_mut(&Term::Integer(1 << 59)).is_none());
-    assert!(hash.get_mut(&Term::tuple(vec![])).is_none());
-}
-
 /// Return the map of a `Map` term.
 fn map_of(term: &Term) -> &Map {
     let Term::Map(map) = term else {
@@ -418,7 +402,10 @@ fn copies_a_shared_form_before_a_change() {
             assert_eq!(Arc::as_ptr(copy.arc()), form);
         }
     };
-    change(|map| *map.get_mut(&Term::Integer(1)).unwrap() = atom("w"));
+    change(|map| {
+        map.update(vec![(Insert::Set, Term::Integer(1), atom("w"))])
+            .unwrap()
+    });
     change(|map| map.insert(Term::Integer(2), atom("w")).unwrap());
     change(|map| map.insert(Term::Integer(-1), atom("w")).unwrap());
 
@@ -475,7 +462,9 @@ fn copies_only_the_hashmap_nodes_on_the_path_of_a_change() {
     };
     change(500, 28, |map, key| map.insert(key, atom("w")).unwrap());
     change(2000, 29, |map, key| map.insert(key, atom("w")).unwrap());
-    change(500, 28, |map, key| *map.get_mut(&key).unwrap() = atom("w"));
+    change(500, 28, |map, key| {
+        map.update(vec![(Insert::Set, key, atom("w"))]).unwrap()
+    });
 }
 
 #[test]
@@ -672,7 +661,8 @@ fn keeps_keys_with_equal_hashes_in_a_collision_child() {
     map.insert(second.clone(), Term::Integer(2)).unwrap();
     map.insert(second.clone(), Term::Integer(3)).unwrap();
     assert_eq!(map.len(), 34);
-    *map.get_mut(&first).unwrap() = Term::Integer(4);
+    map.update(vec![(Insert::Set, first.clone(), Term::Integer(4))])
+        .unwrap();
     assert_eq!(map.get(&first), Some(&Term::Integer(4)));
     assert_eq!(map.get(&second), Some(&Term::Integer(3)));
 }
@@ -811,6 +801,23 @@ fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
     assert!(encode_path(elements.clone()).is_err());
     elements.extend([1, 1]);
     assert!(encode_path(elements).is_err());
+}
+
+#[test]
+fn counts_a_repeated_new_key_one_time_for_the_map_form() {
+    // A 31-key flatmap that adds one missing key twice stays a flatmap of
+    // 32 keys: the second add replaces the value of the one pair, as an
+    // ERTS insert does. It does not become a 33-key hashmap.
+    let mut map = integers(1..=31);
+    let added = Term::Integer(32);
+    map.update(vec![
+        (Insert::Add, added.clone(), atom("first")),
+        (Insert::Add, added.clone(), atom("second")),
+    ])
+    .unwrap();
+    assert_eq!(map.len(), 32);
+    assert!(!map.is_hashmap());
+    assert_eq!(map.get(&added), Some(&atom("second")));
 }
 
 #[test]
@@ -977,9 +984,9 @@ fn records_the_map_operation_cost() {
         },
     );
     // The update in place of `put_map_exact`: `Map::sort_pairs` sorts the one
-    // pair and `Map::get_mut` changes the value in the copy that the
+    // pair and `Map::update` changes the value in the copy that the
     // instruction read. This is the map work of `update_map_exact`
-    // (`src/runtime/interpreter.rs:2640`).
+    // (`src/runtime/interpreter.rs`).
     cost(
         "put_map_exact",
         MAP_COST_ROUNDS as f64,
@@ -990,9 +997,13 @@ fn records_the_map_operation_cost() {
                 let mut pairs = vec![(Term::Integer(1 + key as i64), Term::Integer(2))];
                 Map::sort_pairs(&mut pairs).unwrap();
                 let mut map = hashmap.clone();
-                for (key, value) in pairs {
-                    *map.get_mut(&key).unwrap() = value;
-                }
+                map.update(
+                    pairs
+                        .into_iter()
+                        .map(|(key, value)| (Insert::Set, key, value))
+                        .collect(),
+                )
+                .unwrap();
                 sum += black_box(map.len() as i64);
             }
             sum
@@ -1104,6 +1115,85 @@ fn prints_the_cost_of_a_map_payload() {
             })])
         },
     );
+}
+
+/// The number of keys of one put probe of [`prints_the_cost_of_a_map_put`].
+const PUT_COST_SIZES: [i64; 4] = [1, 10, 100, 1000];
+
+/// The number of rounds of one timed run of a put probe.
+const PUT_COST_ROUNDS: usize = if cfg!(debug_assertions) { 20 } else { 200 };
+
+/// Return the maps of one put probe: one map for each round, and each map
+/// holds the key of the probe. The maps are built once, before the timer.
+fn put_maps(pairs: &[(Term, Term)]) -> Vec<Map> {
+    (0..PUT_COST_ROUNDS)
+        .map(|_| Map::from_pairs(pairs.to_vec()).expect("the probe keys are valid"))
+        .collect()
+}
+
+/// Print the cost of one map put of `body`, in nanosecond for each call, as
+/// the minimum of [`MAP_COST_RUNS`] timed runs over the same maps. `body`
+/// returns the number of keys of its map, so the compiler cannot remove the
+/// work that the timer measures.
+///
+/// Both paths replace the value of a key that every map already holds, so
+/// the timer compares one operation with the same operation. The maps are
+/// built before the timer, and the allocation of the maps stays out of it.
+fn put_cost(name: &str, pairs: &[(Term, Term)], body: impl Fn(&mut Map) -> i64) -> f64 {
+    let mut maps = put_maps(pairs);
+    let mut best = f64::MAX;
+    for _ in 0..MAP_COST_RUNS {
+        let start = Instant::now();
+        let sum: i64 = maps.iter_mut().map(|map| black_box(body(map))).sum();
+        let elapsed = start.elapsed().as_nanos() as f64;
+        black_box(&mut maps);
+        black_box(sum);
+        best = best.min(elapsed / PUT_COST_ROUNDS as f64);
+    }
+    println!("{name}: {best:.2} ns for each call");
+    best
+}
+
+/// Record the cost of a same-register map put on the owned path and on the
+/// retained-version path, on a map of 1, 10, 100, and 1000 keys. This is
+/// the measurement of the same-register map-take task of
+/// `docs/term-performance-design-codex-v2.md`.
+///
+/// The owned path holds the map in the slot, so the map of the change has
+/// one owner and `Map::update` changes the form in place. The
+/// retained-version path changes a clone, so the old map keeps the form and
+/// the change copies the nodes on the path of the key (`Arc::make_mut`).
+/// Each number is the minimum of [`MAP_COST_RUNS`] runs, in nanosecond for
+/// each call.
+#[test]
+fn prints_the_cost_of_a_map_put() {
+    println!(
+        "map put cost: minimum of {MAP_COST_RUNS} runs of {PUT_COST_ROUNDS} rounds, in nanosecond for each call"
+    );
+    for keys in PUT_COST_SIZES {
+        // Each key is its own value, and the key of the probe is the last
+        // key, so both paths replace the value of a key that the map holds.
+        let pairs: Vec<(Term, Term)> = (1..=keys)
+            .map(|key| (Term::Integer(key), Term::Integer(key)))
+            .collect();
+        let probe = Term::Integer(keys);
+        // The owned path: the map has one owner, so `Map::update` replaces
+        // the value in the form of the map.
+        put_cost(&format!("put_owned_{keys}"), &pairs, |map| {
+            map.update(vec![(Insert::Add, probe.clone(), Term::Integer(9))])
+                .expect("the probe key is valid");
+            map.len() as i64
+        });
+        // The retained-version path: `Map::clone` shares the form with the
+        // old map, so the change copies the nodes on the path of the key
+        // and the old map keeps its pairs.
+        put_cost(&format!("put_retained_{keys}"), &pairs, |map| {
+            let mut copy = map.clone();
+            copy.update(vec![(Insert::Add, probe.clone(), Term::Integer(9))])
+                .expect("the probe key is valid");
+            copy.len() as i64
+        });
+    }
 }
 
 #[test]

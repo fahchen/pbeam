@@ -22,7 +22,7 @@ pub(crate) use hash::internal_hash;
 use list::{Cons, ConsRef};
 pub(crate) use live_bytes::LiveBytes;
 pub use map::Map;
-pub(crate) use map::{Direction, from_list_units};
+pub(crate) use map::{Direction, Insert, from_list_units};
 pub use match_context::MatchState;
 pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
@@ -377,6 +377,29 @@ impl Term {
             }
         }
         false
+    }
+
+    /// Return whether this term is a map and holds the only reference to
+    /// its form. Every other term reports `false`, because a change in place
+    /// is measured only for a map; a caller that changes another value takes
+    /// the copy path.
+    ///
+    /// A map count of one is a necessary condition for a change in place,
+    /// not a sufficient one: the nodes of the trie can still have another
+    /// owner, and the change copies them (`Arc::make_mut`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?);
+    /// assert!(map.unique());
+    /// let copy = map.clone();
+    /// assert!(!map.unique() || !copy.unique());
+    /// assert!(!Term::tuple(vec![Term::Integer(1)]).unique());
+    /// assert!(!Term::Integer(1).unique());
+    /// ```
+    pub(crate) fn unique(&self) -> bool {
+        matches!(self, Term::Map(map) if map.unique())
     }
 
     /// Move the nested terms of a list, tuple, map, or fun onto a work stack

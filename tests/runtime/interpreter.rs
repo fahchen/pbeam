@@ -2,8 +2,9 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
-    BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
-    read_bif_arguments, read_operand, write_operand,
+    BeamProgram, CodeTable, Outcome, Register, Scheduler, StackSlot, call_arguments,
+    function_at_label, read_bif_arguments, read_operand, read_ref, take_owned, write,
+    write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -1076,6 +1077,180 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
             .unwrap_err()
             .to_string()
             .contains("unsupported term order of two references")
+    );
+}
+
+#[test]
+fn keeps_a_destination_register_when_a_map_change_fails() {
+    // ERTS writes the destination register only after the update succeeds
+    // (`jit/arm/instr_map.cpp:687-716`), so a fail label finds the value
+    // that the destination held before the instruction. The destination is
+    // a different slot from the source, so no take removes it.
+    let run = |map: Operand, pairs: Vec<(Operand, Operand)>| {
+        make_program(
+            vec![
+                Instruction::Move(Operand::Value(Term::Integer(7)), Operand::X(1)),
+                Instruction::PutMapExact {
+                    fail_label: 3,
+                    map,
+                    destination: Operand::X(1),
+                    pairs,
+                },
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::Move(Operand::X(1), Operand::X(0)),
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .unwrap()
+        .term
+    };
+    // A literal source that is not a map.
+    assert_eq!(
+        run(atom("foo"), vec![(atom("output"), atom("cooked"))]),
+        Term::Integer(7)
+    );
+    // A map source in another register with a missing key.
+    let map = Operand::Value(Term::Map(
+        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(1))]).unwrap(),
+    ));
+    assert_eq!(
+        run(
+            map,
+            vec![(Operand::Value(Term::Integer(2)), atom("cooked"))],
+        ),
+        Term::Integer(7)
+    );
+}
+
+#[test]
+fn keeps_a_built_map_when_a_same_register_change_fails() {
+    // A map that the run built has one owner, so the take removes it. A
+    // `put_map_assoc` on a literal map builds a map that no literal holds,
+    // and the failing `put_map_exact` then takes that map, puts it back, and
+    // jumps to its fail label.
+    let source = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(1))]).unwrap());
+    let build = |source: Term| {
+        vec![
+            Instruction::Move(Operand::Value(source), Operand::X(0)),
+            Instruction::PutMapAssoc {
+                map: Operand::X(0),
+                destination: Operand::X(0),
+                pairs: vec![(
+                    Operand::Value(Term::Integer(3)),
+                    Operand::Value(Term::Integer(3)),
+                )],
+            },
+        ]
+    };
+    let exact = |fail_label, pairs| {
+        let mut body = build(source.clone());
+        body.push(Instruction::PutMapExact {
+            fail_label,
+            map: Operand::X(0),
+            destination: Operand::X(0),
+            pairs,
+        });
+        body.push(Instruction::Return);
+        body.push(Instruction::Label(3));
+        body.push(Instruction::Return);
+        make_program(body, 0).execute("fixture", "main", &[])
+    };
+    // A missing key jumps to the fail label, which returns the register.
+    assert_eq!(
+        exact(3, vec![(Operand::Value(Term::Integer(2)), atom("cooked"))])
+            .unwrap()
+            .term,
+        Term::Map(
+            Map::from_pairs(vec![
+                (Term::Integer(1), Term::Integer(1)),
+                (Term::Integer(3), Term::Integer(3)),
+            ])
+            .unwrap()
+        )
+    );
+    // Two references have no PBeam order, so the change fails with a runtime
+    // error after the take.
+    let error = make_program(
+        {
+            let mut body = build(source);
+            body.push(Instruction::PutMapExact {
+                fail_label: 0,
+                map: Operand::X(0),
+                destination: Operand::X(0),
+                pairs: vec![
+                    (
+                        Operand::Value(Term::Reference(crate::Reference(1))),
+                        atom("a"),
+                    ),
+                    (
+                        Operand::Value(Term::Reference(crate::Reference(2))),
+                        atom("b"),
+                    ),
+                ],
+            });
+            body
+        },
+        0,
+    )
+    .execute("fixture", "main", &[]);
+    assert!(
+        error
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported term order of two references")
+    );
+}
+
+#[test]
+fn keeps_a_key_or_value_in_the_destination_slot() {
+    // The key and the value operands name the destination register, whose
+    // value the instruction overwrites. ERTS reads both before the write, so
+    // the result uses the terms that the register held before.
+    let run = |held: Term, pairs: Vec<(Operand, Operand)>| {
+        make_program(
+            vec![
+                Instruction::Move(
+                    Operand::Value(Term::Map(
+                        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(0))]).unwrap(),
+                    )),
+                    Operand::X(0),
+                ),
+                Instruction::Move(Operand::Value(held), Operand::X(2)),
+                Instruction::PutMapExact {
+                    fail_label: 0,
+                    map: Operand::X(0),
+                    destination: Operand::X(2),
+                    pairs,
+                },
+                Instruction::Move(Operand::X(2), Operand::X(0)),
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .unwrap()
+        .term
+    };
+    let expected =
+        || Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(9))]).unwrap());
+    // The key is the term that the destination register held.
+    assert_eq!(
+        run(
+            Term::Integer(1),
+            vec![(Operand::X(2), Operand::Value(Term::Integer(9)))],
+        ),
+        expected()
+    );
+    // The value is the term that the destination register held.
+    assert_eq!(
+        run(
+            Term::Integer(9),
+            vec![(Operand::Value(Term::Integer(1)), Operand::X(2))],
+        ),
+        expected()
     );
 }
 
@@ -3992,4 +4167,60 @@ fn records_the_decoded_loop_body() {
             count * std::mem::size_of::<Instruction>(),
         );
     }
+}
+
+#[test]
+fn runs_a_handler_after_a_put_map_exact_badmap() {
+    // The map operand is a literal that is not a map, and y0 is a live catch
+    // tag. ERTS raises `{badmap, Map}` and the process continues at the tag
+    // (`beam_common.c:2224-2235`, `handle_error`). The fixture reaches the
+    // raise with a catch tag, so the process runs its handler.
+    let program = make_program(
+        vec![
+            Instruction::Allocate { stack_size: 1 },
+            Instruction::Catch {
+                register: 0,
+                label: 7,
+            },
+            Instruction::PutMapExact {
+                fail_label: 0,
+                map: atom("foo"),
+                destination: Operand::X(0),
+                pairs: vec![(atom("output"), atom("cooked"))],
+            },
+            Instruction::Return,
+            Instruction::Label(7),
+            Instruction::Move(atom("caught"), Operand::X(0)),
+            Instruction::Return,
+        ],
+        0,
+    );
+    assert_eq!(
+        program.execute("fixture", "main", &[]).unwrap().term,
+        test_atom("caught")
+    );
+}
+
+#[test]
+fn gives_up_the_map_of_a_y_register_with_one_owner() {
+    // A `put_map_exact` of a Y source and a Y destination is a valid form of
+    // the compiler. The take gives up the map only when the process owns
+    // the only reference to it, and leaves a shared map in its slot.
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    process.frames.last_mut().unwrap().stack = vec![StackSlot::Term(Term::nil())];
+    write(&mut process, &Operand::Y(0), Term::Map(Map::new())).unwrap();
+    assert!(matches!(
+        take_owned(&mut process, Register::Y(0)),
+        Some(Term::Map(_))
+    ));
+    assert!(take_owned(&mut process, Register::Y(0)).is_none());
+    // A shared map keeps its slot.
+    write(&mut process, &Operand::Y(0), Term::Map(Map::new())).unwrap();
+    let held = read_ref(&process, &Operand::Y(0)).unwrap().clone();
+    assert!(take_owned(&mut process, Register::Y(0)).is_none());
+    assert!(matches!(
+        read_ref(&process, &Operand::Y(0)),
+        Ok(Term::Map(_))
+    ));
+    drop(held);
 }
