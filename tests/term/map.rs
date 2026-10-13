@@ -1105,3 +1105,33 @@ fn prints_the_cost_of_a_map_payload() {
         },
     );
 }
+
+#[test]
+fn reports_the_bytes_of_the_form_and_the_nodes() {
+    let flat = integers([1, 2]);
+    assert!(flat.allocated_bytes() > 0);
+    let hash = integers(0..40);
+    assert!(hash.allocated_bytes() > flat.allocated_bytes());
+    assert!(Node::empty().allocated_bytes() >= std::mem::size_of::<Node>());
+}
+
+#[test]
+fn counts_a_collision_child_in_the_walk() {
+    let key = |element: i64| Term::list_from(vec![Term::Integer(element)]);
+    let child = Node::split(
+        HAMT_MAX_LEVEL,
+        (0x5, key(2), Term::Integer(2)),
+        (0x5, key(1), Term::Integer(1)),
+    );
+    let root = Node {
+        bitmap: 1 << 5,
+        children: vec![child],
+    };
+    let hamt = Hamt { root, size: 2 };
+    let map = Map {
+        repr: Some(Arc::new(Repr::Hash(hamt))),
+    };
+    let mut live = crate::term::LiveBytes::new();
+    live.term(&Term::Map(map));
+    assert!(live.bytes() > 0);
+}

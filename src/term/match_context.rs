@@ -112,6 +112,18 @@ impl MatchState {
         }
     }
 
+    /// Return the binary of the match context, for the live-byte walk.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let context = MatchState::new(Binary::from(&[1, 2][..]));
+    /// assert_eq!(context.binary().to_vec(), vec![1, 2]);
+    /// ```
+    pub(super) fn binary(&self) -> &Binary {
+        &self.bytes
+    }
+
     /// Return the atomic state: the bit position and the flag of a known
     /// position.
     ///

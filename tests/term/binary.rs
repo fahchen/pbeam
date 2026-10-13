@@ -211,3 +211,14 @@ fn takes_the_bytes_of_the_last_holder_with_no_copy() {
     let source = Binary::from(&[0xC3]);
     assert_eq!(source.bits(4, 8).take_bytes(), vec![0b0011_0000]);
 }
+
+#[test]
+fn reports_the_bytes_of_the_backing_and_the_packed_array() {
+    let bytes = Binary::from(b"abcd".to_vec());
+    assert!(bytes.allocated_bytes() >= 4);
+    let packed = bytes.bits(4, 12);
+    assert_eq!(
+        packed.allocated_bytes(),
+        bytes.allocated_bytes() + packed.packed().unwrap().capacity()
+    );
+}

@@ -157,3 +157,17 @@ fn prints_the_cost_of_a_fun_payload() {
         || Fun::new(lambda.clone(), free.clone()),
     );
 }
+
+#[test]
+fn reports_the_bytes_of_the_thing_and_the_free_variables() {
+    let plain = fun(vec![]);
+    let Term::Fun(plain) = &plain else {
+        unreachable!()
+    };
+    assert!(plain.allocated_bytes() >= std::mem::size_of::<FunThing>());
+    let with_free = fun(vec![Term::Integer(1)]);
+    let Term::Fun(with_free) = &with_free else {
+        unreachable!()
+    };
+    assert!(with_free.allocated_bytes() > plain.allocated_bytes());
+}

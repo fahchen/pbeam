@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use super::{MONOTONIC_END_TICKS, Receiver, Timer, Timers};
-use crate::term::{ProcessId, Reference, test_atom};
+use crate::term::{ProcessId, Reference, Term, test_atom};
 
 fn bif(reference: u64, receiver: Receiver) -> Timer {
     Timer::Bif {
@@ -104,4 +104,20 @@ fn reads_the_run_clock_from_one_second() {
     let first = timers.now();
     assert!(first >= 1_000_000_000);
     assert!(timers.now() >= first);
+}
+
+#[test]
+fn counts_the_message_of_an_active_bif_timer() {
+    let mut timers = Timers::new();
+    timers.start(
+        1100,
+        Timer::Bif {
+            reference: Reference(1),
+            receiver: Receiver::Process(ProcessId(0)),
+            message: Term::tuple(vec![Term::Integer(1)]),
+        },
+    );
+    let mut live = crate::term::LiveBytes::new();
+    timers.account_terms(&mut live);
+    assert!(live.bytes() > 0);
 }

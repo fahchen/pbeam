@@ -410,6 +410,10 @@ name = "subtract"
 path = "tests/integration/subtract.rs"
 
 [[test]]
+name = "term_live_bytes"
+path = "tests/integration/term_live_bytes.rs"
+
+[[test]]
 name = "time"
 path = "tests/integration/time.rs"
 
