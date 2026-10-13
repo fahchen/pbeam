@@ -279,7 +279,7 @@ Measured at `c2f0341`, the three base runs and their minimum and spread:
 | `L`, ns for each floor-loop iteration | 162.929 | 161.754 | 162.723 | 161.754 | 1.175 |
 | `I`, ns for each added `gc_bif '+'` | 70.643 | 72.136 | 71.281 | 70.643 | 1.493 |
 
-One iteration of the floor loop retires the 3 instructions `test is_eq_exact`, `gc_bif '-'`, and `call_only`. The function enters after the entry label, and `label_index` resumes after the fail label. Thus the table below gives the share of one iteration for each part, and the same number divided by those 3 instructions for one instruction of the loop.
+One iteration of the floor loop retires the 3 instructions `test is_eq_exact`, `gc_bif '-'`, and `call_only`. The function enters after the entry label, and `label_index` gives the position after the fail label. Thus the table below gives the share of one iteration for each part, and the same number divided by those 3 instructions for one instruction of the loop.
 
 The ablation of a part that both `floor_loop` and `plus_loop` hold cancels in `I`, because it lowers both numbers by the same work. The measured `I` of `V2` to `V6` is 67.774 ns to 72.373 ns against the base 70.643 ns, and every number is inside the 1.493 ns spread of the base `I` plus the noise of one run. The ablation method therefore cannot attribute `I`, and the column "one instruction" is a computed division of the measured iteration number and not a second measurement.
 
@@ -289,7 +289,7 @@ The main method is an ablation. A scratch build of `src/runtime/interpreter.rs` 
 
 A micro-measurement covers a part that an ablation cannot separate. The micro-measurement is `prints_the_cost_of_every_instruction_part` in `tests/runtime/interpreter/dispatch_attribution_costs.rs`, which reads the private helpers beside the interpreter. Each micro number is the minimum of nine timed runs of 100000 operations, in nanosecond for one operation. The thirteen numbers below come from the three base runs; each number is the minimum of the three runs, and the spread of the three runs is at most 0.421 ns.
 
-| Variant | Committed patch | Scratch edit | Part |
+| Variant | Scratch patch | Scratch edit | Part |
 | --- | --- | --- | --- |
 | base | none | none | The reference points `L` and `I` |
 | `V2` | `V2-cursor-compare.patch` | Remove the per-iteration compare `current_frame(process).module_id != cursor.module.id` (`src/runtime/interpreter.rs:603`), because the floor loop keeps one module. | The module of the active frame and the cursor |
