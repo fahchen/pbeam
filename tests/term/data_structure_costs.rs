@@ -91,7 +91,7 @@ fn count_one() {
 /// ```rust,ignore
 /// assert!(allocations() < usize::MAX);
 /// ```
-fn allocations() -> usize {
+pub(super) fn allocations() -> usize {
     ALLOCATIONS.with(Cell::get)
 }
 

@@ -26,7 +26,7 @@
 
 use std::{hint::black_box, rc::Rc, sync::Arc, time::Instant};
 
-use super::{Atom, Fun, Lambda, Map, Term, list::Cons};
+use super::{Atom, Binary, Fun, Lambda, Map, Term, list::Cons};
 
 /// The number of timed runs of one operation. The report gives the minimum
 /// of the runs, as the design measurement does.
@@ -52,6 +52,26 @@ pub(super) const LARGE_COPY_OPERATIONS: usize = 200;
 /// each operation.
 pub(super) fn report(name: &str, ns: f64) {
     println!("TERM-COST {name} {ns:.3} ns");
+}
+
+/// Print one allocation line: the name of the operation and the number of
+/// allocations of one call.
+fn report_allocations(name: &str, count: usize) {
+    println!("TERM-ALLOC {name} {count}");
+}
+
+/// Measure one read of the size of a binary through its view descriptor, and
+/// print the line. The read follows the pointer of the handle and then reads
+/// the fields of the view that the size needs, so the line holds the
+/// dependent load that the boxed descriptor adds to each read of a field of
+/// the view.
+fn read_binary_view(name: &str, bytes: &Binary) {
+    let ns = measure(RUNS, HANDLE_OPERATIONS, || {
+        for _ in 0..HANDLE_OPERATIONS {
+            black_box(bytes.len());
+        }
+    });
+    report(name, ns);
 }
 
 /// Return the nanoseconds for each operation of `body`, as the minimum of
@@ -216,4 +236,67 @@ fn prints_the_cost_of_a_term_operation() {
     // The shapes stay alive to the end of the test, so the compiler keeps
     // the storage that the measurement shares.
     black_box((&tuple, &binary, &cons, &map, &tuple_with_map, &fun, &cell));
+}
+
+#[test]
+fn prints_the_cost_of_a_binary_view() {
+    // The boxed descriptor of task [#571] holds one `Arc` to the view for
+    // each binary handle. The handle then pays one allocation for the view,
+    // and each read of a field of the view follows one dependent load. The
+    // allocation count is exact, so a change of the representation fails
+    // the test. The count uses the counting allocator of
+    // `tests/term/data_structure_costs.rs`, which counts the allocations of
+    // the current thread only.
+    //
+    // [#571]: https://github.com/fahchen/pbeam/issues/571
+    use super::data_structure_costs::allocations;
+
+    let source = vec![7u8; 102_400];
+    let before = allocations();
+    let binary = Binary::from(source);
+    let built = allocations() - before;
+    report_allocations("build_binary_102400", built);
+    assert_eq!(
+        built, 2,
+        "`Binary::from` allocates the byte array and the view descriptor"
+    );
+    assert_eq!(
+        binary.view_bytes(),
+        4 * std::mem::size_of::<usize>(),
+        "the view descriptor is four words"
+    );
+
+    let before = allocations();
+    let copy = binary.clone();
+    let copied = allocations() - before;
+    report_allocations("clone_binary_102400", copied);
+    assert_eq!(copied, 0, "a copy of the handle shares the view");
+    assert!(binary.same_view(&copy), "a copy shares the same view");
+    assert!(
+        !binary.same_view(&Binary::from(b"abcd".to_vec())),
+        "a new binary owns another view"
+    );
+
+    // A byte-aligned sub-binary adds one descriptor and shares the array.
+    let before = allocations();
+    let part = binary.bits(0, 16);
+    let sub = allocations() - before;
+    report_allocations("sub_binary_102400", sub);
+    assert_eq!(sub, 1, "a byte-aligned sub-binary adds one descriptor");
+    assert!(binary.same_bytes(&part), "a sub-binary shares the array");
+
+    // An unaligned sub-binary packs its bits: the vector of the bits and the
+    // `Arc` header of the packed array, beside the descriptor.
+    let before = allocations();
+    let packed = binary.bits(4, 12);
+    let pack = allocations() - before;
+    report_allocations("packed_sub_binary_102400", pack);
+    assert_eq!(
+        pack, 3,
+        "an unaligned sub-binary adds one descriptor and one packed array"
+    );
+    assert!(packed.packed_backing().is_some());
+
+    read_binary_view("read_binary_view_102400", &binary);
+    black_box((&binary, &copy, &part, &packed));
 }

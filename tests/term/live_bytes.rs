@@ -100,9 +100,9 @@ fn counts_a_binary_backing_and_a_packed_view() {
         bytes(&twice),
         2 * size_of::<Term>() + bytes(&Term::Binary(packed.clone()))
     );
-    // A second packed view of one backing array adds only its own packed
-    // array: the backing array of the view that the walk reaches first is
-    // already counted.
+    // A second packed view of one backing array adds its own view
+    // descriptor and its own packed array: the backing array of the view
+    // that the walk reaches first is already counted.
     let other = source.bits(12, 20);
     let backing = source.backing().capacity();
     let packed_bytes = packed.packed_backing().unwrap().capacity();
@@ -110,7 +110,7 @@ fn counts_a_binary_backing_and_a_packed_view() {
     let views = Term::tuple(vec![Term::Binary(packed), Term::Binary(other)]);
     assert_eq!(
         bytes(&views),
-        2 * size_of::<Term>() + backing + packed_bytes + other_bytes
+        2 * size_of::<Term>() + 2 * source.view_bytes() + backing + packed_bytes + other_bytes
     );
 }
 

@@ -48,6 +48,9 @@ enum Shared {
     Cons(Arc<Cons>),
     Map(Arc<Repr>),
     Node(Arc<Node>),
+    /// One binary view descriptor, the allocation behind a [`Binary`]
+    /// handle. Two handles that share one descriptor count it once.
+    BinaryView(Binary),
     Binary(Arc<Vec<u8>>),
     Fun(Arc<FunThing>),
     Match(Arc<MatchState>),
@@ -88,6 +91,7 @@ impl Shared {
             (Shared::Cons(left), Shared::Cons(right)) => Arc::ptr_eq(left, right),
             (Shared::Map(left), Shared::Map(right)) => Arc::ptr_eq(left, right),
             (Shared::Node(left), Shared::Node(right)) => Arc::ptr_eq(left, right),
+            (Shared::BinaryView(left), Shared::BinaryView(right)) => left.same_view(right),
             (Shared::Binary(left), Shared::Binary(right)) => Arc::ptr_eq(left, right),
             (Shared::Fun(left), Shared::Fun(right)) => Arc::ptr_eq(left, right),
             (Shared::Match(left), Shared::Match(right)) => Arc::ptr_eq(left, right),
@@ -254,13 +258,18 @@ impl LiveBytes {
         }
     }
 
-    /// Count the backing array of `binary` and the packed array of a view.
-    /// The first visit of a backing array counts both arrays of the binary
-    /// through [`Binary::allocated_bytes`] and marks each array as visited.
-    /// A later visit of the same backing array counts a packed array that
-    /// the walk has not visited yet. A binary holds no term, so the walk
-    /// does not recurse here.
+    /// Count the view descriptor of `binary`, its backing array, and the
+    /// packed array of a view. The first visit of a descriptor counts the
+    /// bytes behind the handle through [`Binary::view_bytes`]. The first
+    /// visit of a backing array counts both arrays of the binary through
+    /// [`Binary::allocated_bytes`] and marks each array as visited. A later
+    /// visit of the same backing array counts a packed array that the walk
+    /// has not visited yet. A binary holds no term, so the walk does not
+    /// recurse here.
     fn binary(&mut self, binary: &Binary) {
+        if self.fresh(Shared::BinaryView(binary.clone())) {
+            self.bytes += binary.view_bytes();
+        }
         if self.fresh(Shared::Binary(Arc::clone(binary.backing()))) {
             self.bytes += binary.allocated_bytes();
             if let Some(packed) = binary.packed_backing() {
