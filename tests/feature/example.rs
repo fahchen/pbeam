@@ -863,7 +863,9 @@ fn child_setup_failure(bytes: &[u8]) -> Option<String> {
 /// post-processing at the write of the result is thus a race: the restored
 /// mode gives `\r\n` and the raw mode gives `\n`, and the load of the host
 /// changes the winner. With `OPOST` off, both modes write each `\n`
-/// unchanged, so the ERTS run and the PBeam run write the same result.
+/// unchanged, so the ERTS run and the PBeam run write the same result. The
+/// host `stty` clears `OPOST` on the slave, because the standard library has
+/// no safe terminal API and this test adds no unsafe code.
 ///
 /// # Examples
 ///
@@ -874,17 +876,15 @@ fn child_setup_failure(bytes: &[u8]) -> Option<String> {
 fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::io::Error> {
     let (mut master, mut slave) = (-1, -1);
     // SAFETY: `openpty` writes two new fds to `master` and `slave`, and
-    // accepts a null name. `fcntl` changes only the fd flags. `tcgetattr`
-    // writes the mode of `slave` into `attributes`, and `tcsetattr` reads
-    // that mode back into `slave`; both take the open fd `slave`. Each
-    // `OwnedFd` takes one new fd.
+    // accepts a null name. `fcntl` changes only the fd flags. Each `OwnedFd`
+    // takes one new fd.
     let mut win = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    unsafe {
+    let (master, slave) = unsafe {
         let result = libc::openpty(
             &raw mut master,
             &raw mut slave,
@@ -898,20 +898,27 @@ fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::
         for fd in [master, slave] {
             assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
         }
-        let mut attributes = std::mem::zeroed::<libc::termios>();
-        assert_eq!(libc::tcgetattr(slave, &raw mut attributes), 0);
-        attributes.c_oflag &= !libc::OPOST;
-        assert_eq!(
-            libc::tcsetattr(slave, libc::TCSANOW, &raw const attributes),
-            0
-        );
         use std::os::fd::FromRawFd;
 
-        Ok((
+        (
             std::os::fd::OwnedFd::from_raw_fd(master),
             std::os::fd::OwnedFd::from_raw_fd(slave),
-        ))
+        )
+    };
+    // `stty` reads the mode of its standard input, the slave, and clears
+    // `OPOST` in that mode.
+    let status = Command::new("stty")
+        .arg("-opost")
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "the host did not clear OPOST on the pseudo-terminal: stty -opost {status}"
+        )));
     }
+    Ok((master, slave))
 }
 
 #[test]
