@@ -3,7 +3,7 @@ use crate::{
     beam::{BeamModule, ModuleId},
     error::{BeamError, error},
     runtime::process::{Frame, InitialCall},
-    term::Reference,
+    term::{AtomTable, Reference},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -96,7 +96,7 @@ impl CodeTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let (module, function, arity) = code.initial_call_names(&process.initial_call)?;
+    /// let (module, function, arity) = code.initial_call_names(&atoms, &process.initial_call)?;
     /// assert_eq!((module.as_str(), arity), ("erlang", 0));
     /// ```
     ///
@@ -106,6 +106,7 @@ impl CodeTable {
     /// invariant error.
     pub(in crate::runtime) fn initial_call_names(
         &self,
+        atoms: &AtomTable,
         initial_call: &InitialCall,
     ) -> Result<(String, String, usize), BeamError> {
         Ok(match initial_call {
@@ -125,7 +126,11 @@ impl CodeTable {
                 module,
                 function,
                 arity,
-            } => (module.name().to_owned(), function.name().to_owned(), *arity),
+            } => (
+                atoms.name_of(module).to_owned(),
+                atoms.name_of(function).to_owned(),
+                *arity,
+            ),
         })
     }
 

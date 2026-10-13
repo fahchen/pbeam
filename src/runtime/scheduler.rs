@@ -1033,7 +1033,7 @@ impl Scheduler {
                     self.forget_bif_timer(&receiver, reference);
                     let target = match receiver {
                         Receiver::Process(id) => Some(id),
-                        Receiver::Name(name) => self.whereis(name.name()),
+                        Receiver::Name(name) => self.whereis(self.atoms.name_of(&name)),
                     };
                     if let Some(target) = target {
                         self.deliver(target, message);
@@ -1422,6 +1422,35 @@ impl Scheduler {
         self.current_process
             .and_then(|id| self.processes.get_mut(&id))
             .expect("the scheduler has a current process")
+    }
+
+    /// Return the current process and the atom table of the run together.
+    /// A read of an atom name needs the table at the same time as the
+    /// process. The two borrows are of different fields, so they do not
+    /// conflict.
+    ///
+    /// # Panics
+    ///
+    /// Panic when the scheduler has no current process, as
+    /// [`Self::current_process_mut`] does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.schedule_next();
+    /// let (process, atoms) = scheduler.current_process_and_atoms();
+    /// assert_eq!(process.id, ProcessId(0));
+    /// assert_eq!(atoms.name(506), Some("ok"));
+    /// ```
+    pub(super) fn current_process_and_atoms(&mut self) -> (&mut ProcessState, &AtomTable) {
+        let id = self
+            .current_process
+            .expect("the scheduler has a current process");
+        let process = self
+            .processes
+            .get_mut(&id)
+            .expect("the scheduler has a current process");
+        (process, &self.atoms)
     }
 
     /// Return the module of the active frame of the current process from
@@ -1928,7 +1957,7 @@ impl Scheduler {
     ) -> Result<Result<(ProcessId, Option<Reference>), Denied>, BeamError> {
         let module = match &start {
             Start::Entry(frame) => self.code.module_by_id(frame.module_id)?.name.as_str(),
-            Start::Undefined { module, .. } => module.name(),
+            Start::Undefined { module, .. } => self.atoms.name_of(module),
         };
         let parent = &self.current_process().security;
         let boot = parent.is_boot();
@@ -2195,7 +2224,7 @@ impl Scheduler {
         let (kind, id, item) = match target {
             MonitorTarget::Process(id) => ("process", Some(id), Term::Pid(id)),
             MonitorTarget::ProcessName(name) => {
-                let id = self.whereis(name.name());
+                let id = self.whereis(self.atoms.name_of(&name));
                 ("process", id, named_item(&name))
             }
             MonitorTarget::PortName(name) => ("port", None, named_item(&name)),
@@ -2338,14 +2367,15 @@ impl Scheduler {
         let (Term::Atom(name), Term::Pid(id)) = (name, id) else {
             return false;
         };
+        let name_text = self.atoms.name_of(name);
         match self.processes.get_mut(id) {
             Some(process)
                 if name.index() != Atom::static_index("undefined")
                     && process.registered_name.is_none()
-                    && !self.names.contains_key(name.name()) =>
+                    && !self.names.contains_key(name_text) =>
             {
                 process.registered_name = Some(name.clone());
-                self.names.insert(name.name().to_owned(), *id);
+                self.names.insert(name_text.to_owned(), *id);
                 true
             }
             _ => false,
@@ -2369,7 +2399,7 @@ impl Scheduler {
         let Term::Atom(name) = name else {
             return false;
         };
-        let Some(id) = self.names.remove(name.name()) else {
+        let Some(id) = self.names.remove(self.atoms.name_of(name)) else {
             return false;
         };
         let process = self
@@ -2486,7 +2516,7 @@ impl Scheduler {
         // count (`erl_db.c:5044-5045`, `5118`; `erl_process.c:14360-14366`).
         let deleted = reds > 0 && {
             let left = self.current_process_mut().fcalls;
-            let rest = self.ets.delete_owned(id, left);
+            let rest = self.ets.delete_owned(&self.atoms, id, left);
             if let Some(rest) = rest {
                 self.current_process_mut().bump_reductions(left - rest);
             }
@@ -2509,7 +2539,7 @@ impl Scheduler {
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
         if let Some(name) = &process.registered_name {
-            self.names.remove(name.name());
+            self.names.remove(self.atoms.name_of(name));
         }
         self.delegations
             .release(std::mem::take(&mut process.security));

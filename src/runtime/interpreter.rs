@@ -644,8 +644,16 @@ impl BeamProgram {
                 // initial function of ERTS (`i_apply_only`,
                 // `erl_process.c:12616`). PBeam starts the process with no
                 // frame, so the handler enters as a body call of the first
-                // frame and its `return` ends the process.
-                self.undefined_function(scheduler, module.name(), function.name(), arity, false)?
+                // frame and its `return` ends the process. The names of the
+                // start MFA come from the run table.
+                let (module_name, function_name) = {
+                    let atoms = &scheduler.atoms;
+                    (
+                        atoms.name_of(&module).to_owned(),
+                        atoms.name_of(&function).to_owned(),
+                    )
+                };
+                self.undefined_function(scheduler, &module_name, &function_name, arity, false)?
             };
             if let Some(outcome) = outcome {
                 return Ok(outcome);
@@ -865,9 +873,7 @@ impl BeamProgram {
                         cursor.refresh(scheduler)?;
                         continue;
                     };
-                    if let Some(outcome) =
-                        self.call_mfa(scheduler, module.name(), name.name(), *arity, *tail)?
-                    {
+                    if let Some(outcome) = self.call_mfa(scheduler, module, name, *arity, *tail)? {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -1433,17 +1439,30 @@ impl BeamProgram {
                     fail_label,
                     destination,
                     segments,
-                } => match create_binary(process, segments)? {
-                    Ok(bytes) => write(process, destination, Term::binary(bytes))?,
-                    Err(_) if *fail_label != 0 => cursor.position = label_position(*fail_label)?,
-                    Err(failure) => {
-                        cursor.commit(process);
-                        if let Some(outcome) = raise_binary_failure(scheduler, module, failure)? {
-                            return Ok(outcome);
+                } => {
+                    let result = {
+                        let (process, atoms) = scheduler.current_process_and_atoms();
+                        create_binary(atoms, process, segments)?
+                    };
+                    match result {
+                        Ok(bytes) => {
+                            let process = scheduler.current_process_mut();
+                            write(process, destination, Term::binary(bytes))?;
                         }
-                        cursor.refresh(scheduler)?;
+                        Err(_) if *fail_label != 0 => {
+                            cursor.position = label_position(*fail_label)?;
+                        }
+                        Err(failure) => {
+                            let process = scheduler.current_process_mut();
+                            cursor.commit(process);
+                            if let Some(outcome) = raise_binary_failure(scheduler, module, failure)?
+                            {
+                                return Ok(outcome);
+                            }
+                            cursor.refresh(scheduler)?;
+                        }
                     }
-                },
+                }
                 // ERTS `fconv` converts a small integer, a bignum, or a float
                 // to a float register, and raises `badarith` for each other
                 // term (emu float_instrs.tab:38-52; JIT `emit_fconv` and
@@ -1927,25 +1946,57 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // `erlang:apply(erlang, self, [])` runs the `self/0` BIF.
-    /// let outcome = program.call_mfa(&mut scheduler, "erlang", "apply", 3, false)?;
+    /// let apply = scheduler.atoms.get("apply").unwrap();
+    /// let erlang = scheduler.atoms.get("erlang").unwrap();
+    /// let outcome = program.call_mfa(&mut scheduler, &erlang, &apply, 3, false)?;
     /// assert!(outcome.is_none());
     /// ```
     fn call_mfa(
         &self,
         scheduler: &mut Scheduler,
-        module: &str,
-        name: &str,
+        module: &Atom,
+        name: &Atom,
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        let resolved = resolve(module, name, arity);
-        if resolved.is_some() || is_pbeam_bif(module, name, arity) {
-            let process = scheduler.current_process_mut();
-            let arguments = call_arguments(&process.registers, arity)?;
-            let result = self.call_bif(scheduler, module, name, resolved, &arguments)?;
+        let resolved = {
+            let atoms = &scheduler.atoms;
+            resolve(atoms.name_of(module), atoms.name_of(name), arity)
+        };
+        let pbeam = {
+            let atoms = &scheduler.atoms;
+            is_pbeam_bif(atoms.name_of(module), atoms.name_of(name), arity)
+        };
+        if resolved.is_some() || pbeam {
+            let arguments = {
+                let process = scheduler.current_process_mut();
+                call_arguments(&process.registers, arity)?
+            };
+            let result = match resolved {
+                Some(id) => self.bif_slice(scheduler, id, &arguments)?,
+                None => {
+                    let (module_name, name) = {
+                        let atoms = &scheduler.atoms;
+                        (
+                            atoms.name_of(module).to_owned(),
+                            atoms.name_of(name).to_owned(),
+                        )
+                    };
+                    self.named_bif(scheduler, &module_name, &name, &arguments)?
+                }
+            };
             return self.finish_bif(scheduler, result, tail);
         }
-        self.call_export(scheduler, module, name, arity, tail)
+        // A name that PBeam does not resolve as a BIF reaches the export
+        // lookup. The name of the atom term comes from the run table.
+        let (module_name, name) = {
+            let atoms = &scheduler.atoms;
+            (
+                atoms.name_of(module).to_owned(),
+                atoms.name_of(name).to_owned(),
+            )
+        };
+        self.call_export(scheduler, &module_name, &name, arity, tail)
     }
 
     /// Call the export of `module:name/arity` with the arguments in the X
@@ -2124,40 +2175,50 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        let process = scheduler.current_process_mut();
-        let mut call = call_arguments(&process.registers, 3)?;
+        let mut call = {
+            let process = scheduler.current_process_mut();
+            call_arguments(&process.registers, 3)?
+        };
         let (module, name, arguments, proper) = loop {
             // Each wrong form raises the same `badarg`, so one pattern checks
             // the function, the module, and the list.
             let [Term::Atom(module), Term::Atom(name), list] = &mut call[..] else {
                 let badarg = Term::static_atom("badarg");
+                let process = scheduler.current_process_mut();
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
             let Some((arguments, proper)) = list.list_elements() else {
                 let badarg = Term::static_atom("badarg");
+                let process = scheduler.current_process_mut();
                 return Ok(raise(process, ExceptionClass::Error, badarg));
             };
-            if !proper
-                || (module.name(), name.name()) != ("erlang", "apply")
-                || arguments.len() != 3
-            {
+            let is_apply = {
+                let atoms = &scheduler.atoms;
+                (atoms.name_of(module), atoms.name_of(name)) == ("erlang", "apply")
+            };
+            if !proper || !is_apply || arguments.len() != 3 {
                 break (module.clone(), name.clone(), arguments, proper);
             }
             call = arguments;
         };
         if arguments.len() > APPLY_MAX_ARGUMENTS {
             let system_limit = Term::static_atom("system_limit");
+            let process = scheduler.current_process_mut();
             return Ok(raise(process, ExceptionClass::Error, system_limit));
         }
         if !proper {
             let badarg = Term::static_atom("badarg");
+            let process = scheduler.current_process_mut();
             return Ok(raise(process, ExceptionClass::Error, badarg));
         }
         let arity = arguments.len() as u32;
-        for (index, argument) in (0..).zip(arguments) {
-            write(process, &Operand::X(index), argument)?;
+        {
+            let process = scheduler.current_process_mut();
+            for (index, argument) in (0..).zip(arguments) {
+                write(process, &Operand::X(index), argument)?;
+            }
         }
-        self.call_mfa(scheduler, module.name(), name.name(), arity, tail)
+        self.call_mfa(scheduler, &module, &name, arity, tail)
     }
 
     /// Run `erlang:apply(Fun, Arguments)` with the arguments in `x0` and
@@ -2235,16 +2296,17 @@ impl BeamProgram {
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        let process = scheduler.current_process_mut();
         let (target, free) = match call {
             FunCall::Enter { target, free } => (target, free),
             FunCall::BadArity(fun) => {
+                let process = scheduler.current_process_mut();
                 let arguments = call_arguments(&process.registers, arity)?;
                 let call = Term::tuple(vec![fun, Term::list_from(arguments)]);
                 let reason = Term::tuple(vec![Term::static_atom("badarity"), call]);
                 return Ok(raise(process, ExceptionClass::Error, reason));
             }
             FunCall::BadFun(fun) => {
+                let process = scheduler.current_process_mut();
                 let reason = Term::tuple(vec![Term::static_atom("badfun"), fun]);
                 return Ok(raise(process, ExceptionClass::Error, reason));
             }
@@ -2254,22 +2316,29 @@ impl BeamProgram {
             Target::External {
                 module, function, ..
             } if tail
-                && (module.name(), function.name()) == ("erlang", "error")
+                && (
+                    scheduler.atoms.name_of(module),
+                    scheduler.atoms.name_of(function),
+                ) == ("erlang", "error")
                 && matches!(arity, 1 | 2) =>
             {
                 return self.tail_call_error(scheduler, arity);
             }
             Target::External {
                 module, function, ..
-            } => return self.call_mfa(scheduler, module.name(), function.name(), arity, tail),
+            } => return self.call_mfa(scheduler, module, function, arity, tail),
         };
         let total_arity = arity + free.len() as u32;
-        for (register, value) in (arity..).zip(free) {
-            write(process, &Operand::X(register), value)?;
+        {
+            let process = scheduler.current_process_mut();
+            for (register, value) in (arity..).zip(free) {
+                write(process, &Operand::X(register), value)?;
+            }
         }
-        let frame = scheduler
-            .code
-            .frame(lambda.module().name(), lambda.label(), total_arity)?;
+        let frame = {
+            let module = scheduler.atoms.name_of(lambda.module());
+            scheduler.code.frame(module, lambda.label(), total_arity)?
+        };
         enter_frame(scheduler.current_process_mut(), frame, tail);
         Ok(None)
     }
@@ -2303,11 +2372,15 @@ impl BeamProgram {
         let process = scheduler.current_process_mut();
         process.frames.pop();
         if !process.frames.is_empty() {
-            return self.call_mfa(scheduler, "erlang", "error", arity, false);
+            let module = Atom::from_static("erlang").expect("erlang is a static atom");
+            let function = Atom::from_static("error").expect("error is a static atom");
+            return self.call_mfa(scheduler, &module, &function, arity, false);
         }
         let reason = read(process, &Operand::X(0))?;
         let initial_call = process.initial_call.clone();
-        let (module, function, arity) = scheduler.code.initial_call_names(&initial_call)?;
+        let (module, function, arity) = scheduler
+            .code
+            .initial_call_names(&scheduler.atoms, &initial_call)?;
         let frame = Term::tuple(vec![
             Term::Atom(scheduler.atoms.put(&module)?),
             Term::Atom(scheduler.atoms.put(&function)?),
@@ -2563,9 +2636,10 @@ fn create_process(
     let export = if arguments.len() > APPLY_MAX_ARGUMENTS {
         None
     } else {
+        let atoms = &scheduler.atoms;
         scheduler
             .code
-            .export_frame(module.name(), function.name(), arity)?
+            .export_frame(atoms.name_of(module), atoms.name_of(function), arity)?
     };
     let start = match export {
         Some(frame) => Start::Entry(frame),
@@ -4040,6 +4114,7 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 /// runtime error, because PBeam has no bitstring term. A match context in
 /// a `binary` segment is a runtime invariant error.
 fn create_binary(
+    atoms: &AtomTable,
     process: &mut ProcessState,
     segments: &[BinarySegment],
 ) -> Result<Result<Vec<u8>, BinarySegmentFailure>, BeamError> {
@@ -4112,7 +4187,7 @@ fn create_binary(
             BinarySegment::Unsupported(kind) => {
                 return Err(error(format!(
                     "unsupported bs_create_bin segment {}",
-                    kind.name()
+                    atoms.name_of(kind)
                 )));
             }
         }

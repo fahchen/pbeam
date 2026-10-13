@@ -280,6 +280,30 @@ impl AtomTable {
             .map(Arc::as_ref)
     }
 
+    /// Return the name of `atom` from this table. Read it with
+    /// [`AtomTable::name`] at the index of the atom.
+    ///
+    /// An atom term holds an index of the table that owns it, so an index
+    /// that this table does not hold is a broken invariant and not a value.
+    ///
+    /// # Panics
+    ///
+    /// This function panics when this table does not hold the index of
+    /// `atom`. The message names the index.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = AtomTable::new();
+    /// let ok = table.get("ok").unwrap();
+    /// assert_eq!(table.name_of(&ok), "ok");
+    /// ```
+    pub(crate) fn name_of(&self, atom: &Atom) -> &str {
+        let index = atom.index();
+        self.name(index)
+            .unwrap_or_else(|| panic!("atom index {index} is outside the atom table"))
+    }
+
     /// Return the term of `source` with every atom of its source table
     /// replaced by the atom of the same name in this table. The walk reads
     /// each source atom through [`AtomTable::name`], so it also checks that
@@ -641,6 +665,21 @@ thread_local! {
 pub(crate) fn test_atom(name: &str) -> Term {
     let atom = TEST_ATOMS.with(|table| table.borrow_mut().put(name));
     Term::Atom(atom.expect("a test makes fewer atoms than ATOM_LIMIT"))
+}
+
+/// Return a copy of the atom table of the unit tests in this thread. A test
+/// that builds a program by hand uses it as the table of the run, so the
+/// atoms of [`test_atom`] keep their index in the run table.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = test_atom_table();
+/// assert_eq!(atoms.name(test_atom("ok").index()), Some("ok"));
+/// ```
+#[cfg(test)]
+pub(crate) fn test_atom_table() -> AtomTable {
+    TEST_ATOMS.with(|table| table.borrow().clone())
 }
 
 #[cfg(test)]

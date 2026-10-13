@@ -70,7 +70,7 @@ struct CompileOptions {
 /// assert!(parse_options(&Term::list_from(vec![Term::static_atom("global")])).is_none());
 /// assert!(parse_options(&Term::static_atom("foo")).is_none());
 /// ```
-fn parse_options(options: &Term) -> Option<CompileOptions> {
+fn parse_options(atoms: &AtomTable, options: &Term) -> Option<CompileOptions> {
     let options = options.proper_list()?;
     let mut parsed = CompileOptions::default();
     for option in options {
@@ -89,7 +89,7 @@ fn parse_options(options: &Term) -> Option<CompileOptions> {
                 [Term::Atom(key), Term::Atom(value)]
                     if key.index() == Atom::static_index("newline") =>
                 {
-                    parsed.newline = Some(lookup(&NEWLINES, value.name())?);
+                    parsed.newline = Some(lookup(&NEWLINES, atoms.name_of(value))?);
                 }
                 _ => return None,
             },
@@ -157,7 +157,7 @@ pub(super) fn compile(
     pattern: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(parsed) = parse_options(options) else {
+    let Some(parsed) = parse_options(&context.scheduler.atoms, options) else {
         return Ok(BifResult::badarg());
     };
     let unicode = parsed.compile & pcre2::UTF != 0;

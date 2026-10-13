@@ -457,3 +457,16 @@ fn is_one_of_compares_the_index_with_each_static_name() {
 fn static_index_panics_for_a_name_that_is_not_a_static_atom() {
     Atom::static_index("pbeam_zeta");
 }
+
+#[test]
+#[should_panic(expected = "atom index 1150 is outside the atom table")]
+fn rejects_the_read_of_an_atom_index_outside_the_table() {
+    // An atom term holds an index of the table that owns it. An index that
+    // the table does not hold is a broken invariant, so the read fails.
+    let table = AtomTable::new();
+    let atom = Atom {
+        index: 1150,
+        name: Arc::from("outside"),
+    };
+    table.name_of(&atom);
+}

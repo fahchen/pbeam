@@ -71,7 +71,7 @@ pub(super) fn new(
     let (Term::Atom(name), Some(options)) = (name, options.proper_list()) else {
         return Ok(BifResult::badarg());
     };
-    let mut table_type = "set";
+    let mut table_type = "set".to_owned();
     let mut named = false;
     let mut access = Access::Protected;
     let mut keypos = 1;
@@ -81,7 +81,7 @@ pub(super) fn new(
         match option {
             Term::Atom(atom) => match atom.index() {
                 _ if atom.is_one_of(&["bag", "duplicate_bag", "ordered_set"]) => {
-                    table_type = atom.name();
+                    table_type = context.scheduler.atoms.name_of(atom).to_owned();
                 }
                 index if index == Atom::static_index("named_table") => named = true,
                 index if index == Atom::static_index("public") => access = Access::Public,
@@ -90,7 +90,7 @@ pub(super) fn new(
                 _ => return Ok(BifResult::badarg()),
             },
             Term::Tuple(elements) => match elements.as_ref() {
-                [Term::Atom(key), value] => match (key.name(), value) {
+                [Term::Atom(key), value] => match (context.scheduler.atoms.name_of(key), value) {
                     ("keypos", value) => match value.small_integer() {
                         // The C `int` keeps the low 32 bits (`erl_db_util.h:346`).
                         Some(value) if value > 0 => keypos = value as i32,
@@ -123,7 +123,11 @@ pub(super) fn new(
         }
     }
     if (table_type == "ordered_set" && explicit_locks)
-        || (named && context.scheduler.ets.name_in_use(name.name()))
+        || (named
+            && context
+                .scheduler
+                .ets
+                .name_in_use(context.scheduler.atoms.name_of(name)))
     {
         return Ok(BifResult::badarg());
     }
@@ -145,7 +149,7 @@ pub(super) fn new(
     let name = named.then_some(name);
     context.scheduler.ets.create(
         table,
-        name.map(|name| name.name()),
+        name.map(|name| context.scheduler.atoms.name_of(name)),
         Table::new(owner, access, keypos),
     );
     Ok(Value(name.map_or(Term::Reference(table), |name| {
@@ -190,14 +194,19 @@ pub(super) fn insert(
     // A cons cell with a tail that is not `[]`: at least two objects, or an
     // improper list.
     if objects.cons_cell().is_some_and(|(_, tail)| !tail.is_nil()) {
-        let Some((id, found)) = context.scheduler.ets.find(table) else {
+        let Some((id, found)) = context.scheduler.ets.find(&context.scheduler.atoms, table) else {
             return Ok(BifResult::badarg());
         };
         let keypos = found.keypos();
         return insert_list(context, id, objects, 0, keypos);
     }
     let caller = context.scheduler.current_process_mut().id;
-    let Some(table) = context.scheduler.ets.table(table, caller, Operation::Write) else {
+    let Some(table) =
+        context
+            .scheduler
+            .ets
+            .table(&context.scheduler.atoms, table, caller, Operation::Write)
+    else {
         return Ok(BifResult::badarg());
     };
     let objects: Vec<&Term> = match objects.proper_list() {
@@ -208,7 +217,7 @@ pub(super) fn insert(
     let Some(tuples) = valid_objects(objects, keypos) else {
         return Ok(BifResult::badarg());
     };
-    put_objects(table, &tuples, keypos)?;
+    put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
     Ok(Value(Term::static_atom("true")))
 }
 
@@ -281,7 +290,13 @@ pub(super) fn insert_list(
     let count = elements.len();
     let table = Term::Reference(id);
     let insert_phase = 2 * count < done && done <= 4 * count;
-    if insert_phase && context.scheduler.ets.find(&table).is_none() {
+    if insert_phase
+        && context
+            .scheduler
+            .ets
+            .find(&context.scheduler.atoms, &table)
+            .is_none()
+    {
         return Ok(BifResult::badarg());
     }
     let process = context.scheduler.current_process_mut();
@@ -308,14 +323,15 @@ pub(super) fn insert_list(
                 break 'work Some(BifResult::badarg());
             };
             if count as i64 <= units.left {
-                let Some(table) = context
-                    .scheduler
-                    .ets
-                    .table(&table, caller, Operation::Write)
-                else {
+                let Some(table) = context.scheduler.ets.table(
+                    &context.scheduler.atoms,
+                    &table,
+                    caller,
+                    Operation::Write,
+                ) else {
                     break 'work Some(BifResult::badarg());
                 };
-                put_objects(table, tuples, keypos)?;
+                put_objects(&context.scheduler.atoms, table, tuples, keypos)?;
                 units.left -= 2 * count as i64;
                 break 'work Some(Value(Term::static_atom("true")));
             }
@@ -324,14 +340,15 @@ pub(super) fn insert_list(
             if !units.run(&mut done, 2 * count) {
                 break 'work None;
             }
-            match context
-                .scheduler
-                .ets
-                .table(&table, caller, Operation::Write)
-            {
+            match context.scheduler.ets.table(
+                &context.scheduler.atoms,
+                &table,
+                caller,
+                Operation::Write,
+            ) {
                 Some(table) => {
                     let tuples = tuples.expect("the check of a copied list found no bad object");
-                    put_objects(table, &tuples, keypos)?;
+                    put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
                 }
                 None => (removal, done) = (true, 4 * count),
             }
@@ -398,21 +415,26 @@ impl Units {
 }
 
 /// Put each object of `tuples` into `table`, which has the key position
-/// `keypos`.
+/// `keypos`. `atoms` owns the name of an atom key of an object.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let object = vec![test_atom("k")];
-/// put_objects(&mut table, &[&object], 1)?;
-/// assert!(table.object(&test_atom("k")).is_some());
+/// put_objects(&atoms, &mut table, &[&object], 1)?;
+/// assert!(table.object(&atoms, &test_atom("k")).is_some());
 /// ```
 ///
 /// # Errors
 ///
 /// Return a runtime error for an object in a table with the key position
 /// 0: ERTS aborts the emulator there (`Invalid tag in make_internal_hash`).
-fn put_objects(table: &mut Table, tuples: &[&[Term]], keypos: i32) -> Result<(), BeamError> {
+fn put_objects(
+    atoms: &AtomTable,
+    table: &mut Table,
+    tuples: &[&[Term]],
+    keypos: i32,
+) -> Result<(), BeamError> {
     if keypos == 0 && !tuples.is_empty() {
         // ponytail: ERTS aborts here; see "ETS tables" in docs/erts-differences.md.
         return Err(error(
@@ -420,7 +442,7 @@ fn put_objects(table: &mut Table, tuples: &[&[Term]], keypos: i32) -> Result<(),
         ));
     }
     for elements in tuples {
-        table.insert(elements.to_vec());
+        table.insert(atoms, elements.to_vec());
     }
     Ok(())
 }
@@ -486,13 +508,18 @@ pub(super) fn lookup_element(
     default: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    let Some(table) = context.scheduler.ets.table(table, caller, Operation::Read) else {
+    let Some(table) =
+        context
+            .scheduler
+            .ets
+            .table(&context.scheduler.atoms, table, caller, Operation::Read)
+    else {
         return Ok(BifResult::badarg());
     };
     let Some(index) = index.small_integer().filter(|index| *index >= 1) else {
         return Ok(BifResult::badarg());
     };
-    let Some(object) = table.object(key) else {
+    let Some(object) = table.object(&context.scheduler.atoms, key) else {
         return Ok(Value(default.clone()));
     };
     let position = index as i32;
@@ -523,10 +550,17 @@ pub(super) fn lookup_element(
 /// ```
 pub(super) fn lookup(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
     let caller = context.scheduler.current_process_mut().id;
-    let Some(table) = context.scheduler.ets.table(table, caller, Operation::Read) else {
+    let Some(table) =
+        context
+            .scheduler
+            .ets
+            .table(&context.scheduler.atoms, table, caller, Operation::Read)
+    else {
         return BifResult::badarg();
     };
-    let object = table.object(key).map(|object| Term::tuple(object.to_vec()));
+    let object = table
+        .object(&context.scheduler.atoms, key)
+        .map(|object| Term::tuple(object.to_vec()));
     Value(Term::list_from(object))
 }
 
@@ -545,10 +579,15 @@ pub(super) fn lookup(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
 /// ```
 pub(super) fn member(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
     let caller = context.scheduler.current_process_mut().id;
-    let Some(table) = context.scheduler.ets.table(table, caller, Operation::Read) else {
+    let Some(table) =
+        context
+            .scheduler
+            .ets
+            .table(&context.scheduler.atoms, table, caller, Operation::Read)
+    else {
         return BifResult::badarg();
     };
-    let found = table.object(key).is_some();
+    let found = table.object(&context.scheduler.atoms, key).is_some();
     Value(Term::static_atom(if found { "true" } else { "false" }))
 }
 
@@ -568,10 +607,15 @@ pub(super) fn member(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
 /// ```
 pub(super) fn delete(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
     let caller = context.scheduler.current_process_mut().id;
-    let Some(table) = context.scheduler.ets.table(table, caller, Operation::Write) else {
+    let Some(table) =
+        context
+            .scheduler
+            .ets
+            .table(&context.scheduler.atoms, table, caller, Operation::Write)
+    else {
         return BifResult::badarg();
     };
-    table.delete(key);
+    table.delete(&context.scheduler.atoms, key);
     Value(Term::static_atom("true"))
 }
 
