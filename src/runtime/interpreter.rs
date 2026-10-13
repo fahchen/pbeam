@@ -8,7 +8,10 @@ use super::{
 use crate::{
     beam::{
         BeamModule, NameId,
-        code::{self, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
+        code::{
+            self, BifDestination, BifOperand, BinaryMatchCommand, BinarySegment, Instruction,
+            Operand, TestKind,
+        },
     },
     error::{BeamError, error},
     term::{
@@ -825,48 +828,65 @@ impl BeamProgram {
                     // borrowed slice. The loader gives a `bif` instruction
                     // at most `MAX_BORROWED_ARGUMENTS` arguments, so the
                     // path covers every `bif` instruction.
-                    let result = if let Some(state) = process.length_trap.take() {
-                        self.bif_trap(scheduler, "erlang", "length", state)?
-                    } else {
-                        let values = read_bif_arguments(process, arguments)?;
-                        cursor.commit(process);
-                        let size =
-                            values.with(|terms| match_context_byte_size(*bif, arguments, terms))?;
-                        match size {
-                            Some(size) => BifResult::Value(size),
-                            None => values.with(|terms| self.bif_slice(scheduler, *bif, terms))?,
+                    //
+                    // This is the generic operand form: the loader selects
+                    // it only when an argument is a literal or an integer
+                    // that PBeam cannot read. The identity, the label, and
+                    // the destination are copied, so that the shared result
+                    // handler can borrow the cursor mutably beside them.
+                    let bif = *bif;
+                    let fail_label = *fail_label;
+                    let destination = destination.clone();
+                    let result = match process.length_trap.take() {
+                        Some(state) => self.bif_trap(scheduler, "erlang", "length", state)?,
+                        None => {
+                            let values = read_bif_arguments(process, arguments)?;
+                            self.calculate_bif(scheduler, &cursor, bif, arguments, values)?
                         }
                     };
-                    let process = scheduler.current_process_mut();
-                    match result {
-                        BifResult::Value(value) => write(process, destination, value)?,
-                        BifResult::TrapBif {
-                            module: "erlang",
-                            function: "length",
-                            arguments,
-                        } => {
-                            process.length_trap = Some(arguments);
-                            cursor.position -= 1;
-                            cursor.commit(process);
-                            return Ok(Outcome::Yield);
+                    if let Some(outcome) = self.finish_bif_instruction(
+                        scheduler,
+                        &mut cursor,
+                        bif,
+                        fail_label,
+                        result,
+                        BifTarget::Operand(&destination),
+                    )? {
+                        return Ok(outcome);
+                    }
+                }
+                // The loader selects the classified operand form when every
+                // argument is a register or a supported immediate and the
+                // destination is a register. The run loop then reads a
+                // checked register slot, a checked stack slot, or the stored
+                // term, and it matches no `Operand` for an argument. This is
+                // the operand form that the pinned ERTS loader keeps
+                // (`erts/emulator/beam/emu/ops.tab:998-1006`).
+                Instruction::BifOperands {
+                    fail_label,
+                    bif,
+                    arguments,
+                    destination,
+                } => {
+                    let bif = *bif;
+                    let fail_label = *fail_label;
+                    let destination = *destination;
+                    let result = match process.length_trap.take() {
+                        Some(state) => self.bif_trap(scheduler, "erlang", "length", state)?,
+                        None => {
+                            let values = read_bif_operands(process, arguments)?;
+                            self.calculate_bif(scheduler, &cursor, bif, arguments, values)?
                         }
-                        BifResult::Raise { .. } if *fail_label != 0 => {
-                            cursor.position = label_index(module, *fail_label)?
-                        }
-                        BifResult::Raise { class, reason } => {
-                            if let Some(outcome) = raise(process, class, reason) {
-                                return Ok(outcome);
-                            }
-                            cursor.refresh(scheduler)?;
-                        }
-                        // The compiler emits a `bif` instruction only for a
-                        // BIF that does not trap or end the caller.
-                        trap => {
-                            let (module, name, arity) = mfa(*bif);
-                            return Err(error(format!(
-                                "unsupported {module}:{name}/{arity} result {trap:?}"
-                            )));
-                        }
+                    };
+                    if let Some(outcome) = self.finish_bif_instruction(
+                        scheduler,
+                        &mut cursor,
+                        bif,
+                        fail_label,
+                        result,
+                        BifTarget::Register(destination),
+                    )? {
+                        return Ok(outcome);
                     }
                 }
                 Instruction::Jump(label) => cursor.position = label_index(module, *label)?,
@@ -2178,6 +2198,95 @@ impl BeamProgram {
         ))
     }
 
+    /// Read the arguments of a `bif` instruction and run its body. Commit
+    /// the position first, so that the process resumes after the instruction
+    /// and every run of the body sees the committed position.
+    ///
+    /// The caller takes the `length/1` trap state before this call, and it
+    /// passes the argument operands for the match-context check only. The
+    /// two operand forms of the instruction differ in the operand type, so
+    /// this function is generic over it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let values = read_bif_arguments(&process, &[Operand::X(0)])?;
+    /// let result = program.calculate_bif(&mut scheduler, &cursor, BifId::ErlangNode1, &[Operand::X(0)], values)?;
+    /// ```
+    fn calculate_bif<O: std::fmt::Debug>(
+        &self,
+        scheduler: &mut Scheduler,
+        cursor: &Cursor,
+        bif: BifId,
+        arguments: &[O],
+        values: BifArguments,
+    ) -> Result<BifResult, BeamError> {
+        cursor.commit(scheduler.current_process_mut());
+        let size = values.with(|terms| match_context_byte_size(bif, arguments, terms))?;
+        match size {
+            Some(size) => Ok(BifResult::Value(size)),
+            None => values.with(|terms| self.bif_slice(scheduler, bif, terms)),
+        }
+    }
+
+    /// Apply the result of a `bif` instruction and write its value to the
+    /// destination. Return the outcome when the BIF ends the process, or
+    /// `None` to run the next instruction.
+    ///
+    /// The checks, the error text, the trap state, and the reduction order
+    /// are those of the `bif` instruction of the run loop, for the generic
+    /// operand form and for the classified operand form.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let process = scheduler.current_process_mut();
+    /// let target = BifTarget::Register(BifDestination::X(0));
+    /// assert!(program.finish_bif_instruction(&mut scheduler, &mut cursor, BifId::ErlangNode1, 0, BifResult::Value(Term::Integer(1)), target)?.is_none());
+    /// ```
+    fn finish_bif_instruction(
+        &self,
+        scheduler: &mut Scheduler,
+        cursor: &mut Cursor,
+        bif: BifId,
+        fail_label: u32,
+        result: BifResult,
+        destination: BifTarget<'_>,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        match result {
+            BifResult::Value(value) => destination.write(process, value)?,
+            BifResult::TrapBif {
+                module: "erlang",
+                function: "length",
+                arguments,
+            } => {
+                process.length_trap = Some(arguments);
+                cursor.position -= 1;
+                cursor.commit(process);
+                return Ok(Some(Outcome::Yield));
+            }
+            BifResult::Raise { .. } if fail_label != 0 => {
+                cursor.position = label_index(&cursor.module, fail_label)?
+            }
+            BifResult::Raise { class, reason } => {
+                if let Some(outcome) = raise(process, class, reason) {
+                    return Ok(Some(outcome));
+                }
+                cursor.refresh(scheduler)?;
+            }
+            // The compiler emits a `bif` instruction only for a BIF that
+            // does not trap or end the caller.
+            trap => {
+                let (module, name, arity) = mfa(bif);
+                return Err(error(format!(
+                    "unsupported {module}:{name}/{arity} result {trap:?}"
+                )));
+            }
+        }
+        Ok(None)
+    }
+
     /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
     /// does for BIFs and NIFs (`emu/bif_instrs.tab:604-636`; JIT
     /// `emit_bif_nif_epilogue` in `jit/arm/instr_bif.cpp:631-719`). A value
@@ -2449,6 +2558,35 @@ fn create_process(
         Some(reference) => Term::tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),
     }))
+}
+
+/// The destination of a `bif` instruction. The generic operand form holds an
+/// [`Operand`] and the classified operand form holds a [`BifDestination`].
+enum BifTarget<'a> {
+    /// The destination of the generic operand form.
+    Operand(&'a Operand),
+    /// The destination of the classified operand form.
+    Register(BifDestination),
+}
+
+impl BifTarget<'_> {
+    /// Write the value of a BIF to the destination. The checks and the error
+    /// text are those of the matching arm of [`write`] and of
+    /// [`write_operand`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut process = ...;
+    /// BifTarget::Register(BifDestination::X(0)).write(&mut process, Term::Integer(1))?;
+    /// assert_eq!(process.registers[0], Some(Term::Integer(1)));
+    /// ```
+    fn write(self, process: &mut ProcessState, value: Term) -> Result<(), BeamError> {
+        match self {
+            BifTarget::Operand(operand) => write(process, operand, value),
+            BifTarget::Register(destination) => write_bif_operand(process, destination, value),
+        }
+    }
 }
 
 /// The execution position of the run loop: the code of the active frame and
@@ -2966,7 +3104,10 @@ fn match_context(process: &ProcessState, operand: &Operand) -> Result<Arc<MatchS
 /// context.forget_position();
 /// assert!(check_known_position(&context, &Operand::X(0)).is_err());
 /// ```
-fn check_known_position(context: &MatchState, operand: &Operand) -> Result<(), BeamError> {
+fn check_known_position<O: std::fmt::Debug>(
+    context: &MatchState,
+    operand: &O,
+) -> Result<(), BeamError> {
     if context.position_known() {
         Ok(())
     } else {
@@ -3001,9 +3142,9 @@ fn check_known_position(context: &MatchState, operand: &Operand) -> Result<(), B
 /// assert_eq!(size, Some(Term::Integer(3)));
 /// assert!(match_context_byte_size(BifId::ErlangHd1, &[Operand::X(0)], &values).is_err());
 /// ```
-fn match_context_byte_size(
+fn match_context_byte_size<O: std::fmt::Debug>(
     bif: BifId,
-    arguments: &[Operand],
+    arguments: &[O],
     values: &[Term],
 ) -> Result<Option<Term>, BeamError> {
     if let (BifId::ErlangByteSize1, [Term::MatchContext(context)]) = (bif, values) {
@@ -3139,12 +3280,33 @@ fn function_at_label(module: &BeamModule, target: u32) -> Result<Function, BeamE
     }
 }
 
-/// Read the argument operands of a `bif` instruction into a
-/// [`BifArguments`], which holds at most [`MAX_BORROWED_ARGUMENTS`] terms.
-/// Each operand must be set, and a match context is a runtime invariant
-/// error, as it is for a call argument. The loader gives a `bif`
-/// instruction at most [`MAX_BORROWED_ARGUMENTS`] arguments, so this
-/// function holds every argument of an instruction that the loader loads.
+/// Check the argument count of a `bif` instruction against
+/// [`MAX_BORROWED_ARGUMENTS`]. The loader gives the instruction at most
+/// three arguments, and the check keeps the error text of the generic
+/// operand form for an instruction that another caller builds.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(check_bif_argument_count(3).is_ok());
+/// assert!(check_bif_argument_count(4).is_err());
+/// ```
+fn check_bif_argument_count(count: usize) -> Result<(), BeamError> {
+    if count > MAX_BORROWED_ARGUMENTS {
+        return Err(error(format!(
+            "a BIF call holds more than {MAX_BORROWED_ARGUMENTS} borrowed arguments"
+        )));
+    }
+    Ok(())
+}
+
+/// Read the argument operands of a generic [`Instruction::Bif`] instruction
+/// into a [`BifArguments`], which holds at most
+/// [`MAX_BORROWED_ARGUMENTS`] terms. Each operand must be set, and a match
+/// context is a runtime invariant error, as it is for a call argument. The
+/// loader gives a `bif` instruction at most [`MAX_BORROWED_ARGUMENTS`]
+/// arguments, so this function holds every argument of an instruction that
+/// the loader loads.
 ///
 /// # Examples
 ///
@@ -3162,14 +3324,65 @@ fn read_bif_arguments(
     process: &ProcessState,
     operands: &[Operand],
 ) -> Result<BifArguments, BeamError> {
-    if operands.len() > MAX_BORROWED_ARGUMENTS {
-        return Err(error(format!(
-            "a BIF call holds more than {MAX_BORROWED_ARGUMENTS} borrowed arguments"
-        )));
-    }
+    check_bif_argument_count(operands.len())?;
     let mut arguments = BifArguments::new();
     for operand in operands {
         arguments.push(read_any(process, operand)?);
+    }
+    Ok(arguments)
+}
+
+/// Read one classified argument of an [`Instruction::BifOperands`]
+/// instruction. The loader classified the operand, so this reads a checked
+/// register slot or the stored term, and it matches no [`Operand`]. The
+/// checks and the error text are those of [`read_any`] for the generic
+/// operand form.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(read_bif_operand(&process, &BifOperand::Value(Term::Integer(1)))?, Term::Integer(1));
+/// assert!(read_bif_operand(&process, &BifOperand::X(7)).is_err());
+/// ```
+///
+/// # Errors
+///
+/// An unset X register, and a Y stack slot that is unset or holds a catch
+/// tag.
+fn read_bif_operand(process: &ProcessState, operand: &BifOperand) -> Result<Term, BeamError> {
+    match operand {
+        BifOperand::Value(value) => Ok(value.clone()),
+        BifOperand::X(index) => read_x_register(&process.registers, *index).cloned(),
+        BifOperand::Y(index) => {
+            let stack = process.frames.last().map_or(&[][..], |frame| &frame.stack);
+            read_y_register(stack, *index).cloned()
+        }
+    }
+}
+
+/// Read the classified argument operands of an
+/// [`Instruction::BifOperands`] instruction into a [`BifArguments`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let arguments = read_bif_operands(&process, &[BifOperand::X(0)])?;
+/// assert_eq!(arguments.with(|terms| terms.len()), 1);
+/// assert!(read_bif_operands(&process, &[BifOperand::X(0), BifOperand::X(0), BifOperand::X(0), BifOperand::X(0)]).is_err());
+/// ```
+///
+/// # Errors
+///
+/// An unset operand, a match context, or a call with more than
+/// [`MAX_BORROWED_ARGUMENTS`] arguments.
+fn read_bif_operands(
+    process: &ProcessState,
+    operands: &[BifOperand],
+) -> Result<BifArguments, BeamError> {
+    check_bif_argument_count(operands.len())?;
+    let mut arguments = BifArguments::new();
+    for operand in operands {
+        arguments.push(read_bif_operand(process, operand)?);
     }
     Ok(arguments)
 }
@@ -3278,7 +3491,7 @@ fn binary_field_size(size: &Term, unit: u64) -> Option<u64> {
 ///     "invariant error: the match context in X(0) reached an instruction that is not a binary match"
 /// );
 /// ```
-fn match_context_escape(operand: &Operand) -> BeamError {
+fn match_context_escape<O: std::fmt::Debug>(operand: &O) -> BeamError {
     error(format!(
         "invariant error: the match context in {operand:?} reached an instruction that is not a binary match"
     ))
@@ -3988,20 +4201,114 @@ fn read_operand<'a>(
         Operand::UnsupportedInteger => Err(error(
             "unsupported BEAM integer operand outside the 64-bit range: needs a bignum",
         )),
-        Operand::X(index) => registers
-            .get(*index as usize)
-            .and_then(Option::as_ref)
-            .ok_or_else(|| error(format!("register x{index} is unset"))),
-        Operand::Y(index) => match stack.get(*index as usize) {
-            Some(StackSlot::Term(value)) => Ok(value),
-            // The BEAM validator never lets an instruction read a catch tag.
-            Some(StackSlot::Catch(_)) => {
-                Err(error(format!("stack register y{index} holds a catch tag")))
-            }
-            Some(StackSlot::Empty) | None => {
-                Err(error(format!("stack register y{index} is unset")))
-            }
-        },
+        Operand::X(index) => read_x_register(registers, *index),
+        Operand::Y(index) => read_y_register(stack, *index),
+    }
+}
+
+/// Read one X register slot with the checked access of [`read_operand`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let registers = vec![Some(Term::Integer(7))];
+/// assert_eq!(read_x_register(&registers, 0)?, &Term::Integer(7));
+/// assert!(read_x_register(&registers, 1).is_err());
+/// ```
+fn read_x_register(registers: &[Option<Term>], index: u32) -> Result<&Term, BeamError> {
+    registers
+        .get(index as usize)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| error(format!("register x{index} is unset")))
+}
+
+/// Read one Y stack slot with the checked access of [`read_operand`]. A slot
+/// that holds a catch tag, an empty slot, and an out-of-range index each
+/// keep their own error text.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let stack = vec![StackSlot::Term(Term::Integer(7))];
+/// assert_eq!(read_y_register(&stack, 0)?, &Term::Integer(7));
+/// assert!(read_y_register(&stack, 1).is_err());
+/// ```
+fn read_y_register(stack: &[StackSlot], index: u32) -> Result<&Term, BeamError> {
+    match stack.get(index as usize) {
+        Some(StackSlot::Term(value)) => Ok(value),
+        // The BEAM validator never lets an instruction read a catch tag.
+        Some(StackSlot::Catch(_)) => {
+            Err(error(format!("stack register y{index} holds a catch tag")))
+        }
+        Some(StackSlot::Empty) | None => Err(error(format!("stack register y{index} is unset"))),
+    }
+}
+
+/// Write a value to an X register. The register file grows as necessary.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut registers = vec![];
+/// write_x_register(&mut registers, 1, Term::Integer(7));
+/// assert_eq!(registers, vec![None, Some(Term::Integer(7))]);
+/// ```
+fn write_x_register(registers: &mut Vec<Option<Term>>, index: u32, value: Term) {
+    let index = index as usize;
+    registers.resize(registers.len().max(index + 1), None);
+    registers[index] = Some(value);
+}
+
+/// Write a value to an allocated Y register. An index outside the allocated
+/// range is an error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut stack = vec![StackSlot::Empty];
+/// write_y_register(&mut stack, 0, Term::Integer(7))?;
+/// assert!(write_y_register(&mut stack, 1, Term::Integer(7)).is_err());
+/// ```
+fn write_y_register(stack: &mut [StackSlot], index: u32, value: Term) -> Result<(), BeamError> {
+    let index = index as usize;
+    if index >= stack.len() {
+        return Err(error(format!(
+            "register y{index} is outside allocated range"
+        )));
+    }
+    stack[index] = StackSlot::Term(value);
+    Ok(())
+}
+
+/// Write a value to the destination register of an
+/// [`Instruction::BifOperands`] instruction. The checks, the growth of the
+/// X register file, and the error text are those of [`write_operand`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut process = ...;
+/// write_bif_operand(&mut process, BifDestination::X(1), Term::Integer(7))?;
+/// assert_eq!(process.registers[1], Some(Term::Integer(7)));
+/// ```
+fn write_bif_operand(
+    process: &mut ProcessState,
+    destination: BifDestination,
+    value: Term,
+) -> Result<(), BeamError> {
+    match destination {
+        BifDestination::X(index) => {
+            write_x_register(&mut process.registers, index, value);
+            Ok(())
+        }
+        BifDestination::Y(index) => {
+            let stack = &mut process
+                .frames
+                .last_mut()
+                .expect("a running process has an active frame")
+                .stack;
+            write_y_register(stack, index, value)
+        }
     }
 }
 
@@ -4025,20 +4332,8 @@ fn write_operand(
         Operand::UnsupportedLiteral(index) => {
             return Err(error(format!("unsupported BEAM literal index {index}")));
         }
-        Operand::X(index) => {
-            let index = *index as usize;
-            registers.resize(registers.len().max(index + 1), None);
-            registers[index] = Some(value);
-        }
-        Operand::Y(index) => {
-            let index = *index as usize;
-            if index >= stack.len() {
-                return Err(error(format!(
-                    "register y{index} is outside allocated range"
-                )));
-            }
-            stack[index] = StackSlot::Term(value);
-        }
+        Operand::X(index) => write_x_register(registers, *index, value),
+        Operand::Y(index) => write_y_register(stack, *index, value)?,
         Operand::Value(_) | Operand::UnsupportedInteger => {
             return Err(error("invalid BEAM move destination"));
         }

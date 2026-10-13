@@ -2,12 +2,13 @@ use std::{collections::HashMap, rc::Rc};
 
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
-    BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
-    read_bif_arguments, read_operand, write_operand,
+    BeamProgram, BifTarget, CodeTable, Outcome, Scheduler, StackSlot, call_arguments,
+    check_bif_argument_count, function_at_label, read_bif_arguments, read_bif_operand,
+    read_bif_operands, read_operand, write_bif_operand, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
-    beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind},
+    beam::code::{BifDestination, BifOperand, BinaryMatchCommand, Instruction, Operand, TestKind},
     runtime::{
         capability::{AllowAll, Capability, Policy},
         ets::{Access, Table},
@@ -1737,6 +1738,17 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         }]),
         escape
     );
+    // The classified operand form reports the same error and the same
+    // operand text.
+    assert_eq!(
+        run(vec![Instruction::BifOperands {
+            fail_label: 0,
+            bif: BifId::ErlangHd1,
+            arguments: vec![BifOperand::X(0)],
+            destination: BifDestination::X(1),
+        }]),
+        escape
+    );
     // An external call to a loaded function also checks its arguments.
     assert_eq!(
         run(vec![Instruction::CallExternal {
@@ -1896,13 +1908,14 @@ fn run_binary_match(
         .map_err(|error| error.to_string())
 }
 
-/// The `gc_bif` instruction of `byte_size/1` of `argument` to `x0`.
-fn byte_size(argument: Operand) -> Instruction {
-    Instruction::Bif {
+/// The `gc_bif` instruction of `byte_size/1` of `argument` to `x0`, in the
+/// classified operand form that the loader selects.
+fn byte_size(argument: BifOperand) -> Instruction {
+    Instruction::BifOperands {
         fail_label: 0,
         bif: BifId::ErlangByteSize1,
         arguments: vec![argument],
-        destination: Operand::X(0),
+        destination: BifDestination::X(0),
     }
 }
 
@@ -1923,7 +1936,7 @@ fn gives_the_byte_size_of_a_match_context_from_its_position() {
         run_binary_match(
             &[1, 2, 3],
             skip(size),
-            vec![byte_size(Operand::X(0)), Instruction::Return],
+            vec![byte_size(BifOperand::X(0)), Instruction::Return],
         )
     };
     assert_eq!(size(0), Ok(Term::Integer(3)));
@@ -2004,7 +2017,7 @@ fn gives_a_runtime_error_for_a_read_after_a_failed_equal_command() {
         )
     );
     assert_eq!(
-        restore(vec![byte_size(Operand::X(0))]),
+        restore(vec![byte_size(BifOperand::X(0))]),
         Err(
             "unsupported read of the match context in X(0) after a failed bs_match =:= command"
                 .into()
@@ -2116,6 +2129,238 @@ fn reads_bif_arguments_into_a_fixed_buffer_and_reports_invalid_operands() {
             &[Operand::X(0), Operand::X(0), Operand::X(0), Operand::X(0)]
         )
         .is_err()
+    );
+}
+
+/// A classified argument reads an X register, a Y register, or the stored
+/// term, and each unset or unavailable slot keeps the error text of the
+/// generic operand form.
+#[test]
+fn reads_classified_bif_arguments_and_reports_invalid_operands() {
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    process.registers = vec![Some(Term::Integer(7))];
+    process.frames.last_mut().unwrap().stack = vec![
+        StackSlot::Term(Term::Integer(8)),
+        StackSlot::Catch(3),
+        StackSlot::Empty,
+    ];
+    assert_eq!(
+        read_bif_operand(&process, &BifOperand::Value(Term::Integer(9))).unwrap(),
+        Term::Integer(9)
+    );
+    assert_eq!(
+        read_bif_operand(&process, &BifOperand::X(0)).unwrap(),
+        Term::Integer(7)
+    );
+    assert_eq!(
+        read_bif_operand(&process, &BifOperand::Y(0)).unwrap(),
+        Term::Integer(8)
+    );
+    assert_eq!(
+        read_bif_operand(&process, &BifOperand::X(1))
+            .unwrap_err()
+            .to_string(),
+        "register x1 is unset"
+    );
+    assert_eq!(
+        read_bif_operand(&process, &BifOperand::Y(1))
+            .unwrap_err()
+            .to_string(),
+        "stack register y1 holds a catch tag"
+    );
+    assert_eq!(
+        read_bif_operand(&process, &BifOperand::Y(2))
+            .unwrap_err()
+            .to_string(),
+        "stack register y2 is unset"
+    );
+    assert_eq!(
+        read_bif_operand(&process, &BifOperand::Y(3))
+            .unwrap_err()
+            .to_string(),
+        "stack register y3 is unset"
+    );
+    let arguments = read_bif_operands(
+        &process,
+        &[BifOperand::X(0), BifOperand::Value(Term::Integer(9))],
+    )
+    .expect("two set operands are valid arguments");
+    assert_eq!(
+        arguments.with(|terms| terms.to_vec()),
+        vec![Term::Integer(7), Term::Integer(9)]
+    );
+    assert!(read_bif_operand(&process, &BifOperand::X(1)).is_err());
+    assert_eq!(check_bif_argument_count(3), Ok(()));
+    assert!(check_bif_argument_count(4).is_err());
+    assert!(
+        read_bif_operands(
+            &process,
+            &[
+                BifOperand::X(0),
+                BifOperand::X(0),
+                BifOperand::X(0),
+                BifOperand::X(0),
+            ]
+        )
+        .is_err()
+    );
+}
+
+/// The destination of the classified operand form grows the X register file
+/// and writes an allocated Y register, and it keeps the error text of
+/// [`write_operand`] for a Y register outside the allocated range.
+#[test]
+fn writes_the_classified_bif_destination_and_reports_invalid_registers() {
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    process.frames.last_mut().unwrap().stack = vec![StackSlot::Empty, StackSlot::Empty];
+    write_bif_operand(&mut process, BifDestination::X(1), Term::Integer(7)).unwrap();
+    assert_eq!(process.registers, vec![None, Some(Term::Integer(7))]);
+    write_bif_operand(&mut process, BifDestination::Y(1), Term::Integer(8)).unwrap();
+    assert!(matches!(
+        process.frames.last().unwrap().stack[1],
+        StackSlot::Term(Term::Integer(8))
+    ));
+    assert_eq!(
+        write_bif_operand(&mut process, BifDestination::Y(2), Term::Integer(9))
+            .unwrap_err()
+            .to_string(),
+        "register y2 is outside allocated range"
+    );
+    BifTarget::Register(BifDestination::X(0))
+        .write(&mut process, Term::Integer(1))
+        .unwrap();
+    assert_eq!(process.registers[0], Some(Term::Integer(1)));
+    BifTarget::Operand(&Operand::X(0))
+        .write(&mut process, Term::Integer(2))
+        .unwrap();
+    assert_eq!(process.registers[0], Some(Term::Integer(2)));
+}
+
+/// The classified operand form of a `bif` instruction writes its value to an
+/// X register and to a Y register.
+#[test]
+fn runs_a_classified_bif_value_into_an_x_and_a_y_register() {
+    let tuple = || Term::tuple(vec![test_atom("a"), test_atom("b"), test_atom("c")]);
+    let element = |destination: BifDestination| Instruction::BifOperands {
+        fail_label: 0,
+        bif: BifId::ErlangElement2,
+        arguments: vec![BifOperand::Value(Term::Integer(2)), BifOperand::X(0)],
+        destination,
+    };
+    assert_eq!(
+        make_program(
+            vec![
+                Instruction::Move(Operand::Value(tuple()), Operand::X(0)),
+                element(BifDestination::X(0)),
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .unwrap(),
+        test_atom("b")
+    );
+    assert_eq!(
+        make_program(
+            vec![
+                Instruction::Allocate { stack_size: 1 },
+                Instruction::Move(Operand::Value(tuple()), Operand::X(0)),
+                element(BifDestination::Y(0)),
+                Instruction::Move(Operand::Y(0), Operand::X(0)),
+                Instruction::Deallocate { stack_size: 1 },
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .unwrap(),
+        test_atom("b")
+    );
+}
+
+/// A classified `bif` instruction jumps to its fail label on a failure, and
+/// it raises the exception of the BIF when the fail label is 0.
+#[test]
+fn jumps_at_a_classified_bif_failure_and_raises_without_a_fail_label() {
+    let body = |fail_label: u32| {
+        vec![
+            Instruction::BifOperands {
+                fail_label,
+                bif: BifId::ErlangElement2,
+                arguments: vec![
+                    BifOperand::Value(Term::Integer(1)),
+                    BifOperand::Value(Term::tuple(vec![])),
+                ],
+                destination: BifDestination::X(0),
+            },
+            Instruction::Label(3),
+            Instruction::Move(atom("jumped"), Operand::X(0)),
+            Instruction::Return,
+        ]
+    };
+    assert_eq!(
+        make_program(body(3), 0)
+            .execute("fixture", "main", &[])
+            .unwrap(),
+        test_atom("jumped")
+    );
+    assert_eq!(
+        make_program(body(0), 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+        BADARG_EXIT
+    );
+}
+
+/// A classified `bif` instruction of a BIF with a result that the run loop
+/// does not run reports the same unsupported-BIF error as the generic form.
+#[test]
+fn rejects_an_unsupported_result_of_the_classified_bif_operand_form() {
+    let body = vec![
+        erlang_call("make_ref", 0, false),
+        Instruction::BifOperands {
+            fail_label: 0,
+            bif: BifId::ErlangDemonitor2,
+            arguments: vec![
+                BifOperand::X(0),
+                BifOperand::Value(Term::list_from(vec![test_atom("flush")])),
+            ],
+            destination: BifDestination::X(0),
+        },
+        Instruction::Return,
+    ];
+    assert!(
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string()
+            .starts_with("unsupported erlang:demonitor/2 result Trap")
+    );
+}
+
+/// A `length/1` guard of a long list uses its reduction budget, traps to its
+/// export, switches out, and resumes on the next turn. The generic operand
+/// form keeps the same trap path as the classified form.
+#[test]
+fn resumes_a_length_trap_of_the_generic_bif_operand_form() {
+    let count = 100_000;
+    let list = Term::list_from((0..count).map(Term::Integer));
+    let body = vec![
+        Instruction::Move(Operand::Value(list), Operand::X(0)),
+        Instruction::Bif {
+            fail_label: 0,
+            bif: BifId::ErlangLength1,
+            arguments: vec![Operand::X(0)],
+            destination: Operand::X(0),
+        },
+        Instruction::Return,
+    ];
+    assert_eq!(
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap(),
+        Term::Integer(count)
     );
 }
 
@@ -3561,16 +3806,18 @@ fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
 }
 
 /// The bytes of the heap operands of the instructions of `slots`: the
-/// argument vector of a `Bif` and the two names of a `CallExternal`. The
-/// first number counts the operands that the instruction reads, and the
-/// second counts the storage that the loader allocated for them. Every other
-/// operand lives inside the 136-byte slot of its instruction.
+/// argument vector of a `bif` instruction and the two names of a
+/// `CallExternal`. The first number counts the operands that the instruction
+/// reads, and the second counts the storage that the loader allocated for
+/// them. Every other operand lives inside the 136-byte slot of its
+/// instruction.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let slots = loop_body(&program.modules["dispatch_probe"], "floor_loop");
-/// assert_eq!(heap_operand_bytes(&program.modules["dispatch_probe"], &slots), (80, 160));
+/// let (read, allocated) = heap_operand_bytes(&program.modules["dispatch_probe"], &slots);
+/// assert!(read <= allocated);
 /// ```
 fn heap_operand_bytes(module: &BeamModule, slots: &[usize]) -> (usize, usize) {
     let mut read = 0;
@@ -3580,6 +3827,10 @@ fn heap_operand_bytes(module: &BeamModule, slots: &[usize]) -> (usize, usize) {
             Instruction::Bif { arguments, .. } => {
                 read += arguments.len() * std::mem::size_of::<Operand>();
                 allocated += arguments.capacity() * std::mem::size_of::<Operand>();
+            }
+            Instruction::BifOperands { arguments, .. } => {
+                read += arguments.len() * std::mem::size_of::<BifOperand>();
+                allocated += arguments.capacity() * std::mem::size_of::<BifOperand>();
             }
             Instruction::CallExternal { module, name, .. } => {
                 read += module.len() + name.len();

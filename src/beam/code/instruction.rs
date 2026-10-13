@@ -349,6 +349,12 @@ pub(crate) enum Instruction {
     /// `when binary_part(Binary, Start, Length) =:= <<"ell">>` of
     /// `binary_part_probe:guard/3` compiles to
     /// `{gc_bif,binary_part,{f,13},3,[{x,0},{x,1},{x,2}],{x,0}}`.
+    ///
+    /// This is the generic operand form. The loader selects it only when an
+    /// argument is a literal or an integer that PBeam cannot read, so that
+    /// the module still loads and the runtime error text does not change.
+    /// Every other `bif` instruction becomes
+    /// [`Instruction::BifOperands`].
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
@@ -361,6 +367,35 @@ pub(crate) enum Instruction {
         arguments: Vec<Operand>,
         /// Register for the BIF value.
         destination: Operand,
+    },
+    /// Runs a `bif` instruction whose arguments and destination the loader
+    /// classified one time.
+    ///
+    /// The loader selects this form when every argument is an X register, a
+    /// Y register, or a supported immediate term, and the destination is a
+    /// register. The run loop then reads a checked register slot, a checked
+    /// stack slot, or the stored term, and it matches no [`Operand`] for an
+    /// argument. This is the operand form that the pinned ERTS loader keeps:
+    /// `bif1 Fail=f Bif S1 Dst => i_bif1 S1 Fail Bif Dst` carries the
+    /// classified source operand and the destination of the instruction
+    /// (`erts/emulator/beam/emu/ops.tab:998-1006`).
+    ///
+    /// `bif0` has no arguments. The destination of every BIF is a register,
+    /// because the compiler writes the value to an X or a Y register only
+    /// (`erts/emulator/beam/emu/ops.tab:984-1005`).
+    ///
+    /// Erlang: the guard `when tuple_size(X) >= 2` compiles to
+    /// `{bif,tuple_size,{f,22},[{x,0}],{x,1}}`, and the loader selects this
+    /// form for it.
+    BifOperands {
+        /// Label to jump to when the BIF fails, or 0 to raise the exception.
+        fail_label: u32,
+        /// The BIF of the import that the instruction calls.
+        bif: BifId,
+        /// Classified argument operands of the BIF, in argument order.
+        arguments: Vec<BifOperand>,
+        /// Register for the BIF value.
+        destination: BifDestination,
     },
     /// Makes a fun of a lambda with the values of `free` as its free
     /// variables (`make_fun3`, opcode 171), and writes it to `destination`.
@@ -1433,6 +1468,119 @@ pub(crate) enum Operand {
     Y(u32),
 }
 
+/// One argument of [`Instruction::BifOperands`], classified by the loader.
+///
+/// `X` and `Y` are the register slots. `Value` is a supported immediate or
+/// literal term. The loader classifies each argument one time, so the run
+/// loop reads a checked register slot or the stored term and matches no
+/// [`Operand`].
+#[derive(Debug, Clone)]
+pub(crate) enum BifOperand {
+    X(u32),
+    Y(u32),
+    Value(Term),
+}
+
+/// The destination register of [`Instruction::BifOperands`].
+///
+/// The BEAM validator gives a `bif` instruction a register destination only,
+/// so this type has no immediate form.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BifDestination {
+    X(u32),
+    Y(u32),
+}
+
+/// Classify one argument operand of a `bif` instruction for the
+/// [`Instruction::BifOperands`] form.
+///
+/// Return `None` for an operand that PBeam cannot read, so that the generic
+/// [`Instruction::Bif`] form keeps its runtime error text.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(classify_bif_operand(&Operand::X(0)), Some(BifOperand::X(0))));
+/// assert!(matches!(classify_bif_operand(&Operand::Y(1)), Some(BifOperand::Y(1))));
+/// assert!(classify_bif_operand(&Operand::UnsupportedInteger).is_none());
+/// ```
+fn classify_bif_operand(operand: &Operand) -> Option<BifOperand> {
+    match operand {
+        Operand::X(index) => Some(BifOperand::X(*index)),
+        Operand::Y(index) => Some(BifOperand::Y(*index)),
+        Operand::Value(value) => Some(BifOperand::Value(value.clone())),
+        Operand::UnsupportedLiteral(_) | Operand::UnsupportedInteger => None,
+    }
+}
+
+/// Classify the destination operand of a `bif` instruction. The loader reads
+/// the destination with `read_register`, which gives an X or a Y register
+/// only.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(bif_destination(&Operand::Y(1)), Some(BifDestination::Y(1))));
+/// assert!(bif_destination(&Operand::Value(Term::nil())).is_none());
+/// ```
+fn bif_destination(operand: &Operand) -> Option<BifDestination> {
+    match operand {
+        Operand::X(index) => Some(BifDestination::X(*index)),
+        Operand::Y(index) => Some(BifDestination::Y(*index)),
+        _ => None,
+    }
+}
+
+/// Build the classified [`Instruction::BifOperands`] form of a `bif`
+/// instruction, or the generic [`Instruction::Bif`] form when an argument is
+/// an operand that PBeam cannot read.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(
+///     bif_instruction(0, BifId::ErlangNode0, Vec::new(), Operand::X(0)),
+///     Instruction::BifOperands { .. }
+/// ));
+/// assert!(matches!(
+///     bif_instruction(0, BifId::ErlangNode1, vec![Operand::UnsupportedInteger], Operand::X(0)),
+///     Instruction::Bif { .. }
+/// ));
+/// ```
+fn bif_instruction(
+    fail_label: u32,
+    bif: BifId,
+    arguments: Vec<Operand>,
+    destination: Operand,
+) -> Instruction {
+    let Some(classified) = bif_destination(&destination) else {
+        return Instruction::Bif {
+            fail_label,
+            bif,
+            arguments,
+            destination,
+        };
+    };
+    let Some(arguments) = arguments
+        .iter()
+        .map(classify_bif_operand)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Instruction::Bif {
+            fail_label,
+            bif,
+            arguments,
+            destination,
+        };
+    };
+    Instruction::BifOperands {
+        fail_label,
+        bif,
+        arguments,
+        destination: classified,
+    }
+}
+
 /// Decode the `Code` header and instruction stream.
 ///
 /// # Examples
@@ -2073,12 +2221,7 @@ pub(super) fn parse_code(
                     read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
                     0,
                 )?;
-                Instruction::Bif {
-                    fail_label: 0,
-                    bif,
-                    arguments: Vec::new(),
-                    destination: read_register(data, &mut cursor)?,
-                }
+                bif_instruction(0, bif, Vec::new(), read_register(data, &mut cursor)?)
             }
             OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
@@ -2098,12 +2241,12 @@ pub(super) fn parse_code(
                 let arguments = (0..argument_count)
                     .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
                     .collect::<Result<Vec<_>, _>>()?;
-                Instruction::Bif {
+                bif_instruction(
                     fail_label,
                     bif,
                     arguments,
-                    destination: read_register(data, &mut cursor)?,
-                }
+                    read_register(data, &mut cursor)?,
+                )
             }
             OPCODE_ALLOCATE | OPCODE_ALLOCATE_HEAP => {
                 let stack_size = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;

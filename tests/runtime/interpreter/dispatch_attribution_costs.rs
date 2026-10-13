@@ -29,13 +29,14 @@ use std::{collections::HashMap, hint::black_box, rc::Rc, time::Instant};
 
 use super::{
     BeamProgram, CodeTable, Cursor, bif::BifId, code_table, current_frame, function_at_label,
-    label_index, light_bif_switch, read_bif_arguments, read_operand, write_operand,
+    label_index, light_bif_switch, read_bif_arguments, read_bif_operands, read_operand,
+    write_operand,
 };
 use crate::{
     Term,
     beam::{
         BeamModule,
-        code::{Instruction, Operand},
+        code::{BifDestination, BifOperand, Instruction, Operand},
     },
     runtime::{
         process::{ProcessState, StackSlot, Start, tests::frame},
@@ -142,11 +143,11 @@ fn floor_module() -> Rc<BeamModule> {
             },
             Instruction::Return,
             Instruction::Label(3),
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 0,
                 bif: BifId::ErlangMinus2,
-                arguments: vec![Operand::X(0), Operand::Value(Term::Integer(1))],
-                destination: Operand::X(0),
+                arguments: vec![BifOperand::X(0), BifOperand::Value(Term::Integer(1))],
+                destination: BifDestination::X(0),
             },
             Instruction::CallOnly { arity: 1, label: 1 },
         ],
@@ -165,7 +166,7 @@ fn floor_module() -> Rc<BeamModule> {
 fn dispatch_arm(instruction: &Instruction) -> u64 {
     match instruction {
         Instruction::TestExactEqual { .. } => 1,
-        Instruction::Bif { .. } => 2,
+        Instruction::Bif { .. } | Instruction::BifOperands { .. } => 2,
         Instruction::CallOnly { .. } => 3,
         Instruction::Return => 4,
         _ => 0,
@@ -390,8 +391,19 @@ fn prints_the_cost_of_every_instruction_part() {
         ),
     );
 
-    // The BIF call overhead: the borrowed argument path and the body dispatch.
+    // The BIF call overhead: the argument read and the body dispatch. The
+    // run loop reads the classified operand form, and it keeps the generic
+    // reader for a `bif` instruction that holds an unreadable argument.
     let process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![Term::Integer(7)]);
+    let operands = [BifOperand::X(0), BifOperand::Value(Term::Integer(1))];
+    report(
+        "read_bif_operands",
+        cost(|| {
+            let values =
+                read_bif_operands(black_box(&process), black_box(&operands)).expect("x0 is set");
+            values.with(|terms| terms.len()) as u64
+        }),
+    );
     let arguments = [Operand::X(0), Operand::Value(Term::Integer(1))];
     report(
         "read_bif_arguments",

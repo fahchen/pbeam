@@ -6,14 +6,17 @@ use super::{
     OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
     OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP,
     OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
-    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, parse_code,
-    read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
-    read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
-    skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
-    unsupported_opcode_operand_count,
+    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, bif_destination,
+    bif_instruction, classify_bif_operand, parse_code, read_binary_match_commands,
+    read_binary_segments, read_move_operand, read_operand_pairs, read_pair_count,
+    read_record_updates, skip_allocation, skip_counted_operands, skip_integer_payload,
+    skip_operand, skip_unsupported_instruction, test_kind, unsupported_opcode_operand_count,
 };
 use crate::{
-    beam::code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
+    beam::code::{
+        BifDestination, BifOperand, BinaryMatchCommand, BinarySegment, Instruction, Operand,
+        TestKind,
+    },
     runtime::BifId,
     term::{Atom, AtomTable, Lambda, Term},
 };
@@ -386,28 +389,28 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
     assert!(matches!(
         instructions.as_slice(),
         [
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 0,
                 bif: BifId::ErlangNode1,
                 arguments: node1_arguments,
-                destination: Operand::X(2),
+                destination: BifDestination::X(2),
             },
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 0,
                 bif: BifId::ErlangNode0,
                 arguments: node0_arguments,
-                destination: Operand::X(5),
+                destination: BifDestination::X(5),
             },
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 3,
                 bif: BifId::ErlangNode1,
                 arguments: guard_arguments,
-                destination: Operand::X(1),
+                destination: BifDestination::X(1),
             },
             Instruction::End,
-        ] if matches!(node1_arguments.as_slice(), [Operand::X(0)])
+        ] if matches!(node1_arguments.as_slice(), [BifOperand::X(0)])
             && node0_arguments.is_empty()
-            && matches!(guard_arguments.as_slice(), [Operand::X(0)])
+            && matches!(guard_arguments.as_slice(), [BifOperand::X(0)])
     ));
     for bif in [&[0x09, 0x20, 0x03][..], &[0x0A, 0x05, 0x20, 0x03, 0x03]] {
         assert!(
@@ -449,27 +452,131 @@ fn decodes_bif2_into_a_bif_instruction_with_its_fail_label() {
     assert!(matches!(
         instructions.as_slice(),
         [
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 0,
                 bif: BifId::ErlangElement2,
                 arguments,
-                destination: Operand::X(0),
+                destination: BifDestination::X(0),
             },
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 46,
                 bif: BifId::ErlangElement2,
                 arguments: call_arguments,
-                destination: Operand::X(4),
+                destination: BifDestination::X(4),
             },
             Instruction::End,
         ] if matches!(
                 arguments.as_slice(),
-                [Operand::Value(Term::Integer(2)), Operand::X(0)]
+                [BifOperand::Value(Term::Integer(2)), BifOperand::X(0)]
             )
             && matches!(
                 call_arguments.as_slice(),
-                [Operand::Value(Term::Integer(2)), Operand::X(0)]
+                [BifOperand::Value(Term::Integer(2)), BifOperand::X(0)]
             )
+    ));
+}
+
+/// The generic operand form stays for a `bif` instruction whose argument is
+/// an operand that PBeam cannot read. The module still loads, and the run
+/// reports the error of the operand.
+#[test]
+fn keeps_the_generic_bif_form_for_an_argument_that_pbeam_cannot_read() {
+    let code = |instructions: &[u8]| {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend_from_slice(instructions);
+        code.push(0x03);
+        code
+    };
+    let imports = vec![("erlang".to_owned(), "node".to_owned(), 1)];
+    // bif1 f0 node/1 {integer,18446744073709551616} x0
+    let mut huge = vec![0x0A, 0x05, 0x00];
+    huge.extend([0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]);
+    huge.push(0x03);
+    let (instructions, _) = parse_code(&code(&huge), &[], &imports, &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::Bif {
+                fail_label: 0,
+                bif: BifId::ErlangNode1,
+                arguments,
+                destination: Operand::X(0),
+            },
+            Instruction::End,
+        ] if matches!(arguments.as_slice(), [Operand::UnsupportedInteger])
+    ));
+    // bif1 f0 node/1 {literal,0} x0, where literal 0 is one PBeam cannot
+    // read.
+    let (instructions, _) = parse_code(
+        &code(&[0x0A, 0x05, 0x00, 0x47, 0x00, 0x03]),
+        &[],
+        &imports,
+        &[None],
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::Bif {
+                fail_label: 0,
+                bif: BifId::ErlangNode1,
+                arguments,
+                destination: Operand::X(0),
+            },
+            Instruction::End,
+        ] if matches!(arguments.as_slice(), [Operand::UnsupportedLiteral(0)])
+    ));
+}
+
+/// Classify the operands of a `bif` instruction, and keep the generic form
+/// for an operand or a destination that the classifier rejects.
+#[test]
+fn classifies_bif_operands_and_keeps_the_generic_form_for_a_rejected_operand() {
+    assert!(matches!(
+        classify_bif_operand(&Operand::X(1)),
+        Some(BifOperand::X(1))
+    ));
+    assert!(matches!(
+        classify_bif_operand(&Operand::Y(2)),
+        Some(BifOperand::Y(2))
+    ));
+    assert!(matches!(
+        classify_bif_operand(&Operand::Value(Term::Integer(3))),
+        Some(BifOperand::Value(Term::Integer(3)))
+    ));
+    assert!(classify_bif_operand(&Operand::UnsupportedLiteral(0)).is_none());
+    assert!(classify_bif_operand(&Operand::UnsupportedInteger).is_none());
+    assert!(matches!(
+        bif_destination(&Operand::X(1)),
+        Some(BifDestination::X(1))
+    ));
+    assert!(matches!(
+        bif_destination(&Operand::Y(2)),
+        Some(BifDestination::Y(2))
+    ));
+    assert!(bif_destination(&Operand::Value(Term::nil())).is_none());
+    // A destination that is not a register keeps the generic form.
+    assert!(matches!(
+        bif_instruction(
+            0,
+            BifId::ErlangNode0,
+            Vec::new(),
+            Operand::Value(Term::nil())
+        ),
+        Instruction::Bif { .. }
+    ));
+    // An argument that the classifier rejects keeps the generic form.
+    assert!(matches!(
+        bif_instruction(
+            0,
+            BifId::ErlangNode1,
+            vec![Operand::UnsupportedInteger],
+            Operand::X(0)
+        ),
+        Instruction::Bif { .. }
     ));
 }
 
@@ -1302,31 +1409,31 @@ fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction
     assert!(matches!(
         instructions.as_slice(),
         [
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 58,
                 bif: BifId::ErlangPlus2,
                 arguments: plus_arguments,
-                destination: Operand::X(0),
+                destination: BifDestination::X(0),
             },
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 0,
                 bif: BifId::ErlangMinus2,
                 arguments: minus_arguments,
-                destination: Operand::X(0),
+                destination: BifDestination::X(0),
             },
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 55,
                 bif: BifId::ErlangMinus1,
                 arguments: negate_arguments,
-                destination: Operand::X(0),
+                destination: BifDestination::X(0),
             },
             Instruction::End,
         ] if matches!(
                 plus_arguments.as_slice(),
-                [Operand::X(0), Operand::Value(Term::Integer(1))]
+                [BifOperand::X(0), BifOperand::Value(Term::Integer(1))]
             )
-            && matches!(minus_arguments.as_slice(), [Operand::Y(0), Operand::X(0)])
-            && matches!(negate_arguments.as_slice(), [Operand::X(0)])
+            && matches!(minus_arguments.as_slice(), [BifOperand::Y(0), BifOperand::X(0)])
+            && matches!(negate_arguments.as_slice(), [BifOperand::X(0)])
     ));
     // Without its destination and the end, the instruction is truncated.
     code.truncate(code.len() - 2);
@@ -1351,26 +1458,26 @@ fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
     assert!(matches!(
         instructions.as_slice(),
         [
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 13,
                 bif: BifId::ErlangBinaryPart3,
                 arguments: guard_arguments,
-                destination: Operand::X(0),
+                destination: BifDestination::X(0),
             },
-            Instruction::Bif {
+            Instruction::BifOperands {
                 fail_label: 0,
                 bif: BifId::ErlangBinaryPart3,
                 arguments: body_arguments,
-                destination: Operand::Y(22),
+                destination: BifDestination::Y(22),
             },
             Instruction::End,
         ] if matches!(
                 guard_arguments.as_slice(),
-                [Operand::X(0), Operand::X(1), Operand::X(2)]
+                [BifOperand::X(0), BifOperand::X(1), BifOperand::X(2)]
             )
             && matches!(
                 body_arguments.as_slice(),
-                [Operand::Y(23), Operand::Y(22), Operand::X(0)]
+                [BifOperand::Y(23), BifOperand::Y(22), BifOperand::X(0)]
             )
     ));
     // Without its destination and the end, the instruction is truncated.
@@ -2052,6 +2159,17 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
                 + size_of_val(arguments)
                 + size_of_val(destination)
         }
+        Instruction::BifOperands {
+            fail_label,
+            bif,
+            arguments,
+            destination,
+        } => {
+            size_of_val(fail_label)
+                + size_of_val(bif)
+                + size_of_val(arguments)
+                + size_of_val(destination)
+        }
         Instruction::MakeFun {
             lambda,
             free,
@@ -2283,7 +2401,7 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
 fn records_the_decoded_form_layout() {
     use std::mem::size_of;
 
-    let arms: [(&str, Instruction); 8] = [
+    let arms: [(&str, Instruction); 9] = [
         (
             "`BinaryGetBinary`",
             Instruction::BinaryGetBinary {
@@ -2343,6 +2461,15 @@ fn records_the_decoded_form_layout() {
             Instruction::Move(Operand::X(0), Operand::Value(Term::Integer(1))),
         ),
         ("`Label`", Instruction::Label(1)),
+        (
+            "`BifOperands`",
+            Instruction::BifOperands {
+                fail_label: 0,
+                bif: BifId::ErlangPlus2,
+                arguments: vec![BifOperand::X(0), BifOperand::X(1)],
+                destination: BifDestination::X(0),
+            },
+        ),
     ];
 
     println!("| decoded form item | bytes |");
@@ -2352,6 +2479,9 @@ fn records_the_decoded_form_layout() {
     println!("| `Term` | {} |", size_of::<Term>());
     println!("| `String` | {} |", size_of::<String>());
     println!("| `Vec<Operand>` | {} |", size_of::<Vec<Operand>>());
+    println!("| `BifOperand` | {} |", size_of::<BifOperand>());
+    println!("| `Vec<BifOperand>` | {} |", size_of::<Vec<BifOperand>>());
+    println!("| `BifDestination` | {} |", size_of::<BifDestination>());
     println!("| `BifId` | {} |", size_of::<BifId>());
     println!("| `Option<BifId>` | {} |", size_of::<Option<BifId>>());
     println!("| `u64` | {} |", size_of::<u64>());
@@ -2379,4 +2509,11 @@ fn records_the_decoded_form_layout() {
     );
     assert_eq!(arm_field_bytes(&arms[3].1), 72, "the fields of `Bif`");
     assert_eq!(arm_field_bytes(&arms[6].1), 80, "the fields of `Move`");
+    // The classified operand form of the floor loop. Its fields are below
+    // the 132 bytes of `BinaryGetBinary`, so `Instruction` stays 136 bytes.
+    assert_eq!(
+        arm_field_bytes(&arms[8].1),
+        40,
+        "the fields of `BifOperands`"
+    );
 }
