@@ -63,7 +63,10 @@ fn converts_integers_to_lists_as_pinned_erts() {
     .into();
     expected.extend(errors(&program, "badarg", 4));
     assert_eq!(
-        program.execute("event_bif_probe", "to_list", &[]).unwrap(),
+        program
+            .execute("event_bif_probe", "to_list", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -88,7 +91,10 @@ fn counts_iolist_bytes_as_pinned_erts() {
     let mut expected: Vec<Term> = [0, 0, 3, 3, 4, 3, 2].map(Term::Integer).into();
     expected.extend(errors(&program, "badarg", 8));
     assert_eq!(
-        program.execute("event_bif_probe", "size", &[]).unwrap(),
+        program
+            .execute("event_bif_probe", "size", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -113,7 +119,8 @@ fn takes_integer_remainders_as_pinned_erts() {
     assert_eq!(
         program
             .execute("event_bif_probe", "remainder", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -133,7 +140,10 @@ fn selects_the_minimum_as_pinned_erts() {
     let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("event_bif_probe", "minimum", &[]).unwrap(),
+        program
+            .execute("event_bif_probe", "minimum", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             Term::Integer(1),
             Term::Integer(1),
@@ -180,7 +190,10 @@ fn gives_the_default_printable_range_as_pinned_erts() {
     // `erl_unicode.c:2943-2950`), and PBeam takes no emulator flags.
     let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
     assert_eq!(
-        program.execute("event_bif_probe", "range", &[]).unwrap(),
+        program
+            .execute("event_bif_probe", "range", &[])
+            .unwrap()
+            .term,
         Term::Atom(program.atom("latin1").unwrap())
     );
     assert_eq!(reference("range"), b"latin1\n");
@@ -198,7 +211,10 @@ fn checks_process_liveness_as_pinned_erts() {
     let mut expected = vec![atom("true"), atom("false"), atom("true")];
     expected.extend(errors(&program, "badarg", 5));
     assert_eq!(
-        program.execute("event_bif_probe", "alive", &[]).unwrap(),
+        program
+            .execute("event_bif_probe", "alive", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -225,7 +241,8 @@ fn counts_queued_messages_as_pinned_erts() {
     assert_eq!(
         program
             .execute("event_bif_probe", "queue_len", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -245,7 +262,10 @@ fn gets_persistent_terms_as_pinned_erts() {
     let mut expected = vec![Term::Atom(program.atom("value").unwrap())];
     expected.extend(errors(&program, "badarg", 1));
     assert_eq!(
-        program.execute("event_bif_probe", "term", &[]).unwrap(),
+        program
+            .execute("event_bif_probe", "term", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(reference("term"), b"[value,{error,badarg}]\n");

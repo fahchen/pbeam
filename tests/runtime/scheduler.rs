@@ -182,7 +182,7 @@ fn sends_down_and_exit_signals_and_records_the_root_result() {
     );
     scheduler.finish_current(atom("normal"), Some(atom("ok")));
     assert!(scheduler.processes.is_empty());
-    assert_eq!(scheduler.into_root_result(), Some(Ok(atom("ok"))));
+    assert_eq!(scheduler.into_run_result().0, Some(Ok(atom("ok"))));
 }
 
 #[test]
@@ -214,7 +214,7 @@ fn ends_the_run_only_after_the_exit_of_the_root_process_completes() {
         assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
         assert!(scheduler.root_exited());
         assert!(signals(&scheduler));
-        assert_eq!(scheduler.into_root_result(), Some(Ok(atom("ok"))));
+        assert_eq!(scheduler.into_run_result().0, Some(Ok(atom("ok"))));
     }
 }
 
@@ -286,13 +286,13 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     // The link exit signal ends the root process, which does not trap
     // exits, with the reason of the child.
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
-    assert_eq!(scheduler.into_root_result(), Some(Err(atom("boom"))));
+    assert_eq!(scheduler.into_run_result().0, Some(Err(atom("boom"))));
 
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     scheduler.finish_current(atom("boom"), Some(atom("ok")));
-    assert_eq!(scheduler.into_root_result(), Some(Err(atom("boom"))));
+    assert_eq!(scheduler.into_run_result().0, Some(Err(atom("boom"))));
 
     let mut scheduler = Scheduler {
         next_process_id: u64::MAX,

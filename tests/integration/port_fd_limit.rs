@@ -51,7 +51,7 @@ fn runs_a_port_whose_pipes_are_at_or_above_fd_setsize() {
     let result = program.execute("port_probe", "high_fd", &[]);
     drop(fds);
     assert_eq!(
-        result.unwrap(),
+        result.unwrap().term,
         Term::tuple(vec![Term::binary(b"hi".to_vec()), Term::Integer(5)])
     );
 }

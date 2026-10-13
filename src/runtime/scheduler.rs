@@ -260,7 +260,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let scheduler = Scheduler::new(program.atoms.clone());
+    /// let scheduler = Scheduler::new((*program.atoms).clone());
     /// assert_eq!(scheduler.atoms.get("ok"), Atom::from_static("ok"));
     /// ```
     pub(super) fn new(atoms: AtomTable) -> Self {
@@ -308,7 +308,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let scheduler = Scheduler::without_checks(program.atoms.clone());
+    /// let scheduler = Scheduler::without_checks((*program.atoms).clone());
     /// assert!(scheduler.skips_checks());
     /// ```
     pub(super) fn without_checks(atoms: AtomTable) -> Self {
@@ -1287,15 +1287,20 @@ impl Scheduler {
             && !self.freed.contains_key(&root)
     }
 
-    /// Return the root result. `None` means the root process did not exit.
+    /// Return the root result and the atom table of the run together.
+    /// `None` means the root process did not exit. The table holds each name
+    /// that the run created, for example each name of
+    /// `erlang:list_to_atom/1`, so a host result that carries the table can
+    /// name every atom of the root result.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.into_root_result(), Some(Ok(Term::static_atom("ok"))));
+    /// let (root, atoms) = scheduler.into_run_result();
+    /// assert_eq!(root, Some(Ok(Term::static_atom("ok"))));
     /// ```
-    pub(super) fn into_root_result(self) -> Option<Result<Term, Term>> {
-        self.root_result
+    pub(super) fn into_run_result(self) -> (Option<Result<Term, Term>>, AtomTable) {
+        (self.root_result, self.atoms)
     }
 
     /// Return the bytes of the guest containers that the runtime holds: the

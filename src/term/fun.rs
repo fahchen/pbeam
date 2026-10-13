@@ -372,6 +372,22 @@ impl Fun {
             .as_ref()
             .expect("only the drop of a term takes its fun thing")
     }
+
+    /// Return a value that identifies the shared thing. Two funs have one
+    /// value only when they share one thing, so the import of a host term
+    /// reuses the imported term of a fun that the source holds more than
+    /// once. The value is the address of the thing, and no reader
+    /// dereferences it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let fun = Fun::of(Target::Local(lambda), vec![]);
+    /// assert_eq!(fun.identity(), fun.clone().identity());
+    /// ```
+    pub(super) fn identity(&self) -> usize {
+        Arc::as_ptr(self.arc()) as usize
+    }
 }
 
 #[cfg(test)]

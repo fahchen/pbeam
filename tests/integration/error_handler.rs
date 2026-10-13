@@ -95,7 +95,8 @@ fn raises_undef_through_error_handler_beam_as_pinned_erts() {
     assert_eq!(
         program
             .execute("error_handler_probe", "first", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![atom("error"), atom("undef"), frame])
     );
     assert_eq!(
@@ -108,6 +109,7 @@ fn raises_undef_through_error_handler_beam_as_pinned_erts() {
     let frames = program
         .execute("error_handler_probe", "frames", &[])
         .unwrap()
+        .term
         .proper_list()
         .unwrap()
         .map(text)
@@ -147,7 +149,10 @@ fn sets_the_error_handler_of_the_process_as_pinned_erts() {
         ]),
     ]);
     assert_eq!(
-        program.execute("error_handler_probe", "flag", &[]).unwrap(),
+        program
+            .execute("error_handler_probe", "flag", &[])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             atom("error_handler"),
             atom("error_handler_custom"),
@@ -157,7 +162,8 @@ fn sets_the_error_handler_of_the_process_as_pinned_erts() {
     assert_eq!(
         program
             .execute("error_handler_probe", "flag_errors", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(vec![
             atom("error_handler"),
             badarg.clone(),
@@ -203,7 +209,8 @@ fn sets_the_error_handler_for_an_unloaded_module_as_pinned_erts() {
     assert_eq!(
         program
             .execute("error_handler_probe", "flag_unloaded", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![
             atom("error_handler"),
             atom("error_handler_custom"),
@@ -241,7 +248,8 @@ fn charges_the_reductions_of_error_handler_beam_as_pinned_erts() {
     assert_eq!(
         program
             .execute("error_handler_probe", "reductions", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     // The two runs load the same modules, so the `handled` case matches

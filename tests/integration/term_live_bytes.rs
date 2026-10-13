@@ -29,7 +29,7 @@ use std::{
     time::Duration,
 };
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{BeamProgram, HostTerm};
 
 const SCENE: &[u8] = include_bytes!("../../fixtures/term_live_bytes/term_live_bytes_probe.beam");
 
@@ -74,7 +74,7 @@ impl LiveBytes {
 }
 
 /// Run the scene and return its result with the live-byte report of the run.
-fn run(program: &BeamProgram) -> (Term, LiveBytes) {
+fn run(program: &BeamProgram) -> (HostTerm, LiveBytes) {
     let mut report = LiveBytes::default();
     let result = program
         .execute_sampled("term_live_bytes_probe", "scene", &[], &mut |live| {

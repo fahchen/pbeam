@@ -24,7 +24,7 @@ fn runs_a_gen_statem_server_entered_with_enter_loop() {
     // and runs `erlang:exit(normal)` through `apply_last`, so the `DOWN`
     // reason is `normal`.
     assert_eq!(
-        program.execute("statem_probe", "main", &[]).unwrap(),
+        program.execute("statem_probe", "main", &[]).unwrap().term,
         Term::tuple(vec![
             Term::Integer(1),
             Term::tuple(vec![Term::Integer(1)]),

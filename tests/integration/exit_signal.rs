@@ -18,7 +18,10 @@ fn delivers_link_exit_before_monitor_down_and_normal_exit_to_trapping_process() 
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let pair = |tag: &str, reason: &str| Term::tuple(vec![atom(tag), atom(reason)]);
     assert_eq!(
-        program.execute("exit_signal_probe", "main", &[]).unwrap(),
+        program
+            .execute("exit_signal_probe", "main", &[])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             Term::tuple(vec![pair("EXIT", "boom"), pair("DOWN", "boom")]),
             pair("EXIT", "normal"),
@@ -56,7 +59,7 @@ fn sends_exit_signals_with_exit_2_as_erts_does() {
     let returned = Term::tuple(vec![atom("returned"), atom("true"), atom("true")]);
     let pair = |tag: &str, value: &str| Term::tuple(vec![atom(tag), atom(value)]);
     assert_eq!(
-        program.execute("exit_probe", "main", &[]).unwrap(),
+        program.execute("exit_probe", "main", &[]).unwrap().term,
         Term::list_from(vec![
             atom("normal"),
             atom("boom"),

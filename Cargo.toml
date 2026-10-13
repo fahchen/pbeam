@@ -254,6 +254,10 @@ name = "hibernate"
 path = "tests/integration/hibernate.rs"
 
 [[test]]
+name = "host_term"
+path = "tests/integration/host_term.rs"
+
+[[test]]
 name = "improper"
 path = "tests/integration/improper.rs"
 

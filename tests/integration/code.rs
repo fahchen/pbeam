@@ -67,7 +67,7 @@ fn runs_code_ensure_loaded_for_a_loaded_module_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let module = |name: &str| Term::tuple(vec![atom("module"), atom(name)]);
     assert_eq!(
-        program.execute("code_probe", "loaded", &[]).unwrap(),
+        program.execute("code_probe", "loaded", &[]).unwrap().term,
         Term::list_from(vec![module("code_probe"), module("code"), module("erlang")])
     );
     assert_eq!(
@@ -86,7 +86,10 @@ fn runs_erlang_module_loaded_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
-        program.execute("code_probe", "module_loaded", &[]).unwrap(),
+        program
+            .execute("code_probe", "module_loaded", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             atom("true"),
             atom("true"),
@@ -138,10 +141,15 @@ fn load_program() -> BeamProgram {
 /// Run `load_probe:Function(Code)` with the bytes of a fixture and return
 /// the `~w` text of the result.
 fn load_run(function: &str, code: &[u8]) -> String {
-    let result = load_program()
-        .execute("load_probe", function, &[Term::binary(code.to_vec())])
+    let program = load_program();
+    let result = program
+        .execute(
+            "load_probe",
+            function,
+            &[program.host_term(Term::binary(code.to_vec()))],
+        )
         .unwrap();
-    format!("{}\n", text(&result))
+    format!("{}\n", text(&result.term))
 }
 
 /// Run `load_probe:Function(Code)` on the pinned ERTS with one scheduler,
@@ -242,12 +250,13 @@ fn stops_the_run_for_code_replacement() {
     // ERTS makes the current code old and loads the new code
     // (`beam_load.c:258-262`). PBeam has no old code, so the second load
     // stops the run.
+    let program = load_program();
     assert_eq!(
-        load_program()
+        program
             .execute(
                 "load_probe",
                 "replace",
-                &[Term::binary(LOAD_TARGET.to_vec())]
+                &[program.host_term(Term::binary(LOAD_TARGET.to_vec()))]
             )
             .unwrap_err()
             .to_string(),
@@ -274,17 +283,24 @@ fn compares_the_module_name_of_code_load() {
             .execute_with_policy(
                 "load_probe",
                 "constraint",
-                std::slice::from_ref(&code),
+                std::slice::from_ref(&program.host_term(code.clone())),
                 &permitted
             )
-            .unwrap(),
+            .unwrap()
+            .term,
         expected("ok")
     );
     let denied = code_capability(&[Operation::Load], &["other_module"]);
     assert_eq!(
         program
-            .execute_with_policy("load_probe", "constraint", &[code], &denied)
-            .unwrap(),
+            .execute_with_policy(
+                "load_probe",
+                "constraint",
+                &[program.host_term(code)],
+                &denied
+            )
+            .unwrap()
+            .term,
         expected("denied")
     );
 }
@@ -295,12 +311,13 @@ fn stops_the_run_for_a_module_with_an_on_load_function() {
     // `{on_load, [load_on_load]}`, and the module waits for its
     // `-on_load` function (`beam_load.c:239-241`, `beam_bif_load.c:738-755`).
     // The PBeam loader does not decode the `on_load` instruction.
+    let program = load_program();
     assert_eq!(
-        load_program()
+        program
             .execute(
                 "load_probe",
                 "on_load",
-                &[Term::binary(LOAD_ON_LOAD.to_vec())]
+                &[program.host_term(Term::binary(LOAD_ON_LOAD.to_vec()))]
             )
             .unwrap_err()
             .to_string(),

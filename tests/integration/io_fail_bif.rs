@@ -40,7 +40,8 @@ fn checks_unicode_io_of_a_pid_as_pinned_erts() {
     assert_eq!(
         program
             .execute("io_fail_bif_probe", "unicode_io", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(vec![atom("true"), atom("true"), badarg.clone(), badarg])
     );
     assert_eq!(
@@ -72,7 +73,8 @@ fn converts_chardata_to_a_list_as_pinned_erts() {
     assert_eq!(
         program
             .execute("io_fail_bif_probe", "to_list", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(vec![
             list(&[72, 101, 108, 108, 111]),
             error(&[97], binary(&[255, 98])),
@@ -153,7 +155,10 @@ fn converts_chardata_of_100000_characters_as_pinned_erts() {
     let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     let summary = |reason, length, rest| Term::tuple(vec![atom(reason), int(length), rest]);
     assert_eq!(
-        program.execute("io_fail_bif_probe", "big", &[]).unwrap(),
+        program
+            .execute("io_fail_bif_probe", "big", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             summary(
                 "error",

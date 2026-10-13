@@ -47,7 +47,7 @@ fn applies_module_functions_as_pinned_erts() {
     expected.extend(std::iter::repeat_n(atom("badarg"), 8));
     expected.push(atom("system_limit"));
     assert_eq!(
-        program.execute("fun_probe", "mfas", &[]).unwrap(),
+        program.execute("fun_probe", "mfas", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -87,7 +87,7 @@ fn makes_and_calls_local_funs_as_pinned_erts() {
         pair("badfun", pair("fun_probe", atom("id"))),
     ];
     assert_eq!(
-        program.execute("fun_probe", "locals", &[]).unwrap(),
+        program.execute("fun_probe", "locals", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -118,7 +118,7 @@ fn tests_funs_with_is_function_as_pinned_erts() {
         .map(atom),
     );
     assert_eq!(
-        program.execute("fun_probe", "tests", &[]).unwrap(),
+        program.execute("fun_probe", "tests", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -155,7 +155,7 @@ fn applies_funs_as_pinned_erts() {
         atom("system_limit"),
     ];
     assert_eq!(
-        program.execute("fun_probe", "applies", &[]).unwrap(),
+        program.execute("fun_probe", "applies", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -177,7 +177,7 @@ fn spawns_a_fun_at_erlang_apply_2_as_pinned_erts() {
     let program = BeamProgram::load(&[&erlang, FUN_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("fun_probe", "spawned", &[]).unwrap(),
+        program.execute("fun_probe", "spawned", &[]).unwrap().term,
         Term::list_from(vec![atom("spawned"), atom("badarg")])
     );
     assert_eq!(reference("spawned"), b"[spawned,badarg]\n");
@@ -221,7 +221,7 @@ fn makes_and_calls_external_funs_as_pinned_erts() {
     expected.extend(std::iter::repeat_n(atom("badarg"), 5));
     expected.extend(["same", "lit", "same"].map(atom));
     assert_eq!(
-        program.execute("fun_probe", "externals", &[]).unwrap(),
+        program.execute("fun_probe", "externals", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -253,7 +253,7 @@ fn releases_the_frame_before_a_tail_apply_as_pinned_erts() {
         pair("inner", atom("badarg")),
     ];
     assert_eq!(
-        program.execute("tail_catch", "run", &[]).unwrap(),
+        program.execute("tail_catch", "run", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(

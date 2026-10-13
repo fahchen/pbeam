@@ -62,7 +62,10 @@ fn raises_the_exceptions_of_the_error_path_instructions_as_pinned_erts() {
         tuple(vec![r(), atom("error_path_probe"), atom(function), args])
     };
     assert_eq!(
-        program.execute("error_path_probe", "main", &[]).unwrap(),
+        program
+            .execute("error_path_probe", "main", &[])
+            .unwrap()
+            .term,
         tuple(vec![
             Term::list_from(vec![
                 error(tagged("badmatch")),

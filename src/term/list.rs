@@ -96,6 +96,23 @@ impl ConsRef {
             .as_ref()
             .expect("only the drop of a term takes its cons cell")
     }
+
+    /// Return a value that identifies the shared cell. Two cons references
+    /// have one value only when they share one cell, so the import of a
+    /// host term reuses the imported term of a list that the source holds
+    /// more than once. The value is the address of the cell, and no reader
+    /// dereferences it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let cell = ConsRef::new(Term::Integer(1), Term::nil());
+    /// assert_eq!(cell.identity(), cell.clone().identity());
+    /// assert_ne!(cell.identity(), ConsRef::new(Term::Integer(1), Term::nil()).identity());
+    /// ```
+    pub(super) fn identity(&self) -> usize {
+        Arc::as_ptr(self.arc()) as usize
+    }
 }
 
 impl Deref for ConsRef {

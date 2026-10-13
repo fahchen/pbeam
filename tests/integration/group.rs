@@ -19,7 +19,7 @@ fn takes_the_fail_labels_of_guard_bifs_and_is_ge_as_pinned_erts() {
     let output = Term::Atom(program.atom("output").unwrap());
     let other = Term::Atom(program.atom("other").unwrap());
     assert_eq!(
-        program.execute("group_probe", "guards", &[]).unwrap(),
+        program.execute("group_probe", "guards", &[]).unwrap().term,
         Term::list_from(vec![output, other.clone(), other])
     );
 
@@ -46,7 +46,10 @@ fn registers_a_process_name_as_pinned_erts() {
     let program = BeamProgram::load(&[GROUP_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("group_probe", "registry", &[]).unwrap(),
+        program
+            .execute("group_probe", "registry", &[])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             atom("badarg"),
             atom("true"),
@@ -100,7 +103,7 @@ fn executes_the_pinned_group_server_for_one_put_chars_request() {
     let program = BeamProgram::load(&beams).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("group_probe", "main", &[]).unwrap(),
+        program.execute("group_probe", "main", &[]).unwrap().term,
         Term::tuple(vec![
             atom("ok"),
             Term::tuple(vec![

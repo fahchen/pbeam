@@ -51,7 +51,7 @@ fn raises_an_exception_again_with_raise_as_pinned_erts() {
     let caught = |class: &str| tuple(vec![atom(class), reason(class), empty()]);
     let exit = |reason: Term| tuple(vec![atom("EXIT"), reason]);
     assert_eq!(
-        program.execute("raise_probe", "main", &[]).unwrap(),
+        program.execute("raise_probe", "main", &[]).unwrap().term,
         tuple(vec![
             Term::list_from(vec![
                 tuple(vec![
