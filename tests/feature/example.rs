@@ -637,7 +637,11 @@ fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
         });
     }
     let mut child = command.spawn().unwrap_or_else(|error| {
-        panic!("the host did not give the child the pseudo-terminal as its controlling terminal: {error}")
+        panic!(
+            "the host did not start the child of the pseudo-terminal run: {error}. The likely \
+             causes are a failed `setsid` or `TIOCSCTTY` in the child, and a failed fork of the \
+             host. The report does not decide which one occurred."
+        )
     });
     // `spawn` gives each `Stdio` to the child and closes the copies of the
     // test, so the test drops the command and its slave. It keeps the master
@@ -723,6 +727,23 @@ fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
     drop(master);
     reader.join().unwrap();
     let bytes = output.lock().unwrap().clone();
+    // The test compares the terminal handling of the two runs, so a run that
+    // reports a failure of its `erl_child_setup` process gives no result to
+    // compare. Report the observed failure and the bytes of the run here, and
+    // do not assert a result of that run. The known ways that the emulator can
+    // close the port request pipe before the acknowledgement are the end of
+    // the emulator and a timeout of Terra `Terra.Terminal.TTY.run_stty/2`; the
+    // report does not decide between them.
+    if let Some(failure) = child_setup_failure(&bytes) {
+        panic!(
+            "the pinned ERTS reported a failure of its `erl_child_setup` process during the run: \
+             {failure}. The test cannot compare a result of this run. The likely causes are the \
+             2000 ms timeout that Terra `Terra.Terminal.TTY.run_stty/2` uses for its `stty` port, \
+             and the end of the emulator. The report does not decide which one occurred. The \
+             bytes of the run: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
     (bytes, format!("{status} {ret}"))
 }
 
@@ -796,8 +817,55 @@ fn restore_before_result(bytes: &[u8]) -> (&[u8], &[u8]) {
     (before, after)
 }
 
+/// Return the text of the `erl_child_setup` failure in `bytes`, or `None`
+/// when the run reports no such failure.
+///
+/// The pinned ERTS starts each port program from its `erl_child_setup`
+/// process (`sys_drivers.c` `spawn_init`). The forked child reads the port
+/// request and then the acknowledgement on the read end of the port pipe
+/// (`erl_child_setup.c:210-213`, `282-287`). When the emulator closes that
+/// pipe before the acknowledgement, the read gives `EPIPE` and the child
+/// writes a text such as `erl_child_setup: failed with error 32 on line 284`
+/// to its standard error (`erl_child_setup.c:371-374`), which the run shares
+/// with the terminal. The text is thus a part of the bytes of the run. The
+/// emulator closes the pipe when it closes the port or when it stops, so the
+/// text alone does not name the cause.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(
+///     child_setup_failure(b"erl_child_setup: failed with error 32 on line 284\r\n").unwrap(),
+///     "erl_child_setup: failed with error 32 on line 284"
+/// );
+/// ```
+#[cfg(target_os = "macos")]
+fn child_setup_failure(bytes: &[u8]) -> Option<String> {
+    let marker = b"erl_child_setup: failed with error";
+    let at = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)?;
+    let rest = &bytes[at..];
+    let end = rest
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .unwrap_or(rest.len());
+    Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+}
+
 /// Open a pseudo-terminal with the 80 columns and 24 rows of the Terra
-/// Counter reference run.
+/// Counter reference run, without output post-processing.
+///
+/// `OPOST` is off in the first mode of the terminal. The result of `main/0`
+/// is written while the terminal owner of Terra Counter restores the terminal
+/// in its own process (`Terra.Terminal.Owner.do_restore/1` writes the restore
+/// sequence, runs `stty isig`, and restores the tty mode last). The output
+/// post-processing at the write of the result is thus a race: the restored
+/// mode gives `\r\n` and the raw mode gives `\n`, and the load of the host
+/// changes the winner. With `OPOST` off, both modes write each `\n`
+/// unchanged, so the ERTS run and the PBeam run write the same result. The
+/// host `stty` clears `OPOST` on the slave, because the standard library has
+/// no safe terminal API and this test adds no unsafe code.
 ///
 /// # Examples
 ///
@@ -808,15 +876,15 @@ fn restore_before_result(bytes: &[u8]) -> (&[u8], &[u8]) {
 fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::io::Error> {
     let (mut master, mut slave) = (-1, -1);
     // SAFETY: `openpty` writes two new fds to `master` and `slave`, and
-    // accepts a null name and mode. `fcntl` changes only the fd flags. Each
-    // `OwnedFd` takes one new fd.
+    // accepts a null name. `fcntl` changes only the fd flags. Each `OwnedFd`
+    // takes one new fd.
     let mut win = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    unsafe {
+    let (master, slave) = unsafe {
         let result = libc::openpty(
             &raw mut master,
             &raw mut slave,
@@ -832,11 +900,25 @@ fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::
         }
         use std::os::fd::FromRawFd;
 
-        Ok((
+        (
             std::os::fd::OwnedFd::from_raw_fd(master),
             std::os::fd::OwnedFd::from_raw_fd(slave),
-        ))
+        )
+    };
+    // `stty` reads the mode of its standard input, the slave, and clears
+    // `OPOST` in that mode.
+    let status = Command::new("stty")
+        .arg("-opost")
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "the host did not clear OPOST on the pseudo-terminal: stty -opost {status}"
+        )));
     }
+    Ok((master, slave))
 }
 
 #[test]
@@ -867,6 +949,14 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
     // terminal. Terra Counter needs that ownership to read a key, so a host
     // that denies it fails the test at once with the condition of the host,
     // and not after the build limit (#505).
+    //
+    // Terra Counter opens `stty -isig` and `stty isig` ports in its terminal
+    // handling. A run can report a failure of its `erl_child_setup` process,
+    // for example when the host does not run the ERTS process within the
+    // 2000 ms timeout that `Terra.Terminal.TTY.run_stty/2` uses, or when the
+    // emulator stops. The test needs the terminal handling of both runs, so
+    // `run_terra_counter_in_terminal` reports that failure, and it does not
+    // compare a result of a run that reports it.
     let (erts, erts_status) = run_terra_counter_in_terminal(&["terra_counter", "--erts"]);
     let (pbeam, pbeam_status) = run_terra_counter_in_terminal(&["terra_counter", "--no-build"]);
     assert_eq!(erts_status, pbeam_status, "status");

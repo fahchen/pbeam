@@ -18,11 +18,12 @@ use super::{
     },
     interpreter::CodeTable,
     local_node,
+    mailbox::Mailbox,
     persistent_term::PersistentTerms,
     port::Ports,
     process::{
-        DirtyWrite, Flush, Frame, LinkId, Monitor, Origin, OriginMonitor, ProcessState,
-        ReceiveTimer, Start, TargetMonitor, TimerReference, WalkPosition,
+        DirtyWrite, Flush, Frame, LinkId, Monitor, MonitorLinkTree, Origin, OriginMonitor,
+        ProcessState, ReceiveTimer, StackSlot, Start, TargetMonitor, TimerReference, WalkPosition,
     },
     regex_code::RegexCodes,
     resources::Resources,
@@ -33,7 +34,9 @@ use super::{
 use crate::{
     beam::BeamModule,
     error::{BeamError, error},
-    term::{Atom, AtomTable, LiveBytes, ProcessId, Reference, SMALL_INTEGER_MIN, Term},
+    term::{
+        Atom, AtomTable, Group, LiveBytes, MapDrain, ProcessId, Reference, SMALL_INTEGER_MIN, Term,
+    },
 };
 
 /// The reduction budget of a process for one turn, as ERTS `CONTEXT_REDS`
@@ -67,6 +70,187 @@ const SIGNAL_HANDLING_REDUCTIONS: i32 = 100;
 /// part: `erts_proc_sig_receive_helper` uses 4 for each fetch
 /// (`erl_proc_sig_queue.c:7771-7799`).
 const RECEIVE_FETCH_REDUCTIONS: i32 = 4;
+
+/// The number of terms whose nested values one scheduler step releases, as
+/// the release batch of row 11 of `docs/term-performance-design-codex-v2.md`
+/// ("process it in batches of at most 256 nodes"). A process that owned a
+/// large graph leaves that graph on the release work list of the scheduler
+/// when it exits ([`Scheduler::release_process`]), and the scheduler walks
+/// the list in this bound at each step ([`Scheduler::drain_release`]). The
+/// bound is host cleanup work: it changes no guest reduction and no guest
+/// value.
+pub(super) const RELEASE_BATCH: usize = 256;
+
+/// One item of the release work list of the scheduler. One scheduler step
+/// moves at most [`RELEASE_BATCH`] units of the list, where a unit is one
+/// term, one element of an element array, one pair of a map, one register or
+/// Y slot, one dictionary pair, one mailbox entry, one monitor, one frame, or
+/// one step of a map walk. A unit pushes at most two terms, so one step moves
+/// at most twice the batch. The step returns every item that still holds a
+/// term to the list.
+#[derive(Debug)]
+enum Release {
+    /// A term whose nested values the scheduler still has to move. One step
+    /// moves the direct children of this term.
+    Term(Term),
+    /// The element array of a tuple or the free variables of a fun. The array
+    /// is the one that the term owned, so the group copies nothing.
+    Terms(Vec<Term>),
+    /// The pairs of a map.
+    Map(MapDrain),
+    /// The X registers of a process that left the process table.
+    Registers(Vec<Option<Term>>),
+    /// The frames of a process that left the process table.
+    Frames(Vec<Frame>),
+    /// The Y registers of one frame that a process left.
+    Slots(Vec<StackSlot>),
+    /// The process dictionary of a process that left the process table.
+    Dictionary(Vec<(Term, Term)>),
+    /// The mailbox of a process that left the process table.
+    Mailbox(Mailbox),
+    /// The monitors of a process that left the process table.
+    Monitors(MonitorLinkTree<Reference, Origin>),
+}
+
+/// The number of slots of one chunk of the release work list. The stack
+/// allocates one chunk at a time, so a push copies no item that is already on
+/// the list.
+const RELEASE_CHUNK: usize = 256;
+
+/// The release work list of the scheduler: a stack of items in chunks of
+/// [`RELEASE_CHUNK`] slots.
+///
+/// A plain `Vec` copies each item that it holds when it grows. One step of
+/// [`Scheduler::drain_release`] can push many items: a chain whose every node
+/// holds one pending sibling leaves one item on the list for each level. The
+/// growth of a `Vec` would copy the whole pending stack inside that one step
+/// and leave the [`RELEASE_BATCH`] bound. This stack allocates one new chunk
+/// when its last chunk is full, and it copies no item.
+#[derive(Debug)]
+struct ReleaseStack {
+    /// The chunks of the stack, oldest first. Each chunk holds at most
+    /// [`RELEASE_CHUNK`] items.
+    chunks: Vec<Vec<Release>>,
+}
+
+impl ReleaseStack {
+    /// Return an empty stack.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(ReleaseStack::new().is_empty());
+    /// ```
+    const fn new() -> Self {
+        Self { chunks: Vec::new() }
+    }
+
+    /// Push one item on the top of the stack.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = ReleaseStack::new();
+    /// stack.push(Release::Term(Term::Integer(1)));
+    /// assert_eq!(stack.len(), 1);
+    /// ```
+    fn push(&mut self, item: Release) {
+        match self.chunks.last_mut() {
+            Some(chunk) if chunk.len() < RELEASE_CHUNK => chunk.push(item),
+            _ => {
+                let mut chunk = Vec::with_capacity(RELEASE_CHUNK);
+                chunk.push(item);
+                self.chunks.push(chunk);
+            }
+        }
+    }
+
+    /// Push each item of `items` on the top of the stack, in order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = ReleaseStack::new();
+    /// stack.extend([Release::Term(Term::Integer(1))]);
+    /// assert_eq!(stack.len(), 1);
+    /// ```
+    fn extend(&mut self, items: impl IntoIterator<Item = Release>) {
+        for item in items {
+            self.push(item);
+        }
+    }
+
+    /// Remove and return the item at the top of the stack.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = ReleaseStack::new();
+    /// stack.push(Release::Term(Term::Integer(1)));
+    /// assert!(stack.pop().is_some());
+    /// assert!(stack.is_empty());
+    /// ```
+    fn pop(&mut self) -> Option<Release> {
+        let item = self.chunks.last_mut()?.pop()?;
+        if self.chunks.last().is_some_and(|chunk| chunk.is_empty()) {
+            self.chunks.pop();
+        }
+        Some(item)
+    }
+
+    /// Return true when the stack holds no item.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(ReleaseStack::new().is_empty());
+    /// ```
+    fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    /// Return the number of items of the stack.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ReleaseStack::new().len(), 0);
+    /// ```
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.chunks.iter().map(|chunk| chunk.len()).sum()
+    }
+
+    /// Iterate over the items of the stack, oldest first. The live-byte walk
+    /// of a run reads the terms of each item, so this is not a test helper.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ReleaseStack::new().iter().count(), 0);
+    /// ```
+    fn iter(&self) -> impl Iterator<Item = &Release> {
+        self.chunks.iter().flat_map(|chunk| chunk.iter())
+    }
+
+    /// Return the number of bytes of the chunks of the stack and of the slots
+    /// of each chunk.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ReleaseStack::new().allocated_bytes(), 0);
+    /// ```
+    #[cfg(test)]
+    fn allocated_bytes(&self) -> usize {
+        self.chunks.capacity() * std::mem::size_of::<Vec<Release>>()
+            + self
+                .chunks
+                .iter()
+                .map(|chunk| chunk.capacity() * std::mem::size_of::<Release>())
+                .sum::<usize>()
+    }
+}
 
 /// The target of `erlang:monitor/2`, after the BIF checked the type and the
 /// target term as ERTS `monitor` does (`bif.c:758-981`).
@@ -241,6 +425,16 @@ pub(super) struct Scheduler {
     dirty_io: DirtyIo,
     /// The delegation records of the capability copies of the run.
     delegations: Delegations,
+    /// The terms whose nested values the scheduler still has to release, most
+    /// recent first. A process that left the process table moves each term
+    /// that it owned here before it drops ([`Self::release_process`]), and
+    /// each scheduler step releases at most [`RELEASE_BATCH`] terms of the
+    /// list ([`Self::drain_release`]). The list owns each term, so a switch
+    /// to another process loses no root. The final drain of a run is the
+    /// drop of the scheduler, which releases the terms that are left. The
+    /// list grows in chunks ([`ReleaseStack`]), so a push into it copies no
+    /// item that a step of the drain already holds.
+    release: ReleaseStack,
     /// The policy process of a run with a policy module, or `None` with a
     /// Rust policy.
     policy: Option<PolicyProcess>,
@@ -293,6 +487,7 @@ impl Scheduler {
             virtual_reductions: 0,
             dirty_io: DirtyIo::new(),
             delegations: Delegations::default(),
+            release: ReleaseStack::new(),
             policy: None,
             skip_checks: false,
         }
@@ -486,6 +681,220 @@ impl Scheduler {
         }
     }
 
+    /// Release at most `budget` units of the release work list, and leave the
+    /// rest for the next step. A unit is one term, one element of an element
+    /// array, one pair of a map, one register or Y slot, one dictionary pair,
+    /// one mailbox entry, one monitor, one frame, or one step of a map walk.
+    /// One unit pushes at most two terms.
+    ///
+    /// One term takes its direct children onto the list with
+    /// [`Term::take_nested`] and then drops its own storage; the element array
+    /// of a tuple or of a fun goes to the list as a group, a map goes there as
+    /// a [`MapDrain`] walk, and the containers of an exited process go there
+    /// as containers. Thus one call moves at most `budget` units, walks no
+    /// node twice, and uses no Rust recursion. The list owns each term, so a
+    /// term that this method does not reach stays alive.
+    ///
+    /// The method calls no guest code, charges no reduction, and changes no
+    /// value. A caller passes [`RELEASE_BATCH`], so that a process that waits
+    /// to run waits for at most that work (row 11 of
+    /// `docs/term-performance-design-codex-v2.md`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.release.push(Release::Term(Term::tuple(vec![Term::Integer(1)])));
+    /// scheduler.drain_release(RELEASE_BATCH);
+    /// assert!(scheduler.release.is_empty());
+    /// ```
+    fn drain_release(&mut self, budget: usize) {
+        let mut moved = 0;
+        let mut terms = Vec::new();
+        while moved < budget {
+            let Some(item) = self.release.pop() else {
+                return;
+            };
+            let left = budget - moved;
+            match item {
+                Release::Term(mut term) => {
+                    moved += 1;
+                    match term.take_group() {
+                        Some(Group::Terms(group)) => self.release.push(Release::Terms(group)),
+                        Some(Group::Map(drain)) => self.release.push(Release::Map(drain)),
+                        None => {
+                            // A cons cell, a binary, or an immediate. A cons
+                            // cell moves two terms.
+                            terms.clear();
+                            term.take_nested(&mut terms);
+                            self.release.extend(terms.drain(..).map(Release::Term));
+                        }
+                    }
+                }
+                Release::Terms(mut group) => {
+                    let take = group.len().min(left);
+                    moved += take;
+                    if take == group.len() {
+                        self.release.extend(group.into_iter().map(Release::Term));
+                    } else {
+                        // The list takes the terms from the end of the group,
+                        // as `Term::take_nested` puts them on a work stack.
+                        // The group goes under the moved terms, so that the
+                        // next step releases them before it moves more.
+                        let rest = group.split_off(group.len() - take);
+                        self.release.push(Release::Terms(group));
+                        self.release.extend(rest.into_iter().map(Release::Term));
+                    }
+                }
+                Release::Map(mut drain) => {
+                    terms.clear();
+                    moved += drain.step(&mut terms, left);
+                    // The drain goes under the terms that it moved, so that
+                    // the next step releases them before it moves more.
+                    if !drain.is_empty() {
+                        self.release.push(Release::Map(drain));
+                    }
+                    self.release.extend(terms.drain(..).map(Release::Term));
+                }
+                Release::Registers(mut registers) => {
+                    let take = registers.len().min(left);
+                    moved += take;
+                    // The registers that this step did not move go under the
+                    // terms that it moved, so that the next step releases them
+                    // before it moves more.
+                    let rest = registers.split_off(registers.len() - take);
+                    if !registers.is_empty() {
+                        self.release.push(Release::Registers(registers));
+                    }
+                    for term in rest.into_iter().flatten() {
+                        self.release.push(Release::Term(term));
+                    }
+                }
+                Release::Frames(mut frames) => {
+                    let Some(frame) = frames.pop() else {
+                        continue;
+                    };
+                    moved += 1;
+                    if !frames.is_empty() {
+                        self.release.push(Release::Frames(frames));
+                    }
+                    self.release.push(Release::Slots(frame.stack));
+                }
+                Release::Slots(mut slots) => {
+                    let take = slots.len().min(left);
+                    moved += take;
+                    let rest = slots.split_off(slots.len() - take);
+                    if !slots.is_empty() {
+                        self.release.push(Release::Slots(slots));
+                    }
+                    for slot in rest {
+                        match slot {
+                            StackSlot::Empty | StackSlot::Catch(_) => {}
+                            StackSlot::Term(term) => self.release.push(Release::Term(term)),
+                        }
+                    }
+                }
+                Release::Dictionary(mut dictionary) => {
+                    let take = dictionary.len().min(left);
+                    moved += take;
+                    let rest = dictionary.split_off(dictionary.len() - take);
+                    if !dictionary.is_empty() {
+                        self.release.push(Release::Dictionary(dictionary));
+                    }
+                    for (key, value) in rest {
+                        self.release.push(Release::Term(key));
+                        self.release.push(Release::Term(value));
+                    }
+                }
+                Release::Mailbox(mut mailbox) => {
+                    terms.clear();
+                    moved += mailbox.take_terms_bounded(&mut terms, left);
+                    if !mailbox.is_empty() {
+                        self.release.push(Release::Mailbox(mailbox));
+                    }
+                    self.release.extend(terms.drain(..).map(Release::Term));
+                }
+                Release::Monitors(mut monitors) => {
+                    let mut taken = 0;
+                    terms.clear();
+                    while taken < left {
+                        let Some(origin) = monitors.take_value() else {
+                            break;
+                        };
+                        taken += 1;
+                        if let Some(monitor) = origin.monitor {
+                            terms.push(monitor.item);
+                            terms.push(monitor.tag);
+                        }
+                    }
+                    moved += taken;
+                    if !monitors.is_empty() {
+                        self.release.push(Release::Monitors(monitors));
+                    }
+                    self.release.extend(terms.drain(..).map(Release::Term));
+                }
+            }
+        }
+    }
+
+    /// Move each term of the process `process` to the release work list, and
+    /// leave the process with no term. The exit of the process calls this
+    /// before the process drops, so that the release of a large graph runs
+    /// in bounded scheduler work ([`Self::drain_release`]) and not in the
+    /// drop of the process. The list owns each term, so the process loses no
+    /// root.
+    ///
+    /// The process must have left the process table: no guest code can read
+    /// its registers, its frames, its dictionary, or its mailbox again.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.release_process(process);
+    /// assert!(!scheduler.release.is_empty());
+    /// ```
+    fn release_process(&mut self, mut process: ProcessState) {
+        // The containers of the process go to the list as containers, so that
+        // the exit step pays no walk of a large dictionary, mailbox, frame
+        // stack, or monitor tree, and the later steps extract their terms in
+        // batches.
+        if let Some(bif) = process.pending_bif.take() {
+            self.release.push(Release::Terms(bif.arguments));
+        }
+        if let Some(arguments) = process.length_trap.take() {
+            self.release.push(Release::Terms(arguments));
+        }
+        if let Some(reason) = process.exiting.take() {
+            self.release.push(Release::Term(reason));
+        }
+        self.release
+            .push(Release::Registers(std::mem::take(&mut process.registers)));
+        self.release
+            .push(Release::Frames(std::mem::take(&mut process.frames)));
+        self.release
+            .push(Release::Mailbox(std::mem::take(&mut process.mailbox)));
+        self.release
+            .push(Release::Dictionary(std::mem::take(&mut process.dictionary)));
+        self.release
+            .push(Release::Monitors(std::mem::take(&mut process.monitors)));
+    }
+
+    /// Return the number of items of the release work list. The list is
+    /// private to the scheduler, and a test of the run loop of another module
+    /// reads this count to show that the loop released the work of an exited
+    /// process before it waited (row 11 of
+    /// `docs/term-performance-design-codex-v2.md`, task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559)).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.release_len(), 0);
+    /// ```
+    #[cfg(test)]
+    pub(super) fn release_len(&self) -> usize {
+        self.release.len()
+    }
+
     /// Run one scheduling step, as `erts_schedule` does after it takes a
     /// process from the run queue (`erl_process.c:10318-10460`). The process
     /// becomes the current process with a budget of `CONTEXT_REDS`
@@ -506,6 +915,10 @@ impl Scheduler {
     /// - A process whose receive timer expired continues at the instruction
     ///   after its `wait_timeout` with `F_TIMO`, also when a message woke it
     ///   first (`erl_process.c:10451-10458`).
+    /// - A step with no runnable process returns [`Turn::Idle`], except when
+    ///   the release work list still holds a term: that step returns
+    ///   [`Turn::Done`], so that the run loop keeps stepping and the release
+    ///   completes (row 11 of `docs/term-performance-design-codex-v2.md`).
     ///
     /// Return [`Turn::Run`] when the current process runs Erlang code now.
     ///
@@ -520,8 +933,20 @@ impl Scheduler {
     ///
     /// An error of [`Scheduler::handle_signals`].
     pub(super) fn schedule_next(&mut self) -> Result<Turn, BeamError> {
+        // The release work of an exiting process runs in this bound, so the
+        // process that this step runs waits for the release of at most
+        // [`RELEASE_BATCH`] nodes.
+        self.drain_release(RELEASE_BATCH);
         let Some(id) = self.runnable.pop_front() else {
-            return Ok(Turn::Idle);
+            // A step that releases work reports `Done`, so that the run loop
+            // keeps stepping and the release completes. An `Idle` step would
+            // let the loop wait for input while most of a dead graph stays
+            // retained, and nothing would wake it to finish the release.
+            return Ok(if self.release.is_empty() {
+                Turn::Idle
+            } else {
+                Turn::Done
+            });
         };
         if let Some((process, phase)) = self.freed.remove(&id) {
             self.exit_links(process, phase, CONTEXT_REDS);
@@ -1332,7 +1757,83 @@ impl Scheduler {
                 Ok(term) | Err(term) => live.term(term),
             }
         }
+        self.account_release(&mut live);
         live.bytes()
+    }
+
+    /// Account the terms that the release work list holds, so that the
+    /// live-byte walk of a run counts the graph of a process that left the
+    /// process table until the drain releases it. Each item gives the storage
+    /// of its container and its terms to the walk, which counts each shared
+    /// container once.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// scheduler.account_release(&mut live);
+    /// ```
+    pub(super) fn account_release(&self, live: &mut LiveBytes) {
+        for item in self.release.iter() {
+            match item {
+                Release::Term(term) => live.term(term),
+                Release::Terms(group) => {
+                    live.add(group.capacity() * std::mem::size_of::<Term>());
+                    for term in group {
+                        live.term(term);
+                    }
+                }
+                Release::Map(drain) => drain.account(live),
+                Release::Registers(registers) => {
+                    live.add(registers.capacity() * std::mem::size_of::<Option<Term>>());
+                    for register in registers.iter().flatten() {
+                        live.term(register);
+                    }
+                }
+                Release::Frames(frames) => {
+                    live.add(frames.capacity() * std::mem::size_of::<Frame>());
+                    for frame in frames {
+                        live.add(frame.stack.capacity() * std::mem::size_of::<StackSlot>());
+                        for slot in &frame.stack {
+                            if let StackSlot::Term(term) = slot {
+                                live.term(term);
+                            }
+                        }
+                    }
+                }
+                Release::Slots(slots) => {
+                    live.add(slots.capacity() * std::mem::size_of::<StackSlot>());
+                    for slot in slots {
+                        if let StackSlot::Term(term) = slot {
+                            live.term(term);
+                        }
+                    }
+                }
+                Release::Dictionary(dictionary) => {
+                    live.add(dictionary.capacity() * std::mem::size_of::<(Term, Term)>());
+                    for (key, value) in dictionary {
+                        live.term(key);
+                        live.term(value);
+                    }
+                }
+                Release::Mailbox(mailbox) => {
+                    live.add(mailbox.allocated_bytes());
+                    mailbox.account_release_terms(live);
+                }
+                Release::Monitors(monitors) => {
+                    live.add(monitors.allocated_bytes());
+                    for origin in monitors.values() {
+                        if let Some(monitor) = &origin.monitor {
+                            live.term(&monitor.item);
+                            live.term(&monitor.tag);
+                        }
+                    }
+                }
+            }
+        }
+        // Every item of the list flushes its own walk, and this closes the
+        // walk of the list as a whole.
+        live.flush();
     }
 
     /// Deliver a message that no process sends, such as a timer message or
@@ -2182,6 +2683,10 @@ impl Scheduler {
         }
         self.alias_owners.retain(|_, owner| *owner != id);
         self.send_pending_monitor();
+        // The process left the process table and no guest code can read it
+        // again. Its terms go to the release work list, so that the walk of a
+        // large graph runs in bounded scheduler work and not in this step.
+        self.release_process(process);
     }
 }
 
@@ -2208,3 +2713,12 @@ pub(super) use signals::{Flushed, HandlingPoint, Received};
 #[cfg(test)]
 #[path = "../../tests/runtime/scheduler.rs"]
 mod tests;
+
+/// The measurement of the scheduler release of a large shared graph of row 11
+/// of `docs/term-performance-design-codex-v2.md` and task
+/// [#559](https://github.com/fahchen/pbeam/issues/559). It lives beside the
+/// scheduler, because the pause is the time inside the private exit and drop
+/// paths.
+#[cfg(test)]
+#[path = "../../tests/runtime/scheduler/release_costs.rs"]
+mod release_costs;

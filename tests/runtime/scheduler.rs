@@ -1,4 +1,7 @@
-use super::{CONTEXT_REDS, ExitPhase, LinkId, MonitorOptions, MonitorTarget, Scheduler, Turn};
+use super::{
+    CONTEXT_REDS, ExitPhase, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH, RELEASE_CHUNK,
+    Release, Scheduler, Turn,
+};
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
 use crate::runtime::host::output::{IovecWrite, IovecWritten};
@@ -6,12 +9,13 @@ use crate::term::test_atom;
 use crate::{
     runtime::ets::{Access, Table},
     runtime::process::{
-        ReceiveTimer, Start, TimerReference,
+        Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
+        TimerReference,
         tests::{frame, test_scheduler, test_scheduler_without_checks},
     },
     runtime::signal::Signal,
     runtime::timer::{Receiver, Timer},
-    term::{Atom, ProcessId, Reference, Term},
+    term::{Atom, Fun, Lambda, Map, ProcessId, Reference, Term},
 };
 use std::{
     io::{PipeReader, PipeWriter, Read, Write},
@@ -929,6 +933,472 @@ fn sends_a_message_that_shares_the_term_of_the_sender() {
     assert!(!Term::Integer(1).shares_storage_with(&Term::Integer(1)));
 }
 
+/// Return a term of one integer, for a test that tells the terms of the
+/// release work list apart.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(marker(1), Term::tuple(vec![Term::Integer(1)]));
+/// ```
+fn marker(number: i64) -> Term {
+    Term::tuple(vec![Term::Integer(number)])
+}
+
+/// Release each item of the release work list of `scheduler`, and check that
+/// the list ends empty. A test uses it to finish a bounded release.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// release_all(&mut test_scheduler());
+/// ```
+fn release_all(scheduler: &mut Scheduler) {
+    while !scheduler.release.is_empty() {
+        scheduler.drain_release(RELEASE_BATCH);
+    }
+}
+
+#[test]
+fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
+    // Row 11 of docs/term-performance-design-codex-v2.md: the exit moves the
+    // term-holding containers of a process to the release work list as
+    // containers, so the exit step walks no dictionary entry, mailbox node,
+    // frame, or monitor. Each container reaches the list.
+    let mut scheduler = test_scheduler();
+    scheduler
+        .start(frame(), vec![Term::Integer(1)], allow_all())
+        .unwrap();
+    let id = ProcessId(0);
+    {
+        let process = scheduler.processes.get_mut(&id).unwrap();
+        process.frames[0].stack = vec![StackSlot::Term(marker(2))];
+        process.mailbox.push(marker(3));
+        process.dictionary.push((Term::Integer(4), marker(5)));
+        process.pending_bif = Some(PendingBif {
+            module: "erlang",
+            function: "length",
+            arguments: vec![marker(6)],
+            tail: false,
+        });
+        process.length_trap = Some(vec![marker(7)]);
+        process.monitors.insert(
+            Reference(1),
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: marker(8),
+                    tag: marker(9),
+                }),
+                alias: None,
+            },
+        );
+    }
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    let items: Vec<&Release> = scheduler.release.iter().collect();
+    assert_eq!(items.len(), 8, "the exit moves eight containers");
+    assert!(matches!(items[0], Release::Terms(_)));
+    assert!(matches!(items[1], Release::Terms(_)));
+    assert!(matches!(items[2], Release::Term(reason) if *reason == atom("normal")));
+    assert!(matches!(items[3], Release::Registers(_)));
+    assert!(matches!(items[4], Release::Frames(_)));
+    assert!(matches!(items[5], Release::Mailbox(_)));
+    assert!(matches!(items[6], Release::Dictionary(_)));
+    assert!(matches!(items[7], Release::Monitors(_)));
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn releases_the_terms_of_every_container_of_an_exiting_process() {
+    // The drain releases the terms of each container that the exit moved to
+    // the release work list. The test keeps one holder of each term, so a
+    // value that the release lost shows as a changed value, and the run ends
+    // with no item on the list.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let id = ProcessId(0);
+    let register = marker(1);
+    let stack = marker(2);
+    let message = marker(3);
+    let dictionary = marker(4);
+    let pending = marker(5);
+    let length_trap = marker(6);
+    let item = marker(7);
+    let tag = marker(8);
+    {
+        let process = scheduler.processes.get_mut(&id).unwrap();
+        process.registers = vec![Some(register.clone())];
+        process.frames[0].stack = vec![
+            StackSlot::Empty,
+            StackSlot::Catch(1),
+            StackSlot::Term(stack.clone()),
+        ];
+        process.mailbox.push(message.clone());
+        process
+            .dictionary
+            .push((Term::Integer(9), dictionary.clone()));
+        process.pending_bif = Some(PendingBif {
+            module: "erlang",
+            function: "length",
+            arguments: vec![pending.clone()],
+            tail: false,
+        });
+        process.length_trap = Some(vec![length_trap.clone()]);
+        process.monitors.insert(
+            Reference(1),
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: item.clone(),
+                    tag: tag.clone(),
+                }),
+                alias: None,
+            },
+        );
+        // An alias without a monitor holds no term, so the reader skips it.
+        process.monitors.insert(
+            Reference(2),
+            Origin {
+                monitor: None,
+                alias: None,
+            },
+        );
+    }
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    release_all(&mut scheduler);
+    assert!(
+        scheduler.release.is_empty(),
+        "the drain releases every container"
+    );
+    for (term, expected) in [
+        (register, 1),
+        (stack, 2),
+        (message, 3),
+        (dictionary, 4),
+        (pending, 5),
+        (length_trap, 6),
+        (item, 7),
+        (tag, 8),
+    ] {
+        assert_eq!(term, marker(expected), "the value waits for the release");
+    }
+}
+
+#[test]
+fn releases_the_terms_of_an_exiting_process_at_each_later_step() {
+    // A step releases one batch of the release work, also when no process
+    // runs, and that step reports `Done` and not `Idle`, so that the run loop
+    // keeps stepping and the release completes. The X registers hold the 512
+    // terms of the start arguments.
+    let mut scheduler = test_scheduler();
+    let terms: Vec<Term> = (0..2 * RELEASE_BATCH as i64).map(Term::Integer).collect();
+    scheduler.start(frame(), terms, allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    assert!(matches!(
+        scheduler.release.iter().last(),
+        Some(Release::Monitors(_))
+    ));
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
+    assert!(
+        !scheduler.release.is_empty(),
+        "one batch of the registers is left"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
+}
+
+#[test]
+fn keeps_the_shared_child_of_a_released_graph_alive() {
+    // The release work list owns each child root. A child that another holder
+    // still owns keeps its value across the release of the graph that the
+    // process held.
+    let mut scheduler = test_scheduler();
+    let shared = marker(11);
+    let held = shared.clone();
+    let graph = Term::list_from([shared.clone(), shared.clone()]);
+    drop(shared);
+    scheduler.start(frame(), vec![graph], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    release_all(&mut scheduler);
+    assert_eq!(held, marker(11), "the shared child keeps its value");
+}
+
+#[test]
+fn moves_the_pairs_of_a_map_in_batches() {
+    // The pairs of a map move through a drain that one step advances by at
+    // most one batch, so the map of 200 keys waits on the list after a step.
+    let mut scheduler = test_scheduler();
+    let map = Term::Map(
+        Map::from_pairs(
+            (1..=200)
+                .map(|key| (Term::Integer(key), Term::Integer(key)))
+                .collect(),
+        )
+        .unwrap(),
+    );
+    scheduler.start(frame(), vec![map], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    scheduler.drain_release(RELEASE_BATCH);
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Map(_))),
+        "one step leaves part of the map on the list"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn releases_a_deep_chain_through_the_batches_without_a_stack_overflow() {
+    // The walk of the release work list uses no Rust recursion, so the
+    // release of a deep chain does not overflow the stack.
+    let mut scheduler = test_scheduler();
+    let deep = (0..100_000).fold(Term::Nil, |inner, _| Term::tuple(vec![inner]));
+    scheduler.start(frame(), vec![deep], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn drops_a_live_process_that_holds_a_deep_chain_without_a_stack_overflow() {
+    // The shutdown of a run releases the state of a live process through the
+    // iterative drop walk of `Term::drop`, which does not recurse on a deep
+    // term. No process waits to run at the shutdown.
+    let mut scheduler = test_scheduler();
+    let deep = (0..100_000).fold(Term::Nil, |inner, _| Term::tuple(vec![inner]));
+    scheduler.start(frame(), vec![deep], allow_all()).unwrap();
+    drop(scheduler);
+}
+
+#[test]
+fn moves_the_array_of_a_wide_tuple_in_batches() {
+    // One node holds more direct children than one batch. The exit moves the
+    // term to the release work list without taking its array, one step takes
+    // the array as one group and moves at most one batch of the group, and
+    // the rest waits for a later step. A step that moved the whole array
+    // would leave no group.
+    let mut scheduler = test_scheduler();
+    let width = 4 * RELEASE_BATCH;
+    let wide = Term::tuple((0..width as i64).map(Term::Integer).collect());
+    scheduler.start(frame(), vec![wide], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .all(|item| !matches!(item, Release::Terms(_))),
+        "the exit takes no element of the array"
+    );
+    scheduler.drain_release(RELEASE_BATCH);
+    let group = scheduler
+        .release
+        .iter()
+        .find_map(|item| match item {
+            Release::Terms(group) => Some(group.len()),
+            _ => None,
+        })
+        .expect("the array of the tuple waits as one group");
+    assert!(
+        group > width - RELEASE_BATCH,
+        "one step moves at most one batch of the group: {group} of {width} wait"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn moves_the_free_variables_of_a_fun_in_batches() {
+    // The free variables of a fun are one group, as the elements of a tuple
+    // are, so one step moves at most one batch of them.
+    let mut scheduler = test_scheduler();
+    let module = Atom::from_static("lists").unwrap();
+    let width = 4 * RELEASE_BATCH;
+    let free: Vec<Term> = (0..width as i64).map(Term::Integer).collect();
+    let fun = Term::Fun(Fun::new(Lambda::new(module, 0, 7, 53, 1), free));
+    scheduler.start(frame(), vec![fun], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    scheduler.drain_release(RELEASE_BATCH);
+    let group = scheduler
+        .release
+        .iter()
+        .find_map(|item| match item {
+            Release::Terms(group) => Some(group.len()),
+            _ => None,
+        })
+        .expect("the free variables wait as one group");
+    assert!(
+        group > width - RELEASE_BATCH,
+        "one step moves at most one batch of the group: {group} of {width} wait"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn releases_the_empty_containers_of_a_process_that_has_no_frame() {
+    // A process that an undefined start made has no frame, so its release
+    // work holds an empty frame list and an empty monitor tree, and the drain
+    // drops them.
+    let mut scheduler = test_scheduler();
+    let module = Atom::from_static("erlang").unwrap();
+    let function = Atom::from_static("ok").unwrap();
+    let process = ProcessState::new(
+        ProcessId(0),
+        Start::Undefined { module, function },
+        Vec::new(),
+    );
+    scheduler.insert(process);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    assert!(matches!(
+        scheduler.release.iter().last(),
+        Some(Release::Monitors(_))
+    ));
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn moves_the_slots_of_one_frame_in_batches() {
+    // One frame holds more Y registers than one batch. The exit moves the
+    // frame to the list as a frame, one step takes its slots as one group and
+    // moves at most one batch of them, and the rest waits for a later step.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), Vec::new(), allow_all()).unwrap();
+    let id = ProcessId(0);
+    {
+        let process = scheduler.processes.get_mut(&id).unwrap();
+        process.frames[0].stack = (0..4 * RELEASE_BATCH)
+            .map(|number| StackSlot::Term(marker(number as i64)))
+            .collect();
+    }
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    scheduler.drain_release(RELEASE_BATCH);
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Slots(_))),
+        "one step leaves part of the Y registers on the list"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn moves_the_monitors_of_an_exiting_process_in_batches() {
+    // The monitor tree of an exited process goes to the release work list as
+    // a tree, and one step takes at most one batch of its values.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), Vec::new(), allow_all()).unwrap();
+    let id = ProcessId(0);
+    {
+        let process = scheduler.processes.get_mut(&id).unwrap();
+        for reference in 1..=2 {
+            process.monitors.insert(
+                Reference(reference),
+                Origin {
+                    monitor: Some(OriginMonitor {
+                        kind: "process",
+                        target: None,
+                        item: marker(reference as i64),
+                        tag: marker(reference as i64),
+                    }),
+                    alias: None,
+                },
+            );
+        }
+    }
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    scheduler.drain_release(1);
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Monitors(_))),
+        "one step of one unit leaves a monitor on the list"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn moves_the_terms_of_a_discarded_signal_to_the_release_work_list() {
+    // The exit takes each queued signal out of the mailbox and ignores it.
+    // The terms of that signal go to the release work list before the signal
+    // drops, so an ignored signal that owns the last root of a large graph
+    // does not release that graph in the exit step.
+    let mut scheduler = test_scheduler();
+    let expected = Term::list_from((0..4 * RELEASE_BATCH as i64).map(Term::Integer));
+    scheduler.start(frame(), Vec::new(), allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    // The signal arrives after the process took its turn, so the exit sees it
+    // in the mailbox and discards it.
+    scheduler
+        .processes
+        .get_mut(&ProcessId(0))
+        .unwrap()
+        .mailbox
+        .push_signal(Signal::Exit {
+            from: LinkId::Process(ProcessId(1)),
+            reason: expected.clone(),
+            linked: false,
+            normal_kills: false,
+            alias: None,
+        });
+    scheduler.finish_current(atom("normal"), None);
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Term(term) if *term == expected)),
+        "the exit moves the reason of the discarded signal to the list"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn keeps_the_pending_work_of_a_skewed_chain_in_chunks() {
+    // A chain whose every node holds one integer beside the rest of the chain
+    // leaves one pending item on the release work list for each level that
+    // the drain passed, so the list grows past one chunk. The list allocates
+    // one chunk at a time and copies no item that a step of the drain holds.
+    let mut scheduler = test_scheduler();
+    let chain = (0..4 * RELEASE_CHUNK).fold(Term::Nil, |inner, _| {
+        Term::tuple(vec![Term::Integer(1), inner])
+    });
+    scheduler.start(frame(), vec![chain], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    let mut longest = 0;
+    while !scheduler.release.is_empty() {
+        longest = longest.max(scheduler.release.len());
+        scheduler.drain_release(RELEASE_BATCH);
+    }
+    assert!(
+        longest > RELEASE_CHUNK,
+        "the pending siblings fill more than one chunk: {longest}"
+    );
+}
+
 #[test]
 fn reports_the_live_bytes_of_the_scheduler_state() {
     let mut scheduler = test_scheduler();
@@ -982,4 +1452,216 @@ fn counts_the_persistent_terms_the_ets_objects_and_the_timer_messages() {
         },
     );
     assert!(scheduler.live_bytes() > before);
+}
+
+#[test]
+fn counts_the_bytes_of_the_release_work_list() {
+    // The live-byte walk of a run must count the graph that the release work
+    // list holds, for each kind of item of that list: a term, an element
+    // array, a map walk, the X registers, the Y slots of a frame, the
+    // dictionary, the mailbox, and the monitors.
+    let mut scheduler = test_scheduler();
+    let id = ProcessId(0);
+    let map = Map::from_pairs(
+        (0..4 * RELEASE_BATCH as i64)
+            .map(|key| (Term::Integer(key), atom("v")))
+            .collect(),
+    )
+    .unwrap();
+    scheduler
+        .start(
+            frame(),
+            vec![Term::tuple(vec![marker(1)]), Term::Map(map)],
+            allow_all(),
+        )
+        .unwrap();
+    {
+        let process = scheduler.processes.get_mut(&id).unwrap();
+        // The frame holds more Y slots than one batch, so the group of slots
+        // waits on the list after one step.
+        process.frames[0].stack = (0..4 * RELEASE_BATCH)
+            .map(|number| StackSlot::Term(marker(number as i64)))
+            .collect();
+        process.mailbox.push(marker(3));
+        process.dictionary.push((Term::Integer(4), marker(5)));
+        process.pending_bif = Some(PendingBif {
+            module: "erlang",
+            function: "length",
+            arguments: vec![marker(8)],
+            tail: false,
+        });
+        process.length_trap = Some(vec![marker(9)]);
+        process.monitors.insert(
+            Reference(1),
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: marker(6),
+                    tag: marker(7),
+                }),
+                alias: None,
+            },
+        );
+    }
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    // Every item of the list waits here, so the walk reads each kind of item.
+    assert!(
+        scheduler.live_bytes() > 0,
+        "the walk counts the items of the release work list"
+    );
+    // One step spends its budget on the group of Y slots of the frame, which
+    // holds more slots than the batch, so the group waits on the list.
+    scheduler.drain_release(RELEASE_BATCH);
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Slots(_))),
+        "the step leaves the group of Y slots on the list"
+    );
+    assert!(
+        scheduler.live_bytes() > 0,
+        "the walk counts the group of Y slots of the release work list"
+    );
+    // A later step takes the form of the map into a walk, which needs several
+    // steps of its own.
+    for _ in 0..64 {
+        scheduler.drain_release(RELEASE_BATCH);
+        if scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Map(_)))
+        {
+            break;
+        }
+    }
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Map(_))),
+        "a step leaves the map walk on the list"
+    );
+    assert!(
+        scheduler.live_bytes() > 0,
+        "the walk counts the map walk of the release work list"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn counts_the_arena_of_a_mailbox_across_the_drain_steps() {
+    // The bounded drain removes nodes from the arena of the mailbox and
+    // leaves the queue links that point at them, so a walk of the queue
+    // cannot run after a partial drain. The walk of a release reads the
+    // arena instead. The mailbox holds more than one batch of entries, so
+    // the drain needs more than one step.
+    let mut scheduler = test_scheduler();
+    let messages = 4 * RELEASE_BATCH;
+    scheduler.start(frame(), Vec::new(), allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    // The entries arrive while the process holds its turn, so the handling
+    // of the step that took it from the run queue does not consume them.
+    {
+        let process = scheduler.processes.get_mut(&ProcessId(0)).unwrap();
+        for number in 0..messages as i64 {
+            process.mailbox.push(marker(number));
+        }
+        process.mailbox.push_signal(Signal::Exit {
+            from: LinkId::Process(ProcessId(1)),
+            reason: marker(0),
+            linked: false,
+            normal_kills: false,
+            alias: None,
+        });
+        process.mailbox.reserve_marker();
+    }
+    scheduler.finish_current(atom("normal"), None);
+    // One batch moves part of the mailbox, so the arena of the item that
+    // waits holds nodes whose queue links point at the removed nodes.
+    scheduler.drain_release(RELEASE_BATCH);
+    assert!(
+        !scheduler.release.is_empty(),
+        "the drain needs a later step for the rest of the mailbox"
+    );
+    assert!(
+        scheduler.live_bytes() > 0,
+        "the walk counts the arena of the mailbox that waits"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+    assert_eq!(
+        scheduler.live_bytes(),
+        0,
+        "the walk releases the whole mailbox"
+    );
+}
+
+#[test]
+fn counts_the_storage_of_the_containers_across_the_drain_steps() {
+    // The walk counts the storage of each container that the release work
+    // list holds, and not only the terms that the container reaches. The
+    // element array of a wide tuple stays allocated while the drain moves its
+    // elements in batches, so its bytes stay in the count until the last
+    // batch releases the array.
+    let mut scheduler = test_scheduler();
+    let width = 4 * RELEASE_BATCH;
+    let array = width * std::mem::size_of::<Term>();
+    let tuple = Term::tuple((0..width as i64).map(Term::Integer).collect());
+    scheduler
+        .start(frame(), vec![Term::Integer(0)], allow_all())
+        .unwrap();
+    scheduler
+        .processes
+        .get_mut(&ProcessId(0))
+        .unwrap()
+        .registers[0] = Some(tuple);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    // One step moves the element array to a group of terms, which keeps the
+    // capacity of that array.
+    scheduler.drain_release(RELEASE_BATCH);
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Terms(_))),
+        "the step leaves the group of the array on the list"
+    );
+    let with_array = scheduler.live_bytes();
+    release_all(&mut scheduler);
+    let without_array = scheduler.live_bytes();
+    assert_eq!(
+        with_array - without_array,
+        array,
+        "the walk counts exactly the element array of the group"
+    );
+}
+
+#[test]
+fn counts_the_terms_of_a_map_drain_that_is_the_only_item() {
+    // The walk of a drain queues the keys and the values of its leaves. When
+    // the drain is the only item of the release work list, no later term call
+    // flushes that queue, so the walk must flush it before it reads its
+    // number, and it must hold the whole graph of each value.
+    let width = 4 * RELEASE_BATCH;
+    let mut direct = crate::term::LiveBytes::new();
+    direct.term(&Term::list_from((0..width as i64).map(Term::Integer)));
+    let expected = direct.bytes();
+    assert!(expected > 0, "a list of cells holds live bytes");
+    let mut map = Map::from_pairs(vec![(
+        Term::Integer(0),
+        Term::list_from((0..width as i64).map(Term::Integer)),
+    )])
+    .unwrap();
+    let drain = crate::term::MapDrain::take(&mut map).expect("the only holder takes the form");
+    let mut scheduler = test_scheduler();
+    scheduler.release.push(Release::Map(drain));
+    assert!(
+        scheduler.live_bytes() >= expected,
+        "the walk counts the list that the value of the map holds"
+    );
 }

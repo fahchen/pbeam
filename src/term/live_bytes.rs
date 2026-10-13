@@ -172,6 +172,29 @@ impl LiveBytes {
     /// ```
     pub(crate) fn term(&mut self, term: &Term) {
         self.push(term);
+        self.walk();
+    }
+
+    /// Walk the terms that wait on the work stack of the walk. A caller that
+    /// pushes terms and reads [`Self::bytes`] with no later [`Self::term`]
+    /// call, such as the walk of a map drain that is the last item of a
+    /// release, calls this before it reads the number.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// live.flush();
+    /// assert_eq!(live.bytes(), 0);
+    /// ```
+    pub(crate) fn flush(&mut self) {
+        self.walk();
+    }
+
+    /// Count the containers of the terms that wait on the work stack, and
+    /// walk the terms that they hold. The terms of a long list go through the
+    /// work stack, so the loop does not recurse on the Rust stack.
+    fn walk(&mut self) {
         while let Some((term, unique)) = self.pending.pop() {
             match &term {
                 Term::Tuple(tuple) => self.tuple(tuple, unique),
@@ -220,7 +243,7 @@ impl LiveBytes {
         self.bytes += map.allocated_bytes();
         match &**repr {
             Repr::Flat(pairs) => self.pairs(pairs),
-            Repr::Hash(hamt) => self.children(&hamt.root),
+            Repr::Hash(hamt) => self.children_of(&hamt.root.children),
         }
     }
 
@@ -232,11 +255,18 @@ impl LiveBytes {
         }
     }
 
-    /// Count the child nodes of `node` and push the pairs of each leaf. The
+    /// Count the child nodes of `children` and push the pairs of each leaf.
+    /// The caller counts the capacity of the array of `children` itself. The
     /// depth of a HAMT is at most `HAMT_MAX_LEVEL`, so this walk does not
     /// recurse on the Rust stack for a long list.
-    fn children(&mut self, node: &Node) {
-        for child in &node.children {
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// live.children_of(&Node::empty().children);
+    /// ```
+    pub(in crate::term) fn children_of(&mut self, children: &[Child]) {
+        for child in children {
             match child {
                 Child::Leaf(key, value) => {
                     self.push(key);
@@ -248,7 +278,7 @@ impl LiveBytes {
                         continue;
                     }
                     self.bytes += node.allocated_bytes();
-                    self.children(node);
+                    self.children_of(&node.children);
                 }
                 Child::Collision(pairs) => {
                     self.bytes += pairs.capacity() * size_of::<(Term, Term)>();

@@ -24,7 +24,23 @@ One number in a benchmark table is the minimum of nine runs of one probe inside 
 - The floor loop holds `test`, `gc_bif '-'`, and one call. The benchmark measures three shapes: `call_ext_only` in `dispatch_probe`, `call_only` in `dispatch_probe`, and `call_only` in `dispatch_position_probe` after 20 guest functions.
 - The added rows hold the floor loop of `dispatch_probe` plus one instruction: `gc_bif '+'`, the `bif` of `tuple_size/1`, the `bif` of `erlang:element/2`, the `bif` of `erlang:hd/1`, and the `bif` of `map_get/2` on a 1000-key map.
 - A ratio is the PBeam number divided by the pinned ERTS number of the same run and the same row. A ratio above one means that PBeam is slower.
+- A claim that a shape costs at most a fixed number of nanoseconds must name its session, because two sessions of one revision differ by more than the margin of the 120 ns gate. A claim that a change moved a shape needs one session that interleaves the two revisions.
 - Each step column comes from the runs of the step that owns the column, with the aggregation rule that the table states. Two neighbouring columns therefore come from different runs or different groups of runs, and their difference holds both the change of the code and the run-to-run noise of about 10 percent at 200000 iterations.
+
+## The interleaved check of the 120 ns gate of the term plan
+
+Row 9 of the term performance plan, `docs/term-performance-design-codex-v2.md`, asks that the floor loop of the local shape costs at most 120 ns for each iteration. This is not the gate of step 9 of the dispatch plan, which asks for at most 150 ns. One measurement of one revision alone cannot check that gate, because the run-to-run noise at 200000 iterations is larger than the margin: a single session of the current `main` measured 122.0 and 122.3 ns for the two floor shapes, above the gate, and an interleaved session of the same revision measured 117.8 and 117.9 ns, below it.
+
+The decisive session interleaves the after-revision of #585 (`d54e6a4`) with the current `main` (`ddb32f6e`, which holds the host-term boundary of #582, the live-byte harness of #589, the pseudo-terminal fix of #590, and the same-register map update of #597). Each round runs `mise run bench-dispatch` in one detached worktree for each revision, and a comparison uses only the two revisions of one round, so the load of the host reaches both. Each number is the minimum of nine runs inside one invocation.
+
+| Round | `d54e6a4` `call_only`/position, 200000 | `ddb32f6e` `call_only`/position, 200000 | One-minute load, `d54e6a4`/`ddb32f6e` |
+| --- | --- | --- | --- |
+| 1 | 124.9 / 124.1 | 119.1 / 119.1 | 14.88 / 26.15 |
+| 2 | 118.4 / 118.4 | 117.9 / 117.8 | 32.26 / 29.92 |
+| 3 | 118.5 / 118.4 | 119.8 / 118.2 | 27.68 / 25.70 |
+| Minimum | 118.4 / 118.4 | 117.9 / 117.8 | |
+
+The session gives two results. The floor loop of the current `main` costs 117.9 ns and 117.8 ns as the minimum of the three rounds, and the after-revision of #585 costs 118.4 ns for both shapes, so both revisions pass the gate at their minimum across the rounds. Both revisions pass the gate in round 2 and in round 3, where every value is below 120 ns. Round 1 is the round that does not pass for the after-revision of #585, which measures 124.9 ns and 124.1 ns there. The three rounds do not establish the size of any difference between the two revisions, and the gate claim rests on the minimum across the rounds. The control of the same session, the `call_ext_only` floor loop, measures 285.7 ns for `d54e6a4` and 286.4 ns for `ddb32f6e` as the minimum, which is a difference of 0.7 ns. This session does not measure the earlier baseline, so it does not confirm or deny the layout effect of +15.6 ns that the step 9 session reported for this control.
 
 ## Step 0: the baseline
 

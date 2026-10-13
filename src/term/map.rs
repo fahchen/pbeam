@@ -27,7 +27,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use super::{Term, hash::internal_hash};
+use super::{LiveBytes, Term, hash::internal_hash};
 use crate::error::{BeamError, error};
 
 mod build;
@@ -53,6 +53,49 @@ const SMALL_INTEGER_TAG_BITS: u32 = 4;
 /// (`PATH_ELEMS_PER_DIGIT`, `erl_map.c:3635`). A path element has
 /// `SLOT_BITS` bits.
 const PATH_ELEMS_PER_DIGIT: usize = (u64::BITS / SLOT_BITS) as usize;
+
+/// One key operation of [`Map::update`].
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Insert {
+    /// Set the key to the value. The key must be in the map.
+    Set,
+    /// Add the key with the value, or replace the value when the key is in
+    /// the map.
+    Add,
+}
+
+/// Return true when the flatmap pairs hold the key. The pairs are sorted in
+/// the flatmap key order, so a binary search finds the key. A key of a type
+/// without that order is not in the map.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let pairs = [(Term::Integer(1), Term::nil())];
+/// assert!(flatmap_holds(&pairs, &Term::Integer(1)));
+/// assert!(!flatmap_holds(&pairs, &Term::Integer(2)));
+/// ```
+fn flatmap_holds(pairs: &[(Term, Term)], key: &Term) -> bool {
+    pairs
+        .binary_search_by(|(existing, _)| flatmap_order(existing, key).unwrap_or(Ordering::Equal))
+        .is_ok()
+}
+
+/// Return the first key of a flatmap that has no hash, or `Ok(())` when
+/// every key has one. Each key of a map that becomes a hashmap needs a hash,
+/// and a reference key in a stored pair is not a supported map key.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(validate_hashes([&Term::Integer(1)]).is_ok());
+/// assert!(validate_hashes([&Term::Integer(1 << 59)]).is_err());
+/// ```
+fn validate_hashes<'a>(keys: impl IntoIterator<Item = &'a Term>) -> Result<(), Term> {
+    keys.into_iter()
+        .find(|key| map_hash(key).is_none())
+        .map_or(Ok(()), |key| Err(key.clone()))
+}
 
 /// The direction of an `erts_internal:map_next/3` walk over a map.
 #[derive(Clone, Copy, PartialEq)]
@@ -172,6 +215,209 @@ pub(super) enum Child {
     /// collision child, as an ERTS collision node is at level 16
     /// (`erl_map.h:205-210`).
     Collision(Vec<(Term, Term)>),
+}
+
+/// The pairs of a map that a bounded release has not moved yet. The drain
+/// owns the form of the map, so each pair and each key stays alive until its
+/// step moves it. A release that runs in bounded batches drives one step at a
+/// time ([`Drain::step`]); the drop of a map drains its whole form in one call
+/// ([`Map::drain_into`]).
+///
+/// The walk of this type takes the children of a node from the end, and it is
+/// a second walk of a map beside `Map::drain_into`. The drop path keeps its
+/// own walk, because `tests/integration/drop_allocations.rs` gates the
+/// allocation count of that path with the numbers of step 7 of
+/// `docs/interpreter-dispatch-plan.md`.
+pub(crate) struct Drain {
+    /// The children of each node whose pairs are not moved, deepest first. A
+    /// HAMT node holds at most 16 children, so the stack is short.
+    nodes: Vec<Vec<Child>>,
+    /// The pairs of a collision child that are not moved yet.
+    collision: Vec<(Term, Term)>,
+}
+
+/// Print the count of the nodes and of the collision pairs that are left,
+/// which is the state of a drain that a caller reads in a diagnostic.
+impl std::fmt::Debug for Drain {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Drain")
+            .field("nodes", &self.nodes.len())
+            .field("collision", &self.collision.len())
+            .finish()
+    }
+}
+
+impl Drain {
+    /// Take the form of `map` for a bounded drain, and return `None` when the
+    /// map holds no form or another map holds the form. A caller that gets
+    /// `None` leaves the form with its other holder and moves no pair.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut copy = map.clone();
+    /// assert!(Drain::take(&mut map).is_none());
+    /// assert!(Drain::take(&mut copy).is_some());
+    /// ```
+    pub(crate) fn take(map: &mut Map) -> Option<Drain> {
+        let repr = map.repr.take()?;
+        let repr = Arc::into_inner(repr)?;
+        let children = match repr {
+            Repr::Flat(pairs) => pairs
+                .into_iter()
+                .map(|(key, value)| Child::Leaf(key, value))
+                .collect(),
+            Repr::Hash(hamt) => hamt.root.children,
+        };
+        Some(Drain {
+            nodes: vec![children],
+            collision: Vec::new(),
+        })
+    }
+
+    /// Move at most `budget` units of the drain to `pending`, and return the
+    /// number of units that it moved. One unit is one pair of a collision
+    /// child, one leaf, or one step down a node; a leaf and a pair push two
+    /// terms, and a step down a node pushes none. Thus one call moves at most
+    /// `budget` units and at most `2 * budget` terms, and a call that moves 0
+    /// units left no pair to move.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut drain = Drain::take(&mut map).unwrap();
+    /// let mut pending = Vec::new();
+    /// assert_eq!(drain.step(&mut pending, 256), 1);
+    /// assert!(drain.is_empty());
+    /// assert_eq!(pending, [Term::Integer(1), Term::Integer(2)]);
+    /// ```
+    pub(crate) fn step(&mut self, pending: &mut Vec<Term>, budget: usize) -> usize {
+        let mut moved = 0;
+        while moved < budget {
+            if let Some((key, value)) = self.collision.pop() {
+                pending.push(key);
+                pending.push(value);
+                // One pair is one unit, as one leaf is.
+                moved += 1;
+                continue;
+            }
+            let Some(children) = self.nodes.last_mut() else {
+                break;
+            };
+            let Some(child) = children.pop() else {
+                self.nodes.pop();
+                continue;
+            };
+            moved += 1;
+            match child {
+                Child::Leaf(key, value) => pending.extend([key, value]),
+                Child::Node(node) => {
+                    if let Some(node) = Arc::into_inner(node) {
+                        self.nodes.push(node.children);
+                    }
+                }
+                Child::Collision(pairs) => self.collision = pairs,
+            }
+        }
+        while self
+            .nodes
+            .last()
+            .is_some_and(|children| children.is_empty())
+        {
+            self.nodes.pop();
+        }
+        moved
+    }
+
+    /// Return true when the drain holds no pair.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let drain = Drain::take(&mut map).unwrap();
+    /// assert!(!drain.is_empty());
+    /// ```
+    pub(crate) fn is_empty(&self) -> bool {
+        self.collision.is_empty() && self.nodes.iter().all(|children| children.is_empty())
+    }
+
+    /// Account the nodes, the collision pairs, and the terms that this drain
+    /// holds, so that the live-byte walk of a run counts the part of a form
+    /// that the release work list took. The walk visits each shared node
+    /// once, as it does for a form that a term still owns.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// drain.account(&mut live);
+    /// assert!(live.bytes() > 0);
+    /// ```
+    pub(crate) fn account(&self, live: &mut LiveBytes) {
+        live.add(self.collision.capacity() * std::mem::size_of::<(Term, Term)>());
+        for (key, value) in &self.collision {
+            live.term(key);
+            live.term(value);
+        }
+        for children in &self.nodes {
+            live.add(children.capacity() * std::mem::size_of::<Child>());
+            live.children_of(children);
+        }
+        // `children_of` queues the keys and the values of the leaves. A drain
+        // that is the last item of the release work list has no later term
+        // call to flush that queue, so the walk flushes it here.
+        live.flush();
+    }
+
+    /// Return the bytes of the allocations that the drain holds: the stack of
+    /// the node children, the collision pairs that are not moved, and the
+    /// children of each node that the walk has not taken. The keys, the
+    /// values, and the terms of the pairs are slots of these vectors.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let drain = Drain::take(&mut map).unwrap();
+    /// assert!(drain.allocated_bytes() > 0);
+    /// ```
+    #[cfg(test)]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.nodes.capacity() * std::mem::size_of::<Vec<Child>>()
+            + self.collision.capacity() * std::mem::size_of::<(Term, Term)>()
+            + self
+                .nodes
+                .iter()
+                .map(|children| children_bytes(children, children.capacity()))
+                .sum::<usize>()
+    }
+}
+
+/// Return the bytes of the child vector of one node and of the nodes below it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(children_bytes(&[]), 0);
+/// ```
+#[cfg(test)]
+fn children_bytes(children: &[Child], capacity: usize) -> usize {
+    capacity * std::mem::size_of::<Child>()
+        + children
+            .iter()
+            .map(|child| match child {
+                Child::Leaf(..) => 0,
+                Child::Node(node) => {
+                    std::mem::size_of::<Node>()
+                        + children_bytes(&node.children, node.children.capacity())
+                }
+                Child::Collision(pairs) => pairs.capacity() * std::mem::size_of::<(Term, Term)>(),
+            })
+            .sum::<usize>()
 }
 
 impl Map {
@@ -296,6 +542,23 @@ impl Map {
         Ok(map)
     }
 
+    /// Return whether this map holds the only reference to its form. A
+    /// count of one is a necessary condition for a change in place, not a
+    /// sufficient one: [`Map::update`] still copies a node that another map
+    /// also holds (`Arc::make_mut`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// assert!(map.unique());
+    /// let copy = map.clone();
+    /// assert!(!map.unique() || !copy.unique());
+    /// ```
+    pub(crate) fn unique(&self) -> bool {
+        Arc::strong_count(self.arc()) == 1
+    }
+
     /// Return the number of keys.
     ///
     /// # Examples
@@ -383,48 +646,6 @@ impl Map {
         }
     }
 
-    /// Return the value of a key for a change in place, or `None` when the
-    /// map does not hold the key. The key lookup is the one of `get`. When
-    /// another copy also holds the form of the map, copy the form first, so
-    /// the change does not show in the other copy. A hashmap copies only
-    /// the shared nodes on the path of the key.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
-    /// *map.get_mut(&Term::Integer(1)).unwrap() = Term::Integer(3);
-    /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(3)));
-    /// assert!(map.get_mut(&Term::Integer(2)).is_none());
-    /// ```
-    pub(crate) fn get_mut(&mut self, key: &Term) -> Option<&mut Term> {
-        let hamt = match Arc::make_mut(self.arc_mut()) {
-            Repr::Flat(pairs) => {
-                return pairs
-                    .iter_mut()
-                    .find(|(existing, _)| existing == key)
-                    .map(|(_, value)| value);
-            }
-            Repr::Hash(hamt) => hamt,
-        };
-        let hash = map_hash(key)?;
-        let mut node = &mut hamt.root;
-        let mut level = 0;
-        loop {
-            match node.child_mut(slot(hash, level))? {
-                Child::Leaf(existing, value) => return (existing == key).then_some(value),
-                Child::Node(inner) => node = Arc::make_mut(inner),
-                Child::Collision(pairs) => {
-                    return pairs
-                        .iter_mut()
-                        .find(|(existing, _)| existing == key)
-                        .map(|(_, value)| value);
-                }
-            }
-            level += 1;
-        }
-    }
-
     /// Sort key and value pairs by the flatmap key order, as the ERTS loader
     /// sorts the pairs of a map instruction (`beam_load_map_key_sort`,
     /// `beam_transform_helpers.c:54-115`) with `erts_cmp_flatmap_keys`
@@ -490,40 +711,54 @@ impl Map {
     /// Return the first key that the map form does not support yet. The map
     /// does not change.
     pub(crate) fn insert(&mut self, key: Term, value: Term) -> Result<(), Term> {
-        let pairs = match Arc::make_mut(self.arc_mut()) {
-            Repr::Flat(pairs) => pairs,
+        self.update(vec![(Insert::Add, key, value)])
+    }
+
+    /// Apply a list of key operations. An [`Insert::Add`] that gives a
+    /// flatmap its 33rd key turns it into a hashmap, as in ERTS. When
+    /// another copy also holds the form of the map, copy the form first, so
+    /// the change does not show in the other copy.
+    ///
+    /// Check every key and every required change before the first change,
+    /// because a caller can pass the map of a live register. A failure
+    /// leaves the map and the form unchanged. This is the order that
+    /// `erts_gc_update_map_exact` uses for a hashmap: it inserts each pair
+    /// on a copy and reports `{badkey, Key}` for the first key that the map
+    /// does not hold (`beam_common.c:2237-2252`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// map.update(vec![
+    ///     (Insert::Set, Term::Integer(1), Term::Integer(3)),
+    ///     (Insert::Add, Term::Integer(5), Term::Integer(4)),
+    /// ])?;
+    /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(3)));
+    /// assert_eq!(map.get(&Term::Integer(5)), Some(&Term::Integer(4)));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return the first key that the map form does not support, or the first
+    /// key that an [`Insert::Set`] does not find. The map does not change.
+    pub(crate) fn update(&mut self, operations: Vec<(Insert, Term, Term)>) -> Result<(), Term> {
+        // The read of the form and the change are one match, so the change
+        // takes the value of the form that it read. `make_mut` copies a
+        // shared form, so the change does not show in another copy.
+        let hashes = operations
+            .iter()
+            .map(|(_, key, _)| map_hash(key))
+            .collect::<Vec<_>>();
+        match Arc::make_mut(self.arc_mut()) {
             Repr::Hash(hamt) => {
-                let Some(hash) = map_hash(&key) else {
-                    return Err(key);
-                };
-                hamt.insert(hash, key, value);
-                return Ok(());
+                validate_hash(hamt, &operations, &hashes)?;
+                apply_hash(hamt, operations, hashes);
             }
-        };
-        if !matches!(key, Term::Integer(_)) && map_hash(&key).is_none() {
-            return Err(key);
-        }
-        match pairs.binary_search_by(|(existing, _)| {
-            flatmap_order(existing, &key).expect("supported map keys have a term order")
-        }) {
-            Ok(index) => pairs[index].1 = value,
-            Err(index) if pairs.len() < SMALL_MAP_LIMIT => pairs.insert(index, (key, value)),
-            Err(_) => {
-                let hashes = pairs
-                    .iter()
-                    .map(|(existing, _)| existing)
-                    .chain([&key])
-                    .map(|candidate| map_hash(candidate).ok_or_else(|| candidate.clone()))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut hamt = Hamt {
-                    root: Node::empty(),
-                    size: 0,
-                };
-                let pairs = std::mem::take(pairs).into_iter().chain([(key, value)]);
-                for (hash, (key, value)) in hashes.into_iter().zip(pairs) {
-                    hamt.insert(hash, key, value);
+            Repr::Flat(pairs) => {
+                if let Convert::Yes(hamt) = update_flat(pairs, operations, hashes)? {
+                    self.repr = Some(Arc::new(Repr::Hash(hamt)));
                 }
-                self.repr = Some(Arc::new(Repr::Hash(hamt)));
             }
         }
         Ok(())
@@ -829,6 +1064,121 @@ fn merge_walk(
         .sum::<usize>()
 }
 
+/// Check every key of `operations` against a hashmap, as
+/// `erts_gc_update_map_exact` does (`beam_common.c:2237-2252`). Return the
+/// first key that has no hash, or the first key that an [`Insert::Set`]
+/// does not find.
+///
+/// # Errors
+///
+/// Return the first key that the form does not support.
+fn validate_hash(
+    hamt: &Hamt,
+    operations: &[(Insert, Term, Term)],
+    hashes: &[Option<u64>],
+) -> Result<(), Term> {
+    for ((kind, key, _), hash) in operations.iter().zip(hashes) {
+        if hash.is_none() || (*kind == Insert::Set && hamt.get(key).is_none()) {
+            return Err(key.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Apply the operations of [`Map::update`] to a hashmap. `validate_hash`
+/// checked every key.
+fn apply_hash(hamt: &mut Hamt, operations: Vec<(Insert, Term, Term)>, hashes: Vec<Option<u64>>) {
+    for ((_, key, value), hash) in operations.into_iter().zip(hashes) {
+        if let Some(hash) = hash {
+            hamt.insert(hash, key, value);
+        }
+    }
+}
+
+/// Apply the operations of [`Map::update`] to the flatmap pairs, or turn
+/// them into a hashmap when an added key grows the map past the flatmap
+/// limit. The read path checked every key of the operations.
+///
+/// The size of the new map counts each key that an [`Insert::Add`] adds one
+/// time, because a second add of the same key replaces its value in the one
+/// pair. This matches ERTS, which inserts each pair in turn and keeps one
+/// pair for one key.
+///
+/// # Errors
+///
+/// Return the first key that the map form does not support, or the first key
+/// that an [`Insert::Set`] does not find.
+fn update_flat(
+    pairs: &mut Vec<(Term, Term)>,
+    operations: Vec<(Insert, Term, Term)>,
+    hashes: Vec<Option<u64>>,
+) -> Result<Convert, Term> {
+    let mut added: Vec<&Term> = Vec::new();
+    for ((kind, key, _), hash) in operations.iter().zip(&hashes) {
+        if hash.is_none() && !matches!(key, Term::Integer(_)) {
+            return Err(key.clone());
+        }
+        match kind {
+            Insert::Set if !flatmap_holds(pairs, key) => return Err(key.clone()),
+            Insert::Add if !flatmap_holds(pairs, key) && !added.contains(&key) => {
+                added.push(key);
+            }
+            _ => {}
+        }
+    }
+    if pairs.len() + added.len() <= SMALL_MAP_LIMIT {
+        for (_, key, value) in operations {
+            match pairs.binary_search_by(|(existing, _)| {
+                flatmap_order(existing, &key).expect("supported map keys have a term order")
+            }) {
+                Ok(index) => pairs[index].1 = value,
+                Err(index) => pairs.insert(index, (key, value)),
+            }
+        }
+        return Ok(Convert::No);
+    }
+    Ok(Convert::Yes(convert_to_hash(pairs, operations)?))
+}
+
+/// The result of [`update_flat`]: the map kept its flatmap form, or it
+/// becomes the hashmap of the value.
+enum Convert {
+    /// The map kept its flatmap form.
+    No,
+    /// The map becomes a hashmap.
+    Yes(Hamt),
+}
+
+/// Turn the flatmap pairs and the operations into a hashmap. The read path
+/// read a flatmap that grows past its limit.
+///
+/// # Errors
+///
+/// Return the first key that a hashmap form does not support.
+fn convert_to_hash(
+    pairs: &mut Vec<(Term, Term)>,
+    operations: Vec<(Insert, Term, Term)>,
+) -> Result<Hamt, Term> {
+    let mut keys = pairs
+        .iter()
+        .map(|(existing, _)| existing)
+        .collect::<Vec<_>>();
+    keys.extend(operations.iter().map(|(_, key, _)| key));
+    validate_hashes(keys)?;
+    let mut hamt = Hamt {
+        root: Node::empty(),
+        size: 0,
+    };
+    let existing = std::mem::take(pairs)
+        .into_iter()
+        .chain(operations.into_iter().map(|(_, key, value)| (key, value)));
+    for (key, value) in existing {
+        let hash = map_hash(&key).ok_or_else(|| key.clone())?;
+        hamt.insert(hash, key, value);
+    }
+    Ok(hamt)
+}
+
 impl Hamt {
     /// Walk the trie from a path and take up to `limit` pairs, as the
     /// hashmap part of `erts_internal_map_next_3` does
@@ -952,6 +1302,48 @@ impl<'a> Entries<'a> {
 }
 
 impl Hamt {
+    /// Return the value of a key with a hash, or `None` when the trie does
+    /// not hold the key. The lookup is the one of [`Map::get`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs((0..40).map(|key| (Term::Integer(key), Term::Integer(key))).collect())?;
+    /// let Repr::Hash(hamt) = &**map.arc() else { unreachable!() };
+    /// assert_eq!(hamt.get(&Term::Integer(1)), Some(&Term::Integer(1)));
+    /// assert_eq!(hamt.get(&Term::Integer(40)), None);
+    /// ```
+    /// Return the value of a key with a hash, or `None` when the trie does
+    /// not hold the key. The lookup is the one of [`Map::get`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs((0..40).map(|key| (Term::Integer(key), Term::Integer(key))).collect())?;
+    /// let Repr::Hash(hamt) = &**map.arc() else { unreachable!() };
+    /// assert_eq!(hamt.get(&Term::Integer(1)), Some(&Term::Integer(1)));
+    /// assert_eq!(hamt.get(&Term::Integer(40)), None);
+    /// ```
+    fn get(&self, key: &Term) -> Option<&Term> {
+        let hash = map_hash(key)?;
+        let mut node = &self.root;
+        let mut level = 0;
+        loop {
+            let child = node.child(slot(hash, level))?;
+            match child {
+                Child::Leaf(existing, value) => return (*existing == *key).then_some(value),
+                Child::Node(inner) => node = inner,
+                Child::Collision(pairs) => {
+                    return pairs
+                        .iter()
+                        .find(|(existing, _)| *existing == *key)
+                        .map(|(_, value)| value);
+                }
+            }
+            level += 1;
+        }
+    }
+
     /// Set a key with a hash to a value, as ERTS `insert_down` does. A new
     /// key goes into the first free slot on its hash path. When that slot
     /// holds another key, add nodes until the two hashes select different
@@ -1083,22 +1475,6 @@ impl Node {
     /// ```
     pub(super) fn children(&self) -> &[Child] {
         &self.children
-    }
-
-    /// Return the child in a slot for a change in place, or `None` when the
-    /// slot is free.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(Node::empty().child_mut(3).is_none());
-    /// ```
-    fn child_mut(&mut self, slot: u32) -> Option<&mut Child> {
-        let bit = 1 << slot;
-        if self.bitmap & bit == 0 {
-            return None;
-        }
-        Some(&mut self.children[(self.bitmap & (bit - 1)).count_ones() as usize])
     }
 
     /// Build the child at `level` for two different keys whose hashes

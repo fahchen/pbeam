@@ -22,7 +22,7 @@ pub(crate) use hash::internal_hash;
 use list::{Cons, ConsRef};
 pub(crate) use live_bytes::LiveBytes;
 pub use map::Map;
-pub(crate) use map::{Direction, from_list_units};
+pub(crate) use map::{Direction, Drain as MapDrain, Insert, from_list_units};
 pub use match_context::MatchState;
 pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
@@ -297,6 +297,17 @@ impl<'a> EqStack<'a> {
     }
 }
 
+/// The direct children of one node of a term, as owned work for a release
+/// that runs in bounded batches. The element array of a tuple and the free
+/// variables of a fun are one group that a caller moves in batches; the pairs
+/// of a map are a walk that a caller drives one step at a time.
+pub(crate) enum Group {
+    /// The element array of a tuple or the free variables of a fun.
+    Terms(Vec<Term>),
+    /// The pairs of a map.
+    Map(MapDrain),
+}
+
 impl Term {
     /// Return the term of a static atom, such as `true` or `normal`. A
     /// static atom has the same index in every atom table.
@@ -379,6 +390,29 @@ impl Term {
         false
     }
 
+    /// Return whether this term is a map and holds the only reference to
+    /// its form. Every other term reports `false`, because a change in place
+    /// is measured only for a map; a caller that changes another value takes
+    /// the copy path.
+    ///
+    /// A map count of one is a necessary condition for a change in place,
+    /// not a sufficient one: the nodes of the trie can still have another
+    /// owner, and the change copies them (`Arc::make_mut`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?);
+    /// assert!(map.unique());
+    /// let copy = map.clone();
+    /// assert!(!map.unique() || !copy.unique());
+    /// assert!(!Term::tuple(vec![Term::Integer(1)]).unique());
+    /// assert!(!Term::Integer(1).unique());
+    /// ```
+    pub(crate) fn unique(&self) -> bool {
+        matches!(self, Term::Map(map) if map.unique())
+    }
+
     /// Move the nested terms of a list, tuple, map, or fun onto a work stack
     /// and leave the term empty. A tuple gives up its array
     /// ([`Tuple::take_last`]), and only the last holder of the array moves
@@ -387,6 +421,16 @@ impl Term {
     /// its tail and then its head onto the stack. The head comes off the
     /// stack first, so a long list keeps the stack short.
     ///
+    /// The method moves one compound node and its direct children, and it
+    /// does not walk the graph. The children of a tuple, of a fun, and of a
+    /// map can be many, and the whole group moves in this one call: see
+    /// [`Term::take_group`] for the bounded release of a tuple or of a fun.
+    /// A caller that owns a work stack can release the graph one bounded
+    /// step at a time, as `Scheduler::drain_release` does for the exit of a
+    /// process that owns a large graph (row 11 of
+    /// `docs/term-performance-design-codex-v2.md`, task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559)).
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -394,7 +438,7 @@ impl Term {
     /// Term::tuple(vec![Term::Integer(1)]).take_nested(&mut pending);
     /// assert_eq!(pending, vec![Term::Integer(1)]);
     /// ```
-    fn take_nested(&mut self, pending: &mut Vec<Term>) {
+    pub(crate) fn take_nested(&mut self, pending: &mut Vec<Term>) {
         match self {
             Term::Tuple(elements) => pending.extend(elements.take_last().unwrap_or_default()),
             Term::Cons(cell) => {
@@ -405,6 +449,40 @@ impl Term {
             Term::Fun(fun) => pending.extend(fun.take_last().unwrap_or_default()),
             Term::Map(map) => map.drain_into(pending),
             _ => {}
+        }
+    }
+
+    /// Take the element array of a tuple or the free variables of a fun as
+    /// one owned vector, and leave the term empty. Return `None` when the
+    /// term holds no such array: an immediate, a binary, a match context, a
+    /// cons cell of two terms, an empty container, or a map.
+    ///
+    /// The vector can hold many terms, and it is the array that the term
+    /// already owns, so the call copies nothing. A caller that releases a
+    /// graph in bounded steps moves the vector in batches, as
+    /// `Scheduler::drain_release` does (row 11 of
+    /// `docs/term-performance-design-codex-v2.md`, task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559)).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut term = Term::tuple(vec![Term::Integer(1)]);
+    /// assert_eq!(term.take_group(), Some(vec![Term::Integer(1)]));
+    /// assert_eq!(term.take_group(), None);
+    /// ```
+    pub(crate) fn take_group(&mut self) -> Option<Group> {
+        match self {
+            Term::Tuple(elements) => elements
+                .take_last()
+                .filter(|elements| !elements.is_empty())
+                .map(Group::Terms),
+            Term::Fun(fun) => fun
+                .take_last()
+                .filter(|arguments| !arguments.is_empty())
+                .map(Group::Terms),
+            Term::Map(map) => map::Drain::take(map).map(Group::Map),
+            _ => None,
         }
     }
 }

@@ -223,16 +223,34 @@ impl<K: TreeKey, V> MonitorLinkTree<K, V> {
         self.nodes.iter().map(|node| &node.value)
     }
 
-    /// Return true when the tree has no entry. Only tests use it.
+    /// Return true when the tree has no entry. The nodes of a live tree are
+    /// one for each entry, so a tree that [`Self::take_value`] emptied is
+    /// empty.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert!(MonitorLinkTree::<ProcessId, u64>::default().is_empty());
     /// ```
-    #[cfg(test)]
     pub(in crate::runtime) fn is_empty(&self) -> bool {
-        self.root.is_none()
+        self.nodes.is_empty()
+    }
+
+    /// Remove one value of the tree, in no order, and return it, or return
+    /// `None` when the tree is empty. The tree loses the node of that value,
+    /// so a caller reads [`Self::is_empty`] to know when no value is left. A
+    /// release that runs in bounded batches takes one value at a time from a
+    /// tree of a process that no guest code can read again.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// tree.insert(ProcessId(1), 7);
+    /// assert_eq!(tree.take_value(), Some(7));
+    /// assert!(tree.is_empty());
+    /// ```
+    pub(in crate::runtime) fn take_value(&mut self) -> Option<V> {
+        self.nodes.pop().map(|node| node.value)
     }
 
     /// Return the value of `key`, as `mon_lnk_rbt_lookup`.

@@ -226,6 +226,72 @@ impl Signal {
     }
 }
 
+impl Signal {
+    /// Move each term of this signal to `pending`, and leave the signal with
+    /// no term. The `Exit`, `MonitorDown`, `ProcessInfo`, and `AliasMessage`
+    /// signals hold a term; the other signals hold identifiers, references,
+    /// and capabilities. Only a signal that no guest code can read again
+    /// gives up its terms (see
+    /// [`Scheduler::release_process`](super::Scheduler::release_process)).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut signal = Signal::Exit { from: LinkId::Process(ProcessId(1)), reason: Term::Integer(1), linked: false, normal_kills: false, alias: None };
+    /// let mut pending = Vec::new();
+    /// signal.take_terms(&mut pending);
+    /// assert_eq!(pending, vec![Term::Integer(1)]);
+    /// ```
+    pub(super) fn take_terms(&mut self, pending: &mut Vec<Term>) {
+        match self {
+            Signal::Exit {
+                from: _,
+                reason,
+                linked: _,
+                normal_kills: _,
+                alias: _,
+            } => pending.push(std::mem::replace(reason, Term::Nil)),
+            Signal::MonitorDown {
+                reference: _,
+                reason,
+            } => pending.push(std::mem::replace(reason, Term::Nil)),
+            Signal::ProcessInfo {
+                requester: _,
+                reference: _,
+                item,
+            } => pending.push(std::mem::replace(item, Term::Nil)),
+            Signal::AliasMessage { alias: _, message } => {
+                pending.push(std::mem::replace(message, Term::Nil))
+            }
+            Signal::Link { from: _ }
+            | Signal::Unlink { from: _, id: _ }
+            | Signal::UnlinkAck { from: _, id: _ }
+            | Signal::Monitor {
+                watcher: _,
+                reference: _,
+            }
+            | Signal::TtyMonitor { tty: _ }
+            | Signal::Demonitor {
+                watcher: _,
+                reference: _,
+            }
+            | Signal::GroupLeader {
+                leader: _,
+                requester: _,
+                reference: _,
+            }
+            | Signal::IsAlive {
+                requester: _,
+                reference: _,
+            }
+            | Signal::Flush
+            | Signal::Revoke { capability: _ }
+            | Signal::Grant { capability: _ }
+            | Signal::EnterRuntime { capabilities: _ } => {}
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "../../tests/runtime/signal.rs"]
 mod tests;
