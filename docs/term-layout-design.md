@@ -261,7 +261,7 @@ The model measures the arm sizes and the enum size only. It does not measure the
 
 ## 5. The measurement plan that decides row 6
 
-The gate of row 6 is: a term of at most 16 bytes on the verified host, with at least a 10 percent end-to-end Terra gain, or at least a 20 percent reduction of peak live bytes with no time regression above 10 percent. A narrow clone and drop result alone does not pass the gate (`docs/term-performance-design-codex-v2.md`).
+The gate of row 6 is: a term of at most 16 bytes on the verified host, with at least a 10 percent end-to-end Terra gain, or at least a 20 percent reduction of peak live bytes with no time regression above 10 percent. A narrow clone and drop result alone does not pass the gate (`docs/term-performance-design-codex-v2.md`). The plan requires the end-to-end Terra timing limb as the gate of the row, because a time has a control, a unit, and a repeatable sample. The peak-live-byte limb needs the live allocation count of the table below. A sample of the resident set size cannot establish a 20 percent reduction of the live bytes, for the reason in section 7.
 
 Each run records the revision, the host, the toolchain, the mode, and the load, as the merged records of the dispatch work do (`docs/interpreter-dispatch-measurements.md`). A measurement runs in a quiet window: no other heavy `cargo` or `mise` process, and a one-minute load at or below 12. The value of a one-minute load above 12 makes the run weak, and the record states it.
 
@@ -272,10 +272,10 @@ The control of a session is the same probe module and the same harness on the re
 | Term size and slot size | `RUSTC_BOOTSTRAP=1 mise exec -- cargo rustc --locked --lib -- -Zprint-type-sizes` | `Term`, `Option<Term>`, and each arm at the pinned rustc. |
 | The floor loop | `mise run bench-dispatch` | `call_only`, the position shape, and each added instruction, each against pinned ERTS in the same run. |
 | End-to-end Terra time | `bash scripts/terra_latency.sh release <out>` | The first frame and the four keys of the Terra Counter example through a pseudo-terminal. |
-| Peak live bytes | The maximum resident set size of the `pbeam` process during one full Terra scene, sampled as in section 7 | A proxy for the peak live bytes. It includes the loaded BEAM code, the binary, and the allocator arenas, and it is not an exact measure of the live guest heap. |
+| Peak live bytes | The live byte count of a harness with a counting allocator, as the counting allocators of `tests/integration/bif_allocations.rs`, `tests/integration/drop_allocations.rs`, and `tests/term/data_structure_costs.rs` count allocation events; the resident set size sample of section 7 is supporting evidence only | The live byte count is allocated minus freed bytes, held by the `alloc`, `dealloc`, and `realloc` methods of the `CountingAllocator` of those tests. It needs a harness that holds the Terra scene, because the `pbeam` binary is the process that renders it. |
 | Clone and drop counts | `mise run bench-term`, `mise run bench-drop` | The clone and drop cost of an atom, a tuple, a shared map, and an immediate. |
 
-The gate is measured on the full Terra path, not on an isolated loop. The floor loop, the added instructions, the clone and drop counts, and the peak live bytes support the gate and do not replace it.
+The gate is measured on the full Terra path, not on an isolated loop. The floor loop, the added instructions, and the clone and drop counts support the timing limb and do not replace it. The record uses the timing limb as the gate of the row. A claim of at least a 20 percent reduction of peak live bytes needs the live allocation count of a harness that holds the Terra scene, and this record does not claim that count.
 
 ## 6. The split of row 6
 
@@ -311,4 +311,4 @@ The Terra Counter example, release build, from `bash scripts/terra_latency.sh re
 | discarded run, `3b3a21d` | `{ 12.15 12.65 11.32 }` | 0.56 s | 0.016 s | 0.018 s | 0.020 s | 0.024 s | not measured |
 | control run, `3b3a21d` | `{ 6.94 18.96 18.36 }` | 0.29 s | 0.021 s | 0.030 s | 0.015 s | 0.027 s | 62080 KB |
 
-The peak resident set size is 62080 KB, which is 60.6 MiB, for a full scene of the release build. The method is a wrapper that samples `ps -o rss` of the `pbeam` process every 50 ms and keeps the maximum. The number includes the loaded BEAM code, the binary, and the allocator arenas, so it is an upper bound of the live guest bytes and not an exact live-heap measurement. The control run is a single run, and its four keys carry the variance of a single sample. The record keeps the discarded run only to show why the bound of the measurement plan matters.
+The resident set size of the release process is 62080 KB, which is 60.6 MiB, for a full scene of the control run. The method is a wrapper that samples `ps -o rss` of the `pbeam` process every 50 ms and keeps the maximum. The number is not the live guest bytes and it is not an upper bound of them. It can be above the live bytes, because the allocator keeps freed memory, and because the loaded BEAM code, the binary, and the allocator arenas are part of the resident set. It can be below a short peak, because a sample every 50 ms does not see a peak between two samples. The sample is supporting evidence only, as section 5 states, and it cannot establish a 20 percent reduction of the live bytes. The control run is a single run, and its four keys carry the variance of a single sample. The record keeps the discarded run only to show why the bound of the measurement plan matters.
