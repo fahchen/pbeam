@@ -4,7 +4,7 @@ This document is the measurement record of the interpreter dispatch work. It is 
 
 The document collects the numbers that the merged pull requests of steps 0 to 6 report. The text names the revision and the source of each number. Every number is either measured or estimated, and the text says which one.
 
-Baseline revision: `078c119` (2026-10-12). Current revision: `d36f686`, the head of `origin/main`, which is step 6 merged as [#527](https://github.com/fahchen/pbeam/pull/527). Step 6 changes no runtime code, so the numbers of steps 0 to 5 hold at the current revision.
+Baseline revision: `078c119` (2026-10-12). Current revision: `a0104b4`, the head of `origin/main` at the time of the cursor measurement of task [#550](https://github.com/fahchen/pbeam/issues/550). The runtime code of `a0104b4` equals the code of `c2f0341`, the revision of the attribution below, except for `src/term.rs` of [#548](https://github.com/fahchen/pbeam/pull/548), which removed the pair-stack allocation of `Term::eq`. Thus the floor-loop numbers of the earlier sections belong to their own revisions, and the section on the cursor re-measures the floor loop at `a0104b4`.
 
 ## The environment of the numbers
 
@@ -347,6 +347,77 @@ What a neutralised sub-step may hide, for each row:
 
 The issue says that a part with a large share becomes its own task. The measured shares above 5 percent are the BIF call overhead at 21.0 percent, the comparison pair stack at 8.2 percent, and the module of the active frame and the cursor at 5.7 percent. Task [#541](https://github.com/fahchen/pbeam/issues/541) owns the pair stack. The module of the active frame and the cursor is the residue of step 2. This section records the numbers; the owner decides which of the two unowned shares becomes a task.
 
+## The active module and the execution cursor
+
+This section answers the question of issue [#550](https://github.com/fahchen/pbeam/issues/550): what does the active module and the execution cursor add to one floor-loop iteration, and what part of that does the change of the task remove?
+
+The runtime revision of the measurement is `a0104b4`, the head of `origin/main` at the time of the runs. Its runtime code equals the code of `c2f0341`, the revision of the attribution above, except for `src/term.rs` of [#548](https://github.com/fahchen/pbeam/pull/548), which removed the pair-stack allocation of `Term::eq`. Task [#549](https://github.com/fahchen/pbeam/issues/549) records that change as the cause of the lower base floor loop. The branch of the task holds the change of task #550 in its working tree, and `scripts/dispatch_attribution.sh` marks each run of that branch with the line `the working tree differs from HEAD`.
+
+### The three parts
+
+The cursor of step 2 holds three parts that touch the active module and the position. The micro-measurement of `tests/runtime/interpreter/dispatch_attribution_costs.rs` measures each part one operation at a time. Each number is the minimum of nine timed runs of 100000 operations, and the minimum of nine runs of the measurement, at a load of `{ 4.13 ... }` to `{ 10.31 ... }`. The build is the release build of the task branch. The `cursor_module_compare` row measures the per-iteration comparison that the change removes, so that row is a part of the base loop and not of the changed loop.
+
+| Part | Operation | ns for one operation |
+| --- | --- | --- |
+| The module identity comparison | The read of the active frame and the compare of its `ModuleId` with the `ModuleId` of the cursor (`cursor_module_compare`) | 0.495 |
+| The refresh on a module change | `Cursor::refresh` when the active module is the module of the cursor (`cursor_refresh_same_module`) | 11.818 |
+| The refresh on a module change | `Cursor::refresh` when the active module is another module (`cursor_refresh_changed_module`), less the reset of the cursor module (`cursor_module_reset`) | 41.053 less 4.110 |
+| The commit at each exit | `Cursor::commit` (`cursor_commit`) | 0.507 |
+
+The refresh is the largest of the three parts in isolation, and the floor loop does not run it: the local `call_only` loop keeps one module, and only a call into another module, a return, and an exception that truncates the stack can change the active module. The comparison and the commit are each about 0.5 ns in isolation. The floor-loop result below shows which part the loop pays.
+
+### The floor loop at `a0104b4`
+
+The number is `L` of the attribution above: the local `call_only` floor loop of `dispatch_probe` at 200000 iterations, the minimum of the nine sub-runs of one run. The method is the ablation of the attribution. Three builds run interleaved in one session at a load of `{ 4.13 9.40 11.99 }` to `{ 4.42 9.90 12.24 }`: the base `a0104b4`, the `V2` ablation (the per-iteration comparison and the frame read removed), and the task change (the same removal, and each exit that can change the active module refreshes the cursor). Six runs of each build:
+
+| Build | The six `L` values, ns | Minimum, ns | Fall from the base, ns |
+| --- | --- | --- | --- |
+| base `a0104b4` | 148.586, 149.597, 149.649, 148.948, 150.066, 150.213 | 148.586 | — |
+| `V2` ablation | 144.596, 144.802, 145.496, 145.250, 145.757, 145.767 | 144.596 | 3.990 |
+| task change | 154.478, 145.197, 145.254, 146.178, 146.154, 145.952 | 145.197 | 3.389 |
+
+The first run of the task change is an outlier: its load is the same as the other runs of its round, and the other five runs of the change are at or below 146.178 ns. The minimum of the six runs does not use it. The per-round difference of the change less the base is −4.400 ns to −2.770 ns without that run, and the per-round difference of `V2` less the base is −4.795 ns to −3.698 ns.
+
+A fourth build removes only the pre-body `cursor.commit(process)` of the `Instruction::Bif` arm, so that the arm reads no frame and writes no position. Three runs of the commit-removed build and three runs of the base of the same session, at a load of `{ 6.59 12.25 13.24 }` to `{ 11.02 13.60 13.78 }`:
+
+| Build | The three `L` values, ns | Minimum, ns |
+| --- | --- | --- |
+| base | 149.746, 149.141, 151.479 | 149.141 |
+| commit removed | 150.100, 155.865, 149.711 | 149.711 |
+
+The commit-removed build is 0.570 ns above its base. The pre-body commit has no measured share of the floor loop, because the loop reads the committed position nowhere: the `call_only` arm replaces the whole frame at the end of each iteration, and the trap and raise paths of the `Bif` arm commit their own position.
+
+### The gate
+
+The share of the cursor comparison and the module read at `c2f0341` is 9.182 ns for each iteration, or 5.7 percent of the 161.754 ns loop of that revision. Half of that share is 4.591 ns. The same share at `a0104b4` measures 3.990 ns, or 2.7 percent of the 148.586 ns loop, because #548 removed the pair stack of `Term::eq` from the loop. The task change removes 3.389 ns of that share, which is 85 percent of the share of the current revision and above its half of 1.995 ns. A first session of the same revision, with three runs of the base and three runs of the change at a one-minute load of 6.59 to 11.02, gives a larger fall: base 149.141 ns, change 145.026 ns, or 4.115 ns.
+
+The whole share of the current revision, 3.990 ns, is below the 4.591 ns of half of the historical share, so no change to this loop can reach the historical number at `a0104b4`. The cause is the change of #548, which lowered the whole loop from 161.754 ns to 148.586 ns and lowered the ablation effect of the comparison with it.
+
+### The floor shapes and the added rows before and after
+
+`mise run bench-dispatch` measures the three floor shapes at 20000 and 200000 iterations, and the five added rows at 200000 iterations, on the release build. Six runs of the base `a0104b4` and six runs of the task branch ran interleaved in two sessions at a one-minute load of 2.79 to 11.02. Each cell is the minimum of the six runs of that build. The `after` ratio is the after PBeam number divided by the ERTS number of the same row of the after runs.
+
+| Shape | iterations | before, ns | after, ns | fall, ns | ERTS after, ns | ratio after |
+| --- | --- | --- | --- | --- | --- | --- |
+| `call_ext_only`, `dispatch_probe` | 20000 | 283.1 | 260.1 | 23.0 | 2.04 | 127.5 |
+| `call_ext_only`, `dispatch_probe` | 200000 | 283.3 | 262.3 | 21.0 | 2.37 | 110.7 |
+| `call_only`, `dispatch_probe` | 20000 | 146.9 | 143.0 | 3.9 | 2.15 | 66.5 |
+| `call_only`, `dispatch_probe` | 200000 | 147.7 | 144.1 | 3.6 | 2.46 | 58.6 |
+| `call_only`, position probe | 20000 | 147.6 | 143.5 | 4.1 | 2.16 | 66.4 |
+| `call_only`, position probe | 200000 | 147.4 | 143.8 | 3.6 | 2.47 | 58.2 |
+
+The added rows are the added cost of one instruction on the local `call_only` loop at 200000 iterations, which is the probe of the added instruction less the `call_only` floor loop of the same run. The second run of the task branch in the first session is excluded from the subtraction: its `call_only` floor loop measured 215.5 ns and its `call_ext_only` floor loop measured 367.5 ns, which are outliers of that session, and the subtraction of two numbers of that run is not a measurement of one instruction. Each cell is the minimum of the remaining runs.
+
+| Added instruction | before, ns | after, ns | ERTS before, ns | ERTS after, ns |
+| --- | --- | --- | --- | --- |
+| `gc_bif '+'` | 70.5 | 74.1 | 0.00 | 0.02 |
+| the `bif` of `tuple_size/1` | 68.1 | 73.0 | 0.57 | 0.63 |
+| the `bif` of `element/2` (`get_tuple_element`) | 73.5 | 76.2 | 0.02 | 0.02 |
+| the `bif` of `hd/1` (`get_hd`) | 73.7 | 75.9 | 0.01 | 0.04 |
+| the `bif` of `map_get/2` on a 1000-key map | 126.9 | 126.5 | 4.26 | 4.32 |
+
+The change moves no floor shape of the `call_ext_only` kind by less than 21.0 ns and no `call_only` shape by less than 3.6 ns. The added rows move −0.4 ns to +4.9 ns, inside the run-to-run noise of this benchmark.
+
 ## 4. What each step decided and what it left open
 
 ### Step 0, [#520](https://github.com/fahchen/pbeam/pull/520)
@@ -377,11 +448,17 @@ The step decided that `BifArguments` holds the terms of one `bif` call and hands
 
 The step decided to keep the decoded form and to skip step 8. The decision rests on the step 8 gate, under incomplete evidence. It decided to measure the layout and the per-iteration bytes in the library unit tests and the cache proxy in the integration benchmark, because `Instruction` is `pub(crate)` and an integration test cannot name it. It left open the cache-miss count of the instruction slots, which needs a hardware counter, and the Terra redraw measurement on PBeam, which the repository does not have.
 
+### Task #550, the active module and the execution cursor
+
+The task removed the per-iteration comparison of the active module from the run loop. The loop no longer reads the active frame on each iteration, and each exit that can change the active module refreshes the cursor: a call that enters a frame, a return, and an exception that truncates the stack. The refresh compares the integer identity of the two modules, so those paths pay that comparison and no name compare. The `active_position` helper stays for `Cursor::new` only. The test profile asserts that the module of the cursor equals the module of the active frame at the top of each iteration, so a path that changes the active module without a refresh fails a test instead of running another module's code in release.
+
+The task left open two parts of the loop. The per-iteration `scheduler.current_process_mut()` lookup is the process state and not the cursor. The pre-body `cursor.commit` has no measured floor-loop share, and the task keeps it, because the plan commits the position before each body call.
+
 ## 5. Known gaps
 
 - `Instruction::CallExternal` of a pure BIF still builds one `Vec<Term>` (`src/runtime/interpreter.rs:3182`, `call_arguments`). The measured set of step 5 is the `bif` instruction, and no step owns this path.
 - The two small classification scans stay on the external call path: `PBEAM_BIFS` with 5 entries (`src/runtime/interpreter/bif.rs:977`) and `HEAVY_BIFS` with 7 entries (`src/runtime/interpreter/bif.rs:1029`). The scan of the `call_ext_only` shape is 1.24 ns and the largest single scan is 3.22 ns against a review limit of 5 ns. A `call_ext` of a PBeam BIF runs both scans, and a scratch run measured about 5.4 ns for that path, which is above the limit. That path is not a measured benchmark shape. The trigger to store the classification at load time is a PBeam BIF in a hot path.
-- The pair stack of `Term::eq` (`src/term.rs:318`) is one of the two allocations that remain on the call path of step 3. No step of the plan owns it.
+- The pair stack of `Term::eq` (`src/term.rs:318`) was one of the two allocations that remained on the call path of step 3, and it held no owning task. [#548](https://github.com/fahchen/pbeam/pull/548) removed the heap allocation of a shallow or a shared comparison, so the floor loop no longer allocates for its `test`. The attribution section above keeps its 8.2 percent number for `c2f0341`, the revision that it measured.
 - The L1 data cache residency of step 6 is an assumption. It follows from the measured 816-byte slot range and the measured L1 data cache sizes of the host, and it is not a measurement. The host has no hardware performance counter for cache misses, because macOS has no `perf`, so the cache evidence is a proxy of the host memory system.
 - The repository has no Terra benchmark. The 5.0 percent estimate of step 6 is the memory-system difference of the two record strides at the estimated size of one redraw stream, and it is not a measurement of the redraw.
 - The run-to-run noise is about 10 percent at 200000 iterations. A single column of a summary table therefore carries that noise, and a change inside it is not a measured effect.
