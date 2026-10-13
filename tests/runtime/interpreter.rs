@@ -3,7 +3,7 @@ use std::{collections::HashMap, rc::Rc};
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
     BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
-    read_bif_arguments, read_operand, write_operand,
+    read_bif_arguments, read_operand, read_ref, take_owned, write, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -3937,4 +3937,60 @@ fn records_the_decoded_loop_body() {
             count * std::mem::size_of::<Instruction>(),
         );
     }
+}
+
+#[test]
+fn runs_a_handler_after_a_put_map_exact_badmap() {
+    // The map operand is a literal that is not a map, and y0 is a live catch
+    // tag. ERTS raises `{badmap, Map}` and the process continues at the tag
+    // (`beam_common.c:2224-2235`, `handle_error`). The fixture reaches the
+    // raise with a catch tag, so the process runs its handler.
+    let program = make_program(
+        vec![
+            Instruction::Allocate { stack_size: 1 },
+            Instruction::Catch {
+                register: 0,
+                label: 7,
+            },
+            Instruction::PutMapExact {
+                fail_label: 0,
+                map: atom("foo"),
+                destination: Operand::X(0),
+                pairs: vec![(atom("output"), atom("cooked"))],
+            },
+            Instruction::Return,
+            Instruction::Label(7),
+            Instruction::Move(atom("caught"), Operand::X(0)),
+            Instruction::Return,
+        ],
+        0,
+    );
+    assert_eq!(
+        program.execute("fixture", "main", &[]).unwrap(),
+        test_atom("caught")
+    );
+}
+
+#[test]
+fn gives_up_the_map_of_a_y_register_with_one_owner() {
+    // A `put_map_exact` of a Y source and a Y destination is a valid form of
+    // the compiler. The take gives up the map only when the process owns
+    // the only reference to it, and leaves a shared map in its slot.
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    process.frames.last_mut().unwrap().stack = vec![StackSlot::Term(Term::nil())];
+    write(&mut process, &Operand::Y(0), Term::Map(Map::new())).unwrap();
+    assert!(matches!(
+        take_owned(&mut process, &Operand::Y(0)),
+        Some(Term::Map(_))
+    ));
+    assert!(take_owned(&mut process, &Operand::Y(0)).is_none());
+    // A shared map keeps its slot.
+    write(&mut process, &Operand::Y(0), Term::Map(Map::new())).unwrap();
+    let held = read_ref(&process, &Operand::Y(0)).unwrap().clone();
+    assert!(take_owned(&mut process, &Operand::Y(0)).is_none());
+    assert!(matches!(
+        read_ref(&process, &Operand::Y(0)),
+        Ok(Term::Map(_))
+    ));
+    drop(held);
 }
