@@ -90,8 +90,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Build bounded map collision storage for a collision-write consumer
 
-- **Reason:** collisions of a map in this repository reach a count of 2 and are read-only, and every retained-root map write is collision-free.
-- **Evidence:** `fixtures/logger_start/logger_start_probe.erl:224-226` and `tests/term/map.rs:666` read collision pairs; the largest count is 2 (`tests/term/map.rs:629-631`, `:667-672`); retained-root writes are collision-free (`fixtures/map/map_share_probe.erl:7-19`, `tests/term/map.rs:404-432`, `:455-479`, `:858-874`); no measurement harness covers a collision write.
+- **Reason:** the collisions of a map in this repository reach a count of 2, no measured consumer writes a colliding map while it retains the old root, and every retained-root map write of the measured paths is collision-free.
+- **Evidence:** `fixtures/logger_start/logger_start_probe.erl:224-226` and `tests/term/map.rs:666` read collision pairs; the largest count is 2 (`tests/term/map.rs:629-631`, `:667-672`). Collision writes do exist in unit tests: `tests/term/map.rs:670-675` inserts two colliding keys, replaces one of them, and changes the other through `get_mut`, and `:842-846` writes a collision pair. None of them is measured, none is in `scripts/term_costs.sh`, and none holds a retained old root while it writes. Every retained-root write of the measured paths is collision-free (`fixtures/map/map_share_probe.erl:7-19`, `tests/term/map.rs:404-432`, `:455-479`, `:858-874`).
 - **Trigger:** a measured write path with a retained root and a collision count above 16.
 - **Source:** the consumer audit of the term proposal, and issue #557.
 
