@@ -67,6 +67,12 @@ fn report_align<T>(name: &str) {
     println!("STRUCT {name} {} bytes", std::mem::align_of::<T>());
 }
 
+/// Print one byte count that the code computes, such as the heap bytes of the
+/// key index of an ETS table.
+fn report_bytes(name: &str, bytes: usize) {
+    println!("STRUCT {name} {bytes} bytes");
+}
+
 /// Return the nanoseconds for each operation of `body`, as the minimum of
 /// [`RUNS`] timed runs. The caller performs exactly `operations` operations.
 fn measure(operations: usize, mut body: impl FnMut() -> u64) -> f64 {
@@ -339,6 +345,17 @@ fn prints_the_size_of_every_structure() {
     report_size::<EtsTables>("ets_tables");
     report_size::<Table>("ets_table");
     report_size::<PersistentTerms>("persistent_terms");
+
+    // The key index of a `set` table: one stored hash and one position for
+    // each slot of the open-addressing table. The rows report the heap bytes
+    // of the index of a table of 1, 10, 100, and 1000 objects.
+    report_size::<(u64, usize)>("ets_key_index_entry");
+    for objects in [1usize, 10, 100, 1000] {
+        report_bytes(
+            &format!("ets_key_index_{objects}"),
+            table_of(objects).index_bytes(),
+        );
+    }
 }
 
 /// Print the cost of every derivation that the audit names.
@@ -537,6 +554,40 @@ fn prints_the_cost_of_every_derivation() {
             },
         ),
     );
+
+    // The insert and the delete of the real table at each object count, so a
+    // change to the key index shows what it adds to each write path. Each
+    // timed run inserts 200 new keys into a table of `objects` objects, or
+    // removes 200 keys from a table of `objects` + 200 objects. The setup of
+    // each run is outside the timer.
+    for objects in [1usize, 10, 100, 1000] {
+        report(
+            &format!("ets_insert_{objects}"),
+            measure_with(
+                ETS_OPERATIONS,
+                || table_of(objects),
+                |table| {
+                    for round in 0..ETS_OPERATIONS {
+                        table.insert(vec![Term::Integer(-1 - round as i64), Term::Nil]);
+                    }
+                    ETS_OPERATIONS as u64
+                },
+            ),
+        );
+        report(
+            &format!("ets_delete_{objects}"),
+            measure_with(
+                ETS_OPERATIONS,
+                || table_of(objects + ETS_OPERATIONS),
+                |table| {
+                    for round in 0..ETS_OPERATIONS {
+                        table.delete(&Term::Integer((objects + round) as i64));
+                    }
+                    ETS_OPERATIONS as u64
+                },
+            ),
+        );
+    }
     // The index maintenance alone: one key and its hash. The caller of a
     // real insert also builds the object that the table stores, and the row
     // above pays that storage while this row does not. The document must not
