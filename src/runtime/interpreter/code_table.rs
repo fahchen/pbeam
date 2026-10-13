@@ -418,6 +418,53 @@ pub(in crate::runtime) fn frame(
     })
 }
 
+/// Create the frame for the function that a local-call instruction names.
+/// The loader replaces the label of the call with the index of the function
+/// in the function table of the module and the index of the instruction at
+/// the label, so this reads the table and runs no lookup. The frame starts
+/// at `target`, which can be a label inside the function and not only its
+/// entry, as the pinned ERTS `i_call` jumps to the code position of the
+/// operand label (`erts/emulator/beam/emu/instrs.tab:148-180`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [FunctionInfo(main), Label(1), CallOnly { arity: 0, function: 0, target: 2 }]
+/// let frame = frame_at(&module, 0, 2, 0)?;
+/// assert_eq!(module.tables.name(frame.function), "main");
+/// ```
+///
+/// # Errors
+///
+/// A function with another arity is the error `call arity does not match
+/// M:F`. An index that the function table does not hold is a broken loader
+/// invariant, and this function stops the run.
+pub(in crate::runtime) fn frame_at(
+    module: &BeamModule,
+    function: u32,
+    target: u32,
+    arity: u32,
+) -> Result<Frame, BeamError> {
+    let (name, function_arity) = module
+        .tables
+        .functions
+        .get(function as usize)
+        .expect("the loader resolves a call label to a function");
+    if *function_arity != arity {
+        return Err(error(format!(
+            "call arity does not match {}:{}",
+            module.name,
+            module.tables.name(*name)
+        )));
+    }
+    Ok(Frame {
+        module_id: module.id,
+        function: *name,
+        next_instruction: target as usize,
+        stack: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 #[path = "../../../tests/runtime/interpreter/code_table.rs"]
 mod tests;

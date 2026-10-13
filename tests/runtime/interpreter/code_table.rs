@@ -30,7 +30,8 @@ fn fixture() -> CodeTable {
             },
             Instruction::Label(1),
         ],
-    );
+    )
+    .expect("the fixture module loads");
     CodeTable::new(HashMap::from([("fixture".into(), Rc::new(module))]))
 }
 

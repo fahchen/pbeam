@@ -703,29 +703,38 @@ impl BeamProgram {
                     }
                     stack.drain(..*count as usize);
                 }
-                Instruction::Call { arity, label } => {
+                Instruction::Call {
+                    arity,
+                    function,
+                    target,
+                } => {
                     check_local_call_arguments(&process.registers, *arity)?;
                     cursor.commit(process);
-                    let frame = code_table::frame(module, *label, *arity)?;
+                    let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
                     process.frames.push(frame);
                 }
-                Instruction::CallOnly { arity, label } => {
+                Instruction::CallOnly {
+                    arity,
+                    function,
+                    target,
+                } => {
                     check_local_call_arguments(&process.registers, *arity)?;
-                    let frame = code_table::frame(module, *label, *arity)?;
+                    let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
                     *current_frame(process) = frame;
                 }
                 Instruction::CallLast {
                     arity,
-                    label,
+                    function,
+                    target,
                     deallocate,
                 } => {
                     if *deallocate as usize != current_frame(process).stack.len() {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     check_local_call_arguments(&process.registers, *arity)?;
-                    let frame = code_table::frame(module, *label, *arity)?;
+                    let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
                     *current_frame(process) = frame;
                 }
@@ -739,7 +748,7 @@ impl BeamProgram {
                         Term::Tuple(elements) if elements.len() == *arity as usize
                     );
                     if !passed {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::TestFunctionArity {
@@ -755,7 +764,7 @@ impl BeamProgram {
                         BifResult::Value(value) if value == Term::static_atom("true")
                     );
                     if !passed {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::SelectTupleArity {
@@ -770,7 +779,7 @@ impl BeamProgram {
                             .map_or(*fail_label, |(_, label)| *label),
                         _ => *fail_label,
                     };
-                    cursor.position = label_index(module, target)?;
+                    cursor.position = label_position(target)?;
                 }
                 Instruction::CallExternal {
                     arity,
@@ -903,7 +912,7 @@ impl BeamProgram {
                             return Ok(Outcome::Yield);
                         }
                         BifResult::Raise { .. } if *fail_label != 0 => {
-                            cursor.position = label_index(module, *fail_label)?
+                            cursor.position = label_position(*fail_label)?
                         }
                         BifResult::Raise { class, reason } => {
                             if let Some(outcome) = raise(process, class, reason) {
@@ -921,11 +930,11 @@ impl BeamProgram {
                         }
                     }
                 }
-                Instruction::Jump(label) => cursor.position = label_index(module, *label)?,
+                Instruction::Jump(label) => cursor.position = label_position(*label)?,
                 Instruction::Catch { register, label } => {
                     // ERTS also counts `c_p->catches` here. PBeam finds a live
                     // tag with a frame scan in `raise` and needs no counter.
-                    let handler = label_index(module, *label)?;
+                    let handler = label_position(*label)?;
                     let slot = current_frame(process)
                         .stack
                         .get_mut(*register as usize)
@@ -1005,7 +1014,7 @@ impl BeamProgram {
                         }
                     };
                     if !passed {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::GetMapElements {
@@ -1020,7 +1029,7 @@ impl BeamProgram {
                             write(process, destination, value)?;
                         }
                     }
-                    None => cursor.position = label_index(module, *fail_label)?,
+                    None => cursor.position = label_position(*fail_label)?,
                 },
                 // ERTS loads `has_map_fields` as `get_map_elements` with
                 // scratch destinations (`generators.tab:230-253`).
@@ -1030,7 +1039,7 @@ impl BeamProgram {
                     keys,
                 } => {
                     if map_values(process, map, keys)?.is_none() {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::PutMapAssoc {
@@ -1070,7 +1079,7 @@ impl BeamProgram {
                     match update_map_exact(map, pairs)? {
                         Ok(map) => write(process, destination, map)?,
                         Err(_) if *fail_label != 0 => {
-                            cursor.position = label_index(module, *fail_label)?
+                            cursor.position = label_position(*fail_label)?
                         }
                         Err(reason) => {
                             if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
@@ -1105,7 +1114,7 @@ impl BeamProgram {
                     right,
                 } => {
                     if read_ref(process, left)? != read_ref(process, right)? {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 // The loader selects the classified operand form of
@@ -1119,7 +1128,7 @@ impl BeamProgram {
                     right,
                 } => {
                     if read_test_operand(process, left)? != read_test_operand(process, right)? {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 // ERTS `is_ne` (emu instrs.tab:1115-1119, JIT
@@ -1138,7 +1147,7 @@ impl BeamProgram {
                     right,
                 } => {
                     if read_ref(process, left)? == read_ref(process, right)? {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::TestLess {
@@ -1150,7 +1159,7 @@ impl BeamProgram {
                         .compare(read_ref(process, right)?)?
                         .is_lt()
                     {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::TestGreaterEqual {
@@ -1162,7 +1171,7 @@ impl BeamProgram {
                         .compare(read_ref(process, right)?)?
                         .is_lt()
                     {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::TestTaggedTuple {
@@ -1178,7 +1187,7 @@ impl BeamProgram {
                                 && fields.first() == Some(tag)
                     );
                     if !passed {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 // ERTS `i_bs_start_match3` jumps to `Fail` for each term
@@ -1213,7 +1222,7 @@ impl BeamProgram {
                             "invariant error: bs_start_match3 with no fail label got {other:?}, not a binary or a match context"
                         )));
                     }
-                    _ => cursor.position = label_index(module, *fail_label)?,
+                    _ => cursor.position = label_position(*fail_label)?,
                 },
                 // On a 64-bit system, ERTS loads `bs_start_match4` with
                 // `resume` as nothing when the source is the destination,
@@ -1282,7 +1291,7 @@ impl BeamProgram {
                             );
                             write(process, destination, Term::Binary(bytes))?;
                         }
-                        None => cursor.position = label_index(module, *fail_label)?,
+                        None => cursor.position = label_position(*fail_label)?,
                     }
                 }
                 // ERTS `i_bs_get_position` writes `sb->start` as a small
@@ -1324,7 +1333,7 @@ impl BeamProgram {
                         Some(code_point) => {
                             write(process, destination, Term::Integer(code_point.into()))?;
                         }
-                        None => cursor.position = label_index(module, *fail_label)?,
+                        None => cursor.position = label_position(*fail_label)?,
                     }
                 }
                 Instruction::BinaryMatch {
@@ -1333,7 +1342,7 @@ impl BeamProgram {
                     commands,
                 } => {
                     if !binary_match(process, context, commands)? {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 // The ERTS JIT `i_bs_create_bin` first checks that the term
@@ -1353,9 +1362,7 @@ impl BeamProgram {
                     segments,
                 } => match create_binary(process, segments)? {
                     Ok(bytes) => write(process, destination, Term::binary(bytes))?,
-                    Err(_) if *fail_label != 0 => {
-                        cursor.position = label_index(module, *fail_label)?
-                    }
+                    Err(_) if *fail_label != 0 => cursor.position = label_position(*fail_label)?,
                     Err(failure) => {
                         cursor.commit(process);
                         if let Some(outcome) = raise_binary_failure(scheduler, module, failure)? {
@@ -1390,7 +1397,7 @@ impl BeamProgram {
                         .iter()
                         .find(|(choice, _)| choice == value)
                         .map_or(*fail_label, |(_, label)| *label);
-                    cursor.position = label_index(module, target)?;
+                    cursor.position = label_position(target)?;
                 }
                 Instruction::PutList {
                     head,
@@ -1527,7 +1534,7 @@ impl BeamProgram {
                         match scheduler.receive_helper()? {
                             Received::Message => {}
                             Received::Empty => {
-                                cursor.position = label_index(module, *fail_label)?;
+                                cursor.position = label_position(*fail_label)?;
                                 continue;
                             }
                             Received::Yield => {
@@ -1549,7 +1556,7 @@ impl BeamProgram {
                         return Err(error("loop_rec_end without a current message"));
                     }
                     process.fcalls -= 1;
-                    cursor.position = label_index(module, *label)?;
+                    cursor.position = label_position(*label)?;
                 }
                 Instruction::RemoveMessage => {
                     if !process.mailbox.remove_current() {
@@ -1558,7 +1565,7 @@ impl BeamProgram {
                     scheduler.cancel_receive_timer();
                 }
                 Instruction::Wait(label) => {
-                    cursor.position = label_index(module, *label)?;
+                    cursor.position = label_position(*label)?;
                     cursor.commit(process);
                     return Ok(Outcome::Wait);
                 }
@@ -1592,7 +1599,7 @@ impl BeamProgram {
                             }
                         }
                     }
-                    cursor.position = label_index(module, *label)?;
+                    cursor.position = label_position(*label)?;
                     cursor.commit(scheduler.current_process_mut());
                     return Ok(Outcome::Wait);
                 }
@@ -2917,23 +2924,26 @@ fn nonempty_list(list: &Term) -> Result<(&Term, &Term), BeamError> {
         .ok_or_else(|| error(format!("BEAM list source {list:?} is not a nonempty list")))
 }
 
-/// Return the index of the first instruction after a label in a module, from
-/// the loader table.
+/// Return the code position that a branch target names. The loader
+/// replaces each branch label with the index of the instruction after the
+/// label, so a loaded module reads the field and runs no lookup.
+///
+/// A target of 0 is the "no fail label" operand of a BIF. The arm of that
+/// instruction handles 0 before this call, so any other instruction that
+/// reaches this function with 0 keeps the error text of the removed
+/// lookup.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // [FunctionInfo, Label(1), Label(2), Return]
-/// assert_eq!(label_index(&module, 2)?, 3);
-/// assert!(label_index(&module, 9).is_err());
+/// assert_eq!(label_position(3)?, 3);
+/// assert!(label_position(0).is_err());
 /// ```
-fn label_index(module: &BeamModule, label: u32) -> Result<usize, BeamError> {
-    module
-        .tables
-        .jump_targets
-        .get(&label)
-        .copied()
-        .ok_or_else(|| error(format!("missing BEAM label {label}")))
+fn label_position(target: u32) -> Result<usize, BeamError> {
+    if target == 0 {
+        return Err(error("missing BEAM label 0"));
+    }
+    Ok(target as usize)
 }
 
 /// Read a copy of an operand from the process registers or the active

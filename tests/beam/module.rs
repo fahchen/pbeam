@@ -27,7 +27,8 @@ fn execution_skips_another_functions_labels_and_reports_missing_entry_label() {
             Instruction::Label(7),
             Instruction::End,
         ],
-    );
+    )
+    .expect("the fixture module loads");
     assert!(
         module
             .execute("main", &[])
@@ -45,6 +46,7 @@ fn rejects_unimplemented_entry_shapes() {
             HashMap::from([(("main".into(), 0), 2)]),
             instructions,
         )
+        .expect("the fixture module loads")
     };
     let function = Instruction::FunctionInfo {
         module: "constant".into(),
@@ -73,7 +75,8 @@ fn rejects_unimplemented_entry_shapes() {
 
 #[test]
 fn rejects_empty_module_and_missing_export() {
-    let module = BeamModule::new(String::new(), HashMap::new(), vec![]);
+    let module =
+        BeamModule::new(String::new(), HashMap::new(), vec![]).expect("the fixture module loads");
     assert!(module.execute("main", &[]).is_err());
     assert!(BeamModule::load(&assemble_empty_beam()).is_err());
 }

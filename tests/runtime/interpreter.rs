@@ -25,7 +25,13 @@ fn allow_all() -> Vec<Capability> {
 /// `error:badarg`. PBeam gives the stack trace `[]`.
 const BADARG_EXIT: &str = "root process exited with {badarg,[]}";
 
-fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
+/// Return the instructions of `main/function_arity` of the fixture module,
+/// with `body` and `extra` after the two entry labels.
+fn fixture_instructions(
+    function_arity: u32,
+    body: Vec<Instruction>,
+    extra: Vec<Instruction>,
+) -> Vec<Instruction> {
     let mut instructions = vec![
         Instruction::FunctionInfo {
             module: "fixture".into(),
@@ -36,17 +42,31 @@ fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
         Instruction::Label(2),
     ];
     instructions.extend(body);
+    instructions.extend(extra);
+    instructions
+}
+
+/// Return a program of the fixture module with `instructions` and
+/// `exports`. The loader resolves each branch label and each call label of
+/// the stream when it builds the module.
+fn program_of(instructions: Vec<Instruction>, exports: HashMap<(String, u32), u32>) -> BeamProgram {
     BeamProgram {
         modules: HashMap::from([(
             "fixture".into(),
-            Rc::new(BeamModule::new(
-                "fixture".into(),
-                HashMap::from([(("main".into(), 0), 2)]),
-                instructions,
-            )),
+            Rc::new(
+                BeamModule::new("fixture".into(), exports, instructions)
+                    .expect("the fixture module loads"),
+            ),
         )]),
         atoms: Arc::new(AtomTable::new()),
     }
+}
+
+fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
+    program_of(
+        fixture_instructions(function_arity, body, Vec::new()),
+        HashMap::from([(("main".into(), 0), 2)]),
+    )
 }
 
 fn erlang_call(name: &str, arity: u32, tail: bool) -> Instruction {
@@ -66,9 +86,7 @@ fn atom(name: &str) -> Operand {
 
 /// Run `main/0` with a `child/1` function that calls `erlang:exit/1`.
 fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
-    let mut program = make_program(body, 0);
-    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-    module.instructions.extend([
+    let extra = vec![
         Instruction::FunctionInfo {
             module: "fixture".into(),
             name: "child".into(),
@@ -76,11 +94,9 @@ fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
         },
         Instruction::Label(11),
         erlang_call("exit", 1, true),
-    ]);
-    module.reindex();
-    let child = module.tables.name_id("child").unwrap();
-    module.exports.insert((child, 1), 11);
-    program
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("child".into(), 1), 11)]);
+    program_of(fixture_instructions(0, body, extra), exports)
         .execute("fixture", "main", &[])
         .map(|host| host.term)
 }
@@ -620,9 +636,7 @@ fn calls_a_module_export_without_a_bif_search() {
         },
         Instruction::Return,
     ];
-    let mut program = make_program(body, 0);
-    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-    module.instructions.extend([
+    let extra = vec![
         Instruction::FunctionInfo {
             module: "fixture".into(),
             name: "guest".into(),
@@ -631,10 +645,9 @@ fn calls_a_module_export_without_a_bif_search() {
         Instruction::Label(11),
         Instruction::Move(Operand::Value(Term::Integer(7)), Operand::X(0)),
         Instruction::Return,
-    ]);
-    module.reindex();
-    let guest = module.tables.name_id("guest").unwrap();
-    module.exports.insert((guest, 1), 11);
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("guest".into(), 1), 11)]);
+    let program = program_of(fixture_instructions(0, body, extra), exports);
     let before = resolve_calls();
     assert_eq!(
         program.execute("fixture", "main", &[]).unwrap(),
@@ -673,6 +686,73 @@ fn rejects_missing_modules_exports_and_function_arities() {
     );
 }
 
+/// A local call whose arity differs from the arity of the function that the
+/// loader resolved gives the error `call arity does not match M:F`.
+#[test]
+fn rejects_a_local_call_with_the_wrong_arity() {
+    let body = vec![Instruction::Call {
+        arity: 0,
+        function: 11,
+        target: 11,
+    }];
+    let extra = vec![
+        Instruction::FunctionInfo {
+            module: "fixture".into(),
+            name: "one".into(),
+            arity: 1,
+        },
+        Instruction::Label(11),
+        Instruction::Return,
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("one".into(), 1), 11)]);
+    assert_eq!(
+        program_of(fixture_instructions(0, body, extra), exports)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+        "call arity does not match fixture:one"
+    );
+}
+
+/// A local call starts at the exact position of the label that it names, and
+/// not at the entry of the function. The pinned ERTS `i_call` saves the
+/// continuation pointer and dispatches to the code position of the operand
+/// label, and `i_call_only` dispatches to it with no other work
+/// (`erts/emulator/beam/emu/instrs.tab:148-180`), so a call to a label inside
+/// a function does not run the instructions before that label. `two/0` writes
+/// 1 to `x0` between its entry and label 12; the call to label 12 must keep
+/// the 2 that `main/0` wrote, and a frame at the entry would return 1.
+#[test]
+fn starts_a_local_call_at_the_exact_position_of_its_label() {
+    let body = vec![
+        Instruction::Move(Operand::Value(Term::Integer(2)), Operand::X(0)),
+        Instruction::Call {
+            arity: 0,
+            function: 12,
+            target: 12,
+        },
+        Instruction::Return,
+    ];
+    let extra = vec![
+        Instruction::FunctionInfo {
+            module: "fixture".into(),
+            name: "two".into(),
+            arity: 0,
+        },
+        Instruction::Label(11),
+        Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
+        Instruction::Label(12),
+        Instruction::Return,
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("two".into(), 0), 11)]);
+    assert_eq!(
+        program_of(fixture_instructions(0, body, extra), exports)
+            .execute("fixture", "main", &[])
+            .unwrap(),
+        Term::Integer(2)
+    );
+}
+
 /// A module name and a function name that hold a non-ASCII character print
 /// as the pinned ERTS prints the atoms of the same names. The pinned ERTS
 /// prints `~p` of the atom `list_to_atom([109, 228, 105, 110])` as the UTF-8
@@ -691,7 +771,8 @@ fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
         Instruction::End,
     ];
     let exports = HashMap::from([(("mäin".into(), 0), 2)]);
-    let module = BeamModule::new("mäin_module".into(), exports, instructions);
+    let module = BeamModule::new("mäin_module".into(), exports, instructions)
+        .expect("the fixture module loads");
     let mut program = BeamProgram {
         modules: HashMap::from([("mäin_module".into(), Rc::new(module))]),
         atoms: Arc::new(AtomTable::new()),
@@ -828,11 +909,15 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
     );
     let error = |body| run(body).unwrap_err().to_string();
     assert!(
-        error(vec![Instruction::GetMapElements {
-            fail_label: 3,
-            map: atom("a"),
-            pairs: vec![],
-        }])
+        error(vec![
+            Instruction::GetMapElements {
+                fail_label: 3,
+                map: atom("a"),
+                pairs: vec![],
+            },
+            Instruction::Label(3),
+            Instruction::Return,
+        ])
         .contains("get_map_elements source is not a map")
     );
     assert!(
@@ -1129,20 +1214,23 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
     );
     program.modules.insert(
         "maps".into(),
-        Rc::new(BeamModule::new(
-            "maps".into(),
-            HashMap::from([(("keys".into(), 1), 1)]),
-            vec![
-                Instruction::FunctionInfo {
-                    module: "maps".into(),
-                    name: "keys".into(),
-                    arity: 1,
-                },
-                Instruction::Label(1),
-                Instruction::Move(atom("module_code"), Operand::X(0)),
-                Instruction::Return,
-            ],
-        )),
+        Rc::new(
+            BeamModule::new(
+                "maps".into(),
+                HashMap::from([(("keys".into(), 1), 1)]),
+                vec![
+                    Instruction::FunctionInfo {
+                        module: "maps".into(),
+                        name: "keys".into(),
+                        arity: 1,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Move(atom("module_code"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            )
+            .expect("the fixture module loads"),
+        ),
     );
     // The BIF returns the keys of the empty map. The module code would
     // return `module_code`.
@@ -1173,20 +1261,23 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
     );
     program.modules.insert(
         "lists".into(),
-        Rc::new(BeamModule::new(
-            "lists".into(),
-            HashMap::from([(("keysearch".into(), 3), 1)]),
-            vec![
-                Instruction::FunctionInfo {
-                    module: "lists".into(),
-                    name: "keysearch".into(),
-                    arity: 3,
-                },
-                Instruction::Label(1),
-                Instruction::Move(atom("stub"), Operand::X(0)),
-                Instruction::Return,
-            ],
-        )),
+        Rc::new(
+            BeamModule::new(
+                "lists".into(),
+                HashMap::from([(("keysearch".into(), 3), 1)]),
+                vec![
+                    Instruction::FunctionInfo {
+                        module: "lists".into(),
+                        name: "keysearch".into(),
+                        arity: 3,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Move(atom("stub"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            )
+            .expect("the fixture module loads"),
+        ),
     );
     // `lists:keysearch/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
     // BIF, so the BEAM stub body of the loaded `lists` module must not run.
@@ -1772,31 +1863,51 @@ fn rejects_call_stack_and_return_errors() {
             .is_err()
     );
     assert!(
-        make_program(vec![Instruction::Call { arity: 1, label: 2 }], 0)
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string()
-            .contains("argument x0 is unset")
+        make_program(
+            vec![Instruction::Call {
+                arity: 1,
+                function: 2,
+                target: 2
+            }],
+            0
+        )
+        .execute("fixture", "main", &[])
+        .unwrap_err()
+        .to_string()
+        .contains("argument x0 is unset")
     );
 }
 
-/// The loader tables answer a bad label, a bad entry, and a bad register
-/// index with the error text of the removed scans.
+/// The loader answers a bad label and a bad entry with the error text of the
+/// removed scans, and the run answers a bad register index with its text.
 #[test]
 fn keeps_the_error_text_of_a_bad_label_entry_and_register() {
+    let load = |body: Vec<Instruction>| {
+        BeamModule::new(
+            "fixture".into(),
+            HashMap::from([(("main".into(), 0), 2)]),
+            fixture_instructions(0, body, Vec::new()),
+        )
+        .unwrap_err()
+        .to_string()
+    };
+    assert_eq!(load(vec![Instruction::Jump(9)]), "missing BEAM label 9");
     assert_eq!(
-        make_program(vec![Instruction::Jump(9)], 0)
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string(),
-        "missing BEAM label 9"
-    );
-    assert_eq!(
-        make_program(vec![Instruction::Call { arity: 0, label: 9 }], 0)
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string(),
+        load(vec![Instruction::Call {
+            arity: 0,
+            function: 9,
+            target: 9
+        }]),
         "entry label 9 not found in fixture"
+    );
+    // A target of 0 is the "no fail label" operand of a BIF only. Any other
+    // instruction keeps the error text of the removed lookup.
+    assert_eq!(
+        make_program(vec![Instruction::Jump(0)], 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+        "missing BEAM label 0"
     );
     assert_eq!(
         make_program(vec![Instruction::Move(Operand::X(1024), Operand::X(0))], 0)
@@ -1807,9 +1918,41 @@ fn keeps_the_error_text_of_a_bad_label_entry_and_register() {
     );
 }
 
+/// The loader answers a call to a label that no `func_info` of the module
+/// precedes with the error text of the removed lookup.
+#[test]
+fn keeps_the_error_text_of_a_call_with_no_function_info() {
+    let instructions = vec![
+        Instruction::FunctionInfo {
+            module: "fixture".into(),
+            name: "main".into(),
+            arity: 0,
+        },
+        Instruction::Label(1),
+        Instruction::FunctionInfo {
+            module: "other".into(),
+            name: "other".into(),
+            arity: 0,
+        },
+        Instruction::Label(7),
+        Instruction::Call {
+            arity: 0,
+            function: 7,
+            target: 7,
+        },
+    ];
+    assert_eq!(
+        BeamModule::new("fixture".into(), HashMap::new(), instructions)
+            .unwrap_err()
+            .to_string(),
+        "entry label 7 has no function info"
+    );
+}
+
 #[test]
 fn rejects_unresolved_exports_and_function_labels() {
-    let module = BeamModule::new("external".into(), HashMap::new(), vec![]);
+    let module = BeamModule::new("external".into(), HashMap::new(), vec![])
+        .expect("the fixture module loads");
     let program = BeamProgram {
         modules: HashMap::from([("external".into(), Rc::new(module))]),
         atoms: Arc::new(AtomTable::new()),
@@ -1839,7 +1982,8 @@ fn rejects_unresolved_exports_and_function_labels() {
             },
             Instruction::Label(2),
         ],
-    );
+    )
+    .expect("the fixture module loads");
     assert!(
         function_at_label(&module, 2)
             .unwrap_err()
@@ -1870,9 +2014,7 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         ];
         body.extend(rest);
         // `child/1` does not read its argument.
-        let mut program = make_program(body, 0);
-        let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-        module.instructions.extend([
+        let extra = vec![
             Instruction::FunctionInfo {
                 module: "fixture".into(),
                 name: "child".into(),
@@ -1881,11 +2023,9 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
             Instruction::Label(11),
             Instruction::Move(atom("ok"), Operand::X(0)),
             Instruction::Return,
-        ]);
-        module.reindex();
-        let child = module.tables.name_id("child").unwrap();
-        module.exports.insert((child, 1), 11);
-        program
+        ];
+        let exports = HashMap::from([(("main".into(), 0), 2), (("child".into(), 1), 11)]);
+        program_of(fixture_instructions(0, body, extra), exports)
             .execute("fixture", "main", &[])
             .unwrap_err()
             .to_string()
@@ -2352,7 +2492,8 @@ fn selects_tuple_arity_and_rejects_call_last_stack_size() {
             Instruction::Allocate { stack_size: 1 },
             Instruction::CallLast {
                 arity: 0,
-                label: 2,
+                function: 2,
+                target: 2,
                 deallocate: 0,
             },
         ])
@@ -2624,21 +2765,24 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
     );
     program.modules.insert(
         "erts_internal".into(),
-        Rc::new(BeamModule::new(
-            "erts_internal".into(),
-            HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
-            vec![
-                Instruction::FunctionInfo {
-                    module: "erts_internal".into(),
-                    name: "flush_monitor_messages".into(),
-                    arity: 3,
-                },
-                Instruction::Label(1),
-                Instruction::Label(2),
-                Instruction::Move(Operand::X(2), Operand::X(0)),
-                Instruction::Return,
-            ],
-        )),
+        Rc::new(
+            BeamModule::new(
+                "erts_internal".into(),
+                HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
+                vec![
+                    Instruction::FunctionInfo {
+                        module: "erts_internal".into(),
+                        name: "flush_monitor_messages".into(),
+                        arity: 3,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Label(2),
+                    Instruction::Move(Operand::X(2), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            )
+            .expect("the fixture module loads"),
+        ),
     );
     assert_eq!(
         program.execute("fixture", "main", &[]).unwrap(),
@@ -2680,8 +2824,6 @@ fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamErr
 
 /// Return the program of `run_with_apply_targets`.
 fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
-    let mut program = make_program(body, 0);
-    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
     let function = |name: &str, arity, label| {
         [
             Instruction::FunctionInfo {
@@ -2692,21 +2834,22 @@ fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
             Instruction::Label(label),
         ]
     };
-    module.instructions.extend(function("zero", 0, 11));
-    module.instructions.extend([
+    let mut extra = Vec::new();
+    extra.extend(function("zero", 0, 11));
+    extra.extend([
         Instruction::Move(atom("zero"), Operand::X(0)),
         Instruction::Return,
     ]);
-    module.instructions.extend(function("id", 3, 12));
-    module.instructions.extend([
+    extra.extend(function("id", 3, 12));
+    extra.extend([
         Instruction::PutTuple {
             elements: vec![Operand::X(0), Operand::X(1), Operand::X(2)],
             destination: Operand::X(0),
         },
         Instruction::Return,
     ]);
-    module.instructions.extend(function("last", 2, 13));
-    module.instructions.extend([
+    extra.extend(function("last", 2, 13));
+    extra.extend([
         Instruction::Allocate { stack_size: 0 },
         Instruction::Move(Operand::X(1), Operand::X(2)),
         Instruction::Move(Operand::X(0), Operand::X(1)),
@@ -2717,14 +2860,13 @@ fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
             deallocate: 0,
         },
     ]);
-    module.reindex();
-    let zero = module.tables.name_id("zero").unwrap();
-    let id = module.tables.name_id("id").unwrap();
-    let last = module.tables.name_id("last").unwrap();
-    module
-        .exports
-        .extend([((zero, 0), 11), ((id, 3), 12), ((last, 2), 13)]);
-    program
+    let exports = HashMap::from([
+        (("main".into(), 0), 2),
+        (("zero".into(), 0), 11),
+        (("id".into(), 3), 12),
+        (("last".into(), 2), 13),
+    ]);
+    program_of(fixture_instructions(0, body, extra), exports)
 }
 
 /// Return the body that moves the module and the function name of an
@@ -2795,7 +2937,8 @@ fn applies_module_functions_and_bifs_as_pinned_erts() {
             Instruction::Move(atom("exit"), Operand::X(1)),
             Instruction::Call {
                 arity: 2,
-                label: 13
+                function: 13,
+                target: 13
             },
             Instruction::Label(3),
             Instruction::CatchEnd { register: 0 },
@@ -3011,9 +3154,7 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
         erlang_call("spawn_opt", 4, false),
     ];
     body.extend(wait_forever());
-    let mut program = make_program(body, 0);
-    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-    module.instructions.extend([
+    let extra = vec![
         Instruction::FunctionInfo {
             module: "fixture".into(),
             name: "fresh".into(),
@@ -3022,10 +3163,9 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
         Instruction::Label(11),
         get_bif("k", Operand::X(0)),
         erlang_call("exit", 1, true),
-    ]);
-    module.reindex();
-    let fresh = module.tables.name_id("fresh").unwrap();
-    module.exports.insert((fresh, 0), 11);
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("fresh".into(), 0), 11)]);
+    let program = program_of(fixture_instructions(0, body, extra), exports);
     // ERTS 29.1.1: after put(k, parent), a spawned process gets
     // undefined for get(k).
     assert!(matches!(
@@ -3499,8 +3639,6 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
             Instruction::Move(atom("sender"), Operand::X(1)),
             erlang_call("spawn", 3, false),
         ];
-        let mut program = make_program([body, wait_forever()].concat(), 0);
-        let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
         let function = |name: &str, arity, label| {
             [
                 Instruction::FunctionInfo {
@@ -3511,34 +3649,38 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
                 Instruction::Label(label),
             ]
         };
-        module.instructions.extend(function("burner", 0, 21));
-        module
-            .instructions
-            .extend(std::iter::repeat_n(Instruction::TestYield, entries));
-        module.instructions.extend([
+        let mut extra = Vec::new();
+        extra.extend(function("burner", 0, 21));
+        extra.extend(std::iter::repeat_n(Instruction::TestYield, entries));
+        extra.extend([
             Instruction::Call {
                 arity: 0,
-                label: 23,
+                function: 23,
+                target: 23,
             },
             Instruction::Return,
         ]);
-        module.instructions.extend(function("inner", 0, 23));
-        module.instructions.extend([
+        extra.extend(function("inner", 0, 23));
+        extra.extend([
             Instruction::TestYield,
             Instruction::Move(atom("ok"), Operand::X(0)),
             Instruction::Return,
         ]);
-        module.instructions.extend(function("sender", 1, 25));
-        module.instructions.extend([
+        extra.extend(function("sender", 1, 25));
+        extra.extend([
             Instruction::Move(atom("tag"), Operand::X(1)),
             Instruction::Send,
             Instruction::Return,
         ]);
-        module.reindex();
-        let burner = module.tables.name_id("burner").unwrap();
-        let sender = module.tables.name_id("sender").unwrap();
-        module.exports.insert((burner, 0), 21);
-        module.exports.insert((sender, 1), 25);
+        let exports = HashMap::from([
+            (("main".into(), 0), 2),
+            (("burner".into(), 0), 21),
+            (("sender".into(), 1), 25),
+        ]);
+        let program = program_of(
+            fixture_instructions(0, [body, wait_forever()].concat(), extra),
+            exports,
+        );
         program.execute("fixture", "main", &[]).unwrap()
     };
     // 3998 entries, the entry of `inner`, and its return leave 0. The
@@ -3710,11 +3852,9 @@ fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
         | Instruction::TestExactEqualOperands { fail_label, .. } => *fail_label,
         other => panic!("the entry clause test of {function} is not `is_eq_exact`: {other:?}"),
     };
-    let clause = *module
-        .tables
-        .jump_targets
-        .get(&fail_label)
-        .unwrap_or_else(|| panic!("the loader records the jump target of label {fail_label}"));
+    // The loader replaces the fail label of the test with the index of the
+    // instruction after the label, so the operand is the clause position.
+    let clause = fail_label as usize;
     let end = (clause..instructions.len())
         .find(|index| {
             matches!(
