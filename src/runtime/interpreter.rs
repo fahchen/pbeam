@@ -4044,3 +4044,10 @@ fn write_operand(
 #[cfg(test)]
 #[path = "../../tests/runtime/interpreter.rs"]
 mod tests;
+
+/// The measurement of the data structures and of the derivations that
+/// `docs/data-structure-audit.md` reports. It lives beside the interpreter,
+/// because it reads the private operand, label, and frame helpers.
+#[cfg(test)]
+#[path = "../../tests/runtime/interpreter/data_structure_costs.rs"]
+mod data_structure_costs;
