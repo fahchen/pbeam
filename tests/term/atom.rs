@@ -1,8 +1,7 @@
+use crate::term::Lambda;
 use std::sync::Arc;
 
-use super::{
-    ATOM_LIMIT, Atom, AtomTable, Fun, HostTerm, Lambda, Map, STATIC_ATOM_NAMES, Target, Term,
-};
+use super::{ATOM_LIMIT, Atom, AtomTable, Fun, HostTerm, Map, STATIC_ATOM_NAMES, Target, Term};
 
 #[test]
 fn starts_with_the_erts_static_atoms() {
@@ -99,24 +98,16 @@ fn imports_a_fun_between_two_atom_tables() {
         1,
     ));
 
-    let imported = destination.import_term(&source, &local).unwrap();
-    let Term::Fun(imported_local) = &imported else {
-        panic!("the import of a local fun gives a fun");
-    };
-    let Target::Local(lambda) = imported_local.target() else {
-        panic!("the import of a local fun gives a local fun");
-    };
-    assert_eq!(lambda.module().index(), module_destination.index());
+    // A local fun of the same program is rejected, because the import
+    // cannot check the code of the module of the fun: a run can load
+    // different code under that name on demand.
     assert_eq!(
-        destination.name(lambda.module().index()),
-        Some("pbeam_host_module")
+        destination
+            .import_term(&source, &local)
+            .unwrap_err()
+            .to_string(),
+        "local fun of module pbeam_host_module has no verified code in this program"
     );
-    assert_eq!(imported_local.free().len(), 1);
-    let Term::Atom(free) = &imported_local.free()[0] else {
-        panic!("the free variable of the local fun is an atom");
-    };
-    assert_eq!(free.index(), function_destination.index());
-    assert_eq!(destination.name(free.index()), Some("pbeam_host_function"));
 
     let imported = destination.import_term(&source, &external).unwrap();
     let Term::Fun(imported_external) = &imported else {
@@ -232,7 +223,7 @@ fn keeps_the_sharing_of_a_compound_that_the_source_holds_twice() {
     let cell = Term::list_from([Term::Integer(2)]);
     let map =
         Term::Map(Map::from_pairs(vec![(Term::Atom(atom.clone()), Term::Integer(3))]).unwrap());
-    let fun = Term::Fun(Fun::new(Lambda::new(atom.clone(), 0, 1, 53, 1), Vec::new()));
+    let fun = Term::Fun(Fun::external(atom.clone(), atom.clone(), 1));
     let term = Term::tuple(vec![
         tuple.clone(),
         tuple.clone(),
@@ -335,4 +326,100 @@ fn compares_host_terms_of_two_tables_by_their_names() {
         atoms: Arc::new(AtomTable::new()),
     };
     assert_ne!(first_host, foreign);
+}
+
+#[test]
+fn compares_terms_with_a_memory_of_the_shared_compounds() {
+    // The memory decides the pair of a shared tuple and its independent
+    // equal copy one time.
+    let shared = Term::tuple(vec![Term::Integer(1)]);
+    let copy = Term::tuple(vec![Term::Integer(1)]);
+    let left = Term::tuple(vec![shared.clone(), shared.clone()]);
+    let right = Term::tuple(vec![copy.clone(), copy.clone()]);
+    assert!(left.eq_shared(&right));
+    assert!(shared.eq_shared(&shared.clone()));
+    // A tuple pair of a different length.
+    assert!(!Term::tuple(vec![Term::Integer(1)]).eq_shared(&Term::tuple(vec![])));
+
+    // A primitive pair and the empty list.
+    assert!(Term::Integer(1).eq_shared(&Term::Integer(1)));
+    assert!(!Term::Integer(1).eq_shared(&Term::Integer(2)));
+    assert!(Term::nil().eq_shared(&Term::nil()));
+
+    // A cons pair: one shared cell, one equal copy, and one longer list.
+    let cell = Term::list_from([Term::Integer(1)]);
+    assert!(cell.eq_shared(&cell.clone()));
+    assert!(cell.eq_shared(&Term::list_from([Term::Integer(1)])));
+    assert!(!cell.eq_shared(&Term::list_from([Term::Integer(1), Term::Integer(2)])));
+
+    // A map pair: one shared form, one equal copy, and one shorter map.
+    let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap());
+    assert!(map.eq_shared(&map.clone()));
+    assert!(map.eq_shared(&Term::Map(
+        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap()
+    )));
+    assert!(!map.eq_shared(&Term::Map(Map::from_pairs(vec![]).unwrap())));
+
+    // A fun pair: one shared thing, one equal copy, another free-variable
+    // count, and another entry.
+    let atom = Atom::from_static("ok").unwrap();
+    let fun = Term::Fun(Fun::new(
+        Lambda::new(atom.clone(), 0, 1, 53, 1),
+        vec![Term::Integer(1)],
+    ));
+    assert!(fun.eq_shared(&fun.clone()));
+    assert!(fun.eq_shared(&Term::Fun(Fun::new(
+        Lambda::new(atom.clone(), 0, 1, 53, 1),
+        vec![Term::Integer(1)],
+    ))));
+    assert!(!fun.eq_shared(&Term::Fun(Fun::new(
+        Lambda::new(atom.clone(), 0, 1, 53, 1),
+        vec![],
+    ))));
+    assert!(!fun.eq_shared(&Term::Fun(Fun::new(
+        Lambda::new(atom, 1, 1, 53, 1),
+        vec![Term::Integer(1)],
+    ))));
+
+    // A term that holds one cons cell, one map, and one external fun twice
+    // takes the memory for each pair of the repeated compound.
+    let cell = Term::list_from([Term::Integer(1)]);
+    let cell_copy = Term::list_from([Term::Integer(1)]);
+    assert!(
+        Term::tuple(vec![cell.clone(), cell])
+            .eq_shared(&Term::tuple(vec![cell_copy.clone(), cell_copy]))
+    );
+    let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap());
+    let map_copy = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap());
+    assert!(
+        Term::tuple(vec![map.clone(), map])
+            .eq_shared(&Term::tuple(vec![map_copy.clone(), map_copy]))
+    );
+    let atom = Atom::from_static("ok").unwrap();
+    let fun = Term::Fun(Fun::external(atom.clone(), atom.clone(), 1));
+    let fun_copy = Term::Fun(Fun::external(atom.clone(), atom.clone(), 1));
+    assert!(
+        Term::tuple(vec![fun.clone(), fun])
+            .eq_shared(&Term::tuple(vec![fun_copy.clone(), fun_copy]))
+    );
+}
+
+#[test]
+fn compares_a_shared_term_with_a_memory() {
+    // `T(n) = {T(n-1), T(n-1)}` has storage in `n` and expansion `2^n`. A
+    // comparison without the memory would visit 2^30 pairs; the memory
+    // visits each pair of the two terms one time.
+    let mut term = Term::Integer(1);
+    for _ in 0..30 {
+        term = Term::tuple(vec![term.clone(), term]);
+    }
+    let left = HostTerm {
+        term: term.clone(),
+        atoms: Arc::new(AtomTable::new()),
+    };
+    let right = HostTerm {
+        term,
+        atoms: Arc::new(AtomTable::new()),
+    };
+    assert_eq!(left, right);
 }

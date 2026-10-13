@@ -4,13 +4,18 @@
 //!
 //! The test loads two programs that share the module name `host_term_probe`
 //! and hold different code. A local fun holds the entry label of its function,
-//! so a local fun of the first program must not enter a run of the second
-//! program. An external fun holds no label and resolves through an export at
-//! call time, so it imports across programs.
+//! and a run can load different code under one module name on demand, so the
+//! import rejects every local fun. An external fun holds no label and resolves
+//! through an export at call time, so it imports across programs.
 
+#[path = "../common/mod.rs"]
+mod common;
+
+use common::pinned_beam;
 use pbeam_runtime::{BeamProgram, Term};
 
 const FIRST: &[u8] = include_bytes!("../../fixtures/host_term_first/host_term_probe.beam");
+const LOADER: &[u8] = include_bytes!("../../fixtures/host_term_loader/host_term_loader.beam");
 const SECOND: &[u8] = include_bytes!("../../fixtures/host_term_second/host_term_probe.beam");
 
 #[test]
@@ -80,4 +85,43 @@ fn imports_an_atom_that_the_run_created() {
         panic!("the second program returns the atom");
     };
     assert_eq!(atom.name(), name);
+}
+
+#[test]
+fn rejects_a_local_fun_of_another_run() {
+    // `host_term_loader` calls `erlang:load_module/2`, which the `erlang` and
+    // `zlib` modules of the pinned OTP provide.
+    let erlang = pinned_beam("erlang");
+    let zlib = pinned_beam("zlib");
+    let program = BeamProgram::load(&[LOADER, &erlang, &zlib]).unwrap();
+    // The first run loads one code of `host_term_probe` and returns a local
+    // fun of it.
+    let first = program
+        .execute(
+            "host_term_loader",
+            "load",
+            &[program.host_term(Term::binary(FIRST.to_vec()))],
+        )
+        .unwrap();
+    // The second run of the same program loads different code under the same
+    // module name.
+    let _second = program
+        .execute(
+            "host_term_loader",
+            "load",
+            &[program.host_term(Term::binary(SECOND.to_vec()))],
+        )
+        .unwrap();
+    assert!(matches!(&first.term, Term::Fun(_)));
+
+    // The entry label of the local fun names a function of the code of the
+    // first run, and the run of the destination can load other code under
+    // that name after the import, so the import rejects the local fun.
+    let error = program
+        .execute("host_term_loader", "accept", &[first])
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "local fun of module host_term_probe has no verified code in this program"
+    );
 }

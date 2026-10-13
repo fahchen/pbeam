@@ -29,7 +29,7 @@ use static_names::STATIC_ATOM_NAMES;
 
 use crate::{
     error::{BeamError, error},
-    term::{Fun, Lambda, Map, Target, Term},
+    term::{Fun, Map, Target, Term},
 };
 
 /// The largest number of atoms in the atom table (`ATOM_LIMIT` in `atom.h`,
@@ -341,13 +341,44 @@ impl AtomTable {
                         if let Some(term) = imported.get(&key) {
                             ready.push(term.clone());
                         } else {
-                            let target = self.import_target(source, fun.target())?;
-                            work.push(ImportStep::Fun {
-                                key,
-                                target,
-                                free: fun.free().len(),
-                            });
-                            work.extend(fun.free().iter().rev().map(ImportStep::Term));
+                            match fun.target() {
+                                Target::External {
+                                    module,
+                                    function,
+                                    arity,
+                                } => {
+                                    let module = self.import_atom(source, module)?;
+                                    let function = self.import_atom(source, function)?;
+                                    work.push(ImportStep::Fun {
+                                        key,
+                                        module,
+                                        function,
+                                        arity: *arity,
+                                    });
+                                }
+                                Target::Local(lambda) => {
+                                    let module = lambda.module();
+                                    let name = source
+                                        .name(module.index())
+                                        .ok_or_else(|| outside_atom_table(module.index()))?;
+                                    if source.program != self.program {
+                                        return Err(error(format!(
+                                            "local fun of module {name} belongs to another program"
+                                        )));
+                                    }
+                                    // A local fun holds the entry label of its
+                                    // function, and the code of its module is
+                                    // not part of the host term. A run can load
+                                    // different code under one module name on
+                                    // demand, and the destination run can load
+                                    // such code after this import, so the
+                                    // import cannot check that the label names
+                                    // the same function of the destination.
+                                    return Err(error(format!(
+                                        "local fun of module {name} has no verified code in this program"
+                                    )));
+                                }
+                            }
                         }
                     }
                     Term::Binary(_)
@@ -371,16 +402,14 @@ impl AtomTable {
                     imported.insert(key, term.clone());
                     ready.push(term);
                 }
-                ImportStep::Fun { key, target, free } => {
-                    let values = ready.split_off(ready.len() - free);
-                    let term = Term::Fun(match target {
-                        Target::Local(lambda) => Fun::new(lambda, values),
-                        Target::External {
-                            module,
-                            function,
-                            arity,
-                        } => Fun::external(module, function, arity),
-                    });
+                ImportStep::Fun {
+                    key,
+                    module,
+                    function,
+                    arity,
+                } => {
+                    // An external fun holds no free variable.
+                    let term = Term::Fun(Fun::external(module, function, arity));
                     imported.insert(key, term.clone());
                     ready.push(term);
                 }
@@ -419,45 +448,6 @@ impl AtomTable {
             .ok_or_else(|| outside_atom_table(atom.index()))?;
         self.put(name)
     }
-
-    /// Return the entry of `target` with each atom of its source table
-    /// resolved in this table.
-    ///
-    /// # Errors
-    ///
-    /// The errors of [`AtomTable::import_term`].
-    fn import_target(&mut self, source: &AtomTable, target: &Target) -> Result<Target, BeamError> {
-        match target {
-            Target::Local(lambda) => {
-                let module = lambda.module();
-                let name = source
-                    .name(module.index())
-                    .ok_or_else(|| outside_atom_table(module.index()))?;
-                if source.program != self.program {
-                    return Err(error(format!(
-                        "local fun of module {name} belongs to another program"
-                    )));
-                }
-                let module = self.put(name)?;
-                Ok(Target::Local(Lambda::new(
-                    module,
-                    lambda.index,
-                    lambda.old_unique,
-                    lambda.label(),
-                    lambda.arity(),
-                )))
-            }
-            Target::External {
-                module,
-                function,
-                arity,
-            } => Ok(Target::External {
-                module: self.import_atom(source, module)?,
-                function: self.import_atom(source, function)?,
-                arity: *arity,
-            }),
-        }
-    }
 }
 
 /// One step of the import walk of [`AtomTable::import_term`]: import a term,
@@ -471,12 +461,13 @@ enum ImportStep<'a> {
     Tuple { key: usize, len: usize },
     /// Make a cons cell of the last two results, and remember it at `key`.
     Cons { key: usize },
-    /// Make a fun of the last `free` results and this entry, and remember it
-    /// at `key`.
+    /// Make the external fun of this module, function, and arity, and
+    /// remember it at `key`.
     Fun {
         key: usize,
-        target: Target,
-        free: usize,
+        module: Atom,
+        function: Atom,
+        arity: u32,
     },
     /// Make a map of the last `len` pairs of results, and remember it at
     /// `key`.
@@ -538,11 +529,11 @@ impl PartialEq for HostTerm {
     /// ```
     fn eq(&self, other: &Self) -> bool {
         if Arc::ptr_eq(&self.atoms, &other.atoms) {
-            return self.term == other.term;
+            return self.term.eq_shared(&other.term);
         }
         let mut table = (*self.atoms).clone();
         match table.import_term(&other.atoms, &other.term) {
-            Ok(imported) => self.term == imported,
+            Ok(imported) => self.term.eq_shared(&imported),
             Err(_) => false,
         }
     }
