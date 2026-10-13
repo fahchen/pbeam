@@ -842,6 +842,28 @@ pub(crate) enum Instruction {
         left: Operand,
         right: Operand,
     },
+    /// Jumps to `fail_label` when the operands are not exactly equal, with
+    /// the operands that the loader classified one time.
+    ///
+    /// The loader selects this form from `test is_eq_exact` when both
+    /// operands are a register or an immediate term and at least one operand
+    /// is a register, so this form reads one register and one immediate, or
+    /// two registers. It is the operand form that the pinned ERTS selects at
+    /// load time: `is_eq_exact Lbl R=xy C=ia => i_is_eq_exact_immed Lbl R C`
+    /// and `... C=q => i_is_eq_exact_literal ...`
+    /// (`erts/emulator/beam/emu/ops.tab:506-507`). The run loop reads a
+    /// checked register slot or the stored term, so it matches no
+    /// [`Operand`] for this instruction.
+    ///
+    /// Erlang: the entry clause `loop(0) -> ok;` of
+    /// `fixtures/dispatch/dispatch_probe.erl` compiles to
+    /// `{test,is_eq_exact,{f,6},[{x,0},{integer,0}]}`, and the loader
+    /// selects this form for it.
+    TestExactEqualOperands {
+        fail_label: u32,
+        left: TestOperand,
+        right: TestOperand,
+    },
     /// Jumps to `fail_label` when the operands are not equal in the ERTS
     /// arithmetic order (`is_eq`, opcode 41). PBeam has no float term, so the
     /// test gives the same result as exact equality.
@@ -1581,6 +1603,62 @@ fn bif_instruction(
     }
 }
 
+/// One operand of [`Instruction::TestExactEqualOperands`], classified by the
+/// loader.
+///
+/// `X` and `Y` are the register slots. `Value` is a supported immediate or
+/// literal term. The loader classifies each operand one time, so the run
+/// loop reads a checked register slot or the stored term and matches no
+/// [`Operand`].
+#[derive(Debug, Clone)]
+pub(crate) enum TestOperand {
+    X(u32),
+    Y(u32),
+    Value(Term),
+}
+
+/// Classify one operand of `test is_eq_exact` for the
+/// [`Instruction::TestExactEqualOperands`] form.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(classify_test_operand(&Operand::X(0)), Some(TestOperand::X(0))));
+/// assert!(classify_test_operand(&Operand::UnsupportedInteger).is_none());
+/// ```
+fn classify_test_operand(operand: &Operand) -> Option<TestOperand> {
+    match operand {
+        Operand::X(index) => Some(TestOperand::X(*index)),
+        Operand::Y(index) => Some(TestOperand::Y(*index)),
+        Operand::Value(value) => Some(TestOperand::Value(value.clone())),
+        Operand::UnsupportedLiteral(_) | Operand::UnsupportedInteger => None,
+    }
+}
+
+/// Return the classified operands of `test is_eq_exact`, or `None` when the
+/// generic [`Instruction::TestExactEqual`] form must hold them.
+///
+/// The classified form reads one register and one immediate, or two
+/// registers, so it needs at least one register operand.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(test_operands(&Operand::X(0), &Operand::Value(Term::nil())).is_some());
+/// assert!(test_operands(&Operand::Value(Term::nil()), &Operand::Value(Term::nil())).is_none());
+/// ```
+fn test_operands(left: &Operand, right: &Operand) -> Option<(TestOperand, TestOperand)> {
+    let left = classify_test_operand(left)?;
+    let right = classify_test_operand(right)?;
+    let has_register = matches!(left, TestOperand::X(_) | TestOperand::Y(_))
+        || matches!(right, TestOperand::X(_) | TestOperand::Y(_));
+    if has_register {
+        Some((left, right))
+    } else {
+        None
+    }
+}
+
 /// Decode the `Code` header and instruction stream.
 ///
 /// # Examples
@@ -1875,11 +1953,23 @@ pub(super) fn parse_code(
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
-            OPCODE_TEST_EXACT_EQ => Instruction::TestExactEqual {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
-                left: read_move_operand(data, &mut cursor, atoms, literals)?,
-                right: read_move_operand(data, &mut cursor, atoms, literals)?,
-            },
+            OPCODE_TEST_EXACT_EQ => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let left = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let right = read_move_operand(data, &mut cursor, atoms, literals)?;
+                match test_operands(&left, &right) {
+                    Some((left, right)) => Instruction::TestExactEqualOperands {
+                        fail_label,
+                        left,
+                        right,
+                    },
+                    None => Instruction::TestExactEqual {
+                        fail_label,
+                        left,
+                        right,
+                    },
+                }
+            }
             OPCODE_TEST_EXACT_NE => Instruction::TestExactNotEqual {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,

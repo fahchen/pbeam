@@ -10,6 +10,7 @@ const WORD_SIZE: usize = 4;
 mod instruction;
 pub(crate) use instruction::{
     BifDestination, BifOperand, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind,
+    TestOperand,
 };
 
 const CHUNK_ALIGNMENT: usize = WORD_SIZE;

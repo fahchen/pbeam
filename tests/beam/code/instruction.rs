@@ -15,7 +15,7 @@ use super::{
 use crate::{
     beam::code::{
         BifDestination, BifOperand, BinaryMatchCommand, BinarySegment, Instruction, Operand,
-        TestKind,
+        TestKind, TestOperand,
     },
     runtime::BifId,
     term::{Atom, AtomTable, Lambda, Term},
@@ -595,6 +595,97 @@ fn decodes_is_ne_exact_with_its_fail_label() {
                 fail_label: 157,
                 left: Operand::X(0),
                 right: Operand::X(3),
+            },
+            Instruction::End,
+        ]
+    ));
+}
+
+/// The loader selects the classified operand form of `test is_eq_exact` when
+/// both operands are a register or an immediate and at least one is a
+/// register. It keeps the generic form for two immediates and for an operand
+/// that it cannot classify, so the run loop keeps its error text.
+#[test]
+fn selects_the_classified_operand_form_of_is_eq_exact() {
+    let atoms = vec![
+        Atom::from_static("ok").unwrap(),
+        Atom::from_static("output").unwrap(),
+    ];
+    let parse = |stream: &[u8]| {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend_from_slice(stream);
+        code.push(0x03);
+        parse_code(&code, &atoms, &[], &[], &[], &[]).unwrap().0
+    };
+    // {test,is_eq_exact,{f,3},[{x,0},{integer,0}]}: the floor-loop shape.
+    assert!(matches!(
+        parse(&[0x2B, 0x35, 0x03, 0x01]).as_slice(),
+        [
+            Instruction::TestExactEqualOperands {
+                fail_label: 3,
+                left: TestOperand::X(0),
+                right: TestOperand::Value(Term::Integer(0)),
+            },
+            Instruction::End,
+        ]
+    ));
+    // {test,is_eq_exact,{f,3},[{x,0},{x,1}]}: two registers.
+    assert!(matches!(
+        parse(&[0x2B, 0x35, 0x03, 0x13]).as_slice(),
+        [
+            Instruction::TestExactEqualOperands {
+                fail_label: 3,
+                left: TestOperand::X(0),
+                right: TestOperand::X(1),
+            },
+            Instruction::End,
+        ]
+    ));
+    // {test,is_eq_exact,{f,3},[{y,1},{atom,2}]}: a Y register and an atom.
+    assert!(matches!(
+        parse(&[0x2B, 0x35, 0x14, 0x22]).as_slice(),
+        [
+            Instruction::TestExactEqualOperands {
+                fail_label: 3,
+                left: TestOperand::Y(1),
+                right: TestOperand::Value(Term::Atom(_)),
+            },
+            Instruction::End,
+        ]
+    ));
+    // {test,is_eq_exact,{f,3},[{atom,1},{x,0}]}: the immediate comes first.
+    assert!(matches!(
+        parse(&[0x2B, 0x35, 0x12, 0x03]).as_slice(),
+        [
+            Instruction::TestExactEqualOperands {
+                fail_label: 3,
+                left: TestOperand::Value(Term::Atom(_)),
+                right: TestOperand::X(0),
+            },
+            Instruction::End,
+        ]
+    ));
+    // Two immediates keep the generic form.
+    assert!(matches!(
+        parse(&[0x2B, 0x35, 0x12, 0x22]).as_slice(),
+        [
+            Instruction::TestExactEqual {
+                fail_label: 3,
+                left: Operand::Value(Term::Atom(_)),
+                right: Operand::Value(Term::Atom(_)),
+            },
+            Instruction::End,
+        ]
+    ));
+    // An operand that needs a bignum keeps the generic form.
+    assert!(matches!(
+        parse(&[0x2B, 0x35, 0x03, 0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]).as_slice(),
+        [
+            Instruction::TestExactEqual {
+                fail_label: 3,
+                left: Operand::X(0),
+                right: Operand::UnsupportedInteger,
             },
             Instruction::End,
         ]
@@ -2284,6 +2375,11 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
             destination,
         } => size_of_val(tuple) + size_of_val(index) + size_of_val(destination),
         Instruction::TestExactEqual {
+            fail_label,
+            left,
+            right,
+        } => size_of_val(fail_label) + size_of_val(left) + size_of_val(right),
+        Instruction::TestExactEqualOperands {
             fail_label,
             left,
             right,

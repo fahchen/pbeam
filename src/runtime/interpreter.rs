@@ -10,7 +10,7 @@ use crate::{
         BeamModule, NameId,
         code::{
             self, BifDestination, BifOperand, BinaryMatchCommand, BinarySegment, Instruction,
-            Operand, TestKind,
+            Operand, TestKind, TestOperand,
         },
     },
     error::{BeamError, error},
@@ -1073,6 +1073,20 @@ impl BeamProgram {
                     right,
                 } => {
                     if read_ref(process, left)? != read_ref(process, right)? {
+                        cursor.position = label_index(module, *fail_label)?;
+                    }
+                }
+                // The loader selects the classified operand form of
+                // `test is_eq_exact` when both operands are a register or an
+                // immediate and at least one is a register. The run loop then
+                // reads a checked register slot or the stored term, and it
+                // matches no `Operand`.
+                Instruction::TestExactEqualOperands {
+                    fail_label,
+                    left,
+                    right,
+                } => {
+                    if read_test_operand(process, left)? != read_test_operand(process, right)? {
                         cursor.position = label_index(module, *fail_label)?;
                     }
                 }
@@ -3040,6 +3054,80 @@ fn read_ref<'a>(process: &'a ProcessState, operand: &'a Operand) -> Result<&'a T
     }
 }
 
+/// Borrow a classified operand of [`Instruction::TestExactEqualOperands`].
+/// The loader classified the operand, so this reads a checked register slot
+/// or returns the stored term, and it matches no [`Operand`].
+///
+/// A register that holds a match context gives the same invariant error as
+/// [`read_ref`]. A stored term comes from the literal table, which cannot
+/// hold a match context.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(
+///     read_test_operand(&process, &TestOperand::Value(Term::Integer(1)))?,
+///     &Term::Integer(1)
+/// );
+/// ```
+fn read_test_operand<'a>(
+    process: &'a ProcessState,
+    operand: &'a TestOperand,
+) -> Result<&'a Term, BeamError> {
+    match operand {
+        TestOperand::Value(value) => Ok(value),
+        TestOperand::X(index) => match read_x_register(&process.registers, *index)? {
+            Term::MatchContext(_) => Err(match_context_escape(&Operand::X(*index))),
+            value => Ok(value),
+        },
+        TestOperand::Y(index) => {
+            let stack = process.frames.last().map_or(&[][..], |frame| &frame.stack);
+            match read_y_register(stack, *index)? {
+                Term::MatchContext(_) => Err(match_context_escape(&Operand::Y(*index))),
+                value => Ok(value),
+            }
+        }
+    }
+}
+
+/// Read one X register slot with the checked access of [`read_operand`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let registers = vec![Some(Term::Integer(7))];
+/// assert_eq!(read_x_register(&registers, 0)?, &Term::Integer(7));
+/// assert!(read_x_register(&registers, 1).is_err());
+/// ```
+fn read_x_register(registers: &[Option<Term>], index: u32) -> Result<&Term, BeamError> {
+    registers
+        .get(index as usize)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| error(format!("register x{index} is unset")))
+}
+
+/// Read one Y stack slot with the checked access of [`read_operand`]. A slot
+/// that holds a catch tag, an empty slot, and an out-of-range index each
+/// keep their own error text.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let stack = vec![StackSlot::Term(Term::Integer(7))];
+/// assert_eq!(read_y_register(&stack, 0)?, &Term::Integer(7));
+/// assert!(read_y_register(&stack, 1).is_err());
+/// ```
+fn read_y_register(stack: &[StackSlot], index: u32) -> Result<&Term, BeamError> {
+    match stack.get(index as usize) {
+        Some(StackSlot::Term(value)) => Ok(value),
+        // The BEAM validator never lets an instruction read a catch tag.
+        Some(StackSlot::Catch(_)) => {
+            Err(error(format!("stack register y{index} holds a catch tag")))
+        }
+        Some(StackSlot::Empty) | None => Err(error(format!("stack register y{index} is unset"))),
+    }
+}
+
 /// Read a copy of an operand from the process registers or the active
 /// frame, also when it is a match context.
 ///
@@ -4203,44 +4291,6 @@ fn read_operand<'a>(
         )),
         Operand::X(index) => read_x_register(registers, *index),
         Operand::Y(index) => read_y_register(stack, *index),
-    }
-}
-
-/// Read one X register slot with the checked access of [`read_operand`].
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let registers = vec![Some(Term::Integer(7))];
-/// assert_eq!(read_x_register(&registers, 0)?, &Term::Integer(7));
-/// assert!(read_x_register(&registers, 1).is_err());
-/// ```
-fn read_x_register(registers: &[Option<Term>], index: u32) -> Result<&Term, BeamError> {
-    registers
-        .get(index as usize)
-        .and_then(Option::as_ref)
-        .ok_or_else(|| error(format!("register x{index} is unset")))
-}
-
-/// Read one Y stack slot with the checked access of [`read_operand`]. A slot
-/// that holds a catch tag, an empty slot, and an out-of-range index each
-/// keep their own error text.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let stack = vec![StackSlot::Term(Term::Integer(7))];
-/// assert_eq!(read_y_register(&stack, 0)?, &Term::Integer(7));
-/// assert!(read_y_register(&stack, 1).is_err());
-/// ```
-fn read_y_register(stack: &[StackSlot], index: u32) -> Result<&Term, BeamError> {
-    match stack.get(index as usize) {
-        Some(StackSlot::Term(value)) => Ok(value),
-        // The BEAM validator never lets an instruction read a catch tag.
-        Some(StackSlot::Catch(_)) => {
-            Err(error(format!("stack register y{index} holds a catch tag")))
-        }
-        Some(StackSlot::Empty) | None => Err(error(format!("stack register y{index} is unset"))),
     }
 }
 

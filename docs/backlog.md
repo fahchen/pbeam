@@ -275,6 +275,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - `maps:remove/2` (#129) rebuilds the map, which is O(n). ERTS changes one HAMT path.
 - **Trigger:** a hot path removes keys from large maps.
 
+### Compare a shared map root before walking a map
+
+- **Reason:** the map arm of `Term::eq` (`src/term.rs:586-593`) zips the pairs of two maps onto a work stack and compares the lengths, with no check of a shared root, and no measurement harness covers a comparison of two maps with the same root. The unit test `tests/term.rs:395` compares a map with its own clone and does share the root, but it is a correctness test and not a measured consumer.
+- **Evidence:** the map comparisons that run in a loop are the per-cell loop of Terra `Renderer.diff/2` over 4-key cell maps, which each frame builds afresh, and the microbenchmark `term_eq_map_1000_equal` (`tests/term/data_structure_costs.rs:461`), which builds two maps of 1000 keys independently. Every other comparison site is a one-shot path or a correctness test, and no fixture and no measurement harness compares a map against a clone, a received copy, or a value read back from a table. The pinned ERTS skips an identical root (`erts/emulator/beam/utils.c:1133`) and identical HAMT children (`:1495`), so the check follows the reference, but on these consumers the roots differ and the check saves nothing.
+- **Trigger:** a measured consumer that compares two references to one map value: a map read back from ETS or a persistent term, a map sent and compared against a retained copy, or a `lists:member/2` over a list that holds the same map twice.
+- **Source:** the consumer audit of the term proposal on #552, and issue #555.
+
 ### Share map nodes in the results of the map BIFs
 
 - `maps:remove/2`, `maps:take/2`, and `maps:merge/2` build their result map again with `Map::from_pairs`, so the result holds no node of an argument. An update that puts the value that the key already has makes a new map. ERTS shares the nodes in each of these cases, so `maps:merge/2` of such a result and its argument uses more reductions on PBeam. The row "Map merge reductions" of `docs/erts-differences.md` records this difference, and this entry owns it.
