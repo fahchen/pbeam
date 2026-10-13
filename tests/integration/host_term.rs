@@ -12,7 +12,7 @@
 mod common;
 
 use common::pinned_beam;
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{BeamProgram, Map, Term};
 
 const FIRST: &[u8] = include_bytes!("../../fixtures/host_term_first/host_term_probe.beam");
 const LOADER: &[u8] = include_bytes!("../../fixtures/host_term_loader/host_term_loader.beam");
@@ -85,6 +85,50 @@ fn imports_an_atom_that_the_run_created() {
         panic!("the second program returns the atom");
     };
     assert_eq!(atom.name(), name);
+}
+
+#[test]
+fn builds_a_map_from_an_atom_that_the_run_created() {
+    // `created_atom/1` calls `erlang:list_to_atom/1`, so the name is made at
+    // run time. The program table holds no name at the index of the created
+    // atom, so a host that builds a map from the run atom passes the table of
+    // the host result, which is the table of the run. The table of the run
+    // owns the created atom and the static atoms. `program.atoms()` is not the
+    // owning table, and the order rule then has no name to read for the
+    // created atom.
+    let program = BeamProgram::load(&[FIRST]).unwrap();
+    let name = "host_term_created";
+    assert!(program.atom(name).is_none());
+    let characters = Term::list_from(name.bytes().map(|byte| Term::Integer(i64::from(byte))));
+    let created = program
+        .execute(
+            "host_term_probe",
+            "created_atom",
+            &[program.host_term(characters)],
+        )
+        .unwrap();
+    assert!(program.atom(name).is_none());
+    // Two nested list keys make the flatmap key order fall back to the term
+    // order, which reads the name of each nested atom through the table.
+    let key = |name: &str| Term::list_from([Term::Atom(created.atom(name).unwrap())]);
+    let map = Map::from_pairs(
+        vec![
+            (key(name), Term::Atom(created.atom("ok").unwrap())),
+            (key("true"), Term::Atom(created.atom("ok").unwrap())),
+        ],
+        created.atoms(),
+    )
+    .unwrap();
+    // `host_term_created` comes before the static `true` in the term order,
+    // so the created key is the first key of the map.
+    let term = Term::Map(map);
+    assert_eq!(
+        format!("{term:?}"),
+        format!(
+            "Map([(List([Atom(\"{name}\")]), Atom(\"ok\")), \
+             (List([Atom(\"true\")]), Atom(\"ok\"))])"
+        )
+    );
 }
 
 #[test]

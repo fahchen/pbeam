@@ -598,6 +598,22 @@ impl HostTerm {
         self.atoms.get(name)
     }
 
+    /// Return the atom table that owns the atoms of this host term, which is
+    /// the table of the run that made the term. A run adds each name that it
+    /// creates to that table, for example with `erlang:list_to_atom/1`, and
+    /// the program table holds none of those names. A host that builds a map
+    /// from an atom of a run passes this table to [`Map::from_pairs`],
+    /// because the order rule reads each name through the owning table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::from_pairs(vec![(key, value)], host_term.atoms())?;
+    /// ```
+    pub fn atoms(&self) -> &AtomTable {
+        &self.atoms
+    }
+
     /// Return this term with every atom of its table replaced by the atom
     /// of the same name in `destination`, as
     /// [`AtomTable::import_term`] describes.
