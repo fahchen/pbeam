@@ -1123,8 +1123,8 @@ const PUT_COST_SIZES: [i64; 4] = [1, 10, 100, 1000];
 /// The number of rounds of one timed run of a put probe.
 const PUT_COST_ROUNDS: usize = if cfg!(debug_assertions) { 20 } else { 200 };
 
-/// Return the maps of one put probe: one fresh map for each round. Every
-/// map lacks the key of the probe.
+/// Return the maps of one put probe: one map for each round, and each map
+/// holds the key of the probe. The maps are built once, before the timer.
 fn put_maps(pairs: &[(Term, Term)]) -> Vec<Map> {
     (0..PUT_COST_ROUNDS)
         .map(|_| Map::from_pairs(pairs.to_vec()).expect("the probe keys are valid"))
@@ -1132,19 +1132,17 @@ fn put_maps(pairs: &[(Term, Term)]) -> Vec<Map> {
 }
 
 /// Print the cost of one map put of `body`, in nanosecond for each call, as
-/// the minimum of [`MAP_COST_RUNS`] timed runs. `body` returns the number of
-/// keys of its map, so the compiler cannot remove the work that the timer
-/// measures.
+/// the minimum of [`MAP_COST_RUNS`] timed runs over the same maps. `body`
+/// returns the number of keys of its map, so the compiler cannot remove the
+/// work that the timer measures.
 ///
-/// Each run builds its maps before the timer and holds one pass over every
-/// map. The maps are fresh for each run, so both paths insert the key of the
-/// probe in every run: an owned map changes in place and a retained-version
-/// map changes a clone, but neither replaces a key that an earlier run
-/// added. The allocation of the maps stays out of the timer.
+/// Both paths replace the value of a key that every map already holds, so
+/// the timer compares one operation with the same operation. The maps are
+/// built before the timer, and the allocation of the maps stays out of it.
 fn put_cost(name: &str, pairs: &[(Term, Term)], body: impl Fn(&mut Map) -> i64) -> f64 {
+    let mut maps = put_maps(pairs);
     let mut best = f64::MAX;
     for _ in 0..MAP_COST_RUNS {
-        let mut maps = put_maps(pairs);
         let start = Instant::now();
         let sum: i64 = maps.iter_mut().map(|map| black_box(body(map))).sum();
         let elapsed = start.elapsed().as_nanos() as f64;
@@ -1173,17 +1171,16 @@ fn prints_the_cost_of_a_map_put() {
         "map put cost: minimum of {MAP_COST_RUNS} runs of {PUT_COST_ROUNDS} rounds, in nanosecond for each call"
     );
     for keys in PUT_COST_SIZES {
-        // A key that is not in the map, so the first change adds one pair,
-        // and each key is its own value. A later run of the owned path
-        // changes the value of the key that the first run added.
+        // Each key is its own value, and the key of the probe is the last
+        // key, so both paths replace the value of a key that the map holds.
         let pairs: Vec<(Term, Term)> = (1..=keys)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect();
-        let missing = Term::Integer(keys + 1);
-        // The owned path: the map has one owner, so `Map::update` changes
-        // the form in place.
+        let probe = Term::Integer(keys);
+        // The owned path: the map has one owner, so `Map::update` replaces
+        // the value in the form of the map.
         put_cost(&format!("put_owned_{keys}"), &pairs, |map| {
-            map.update(vec![(Insert::Add, missing.clone(), Term::Integer(9))])
+            map.update(vec![(Insert::Add, probe.clone(), Term::Integer(9))])
                 .expect("the probe key is valid");
             map.len() as i64
         });
@@ -1192,7 +1189,7 @@ fn prints_the_cost_of_a_map_put() {
         // and the old map keeps its pairs.
         put_cost(&format!("put_retained_{keys}"), &pairs, |map| {
             let mut copy = map.clone();
-            copy.update(vec![(Insert::Add, missing.clone(), Term::Integer(9))])
+            copy.update(vec![(Insert::Add, probe.clone(), Term::Integer(9))])
                 .expect("the probe key is valid");
             copy.len() as i64
         });
