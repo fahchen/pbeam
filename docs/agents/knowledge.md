@@ -144,3 +144,9 @@ Keep benchmark setup outside timed runs and isolate counters to the measuring th
 ## Structural tests become stale after enum growth
 
 Make structural tests fail to compile when the represented enum gains a variant. Match every variant and name every field instead of using `..` or a fallback.
+
+## Incremental cleanup follows authoritative storage
+
+When cleanup removes items in bounded steps, account and drain the authoritative
+storage that owns their terms. Do not walk stale indexes or links after a step
+can remove their entries.
