@@ -71,6 +71,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Option:** a `Binary` payload of 8 bytes that keeps the offset and the size with the bytes behind one pointer. `docs/copy-on-write-terms.md` permits no smaller offset or size type, because it adds a binary size limit that ERTS does not have.
 - **Trigger:** a measured memory or cache cost of the term width, or an owner decision to reach the design target.
 - **Source:** owner decision on #503; epic checkpoint measurement at `a6b838c`.
+- **Scheduled:** this entry is the older statement of the same target as row 6 of `docs/term-performance-design-codex-v2.md` ("Immediate atoms and compact term"), which is the active task #553. The proposal asks for at most 16 bytes for `size_of::<Term>()` on the verified host, while this entry records the 24-byte design target of `docs/copy-on-write-terms.md`. The pull request that closes #553 removes this entry.
 
 ### Drop a shared map without a fresh empty handle
 
@@ -79,6 +80,27 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Option:** hold the `Arc` in an `Option` field, as `Term::Tuple`, `Term::Cons`, and `Term::Fun` do: the drop takes the `Arc` out of the `Option` and calls `Arc::into_inner`, and each other reader finds the map. `Map` then needs no replacement handle.
 - **Trigger:** a measured path where the drop of a shared map costs time, or a change of the map representation.
 - **Source:** epic checkpoint measurement on #450; recorded on #503.
+
+### Build the large tuple tree for a retained-version consumer
+
+- **Reason:** no consumer in this repository updates a tuple of more than 32 slots while an old version stays reachable.
+- **Evidence:** the only tuple write path of this runtime is `update_record` (`src/runtime/interpreter.rs:1363`), which copies the whole array and discards the hint of the instruction (`src/beam/code/instruction.rs:731-743`). The only live compiled consumer is the pinned `gen_statem.beam` with `{update_record,{atom,inplace},6,...}` in `loop_t0q/5` and `{atom,copy},7` in `enter/8`. `fixtures/user_drv/user_drv_state_check.erl:16` updates a tuple of 19 slots through `call_ext erlang:setelement/3`, that BIF is unsupported (`src/runtime/interpreter/bif/table.rs:299`), and the test runs on ERTS only (`tests/integration/user_drv.rs:270`). A retained old version appears only in a hand-built 4-tuple at `tests/runtime/interpreter.rs:1362`.
+- **Trigger:** a measured consumer that updates a tuple of more than 32 slots and keeps the old version reachable.
+- **Source:** the consumer audit of the term proposal, and issue #556.
+
+### Build bounded map collision storage for a collision-write consumer
+
+- **Reason:** collisions of a map in this repository reach a count of 2 and are read-only, and every retained-root map write is collision-free.
+- **Evidence:** `fixtures/logger_start/logger_start_probe.erl:224-226` and `tests/term/map.rs:666` read collision pairs; the largest count is 2 (`tests/term/map.rs:629-631`, `:667-672`); retained-root writes are collision-free (`fixtures/map/map_share_probe.erl:7-19`, `tests/term/map.rs:404-432`, `:455-479`, `:858-874`); no measurement harness covers a collision write.
+- **Trigger:** a measured write path with a retained root and a collision count above 16.
+- **Source:** the consumer audit of the term proposal, and issue #557.
+
+### Combine the measured instruction pairs
+
+- **Reason:** row 10 of the term proposal combines the measured instruction pairs, and that form was measured and rejected in the dispatch work. The row has no consumer until a combined form measures a gain.
+- **Evidence:** task #517 of the dispatch epic built the combined pairs for `test is_eq_exact` with `gc_bif '-'`. The gate measures the local `call_only` floor loop at 200000 iterations: the combined form measures 165.7 ns for each iteration against 163.2 ns of the two separate instructions, and the position shape measures 165.4 ns against 163.5 ns. The added rows of one instruction are 9.1 ns to 12.1 ns slower. The task closed with no landed change, and issue #517 and the closed draft PR #538 hold the measurement. The plan of record is `docs/interpreter-dispatch-plan.md`.
+- **Trigger:** a combined form that measures a gain of at least 10 percent on the local floor loop against the two separate instructions, with the session control of its own revision.
+- **Source:** task #517 and the step 9 measurement of `docs/interpreter-dispatch-measurements.md`.
 
 ## Runtime
 
