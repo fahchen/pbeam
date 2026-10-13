@@ -118,7 +118,7 @@ The arm body keeps the table syntax. The slice pattern `[left, right]` against `
 
 A reference pattern in front of the slice pattern, `&[left, right]`, dereferences the `&[&Term]` and leaves a place of type `[&Term]`. The bindings then have the by-value mode, so `left: &Term`. A plain slice pattern against `&[&Term]` would instead bind `&&Term` under the match ergonomics. The scratch check below confirms the difference.
 
-The leaf list is the single source of truth for the lane. `is_leaf` and `dispatch_leaf` hold the same identities. A unit test of `tests/runtime/interpreter/bif.rs` asserts that every leaf identity resolves from its MFA to the same `BifId` (`resolve`, `src/runtime/interpreter/bif.rs:488-495`) and that `dispatch_leaf` and `dispatch` give the same result for a representative argument list of each leaf. The test also asserts the fallback arm, so a missing leaf identity cannot pass.
+The predicate `is_leaf` and the arms of `dispatch_leaf` are handwritten. The design rejects the generation of the leaf list from the `bifs!` table, because `macro_rules!` cannot combine the entry marker and the closure pattern of one entry in one repetition; the rejected alternatives give the exact error. The leaf list is the single source of truth for the lane, and `is_leaf` and `dispatch_leaf` hold the same identities. A unit test of `tests/runtime/interpreter/bif.rs` asserts that every leaf identity resolves from its MFA to the same `BifId` (`resolve`, `src/runtime/interpreter/bif.rs:488-495`) and that `dispatch_leaf` and `dispatch` give the same result for a representative argument list of each leaf. The test also asserts the fallback arm, so a missing leaf identity cannot pass.
 
 ### The call site
 
@@ -148,10 +148,38 @@ let result = if let Some(state) = process.length_trap.take() {
 
 Four details follow from this code:
 
-- `cursor.commit(process)` moves before the read on both lanes. The commit writes the already advanced `cursor.position` into the active frame, so the value is the same. The read of the current code happens before the commit, and the two errors that the read can report (an unset operand and a match context) leave the run, so the order of the commit changes no observable result. The design states the order explicitly because the borrow forces it.
+- Only the leaf lane needs the order change `cursor.commit(process)` before the read. Its read borrows the process, so the commit, which needs `&mut ProcessState`, cannot run while the borrowed view lives. The owned lane keeps the current order, the read and then the commit, because its read returns an owned `OwnedBifArguments` and holds no borrow. The commit writes the already advanced `cursor.position` into the active frame, so its value is the same in both orders. On the leaf lane the two errors that the read can report (an unset operand and a match context) leave the run, so the earlier commit changes no observable result.
 - `read_owned_bif_arguments` is the current `read_bif_arguments` body with `read_any`, and it keeps the owned `BifArguments`. The struct of the owned lane keeps the old shape and the old cost, so an effectful `bif` instruction pays nothing for the new lane. The two structs need two names: `BifArguments<'a>` for the borrow and `OwnedBifArguments` for the copy.
-- `match_context_byte_size` (`src/runtime/interpreter.rs:2999-3016`) becomes generic over the element type with the `std::borrow::Borrow<Term>` bound, so one function serves `&[&Term]` and `&[Term]`. The body changes `matches!(value, Term::MatchContext(_))` to `matches!(value.borrow(), Term::MatchContext(_))`.
+- `match_context_byte_size` (`src/runtime/interpreter.rs:2999-3016`) becomes generic over the element type with the `std::borrow::Borrow<Term>` bound, so one function serves `&[&Term]` and `&[Term]`. Two changes are necessary. The later `matches!` check changes `matches!(value, Term::MatchContext(_))` to `matches!(value.borrow(), Term::MatchContext(_))`, and the first pattern cannot match `[Term::MatchContext(context)]` against an element that is only `Borrow<Term>`. The first element is borrowed before the match, so the borrow gives the `Term` that the pattern needs. The exact form follows the list.
 - The leaf lane returns `BifResult` and not `Option<BifResult>`. The fallback arm of `dispatch_leaf` reports the unresolved MFA, exactly as the fallback arm of `dispatch` does (`src/runtime/interpreter/bif.rs:542-545`), and it is reachable in a unit test, so it keeps 100 percent line coverage. `is_leaf` keeps the non-leaf identities out of that arm in a run. A leaf body may return every variant of `BifResult`, including `Trap` and `TrapBif`, because a leaf body can build an owned argument vector itself.
+
+The generic `match_context_byte_size`:
+
+```rust
+fn match_context_byte_size<T: Borrow<Term>>(
+    bif: BifId,
+    arguments: &[Operand],
+    values: &[T],
+) -> Result<Option<Term>, BeamError> {
+    if bif == BifId::ErlangByteSize1
+        && let [value] = values
+        && let Term::MatchContext(context) = value.borrow()
+    {
+        check_known_position(context, &arguments[0])?;
+        let bits = context.remaining_bits();
+        return Ok(Some(Term::Integer(bits.div_ceil(8) as i64)));
+    }
+    match values
+        .iter()
+        .position(|value| matches!(value.borrow(), Term::MatchContext(_)))
+    {
+        Some(index) => Err(match_context_escape(&arguments[index])),
+        None => Ok(None),
+    }
+}
+```
+
+The `byte_size/1` special case is unchanged: a `byte_size/1` call with a match context returns the remaining bytes, and a match context in any other argument position is a runtime invariant error with the operand in the message. The first pattern tests the identity and the length before it borrows the element, and the borrow of `Term` is the value that the pattern matches. The scratch check of the next section compiled this form for `&[Term]` and for `&[&Term]`.
 
 The functions of the other paths do not change: `call_arguments` (`src/runtime/interpreter.rs:3182-3192`), `call_bif` (`src/runtime/interpreter/bif.rs:635-645`), `named_bif` (`src/runtime/interpreter/bif.rs:663-674`), `bif_slice` (`src/runtime/interpreter/bif.rs:695-703`), `bif_trap` (`src/runtime/interpreter/bif.rs:776-800`), `finish_bif` (`src/runtime/interpreter.rs:2199-2280`), `Scheduler::current_process_mut` (`src/runtime/scheduler.rs:995-1001`), and `ProcessState::registers` (`src/runtime/process.rs:217`).
 
@@ -172,7 +200,7 @@ The borrow checker proves the remaining facts:
 - The leaf body cannot store a reference, because its return type `BifResult` holds owned values and no lifetime.
 - The leaf body cannot reach the process, the scheduler, or any mutable runtime state, because the macro-generated call passes no context binding.
 
-The scratch check of this section compiled the structure against the real types. The check changed `BifArguments` to the borrowed form, changed `read_bif_arguments` to `read_any_ref`, added a leaf arm for `erlang:'-'/2`, and built the workspace at `9adc310` in a scratch worktree with `mise exec -- cargo check --locked --lib`. The check passed with no `unsafe` and no error.
+The scratch check of this section compiled the structure against the real types. The check changed `BifArguments` to the borrowed form, changed `read_bif_arguments` to `read_any_ref`, changed `match_context_byte_size` to the generic form of the call-site section, added a leaf arm for `erlang:'-'/2`, and built the workspace at `9adc310` in a scratch worktree with `mise exec -- cargo check --locked --lib`. The check passed with no `unsafe` and no error. A second scratch check compiled the generic form alone with the pinned rustc 1.99.0 and the edition 2024 of the crate, for `&[Term]` and for `&[&Term]`, and it confirmed the `byte_size/1` result and the invariant error of both element types.
 
 ## Behavior of each path
 
@@ -211,13 +239,13 @@ The design changes no result variant, no fail-label jump, no exception class, no
 
 The design removes the buffer initialization and the argument copy of the leaf lane. The operand reads, the match-context check, the dispatch match, and the result handling stay. The prediction against the measured parts:
 
-| Part | Measured base at `4261205` | Predicted after the leaf lane | Basis |
+| Part | Measured base | Predicted after the leaf lane | Basis |
 | --- | --- | --- | --- |
-| `bif_arguments_build` | 24.883 ns | about 15 ns to 16 ns | the 6.811 ns of initialization leaves; the operand reads and the reference stores stay |
-| `bif_slice_minus` | 5.900 ns | 5.900 ns | the identity dispatch and the subtraction do not change |
-| `bif_result_value_handling` | 7.379 ns | 7.379 ns | the `BifResult` match and the `x` write do not change |
-| one local `call_only` floor-loop iteration | 148.699 ns to 153.672 ns | about 138 ns to 145 ns | estimated: the floor loop holds the same `gc_bif '-'`, so the build part is on its critical path |
-| the added `gc_bif '+'` on the same loop | 70.828 ns to 71.525 ns | about 60 ns to 63 ns | estimated from the same build part |
+| `bif_arguments_build` | 24.883 ns, the #549 session at `4261205` | about 15 ns to 16 ns | the 6.811 ns of initialization leaves; the operand reads and the reference stores stay |
+| `bif_slice_minus` | 5.900 ns, the #549 session at `4261205` | 5.900 ns | the identity dispatch and the subtraction do not change |
+| `bif_result_value_handling` | 7.379 ns, the #549 session at `4261205` | 7.379 ns | the `BifResult` match and the `x` write do not change |
+| one local `call_only` floor-loop iteration | 149.364 ns to 153.976 ns, the base group of the #549 session at `4261205` | about 138 ns to 145 ns | estimated: the floor loop holds the same `gc_bif '-'`, so the build part is on its critical path |
+| the added `gc_bif '+'` on the same loop | 70.828 ns to 73.176 ns, the three before runs of the floor-loop section of [PR #561](https://github.com/fahchen/pbeam/pull/561) at `4261205` | about 59 ns to 64 ns | estimated from the same build part |
 
 The scratch check measured the build part in a session of its own, with the borrowed `read_bif_arguments` and the owned one interleaved in one session at load 25.82, each number the minimum of nine timed runs of 100000 operations:
 
@@ -258,7 +286,7 @@ The measurement must carry the control of its own session:
 - The base group of the same session, interleaved with the change, at the same revision of the runtime code, is the control. The record names the revision of each group.
 - The record gives the minimum of the nine sub-runs of each probe, and the spread of the three runs of each group.
 - The record gives the one-minute load of every run and the host and toolchain of the session.
-- A fixed historical floor-loop number is not a control. The base floor loop moved outside the BIF path: it was 161.754 ns with a range of about 161.5 ns to 162.2 ns at `c2f0341` (`docs/interpreter-dispatch-measurements.md:279`), and the `Term::eq` change of [#548](https://github.com/fahchen/pbeam/pull/548) made it 147.5 ns to 153.7 ns at `4261205` ([#549 comment](https://github.com/fahchen/pbeam/issues/549)). A record that compares its after number with a number of another revision cannot separate the change from the revision and the load.
+- A fixed historical floor-loop number is not a control. The base floor loop moved outside the BIF path: the attribution session at `c2f0341` gives 161.754 ns with a range of about 161.5 ns to 162.2 ns (`docs/interpreter-dispatch-measurements.md:279`), and the base group of the #549 session at `4261205` gives 149.364 ns to 153.976 ns, because the `Term::eq` change of [#548](https://github.com/fahchen/pbeam/pull/548) lowered the loop outside the BIF path ([#549 comment](https://github.com/fahchen/pbeam/issues/549)). A record that compares its after number with a number of another revision cannot separate the change from the revision and the load.
 - The record gives the paired difference of each round, as the `V5b` measurement of the attribution does (`docs/interpreter-dispatch-measurements.md:310`).
 
 ## Rejected alternatives
