@@ -1,13 +1,11 @@
 use std::{collections::HashMap, rc::Rc};
 
-use super::{
-    Frame, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
-};
+use super::{Frame, ProcessState, ReceiveTimer, Start};
 use crate::{
     BeamModule,
     beam::code::Instruction,
     runtime::{interpreter::CodeTable, scheduler::Scheduler},
-    term::{Atom, AtomTable, ProcessId, Reference, Term},
+    term::{Atom, AtomTable, ProcessId, Term},
 };
 
 thread_local! {
@@ -104,109 +102,4 @@ fn keeps_the_mfa_of_an_undefined_start_without_a_frame() {
     assert!(process.frames.is_empty());
     assert_eq!(process.undefined_start, Some((module, function)));
     assert_eq!(process.registers, vec![Some(Term::Integer(1))]);
-}
-
-/// Return a term of one integer, for a test that tells the terms of a
-/// process apart.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(marker(1), Term::tuple(vec![Term::Integer(1)]));
-/// ```
-fn marker(number: i64) -> Term {
-    Term::tuple(vec![Term::Integer(number)])
-}
-
-#[test]
-fn takes_each_term_of_a_process_and_leaves_no_term() {
-    // Row 11 of docs/term-performance-design-codex-v2.md: the scheduler moves
-    // each term of an exiting process to its release work list, so that the
-    // walk of a large graph runs in bounded scheduler work. A term that this
-    // reader forgets drops in the exit step and not in a release batch.
-    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
-    let register = marker(1);
-    let stack = marker(2);
-    let message = marker(3);
-    let dictionary = marker(4);
-    let pending = marker(5);
-    let length_trap = marker(6);
-    let exiting = marker(7);
-    let item = marker(8);
-    let tag = marker(9);
-    process.registers = vec![Some(register.clone())];
-    // The frame holds each kind of slot, so that the reader covers a slot of
-    // no term and a catch tag as well as a term.
-    process.frames[0].stack = vec![
-        StackSlot::Empty,
-        StackSlot::Catch(1),
-        StackSlot::Term(stack.clone()),
-    ];
-    process.mailbox.push(message.clone());
-    process
-        .dictionary
-        .push((Term::Integer(10), dictionary.clone()));
-    process.pending_bif = Some(PendingBif {
-        module: "erlang",
-        function: "length",
-        arguments: vec![pending.clone()],
-        tail: false,
-    });
-    process.length_trap = Some(vec![length_trap.clone()]);
-    process.exiting = Some(exiting.clone());
-    process.monitors.insert(
-        Reference(1),
-        Origin {
-            monitor: Some(OriginMonitor {
-                kind: "process",
-                target: None,
-                item: item.clone(),
-                tag: tag.clone(),
-            }),
-            alias: None,
-        },
-    );
-    // An alias without a monitor holds no term, so the reader skips it.
-    process.monitors.insert(
-        Reference(2),
-        Origin {
-            monitor: None,
-            alias: None,
-        },
-    );
-    let mut pending_terms = Vec::new();
-    process.take_terms(&mut pending_terms);
-    for term in [
-        &register,
-        &stack,
-        &message,
-        &dictionary,
-        &pending,
-        &length_trap,
-        &exiting,
-        &item,
-        &tag,
-    ] {
-        assert!(
-            pending_terms.contains(term),
-            "{term:?} must move to the release work list"
-        );
-    }
-    assert_eq!(pending_terms.len(), 10);
-    // The process owns no term afterwards, so its drop releases nothing.
-    assert!(process.registers.is_empty());
-    assert!(process.frames.is_empty());
-    assert!(process.dictionary.is_empty());
-    assert!(process.pending_bif.is_none());
-    assert!(process.length_trap.is_none());
-    assert!(process.exiting.is_none());
-    assert_eq!(
-        process.monitors.get(&Reference(1)).unwrap().monitor,
-        Some(OriginMonitor {
-            kind: "process",
-            target: None,
-            item: Term::Nil,
-            tag: Term::Nil,
-        })
-    );
 }

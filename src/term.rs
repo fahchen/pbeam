@@ -19,7 +19,7 @@ pub(crate) use fun::{Lambda, Target};
 pub(crate) use hash::internal_hash;
 use list::{Cons, ConsRef};
 pub use map::Map;
-pub(crate) use map::{Direction, from_list_units};
+pub(crate) use map::{Direction, Drain as MapDrain, from_list_units};
 pub use match_context::MatchState;
 pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
@@ -294,6 +294,17 @@ impl<'a> EqStack<'a> {
     }
 }
 
+/// The direct children of one node of a term, as owned work for a release
+/// that runs in bounded batches. The element array of a tuple and the free
+/// variables of a fun are one group that a caller moves in batches; the pairs
+/// of a map are a walk that a caller drives one step at a time.
+pub(crate) enum Group {
+    /// The element array of a tuple or the free variables of a fun.
+    Terms(Vec<Term>),
+    /// The pairs of a map.
+    Map(MapDrain),
+}
+
 impl Term {
     /// Return the term of a static atom, such as `true` or `normal`. A
     /// static atom has the same index in every atom table.
@@ -434,10 +445,17 @@ impl Term {
     /// assert_eq!(term.take_group(), Some(vec![Term::Integer(1)]));
     /// assert_eq!(term.take_group(), None);
     /// ```
-    pub(crate) fn take_group(&mut self) -> Option<Vec<Term>> {
+    pub(crate) fn take_group(&mut self) -> Option<Group> {
         match self {
-            Term::Tuple(elements) => elements.take_last().filter(|elements| !elements.is_empty()),
-            Term::Fun(fun) => fun.take_last().filter(|arguments| !arguments.is_empty()),
+            Term::Tuple(elements) => elements
+                .take_last()
+                .filter(|elements| !elements.is_empty())
+                .map(Group::Terms),
+            Term::Fun(fun) => fun
+                .take_last()
+                .filter(|arguments| !arguments.is_empty())
+                .map(Group::Terms),
+            Term::Map(map) => map::Drain::take(map).map(Group::Map),
             _ => None,
         }
     }

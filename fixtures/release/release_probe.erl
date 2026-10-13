@@ -4,13 +4,30 @@
 %% observable results are the same on pinned ERTS.
 -module(release_probe).
 
--export([exits_with/1, shared/1, shutdown/1, sender/2, holder/2]).
+-export([exits_with/1, shared/1, shutdown/1, waits/1, sender/2, holder/2, exiter/1]).
 
 %% Build a list of N cells in the caller, keep it in the process dictionary,
 %% and return `ok`. The exit of the caller releases the graph.
 exits_with(N) ->
     put(graph, build(N)),
     ok.
+
+%% Spawn a process that builds a list of N cells, keep it in the process
+%% dictionary of that process, and let it exit. Wait for its end and then wait
+%% for a message that never arrives, so that the run ends with the release
+%% work of the child that the interpreter loop still has to release.
+waits(N) ->
+    {Pid, Reference} = spawn_opt(?MODULE, exiter, [N], [monitor]),
+    receive
+        {'DOWN', Reference, process, Pid, normal} -> ok
+    end,
+    receive
+        never -> ok
+    end.
+
+%% Build a list of N cells in the process dictionary and return.
+exiter(N) ->
+    put(graph, build(N)).
 
 %% Spawn a process that builds a list of N cells and sends it to the caller.
 %% Wait for the message and for the end of the sender, and return the length

@@ -42,7 +42,7 @@ use crate::{
     runtime::{
         capability::{AllowAll, Capability, Policy},
         process::{
-            Start,
+            ProcessState, Start,
             tests::{frame, test_scheduler},
         },
     },
@@ -55,6 +55,14 @@ const CELLS: usize = 1_000_000;
 /// The number of leaves of the tuple tree of the report. The tree then holds
 /// 1048575 cells, which is about one million.
 const TREE_LEAVES: usize = 1 << 19;
+
+/// The number of entries of the process dictionary of the report, which holds
+/// two terms for each entry.
+const DICTIONARY_ENTRIES: usize = 100_000;
+
+/// The number of messages of the mailbox of the report, which holds one term
+/// for each message.
+const MAILBOX_MESSAGES: usize = 100_000;
 
 /// The number of keys of the map of the report. The map is a HAMT, and the
 /// walk of `Map::drain_into` moves all of its pairs in one call.
@@ -83,17 +91,28 @@ struct Measurement {
     retained_bytes: usize,
 }
 
-/// One graph shape: its name, the number of compound nodes that its release
-/// walks, and its builder.
+/// One workload of the report: its name, the number of terms that its release
+/// moves, the term that the synchronous path releases, and the way to give the
+/// workload to a process.
 struct Shape {
     /// The name of the shape in the report.
     name: &'static str,
-    /// The number of compound nodes that the release of one graph of this
-    /// shape walks: one cons cell for a list, one tuple for a chain, and one
-    /// internal tuple for a tree.
+    /// The number of terms that the release of one workload moves: one cons
+    /// cell for a list, one tuple for a chain, one internal tuple for a tree,
+    /// two terms for each dictionary entry, and one term for each message.
     nodes: usize,
-    /// Build one graph of the shape.
+    /// Build one workload outside a process, for the synchronous last release
+    /// of a term and for the shared paths. A container workload builds a flat
+    /// tuple with as many elements as the container holds terms.
     build: fn() -> Term,
+    /// Give one workload to `process`, so that its exit releases it. A term
+    /// workload puts the term of `build` in the X registers; a container
+    /// workload fills the container of the process.
+    install: fn(&mut ProcessState, fn() -> Term),
+    /// True when two processes can hold one workload of this shape, so that
+    /// the report measures the shared last release of it. A container belongs
+    /// to one process, so it has no shared path.
+    shared: bool,
 }
 
 /// Return a list of [`CELLS`] cons cells.
@@ -169,6 +188,78 @@ fn map() -> Term {
     )
 }
 
+/// Return one flat tuple of `2 * DICTIONARY_ENTRIES` elements, which holds as
+/// many terms as the dictionary workload of the report.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(dictionary_terms(), Term::Tuple(_)));
+/// ```
+fn dictionary_terms() -> Term {
+    Term::tuple(
+        (0..(2 * DICTIONARY_ENTRIES) as i64)
+            .map(Term::Integer)
+            .collect(),
+    )
+}
+
+/// Return one flat tuple of [`MAILBOX_MESSAGES`] elements, which holds as many
+/// terms as the mailbox workload of the report.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(mailbox_terms(), Term::Tuple(_)));
+/// ```
+fn mailbox_terms() -> Term {
+    Term::tuple((0..MAILBOX_MESSAGES as i64).map(Term::Integer).collect())
+}
+
+/// Put the term of `build` in the X registers of `process`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+/// install_registers(&mut process, list);
+/// assert_eq!(process.registers.len(), 1);
+/// ```
+fn install_registers(process: &mut ProcessState, build: fn() -> Term) {
+    process.registers = vec![Some(build())];
+}
+
+/// Fill the process dictionary of `process` with [`DICTIONARY_ENTRIES`]
+/// entries of two terms.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+/// install_dictionary(&mut process, dictionary_terms);
+/// assert_eq!(process.dictionary.len(), DICTIONARY_ENTRIES);
+/// ```
+fn install_dictionary(process: &mut ProcessState, _build: fn() -> Term) {
+    process.dictionary = (0..DICTIONARY_ENTRIES as i64)
+        .map(|key| (Term::Integer(key), Term::Integer(key)))
+        .collect();
+}
+
+/// Fill the mailbox of `process` with [`MAILBOX_MESSAGES`] messages.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+/// install_mailbox(&mut process, mailbox_terms);
+/// assert!(!process.mailbox.is_empty());
+/// ```
+fn install_mailbox(process: &mut ProcessState, _build: fn() -> Term) {
+    for message in 0..MAILBOX_MESSAGES as i64 {
+        process.mailbox.push(Term::Integer(message));
+    }
+}
+
 /// Return the shapes of the report, in table order.
 ///
 /// # Examples
@@ -182,26 +273,50 @@ fn shapes() -> Vec<Shape> {
             name: "list of 1000000 cells",
             nodes: CELLS,
             build: list,
+            install: install_registers,
+            shared: true,
         },
         Shape {
             name: "chain of 1000000 levels",
             nodes: CELLS,
             build: chain,
+            install: install_registers,
+            shared: true,
         },
         Shape {
             name: "tuple tree of 1048575 cells",
             nodes: 2 * TREE_LEAVES - 1,
             build: tree,
+            install: install_registers,
+            shared: true,
         },
         Shape {
-            name: "flat tuple of 1048575 cells, one node",
+            name: "flat tuple of 1000000 elements, one node",
             nodes: 1,
             build: flat_tuple,
+            install: install_registers,
+            shared: true,
         },
         Shape {
             name: "map of 20000 keys, one walk",
             nodes: MAP_KEYS,
             build: map,
+            install: install_registers,
+            shared: true,
+        },
+        Shape {
+            name: "dictionary of 100000 entries",
+            nodes: 2 * DICTIONARY_ENTRIES,
+            build: dictionary_terms,
+            install: install_dictionary,
+            shared: false,
+        },
+        Shape {
+            name: "mailbox of 100000 messages",
+            nodes: MAILBOX_MESSAGES,
+            build: mailbox_terms,
+            install: install_mailbox,
+            shared: false,
         },
     ]
 }
@@ -217,19 +332,24 @@ fn allow_all() -> Vec<Capability> {
     AllowAll.initial()
 }
 
-/// Return a scheduler whose root process owns one holder of `graph`.
+/// Return a scheduler whose root process holds one workload of `shape`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let scheduler = scheduler_with(Term::Nil);
+/// let scheduler = scheduler_with(&shapes()[0]);
 /// assert!(scheduler.processes.contains_key(&ProcessId(0)));
 /// ```
-fn scheduler_with(graph: Term) -> Scheduler {
+fn scheduler_with(shape: &Shape) -> Scheduler {
     let mut scheduler = test_scheduler();
     scheduler
-        .start(frame(), vec![graph], allow_all())
+        .start(frame(), vec![], allow_all())
         .expect("the root process starts");
+    let process = scheduler
+        .processes
+        .get_mut(&ProcessId(0))
+        .expect("the root process is in the table");
+    (shape.install)(process, shape.build);
     scheduler
 }
 
@@ -262,8 +382,11 @@ fn drain(scheduler: &mut Scheduler) -> (Duration, Duration, usize, usize) {
     (maximum, total, batches, peak)
 }
 
-/// Return the number of terms that the release work list of `scheduler`
-/// owns: each term of the list and each term of a group that it holds.
+/// Return the number of units that the release work list of `scheduler`
+/// owns: one for each term, element, register, Y slot, or dictionary pair, and
+/// one for a mailbox, a monitor tree, or a map while it holds a term. The
+/// count is exact for the terms and the elements, and it is one unit for a
+/// container whose terms this module cannot count.
 ///
 /// # Examples
 ///
@@ -271,14 +394,28 @@ fn drain(scheduler: &mut Scheduler) -> (Duration, Duration, usize, usize) {
 /// assert_eq!(retained(&test_scheduler()), 0);
 /// ```
 fn retained(scheduler: &Scheduler) -> usize {
-    scheduler
-        .release
-        .iter()
-        .map(|item| match item {
-            Release::Term(_) => 1,
-            Release::Terms(group) => group.len(),
-        })
-        .sum()
+    scheduler.release.iter().map(held_by).sum()
+}
+
+/// Return the number of units that one item of the release work list owns.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(held_by(&Release::Term(Term::Integer(1))), 1);
+/// ```
+fn held_by(item: &Release) -> usize {
+    match item {
+        Release::Term(_) => 1,
+        Release::Terms(group) => group.len(),
+        Release::Map(drain) => usize::from(!drain.is_empty()),
+        Release::Registers(registers) => registers.len(),
+        Release::Frames(frames) => frames.len(),
+        Release::Slots(slots) => slots.len(),
+        Release::Dictionary(dictionary) => 2 * dictionary.len(),
+        Release::Mailbox(mailbox) => usize::from(!mailbox.is_empty()),
+        Release::Monitors(monitors) => usize::from(!monitors.is_empty()),
+    }
 }
 
 /// Return the number of bytes of the buffer of the release work list of
@@ -294,14 +431,17 @@ fn retained_bytes(scheduler: &Scheduler) -> usize {
     scheduler.release.capacity() * std::mem::size_of::<Release>()
 }
 
-/// Return the measurement of the direct drop of the only holder of `graph`.
+/// Return the measurement of the direct drop of the only holder of the term
+/// that `shape` builds.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(synchronous_measurement(list()).max_step.as_nanos() > 0);
+/// assert!(synchronous_measurement(&shapes()[0]).max_step.as_nanos() > 0);
 /// ```
-fn synchronous_measurement(graph: Term) -> Measurement {
+fn synchronous_measurement(shape: &Shape) -> Measurement {
+    // The build stays outside the timer, so the pause is the release only.
+    let graph = (shape.build)();
     let start = Instant::now();
     drop(graph);
     let pause = start.elapsed();
@@ -314,15 +454,16 @@ fn synchronous_measurement(graph: Term) -> Measurement {
     }
 }
 
-/// Return the measurement of the exit of a process that owns `graph`.
+/// Return the measurement of the exit of a process that holds one workload of
+/// `shape`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(exit_measurement(list()).total.as_nanos() > 0);
+/// assert!(exit_measurement(&shapes()[0]).total.as_nanos() > 0);
 /// ```
-fn exit_measurement(graph: Term) -> Measurement {
-    let mut scheduler = scheduler_with(graph);
+fn exit_measurement(shape: &Shape) -> Measurement {
+    let mut scheduler = scheduler_with(shape);
     assert_eq!(
         scheduler.schedule_next().expect("the step runs"),
         Turn::Run,
@@ -344,17 +485,22 @@ fn exit_measurement(graph: Term) -> Measurement {
     }
 }
 
-/// Return the measurement of the exit of the second process that shares
-/// `graph`. The root process exits first and drops one holder; the child
-/// process then exits and releases the graph.
+/// Return the measurement of the exit of the second process that shares the
+/// graph of `shape`. The root process exits first and drops one holder; the
+/// child process then exits and releases the graph. Only a shape that two
+/// processes can hold has this path.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(shared_last_release_measurement(Term::Nil).steps > 0);
+/// assert!(shared_last_release_measurement(&shapes()[0]).steps > 0);
 /// ```
-fn shared_last_release_measurement(graph: Term) -> Measurement {
-    let mut scheduler = scheduler_with(graph.clone());
+fn shared_last_release_measurement(shape: &Shape) -> Measurement {
+    let graph = (shape.build)();
+    let mut scheduler = test_scheduler();
+    scheduler
+        .start(frame(), vec![graph.clone()], allow_all())
+        .expect("the root process starts");
     assert_eq!(
         scheduler.schedule_next().expect("the step runs"),
         Turn::Run,
@@ -398,15 +544,16 @@ fn shared_last_release_measurement(graph: Term) -> Measurement {
 }
 
 /// Return the measurement of the drop of the scheduler of a run whose root
-/// process is live and owns `graph`. No process waits to run at that point.
+/// process is live and holds one workload of `shape`. No process waits to run
+/// at that point.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(shutdown_measurement(list()).max_step.as_nanos() > 0);
+/// assert!(shutdown_measurement(&shapes()[0]).max_step.as_nanos() > 0);
 /// ```
-fn shutdown_measurement(graph: Term) -> Measurement {
-    let scheduler = scheduler_with(graph);
+fn shutdown_measurement(shape: &Shape) -> Measurement {
+    let scheduler = scheduler_with(shape);
     let start = Instant::now();
     drop(scheduler);
     let pause = start.elapsed();
@@ -446,23 +593,47 @@ fn load() -> String {
     }
 }
 
-/// One measured path: its name in the report and the function that returns
-/// the measurement of one run on one graph.
-type Path = (&'static str, fn(Term) -> Measurement);
+/// One measured path: its name in the report, true when a shape that two
+/// processes can hold has this path, and the function that returns the
+/// measurement of one run of one shape.
+struct Path {
+    /// The name of the path in the report.
+    name: &'static str,
+    /// True for the shared last release, which needs two processes.
+    shared: bool,
+    /// Measure one run of one shape.
+    measure: fn(&Shape) -> Measurement,
+}
 
 /// Return the paths of the report, in table order.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(paths()[0].0, "synchronous last release");
+/// assert_eq!(paths()[0].name, "synchronous last release");
 /// ```
 fn paths() -> Vec<Path> {
     vec![
-        ("synchronous last release", synchronous_measurement),
-        ("process exit", exit_measurement),
-        ("shared last release", shared_last_release_measurement),
-        ("shutdown", shutdown_measurement),
+        Path {
+            name: "synchronous last release",
+            shared: false,
+            measure: synchronous_measurement,
+        },
+        Path {
+            name: "process exit",
+            shared: false,
+            measure: exit_measurement,
+        },
+        Path {
+            name: "shared last release",
+            shared: true,
+            measure: shared_last_release_measurement,
+        },
+        Path {
+            name: "shutdown",
+            shared: false,
+            measure: shutdown_measurement,
+        },
     ]
 }
 
@@ -475,61 +646,64 @@ fn records_the_release_pause_of_a_large_graph() {
         "RELEASE scheduler release of a large shared graph: one timed run of one path of one shape, in microsecond, with the load of the run."
     );
     println!("RELEASE runs: shape | path | run | load | max step pause us");
-    // One entry for each (shape, path) in the order of the two loops below.
-    let mut measurements: Vec<Vec<Measurement>> = (0..shapes().len() * paths().len())
-        .map(|_| Vec::new())
-        .collect();
-    let path_count = paths().len();
+    // One entry for each (shape, path) that the loops below measure.
+    let mut measurements: Vec<(usize, usize, Vec<Measurement>)> = Vec::new();
     for (shape_index, shape) in shapes().into_iter().enumerate() {
-        for (path_index, (path, measure)) in paths().into_iter().enumerate() {
+        for (path_index, path) in paths().into_iter().enumerate() {
+            // A container belongs to one process, so it has no shared path.
+            if path.shared && !shape.shared {
+                continue;
+            }
+            let mut runs = Vec::new();
             for run in 0..RUNS {
-                let graph = (shape.build)();
                 let run_load = load();
-                let measurement = measure(graph);
+                let measurement = (path.measure)(&shape);
                 println!(
                     "RELEASE run | {} | {} | {} | {} | {:.3}",
                     shape.name,
-                    path,
+                    path.name,
                     run,
                     run_load,
                     measurement.max_step.as_secs_f64() * 1e6
                 );
-                measurements[shape_index * path_count + path_index].push(measurement);
+                runs.push(measurement);
             }
+            measurements.push((shape_index, path_index, runs));
         }
     }
     println!();
     println!(
-        "RELEASE summary: shape | nodes | path | max step pause us | total pause ms | steps | M nodes/s | retained terms | retained bytes"
+        "RELEASE summary: shape | nodes | path | max step pause us | total pause ms | steps | M nodes for each second | retained units | retained bytes"
     );
-    for (shape_index, shape) in shapes().into_iter().enumerate() {
-        for (path_index, (path, _)) in paths().into_iter().enumerate() {
-            let runs = &measurements[shape_index * path_count + path_index];
-            let max_step = runs
-                .iter()
-                .map(|run| run.max_step)
-                .max()
-                .expect("a path has runs");
-            let total = runs
-                .iter()
-                .map(|run| run.total)
-                .max()
-                .expect("a path has runs");
-            let steps = runs.iter().map(|run| run.steps).max().unwrap_or(0);
-            let retained_terms = runs.iter().map(|run| run.retained_terms).max().unwrap_or(0);
-            let retained_bytes = runs.iter().map(|run| run.retained_bytes).max().unwrap_or(0);
-            println!(
-                "RELEASE summary | {} | {} | {} | {:.3} | {:.3} | {} | {:.2} | {} | {}",
-                shape.name,
-                shape.nodes,
-                path,
-                max_step.as_secs_f64() * 1e6,
-                total.as_secs_f64() * 1e3,
-                steps,
-                shape.nodes as f64 / total.as_secs_f64() / 1e6,
-                retained_terms,
-                retained_bytes
-            );
-        }
+    let shapes = shapes();
+    let paths = paths();
+    for (shape_index, path_index, runs) in &measurements {
+        let shape = &shapes[*shape_index];
+        let path = &paths[*path_index];
+        let max_step = runs
+            .iter()
+            .map(|run| run.max_step)
+            .max()
+            .expect("a path has runs");
+        let total = runs
+            .iter()
+            .map(|run| run.total)
+            .max()
+            .expect("a path has runs");
+        let steps = runs.iter().map(|run| run.steps).max().unwrap_or(0);
+        let retained_terms = runs.iter().map(|run| run.retained_terms).max().unwrap_or(0);
+        let retained_bytes = runs.iter().map(|run| run.retained_bytes).max().unwrap_or(0);
+        println!(
+            "RELEASE summary | {} | {} | {} | {:.3} | {:.3} | {} | {:.2} | {} | {}",
+            shape.name,
+            shape.nodes,
+            path.name,
+            max_step.as_secs_f64() * 1e6,
+            total.as_secs_f64() * 1e3,
+            steps,
+            shape.nodes as f64 / total.as_secs_f64() / 1e6,
+            retained_terms,
+            retained_bytes
+        );
     }
 }

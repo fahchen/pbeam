@@ -2,8 +2,8 @@ use std::{collections::HashMap, rc::Rc};
 
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
-    BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
-    read_bif_arguments, read_operand, write_operand,
+    BeamProgram, CodeTable, Issuer, Outcome, Scheduler, StackSlot, call_arguments,
+    function_at_label, read_bif_arguments, read_operand, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -3636,4 +3636,42 @@ fn records_the_decoded_loop_body() {
             count * std::mem::size_of::<Instruction>(),
         );
     }
+}
+
+#[path = "../common/mod.rs"]
+mod common;
+
+/// The probe whose child exits with a graph that the interpreter loop still
+/// has to release when the root waits for a message (task #559).
+const RELEASE_PROBE: &[u8] = include_bytes!("../../fixtures/release/release_probe.beam");
+
+/// The number of cells of the graph of `release_probe:exiter/1`, which is
+/// large enough that the release work of the child needs more than one step.
+const RELEASE_CELLS: i64 = 50_000;
+
+#[test]
+fn drains_the_release_work_of_an_exited_process_while_the_root_waits() {
+    // Row 11 of docs/term-performance-design-codex-v2.md and task #559. The
+    // child builds a graph of 50000 cells in its process dictionary and
+    // exits; the root then waits for a message that never arrives. The run
+    // loop must keep stepping until the release work list is empty. A step
+    // that reported `Idle` with work on the list would let the loop wait for
+    // input with most of the graph retained, and the list would not drain.
+    let erlang = common::pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, RELEASE_PROBE]).unwrap();
+    let mut scheduler = Scheduler::without_checks(program.atoms.clone());
+    scheduler.code = CodeTable::new(program.modules.clone());
+    program
+        .run_root(
+            &mut scheduler,
+            "release_probe",
+            "waits",
+            &[Term::Integer(RELEASE_CELLS)],
+            Issuer::Unchecked,
+        )
+        .expect("the loop ends with the root that waits");
+    assert!(
+        scheduler.release_len() == 0,
+        "the release work of the child drains before the loop waits"
+    );
 }

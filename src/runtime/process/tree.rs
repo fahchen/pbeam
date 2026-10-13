@@ -192,16 +192,34 @@ impl<K, V> Default for MonitorLinkTree<K, V> {
 }
 
 impl<K: TreeKey, V> MonitorLinkTree<K, V> {
-    /// Return true when the tree has no entry. Only tests use it.
+    /// Return true when the tree has no entry. The nodes of a live tree are
+    /// one for each entry, so a tree that [`Self::take_value`] emptied is
+    /// empty.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert!(MonitorLinkTree::<ProcessId, u64>::default().is_empty());
     /// ```
-    #[cfg(test)]
     pub(in crate::runtime) fn is_empty(&self) -> bool {
-        self.root.is_none()
+        self.nodes.is_empty()
+    }
+
+    /// Remove one value of the tree, in no order, and return it, or return
+    /// `None` when the tree is empty. The tree loses the node of that value,
+    /// so a caller reads [`Self::is_empty`] to know when no value is left. A
+    /// release that runs in bounded batches takes one value at a time from a
+    /// tree of a process that no guest code can read again.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// tree.insert(ProcessId(1), 7);
+    /// assert_eq!(tree.take_value(), Some(7));
+    /// assert!(tree.is_empty());
+    /// ```
+    pub(in crate::runtime) fn take_value(&mut self) -> Option<V> {
+        self.nodes.pop().map(|node| node.value)
     }
 
     /// Return the value of `key`, as `mon_lnk_rbt_lookup`.
@@ -229,23 +247,6 @@ impl<K: TreeKey, V> MonitorLinkTree<K, V> {
     /// ```
     pub(in crate::runtime) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.find(*key).map(|index| &mut self.nodes[index].value)
-    }
-
-    /// Return each value of the tree for a change in place, in no order. A
-    /// reader that takes the terms out of a value uses it before the tree
-    /// drops (see [`ProcessState::take_terms`](super::ProcessState)).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// tree.insert(ProcessId(1), 0);
-    /// for value in tree.values_mut() {
-    ///     *value += 1;
-    /// }
-    /// assert_eq!(tree.get(&ProcessId(1)), Some(&1));
-    /// ```
-    pub(in crate::runtime) fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
-        self.nodes.iter_mut().map(|node| &mut node.value)
     }
 
     /// Insert `value` at `key`, as the ERTS `insert_aux__`

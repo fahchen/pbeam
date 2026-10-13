@@ -345,9 +345,9 @@ fn reuses_marker_slots_and_drops_passed_markers() {
 
 #[test]
 fn takes_the_terms_of_the_messages_the_signal_reasons_and_the_markers() {
-    // The scheduler moves each term of the mailbox of an exiting process to
-    // its release work list (`Mailbox::take_terms`, row 11 of
-    // docs/term-performance-design-codex-v2.md).
+    // The scheduler moves the terms of the mailbox of an exiting process to
+    // its release work list in batches (`Mailbox::take_terms_bounded`, row 11
+    // of docs/term-performance-design-codex-v2.md).
     let mut mailbox = Mailbox::default();
     let message = int(1);
     let reason = int(2);
@@ -362,18 +362,28 @@ fn takes_the_terms_of_the_messages_the_signal_reasons_and_the_markers() {
     let marker = mailbox.reserve_marker();
     assert_eq!(marker, int(-(1i64 << 59)));
     let mut pending = Vec::new();
-    mailbox.take_terms(&mut pending);
-    assert_eq!(pending, vec![message, reason, marker]);
+    // One entry of the budget takes the marker, which the mailbox holds last.
+    assert_eq!(mailbox.take_terms_bounded(&mut pending, 1), 1);
+    assert!(!mailbox.is_empty());
+    // The next call takes the node of the marker, the signal, and the
+    // message.
+    assert_eq!(mailbox.take_terms_bounded(&mut pending, 256), 3);
+    assert!(mailbox.is_empty());
+    assert_eq!(pending, vec![marker, reason, message]);
+    // A call of an empty mailbox takes nothing.
+    assert_eq!(mailbox.take_terms_bounded(&mut pending, 256), 0);
 }
 
 #[test]
 fn takes_no_term_of_a_signal_node_that_the_handling_emptied() {
     // The handling of a signal leaves its node with `Entry::Signal(None)`.
-    // That node holds no term, so the reader of an exiting process skips it.
+    // That node holds no term, so the reader of an exiting process takes no
+    // term from it and counts the entry.
     let mut mailbox = Mailbox::default();
     mailbox.push_signal(Signal::Flush);
     mailbox.nodes[0].entry = Entry::Signal(None);
     let mut pending = Vec::new();
-    mailbox.take_terms(&mut pending);
+    assert_eq!(mailbox.take_terms_bounded(&mut pending, 256), 1);
+    assert!(mailbox.is_empty());
     assert!(pending.is_empty());
 }

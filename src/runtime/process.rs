@@ -90,31 +90,6 @@ pub(super) enum StackSlot {
     Catch(usize),
 }
 
-impl Frame {
-    /// Return each term of the Y registers of this frame. The frame gives up
-    /// its slots, so the caller owns the terms. Only a frame that no guest
-    /// code can read again gives up its terms (see
-    /// [`ProcessState::take_terms`]).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut frame = frame();
-    /// frame.stack = vec![StackSlot::Term(Term::Integer(1))];
-    /// assert_eq!(frame.take_terms(), vec![Term::Integer(1)]);
-    /// ```
-    pub(super) fn take_terms(self) -> Vec<Term> {
-        self.stack
-            .into_iter()
-            .filter_map(|slot| match slot {
-                StackSlot::Empty => None,
-                StackSlot::Term(term) => Some(term),
-                StackSlot::Catch(_) => None,
-            })
-            .collect()
-    }
-}
-
 /// The receive timeout state of a process, as the ERTS process flags
 /// `F_TIMO` and `F_INSLPQUEUE`, the process timer `common.timer`, and the
 /// resume address in `def_arg_reg[0]` (`erl_process.h:1841-1849`).
@@ -474,57 +449,6 @@ impl ProcessState {
             parent: None,
             initial_call,
             policy_reply: None,
-        }
-    }
-
-    /// Move each term that this process owns to `pending`, and leave the
-    /// process with no term. The exit of the process calls this through
-    /// [`Scheduler`](super::scheduler::Scheduler) after the process left the
-    /// process table and before the process drops, so that the nested release
-    /// of a large graph runs in bounded scheduler work and not in the exit
-    /// step (row 11 of `docs/term-performance-design-codex-v2.md`, task
-    /// [#559](https://github.com/fahchen/pbeam/issues/559)).
-    ///
-    /// The terms are the ones that a guest value can reach and that can grow
-    /// with that value: the X registers, the Y registers of each frame, the
-    /// messages and the signals of the mailbox, the process dictionary, the
-    /// arguments of a trapped BIF and of the `length/1` trap, the exit
-    /// reason, and the `item` and `tag` of each monitor. The links, the
-    /// monitors that another process holds, and the BIF timers hold
-    /// identifiers and references and no term.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![Term::Integer(1)]);
-    /// let mut pending = Vec::new();
-    /// process.take_terms(&mut pending);
-    /// assert_eq!(pending, vec![Term::Integer(1)]);
-    /// assert!(process.registers.is_empty());
-    /// ```
-    pub(super) fn take_terms(&mut self, pending: &mut Vec<Term>) {
-        pending.extend(self.registers.drain(..).flatten());
-        for frame in self.frames.drain(..) {
-            pending.extend(frame.take_terms());
-        }
-        self.mailbox.take_terms(pending);
-        pending.extend(
-            self.dictionary
-                .drain(..)
-                .flat_map(|(key, value)| [key, value]),
-        );
-        if let Some(bif) = self.pending_bif.take() {
-            pending.extend(bif.arguments);
-        }
-        if let Some(arguments) = self.length_trap.take() {
-            pending.extend(arguments);
-        }
-        pending.extend(self.exiting.take());
-        for origin in self.monitors.values_mut() {
-            if let Some(monitor) = &mut origin.monitor {
-                pending.push(std::mem::replace(&mut monitor.item, Term::Nil));
-                pending.push(std::mem::replace(&mut monitor.tag, Term::Nil));
-            }
         }
     }
 
