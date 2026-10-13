@@ -110,6 +110,14 @@ run = 'bash scripts/example.sh "$usage_name" ${usage_erts:+--erts} ${usage_polic
 description = "Measure the interpreter dispatch baseline on a release build and write target/dispatch-baseline.txt"
 run = "bash scripts/dispatch_baseline.sh"
 
+[tasks.bench-attribution]
+description = "Measure the instruction attribution reference points and micro-costs on a release build and write target/dispatch-attribution.txt"
+usage = '''
+arg "[label]" help="The label of the build, such as the name of the scratch ablation variant"
+arg "[output]" help="The output file; the default is target/dispatch-attribution.txt"
+'''
+run = 'bash scripts/dispatch_attribution.sh "${usage_label:-base}" "${usage_output:-target/dispatch-attribution.txt}"'
+
 [tasks.bench-drop]
 description = "Measure the term drop cost on a release build and write target/drop-costs.txt"
 run = "bash scripts/drop_costs.sh"

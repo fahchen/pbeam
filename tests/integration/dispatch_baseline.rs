@@ -780,3 +780,44 @@ fn records_the_instruction_stream_cache_proxy() {
     }
     println!();
 }
+
+/// Record the two reference points of the instruction attribution of task
+/// [#546](https://github.com/fahchen/pbeam/issues/546) in a machine-readable
+/// form. `scripts/dispatch_attribution.sh` runs this test in the base build
+/// and in each scratch ablation variant, so the same command measures the
+/// same loop in each build.
+///
+/// The two numbers are the local `call_only` floor loop of `dispatch_probe`
+/// for each iteration, and the added cost of one `gc_bif '+'` on the same
+/// loop for each iteration. The added `+` is the unit of one instruction that
+/// `docs/interpreter-dispatch-plan.md` measures, and the floor loop holds the
+/// `test`, the `gc_bif '-'`, and the `call_only` that the attribution names.
+#[test]
+fn records_the_attribution_reference_points() {
+    let program = BeamProgram::load(&[DISPATCH_PROBE]).unwrap();
+    let length = DELTA_LENGTH;
+    let floor_arguments = [Term::Integer(length as i64)];
+    let plus_arguments = [Term::Integer(length as i64), Term::Integer(0)];
+    assert_eq!(
+        program
+            .execute("dispatch_probe", "floor_loop", &floor_arguments)
+            .unwrap(),
+        Term::Integer(0)
+    );
+    assert_eq!(
+        program
+            .execute("dispatch_probe", "plus_loop", &plus_arguments)
+            .unwrap(),
+        Term::Integer(length as i64)
+    );
+    let floor = measure_pbeam(&program, "dispatch_probe", "floor_loop", &floor_arguments);
+    let plus = measure_pbeam(&program, "dispatch_probe", "plus_loop", &plus_arguments);
+    let floor_ns = floor.as_nanos() as f64 / length as f64;
+    let added_ns = plus.as_nanos() as f64 / length as f64 - floor_ns;
+    println!(
+        "attribution floor_loop iterations {length} runs {RUNS} ns_per_iteration {floor_ns:.3}"
+    );
+    println!(
+        "attribution added_gc_bif_plus iterations {length} runs {RUNS} ns_per_iteration {added_ns:.3}"
+    );
+}
