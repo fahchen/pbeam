@@ -64,11 +64,14 @@ fn report_allocations(name: &str, count: usize) {
 /// print the line. The read follows the pointer of the handle and then reads
 /// the fields of the view that the size needs, so the line holds the
 /// dependent load that the boxed descriptor adds to each read of a field of
-/// the view.
+/// the view. The inner `black_box` sets the handle pointer of one iteration,
+/// so the compiler cannot move the read of the view out of the loop, and the
+/// outer `black_box` consumes the size that the read gives. The release
+/// assembly of the test keeps the load of the view inside the loop.
 fn read_binary_view(name: &str, bytes: &Binary) {
     let ns = measure(RUNS, HANDLE_OPERATIONS, || {
         for _ in 0..HANDLE_OPERATIONS {
-            black_box(bytes.len());
+            black_box(black_box(bytes).len());
         }
     });
     report(name, ns);
