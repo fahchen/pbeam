@@ -221,14 +221,14 @@ impl ReleaseStack {
         self.chunks.iter().map(|chunk| chunk.len()).sum()
     }
 
-    /// Iterate over the items of the stack, oldest first.
+    /// Iterate over the items of the stack, oldest first. The live-byte walk
+    /// of a run reads the terms of each item, so this is not a test helper.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(ReleaseStack::new().iter().count(), 0);
     /// ```
-    #[cfg(test)]
     fn iter(&self) -> impl Iterator<Item = &Release> {
         self.chunks.iter().flat_map(|chunk| chunk.iter())
     }
@@ -1757,7 +1757,69 @@ impl Scheduler {
                 Ok(term) | Err(term) => live.term(term),
             }
         }
+        self.account_release(&mut live);
         live.bytes()
+    }
+
+    /// Account the terms that the release work list holds, so that the
+    /// live-byte walk of a run counts the graph of a process that left the
+    /// process table until the drain releases it. Each item gives its terms
+    /// to the walk, which counts each shared container once.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// scheduler.account_release(&mut live);
+    /// ```
+    pub(super) fn account_release(&self, live: &mut LiveBytes) {
+        for item in self.release.iter() {
+            match item {
+                Release::Term(term) => live.term(term),
+                Release::Terms(group) => {
+                    for term in group {
+                        live.term(term);
+                    }
+                }
+                Release::Map(drain) => drain.account(live),
+                Release::Registers(registers) => {
+                    for register in registers.iter().flatten() {
+                        live.term(register);
+                    }
+                }
+                Release::Frames(frames) => {
+                    for frame in frames {
+                        for slot in &frame.stack {
+                            if let StackSlot::Term(term) = slot {
+                                live.term(term);
+                            }
+                        }
+                    }
+                }
+                Release::Slots(slots) => {
+                    for slot in slots {
+                        if let StackSlot::Term(term) = slot {
+                            live.term(term);
+                        }
+                    }
+                }
+                Release::Dictionary(dictionary) => {
+                    for (key, value) in dictionary {
+                        live.term(key);
+                        live.term(value);
+                    }
+                }
+                Release::Mailbox(mailbox) => mailbox.account_terms(live),
+                Release::Monitors(monitors) => {
+                    for origin in monitors.values() {
+                        if let Some(monitor) = &origin.monitor {
+                            live.term(&monitor.item);
+                            live.term(&monitor.tag);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Deliver a message that no process sends, such as a timer message or

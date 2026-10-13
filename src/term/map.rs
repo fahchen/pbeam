@@ -27,7 +27,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use super::{Term, hash::internal_hash};
+use super::{LiveBytes, Term, hash::internal_hash};
 use crate::error::{BeamError, error};
 
 mod build;
@@ -300,6 +300,30 @@ impl Drain {
     /// ```
     pub(crate) fn is_empty(&self) -> bool {
         self.collision.is_empty() && self.nodes.iter().all(|children| children.is_empty())
+    }
+
+    /// Account the nodes, the collision pairs, and the terms that this drain
+    /// holds, so that the live-byte walk of a run counts the part of a form
+    /// that the release work list took. The walk visits each shared node
+    /// once, as it does for a form that a term still owns.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// drain.account(&mut live);
+    /// assert!(live.bytes() > 0);
+    /// ```
+    pub(crate) fn account(&self, live: &mut LiveBytes) {
+        live.add(self.collision.capacity() * std::mem::size_of::<(Term, Term)>());
+        for (key, value) in &self.collision {
+            live.term(key);
+            live.term(value);
+        }
+        for children in &self.nodes {
+            live.add(children.capacity() * std::mem::size_of::<Child>());
+            live.children_of(children);
+        }
     }
 
     /// Return the bytes of the allocations that the drain holds: the stack of

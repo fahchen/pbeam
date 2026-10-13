@@ -216,7 +216,7 @@ impl LiveBytes {
         self.bytes += map.allocated_bytes();
         match &**repr {
             Repr::Flat(pairs) => self.pairs(pairs),
-            Repr::Hash(hamt) => self.children(&hamt.root),
+            Repr::Hash(hamt) => self.children_of(&hamt.root.children),
         }
     }
 
@@ -228,11 +228,18 @@ impl LiveBytes {
         }
     }
 
-    /// Count the child nodes of `node` and push the pairs of each leaf. The
+    /// Count the child nodes of `children` and push the pairs of each leaf.
+    /// The caller counts the capacity of the array of `children` itself. The
     /// depth of a HAMT is at most `HAMT_MAX_LEVEL`, so this walk does not
     /// recurse on the Rust stack for a long list.
-    fn children(&mut self, node: &Node) {
-        for child in &node.children {
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// live.children_of(&Node::empty().children);
+    /// ```
+    pub(in crate::term) fn children_of(&mut self, children: &[Child]) {
+        for child in children {
             match child {
                 Child::Leaf(key, value) => {
                     self.push(key);
@@ -244,7 +251,7 @@ impl LiveBytes {
                         continue;
                     }
                     self.bytes += node.allocated_bytes();
-                    self.children(node);
+                    self.children_of(&node.children);
                 }
                 Child::Collision(pairs) => {
                     self.bytes += pairs.capacity() * size_of::<(Term, Term)>();

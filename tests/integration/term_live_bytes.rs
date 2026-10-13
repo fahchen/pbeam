@@ -30,9 +30,19 @@ use std::{
     time::Duration,
 };
 
-use pbeam_runtime::{BeamProgram, HostTerm};
+use pbeam_runtime::{BeamProgram, HostTerm, Term};
+
+#[path = "../common/mod.rs"]
+mod common;
+
+use common::pinned_beam;
 
 const SCENE: &[u8] = include_bytes!("../../fixtures/term_live_bytes/term_live_bytes_probe.beam");
+
+const RELEASE_PROBE: &[u8] = include_bytes!("../../fixtures/release/release_probe.beam");
+
+/// The number of cells of the graph of the release regression test.
+const RELEASE_CELLS: i64 = 20_000;
 
 /// The live bytes of one measured run.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -182,4 +192,50 @@ fn records_the_peak_live_bytes_of_one_terra_scene() {
     // bytes. It can be above the live bytes or below a short peak, and
     // neither number bounds the other. The check above only shows that the
     // sampling produced a value.
+}
+
+/// Record the samples of the release work list across the exit of a child and
+/// the drain of its graph.
+///
+/// `release_probe:waits/1` spawns a child that keeps a list of
+/// [`RELEASE_CELLS`] cells in its process dictionary and exits. The exit
+/// moves the graph to the release work list of the scheduler, and the drain
+/// releases it in batches while the root waits for a message that never
+/// arrives. A walk that does not visit the release work list reports no bytes
+/// for the graph after the sample of the peak, although the scheduler still
+/// owns it.
+#[test]
+fn counts_the_release_work_of_an_exited_child_across_its_drain() {
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, RELEASE_PROBE]).unwrap();
+    let mut samples = Vec::new();
+    program
+        .execute_sampled(
+            "release_probe",
+            "waits",
+            &[program.host_term(Term::Integer(RELEASE_CELLS))],
+            &mut |live| samples.push(live),
+        )
+        .expect_err("the run ends when the root waits for a message that cannot arrive");
+
+    let peak = samples.iter().copied().max().unwrap_or(0);
+    assert!(
+        peak > 0,
+        "the child builds a graph of live bytes: {samples:?}"
+    );
+    let at_peak = samples
+        .iter()
+        .position(|sample| *sample == peak)
+        .expect("the samples hold the peak");
+    // The graph waits on the release work list while the drain releases it in
+    // batches, so more than one sample after the peak still holds most of it.
+    let counted = samples[at_peak + 1..]
+        .iter()
+        .filter(|sample| **sample > peak / 2)
+        .count();
+    assert!(
+        counted >= 2,
+        "the graph stays counted across the drain steps: peak {peak}, {counted} of {} samples after the peak",
+        samples.len() - at_peak - 1
+    );
 }

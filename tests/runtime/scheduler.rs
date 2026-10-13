@@ -1453,3 +1453,101 @@ fn counts_the_persistent_terms_the_ets_objects_and_the_timer_messages() {
     );
     assert!(scheduler.live_bytes() > before);
 }
+
+#[test]
+fn counts_the_bytes_of_the_release_work_list() {
+    // The live-byte walk of a run must count the graph that the release work
+    // list holds, for each kind of item of that list: a term, an element
+    // array, a map walk, the X registers, the Y slots of a frame, the
+    // dictionary, the mailbox, and the monitors.
+    let mut scheduler = test_scheduler();
+    let id = ProcessId(0);
+    let map = Map::from_pairs(
+        (0..4 * RELEASE_BATCH as i64)
+            .map(|key| (Term::Integer(key), atom("v")))
+            .collect(),
+    )
+    .unwrap();
+    scheduler
+        .start(
+            frame(),
+            vec![Term::tuple(vec![marker(1)]), Term::Map(map)],
+            allow_all(),
+        )
+        .unwrap();
+    {
+        let process = scheduler.processes.get_mut(&id).unwrap();
+        // The frame holds more Y slots than one batch, so the group of slots
+        // waits on the list after one step.
+        process.frames[0].stack = (0..4 * RELEASE_BATCH)
+            .map(|number| StackSlot::Term(marker(number as i64)))
+            .collect();
+        process.mailbox.push(marker(3));
+        process.dictionary.push((Term::Integer(4), marker(5)));
+        process.pending_bif = Some(PendingBif {
+            module: "erlang",
+            function: "length",
+            arguments: vec![marker(8)],
+            tail: false,
+        });
+        process.length_trap = Some(vec![marker(9)]);
+        process.monitors.insert(
+            Reference(1),
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: marker(6),
+                    tag: marker(7),
+                }),
+                alias: None,
+            },
+        );
+    }
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    // Every item of the list waits here, so the walk reads each kind of item.
+    assert!(
+        scheduler.live_bytes() > 0,
+        "the walk counts the items of the release work list"
+    );
+    // One step spends its budget on the group of Y slots of the frame, which
+    // holds more slots than the batch, so the group waits on the list.
+    scheduler.drain_release(RELEASE_BATCH);
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Slots(_))),
+        "the step leaves the group of Y slots on the list"
+    );
+    assert!(
+        scheduler.live_bytes() > 0,
+        "the walk counts the group of Y slots of the release work list"
+    );
+    // A later step takes the form of the map into a walk, which needs several
+    // steps of its own.
+    for _ in 0..64 {
+        scheduler.drain_release(RELEASE_BATCH);
+        if scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Map(_)))
+        {
+            break;
+        }
+    }
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Map(_))),
+        "a step leaves the map walk on the list"
+    );
+    assert!(
+        scheduler.live_bytes() > 0,
+        "the walk counts the map walk of the release work list"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}

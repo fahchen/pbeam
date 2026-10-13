@@ -1167,6 +1167,12 @@ fn drains_the_pairs_of_a_collision_child_in_batches() {
         drain.allocated_bytes() > 0,
         "the drain holds the nodes of the collision"
     );
+    let mut live = crate::term::LiveBytes::new();
+    drain.account(&mut live);
+    assert!(
+        live.bytes() > 0,
+        "the live-byte walk counts the collision pairs of the drain"
+    );
     let mut pending = Vec::new();
     let mut units = 0;
     for _ in 0..1000 {
@@ -1176,6 +1182,14 @@ fn drains_the_pairs_of_a_collision_child_in_batches() {
         let moved = drain.step(&mut pending, 1);
         assert!(moved <= 1, "one step of one unit moved {moved} units");
         units += moved;
+        // A step that reaches the collision child moves its pairs into the
+        // collision list of the drain, and the walk must count them there.
+        let mut live = crate::term::LiveBytes::new();
+        drain.account(&mut live);
+        assert!(
+            live.bytes() > 0,
+            "the walk counts the drain at each step of the collision walk"
+        );
     }
     assert!(drain.is_empty());
     assert_eq!(
