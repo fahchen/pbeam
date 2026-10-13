@@ -93,8 +93,10 @@ struct Measurement {
     /// count of the drain; [`items_of`] names the difference.
     retained_items: usize,
     /// The largest number of bytes that the containers of the release work
-    /// list held at a step boundary: the capacity of every container on the
-    /// list and one term slot for each term of the list.
+    /// list held at a step boundary: the capacity of every container that an
+    /// item of the list owns. The buffer of the list holds the term slot of
+    /// each item, so [`list_bytes`](Measurement::list_bytes) reports that
+    /// storage and this number leaves it out.
     retained_bytes: usize,
     /// The largest number of bytes of the buffer of the release work list.
     list_bytes: usize,
@@ -565,18 +567,22 @@ fn items_of(item: &Release) -> usize {
 }
 
 /// Return the bytes of the allocations that one item of the release work list
-/// owns: the capacity of each container on it, and one term slot for each
-/// term. The payload behind a term that the list has not drained is not
-/// counted; see "Known gaps" of the pull request.
+/// owns: the capacity of the container of the item. An item that is one term
+/// owns no container of its own, because the buffer of the list holds its
+/// term slot, and `list_bytes` counts that buffer. The payload behind a term
+/// that the list has not drained is not counted; see "Known gaps" of the
+/// pull request. Thus the sum of the `Held bytes` and `List bytes` columns of
+/// a row is the measured memory of the release, with no storage counted
+/// twice.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(held_bytes(&Release::Term(Term::Integer(1))) > 0);
+/// assert_eq!(held_bytes(&Release::Term(Term::Integer(1))), 0);
 /// ```
 fn held_bytes(item: &Release) -> usize {
     match item {
-        Release::Term(_) => std::mem::size_of::<Term>(),
+        Release::Term(_) => 0,
         Release::Terms(group) => group.capacity() * std::mem::size_of::<Term>(),
         Release::Map(drain) => drain.allocated_bytes(),
         Release::Registers(registers) => registers.capacity() * std::mem::size_of::<Option<Term>>(),
