@@ -40,7 +40,7 @@ The decisive session interleaves the after-revision of step 9 (`d54e6a4`) with t
 | 3 | 118.5 / 118.4 | 119.8 / 118.2 | 27.68 / 25.70 |
 | Minimum | 118.4 / 118.4 | 117.9 / 117.8 | |
 
-The session gives two results. The floor loop of the current `main` costs 117.9 ns and 117.8 ns, so the gate holds. The current `main` sits at or below the after-revision of step 9 in each round, so the changes that landed after step 9 did not move the loop. The control of the same session, the `call_ext_only` floor loop, measures 285.7 ns for `d54e6a4` and 286.4 ns for `ddb32f6e` as the minimum, which keeps the layout effect of +15.6 ns that step 9 reports for that control.
+The session gives two results. The floor loop of the current `main` costs 117.9 ns and 117.8 ns as the minimum of the three rounds, so the gate holds. The rounds do not agree on the size of the difference: round 1 and round 2 put the current `main` at or below the after-revision of step 9, and round 3 measures 119.8 ns for the current `main` against 118.5 ns for that revision, which is an increase of 1.3 ns. The three rounds pass the gate in both revisions, and they do not establish the cause of that one increase. The control of the same session, the `call_ext_only` floor loop, measures 285.7 ns for `d54e6a4` and 286.4 ns for `ddb32f6e` as the minimum, which keeps the layout effect of +15.6 ns that step 9 reports for that control.
 
 ## Step 0: the baseline
 
