@@ -280,7 +280,59 @@ fn compares_and_debug_prints_a_host_term() {
     assert_ne!(host, other);
     assert_eq!(host, term);
     assert_eq!(term, host);
+    assert!(host.atom("ok").is_some());
+    assert_eq!(host.atom("pbeam_unknown"), None);
     let printed = format!("{host:?}");
     assert_eq!(printed, format!("{term:?}"));
     assert_eq!(printed, "Tuple([Integer(1)])");
+}
+
+#[test]
+fn compares_host_terms_of_two_tables_by_their_names() {
+    // The two tables give `pbeam_host_a` and `pbeam_host_b` different
+    // indices, and the index order of the two keys differs, so the two maps
+    // hold their pairs in a different canonical order. The two host terms
+    // hold the same value, so they are equal.
+    let mut first = AtomTable::new();
+    let mut second = first.clone();
+    for index in 0..3 {
+        second.put(&format!("pbeam_host_filler_{index}")).unwrap();
+    }
+    let first_a = first.put("pbeam_host_a").unwrap();
+    let first_b = first.put("pbeam_host_b").unwrap();
+    let second_b = second.put("pbeam_host_b").unwrap();
+    let second_a = second.put("pbeam_host_a").unwrap();
+    assert_ne!(first_a.index(), second_a.index());
+    assert_ne!(first_b.index(), second_b.index());
+    let first_map = Map::from_pairs(vec![
+        (Term::Atom(first_a), Term::Integer(1)),
+        (Term::Atom(first_b), Term::Integer(2)),
+    ])
+    .unwrap();
+    let second_map = Map::from_pairs(vec![
+        (Term::Atom(second_b), Term::Integer(2)),
+        (Term::Atom(second_a), Term::Integer(1)),
+    ])
+    .unwrap();
+    let first_host = HostTerm {
+        term: Term::Map(first_map),
+        atoms: Arc::new(first),
+    };
+    let second_host = HostTerm {
+        term: Term::Map(second_map),
+        atoms: Arc::new(second),
+    };
+    assert_eq!(first_host, second_host);
+    // Two host terms that share one table compare with no import.
+    assert_eq!(first_host, first_host.clone());
+
+    // A term that the other table cannot import is not equal.
+    let foreign = HostTerm {
+        term: Term::Atom(Atom {
+            index: 1 << 30,
+            name: Arc::from("pbeam_host_foreign"),
+        }),
+        atoms: Arc::new(AtomTable::new()),
+    };
+    assert_ne!(first_host, foreign);
 }

@@ -136,7 +136,7 @@ fn charges_the_exit_items_as_pinned_erts_with_one_scheduler() {
             ],
         )
         .unwrap();
-    assert_eq!(text(exits.term()), EXITS);
+    assert_eq!(text(&exits.term), EXITS);
 
     // The reference run checks that the pinned `erl` is the JIT flavor, and
     // that `a` and `b` collect no garbage: a collection costs reductions on
@@ -174,7 +174,7 @@ fn gives_no_bif_timer_to_a_process_whose_exit_switched_out() {
     // so `erlang:start_timer/3` destroys the timer (`erl_hl_timer.c:1833-1861`).
     let program = BeamProgram::load(&[EXIT_PROBE]).unwrap();
     let result = program.execute("exit_probe", "late_timer", &[]).unwrap();
-    assert_eq!(text(result.term()), "false");
+    assert_eq!(text(&result.term), "false");
 
     let reference = Command::new("erl")
         .args([

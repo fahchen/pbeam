@@ -373,7 +373,7 @@ fn returns_the_host_os_type_as_pinned_erts() {
     let program = BeamProgram::load(&[IO_START_PROBE, &os]).unwrap();
     let result = program.execute("io_start_probe", "system", &[]).unwrap();
     let Some(results) = result
-        .term()
+        .term
         .proper_list()
         .map(|results| results.collect::<Vec<_>>())
     else {

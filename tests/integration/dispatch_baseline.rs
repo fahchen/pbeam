@@ -578,7 +578,7 @@ fn records_the_interpreter_dispatch_baseline() {
     let list = program.execute("dispatch_probe", "list3", &[]).unwrap();
     let map = program.execute("dispatch_probe", "map_1000", &[]).unwrap();
     let key = program.execute("dispatch_probe", "key", &[]).unwrap();
-    assert_eq!(text(key.term()), "500");
+    assert_eq!(text(&key.term), "500");
 
     let lines = run_erts();
     let erts_result = |key: &str| {
@@ -603,16 +603,16 @@ fn records_the_interpreter_dispatch_baseline() {
             &program,
             probe.function,
             probe.length,
-            tuple.term(),
-            list.term(),
-            map.term(),
-            key.term(),
+            &tuple.term,
+            &list.term,
+            &map.term,
+            &key.term,
         );
         let result = program
             .execute(probe.module, probe.function, &args)
             .unwrap();
         assert_eq!(
-            text(result.term()),
+            text(&result.term),
             text(&expected(&program, probe.function, probe.length)),
             "{}:{} at {} iterations",
             probe.module,
@@ -620,7 +620,7 @@ fn records_the_interpreter_dispatch_baseline() {
             probe.length
         );
         assert_eq!(
-            text(result.term()),
+            text(&result.term),
             erts_result(&probe.key()),
             "PBeam and ERTS differ for {}:{} at {} iterations",
             probe.module,

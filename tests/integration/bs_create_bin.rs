@@ -42,7 +42,7 @@ fn run(program: &BeamProgram, function: &str, argument: Term) -> Term {
             &[program.host_term(argument)],
         )
         .unwrap()
-        .into_term()
+        .term
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn run_append(program: &BeamProgram, function: &str, arguments: &[Term]) -> Term
     program
         .execute("bs_create_bin_append_probe", function, &arguments)
         .unwrap()
-        .into_term()
+        .term
 }
 
 #[test]
@@ -613,7 +613,7 @@ fn run_integer(program: &BeamProgram, function: &str, arguments: &[Term]) -> Ter
     program
         .execute("bs_create_bin_integer_probe", function, &arguments)
         .unwrap()
-        .into_term()
+        .term
 }
 
 /// Return the ERTS expression that calls `bs_create_bin_integer_probe:Function`

@@ -78,7 +78,7 @@ fn assert_runs(call: &str, expected: &str) {
     );
     let function = call.strip_suffix("()").unwrap();
     let result = load().execute("port_probe", function, &[]).unwrap();
-    assert_eq!(text(result.term()), expected, "PBeam {call}");
+    assert_eq!(text(&result.term), expected, "PBeam {call}");
 }
 
 /// Load the probe with the pinned `erlang` module, whose `open_port/2`,
@@ -225,5 +225,5 @@ fn charges_the_port_bifs_as_pinned_erts() {
     let result = program
         .execute("port_probe", "costs", &[program.host_term(Term::nil())])
         .unwrap();
-    assert_eq!(text(result.term()), expected);
+    assert_eq!(text(&result.term), expected);
 }

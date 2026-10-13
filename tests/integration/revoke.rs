@@ -82,7 +82,7 @@ fn pbeam(function: &str, policy: &dyn Policy) -> String {
     let result = program()
         .execute_with_policy("revoke_probe", function, &[], policy)
         .unwrap();
-    text(result.term())
+    text(&result.term)
 }
 
 /// Run `revoke_probe:Function()` on PBeam with no policy, which skips each
@@ -95,10 +95,10 @@ fn pbeam(function: &str, policy: &dyn Policy) -> String {
 /// ```
 fn unchecked(function: &str) -> String {
     text(
-        program()
+        &program()
             .execute("revoke_probe", function, &[])
             .unwrap()
-            .term(),
+            .term,
     )
 }
 

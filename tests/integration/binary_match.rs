@@ -97,7 +97,7 @@ fn run_each_in(
                     function,
                     &[program.host_term(Term::binary(input.to_vec()))],
                 )
-                .map(|host| host.into_term())
+                .map(|host| host.term)
                 .map_err(|error| error.to_string())
         })
         .collect()
@@ -545,7 +545,7 @@ fn bs_get_each(function: &str, calls: &[Vec<Term>]) -> Vec<Result<Term, String>>
                 .collect::<Vec<_>>();
             program
                 .execute("bs_get_probe", function, &imported)
-                .map(|host| host.into_term())
+                .map(|host| host.term)
                 .map_err(|error| error.to_string())
         })
         .collect()

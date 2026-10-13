@@ -80,7 +80,7 @@ fn charges_each_bif_with_a_body_as_pinned_erts_except_the_message_copy() {
         )
         .unwrap();
     assert_eq!(
-        text(costs.term()),
+        text(&costs.term),
         ERTS_COSTS.replace(SEND_COPY.0, SEND_COPY.1)
     );
 

@@ -251,8 +251,15 @@ impl AtomTable {
     /// the free variables of the fun. It builds a new term and never
     /// changes `source` or the term. It remembers each compound by the
     /// identity of its storage, so a term that holds one subtree more than
-    /// once keeps that sharing in the imported term and the walk takes time
-    /// in the size of the term.
+    /// once keeps that sharing in the imported term and the walk visits
+    /// each compound one time.
+    ///
+    /// The memory covers the walk. It does not cover the rebuild of a map:
+    /// the `Map::from_pairs` call validates and hashes each key, and that
+    /// pass visits a key with a shared subtree again for each occurrence. A
+    /// map whose key is built as `T{n} = {T{n-1}, T{n-1}}` has storage in
+    /// `n` and costs time that grows exponentially in `n`, so this function
+    /// does not promise linear time for every term.
     ///
     /// # Errors
     ///
@@ -492,10 +499,12 @@ fn outside_atom_table(index: u32) -> BeamError {
 /// A term of one program together with the atom table that owns each of its
 /// atoms. A host result and a host argument are `HostTerm` values. A copy is
 /// cheap: the term copy is O(1), and the table is shared through an `Arc`.
+/// The `term` field is the value, and `HostTerm::atom` reads a name of its
+/// table.
 #[derive(Clone)]
 pub struct HostTerm {
     /// The term.
-    pub(crate) term: Term,
+    pub term: Term,
     /// The atom table that owns each atom of the term, at any depth.
     pub(crate) atoms: Arc<AtomTable>,
 }
@@ -508,7 +517,7 @@ impl fmt::Debug for HostTerm {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(format!("{:?}", host_term), format!("{:?}", host_term.term()));
+    /// assert_eq!(format!("{:?}", host_term), format!("{:?}", host_term.term));
     /// ```
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.term.fmt(formatter)
@@ -516,9 +525,11 @@ impl fmt::Debug for HostTerm {
 }
 
 impl PartialEq for HostTerm {
-    /// Compare the terms of the two host terms. The atom table is storage
-    /// metadata and is not part of the value of a term, as the knowledge
-    /// rule "Equality uses semantic identity, not dispatch metadata" asks.
+    /// Compare the two host terms by their semantic identity. The atom
+    /// table is storage metadata, and the same name holds a different index
+    /// in another program, so the comparison imports the term of `other`
+    /// into a copy of the table of `self` and compares the two terms of one
+    /// table. A term that the copy cannot import is not equal.
     ///
     /// # Examples
     ///
@@ -526,7 +537,14 @@ impl PartialEq for HostTerm {
     /// assert_eq!(program.host_term(Term::static_atom("ok")), program.host_term(Term::static_atom("ok")));
     /// ```
     fn eq(&self, other: &Self) -> bool {
-        self.term == other.term
+        if Arc::ptr_eq(&self.atoms, &other.atoms) {
+            return self.term == other.term;
+        }
+        let mut table = (*self.atoms).clone();
+        match table.import_term(&other.atoms, &other.term) {
+            Ok(imported) => self.term == imported,
+            Err(_) => false,
+        }
     }
 }
 
@@ -559,28 +577,19 @@ impl PartialEq<HostTerm> for Term {
 }
 
 impl HostTerm {
-    /// Return the term of this host term.
+    /// Return the atom of `name` in the atom table of this host term, or
+    /// `None` when the table does not hold the name. A run adds each name
+    /// that it creates to the table of its result, so this function reads
+    /// that name after the run.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(host_term.term(), &Term::static_atom("ok"));
+    /// assert!(host_term.atom("ok").is_some());
+    /// assert_eq!(host_term.atom("pbeam_unknown"), None);
     /// ```
-    pub fn term(&self) -> &Term {
-        &self.term
-    }
-
-    /// Return the term and drop the atom table of this host term. Use it
-    /// when the caller reads the term and does not pass it to another
-    /// program.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(host_term.into_term(), Term::static_atom("ok"));
-    /// ```
-    pub fn into_term(self) -> Term {
-        self.term
+    pub fn atom(&self, name: &str) -> Option<Atom> {
+        self.atoms.get(name)
     }
 
     /// Return this term with every atom of its table replaced by the atom

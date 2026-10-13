@@ -220,8 +220,7 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let result = program.execute("process_probe", "main", &[])?;
-    /// let argument = program.host_term(result);
+    /// let argument = program.host_term(Term::Atom(program.atom("ok").unwrap()));
     /// let applied = program.execute("process_probe", "apply", &[argument])?;
     /// ```
     pub fn host_term(&self, term: Term) -> HostTerm {

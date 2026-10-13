@@ -307,10 +307,10 @@ fn runs_erlang_yield_as_the_pinned_erts_instruction() {
     let program = BeamProgram::load(&[&erlang, PREEMPT_PROBE]).unwrap();
     let run = |function| {
         text(
-            program
+            &program
                 .execute("preempt_probe", function, &[])
                 .unwrap()
-                .term(),
+                .term,
         )
     };
     assert_eq!(run("yields"), yields);
@@ -370,10 +370,10 @@ fn runs_bump_reductions_and_reads_the_reduction_total_as_pinned_erts() {
     let program = BeamProgram::load(&[&erlang, PREEMPT_PROBE]).unwrap();
     let run = |function| {
         text(
-            program
+            &program
                 .execute("preempt_probe", function, &[])
                 .unwrap()
-                .term(),
+                .term,
         )
     };
     assert_eq!(run("bumps"), bumps);

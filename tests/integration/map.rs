@@ -315,7 +315,7 @@ fn orders_a_hashmap_of_all_static_atoms_like_erts() {
         .execute("atom_map_probe", "static_keys", &[])
         .unwrap();
     let Some(keys) = result
-        .term()
+        .term
         .proper_list()
         .map(|keys| keys.collect::<Vec<_>>())
     else {

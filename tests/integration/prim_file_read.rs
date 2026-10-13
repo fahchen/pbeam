@@ -172,7 +172,7 @@ fn isolated_prim_file_read() {
             &[program.host_term(characters(&directory))],
         )
         .unwrap();
-    fs::write(env::var_os(RESULT).unwrap(), text(result.term()) + "\n").unwrap();
+    fs::write(env::var_os(RESULT).unwrap(), text(&result.term) + "\n").unwrap();
 }
 
 /// Return the path as a list of its bytes, which is the character list of

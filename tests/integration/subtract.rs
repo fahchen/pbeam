@@ -64,7 +64,7 @@ fn subtracts_lists_in_each_stage_as_pinned_erts() {
             &[program.host_term(Term::nil())],
         )
         .unwrap();
-    assert_eq!(text(results.term()), ERTS_RESULTS);
+    assert_eq!(text(&results.term), ERTS_RESULTS);
 
     let reference = Command::new("erl")
         .args([

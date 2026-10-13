@@ -239,7 +239,7 @@ fn exports_compiled_patterns_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let result = program.execute("re_probe", "export", &[]).unwrap();
     let Some(results) = result
-        .term()
+        .term
         .proper_list()
         .map(|results| results.collect::<Vec<_>>())
     else {

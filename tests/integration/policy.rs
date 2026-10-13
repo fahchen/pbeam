@@ -69,7 +69,7 @@ fn program() -> BeamProgram {
 fn pbeam(function: &str, policy: &str) -> Result<String, String> {
     program()
         .execute_with_policy_module("policy_probe", function, &[], policy, false)
-        .map(|result| text(result.term()))
+        .map(|result| text(&result.term))
         .map_err(|error| error.to_string())
 }
 
@@ -137,11 +137,11 @@ fn grants_a_requested_capability_with_an_erlang_and_an_elixir_policy() {
     let host = program
         .execute_with_policy("policy_probe", "granted", &[], &AllowAll)
         .unwrap();
-    assert_eq!(text(host.term()), "{string,denied,[string,string]}");
+    assert_eq!(text(&host.term), "{string,denied,[string,string]}");
     // A run with no policy skips each check, so a request returns ok and
     // calls no policy code.
     let unchecked = program.execute("policy_probe", "granted", &[]).unwrap();
-    assert_eq!(text(unchecked.term()), "{string,ok,[string,string]}");
+    assert_eq!(text(&unchecked.term), "{string,ok,[string,string]}");
 }
 
 #[test]
@@ -293,7 +293,7 @@ fn lets_only_the_policy_process_call_policy_revoke() {
         .execute("policy_probe", "revoke_denied", &[])
         .unwrap();
     assert_eq!(
-        text(unchecked.term()),
+        text(&unchecked.term),
         "[ok,ok,ok,{error,badarg},ok,ok,ok,ok,ok,string,pid]"
     );
 }

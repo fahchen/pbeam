@@ -83,10 +83,10 @@ fn matches_binaries_as_pinned_erts_with_one_scheduler() {
     let program = BeamProgram::load(&[BINARY_FIND_PROBE]).unwrap();
     let run = |function, arguments: &[HostTerm]| {
         text(
-            program
+            &program
                 .execute("binary_find_probe", function, arguments)
                 .unwrap()
-                .term(),
+                .term,
         )
     };
     assert_eq!(run("results", &[]), RESULTS);

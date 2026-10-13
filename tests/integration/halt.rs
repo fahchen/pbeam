@@ -52,7 +52,7 @@ fn pbeam(function: &str) -> Result<Term, BeamError> {
     let program = BeamProgram::load(&[&erlang, HALT_PROBE]).unwrap();
     program
         .execute("halt_probe", function, &[])
-        .map(|host| host.into_term())
+        .map(|host| host.term)
 }
 
 #[test]

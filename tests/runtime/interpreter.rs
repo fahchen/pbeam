@@ -82,7 +82,7 @@ fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
     module.exports.insert((child, 1), 11);
     program
         .execute("fixture", "main", &[])
-        .map(|host| host.into_term())
+        .map(|host| host.term)
 }
 
 fn spawn_link_child(arguments: Term) -> Vec<Instruction> {
@@ -2063,7 +2063,7 @@ fn run_binary_match(
     ]);
     make_program(body, 0)
         .execute("fixture", "main", &[])
-        .map(|host| host.into_term())
+        .map(|host| host.term)
         .map_err(|error| error.to_string())
 }
 
@@ -2146,7 +2146,7 @@ fn gives_a_runtime_error_for_a_read_after_a_failed_equal_command() {
         body.extend(rest);
         make_program(body, 0)
             .execute("fixture", "main", &[])
-            .map(|host| host.into_term())
+            .map(|host| host.term)
             .map_err(|error| error.to_string())
     };
     assert_eq!(
@@ -2675,7 +2675,7 @@ fn removes_an_active_monitor_without_a_trap() {
 fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
     apply_targets_program(body)
         .execute("fixture", "main", &[])
-        .map(|host| host.into_term())
+        .map(|host| host.term)
 }
 
 /// Return the program of `run_with_apply_targets`.
@@ -2941,7 +2941,7 @@ fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term,
     body.push(Instruction::Return);
     make_program(body, 0)
         .execute("fixture", "main", &[])
-        .map(|host| host.into_term())
+        .map(|host| host.term)
 }
 
 fn get_bif(key: &str, destination: Operand) -> Instruction {
@@ -3029,7 +3029,7 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
     // ERTS 29.1.1: after put(k, parent), a spawned process gets
     // undefined for get(k).
     assert!(matches!(
-        program.execute("fixture", "main", &[]).map(|host| host.into_term()),
+        program.execute("fixture", "main", &[]).map(|host| host.term),
         Ok(Term::Tuple(ref elements))
             if elements.first() == Some(&test_atom("DOWN"))
                 && elements.last() == Some(&Term::static_atom("undefined"))

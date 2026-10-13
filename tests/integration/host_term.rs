@@ -21,7 +21,7 @@ fn rejects_a_local_fun_of_another_program() {
     // The two programs share one module name and hold different code.
     let name = |program: &BeamProgram, function: &str| {
         let result = program.execute("host_term_probe", function, &[]).unwrap();
-        match result.term() {
+        match &result.term {
             Term::Atom(atom) => atom.name().to_owned(),
             other => panic!("expected an atom, got {other:?}"),
         }
@@ -48,7 +48,7 @@ fn rejects_a_local_fun_of_another_program() {
     let applied = second
         .execute("host_term_probe", "accept", &[external])
         .unwrap();
-    assert!(matches!(applied.term(), Term::Fun(_)));
+    assert!(matches!(applied.term, Term::Fun(_)));
 }
 
 #[test]
@@ -56,18 +56,28 @@ fn imports_an_atom_that_the_run_created() {
     let first = BeamProgram::load(&[FIRST]).unwrap();
     let second = BeamProgram::load(&[SECOND]).unwrap();
 
-    // `created_atom/0` calls `erlang:list_to_atom/1`, so the name is in the
-    // atom table of the run and not in the table of the program. The host
-    // result of the run carries the table of the run, so the import of the
-    // second program resolves the name.
+    // `created_atom/1` calls `erlang:list_to_atom/1` on the character list
+    // of the argument, so the name is made at run time. The program table
+    // does not hold the name; only the run creates it.
+    let name = "host_term_created";
+    assert!(first.atom(name).is_none());
+    let characters = Term::list_from(name.bytes().map(|byte| Term::Integer(i64::from(byte))));
     let created = first
-        .execute("host_term_probe", "created_atom", &[])
+        .execute(
+            "host_term_probe",
+            "created_atom",
+            &[first.host_term(characters)],
+        )
         .unwrap();
+    // The program table of `first` still does not hold the name, and the
+    // host result carries the table of the run, which does.
+    assert!(first.atom(name).is_none());
+    assert_eq!(created.atom(name).unwrap().name(), name);
     let applied = second
         .execute("host_term_probe", "accept", &[created])
         .unwrap();
-    let Term::Atom(atom) = applied.term() else {
+    let Term::Atom(atom) = &applied.term else {
         panic!("the second program returns the atom");
     };
-    assert_eq!(atom.name(), "host_term_created");
+    assert_eq!(atom.name(), name);
 }

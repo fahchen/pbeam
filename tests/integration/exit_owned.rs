@@ -186,7 +186,7 @@ fn deletes_the_owned_tables_as_pinned_erts_with_one_scheduler() {
             ],
         )
         .unwrap();
-    assert_eq!(text(tables.term()), TABLES);
+    assert_eq!(text(&tables.term), TABLES);
 
     let reference = Command::new("erl")
         .args([
@@ -228,7 +228,7 @@ fn runs_the_tty_monitors_in_the_order_of_pinned_erts() {
             ],
         )
         .unwrap();
-    assert_eq!(text(ttys.term()), TTYS);
+    assert_eq!(text(&ttys.term), TTYS);
 
     // The stand-in replaces the `prim_tty` of the boot, so the reference
     // prints with `erlang:display/1`, which needs no IO server and ends the

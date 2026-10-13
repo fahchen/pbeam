@@ -193,7 +193,7 @@ fn pbeam_all(module: &str, probe: &[u8]) -> String {
     let erlang = pinned_beam("erlang");
     let erts_internal = pinned_beam("erts_internal");
     let program = BeamProgram::load(&[&erlang, &erts_internal, probe]).unwrap();
-    text(program.execute(module, "all", &[]).unwrap().term())
+    text(&program.execute(module, "all", &[]).unwrap().term)
 }
 
 #[test]
