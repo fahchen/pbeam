@@ -9,7 +9,7 @@ use super::{
 use crate::{
     beam::{ModuleId, NameId},
     error::{BeamError, error},
-    term::{Atom, LiveBytes, PortId, ProcessId, Reference, Term},
+    term::{Atom, AtomTable, LiveBytes, PortId, ProcessId, Reference, Term},
 };
 
 /// The other end of a link: a process or a port, as the `other.item` of an
@@ -546,7 +546,7 @@ impl ProcessState {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let length = process.info(&Term::static_atom("message_queue_len"), 0, 2, false)?;
+    /// let length = process.info(&atoms, &Term::static_atom("message_queue_len"), 0, 2, false)?;
     /// assert_eq!(length, Some(Term::tuple(vec![Term::static_atom("message_queue_len"), Term::Integer(2)])));
     /// ```
     ///
@@ -555,6 +555,7 @@ impl ProcessState {
     /// A reduction total above the PBeam integer range is an error.
     pub(super) fn info(
         &self,
+        atoms: &AtomTable,
         item: &Term,
         current: u64,
         messages: usize,
@@ -563,7 +564,7 @@ impl ProcessState {
         let Term::Atom(name) = item else {
             return Ok(None);
         };
-        let value = match (name.name(), &self.registered_name) {
+        let value = match (atoms.name_of(name), &self.registered_name) {
             // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
             ("current_stacktrace", _) if caller => Term::nil(),
             ("registered_name", Some(registered)) => Term::Atom(registered.clone()),

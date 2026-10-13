@@ -12,9 +12,9 @@ mod tuple;
 
 pub use atom::Atom;
 pub use atom::HostTerm;
-#[cfg(test)]
-pub(crate) use atom::test_atom;
 pub(crate) use atom::{AtomTable, MAX_ATOM_CHARACTERS};
+#[cfg(test)]
+pub(crate) use atom::{test_atom, test_atom_table};
 pub use binary::Binary;
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target};

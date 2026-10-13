@@ -7,7 +7,7 @@ use crate::{
     BeamModule,
     beam::{ModuleId, code::Instruction},
     runtime::process::InitialCall,
-    term::Atom,
+    term::{Atom, AtomTable},
 };
 
 /// Return the code table of one module `fixture` with the function `main/0`.
@@ -58,7 +58,7 @@ fn returns_the_names_of_a_start_mfa() {
         arity: 2,
     };
     assert_eq!(
-        code.initial_call_names(&entry).unwrap(),
+        code.initial_call_names(&AtomTable::new(), &entry).unwrap(),
         ("fixture".to_owned(), "main".to_owned(), 2)
     );
     let undefined = InitialCall::Undefined {
@@ -67,7 +67,8 @@ fn returns_the_names_of_a_start_mfa() {
         arity: 0,
     };
     assert_eq!(
-        code.initial_call_names(&undefined).unwrap(),
+        code.initial_call_names(&AtomTable::new(), &undefined)
+            .unwrap(),
         (
             "error_handler".to_owned(),
             "undefined_function".to_owned(),

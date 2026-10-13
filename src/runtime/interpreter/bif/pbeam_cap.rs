@@ -42,7 +42,7 @@ pub(super) fn revoke(
     let (Term::Pid(holder), Term::Atom(kind)) = (holder, kind) else {
         return Ok(BifResult::badarg());
     };
-    let Some(kind) = CapabilityKind::named(kind.name()) else {
+    let Some(kind) = CapabilityKind::named(scheduler.atoms.name_of(kind)) else {
         return Ok(BifResult::badarg());
     };
     match scheduler.revoke_given(*holder, kind) {
@@ -87,7 +87,7 @@ pub(super) fn policy_revoke(
     let (Term::Pid(holder), Term::Atom(kind)) = (holder, kind) else {
         return Ok(BifResult::badarg());
     };
-    let Some(kind) = CapabilityKind::named(kind.name()) else {
+    let Some(kind) = CapabilityKind::named(scheduler.atoms.name_of(kind)) else {
         return Ok(BifResult::badarg());
     };
     match scheduler.policy_revoke(*holder, kind) {
