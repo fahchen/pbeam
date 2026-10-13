@@ -28,6 +28,26 @@ fn reference(function: &str) -> Vec<u8> {
 }
 
 #[test]
+fn looks_up_a_key_in_a_loop_as_pinned_erts() {
+    // `ets_probe:lookup_loop/0` inserts the 1000 objects {I, I * 2} and then
+    // reads each key again in a loop of 2000 lookups. The result is the sum
+    // of the values that the lookups read, and the pinned ERTS gives the same
+    // result. The loop is the program-level evidence of the key index of
+    // #543, and the test prints the least of 9 timed runs of the program.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let mut best = std::time::Duration::MAX;
+    let mut result = None;
+    for _ in 0..9 {
+        let start = std::time::Instant::now();
+        result = Some(program.execute("ets_probe", "lookup_loop", &[]).unwrap());
+        best = best.min(start.elapsed());
+    }
+    println!("COST ets_lookup_loop_program {} ns", best.as_nanos());
+    assert_eq!(result.unwrap(), Term::Integer(2_002_000));
+    assert_eq!(reference("lookup_loop"), b"2002000\n");
+}
+
+#[test]
 fn makes_tables_and_raises_badarg_as_pinned_erts() {
     // `ets_probe:new/0` makes an unnamed table, a named table, and a table
     // with each option that ERTS accepts (erl_db.c:2597-2710). A heir that
