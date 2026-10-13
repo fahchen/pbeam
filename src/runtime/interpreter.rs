@@ -14,8 +14,8 @@ use crate::{
     },
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Fun, HostTerm, Map, MatchState, Target, Term, print_term, segment_equals,
-        segment_integer,
+        Atom, AtomTable, Fun, HostTerm, Insert, Map, MatchState, Target, Term, print_term,
+        segment_equals, segment_integer,
     },
 };
 use std::{borrow::Cow, collections::HashMap, rc::Rc, sync::Arc};
@@ -1087,20 +1087,35 @@ impl BeamProgram {
                     destination,
                     pairs,
                 } => {
-                    let mut map = read(process, map)?;
-                    let Term::Map(entries) = &mut map else {
-                        // ponytail: ERTS raises error {badmap, Map}; see "Exception raise sites" in docs/erts-differences.md.
-                        return Err(error("unsupported BEAM put_map_assoc source: not a map"));
-                    };
-                    // PBeam inserts the pairs one by one. ERTS merges a flatmap source and builds a
-                    // hashmap in one step above 32 keys. The result is the same, because the flatmap
-                    // order and the HAMT shape depend only on the set of keys.
-                    for (key, value) in pairs {
+                    let pairs = pairs
+                        .iter()
+                        .map(|(key, value)| Ok((read(process, key)?, read(process, value)?)))
+                        .collect::<Result<Vec<_>, BeamError>>()?;
+                    // PBeam checks every key before the first change and
+                    // inserts the pairs. ERTS merges a flatmap source and
+                    // builds a hashmap in one step above 32 keys
+                    // (`erts_maps_put`, `erl_map.c:2105-2237`). The result
+                    // is the same, because the flatmap order and the HAMT
+                    // shape depend only on the set of keys.
+                    match update_owned(process, map, destination, |entries| {
                         entries
-                            .insert(read(process, key)?, read(process, value)?)
+                            .update(
+                                pairs
+                                    .into_iter()
+                                    .map(|(key, value)| (Insert::Add, key, value))
+                                    .collect(),
+                            )
                             .map_err(|key| error(format!("unsupported map key {key:?}")))?;
+                        Ok(None)
+                    })? {
+                        Update::Written => {}
+                        // `put_map_assoc` has no fail label and no exception
+                        // of its own. ERTS raises `{badmap, Map}`; see
+                        // "Exception raise sites" in docs/erts-differences.md.
+                        Update::Missing(_) | Update::Reason(_) => {
+                            return Err(error("unsupported BEAM put_map_assoc source: not a map"));
+                        }
                     }
-                    write(process, destination, map)?;
                 }
                 Instruction::PutMapExact {
                     fail_label,
@@ -1108,20 +1123,38 @@ impl BeamProgram {
                     destination,
                     pairs,
                 } => {
-                    let map = read(process, map)?;
                     let pairs = pairs
                         .iter()
                         .map(|(key, value)| Ok((read(process, key)?, read(process, value)?)))
                         .collect::<Result<Vec<_>, BeamError>>()?;
                     // ERTS `update_map_exact` jumps to a fail label that is
                     // not 0, and else raises the exception
-                    // (`jit/arm/instr_map.cpp:678-719`).
-                    match update_map_exact(map, pairs)? {
-                        Ok(map) => write(process, destination, map)?,
-                        Err(_) if *fail_label != 0 => {
+                    // (`jit/arm/instr_map.cpp:687-716`). It writes no
+                    // register before the update succeeds, so the source
+                    // register keeps its value on a failure
+                    // (`beam_common.c:2231-2253`, `erts_gc_update_map_exact`).
+                    match update_owned(process, map, destination, |entries| {
+                        update_map_exact(entries, pairs)
+                    })? {
+                        Update::Written => {}
+                        Update::Missing(value) => {
+                            // ERTS `erts_gc_update_map_exact` sets
+                            // `{badmap, Map}` (`beam_common.c:2224-2235`).
+                            let reason = Term::tuple(vec![Term::static_atom("badmap"), value]);
+                            if *fail_label != 0 {
+                                cursor.position = label_position(*fail_label)?;
+                            } else if let Some(outcome) =
+                                raise(process, ExceptionClass::Error, reason)
+                            {
+                                return Ok(outcome);
+                            } else {
+                                cursor.refresh(scheduler)?;
+                            }
+                        }
+                        Update::Reason(_) if *fail_label != 0 => {
                             cursor.position = label_position(*fail_label)?
                         }
-                        Err(reason) => {
+                        Update::Reason(reason) => {
                             if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
                                 return Ok(outcome);
                             }
@@ -2733,22 +2766,107 @@ fn light_bif_switch(process: &mut ProcessState) -> bool {
     true
 }
 
-/// Replace the value of each existing key of a map, as ERTS
+/// Change the map of the source operand, then write the result to the
+/// destination operand. Return the outcome of the change.
+///
+/// ERTS writes the destination register only after the update succeeds
+/// (`jit/arm/instr_map.cpp:687-716`), so a failure, a fail label, and a
+/// raised exception leave every register as it was. The instruction takes
+/// the map from the source register only when the source and the
+/// destination name one slot and the term has one owner. This follows D11
+/// of `docs/term-performance-design-codex-v2.md`: take a source register
+/// only when it is also the destination, all other operand reads are
+/// complete, and a failure preserves the required register state. A take
+/// removes the term from the slot, so a failed change writes the unchanged
+/// term back; the destination of a change that took no term keeps its
+/// value. The change of a term with another owner copies the form of the
+/// map first, as before.
+///
+/// # Errors
+///
+/// Return the error of `update` for a change that fails.
+fn update_owned(
+    process: &mut ProcessState,
+    map: &Operand,
+    destination: &Operand,
+    update: impl FnOnce(&mut Map) -> Result<Option<Term>, BeamError>,
+) -> Result<Update, BeamError> {
+    let owned = match (register_of(map), register_of(destination)) {
+        (Some(source), Some(target)) if register_index(&source) == register_index(&target) => {
+            take_owned(process, target)
+        }
+        _ => None,
+    };
+    let taken = owned.is_some();
+    let mut term = match owned {
+        Some(term) => term,
+        None => read(process, map)?,
+    };
+    if let Term::Map(entries) = &mut term {
+        match update(entries) {
+            Ok(None) => {
+                write(process, destination, term)?;
+                return Ok(Update::Written);
+            }
+            // The take removed the term from the slot of the destination, so
+            // the unchanged term goes back. A change that took no term
+            // leaves the destination register as it was, as ERTS does on a
+            // failure.
+            Ok(Some(reason)) => {
+                if taken {
+                    write(process, destination, term)?;
+                }
+                return Ok(Update::Reason(reason));
+            }
+            Err(error) => {
+                if taken {
+                    write(process, destination, term)?;
+                }
+                return Err(error);
+            }
+        }
+    }
+    // The operand is not a map. ERTS raises `{badmap, Map}` and writes no
+    // register, so the destination register keeps its value. A take only
+    // gives a map (see `take_owned`), so no term goes back here.
+    Ok(Update::Missing(term.clone()))
+}
+
+/// The result of [`update_owned`].
+enum Update {
+    /// The change succeeded and its map is in the destination register.
+    Written,
+    /// The source operand does not hold a map. The value is the term of the
+    /// operand.
+    Missing(Term),
+    /// The change of a map failed; the destination register keeps the map
+    /// that it held.
+    Reason(Term),
+}
+
+/// Replace the value of each existing key of `entries`, as ERTS
 /// `erts_gc_update_map_exact` does (`beam_common.c:2203-2345`). The pairs go
 /// in the flatmap key order, as the ERTS loader sorts them, so the first key
 /// that the map does not hold is the first missing key in that order. Return
-/// the new map, or the exception reason `{badmap, Map}` for a term that is
-/// not a map and `{badkey, Key}` for a missing key. A key of a type that a
-/// PBeam map cannot hold, for example a tuple, is a missing key.
+/// `None` when every key is in the map, or the exception reason
+/// `{badkey, Key}` for a missing key. A key of a type that a PBeam map
+/// cannot hold, for example a tuple, is a missing key.
+///
+/// The change reads every pair and checks every key before it writes one
+/// value, because the map can be the map of a live register. A failed check
+/// leaves `entries` unchanged.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let map = Term::Map(Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))])?);
+/// let mut entries = Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))])?;
 /// let cooked = vec![(Term::static_atom("output"), Term::static_atom("cooked"))];
-/// assert!(matches!(update_map_exact(map, cooked.clone())?, Ok(Term::Map(_))));
-/// let badmap = update_map_exact(Term::static_atom("foo"), cooked)?.unwrap_err();
-/// assert_eq!(badmap, Term::tuple(vec![Term::static_atom("badmap"), Term::static_atom("foo")]));
+/// assert_eq!(update_map_exact(&mut entries, cooked)?, None);
+/// let missing = vec![(Term::static_atom("input"), Term::static_atom("cooked"))];
+/// assert_eq!(
+///     update_map_exact(&mut entries, missing)?,
+///     Some(Term::tuple(vec![Term::static_atom("badkey"), Term::static_atom("input")]))
+/// );
 /// ```
 ///
 /// # Errors
@@ -2756,20 +2874,102 @@ fn light_bif_switch(process: &mut ProcessState) -> bool {
 /// Return a runtime error when the key order depends on two different
 /// references (`Map::sort_pairs`).
 fn update_map_exact(
-    mut map: Term,
+    entries: &mut Map,
     mut pairs: Vec<(Term, Term)>,
-) -> Result<Result<Term, Term>, BeamError> {
-    let Term::Map(entries) = &mut map else {
-        return Ok(Err(Term::tuple(vec![Term::static_atom("badmap"), map])));
-    };
+) -> Result<Option<Term>, BeamError> {
     Map::sort_pairs(&mut pairs)?;
-    for (key, value) in pairs {
-        let Some(existing) = entries.get_mut(&key) else {
-            return Ok(Err(Term::tuple(vec![Term::static_atom("badkey"), key])));
-        };
-        *existing = value;
+    Ok(entries
+        .update(
+            pairs
+                .into_iter()
+                .map(|(key, value)| (Insert::Set, key, value))
+                .collect(),
+        )
+        .err()
+        .map(|key| Term::tuple(vec![Term::static_atom("badkey"), key])))
+}
+
+/// Give up ownership of the term of the register slot of `destination`, or
+/// return `None` when the slot does not exist, the slot is empty, or the
+/// term has another owner. The last condition reads the count of the `Arc`
+/// of the term, so a term that guest code can still observe is not taken.
+/// The function is called only when the source and the destination name one
+/// slot, so the take leaves the destination register unset.
+///
+/// An `Arc` count of one is not proof that a descendant is unique; the
+/// caller must still copy a shared descendant (`Arc::make_mut`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut process = ProcessState::new();
+/// write(&mut process, &Operand::X(0), Term::Map(Map::new()))?;
+/// assert!(matches!(take_owned(&mut process, &Operand::X(0)), Some(Term::Map(_))));
+/// assert!(take_owned(&mut process, &Operand::X(0)).is_none());
+/// ```
+fn take_owned(process: &mut ProcessState, destination: Register) -> Option<Term> {
+    match destination {
+        Register::X(index) => process
+            .registers
+            .get_mut(index as usize)
+            .and_then(Option::as_mut)
+            .filter(|term| term.unique())
+            .map(|slot| std::mem::replace(slot, Term::nil())),
+        Register::Y(index) => process
+            .frames
+            .last_mut()
+            .and_then(|frame| frame.stack.get_mut(index as usize))
+            .and_then(|slot| match slot {
+                StackSlot::Term(term) if term.unique() => {
+                    Some(std::mem::replace(term, Term::nil()))
+                }
+                StackSlot::Term(_) | StackSlot::Empty | StackSlot::Catch(_) => None,
+            }),
     }
-    Ok(Ok(map))
+}
+
+/// Return a name of a register that two [`Register`] values share only when
+/// they are the same slot.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(register_index(&Register::X(1)), register_index(&Register::X(1)));
+/// assert_ne!(register_index(&Register::X(1)), register_index(&Register::Y(1)));
+/// ```
+fn register_index(register: &Register) -> (bool, u32) {
+    match register {
+        Register::X(index) => (true, *index),
+        Register::Y(index) => (false, *index),
+    }
+}
+
+/// The register slot of a `put_map_assoc` or `put_map_exact` operand. Both
+/// the source and the destination of these instructions are a register, so
+/// the value cannot be a literal.
+enum Register {
+    /// An X register at the index.
+    X(u32),
+    /// A Y register at the index.
+    Y(u32),
+}
+
+/// Return the [`Register`] of an operand, or `None` for a literal. The
+/// loader gives a `put_map_assoc` and a `put_map_exact` a register, so a
+/// literal is not an operand of these instructions.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(register_of(&Operand::X(1)), Some(Register::X(1))));
+/// assert!(register_of(&Operand::Value(Term::Integer(1))).is_none());
+/// ```
+fn register_of(operand: &Operand) -> Option<Register> {
+    match operand {
+        Operand::X(index) => Some(Register::X(*index)),
+        Operand::Y(index) => Some(Register::Y(*index)),
+        Operand::Value(_) | Operand::UnsupportedLiteral(_) | Operand::UnsupportedInteger => None,
+    }
 }
 
 /// Borrow the value of each key in the map of a `get_map_elements` or

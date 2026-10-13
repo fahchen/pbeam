@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Map, Term};
+use pbeam_runtime::{Atom, BeamProgram, Map, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -906,5 +906,217 @@ fn raises_badkey_and_keeps_the_shared_map_like_erts() {
     assert_eq!(
         erl_reference("io:format(\"~w~n\", [map_share_probe:errors()])"),
         b"[{error,{badkey,2}},{error,{badkey,34}},#{1 => a},33,1]\n"
+    );
+}
+
+const MAP_TAKE_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_take_probe.beam");
+
+/// Check `function/0` of the map-take probe against the pinned ERTS 29.1.1
+/// result. `erts` is the text of that run and `expected` is the same value
+/// as a term. Both runtimes are compared with `expected`, so a wrong
+/// expected value fails: the pinned text is a literal of this test, and
+/// PBeam runs the compiled fixture. The keys are integers, so the map order
+/// does not depend on the atom table.
+fn take_probe(function: &str, expected: Term, erts: &[u8]) {
+    let program = BeamProgram::load(&[MAP_TAKE_PROBE]).unwrap();
+    let result = program.execute("map_take_probe", function, &[]).unwrap();
+    assert_eq!(
+        erl_reference(&format!(
+            "io:format(\"~w~n\", [map_take_probe:{function}()])"
+        )),
+        erts,
+        "{function} must keep the pinned ERTS reference run"
+    );
+    assert_eq!(
+        result.term, expected,
+        "{function} must give the pinned ERTS result through PBeam"
+    );
+}
+
+/// Return a map term of the given integer keys and values.
+fn int_map(pairs: &[(i64, Term)]) -> Term {
+    Term::Map(
+        Map::from_pairs(
+            pairs
+                .iter()
+                .map(|(key, value)| (Term::Integer(*key), value.clone()))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+/// Return the static atom term of a name.
+fn static_atom(name: &str) -> Term {
+    Term::Atom(Atom::from_static(name).expect("a static atom name"))
+}
+
+#[test]
+fn keeps_a_same_register_update_with_its_aliases_like_erts() {
+    // The source and the destination of `put_map_exact` and of
+    // `put_map_assoc` are one register (`exact/2` and `assoc/3` of the
+    // fixture). The take path changes the map in place. The key and the
+    // value of the pair of `assoc/3` are registers of the caller, so every
+    // operand read completes before the change. Every old root and each
+    // alias keeps the pinned ERTS value.
+    let source = int_map(&[(1, Term::Integer(1)), (2, Term::Integer(2))]);
+    let alias = int_map(&[
+        (1, Term::Integer(1)),
+        (2, Term::Integer(2)),
+        (7, Term::Integer(7)),
+    ]);
+    take_probe(
+        "aliases",
+        Term::list_from(vec![
+            int_map(&[(1, Term::Integer(9)), (2, Term::Integer(2))]),
+            source.clone(),
+            Term::Integer(7),
+            Term::Integer(9),
+            alias.clone(),
+            int_map(&[
+                (1, Term::Integer(1)),
+                (2, Term::Integer(2)),
+                (7, Term::Integer(9)),
+            ]),
+            int_map(&[(1, Term::Integer(3)), (2, Term::Integer(2))]),
+        ]),
+        b"[#{1 => 9,2 => 2},#{1 => 1,2 => 2},7,9,#{1 => 1,2 => 2,7 => 7},\
+          #{1 => 1,2 => 2,7 => 9},#{1 => 3,2 => 2}]\n",
+    );
+}
+
+#[test]
+fn keeps_a_value_that_aliases_the_map_like_erts() {
+    // `exact_self/1`, `assoc_self/2`, and `exact_self_key/2` name the source
+    // map in the value operand, so the value operand is the register that the
+    // change also writes (`{put_map_exact,{f,0},{x,0},{x,0},1,
+    // {list,[{integer,1},{x,0}]}}` and the two other forms). ERTS reads the
+    // value before the change, so the new map holds the old map.
+    // `shared_value/1` puts a map that the source holds in the value
+    // (`{list,[{integer,1},{x,1}]}`).
+    let program = BeamProgram::load(&[MAP_TAKE_PROBE]).unwrap();
+    let i = Term::Atom(program.atom("i").unwrap());
+    let x = static_atom("x");
+    let source = int_map(&[(1, Term::Integer(0)), (2, Term::Integer(2))]);
+    let two = int_map(&[(2, Term::Integer(2))]);
+    let inner = Term::Map(Map::from_pairs(vec![(x, Term::Integer(1))]).unwrap());
+    take_probe(
+        "aliasing",
+        Term::list_from(vec![
+            int_map(&[(1, source.clone()), (2, Term::Integer(2))]),
+            int_map(&[(2, Term::Integer(2)), (7, two)]),
+            int_map(&[(1, source), (2, Term::Integer(2))]),
+            Term::Map(
+                Map::from_pairs(vec![
+                    (Term::Integer(1), inner.clone()),
+                    (Term::Integer(2), Term::Integer(2)),
+                    (i, inner),
+                ])
+                .unwrap(),
+            ),
+        ]),
+        b"[#{1 => #{1 => 0,2 => 2},2 => 2},#{2 => 2,7 => #{2 => 2}},\
+          #{1 => #{1 => 0,2 => 2},2 => 2},#{1 => #{x => 1},2 => 2,i => #{x => 1}}]\n",
+    );
+}
+
+#[test]
+fn keeps_a_shared_map_and_its_descendants_like_erts() {
+    // An update of a map that another owner holds copies the form and the
+    // nodes on the path of the key, and each old root keeps its pairs. The
+    // shared inner term is not written.
+    let inner = int_map(&[(1, Term::Integer(1))]);
+    let old = int_map(&[(1, inner.clone())]);
+    take_probe(
+        "retained",
+        Term::list_from(vec![
+            old.clone(),
+            old,
+            int_map(&[(1, inner.clone()), (2, Term::Integer(2))]),
+            inner.clone(),
+            int_map(&[(1, inner.clone())]),
+            int_map(&[(1, int_map(&[(1, Term::Integer(1)), (2, Term::Integer(2))]))]),
+            inner,
+            int_map(&[(1, Term::Integer(1)), (2, Term::Integer(2))]),
+        ]),
+        b"[#{1 => #{1 => 1}},#{1 => #{1 => 1}},#{1 => #{1 => 1},2 => 2},#{1 => 1},\
+          #{1 => #{1 => 1}},#{1 => #{1 => 1,2 => 2}},#{1 => 1},#{1 => 1,2 => 2}]\n",
+    );
+}
+
+#[test]
+fn raises_badkey_and_badmap_for_a_same_register_update_like_erts() {
+    // An invalid key and a term that is not a map keep the pinned ERTS
+    // exception class and reason: `error:{badkey, 2}` and
+    // `error:{badmap, not_a_map}`.
+    let program = BeamProgram::load(&[MAP_TAKE_PROBE]).unwrap();
+    let not_a_map = Term::Atom(program.atom("not_a_map").unwrap());
+    take_probe(
+        "keys",
+        Term::list_from(vec![
+            Term::tuple(vec![static_atom("badkey"), Term::Integer(2)]),
+            int_map(&[(1, Term::Integer(2))]),
+            int_map(&[(1, Term::Integer(1)), (2, Term::Integer(2))]),
+            int_map(&[(1, Term::Integer(3))]),
+            int_map(&[(1, Term::Integer(1))]),
+            Term::tuple(vec![static_atom("badmap"), not_a_map]),
+        ]),
+        b"[{badkey,2},#{1 => 2},#{1 => 1,2 => 2},#{1 => 3},#{1 => 1},{badmap,not_a_map}]\n",
+    );
+}
+
+#[test]
+fn jumps_to_a_fail_label_in_a_guard_like_erts() {
+    // `put_map_exact` of a guard has a fail label that is not 0. A missing
+    // key fails the guard, and the source register keeps its value.
+    let program = BeamProgram::load(&[MAP_TAKE_PROBE]).unwrap();
+    let present = Term::Atom(program.atom("present").unwrap());
+    let absent = Term::Atom(program.atom("absent").unwrap());
+    take_probe(
+        "guarded",
+        Term::list_from(vec![present, absent, int_map(&[(1, Term::Integer(1))])]),
+        b"[present,absent,#{1 => 1}]\n",
+    );
+}
+
+#[test]
+fn keeps_the_source_of_a_caught_exception_like_erts() {
+    // A caught exception keeps the source register and each alias. The
+    // catch gives the class `error` and the reason `{badkey, 2}`.
+    let source = int_map(&[(1, Term::Integer(1))]);
+    take_probe(
+        "caught",
+        Term::list_from(vec![
+            Term::tuple(vec![
+                static_atom("error"),
+                Term::tuple(vec![static_atom("badkey"), Term::Integer(2)]),
+                source.clone(),
+                source.clone(),
+            ]),
+            source.clone(),
+            source,
+        ]),
+        b"[{error,{badkey,2},#{1 => 1},#{1 => 1}},#{1 => 1},#{1 => 1}]\n",
+    );
+}
+
+#[test]
+fn raises_badmap_for_a_same_register_update_of_a_non_map_like_erts() {
+    // `badmap/1` holds a term that is not a map in the source register and
+    // calls `put_map_exact` on it with a catch tag, so the process runs its
+    // handler after the raise.
+    let program = BeamProgram::load(&[MAP_TAKE_PROBE]).unwrap();
+    let not_a_map = Term::Atom(program.atom("not_a_map").unwrap());
+    let argument = program.host_term(not_a_map.clone());
+    assert_eq!(
+        program
+            .execute("map_take_probe", "badmap", std::slice::from_ref(&argument))
+            .unwrap()
+            .term,
+        Term::tuple(vec![static_atom("badmap"), not_a_map])
+    );
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [map_take_probe:badmap(not_a_map)])"),
+        b"{badmap,not_a_map}\n"
     );
 }
