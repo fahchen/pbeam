@@ -110,6 +110,146 @@ enum Release {
     Monitors(MonitorLinkTree<Reference, Origin>),
 }
 
+/// The number of slots of one chunk of the release work list. The stack
+/// allocates one chunk at a time, so a push copies no item that is already on
+/// the list.
+const RELEASE_CHUNK: usize = 256;
+
+/// The release work list of the scheduler: a stack of items in chunks of
+/// [`RELEASE_CHUNK`] slots.
+///
+/// A plain `Vec` copies each item that it holds when it grows. One step of
+/// [`Scheduler::drain_release`] can push many items: a chain whose every node
+/// holds one pending sibling leaves one item on the list for each level. The
+/// growth of a `Vec` would copy the whole pending stack inside that one step
+/// and leave the [`RELEASE_BATCH`] bound. This stack allocates one new chunk
+/// when its last chunk is full, and it copies no item.
+#[derive(Debug)]
+struct ReleaseStack {
+    /// The chunks of the stack, oldest first. Each chunk holds at most
+    /// [`RELEASE_CHUNK`] items.
+    chunks: Vec<Vec<Release>>,
+}
+
+impl ReleaseStack {
+    /// Return an empty stack.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(ReleaseStack::new().is_empty());
+    /// ```
+    const fn new() -> Self {
+        Self { chunks: Vec::new() }
+    }
+
+    /// Push one item on the top of the stack.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = ReleaseStack::new();
+    /// stack.push(Release::Term(Term::Integer(1)));
+    /// assert_eq!(stack.len(), 1);
+    /// ```
+    fn push(&mut self, item: Release) {
+        match self.chunks.last_mut() {
+            Some(chunk) if chunk.len() < RELEASE_CHUNK => chunk.push(item),
+            _ => {
+                let mut chunk = Vec::with_capacity(RELEASE_CHUNK);
+                chunk.push(item);
+                self.chunks.push(chunk);
+            }
+        }
+    }
+
+    /// Push each item of `items` on the top of the stack, in order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = ReleaseStack::new();
+    /// stack.extend([Release::Term(Term::Integer(1))]);
+    /// assert_eq!(stack.len(), 1);
+    /// ```
+    fn extend(&mut self, items: impl IntoIterator<Item = Release>) {
+        for item in items {
+            self.push(item);
+        }
+    }
+
+    /// Remove and return the item at the top of the stack.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut stack = ReleaseStack::new();
+    /// stack.push(Release::Term(Term::Integer(1)));
+    /// assert!(stack.pop().is_some());
+    /// assert!(stack.is_empty());
+    /// ```
+    fn pop(&mut self) -> Option<Release> {
+        let item = self.chunks.last_mut()?.pop()?;
+        if self.chunks.last().is_some_and(|chunk| chunk.is_empty()) {
+            self.chunks.pop();
+        }
+        Some(item)
+    }
+
+    /// Return true when the stack holds no item.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(ReleaseStack::new().is_empty());
+    /// ```
+    fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    /// Return the number of items of the stack.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ReleaseStack::new().len(), 0);
+    /// ```
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.chunks.iter().map(|chunk| chunk.len()).sum()
+    }
+
+    /// Iterate over the items of the stack, oldest first.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ReleaseStack::new().iter().count(), 0);
+    /// ```
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = &Release> {
+        self.chunks.iter().flat_map(|chunk| chunk.iter())
+    }
+
+    /// Return the number of bytes of the chunks of the stack and of the slots
+    /// of each chunk.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ReleaseStack::new().allocated_bytes(), 0);
+    /// ```
+    #[cfg(test)]
+    fn allocated_bytes(&self) -> usize {
+        self.chunks.capacity() * std::mem::size_of::<Vec<Release>>()
+            + self
+                .chunks
+                .iter()
+                .map(|chunk| chunk.capacity() * std::mem::size_of::<Release>())
+                .sum::<usize>()
+    }
+}
+
 /// The target of `erlang:monitor/2`, after the BIF checked the type and the
 /// target term as ERTS `monitor` does (`bif.c:758-981`).
 #[derive(Debug)]
@@ -289,8 +429,10 @@ pub(super) struct Scheduler {
     /// each scheduler step releases at most [`RELEASE_BATCH`] terms of the
     /// list ([`Self::drain_release`]). The list owns each term, so a switch
     /// to another process loses no root. The final drain of a run is the
-    /// drop of the scheduler, which releases the terms that are left.
-    release: Vec<Release>,
+    /// drop of the scheduler, which releases the terms that are left. The
+    /// list grows in chunks ([`ReleaseStack`]), so a push into it copies no
+    /// item that a step of the drain already holds.
+    release: ReleaseStack,
     /// The policy process of a run with a policy module, or `None` with a
     /// Rust policy.
     policy: Option<PolicyProcess>,
@@ -343,7 +485,7 @@ impl Scheduler {
             virtual_reductions: 0,
             dirty_io: DirtyIo::new(),
             delegations: Delegations::default(),
-            release: Vec::new(),
+            release: ReleaseStack::new(),
             policy: None,
             skip_checks: false,
         }

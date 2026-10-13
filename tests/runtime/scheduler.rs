@@ -1,5 +1,6 @@
 use super::{
-    CONTEXT_REDS, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH, Release, Scheduler, Turn,
+    CONTEXT_REDS, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH, RELEASE_CHUNK, Release,
+    Scheduler, Turn,
 };
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
@@ -996,19 +997,16 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
     }
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.finish_current(atom("normal"), None);
-    assert!(matches!(
-        scheduler.release.as_slice(),
-        [
-            Release::Terms(_),
-            Release::Terms(_),
-            Release::Term(reason),
-            Release::Registers(_),
-            Release::Frames(_),
-            Release::Mailbox(_),
-            Release::Dictionary(_),
-            Release::Monitors(_),
-        ] if *reason == atom("normal")
-    ));
+    let items: Vec<&Release> = scheduler.release.iter().collect();
+    assert_eq!(items.len(), 8, "the exit moves eight containers");
+    assert!(matches!(items[0], Release::Terms(_)));
+    assert!(matches!(items[1], Release::Terms(_)));
+    assert!(matches!(items[2], Release::Term(reason) if *reason == atom("normal")));
+    assert!(matches!(items[3], Release::Registers(_)));
+    assert!(matches!(items[4], Release::Frames(_)));
+    assert!(matches!(items[5], Release::Mailbox(_)));
+    assert!(matches!(items[6], Release::Dictionary(_)));
+    assert!(matches!(items[7], Release::Monitors(_)));
     release_all(&mut scheduler);
     assert!(scheduler.release.is_empty());
 }
@@ -1103,7 +1101,7 @@ fn releases_the_terms_of_an_exiting_process_at_each_later_step() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.finish_current(atom("normal"), None);
     assert!(matches!(
-        scheduler.release.last(),
+        scheduler.release.iter().last(),
         Some(Release::Monitors(_))
     ));
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
@@ -1268,7 +1266,7 @@ fn releases_the_empty_containers_of_a_process_that_has_no_frame() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.finish_current(atom("normal"), None);
     assert!(matches!(
-        scheduler.release.last(),
+        scheduler.release.iter().last(),
         Some(Release::Monitors(_))
     ));
     release_all(&mut scheduler);
@@ -1339,4 +1337,64 @@ fn moves_the_monitors_of_an_exiting_process_in_batches() {
     );
     release_all(&mut scheduler);
     assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn moves_the_terms_of_a_discarded_signal_to_the_release_work_list() {
+    // The exit takes each queued signal out of the mailbox and ignores it.
+    // The terms of that signal go to the release work list before the signal
+    // drops, so an ignored signal that owns the last root of a large graph
+    // does not release that graph in the exit step.
+    let mut scheduler = test_scheduler();
+    let expected = Term::list_from((0..4 * RELEASE_BATCH as i64).map(Term::Integer));
+    scheduler.start(frame(), Vec::new(), allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    // The signal arrives after the process took its turn, so the exit sees it
+    // in the mailbox and discards it.
+    scheduler
+        .processes
+        .get_mut(&ProcessId(0))
+        .unwrap()
+        .mailbox
+        .push_signal(Signal::Exit {
+            from: LinkId::Process(ProcessId(1)),
+            reason: expected.clone(),
+            linked: false,
+            normal_kills: false,
+            alias: None,
+        });
+    scheduler.finish_current(atom("normal"), None);
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Term(term) if *term == expected)),
+        "the exit moves the reason of the discarded signal to the list"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn keeps_the_pending_work_of_a_skewed_chain_in_chunks() {
+    // A chain whose every node holds one integer beside the rest of the chain
+    // leaves one pending item on the release work list for each level that
+    // the drain passed, so the list grows past one chunk. The list allocates
+    // one chunk at a time and copies no item that a step of the drain holds.
+    let mut scheduler = test_scheduler();
+    let chain = (0..4 * RELEASE_CHUNK).fold(Term::Nil, |inner, _| {
+        Term::tuple(vec![Term::Integer(1), inner])
+    });
+    scheduler.start(frame(), vec![chain], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    let mut longest = 0;
+    while !scheduler.release.is_empty() {
+        longest = longest.max(scheduler.release.len());
+        scheduler.drain_release(RELEASE_BATCH);
+    }
+    assert!(
+        longest > RELEASE_CHUNK,
+        "the pending siblings fill more than one chunk: {longest}"
+    );
 }

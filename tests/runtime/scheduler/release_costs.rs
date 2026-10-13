@@ -37,8 +37,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{RELEASE_BATCH, Release, Scheduler, Turn};
+use super::{LinkId, RELEASE_BATCH, Release, Scheduler, Turn};
 use crate::{
+    runtime::signal::Signal,
     runtime::{
         capability::{AllowAll, Capability, Policy},
         process::{
@@ -65,8 +66,13 @@ const DICTIONARY_ENTRIES: usize = 100_000;
 const MAILBOX_MESSAGES: usize = 100_000;
 
 /// The number of keys of the map of the report. The map is a HAMT, and the
-/// walk of `Map::drain_into` moves all of its pairs in one call.
+/// release walks it through `map::Drain`, one batch for each step.
 const MAP_KEYS: usize = 20_000;
+
+/// The number of levels of the skewed chain of the report. Every level holds
+/// one integer beside the rest of the chain, so the release work stack keeps
+/// one pending item for each level that the drain passed.
+const SKEWED_LEVELS: usize = 200_000;
 
 /// The number of timed runs of one path of one shape. The report gives the
 /// maximum pause of the runs.
@@ -111,6 +117,13 @@ struct Shape {
     /// workload puts the term of `build` in the X registers; a container
     /// workload fills the container of the process.
     install: fn(&mut ProcessState, fn() -> Term),
+    /// Give work to the process while it holds its turn, after the step that
+    /// takes it from the run queue. The exit path calls this before the exit,
+    /// and the shutdown path calls it before it drops the scheduler. A signal
+    /// that the handling at the schedule-in step consumes is not in the
+    /// mailbox at the exit, so a shape that measures a queued signal gives
+    /// its graph here and not in `install`.
+    queue: fn(&mut Scheduler, ProcessId),
     /// True when two processes can hold one workload of this shape, so that
     /// the report measures the shared last release of it. A container belongs
     /// to one process, so it has no shared path.
@@ -137,6 +150,27 @@ fn list() -> Term {
 /// ```
 fn chain() -> Term {
     (0..CELLS).fold(Term::Nil, |inner, _| Term::tuple(vec![inner]))
+}
+
+/// Return a chain of [`SKEWED_LEVELS`] levels whose each node holds one
+/// integer beside the rest of the chain.
+///
+/// The drain of a tuple takes its element array as one group, and the group
+/// pushes its elements in order. The inner term of a level is then at the top
+/// of the release work list, and its integer stays below it while the drain
+/// walks the rest of the chain. Thus one item waits on the list for each
+/// level, and the list grows past many chunks. A `Vec` would copy each of
+/// those items when it grows, inside one step of the drain.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(skewed_chain(), Term::Tuple(_)));
+/// ```
+fn skewed_chain() -> Term {
+    (0..SKEWED_LEVELS).fold(Term::Nil, |inner, _| {
+        Term::tuple(vec![Term::Integer(1), inner])
+    })
 }
 
 /// Return a balanced tuple tree of [`TREE_LEAVES`] immediate leaves.
@@ -256,6 +290,56 @@ fn install_dictionary(process: &mut ProcessState, _build: fn() -> Term) {
 /// install_mailbox(&mut process, mailbox_terms);
 /// assert!(!process.mailbox.is_empty());
 /// ```
+/// Queue nothing: most shapes hold their whole workload before the step that
+/// takes the process from the run queue.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// queue_nothing(&mut scheduler, ProcessId(0));
+/// ```
+fn queue_nothing(_scheduler: &mut Scheduler, _id: ProcessId) {}
+
+/// Give the process no workload at its start: the workload of this shape
+/// arrives while the process holds its turn ([`Shape::queue`]).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// install_nothing(&mut process, list);
+/// ```
+fn install_nothing(_process: &mut ProcessState, _build: fn() -> Term) {}
+
+/// Put one exit signal with a fresh graph in the mailbox of the process of
+/// `scheduler`. The graph has no other holder, so the release of the signal
+/// is the last release of that graph, and the exit discards the signal
+/// without another holder.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// queue_signal(&mut scheduler, ProcessId(0));
+/// ```
+fn queue_signal(scheduler: &mut Scheduler, id: ProcessId) {
+    let Some(process) = scheduler.processes.get_mut(&id) else {
+        return;
+    };
+    process.mailbox.push_signal(Signal::Exit {
+        from: LinkId::Process(ProcessId(1)),
+        reason: list(),
+        linked: false,
+        normal_kills: false,
+        alias: None,
+    });
+}
+
+/// Give one mailbox to `process`, and keep the empty X registers.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// install_mailbox(&mut process, mailbox_terms);
+/// ```
 fn install_mailbox(process: &mut ProcessState, _build: fn() -> Term) {
     for message in 0..MAILBOX_MESSAGES as i64 {
         process.mailbox.push(Term::Integer(message));
@@ -276,6 +360,7 @@ fn shapes() -> Vec<Shape> {
             nodes: CELLS,
             build: list,
             install: install_registers,
+            queue: queue_nothing,
             shared: true,
         },
         Shape {
@@ -283,13 +368,23 @@ fn shapes() -> Vec<Shape> {
             nodes: CELLS,
             build: chain,
             install: install_registers,
+            queue: queue_nothing,
             shared: true,
+        },
+        Shape {
+            name: "skewed chain of 200000 levels",
+            nodes: SKEWED_LEVELS,
+            build: skewed_chain,
+            install: install_registers,
+            queue: queue_nothing,
+            shared: false,
         },
         Shape {
             name: "tuple tree of 1048575 cells",
             nodes: 2 * TREE_LEAVES - 1,
             build: tree,
             install: install_registers,
+            queue: queue_nothing,
             shared: true,
         },
         Shape {
@@ -297,6 +392,7 @@ fn shapes() -> Vec<Shape> {
             nodes: 1,
             build: flat_tuple,
             install: install_registers,
+            queue: queue_nothing,
             shared: true,
         },
         Shape {
@@ -304,6 +400,7 @@ fn shapes() -> Vec<Shape> {
             nodes: MAP_KEYS,
             build: map,
             install: install_registers,
+            queue: queue_nothing,
             shared: true,
         },
         Shape {
@@ -311,6 +408,7 @@ fn shapes() -> Vec<Shape> {
             nodes: 2 * DICTIONARY_ENTRIES,
             build: dictionary_terms,
             install: install_dictionary,
+            queue: queue_nothing,
             shared: false,
         },
         Shape {
@@ -318,6 +416,15 @@ fn shapes() -> Vec<Shape> {
             nodes: MAILBOX_MESSAGES,
             build: mailbox_terms,
             install: install_mailbox,
+            queue: queue_nothing,
+            shared: false,
+        },
+        Shape {
+            name: "queued exit signal with a list of 1000000 cells",
+            nodes: CELLS,
+            build: list,
+            install: install_nothing,
+            queue: queue_signal,
             shared: false,
         },
     ]
@@ -424,7 +531,7 @@ fn held(scheduler: &Scheduler) -> Peak {
     Peak {
         units: scheduler.release.iter().map(units_of).sum(),
         held_bytes: scheduler.release.iter().map(held_bytes).sum(),
-        list_bytes: scheduler.release.capacity() * std::mem::size_of::<Release>(),
+        list_bytes: scheduler.release.allocated_bytes(),
     }
 }
 
@@ -522,6 +629,7 @@ fn exit_measurement(shape: &Shape) -> Measurement {
         Turn::Run,
         "the root process runs"
     );
+    (shape.queue)(&mut scheduler, ProcessId(0));
     let start = Instant::now();
     scheduler.finish_current(Term::static_atom("normal"), None);
     let exit = start.elapsed();
@@ -612,7 +720,10 @@ fn shared_last_release_measurement(shape: &Shape) -> Measurement {
 /// assert!(shutdown_measurement(&shapes()[0]).max_step.as_nanos() > 0);
 /// ```
 fn shutdown_measurement(shape: &Shape) -> Measurement {
-    let scheduler = scheduler_with(shape);
+    let mut scheduler = scheduler_with(shape);
+    // The work of the shape arrives while the process holds its turn, and the
+    // process holds it at the end of the run.
+    (shape.queue)(&mut scheduler, ProcessId(0));
     let start = Instant::now();
     drop(scheduler);
     let pause = start.elapsed();

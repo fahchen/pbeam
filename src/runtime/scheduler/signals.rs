@@ -8,8 +8,8 @@
 //! the one place that applies a signal to its receiver.
 
 use super::{
-    Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, SIGNAL_HANDLING_REDUCTIONS,
-    Scheduler, TargetMonitor, Ttys,
+    Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
+    SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, Ttys,
 };
 use crate::{
     error::BeamError,
@@ -708,10 +708,20 @@ impl Scheduler {
             && let Some(step) = process.mailbox.next_signal(&mut walk)
         {
             count += 1;
-            let Step::Signal(node, signal) = step else {
+            let Step::Signal(node, mut signal) = step else {
                 continue;
             };
             process.mailbox.remove(node);
+            // The handling takes the signal out of the queue here, so the
+            // signal drops at the end of this arm. Its terms go to the release
+            // work list first: an ignored signal can own the last root of a
+            // large graph, and the drop of that graph would leave the bound of
+            // the release step.
+            let mut terms = Vec::new();
+            signal.take_terms(&mut terms);
+            for term in terms {
+                self.release.push(Release::Term(term));
+            }
             match signal {
                 Signal::Monitor { watcher, reference } => {
                     count += 4;
