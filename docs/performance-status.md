@@ -29,11 +29,11 @@ The table holds the headline numbers of the whole programme. Each row names its 
 | Pinned ERTS `call_only` floor loop, 200000 iterations | 2.46 ns to 2.58 ns across the recent sessions | The after session of [#569](https://github.com/fahchen/pbeam/pull/569), [#576](https://github.com/fahchen/pbeam/pull/576), [#585](https://github.com/fahchen/pbeam/pull/585), and [#598](https://github.com/fahchen/pbeam/pull/598) | The ERTS run of the same session as each PBeam number | The load of that session | The tables of those pull requests and the record |
 | Terra first frame | 0.52 s | `e74a1af9` | One run of `bash scripts/terra_latency.sh release` | Load `{ 12.19 25.63 26.34 }`, above the bound of 12, so the record marks the run as weak | [#588](https://github.com/fahchen/pbeam/pull/588) and the record |
 | Terra key latency, four keys | 0.014 s to 0.033 s | `e74a1af9` | The same single run | The same load | [#588](https://github.com/fahchen/pbeam/pull/588) and the record |
-| Peak live bytes of one Terra scene | 24096 bytes | `c7dd12f5` | Two runs of `mise run bench-live-bytes`, spread 0 | Load `{ 41.79 77.93 80.63 }` and `{ 38.77 76.71 80.18 }` | [#589](https://github.com/fahchen/pbeam/pull/589) |
-| `size_of::<Term>()` | 40 bytes | `origin/main`; 40 bytes before and after the host-term boundary of #582 | `RUSTC_BOOTSTRAP=1 cargo rustc --locked --lib -- -Zprint-type-sizes` at the pinned rustc | No load applies to a type size | [#582](https://github.com/fahchen/pbeam/pull/582), [#598](https://github.com/fahchen/pbeam/pull/598), and `docs/term-layout-design.md` |
-| Maximum scheduler step pause on the exit of a process, list of 1000000 cells | 56.541 µs, from 23664.417 µs | Before `3b3a21d`, after `f899ea91` | `mise run bench-release`, the maximum of five runs of one path | Load `{ 6.23 51.10 69.48 }` to `{ 5.45 48.73 68.31 }` | [#578](https://github.com/fahchen/pbeam/pull/578) |
+| Peak live bytes of one Terra scene | 24096 bytes; 20192 bytes in the open compact-term branch | 24096 at `ffb1a05a` and at `35c410e6`; 20192 at `dabac942` | Two runs of `mise run bench-live-bytes` at `ffb1a05a`, spread 0, and 30 runs of each revision at `35c410e6` and `dabac942`, spread 0 | Load `{ 41.79 77.93 80.63 }` and `{ 38.77 76.71 80.18 }` at `ffb1a05a`; load 6.13 to 6.76 at the two later revisions | [#589](https://github.com/fahchen/pbeam/pull/589) and [#598](https://github.com/fahchen/pbeam/pull/598) |
+| `size_of::<Term>()` | 40 bytes; 32 bytes in the open compact-term branch | 40 at `35c410e6`, and 40 bytes before and after the host-term boundary of #582; 32 at `dabac942` | `RUSTC_BOOTSTRAP=1 cargo rustc --locked --lib -- -Zprint-type-sizes` at the pinned rustc | No load applies to a type size | [#582](https://github.com/fahchen/pbeam/pull/582), [#598](https://github.com/fahchen/pbeam/pull/598), and `docs/term-layout-design.md` |
+| Maximum scheduler step pause on the exit of a process, list of 1000000 cells | 56.541 µs, from 23664.417 µs | Before `3b3a21d`, after `f899ea91` | `mise run bench-release`, the maximum of five runs of one path | Before load `{ 4.95 45.12 66.44 }` to `{ 4.64 44.39 66.06 }`; after load `{ 6.23 51.10 69.48 }` to `{ 5.45 48.73 68.31 }` | [#578](https://github.com/fahchen/pbeam/pull/578) |
 | ETS `set` lookup of one object in a table of 1000 objects | 10.000 ns, from 4195.205 ns | Before `3b3a21d`, after `0c27d4d` | Three runs of the micro-measurement, the minimum of the nine timed runs of one run | Load before `{ 4.64 6.07 6.76 }`, after `{ 11.75 22.48 17.40 }` | [#570](https://github.com/fahchen/pbeam/pull/570) |
-| Row 6 gate of the term plan | Fail: `Term` reaches 32 bytes and the peak-live-byte reduction is 16.20 percent, below the 16-byte and 20 percent bounds | Before `c7dd12f5`, after `45cae312` | The draft of [#598](https://github.com/fahchen/pbeam/pull/598), one quiet window | Load `{ 8.55 39.09 47.42 }` and `{ 5.68 24.15 39.60 }` | [#598](https://github.com/fahchen/pbeam/pull/598) |
+| Row 6 gate of the term plan | Fail on its numbers: the median of the first frame is 0.37 s in both revisions, and the peak-live-byte reduction is 16.20 percent, below the 20 percent bound; the owner decided to land the compact term as the first half of the 16-byte target | Before `35c410e6`, after `dabac942` | 30 runs of the live-byte harness and 30 runs of the Terra path of each revision, with one before run and one after run next to each other in each round | Live-byte load 6.13 to 6.76; Terra load of the 60 runs 3.23 to 31.34, and 15 runs above the bound of 12; floor-loop load `{ 6.45 6.73 4.81 }` | [#598](https://github.com/fahchen/pbeam/pull/598) |
 
 The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. Their difference is not a measured gain of one step, and this file does not state one.
 
@@ -43,38 +43,50 @@ Each entry is one landed change or one change that is not landed. The entries ar
 
 ### 2026-10-14 - Row 6 compact term, task [#571](https://github.com/fahchen/pbeam/issues/571), pull request [#598](https://github.com/fahchen/pbeam/pull/598) - Not landed
 
-The change boxes the 32-byte binary descriptor behind one `Arc` to a private `BinaryView`, so the `Term::Binary` arm falls from 32 bytes to 8 bytes. The pull request is a draft, and the row 6 gate fails: `Term` reaches 32 bytes and not 16, and the peak-live-byte reduction is 16.20 percent, below the 20 percent bound. The task waits for the owner's decision on row 6, because the compact term and the immediate atom root of [#580](https://github.com/fahchen/pbeam/issues/580) belong to one decision.
+The change boxes the 32-byte binary descriptor behind one `Arc` to a private `BinaryView`, so the `Term::Binary` arm falls from 32 bytes to 8 bytes. The owner decided to land the compact term as the first half of the 16-byte target of row 6, and the pull request is open; the row gate fails on its numbers, and the change is not merged. The 16-byte target waits for the immediate atom root of [#580](https://github.com/fahchen/pbeam/issues/580).
 
 | Shape | Before | After | Change | Revision | Load or run rule |
 | --- | --- | --- | --- | --- | --- |
-| `size_of::<Term>()` | 40 bytes | 32 bytes | -8 bytes | Before `c7dd12f5`, after `45cae312` | Pinned rustc 1.99.0, `-Zprint-type-sizes`; the type size carries no load |
+| `size_of::<Term>()` | 40 bytes | 32 bytes | -8 bytes | Before `35c410e6`, after `dabac942` | Pinned rustc 1.99.0, `-Zprint-type-sizes`; the type size carries no load |
 | `size_of::<Option<Term>>()` | 40 bytes | 32 bytes | -8 bytes | The same two revisions | The same command |
 | `size_of::<Binary>()` | 32 bytes | 8 bytes | -24 bytes | The same two revisions | The same command |
+| `size_of::<BinaryView>()` | No separate type | 32 bytes | A new type | The same two revisions | The same command |
+| `size_of::<MatchState>()` | 40 bytes | 16 bytes | -24 bytes | The same two revisions | The same command |
+| `size_of::<Operand>()` | 40 bytes | 32 bytes | -8 bytes | The same two revisions | The same command |
 | `size_of::<Instruction>()` | 136 bytes | 112 bytes | -24 bytes | The same two revisions | The same command |
-| Peak live bytes of one Terra scene | 24096 bytes | 20192 bytes | -3904 bytes, or -16.20 percent | The same two revisions | `mise run bench-live-bytes`, two runs of each revision, spread 0, load `{ 8.55 39.09 47.42 }` |
-| Terra first frame | 0.50 s | 0.51 s | +0.01 s | The same two revisions | One run of each revision, load `{ 8.23 38.01 46.94 }` and `{ 7.50 36.88 46.44 }` |
-| Terra key latency, four keys | 0.014 s to 0.016 s | 0.015 s | Inside one sample | The same two revisions | The same two runs |
-| Local `call_only` floor loop, 200000 iterations | 122.5 ns | 122.2 ns | -0.3 ns | The same two revisions | `mise run bench-dispatch`, load `{ 8.42 38.56 47.19 }` for both runs |
-| `call_ext_only` floor loop, 200000 iterations | 296.4 ns | 253.4 ns | -43.0 ns | The same two revisions | The same two runs |
+| `size_of::<StackSlot>()` | 40 bytes | 32 bytes | -8 bytes | The same two revisions | The same command |
+| Peak live bytes of one Terra scene | 24096 bytes | 20192 bytes | -3904 bytes, or -16.20 percent | The same two revisions | `mise run bench-live-bytes`, 30 runs of each revision, spread 0, load 6.13 to 6.76 |
+| Terra first frame, median | 0.37 s | 0.37 s | Ratio 1.000 | The same two revisions | 22 before runs and 23 after runs with a one-minute load at or below 12, one before run and one after run next to each other in each round; the load of the 60 runs is 3.23 to 31.34, and 15 runs are above the bound |
+| Terra key latency, the medians of the four keys | 0.022 s, 0.025 s, 0.022 s, 0.022 s | 0.021 s, 0.022 s, 0.023 s, 0.022 s | Ratios 0.955, 0.880, 1.045, 0.978 | The same two revisions | The same 22 and 23 runs; the key latency has a resolution of 1 ms, so a key median carries that step |
+| Deep copy of a 102400-byte binary | 1748.834 ns, 1632.166 ns, 1640.000 ns, 1630.000 ns in four pairs | 1812.000 ns, 1750.250 ns, 1745.000 ns, 1747.916 ns in the same four pairs | +3.6 to +7.2 percent in every pair | The same two revisions | `mise run bench-term`, one before invocation and one after invocation next to each other in one quiet window, each value the minimum of nine calls inside one test process |
+| `arc_clone_drop_binary_102400` | 9.952 ns, 9.952 ns, 9.939 ns | 9.612 ns, 9.609 ns, 9.612 ns | About -3.4 percent | The same two revisions | The same command and the same quiet window |
+| Read of the size of a 102400-byte binary | 0.813 ns, 0.814 ns, 0.813 ns | 0.878 ns, 0.877 ns, 0.877 ns | +0.064 ns, or +7.9 percent | The same two revisions | The same command, the minimum of nine timed harness calls, load 7.88 to 8.48, three rounds of each revision |
+| Local `call_only` floor loop, 200000 iterations | 120.7 ns | 117.9 ns | -2.8 ns | The same two revisions | `mise run bench-dispatch`, load `{ 6.45 6.73 4.81 }` for both runs; the pinned ERTS number of the same session is 2.67 ns |
+| `call_ext_only` floor loop, 200000 iterations | 274.3 ns | 250.8 ns | -23.5 ns | The same two revisions | The same run; the pinned ERTS number is 2.81 ns |
+| Local `call_only` plus `gc_bif '+'` | 189.7 ns | 187.9 ns | -1.8 ns | The same two revisions | The same run; the pinned ERTS number is 2.65 ns |
+| Local `call_only` plus the `bif` of `tuple_size/1` | 191.6 ns | 186.9 ns | -4.7 ns | The same two revisions | The same run; the pinned ERTS number is 3.34 ns |
+| Local `call_only` plus the `bif` of `element/2` | 195.4 ns | 190.7 ns | -4.7 ns | The same two revisions | The same run; the pinned ERTS number is 2.61 ns |
+| Local `call_only` plus the `bif` of `hd/1` | 194.6 ns | 190.8 ns | -3.8 ns | The same two revisions | The same run; the pinned ERTS number is 2.62 ns |
+| Local `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 261.2 ns | 251.1 ns | -10.1 ns | The same two revisions | The same run; the pinned ERTS number is 7.53 ns |
 
-Source: the body and the verification of [#598](https://github.com/fahchen/pbeam/pull/598). The gate of row 6 is a term of at most 16 bytes with at least a 10 percent end-to-end Terra gain, or at least a 20 percent reduction of peak live bytes with no time regression above 10 percent. This entry marks the change as not landed and states no landed gain.
+Source: the body and the verification of [#598](https://github.com/fahchen/pbeam/pull/598). The gate of row 6 is a term of at most 16 bytes with at least a 10 percent end-to-end Terra gain, or at least a 20 percent reduction of peak live bytes with no time regression above 10 percent. The gate fails on its numbers, and the owner decided to land the compact term as the first half of the target. This entry marks the change as not landed while the pull request is unmerged and states no landed gain.
 
 ### 2026-10-14 06:06 JST - Bounded scheduler release, task [#559](https://github.com/fahchen/pbeam/issues/559), pull request [#578](https://github.com/fahchen/pbeam/pull/578), row 11 of the term plan
 
-The scheduler owns a release work list, and the exit of a process moves its containers to that list as containers. `Scheduler::drain_release` releases at most `RELEASE_BATCH` units of 256 terms in one scheduler step, so the exit of a process no longer releases its whole term graph in one step.
+The scheduler owns a release work list, and the exit of a process moves its containers to that list as containers. One call of `Scheduler::drain_release` processes at most `RELEASE_BATCH`, which is 256 units, in one scheduler step; a unit is one term, one element of an element array, one pair of a map, one register or Y slot, one dictionary pair, one mailbox entry, one monitor, one frame, or one step of a map walk, and a unit pushes at most two terms. The exit of a process therefore no longer releases its whole term graph in one step.
 
 | Shape, maximum pause of one scheduler step | Before `3b3a21d` | After `f899ea91` | Change | Revision | Load or run rule |
 | --- | --- | --- | --- | --- | --- |
-| List of 1000000 cells, process exit | 23664.417 µs | 56.541 µs | -23607.876 µs | Before `3b3a21d`, after `f899ea91` | `mise run bench-release`, the maximum of five runs of one path; load `{ 6.23 51.10 69.48 }` to `{ 5.45 48.73 68.31 }` |
-| Chain of 1000000 levels, process exit | 26319.916 µs | 48.834 µs | -26271.082 µs | The same two revisions | The same run |
-| Skewed chain of 200000 levels, process exit | 6594.000 µs | 42.000 µs | -6552.000 µs | The same two revisions | The same run; the exit rows of this shape ran at load `{ 5.57 49.48 68.69 }` to `{ 5.45 48.73 68.31 }` |
-| Tuple tree of 1048575 cells, process exit | 20815.709 µs | 55.208 µs | -20760.501 µs | The same two revisions | The same run |
-| Flat tuple of 1000000 elements, process exit | 3713.584 µs | 108.208 µs | -3605.376 µs | The same two revisions | The same run |
-| Map of 20000 keys, process exit | 609.833 µs | 15.542 µs | -594.291 µs | The same two revisions | The same run |
-| Dictionary of 100000 entries, process exit | 442.000 µs | 13.875 µs | -428.125 µs | The same two revisions | The same run |
-| Mailbox of 100000 messages, process exit | 561.792 µs | 7.584 µs | -554.208 µs | The same two revisions | The same run |
-| Queued exit signal with a list of 1000000 cells, process exit | 24748.041 µs | 122.166 µs | -24625.875 µs | The same two revisions | The same run |
-| List of 1000000 cells, shutdown | 23696.708 µs | 24979.333 µs | Stays synchronous | The same two revisions | The same run; the drop of the `Scheduler` at the end of a run stays synchronous |
+| List of 1000000 cells, process exit | 23664.417 µs | 56.541 µs | -23607.876 µs | Before `3b3a21d`, after `f899ea91` | `mise run bench-release`, the maximum of five runs of one path; before load `{ 4.95 45.12 66.44 }` to `{ 4.64 44.39 66.06 }`, after load `{ 6.23 51.10 69.48 }` to `{ 5.45 48.73 68.31 }` |
+| Chain of 1000000 levels, process exit | 26319.916 µs | 48.834 µs | -26271.082 µs | The same two revisions | The same run of each revision, at the before and after loads above |
+| Skewed chain of 200000 levels, process exit | 6594.000 µs | 42.000 µs | -6552.000 µs | The same two revisions | The same run of each revision, at the before and after loads above; the exit rows of this shape after the change ran at load `{ 5.57 49.48 68.69 }` to `{ 5.45 48.73 68.31 }` |
+| Tuple tree of 1048575 cells, process exit | 20815.709 µs | 55.208 µs | -20760.501 µs | The same two revisions | The same run of each revision, at the before and after loads above |
+| Flat tuple of 1000000 elements, process exit | 3713.584 µs | 108.208 µs | -3605.376 µs | The same two revisions | The same run of each revision, at the before and after loads above |
+| Map of 20000 keys, process exit | 609.833 µs | 15.542 µs | -594.291 µs | The same two revisions | The same run of each revision, at the before and after loads above |
+| Dictionary of 100000 entries, process exit | 442.000 µs | 13.875 µs | -428.125 µs | The same two revisions | The same run of each revision, at the before and after loads above |
+| Mailbox of 100000 messages, process exit | 561.792 µs | 7.584 µs | -554.208 µs | The same two revisions | The same run of each revision, at the before and after loads above |
+| Queued exit signal with a list of 1000000 cells, process exit | 24748.041 µs | 122.166 µs | -24625.875 µs | The same two revisions | The same run of each revision, at the before and after loads above |
+| List of 1000000 cells, shutdown | 23696.708 µs | 24979.333 µs | Stays synchronous | The same two revisions | The same run of each revision, at the before and after loads above; the drop of the `Scheduler` at the end of a run stays synchronous |
 
 Source: the measurement section of [#578](https://github.com/fahchen/pbeam/pull/578). Limits of that source: the control row does not agree between the two revisions for the map and the queued signal, so the control does not prove the size of every row; the pause is the pause of one scheduler step of the release path and not a wall-clock deadline; `Held bytes` is not the peak allocation of the whole process; a later clean run of the harness at `2794bfd` recorded exit rows of 15.708 µs to 100.875 µs at load `{ 8.73 12.74 16.71 }` to `{ 11.23 13.47 17.05 }`.
 
@@ -195,17 +207,17 @@ Source: the verification of [#570](https://github.com/fahchen/pbeam/pull/570). T
 
 The change removes the per-iteration comparison of the active module from the run loop. The loop no longer reads the active frame on each iteration, and each exit that can change the active module refreshes the cursor: a call that enters a frame, a return, and an exception that truncates the stack.
 
-| Shape | Before `a0104b4` | After the task branch | Change | Revision | Load or run rule |
+| Shape | Before `a0104b4`, after `3b3a21d2` | After `3b3a21d2` | Change | Revision | Load or run rule |
 | --- | --- | --- | --- | --- | --- |
-| Local `call_only` floor loop, 200000 iterations | 147.7 ns | 144.1 ns | -3.6 ns | Before `a0104b4` | `mise run bench-dispatch`, six interleaved runs of each build in two sessions; each cell is the minimum of the six runs, and each run is the minimum of nine probe runs; load 2.79 to 11.02 |
-| Position `call_only` floor loop, 200000 iterations | 147.4 ns | 143.8 ns | -3.6 ns | Before `a0104b4` | The same runs |
-| Local `call_only` floor loop, 20000 iterations | 146.9 ns | 143.0 ns | -3.9 ns | Before `a0104b4` | The same runs |
-| Position `call_only` floor loop, 20000 iterations | 147.6 ns | 143.5 ns | -4.1 ns | Before `a0104b4` | The same runs |
-| `call_ext_only` floor loop, 200000 iterations | 283.3 ns | 262.3 ns | -21.0 ns | Before `a0104b4` | The same runs |
-| `call_ext_only` floor loop, 20000 iterations | 283.1 ns | 260.1 ns | -23.0 ns | Before `a0104b4` | The same runs |
-| Attribution `L`, local `call_only`, 200000 iterations | 148.586 ns | 145.197 ns | -3.389 ns | Before `a0104b4` | `bash scripts/dispatch_attribution.sh`, three builds interleaved in one session, six runs of each build, the minimum of six runs; load `{ 4.13 9.40 11.99 }` to `{ 4.42 9.90 12.24 }` |
-| Attribution `L` of the `V2` ablation, the control | 148.586 ns | 144.596 ns | -3.990 ns | The same base revision | The same three builds |
-| Micro-measurement of the module identity comparison | 0.495 ns for one operation | Removed from the loop | -0.495 ns for one operation | The task branch | The minimum of nine timed runs of 100000 operations; load `{ 4.13 ... }` to `{ 10.31 ... }` |
+| Local `call_only` floor loop, 200000 iterations | 147.7 ns | 144.1 ns | -3.6 ns | Before `a0104b4`, after `3b3a21d2` | `mise run bench-dispatch`, six interleaved runs of each build in two sessions; each cell is the minimum of the six runs, and each run is the minimum of nine probe runs; load 2.79 to 11.02 |
+| Position `call_only` floor loop, 200000 iterations | 147.4 ns | 143.8 ns | -3.6 ns | Before `a0104b4`, after `3b3a21d2` | The same runs |
+| Local `call_only` floor loop, 20000 iterations | 146.9 ns | 143.0 ns | -3.9 ns | Before `a0104b4`, after `3b3a21d2` | The same runs |
+| Position `call_only` floor loop, 20000 iterations | 147.6 ns | 143.5 ns | -4.1 ns | Before `a0104b4`, after `3b3a21d2` | The same runs |
+| `call_ext_only` floor loop, 200000 iterations | 283.3 ns | 262.3 ns | -21.0 ns | Before `a0104b4`, after `3b3a21d2` | The same runs |
+| `call_ext_only` floor loop, 20000 iterations | 283.1 ns | 260.1 ns | -23.0 ns | Before `a0104b4`, after `3b3a21d2` | The same runs |
+| Attribution `L`, local `call_only`, 200000 iterations | 148.586 ns | 145.197 ns | -3.389 ns | Before `a0104b4`, after `3b3a21d2` | `bash scripts/dispatch_attribution.sh`, three builds interleaved in one session, six runs of each build, the minimum of six runs; load `{ 4.13 9.40 11.99 }` to `{ 4.42 9.90 12.24 }` |
+| Attribution `L` of the `V2` ablation, the control | 148.586 ns | 144.596 ns | -3.990 ns | Before `a0104b4`, after the `V2` ablation build | The same three builds |
+| Micro-measurement of the module identity comparison | 0.495 ns for one operation | Removed from the loop | -0.495 ns for one operation | The task branch head `af039313`, merged as `3b3a21d2` | The minimum of nine timed runs of 100000 operations; load `{ 4.13 ... }` to `{ 10.31 ... }` |
 
 Source: the verification of [#569](https://github.com/fahchen/pbeam/pull/569) and the section "The active module and the execution cursor" of `docs/interpreter-dispatch-measurements.md`. A second session of the same revision gives a fall of 4.115 ns on the attribution `L`, and the pull request states that both falls are below the 4.591 ns of half the historical share at `c2f0341` and above half of the re-measured share at `a0104b4`.
 
@@ -229,7 +241,7 @@ Source: the verification of [#548](https://github.com/fahchen/pbeam/pull/548). T
 
 ### 2026-10-12 - Dispatch step 9, combine the measured instruction pairs, task [#517](https://github.com/fahchen/pbeam/issues/517), pull request [#538](https://github.com/fahchen/pbeam/pull/538) - Not landed
 
-The draft adds `Instruction::TestCompareBif` and `Instruction::BifCall`, so the measured `test` with `gc_bif` shape and the measured `gc_bif` with `call_only` shape each run in one dispatch step. The gate of the step fails, so the task closed without an implementation and the pull request stays a draft.
+The closed pull request [#538](https://github.com/fahchen/pbeam/pull/538) adds `Instruction::TestCompareBif` and `Instruction::BifCall`, so the measured `test` with `gc_bif` shape and the measured `gc_bif` with `call_only` shape each run in one dispatch step. The gate of the step fails, so the task closed without an implementation and the pull request closed without a merge.
 
 | Shape | Before `c6cfb3a` | After `945e9f8` | Change | Revision | Load or run rule |
 | --- | --- | --- | --- | --- | --- |
@@ -257,7 +269,7 @@ Source: the closing comment on [#517](https://github.com/fahchen/pbeam/issues/51
 | Drop of a tuple of one element, shared holder | 5.99 ns | 3.19 ns | -2.80 ns | The same two revisions | The same three runs |
 | Drop of a map of one key, last holder | 91.10 ns | 67.08 ns | -24.02 ns | The same two revisions | The same three runs |
 | Drop of a map of one key, shared holder | 25.91 ns | 6.57 ns | -19.34 ns | The same two revisions | The same three runs |
-| Drop of a list of 1000000 cells | 24.69 ms | 22.76 ms | -1.93 ms | The same two revisions | The same command; three runs only for this shape |
+| Drop of a list of 1000000 cells | 24.69 ms | 22.29 ms | -2.41 ms | The same two revisions | The same command; three runs only for this shape, and the report gives 22.758750 ms, 22.288333 ms, and 22.757625 ms for each after run |
 | Allocations of the drop of a map of one key, shared holder | 1 | 0 | -1 | The same two revisions | `cargo test --release --test drop_allocations`, the minimum of the three runs of each revision |
 | Allocations of the drop of a tuple of three elements, last holder | 1 | 0 | -1 | The same two revisions | The same counter |
 | `get` on a 1000-key map | 68.57 ns | 68.46 ns | -0.11 ns | The same two revisions | `cargo test --release --lib records_the_map_operation_cost`; three runs, each the minimum of nine runs of 200 rounds; before load `{ 3.55 7.00 11.52 }` to `{ 7.42 7.51 11.54 }`, after `{ 3.34 6.90 11.46 }` to `{ 7.13 7.44 11.46 }` |
