@@ -207,7 +207,7 @@ Source: the verification of [#570](https://github.com/fahchen/pbeam/pull/570). T
 
 The change removes the per-iteration comparison of the active module from the run loop. The loop no longer reads the active frame on each iteration, and each exit that can change the active module refreshes the cursor: a call that enters a frame, a return, and an exception that truncates the stack.
 
-| Shape | Before `a0104b4`, after `3b3a21d2` | After `3b3a21d2` | Change | Revision | Load or run rule |
+| Shape | Before `a0104b4` | After `3b3a21d2` | Change | Revision | Load or run rule |
 | --- | --- | --- | --- | --- | --- |
 | Local `call_only` floor loop, 200000 iterations | 147.7 ns | 144.1 ns | -3.6 ns | Before `a0104b4`, after `3b3a21d2` | `mise run bench-dispatch`, six interleaved runs of each build in two sessions; each cell is the minimum of the six runs, and each run is the minimum of nine probe runs; load 2.79 to 11.02 |
 | Position `call_only` floor loop, 200000 iterations | 147.4 ns | 143.8 ns | -3.6 ns | Before `a0104b4`, after `3b3a21d2` | The same runs |
