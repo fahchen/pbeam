@@ -1,5 +1,6 @@
 //! The micro-measurement of the parts of one interpreter instruction, for the
-//! attribution of task [#546](https://github.com/fahchen/pbeam/issues/546).
+//! attribution of task [#546](https://github.com/fahchen/pbeam/issues/546) and
+//! the cursor measurement of task [#550](https://github.com/fahchen/pbeam/issues/550).
 //!
 //! The ablation of the record neutralises one sub-step of the interpreter in a
 //! scratch build and measures the difference on the floor loop of
@@ -27,8 +28,8 @@
 use std::{collections::HashMap, hint::black_box, rc::Rc, time::Instant};
 
 use super::{
-    BeamProgram, bif::BifId, code_table, function_at_label, label_index, light_bif_switch,
-    read_bif_arguments, read_operand, write_operand,
+    BeamProgram, CodeTable, Cursor, bif::BifId, code_table, current_frame, function_at_label,
+    label_index, light_bif_switch, read_bif_arguments, read_operand, write_operand,
 };
 use crate::{
     Term,
@@ -171,6 +172,30 @@ fn dispatch_arm(instruction: &Instruction) -> u64 {
     }
 }
 
+/// Return a scheduler that runs [`floor_module`] at the entry of its
+/// `floor_loop/1` function, for the cursor rows of task
+/// [#550](https://github.com/fahchen/pbeam/issues/550).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (scheduler, module) = cursor_scheduler();
+/// assert_eq!(scheduler.current_module().unwrap().id, module.id);
+/// ```
+fn cursor_scheduler() -> (Scheduler, Rc<BeamModule>) {
+    let module = floor_module();
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    scheduler.code = CodeTable::new(HashMap::from([("fixture".to_owned(), Rc::clone(&module))]));
+    let frame = code_table::frame(&module, 1, 1).expect("floor_loop/1 exists");
+    scheduler
+        .start(frame, vec![Term::Integer(7)], Vec::new())
+        .expect("the root process starts");
+    scheduler
+        .schedule_next()
+        .expect("the root process is runnable");
+    (scheduler, module)
+}
+
 /// Print the cost of every part that an ablation cannot separate.
 #[test]
 fn prints_the_cost_of_every_instruction_part() {
@@ -274,6 +299,94 @@ fn prints_the_cost_of_every_instruction_part() {
                 process
             },
             |process| u64::from(light_bif_switch(process)),
+        ),
+    );
+
+    // The three parts of the cursor of step 2, which task
+    // [#550](https://github.com/fahchen/pbeam/issues/550) measures apart: the
+    // module compare of each iteration, the refresh of the cursor when the
+    // active module changes, and the commit of the position at each exit.
+    // Each operation reads its state through `black_box`, because the state
+    // does not change between two iterations of a plain loop and the
+    // compiler would hoist the read out of the timed region.
+    let (_, module) = cursor_scheduler();
+    let module_id = module.id;
+    report(
+        "cursor_module_compare",
+        cost_with(
+            || ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]),
+            |process| u64::from(current_frame(black_box(process)).module_id != module_id),
+        ),
+    );
+    report(
+        "cursor_commit",
+        cost_with(
+            || {
+                let (mut scheduler, _module) = cursor_scheduler();
+                let cursor = Cursor::new(&mut scheduler).expect("the active frame has code");
+                (
+                    ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]),
+                    cursor,
+                    scheduler,
+                )
+            },
+            |(process, cursor, _scheduler)| {
+                cursor.commit(black_box(process));
+                cursor.position as u64
+            },
+        ),
+    );
+    report(
+        "cursor_refresh_same_module",
+        cost_with(
+            || {
+                let (mut scheduler, module) = cursor_scheduler();
+                let cursor = Cursor::new(&mut scheduler).expect("the active frame has code");
+                (scheduler, cursor, module)
+            },
+            |(scheduler, cursor, _module)| {
+                cursor
+                    .refresh(black_box(scheduler))
+                    .expect("the module is loaded");
+                cursor.position as u64
+            },
+        ),
+    );
+    // The changed path reads the code table and clones the module of the
+    // active frame, and the reset of `cursor.module` between the operations
+    // adds one more clone-and-drop pair. The `cursor_module_reset` row gives
+    // the cost of that reset alone, so a reader can subtract it.
+    let other = Rc::new(BeamModule::new("other".into(), HashMap::new(), vec![]));
+    assert_ne!(other.id, module_id);
+    report(
+        "cursor_module_reset",
+        cost_with(
+            || {
+                let (mut scheduler, module) = cursor_scheduler();
+                let cursor = Cursor::new(&mut scheduler).expect("the active frame has code");
+                (cursor, module)
+            },
+            |(cursor, _module)| {
+                cursor.module = Rc::clone(black_box(&other));
+                cursor.position as u64
+            },
+        ),
+    );
+    report(
+        "cursor_refresh_changed_module",
+        cost_with(
+            || {
+                let (mut scheduler, module) = cursor_scheduler();
+                let cursor = Cursor::new(&mut scheduler).expect("the active frame has code");
+                (scheduler, cursor, module)
+            },
+            |(scheduler, cursor, _module)| {
+                cursor.module = Rc::clone(black_box(&other));
+                cursor
+                    .refresh(black_box(scheduler))
+                    .expect("the module is loaded");
+                cursor.position as u64
+            },
         ),
     );
 
