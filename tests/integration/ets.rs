@@ -35,16 +35,36 @@ fn looks_up_a_key_in_a_loop_as_pinned_erts() {
     // result. The loop is the program-level evidence of the key index of
     // #543, and the test prints the least of 9 timed runs of the program.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(timed(&program, "lookup_loop"), Term::Integer(2_002_000));
+    assert_eq!(reference("lookup_loop"), b"2002000\n");
+}
+
+#[test]
+fn inserts_objects_in_a_loop_as_pinned_erts() {
+    // `ets_probe:insert_loop/0` fills a set table with the 1000 objects
+    // {I, I * 2} and returns the object of the last key, so the program-level
+    // evidence shows the cost of an insert and not only the cost of a lookup.
+    // The pinned ERTS gives the same result.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        timed(&program, "insert_loop"),
+        Term::list_from([Term::tuple(vec![Term::Integer(1000), Term::Integer(2000)])])
+    );
+    assert_eq!(reference("insert_loop"), b"[{1000,2000}]\n");
+}
+
+/// Run `ets_probe:Function()` 9 times on PBeam, print the least of the timed
+/// runs, and return the result of the last run.
+fn timed(program: &BeamProgram, function: &str) -> Term {
     let mut best = std::time::Duration::MAX;
     let mut result = None;
     for _ in 0..9 {
         let start = std::time::Instant::now();
-        result = Some(program.execute("ets_probe", "lookup_loop", &[]).unwrap());
+        result = Some(program.execute("ets_probe", function, &[]).unwrap());
         best = best.min(start.elapsed());
     }
-    println!("COST ets_lookup_loop_program {} ns", best.as_nanos());
-    assert_eq!(result.unwrap(), Term::Integer(2_002_000));
-    assert_eq!(reference("lookup_loop"), b"2002000\n");
+    println!("COST ets_{function}_program {} ns", best.as_nanos());
+    result.unwrap()
 }
 
 #[test]
