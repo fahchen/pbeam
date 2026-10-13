@@ -495,9 +495,11 @@ impl Scheduler {
                 };
                 let process = self.processes.get_mut(&id).expect("the process is alive");
                 let messages = process.mailbox.messages_before(node);
-                let process = self.handled(id, node);
+                // The item name comes from the atom table, so remove the
+                // node here and keep the two field borrows separate.
+                process.mailbox.remove(node);
                 let info = process
-                    .info(&item, current, messages, true)?
+                    .info(&self.atoms, &item, current, messages, true)?
                     .expect("erlang:process_info/2 sends a supported item");
                 self.send_message(id, requester, reply(reference, info));
                 0

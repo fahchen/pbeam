@@ -14,7 +14,7 @@ use crate::{
         ets::{Access, Table},
         process::{ProcessState, Start, tests::frame},
     },
-    term::{Atom, AtomTable, Lambda, ProcessId, Reference, test_atom},
+    term::{Atom, AtomTable, Lambda, ProcessId, Reference, test_atom, test_atom_table},
 };
 
 /// Return the initial capabilities of the default policy.
@@ -59,7 +59,7 @@ fn program_of(instructions: Vec<Instruction>, exports: HashMap<(String, u32), u3
                     .expect("the fixture module loads"),
             ),
         )]),
-        atoms: Arc::new(AtomTable::new()),
+        atoms: Arc::new(test_atom_table()),
     }
 }
 
@@ -3202,18 +3202,9 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
         Term::list_from(vec![test_atom("x"); 1023]),
     );
     body.push(erlang_call("apply", 3, true));
-    let mut program = apply_targets_program(body);
-    // The atoms of the `undef` frame come from the atom table of the run.
-    assert_eq!(
-        program
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string(),
-        "atom table does not hold fixture"
-    );
-    for name in ["fixture", "missing"] {
-        Arc::get_mut(&mut program.atoms).unwrap().put(name).unwrap();
-    }
+    let program = apply_targets_program(body);
+    // The atoms of the `undef` frame come from the atom table of the run,
+    // which holds the atoms of the hand-built code.
     assert_eq!(
         program
             .execute("fixture", "main", &[])
@@ -3233,6 +3224,22 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
     assert_eq!(
         run_with_apply_targets(body).unwrap_err().to_string(),
         "root process exited with {system_limit,[]}"
+    );
+}
+
+#[test]
+fn applies_a_pbeam_bif_through_the_name_path() {
+    // `pbeam_cap:revoke/2` is a PBeam BIF and no `bif.tab` entry, so an
+    // `apply` reaches it through the name path of `call_mfa`. A holder that
+    // is not a pid gives `badarg`.
+    let mut body = vec![
+        Instruction::Move(atom("x"), Operand::X(0)),
+        Instruction::Move(atom("env"), Operand::X(1)),
+    ];
+    body.extend(apply_body(2, atom("pbeam_cap"), atom("revoke")));
+    assert_eq!(
+        run_with_apply_targets(body).unwrap_err().to_string(),
+        BADARG_EXIT
     );
 }
 

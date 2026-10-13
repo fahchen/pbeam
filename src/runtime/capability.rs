@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use super::{host::filename_encoding, unicode::native_filename};
 use crate::{
     error::{BeamError, error},
-    term::{ProcessId, Term},
+    term::{AtomTable, ProcessId, Term},
 };
 
 /// The resource kind that a capability covers.
@@ -1047,7 +1047,7 @@ impl Restriction {
 /// assert!(restrictions(&option).is_some());
 /// assert!(restrictions(&Term::static_atom("all")).is_none());
 /// ```
-pub(super) fn restrictions(term: &Term) -> Option<Vec<Restriction>> {
+pub(super) fn restrictions(atoms: &AtomTable, term: &Term) -> Option<Vec<Restriction>> {
     let Term::Map(kinds) = term else {
         return None;
     };
@@ -1057,7 +1057,11 @@ pub(super) fn restrictions(term: &Term) -> Option<Vec<Restriction>> {
             let Term::Atom(kind) = kind else {
                 return None;
             };
-            restriction(CapabilityKind::named(kind.name())?.spec(), fields)
+            restriction(
+                atoms,
+                CapabilityKind::named(atoms.name_of(kind))?.spec(),
+                fields,
+            )
         })
         .collect()
 }
@@ -1071,11 +1075,11 @@ pub(super) fn restrictions(term: &Term) -> Option<Vec<Restriction>> {
 /// // #{operations => [write], delegable => false}
 /// assert!(restriction(CapabilityKind::Terminal.spec(), &fields).is_some());
 /// ```
-fn restriction(spec: &KindSpec, fields: &Term) -> Option<Restriction> {
+fn restriction(atoms: &AtomTable, spec: &KindSpec, fields: &Term) -> Option<Restriction> {
     let Term::Map(fields) = fields else {
         return None;
     };
-    restriction_fields(spec, fields.iter())
+    restriction_fields(atoms, spec, fields.iter())
 }
 
 /// Read the `(field, value)` pairs of a restriction map of the kind of
@@ -1090,6 +1094,7 @@ fn restriction(spec: &KindSpec, fields: &Term) -> Option<Restriction> {
 /// assert_eq!(restriction.and_then(|restriction| restriction.delegable), None);
 /// ```
 fn restriction_fields<'a>(
+    atoms: &AtomTable,
     spec: &KindSpec,
     fields: impl Iterator<Item = (&'a Term, &'a Term)>,
 ) -> Option<Restriction> {
@@ -1103,7 +1108,7 @@ fn restriction_fields<'a>(
         let Term::Atom(field) = field else {
             return None;
         };
-        match (field.name(), value) {
+        match (atoms.name_of(field), value) {
             ("operations", _) if let Some(operations) = value.proper_list() => {
                 let mut set = 0;
                 for operation in operations {
@@ -1112,7 +1117,8 @@ fn restriction_fields<'a>(
                     };
                     let (operation, _) =
                         OPERATION_NAMES.iter().find(|(operation_kind, name)| {
-                            *name == operation.name() && spec.operations.contains(operation_kind)
+                            *name == atoms.name_of(operation)
+                                && spec.operations.contains(operation_kind)
                         })?;
                     set |= operation.bit();
                 }
@@ -1130,7 +1136,7 @@ fn restriction_fields<'a>(
                 if field != constraint_field {
                     return None;
                 }
-                restriction.constraint = Some(constraint(form, value)?);
+                restriction.constraint = Some(constraint(atoms, form, value)?);
             }
         }
     }
@@ -1151,7 +1157,7 @@ fn restriction_fields<'a>(
 /// // #{kind => env, operations => [read], delegable => false}
 /// assert!(capability(&no_names).is_none());
 /// ```
-pub(super) fn capability(term: &Term) -> Option<Capability> {
+pub(super) fn capability(atoms: &AtomTable, term: &Term) -> Option<Capability> {
     let Term::Map(fields) = term else {
         return None;
     };
@@ -1159,8 +1165,12 @@ pub(super) fn capability(term: &Term) -> Option<Capability> {
     let (_, Term::Atom(kind)) = fields.iter().find(|(field, _)| is_kind(field))? else {
         return None;
     };
-    let spec = CapabilityKind::named(kind.name())?.spec();
-    let fields = restriction_fields(spec, fields.iter().filter(|(field, _)| !is_kind(field)))?;
+    let spec = CapabilityKind::named(atoms.name_of(kind))?.spec();
+    let fields = restriction_fields(
+        atoms,
+        spec,
+        fields.iter().filter(|(field, _)| !is_kind(field)),
+    )?;
     let constraint = match spec.constraint {
         Some(_) => fields.constraint?,
         None => Constraint::Any,
@@ -1182,14 +1192,14 @@ pub(super) fn capability(term: &Term) -> Option<Capability> {
 /// assert_eq!(constraint(NameForm::Atom, &Term::static_atom("any")), Some(Constraint::Any));
 /// assert_eq!(constraint(NameForm::String, &Term::nil()), Some(Constraint::Only(BTreeSet::new())));
 /// ```
-fn constraint(form: NameForm, value: &Term) -> Option<Constraint> {
+fn constraint(atoms: &AtomTable, form: NameForm, value: &Term) -> Option<Constraint> {
     let names = match value {
         Term::Atom(any) if any.name() == "any" => return Some(Constraint::Any),
         _ => value.proper_list()?,
     };
     names
         .map(|name| match (form, name) {
-            (NameForm::Atom, Term::Atom(name)) => Some(name.name().to_owned()),
+            (NameForm::Atom, Term::Atom(name)) => Some(atoms.name_of(name).to_owned()),
             (NameForm::String, _) => name
                 .proper_list()?
                 .map(|character| match character {

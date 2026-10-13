@@ -351,16 +351,18 @@ fn decode(
     atoms: Vec<Atom>,
     atom_table: &mut AtomTable,
 ) -> Result<BeamModule, BeamError> {
-    let exports = parse_exports(required_chunk(chunks, b"ExpT")?, &atoms)?;
+    let exports = parse_exports(required_chunk(chunks, b"ExpT")?, &atoms, atom_table)?;
     let code = required_chunk(chunks, b"Code")?;
-    let name = atoms
-        .first()
-        .ok_or_else(|| error("empty BEAM atom table"))?
-        .name()
+    let name = atom_table
+        .name_of(
+            atoms
+                .first()
+                .ok_or_else(|| error("empty BEAM atom table"))?,
+        )
         .to_owned();
     let imports = chunks
         .get(b"ImpT".as_slice())
-        .map(|data| parse_imports(data, &atoms))
+        .map(|data| parse_imports(data, &atoms, atom_table))
         .transpose()?
         .unwrap_or_default();
     let literals = chunks
@@ -375,8 +377,9 @@ fn decode(
         .transpose()?
         .unwrap_or_default();
     let strings = chunks.get(b"StrT".as_slice()).copied().unwrap_or_default();
-    let (instructions, number_of_labels) =
-        instruction::parse_code(code, &atoms, &imports, &literals, &lambdas, strings)?;
+    let (instructions, number_of_labels) = instruction::parse_code(
+        code, atom_table, &atoms, &imports, &literals, &lambdas, strings,
+    )?;
     if let Some(label) = exports
         .values()
         .find(|&&label| label < FIRST_LABEL_NUMBER || label > number_of_labels)
@@ -475,12 +478,17 @@ fn atom_chunk_name(bytes: &[u8]) -> Result<&str, BeamError> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let atoms = vec![AtomTable::new().put("main")?];
+/// let mut atoms = AtomTable::new();
+/// let names = vec![atoms.put("main")?];
 /// let table = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
-/// let exports = parse_exports(table, &atoms)?;
+/// let exports = parse_exports(table, &names, &atoms)?;
 /// assert_eq!(exports.get(&("main".to_owned(), 0)), Some(&1));
 /// ```
-fn parse_exports(data: &[u8], atoms: &[Atom]) -> Result<HashMap<(String, u32), u32>, BeamError> {
+fn parse_exports(
+    data: &[u8],
+    atoms: &[Atom],
+    atom_table: &AtomTable,
+) -> Result<HashMap<(String, u32), u32>, BeamError> {
     let export_count = read_u32(data)? as usize;
     let expected_table_size = WORD_SIZE
         .checked_add(
@@ -497,7 +505,7 @@ fn parse_exports(data: &[u8], atoms: &[Atom]) -> Result<HashMap<(String, u32), u
         let atom_index = read_u32(&entry[..WORD_SIZE])? as usize;
         let arity = read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])?;
         let label = read_u32(&entry[WORD_SIZE * 2..])?;
-        let name = atom_at(atoms, atom_index)?.name().to_owned();
+        let name = atom_table.name_of(atom_at(atoms, atom_index)?).to_owned();
         if exports.insert((name, arity), label).is_some() {
             return Err(error("duplicate BEAM export"));
         }
@@ -513,9 +521,13 @@ fn parse_exports(data: &[u8], atoms: &[Atom]) -> Result<HashMap<(String, u32), u
 /// let mut table = AtomTable::new();
 /// let atoms = vec![table.put("IO")?, table.put("puts")?];
 /// let entries = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1];
-/// assert_eq!(parse_imports(entries, &atoms)?, [("IO".into(), "puts".into(), 1)]);
+/// assert_eq!(parse_imports(entries, &atoms, &table)?, [("IO".into(), "puts".into(), 1)]);
 /// ```
-fn parse_imports(data: &[u8], atoms: &[Atom]) -> Result<Vec<(String, String, u32)>, BeamError> {
+fn parse_imports(
+    data: &[u8],
+    atoms: &[Atom],
+    atom_table: &AtomTable,
+) -> Result<Vec<(String, String, u32)>, BeamError> {
     let import_count = read_u32(data)? as usize;
     let expected_size = WORD_SIZE
         .checked_add(
@@ -530,13 +542,11 @@ fn parse_imports(data: &[u8], atoms: &[Atom]) -> Result<Vec<(String, String, u32
     data[WORD_SIZE..]
         .chunks(IMPORT_ENTRY_SIZE)
         .map(|entry| {
+            let module = read_u32(&entry[..WORD_SIZE])? as usize;
+            let function = read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])? as usize;
             Ok((
-                atom_at(atoms, read_u32(&entry[..WORD_SIZE])? as usize)?
-                    .name()
-                    .to_owned(),
-                atom_at(atoms, read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])? as usize)?
-                    .name()
-                    .to_owned(),
+                atom_table.name_of(atom_at(atoms, module)?).to_owned(),
+                atom_table.name_of(atom_at(atoms, function)?).to_owned(),
                 read_u32(&entry[WORD_SIZE * 2..])?,
             ))
         })

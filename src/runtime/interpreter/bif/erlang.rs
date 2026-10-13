@@ -103,12 +103,13 @@ pub(super) fn process_flag(
     flag: &Term,
     value: &Term,
 ) -> Result<BifResult, BeamError> {
-    let process = context.scheduler.current_process_mut();
     let term = value;
     let value = match value {
-        Term::Atom(value) => Some(value.name()),
+        Term::Atom(value) => Some(context.scheduler.atoms.name_of(value).to_owned()),
         _ => None,
     };
+    let value = value.as_deref();
+    let process = context.scheduler.current_process_mut();
     Ok(match flag {
         Term::Atom(flag) if flag.name() == "trap_exit" => {
             let old = Term::static_atom(&process.trap_exit.to_string());
@@ -156,7 +157,9 @@ pub(super) fn process_flag(
             context.scheduler.current_process_mut().error_handler = handler;
             Value(old)
         }
-        Term::Atom(flag) if UNSUPPORTED_PROCESS_FLAGS.contains(&flag.name()) => {
+        Term::Atom(flag)
+            if UNSUPPORTED_PROCESS_FLAGS.contains(&context.scheduler.atoms.name_of(flag)) =>
+        {
             let small = term.small_integer();
             let valid = match flag.name() {
                 "async_dist" | "sensitive" | "monitor_nodes" => {
@@ -172,7 +175,7 @@ pub(super) fn process_flag(
             }
             return Err(error(format!(
                 "unsupported erlang:process_flag/2 flag {}",
-                flag.name()
+                context.scheduler.atoms.name_of(flag)
             )));
         }
         Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.name() == "monitor_nodes") =>
@@ -279,13 +282,14 @@ pub(super) fn system_flag(
         Term::Atom(logger) => matches!(logger.name(), "logger" | "undefined"),
         _ => false,
     };
-    let valid = match (item.name(), value) {
+    let atoms = &context.scheduler.atoms;
+    let valid = match (atoms.name_of(item), value) {
         ("system_logger", _) => logger,
         ("debug_flags", _) => true,
         ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
         ("time_offset", Term::Atom(finalize)) => finalize.name() == "finalize",
         (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
-            unsupported_system_flag_value(name, value)
+            unsupported_system_flag_value(name, atoms, value)
         }
         _ => false,
     };
@@ -302,23 +306,25 @@ pub(super) fn system_flag(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    Ok(match (item.name(), value.small_integer()) {
-        ("system_logger", _) => Value(std::mem::replace(
-            &mut scheduler.system_logger,
-            value.clone(),
-        )),
-        ("debug_flags", _) => Value(Term::static_atom("true")),
-        ("backtrace_depth", Some(depth)) => {
-            let depth = depth.min(MAX_BACKTRACE_SIZE) as usize;
-            let old = std::mem::replace(&mut scheduler.backtrace_depth, depth);
-            Value(Term::Integer(old as i64))
-        }
-        (name, _) => {
-            return Err(error(format!(
-                "unsupported erlang:system_flag/2 item {name}"
-            )));
-        }
-    })
+    Ok(
+        match (scheduler.atoms.name_of(item), value.small_integer()) {
+            ("system_logger", _) => Value(std::mem::replace(
+                &mut scheduler.system_logger,
+                value.clone(),
+            )),
+            ("debug_flags", _) => Value(Term::static_atom("true")),
+            ("backtrace_depth", Some(depth)) => {
+                let depth = depth.min(MAX_BACKTRACE_SIZE) as usize;
+                let old = std::mem::replace(&mut scheduler.backtrace_depth, depth);
+                Value(Term::Integer(old as i64))
+            }
+            (name, _) => {
+                return Err(error(format!(
+                    "unsupported erlang:system_flag/2 item {name}"
+                )));
+            }
+        },
+    )
 }
 
 /// Tell whether ERTS `system_flag_2` (`bif.c:4972-5304`) accepts `value` for
@@ -362,13 +368,13 @@ pub(super) fn system_flag(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(!unsupported_system_flag_value("min_heap_size", &Term::static_atom("foo")));
-/// assert!(unsupported_system_flag_value("min_heap_size", &Term::Integer(8)));
-/// assert!(!unsupported_system_flag_value("schedulers_online", &Term::Integer(0)));
+/// assert!(!unsupported_system_flag_value("min_heap_size", &AtomTable::new(), &Term::static_atom("foo")));
+/// assert!(unsupported_system_flag_value("min_heap_size", &AtomTable::new(), &Term::Integer(8)));
+/// assert!(!unsupported_system_flag_value("schedulers_online", &AtomTable::new(), &Term::Integer(0)));
 /// ```
-fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
+fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) -> bool {
     let atom = match value {
-        Term::Atom(atom) => Some(atom.name()),
+        Term::Atom(atom) => Some(atoms.name_of(atom)),
         _ => None,
     };
     let integer = match value {
@@ -851,7 +857,7 @@ pub(super) fn monitor(
     };
     // An `Err` is the runtime error of a valid target that PBeam does not
     // support. It comes after the capability check.
-    let target = match (kind.name(), target) {
+    let target = match (context.scheduler.atoms.name_of(kind), target) {
         ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
         ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
         ("port", Term::Port(_)) => Some(Err(unsupported_port("erlang:monitor/2,3"))),
@@ -1034,7 +1040,9 @@ pub(super) fn spawn_opt(
             }
             Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.name() == "capabilities") =>
             {
-                let Some(restrictions) = capability::restrictions(&option[1]) else {
+                let Some(restrictions) =
+                    capability::restrictions(&context.scheduler.atoms, &option[1])
+                else {
                     return Ok(BifResult::badarg());
                 };
                 spawn_options.capabilities = Some(restrictions);
@@ -1618,20 +1626,20 @@ pub(super) fn atom_to_list(term: &Term) -> BifResult {
 ///
 /// ```rust,ignore
 /// let pi = Term::Atom(atoms.put("\u{3c0}")?);
-/// assert!(matches!(atom_to_binary(&pi, &Term::static_atom("utf8")), BifResult::Value(Term::Binary(bytes)) if bytes == [207, 128]));
-/// assert!(matches!(atom_to_binary(&pi, &Term::static_atom("latin1")), BifResult::Raise { .. }));
+/// assert!(matches!(atom_to_binary(&atoms, &pi, &Term::static_atom("utf8")), BifResult::Value(Term::Binary(bytes)) if bytes == [207, 128]));
+/// assert!(matches!(atom_to_binary(&atoms, &pi, &Term::static_atom("latin1")), BifResult::Raise { .. }));
 /// let e_acute = Term::Atom(atoms.put("\u{e9}")?);
-/// assert!(matches!(atom_to_binary(&e_acute, &Term::static_atom("latin1")), BifResult::Value(Term::Binary(bytes)) if bytes == [233]));
-/// assert!(matches!(atom_to_binary(&Term::static_atom("ok"), &Term::static_atom("foo")), BifResult::Raise { .. }));
+/// assert!(matches!(atom_to_binary(&atoms, &e_acute, &Term::static_atom("latin1")), BifResult::Value(Term::Binary(bytes)) if bytes == [233]));
+/// assert!(matches!(atom_to_binary(&atoms, &Term::static_atom("ok"), &Term::static_atom("foo")), BifResult::Raise { .. }));
 /// ```
-pub(super) fn atom_to_binary(term: &Term, encoding: &Term) -> BifResult {
+pub(super) fn atom_to_binary(atoms: &AtomTable, term: &Term, encoding: &Term) -> BifResult {
     let (Term::Atom(atom), Term::Atom(encoding)) = (term, encoding) else {
         return BifResult::badarg();
     };
     match encoding.name() {
-        "utf8" | "unicode" => Value(Term::binary(atom.name().as_bytes().to_vec())),
-        "latin1" => atom
-            .name()
+        "utf8" | "unicode" => Value(Term::binary(atoms.name_of(atom).as_bytes().to_vec())),
+        "latin1" => atoms
+            .name_of(atom)
             .chars()
             .map(|character| u8::try_from(u32::from(character)).ok())
             .collect::<Option<Vec<u8>>>()
@@ -2253,11 +2261,13 @@ enum Destination<'a> {
     Pid(ProcessId),
     /// A reference, which can be an alias.
     Alias(Reference),
-    /// A registered name. A name that no process has raises `badarg`.
-    Name(&'a str),
-    /// `{Name, Node}` with the local node. A name that no process has drops
-    /// the message.
-    NodeName(&'a str),
+    /// A registered name atom. A name that no process has raises `badarg`.
+    /// The caller reads the name through the owning atom table.
+    Name(&'a Atom),
+    /// `{Name, Node}` with the local node, as an atom. A name that no
+    /// process has drops the message. The caller reads the name through the
+    /// owning atom table.
+    NodeName(&'a Atom),
     /// `{Name, Node}` with another node.
     Remote,
     /// A port.
@@ -2267,7 +2277,9 @@ enum Destination<'a> {
 /// Return the destination of `to`, or `None` for a term that `do_send`
 /// rejects with `SEND_BADARG` before any lookup: a term that is not a pid,
 /// a reference, an atom, a port, or a 2-tuple of atoms
-/// (`bif.c:2614-2621`, `2668-2674`).
+/// (`bif.c:2614-2621`, `2668-2674`). The caller reads the name of a
+/// [`Destination::Name`] or a [`Destination::NodeName`] through the owning
+/// [`AtomTable`].
 ///
 /// # Examples
 ///
@@ -2281,11 +2293,11 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
     Some(match to {
         Term::Pid(pid) => Destination::Pid(*pid),
         Term::Reference(reference) => Destination::Alias(*reference),
-        Term::Atom(name) => Destination::Name(name.name()),
+        Term::Atom(name) => Destination::Name(name),
         Term::Port(_) => Destination::Port,
         Term::Tuple(elements) => match elements.as_ref() {
             [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
-                Destination::NodeName(name.name())
+                Destination::NodeName(name)
             }
             [Term::Atom(_), Term::Atom(_)] => Destination::Remote,
             _ => return None,
@@ -2356,11 +2368,14 @@ fn deliver_to(
             scheduler.send_alias_message(reference, message);
             return Ok(Ok(Sent::Local));
         }
-        Destination::Name(name) => match scheduler.whereis(name) {
-            Some(target) => Some(target),
-            None => return Ok(Err(BifResult::badarg())),
-        },
-        Destination::NodeName(name) => scheduler.whereis(name),
+        Destination::Name(atom) => {
+            let name = scheduler.atoms.name_of(atom);
+            match scheduler.whereis(name) {
+                Some(target) => Some(target),
+                None => return Ok(Err(BifResult::badarg())),
+            }
+        }
+        Destination::NodeName(atom) => scheduler.whereis(scheduler.atoms.name_of(atom)),
         Destination::Remote => return Ok(Ok(Sent::NoConnect)),
         Destination::Port => return Err(unsupported_port(bif)),
     };
@@ -2394,7 +2409,7 @@ fn deliver_to(
 /// `AtomTable::put`.
 pub(super) fn unregister(scheduler: &mut Scheduler, name: &Term) -> Result<BifResult, BeamError> {
     if let Term::Atom(atom) = name
-        && let Some(owner) = scheduler.whereis(atom.name())
+        && let Some(owner) = scheduler.whereis(scheduler.atoms.name_of(atom))
         && let Some(denied) = boot_denial(scheduler, owner)?
     {
         return Ok(denied);
@@ -2485,14 +2500,14 @@ const PROCESS_INFO_ITEMS: [&str; 40] = [
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(is_process_info_item(&Term::static_atom("registered_name")));
+/// assert!(is_process_info_item(&AtomTable::new(), &Term::static_atom("registered_name")));
 /// let lookup = Term::tuple(vec![Term::static_atom("dictionary"), Term::Integer(1)]);
-/// assert!(is_process_info_item(&lookup));
-/// assert!(!is_process_info_item(&Term::static_atom("ok")));
+/// assert!(is_process_info_item(&AtomTable::new(), &lookup));
+/// assert!(!is_process_info_item(&AtomTable::new(), &Term::static_atom("ok")));
 /// ```
-fn is_process_info_item(item: &Term) -> bool {
+fn is_process_info_item(atoms: &AtomTable, item: &Term) -> bool {
     match item {
-        Term::Atom(name) => PROCESS_INFO_ITEMS.contains(&name.name()),
+        Term::Atom(name) => PROCESS_INFO_ITEMS.contains(&atoms.name_of(name)),
         Term::Tuple(elements) => {
             matches!(elements.as_ref(), [Term::Atom(key), _] if key.name() == "dictionary")
         }
@@ -2550,9 +2565,10 @@ pub(super) fn process_info(
     process: &Term,
     item: &Term,
 ) -> Result<BifResult, BeamError> {
+    let atoms = &context.scheduler.atoms;
     let valid = match item.proper_list() {
-        Some(items) => items.clone().all(is_process_info_item),
-        None => is_process_info_item(item),
+        Some(items) => items.clone().all(|item| is_process_info_item(atoms, item)),
+        None => is_process_info_item(atoms, item),
     };
     let (true, Term::Pid(id)) = (valid, process) else {
         return Ok(BifResult::badarg());
@@ -2587,12 +2603,15 @@ pub(super) fn process_info(
             }
         }
         let current = scheduler.current_reductions();
-        let caller = scheduler.current_process_mut();
-        let messages = caller.mailbox.message_count();
-        let info = caller
-            .info(item, current, messages, true)?
-            .ok_or_else(unsupported)?;
-        caller.bump_reductions(1);
+        let info = {
+            let (caller, atoms) = scheduler.current_process_and_atoms();
+            let messages = caller.mailbox.message_count();
+            let info = caller
+                .info(atoms, item, current, messages, true)?
+                .ok_or_else(unsupported)?;
+            caller.bump_reductions(1);
+            info
+        };
         return Ok(Value(info));
     }
     let Some(target) = scheduler.process(*id) else {
@@ -2600,7 +2619,7 @@ pub(super) fn process_info(
     };
     let messages = target.mailbox.message_count();
     let info = target
-        .info(item, 0, messages, false)?
+        .info(&scheduler.atoms, item, 0, messages, false)?
         .ok_or_else(unsupported)?;
     if target.exiting.is_some() || target.mailbox.has_incoming() {
         let caller = scheduler.current_process_mut().id;
@@ -2711,12 +2730,13 @@ pub(super) fn signals_return(scheduler: &mut Scheduler, from: &Term, value: Term
 ///
 /// ```rust,ignore
 /// let erlang = Term::static_atom("erlang");
-/// let exported = function_exported(&scheduler.code, &erlang, &Term::static_atom("self"), &Term::Integer(0));
+/// let exported = function_exported(&AtomTable::new(), &scheduler.code, &erlang, &Term::static_atom("self"), &Term::Integer(0));
 /// assert!(matches!(exported, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// let exported = function_exported(&scheduler.code, &erlang, &Term::static_atom("self"), &Term::Integer(1 << 59));
+/// let exported = function_exported(&AtomTable::new(), &scheduler.code, &erlang, &Term::static_atom("self"), &Term::Integer(1 << 59));
 /// assert!(matches!(exported, BifResult::Raise { .. }));
 /// ```
 pub(super) fn function_exported(
+    atoms: &AtomTable,
     code: &CodeTable,
     module: &Term,
     name: &Term,
@@ -2726,7 +2746,7 @@ pub(super) fn function_exported(
     else {
         return BifResult::badarg();
     };
-    let (module, name) = (module.name(), name.name());
+    let (module, name) = (atoms.name_of(module), atoms.name_of(name));
     let exported = u32::try_from(arity as i32).is_ok_and(|arity| {
         let exported_by_code = code.get(module).is_some_and(|loaded| {
             loaded
@@ -2861,7 +2881,11 @@ pub(super) fn module_loaded(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    let loaded = context.scheduler.code.get(module.name()).is_some();
+    let loaded = context
+        .scheduler
+        .code
+        .get(context.scheduler.atoms.name_of(module))
+        .is_some();
     Ok(Value(Term::static_atom(if loaded {
         "true"
     } else {
@@ -2969,7 +2993,12 @@ pub(super) fn get_module_info(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    if context.scheduler.code.get(name.name()).is_none() {
+    if context
+        .scheduler
+        .code
+        .get(context.scheduler.atoms.name_of(name))
+        .is_none()
+    {
         return Ok(BifResult::badarg());
     }
     match key.name() {
@@ -3043,7 +3072,7 @@ pub(super) fn start_timer(
     }
     let target = match &receiver {
         Receiver::Process(id) => Some(*id),
-        Receiver::Name(name) => scheduler.whereis(name.name()),
+        Receiver::Name(name) => scheduler.whereis(scheduler.atoms.name_of(name)),
     };
     if let Some(target) = target
         && let Some(denied) = boot_denial(scheduler, target)?

@@ -391,7 +391,7 @@ fn frees_the_name_of_a_process_when_it_exits() {
         .spawn(Start::Entry(frame()), vec![], false, false, false, None)
         .unwrap()
         .unwrap();
-    let name = atom("pbeam_probe_reg");
+    let name = Term::Atom(scheduler.atoms.put("pbeam_probe_reg").unwrap());
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
     assert!(scheduler.register(&name, &Term::Pid(child)));
     assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
@@ -1439,8 +1439,12 @@ fn counts_the_persistent_terms_the_ets_objects_and_the_timer_messages() {
         .persistent_terms
         .put(&atom("key"), &Term::tuple(vec![Term::Integer(1)]));
     assert!(scheduler.live_bytes() > before);
+    let key = Term::Atom(scheduler.atoms.put("key").unwrap());
     let mut table = Table::new(ProcessId(1), Access::Public, 1);
-    table.insert(vec![atom("key"), Term::tuple(vec![Term::Integer(2)])]);
+    table.insert(
+        &scheduler.atoms,
+        vec![key, Term::tuple(vec![Term::Integer(2)])],
+    );
     scheduler.ets.create(Reference(1), None, table);
     assert!(scheduler.live_bytes() > before);
     scheduler.timers.start(
