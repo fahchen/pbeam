@@ -29,7 +29,10 @@ fn matches_erts_demonitor_options_and_argument_errors() {
     ];
 
     assert_eq!(
-        program.execute("demonitor_probe", "main", &[]).unwrap(),
+        program
+            .execute("demonitor_probe", "main", &[])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             Term::tuple(vec![atom("badarg"); 5]),
             Term::tuple(vec![atom("value"), atom("false")]),
@@ -70,7 +73,8 @@ fn creates_no_monitor_when_a_process_monitors_itself() {
     assert_eq!(
         program
             .execute("demonitor_probe", "self_monitor", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::Atom(program.atom("false").unwrap())
     );
 

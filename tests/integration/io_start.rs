@@ -69,7 +69,10 @@ fn takes_the_tail_and_the_length_of_lists_as_pinned_erts() {
         atom("other"),
     ];
     assert_eq!(
-        program.execute("io_start_probe", "lists", &[]).unwrap(),
+        program
+            .execute("io_start_probe", "lists", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -94,7 +97,7 @@ fn negates_booleans_as_pinned_erts() {
     ]
     .map(atom);
     assert_eq!(
-        program.execute("io_start_probe", "nots", &[]).unwrap(),
+        program.execute("io_start_probe", "nots", &[]).unwrap().term,
         Term::list_from(expected.to_vec())
     );
     assert_eq!(
@@ -119,7 +122,7 @@ fn conjoins_booleans_as_pinned_erts() {
     ]
     .map(atom);
     assert_eq!(
-        program.execute("io_start_probe", "ands", &[]).unwrap(),
+        program.execute("io_start_probe", "ands", &[]).unwrap().term,
         Term::list_from(expected.to_vec())
     );
     assert_eq!(
@@ -148,7 +151,8 @@ fn finds_key_members_as_pinned_erts() {
     assert_eq!(
         program
             .execute("io_start_probe", "keymembers", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected.to_vec())
     );
     assert_eq!(
@@ -192,7 +196,7 @@ fn reads_and_updates_maps_as_pinned_erts() {
         atom("other"),
     ];
     assert_eq!(
-        program.execute("io_start_probe", "maps", &[]).unwrap(),
+        program.execute("io_start_probe", "maps", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -230,7 +234,10 @@ fn reports_the_first_missing_map_key_as_pinned_erts() {
         atom("updated"),
     ];
     assert_eq!(
-        program.execute("io_start_probe", "map_keys", &[]).unwrap(),
+        program
+            .execute("io_start_probe", "map_keys", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -276,7 +283,10 @@ fn merges_maps_as_pinned_erts() {
         Term::tuple(vec![atom("badmap"), atom("foo")]),
     ];
     assert_eq!(
-        program.execute("io_start_probe", "merge", &[]).unwrap(),
+        program
+            .execute("io_start_probe", "merge", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -323,7 +333,10 @@ fn converts_atoms_and_lists_as_pinned_erts() {
         atom("badarg"),
     ];
     assert_eq!(
-        program.execute("io_start_probe", "atoms", &[]).unwrap(),
+        program
+            .execute("io_start_probe", "atoms", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -351,7 +364,8 @@ fn limits_atom_names_to_255_characters_as_pinned_erts() {
     assert_eq!(
         program
             .execute("io_start_probe", "atom_limit", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -373,6 +387,7 @@ fn returns_the_host_os_type_as_pinned_erts() {
     let program = BeamProgram::load(&[IO_START_PROBE, &os]).unwrap();
     let result = program.execute("io_start_probe", "system", &[]).unwrap();
     let Some(results) = result
+        .term
         .proper_list()
         .map(|results| results.collect::<Vec<_>>())
     else {
@@ -426,7 +441,10 @@ fn formats_the_empty_noshell_slogan_as_pinned_erts() {
     beams.push(IO_START_PROBE);
     let program = BeamProgram::load(&beams).unwrap();
     assert_eq!(
-        program.execute("io_start_probe", "format", &[]).unwrap(),
+        program
+            .execute("io_start_probe", "format", &[])
+            .unwrap()
+            .term,
         Term::binary(Vec::new())
     );
     assert_eq!(reference("format"), b"<<>>\n");

@@ -24,7 +24,8 @@ fn runs_garbage_collect_as_pinned_erts() {
     assert_eq!(
         program
             .execute("garbage_collect_probe", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(vec![
             atom("true"),
             atom("true"),

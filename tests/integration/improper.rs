@@ -75,7 +75,10 @@ fn loads_compares_and_hashes_improper_list_literals_as_pinned_erts() {
     .chain(integers(&[3, 16, 21, 5, 26, 22]))
     .collect::<Vec<_>>();
     assert_eq!(
-        program.execute("improper_probe", "literals", &[]).unwrap(),
+        program
+            .execute("improper_probe", "literals", &[])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             improper(vec![atom("a")], atom("b")),
             Term::tuple(vec![improper(
@@ -122,7 +125,8 @@ fn builds_and_matches_improper_lists_as_pinned_erts() {
     assert_eq!(
         program
             .execute("improper_probe", "instructions", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(vec![
             atom("reply"),
             imp(),
@@ -173,7 +177,10 @@ fn gives_the_list_bif_results_of_pinned_erts_for_improper_lists() {
     let x = || atom("x");
     let imp = || improper(vec![int(1)], x());
     assert_eq!(
-        program.execute("improper_probe", "list_bifs", &[]).unwrap(),
+        program
+            .execute("improper_probe", "list_bifs", &[])
+            .unwrap()
+            .term,
         Term::list_from(
             [
                 imp(),
@@ -238,7 +245,10 @@ fn gives_the_iodata_and_chardata_results_of_pinned_erts_for_improper_lists() {
     let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
     assert_eq!(
-        program.execute("improper_probe", "iodata", &[]).unwrap(),
+        program
+            .execute("improper_probe", "iodata", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             Term::list_from(vec![binary(b"ab")]),
             Term::list_from(vec![binary(b"abc")]),

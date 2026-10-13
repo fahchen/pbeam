@@ -43,6 +43,23 @@ impl Tuple {
             .expect("only the drop of a term takes its tuple array")
     }
 
+    /// Return a value that identifies the shared array. Two tuples have one
+    /// value only when they share one array, so the import of a host term
+    /// reuses the imported term of a tuple that the source holds more than
+    /// once. The value is the address of the array, and no reader
+    /// dereferences it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let tuple = Tuple::from(vec![Term::Integer(1)]);
+    /// assert_eq!(tuple.identity(), tuple.clone().identity());
+    /// assert_ne!(tuple.identity(), Tuple::from(vec![Term::Integer(1)]).identity());
+    /// ```
+    pub(super) fn identity(&self) -> usize {
+        Arc::as_ptr(self.arc()) as usize
+    }
+
     /// Return the array of the tuple for a change. This is the receiver of
     /// `Arc::make_mut`: the caller copies the array first when another copy
     /// also holds it.

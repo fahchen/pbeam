@@ -49,7 +49,7 @@ fn monitors_a_process_by_pid_and_name_and_a_port_name_as_pinned_erts() {
     let falses = |count| list(vec![atom("false"); count]);
     let noproc = |kind: &str, item: Term| tuple(vec![atom(kind), item, atom("noproc")]);
     assert_eq!(
-        program.execute("alias_probe", "targets", &[]).unwrap(),
+        program.execute("alias_probe", "targets", &[]).unwrap().term,
         tuple(vec![
             list((0..12).map(|_| badarg()).collect()),
             falses(3),
@@ -84,7 +84,7 @@ fn returns_a_runtime_error_for_a_time_offset_monitor() {
         .execute(
             "alias_probe",
             "unsupported",
-            &[Term::Atom(program.atom("time_offset").unwrap())],
+            &[program.host_term(Term::Atom(program.atom("time_offset").unwrap()))],
         )
         .unwrap_err();
     assert!(
@@ -108,7 +108,7 @@ fn returns_a_runtime_error_for_a_time_offset_monitor() {
 fn run(function: &str) -> (Term, impl Fn(&str) -> Term) {
     let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
     let result = program.execute("alias_probe", function, &[]).unwrap();
-    (result, move |name: &str| {
+    (result.term, move |name: &str| {
         Term::Atom(program.atom(name).unwrap())
     })
 }
@@ -124,7 +124,7 @@ fn unsupported(case: &str) -> String {
     let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
     let case = Term::Atom(program.atom(case).unwrap());
     program
-        .execute("alias_probe", "unsupported", &[case])
+        .execute("alias_probe", "unsupported", &[program.host_term(case)])
         .unwrap_err()
         .to_string()
 }
@@ -346,7 +346,7 @@ fn replies_to_a_gen_server_call_through_an_alias_as_pinned_erts() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let echo = |value| Term::tuple(vec![atom("echo"), Term::Integer(value)]);
     assert_eq!(
-        program.execute("alias_probe", "call", &[]).unwrap(),
+        program.execute("alias_probe", "call", &[]).unwrap().term,
         Term::list_from(vec![echo(1), echo(2), atom("timeout"), Term::nil()])
     );
     assert_eq!(erl_reference("call()"), "[{echo,1},{echo,2},timeout,[]]\n");

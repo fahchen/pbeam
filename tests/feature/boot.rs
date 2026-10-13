@@ -152,9 +152,13 @@ fn isolated_logger_boot() {
             .execute(
                 "pbeam_boot",
                 "start",
-                &[atom("logger_boot_probe"), atom("main")]
+                &[
+                    program.host_term(atom("logger_boot_probe")),
+                    program.host_term(atom("main")),
+                ]
             )
-            .unwrap(),
+            .unwrap()
+            .term,
         expected
     );
 }
@@ -202,7 +206,10 @@ fn isolated_init_stop() {
         program.execute(
             "pbeam_boot",
             "start",
-            &[atom("init_stop_probe"), atom("main")]
+            &[
+                program.host_term(atom("init_stop_probe")),
+                program.host_term(atom("main")),
+            ]
         ),
         Err(BeamError::Halt(0))
     );

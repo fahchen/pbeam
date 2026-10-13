@@ -163,17 +163,18 @@ fn run(arguments: Cli) -> Result<(), Exit> {
         .map(|name| {
             program
                 .atom(name)
-                .map(Term::Atom)
+                .map(|atom| program.host_term(Term::Atom(atom)))
                 .ok_or_else(|| format!("argument {name} is not an atom of the loaded modules"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     if arguments.root.is_some() || !arguments.code_path.is_empty() {
-        atoms.push(boot_flags(
+        let flags = boot_flags(
             &program,
             arguments.root.as_ref(),
             &arguments.code_path,
             arguments.mode.as_ref(),
-        )?);
+        )?;
+        atoms.push(program.host_term(flags));
     }
     let (module, function) = (&arguments.module, &arguments.function);
     let result = match &arguments.policy {

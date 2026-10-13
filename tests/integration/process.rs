@@ -16,7 +16,7 @@ fn runs_a_compiled_process_probe_with_reference_matching_and_cleanup() {
     let program = BeamProgram::load(&[&erlang, PROCESS_PROBE]).unwrap();
 
     assert_eq!(
-        program.execute("process_probe", "main", &[]).unwrap(),
+        program.execute("process_probe", "main", &[]).unwrap().term,
         Term::tuple(
             ["io_ok", "down_ok", "exit_ok", "noise_ok"]
                 .map(|name| Term::Atom(program.atom(name).unwrap()))

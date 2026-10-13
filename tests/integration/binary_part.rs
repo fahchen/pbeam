@@ -52,7 +52,10 @@ fn gives_the_binary_part_like_erts() {
     ];
     expected.extend(std::iter::repeat_n(badarg, 12));
     assert_eq!(
-        program.execute("binary_part_probe", "main", &[]).unwrap(),
+        program
+            .execute("binary_part_probe", "main", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected)
     );
 
@@ -97,7 +100,7 @@ fn gives_a_part_that_shares_the_bytes_of_its_source() {
     // the part points into it, and a copy would point outside it.
     let program = BeamProgram::load(&[BINARY_PART_PROBE]).unwrap();
     let result = program.execute("binary_part_probe", "main", &[]).unwrap();
-    let parts: Vec<&Term> = result.proper_list().expect("a list").collect();
+    let parts: Vec<&Term> = result.term.proper_list().expect("a list").collect();
     // `main/0` gives `binary_part(<<"hello">>, 0, 5)` first and
     // `binary_part(<<"hello">>, 1, 3)` second.
     let (Term::Binary(source), Term::Binary(part)) = (parts[0], parts[1]) else {

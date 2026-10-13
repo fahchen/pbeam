@@ -14,7 +14,10 @@ fn looks_up_registered_names_as_pinned_erts() {
     let program = BeamProgram::load(&[REGISTRY_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("registry_probe", "names", &[]).unwrap(),
+        program
+            .execute("registry_probe", "names", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             atom("named"),
             atom("undefined"),
@@ -54,7 +57,8 @@ fn unregisters_names_as_pinned_erts() {
     assert_eq!(
         program
             .execute("registry_probe", "unregister", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(vec![
             atom("true"),
             atom("undefined"),
@@ -96,7 +100,7 @@ fn reads_the_registered_name_of_another_process_as_pinned_erts() {
     let program = BeamProgram::load(&[REGISTRY_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("registry_probe", "info", &[]).unwrap(),
+        program.execute("registry_probe", "info", &[]).unwrap().term,
         Term::list_from(vec![
             Term::tuple(vec![atom("registered_name"), atom("registry_probe_info")]),
             Term::nil(),
@@ -142,7 +146,7 @@ fn sends_to_registered_names_as_pinned_erts() {
         "dropped",
     ];
     assert_eq!(
-        program.execute("registry_probe", "send", &[]).unwrap(),
+        program.execute("registry_probe", "send", &[]).unwrap().term,
         Term::list_from(vec![
             atom("to_self"),
             atom("received"),
@@ -198,7 +202,7 @@ fn exits_with_badarg_for_an_uncaught_send_to_a_missing_name() {
     let program = BeamProgram::load(&[REGISTRY_PROBE]).unwrap();
     let missing = Term::Atom(program.atom("registry_probe_missing").unwrap());
     let error = program
-        .execute("registry_probe", "send_to", &[missing])
+        .execute("registry_probe", "send_to", &[program.host_term(missing)])
         .unwrap_err();
     assert!(
         error

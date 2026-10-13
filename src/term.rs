@@ -10,6 +10,7 @@ mod print;
 mod tuple;
 
 pub use atom::Atom;
+pub use atom::HostTerm;
 #[cfg(test)]
 pub(crate) use atom::test_atom;
 pub(crate) use atom::{AtomTable, MAX_ATOM_CHARACTERS};
@@ -25,7 +26,7 @@ pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
 use tuple::Tuple;
 
-use std::{fmt, sync::Arc};
+use std::{collections::HashSet, fmt, sync::Arc};
 
 /// The smallest ERTS small integer on a 64-bit system: -(2^59).
 pub(crate) const SMALL_INTEGER_MIN: i64 = -(1 << 59);
@@ -619,6 +620,90 @@ impl PartialEq for Term {
 }
 
 impl Eq for Term {}
+
+impl Term {
+    /// Return true when `self` and `other` hold the same value. The
+    /// comparison remembers each pair of shared compounds that it decided,
+    /// so a term that holds one subtree more than once takes time in the
+    /// size of its storage and not in the size of its expansion. The two
+    /// terms must be of one atom table, as two terms of `Term::eq` are.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let shared = Term::tuple(vec![Term::Integer(1)]);
+    /// let term = Term::tuple(vec![shared.clone(), shared]);
+    /// assert!(term.eq_shared(&term.clone()));
+    /// ```
+    pub(crate) fn eq_shared(&self, other: &Term) -> bool {
+        let mut pending = vec![(self, other)];
+        // The pairs of compounds whose equality the comparison decided. A
+        // pair of one shared subtree and its rebuilt copy enters once, and
+        // each later occurrence of the pair finds the decision.
+        let mut decided: HashSet<(usize, usize)> = HashSet::new();
+        while let Some((left, right)) = pending.pop() {
+            match (left, right) {
+                (Term::Tuple(left), Term::Tuple(right)) => {
+                    if left.same_array(right) {
+                        continue;
+                    }
+                    if !decided.insert((left.identity(), right.identity())) {
+                        continue;
+                    }
+                    if left.len() != right.len() {
+                        return false;
+                    }
+                    pending.extend(left.iter().zip(right.iter()));
+                }
+                (Term::Cons(left), Term::Cons(right)) => {
+                    if left.same_cell(right) {
+                        continue;
+                    }
+                    if !decided.insert((left.identity(), right.identity())) {
+                        continue;
+                    }
+                    pending.push((&left.tail, &right.tail));
+                    pending.push((&left.head, &right.head));
+                }
+                (Term::Map(left), Term::Map(right)) => {
+                    if left.same_form(right) {
+                        continue;
+                    }
+                    if !decided.insert((left.identity(), right.identity())) {
+                        continue;
+                    }
+                    if left.len() != right.len() {
+                        return false;
+                    }
+                    for ((left_key, left_value), (right_key, right_value)) in
+                        left.iter().zip(right.iter())
+                    {
+                        pending.push((left_key, right_key));
+                        pending.push((left_value, right_value));
+                    }
+                }
+                (Term::Fun(left), Term::Fun(right)) => {
+                    if left.same_thing(right) {
+                        continue;
+                    }
+                    if !decided.insert((left.identity(), right.identity())) {
+                        continue;
+                    }
+                    if left.target() != right.target() || left.free().len() != right.free().len() {
+                        return false;
+                    }
+                    pending.extend(left.free().iter().zip(right.free()));
+                }
+                _ => {
+                    if left != right {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+}
 
 impl fmt::Debug for Term {
     /// Write the text of a derived `Debug`, for example

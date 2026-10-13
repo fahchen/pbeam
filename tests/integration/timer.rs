@@ -30,7 +30,7 @@ fn runs_receive_timeouts_as_pinned_erts() {
         .unwrap();
     let elapsed = start.elapsed();
     assert_eq!(
-        receive_after,
+        receive_after.term,
         Term::list_from(vec![
             atom("timeout"),
             atom("early"),
@@ -53,7 +53,8 @@ fn runs_receive_timeouts_as_pinned_erts() {
     assert_eq!(
         program
             .execute("timer_probe", "timeout_values", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(timeout_values)
     );
 
@@ -61,7 +62,8 @@ fn runs_receive_timeouts_as_pinned_erts() {
     assert_eq!(
         program
             .execute("timer_probe", "receive_limits", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::list_from(vec![atom("ok"), atom("ok"), atom("other"), atom("none")])
     );
 
@@ -102,7 +104,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     // receiver that is not a pid or an atom (`erl_hl_timer.c:2605-2620`,
     // `1814-1815`).
     assert_eq!(
-        run("start_timer"),
+        run("start_timer").term,
         Term::list_from(vec![atom("true"), atom("true"), atom("none"), badargs(7)])
     );
 
@@ -113,7 +115,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     // `{async, Bool}` or `{info, Bool}` and each term that is not a reference
     // raise `badarg` (`erl_hl_timer.c:2237-2398`).
     assert_eq!(
-        run("cancel_timer"),
+        run("cancel_timer").term,
         Term::list_from(vec![
             atom("true"),
             atom("false"),
@@ -137,7 +139,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     // A name timer finds the process with the name when it expires, and a
     // name that no process has drops the message (`erl_hl_timer.c:1165-1171`).
     assert_eq!(
-        run("receiver_exit"),
+        run("receiver_exit").term,
         Term::list_from(vec![
             atom("false"),
             atom("false"),
@@ -149,7 +151,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     // Timers with the same end expire in start order (`time.c:647-668`).
     let order = [1, 2, 3, 4, 40, 50, 60].map(Term::Integer).to_vec();
     assert_eq!(
-        run("order"),
+        run("order").term,
         Term::list_from(vec![Term::list_from(order), atom("recv"), atom("bif")])
     );
 
@@ -157,7 +159,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     // (`erl_hl_timer.c:2549-2552`).
     let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
-        run("timer_limits"),
+        run("timer_limits").term,
         Term::list_from(vec![atom("ok"), atom("ok"), badarg.clone(), badarg])
     );
 

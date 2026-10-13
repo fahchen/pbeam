@@ -9,7 +9,7 @@ fn decodes_tuple_and_list_literals_and_builds_lists_on_the_empty_list() {
     let program = BeamProgram::load(&[LITERAL_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("literal_probe", "main", &[]).unwrap(),
+        program.execute("literal_probe", "main", &[]).unwrap().term,
         Term::tuple(vec![
             Term::list_from(vec![atom("flush")]),
             Term::tuple(vec![atom("error"), atom("enotsup")]),

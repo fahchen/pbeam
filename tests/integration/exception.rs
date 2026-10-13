@@ -39,7 +39,10 @@ fn catches_error_and_exit_exceptions_with_try_and_catch() {
     let program = BeamProgram::load(&[EXCEPTION_PROBE]).unwrap();
     let atom = |name: &str| atom(&program, name);
     assert_eq!(
-        program.execute("exception_probe", "main", &[]).unwrap(),
+        program
+            .execute("exception_probe", "main", &[])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             pair(atom("value"), atom("ok")),
             atom("ok"),
@@ -80,7 +83,8 @@ fn adds_the_stack_trace_to_a_caught_error() {
     assert_eq!(
         program
             .execute("exception_probe", "catch_stub", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         pair(atom("EXIT"), pair(atom("undef"), Term::nil()))
     );
 }
@@ -104,7 +108,10 @@ fn raises_the_first_argument_of_error_3_as_an_error() {
     let atom = |name: &str| atom(&program, name);
     let error = |reason| pair(atom("error"), reason);
     assert_eq!(
-        program.execute("exception_probe", "error3", &[]).unwrap(),
+        program
+            .execute("exception_probe", "error3", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             error(atom("badarg")),
             error(pair(atom("my"), atom("reason"))),
@@ -116,7 +123,8 @@ fn raises_the_first_argument_of_error_3_as_an_error() {
     assert_eq!(
         program
             .execute("exception_probe", "group_leader_badarg", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         error(atom("badarg"))
     );
 }

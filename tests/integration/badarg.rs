@@ -19,7 +19,7 @@ fn raises_badarg_that_catch_and_try_catch_as_pinned_erts() {
     let mut expected = vec![badarg; 11];
     expected.extend([caught.clone(), caught]);
     assert_eq!(
-        program.execute("badarg_probe", "main", &[]).unwrap(),
+        program.execute("badarg_probe", "main", &[]).unwrap().term,
         Term::tuple(expected)
     );
 

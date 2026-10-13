@@ -35,7 +35,8 @@ fn returns_badarg_from_erts_internal_group_leader_for_a_dead_target_or_a_non_pid
     assert_eq!(
         program
             .execute("io_client_probe", "group_leader_badarg", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![badarg.clone(), badarg])
     );
 
@@ -66,7 +67,10 @@ fn assert_probe_matches_erts(function: &str) {
     let program = BeamProgram::load(&[&erlang, &io, &erts_internal, IO_CLIENT_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("io_client_probe", function, &[]).unwrap(),
+        program
+            .execute("io_client_probe", function, &[])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             atom("ok"),
             Term::tuple(vec![

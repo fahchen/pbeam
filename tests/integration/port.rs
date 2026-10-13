@@ -78,7 +78,7 @@ fn assert_runs(call: &str, expected: &str) {
     );
     let function = call.strip_suffix("()").unwrap();
     let result = load().execute("port_probe", function, &[]).unwrap();
-    assert_eq!(text(&result), expected, "PBeam {call}");
+    assert_eq!(text(&result.term), expected, "PBeam {call}");
 }
 
 /// Load the probe with the pinned `erlang` module, whose `open_port/2`,
@@ -187,7 +187,7 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program
-            .execute("port_probe", "unsupported", &[argument])
+            .execute("port_probe", "unsupported", &[program.host_term(argument)])
             .unwrap_err()
             .to_string();
         assert!(error.starts_with(message), "{case}: {error}");
@@ -221,8 +221,9 @@ fn charges_the_port_bifs_as_pinned_erts() {
         String::from_utf8_lossy(&reference.stdout),
         format!("{expected}\n")
     );
-    let result = load()
-        .execute("port_probe", "costs", &[Term::nil()])
+    let program = load();
+    let result = program
+        .execute("port_probe", "costs", &[program.host_term(Term::nil())])
         .unwrap();
-    assert_eq!(text(&result), expected);
+    assert_eq!(text(&result.term), expected);
 }

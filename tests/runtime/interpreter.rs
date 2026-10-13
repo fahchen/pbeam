@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
@@ -58,7 +58,7 @@ fn program_of(instructions: Vec<Instruction>, exports: HashMap<(String, u32), u3
                     .expect("the fixture module loads"),
             ),
         )]),
-        atoms: AtomTable::new(),
+        atoms: Arc::new(AtomTable::new()),
     }
 }
 
@@ -96,7 +96,9 @@ fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
         erlang_call("exit", 1, true),
     ];
     let exports = HashMap::from([(("main".into(), 0), 2), (("child".into(), 1), 11)]);
-    program_of(fixture_instructions(0, body, extra), exports).execute("fixture", "main", &[])
+    program_of(fixture_instructions(0, body, extra), exports)
+        .execute("fixture", "main", &[])
+        .map(|host| host.term)
 }
 
 fn spawn_link_child(arguments: Term) -> Vec<Instruction> {
@@ -155,9 +157,9 @@ fn tests_a_fun_with_a_register_arity_as_erl_is_function() {
         .execute("fixture", "main", &[])
         .unwrap()
     };
-    assert_eq!(run(Term::Integer(1)), test_atom("pass"));
+    assert_eq!(run(Term::Integer(1)).term, test_atom("pass"));
     for arity in [Term::Integer(0), Term::Integer(-1), test_atom("a")] {
-        assert_eq!(run(arity), test_atom("fail"));
+        assert_eq!(run(arity).term, test_atom("fail"));
     }
 }
 
@@ -210,7 +212,7 @@ fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
             .unwrap(),
         1,
     )];
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.code = CodeTable::new(program.modules.clone());
     let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
     scheduler
@@ -459,7 +461,8 @@ fn runs_the_classified_operand_form_of_is_eq_exact() {
             Instruction::Label(3),
             Instruction::Move(atom("different"), Operand::X(0)),
             Instruction::Return,
-        ]),
+        ])
+        .term,
         test_atom("equal")
     );
     // x0 is 1 and the immediate is 2: not equal, so the test jumps.
@@ -472,7 +475,8 @@ fn runs_the_classified_operand_form_of_is_eq_exact() {
             Instruction::Label(3),
             Instruction::Move(atom("different"), Operand::X(0)),
             Instruction::Return,
-        ]),
+        ])
+        .term,
         test_atom("different")
     );
     // Two registers that hold the same boxed literal are equal.
@@ -489,7 +493,8 @@ fn runs_the_classified_operand_form_of_is_eq_exact() {
             Instruction::Label(3),
             Instruction::Move(atom("different"), Operand::X(0)),
             Instruction::Return,
-        ]),
+        ])
+        .term,
         test_atom("equal")
     );
     // A Y register and an immediate.
@@ -503,7 +508,8 @@ fn runs_the_classified_operand_form_of_is_eq_exact() {
             Instruction::Label(3),
             Instruction::Move(atom("different"), Operand::X(0)),
             Instruction::Return,
-        ]),
+        ])
+        .term,
         test_atom("equal")
     );
     // The immediate comes first, and a register that holds nil equals nil.
@@ -516,7 +522,8 @@ fn runs_the_classified_operand_form_of_is_eq_exact() {
             Instruction::Label(3),
             Instruction::Move(atom("different"), Operand::X(0)),
             Instruction::Return,
-        ]),
+        ])
+        .term,
         test_atom("equal")
     );
 }
@@ -648,7 +655,7 @@ fn calls_a_module_export_without_a_bif_search() {
     let program = program_of(fixture_instructions(0, body, extra), exports);
     let before = resolve_calls();
     assert_eq!(
-        program.execute("fixture", "main", &[]).unwrap(),
+        program.execute("fixture", "main", &[]).unwrap().term,
         Term::Integer(7)
     );
     assert_eq!(
@@ -746,7 +753,8 @@ fn starts_a_local_call_at_the_exact_position_of_its_label() {
     assert_eq!(
         program_of(fixture_instructions(0, body, extra), exports)
             .execute("fixture", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::Integer(2)
     );
 }
@@ -773,7 +781,7 @@ fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
         .expect("the fixture module loads");
     let mut program = BeamProgram {
         modules: HashMap::from([("mäin_module".into(), Rc::new(module))]),
-        atoms: AtomTable::new(),
+        atoms: Arc::new(AtomTable::new()),
     };
     assert_eq!(
         program
@@ -790,7 +798,11 @@ fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
         .insert((module.tables.name_id("mäin").unwrap(), 1), 2);
     assert_eq!(
         program
-            .execute("mäin_module", "mäin", &[Term::Integer(1)])
+            .execute(
+                "mäin_module",
+                "mäin",
+                &[program.host_term(Term::Integer(1))]
+            )
             .unwrap_err()
             .to_string(),
         "call arity does not match mäin_module:mäin"
@@ -808,7 +820,7 @@ fn executes_a_loaded_function_and_returns_x0() {
     );
 
     assert_eq!(
-        program.execute("fixture", "main", &[]).unwrap(),
+        program.execute("fixture", "main", &[]).unwrap().term,
         Term::Integer(7)
     );
 }
@@ -838,14 +850,20 @@ fn recognizes_runtime_process_identifiers_as_pids() {
 
     assert_eq!(
         program
-            .execute("fixture", "main", &[Term::Pid(ProcessId(1))])
-            .unwrap(),
+            .execute(
+                "fixture",
+                "main",
+                &[program.host_term(Term::Pid(ProcessId(1)))]
+            )
+            .unwrap()
+            .term,
         test_atom("pid")
     );
     assert_eq!(
         program
-            .execute("fixture", "main", &[Term::Integer(1)])
-            .unwrap(),
+            .execute("fixture", "main", &[program.host_term(Term::Integer(1))])
+            .unwrap()
+            .term,
         test_atom("other")
     );
 }
@@ -878,7 +896,8 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             Instruction::Move(atom("missing"), Operand::X(0)),
             Instruction::Return,
         ])
-        .unwrap(),
+        .unwrap()
+        .term,
         Term::Integer(3)
     );
     // A missing key jumps to the fail label.
@@ -894,7 +913,8 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             Instruction::Move(atom("missing"), Operand::X(0)),
             Instruction::Return,
         ])
-        .unwrap(),
+        .unwrap()
+        .term,
         test_atom("missing")
     );
     let error = |body| run(body).unwrap_err().to_string();
@@ -961,11 +981,13 @@ fn tests_map_keys_with_has_map_fields_and_writes_no_register() {
     };
     // All keys present: x0 keeps its value.
     assert_eq!(
-        run(vec![atom("input"), Operand::X(1)], map.clone()).unwrap(),
+        run(vec![atom("input"), Operand::X(1)], map.clone())
+            .unwrap()
+            .term,
         test_atom("none")
     );
     assert_eq!(
-        run(vec![atom("input"), atom("output")], map).unwrap(),
+        run(vec![atom("input"), atom("output")], map).unwrap().term,
         test_atom("missing")
     );
     assert!(
@@ -1004,7 +1026,7 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         run(0, atom("foo")).unwrap_err().to_string(),
         "root process exited with {{badmap,foo},[]}"
     );
-    assert_eq!(run(3, atom("foo")).unwrap(), test_atom("failed"));
+    assert_eq!(run(3, atom("foo")).unwrap().term, test_atom("failed"));
     // A key of a type that a PBeam map cannot hold is a missing key.
     let tuple_key = |fail_label| {
         make_program(
@@ -1028,7 +1050,7 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         tuple_key(0).unwrap_err().to_string(),
         "root process exited with {{badkey,{}},[]}"
     );
-    assert_eq!(tuple_key(3).unwrap(), test_atom("failed"));
+    assert_eq!(tuple_key(3).unwrap().term, test_atom("failed"));
     // Two different references have no PBeam order.
     let references = make_program(
         vec![Instruction::PutMapExact {
@@ -1168,12 +1190,16 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
     // ERTS 29.1.1: maps:keys(#{a => V, 2 => V, 1 => V}) is [1,2,a].
     let a = test_atom("a");
     assert_eq!(
-        keys(map(vec![a.clone(), Term::Integer(2), Term::Integer(1)])).unwrap(),
+        keys(map(vec![a.clone(), Term::Integer(2), Term::Integer(1)]))
+            .unwrap()
+            .term,
         Term::list_from(vec![Term::Integer(1), Term::Integer(2), a])
     );
     // ERTS 29.1.1: maps:keys(#{true => V, abs_path => V, 1 => V}) is [1,true,abs_path].
     assert_eq!(
-        keys(map(vec![atom("abs_path"), atom("true"), Term::Integer(1)])).unwrap(),
+        keys(map(vec![atom("abs_path"), atom("true"), Term::Integer(1)]))
+            .unwrap()
+            .term,
         Term::list_from(vec![Term::Integer(1), atom("true"), atom("abs_path")])
     );
     assert_eq!(
@@ -1225,7 +1251,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
     // The BIF returns the keys of the empty map. The module code would
     // return `module_code`.
     assert_eq!(
-        program.execute("fixture", "main", &[]).unwrap(),
+        program.execute("fixture", "main", &[]).unwrap().term,
         Term::nil()
     );
 }
@@ -1340,7 +1366,7 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
     };
     let chardata = || Term::list_from(vec![Term::binary(b"Hello".to_vec()), Term::Integer(10)]);
     assert_eq!(
-        convert(chardata(), "unicode").unwrap(),
+        convert(chardata(), "unicode").unwrap().term,
         Term::binary(b"Hello\n".to_vec())
     );
     // ERTS 29.1.1 raises badarg for a term that is not chardata.
@@ -1353,18 +1379,20 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
     // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], utf8)
     // is <<"Hello\n">>.
     assert_eq!(
-        convert(chardata(), "utf8").unwrap(),
+        convert(chardata(), "utf8").unwrap().term,
         Term::binary(b"Hello\n".to_vec())
     );
     // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], latin1)
     // is <<"Hello\n">>, and unicode:characters_to_binary([<<233>>], latin1)
     // is <<195,169>>.
     assert_eq!(
-        convert(chardata(), "latin1").unwrap(),
+        convert(chardata(), "latin1").unwrap().term,
         Term::binary(b"Hello\n".to_vec())
     );
     assert_eq!(
-        convert(Term::list_from(vec![Term::binary(vec![233])]), "latin1").unwrap(),
+        convert(Term::list_from(vec![Term::binary(vec![233])]), "latin1")
+            .unwrap()
+            .term,
         Term::binary(vec![195, 169])
     );
     assert_eq!(
@@ -1387,7 +1415,7 @@ fn builds_a_proper_and_an_improper_list() {
         0,
     );
     assert_eq!(
-        list.execute("fixture", "main", &[]).unwrap(),
+        list.execute("fixture", "main", &[]).unwrap().term,
         Term::list_from(vec![Term::Integer(10)])
     );
 
@@ -1404,7 +1432,7 @@ fn builds_a_proper_and_an_improper_list() {
         0,
     );
     assert_eq!(
-        improper.execute("fixture", "main", &[]).unwrap(),
+        improper.execute("fixture", "main", &[]).unwrap().term,
         Term::list_with_tail(vec![Term::Integer(10)], Term::Integer(0))
     );
 }
@@ -1441,11 +1469,11 @@ fn reads_and_tests_lists_as_pinned_erts() {
     };
     // ERTS: lst([a,b,c]) is {a,[b,c]}, and lst([a]) is {a,[]}.
     assert_eq!(
-        get_list(list(&["a", "b", "c"])).unwrap(),
+        get_list(list(&["a", "b", "c"])).unwrap().term,
         Term::tuple(vec![test_atom("a"), list(&["b", "c"])])
     );
     assert_eq!(
-        get_list(list(&["a"])).unwrap(),
+        get_list(list(&["a"])).unwrap().term,
         Term::tuple(vec![test_atom("a"), list(&[])])
     );
     // ERTS: hd1([x,y]) is x.
@@ -1461,7 +1489,7 @@ fn reads_and_tests_lists_as_pinned_erts() {
             ],
         )
     };
-    assert_eq!(get_head(list(&["x", "y"])).unwrap(), test_atom("x"));
+    assert_eq!(get_head(list(&["x", "y"])).unwrap().term, test_atom("x"));
     // ERTS: lst([a|x]) is {a,x}, lst([a,b|x]) is {a,[b|x]}, and
     // hd1([x|y]) is x.
     let improper = |names: &[&str], tail: &str| {
@@ -1471,14 +1499,17 @@ fn reads_and_tests_lists_as_pinned_erts() {
         )
     };
     assert_eq!(
-        get_list(improper(&["a"], "x")).unwrap(),
+        get_list(improper(&["a"], "x")).unwrap().term,
         Term::tuple(vec![test_atom("a"), test_atom("x")])
     );
     assert_eq!(
-        get_list(improper(&["a", "b"], "x")).unwrap(),
+        get_list(improper(&["a", "b"], "x")).unwrap().term,
         Term::tuple(vec![test_atom("a"), improper(&["b"], "x")])
     );
-    assert_eq!(get_head(improper(&["x"], "y")).unwrap(), test_atom("x"));
+    assert_eq!(
+        get_head(improper(&["x"], "y")).unwrap().term,
+        test_atom("x")
+    );
     // ERTS: nil([]) is nil, nil([a]) is nonempty, and nil(a) is other.
     let classify = |argument: Term| {
         run(
@@ -1506,11 +1537,11 @@ fn reads_and_tests_lists_as_pinned_erts() {
         )
         .unwrap()
     };
-    assert_eq!(classify(list(&[])), test_atom("nil"));
-    assert_eq!(classify(list(&["a"])), test_atom("nonempty"));
-    assert_eq!(classify(test_atom("a")), test_atom("other"));
+    assert_eq!(classify(list(&[])).term, test_atom("nil"));
+    assert_eq!(classify(list(&["a"])).term, test_atom("nonempty"));
+    assert_eq!(classify(test_atom("a")).term, test_atom("other"));
     // ERTS: nil([a|x]) is nonempty.
-    assert_eq!(classify(improper(&["a"], "x")), test_atom("nonempty"));
+    assert_eq!(classify(improper(&["a"], "x")).term, test_atom("nonempty"));
     // The BEAM validator makes sure that the source is a nonempty list.
     assert_eq!(
         get_list(list(&[])).unwrap_err().to_string(),
@@ -1560,7 +1591,9 @@ fn updates_record_positions_as_pinned_erts() {
         .execute("fixture", "main", &[])
     };
     assert_eq!(
-        run(Operand::X(0), vec![(3, Operand::X(1)), (4, Operand::X(2))]).unwrap(),
+        run(Operand::X(0), vec![(3, Operand::X(1)), (4, Operand::X(2))])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             test_atom("r"),
             Term::Integer(1),
@@ -1571,7 +1604,9 @@ fn updates_record_positions_as_pinned_erts() {
     // The destination x1 is also a value register. The update uses the
     // value of x1 before the write, as the ERTS `SCRATCH_X_REG` rewrite does.
     assert_eq!(
-        run(Operand::X(1), vec![(2, Operand::X(2)), (3, Operand::X(1))]).unwrap(),
+        run(Operand::X(1), vec![(2, Operand::X(2)), (3, Operand::X(1))])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             test_atom("r"),
             Term::Integer(1),
@@ -1638,7 +1673,7 @@ fn keeps_the_source_record_of_update_record_as_pinned_erts() {
     .execute("fixture", "main", &[])
     .unwrap();
     assert_eq!(
-        result,
+        result.term,
         Term::tuple(vec![record(&[1, 2, 3]), record(&[1, 9, 3])])
     );
 }
@@ -1769,7 +1804,7 @@ fn raw_raise_writes_badarg_for_a_class_that_is_not_valid() {
         )
         .execute("fixture", "main", &[])
     };
-    assert_eq!(raw_raise("foo").unwrap(), Term::static_atom("badarg"));
+    assert_eq!(raw_raise("foo").unwrap().term, Term::static_atom("badarg"));
     // The raw stack trace `[]` keeps the class of `x0`.
     assert_eq!(
         raw_raise("exit").unwrap_err().to_string(),
@@ -1945,7 +1980,7 @@ fn rejects_unresolved_exports_and_function_labels() {
         .expect("the fixture module loads");
     let program = BeamProgram {
         modules: HashMap::from([("external".into(), Rc::new(module))]),
-        atoms: AtomTable::new(),
+        atoms: Arc::new(AtomTable::new()),
     };
     assert!(
         CodeTable::new(program.modules.clone())
@@ -2139,7 +2174,8 @@ fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
         run(
             Instruction::Move(Operand::X(0), Operand::Y(0)),
             Operand::Y(0)
-        ),
+        )
+        .term,
         expected
     );
     assert_eq!(
@@ -2150,7 +2186,8 @@ fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
                 destination: Operand::X(1),
             },
             Operand::X(1)
-        ),
+        )
+        .term,
         expected
     );
     assert_eq!(
@@ -2160,7 +2197,8 @@ fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
                 destination: Operand::X(1),
             },
             Operand::X(1)
-        ),
+        )
+        .term,
         expected
     );
 }
@@ -2193,6 +2231,7 @@ fn run_binary_match(
     ]);
     make_program(body, 0)
         .execute("fixture", "main", &[])
+        .map(|host| host.term)
         .map_err(|error| error.to_string())
 }
 
@@ -2275,6 +2314,7 @@ fn gives_a_runtime_error_for_a_read_after_a_failed_equal_command() {
         body.extend(rest);
         make_program(body, 0)
             .execute("fixture", "main", &[])
+            .map(|host| host.term)
             .map_err(|error| error.to_string())
     };
     assert_eq!(
@@ -2463,11 +2503,11 @@ fn selects_tuple_arity_and_rejects_call_last_stack_size() {
         .unwrap()
     };
     assert_eq!(
-        select(Term::tuple(vec![Term::Integer(1)])),
+        select(Term::tuple(vec![Term::Integer(1)])).term,
         test_atom("one")
     );
-    assert_eq!(select(Term::tuple(vec![])), test_atom("other"));
-    assert_eq!(select(test_atom("a")), test_atom("other"));
+    assert_eq!(select(Term::tuple(vec![])).term, test_atom("other"));
+    assert_eq!(select(test_atom("a")).term, test_atom("other"));
 
     let error = |body| {
         make_program(body, 0)
@@ -2512,10 +2552,17 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
         ],
         0,
     );
-    assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1150);
+    assert_eq!(
+        Arc::get_mut(&mut program.atoms)
+            .unwrap()
+            .put("pbeam_zeta")
+            .unwrap()
+            .index(),
+        1150
+    );
     for _ in 0..2 {
         assert!(matches!(
-            program.execute("fixture", "main", &[]).unwrap(),
+            program.execute("fixture", "main", &[]).unwrap().term,
             Term::Atom(ref alpha) if alpha.name() == "pbeam_alpha" && alpha.index() == 1151
         ));
     }
@@ -2540,12 +2587,13 @@ fn returns_the_iovec_of_a_binary_and_of_a_list() {
         .unwrap()
     };
     let hello = Term::binary(b"Hello".to_vec());
-    assert_eq!(run(hello.clone()), Term::list_from(vec![hello]));
+    assert_eq!(run(hello.clone()).term, Term::list_from(vec![hello]));
     assert_eq!(
         run(Term::list_from(vec![
             Term::Integer(1),
             Term::list_from(vec![Term::binary(vec![2])]),
-        ])),
+        ]))
+        .term,
         Term::list_from(vec![Term::binary(vec![1, 2])])
     );
 }
@@ -2572,7 +2620,7 @@ fn finds_a_live_catch_tag_after_other_slots_and_skips_a_cleared_tag() {
         Instruction::Return,
     ]);
     assert_eq!(
-        run(body).unwrap(),
+        run(body).unwrap().term,
         Term::tuple(vec![
             Term::static_atom("EXIT"),
             Term::tuple(vec![Term::static_atom("undef"), Term::nil()]),
@@ -2648,7 +2696,7 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
     // ERTS 29.1.1: catch element(1, {}) is {'EXIT', {badarg, Stack}}.
     // PBeam gives the stack trace [].
     assert_eq!(
-        element(1).unwrap(),
+        element(1).unwrap().term,
         Term::tuple(vec![
             test_atom("EXIT"),
             Term::tuple(vec![test_atom("badarg"), Term::nil()]),
@@ -2715,11 +2763,11 @@ fn returns_the_local_node_for_node_0_and_a_pid() {
     };
     // ERTS 29.1.1 without distribution: node() and node(self()) are nonode@nohost.
     assert_eq!(
-        node(BifId::ErlangNode0, Vec::new()).unwrap(),
+        node(BifId::ErlangNode0, Vec::new()).unwrap().term,
         Term::static_atom("nonode@nohost")
     );
     assert_eq!(
-        node(BifId::ErlangNode1, vec![Operand::X(1)]).unwrap(),
+        node(BifId::ErlangNode1, vec![Operand::X(1)]).unwrap().term,
         Term::static_atom("nonode@nohost")
     );
     assert_eq!(
@@ -2766,7 +2814,7 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
         ),
     );
     assert_eq!(
-        program.execute("fixture", "main", &[]).unwrap(),
+        program.execute("fixture", "main", &[]).unwrap().term,
         test_atom("true")
     );
 }
@@ -2798,7 +2846,9 @@ fn removes_an_active_monitor_without_a_trap() {
 /// `zero() -> zero.`, `id(A, B, C) -> {A, B, C}.`, and
 /// `last(M, F) -> M:F(bye).`, which compiles to `{apply_last,1,0}`.
 fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
-    apply_targets_program(body).execute("fixture", "main", &[])
+    apply_targets_program(body)
+        .execute("fixture", "main", &[])
+        .map(|host| host.term)
 }
 
 /// Return the program of `run_with_apply_targets`.
@@ -2987,7 +3037,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
         "atom table does not hold fixture"
     );
     for name in ["fixture", "missing"] {
-        program.atoms.put(name).unwrap();
+        Arc::get_mut(&mut program.atoms).unwrap().put(name).unwrap();
     }
     assert_eq!(
         program
@@ -3061,7 +3111,9 @@ fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term,
         deallocate: 0,
     });
     body.push(Instruction::Return);
-    make_program(body, 0).execute("fixture", "main", &[])
+    make_program(body, 0)
+        .execute("fixture", "main", &[])
+        .map(|host| host.term)
 }
 
 fn get_bif(key: &str, destination: Operand) -> Instruction {
@@ -3105,7 +3157,8 @@ fn puts_and_gets_process_dictionary_values_as_pinned_erts() {
     assert_eq!(
         make_program(body, 0)
             .execute("fixture", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![
             undefined.clone(),
             Term::Integer(1),
@@ -3146,7 +3199,7 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
     // ERTS 29.1.1: after put(k, parent), a spawned process gets
     // undefined for get(k).
     assert!(matches!(
-        program.execute("fixture", "main", &[]),
+        program.execute("fixture", "main", &[]).map(|host| host.term),
         Ok(Term::Tuple(ref elements))
             if elements.first() == Some(&test_atom("DOWN"))
                 && elements.last() == Some(&Term::static_atom("undefined"))
@@ -3317,7 +3370,8 @@ fn reads_tuple_elements_as_pinned_erts() {
     assert_eq!(
         make_program(body, 0)
             .execute("fixture", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         b
     );
     let element = |index: Term, tuple: Term| call_ext_with("erlang", "element", vec![index, tuple]);
@@ -3402,7 +3456,8 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
     assert_eq!(
         make_program(body, 0)
             .execute("fixture", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![stacktrace, Term::nil()])
     );
     let process_info =
@@ -3663,17 +3718,17 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
     // 3998 entries, the entry of `inner`, and its return leave 0. The
     // last return makes the budget -1: `burner` switches out, `sender`
     // runs, and then `burner` exits.
-    assert_eq!(first_message(3998), test_atom("tag"));
+    assert_eq!(first_message(3998).term, test_atom("tag"));
     // With 3997 entries, the last return leaves 0, and `burner` exits at
     // once. The exit bumps 100 reductions and finds none left, so it
     // switches out before the monitor (`erl_process.c:14229`, `14315`).
-    assert_eq!(first_message(3997), test_atom("tag"));
+    assert_eq!(first_message(3997).term, test_atom("tag"));
     // The exit of a process with 150 reductions left uses 100 and 50, and
     // switches out before the monitor (`erl_process.c:14475`, `14543`).
-    assert_eq!(first_message(3847), test_atom("tag"));
+    assert_eq!(first_message(3847).term, test_atom("tag"));
     // With 151 reductions left, the exit sends the monitor signal at once.
     assert!(matches!(
-        first_message(3846),
+        first_message(3846).term,
         Term::Tuple(ref elements) if elements.first() == Some(&test_atom("DOWN"))
     ));
 }
@@ -3719,7 +3774,7 @@ fn shares_the_stored_term_of_an_ets_lookup() {
     // `db_copy_from_comp`, `:3729`). PBeam shares the term by owner
     // decision R3 of #450 (row "Message copy" of docs/erts-differences.md).
     let program = make_program(vec![], 0);
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
@@ -3755,7 +3810,7 @@ fn shares_the_stored_term_of_a_persistent_term() {
     // copy (`:380-388`). PBeam shares the term by owner decision R3 of #450
     // (row "Message copy" of docs/erts-differences.md).
     let program = make_program(vec![], 0);
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let key = Term::tuple(vec![Term::Integer(7)]);
@@ -3784,7 +3839,7 @@ fn rejects_a_bif_name_that_no_table_entry_holds() {
     // MFA error, which is the error that the run gave before the loader
     // resolved the identity of a BIF.
     let program = make_program(vec![], 0);
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     assert_eq!(

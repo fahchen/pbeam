@@ -68,6 +68,7 @@ fn run(program: &BeamProgram, function: &str, policy: &dyn Policy) -> Term {
     program
         .execute_with_policy("capability_probe", function, &[], policy)
         .unwrap()
+        .term
 }
 
 /// Run `capability_probe:Function()` on the pinned ERTS with one
@@ -96,13 +97,19 @@ fn gives_the_erts_results_with_the_default_policy() {
     let five_ok = results(&program, &["ok"; 5]);
     for function in ["main", "inherit"] {
         assert_eq!(
-            program.execute("capability_probe", function, &[]).unwrap(),
+            program
+                .execute("capability_probe", function, &[])
+                .unwrap()
+                .term,
             five_ok
         );
         assert_eq!(erts(function), "[ok,ok,ok,ok,ok]\n");
     }
     assert_eq!(
-        program.execute("capability_probe", "modules", &[]).unwrap(),
+        program
+            .execute("capability_probe", "modules", &[])
+            .unwrap()
+            .term,
         results(&program, &["ok", "ok"])
     );
     assert_eq!(erts("modules"), "[ok,ok]\n");
@@ -239,16 +246,16 @@ fn skips_each_spawn_check_and_reduction_in_a_run_with_no_policy() {
     let unchecked = |function| program.execute("capability_probe", function, &[]).unwrap();
     for function in ["reduce", "empty", "undelegable"] {
         assert_eq!(
-            unchecked(function),
+            unchecked(function).term,
             results(&program, &["ok"; 5]),
             "{function}"
         );
     }
-    assert_eq!(unchecked("widen"), results(&program, &["ok"; 6]));
+    assert_eq!(unchecked("widen").term, results(&program, &["ok"; 6]));
     // The option is still checked: a `Map` that is not valid raises badarg.
     let mut expected = vec!["badarg"; 19];
     expected.push("ok");
-    assert_eq!(unchecked("malformed"), results(&program, &expected));
+    assert_eq!(unchecked("malformed").term, results(&program, &expected));
 }
 
 #[test]

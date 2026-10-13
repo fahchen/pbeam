@@ -52,7 +52,7 @@ fn runs_the_is_bitstr_test_as_pinned_erts() {
     let binaries = [&b"b"[..], b"", b"ab"].map(|bytes| Term::binary(bytes.to_vec()));
     let expected = Term::list_from(binaries.into_iter().chain(std::iter::repeat_n(other, 12)));
     assert_eq!(
-        program.execute("bitstr_probe", "kinds", &[]).unwrap(),
+        program.execute("bitstr_probe", "kinds", &[]).unwrap().term,
         expected
     );
     assert_eq!(
