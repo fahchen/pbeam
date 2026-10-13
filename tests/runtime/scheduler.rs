@@ -1640,3 +1640,28 @@ fn counts_the_storage_of_the_containers_across_the_drain_steps() {
         "the walk counts exactly the element array of the group"
     );
 }
+
+#[test]
+fn counts_the_terms_of_a_map_drain_that_is_the_only_item() {
+    // The walk of a drain queues the keys and the values of its leaves. When
+    // the drain is the only item of the release work list, no later term call
+    // flushes that queue, so the walk must flush it before it reads its
+    // number, and it must hold the whole graph of each value.
+    let width = 4 * RELEASE_BATCH;
+    let mut direct = crate::term::LiveBytes::new();
+    direct.term(&Term::list_from((0..width as i64).map(Term::Integer)));
+    let expected = direct.bytes();
+    assert!(expected > 0, "a list of cells holds live bytes");
+    let mut map = Map::from_pairs(vec![(
+        Term::Integer(0),
+        Term::list_from((0..width as i64).map(Term::Integer)),
+    )])
+    .unwrap();
+    let drain = crate::term::MapDrain::take(&mut map).expect("the only holder takes the form");
+    let mut scheduler = test_scheduler();
+    scheduler.release.push(Release::Map(drain));
+    assert!(
+        scheduler.live_bytes() >= expected,
+        "the walk counts the list that the value of the map holds"
+    );
+}

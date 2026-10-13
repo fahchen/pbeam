@@ -88,9 +88,10 @@ struct Measurement {
     total: Duration,
     /// The number of scheduler steps that the release used.
     steps: usize,
-    /// The largest number of terms that the release work list of the
-    /// scheduler held at a step boundary.
-    retained_terms: usize,
+    /// The largest number of terms that the items of the release work list of
+    /// the scheduler held at a step boundary. This count is not the unit
+    /// count of the drain; [`items_of`] names the difference.
+    retained_items: usize,
     /// The largest number of bytes that the containers of the release work
     /// list held at a step boundary: the capacity of every container on the
     /// list and one term slot for each term of the list.
@@ -466,8 +467,8 @@ fn scheduler_with(shape: &Shape) -> Scheduler {
 
 /// What the release work list of one run held at a step boundary.
 struct Peak {
-    /// The largest number of units that the list owned.
-    units: usize,
+    /// The largest number of items that the list owned.
+    items: usize,
     /// The largest number of bytes that the containers of the list owned: the
     /// capacity of each container and one term slot for each term.
     held_bytes: usize,
@@ -481,12 +482,12 @@ impl Peak {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let one = Peak { units: 1, held_bytes: 2, list_bytes: 3 };
+    /// let one = Peak { items: 1, held_bytes: 2, list_bytes: 3 };
     /// assert_eq!(one.max(one).units, 1);
     /// ```
     fn max(self, other: Peak) -> Peak {
         Peak {
-            units: self.units.max(other.units),
+            items: self.items.max(other.items),
             held_bytes: self.held_bytes.max(other.held_bytes),
             list_bytes: self.list_bytes.max(other.list_bytes),
         }
@@ -527,26 +528,29 @@ fn drain(scheduler: &mut Scheduler) -> (Duration, Duration, usize, Peak) {
 ///
 /// ```rust,ignore
 /// let peak = held(&test_scheduler());
-/// assert_eq!(peak.units, 0);
+/// assert_eq!(peak.items, 0);
 /// ```
 fn held(scheduler: &Scheduler) -> Peak {
     Peak {
-        units: scheduler.release.iter().map(units_of).sum(),
+        items: scheduler.release.iter().map(items_of).sum(),
         held_bytes: scheduler.release.iter().map(held_bytes).sum(),
         list_bytes: scheduler.release.allocated_bytes(),
     }
 }
 
-/// Return the number of units that one item of the release work list owns:
-/// one for each term, element, register, Y slot, or dictionary pair, and one
-/// for a mailbox, a monitor tree, or a map while it holds a term.
+/// Return the number of items that one item of the release work list holds:
+/// one for each term, element, register, or Y slot, two for each dictionary
+/// entry, and one for a map walk, a mailbox, or a monitor tree while it holds
+/// a term. This is not the unit count of the drain, which charges one unit
+/// for each dictionary pair, each mailbox entry, and each monitor value; the
+/// two counts agree for the items that hold one term for each unit.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(units_of(&Release::Term(Term::Integer(1))), 1);
+/// assert_eq!(items_of(&Release::Term(Term::Integer(1))), 1);
 /// ```
-fn units_of(item: &Release) -> usize {
+fn items_of(item: &Release) -> usize {
     match item {
         Release::Term(_) => 1,
         Release::Terms(group) => group.len(),
@@ -610,7 +614,7 @@ fn synchronous_measurement(shape: &Shape) -> Measurement {
         max_step: pause,
         total: pause,
         steps: 1,
-        retained_terms: 0,
+        retained_items: 0,
         retained_bytes: 0,
         list_bytes: 0,
     }
@@ -637,7 +641,7 @@ fn exit_measurement(shape: &Shape) -> Measurement {
     let exit = start.elapsed();
     let (maximum, total, batches, peak) = drain(&mut scheduler);
     let peak = peak.max(held(&scheduler));
-    let retained_terms = peak.units;
+    let retained_items = peak.items;
     let retained_bytes = peak.held_bytes;
     let list_bytes = peak.list_bytes;
     black_box(&scheduler);
@@ -645,7 +649,7 @@ fn exit_measurement(shape: &Shape) -> Measurement {
         max_step: exit.max(maximum),
         total: exit + total,
         steps: 1 + batches,
-        retained_terms,
+        retained_items,
         retained_bytes,
         list_bytes,
     }
@@ -698,7 +702,7 @@ fn shared_last_release_measurement(shape: &Shape) -> Measurement {
     let exit = start.elapsed();
     let (maximum, total, batches, peak) = drain(&mut scheduler);
     let peak = peak.max(held(&scheduler));
-    let retained_terms = peak.units;
+    let retained_items = peak.items;
     let retained_bytes = peak.held_bytes;
     let list_bytes = peak.list_bytes;
     black_box(&scheduler);
@@ -706,7 +710,7 @@ fn shared_last_release_measurement(shape: &Shape) -> Measurement {
         max_step: exit.max(maximum),
         total: exit + total,
         steps: 1 + batches,
-        retained_terms,
+        retained_items,
         retained_bytes,
         list_bytes,
     }
@@ -733,7 +737,7 @@ fn shutdown_measurement(shape: &Shape) -> Measurement {
         max_step: pause,
         total: pause,
         steps: 1,
-        retained_terms: 0,
+        retained_items: 0,
         retained_bytes: 0,
         list_bytes: 0,
     }
@@ -846,7 +850,7 @@ fn records_the_release_pause_of_a_large_graph() {
     }
     println!();
     println!(
-        "RELEASE summary: shape | nodes | path | max step pause us | total pause ms | steps | M nodes for each second | retained units | held bytes | list bytes"
+        "RELEASE summary: shape | nodes | path | max step pause us | total pause ms | steps | M nodes for each second | retained items | held bytes | list bytes"
     );
     let shapes = shapes();
     let paths = paths();
@@ -864,7 +868,7 @@ fn records_the_release_pause_of_a_large_graph() {
             .max()
             .expect("a path has runs");
         let steps = runs.iter().map(|run| run.steps).max().unwrap_or(0);
-        let retained_terms = runs.iter().map(|run| run.retained_terms).max().unwrap_or(0);
+        let retained_items = runs.iter().map(|run| run.retained_items).max().unwrap_or(0);
         let retained_bytes = runs.iter().map(|run| run.retained_bytes).max().unwrap_or(0);
         let list_bytes = runs.iter().map(|run| run.list_bytes).max().unwrap_or(0);
         println!(
@@ -876,7 +880,7 @@ fn records_the_release_pause_of_a_large_graph() {
             total.as_secs_f64() * 1e3,
             steps,
             shape.nodes as f64 / total.as_secs_f64() / 1e6,
-            retained_terms,
+            retained_items,
             retained_bytes,
             list_bytes
         );

@@ -168,6 +168,29 @@ impl LiveBytes {
     /// ```
     pub(crate) fn term(&mut self, term: &Term) {
         self.push(term);
+        self.walk();
+    }
+
+    /// Walk the terms that wait on the work stack of the walk. A caller that
+    /// pushes terms and reads [`Self::bytes`] with no later [`Self::term`]
+    /// call, such as the walk of a map drain that is the last item of a
+    /// release, calls this before it reads the number.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// live.flush();
+    /// assert_eq!(live.bytes(), 0);
+    /// ```
+    pub(crate) fn flush(&mut self) {
+        self.walk();
+    }
+
+    /// Count the containers of the terms that wait on the work stack, and
+    /// walk the terms that they hold. The terms of a long list go through the
+    /// work stack, so the loop does not recurse on the Rust stack.
+    fn walk(&mut self) {
         while let Some((term, unique)) = self.pending.pop() {
             match &term {
                 Term::Tuple(tuple) => self.tuple(tuple, unique),

@@ -1337,3 +1337,27 @@ fn counts_a_collision_child_in_the_walk() {
     live.term(&Term::Map(map));
     assert!(live.bytes() > 0);
 }
+
+#[test]
+fn counts_the_terms_of_the_values_of_a_drain() {
+    // The walk of a drain queues the keys and the values of its leaves, and
+    // it flushes that queue before a caller reads the number. A value that
+    // holds a long list therefore gives the bytes of that list.
+    let width = 1024;
+    let mut direct = crate::term::LiveBytes::new();
+    direct.term(&Term::list_from((0..width as i64).map(Term::Integer)));
+    let expected = direct.bytes();
+    assert!(expected > 0, "a list of cells holds live bytes");
+    let mut map = Map::from_pairs(vec![(
+        Term::Integer(0),
+        Term::list_from((0..width as i64).map(Term::Integer)),
+    )])
+    .unwrap();
+    let drain = Drain::take(&mut map).expect("the only holder takes the form");
+    let mut live = crate::term::LiveBytes::new();
+    drain.account(&mut live);
+    assert!(
+        live.bytes() >= expected,
+        "the walk counts the list that the value of the map holds"
+    );
+}

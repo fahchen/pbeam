@@ -367,6 +367,10 @@ impl Drain {
             live.add(children.capacity() * std::mem::size_of::<Child>());
             live.children_of(children);
         }
+        // `children_of` queues the keys and the values of the leaves. A drain
+        // that is the last item of the release work list has no later term
+        // call to flush that queue, so the walk flushes it here.
+        live.flush();
     }
 
     /// Return the bytes of the allocations that the drain holds: the stack of

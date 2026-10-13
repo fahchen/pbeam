@@ -1831,6 +1831,9 @@ impl Scheduler {
                 }
             }
         }
+        // Every item of the list flushes its own walk, and this closes the
+        // walk of the list as a whole.
+        live.flush();
     }
 
     /// Deliver a message that no process sends, such as a timer message or
