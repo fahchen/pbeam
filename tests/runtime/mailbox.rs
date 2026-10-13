@@ -341,3 +341,17 @@ fn reuses_marker_slots_and_drops_passed_markers() {
     assert!(mailbox.markers.is_empty());
     assert_eq!(mailbox.messages(), vec![int(0), int(1)]);
 }
+
+#[test]
+fn reports_the_bytes_of_the_mailbox_and_walks_its_terms() {
+    let mut mailbox = Mailbox::default();
+    assert_eq!(mailbox.allocated_bytes(), 0);
+    mailbox.push(Term::tuple(vec![Term::Integer(1)]));
+    mailbox.push_signal(link(5));
+    mailbox.reserve_marker();
+    mailbox.fetch();
+    assert!(mailbox.allocated_bytes() > 0);
+    let mut live = crate::term::LiveBytes::new();
+    mailbox.account_terms(&mut live);
+    assert!(live.bytes() > 0);
+}

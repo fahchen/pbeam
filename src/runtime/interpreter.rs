@@ -256,7 +256,7 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
     ) -> Result<Term, BeamError> {
-        self.execute_issued(module, function, arguments, Issuer::Unchecked)
+        self.execute_issued(module, function, arguments, Issuer::Unchecked, &mut None)
     }
 
     /// Run an exported function as the root process, as
@@ -284,7 +284,7 @@ impl BeamProgram {
         arguments: &[Term],
         policy: &dyn Policy,
     ) -> Result<Term, BeamError> {
-        self.execute_issued(module, function, arguments, Issuer::Host(policy))
+        self.execute_issued(module, function, arguments, Issuer::Host(policy), &mut None)
     }
 
     /// Run an exported function as the root process, as
@@ -354,7 +354,40 @@ impl BeamProgram {
         boot: bool,
     ) -> Result<Term, BeamError> {
         let issuer = Issuer::Module { policy, boot };
-        self.execute_issued(module, function, arguments, issuer)
+        self.execute_issued(module, function, arguments, issuer, &mut None)
+    }
+
+    /// Run an exported function as the root process, as
+    /// [`BeamProgram::execute`] does, and call `sample` with the live bytes
+    /// of the guest containers before each scheduling step. The bytes are
+    /// the accounting of the runtime containers: the element array of a
+    /// tuple, the cells of a list, the forms and pairs of a map, the
+    /// backing of a binary, the free variables of a fun, the frames and
+    /// slots of a process, the mailbox, and the dictionary, each counted
+    /// once for each allocation (see `Scheduler::live_bytes`). The run has
+    /// no policy, as [`BeamProgram::execute`] has none.
+    ///
+    /// The sample runs outside the interpreter loop, at a scheduling step,
+    /// so the accounting changes no term behavior and no measured hot path.
+    /// A sample is the state at a scheduling step, and the run samples no
+    /// state inside a turn.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut peak = 0;
+    /// let result = program.execute_sampled("terra_probe", "main", &[], &mut |live| peak = peak.max(live))?;
+    /// assert!(peak > 0);
+    /// ```
+    pub fn execute_sampled(
+        &self,
+        module: &str,
+        function: &str,
+        arguments: &[Term],
+        sample: &mut dyn FnMut(usize),
+    ) -> Result<Term, BeamError> {
+        let mut sample = Some(sample);
+        self.execute_issued(module, function, arguments, Issuer::Unchecked, &mut sample)
     }
 
     /// Run an exported function as the root process with the initial
@@ -372,6 +405,7 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
         issuer: Issuer,
+        sample: &mut Option<&mut dyn FnMut(usize)>,
     ) -> Result<Term, BeamError> {
         let initial_mode = InitialMode::read();
         let mut scheduler = match issuer {
@@ -379,7 +413,7 @@ impl BeamProgram {
             Issuer::Host(_) | Issuer::Module { .. } => Scheduler::new(self.atoms.clone()),
         };
         scheduler.code = CodeTable::new(self.modules.clone());
-        let run = self.run_root(&mut scheduler, module, function, arguments, issuer);
+        let run = self.run_root(&mut scheduler, module, function, arguments, issuer, sample);
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
         match scheduler.into_root_result() {
@@ -430,6 +464,7 @@ impl BeamProgram {
         function: &str,
         arguments: &[Term],
         issuer: Issuer,
+        sample: &mut Option<&mut dyn FnMut(usize)>,
     ) -> Result<(), BeamError> {
         let arity =
             u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
@@ -459,6 +494,7 @@ impl BeamProgram {
                 }
             }
         };
+        sample_live(scheduler, sample);
         while !scheduler.root_exited() {
             if let Some(initial) = scheduler.take_policy_initial() {
                 let capabilities = initial.map_err(|cause| {
@@ -512,7 +548,9 @@ impl BeamProgram {
                     }
                 }
             }
+            sample_live(scheduler, sample);
         }
+        sample_live(scheduler, sample);
         if root.is_some() {
             return Err(error("the policy process waits in initial/1"));
         }
@@ -4152,3 +4190,20 @@ mod dispatch_attribution_costs;
 #[cfg(test)]
 #[path = "../../tests/runtime/interpreter/data_structure_costs.rs"]
 mod data_structure_costs;
+
+/// Call the live-byte sampler of a measured run with the bytes of the guest
+/// containers of `scheduler`. Do nothing when the run has no sampler.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut peak = 0;
+/// let mut sample = Some(&mut |live: usize| peak = live);
+/// sample_live(&scheduler, &mut sample);
+/// assert!(peak > 0);
+/// ```
+fn sample_live(scheduler: &Scheduler, sample: &mut Option<&mut dyn FnMut(usize)>) {
+    if let Some(sample) = sample.as_deref_mut() {
+        sample(scheduler.live_bytes());
+    }
+}

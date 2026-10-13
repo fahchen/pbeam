@@ -928,3 +928,17 @@ fn sends_a_message_that_shares_the_term_of_the_sender() {
     // A term of another kind does not share its storage.
     assert!(!Term::Integer(1).shares_storage_with(&Term::Integer(1)));
 }
+
+#[test]
+fn reports_the_live_bytes_of_the_scheduler_state() {
+    let mut scheduler = test_scheduler();
+    assert_eq!(scheduler.live_bytes(), 0);
+    scheduler
+        .start(
+            frame(),
+            vec![Term::tuple(vec![Term::Integer(1)])],
+            Vec::new(),
+        )
+        .unwrap();
+    assert!(scheduler.live_bytes() > 0);
+}

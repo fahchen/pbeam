@@ -36,8 +36,24 @@ impl Tuple {
         self.arc().len()
     }
 
+    /// Return the bytes of the element array of the tuple: the capacity of
+    /// the array times the size of one element. The number excludes the
+    /// header of the `Arc` and the header of the `Vec`, as the accounting of
+    /// task [#559](https://github.com/fahchen/pbeam/issues/559) excludes
+    /// them.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let tuple = Tuple::from(vec![Term::Integer(1), Term::Integer(2)]);
+    /// assert!(tuple.allocated_bytes() >= 2 * std::mem::size_of::<Term>());
+    /// ```
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.arc().capacity() * std::mem::size_of::<Term>()
+    }
+
     /// Return the array of the tuple.
-    fn arc(&self) -> &Arc<Vec<Term>> {
+    pub(super) fn arc(&self) -> &Arc<Vec<Term>> {
         self.0
             .as_ref()
             .expect("only the drop of a term takes its tuple array")

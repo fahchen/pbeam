@@ -225,11 +225,11 @@ impl Target {
 /// The thing of a fun, as the `ErlFunThing` of ERTS is: the entry that the
 /// fun points to and the values of its free variables. An external fun has
 /// no free variables.
-struct FunThing {
+pub(super) struct FunThing {
     /// The entry of the fun.
-    target: Target,
+    pub(super) target: Target,
     /// The values of the free variables, in `FunT` order.
-    free: Vec<Term>,
+    pub(super) free: Vec<Term>,
 }
 
 /// A fun: a shared reference to its thing. All copies of the fun own one
@@ -349,8 +349,25 @@ impl Fun {
             .map(|thing| thing.free)
     }
 
+    /// Return the bytes of the thing of the fun and of its free variables:
+    /// the size of the thing and the capacity of the free-variable array
+    /// times the size of one element. The number excludes the header of the
+    /// `Arc` and the header of the `Vec`, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes them.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let fun = Fun::new(lambda, vec![Term::Integer(1)]);
+    /// assert!(fun.allocated_bytes() >= std::mem::size_of::<FunThing>());
+    /// ```
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        let thing = self.arc();
+        std::mem::size_of::<FunThing>() + thing.free.capacity() * std::mem::size_of::<Term>()
+    }
+
     /// Return the shared thing of the fun.
-    fn arc(&self) -> &Arc<FunThing> {
+    pub(super) fn arc(&self) -> &Arc<FunThing> {
         self.0
             .as_ref()
             .expect("only the drop of a term takes its fun thing")

@@ -73,6 +73,38 @@ impl Binary {
         &self.bytes
     }
 
+    /// Return the shared array of the bytes for the live-byte walk. Two
+    /// binaries that return one array keep their bytes in one place.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let bytes = Binary::from(b"ab".to_vec());
+    /// assert_eq!(bytes.backing().len(), 2);
+    /// ```
+    pub(super) fn backing(&self) -> &Arc<Vec<u8>> {
+        &self.bytes
+    }
+
+    /// Return the bytes of the backing array of this binary, and of the
+    /// packed array of a view whose offset is not on a byte boundary: the
+    /// capacity of each array. The number excludes the header of the `Arc`
+    /// and the header of the `Vec`, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes them.
+    /// A view counts the whole backing array of its source, because the
+    /// array is one allocation and the view keeps it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let bytes = Binary::from(b"abc".to_vec());
+    /// assert!(bytes.allocated_bytes() >= 3);
+    /// assert!(bytes.bits(4, 12).allocated_bytes() > bytes.allocated_bytes());
+    /// ```
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.bytes.capacity() + self.packed.as_ref().map_or(0, |packed| packed.capacity())
+    }
+
     /// Return the packed bits of a view whose size is not a whole number of
     /// bytes, or `None` for each other view.
     ///
@@ -84,6 +116,18 @@ impl Binary {
     /// ```
     #[cfg(test)]
     pub(crate) fn packed(&self) -> Option<&Arc<Vec<u8>>> {
+        self.packed.as_ref()
+    }
+
+    /// Return the packed array of a view whose offset is not on a byte
+    /// boundary, or `None` for each other view, for the live-byte walk.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Binary::from(&[0xC3]).bits(4, 8).packed_backing().is_some());
+    /// ```
+    pub(super) fn packed_backing(&self) -> Option<&Arc<Vec<u8>>> {
         self.packed.as_ref()
     }
 

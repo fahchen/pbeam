@@ -76,8 +76,22 @@ impl ConsRef {
         self.0.take().and_then(Arc::into_inner)
     }
 
+    /// Return the bytes of one cons cell: the size of the cell itself. The
+    /// number excludes the header of the `Arc`, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let cell = ConsRef::new(Term::Integer(1), Term::nil());
+    /// assert_eq!(cell.allocated_bytes(), std::mem::size_of::<Cons>());
+    /// ```
+    pub(super) fn allocated_bytes(&self) -> usize {
+        std::mem::size_of::<Cons>()
+    }
+
     /// Return the `Arc` of the cell.
-    fn arc(&self) -> &Arc<Cons> {
+    pub(super) fn arc(&self) -> &Arc<Cons> {
         self.0
             .as_ref()
             .expect("only the drop of a term takes its cons cell")

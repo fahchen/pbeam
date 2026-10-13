@@ -33,7 +33,7 @@ use super::{
 use crate::{
     beam::BeamModule,
     error::{BeamError, error},
-    term::{Atom, AtomTable, ProcessId, Reference, SMALL_INTEGER_MIN, Term},
+    term::{Atom, AtomTable, LiveBytes, ProcessId, Reference, SMALL_INTEGER_MIN, Term},
 };
 
 /// The reduction budget of a process for one turn, as ERTS `CONTEXT_REDS`
@@ -1296,6 +1296,32 @@ impl Scheduler {
     /// ```
     pub(super) fn into_root_result(self) -> Option<Result<Term, Term>> {
         self.root_result
+    }
+
+    /// Return the bytes of the guest containers that the runtime holds: the
+    /// container arrays of each live process and of each freed process, and
+    /// the guest terms that they hold, plus the result or the exit reason of
+    /// the root process. Each shared container is counted once, as the
+    /// counting allocator of `docs/term-layout-design.md` section 5 counts
+    /// each allocation once.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.live_bytes() > 0);
+    /// ```
+    pub(super) fn live_bytes(&self) -> usize {
+        let mut live = LiveBytes::new();
+        let freed = self.freed.values().map(|(process, _)| process);
+        for process in self.processes.values().chain(freed) {
+            process.account(&mut live);
+        }
+        if let Some(result) = &self.root_result {
+            match result {
+                Ok(term) | Err(term) => live.term(term),
+            }
+        }
+        live.bytes()
     }
 
     /// Deliver a message that no process sends, such as a timer message or

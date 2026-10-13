@@ -121,7 +121,7 @@ pub struct Map {
 
 /// The two forms of a map. The number of keys selects the form.
 #[derive(Clone)]
-enum Repr {
+pub(super) enum Repr {
     /// At most 32 pairs, sorted by the flatmap key order.
     Flat(Vec<(Term, Term)>),
     /// A HAMT, only for 33 or more keys.
@@ -130,9 +130,9 @@ enum Repr {
 
 /// A hash array mapped trie of map pairs.
 #[derive(Clone)]
-struct Hamt {
+pub(super) struct Hamt {
     /// The node at level 0.
-    root: Node,
+    pub(super) root: Node,
     /// The number of keys in the trie.
     size: usize,
 }
@@ -152,9 +152,9 @@ pub(super) enum Form<'a> {
 #[derive(Clone)]
 pub(super) struct Node {
     /// The occupied slots.
-    bitmap: u16,
+    pub(super) bitmap: u16,
     /// The child of each occupied slot, in ascending slot order.
-    children: Vec<Child>,
+    pub(super) children: Vec<Child>,
 }
 
 /// The child in one slot of a HAMT node.
@@ -200,10 +200,34 @@ impl Map {
     /// ```rust,ignore
     /// assert!(matches!(&**Map::new().arc(), Repr::Flat(pairs) if pairs.is_empty()));
     /// ```
-    fn arc(&self) -> &Arc<Repr> {
+    pub(super) fn arc(&self) -> &Arc<Repr> {
         self.repr
             .as_ref()
             .expect("only the drop of a term takes the form of a map")
+    }
+
+    /// Return the bytes of the form of the map: the size of the form, the
+    /// capacity of the pair array of a flatmap, and the capacity of the
+    /// child array of the root node of a hashmap. The number excludes the
+    /// header of the `Arc` and the header of each `Vec`, as the accounting
+    /// of task [#559](https://github.com/fahchen/pbeam/issues/559) excludes
+    /// them. A child node of a hashmap and a collision array are separate
+    /// allocations; the live-byte walk of `src/term/live_bytes.rs` counts
+    /// them through [`Node::allocated_bytes`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let flat = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// assert!(flat.allocated_bytes() > 0);
+    /// ```
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        let repr = self.arc();
+        std::mem::size_of::<Repr>()
+            + match &**repr {
+                Repr::Flat(pairs) => pairs.capacity() * std::mem::size_of::<(Term, Term)>(),
+                Repr::Hash(hamt) => hamt.root.children.capacity() * std::mem::size_of::<Child>(),
+            }
     }
 
     /// Return the handle of the form for a change. This is the receiver of
@@ -977,6 +1001,21 @@ impl Hamt {
 }
 
 impl Node {
+    /// Return the bytes of the node and of its child array: the size of the
+    /// node plus the capacity of the child array times the size of one
+    /// child. The number excludes the header of the `Arc`, as the
+    /// accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Node::empty().allocated_bytes() >= std::mem::size_of::<Node>());
+    /// ```
+    pub(super) fn allocated_bytes(&self) -> usize {
+        std::mem::size_of::<Node>() + self.children.capacity() * std::mem::size_of::<Child>()
+    }
+
     /// Return a node with no children.
     ///
     /// # Examples

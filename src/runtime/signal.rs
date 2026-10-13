@@ -201,3 +201,31 @@ pub(super) enum Signal {
         capabilities: Vec<Capability>,
     },
 }
+
+impl Signal {
+    /// Call `visit` for each guest term that the signal holds: the exit
+    /// reason of an exit or a monitor down signal, the item of a
+    /// `process_info/2` signal, and the message of an alias signal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut terms = Vec::new();
+    /// Signal::Exit { from: LinkId::Process(ProcessId(1)), reason: Term::nil(), linked: false, normal_kills: false, alias: None }
+    ///     .visit_terms(&mut |term| terms.push(term.clone()));
+    /// assert_eq!(terms, vec![Term::nil()]);
+    /// ```
+    pub(super) fn visit_terms(&self, visit: &mut impl FnMut(&Term)) {
+        match self {
+            Signal::Exit { reason, .. } => visit(reason),
+            Signal::MonitorDown { reason, .. } => visit(reason),
+            Signal::ProcessInfo { item, .. } => visit(item),
+            Signal::AliasMessage { message, .. } => visit(message),
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/runtime/signal.rs"]
+mod tests;

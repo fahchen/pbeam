@@ -1,5 +1,5 @@
 use super::super::{Term, test_atom as atom};
-use super::ConsRef;
+use super::{Cons, ConsRef};
 
 fn integers(values: &[i64]) -> Vec<Term> {
     values.iter().copied().map(Term::Integer).collect()
@@ -144,4 +144,13 @@ fn drops_a_long_list_and_a_shared_list_without_recursion() {
     drop(copy);
     let nested = (0..1_000_000).fold(Term::nil(), |inner, _| Term::cons(inner, Term::nil()));
     drop(nested);
+}
+
+#[test]
+fn reports_the_bytes_of_a_cons_cell() {
+    let term = Term::cons(Term::Integer(1), Term::nil());
+    let Term::Cons(cell) = &term else {
+        unreachable!()
+    };
+    assert_eq!(cell.allocated_bytes(), std::mem::size_of::<Cons>());
 }
