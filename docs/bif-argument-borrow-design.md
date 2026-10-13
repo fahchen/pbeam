@@ -274,7 +274,7 @@ The measured target is the borrowed path of the floor loop in `mise run bench-di
 
 Two commands confirm or reject the prediction.
 
-1. The micro-measurement of the parts: `cargo test --locked --release --lib -- dispatch_attribution_costs -- --nocapture --test-threads=1` at `tests/runtime/interpreter/dispatch_attribution_costs.rs:284`. The test gains a `bif_arguments_build` row that measures the whole read of a `bif` instruction with two arguments, as [PR #561](https://github.com/fahchen/pbeam/pull/561) did, and it keeps the `bif_slice_minus` row (`:298`).
+1. The micro-measurement of the parts: `cargo test --locked --release --lib dispatch_attribution_costs -- --nocapture --test-threads=1` at `tests/runtime/interpreter/dispatch_attribution_costs.rs:284`. The test gains a `bif_arguments_build` row that measures the whole read of a `bif` instruction with two arguments, as [PR #561](https://github.com/fahchen/pbeam/pull/561) did, and it keeps the `bif_slice_minus` row (`:298`).
 2. The floor loop and the added rows: `mise run bench-dispatch`, at 200000 and 20000 iterations, for the local `call_only` shape, the position shape, and the added rows of the measured set.
 
 Both commands run in one quiet session, in the off-peak window that the record of #546 describes (`docs/interpreter-dispatch-measurements.md:264`), with three interleaved runs of the base revision and three of the change.
