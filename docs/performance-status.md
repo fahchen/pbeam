@@ -41,7 +41,7 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
-### 2026-10-14 - Row 6 compact term, task [#571](https://github.com/fahchen/pbeam/issues/571), pull request [#598](https://github.com/fahchen/pbeam/pull/598)
+### 2026-10-14 - Row 6 compact term, task [#571](https://github.com/fahchen/pbeam/issues/571), pull request [#598](https://github.com/fahchen/pbeam/pull/598) - Landed as `855da1fc`
 
 The change boxes the 32-byte binary descriptor behind one `Arc` to a private `BinaryView`, so the `Term::Binary` arm falls from 32 bytes to 8 bytes. The owner decided to land the compact term as the first half of the 16-byte target of row 6, and the row gate fails on its numbers. Pull request [#598](https://github.com/fahchen/pbeam/pull/598) merged on 2026-10-14 as the squash commit `855da1fc` of a branch whose measured revisions are `35c410e6` (before) and `dabac942` (after). The 16-byte target waits for the immediate atom root of [#580](https://github.com/fahchen/pbeam/issues/580).
 
