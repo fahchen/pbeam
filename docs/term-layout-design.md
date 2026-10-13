@@ -1,6 +1,6 @@
 # Term layout and the two mechanisms of row 6
 
-Status: measurement and design record for task [#572](https://github.com/fahchen/pbeam/issues/572), a sub-issue of [#553](https://github.com/fahchen/pbeam/issues/553), under epic [#450](https://github.com/fahchen/pbeam/issues/450) and milestone tracker [#38](https://github.com/fahchen/pbeam/issues/38). Row 6 of the [term proposal](term-performance-design-codex-v2.md) is the design. This record changes no runtime code. The immediate atom root is [#553](https://github.com/fahchen/pbeam/issues/553), and the compact term is [#571](https://github.com/fahchen/pbeam/issues/571).
+Status: measurement and design record for task [#572](https://github.com/fahchen/pbeam/issues/572), under epic [#450](https://github.com/fahchen/pbeam/issues/450) and milestone tracker [#38](https://github.com/fahchen/pbeam/issues/38). Row 6 of the [term proposal](term-performance-design-codex-v2.md) is the design. This record changes no runtime code. The compact term is [#571](https://github.com/fahchen/pbeam/issues/571), and the immediate atom root is [#580](https://github.com/fahchen/pbeam/issues/580), whose sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver it.
 
 ## 1. The measured layout at `3b3a21d`
 
@@ -271,7 +271,7 @@ The model of section 1 gives the sizes. After the binary move, `Binary` is 8 byt
 | `Cons`, `Tuple`, `Map`, `Fun`, `MatchContext` | 8 |
 | `Nil` | 0 |
 
-The design departs from the proposal sketch in these places. PBeam keeps the separate `Fun`, `Map`, `Tuple`, `Cons`, and `MatchContext` arms, each one an 8-byte handle, and the sketch merges them into `Boxed(Arc<Object>)`. Both reach 16 bytes. The sketch adds `Float(f64)`, and PBeam has no float term: an unsupported numeric path keeps its current error, as the acceptance of [#553](https://github.com/fahchen/pbeam/issues/553) requires. The `Small(i64)` arm of the sketch is the `Integer(i64)` arm of PBeam.
+The design departs from the proposal sketch in these places. PBeam keeps the separate `Fun`, `Map`, `Tuple`, `Cons`, and `MatchContext` arms, each one an 8-byte handle, and the sketch merges them into `Boxed(Arc<Object>)`. Both reach 16 bytes. The sketch adds `Float(f64)`, and PBeam has no float term: an unsupported numeric path keeps its current error, as the acceptance of [#580](https://github.com/fahchen/pbeam/issues/580) requires. The `Small(i64)` arm of the sketch is the `Integer(i64)` arm of PBeam.
 
 The model measures the arm sizes and the enum size only. It does not measure the cost of the move. A binary root then pays one allocation for the view and one dependent load for each read of the descriptor. Row 6 states the requirement: "Measure the added binary-view allocation and indirection."
 
@@ -295,7 +295,7 @@ The gate is measured on the full Terra path, not on an isolated loop. The floor 
 
 ## 6. The split of row 6
 
-Row 6 holds two independent mechanisms, so it splits, as the rule of the proposal asks. [#553](https://github.com/fahchen/pbeam/issues/553) owns the immediate atom root and records the term and slot sizes. [#571](https://github.com/fahchen/pbeam/issues/571) owns the compact term and the 16-byte target, and its start size is the size that [#553](https://github.com/fahchen/pbeam/issues/553) records. [#572](https://github.com/fahchen/pbeam/issues/572), this record, blocks both, because each mechanism uses the consumer list and the measurement plan of this document. Native sub-issue links express the order.
+Row 6 holds two independent mechanisms, so it splits, as the rule of the proposal asks. [#571](https://github.com/fahchen/pbeam/issues/571) owns the compact term and delivers it first: `Term` falls from 40 bytes to 32 bytes, and section 8 records that result. [#580](https://github.com/fahchen/pbeam/issues/580) owns the immediate atom root, and its sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver it: the atom arm falls to 4 bytes and `Term` falls from 32 bytes to 16 bytes. The title of row 6 is the 16-byte term, so the two tasks are the two halves of one target, and the owner decided on 2026-10-14 that the compact term lands on its own result and the atom mechanism lands the rest. [#572](https://github.com/fahchen/pbeam/issues/572), this record, blocked both at the design step, because each mechanism uses the consumer list and the measurement plan of this document. Native sub-issue links express the order.
 
 ## 7. The baseline numbers of this record
 
@@ -375,17 +375,20 @@ The peak live bytes of one Terra scene, from 30 runs of `mise run bench-live-byt
 
 The reduction is 3904 bytes, or 16.20 percent of 24096 bytes, and the spread of the samples is 0 bytes in both revisions.
 
-The end-to-end Terra path, from 30 runs of `bash scripts/terra_latency.sh release` for each revision, with one before run and one after run next to each other in each round. The table keeps the runs with a one-minute load of at most 12, as section 5 requires: 22 of the 30 before runs and 23 of the 30 after runs.
+The end-to-end Terra path, from `bash scripts/terra_latency.sh release`, with one before run and one after run next to each other in each round. Each revision contributes 42 runs, and the table keeps the 30 runs of each revision with a one-minute load of at most 12, as section 5 requires; the load rejects 12 runs of each revision.
 
-| Revision | Runs | First frame: min, median, p95 | Key `j`: median | Key `j`: median | Key `k`: median | Key `q`: median |
-| --- | --- | --- | --- | --- | --- | --- |
-| `35c410e6` | 22 | 0.36 s, 0.37 s, 0.56 s | 0.022 s | 0.025 s | 0.022 s | 0.022 s |
-| the branch head | 23 | 0.36 s, 0.37 s, 0.64 s | 0.021 s | 0.022 s | 0.023 s | 0.022 s |
+| Metric | `35c410e6`: min, median, p95 | the branch head: min, median, p95 |
+| --- | --- | --- |
+| First frame | 0.34 s, 0.37 s, 0.81 s | 0.33 s, 0.37 s, 0.86 s |
+| Key `j` | 0.015 s, 0.022 s, 0.032 s | 0.014 s, 0.021 s, 0.035 s |
+| Key `j` | 0.014 s, 0.026 s, 0.032 s | 0.014 s, 0.022 s, 0.030 s |
+| Key `k` | 0.015 s, 0.022 s, 0.029 s | 0.014 s, 0.023 s, 0.031 s |
+| Key `q` | 0.015 s, 0.022 s, 0.030 s | 0.015 s, 0.022 s, 0.034 s |
 
-The one-minute load of the 60 runs is 3.23 to 31.34, and 15 runs are above the bound of 12. The ratio of the median of the after runs to the median of the before runs is 1.000 for the first frame and 0.955, 0.880, 1.045, and 0.978 for the four keys. The key latency has a resolution of 1 ms, so a key median carries that step.
+The one-minute load of the 84 runs is 3.23 to 31.34. The ratio of the median of the after runs to the median of the before runs is 1.000 for the first frame and 0.955, 0.830, 1.045, and 0.978 for the four keys. The key latency has a resolution of 1 ms, so a key median carries that step.
 
 The floor loop at 200000 iterations, from `mise run bench-dispatch`, load `{ 6.45 6.73 4.81 }` for both runs. The `call_only` floor loop of `dispatch_probe` is 120.7 ns at `35c410e6` and 117.9 ns at the branch head; the `call_ext_only` floor loop is 274.3 ns and 250.8 ns; the loop plus `gc_bif '+'` is 189.7 ns and 187.9 ns; the loop plus the `bif` of `tuple_size/1` is 191.6 ns and 186.9 ns; the loop plus the `bif` of `element/2` is 195.4 ns and 190.7 ns; the loop plus the `bif` of `hd/1` is 194.6 ns and 190.8 ns; and the loop plus the `bif` of `map_get/2` on a 1000-key map is 261.2 ns and 251.1 ns.
 
-The gate of row 6 fails on its numbers. The end-to-end Terra time does not gain 10 percent: the median of the first frame is 0.37 s in both revisions, and the four keys move between 12.0 percent faster and 4.5 percent slower. The peak-live-byte reduction is 16.20 percent, below the 20 percent bound. The time does not regress by more than 10 percent: the largest key increase is 4.5 percent.
+The gate of row 6 fails on its numbers. The end-to-end Terra time does not gain 10 percent: the median of the first frame is 0.37 s in both revisions, and the four keys move between 17.0 percent faster and 4.5 percent slower. The peak-live-byte reduction is 16.20 percent, below the 20 percent bound. The time does not regress by more than 10 percent: the largest increase of a key median is 4.5 percent.
 
 The owner decided on 2026-10-14 that the title of row 6 is reached when `size_of::<Term>()` is 16 bytes, that the compact term is the first half of that target, and that the compact term lands on this result. The row stays open for the immediate atom of [#580](https://github.com/fahchen/pbeam/issues/580), whose sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) take `Term` from 32 bytes to 16 bytes.
