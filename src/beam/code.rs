@@ -8,7 +8,9 @@ use crate::{
 
 const WORD_SIZE: usize = 4;
 mod instruction;
-pub(crate) use instruction::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind};
+pub(crate) use instruction::{
+    BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind, TestOperand,
+};
 
 const CHUNK_ALIGNMENT: usize = WORD_SIZE;
 const CHUNK_HEADER_SIZE: usize = WORD_SIZE * 2;

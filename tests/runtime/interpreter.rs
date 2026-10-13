@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     BeamModule, Map, Term,
-    beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind},
+    beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind, TestOperand},
     runtime::{
         capability::{AllowAll, Capability, Policy},
         ets::{Access, Table},
@@ -415,6 +415,166 @@ fn handles_tuple_tests_timeouts_and_unbound_receive_markers() {
         ])
         .unwrap(),
         Term::tuple(vec![test_atom("a")])
+    );
+}
+
+/// The classified operand form of `test is_eq_exact` compares the same values
+/// as the generic form and takes the same fail branch. It reads one register
+/// and one immediate, two registers, or a Y register.
+#[test]
+fn runs_the_classified_operand_form_of_is_eq_exact() {
+    let run = |body: Vec<Instruction>| {
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap()
+    };
+    let test = |left: TestOperand, right: TestOperand| Instruction::TestExactEqualOperands {
+        fail_label: 3,
+        left,
+        right,
+    };
+    // x0 is 1 and the immediate is 1: equal, so the test does not jump.
+    assert_eq!(
+        run(vec![
+            Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
+            test(TestOperand::X(0), TestOperand::Value(Term::Integer(1))),
+            Instruction::Move(atom("equal"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(atom("different"), Operand::X(0)),
+            Instruction::Return,
+        ]),
+        test_atom("equal")
+    );
+    // x0 is 1 and the immediate is 2: not equal, so the test jumps.
+    assert_eq!(
+        run(vec![
+            Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
+            test(TestOperand::X(0), TestOperand::Value(Term::Integer(2))),
+            Instruction::Move(atom("equal"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(atom("different"), Operand::X(0)),
+            Instruction::Return,
+        ]),
+        test_atom("different")
+    );
+    // Two registers that hold the same boxed literal are equal.
+    assert_eq!(
+        run(vec![
+            Instruction::Move(
+                Operand::Value(Term::tuple(vec![Term::Integer(1)])),
+                Operand::X(0),
+            ),
+            Instruction::Move(Operand::X(0), Operand::X(1)),
+            test(TestOperand::X(0), TestOperand::X(1)),
+            Instruction::Move(atom("equal"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(atom("different"), Operand::X(0)),
+            Instruction::Return,
+        ]),
+        test_atom("equal")
+    );
+    // A Y register and an immediate.
+    assert_eq!(
+        run(vec![
+            Instruction::Allocate { stack_size: 1 },
+            Instruction::Move(Operand::Value(Term::Integer(7)), Operand::Y(0)),
+            test(TestOperand::Y(0), TestOperand::Value(Term::Integer(7))),
+            Instruction::Move(atom("equal"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(atom("different"), Operand::X(0)),
+            Instruction::Return,
+        ]),
+        test_atom("equal")
+    );
+    // The immediate comes first, and a register that holds nil equals nil.
+    assert_eq!(
+        run(vec![
+            Instruction::Move(Operand::Value(Term::nil()), Operand::X(0)),
+            test(TestOperand::Value(Term::nil()), TestOperand::X(0)),
+            Instruction::Move(atom("equal"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(atom("different"), Operand::X(0)),
+            Instruction::Return,
+        ]),
+        test_atom("equal")
+    );
+}
+
+/// The classified operand form keeps the register and match-context error
+/// text of the generic form.
+#[test]
+fn keeps_the_classified_test_operand_errors() {
+    let error = |body: Vec<Instruction>| {
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string()
+    };
+    let test = |left: TestOperand, right: TestOperand| Instruction::TestExactEqualOperands {
+        fail_label: 2,
+        left,
+        right,
+    };
+    assert_eq!(
+        error(vec![test(
+            TestOperand::X(0),
+            TestOperand::Value(Term::Integer(0))
+        )]),
+        "register x0 is unset"
+    );
+    assert_eq!(
+        error(vec![
+            Instruction::Allocate { stack_size: 1 },
+            test(TestOperand::Y(0), TestOperand::Value(Term::Integer(0))),
+        ]),
+        "stack register y0 is unset"
+    );
+    assert_eq!(
+        error(vec![test(
+            TestOperand::Y(0),
+            TestOperand::Value(Term::Integer(0))
+        )]),
+        "stack register y0 is unset"
+    );
+    assert_eq!(
+        error(vec![
+            Instruction::Allocate { stack_size: 1 },
+            Instruction::Catch {
+                register: 0,
+                label: 2,
+            },
+            test(TestOperand::Y(0), TestOperand::Value(Term::Integer(0))),
+        ]),
+        "stack register y0 holds a catch tag"
+    );
+    let binary = Instruction::Move(Operand::Value(Term::binary(b"a".to_vec())), Operand::X(0));
+    let start = Instruction::BinaryMatchStart {
+        fail_label: 2,
+        source: Operand::X(0),
+        destination: Operand::X(0),
+    };
+    assert_eq!(
+        error(vec![
+            binary.clone(),
+            start.clone(),
+            test(TestOperand::X(0), TestOperand::Value(Term::Integer(0))),
+        ]),
+        "invariant error: the match context in X(0) reached an instruction that is not a binary match"
+    );
+    assert_eq!(
+        error(vec![
+            Instruction::Allocate { stack_size: 1 },
+            binary,
+            start,
+            Instruction::Move(Operand::X(0), Operand::Y(0)),
+            test(TestOperand::Y(0), TestOperand::Value(Term::Integer(0))),
+        ]),
+        "invariant error: the match context in Y(0) reached an instruction that is not a binary match"
     );
 }
 
@@ -3523,7 +3683,8 @@ fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
         instructions[start]
     );
     let fail_label = match &instructions[start + 1] {
-        Instruction::TestExactEqual { fail_label, .. } => *fail_label,
+        Instruction::TestExactEqual { fail_label, .. }
+        | Instruction::TestExactEqualOperands { fail_label, .. } => *fail_label,
         other => panic!("the entry clause test of {function} is not `is_eq_exact`: {other:?}"),
     };
     let clause = *module
