@@ -3,7 +3,7 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::ets::{Access, Operation, Table};
-use crate::term::Reference;
+use crate::term::{Atom, Reference};
 
 /// The fewest and the most locks that the hidden option
 /// `{write_concurrency, {debug_hash_fixed_number_of_locks, N}}` accepts
@@ -79,12 +79,14 @@ pub(super) fn new(
     let mut heir = None;
     for option in options {
         match option {
-            Term::Atom(atom) => match atom.name() {
-                "bag" | "duplicate_bag" | "ordered_set" => table_type = atom.name(),
-                "named_table" => named = true,
-                "public" => access = Access::Public,
-                "private" => access = Access::Private,
-                "set" | "protected" | "compressed" => {}
+            Term::Atom(atom) => match atom.index() {
+                _ if atom.is_one_of(&["bag", "duplicate_bag", "ordered_set"]) => {
+                    table_type = atom.name();
+                }
+                index if index == Atom::static_index("named_table") => named = true,
+                index if index == Atom::static_index("public") => access = Access::Public,
+                index if index == Atom::static_index("private") => access = Access::Private,
+                _ if atom.is_one_of(&["set", "protected", "compressed"]) => {}
                 _ => return Ok(BifResult::badarg()),
             },
             Term::Tuple(elements) => match elements.as_ref() {
@@ -95,7 +97,7 @@ pub(super) fn new(
                         _ => return Ok(BifResult::badarg()),
                     },
                     ("write_concurrency", Term::Atom(value))
-                        if matches!(value.name(), "true" | "false" | "auto") =>
+                        if value.is_one_of(&["true", "false", "auto"]) =>
                     {
                         explicit_locks = false;
                     }
@@ -103,12 +105,18 @@ pub(super) fn new(
                         explicit_locks = true;
                     }
                     ("read_concurrency" | "decentralized_counters", Term::Atom(value))
-                        if matches!(value.name(), "true" | "false") => {}
-                    ("heir", Term::Atom(value)) if value.name() == "none" => heir = None,
+                        if value.is_one_of(&["true", "false"]) => {}
+                    ("heir", Term::Atom(value)) if value.index() == Atom::static_index("none") => {
+                        heir = None;
+                    }
                     ("heir", Term::Pid(pid)) => heir = Some(*pid),
                     _ => return Ok(BifResult::badarg()),
                 },
-                [Term::Atom(key), Term::Pid(pid), _] if key.name() == "heir" => heir = Some(*pid),
+                [Term::Atom(key), Term::Pid(pid), _]
+                    if key.index() == Atom::static_index("heir") =>
+                {
+                    heir = Some(*pid);
+                }
                 _ => return Ok(BifResult::badarg()),
             },
             _ => return Ok(BifResult::badarg()),
@@ -580,5 +588,5 @@ pub(super) fn delete(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
 /// ```
 fn is_lock_count(locks: &[Term]) -> bool {
     matches!(locks, [Term::Atom(tag), Term::Integer(count)]
-        if tag.name() == "debug_hash_fixed_number_of_locks" && LOCKS.contains(count))
+        if tag.index() == Atom::static_index("debug_hash_fixed_number_of_locks") && LOCKS.contains(count))
 }

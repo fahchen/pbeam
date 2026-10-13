@@ -4,7 +4,7 @@
 
 use super::BifResult::Value;
 use super::*;
-use crate::term::Binary;
+use crate::term::{Atom, Binary};
 
 /// The option `global`: find each match (`BF_FLAG_GLOBAL`,
 /// `erl_bif_binary.c:1118`).
@@ -607,9 +607,9 @@ fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
     };
     for cell in options.list_iter()? {
         match cell {
-            Term::Atom(atom) if atom.name() == "global" => flags |= GLOBAL,
-            Term::Atom(atom) if atom.name() == "trim" => flags |= TRIM,
-            Term::Atom(atom) if atom.name() == "trim_all" => flags |= TRIM_ALL,
+            Term::Atom(atom) if atom.index() == Atom::static_index("global") => flags |= GLOBAL,
+            Term::Atom(atom) if atom.index() == Atom::static_index("trim") => flags |= TRIM,
+            Term::Atom(atom) if atom.index() == Atom::static_index("trim_all") => flags |= TRIM_ALL,
             Term::Tuple(option) => {
                 let [Term::Atom(scope), Term::Tuple(range)] = option.as_ref() else {
                     return None;
@@ -617,7 +617,7 @@ fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
                 let [Term::Integer(pos), Term::Integer(len)] = range.as_ref() else {
                     return None;
                 };
-                if scope.name() != "scope" || *pos < 0 {
+                if scope.index() != Atom::static_index("scope") || *pos < 0 {
                     return None;
                 }
                 let (mut pos, mut len) = (*pos as u64, *len as u64);

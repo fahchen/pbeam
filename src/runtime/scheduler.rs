@@ -2340,7 +2340,7 @@ impl Scheduler {
         };
         match self.processes.get_mut(id) {
             Some(process)
-                if name.name() != "undefined"
+                if name.index() != Atom::static_index("undefined")
                     && process.registered_name.is_none()
                     && !self.names.contains_key(name.name()) =>
             {

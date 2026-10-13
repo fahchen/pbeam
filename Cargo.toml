@@ -410,6 +410,10 @@ name = "statem"
 path = "tests/integration/statem.rs"
 
 [[test]]
+name = "static_atom"
+path = "tests/integration/static_atom.rs"
+
+[[test]]
 name = "subtract"
 path = "tests/integration/subtract.rs"
 

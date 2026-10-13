@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use super::{host::filename_encoding, unicode::native_filename};
 use crate::{
     error::{BeamError, error},
-    term::{ProcessId, Term},
+    term::{Atom, ProcessId, Term},
 };
 
 /// The resource kind that a capability covers.
@@ -1119,9 +1119,9 @@ fn restriction_fields<'a>(
                 restriction.operations = Some(set);
             }
             ("delegable", Term::Atom(delegable)) => {
-                restriction.delegable = Some(match delegable.name() {
-                    "true" => true,
-                    "false" => false,
+                restriction.delegable = Some(match delegable.index() {
+                    index if index == Atom::static_index("true") => true,
+                    index if index == Atom::static_index("false") => false,
                     _ => return None,
                 });
             }
@@ -1184,7 +1184,9 @@ pub(super) fn capability(term: &Term) -> Option<Capability> {
 /// ```
 fn constraint(form: NameForm, value: &Term) -> Option<Constraint> {
     let names = match value {
-        Term::Atom(any) if any.name() == "any" => return Some(Constraint::Any),
+        Term::Atom(any) if any.index() == Atom::static_index("any") => {
+            return Some(Constraint::Any);
+        }
         _ => value.proper_list()?,
     };
     names

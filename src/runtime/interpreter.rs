@@ -142,10 +142,10 @@ impl ExceptionClass {
     /// ```
     fn from_term(term: &Term) -> Option<Self> {
         match term {
-            Term::Atom(atom) => match atom.name() {
-                "error" => Some(ExceptionClass::Error),
-                "exit" => Some(ExceptionClass::Exit),
-                "throw" => Some(ExceptionClass::Throw),
+            Term::Atom(atom) => match atom.index() {
+                index if index == Atom::static_index("error") => Some(ExceptionClass::Error),
+                index if index == Atom::static_index("exit") => Some(ExceptionClass::Exit),
+                index if index == Atom::static_index("throw") => Some(ExceptionClass::Throw),
                 _ => None,
             },
             _ => None,
@@ -1050,7 +1050,7 @@ impl BeamProgram {
                         // float term, so the test fails for each term.
                         TestKind::Float => false,
                         TestKind::Boolean => {
-                            matches!(value, Term::Atom(atom) if matches!(atom.name(), "true" | "false"))
+                            matches!(value, Term::Atom(atom) if atom.is_one_of(&["true", "false"]))
                         }
                     };
                     if !passed {

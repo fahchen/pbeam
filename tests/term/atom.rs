@@ -423,3 +423,37 @@ fn compares_a_shared_term_with_a_memory() {
     };
     assert_eq!(left, right);
 }
+
+#[test]
+fn maps_each_static_name_to_the_index_of_the_static_atom() {
+    // `Atom::static_index` gives the index of the static atom for a name, as
+    // `Atom::from_static(name).unwrap().index()` does, for each of the 1150
+    // static names. A comparison of `atom.index()` with this index is thus a
+    // comparison of the name of the atom with the static name, with no table.
+    for (index, name) in STATIC_ATOM_NAMES.iter().enumerate() {
+        let index = u32::try_from(index).unwrap();
+        assert_eq!(Atom::static_index(name), index);
+        assert_eq!(Atom::from_static(name).unwrap().index(), index);
+    }
+    assert_eq!(Atom::static_index("ok"), 506);
+    assert_eq!(Atom::from_static("ok").unwrap().index(), 506);
+}
+
+#[test]
+fn is_one_of_compares_the_index_with_each_static_name() {
+    let ok = Atom::from_static("ok").unwrap();
+    assert!(ok.is_one_of(&["ok"]));
+    assert!(ok.is_one_of(&["error", "ok"]));
+    assert!(!ok.is_one_of(&["error"]));
+    assert!(!ok.is_one_of(&[]));
+    // An atom that the run created has an index above the static range, so it
+    // is not one of the static names.
+    let runtime = AtomTable::new().put("pbeam_zeta").unwrap();
+    assert!(!runtime.is_one_of(&["ok", "error"]));
+}
+
+#[test]
+#[should_panic(expected = "the name is a static atom")]
+fn static_index_panics_for_a_name_that_is_not_a_static_atom() {
+    Atom::static_index("pbeam_zeta");
+}

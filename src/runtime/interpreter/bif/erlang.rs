@@ -13,7 +13,7 @@ use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
-use crate::term::{Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference};
+use crate::term::{Atom, Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference};
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
 /// gives a runtime error.
@@ -110,7 +110,7 @@ pub(super) fn process_flag(
         _ => None,
     };
     Ok(match flag {
-        Term::Atom(flag) if flag.name() == "trap_exit" => {
+        Term::Atom(flag) if flag.index() == Atom::static_index("trap_exit") => {
             let old = Term::static_atom(&process.trap_exit.to_string());
             match value {
                 Some("true") => process.trap_exit = true,
@@ -119,7 +119,7 @@ pub(super) fn process_flag(
             }
             Value(old)
         }
-        Term::Atom(flag) if flag.name() == "message_queue_data" => {
+        Term::Atom(flag) if flag.index() == Atom::static_index("message_queue_data") => {
             let old = Term::static_atom(if process.off_heap_message_queue {
                 "off_heap"
             } else {
@@ -132,7 +132,7 @@ pub(super) fn process_flag(
             }
             Value(old)
         }
-        Term::Atom(flag) if flag.name() == "error_handler" => {
+        Term::Atom(flag) if flag.index() == Atom::static_index("error_handler") => {
             // `process_flag_2` takes an atom for `error_handler` and gives
             // `badarg` for each other value (`bif.c:2045-2051`), and
             // `erts_proc_set_error_handler` returns the old handler
@@ -158,13 +158,17 @@ pub(super) fn process_flag(
         }
         Term::Atom(flag) if UNSUPPORTED_PROCESS_FLAGS.contains(&flag.name()) => {
             let small = term.small_integer();
-            let valid = match flag.name() {
-                "async_dist" | "sensitive" | "monitor_nodes" => {
+            let valid = match flag.index() {
+                _ if flag.is_one_of(&["async_dist", "sensitive", "monitor_nodes"]) => {
                     matches!(value, Some("true" | "false"))
                 }
-                "priority" => matches!(value, Some("low" | "normal" | "high" | "max")),
-                "save_calls" => small.is_some_and(|calls| (0..=10_000).contains(&calls)),
-                "max_heap_size" => true,
+                index if index == Atom::static_index("priority") => {
+                    matches!(value, Some("low" | "normal" | "high" | "max"))
+                }
+                index if index == Atom::static_index("save_calls") => {
+                    small.is_some_and(|calls| (0..=10_000).contains(&calls))
+                }
+                index if index == Atom::static_index("max_heap_size") => true,
                 _ => small.is_some_and(|size| size >= 0),
             };
             if !valid {
@@ -175,7 +179,7 @@ pub(super) fn process_flag(
                 flag.name()
             )));
         }
-        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.name() == "monitor_nodes") =>
+        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.index() == Atom::static_index("monitor_nodes")) =>
         {
             return Err(error(
                 "unsupported erlang:process_flag/2 flag {monitor_nodes, Options}",
@@ -276,7 +280,7 @@ pub(super) fn system_flag(
     };
     let logger = match value {
         Term::Pid(_) => true,
-        Term::Atom(logger) => matches!(logger.name(), "logger" | "undefined"),
+        Term::Atom(logger) => logger.is_one_of(&["logger", "undefined"]),
         _ => false,
     };
     let valid = match (item.name(), value) {
@@ -378,7 +382,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
     let small = value.small_integer();
     let cpu = |cpu: &Term| match cpu {
         Term::Tuple(elements) => {
-            matches!(elements.as_ref(), [Term::Atom(tag), _, _, _, _, _, _] if tag.name() == "cpu")
+            matches!(elements.as_ref(), [Term::Atom(tag), _, _, _, _, _, _] if tag.index() == Atom::static_index("cpu"))
         }
         _ => false,
     };
@@ -421,7 +425,7 @@ fn unsupported_system_flag_value(name: &str, value: &Term) -> bool {
                 Term::Map(map) => {
                     let flag = |key| {
                         map.get(&Term::static_atom(key)).is_none_or(
-                            |flag| matches!(flag, Term::Atom(flag) if matches!(flag.name(), "true" | "false")),
+                            |flag| matches!(flag, Term::Atom(flag) if flag.is_one_of(&["true", "false"])),
                         )
                     };
                     if !["kill", "error_logger", "include_shared_binaries"]
@@ -777,8 +781,8 @@ pub(super) fn demonitor(
     let (mut flush, mut info) = (false, false);
     for option in options {
         match option {
-            Term::Atom(atom) if atom.name() == "flush" => flush = true,
-            Term::Atom(atom) if atom.name() == "info" => info = true,
+            Term::Atom(atom) if atom.index() == Atom::static_index("flush") => flush = true,
+            Term::Atom(atom) if atom.index() == Atom::static_index("info") => info = true,
             _ => return BifResult::badarg(),
         }
     }
@@ -856,7 +860,9 @@ pub(super) fn monitor(
         ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
         ("port", Term::Port(_)) => Some(Err(unsupported_port("erlang:monitor/2,3"))),
         ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
-        ("time_offset", Term::Atom(service)) if service.name() == "clock_service" => {
+        ("time_offset", Term::Atom(service))
+            if service.index() == Atom::static_index("clock_service") =>
+        {
             // ponytail: no time offset service yet; add it when a measured path monitors it.
             Some(Err(error("unsupported time_offset monitor")))
         }
@@ -897,17 +903,27 @@ fn monitor_options(options: &Term) -> Option<MonitorOptions> {
     };
     for option in options {
         match option {
-            Term::Atom(option) if option.name() == "priority" => result.priority = true,
+            Term::Atom(option) if option.index() == Atom::static_index("priority") => {
+                result.priority = true
+            }
             Term::Tuple(pair) => match pair.as_ref() {
-                [Term::Atom(key), Term::Atom(mode)] if key.name() == "alias" => {
-                    result.alias = Some(match mode.name() {
-                        "explicit_unalias" => AliasMode::ExplicitUnalias,
-                        "demonitor" => AliasMode::Demonitor,
-                        "reply_demonitor" => AliasMode::ReplyDemonitor,
+                [Term::Atom(key), Term::Atom(mode)]
+                    if key.index() == Atom::static_index("alias") =>
+                {
+                    result.alias = Some(match mode.index() {
+                        index if index == Atom::static_index("explicit_unalias") => {
+                            AliasMode::ExplicitUnalias
+                        }
+                        index if index == Atom::static_index("demonitor") => AliasMode::Demonitor,
+                        index if index == Atom::static_index("reply_demonitor") => {
+                            AliasMode::ReplyDemonitor
+                        }
                         _ => return None,
                     });
                 }
-                [Term::Atom(key), tag] if key.name() == "tag" => result.tag = tag.clone(),
+                [Term::Atom(key), tag] if key.index() == Atom::static_index("tag") => {
+                    result.tag = tag.clone()
+                }
                 _ => return None,
             },
             _ => return None,
@@ -1022,13 +1038,17 @@ pub(super) fn spawn_opt(
     let mut spawn_options = SpawnOptions::default();
     for option in options {
         match option {
-            Term::Atom(option) if option.name() == "link" => spawn_options.link = true,
-            Term::Atom(option) if option.name() == "monitor" => spawn_options.monitor = true,
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.name() == "message_queue_data") =>
+            Term::Atom(option) if option.index() == Atom::static_index("link") => {
+                spawn_options.link = true
+            }
+            Term::Atom(option) if option.index() == Atom::static_index("monitor") => {
+                spawn_options.monitor = true
+            }
+            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.index() == Atom::static_index("message_queue_data")) =>
             {
                 spawn_options.off_heap_message_queue = match &option[1] {
-                    Term::Atom(value) if value.name() == "on_heap" => false,
-                    Term::Atom(value) if value.name() == "off_heap" => true,
+                    Term::Atom(value) if value.index() == Atom::static_index("on_heap") => false,
+                    Term::Atom(value) if value.index() == Atom::static_index("off_heap") => true,
                     _ => return Ok(BifResult::badarg()),
                 };
             }
@@ -1628,9 +1648,11 @@ pub(super) fn atom_to_binary(term: &Term, encoding: &Term) -> BifResult {
     let (Term::Atom(atom), Term::Atom(encoding)) = (term, encoding) else {
         return BifResult::badarg();
     };
-    match encoding.name() {
-        "utf8" | "unicode" => Value(Term::binary(atom.name().as_bytes().to_vec())),
-        "latin1" => atom
+    match encoding.index() {
+        _ if encoding.is_one_of(&["utf8", "unicode"]) => {
+            Value(Term::binary(atom.name().as_bytes().to_vec()))
+        }
+        index if index == Atom::static_index("latin1") => atom
             .name()
             .chars()
             .map(|character| u8::try_from(u32::from(character)).ok())
@@ -1720,10 +1742,12 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
 /// `AtomTable::put`.
 pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResult, BeamError> {
     match item {
-        Term::Atom(atom) if atom.name() == "os_type" => Ok(Value(Term::tuple(vec![
-            Term::Atom(atoms.put("unix")?),
-            Term::Atom(atoms.put(&host::os_flavor())?),
-        ]))),
+        Term::Atom(atom) if atom.index() == Atom::static_index("os_type") => {
+            Ok(Value(Term::tuple(vec![
+                Term::Atom(atoms.put("unix")?),
+                Term::Atom(atoms.put(&host::os_flavor())?),
+            ])))
+        }
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {item:?}"
         ))),
@@ -2168,8 +2192,10 @@ pub(super) fn send3(
     let mut connect = true;
     for option in options {
         match option {
-            Term::Atom(option) if option.name() == "noconnect" => connect = false,
-            Term::Atom(option) if matches!(option.name(), "nosuspend" | "priority") => {}
+            Term::Atom(option) if option.index() == Atom::static_index("noconnect") => {
+                connect = false
+            }
+            Term::Atom(option) if option.is_one_of(&["nosuspend", "priority"]) => {}
             _ => return Ok(BifResult::badarg()),
         }
     }
@@ -2494,7 +2520,7 @@ fn is_process_info_item(item: &Term) -> bool {
     match item {
         Term::Atom(name) => PROCESS_INFO_ITEMS.contains(&name.name()),
         Term::Tuple(elements) => {
-            matches!(elements.as_ref(), [Term::Atom(key), _] if key.name() == "dictionary")
+            matches!(elements.as_ref(), [Term::Atom(key), _] if key.index() == Atom::static_index("dictionary"))
         }
         _ => false,
     }
@@ -2972,12 +2998,24 @@ pub(super) fn get_module_info(
     if context.scheduler.code.get(name.name()).is_none() {
         return Ok(BifResult::badarg());
     }
-    match key.name() {
-        "module" => Ok(Value(module.clone())),
-        key @ ("md5" | "exports" | "functions" | "nifs" | "attributes" | "compile"
-        | "native_addresses" | "native") => Err(error(format!(
-            "erlang:get_module_info/2 key {key} is not implemented"
-        ))),
+    match key.index() {
+        index if index == Atom::static_index("module") => Ok(Value(module.clone())),
+        _ if key.is_one_of(&[
+            "md5",
+            "exports",
+            "functions",
+            "nifs",
+            "attributes",
+            "compile",
+            "native_addresses",
+            "native",
+        ]) =>
+        {
+            Err(error(format!(
+                "erlang:get_module_info/2 key {} is not implemented",
+                key.name()
+            )))
+        }
         _ => Ok(BifResult::badarg()),
     }
 }
@@ -3155,14 +3193,14 @@ fn timer_options(options: &Term) -> Option<(bool, bool)> {
         let [Term::Atom(name), Term::Atom(value)] = fields.as_ref() else {
             return None;
         };
-        let value = match value.name() {
-            "true" => true,
-            "false" => false,
+        let value = match value.index() {
+            index if index == Atom::static_index("true") => true,
+            index if index == Atom::static_index("false") => false,
             _ => return None,
         };
-        match name.name() {
-            "async" => asynchronous = value,
-            "info" => info = value,
+        match name.index() {
+            index if index == Atom::static_index("async") => asynchronous = value,
+            index if index == Atom::static_index("info") => info = value,
             _ => return None,
         }
     }
@@ -3230,11 +3268,14 @@ pub(super) fn halt(
         match option {
             Term::Tuple(pair) => match pair.as_ref() {
                 [Term::Atom(name), Term::Atom(value)]
-                    if name.name() == "flush" && matches!(value.name(), "true" | "false") =>
+                    if name.index() == Atom::static_index("flush")
+                        && value.is_one_of(&["true", "false"]) =>
                 {
-                    flush = value.name() == "true";
+                    flush = value.index() == Atom::static_index("true");
                 }
-                [Term::Atom(name), value] if name.name() == "flush_timeout" => {
+                [Term::Atom(name), value]
+                    if name.index() == Atom::static_index("flush_timeout") =>
+                {
                     match value.small_integer() {
                         Some(value @ 0..) => timeout = Some(value & i64::from(u32::MAX)),
                         _ => return Ok(BifResult::badarg()),
@@ -3254,7 +3295,7 @@ pub(super) fn halt(
                 BeamError::Halt(code)
             }
         }
-        Term::Atom(abort) if abort.name() == "abort" => {
+        Term::Atom(abort) if abort.index() == Atom::static_index("abort") => {
             error("unsupported erlang:halt/2 with abort: PBeam writes no core dump")
         }
         _ if is_slogan(status) => {
