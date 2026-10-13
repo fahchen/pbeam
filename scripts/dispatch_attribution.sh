@@ -12,14 +12,18 @@
 # helpers of the interpreter, so it is a library unit test.
 #
 # The release profile holds the numbers. Run one script call for one build,
-# and give each call its variant label. The file records the revision, the
-# label, the clock, the JST time, the host, and the load, so the record of the
-# pull request names the conditions of every run.
+# and give each call its variant label. The script builds the test binaries
+# first, then waits for the one-minute load to fall to the maximum, then
+# records the revision, the label, the clock, the JST time, the host, and the
+# load. Thus the recorded conditions describe the measurement and not the
+# build, because the release build raises the load.
 #
 # Usage: bash scripts/dispatch_attribution.sh [label] [output file]
 #
 # The default label is `base`. The default output file is
-# target/dispatch-attribution.txt.
+# target/dispatch-attribution.txt. The wait stops after
+# PBEAM_ATTRIBUTION_MAX_WAIT polls of PBEAM_ATTRIBUTION_POLL seconds and
+# records the load that it finds.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -31,7 +35,49 @@ export LC_ALL=en_US.UTF-8
 
 label=${1:-base}
 out=${2:-target/dispatch-attribution.txt}
+max_load=${PBEAM_ATTRIBUTION_MAX_LOAD:-12}
+poll=${PBEAM_ATTRIBUTION_POLL:-15}
+max_wait=${PBEAM_ATTRIBUTION_MAX_WAIT:-60}
 mkdir -p "$(dirname "$out")"
+
+# Return the one-minute load of the host, or `unknown`.
+one_minute_load() {
+  if sysctl -n vm.loadavg >/dev/null 2>&1; then
+    sysctl -n vm.loadavg | awk '{print $2}'
+  elif [ -r /proc/loadavg ]; then
+    cut -d' ' -f1 /proc/loadavg
+  else
+    echo unknown
+  fi
+}
+
+# Return the three load values of the host, or `unknown`.
+load_string() {
+  sysctl -n vm.loadavg 2>/dev/null ||
+    cut -d' ' -f1-3 /proc/loadavg 2>/dev/null ||
+    echo unknown
+}
+
+# Build the test binaries first. The release build is the heavy command of
+# this script, and its load must not enter the record of the measurement.
+build_log=target/dispatch-attribution-build.log
+cargo test --locked --release --test dispatch_baseline --no-run >"$build_log" 2>&1
+cargo test --locked --release --lib --no-run >>"$build_log" 2>&1
+
+# Wait for the one-minute load, which the build raised, to fall to the
+# maximum. The measurement of a loaded host is worthless, so the wait holds.
+waited=0
+while :; do
+  load=$(one_minute_load)
+  if [ "$load" = unknown ] || awk -v l="$load" -v m="$max_load" 'BEGIN{exit !(l<=m)}'; then
+    break
+  fi
+  if [ "$waited" -ge "$max_wait" ]; then
+    break
+  fi
+  sleep "$poll"
+  waited=$((waited + 1))
+done
 
 {
   printf '== interpreter instruction attribution ==\n'
@@ -46,8 +92,7 @@ mkdir -p "$(dirname "$out")"
     "$(uname -srm)" \
     "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
   printf 'cpus %s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
-  printf 'load %s\n' \
-    "$(sysctl -n vm.loadavg 2>/dev/null || cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo unknown)"
+  printf 'load %s\n' "$(load_string)"
   printf 'rustc %s\n' "$(rustc --version)"
   printf 'cargo %s\n' "$(cargo --version)"
   printf '\n'
