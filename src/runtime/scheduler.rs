@@ -1307,9 +1307,11 @@ impl Scheduler {
     /// container arrays of each live process and of each freed process, and
     /// the guest terms that they hold; the persistent terms, the ETS
     /// objects, and the messages of the active BIF timers of the node; and
-    /// the result or the exit reason of the root process. Each shared
-    /// container is counted once, as the counting allocator of
-    /// `docs/term-layout-design.md` section 5 counts each allocation once.
+    /// the result or the exit reason of the root process. A guest term that
+    /// only the loaded code holds, such as a literal of a decoded
+    /// instruction, is not counted. Each shared container is counted once,
+    /// as the counting allocator of `docs/term-layout-design.md` section 5
+    /// counts each allocation once.
     ///
     /// # Examples
     ///

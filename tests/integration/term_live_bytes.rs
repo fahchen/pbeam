@@ -7,9 +7,10 @@
 //! `BeamProgram::execute_sampled`. The sampler reports the bytes of the
 //! guest containers at each scheduling step, so the test records the peak
 //! of that number without a global allocator and without `unsafe` code. The
-//! peak is the maximum of the bytes added less the bytes released, with the
-//! totals of both and the counts of the steps that added and released
-//! bytes.
+//! peak is the maximum of the sampled live bytes. The bytes added and the
+//! bytes released are the changes after the baseline, the first sample, so
+//! the test reports the baseline, the totals of both, and the counts of the
+//! steps that added and released bytes.
 //!
 //! The test reports a second, independent number for the same run: the peak
 //! resident set size of the test process, sampled from `ps -o rss` by a
