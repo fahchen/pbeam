@@ -97,14 +97,14 @@ Most of these sites compare the name with a tag such as `"true"`, `"flush"`, `"n
 - `src/runtime/interpreter/bif/erlang.rs`: 1602, 1632, 2859, 2967
 - `src/runtime/interpreter/bif/os.rs`: 107
 
-### 2.3 An order rule (6 sites, with 6 transitive callers)
+### 2.3 An order rule (6 sites, with 12 transitive call sites in six files)
 
 ERTS compares two atoms by the bytes of the name (`erts_cmp_atoms`, `erts/emulator/beam/erl_utils.h:193-215`), not by the index. `Term::compare` uses the name (`src/term/order.rs:112`), and `Fun` and `Target` compare the module and the function names (`src/term/fun.rs:116`, `:117`, `:215`, `:216`, `:217`).
 
 - `src/term/order.rs`: 112
 - `src/term/fun.rs`: 116, 117, 215, 216, 217
 
-The transitive callers of `Term::compare` in `src/` are `src/runtime/interpreter.rs:1084` and `:1096`, `src/term/map.rs:962`, `:1075`, and `:1130`, `src/term/map/build.rs:382`, `src/term/order.rs:164`, `src/runtime/interpreter/bif/table.rs:87`, `:93`, `:243`, and `:248`, and `src/runtime/interpreter/bif/subtract.rs:528`. The flatmap key order already compares two atoms by the index (`flatmap_order`, `src/term/map.rs:1120-1131`), and only its fallback to `Term::compare` reads a name.
+The transitive call sites of `Term::compare` in `src/` are 12, in six files: `src/runtime/interpreter.rs:1084` and `:1096`, `src/term/map.rs:962`, `:1075`, and `:1130`, `src/term/map/build.rs:382`, `src/term/order.rs:164`, `src/runtime/interpreter/bif/table.rs:87`, `:93`, `:243`, and `:248`, and `src/runtime/interpreter/bif/subtract.rs:528`. The flatmap key order already compares two atoms by the index (`flatmap_order`, `src/term/map.rs:1120-1131`), and only its fallback to `Term::compare` reads a name.
 
 ### 2.4 A hash rule (1 site)
 
