@@ -2,7 +2,7 @@
 
 Owning epic: #506. Step tasks: #508 to #518.
 
-Status: plan for owner review. This document covers the interpreter dispatch work only. The term representation work has its own design documents (`docs/term-performance-design-codex-v2.md`, `docs/term-performance-design-deepseek-v2.md`).
+Status: plan for owner review. This document covers the interpreter dispatch work only. The term representation work has its own design documents ([term-performance proposal](term-performance-design-codex-v2.md)).
 
 Baseline revision: `a6b838cd24de4330202549829def13e576b664d3` (2026-10-11). All measured numbers in this document come from this revision, unless the text names another source.
 
@@ -99,7 +99,7 @@ Changes:
 
 - Preallocate the register file for the function before its first instruction. The loader records the highest X index each function touches (`max_x`, step 8, task #516). `Cargo`-level cost: one `Vec` size for each process, grown at call entry to the maximum of its frames, never shrunk. The per-write `resize` goes away (measured removal of a branch and a possible reallocation on each write; the current per-operation cost of the growth path is not measured).
 - Store the "no value" state as one sentinel `Term` instead of `Option<Term>`. ERTS uses the tagged word `THE_NON_VALUE`, which no guest term can hold. Add a private `Term::EMPTY` or a private newtype around `Term`, and keep the guards in `read_operand` and `write_operand`. The X array then holds terms with no `Option` tag work, and at 40 bytes per term, 1027 slots need 41080 bytes for each process (measured size, estimated array).
-- A checked read that cannot fail after loader validation: the loader already validates each register operand against the declared X limit and each `allocate` size against the Y use. Keep the checked access first, and keep the error text. A later unchecked accessor needs all of: the register bound, the initialized state, the frame size, and the lifetime, proved at each dynamic entry. Adopt it only if bounds checks are at least 10 percent of the remaining loop time and the measured gain is at least 10 percent (the same gate as `docs/term-performance-design-codex-v2.md:196`).
+- A checked read that cannot fail after loader validation: the loader already validates each register operand against the declared X limit and each `allocate` size against the Y use. Keep the checked access first, and keep the error text. A later unchecked accessor needs all of: the register bound, the initialized state, the frame size, and the lifetime, proved at each dynamic entry. Adopt it only if bounds checks are at least 10 percent of the remaining loop time and the measured gain is at least 10 percent (the same gate as [term-performance proposal](term-performance-design-codex-v2.md)).
 - A borrow into registers and the frame stack at the same time is the hard part. The frame stack lives in `process.frames.last().stack` (`src/runtime/interpreter.rs:2793`), and the registers live in `process.registers`. A read of one of them borrows the whole process. A read that returns a reference must not be held across a write. Keep a single operand read for each instruction argument, and copy to the destination at the end.
 
 Places that must still clone for ownership (name each one):
@@ -139,35 +139,17 @@ Expected removals (estimated from the measured components, and the numbers overl
 
 Acceptance for this section: a compiled fixture calls `+`, `-`, `tuple_size`, `map_get`, and `hd` with a success, a guard failure, a caught exception, and a trap where the BIF has one. Each result, class, reason, and reduction count matches the pinned ERTS run.
 
-## 5. The three ownership classes
+## 5. Ownership and the reference-count gate
 
-Decision: keep the owner's split, and move the process-private data from `Arc` to `Box` and `Rc` in step 10.
+Decision, revised 2026-10-13 after the owner-supplied `erlang_immutable_data_structures_pbeam_reference.md`: keep the accepted safe term enum and `Arc` graph. Remove the private `Box`/`Rc` heap and promotion proposal. The [term-performance proposal](term-performance-design-codex-v2.md#reference-review-and-storage-rules) records update, equality, and lifetime rules.
 
-The split, with its justification:
+OTP's process heap and PBeam's `Arc` graph have different physical costs. OTP garbage collection is not a reason to replace the accepted PBeam ownership model. Process execution state remains exclusive. Stored immutable roots and descendants retain their owners. A message can outlive its sender. Keep `Term: Send + Sync`, match-context confinement, and iterative final release.
 
-- Process heap: `Box`, owned by the current scheduler. A term that one process owns and no other process can see needs no shared count. The process heap is the term storage of the process: tuples, lists, maps, and funs that only this process holds. `Box<[Term]>`, `Box<Cons>`, and `Box<Node>` replace the `Arc` forms for that data. The scheduler owns one process heap at a time, and it frees the heap when the process exits.
-- Shared binary: `Arc<[u8]>`. The bytes are immutable and shared across processes, so a slice with one shared count is right. The current code uses `Arc<Vec<u8>>` (`src/term/binary.rs:48`, `:58`). Move to `Arc<[u8]>` in the same step, because a `Vec` keeps a capacity field and a separate allocation header that the bytes never change.
-- Shared module code: `Arc<Module>`. Loaded code is immutable and shared by every process. The code table holds `Rc<BeamModule>` today (`src/runtime/interpreter/code_table.rs:23`), which is not `Send`, and the runtime holds it behind the scheduler. Move the module code to `Arc` when the code table crosses a scheduler thread, and keep the load path single-threaded.
-- Scheduler-local temporary data: `Rc` or a plain reference. A value that never leaves one scheduler uses the non-atomic count or a borrow. `MatchState` is `Arc<MatchState>` today (`src/term.rs:91`) and stays per process; it moves to `Rc` when the process heap is private.
+Borrowed reads perform no count operation. Ownership moves avoid a retain. A stored compound alias retains a root, and a copied container path retains each shared child. Count the whole operation rather than one root clone. A unique root does not prove unique descendants. Validate arguments and failure state before a same-register take or private-node write.
 
-What moves, in order:
+The recorded uncontended clone/drop costs are 11.2 ns for `Arc` and 4.03 ns for `Rc`, as minima of 27 runs. Their difference does not establish the share of reference counting in a real instruction. At the recorded read-and-move point, an `Arc` clone was 1.3 percent of one interpreter step. Keep these as historical measurements.
 
-- `Tuple(Option<Arc<Vec<Term>>>)` (`src/term/tuple.rs:24`) to a private form with `Box<[Term]>` and a shared form only for a published term.
-- `ConsRef(Option<Arc<Cons>>)` (`src/term/list.rs:34`) to the same split.
-- `Map { repr: Arc<Repr> }` (`src/term/map.rs:110`) to the same split. This is the largest change, because the HAMT nodes are shared between versions today.
-- `Fun(Option<Arc<FunThing>>)` (`src/term/fun.rs:248`) to the same split.
-- `Binary` keeps `Arc` and changes `Vec<u8>` to `[u8]`.
-- `MatchContext` moves to `Rc` with the process heap.
-
-How a message crosses processes. Today `Term::clone` shares the storage of a compound term and takes O(1) time (`src/term.rs:262-295`), and #459 made `Term` `Send + Sync` with a compile-time bound (`src/term.rs:94-104`). Keep that rule for a published term: a send, an ETS entry, a persistent term, a timer, and a process exit reason keep the current shared form. A process-private term that becomes shared has to be promoted at that point. Promotion walks the term graph and copies the private nodes into shared nodes, or moves the whole heap into a shared form when the last owner sends it. Name the promotion cost at the send path and measure it on a message with a deep term. Do not add a per-instruction promotion check.
-
-How the process heap is allocated and freed. Allocate one heap for each process at its creation, or at its first term allocation, and free it at its exit. A BEAM `allocate` does not allocate the term storage of a process, because the process heap is not a stack. Keep the Y register stack separate, as today (`src/runtime/process.rs:54`). The scheduler owns the heap while the process runs, so no count operation is needed on the per-process path.
-
-The measured atomic cost that this change removes, and where it is paid. An uncontended `Arc` clone and drop of a `Term` is 11.2 ns, and an `Rc` clone and drop is 4.03 ns (measured, minimum of 27 runs). The 7.2 ns difference is the cost of the two atomic operations of the pair. On the current read-and-move path the `Arc` clone is 1.3 percent of one interpreter step (measured). Thus the atomic cost is not the dominant term today. It is paid on each compound clone: `read`, `read_any`, `call_arguments`, `Term::clone` in send and ETS, and each register write that drops a shared destination.
-
-Interaction with task #459. #459 is merged (`a6b838cd`, PR #496) and made terms `Send` and `Sync` and shared them between processes. Keep that decision for shared data, and do not reverse it. The private heap is a second class beside the shared class, not a replacement. A term that no other process saw is private by construction, and the runtime may not publish a private term without promotion. The compile-time `Send + Sync` bound stays.
-
-Gate for step 10: the floor loop, the Terra key latency, and a message-passing workload with a deep term. Adopt the private heap only if the floor loop gains at least 15 percent over step 9 and no send, ETS, and persistent-term value changes. If the counts stay below 20 percent of loop time, keep `Arc` and report the ceiling instead (the rule in `docs/term-performance-design-codex-v2.md:267`).
+Step 10 profiles ownership after step 9. If counts consume at least 20 percent of loop time, first remove measured temporary owners. Any storage replacement needs a separate owner decision and a complete thread-safe lifetime design. Do not add a second private/shared term representation, graph promotion, a binary-backing migration, or a collector in this dispatch step. If counts remain below the gate, keep `Arc` and report the remaining dispatch cost.
 
 ## 6. The small defects with measured costs
 
@@ -195,7 +177,7 @@ Each step is one focused PR with one acceptance test, one measurement, and one g
 | 7 | `Term::Drop` and `Map` drop | A deep term, a shared map, a cloned map, and a 1000000-cell list drop without a stack overflow and with the same values afterwards. | Drop cost of an immediate, a tuple, a shared map, and a deep list. | No measured regression on a term drop, and no map operation regression above 2 percent. |
 | 8 | Prepared instruction form with a constant pool, and the X register array (`max_x`) | Register limit, empty slot, Y catch tag, dynamic call bounds, and every current loader error text. | `size_of::<Instruction>()` and `size_of::<Op>()` with the pinned rustc; floor loop; Terra redraw. | At most 32 bytes for each instruction and at least a 10 percent floor-loop gain. If either fails, revert the step and go to step 9. |
 | 9 | Combined instruction pairs | Every exit from each pair, its exception state, its reduction charge, and its message order against pinned ERTS. | Floor loop per original instruction; Terra redraw. | The floor loop is at most 150 ns for each iteration. |
-| 10 | Process heap with `Box` and `Rc`; binary `Arc<[u8]>`; shared module `Arc` | Send, ETS, persistent term, timer, and exit reason values; cross-thread release; a deep send. | Arc and Rc clone/drop counts for each original instruction; floor loop; Terra key latency. | At least a 15 percent floor-loop gain over step 9 with no value change. If the counts stay below 20 percent of loop time, stop and report the ceiling. |
+| 10 | Profile ownership; keep the accepted `Arc` storage | Retained old values, send after sender exit, ETS, persistent term, timer, exit reason, and cross-thread final release remain correct. | Count retain/release operations for each original instruction and complete container update; floor loop; Terra latency; release pauses. | Counts at least 20 percent require a measured ownership-path proposal. Counts below the gate retain `Arc` and require a report of the remaining dispatch cost. A new representation needs a separate owner decision. |
 
 The order matters in these places. Step 1 must come before step 2, because the cursor needs the tables. Step 4 must come before step 5, because the borrowed path needs the resolved identifier. Step 6 decides whether step 8 is worth its risk. Step 7 is independent of the instruction representation. Step 10 must come after step 9, because a measured dispatch cost decides whether the ownership work can pay.
 
@@ -203,16 +185,16 @@ The order matters in these places. Step 1 must come before step 2, because the c
 
 Targets, all as forecasts from the measured baseline:
 
-- Floor loop: 512 ns for each iteration at the baseline (measured). The shape of that number is the floor loop of a module that holds 20 functions before the loop, and the benchmark target `tests/integration/dispatch_baseline.rs` measures it in `fixtures/dispatch/dispatch_position_probe.erl`. The same target measures the local `call_only` shape at 340 ns and the module-qualified `call_ext_only` shape at 564 ns. The target after step 5 is at most 300 ns, after step 9 at most 150 ns, and the stretch target is 34 ns, which is the ERTS 2.7 ns for each iteration multiplied by 12.5. The `docs/term-performance-design-codex-v2.md:261` gate rejects the plan if the borrowed BIF and cursor work leaves the loop above 300 ns.
+- Floor loop: 512 ns for each iteration at the baseline (measured). The shape of that number is the floor loop of a module that holds 20 functions before the loop, and the benchmark target `tests/integration/dispatch_baseline.rs` measures it in `fixtures/dispatch/dispatch_position_probe.erl`. The same target measures the local `call_only` shape at 340 ns and the module-qualified `call_ext_only` shape at 564 ns. The target after step 5 is at most 300 ns, after step 9 at most 150 ns, and the stretch target is 34 ns, which is the ERTS 2.7 ns for each iteration multiplied by 12.5. The [term-performance proposal](term-performance-design-codex-v2.md) gate rejects the plan if the borrowed BIF and cursor work leaves the loop above 300 ns.
 - Each added instruction: at most 80 ns for each added `gc_bif` after step 5, against the measured 307 ns for `+` and 297 ns for `tuple_size`. At most 40 ns for each added element read after step 8, against the measured 148 ns for `get_tuple_element` and 239 ns for `get_hd`. At most 200 ns for the `map_get` call, against the measured 633 ns, of which 34 ns is the HAMT walk. These are estimates of the achievable result, not results.
-- Terra key latency: 0.09 s to 0.11 s at the baseline (measured). The target after step 5 is at most 30 ms, after step 9 at most 10 ms, and the final target is at most 5 ms. The measured ERTS value is 3 ms. The redraw target of 4 ms in `docs/term-performance-design-codex-v2.md:216` needs about 14 ns for each original instruction over 280000 instructions (estimated from the measured instruction count).
-- The final floor-loop target is at most 45 ns for each iteration, the lower end of the `docs/term-performance-design-codex-v2.md:185` range for operation-specific operands.
+- Terra key latency: 0.09 s to 0.11 s at the baseline (measured). The target after step 5 is at most 30 ms, after step 9 at most 10 ms, and the final target is at most 5 ms. The measured ERTS value is 3 ms. The redraw target of 4 ms in [term-performance proposal](term-performance-design-codex-v2.md) needs about 14 ns for each original instruction over 280000 instructions (estimated from the measured instruction count).
+- The final floor-loop target is at most 45 ns for each iteration, the lower end of the [term-performance proposal](term-performance-design-codex-v2.md) range for operation-specific operands.
 
 The measurements that would show the plan is wrong:
 
 - The floor loop stays above 300 ns for each iteration after steps 1 to 5. Then the cost is not in the dispatch paths this plan names. Profile again before any representation work.
-- The cursor and the BIF identifier give less than a 20 percent floor-loop reduction, or less than a 10 percent Terra reduction. Then the loop is bound by something this plan does not own, and the plan stops.
-- The measured `Arc` clone and drop count on the hot path is below 5 percent of loop time after step 9. Then step 10 cannot pay and the plan keeps `Arc` and stops.
+- The cursor and the BIF identifier give less than a 20 percent floor-loop reduction, or less than a 20 percent Terra reduction. Then the loop is bound by something this plan does not own, and the plan stops.
+- If measured retain/release work is below 20 percent of loop time after step 9, keep `Arc`. Report the remaining cost before proposing storage work. This gate ends the ownership investigation, not the Terra acceptance requirement.
 - The prepared form does not reach 32 bytes with the pinned rustc, or it changes one error term, one exception class, or one stack trace. Then the plan keeps the decoded form.
 - A combined instruction changes a reduction charge, a signal observation, or a message order. Then the plan removes that pair and keeps the two instructions.
 
@@ -221,10 +203,10 @@ The risk that a Rust interpreter has a lower ceiling than the ERTS JIT. ERTS exe
 ## 9. Rejected alternatives
 
 - **NaN boxing.** A NaN payload cannot hold the full 60-bit ERTS small-integer domain, and it complicates the float paths. It also changes term layout, which is not this plan's problem. Reject it here, and let the term representation design decide it.
-- **A bytecode-to-threaded-code translator.** Rust has no stable computed goto. A function-pointer table loses inlining and adds an indirect call for each instruction. The current `match` already compiles to a jump table. Keep the `match` first, and compare it with a handler table only on the same decoded stream and with a measurement. Do not add a C execution loop to obtain the syntax (`docs/term-performance-design-codex-v2.md:194`).
-- **A garbage collector.** ERTS collects the process heap, and PBeam does not. A tracing collector changes when a term is released, which changes the reductions and the release order that this plan must keep. It also needs the cross-process sharing rules of a second collector. Step 10 uses `Box` and `Rc` with private ownership and no collector.
+- **A bytecode-to-threaded-code translator.** Rust has no stable computed goto. A function-pointer table loses inlining and adds an indirect call for each instruction. The current `match` already compiles to a jump table. Keep the `match` first, and compare it with a handler table only on the same decoded stream and with a measurement. Do not add a C execution loop to obtain the syntax ([term-performance proposal](term-performance-design-codex-v2.md)).
+- **A garbage collector.** ERTS collects the process heap, and PBeam does not. A tracing collector changes when a term is released, which changes the reductions and the release order that this plan must keep. It also needs the cross-process sharing rules of a second collector. Step 10 keeps the accepted `Arc` graph and measures its real ownership cost. Guest-value graphs must remain acyclic.
 - **A JIT or AOT.** The specification excludes them (`README.md:24`, `docs/portable-beam-spec.md:46`). Their possible speed is not evidence for this interpreter. Consider them only after the ceiling in section 8, and only as a separately approved design.
 - **Unchecked indexing without proof.** Keep the checked access first. Adopt an unchecked accessor only with the proof and the malformed-bytecode evidence of section 3.
-- **A reusable owned argument vector as the pure-leaf default.** It removes the allocation but keeps the clones. Borrowed fixed-arity arguments are the smaller ownership cost (`docs/term-performance-design-codex-v2.md:256`).
+- **A reusable owned argument vector as the pure-leaf default.** It removes the allocation but keeps the clones. Borrowed fixed-arity arguments are the smaller ownership cost ([term-performance proposal](term-performance-design-codex-v2.md)).
 - **`Rc` everywhere.** It reverses #459 and the multi-scheduler storage boundary. Keep `Arc` at each shared root.
 - **One `Arc` for each integer, atom, or pid.** It adds an allocation and an atomic operation to the most frequent operations. Those terms are immediates and stay immediates.
