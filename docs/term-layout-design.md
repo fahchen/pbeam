@@ -331,11 +331,11 @@ The resident set size of the release process is 62080 KB, which is 60.6 MiB, for
 
 ## 8. The outcome of the compact term of [#571](https://github.com/fahchen/pbeam/issues/571)
 
-Task [#571](https://github.com/fahchen/pbeam/issues/571) implements the compact term of section 4 on branch `perf/571-compact-term` at `45cae312`. The implementation makes `Binary` the one-pointer handle: the private `BinaryView` keeps the bytes, the bit offset, the size, and the packed bytes, and `Binary` is one `Arc` to it. The public `Term::Binary(Binary)` variant and every call site stay unchanged.
+Task [#571](https://github.com/fahchen/pbeam/issues/571) implements the compact term of section 4 on branch `perf/571-compact-term`, on top of `origin/main` at `35c410e6`. The implementation makes `Binary` the one-pointer handle: the private `BinaryView` keeps the bytes, the bit offset, the size, and the packed bytes, and `Binary` is one `Arc` to it. The public `Term::Binary(Binary)` variant and every call site stay unchanged.
 
 The sizes at the pinned `rustc 1.99.0 (b940084d7 2026-09-28)`, host Darwin 27.0.0 arm64, Apple M1 Max, from `RUSTC_BOOTSTRAP=1 mise exec -- cargo rustc --locked --lib -- -Zprint-type-sizes`:
 
-| Type | At `c7dd12f5`, bytes | At `45cae312`, bytes |
+| Type | At `35c410e6`, bytes | At the branch head, bytes |
 | --- | --- | --- |
 | `Term` | 40 | 32 |
 | `Option<Term>` | 40 | 32 |
@@ -347,9 +347,9 @@ The sizes at the pinned `rustc 1.99.0 (b940084d7 2026-09-28)`, host Darwin 27.0.
 | `Instruction` | 136 | 112 |
 | `StackSlot` | 40 | 32 |
 
-The arm sizes at `45cae312` are `Binary` 8, `Atom` 24, `Integer`, `Cons`, `Tuple`, `Map`, `Pid`, `Port`, `Reference`, `Fun`, and `MatchContext` 8, and `Nil` 0. `Term` is 32 bytes because the 24-byte `Atom` arm is the largest arm and the discriminant is 8 bytes. The task does not reach the 16-byte target of row 6. Only the immediate atom root of [#580](https://github.com/fahchen/pbeam/issues/580) takes the largest arm to 8 bytes and `Term` to 16 bytes, and its sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver it.
+The arm sizes at the branch head are `Binary` 8, `Atom` 24, `Integer`, `Cons`, `Tuple`, `Map`, `Pid`, `Port`, `Reference`, `Fun`, and `MatchContext` 8, and `Nil` 0. `Term` is 32 bytes because the 24-byte `Atom` arm is the largest arm and the discriminant is 8 bytes. The task does not reach the 16-byte target of row 6. Only the immediate atom root of [#580](https://github.com/fahchen/pbeam/issues/580) takes the largest arm to 8 bytes and `Term` to 16 bytes, and its sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver it.
 
-The added allocation and the indirection, from `mise run bench-term` at `45cae312`, load `{ 8.55 39.09 47.42 }` for the first run and `{ 5.68 24.15 39.60 }` for the second:
+The added allocation and the indirection, from `mise run bench-term`. Each allocation row is the exact count of the counting allocator of `tests/term/data_structure_costs.rs` for one call:
 
 | Operation | Allocations | Note |
 | --- | --- | --- |
@@ -357,28 +357,35 @@ The added allocation and the indirection, from `mise run bench-term` at `45cae31
 | a copy of a `Binary` handle | 0 | one reference count |
 | `bits` of a byte-aligned range | 1 | one view descriptor |
 | `bits` of a range whose first bit is not on a byte boundary | 3 | the view descriptor, the vector of the packed bits, and its `Arc` |
-| one read of the size through the handle | 0.825 ns, then 0.799 ns | one pointer load before the fields of the view |
+| one read of the size through the handle, at `35c410e6` | 0.813 ns | the fields of the inline descriptor; three rounds 0.813, 0.814, 0.813 |
+| one read of the size through the handle, at the branch head | 0.877 ns | one pointer load before the fields; three rounds 0.878, 0.877, 0.877 |
+
+The read harness sets the handle pointer with `black_box` inside the timed loop, so the compiler cannot move the read of the view out of the loop. The release assembly of `prints_the_cost_of_a_binary_view` keeps the loop: the counter `0x30d40` (200000) decrements in the loop, and the body loads the handle, takes the view pointer with `ldr x12, [x12]`, and reads `packed` with `ldr x13, [x12, #0x28]`, `size` with `ldr x13, [x12, #0x20]`, and the byte pointer and its length with `ldp x12, x14, [x12, #0x10]`. The three read rounds run at a one-minute load of 7.88 to 8.48, and each value is the minimum of nine timed runs of one harness call.
 
 The boxed descriptor adds one allocation for each binary handle against the inline descriptor of the previous layout. The live-byte walk counts 32 bytes of the descriptor for each distinct handle and excludes the 16-byte `Arc` header, as it excludes the header of every shared container (section 5).
 
-The peak live bytes of one Terra scene, from `mise run bench-live-bytes`, at load `{ 8.55 39.09 47.42 }` for both runs:
+The deep copy of a 100 KB binary is slower at the branch head, and the record states the sign. One pair is one invocation of `mise run bench-term` on `35c410e6` and one invocation on the branch head, next to each other in one quiet window; each value is the minimum of nine calls inside one test process. The four pairs are 1748.834 and 1812.000 ns, 1632.166 and 1750.250 ns, 1640.000 and 1745.000 ns, and 1630.000 and 1747.916 ns, so the branch head is from 3.6 to 7.2 percent slower in every pair. `arc_clone_drop_binary_102400` is 9.952, 9.952, and 9.939 ns at `35c410e6` and 9.612, 9.609, and 9.612 ns at the branch head, so a copy of the smaller handle is about 3.4 percent faster.
 
-| Revision | Peak live bytes | Peak resident set size |
-| --- | --- | --- |
-| `c7dd12f5` | 24096 | 3952 KB |
-| `45cae312` | 20192 | 3792 KB |
+The peak live bytes of one Terra scene, from 30 runs of `mise run bench-live-bytes` for each revision, at a one-minute load of 6.13 to 6.76:
 
-The reduction is 3904 bytes, or 16.20 percent of 24096 bytes. The two runs of the harness agree in both revisions, so the spread is 0 bytes.
+| Revision | Samples | Peak live bytes | Peak resident set size |
+| --- | --- | --- | --- |
+| `35c410e6` | 30 | 24096 in each run | 3992 KB median, 3904 to 4032 KB |
+| the branch head | 30 | 20192 in each run | 3968 KB median, 3888 to 4032 KB |
 
-The end-to-end Terra path, from `bash scripts/terra_latency.sh release`:
+The reduction is 3904 bytes, or 16.20 percent of 24096 bytes, and the spread of the samples is 0 bytes in both revisions.
 
-| Revision | Load | First frame | Key `j` | Key `j` | Key `k` | Key `q` |
+The end-to-end Terra path, from 30 runs of `bash scripts/terra_latency.sh release` for each revision, with one before run and one after run next to each other in each round. The table keeps the runs with a one-minute load of at most 12, as section 5 requires: 22 of the 30 before runs and 23 of the 30 after runs.
+
+| Revision | Runs | First frame: min, median, p95 | Key `j`: median | Key `j`: median | Key `k`: median | Key `q`: median |
 | --- | --- | --- | --- | --- | --- | --- |
-| `c7dd12f5` | `{ 8.23 38.01 46.94 }` | 0.50 s | 0.014 s | 0.015 s | 0.015 s | 0.016 s |
-| `45cae312` | `{ 7.50 36.88 46.44 }` | 0.51 s | 0.015 s | 0.015 s | 0.015 s | 0.015 s |
+| `35c410e6` | 22 | 0.36 s, 0.37 s, 0.56 s | 0.022 s | 0.025 s | 0.022 s | 0.022 s |
+| the branch head | 23 | 0.36 s, 0.37 s, 0.64 s | 0.021 s | 0.022 s | 0.023 s | 0.022 s |
 
-The floor loop at 200000 iterations, from `mise run bench-dispatch`, load `{ 8.42 38.56 47.19 }` at both runs. The `call_only` floor loop of `dispatch_probe` is 122.5 ns at `c7dd12f5` and 122.2 ns at `45cae312`; the `call_ext_only` floor loop is 296.4 ns and 253.4 ns; the loop plus `gc_bif '+'` is 194.0 ns and 192.3 ns; the loop plus the `bif` of `tuple_size/1` is 194.7 ns and 193.4 ns; the loop plus the `bif` of `element/2` is 197.8 ns and 194.3 ns; the loop plus the `bif` of `hd/1` is 197.8 ns and 194.7 ns; and the loop plus the `bif` of `map_get/2` on a 1000-key map is 254.7 ns and 252.4 ns.
+The one-minute load of the 60 runs is 3.23 to 31.34, and 15 runs are above the bound of 12. The ratio of the median of the after runs to the median of the before runs is 1.000 for the first frame and 0.955, 0.880, 1.045, and 0.978 for the four keys. The key latency has a resolution of 1 ms, so a key median carries that step.
 
-The gate of row 6 fails. The end-to-end Terra time does not gain 10 percent: the first frame is 0.50 s and 0.51 s, and each key is at most 0.016 s in both runs. The peak-live-byte reduction is 16.20 percent, below the 20 percent bound. The time does not regress by more than 10 percent: each Terra key is flat, and no floor-loop number regresses. The `call_ext_only` floor loop improves by 14.5 percent, which is supporting evidence of the smaller decoded form and not a limb of the gate. The compact term alone therefore does not pass the gate, and the task closes with this measurement.
+The floor loop at 200000 iterations, from `mise run bench-dispatch`, load `{ 6.45 6.73 4.81 }` for both runs. The `call_only` floor loop of `dispatch_probe` is 120.7 ns at `35c410e6` and 117.9 ns at the branch head; the `call_ext_only` floor loop is 274.3 ns and 250.8 ns; the loop plus `gc_bif '+'` is 189.7 ns and 187.9 ns; the loop plus the `bif` of `tuple_size/1` is 191.6 ns and 186.9 ns; the loop plus the `bif` of `element/2` is 195.4 ns and 190.7 ns; the loop plus the `bif` of `hd/1` is 194.6 ns and 190.8 ns; and the loop plus the `bif` of `map_get/2` on a 1000-key map is 261.2 ns and 251.1 ns.
 
-The row stays open for the immediate atom of [#580](https://github.com/fahchen/pbeam/issues/580). That mechanism takes term slots from 32 bytes to 16 bytes, so the peak-live-byte limb has the reduction that this task alone does not reach.
+The gate of row 6 fails on its numbers. The end-to-end Terra time does not gain 10 percent: the median of the first frame is 0.37 s in both revisions, and the four keys move between 12.0 percent faster and 4.5 percent slower. The peak-live-byte reduction is 16.20 percent, below the 20 percent bound. The time does not regress by more than 10 percent: the largest key increase is 4.5 percent.
+
+The owner decided on 2026-10-14 that the title of row 6 is reached when `size_of::<Term>()` is 16 bytes, that the compact term is the first half of that target, and that the compact term lands on this result. The row stays open for the immediate atom of [#580](https://github.com/fahchen/pbeam/issues/580), whose sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) take `Term` from 32 bytes to 16 bytes.
