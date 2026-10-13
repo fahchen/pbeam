@@ -723,21 +723,20 @@ fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
     drop(master);
     reader.join().unwrap();
     let bytes = output.lock().unwrap().clone();
-    // The run must report no failure of its port child, because Terra Counter
-    // opens `stty -isig` and `stty isig` ports in its terminal handling
-    // (`Terra.Terminal.TTY.run_stty/2` waits `@stty_timeout`, 2000 ms). A run
-    // that reports the failure did not complete those steps, so the test
-    // cannot check the terminal restore of that run. Report the condition of
-    // the host here, and do not assert a result of a run that did not complete
-    // its terminal handling.
+    // The test compares the terminal handling of the two runs, so a run that
+    // reports a failure of its `erl_child_setup` process gives no result to
+    // compare. Report the observed failure and the bytes of the run here, and
+    // do not assert a result of that run. The known ways that the emulator can
+    // close the port request pipe before the acknowledgement are the end of
+    // the emulator and a timeout of Terra `Terra.Terminal.TTY.run_stty/2`; the
+    // report does not decide between them.
     if let Some(failure) = child_setup_failure(&bytes) {
         panic!(
-            "the pinned ERTS could not start a stty port child of Terra Counter: {failure}. \
-             The `erl_child_setup` process of the ERTS run reports that the emulator closed the \
-             port request pipe before the acknowledgement, so the run did not complete its \
-             `stty` steps. The host did not run the ERTS process within the 2000 ms timeout of \
-             `Terra.Terminal.TTY.run_stty/2`. The test cannot check the terminal restore of this \
-             run. The bytes of the run: {:?}",
+            "the pinned ERTS reported a failure of its `erl_child_setup` process during the run: \
+             {failure}. The test cannot compare a result of this run. The likely causes are the \
+             2000 ms timeout that Terra `Terra.Terminal.TTY.run_stty/2` uses for its `stty` port, \
+             and the end of the emulator. The report does not decide which one occurred. The \
+             bytes of the run: {:?}",
             String::from_utf8_lossy(&bytes)
         );
     }
@@ -822,9 +821,11 @@ fn restore_before_result(bytes: &[u8]) -> (&[u8], &[u8]) {
 /// request and then the acknowledgement on the read end of the port pipe
 /// (`erl_child_setup.c:210-213`, `282-287`). When the emulator closes that
 /// pipe before the acknowledgement, the read gives `EPIPE` and the child
-/// writes `erl_child_setup: failed with error 32 on line 284` to its
-/// standard error (`erl_child_setup.c:371-374`), which the run shares with
-/// the terminal. The text is thus a part of the bytes of the run.
+/// writes a text such as `erl_child_setup: failed with error 32 on line 284`
+/// to its standard error (`erl_child_setup.c:371-374`), which the run shares
+/// with the terminal. The text is thus a part of the bytes of the run. The
+/// emulator closes the pipe when it closes the port or when it stops, so the
+/// text alone does not name the cause.
 ///
 /// # Examples
 ///
@@ -939,13 +940,12 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
     // and not after the build limit (#505).
     //
     // Terra Counter opens `stty -isig` and `stty isig` ports in its terminal
-    // handling (`Terra.Terminal.TTY.run_stty/2` waits `@stty_timeout`,
-    // 2000 ms). A host that does not run the ERTS process within that timeout
-    // closes the port before `erl_child_setup` gets the acknowledgement, and
-    // the run does not complete those steps. The test needs the terminal
-    // handling of both runs, so `run_terra_counter_in_terminal` reports that
-    // condition of the host, and it does not compare a result of a run that
-    // did not complete it.
+    // handling. A run can report a failure of its `erl_child_setup` process,
+    // for example when the host does not run the ERTS process within the
+    // 2000 ms timeout that `Terra.Terminal.TTY.run_stty/2` uses, or when the
+    // emulator stops. The test needs the terminal handling of both runs, so
+    // `run_terra_counter_in_terminal` reports that failure, and it does not
+    // compare a result of a run that reports it.
     let (erts, erts_status) = run_terra_counter_in_terminal(&["terra_counter", "--erts"]);
     let (pbeam, pbeam_status) = run_terra_counter_in_terminal(&["terra_counter", "--no-build"]);
     assert_eq!(erts_status, pbeam_status, "status");
