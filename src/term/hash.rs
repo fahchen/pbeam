@@ -344,7 +344,7 @@ impl State {
     ///
     /// ```rust,ignore
     /// let pairs = (1..=33).map(|key| (Term::Integer(key), Term::Integer(key))).collect();
-    /// let map = Map::from_pairs(pairs)?;
+    /// let map = Map::from_pairs(pairs, &AtomTable::new())?;
     /// let Form::Hash { root, .. } = map.form() else { unreachable!() };
     /// let (mut state, mut stack) = (State::default(), Vec::new());
     /// state.push_children(&mut stack, root);

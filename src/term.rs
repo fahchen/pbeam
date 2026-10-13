@@ -405,7 +405,7 @@ impl Term {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?);
+    /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?);
     /// assert!(map.unique());
     /// let copy = map.clone();
     /// assert!(!map.unique() || !copy.unique());

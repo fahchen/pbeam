@@ -2878,12 +2878,13 @@ enum Update {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let mut entries = Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))])?;
+/// let atoms = AtomTable::new();
+/// let mut entries = Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))], &atoms)?;
 /// let cooked = vec![(Term::static_atom("output"), Term::static_atom("cooked"))];
-/// assert_eq!(update_map_exact(&mut entries, cooked)?, None);
+/// assert_eq!(update_map_exact(&mut entries, cooked, &atoms)?, None);
 /// let missing = vec![(Term::static_atom("input"), Term::static_atom("cooked"))];
 /// assert_eq!(
-///     update_map_exact(&mut entries, missing)?,
+///     update_map_exact(&mut entries, missing, &atoms)?,
 ///     Some(Term::tuple(vec![Term::static_atom("badkey"), Term::static_atom("input")]))
 /// );
 /// ```

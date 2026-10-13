@@ -258,7 +258,7 @@ impl Drain {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// let mut copy = map.clone();
     /// assert!(Drain::take(&mut map).is_none());
     /// assert!(Drain::take(&mut copy).is_some());
@@ -289,7 +289,7 @@ impl Drain {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// let mut drain = Drain::take(&mut map).unwrap();
     /// let mut pending = Vec::new();
     /// assert_eq!(drain.step(&mut pending, 256), 1);
@@ -339,7 +339,7 @@ impl Drain {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// let drain = Drain::take(&mut map).unwrap();
     /// assert!(!drain.is_empty());
     /// ```
@@ -383,7 +383,7 @@ impl Drain {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// let drain = Drain::take(&mut map).unwrap();
     /// assert!(drain.allocated_bytes() > 0);
     /// ```
@@ -466,7 +466,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let flat = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let flat = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert!(flat.allocated_bytes() > 0);
     /// ```
     pub(crate) fn allocated_bytes(&self) -> usize {
@@ -552,7 +552,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert!(map.unique());
     /// let copy = map.clone();
     /// assert!(!map.unique() || !copy.unique());
@@ -566,7 +566,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert_eq!(map.len(), 1);
     /// ```
     pub(crate) fn len(&self) -> usize {
@@ -593,7 +593,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert!(matches!(map.form(), Form::Flat([(Term::Integer(1), Term::Integer(2))])));
     /// ```
     pub(super) fn form(&self) -> Form<'_> {
@@ -614,7 +614,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(2)));
     /// assert_eq!(map.get(&Term::tuple(vec![])), None);
     /// ```
@@ -782,7 +782,7 @@ impl Map {
     ///
     /// ```rust,ignore
     /// let nil = || Term::nil();
-    /// let map = Map::from_pairs(vec![(Term::Integer(2), nil()), (Term::Integer(1), nil())])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(2), nil()), (Term::Integer(1), nil())], &AtomTable::new())?;
     /// let keys: Vec<_> = map.iter().map(|(key, _)| key.clone()).collect();
     /// assert_eq!(keys, [Term::Integer(1), Term::Integer(2)]);
     /// ```
@@ -829,7 +829,7 @@ impl Map {
     ///
     /// ```rust,ignore
     /// let mut pending = Vec::new();
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// let mut copy = map.clone();
     /// map.drain_into(&mut pending);
     /// assert!(pending.is_empty());
@@ -889,7 +889,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs((1..=40).map(|key| (Term::Integer(key), Term::Integer(key))).collect())?;
+    /// let map = Map::from_pairs((1..=40).map(|key| (Term::Integer(key), Term::Integer(key))).collect(), &AtomTable::new())?;
     /// let chunk = map.chunk(&Term::Integer(0), 1000, Direction::Backward)?.unwrap();
     /// // ERTS 29.1.1: the last 32 pairs and the path 43.
     /// assert_eq!((chunk.pairs.len(), chunk.next), (32, Some(43)));
@@ -946,9 +946,9 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert!(map.same_form(&map.clone()));
-    /// assert!(!map.same_form(&Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?));
+    /// assert!(!map.same_form(&Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?));
     /// ```
     pub(crate) fn same_form(&self, other: &Map) -> bool {
         Arc::ptr_eq(self.arc(), other.arc())
@@ -969,7 +969,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = |keys: std::ops::Range<i64>| Map::from_pairs(keys.map(|key| (Term::Integer(key), Term::Integer(key))).collect());
+    /// let map = |keys: std::ops::Range<i64>| Map::from_pairs(keys.map(|key| (Term::Integer(key), Term::Integer(key))).collect(), &AtomTable::new());
     /// assert_eq!(map(0..10)?.merge_steps(&map(5..20)?), None);
     /// assert_eq!(map(0..0)?.merge_steps(&map(0..40)?), None);
     /// // ERTS 29.1.1: maps:merge/2 of two maps of the keys 1..40 costs 8.
@@ -1324,7 +1324,7 @@ impl Hamt {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs((0..40).map(|key| (Term::Integer(key), Term::Integer(key))).collect())?;
+    /// let mut map = Map::from_pairs((0..40).map(|key| (Term::Integer(key), Term::Integer(key))).collect(), &AtomTable::new())?;
     /// let Repr::Hash(hamt) = &**map.arc() else { unreachable!() };
     /// assert_eq!(hamt.get(&Term::Integer(1)), Some(&Term::Integer(1)));
     /// assert_eq!(hamt.get(&Term::Integer(40)), None);
@@ -1335,7 +1335,7 @@ impl Hamt {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs((0..40).map(|key| (Term::Integer(key), Term::Integer(key))).collect())?;
+    /// let mut map = Map::from_pairs((0..40).map(|key| (Term::Integer(key), Term::Integer(key))).collect(), &AtomTable::new())?;
     /// let Repr::Hash(hamt) = &**map.arc() else { unreachable!() };
     /// assert_eq!(hamt.get(&Term::Integer(1)), Some(&Term::Integer(1)));
     /// assert_eq!(hamt.get(&Term::Integer(40)), None);
