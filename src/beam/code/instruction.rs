@@ -173,6 +173,14 @@ const OPCODE_RECV_MARKER_USE: u8 = 176;
 /// Byte examples use hexadecimal values. Compact operands use the short form
 /// in the Code chunk grammar. `End` represents the stream terminator; the
 /// executor does not run it.
+///
+/// A branch operand and a local-call operand hold the label number that the
+/// parser read from the stream. `ModuleTables::build` replaces each one with
+/// the resolved code position before any process runs: a branch operand
+/// becomes the index of the instruction after the label, and a call operand
+/// becomes the index of the function in the function table of the module and
+/// the index of the instruction at the label. A loaded instruction therefore
+/// reads the field and runs no lookup.
 pub(crate) enum Instruction {
     /// Starts a code label. The label must be in `1..=label_count`.
     ///
@@ -201,10 +209,20 @@ pub(crate) enum Instruction {
     Move(Operand, Operand),
     /// Calls a local function and continues after it returns.
     ///
+    /// `function` is the index of the function in the function table of the
+    /// module, and `target` is the index of the instruction at the label that
+    /// the call names. A call starts at `target`, which can be a label inside
+    /// a function and not only its entry. The parser writes the label operand
+    /// into both fields, and `ModuleTables::build` replaces both.
+    ///
     /// Erlang: `b(X) -> c(X), ok.` compiles to `{call,1,{f,6}}`.
-    Call { arity: u32, label: u32 },
+    Call {
+        arity: u32,
+        function: u32,
+        target: u32,
+    },
     /// Releases `deallocate` Y registers and calls a local function in place
-    /// of the active one.
+    /// of the active one. `function` and `target` are as for [`Self::Call`].
     ///
     /// Encoding: opcode, arity, label, deallocate. Example:
     /// `[0x05, 0x30, 0x35, 0x20]` calls label 3 with arity 3 and releases two
@@ -214,13 +232,19 @@ pub(crate) enum Instruction {
     /// to `{call_last,3,{io,request,3},2}`.
     CallLast {
         arity: u32,
-        label: u32,
+        function: u32,
+        target: u32,
         deallocate: u32,
     },
-    /// Tail-calls a local function.
+    /// Tail-calls a local function. `function` and `target` are as for
+    /// [`Self::Call`].
     ///
     /// Erlang: `c(X) -> d(X).` compiles to `{call_only,1,{f,8}}`.
-    CallOnly { arity: u32, label: u32 },
+    CallOnly {
+        arity: u32,
+        function: u32,
+        target: u32,
+    },
     /// Calls an imported function. `tail` marks `call_ext_last` and
     /// `call_ext_only`; `deallocate` is the stack size to release first.
     /// The loader puts `Deallocate { stack_size: deallocate }` after a
@@ -1607,14 +1631,24 @@ pub(super) fn parse_code(
                 }
                 Instruction::Return
             }
-            OPCODE_CALL => Instruction::Call {
-                arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
-                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
-            },
-            OPCODE_CALL_ONLY => Instruction::CallOnly {
-                arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
-                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
-            },
+            OPCODE_CALL => {
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                Instruction::Call {
+                    arity,
+                    function: label,
+                    target: label,
+                }
+            }
+            OPCODE_CALL_ONLY => {
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                Instruction::CallOnly {
+                    arity,
+                    function: label,
+                    target: label,
+                }
+            }
             OPCODE_JUMP => Instruction::Jump(read_operand(data, &mut cursor, TAG_LABEL)? as u32),
             OPCODE_SELECT_VAL => {
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -1656,11 +1690,17 @@ pub(super) fn parse_code(
                 value: read_move_operand(data, &mut cursor, atoms, literals)?,
                 arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
             },
-            OPCODE_CALL_LAST => Instruction::CallLast {
-                arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
-                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
-                deallocate: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
-            },
+            OPCODE_CALL_LAST => {
+                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let deallocate = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                Instruction::CallLast {
+                    arity,
+                    function: label,
+                    target: label,
+                    deallocate,
+                }
+            }
             OPCODE_TEST_TAGGED_TUPLE => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
