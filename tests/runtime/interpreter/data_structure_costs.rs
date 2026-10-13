@@ -139,17 +139,22 @@ fn table_of(objects: usize) -> Table {
 
 /// A hashed index of the keys of a `set` table, in the shape that a hashed
 /// ETS store could use. The ERTS internal hash of a key selects a slot, and
-/// the slot holds the object index of every key with that slot. A lookup
-/// walks the slot and compares each stored key with the exact equality of
-/// `Term`.
+/// the slot holds the object index of every key with that slot.
 ///
-/// The counterfactual must check the stored key. Pinned OTP compares the
-/// stored hash value first and then the stored key with `EQ`
-/// (`has_live_key` and `has_key`, `erl_db_hash.c:766-790`), so an index that
-/// compares hashes alone does not model one lookup of a `set` table.
+/// The counterfactual must check the stored hash and then the stored key.
+/// Pinned OTP rejects an entry whose stored hash value is not the hash of the
+/// key and only then compares the stored key with `EQ` (`has_live_key` and
+/// `has_key`, `erl_db_hash.c:766-790`), so the model stores the full hash of
+/// each key and compares that hash before it compares the key. An index that
+/// compares hashes alone cannot separate two keys in one slot, and an index
+/// that compares keys alone pays an equality that the stored hash of OTP
+/// rejects.
 struct KeyIndex {
     /// The object indexes of each slot.
     slots: Vec<Vec<usize>>,
+    /// The full ERTS internal hash of each object index, as the `hvalue` of
+    /// an ERTS hash-table entry (`erl_db_hash.h`).
+    hashes: Vec<u64>,
     /// The stored key of each object index.
     keys: Vec<Term>,
 }
@@ -160,6 +165,7 @@ impl KeyIndex {
     fn with_slots(slots: usize) -> Self {
         KeyIndex {
             slots: vec![Vec::new(); slots],
+            hashes: Vec::new(),
             keys: Vec::new(),
         }
     }
@@ -173,17 +179,16 @@ impl KeyIndex {
         index
     }
 
-    /// Return the slot of `key`: the ERTS internal hash of the key masked to
-    /// the slot count.
+    /// Return the slot of a key hash: the hash masked to the slot count.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let index = KeyIndex::of(vec![Term::Integer(1)], 1024);
-    /// assert!(index.slot(&Term::Integer(1)) < 1024);
+    /// assert!(index.slot(index.hashes[0]) < 1024);
     /// ```
-    fn slot(&self, key: &Term) -> usize {
-        internal_hash(key) as usize & (self.slots.len() - 1)
+    fn slot(&self, hash: u64) -> usize {
+        hash as usize & (self.slots.len() - 1)
     }
 
     /// Store `key`, as `db_put_hash` does: an equal stored key keeps its
@@ -196,20 +201,44 @@ impl KeyIndex {
     /// index.insert(Term::Integer(1));
     /// index.insert(Term::Integer(1));
     /// assert_eq!(index.keys.len(), 1);
+    /// assert_eq!(index.hashes.len(), 1);
     /// ```
     fn insert(&mut self, key: Term) {
-        if let Some(index) = self.get(&key) {
+        let hash = internal_hash(&key);
+        if let Some(index) = self.find(hash, &key) {
+            self.hashes[index] = hash;
             self.keys[index] = key;
             return;
         }
-        let slot = self.slot(&key);
+        let slot = self.slot(hash);
+        self.hashes.push(hash);
         self.keys.push(key);
         self.slots[slot].push(self.keys.len() - 1);
     }
 
+    /// Return the object index of the key with the hash `hash`, or `None`
+    /// when the slot holds no such key. The walk compares the stored hash of
+    /// each entry first, as `has_key` does, and compares the stored key only
+    /// when the two hashes are equal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut index = KeyIndex::with_slots(1024);
+    /// index.insert(Term::Integer(1));
+    /// assert_eq!(index.find(index.hashes[0], &Term::Integer(1)), Some(0));
+    /// ```
+    fn find(&self, hash: u64, key: &Term) -> Option<usize> {
+        self.slots[self.slot(hash)]
+            .iter()
+            .copied()
+            .find(|index| self.hashes[*index] == hash && self.keys[*index] == *key)
+    }
+
     /// Return the object index of an equal stored key, or `None` when no
-    /// stored key is equal. The walk compares every key of the slot, so a
-    /// slot with more than one key pays the equality of each of them.
+    /// stored key is equal. The walk compares the stored hash of each entry
+    /// of the slot first, so a slot with more than one key pays the equality
+    /// of a key only when a stored hash is equal.
     ///
     /// # Examples
     ///
@@ -220,16 +249,13 @@ impl KeyIndex {
     /// assert_eq!(index.get(&Term::Integer(2)), None);
     /// ```
     fn get(&self, key: &Term) -> Option<usize> {
-        let slot = self.slot(key);
-        self.slots[slot]
-            .iter()
-            .copied()
-            .find(|index| self.keys[*index] == *key)
+        let hash = internal_hash(key);
+        self.find(hash, key)
     }
 
     /// Return the key at `position` of the first slot that holds `count` or
-    /// more keys, so a lookup of it compares a key that is not equal first.
-    /// The caller makes sure that such a slot exists.
+    /// more keys, so a lookup of it walks one entry with a different stored
+    /// hash first. The caller makes sure that such a slot exists.
     ///
     /// # Examples
     ///
@@ -434,10 +460,10 @@ fn prints_the_cost_of_every_derivation() {
 
     // The counterfactual of the ETS lookup: a hashed index of the 1000 keys.
     // One lookup pays the ERTS internal hash of the key, the slot probe, and
-    // the exact equality of each stored key of the slot, as `has_live_key`
-    // and `has_key` check the stored hash and then the stored key
-    // (`erl_db_hash.c:766-790`). The hash is inside the lookup, so no row
-    // adds it again.
+    // then the stored hash of each entry of the slot before the stored key,
+    // as `has_live_key` and `has_key` check the stored hash value and then
+    // the stored key with `EQ` (`erl_db_hash.c:766-790`). The hash is inside
+    // the lookup, so no row adds it again.
     let keys_1000: Vec<Term> = (0..1000).map(Term::Integer).collect();
     let index_1000 = KeyIndex::of(keys_1000, 1024);
     let hit_key = Term::Integer(999);
