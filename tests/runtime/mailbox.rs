@@ -1,4 +1,5 @@
-use super::{MARKER_SLOTS, Mailbox, Step};
+use super::{Entry, MARKER_SLOTS, Mailbox, Step};
+use crate::runtime::process::LinkId;
 use crate::runtime::signal::Signal;
 use crate::term::test_atom;
 use crate::term::{ProcessId, Reference, Term};
@@ -343,6 +344,51 @@ fn reuses_marker_slots_and_drops_passed_markers() {
 }
 
 #[test]
+fn takes_the_terms_of_the_messages_the_signal_reasons_and_the_markers() {
+    // The scheduler moves the terms of the mailbox of an exiting process to
+    // its release work list in batches (`Mailbox::take_terms_bounded`, row 11
+    // of docs/term-performance-design-codex-v2.md).
+    let mut mailbox = Mailbox::default();
+    let message = int(1);
+    let reason = int(2);
+    mailbox.push(message.clone());
+    mailbox.push_signal(Signal::Exit {
+        from: LinkId::Process(ProcessId(1)),
+        reason: reason.clone(),
+        linked: false,
+        normal_kills: false,
+        alias: None,
+    });
+    let marker = mailbox.reserve_marker();
+    assert_eq!(marker, int(-(1i64 << 59)));
+    let mut pending = Vec::new();
+    // One entry of the budget takes the marker, which the mailbox holds last.
+    assert_eq!(mailbox.take_terms_bounded(&mut pending, 1), 1);
+    assert!(!mailbox.is_empty());
+    // The next call takes the node of the marker, the signal, and the
+    // message.
+    assert_eq!(mailbox.take_terms_bounded(&mut pending, 256), 3);
+    assert!(mailbox.is_empty());
+    assert_eq!(pending, vec![marker, reason, message]);
+    // A call of an empty mailbox takes nothing.
+    assert_eq!(mailbox.take_terms_bounded(&mut pending, 256), 0);
+}
+
+#[test]
+fn takes_no_term_of_a_signal_node_that_the_handling_emptied() {
+    // The handling of a signal leaves its node with `Entry::Signal(None)`.
+    // That node holds no term, so the reader of an exiting process takes no
+    // term from it and counts the entry.
+    let mut mailbox = Mailbox::default();
+    mailbox.push_signal(Signal::Flush);
+    mailbox.nodes[0].entry = Entry::Signal(None);
+    let mut pending = Vec::new();
+    assert_eq!(mailbox.take_terms_bounded(&mut pending, 256), 1);
+    assert!(mailbox.is_empty());
+    assert!(pending.is_empty());
+}
+
+#[test]
 fn reports_the_bytes_of_the_mailbox_and_walks_its_terms() {
     let mut mailbox = Mailbox::default();
     assert_eq!(mailbox.allocated_bytes(), 0);
@@ -354,4 +400,20 @@ fn reports_the_bytes_of_the_mailbox_and_walks_its_terms() {
     let mut live = crate::term::LiveBytes::new();
     mailbox.account_terms(&mut live);
     assert!(live.bytes() > 0);
+}
+
+#[test]
+fn accounts_the_arena_of_a_mailbox_for_a_release() {
+    // The walk of a release reads the arena of the mailbox, because the
+    // bounded drain removes nodes from it and leaves the queue links
+    // pointing at them. A message, a signal, and a bound marker each give a
+    // term in the arena.
+    let mut mailbox = Mailbox::default();
+    mailbox.push(Term::tuple(vec![Term::Integer(1)]));
+    mailbox.push_signal(link(5));
+    mailbox.reserve_marker();
+    mailbox.fetch();
+    let mut live = crate::term::LiveBytes::new();
+    mailbox.account_release_terms(&mut live);
+    assert!(live.bytes() > 0, "the walk counts the arena of the mailbox");
 }

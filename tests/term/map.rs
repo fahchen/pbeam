@@ -1,7 +1,7 @@
 use std::{hint::black_box, rc::Rc, sync::Arc, time::Instant};
 
 use super::{
-    Child, Direction, HAMT_MAX_LEVEL, Hamt, Insert, Map, Node, Repr, encode_path, map_hash,
+    Child, Direction, Drain, HAMT_MAX_LEVEL, Hamt, Insert, Map, Node, Repr, encode_path, map_hash,
 };
 use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom};
 
@@ -1197,6 +1197,118 @@ fn prints_the_cost_of_a_map_put() {
 }
 
 #[test]
+fn drains_the_pairs_of_a_map_in_batches() {
+    // A flatmap: each pair of the drain costs one unit, and the drain moves
+    // one pair for each unit of its budget.
+    let mut map = integers([2, 1]);
+    let mut drain = Drain::take(&mut map).expect("the only holder takes the form");
+    let mut pending = Vec::new();
+    assert_eq!(drain.step(&mut pending, 1), 1);
+    assert!(!drain.is_empty());
+    assert_eq!(drain.step(&mut pending, 1), 1);
+    assert!(drain.is_empty());
+    assert_eq!(pending.len(), 4);
+    // A hashmap: the walk descends its nodes, so it takes more units than the
+    // count of its pairs, and it moves every pair.
+    let mut map = integers(1..=40);
+    let mut drain = Drain::take(&mut map).unwrap();
+    let mut pending = Vec::new();
+    let mut moved = 0;
+    for _ in 0..1000 {
+        if drain.is_empty() {
+            break;
+        }
+        moved += drain.step(&mut pending, 1);
+    }
+    assert!(drain.is_empty());
+    assert!(moved > 40, "the walk descends nodes: {moved} units");
+    assert_eq!(pending.len(), 80);
+    // A second holder keeps the form, so the drain of the first takes nothing.
+    let mut map = integers(1..=40);
+    let mut copy = map.clone();
+    assert!(Drain::take(&mut map).is_none());
+    assert!(Drain::take(&mut copy).is_some());
+}
+
+#[test]
+fn drains_the_pairs_of_a_collision_child_in_batches() {
+    // The HAMT of `keeps_keys_with_equal_hashes_in_a_collision_child`, which
+    // holds a collision child at the last level.
+    let key = |element: i64| Term::list_from(vec![Term::Integer(element)]);
+    let root = Node {
+        bitmap: 1 << 5,
+        children: vec![Node::split(
+            1,
+            (0x5, key(3), Term::Integer(0)),
+            (0x5, key(2), Term::Integer(2)),
+        )],
+    };
+    let mut hamt = Hamt { root, size: 2 };
+    hamt.insert(0x5, key(1), Term::Integer(1));
+    hamt.insert(0x5, key(3), Term::Integer(3));
+    hamt.insert(0x15, key(4), Term::Integer(4));
+    let mut map = Map {
+        repr: Some(Repr::Hash(hamt).into()),
+    };
+    let mut drain = Drain::take(&mut map).expect("the only holder takes the form");
+    assert!(
+        drain.allocated_bytes() > 0,
+        "the drain holds the nodes of the collision"
+    );
+    let mut live = crate::term::LiveBytes::new();
+    drain.account(&mut live);
+    assert!(
+        live.bytes() > 0,
+        "the live-byte walk counts the collision pairs of the drain"
+    );
+    let mut pending = Vec::new();
+    let mut units = 0;
+    for _ in 0..1000 {
+        if drain.is_empty() {
+            break;
+        }
+        let moved = drain.step(&mut pending, 1);
+        assert!(moved <= 1, "one step of one unit moved {moved} units");
+        units += moved;
+        // A step that reaches the collision child moves its pairs into the
+        // collision list of the drain, and the walk must count them there.
+        let mut live = crate::term::LiveBytes::new();
+        drain.account(&mut live);
+        assert!(
+            live.bytes() > 0,
+            "the walk counts the drain at each step of the collision walk"
+        );
+    }
+    assert!(drain.is_empty());
+    assert_eq!(
+        pending.len(),
+        8,
+        "the drain moves the pairs of the collision"
+    );
+    // The four pairs of the collision cost one unit each, and the walk steps
+    // down a node for each level of the trie.
+    assert!(units > 4, "the walk descends nodes: {units} units");
+}
+
+#[test]
+fn prints_the_state_of_a_drain() {
+    // The drain prints the count of the nodes and of the collision pairs that
+    // are left.
+    let mut map = integers(1..=40);
+    let drain = Drain::take(&mut map).expect("the only holder takes the form");
+    let text = format!("{drain:?}");
+    assert!(text.starts_with("Drain"), "{text}");
+    let mut map = integers(1..=40);
+    let mut drain = Drain::take(&mut map).unwrap();
+    let mut pending = Vec::new();
+    while !drain.is_empty() {
+        drain.step(&mut pending, 256);
+    }
+    let text = format!("{drain:?}");
+    assert!(text.contains("nodes: 0"), "{text}");
+}
+
+#[test]
 fn reports_the_bytes_of_the_form_and_the_nodes() {
     let flat = integers([1, 2]);
     assert!(flat.allocated_bytes() > 0);
@@ -1224,4 +1336,28 @@ fn counts_a_collision_child_in_the_walk() {
     let mut live = crate::term::LiveBytes::new();
     live.term(&Term::Map(map));
     assert!(live.bytes() > 0);
+}
+
+#[test]
+fn counts_the_terms_of_the_values_of_a_drain() {
+    // The walk of a drain queues the keys and the values of its leaves, and
+    // it flushes that queue before a caller reads the number. A value that
+    // holds a long list therefore gives the bytes of that list.
+    let width = 1024;
+    let mut direct = crate::term::LiveBytes::new();
+    direct.term(&Term::list_from((0..width as i64).map(Term::Integer)));
+    let expected = direct.bytes();
+    assert!(expected > 0, "a list of cells holds live bytes");
+    let mut map = Map::from_pairs(vec![(
+        Term::Integer(0),
+        Term::list_from((0..width as i64).map(Term::Integer)),
+    )])
+    .unwrap();
+    let drain = Drain::take(&mut map).expect("the only holder takes the form");
+    let mut live = crate::term::LiveBytes::new();
+    drain.account(&mut live);
+    assert!(
+        live.bytes() >= expected,
+        "the walk counts the list that the value of the map holds"
+    );
 }

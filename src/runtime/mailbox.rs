@@ -927,6 +927,91 @@ impl Mailbox {
         messages
     }
 
+    /// Move the terms of at most `budget` entries of the mailbox to
+    /// `pending`, and return the number of entries that it removed. An entry
+    /// is the message of a node, the terms of a signal, or the identifier of
+    /// a receive marker. Only a mailbox of a process that no guest code can
+    /// read again gives up its terms (see `Scheduler::release_process`).
+    ///
+    /// The mailbox loses the nodes that it gives, so a caller reads the count
+    /// to know its progress and reads [`Mailbox::is_empty`] to know when no
+    /// entry is left.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut mailbox = Mailbox::default();
+    /// mailbox.push(Term::Integer(1));
+    /// let mut pending = Vec::new();
+    /// assert_eq!(mailbox.take_terms_bounded(&mut pending, 256), 1);
+    /// assert_eq!(pending, vec![Term::Integer(1)]);
+    /// assert!(mailbox.is_empty());
+    /// ```
+    pub(super) fn take_terms_bounded(&mut self, pending: &mut Vec<Term>, budget: usize) -> usize {
+        let mut taken = 0;
+        while taken < budget {
+            if let Some(marker) = self.markers.pop_back() {
+                pending.extend(marker.id);
+                taken += 1;
+                continue;
+            }
+            let Some(node) = self.nodes.pop() else {
+                break;
+            };
+            taken += 1;
+            match node.entry {
+                Entry::Message(term) => pending.push(term),
+                Entry::Marker => {}
+                Entry::Signal(signal) => {
+                    if let Some(mut signal) = signal {
+                        signal.take_terms(pending);
+                    }
+                }
+            }
+        }
+        taken
+    }
+
+    /// Return true when no entry of the mailbox is left.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Mailbox::default().is_empty());
+    /// ```
+    pub(super) fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.markers.is_empty()
+    }
+
+    /// Account the terms that the arena of the mailbox holds, in no order,
+    /// for the live-byte walk of a release. The bounded drain removes nodes
+    /// from the arena and leaves the queue links that point at them, so a
+    /// walk of the queue cannot run after a partial drain. A node that the
+    /// queue already removed holds no term, and the drain took the terms of
+    /// the nodes that it removed, so this walk counts each term once.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// mailbox.account_release_terms(&mut live);
+    /// assert!(live.bytes() > 0);
+    /// ```
+    pub(super) fn account_release_terms(&self, live: &mut LiveBytes) {
+        for node in &self.nodes {
+            match &node.entry {
+                Entry::Message(term) => live.term(term),
+                Entry::Signal(Some(signal)) => signal.visit_terms(&mut |term| live.term(term)),
+                Entry::Marker | Entry::Signal(None) => {}
+            }
+        }
+        for marker in &self.markers {
+            if let Some(id) = &marker.id {
+                live.term(id);
+            }
+        }
+    }
+
     /// Return the bytes of the allocations of the mailbox: its node arena,
     /// its free slots, and its marker slots. The number excludes the header
     /// of each `Vec` and of the `VecDeque`, as the accounting of task

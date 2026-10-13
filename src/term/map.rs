@@ -27,7 +27,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use super::{Term, hash::internal_hash};
+use super::{LiveBytes, Term, hash::internal_hash};
 use crate::error::{BeamError, error};
 
 mod build;
@@ -215,6 +215,209 @@ pub(super) enum Child {
     /// collision child, as an ERTS collision node is at level 16
     /// (`erl_map.h:205-210`).
     Collision(Vec<(Term, Term)>),
+}
+
+/// The pairs of a map that a bounded release has not moved yet. The drain
+/// owns the form of the map, so each pair and each key stays alive until its
+/// step moves it. A release that runs in bounded batches drives one step at a
+/// time ([`Drain::step`]); the drop of a map drains its whole form in one call
+/// ([`Map::drain_into`]).
+///
+/// The walk of this type takes the children of a node from the end, and it is
+/// a second walk of a map beside `Map::drain_into`. The drop path keeps its
+/// own walk, because `tests/integration/drop_allocations.rs` gates the
+/// allocation count of that path with the numbers of step 7 of
+/// `docs/interpreter-dispatch-plan.md`.
+pub(crate) struct Drain {
+    /// The children of each node whose pairs are not moved, deepest first. A
+    /// HAMT node holds at most 16 children, so the stack is short.
+    nodes: Vec<Vec<Child>>,
+    /// The pairs of a collision child that are not moved yet.
+    collision: Vec<(Term, Term)>,
+}
+
+/// Print the count of the nodes and of the collision pairs that are left,
+/// which is the state of a drain that a caller reads in a diagnostic.
+impl std::fmt::Debug for Drain {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Drain")
+            .field("nodes", &self.nodes.len())
+            .field("collision", &self.collision.len())
+            .finish()
+    }
+}
+
+impl Drain {
+    /// Take the form of `map` for a bounded drain, and return `None` when the
+    /// map holds no form or another map holds the form. A caller that gets
+    /// `None` leaves the form with its other holder and moves no pair.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut copy = map.clone();
+    /// assert!(Drain::take(&mut map).is_none());
+    /// assert!(Drain::take(&mut copy).is_some());
+    /// ```
+    pub(crate) fn take(map: &mut Map) -> Option<Drain> {
+        let repr = map.repr.take()?;
+        let repr = Arc::into_inner(repr)?;
+        let children = match repr {
+            Repr::Flat(pairs) => pairs
+                .into_iter()
+                .map(|(key, value)| Child::Leaf(key, value))
+                .collect(),
+            Repr::Hash(hamt) => hamt.root.children,
+        };
+        Some(Drain {
+            nodes: vec![children],
+            collision: Vec::new(),
+        })
+    }
+
+    /// Move at most `budget` units of the drain to `pending`, and return the
+    /// number of units that it moved. One unit is one pair of a collision
+    /// child, one leaf, or one step down a node; a leaf and a pair push two
+    /// terms, and a step down a node pushes none. Thus one call moves at most
+    /// `budget` units and at most `2 * budget` terms, and a call that moves 0
+    /// units left no pair to move.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut drain = Drain::take(&mut map).unwrap();
+    /// let mut pending = Vec::new();
+    /// assert_eq!(drain.step(&mut pending, 256), 1);
+    /// assert!(drain.is_empty());
+    /// assert_eq!(pending, [Term::Integer(1), Term::Integer(2)]);
+    /// ```
+    pub(crate) fn step(&mut self, pending: &mut Vec<Term>, budget: usize) -> usize {
+        let mut moved = 0;
+        while moved < budget {
+            if let Some((key, value)) = self.collision.pop() {
+                pending.push(key);
+                pending.push(value);
+                // One pair is one unit, as one leaf is.
+                moved += 1;
+                continue;
+            }
+            let Some(children) = self.nodes.last_mut() else {
+                break;
+            };
+            let Some(child) = children.pop() else {
+                self.nodes.pop();
+                continue;
+            };
+            moved += 1;
+            match child {
+                Child::Leaf(key, value) => pending.extend([key, value]),
+                Child::Node(node) => {
+                    if let Some(node) = Arc::into_inner(node) {
+                        self.nodes.push(node.children);
+                    }
+                }
+                Child::Collision(pairs) => self.collision = pairs,
+            }
+        }
+        while self
+            .nodes
+            .last()
+            .is_some_and(|children| children.is_empty())
+        {
+            self.nodes.pop();
+        }
+        moved
+    }
+
+    /// Return true when the drain holds no pair.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let drain = Drain::take(&mut map).unwrap();
+    /// assert!(!drain.is_empty());
+    /// ```
+    pub(crate) fn is_empty(&self) -> bool {
+        self.collision.is_empty() && self.nodes.iter().all(|children| children.is_empty())
+    }
+
+    /// Account the nodes, the collision pairs, and the terms that this drain
+    /// holds, so that the live-byte walk of a run counts the part of a form
+    /// that the release work list took. The walk visits each shared node
+    /// once, as it does for a form that a term still owns.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// drain.account(&mut live);
+    /// assert!(live.bytes() > 0);
+    /// ```
+    pub(crate) fn account(&self, live: &mut LiveBytes) {
+        live.add(self.collision.capacity() * std::mem::size_of::<(Term, Term)>());
+        for (key, value) in &self.collision {
+            live.term(key);
+            live.term(value);
+        }
+        for children in &self.nodes {
+            live.add(children.capacity() * std::mem::size_of::<Child>());
+            live.children_of(children);
+        }
+        // `children_of` queues the keys and the values of the leaves. A drain
+        // that is the last item of the release work list has no later term
+        // call to flush that queue, so the walk flushes it here.
+        live.flush();
+    }
+
+    /// Return the bytes of the allocations that the drain holds: the stack of
+    /// the node children, the collision pairs that are not moved, and the
+    /// children of each node that the walk has not taken. The keys, the
+    /// values, and the terms of the pairs are slots of these vectors.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let drain = Drain::take(&mut map).unwrap();
+    /// assert!(drain.allocated_bytes() > 0);
+    /// ```
+    #[cfg(test)]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.nodes.capacity() * std::mem::size_of::<Vec<Child>>()
+            + self.collision.capacity() * std::mem::size_of::<(Term, Term)>()
+            + self
+                .nodes
+                .iter()
+                .map(|children| children_bytes(children, children.capacity()))
+                .sum::<usize>()
+    }
+}
+
+/// Return the bytes of the child vector of one node and of the nodes below it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(children_bytes(&[]), 0);
+/// ```
+#[cfg(test)]
+fn children_bytes(children: &[Child], capacity: usize) -> usize {
+    capacity * std::mem::size_of::<Child>()
+        + children
+            .iter()
+            .map(|child| match child {
+                Child::Leaf(..) => 0,
+                Child::Node(node) => {
+                    std::mem::size_of::<Node>()
+                        + children_bytes(&node.children, node.children.capacity())
+                }
+                Child::Collision(pairs) => pairs.capacity() * std::mem::size_of::<(Term, Term)>(),
+            })
+            .sum::<usize>()
 }
 
 impl Map {
