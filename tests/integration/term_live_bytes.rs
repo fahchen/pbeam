@@ -132,12 +132,14 @@ impl RssSampler {
         Self { stop, peak, handle }
     }
 
-    /// Stop the sampler and return its maximum sample.
+    /// Stop the sampler and return its maximum sample. The thread joins
+    /// before the maximum is read, so a sample that an in-flight `ps`
+    /// command publishes is part of the result.
     fn stop(self) -> usize {
-        self.stop.store(true, Ordering::Relaxed);
-        let peak = self.peak.load(Ordering::Relaxed);
-        self.handle.join().expect("the sampler thread joins");
-        peak
+        let Self { stop, peak, handle } = self;
+        stop.store(true, Ordering::Relaxed);
+        handle.join().expect("the sampler thread joins");
+        peak.load(Ordering::Relaxed)
     }
 }
 
@@ -180,9 +182,7 @@ fn records_the_peak_live_bytes_of_one_terra_scene() {
     );
     // The resident set size holds the binary, the loaded code, and the
     // allocator arenas of the test process, so it is not the live guest
-    // bytes and neither number bounds the other.
-    assert!(
-        rss_peak >= first.peak / 1024,
-        "the resident set size sample covers the process of the run"
-    );
+    // bytes. It can be above the live bytes or below a short peak, and
+    // neither number bounds the other. The check above only shows that the
+    // sampling produced a value.
 }

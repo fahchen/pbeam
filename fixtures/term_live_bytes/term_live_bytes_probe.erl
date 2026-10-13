@@ -23,6 +23,9 @@ scene() ->
     put(counter, length(Screen)),
     put(styles, Styles),
     self() ! {screen, Screen},
+    %% Yield with the screen, the dictionary entries, and the mailbox message
+    %% live, so a sample of the run includes those containers.
+    ok = pump(3),
     Held.
 
 %% The flat style map of the scene.
@@ -54,11 +57,10 @@ hold(Screen, Render) ->
     Count = total(Screen, 0, Render),
     Safe = Screen,
     More = seq(1, 3),
-    ok = pump(3),
     {Safe, More, Count}.
 
-%% Yield three times with the screen live, so the harness samples the live
-%% bytes at more than one scheduling step.
+%% Yield three times, so the harness samples the live bytes at more than one
+%% scheduling step while the caller holds the scene.
 pump(0) ->
     ok;
 pump(N) ->
