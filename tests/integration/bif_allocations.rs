@@ -98,20 +98,24 @@ fn counted() -> usize {
 fn allocations(program: &BeamProgram, function: &str, length: usize) -> usize {
     let counter = Term::Integer(length as i64);
     let tuple = || Term::tuple(vec![Term::Integer(1), Term::Integer(2), Term::Integer(3)]);
-    let arguments: &[Term] = match function {
-        "floor_loop" => &[counter],
-        "plus_loop" => &[counter, Term::Integer(0)],
-        "tuple_size_loop" | "element_loop" => &[counter, Term::Integer(0), tuple()],
-        "hd_loop" => &[
+    let terms: Vec<Term> = match function {
+        "floor_loop" => vec![counter],
+        "plus_loop" => vec![counter, Term::Integer(0)],
+        "tuple_size_loop" | "element_loop" => vec![counter, Term::Integer(0), tuple()],
+        "hd_loop" => vec![
             counter,
             Term::Integer(0),
             Term::list_from([Term::Integer(1)]),
         ],
         other => panic!("unknown probe function {other}"),
     };
+    let arguments = terms
+        .into_iter()
+        .map(|term| program.host_term(term))
+        .collect::<Vec<_>>();
     let start = counted();
     let result = program
-        .execute("dispatch_probe", function, arguments)
+        .execute("dispatch_probe", function, &arguments)
         .unwrap();
     let difference = counted() - start;
     black_box(&result);

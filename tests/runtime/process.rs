@@ -22,7 +22,7 @@ thread_local! {
             },
             Instruction::Label(1),
         ],
-    ));
+    ).expect("the fixture module loads"));
 }
 
 /// Return the module of the frames of the tests.

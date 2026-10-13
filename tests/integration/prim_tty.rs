@@ -189,7 +189,7 @@ fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
         Term::nil(),
     ]);
     assert_eq!(
-        program.execute("prim_tty_probe", "main", &[]).unwrap(),
+        program.execute("prim_tty_probe", "main", &[]).unwrap().term,
         Term::list_from(vec![badarg.clone(), badarg.clone(), badarg.clone(), badarg])
     );
 }

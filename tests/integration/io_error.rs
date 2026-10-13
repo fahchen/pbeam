@@ -17,7 +17,7 @@ fn surfaces_a_writer_process_exit_as_an_io_protocol_error() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
 
     assert_eq!(
-        program.execute("io_error_probe", "main", &[]).unwrap(),
+        program.execute("io_error_probe", "main", &[]).unwrap().term,
         Term::tuple(vec![
             Term::tuple(vec![atom("error"), atom("write_failed"),]),
             atom("noise_ok"),

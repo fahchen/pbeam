@@ -1,6 +1,6 @@
 -module(ets_probe).
--export([new/0, owner_exit/0, insert/0, lookup/0, access/0, main/0, env/0,
-         unsupported/1, own/2]).
+-export([new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
+         access/0, main/0, env/0, unsupported/1, own/2]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -106,6 +106,40 @@ access() ->
      ets:lookup_element(ets_probe_owned, k, 2, d),
      [stop(Owner) || {_, Owner} <- Tables],
      catch_error(fun() -> ets:lookup_element(tid(Public), k, 2, d) end)].
+
+%% A loop of lookups in a set table of 1000 objects (#543). The table holds
+%% the object {I, I * 2} for each I from 1 to 1000, and the loop reads each
+%% key again, so the result is the sum of the values that the lookups read.
+%% The compiled loop keeps the lookup work, as the disassembly of this
+%% function shows.
+lookup_loop() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{I, I * 2} || I <- seq(1000)]),
+    lookup_loop(T, 0, 2000).
+
+lookup_loop(_T, Sum, 0) ->
+    Sum;
+lookup_loop(T, Sum, N) ->
+    [{_, Value}] = ets:lookup(T, (N rem 1000) + 1),
+    lookup_loop(T, Sum + Value, N - 1).
+
+%% The fill of lookup_loop/0 alone, so the program evidence shows the cost of
+%% an insert as well as the cost of a lookup. The result is the object of the
+%% last key, which shows that the table holds all 1000 objects.
+insert_loop() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{I, I * 2} || I <- seq(1000)]),
+    ets:lookup(T, 1000).
+
+%% The integers 1 to `High` in descending order. PBeam has no
+%% `lists:seq/2`, and a local loop keeps the table fill in the fixture.
+seq(High) ->
+    seq(1, High, []).
+
+seq(Low, High, Acc) when Low > High ->
+    Acc;
+seq(Low, High, Acc) ->
+    seq(Low + 1, High, [Low | Acc]).
 
 %% PBeam has no application_controller, so main/0 makes ac_tab with the
 %% options of application_controller.erl:544-545 in an owner process.

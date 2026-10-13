@@ -8,7 +8,9 @@ use crate::{
 
 const WORD_SIZE: usize = 4;
 mod instruction;
-pub(crate) use instruction::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind};
+pub(crate) use instruction::{
+    BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind, TestOperand,
+};
 
 const CHUNK_ALIGNMENT: usize = WORD_SIZE;
 const CHUNK_HEADER_SIZE: usize = WORD_SIZE * 2;
@@ -391,7 +393,7 @@ fn decode(
             lambda.label()
         )));
     }
-    Ok(BeamModule::new(name, exports, instructions))
+    BeamModule::new(name, exports, instructions)
 }
 
 /// Read the atoms of an `AtU8` chunk and put each one, in chunk order, into

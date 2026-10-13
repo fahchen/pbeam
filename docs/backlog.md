@@ -71,6 +71,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Option:** a `Binary` payload of 8 bytes that keeps the offset and the size with the bytes behind one pointer. `docs/copy-on-write-terms.md` permits no smaller offset or size type, because it adds a binary size limit that ERTS does not have.
 - **Trigger:** a measured memory or cache cost of the term width, or an owner decision to reach the design target.
 - **Source:** owner decision on #503; epic checkpoint measurement at `a6b838c`.
+- **Scheduled:** this entry is the older statement of the same target as row 6 of `docs/term-performance-design-codex-v2.md` ("Immediate atoms and compact term"), which is the active task #553. The proposal asks for at most 16 bytes for `size_of::<Term>()` on the verified host, while this entry records the 24-byte design target of `docs/copy-on-write-terms.md`. The pull request that closes #553 removes this entry.
 
 ### Drop a shared map without a fresh empty handle
 
@@ -79,6 +80,27 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Option:** hold the `Arc` in an `Option` field, as `Term::Tuple`, `Term::Cons`, and `Term::Fun` do: the drop takes the `Arc` out of the `Option` and calls `Arc::into_inner`, and each other reader finds the map. `Map` then needs no replacement handle.
 - **Trigger:** a measured path where the drop of a shared map costs time, or a change of the map representation.
 - **Source:** epic checkpoint measurement on #450; recorded on #503.
+
+### Build the large tuple tree for a retained-version consumer
+
+- **Reason:** no consumer in this repository updates a tuple of more than 32 slots while an old version stays reachable.
+- **Evidence:** the only tuple write path of this runtime is `update_record` (`src/runtime/interpreter.rs:1363`), which copies the whole array and discards the hint of the instruction (`src/beam/code/instruction.rs:731-743`). The only live compiled consumer is the pinned `gen_statem.beam` with `{update_record,{atom,inplace},6,...}` in `loop_t0q/5` and `{atom,copy},7` in `enter/8`. `fixtures/user_drv/user_drv_state_check.erl:16` updates a tuple of 19 slots through `call_ext erlang:setelement/3`, that BIF is unsupported (`src/runtime/interpreter/bif/table.rs:299`), and the test runs on ERTS only (`tests/integration/user_drv.rs:270`). A retained old version appears only in a hand-built 4-tuple at `tests/runtime/interpreter.rs:1362`.
+- **Trigger:** a measured consumer that updates a tuple of more than 32 slots and keeps the old version reachable.
+- **Source:** the consumer audit of the term proposal, and issue #556.
+
+### Build bounded map collision storage for a collision-write consumer
+
+- **Reason:** the collisions of a map in this repository reach a count of 2, no measured consumer writes a colliding map while it retains the old root, and every retained-root map write of the measured paths is collision-free.
+- **Evidence:** `fixtures/logger_start/logger_start_probe.erl:224-226` and `tests/term/map.rs:666` read collision pairs; the largest count is 2 (`tests/term/map.rs:629-631`, `:667-672`). Collision writes do exist in unit tests: `tests/term/map.rs:670-675` inserts two colliding keys, replaces one of them, and changes the other through `get_mut`, and `:842-846` writes a collision pair. None of them is measured, none is in `scripts/term_costs.sh`, and none holds a retained old root while it writes. Every retained-root write of the measured paths is collision-free (`fixtures/map/map_share_probe.erl:7-19`, `tests/term/map.rs:404-432`, `:455-479`, `:858-874`).
+- **Trigger:** a measured write path with a retained root and a collision count above 16.
+- **Source:** the consumer audit of the term proposal, and issue #557.
+
+### Combine the measured instruction pairs
+
+- **Reason:** row 10 of the term proposal combines the measured instruction pairs, and that form was measured and rejected in the dispatch work. The row has no consumer until a combined form measures a gain.
+- **Evidence:** task #517 of the dispatch epic built the combined pairs for `test is_eq_exact` with `gc_bif '-'`. The gate measures the local `call_only` floor loop at 200000 iterations: the combined form measures 165.7 ns for each iteration against 163.2 ns of the two separate instructions, and the position shape measures 165.4 ns against 163.5 ns. The added rows of one instruction are 9.1 ns to 12.1 ns slower. The task closed with no landed change, and issue #517 and the closed draft PR #538 hold the measurement. The plan of record is `docs/interpreter-dispatch-plan.md`.
+- **Trigger:** a combined form that measures a gain of at least 10 percent on the local floor loop against the two separate instructions, with the session control of its own revision.
+- **Source:** task #517 and the step 9 measurement of `docs/interpreter-dispatch-measurements.md`.
 
 ## Runtime
 
@@ -253,12 +275,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - `maps:remove/2` (#129) rebuilds the map, which is O(n). ERTS changes one HAMT path.
 - **Trigger:** a hot path removes keys from large maps.
 
-### Find the key of an ETS object without a search of all objects
+### Compare a shared map root before walking a map
 
-- `Table::insert` and `Table::object` in `src/runtime/ets.rs` compare the key with each object of the table, so an insert of a list of N objects takes O(N^2) time. ERTS finds the bucket of the key from its hash (`erl_db_hash.c`).
-- **Evidence:** the `ets:insert/2` cases of `fixtures/preempt/input_probe.erl` (in `costs/1`, `longs/1`, and `vanish/1`, with up to 40000 objects) use about 15 s of the 26 s of the `input_reductions` test without coverage on an Apple M1 Max host, and that test takes about 72 s on CI (#355). The table fills of `exit_owned_probe` have the same cost.
-- **Trigger:** an owner decision to make the CI test time shorter again, or a consumer with large ETS tables.
-- **Source:** PR for #355.
+- **Reason:** the map arm of `Term::eq` (`src/term.rs:586-593`) zips the pairs of two maps onto a work stack and compares the lengths, with no check of a shared root, and no measurement harness covers a comparison of two maps with the same root. The unit test `tests/term.rs:395` compares a map with its own clone and does share the root, but it is a correctness test and not a measured consumer.
+- **Evidence:** the map comparisons that run in a loop are the per-cell loop of Terra `Renderer.diff/2` over 4-key cell maps, which each frame builds afresh, and the microbenchmark `term_eq_map_1000_equal` (`tests/term/data_structure_costs.rs:461`), which builds two maps of 1000 keys independently. Every other comparison site is a one-shot path or a correctness test, and no fixture and no measurement harness compares a map against a clone, a received copy, or a value read back from a table. The pinned ERTS skips an identical root (`erts/emulator/beam/utils.c:1133`) and identical HAMT children (`:1495`), so the check follows the reference, but on these consumers the roots differ and the check saves nothing.
+- **Trigger:** a measured consumer that compares two references to one map value: a map read back from ETS or a persistent term, a map sent and compared against a retained copy, or a `lists:member/2` over a list that holds the same map twice.
+- **Source:** the consumer audit of the term proposal on #552, and issue #555.
 
 ### Share map nodes in the results of the map BIFs
 

@@ -49,7 +49,8 @@ fn converts_atoms_to_binaries_as_pinned_erts() {
     assert_eq!(
         program
             .execute("atom_to_binary_probe", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         expected
     );
 

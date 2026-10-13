@@ -1,6 +1,6 @@
 use std::process::{Command, Stdio};
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{BeamProgram, HostTerm, Term};
 
 const BINARY_FIND_PROBE: &[u8] =
     include_bytes!("../../fixtures/binary_find/binary_find_probe.beam");
@@ -81,15 +81,16 @@ fn text(term: &Term) -> String {
 #[test]
 fn matches_binaries_as_pinned_erts_with_one_scheduler() {
     let program = BeamProgram::load(&[BINARY_FIND_PROBE]).unwrap();
-    let run = |function, arguments: &[Term]| {
+    let run = |function, arguments: &[HostTerm]| {
         text(
             &program
                 .execute("binary_find_probe", function, arguments)
-                .unwrap(),
+                .unwrap()
+                .term,
         )
     };
     assert_eq!(run("results", &[]), RESULTS);
-    assert_eq!(run("costs", &[Term::nil()]), COSTS);
+    assert_eq!(run("costs", &[program.host_term(Term::nil())]), COSTS);
 
     let reference = Command::new("erl")
         .args([

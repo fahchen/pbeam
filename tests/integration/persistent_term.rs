@@ -33,7 +33,8 @@ fn keeps_persistent_terms_for_all_processes_as_pinned_erts() {
     assert_eq!(
         program
             .execute("persistent_term_probe", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![
             atom("default"),
             atom("ok"),
@@ -112,7 +113,8 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
     assert_eq!(
         program
             .execute("persistent_term_probe", "table", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![
             Term::nil(),
             Term::list_from(vec![

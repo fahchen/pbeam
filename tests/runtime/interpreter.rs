@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     BeamModule, Map, Term,
-    beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind},
+    beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind, TestOperand},
     runtime::{
         capability::{AllowAll, Capability, Policy},
         ets::{Access, Table},
@@ -25,7 +25,13 @@ fn allow_all() -> Vec<Capability> {
 /// `error:badarg`. PBeam gives the stack trace `[]`.
 const BADARG_EXIT: &str = "root process exited with {badarg,[]}";
 
-fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
+/// Return the instructions of `main/function_arity` of the fixture module,
+/// with `body` and `extra` after the two entry labels.
+fn fixture_instructions(
+    function_arity: u32,
+    body: Vec<Instruction>,
+    extra: Vec<Instruction>,
+) -> Vec<Instruction> {
     let mut instructions = vec![
         Instruction::FunctionInfo {
             module: "fixture".into(),
@@ -36,17 +42,31 @@ fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
         Instruction::Label(2),
     ];
     instructions.extend(body);
+    instructions.extend(extra);
+    instructions
+}
+
+/// Return a program of the fixture module with `instructions` and
+/// `exports`. The loader resolves each branch label and each call label of
+/// the stream when it builds the module.
+fn program_of(instructions: Vec<Instruction>, exports: HashMap<(String, u32), u32>) -> BeamProgram {
     BeamProgram {
         modules: HashMap::from([(
             "fixture".into(),
-            Rc::new(BeamModule::new(
-                "fixture".into(),
-                HashMap::from([(("main".into(), 0), 2)]),
-                instructions,
-            )),
+            Rc::new(
+                BeamModule::new("fixture".into(), exports, instructions)
+                    .expect("the fixture module loads"),
+            ),
         )]),
-        atoms: AtomTable::new(),
+        atoms: Arc::new(AtomTable::new()),
     }
+}
+
+fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
+    program_of(
+        fixture_instructions(function_arity, body, Vec::new()),
+        HashMap::from([(("main".into(), 0), 2)]),
+    )
 }
 
 fn erlang_call(name: &str, arity: u32, tail: bool) -> Instruction {
@@ -66,9 +86,7 @@ fn atom(name: &str) -> Operand {
 
 /// Run `main/0` with a `child/1` function that calls `erlang:exit/1`.
 fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
-    let mut program = make_program(body, 0);
-    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-    module.instructions.extend([
+    let extra = vec![
         Instruction::FunctionInfo {
             module: "fixture".into(),
             name: "child".into(),
@@ -76,11 +94,11 @@ fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
         },
         Instruction::Label(11),
         erlang_call("exit", 1, true),
-    ]);
-    module.reindex();
-    let child = module.tables.name_id("child").unwrap();
-    module.exports.insert((child, 1), 11);
-    program.execute("fixture", "main", &[])
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("child".into(), 1), 11)]);
+    program_of(fixture_instructions(0, body, extra), exports)
+        .execute("fixture", "main", &[])
+        .map(|host| host.term)
 }
 
 fn spawn_link_child(arguments: Term) -> Vec<Instruction> {
@@ -139,9 +157,9 @@ fn tests_a_fun_with_a_register_arity_as_erl_is_function() {
         .execute("fixture", "main", &[])
         .unwrap()
     };
-    assert_eq!(run(Term::Integer(1)), test_atom("pass"));
+    assert_eq!(run(Term::Integer(1)).term, test_atom("pass"));
     for arity in [Term::Integer(0), Term::Integer(-1), test_atom("a")] {
-        assert_eq!(run(arity), test_atom("fail"));
+        assert_eq!(run(arity).term, test_atom("fail"));
     }
 }
 
@@ -194,7 +212,7 @@ fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
             .unwrap(),
         1,
     )];
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.code = CodeTable::new(program.modules.clone());
     let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
     scheduler
@@ -418,6 +436,171 @@ fn handles_tuple_tests_timeouts_and_unbound_receive_markers() {
     );
 }
 
+/// The classified operand form of `test is_eq_exact` compares the same values
+/// as the generic form and takes the same fail branch. It reads one register
+/// and one immediate, two registers, or a Y register.
+#[test]
+fn runs_the_classified_operand_form_of_is_eq_exact() {
+    let run = |body: Vec<Instruction>| {
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap()
+    };
+    let test = |left: TestOperand, right: TestOperand| Instruction::TestExactEqualOperands {
+        fail_label: 3,
+        left,
+        right,
+    };
+    // x0 is 1 and the immediate is 1: equal, so the test does not jump.
+    assert_eq!(
+        run(vec![
+            Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
+            test(TestOperand::X(0), TestOperand::Value(Term::Integer(1))),
+            Instruction::Move(atom("equal"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(atom("different"), Operand::X(0)),
+            Instruction::Return,
+        ])
+        .term,
+        test_atom("equal")
+    );
+    // x0 is 1 and the immediate is 2: not equal, so the test jumps.
+    assert_eq!(
+        run(vec![
+            Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
+            test(TestOperand::X(0), TestOperand::Value(Term::Integer(2))),
+            Instruction::Move(atom("equal"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(atom("different"), Operand::X(0)),
+            Instruction::Return,
+        ])
+        .term,
+        test_atom("different")
+    );
+    // Two registers that hold the same boxed literal are equal.
+    assert_eq!(
+        run(vec![
+            Instruction::Move(
+                Operand::Value(Term::tuple(vec![Term::Integer(1)])),
+                Operand::X(0),
+            ),
+            Instruction::Move(Operand::X(0), Operand::X(1)),
+            test(TestOperand::X(0), TestOperand::X(1)),
+            Instruction::Move(atom("equal"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(atom("different"), Operand::X(0)),
+            Instruction::Return,
+        ])
+        .term,
+        test_atom("equal")
+    );
+    // A Y register and an immediate.
+    assert_eq!(
+        run(vec![
+            Instruction::Allocate { stack_size: 1 },
+            Instruction::Move(Operand::Value(Term::Integer(7)), Operand::Y(0)),
+            test(TestOperand::Y(0), TestOperand::Value(Term::Integer(7))),
+            Instruction::Move(atom("equal"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(atom("different"), Operand::X(0)),
+            Instruction::Return,
+        ])
+        .term,
+        test_atom("equal")
+    );
+    // The immediate comes first, and a register that holds nil equals nil.
+    assert_eq!(
+        run(vec![
+            Instruction::Move(Operand::Value(Term::nil()), Operand::X(0)),
+            test(TestOperand::Value(Term::nil()), TestOperand::X(0)),
+            Instruction::Move(atom("equal"), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(atom("different"), Operand::X(0)),
+            Instruction::Return,
+        ])
+        .term,
+        test_atom("equal")
+    );
+}
+
+/// The classified operand form keeps the register and match-context error
+/// text of the generic form.
+#[test]
+fn keeps_the_classified_test_operand_errors() {
+    let error = |body: Vec<Instruction>| {
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string()
+    };
+    let test = |left: TestOperand, right: TestOperand| Instruction::TestExactEqualOperands {
+        fail_label: 2,
+        left,
+        right,
+    };
+    assert_eq!(
+        error(vec![test(
+            TestOperand::X(0),
+            TestOperand::Value(Term::Integer(0))
+        )]),
+        "register x0 is unset"
+    );
+    assert_eq!(
+        error(vec![
+            Instruction::Allocate { stack_size: 1 },
+            test(TestOperand::Y(0), TestOperand::Value(Term::Integer(0))),
+        ]),
+        "stack register y0 is unset"
+    );
+    assert_eq!(
+        error(vec![test(
+            TestOperand::Y(0),
+            TestOperand::Value(Term::Integer(0))
+        )]),
+        "stack register y0 is unset"
+    );
+    assert_eq!(
+        error(vec![
+            Instruction::Allocate { stack_size: 1 },
+            Instruction::Catch {
+                register: 0,
+                label: 2,
+            },
+            test(TestOperand::Y(0), TestOperand::Value(Term::Integer(0))),
+        ]),
+        "stack register y0 holds a catch tag"
+    );
+    let binary = Instruction::Move(Operand::Value(Term::binary(b"a".to_vec())), Operand::X(0));
+    let start = Instruction::BinaryMatchStart {
+        fail_label: 2,
+        source: Operand::X(0),
+        destination: Operand::X(0),
+    };
+    assert_eq!(
+        error(vec![
+            binary.clone(),
+            start.clone(),
+            test(TestOperand::X(0), TestOperand::Value(Term::Integer(0))),
+        ]),
+        "invariant error: the match context in X(0) reached an instruction that is not a binary match"
+    );
+    assert_eq!(
+        error(vec![
+            Instruction::Allocate { stack_size: 1 },
+            binary,
+            start,
+            Instruction::Move(Operand::X(0), Operand::Y(0)),
+            test(TestOperand::Y(0), TestOperand::Value(Term::Integer(0))),
+        ]),
+        "invariant error: the match context in Y(0) reached an instruction that is not a binary match"
+    );
+}
+
 #[test]
 fn rejects_invalid_tuple_access_receives_and_bifs() {
     let error = |body| run_with_child(body).unwrap_err().to_string();
@@ -458,9 +641,7 @@ fn calls_a_module_export_without_a_bif_search() {
         },
         Instruction::Return,
     ];
-    let mut program = make_program(body, 0);
-    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-    module.instructions.extend([
+    let extra = vec![
         Instruction::FunctionInfo {
             module: "fixture".into(),
             name: "guest".into(),
@@ -469,13 +650,12 @@ fn calls_a_module_export_without_a_bif_search() {
         Instruction::Label(11),
         Instruction::Move(Operand::Value(Term::Integer(7)), Operand::X(0)),
         Instruction::Return,
-    ]);
-    module.reindex();
-    let guest = module.tables.name_id("guest").unwrap();
-    module.exports.insert((guest, 1), 11);
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("guest".into(), 1), 11)]);
+    let program = program_of(fixture_instructions(0, body, extra), exports);
     let before = resolve_calls();
     assert_eq!(
-        program.execute("fixture", "main", &[]).unwrap(),
+        program.execute("fixture", "main", &[]).unwrap().term,
         Term::Integer(7)
     );
     assert_eq!(
@@ -511,6 +691,74 @@ fn rejects_missing_modules_exports_and_function_arities() {
     );
 }
 
+/// A local call whose arity differs from the arity of the function that the
+/// loader resolved gives the error `call arity does not match M:F`.
+#[test]
+fn rejects_a_local_call_with_the_wrong_arity() {
+    let body = vec![Instruction::Call {
+        arity: 0,
+        function: 11,
+        target: 11,
+    }];
+    let extra = vec![
+        Instruction::FunctionInfo {
+            module: "fixture".into(),
+            name: "one".into(),
+            arity: 1,
+        },
+        Instruction::Label(11),
+        Instruction::Return,
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("one".into(), 1), 11)]);
+    assert_eq!(
+        program_of(fixture_instructions(0, body, extra), exports)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+        "call arity does not match fixture:one"
+    );
+}
+
+/// A local call starts at the exact position of the label that it names, and
+/// not at the entry of the function. The pinned ERTS `i_call` saves the
+/// continuation pointer and dispatches to the code position of the operand
+/// label, and `i_call_only` dispatches to it with no other work
+/// (`erts/emulator/beam/emu/instrs.tab:148-180`), so a call to a label inside
+/// a function does not run the instructions before that label. `two/0` writes
+/// 1 to `x0` between its entry and label 12; the call to label 12 must keep
+/// the 2 that `main/0` wrote, and a frame at the entry would return 1.
+#[test]
+fn starts_a_local_call_at_the_exact_position_of_its_label() {
+    let body = vec![
+        Instruction::Move(Operand::Value(Term::Integer(2)), Operand::X(0)),
+        Instruction::Call {
+            arity: 0,
+            function: 12,
+            target: 12,
+        },
+        Instruction::Return,
+    ];
+    let extra = vec![
+        Instruction::FunctionInfo {
+            module: "fixture".into(),
+            name: "two".into(),
+            arity: 0,
+        },
+        Instruction::Label(11),
+        Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
+        Instruction::Label(12),
+        Instruction::Return,
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("two".into(), 0), 11)]);
+    assert_eq!(
+        program_of(fixture_instructions(0, body, extra), exports)
+            .execute("fixture", "main", &[])
+            .unwrap()
+            .term,
+        Term::Integer(2)
+    );
+}
+
 /// A module name and a function name that hold a non-ASCII character print
 /// as the pinned ERTS prints the atoms of the same names. The pinned ERTS
 /// prints `~p` of the atom `list_to_atom([109, 228, 105, 110])` as the UTF-8
@@ -529,10 +777,11 @@ fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
         Instruction::End,
     ];
     let exports = HashMap::from([(("mäin".into(), 0), 2)]);
-    let module = BeamModule::new("mäin_module".into(), exports, instructions);
+    let module = BeamModule::new("mäin_module".into(), exports, instructions)
+        .expect("the fixture module loads");
     let mut program = BeamProgram {
         modules: HashMap::from([("mäin_module".into(), Rc::new(module))]),
-        atoms: AtomTable::new(),
+        atoms: Arc::new(AtomTable::new()),
     };
     assert_eq!(
         program
@@ -549,7 +798,11 @@ fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
         .insert((module.tables.name_id("mäin").unwrap(), 1), 2);
     assert_eq!(
         program
-            .execute("mäin_module", "mäin", &[Term::Integer(1)])
+            .execute(
+                "mäin_module",
+                "mäin",
+                &[program.host_term(Term::Integer(1))]
+            )
             .unwrap_err()
             .to_string(),
         "call arity does not match mäin_module:mäin"
@@ -567,7 +820,7 @@ fn executes_a_loaded_function_and_returns_x0() {
     );
 
     assert_eq!(
-        program.execute("fixture", "main", &[]).unwrap(),
+        program.execute("fixture", "main", &[]).unwrap().term,
         Term::Integer(7)
     );
 }
@@ -597,14 +850,20 @@ fn recognizes_runtime_process_identifiers_as_pids() {
 
     assert_eq!(
         program
-            .execute("fixture", "main", &[Term::Pid(ProcessId(1))])
-            .unwrap(),
+            .execute(
+                "fixture",
+                "main",
+                &[program.host_term(Term::Pid(ProcessId(1)))]
+            )
+            .unwrap()
+            .term,
         test_atom("pid")
     );
     assert_eq!(
         program
-            .execute("fixture", "main", &[Term::Integer(1)])
-            .unwrap(),
+            .execute("fixture", "main", &[program.host_term(Term::Integer(1))])
+            .unwrap()
+            .term,
         test_atom("other")
     );
 }
@@ -637,7 +896,8 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             Instruction::Move(atom("missing"), Operand::X(0)),
             Instruction::Return,
         ])
-        .unwrap(),
+        .unwrap()
+        .term,
         Term::Integer(3)
     );
     // A missing key jumps to the fail label.
@@ -653,16 +913,21 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             Instruction::Move(atom("missing"), Operand::X(0)),
             Instruction::Return,
         ])
-        .unwrap(),
+        .unwrap()
+        .term,
         test_atom("missing")
     );
     let error = |body| run(body).unwrap_err().to_string();
     assert!(
-        error(vec![Instruction::GetMapElements {
-            fail_label: 3,
-            map: atom("a"),
-            pairs: vec![],
-        }])
+        error(vec![
+            Instruction::GetMapElements {
+                fail_label: 3,
+                map: atom("a"),
+                pairs: vec![],
+            },
+            Instruction::Label(3),
+            Instruction::Return,
+        ])
         .contains("get_map_elements source is not a map")
     );
     assert!(
@@ -716,11 +981,13 @@ fn tests_map_keys_with_has_map_fields_and_writes_no_register() {
     };
     // All keys present: x0 keeps its value.
     assert_eq!(
-        run(vec![atom("input"), Operand::X(1)], map.clone()).unwrap(),
+        run(vec![atom("input"), Operand::X(1)], map.clone())
+            .unwrap()
+            .term,
         test_atom("none")
     );
     assert_eq!(
-        run(vec![atom("input"), atom("output")], map).unwrap(),
+        run(vec![atom("input"), atom("output")], map).unwrap().term,
         test_atom("missing")
     );
     assert!(
@@ -759,7 +1026,7 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         run(0, atom("foo")).unwrap_err().to_string(),
         "root process exited with {{badmap,foo},[]}"
     );
-    assert_eq!(run(3, atom("foo")).unwrap(), test_atom("failed"));
+    assert_eq!(run(3, atom("foo")).unwrap().term, test_atom("failed"));
     // A key of a type that a PBeam map cannot hold is a missing key.
     let tuple_key = |fail_label| {
         make_program(
@@ -783,7 +1050,7 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         tuple_key(0).unwrap_err().to_string(),
         "root process exited with {{badkey,{}},[]}"
     );
-    assert_eq!(tuple_key(3).unwrap(), test_atom("failed"));
+    assert_eq!(tuple_key(3).unwrap().term, test_atom("failed"));
     // Two different references have no PBeam order.
     let references = make_program(
         vec![Instruction::PutMapExact {
@@ -923,12 +1190,16 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
     // ERTS 29.1.1: maps:keys(#{a => V, 2 => V, 1 => V}) is [1,2,a].
     let a = test_atom("a");
     assert_eq!(
-        keys(map(vec![a.clone(), Term::Integer(2), Term::Integer(1)])).unwrap(),
+        keys(map(vec![a.clone(), Term::Integer(2), Term::Integer(1)]))
+            .unwrap()
+            .term,
         Term::list_from(vec![Term::Integer(1), Term::Integer(2), a])
     );
     // ERTS 29.1.1: maps:keys(#{true => V, abs_path => V, 1 => V}) is [1,true,abs_path].
     assert_eq!(
-        keys(map(vec![atom("abs_path"), atom("true"), Term::Integer(1)])).unwrap(),
+        keys(map(vec![atom("abs_path"), atom("true"), Term::Integer(1)]))
+            .unwrap()
+            .term,
         Term::list_from(vec![Term::Integer(1), atom("true"), atom("abs_path")])
     );
     assert_eq!(
@@ -959,25 +1230,28 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
     );
     program.modules.insert(
         "maps".into(),
-        Rc::new(BeamModule::new(
-            "maps".into(),
-            HashMap::from([(("keys".into(), 1), 1)]),
-            vec![
-                Instruction::FunctionInfo {
-                    module: "maps".into(),
-                    name: "keys".into(),
-                    arity: 1,
-                },
-                Instruction::Label(1),
-                Instruction::Move(atom("module_code"), Operand::X(0)),
-                Instruction::Return,
-            ],
-        )),
+        Rc::new(
+            BeamModule::new(
+                "maps".into(),
+                HashMap::from([(("keys".into(), 1), 1)]),
+                vec![
+                    Instruction::FunctionInfo {
+                        module: "maps".into(),
+                        name: "keys".into(),
+                        arity: 1,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Move(atom("module_code"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            )
+            .expect("the fixture module loads"),
+        ),
     );
     // The BIF returns the keys of the empty map. The module code would
     // return `module_code`.
     assert_eq!(
-        program.execute("fixture", "main", &[]).unwrap(),
+        program.execute("fixture", "main", &[]).unwrap().term,
         Term::nil()
     );
 }
@@ -1003,20 +1277,23 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
     );
     program.modules.insert(
         "lists".into(),
-        Rc::new(BeamModule::new(
-            "lists".into(),
-            HashMap::from([(("keysearch".into(), 3), 1)]),
-            vec![
-                Instruction::FunctionInfo {
-                    module: "lists".into(),
-                    name: "keysearch".into(),
-                    arity: 3,
-                },
-                Instruction::Label(1),
-                Instruction::Move(atom("stub"), Operand::X(0)),
-                Instruction::Return,
-            ],
-        )),
+        Rc::new(
+            BeamModule::new(
+                "lists".into(),
+                HashMap::from([(("keysearch".into(), 3), 1)]),
+                vec![
+                    Instruction::FunctionInfo {
+                        module: "lists".into(),
+                        name: "keysearch".into(),
+                        arity: 3,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Move(atom("stub"), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            )
+            .expect("the fixture module loads"),
+        ),
     );
     // `lists:keysearch/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
     // BIF, so the BEAM stub body of the loaded `lists` module must not run.
@@ -1089,7 +1366,7 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
     };
     let chardata = || Term::list_from(vec![Term::binary(b"Hello".to_vec()), Term::Integer(10)]);
     assert_eq!(
-        convert(chardata(), "unicode").unwrap(),
+        convert(chardata(), "unicode").unwrap().term,
         Term::binary(b"Hello\n".to_vec())
     );
     // ERTS 29.1.1 raises badarg for a term that is not chardata.
@@ -1102,18 +1379,20 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
     // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], utf8)
     // is <<"Hello\n">>.
     assert_eq!(
-        convert(chardata(), "utf8").unwrap(),
+        convert(chardata(), "utf8").unwrap().term,
         Term::binary(b"Hello\n".to_vec())
     );
     // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], latin1)
     // is <<"Hello\n">>, and unicode:characters_to_binary([<<233>>], latin1)
     // is <<195,169>>.
     assert_eq!(
-        convert(chardata(), "latin1").unwrap(),
+        convert(chardata(), "latin1").unwrap().term,
         Term::binary(b"Hello\n".to_vec())
     );
     assert_eq!(
-        convert(Term::list_from(vec![Term::binary(vec![233])]), "latin1").unwrap(),
+        convert(Term::list_from(vec![Term::binary(vec![233])]), "latin1")
+            .unwrap()
+            .term,
         Term::binary(vec![195, 169])
     );
     assert_eq!(
@@ -1136,7 +1415,7 @@ fn builds_a_proper_and_an_improper_list() {
         0,
     );
     assert_eq!(
-        list.execute("fixture", "main", &[]).unwrap(),
+        list.execute("fixture", "main", &[]).unwrap().term,
         Term::list_from(vec![Term::Integer(10)])
     );
 
@@ -1153,7 +1432,7 @@ fn builds_a_proper_and_an_improper_list() {
         0,
     );
     assert_eq!(
-        improper.execute("fixture", "main", &[]).unwrap(),
+        improper.execute("fixture", "main", &[]).unwrap().term,
         Term::list_with_tail(vec![Term::Integer(10)], Term::Integer(0))
     );
 }
@@ -1190,11 +1469,11 @@ fn reads_and_tests_lists_as_pinned_erts() {
     };
     // ERTS: lst([a,b,c]) is {a,[b,c]}, and lst([a]) is {a,[]}.
     assert_eq!(
-        get_list(list(&["a", "b", "c"])).unwrap(),
+        get_list(list(&["a", "b", "c"])).unwrap().term,
         Term::tuple(vec![test_atom("a"), list(&["b", "c"])])
     );
     assert_eq!(
-        get_list(list(&["a"])).unwrap(),
+        get_list(list(&["a"])).unwrap().term,
         Term::tuple(vec![test_atom("a"), list(&[])])
     );
     // ERTS: hd1([x,y]) is x.
@@ -1210,7 +1489,7 @@ fn reads_and_tests_lists_as_pinned_erts() {
             ],
         )
     };
-    assert_eq!(get_head(list(&["x", "y"])).unwrap(), test_atom("x"));
+    assert_eq!(get_head(list(&["x", "y"])).unwrap().term, test_atom("x"));
     // ERTS: lst([a|x]) is {a,x}, lst([a,b|x]) is {a,[b|x]}, and
     // hd1([x|y]) is x.
     let improper = |names: &[&str], tail: &str| {
@@ -1220,14 +1499,17 @@ fn reads_and_tests_lists_as_pinned_erts() {
         )
     };
     assert_eq!(
-        get_list(improper(&["a"], "x")).unwrap(),
+        get_list(improper(&["a"], "x")).unwrap().term,
         Term::tuple(vec![test_atom("a"), test_atom("x")])
     );
     assert_eq!(
-        get_list(improper(&["a", "b"], "x")).unwrap(),
+        get_list(improper(&["a", "b"], "x")).unwrap().term,
         Term::tuple(vec![test_atom("a"), improper(&["b"], "x")])
     );
-    assert_eq!(get_head(improper(&["x"], "y")).unwrap(), test_atom("x"));
+    assert_eq!(
+        get_head(improper(&["x"], "y")).unwrap().term,
+        test_atom("x")
+    );
     // ERTS: nil([]) is nil, nil([a]) is nonempty, and nil(a) is other.
     let classify = |argument: Term| {
         run(
@@ -1255,11 +1537,11 @@ fn reads_and_tests_lists_as_pinned_erts() {
         )
         .unwrap()
     };
-    assert_eq!(classify(list(&[])), test_atom("nil"));
-    assert_eq!(classify(list(&["a"])), test_atom("nonempty"));
-    assert_eq!(classify(test_atom("a")), test_atom("other"));
+    assert_eq!(classify(list(&[])).term, test_atom("nil"));
+    assert_eq!(classify(list(&["a"])).term, test_atom("nonempty"));
+    assert_eq!(classify(test_atom("a")).term, test_atom("other"));
     // ERTS: nil([a|x]) is nonempty.
-    assert_eq!(classify(improper(&["a"], "x")), test_atom("nonempty"));
+    assert_eq!(classify(improper(&["a"], "x")).term, test_atom("nonempty"));
     // The BEAM validator makes sure that the source is a nonempty list.
     assert_eq!(
         get_list(list(&[])).unwrap_err().to_string(),
@@ -1309,7 +1591,9 @@ fn updates_record_positions_as_pinned_erts() {
         .execute("fixture", "main", &[])
     };
     assert_eq!(
-        run(Operand::X(0), vec![(3, Operand::X(1)), (4, Operand::X(2))]).unwrap(),
+        run(Operand::X(0), vec![(3, Operand::X(1)), (4, Operand::X(2))])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             test_atom("r"),
             Term::Integer(1),
@@ -1320,7 +1604,9 @@ fn updates_record_positions_as_pinned_erts() {
     // The destination x1 is also a value register. The update uses the
     // value of x1 before the write, as the ERTS `SCRATCH_X_REG` rewrite does.
     assert_eq!(
-        run(Operand::X(1), vec![(2, Operand::X(2)), (3, Operand::X(1))]).unwrap(),
+        run(Operand::X(1), vec![(2, Operand::X(2)), (3, Operand::X(1))])
+            .unwrap()
+            .term,
         Term::tuple(vec![
             test_atom("r"),
             Term::Integer(1),
@@ -1387,7 +1673,7 @@ fn keeps_the_source_record_of_update_record_as_pinned_erts() {
     .execute("fixture", "main", &[])
     .unwrap();
     assert_eq!(
-        result,
+        result.term,
         Term::tuple(vec![record(&[1, 2, 3]), record(&[1, 9, 3])])
     );
 }
@@ -1518,7 +1804,7 @@ fn raw_raise_writes_badarg_for_a_class_that_is_not_valid() {
         )
         .execute("fixture", "main", &[])
     };
-    assert_eq!(raw_raise("foo").unwrap(), Term::static_atom("badarg"));
+    assert_eq!(raw_raise("foo").unwrap().term, Term::static_atom("badarg"));
     // The raw stack trace `[]` keeps the class of `x0`.
     assert_eq!(
         raw_raise("exit").unwrap_err().to_string(),
@@ -1602,31 +1888,51 @@ fn rejects_call_stack_and_return_errors() {
             .is_err()
     );
     assert!(
-        make_program(vec![Instruction::Call { arity: 1, label: 2 }], 0)
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string()
-            .contains("argument x0 is unset")
+        make_program(
+            vec![Instruction::Call {
+                arity: 1,
+                function: 2,
+                target: 2
+            }],
+            0
+        )
+        .execute("fixture", "main", &[])
+        .unwrap_err()
+        .to_string()
+        .contains("argument x0 is unset")
     );
 }
 
-/// The loader tables answer a bad label, a bad entry, and a bad register
-/// index with the error text of the removed scans.
+/// The loader answers a bad label and a bad entry with the error text of the
+/// removed scans, and the run answers a bad register index with its text.
 #[test]
 fn keeps_the_error_text_of_a_bad_label_entry_and_register() {
+    let load = |body: Vec<Instruction>| {
+        BeamModule::new(
+            "fixture".into(),
+            HashMap::from([(("main".into(), 0), 2)]),
+            fixture_instructions(0, body, Vec::new()),
+        )
+        .unwrap_err()
+        .to_string()
+    };
+    assert_eq!(load(vec![Instruction::Jump(9)]), "missing BEAM label 9");
     assert_eq!(
-        make_program(vec![Instruction::Jump(9)], 0)
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string(),
-        "missing BEAM label 9"
-    );
-    assert_eq!(
-        make_program(vec![Instruction::Call { arity: 0, label: 9 }], 0)
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string(),
+        load(vec![Instruction::Call {
+            arity: 0,
+            function: 9,
+            target: 9
+        }]),
         "entry label 9 not found in fixture"
+    );
+    // A target of 0 is the "no fail label" operand of a BIF only. Any other
+    // instruction keeps the error text of the removed lookup.
+    assert_eq!(
+        make_program(vec![Instruction::Jump(0)], 0)
+            .execute("fixture", "main", &[])
+            .unwrap_err()
+            .to_string(),
+        "missing BEAM label 0"
     );
     assert_eq!(
         make_program(vec![Instruction::Move(Operand::X(1024), Operand::X(0))], 0)
@@ -1637,12 +1943,44 @@ fn keeps_the_error_text_of_a_bad_label_entry_and_register() {
     );
 }
 
+/// The loader answers a call to a label that no `func_info` of the module
+/// precedes with the error text of the removed lookup.
+#[test]
+fn keeps_the_error_text_of_a_call_with_no_function_info() {
+    let instructions = vec![
+        Instruction::FunctionInfo {
+            module: "fixture".into(),
+            name: "main".into(),
+            arity: 0,
+        },
+        Instruction::Label(1),
+        Instruction::FunctionInfo {
+            module: "other".into(),
+            name: "other".into(),
+            arity: 0,
+        },
+        Instruction::Label(7),
+        Instruction::Call {
+            arity: 0,
+            function: 7,
+            target: 7,
+        },
+    ];
+    assert_eq!(
+        BeamModule::new("fixture".into(), HashMap::new(), instructions)
+            .unwrap_err()
+            .to_string(),
+        "entry label 7 has no function info"
+    );
+}
+
 #[test]
 fn rejects_unresolved_exports_and_function_labels() {
-    let module = BeamModule::new("external".into(), HashMap::new(), vec![]);
+    let module = BeamModule::new("external".into(), HashMap::new(), vec![])
+        .expect("the fixture module loads");
     let program = BeamProgram {
         modules: HashMap::from([("external".into(), Rc::new(module))]),
-        atoms: AtomTable::new(),
+        atoms: Arc::new(AtomTable::new()),
     };
     assert!(
         CodeTable::new(program.modules.clone())
@@ -1669,7 +2007,8 @@ fn rejects_unresolved_exports_and_function_labels() {
             },
             Instruction::Label(2),
         ],
-    );
+    )
+    .expect("the fixture module loads");
     assert!(
         function_at_label(&module, 2)
             .unwrap_err()
@@ -1700,9 +2039,7 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         ];
         body.extend(rest);
         // `child/1` does not read its argument.
-        let mut program = make_program(body, 0);
-        let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-        module.instructions.extend([
+        let extra = vec![
             Instruction::FunctionInfo {
                 module: "fixture".into(),
                 name: "child".into(),
@@ -1711,11 +2048,9 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
             Instruction::Label(11),
             Instruction::Move(atom("ok"), Operand::X(0)),
             Instruction::Return,
-        ]);
-        module.reindex();
-        let child = module.tables.name_id("child").unwrap();
-        module.exports.insert((child, 1), 11);
-        program
+        ];
+        let exports = HashMap::from([(("main".into(), 0), 2), (("child".into(), 1), 11)]);
+        program_of(fixture_instructions(0, body, extra), exports)
             .execute("fixture", "main", &[])
             .unwrap_err()
             .to_string()
@@ -1839,7 +2174,8 @@ fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
         run(
             Instruction::Move(Operand::X(0), Operand::Y(0)),
             Operand::Y(0)
-        ),
+        )
+        .term,
         expected
     );
     assert_eq!(
@@ -1850,7 +2186,8 @@ fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
                 destination: Operand::X(1),
             },
             Operand::X(1)
-        ),
+        )
+        .term,
         expected
     );
     assert_eq!(
@@ -1860,7 +2197,8 @@ fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
                 destination: Operand::X(1),
             },
             Operand::X(1)
-        ),
+        )
+        .term,
         expected
     );
 }
@@ -1893,6 +2231,7 @@ fn run_binary_match(
     ]);
     make_program(body, 0)
         .execute("fixture", "main", &[])
+        .map(|host| host.term)
         .map_err(|error| error.to_string())
 }
 
@@ -1975,6 +2314,7 @@ fn gives_a_runtime_error_for_a_read_after_a_failed_equal_command() {
         body.extend(rest);
         make_program(body, 0)
             .execute("fixture", "main", &[])
+            .map(|host| host.term)
             .map_err(|error| error.to_string())
     };
     assert_eq!(
@@ -2163,11 +2503,11 @@ fn selects_tuple_arity_and_rejects_call_last_stack_size() {
         .unwrap()
     };
     assert_eq!(
-        select(Term::tuple(vec![Term::Integer(1)])),
+        select(Term::tuple(vec![Term::Integer(1)])).term,
         test_atom("one")
     );
-    assert_eq!(select(Term::tuple(vec![])), test_atom("other"));
-    assert_eq!(select(test_atom("a")), test_atom("other"));
+    assert_eq!(select(Term::tuple(vec![])).term, test_atom("other"));
+    assert_eq!(select(test_atom("a")).term, test_atom("other"));
 
     let error = |body| {
         make_program(body, 0)
@@ -2180,7 +2520,8 @@ fn selects_tuple_arity_and_rejects_call_last_stack_size() {
             Instruction::Allocate { stack_size: 1 },
             Instruction::CallLast {
                 arity: 0,
-                label: 2,
+                function: 2,
+                target: 2,
                 deallocate: 0,
             },
         ])
@@ -2211,10 +2552,17 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
         ],
         0,
     );
-    assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1150);
+    assert_eq!(
+        Arc::get_mut(&mut program.atoms)
+            .unwrap()
+            .put("pbeam_zeta")
+            .unwrap()
+            .index(),
+        1150
+    );
     for _ in 0..2 {
         assert!(matches!(
-            program.execute("fixture", "main", &[]).unwrap(),
+            program.execute("fixture", "main", &[]).unwrap().term,
             Term::Atom(ref alpha) if alpha.name() == "pbeam_alpha" && alpha.index() == 1151
         ));
     }
@@ -2239,12 +2587,13 @@ fn returns_the_iovec_of_a_binary_and_of_a_list() {
         .unwrap()
     };
     let hello = Term::binary(b"Hello".to_vec());
-    assert_eq!(run(hello.clone()), Term::list_from(vec![hello]));
+    assert_eq!(run(hello.clone()).term, Term::list_from(vec![hello]));
     assert_eq!(
         run(Term::list_from(vec![
             Term::Integer(1),
             Term::list_from(vec![Term::binary(vec![2])]),
-        ])),
+        ]))
+        .term,
         Term::list_from(vec![Term::binary(vec![1, 2])])
     );
 }
@@ -2271,7 +2620,7 @@ fn finds_a_live_catch_tag_after_other_slots_and_skips_a_cleared_tag() {
         Instruction::Return,
     ]);
     assert_eq!(
-        run(body).unwrap(),
+        run(body).unwrap().term,
         Term::tuple(vec![
             Term::static_atom("EXIT"),
             Term::tuple(vec![Term::static_atom("undef"), Term::nil()]),
@@ -2347,7 +2696,7 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
     // ERTS 29.1.1: catch element(1, {}) is {'EXIT', {badarg, Stack}}.
     // PBeam gives the stack trace [].
     assert_eq!(
-        element(1).unwrap(),
+        element(1).unwrap().term,
         Term::tuple(vec![
             test_atom("EXIT"),
             Term::tuple(vec![test_atom("badarg"), Term::nil()]),
@@ -2414,11 +2763,11 @@ fn returns_the_local_node_for_node_0_and_a_pid() {
     };
     // ERTS 29.1.1 without distribution: node() and node(self()) are nonode@nohost.
     assert_eq!(
-        node(BifId::ErlangNode0, Vec::new()).unwrap(),
+        node(BifId::ErlangNode0, Vec::new()).unwrap().term,
         Term::static_atom("nonode@nohost")
     );
     assert_eq!(
-        node(BifId::ErlangNode1, vec![Operand::X(1)]).unwrap(),
+        node(BifId::ErlangNode1, vec![Operand::X(1)]).unwrap().term,
         Term::static_atom("nonode@nohost")
     );
     assert_eq!(
@@ -2445,24 +2794,27 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
     );
     program.modules.insert(
         "erts_internal".into(),
-        Rc::new(BeamModule::new(
-            "erts_internal".into(),
-            HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
-            vec![
-                Instruction::FunctionInfo {
-                    module: "erts_internal".into(),
-                    name: "flush_monitor_messages".into(),
-                    arity: 3,
-                },
-                Instruction::Label(1),
-                Instruction::Label(2),
-                Instruction::Move(Operand::X(2), Operand::X(0)),
-                Instruction::Return,
-            ],
-        )),
+        Rc::new(
+            BeamModule::new(
+                "erts_internal".into(),
+                HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
+                vec![
+                    Instruction::FunctionInfo {
+                        module: "erts_internal".into(),
+                        name: "flush_monitor_messages".into(),
+                        arity: 3,
+                    },
+                    Instruction::Label(1),
+                    Instruction::Label(2),
+                    Instruction::Move(Operand::X(2), Operand::X(0)),
+                    Instruction::Return,
+                ],
+            )
+            .expect("the fixture module loads"),
+        ),
     );
     assert_eq!(
-        program.execute("fixture", "main", &[]).unwrap(),
+        program.execute("fixture", "main", &[]).unwrap().term,
         test_atom("true")
     );
 }
@@ -2494,13 +2846,13 @@ fn removes_an_active_monitor_without_a_trap() {
 /// `zero() -> zero.`, `id(A, B, C) -> {A, B, C}.`, and
 /// `last(M, F) -> M:F(bye).`, which compiles to `{apply_last,1,0}`.
 fn run_with_apply_targets(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
-    apply_targets_program(body).execute("fixture", "main", &[])
+    apply_targets_program(body)
+        .execute("fixture", "main", &[])
+        .map(|host| host.term)
 }
 
 /// Return the program of `run_with_apply_targets`.
 fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
-    let mut program = make_program(body, 0);
-    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
     let function = |name: &str, arity, label| {
         [
             Instruction::FunctionInfo {
@@ -2511,21 +2863,22 @@ fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
             Instruction::Label(label),
         ]
     };
-    module.instructions.extend(function("zero", 0, 11));
-    module.instructions.extend([
+    let mut extra = Vec::new();
+    extra.extend(function("zero", 0, 11));
+    extra.extend([
         Instruction::Move(atom("zero"), Operand::X(0)),
         Instruction::Return,
     ]);
-    module.instructions.extend(function("id", 3, 12));
-    module.instructions.extend([
+    extra.extend(function("id", 3, 12));
+    extra.extend([
         Instruction::PutTuple {
             elements: vec![Operand::X(0), Operand::X(1), Operand::X(2)],
             destination: Operand::X(0),
         },
         Instruction::Return,
     ]);
-    module.instructions.extend(function("last", 2, 13));
-    module.instructions.extend([
+    extra.extend(function("last", 2, 13));
+    extra.extend([
         Instruction::Allocate { stack_size: 0 },
         Instruction::Move(Operand::X(1), Operand::X(2)),
         Instruction::Move(Operand::X(0), Operand::X(1)),
@@ -2536,14 +2889,13 @@ fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
             deallocate: 0,
         },
     ]);
-    module.reindex();
-    let zero = module.tables.name_id("zero").unwrap();
-    let id = module.tables.name_id("id").unwrap();
-    let last = module.tables.name_id("last").unwrap();
-    module
-        .exports
-        .extend([((zero, 0), 11), ((id, 3), 12), ((last, 2), 13)]);
-    program
+    let exports = HashMap::from([
+        (("main".into(), 0), 2),
+        (("zero".into(), 0), 11),
+        (("id".into(), 3), 12),
+        (("last".into(), 2), 13),
+    ]);
+    program_of(fixture_instructions(0, body, extra), exports)
 }
 
 /// Return the body that moves the module and the function name of an
@@ -2614,7 +2966,8 @@ fn applies_module_functions_and_bifs_as_pinned_erts() {
             Instruction::Move(atom("exit"), Operand::X(1)),
             Instruction::Call {
                 arity: 2,
-                label: 13
+                function: 13,
+                target: 13
             },
             Instruction::Label(3),
             Instruction::CatchEnd { register: 0 },
@@ -2684,7 +3037,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
         "atom table does not hold fixture"
     );
     for name in ["fixture", "missing"] {
-        program.atoms.put(name).unwrap();
+        Arc::get_mut(&mut program.atoms).unwrap().put(name).unwrap();
     }
     assert_eq!(
         program
@@ -2758,7 +3111,9 @@ fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term,
         deallocate: 0,
     });
     body.push(Instruction::Return);
-    make_program(body, 0).execute("fixture", "main", &[])
+    make_program(body, 0)
+        .execute("fixture", "main", &[])
+        .map(|host| host.term)
 }
 
 fn get_bif(key: &str, destination: Operand) -> Instruction {
@@ -2802,7 +3157,8 @@ fn puts_and_gets_process_dictionary_values_as_pinned_erts() {
     assert_eq!(
         make_program(body, 0)
             .execute("fixture", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![
             undefined.clone(),
             Term::Integer(1),
@@ -2828,9 +3184,7 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
         erlang_call("spawn_opt", 4, false),
     ];
     body.extend(wait_forever());
-    let mut program = make_program(body, 0);
-    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
-    module.instructions.extend([
+    let extra = vec![
         Instruction::FunctionInfo {
             module: "fixture".into(),
             name: "fresh".into(),
@@ -2839,14 +3193,13 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
         Instruction::Label(11),
         get_bif("k", Operand::X(0)),
         erlang_call("exit", 1, true),
-    ]);
-    module.reindex();
-    let fresh = module.tables.name_id("fresh").unwrap();
-    module.exports.insert((fresh, 0), 11);
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("fresh".into(), 0), 11)]);
+    let program = program_of(fixture_instructions(0, body, extra), exports);
     // ERTS 29.1.1: after put(k, parent), a spawned process gets
     // undefined for get(k).
     assert!(matches!(
-        program.execute("fixture", "main", &[]),
+        program.execute("fixture", "main", &[]).map(|host| host.term),
         Ok(Term::Tuple(ref elements))
             if elements.first() == Some(&test_atom("DOWN"))
                 && elements.last() == Some(&Term::static_atom("undefined"))
@@ -3017,7 +3370,8 @@ fn reads_tuple_elements_as_pinned_erts() {
     assert_eq!(
         make_program(body, 0)
             .execute("fixture", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         b
     );
     let element = |index: Term, tuple: Term| call_ext_with("erlang", "element", vec![index, tuple]);
@@ -3102,7 +3456,8 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
     assert_eq!(
         make_program(body, 0)
             .execute("fixture", "main", &[])
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::tuple(vec![stacktrace, Term::nil()])
     );
     let process_info =
@@ -3316,8 +3671,6 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
             Instruction::Move(atom("sender"), Operand::X(1)),
             erlang_call("spawn", 3, false),
         ];
-        let mut program = make_program([body, wait_forever()].concat(), 0);
-        let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
         let function = |name: &str, arity, label| {
             [
                 Instruction::FunctionInfo {
@@ -3328,50 +3681,54 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
                 Instruction::Label(label),
             ]
         };
-        module.instructions.extend(function("burner", 0, 21));
-        module
-            .instructions
-            .extend(std::iter::repeat_n(Instruction::TestYield, entries));
-        module.instructions.extend([
+        let mut extra = Vec::new();
+        extra.extend(function("burner", 0, 21));
+        extra.extend(std::iter::repeat_n(Instruction::TestYield, entries));
+        extra.extend([
             Instruction::Call {
                 arity: 0,
-                label: 23,
+                function: 23,
+                target: 23,
             },
             Instruction::Return,
         ]);
-        module.instructions.extend(function("inner", 0, 23));
-        module.instructions.extend([
+        extra.extend(function("inner", 0, 23));
+        extra.extend([
             Instruction::TestYield,
             Instruction::Move(atom("ok"), Operand::X(0)),
             Instruction::Return,
         ]);
-        module.instructions.extend(function("sender", 1, 25));
-        module.instructions.extend([
+        extra.extend(function("sender", 1, 25));
+        extra.extend([
             Instruction::Move(atom("tag"), Operand::X(1)),
             Instruction::Send,
             Instruction::Return,
         ]);
-        module.reindex();
-        let burner = module.tables.name_id("burner").unwrap();
-        let sender = module.tables.name_id("sender").unwrap();
-        module.exports.insert((burner, 0), 21);
-        module.exports.insert((sender, 1), 25);
+        let exports = HashMap::from([
+            (("main".into(), 0), 2),
+            (("burner".into(), 0), 21),
+            (("sender".into(), 1), 25),
+        ]);
+        let program = program_of(
+            fixture_instructions(0, [body, wait_forever()].concat(), extra),
+            exports,
+        );
         program.execute("fixture", "main", &[]).unwrap()
     };
     // 3998 entries, the entry of `inner`, and its return leave 0. The
     // last return makes the budget -1: `burner` switches out, `sender`
     // runs, and then `burner` exits.
-    assert_eq!(first_message(3998), test_atom("tag"));
+    assert_eq!(first_message(3998).term, test_atom("tag"));
     // With 3997 entries, the last return leaves 0, and `burner` exits at
     // once. The exit bumps 100 reductions and finds none left, so it
     // switches out before the monitor (`erl_process.c:14229`, `14315`).
-    assert_eq!(first_message(3997), test_atom("tag"));
+    assert_eq!(first_message(3997).term, test_atom("tag"));
     // The exit of a process with 150 reductions left uses 100 and 50, and
     // switches out before the monitor (`erl_process.c:14475`, `14543`).
-    assert_eq!(first_message(3847), test_atom("tag"));
+    assert_eq!(first_message(3847).term, test_atom("tag"));
     // With 151 reductions left, the exit sends the monitor signal at once.
     assert!(matches!(
-        first_message(3846),
+        first_message(3846).term,
         Term::Tuple(ref elements) if elements.first() == Some(&test_atom("DOWN"))
     ));
 }
@@ -3417,7 +3774,7 @@ fn shares_the_stored_term_of_an_ets_lookup() {
     // `db_copy_from_comp`, `:3729`). PBeam shares the term by owner
     // decision R3 of #450 (row "Message copy" of docs/erts-differences.md).
     let program = make_program(vec![], 0);
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
@@ -3453,7 +3810,7 @@ fn shares_the_stored_term_of_a_persistent_term() {
     // copy (`:380-388`). PBeam shares the term by owner decision R3 of #450
     // (row "Message copy" of docs/erts-differences.md).
     let program = make_program(vec![], 0);
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let key = Term::tuple(vec![Term::Integer(7)]);
@@ -3482,7 +3839,7 @@ fn rejects_a_bif_name_that_no_table_entry_holds() {
     // MFA error, which is the error that the run gave before the loader
     // resolved the identity of a BIF.
     let program = make_program(vec![], 0);
-    let mut scheduler = Scheduler::new(program.atoms.clone());
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     assert_eq!(
@@ -3523,14 +3880,13 @@ fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
         instructions[start]
     );
     let fail_label = match &instructions[start + 1] {
-        Instruction::TestExactEqual { fail_label, .. } => *fail_label,
+        Instruction::TestExactEqual { fail_label, .. }
+        | Instruction::TestExactEqualOperands { fail_label, .. } => *fail_label,
         other => panic!("the entry clause test of {function} is not `is_eq_exact`: {other:?}"),
     };
-    let clause = *module
-        .tables
-        .jump_targets
-        .get(&fail_label)
-        .unwrap_or_else(|| panic!("the loader records the jump target of label {fail_label}"));
+    // The loader replaces the fail label of the test with the index of the
+    // instruction after the label, so the operand is the clause position.
+    let clause = fail_label as usize;
     let end = (clause..instructions.len())
         .find(|index| {
             matches!(

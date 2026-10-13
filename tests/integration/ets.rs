@@ -28,6 +28,46 @@ fn reference(function: &str) -> Vec<u8> {
 }
 
 #[test]
+fn looks_up_a_key_in_a_loop_as_pinned_erts() {
+    // `ets_probe:lookup_loop/0` inserts the 1000 objects {I, I * 2} and then
+    // reads each key again in a loop of 2000 lookups. The result is the sum
+    // of the values that the lookups read, and the pinned ERTS gives the same
+    // result. The loop is the program-level evidence of the key index of
+    // #543, and the test prints the least of 9 timed runs of the program.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(timed(&program, "lookup_loop"), Term::Integer(2_002_000));
+    assert_eq!(reference("lookup_loop"), b"2002000\n");
+}
+
+#[test]
+fn inserts_objects_in_a_loop_as_pinned_erts() {
+    // `ets_probe:insert_loop/0` fills a set table with the 1000 objects
+    // {I, I * 2} and returns the object of the last key, so the program-level
+    // evidence shows the cost of an insert and not only the cost of a lookup.
+    // The pinned ERTS gives the same result.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        timed(&program, "insert_loop"),
+        Term::list_from([Term::tuple(vec![Term::Integer(1000), Term::Integer(2000)])])
+    );
+    assert_eq!(reference("insert_loop"), b"[{1000,2000}]\n");
+}
+
+/// Run `ets_probe:Function()` 9 times on PBeam, print the least of the timed
+/// runs, and return the result of the last run.
+fn timed(program: &BeamProgram, function: &str) -> Term {
+    let mut best = std::time::Duration::MAX;
+    let mut result = None;
+    for _ in 0..9 {
+        let start = std::time::Instant::now();
+        result = Some(program.execute("ets_probe", function, &[]).unwrap());
+        best = best.min(start.elapsed());
+    }
+    println!("COST ets_{function}_program {} ns", best.as_nanos());
+    result.unwrap().term
+}
+
+#[test]
 fn makes_tables_and_raises_badarg_as_pinned_erts() {
     // `ets_probe:new/0` makes an unnamed table, a named table, and a table
     // with each option that ERTS accepts (erl_db.c:2597-2710). A heir that
@@ -41,7 +81,7 @@ fn makes_tables_and_raises_badarg_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
-        program.execute("ets_probe", "new", &[]).unwrap(),
+        program.execute("ets_probe", "new", &[]).unwrap().term,
         Term::list_from(vec![
             atom("reference"),
             atom("ets_probe_named"),
@@ -71,7 +111,10 @@ fn deletes_the_tables_of_an_owner_before_its_down_message_as_pinned_erts() {
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("ets_probe", "owner_exit", &[]).unwrap(),
+        program
+            .execute("ets_probe", "owner_exit", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             Term::tuple(vec![atom("error"), atom("badarg")]),
             atom("stopped"),
@@ -99,7 +142,7 @@ fn inserts_objects_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
-        program.execute("ets_probe", "insert", &[]).unwrap(),
+        program.execute("ets_probe", "insert", &[]).unwrap().term,
         Term::list_from(vec![
             atom("true"),
             atom("true"),
@@ -131,7 +174,7 @@ fn looks_up_elements_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
-        program.execute("ets_probe", "lookup", &[]).unwrap(),
+        program.execute("ets_probe", "lookup", &[]).unwrap().term,
         Term::list_from(vec![
             atom("v"),
             atom("x"),
@@ -164,7 +207,7 @@ fn checks_table_access_as_pinned_erts() {
     let all = || Term::tuple(vec![atom("owner"), atom("true"), atom("true")]);
     let none = || Term::tuple(vec![badarg(), badarg(), badarg()]);
     assert_eq!(
-        program.execute("ets_probe", "access", &[]).unwrap(),
+        program.execute("ets_probe", "access", &[]).unwrap().term,
         Term::list_from(vec![
             Term::list_from(vec![
                 all(),
@@ -206,7 +249,7 @@ fn reads_the_application_environment_from_ac_tab_as_pinned_erts() {
     let program = BeamProgram::load(&[&application, &application_controller, ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("ets_probe", "main", &[]).unwrap(),
+        program.execute("ets_probe", "main", &[]).unwrap().term,
         Term::list_from(vec![atom("default"), atom("true"), atom("value")])
     );
     let output = Command::new("erl")
@@ -251,7 +294,7 @@ fn rejects_tables_that_pbeam_cannot_model() {
         let message = format!("unsupported ets:{detail}");
         let case = Term::Atom(program.atom(case).unwrap());
         let error = program
-            .execute("ets_probe", "unsupported", &[case])
+            .execute("ets_probe", "unsupported", &[program.host_term(case)])
             .unwrap_err();
         assert!(
             error.to_string().contains(&message),

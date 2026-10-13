@@ -20,6 +20,10 @@ const SHRINK_SLOTS: usize = FIRST_SEGMENT_SLOTS + 2 * SEGMENT_SLOTS;
 /// The most buckets that one grow or shrink call joins or splits
 /// (`loop_limit`, `erl_db_hash.c:3656`, `3752`).
 const RESIZE_STEPS: usize = 5;
+/// The marker of a free slot of the key index.
+const EMPTY: usize = usize::MAX;
+/// The number of slots of the first key index.
+const INITIAL_INDEX_SLOTS: usize = 8;
 
 /// The ETS tables of the node. ERTS identifies each table by a table
 /// reference that `make_btid` (`erl_db.c:2811`) gives it, also a named
@@ -52,11 +56,16 @@ pub(super) struct Table {
     /// 0, and the C assignment keeps only its low 32 bits, so the value can
     /// be 0 or negative.
     keypos: i32,
-    /// The elements of each object. ERTS keeps a `set` in a hash table and
-    /// finds a key with the `EQ` exact equality (`erl_db_hash.c:766-789`).
-    /// `Term` has no hash, so this store uses a linear search with the exact
-    /// equality of `Term`. Each object has a key: an element at `keypos`.
-    objects: Vec<Vec<Term>>,
+    /// The object of each allocated slot, or `None` when the slot is free. A
+    /// slot id never changes while the table is live, so the key index stores
+    /// it and a delete moves no other object. A traversal reads the live
+    /// slots in slot order and skips the free ones.
+    objects: Vec<Option<Vec<Term>>>,
+    /// The free slots, last in first out, so a later insert reuses them.
+    free: Vec<usize>,
+    /// The stored key hash of each key to its slot. Look up a key through
+    /// this index, not by a walk of the slots.
+    index: KeyIndex,
     /// The number of active buckets of the ERTS hash table (`nactive`). It
     /// gives the number of slots and the slot of each key, so the exit of
     /// the owner frees the same segments with the same objects as ERTS. A
@@ -274,6 +283,8 @@ impl Table {
             access,
             keypos,
             objects: Vec::new(),
+            free: Vec::new(),
+            index: KeyIndex::default(),
             buckets: FIRST_SEGMENT_SLOTS,
         }
     }
@@ -291,7 +302,7 @@ impl Table {
 
     /// Add the object with the elements `object`. An object with an exactly
     /// equal key replaces the old object, as `db_put_hash`
-    /// (`erl_db_hash.c:1387-1402`) does in a `set` table. A new key that
+    /// (`erl_db_hash.c:1384-1410`) does in a `set` table. A new key that
     /// makes the objects more than the buckets splits one bucket
     /// (`erl_db_hash.c:1349-1354`). The buckets are never fewer than the
     /// objects, so one split is enough. The caller makes sure that the key
@@ -306,14 +317,21 @@ impl Table {
     /// assert_eq!(table.object(&Term::static_atom("k")), Some(&[Term::static_atom("k"), Term::Integer(2)][..]));
     /// ```
     pub(super) fn insert(&mut self, object: Vec<Term>) {
-        let key = self.key(&object);
-        match self.objects.iter().position(|other| self.key(other) == key) {
-            Some(index) => self.objects[index] = object,
-            None => {
-                self.objects.push(object);
-                self.buckets = self.buckets.max(self.objects.len());
+        let (found, hash) = {
+            let key = self.key(&object);
+            let hash = stored_hash(key);
+            (self.position(hash, key), hash)
+        };
+        let slot = match found {
+            Some(slot) => {
+                self.objects[slot] = Some(object);
+                return;
             }
-        }
+            None => self.allocate(),
+        };
+        self.objects[slot] = Some(object);
+        self.index.insert(hash, slot);
+        self.buckets = self.buckets.max(self.object_count());
     }
 
     /// Return the elements of the object with a key that is exactly equal to
@@ -328,15 +346,82 @@ impl Table {
     /// assert_eq!(table.object(&Term::static_atom("k")), Some(&[Term::static_atom("k")][..]));
     /// ```
     pub(super) fn object(&self, key: &Term) -> Option<&[Term]> {
-        self.objects
-            .iter()
-            .find(|object| self.key(object) == key)
-            .map(Vec::as_slice)
+        let slot = self.position(stored_hash(key), key)?;
+        Some(self.object_of(slot).as_slice())
+    }
+
+    /// Return the slot of the object whose stored key hash is `hash` and whose
+    /// key is exactly equal to `key`, or `None` when the table has no such
+    /// object. The walk reads the index slot of the hash (`hash_to_ix`,
+    /// `erl_db_hash.c:207-218`), compares the stored hash value, and compares
+    /// the stored key when the two hashes are equal (`has_live_key`,
+    /// `erl_db_hash.c:766-776`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// table.insert(vec![Term::static_atom("k")]);
+    /// assert_eq!(table.position(stored_hash(&Term::static_atom("k")), &Term::static_atom("k")), Some(0));
+    /// ```
+    fn position(&self, hash: u64, key: &Term) -> Option<usize> {
+        self.index
+            .find(hash, |slot| self.key(self.object_of(slot)) == key)
+    }
+
+    /// Return the elements of the object in the slot `slot`. The caller makes
+    /// sure that the slot is live.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// table.insert(vec![Term::static_atom("k")]);
+    /// assert_eq!(table.object_of(0), &vec![Term::static_atom("k")]);
+    /// ```
+    fn object_of(&self, slot: usize) -> &Vec<Term> {
+        self.objects[slot]
+            .as_ref()
+            .expect("a live slot holds an object")
+    }
+
+    /// Return the number of live objects.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// table.insert(vec![Term::static_atom("k")]);
+    /// assert_eq!(table.object_count(), 1);
+    /// ```
+    fn object_count(&self) -> usize {
+        self.objects.len() - self.free.len()
+    }
+
+    /// Return a slot for a new object: a free slot when the table has one,
+    /// else a new slot at the end of the table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// assert_eq!(table.allocate(), 0);
+    /// assert_eq!(table.allocate(), 1);
+    /// ```
+    fn allocate(&mut self) -> usize {
+        match self.free.pop() {
+            Some(slot) => slot,
+            None => {
+                self.objects.push(None);
+                self.objects.len() - 1
+            }
+        }
     }
 
     /// Remove the object with a key that is exactly equal to `key`, as
     /// `db_erase_hash` (`erl_db_hash.c:1613-1664`) does in a `set` table. A
-    /// key that the table does not hold changes nothing. A removed object
+    /// key that the table does not hold changes nothing. The slot of the
+    /// object becomes free, and a later insert reuses it. A removed object
     /// joins the top bucket into its low bucket, up to 5 times, while the
     /// objects are fewer than the shrink limit (`try_shrink` and `shrink`,
     /// `erl_db_hash.c:757-762`, `3743-3818`).
@@ -351,33 +436,34 @@ impl Table {
     /// assert_eq!(table.object(&Term::static_atom("k")), None);
     /// ```
     pub(super) fn delete(&mut self, key: &Term) {
-        if let Some(index) = self
-            .objects
-            .iter()
-            .position(|object| self.key(object) == key)
-        {
-            self.objects.remove(index);
-            for _ in 0..RESIZE_STEPS {
-                if self.objects.len() >= self.shrink_limit() {
-                    break;
-                }
-                self.buckets -= 1;
+        let hash = stored_hash(key);
+        let Some(slot) = self.position(hash, key) else {
+            return;
+        };
+        self.objects[slot] = None;
+        self.free.push(slot);
+        self.index.remove(hash, slot);
+        for _ in 0..RESIZE_STEPS {
+            if self.object_count() >= self.shrink_limit() {
+                break;
             }
+            self.buckets -= 1;
         }
     }
 
-    /// Return the number of slots of the table: the first segment and each
-    /// later segment that has an active bucket. A split allocates a segment
-    /// when the buckets fill the slots (`erl_db_hash.c:3667-3672`), and a
-    /// join frees the top segment when it has no active bucket
-    /// (`erl_db_hash.c:3783-3785`).
+    /// Return the number of slots of the ERTS hash table: the first segment
+    /// and each later segment that has an active bucket. A split allocates a
+    /// segment when the buckets fill the slots (`erl_db_hash.c:3667-3672`),
+    /// and a join frees the top segment when it has no active bucket
+    /// (`erl_db_hash.c:3783-3785`). The key index has its own slots and does
+    /// not use this count.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1).slots(), 256);
+    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1).segment_slots(), 256);
     /// ```
-    fn slots(&self) -> usize {
+    fn segment_slots(&self) -> usize {
         FIRST_SEGMENT_SLOTS
             + (self.buckets - FIRST_SEGMENT_SLOTS).div_ceil(SEGMENT_SLOTS) * SEGMENT_SLOTS
     }
@@ -392,7 +478,7 @@ impl Table {
     /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1).shrink_limit(), 0);
     /// ```
     fn shrink_limit(&self) -> usize {
-        let slots = self.slots();
+        let slots = self.segment_slots();
         if slots >= SHRINK_SLOTS {
             (slots - SEGMENT_SLOTS) / 2
         } else {
@@ -417,10 +503,10 @@ impl Table {
     /// ```
     fn segment_reductions(&self) -> Vec<i32> {
         let mask = self.buckets.next_power_of_two() - 1;
-        let mut segments = vec![SEGMENT_REDUCTIONS; segment(self.slots() - 1) + 1];
-        for object in &self.objects {
+        let mut segments = vec![SEGMENT_REDUCTIONS; segment(self.segment_slots() - 1) + 1];
+        for object in self.objects.iter().flatten() {
             // `HashValue` is a `UWord`, so the key hash fits.
-            let mut slot = (key_hash(self.key(object)) >> 1) as usize & mask;
+            let mut slot = stored_hash(self.key(object)) as usize & mask;
             if slot >= self.buckets {
                 slot &= mask >> 1;
             }
@@ -441,6 +527,226 @@ impl Table {
         let index = usize::try_from(self.keypos).expect("a stored object has a key position") - 1;
         &object[index]
     }
+}
+
+#[cfg(test)]
+impl Table {
+    /// Return the bytes of the two vectors of the key index. The measurement
+    /// harness of [#539](https://github.com/fahchen/pbeam/issues/539) reports
+    /// it, so the space of the index is a measured number.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1).index_bytes(), 0);
+    /// ```
+    pub(super) fn index_bytes(&self) -> usize {
+        self.index.hashes.capacity() * std::mem::size_of::<u64>()
+            + self.index.slots.capacity() * std::mem::size_of::<usize>()
+    }
+
+    /// Return the live objects in slot order, for a test.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// table.insert(vec![Term::static_atom("k")]);
+    /// assert_eq!(table.live_objects(), vec![vec![Term::static_atom("k")]]);
+    /// ```
+    pub(super) fn live_objects(&self) -> Vec<Vec<Term>> {
+        self.objects.iter().flatten().cloned().collect()
+    }
+
+    /// Return the number of allocated slots, for a test.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// table.insert(vec![Term::static_atom("k")]);
+    /// assert_eq!(table.slot_count(), 1);
+    /// ```
+    pub(super) fn slot_count(&self) -> usize {
+        self.objects.len()
+    }
+}
+
+/// The key index of one `set` table: the stored hash of each key to the slot
+/// of its object in [`Table::objects`].
+///
+/// The index is an open-addressing table with linear probing. A lookup reads
+/// the slot that the ERTS size mask of the hash gives (`hash_to_ix`,
+/// `erl_db_hash.c:207-218`), then compares the stored hash value of the entry
+/// and the stored key only when the two hashes are equal (`has_live_key`,
+/// `erl_db_hash.c:766-776`). The index stores one 64-bit hash and one slot id
+/// for each object. A slot id is stable while the table is live, so a delete
+/// holds no scan of the index.
+#[derive(Debug, Default)]
+struct KeyIndex {
+    /// The stored key hash of each index slot, as the `hvalue` of an ERTS
+    /// hash table entry (`HashDbTerm`), or 0 in a free slot.
+    hashes: Vec<u64>,
+    /// The object slot of each index slot, or `EMPTY` in a free slot.
+    slots: Vec<usize>,
+    /// The number of live entries.
+    len: usize,
+}
+
+impl KeyIndex {
+    /// Return the object slot of the entry whose stored hash is `hash` and
+    /// whose key `matches`, or `None` when the index holds no such entry.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut index = KeyIndex::default();
+    /// index.insert(7, 0);
+    /// assert_eq!(index.find(7, |_| true), Some(0));
+    /// assert_eq!(index.find(8, |_| true), None);
+    /// ```
+    fn find(&self, hash: u64, matches: impl Fn(usize) -> bool) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut slot = hash as usize & mask;
+        loop {
+            let object = self.slots[slot];
+            if object == EMPTY {
+                return None;
+            }
+            if self.hashes[slot] == hash && matches(object) {
+                return Some(object);
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    /// Add the entry with the stored hash `hash` and the object slot `object`.
+    /// The caller made sure that the index holds no entry with that hash and a
+    /// matching key. The slot count doubles when the live entries reach half
+    /// of it (`grow`, `erl_db_hash.c:3648-3740`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut index = KeyIndex::default();
+    /// index.insert(7, 4);
+    /// assert_eq!(index.find(7, |_| true), Some(4));
+    /// ```
+    fn insert(&mut self, hash: u64, object: usize) {
+        if 2 * (self.len + 1) > self.slots.len() {
+            self.grow();
+        }
+        let mask = self.slots.len() - 1;
+        let mut slot = hash as usize & mask;
+        while self.slots[slot] != EMPTY {
+            slot = (slot + 1) & mask;
+        }
+        self.hashes[slot] = hash;
+        self.slots[slot] = object;
+        self.len += 1;
+    }
+
+    /// Double the slot count and add each live entry again. The entries keep
+    /// their stored hashes and their object slots, so a growth hashes no key
+    /// again and moves no object.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut index = KeyIndex::default();
+    /// for hash in 0..5 {
+    ///     index.insert(hash, hash as usize);
+    /// }
+    /// assert_eq!(index.slots.len(), 16);
+    /// ```
+    fn grow(&mut self) {
+        let slots = if self.slots.is_empty() {
+            INITIAL_INDEX_SLOTS
+        } else {
+            self.slots.len() * 2
+        };
+        let hashes = std::mem::replace(&mut self.hashes, vec![0; slots]);
+        let objects = std::mem::replace(&mut self.slots, vec![EMPTY; slots]);
+        let mask = slots - 1;
+        self.len = 0;
+        for (hash, object) in hashes.into_iter().zip(objects) {
+            if object == EMPTY {
+                continue;
+            }
+            let mut slot = hash as usize & mask;
+            while self.slots[slot] != EMPTY {
+                slot = (slot + 1) & mask;
+            }
+            self.hashes[slot] = hash;
+            self.slots[slot] = object;
+            self.len += 1;
+        }
+    }
+
+    /// Remove the entry with the stored hash `hash` and the object slot
+    /// `object`. The hole of the entry closes by a backward shift: an entry
+    /// moves into the hole when its home slot is not between the hole and the
+    /// entry in the circular probe order. OTP unlinks a chained entry with a
+    /// pointer write (`b = *bp = next`, `erl_db_hash.c:1641`) and performs no
+    /// shift; the shift is the choice of this open-addressing index, and it
+    /// keeps the rule that an entry stays reachable from its home slot. The
+    /// object slot of each other entry does not change, so a delete walks no
+    /// other entry.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut index = KeyIndex::default();
+    /// index.insert(7, 0);
+    /// index.insert(9, 1);
+    /// index.remove(7, 0);
+    /// assert_eq!(index.find(7, |_| true), None);
+    /// assert_eq!(index.find(9, |_| true), Some(1));
+    /// ```
+    fn remove(&mut self, hash: u64, object: usize) {
+        let mask = self.slots.len() - 1;
+        let mut entry = hash as usize & mask;
+        while self.slots[entry] != object {
+            entry = (entry + 1) & mask;
+        }
+        let mut hole = entry;
+        let mut next = entry;
+        loop {
+            next = (next + 1) & mask;
+            if self.slots[next] == EMPTY {
+                break;
+            }
+            let home = self.hashes[next] as usize & mask;
+            let blocked = if hole <= next {
+                hole < home && home <= next
+            } else {
+                hole < home || home <= next
+            };
+            if !blocked {
+                self.hashes[hole] = self.hashes[next];
+                self.slots[hole] = self.slots[next];
+                hole = next;
+            }
+        }
+        self.slots[hole] = EMPTY;
+        self.len -= 1;
+    }
+}
+
+/// Return the stored hash of an ETS key: the ERTS key hash ([`key_hash`])
+/// shifted one bit right, as `MAKE_HASH` gives the `hvalue` of an ERTS hash
+/// table entry (`erl_db_hash.c:279-282`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(stored_hash(&Term::Integer(1)), key_hash(&Term::Integer(1)) >> 1);
+/// ```
+fn stored_hash(key: &Term) -> u64 {
+    key_hash(key) >> 1
 }
 
 /// Return the segment of the slot `slot`: the first segment has the slots

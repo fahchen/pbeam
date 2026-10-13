@@ -210,24 +210,36 @@ impl ModuleTables {
         self.names.name(id)
     }
 
-    /// Build the side tables of the instruction stream of the module `name`.
-    /// The loader reads the stream once, so a later jump and a later frame
-    /// creation read one table entry each. `names` holds the identities of
-    /// the names that an earlier build of the same module gave, so a rebuild
-    /// keeps the identity of a name.
+    /// Build the side tables of the instruction stream of the module `name`,
+    /// and replace each branch label and each call label in the stream with
+    /// the code position that the tables give. The loader reads the stream
+    /// once, so a later jump and a later frame creation read one field and
+    /// run no lookup. `names` holds the identities of the names that an
+    /// earlier build of the same module gave, so a rebuild keeps the
+    /// identity of a name.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // [FunctionInfo, Label(1), Label(2), Return]
-    /// let tables = ModuleTables::build("fixture", &instructions, NameTable::default());
+    /// let mut instructions = vec![
+    ///     Instruction::FunctionInfo { module: "fixture".into(), name: "main".into(), arity: 0 },
+    ///     Instruction::Label(1),
+    ///     Instruction::Label(2),
+    ///     Instruction::Return,
+    /// ];
+    /// let tables = ModuleTables::build("fixture", &mut instructions, NameTable::default()).unwrap();
     /// assert_eq!(tables.jump_targets.get(&2), Some(&3));
     /// assert_eq!(tables.name(tables.functions[0].0), "main");
     /// ```
-    fn build(name: &str, instructions: &[Instruction], mut names: NameTable) -> Self {
+    fn build(
+        name: &str,
+        instructions: &mut [Instruction],
+        mut names: NameTable,
+    ) -> Result<Self, BeamError> {
         let mut jump_targets = LabelMap::default();
         let mut function_starts = LabelMap::default();
-        let mut functions = Vec::new();
+        let mut functions: Vec<(NameId, u32)> = Vec::new();
         let mut function: Option<usize> = None;
         for (index, instruction) in instructions.iter().enumerate() {
             match instruction {
@@ -252,61 +264,178 @@ impl ModuleTables {
                 _ => {}
             }
         }
-        ModuleTables {
+        let tables = ModuleTables {
             jump_targets,
             function_starts,
             names,
             functions,
+        };
+        for instruction in instructions.iter_mut() {
+            resolve(name, instruction, &tables)?;
         }
+        Ok(tables)
     }
+}
+
+/// Replace the label of one instruction with the code position that the
+/// loader tables give. A branch label becomes the index of the instruction
+/// after the label. A call label becomes the index of the function in
+/// [`ModuleTables::functions`] and the index of the instruction at the
+/// label, so that a call starts where its label is and not at the entry of
+/// the function. A label that no table holds keeps the error text of the
+/// removed lookup, and the module does not load.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [Jump(1)] with label 1 at index 3 gives Jump(4).
+/// resolve("fixture", &mut jump, &tables)?;
+/// assert_eq!(jump, Instruction::Jump(4));
+/// ```
+fn resolve(
+    name: &str,
+    instruction: &mut Instruction,
+    tables: &ModuleTables,
+) -> Result<(), BeamError> {
+    let jump_targets = &tables.jump_targets;
+    let function_starts = &tables.function_starts;
+    match instruction {
+        Instruction::Call {
+            function, target, ..
+        }
+        | Instruction::CallLast {
+            function, target, ..
+        }
+        | Instruction::CallOnly {
+            function, target, ..
+        } => {
+            let label = *target;
+            match function_starts.get(&label) {
+                Some(Some(entry)) => {
+                    *function = entry.function as u32;
+                    *target = entry.start as u32;
+                }
+                Some(None) => {
+                    return Err(error(format!("entry label {label} has no function info")));
+                }
+                None => {
+                    return Err(error(format!("entry label {label} not found in {name}")));
+                }
+            }
+        }
+        Instruction::Jump(target)
+        | Instruction::LoopReceiveEnd(target)
+        | Instruction::Wait(target) => resolve_branch(target, jump_targets)?,
+        Instruction::Catch { label, .. } | Instruction::WaitTimeout { label, .. } => {
+            resolve_branch(label, jump_targets)?
+        }
+        Instruction::Bif { fail_label, .. }
+        | Instruction::Test { fail_label, .. }
+        | Instruction::TestFunctionArity { fail_label, .. }
+        | Instruction::TestArity { fail_label, .. }
+        | Instruction::GetMapElements { fail_label, .. }
+        | Instruction::HasMapFields { fail_label, .. }
+        | Instruction::PutMapExact { fail_label, .. }
+        | Instruction::TestExactEqual { fail_label, .. }
+        | Instruction::TestExactEqualOperands { fail_label, .. }
+        | Instruction::TestEqual { fail_label, .. }
+        | Instruction::TestNotEqual { fail_label, .. }
+        | Instruction::TestExactNotEqual { fail_label, .. }
+        | Instruction::TestLess { fail_label, .. }
+        | Instruction::TestGreaterEqual { fail_label, .. }
+        | Instruction::TestTaggedTuple { fail_label, .. }
+        | Instruction::BinaryMatchStart { fail_label, .. }
+        | Instruction::BinaryGetBinary { fail_label, .. }
+        | Instruction::BinaryGetUtf8 { fail_label, .. }
+        | Instruction::BinaryMatch { fail_label, .. }
+        | Instruction::BinaryCreate { fail_label, .. }
+        | Instruction::LoopReceive { fail_label, .. } => resolve_branch(fail_label, jump_targets)?,
+        Instruction::SelectTupleArity {
+            fail_label,
+            choices,
+            ..
+        } => {
+            resolve_branch(fail_label, jump_targets)?;
+            for (_, target) in choices {
+                resolve_branch(target, jump_targets)?;
+            }
+        }
+        Instruction::SelectValue {
+            fail_label,
+            choices,
+            ..
+        } => {
+            resolve_branch(fail_label, jump_targets)?;
+            for (_, target) in choices {
+                resolve_branch(target, jump_targets)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Replace one branch label with the index of the instruction after the
+/// label. A target of 0 is the "no fail label" operand of a BIF, and it
+/// stays 0 for the arm that handles it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut target = 5;
+/// resolve_branch(&mut target, &targets)?;
+/// assert_eq!(target, 9);
+/// ```
+///
+/// # Errors
+///
+/// A label that the module does not hold is the error `missing BEAM label
+/// L`.
+fn resolve_branch(target: &mut u32, jump_targets: &LabelMap<usize>) -> Result<(), BeamError> {
+    if *target == 0 {
+        return Ok(());
+    }
+    let label = *target;
+    let index = jump_targets
+        .get(&label)
+        .copied()
+        .ok_or_else(|| error(format!("missing BEAM label {label}")))?;
+    // A BEAM `Code` chunk is at most 2^32 - 1 bytes, so its instruction
+    // index is below 2^32 and the cast keeps every value.
+    *target = index as u32;
+    Ok(())
 }
 
 impl BeamModule {
     /// Return the module `name` with `exports` and the decoded
     /// `instructions`, and build the side tables of the stream. Each export
     /// name goes into the name table of the module, so its name lives in one
-    /// place.
+    /// place. Each branch label and each call label becomes the resolved
+    /// code position; a label that does not resolve is an error.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let module = BeamModule::new("fixture".into(), HashMap::new(), vec![Instruction::End]);
+    /// let module = BeamModule::new("fixture".into(), HashMap::new(), vec![Instruction::End])?;
     /// assert!(module.tables.jump_targets.is_empty());
     /// ```
     pub(crate) fn new(
         name: String,
         exports: HashMap<(String, u32), u32>,
-        instructions: Vec<Instruction>,
-    ) -> Self {
-        let mut tables = ModuleTables::build(&name, &instructions, NameTable::default());
+        mut instructions: Vec<Instruction>,
+    ) -> Result<Self, BeamError> {
+        let mut tables = ModuleTables::build(&name, &mut instructions, NameTable::default())?;
         let exports = exports
             .into_iter()
             .map(|((function, arity), label)| ((tables.names.intern(&function), arity), label))
             .collect();
-        BeamModule {
+        Ok(BeamModule {
             name,
             id: ModuleId::next(),
             exports,
             instructions,
             tables,
-        }
-    }
-
-    /// Rebuild the side tables from the current `instructions`. Only a test
-    /// that changes the instructions of a module after its construction needs
-    /// this. The identity of a name does not change, so an export key and a
-    /// frame stay valid.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// module.instructions.push(Instruction::End);
-    /// module.reindex();
-    /// ```
-    #[cfg(test)]
-    pub(crate) fn reindex(&mut self) {
-        let names = std::mem::take(&mut self.tables.names);
-        self.tables = ModuleTables::build(&self.name, &self.instructions, names);
+        })
     }
 
     /// Parse one BEAM file into a module, with a new atom table.

@@ -17,7 +17,7 @@
 
 use std::{collections::HashMap, hint::black_box, mem::size_of, time::Instant};
 
-use super::{code_table, function_at_label, label_index, write_operand};
+use super::{code_table, function_at_label, write_operand};
 use crate::{
     beam::{
         BeamModule,
@@ -67,6 +67,12 @@ fn report_align<T>(name: &str) {
     println!("STRUCT {name} {} bytes", std::mem::align_of::<T>());
 }
 
+/// Print one byte count that the code computes, such as the heap bytes of the
+/// key index of an ETS table.
+fn report_bytes(name: &str, bytes: usize) {
+    println!("STRUCT {name} {bytes} bytes");
+}
+
 /// Return the nanoseconds for each operation of `body`, as the minimum of
 /// [`RUNS`] timed runs. The caller performs exactly `operations` operations.
 fn measure(operations: usize, mut body: impl FnMut() -> u64) -> f64 {
@@ -109,8 +115,10 @@ fn tuple_of(len: usize) -> Term {
 }
 
 /// Return a module of `functions` functions, each with its own label. The
-/// shape gives the label tables of a real module, so `label_index` and
-/// `function_at_label` measure the real lookup and not a copy of it.
+/// shape gives the label tables of a real module, so the `jump_targets`
+/// and `function_at_label` rows measure the real lookup and not a copy of
+/// it. The runtime no longer runs the `jump_targets` lookup, and this row
+/// keeps the baseline of the audit that the loader change removed.
 fn module_of(functions: u32) -> BeamModule {
     let mut instructions = Vec::new();
     for index in 1..=functions {
@@ -122,7 +130,7 @@ fn module_of(functions: u32) -> BeamModule {
         instructions.push(Instruction::Label(index));
     }
     instructions.push(Instruction::End);
-    BeamModule::new("audit".into(), HashMap::new(), instructions)
+    BeamModule::new("audit".into(), HashMap::new(), instructions).expect("the fixture module loads")
 }
 
 /// Return an ETS set table of `objects` objects, keyed by an integer.
@@ -339,6 +347,17 @@ fn prints_the_size_of_every_structure() {
     report_size::<EtsTables>("ets_tables");
     report_size::<Table>("ets_table");
     report_size::<PersistentTerms>("persistent_terms");
+
+    // The key index of a `set` table: one stored hash and one position for
+    // each slot of the open-addressing table. The rows report the heap bytes
+    // of the index of a table of 1, 10, 100, and 1000 objects.
+    report_size::<(u64, usize)>("ets_key_index_entry");
+    for objects in [1usize, 10, 100, 1000] {
+        report_bytes(
+            &format!("ets_key_index_{objects}"),
+            table_of(objects).index_bytes(),
+        );
+    }
 }
 
 /// Print the cost of every derivation that the audit names.
@@ -401,14 +420,22 @@ fn prints_the_cost_of_every_derivation() {
         }),
     );
 
-    // The label lookup of `label_index` and of `function_at_label`. Both
-    // read the side tables of the module of the running code.
+    // The label lookup of `jump_targets` and of `function_at_label`. Both
+    // read the side tables of the module of the running code. The runtime
+    // no longer runs the `jump_targets` lookup, and this row keeps the
+    // baseline of the audit that the loader change removed.
     report(
         "label_index_1000_labels",
         measure(OPERATIONS, || {
             let mut sum = 0u64;
             for _ in 0..OPERATIONS {
-                sum += black_box(label_index(black_box(&module), black_box(500)).unwrap()) as u64;
+                sum += black_box(
+                    *module
+                        .tables
+                        .jump_targets
+                        .get(black_box(&500))
+                        .expect("label 500 exists"),
+                ) as u64;
             }
             sum
         }),
@@ -537,6 +564,40 @@ fn prints_the_cost_of_every_derivation() {
             },
         ),
     );
+
+    // The insert and the delete of the real table at each object count, so a
+    // change to the key index shows what it adds to each write path. Each
+    // timed run inserts 200 new keys into a table of `objects` objects, or
+    // removes 200 keys from a table of `objects` + 200 objects. The setup of
+    // each run is outside the timer.
+    for objects in [1usize, 10, 100, 1000] {
+        report(
+            &format!("ets_insert_{objects}"),
+            measure_with(
+                ETS_OPERATIONS,
+                || table_of(objects),
+                |table| {
+                    for round in 0..ETS_OPERATIONS {
+                        table.insert(vec![Term::Integer(-1 - round as i64), Term::Nil]);
+                    }
+                    ETS_OPERATIONS as u64
+                },
+            ),
+        );
+        report(
+            &format!("ets_delete_{objects}"),
+            measure_with(
+                ETS_OPERATIONS,
+                || table_of(objects + ETS_OPERATIONS),
+                |table| {
+                    for round in 0..ETS_OPERATIONS {
+                        table.delete(&Term::Integer((objects + round) as i64));
+                    }
+                    ETS_OPERATIONS as u64
+                },
+            ),
+        );
+    }
     // The index maintenance alone: one key and its hash. The caller of a
     // real insert also builds the object that the table stores, and the row
     // above pays that storage while this row does not. The document must not

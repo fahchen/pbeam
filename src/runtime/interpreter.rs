@@ -8,11 +8,13 @@ use super::{
 use crate::{
     beam::{
         BeamModule, NameId,
-        code::{self, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind},
+        code::{
+            self, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind, TestOperand,
+        },
     },
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Fun, Map, MatchState, Target, Term, print_term, segment_equals,
+        Atom, AtomTable, Fun, HostTerm, Map, MatchState, Target, Term, print_term, segment_equals,
         segment_integer,
     },
 };
@@ -58,7 +60,8 @@ pub struct BeamProgram {
     modules: HashMap<String, Rc<BeamModule>>,
     /// The atom table of the loaded modules. ERTS has one atom table for
     /// each emulator, so each run starts its own table from a copy of it.
-    atoms: AtomTable,
+    /// The `Arc` lets a [`HostTerm`] of this program share the table.
+    atoms: Arc<AtomTable>,
 }
 
 /// The issuer of the initial capabilities of a run.
@@ -173,7 +176,7 @@ impl BeamProgram {
         }
         Ok(Self {
             modules: loaded,
-            atoms,
+            atoms: Arc::new(atoms),
         })
     }
 
@@ -191,6 +194,40 @@ impl BeamProgram {
     /// ```
     pub fn atom(&self, name: &str) -> Option<Atom> {
         self.atoms.get(name)
+    }
+
+    /// Pair `term` with the atom table of this program. Pass the result as
+    /// an argument of [`BeamProgram::execute`],
+    /// [`BeamProgram::execute_with_policy`], or
+    /// [`BeamProgram::execute_with_policy_module`]. A copy of the result is
+    /// cheap: the term copy is O(1), and the table is shared. The result of
+    /// a run is already a `HostTerm` that carries the table of the run, so
+    /// use this function for a term that the caller builds with
+    /// [`BeamProgram::atom`].
+    ///
+    /// # Precondition
+    ///
+    /// Every atom of `term` must come from this program, through
+    /// [`BeamProgram::atom`], or be a static atom, whose index is the same
+    /// in every table. A term of another table enters through
+    /// `HostTerm::import_into` first. This function reads no atom of the
+    /// term, because a bare atom term holds an index and no table identity,
+    /// so it cannot prove that the term belongs to the program. A foreign
+    /// index is a caller error, and no run-time check detects it. When the
+    /// program table gives that index to a different name, the host term
+    /// reads that other name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let argument = program.host_term(Term::Atom(program.atom("ok").unwrap()));
+    /// let applied = program.execute("process_probe", "apply", &[argument])?;
+    /// ```
+    pub fn host_term(&self, term: Term) -> HostTerm {
+        HostTerm {
+            term,
+            atoms: Arc::clone(&self.atoms),
+        }
     }
 
     /// Run an exported function as the root process. Processes that it
@@ -252,8 +289,8 @@ impl BeamProgram {
         &self,
         module: &str,
         function: &str,
-        arguments: &[Term],
-    ) -> Result<Term, BeamError> {
+        arguments: &[HostTerm],
+    ) -> Result<HostTerm, BeamError> {
         self.execute_issued(module, function, arguments, Issuer::Unchecked)
     }
 
@@ -279,9 +316,9 @@ impl BeamProgram {
         &self,
         module: &str,
         function: &str,
-        arguments: &[Term],
+        arguments: &[HostTerm],
         policy: &dyn Policy,
-    ) -> Result<Term, BeamError> {
+    ) -> Result<HostTerm, BeamError> {
         self.execute_issued(module, function, arguments, Issuer::Host(policy))
     }
 
@@ -347,10 +384,10 @@ impl BeamProgram {
         &self,
         module: &str,
         function: &str,
-        arguments: &[Term],
+        arguments: &[HostTerm],
         policy: &str,
         boot: bool,
-    ) -> Result<Term, BeamError> {
+    ) -> Result<HostTerm, BeamError> {
         let issuer = Issuer::Module { policy, boot };
         self.execute_issued(module, function, arguments, issuer)
     }
@@ -368,20 +405,35 @@ impl BeamProgram {
         &self,
         module: &str,
         function: &str,
-        arguments: &[Term],
+        arguments: &[HostTerm],
         issuer: Issuer,
-    ) -> Result<Term, BeamError> {
+    ) -> Result<HostTerm, BeamError> {
         let initial_mode = InitialMode::read();
         let mut scheduler = match issuer {
-            Issuer::Unchecked => Scheduler::without_checks(self.atoms.clone()),
-            Issuer::Host(_) | Issuer::Module { .. } => Scheduler::new(self.atoms.clone()),
+            Issuer::Unchecked => Scheduler::without_checks((*self.atoms).clone()),
+            Issuer::Host(_) | Issuer::Module { .. } => Scheduler::new((*self.atoms).clone()),
         };
         scheduler.code = CodeTable::new(self.modules.clone());
-        let run = self.run_root(&mut scheduler, module, function, arguments, issuer);
+        // Each argument of another table is imported into the table of the
+        // run. `run_root` then runs with terms of one table.
+        let imported = arguments
+            .iter()
+            .map(|argument| argument.import_into(&mut scheduler.atoms))
+            .collect::<Result<Vec<Term>, BeamError>>();
+        let run = match imported {
+            Ok(arguments) => self.run_root(&mut scheduler, module, function, &arguments, issuer),
+            Err(import_error) => Err(import_error),
+        };
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
-        match scheduler.into_root_result() {
-            Some(Ok(result)) => Ok(result),
+        // The table of the run holds each name that the run created, so the
+        // host result can name every atom of the root result.
+        let (root, atoms) = scheduler.into_run_result();
+        match root {
+            Some(Ok(result)) => Ok(HostTerm {
+                term: result,
+                atoms: Arc::new(atoms),
+            }),
             Some(Err(reason)) => {
                 // `erlang:halt/1` writes each byte of the `%T` text as one code
                 // point (`bif.c:4372-4387`), so the text is valid UTF-8.
@@ -410,7 +462,7 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut scheduler = Scheduler::new(program.atoms.clone());
+    /// let mut scheduler = Scheduler::new((*program.atoms).clone());
     /// scheduler.code = CodeTable::new(program.modules.clone());
     /// program.run_root(&mut scheduler, "process_probe", "main", &[], Issuer::Host(&AllowAll))?;
     /// assert!(scheduler.into_root_result().is_some());
@@ -651,29 +703,38 @@ impl BeamProgram {
                     }
                     stack.drain(..*count as usize);
                 }
-                Instruction::Call { arity, label } => {
+                Instruction::Call {
+                    arity,
+                    function,
+                    target,
+                } => {
                     check_local_call_arguments(&process.registers, *arity)?;
                     cursor.commit(process);
-                    let frame = code_table::frame(module, *label, *arity)?;
+                    let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
                     process.frames.push(frame);
                 }
-                Instruction::CallOnly { arity, label } => {
+                Instruction::CallOnly {
+                    arity,
+                    function,
+                    target,
+                } => {
                     check_local_call_arguments(&process.registers, *arity)?;
-                    let frame = code_table::frame(module, *label, *arity)?;
+                    let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
                     *current_frame(process) = frame;
                 }
                 Instruction::CallLast {
                     arity,
-                    label,
+                    function,
+                    target,
                     deallocate,
                 } => {
                     if *deallocate as usize != current_frame(process).stack.len() {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     check_local_call_arguments(&process.registers, *arity)?;
-                    let frame = code_table::frame(module, *label, *arity)?;
+                    let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
                     *current_frame(process) = frame;
                 }
@@ -687,7 +748,7 @@ impl BeamProgram {
                         Term::Tuple(elements) if elements.len() == *arity as usize
                     );
                     if !passed {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::TestFunctionArity {
@@ -703,7 +764,7 @@ impl BeamProgram {
                         BifResult::Value(value) if value == Term::static_atom("true")
                     );
                     if !passed {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::SelectTupleArity {
@@ -718,7 +779,7 @@ impl BeamProgram {
                             .map_or(*fail_label, |(_, label)| *label),
                         _ => *fail_label,
                     };
-                    cursor.position = label_index(module, target)?;
+                    cursor.position = label_position(target)?;
                 }
                 Instruction::CallExternal {
                     arity,
@@ -851,7 +912,7 @@ impl BeamProgram {
                             return Ok(Outcome::Yield);
                         }
                         BifResult::Raise { .. } if *fail_label != 0 => {
-                            cursor.position = label_index(module, *fail_label)?
+                            cursor.position = label_position(*fail_label)?
                         }
                         BifResult::Raise { class, reason } => {
                             if let Some(outcome) = raise(process, class, reason) {
@@ -869,11 +930,11 @@ impl BeamProgram {
                         }
                     }
                 }
-                Instruction::Jump(label) => cursor.position = label_index(module, *label)?,
+                Instruction::Jump(label) => cursor.position = label_position(*label)?,
                 Instruction::Catch { register, label } => {
                     // ERTS also counts `c_p->catches` here. PBeam finds a live
                     // tag with a frame scan in `raise` and needs no counter.
-                    let handler = label_index(module, *label)?;
+                    let handler = label_position(*label)?;
                     let slot = current_frame(process)
                         .stack
                         .get_mut(*register as usize)
@@ -953,7 +1014,7 @@ impl BeamProgram {
                         }
                     };
                     if !passed {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::GetMapElements {
@@ -968,7 +1029,7 @@ impl BeamProgram {
                             write(process, destination, value)?;
                         }
                     }
-                    None => cursor.position = label_index(module, *fail_label)?,
+                    None => cursor.position = label_position(*fail_label)?,
                 },
                 // ERTS loads `has_map_fields` as `get_map_elements` with
                 // scratch destinations (`generators.tab:230-253`).
@@ -978,7 +1039,7 @@ impl BeamProgram {
                     keys,
                 } => {
                     if map_values(process, map, keys)?.is_none() {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::PutMapAssoc {
@@ -1018,7 +1079,7 @@ impl BeamProgram {
                     match update_map_exact(map, pairs)? {
                         Ok(map) => write(process, destination, map)?,
                         Err(_) if *fail_label != 0 => {
-                            cursor.position = label_index(module, *fail_label)?
+                            cursor.position = label_position(*fail_label)?
                         }
                         Err(reason) => {
                             if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
@@ -1053,7 +1114,21 @@ impl BeamProgram {
                     right,
                 } => {
                     if read_ref(process, left)? != read_ref(process, right)? {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
+                    }
+                }
+                // The loader selects the classified operand form of
+                // `test is_eq_exact` when both operands are a register or an
+                // immediate and at least one is a register. The run loop then
+                // reads a checked register slot or the stored term, and it
+                // matches no `Operand`.
+                Instruction::TestExactEqualOperands {
+                    fail_label,
+                    left,
+                    right,
+                } => {
+                    if read_test_operand(process, left)? != read_test_operand(process, right)? {
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 // ERTS `is_ne` (emu instrs.tab:1115-1119, JIT
@@ -1072,7 +1147,7 @@ impl BeamProgram {
                     right,
                 } => {
                     if read_ref(process, left)? == read_ref(process, right)? {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::TestLess {
@@ -1084,7 +1159,7 @@ impl BeamProgram {
                         .compare(read_ref(process, right)?)?
                         .is_lt()
                     {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::TestGreaterEqual {
@@ -1096,7 +1171,7 @@ impl BeamProgram {
                         .compare(read_ref(process, right)?)?
                         .is_lt()
                     {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 Instruction::TestTaggedTuple {
@@ -1112,7 +1187,7 @@ impl BeamProgram {
                                 && fields.first() == Some(tag)
                     );
                     if !passed {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 // ERTS `i_bs_start_match3` jumps to `Fail` for each term
@@ -1147,7 +1222,7 @@ impl BeamProgram {
                             "invariant error: bs_start_match3 with no fail label got {other:?}, not a binary or a match context"
                         )));
                     }
-                    _ => cursor.position = label_index(module, *fail_label)?,
+                    _ => cursor.position = label_position(*fail_label)?,
                 },
                 // On a 64-bit system, ERTS loads `bs_start_match4` with
                 // `resume` as nothing when the source is the destination,
@@ -1216,7 +1291,7 @@ impl BeamProgram {
                             );
                             write(process, destination, Term::Binary(bytes))?;
                         }
-                        None => cursor.position = label_index(module, *fail_label)?,
+                        None => cursor.position = label_position(*fail_label)?,
                     }
                 }
                 // ERTS `i_bs_get_position` writes `sb->start` as a small
@@ -1258,7 +1333,7 @@ impl BeamProgram {
                         Some(code_point) => {
                             write(process, destination, Term::Integer(code_point.into()))?;
                         }
-                        None => cursor.position = label_index(module, *fail_label)?,
+                        None => cursor.position = label_position(*fail_label)?,
                     }
                 }
                 Instruction::BinaryMatch {
@@ -1267,7 +1342,7 @@ impl BeamProgram {
                     commands,
                 } => {
                     if !binary_match(process, context, commands)? {
-                        cursor.position = label_index(module, *fail_label)?;
+                        cursor.position = label_position(*fail_label)?;
                     }
                 }
                 // The ERTS JIT `i_bs_create_bin` first checks that the term
@@ -1287,9 +1362,7 @@ impl BeamProgram {
                     segments,
                 } => match create_binary(process, segments)? {
                     Ok(bytes) => write(process, destination, Term::binary(bytes))?,
-                    Err(_) if *fail_label != 0 => {
-                        cursor.position = label_index(module, *fail_label)?
-                    }
+                    Err(_) if *fail_label != 0 => cursor.position = label_position(*fail_label)?,
                     Err(failure) => {
                         cursor.commit(process);
                         if let Some(outcome) = raise_binary_failure(scheduler, module, failure)? {
@@ -1324,7 +1397,7 @@ impl BeamProgram {
                         .iter()
                         .find(|(choice, _)| choice == value)
                         .map_or(*fail_label, |(_, label)| *label);
-                    cursor.position = label_index(module, target)?;
+                    cursor.position = label_position(target)?;
                 }
                 Instruction::PutList {
                     head,
@@ -1461,7 +1534,7 @@ impl BeamProgram {
                         match scheduler.receive_helper()? {
                             Received::Message => {}
                             Received::Empty => {
-                                cursor.position = label_index(module, *fail_label)?;
+                                cursor.position = label_position(*fail_label)?;
                                 continue;
                             }
                             Received::Yield => {
@@ -1483,7 +1556,7 @@ impl BeamProgram {
                         return Err(error("loop_rec_end without a current message"));
                     }
                     process.fcalls -= 1;
-                    cursor.position = label_index(module, *label)?;
+                    cursor.position = label_position(*label)?;
                 }
                 Instruction::RemoveMessage => {
                     if !process.mailbox.remove_current() {
@@ -1492,7 +1565,7 @@ impl BeamProgram {
                     scheduler.cancel_receive_timer();
                 }
                 Instruction::Wait(label) => {
-                    cursor.position = label_index(module, *label)?;
+                    cursor.position = label_position(*label)?;
                     cursor.commit(process);
                     return Ok(Outcome::Wait);
                 }
@@ -1526,7 +1599,7 @@ impl BeamProgram {
                             }
                         }
                     }
-                    cursor.position = label_index(module, *label)?;
+                    cursor.position = label_position(*label)?;
                     cursor.commit(scheduler.current_process_mut());
                     return Ok(Outcome::Wait);
                 }
@@ -2851,23 +2924,26 @@ fn nonempty_list(list: &Term) -> Result<(&Term, &Term), BeamError> {
         .ok_or_else(|| error(format!("BEAM list source {list:?} is not a nonempty list")))
 }
 
-/// Return the index of the first instruction after a label in a module, from
-/// the loader table.
+/// Return the code position that a branch target names. The loader
+/// replaces each branch label with the index of the instruction after the
+/// label, so a loaded module reads the field and runs no lookup.
+///
+/// A target of 0 is the "no fail label" operand of a BIF. The arm of that
+/// instruction handles 0 before this call, so any other instruction that
+/// reaches this function with 0 keeps the error text of the removed
+/// lookup.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // [FunctionInfo, Label(1), Label(2), Return]
-/// assert_eq!(label_index(&module, 2)?, 3);
-/// assert!(label_index(&module, 9).is_err());
+/// assert_eq!(label_position(3)?, 3);
+/// assert!(label_position(0).is_err());
 /// ```
-fn label_index(module: &BeamModule, label: u32) -> Result<usize, BeamError> {
-    module
-        .tables
-        .jump_targets
-        .get(&label)
-        .copied()
-        .ok_or_else(|| error(format!("missing BEAM label {label}")))
+fn label_position(target: u32) -> Result<usize, BeamError> {
+    if target == 0 {
+        return Err(error("missing BEAM label 0"));
+    }
+    Ok(target as usize)
 }
 
 /// Read a copy of an operand from the process registers or the active
@@ -2899,6 +2975,80 @@ fn read_ref<'a>(process: &'a ProcessState, operand: &'a Operand) -> Result<&'a T
     match read_any_ref(process, operand)? {
         Term::MatchContext(_) => Err(match_context_escape(operand)),
         value => Ok(value),
+    }
+}
+
+/// Borrow a classified operand of [`Instruction::TestExactEqualOperands`].
+/// The loader classified the operand, so this reads a checked register slot
+/// or returns the stored term, and it matches no [`Operand`].
+///
+/// A register that holds a match context gives the same invariant error as
+/// [`read_ref`]. A stored term comes from the literal table, which cannot
+/// hold a match context.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(
+///     read_test_operand(&process, &TestOperand::Value(Term::Integer(1)))?,
+///     &Term::Integer(1)
+/// );
+/// ```
+fn read_test_operand<'a>(
+    process: &'a ProcessState,
+    operand: &'a TestOperand,
+) -> Result<&'a Term, BeamError> {
+    match operand {
+        TestOperand::Value(value) => Ok(value),
+        TestOperand::X(index) => match read_x_register(&process.registers, *index)? {
+            Term::MatchContext(_) => Err(match_context_escape(&Operand::X(*index))),
+            value => Ok(value),
+        },
+        TestOperand::Y(index) => {
+            let stack = process.frames.last().map_or(&[][..], |frame| &frame.stack);
+            match read_y_register(stack, *index)? {
+                Term::MatchContext(_) => Err(match_context_escape(&Operand::Y(*index))),
+                value => Ok(value),
+            }
+        }
+    }
+}
+
+/// Read one X register slot with the checked access of [`read_operand`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let registers = vec![Some(Term::Integer(7))];
+/// assert_eq!(read_x_register(&registers, 0)?, &Term::Integer(7));
+/// assert!(read_x_register(&registers, 1).is_err());
+/// ```
+fn read_x_register(registers: &[Option<Term>], index: u32) -> Result<&Term, BeamError> {
+    registers
+        .get(index as usize)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| error(format!("register x{index} is unset")))
+}
+
+/// Read one Y stack slot with the checked access of [`read_operand`]. A slot
+/// that holds a catch tag, an empty slot, and an out-of-range index each
+/// keep their own error text.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let stack = vec![StackSlot::Term(Term::Integer(7))];
+/// assert_eq!(read_y_register(&stack, 0)?, &Term::Integer(7));
+/// assert!(read_y_register(&stack, 1).is_err());
+/// ```
+fn read_y_register(stack: &[StackSlot], index: u32) -> Result<&Term, BeamError> {
+    match stack.get(index as usize) {
+        Some(StackSlot::Term(value)) => Ok(value),
+        // The BEAM validator never lets an instruction read a catch tag.
+        Some(StackSlot::Catch(_)) => {
+            Err(error(format!("stack register y{index} holds a catch tag")))
+        }
+        Some(StackSlot::Empty) | None => Err(error(format!("stack register y{index} is unset"))),
     }
 }
 
@@ -3988,20 +4138,8 @@ fn read_operand<'a>(
         Operand::UnsupportedInteger => Err(error(
             "unsupported BEAM integer operand outside the 64-bit range: needs a bignum",
         )),
-        Operand::X(index) => registers
-            .get(*index as usize)
-            .and_then(Option::as_ref)
-            .ok_or_else(|| error(format!("register x{index} is unset"))),
-        Operand::Y(index) => match stack.get(*index as usize) {
-            Some(StackSlot::Term(value)) => Ok(value),
-            // The BEAM validator never lets an instruction read a catch tag.
-            Some(StackSlot::Catch(_)) => {
-                Err(error(format!("stack register y{index} holds a catch tag")))
-            }
-            Some(StackSlot::Empty) | None => {
-                Err(error(format!("stack register y{index} is unset")))
-            }
-        },
+        Operand::X(index) => read_x_register(registers, *index),
+        Operand::Y(index) => read_y_register(stack, *index),
     }
 }
 
