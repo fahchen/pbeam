@@ -1551,3 +1551,92 @@ fn counts_the_bytes_of_the_release_work_list() {
     release_all(&mut scheduler);
     assert!(scheduler.release.is_empty());
 }
+
+#[test]
+fn counts_the_arena_of_a_mailbox_across_the_drain_steps() {
+    // The bounded drain removes nodes from the arena of the mailbox and
+    // leaves the queue links that point at them, so a walk of the queue
+    // cannot run after a partial drain. The walk of a release reads the
+    // arena instead. The mailbox holds more than one batch of entries, so
+    // the drain needs more than one step.
+    let mut scheduler = test_scheduler();
+    let messages = 4 * RELEASE_BATCH;
+    scheduler.start(frame(), Vec::new(), allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    // The entries arrive while the process holds its turn, so the handling
+    // of the step that took it from the run queue does not consume them.
+    {
+        let process = scheduler.processes.get_mut(&ProcessId(0)).unwrap();
+        for number in 0..messages as i64 {
+            process.mailbox.push(marker(number));
+        }
+        process.mailbox.push_signal(Signal::Exit {
+            from: LinkId::Process(ProcessId(1)),
+            reason: marker(0),
+            linked: false,
+            normal_kills: false,
+            alias: None,
+        });
+        process.mailbox.reserve_marker();
+    }
+    scheduler.finish_current(atom("normal"), None);
+    // One batch moves part of the mailbox, so the arena of the item that
+    // waits holds nodes whose queue links point at the removed nodes.
+    scheduler.drain_release(RELEASE_BATCH);
+    assert!(
+        !scheduler.release.is_empty(),
+        "the drain needs a later step for the rest of the mailbox"
+    );
+    assert!(
+        scheduler.live_bytes() > 0,
+        "the walk counts the arena of the mailbox that waits"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+    assert_eq!(
+        scheduler.live_bytes(),
+        0,
+        "the walk releases the whole mailbox"
+    );
+}
+
+#[test]
+fn counts_the_storage_of_the_containers_across_the_drain_steps() {
+    // The walk counts the storage of each container that the release work
+    // list holds, and not only the terms that the container reaches. The
+    // element array of a wide tuple stays allocated while the drain moves its
+    // elements in batches, so its bytes stay in the count until the last
+    // batch releases the array.
+    let mut scheduler = test_scheduler();
+    let width = 4 * RELEASE_BATCH;
+    let array = width * std::mem::size_of::<Term>();
+    let tuple = Term::tuple((0..width as i64).map(Term::Integer).collect());
+    scheduler
+        .start(frame(), vec![Term::Integer(0)], allow_all())
+        .unwrap();
+    scheduler
+        .processes
+        .get_mut(&ProcessId(0))
+        .unwrap()
+        .registers[0] = Some(tuple);
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    // One step moves the element array to a group of terms, which keeps the
+    // capacity of that array.
+    scheduler.drain_release(RELEASE_BATCH);
+    assert!(
+        scheduler
+            .release
+            .iter()
+            .any(|item| matches!(item, Release::Terms(_))),
+        "the step leaves the group of the array on the list"
+    );
+    let with_array = scheduler.live_bytes();
+    release_all(&mut scheduler);
+    let without_array = scheduler.live_bytes();
+    assert_eq!(
+        with_array - without_array,
+        array,
+        "the walk counts exactly the element array of the group"
+    );
+}

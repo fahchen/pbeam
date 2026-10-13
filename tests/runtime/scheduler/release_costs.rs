@@ -106,8 +106,10 @@ struct Shape {
     /// The name of the shape in the report.
     name: &'static str,
     /// The number of terms that the release of one workload moves: one cons
-    /// cell for a list, one tuple for a chain, one internal tuple for a tree,
-    /// two terms for each dictionary entry, and one term for each message.
+    /// cell for a list, one tuple for a chain, one internal tuple and one
+    /// integer leaf for a tree, two terms for each dictionary entry, and one
+    /// term for each message. The count of a shape is not the unit count of
+    /// the release work list, which the summary column names.
     nodes: usize,
     /// Build one workload outside a process, for the synchronous last release
     /// of a term and for the shared paths. A container workload builds a flat

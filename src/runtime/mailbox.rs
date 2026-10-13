@@ -983,6 +983,35 @@ impl Mailbox {
         self.nodes.is_empty() && self.markers.is_empty()
     }
 
+    /// Account the terms that the arena of the mailbox holds, in no order,
+    /// for the live-byte walk of a release. The bounded drain removes nodes
+    /// from the arena and leaves the queue links that point at them, so a
+    /// walk of the queue cannot run after a partial drain. A node that the
+    /// queue already removed holds no term, and the drain took the terms of
+    /// the nodes that it removed, so this walk counts each term once.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// mailbox.account_release_terms(&mut live);
+    /// assert!(live.bytes() > 0);
+    /// ```
+    pub(super) fn account_release_terms(&self, live: &mut LiveBytes) {
+        for node in &self.nodes {
+            match &node.entry {
+                Entry::Message(term) => live.term(term),
+                Entry::Signal(Some(signal)) => signal.visit_terms(&mut |term| live.term(term)),
+                Entry::Marker | Entry::Signal(None) => {}
+            }
+        }
+        for marker in &self.markers {
+            if let Some(id) = &marker.id {
+                live.term(id);
+            }
+        }
+    }
+
     /// Return the bytes of the allocations of the mailbox: its node arena,
     /// its free slots, and its marker slots. The number excludes the header
     /// of each `Vec` and of the `VecDeque`, as the accounting of task

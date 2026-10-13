@@ -1763,8 +1763,9 @@ impl Scheduler {
 
     /// Account the terms that the release work list holds, so that the
     /// live-byte walk of a run counts the graph of a process that left the
-    /// process table until the drain releases it. Each item gives its terms
-    /// to the walk, which counts each shared container once.
+    /// process table until the drain releases it. Each item gives the storage
+    /// of its container and its terms to the walk, which counts each shared
+    /// container once.
     ///
     /// # Examples
     ///
@@ -1777,18 +1778,22 @@ impl Scheduler {
             match item {
                 Release::Term(term) => live.term(term),
                 Release::Terms(group) => {
+                    live.add(group.capacity() * std::mem::size_of::<Term>());
                     for term in group {
                         live.term(term);
                     }
                 }
                 Release::Map(drain) => drain.account(live),
                 Release::Registers(registers) => {
+                    live.add(registers.capacity() * std::mem::size_of::<Option<Term>>());
                     for register in registers.iter().flatten() {
                         live.term(register);
                     }
                 }
                 Release::Frames(frames) => {
+                    live.add(frames.capacity() * std::mem::size_of::<Frame>());
                     for frame in frames {
+                        live.add(frame.stack.capacity() * std::mem::size_of::<StackSlot>());
                         for slot in &frame.stack {
                             if let StackSlot::Term(term) = slot {
                                 live.term(term);
@@ -1797,6 +1802,7 @@ impl Scheduler {
                     }
                 }
                 Release::Slots(slots) => {
+                    live.add(slots.capacity() * std::mem::size_of::<StackSlot>());
                     for slot in slots {
                         if let StackSlot::Term(term) = slot {
                             live.term(term);
@@ -1804,13 +1810,18 @@ impl Scheduler {
                     }
                 }
                 Release::Dictionary(dictionary) => {
+                    live.add(dictionary.capacity() * std::mem::size_of::<(Term, Term)>());
                     for (key, value) in dictionary {
                         live.term(key);
                         live.term(value);
                     }
                 }
-                Release::Mailbox(mailbox) => mailbox.account_terms(live),
+                Release::Mailbox(mailbox) => {
+                    live.add(mailbox.allocated_bytes());
+                    mailbox.account_release_terms(live);
+                }
                 Release::Monitors(monitors) => {
+                    live.add(monitors.allocated_bytes());
                     for origin in monitors.values() {
                         if let Some(monitor) = &origin.monitor {
                             live.term(&monitor.item);

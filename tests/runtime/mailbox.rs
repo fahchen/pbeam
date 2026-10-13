@@ -401,3 +401,19 @@ fn reports_the_bytes_of_the_mailbox_and_walks_its_terms() {
     mailbox.account_terms(&mut live);
     assert!(live.bytes() > 0);
 }
+
+#[test]
+fn accounts_the_arena_of_a_mailbox_for_a_release() {
+    // The walk of a release reads the arena of the mailbox, because the
+    // bounded drain removes nodes from it and leaves the queue links
+    // pointing at them. A message, a signal, and a bound marker each give a
+    // term in the arena.
+    let mut mailbox = Mailbox::default();
+    mailbox.push(Term::tuple(vec![Term::Integer(1)]));
+    mailbox.push_signal(link(5));
+    mailbox.reserve_marker();
+    mailbox.fetch();
+    let mut live = crate::term::LiveBytes::new();
+    mailbox.account_release_terms(&mut live);
+    assert!(live.bytes() > 0, "the walk counts the arena of the mailbox");
+}
