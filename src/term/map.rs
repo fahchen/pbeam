@@ -896,6 +896,11 @@ fn apply_hash(hamt: &mut Hamt, operations: Vec<(Insert, Term, Term)>, hashes: Ve
 /// them into a hashmap when an added key grows the map past the flatmap
 /// limit. The read path checked every key of the operations.
 ///
+/// The size of the new map counts each key that an [`Insert::Add`] adds one
+/// time, because a second add of the same key replaces its value in the one
+/// pair. This matches ERTS, which inserts each pair in turn and keeps one
+/// pair for one key.
+///
 /// # Errors
 ///
 /// Return the first key that the map form does not support, or the first key
@@ -905,18 +910,20 @@ fn update_flat(
     operations: Vec<(Insert, Term, Term)>,
     hashes: Vec<Option<u64>>,
 ) -> Result<Convert, Term> {
-    let mut inserts = 0;
+    let mut added: Vec<&Term> = Vec::new();
     for ((kind, key, _), hash) in operations.iter().zip(&hashes) {
         if hash.is_none() && !matches!(key, Term::Integer(_)) {
             return Err(key.clone());
         }
         match kind {
             Insert::Set if !flatmap_holds(pairs, key) => return Err(key.clone()),
-            Insert::Add if !flatmap_holds(pairs, key) => inserts += 1,
+            Insert::Add if !flatmap_holds(pairs, key) && !added.contains(&key) => {
+                added.push(key);
+            }
             _ => {}
         }
     }
-    if pairs.len() + inserts <= SMALL_MAP_LIMIT {
+    if pairs.len() + added.len() <= SMALL_MAP_LIMIT {
         for (_, key, value) in operations {
             match pairs.binary_search_by(|(existing, _)| {
                 flatmap_order(existing, &key).expect("supported map keys have a term order")

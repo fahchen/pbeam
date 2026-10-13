@@ -1081,6 +1081,130 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
 }
 
 #[test]
+fn keeps_a_destination_register_when_a_map_change_fails() {
+    // ERTS writes the destination register only after the update succeeds
+    // (`jit/arm/instr_map.cpp:687-716`), so a fail label finds the value
+    // that the destination held before the instruction. The destination is
+    // a different slot from the source, so no take removes it.
+    let run = |map: Operand, pairs: Vec<(Operand, Operand)>| {
+        make_program(
+            vec![
+                Instruction::Move(Operand::Value(Term::Integer(7)), Operand::X(1)),
+                Instruction::PutMapExact {
+                    fail_label: 3,
+                    map,
+                    destination: Operand::X(1),
+                    pairs,
+                },
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::Move(Operand::X(1), Operand::X(0)),
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .unwrap()
+        .term
+    };
+    // A literal source that is not a map.
+    assert_eq!(
+        run(atom("foo"), vec![(atom("output"), atom("cooked"))]),
+        Term::Integer(7)
+    );
+    // A map source in another register with a missing key.
+    let map = Operand::Value(Term::Map(
+        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(1))]).unwrap(),
+    ));
+    assert_eq!(
+        run(
+            map,
+            vec![(Operand::Value(Term::Integer(2)), atom("cooked"))],
+        ),
+        Term::Integer(7)
+    );
+}
+
+#[test]
+fn keeps_a_built_map_when_a_same_register_change_fails() {
+    // A map that the run built has one owner, so the take removes it. A
+    // `put_map_assoc` on a literal map builds a map that no literal holds,
+    // and the failing `put_map_exact` then takes that map, puts it back, and
+    // jumps to its fail label.
+    let source = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(1))]).unwrap());
+    let build = |source: Term| {
+        vec![
+            Instruction::Move(Operand::Value(source), Operand::X(0)),
+            Instruction::PutMapAssoc {
+                map: Operand::X(0),
+                destination: Operand::X(0),
+                pairs: vec![(
+                    Operand::Value(Term::Integer(3)),
+                    Operand::Value(Term::Integer(3)),
+                )],
+            },
+        ]
+    };
+    let exact = |fail_label, pairs| {
+        let mut body = build(source.clone());
+        body.push(Instruction::PutMapExact {
+            fail_label,
+            map: Operand::X(0),
+            destination: Operand::X(0),
+            pairs,
+        });
+        body.push(Instruction::Return);
+        body.push(Instruction::Label(3));
+        body.push(Instruction::Return);
+        make_program(body, 0).execute("fixture", "main", &[])
+    };
+    // A missing key jumps to the fail label, which returns the register.
+    assert_eq!(
+        exact(3, vec![(Operand::Value(Term::Integer(2)), atom("cooked"))])
+            .unwrap()
+            .term,
+        Term::Map(
+            Map::from_pairs(vec![
+                (Term::Integer(1), Term::Integer(1)),
+                (Term::Integer(3), Term::Integer(3)),
+            ])
+            .unwrap()
+        )
+    );
+    // Two references have no PBeam order, so the change fails with a runtime
+    // error after the take.
+    let error = make_program(
+        {
+            let mut body = build(source);
+            body.push(Instruction::PutMapExact {
+                fail_label: 0,
+                map: Operand::X(0),
+                destination: Operand::X(0),
+                pairs: vec![
+                    (
+                        Operand::Value(Term::Reference(crate::Reference(1))),
+                        atom("a"),
+                    ),
+                    (
+                        Operand::Value(Term::Reference(crate::Reference(2))),
+                        atom("b"),
+                    ),
+                ],
+            });
+            body
+        },
+        0,
+    )
+    .execute("fixture", "main", &[]);
+    assert!(
+        error
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported term order of two references")
+    );
+}
+
+#[test]
 fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
     // A flatmap accepts the integer 2^59, and a hashmap does not yet.
     let pairs = |keys: std::ops::RangeInclusive<i64>| {

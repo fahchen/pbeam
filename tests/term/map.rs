@@ -804,6 +804,23 @@ fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
 }
 
 #[test]
+fn counts_a_repeated_new_key_one_time_for_the_map_form() {
+    // A 31-key flatmap that adds one missing key twice stays a flatmap of
+    // 32 keys: the second add replaces the value of the one pair, as an
+    // ERTS insert does. It does not become a 33-key hashmap.
+    let mut map = integers(1..=31);
+    let added = Term::Integer(32);
+    map.update(vec![
+        (Insert::Add, added.clone(), atom("first")),
+        (Insert::Add, added.clone(), atom("second")),
+    ])
+    .unwrap();
+    assert_eq!(map.len(), 32);
+    assert!(!map.is_hashmap());
+    assert_eq!(map.get(&added), Some(&atom("second")));
+}
+
+#[test]
 fn counts_the_steps_of_the_erts_hashmap_merge() {
     let range = |first: i64, last: i64| integers(first..=last);
     // No hashmap merge for two flatmaps, and for an empty flatmap.
@@ -1106,28 +1123,28 @@ const PUT_COST_SIZES: [i64; 4] = [1, 10, 100, 1000];
 /// The number of rounds of one timed run of a put probe.
 const PUT_COST_ROUNDS: usize = if cfg!(debug_assertions) { 20 } else { 200 };
 
-/// Return the maps of one put probe: one fresh map for each round. The maps
-/// are built before the timer, and the timed runs reuse them.
+/// Return the maps of one put probe: one fresh map for each round. Every
+/// map lacks the key of the probe.
 fn put_maps(pairs: &[(Term, Term)]) -> Vec<Map> {
     (0..PUT_COST_ROUNDS)
         .map(|_| Map::from_pairs(pairs.to_vec()).expect("the probe keys are valid"))
         .collect()
 }
 
-/// Print the cost of one map put of `body` on the maps of `put_maps`, in
-/// nanosecond for each call, as the minimum of [`MAP_COST_RUNS`] timed runs
-/// over the same maps. `body` returns the number of keys of its map, so the
-/// compiler cannot remove the work that the timer measures.
+/// Print the cost of one map put of `body`, in nanosecond for each call, as
+/// the minimum of [`MAP_COST_RUNS`] timed runs. `body` returns the number of
+/// keys of its map, so the compiler cannot remove the work that the timer
+/// measures.
 ///
-/// The timer region per run holds one pass over every map, and the
-/// allocation of the maps stays before the first timed run. An owned put
-/// changes the map of a slot in place, so a later run changes a map that
-/// already holds the key of the probe and pays no allocation for it. A
-/// retained-version put builds a fresh map each round.
+/// Each run builds its maps before the timer and holds one pass over every
+/// map. The maps are fresh for each run, so both paths insert the key of the
+/// probe in every run: an owned map changes in place and a retained-version
+/// map changes a clone, but neither replaces a key that an earlier run
+/// added. The allocation of the maps stays out of the timer.
 fn put_cost(name: &str, pairs: &[(Term, Term)], body: impl Fn(&mut Map) -> i64) -> f64 {
-    let mut maps = put_maps(pairs);
     let mut best = f64::MAX;
     for _ in 0..MAP_COST_RUNS {
+        let mut maps = put_maps(pairs);
         let start = Instant::now();
         let sum: i64 = maps.iter_mut().map(|map| black_box(body(map))).sum();
         let elapsed = start.elapsed().as_nanos() as f64;

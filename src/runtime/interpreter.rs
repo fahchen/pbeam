@@ -2767,17 +2767,20 @@ fn light_bif_switch(process: &mut ProcessState) -> bool {
 }
 
 /// Change the map of the source operand, then write the result to the
-/// destination operand. Return the outcome of the change. A source that is
-/// not a map changes no register, so the source register and each alias
-/// keep their value.
+/// destination operand. Return the outcome of the change.
 ///
-/// The instruction takes the map from a register only when the source and
-/// the destination name one slot and the term has one owner. This follows
-/// D11 of `docs/term-performance-design-codex-v2.md`: take a source
-/// register only when it is also the destination, all other operand reads
-/// are complete, and a failure preserves the required register state. The
-/// change of a term with another owner copies the form of the map first, as
-/// before.
+/// ERTS writes the destination register only after the update succeeds
+/// (`jit/arm/instr_map.cpp:687-716`), so a failure, a fail label, and a
+/// raised exception leave every register as it was. The instruction takes
+/// the map from the source register only when the source and the
+/// destination name one slot and the term has one owner. This follows D11
+/// of `docs/term-performance-design-codex-v2.md`: take a source register
+/// only when it is also the destination, all other operand reads are
+/// complete, and a failure preserves the required register state. A take
+/// removes the term from the slot, so a failed change writes the unchanged
+/// term back; the destination of a change that took no term keeps its
+/// value. The change of a term with another owner copies the form of the
+/// map first, as before.
 ///
 /// # Errors
 ///
@@ -2794,25 +2797,39 @@ fn update_owned(
         }
         _ => None,
     };
-    // The destination of a `put_map_assoc` and a `put_map_exact` is a
-    // register, so the write always gives that register its value back.
+    let taken = owned.is_some();
     let mut term = match owned {
         Some(term) => term,
         None => read(process, map)?,
     };
     if let Term::Map(entries) = &mut term {
-        let result = update(entries);
-        write(process, destination, term)?;
-        return Ok(match result? {
-            None => Update::Written,
-            Some(reason) => Update::Reason(reason),
-        });
+        match update(entries) {
+            Ok(None) => {
+                write(process, destination, term)?;
+                return Ok(Update::Written);
+            }
+            // The take removed the term from the slot of the destination, so
+            // the unchanged term goes back. A change that took no term
+            // leaves the destination register as it was, as ERTS does on a
+            // failure.
+            Ok(Some(reason)) => {
+                if taken {
+                    write(process, destination, term)?;
+                }
+                return Ok(Update::Reason(reason));
+            }
+            Err(error) => {
+                if taken {
+                    write(process, destination, term)?;
+                }
+                return Err(error);
+            }
+        }
     }
-    // The operand is not a map. The register keeps the term, so the
-    // exception reason and the register give it.
-    let value = term.clone();
-    write(process, destination, term)?;
-    Ok(Update::Missing(value))
+    // The operand is not a map. ERTS raises `{badmap, Map}` and writes no
+    // register, so the destination register keeps its value. A take only
+    // gives a map (see `take_owned`), so no term goes back here.
+    Ok(Update::Missing(term.clone()))
 }
 
 /// The result of [`update_owned`].

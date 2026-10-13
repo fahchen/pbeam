@@ -911,25 +911,25 @@ fn raises_badkey_and_keeps_the_shared_map_like_erts() {
 
 const MAP_TAKE_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_take_probe.beam");
 
-/// Return the pinned ERTS 29.1.1 result of `function/0` of the map-take
-/// probe, and check that PBeam gives the same term. The keys are integers,
-/// so the map order does not depend on the atom table.
-fn take_probe(function: &str, expected: Term) {
+/// Check `function/0` of the map-take probe against the pinned ERTS 29.1.1
+/// result. `erts` is the text of that run and `expected` is the same value
+/// as a term. Both runtimes are compared with `expected`, so a wrong
+/// expected value fails: the pinned text is a literal of this test, and
+/// PBeam runs the compiled fixture. The keys are integers, so the map order
+/// does not depend on the atom table.
+fn take_probe(function: &str, expected: Term, erts: &[u8]) {
     let program = BeamProgram::load(&[MAP_TAKE_PROBE]).unwrap();
-    let erts = erl_reference(&format!(
-        "io:format(\"~w~n\", [map_take_probe:{function}()])"
-    ));
     let result = program.execute("map_take_probe", function, &[]).unwrap();
-    assert_eq!(
-        result.term, expected,
-        "{function} must give the pinned ERTS result"
-    );
     assert_eq!(
         erl_reference(&format!(
             "io:format(\"~w~n\", [map_take_probe:{function}()])"
         )),
         erts,
         "{function} must keep the pinned ERTS reference run"
+    );
+    assert_eq!(
+        result.term, expected,
+        "{function} must give the pinned ERTS result through PBeam"
     );
 }
 
@@ -980,6 +980,8 @@ fn keeps_a_same_register_update_with_its_aliases_like_erts() {
             ]),
             int_map(&[(1, Term::Integer(3)), (2, Term::Integer(2))]),
         ]),
+        b"[#{1 => 9,2 => 2},#{1 => 1,2 => 2},7,9,#{1 => 1,2 => 2,7 => 7},\
+          #{1 => 1,2 => 2,7 => 9},#{1 => 3,2 => 2}]\n",
     );
 }
 
@@ -1002,6 +1004,8 @@ fn keeps_a_shared_map_and_its_descendants_like_erts() {
             inner,
             int_map(&[(1, Term::Integer(1)), (2, Term::Integer(2))]),
         ]),
+        b"[#{1 => #{1 => 1}},#{1 => #{1 => 1}},#{1 => #{1 => 1},2 => 2},#{1 => 1},\
+          #{1 => #{1 => 1}},#{1 => #{1 => 1,2 => 2}},#{1 => 1},#{1 => 1,2 => 2}]\n",
     );
 }
 
@@ -1022,6 +1026,7 @@ fn raises_badkey_and_badmap_for_a_same_register_update_like_erts() {
             int_map(&[(1, Term::Integer(1))]),
             Term::tuple(vec![static_atom("badmap"), not_a_map]),
         ]),
+        b"[{badkey,2},#{1 => 2},#{1 => 1,2 => 2},#{1 => 3},#{1 => 1},{badmap,not_a_map}]\n",
     );
 }
 
@@ -1035,6 +1040,7 @@ fn jumps_to_a_fail_label_in_a_guard_like_erts() {
     take_probe(
         "guarded",
         Term::list_from(vec![present, absent, int_map(&[(1, Term::Integer(1))])]),
+        b"[present,absent,#{1 => 1}]\n",
     );
 }
 
@@ -1055,6 +1061,7 @@ fn keeps_the_source_of_a_caught_exception_like_erts() {
             source.clone(),
             source,
         ]),
+        b"[{error,{badkey,2},#{1 => 1},#{1 => 1}},#{1 => 1},#{1 => 1}]\n",
     );
 }
 
