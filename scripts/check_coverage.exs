@@ -13,4 +13,22 @@ end
 covered = coverage_attribute.("lines-covered")
 valid = coverage_attribute.("lines-valid")
 IO.puts("Application line coverage: #{covered}/#{valid}")
+
+# Temporary debug: print each class-level line whose hits are zero.
+for [_, filename, body] <- Regex.scan(~r/<class [^>]*filename="([^"]+)"[^>]*>(.*?)<\/class>/s, contents) do
+  lines =
+    case Regex.scan(~r/<lines>(.*?)<\/lines>/s, body) do
+      [] -> ""
+      matches -> matches |> List.last() |> Enum.at(1)
+    end
+
+  uncovered =
+    Regex.scan(~r/<line number="(\d+)" hits="0"/, lines)
+    |> Enum.map(fn [_, number] -> number end)
+
+  if uncovered != [] do
+    IO.puts("UNCOVERED #{filename}: #{Enum.join(uncovered, ",")}")
+  end
+end
+
 if valid == 0 or covered != valid, do: raise("application line coverage must be 100%")
