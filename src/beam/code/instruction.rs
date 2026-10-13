@@ -173,6 +173,13 @@ const OPCODE_RECV_MARKER_USE: u8 = 176;
 /// Byte examples use hexadecimal values. Compact operands use the short form
 /// in the Code chunk grammar. `End` represents the stream terminator; the
 /// executor does not run it.
+///
+/// A branch operand and a local-call operand hold the label number that the
+/// parser read from the stream. `ModuleTables::build` replaces each one with
+/// the resolved code position before any process runs: a branch operand
+/// becomes the index of the instruction after the label, and a call operand
+/// becomes the index of the function in the function table of the module. A
+/// loaded instruction therefore reads the field and runs no lookup.
 pub(crate) enum Instruction {
     /// Starts a code label. The label must be in `1..=label_count`.
     ///

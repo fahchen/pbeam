@@ -29,7 +29,7 @@ use std::{collections::HashMap, hint::black_box, rc::Rc, time::Instant};
 
 use super::{
     BeamProgram, CodeTable, Cursor, bif::BifId, code_table, current_frame, function_at_label,
-    label_index, light_bif_switch, read_bif_arguments, read_operand, write_operand,
+    light_bif_switch, read_bif_arguments, read_operand, write_operand,
 };
 use crate::{
     Term,
@@ -125,32 +125,35 @@ fn cost_with<State>(
 /// assert_eq!(floor_module().instructions.len(), 7);
 /// ```
 fn floor_module() -> Rc<BeamModule> {
-    Rc::new(BeamModule::new(
-        "fixture".into(),
-        HashMap::from([(("floor_loop".into(), 1), 1)]),
-        vec![
-            Instruction::FunctionInfo {
-                module: "fixture".into(),
-                name: "floor_loop".into(),
-                arity: 1,
-            },
-            Instruction::Label(1),
-            Instruction::TestExactEqual {
-                fail_label: 3,
-                left: Operand::X(0),
-                right: Operand::Value(Term::Integer(0)),
-            },
-            Instruction::Return,
-            Instruction::Label(3),
-            Instruction::Bif {
-                fail_label: 0,
-                bif: BifId::ErlangMinus2,
-                arguments: vec![Operand::X(0), Operand::Value(Term::Integer(1))],
-                destination: Operand::X(0),
-            },
-            Instruction::CallOnly { arity: 1, label: 1 },
-        ],
-    ))
+    Rc::new(
+        BeamModule::new(
+            "fixture".into(),
+            HashMap::from([(("floor_loop".into(), 1), 1)]),
+            vec![
+                Instruction::FunctionInfo {
+                    module: "fixture".into(),
+                    name: "floor_loop".into(),
+                    arity: 1,
+                },
+                Instruction::Label(1),
+                Instruction::TestExactEqual {
+                    fail_label: 3,
+                    left: Operand::X(0),
+                    right: Operand::Value(Term::Integer(0)),
+                },
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::Bif {
+                    fail_label: 0,
+                    bif: BifId::ErlangMinus2,
+                    arguments: vec![Operand::X(0), Operand::Value(Term::Integer(1))],
+                    destination: Operand::X(0),
+                },
+                Instruction::CallOnly { arity: 1, label: 1 },
+            ],
+        )
+        .expect("the fixture module loads"),
+    )
 }
 
 /// Return the number of the opcode arm that the run loop of the floor loop
@@ -264,7 +267,11 @@ fn prints_the_cost_of_every_instruction_part() {
     report(
         "label_index",
         cost(|| {
-            let index = label_index(black_box(&module), black_box(3)).expect("label 3 exists");
+            let index = *module
+                .tables
+                .jump_targets
+                .get(black_box(&3))
+                .expect("label 3 exists");
             index as u64
         }),
     );
@@ -356,7 +363,9 @@ fn prints_the_cost_of_every_instruction_part() {
     // active frame, and the reset of `cursor.module` between the operations
     // adds one more clone-and-drop pair. The `cursor_module_reset` row gives
     // the cost of that reset alone, so a reader can subtract it.
-    let other = Rc::new(BeamModule::new("other".into(), HashMap::new(), vec![]));
+    let other = Rc::new(
+        BeamModule::new("other".into(), HashMap::new(), vec![]).expect("the fixture module loads"),
+    );
     assert_ne!(other.id, module_id);
     report(
         "cursor_module_reset",
