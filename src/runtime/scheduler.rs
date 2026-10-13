@@ -1305,10 +1305,11 @@ impl Scheduler {
 
     /// Return the bytes of the guest containers that the runtime holds: the
     /// container arrays of each live process and of each freed process, and
-    /// the guest terms that they hold, plus the result or the exit reason of
-    /// the root process. Each shared container is counted once, as the
-    /// counting allocator of `docs/term-layout-design.md` section 5 counts
-    /// each allocation once.
+    /// the guest terms that they hold; the persistent terms, the ETS
+    /// objects, and the messages of the active BIF timers of the node; and
+    /// the result or the exit reason of the root process. Each shared
+    /// container is counted once, as the counting allocator of
+    /// `docs/term-layout-design.md` section 5 counts each allocation once.
     ///
     /// # Examples
     ///
@@ -1321,6 +1322,9 @@ impl Scheduler {
         for process in self.processes.values().chain(freed) {
             process.account(&mut live);
         }
+        self.persistent_terms.account_terms(&mut live);
+        self.ets.account_terms(&mut live);
+        self.timers.account_terms(&mut live);
         if let Some(result) = &self.root_result {
             match result {
                 Ok(term) | Err(term) => live.term(term),

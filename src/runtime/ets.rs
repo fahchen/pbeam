@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::term::{ProcessId, Reference, Term, internal_hash};
+use crate::term::{LiveBytes, ProcessId, Reference, Term, internal_hash};
 
 /// The number of slots of the first segment of a hash table, which a new
 /// table has (`FIRST_SEGSZ`, `erl_db_hash.c:164-165`).
@@ -134,6 +134,30 @@ impl EtsTables {
         self.tables.insert(id, table);
         if let Some(name) = name {
             self.names.insert(name.to_owned(), id);
+        }
+    }
+
+    /// Count the guest terms that the tables hold: each element of each
+    /// stored object, including the key.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tables = EtsTables::default();
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// table.insert(vec![Term::static_atom("k"), Term::tuple(vec![Term::Integer(1)])]);
+    /// tables.create(Reference(1), None, table);
+    /// let mut live = LiveBytes::new();
+    /// tables.account_terms(&mut live);
+    /// assert!(live.bytes() > 0);
+    /// ```
+    pub(super) fn account_terms(&self, live: &mut LiveBytes) {
+        for table in self.tables.values() {
+            for object in table.objects.iter().flatten() {
+                for term in object {
+                    live.term(term);
+                }
+            }
         }
     }
 

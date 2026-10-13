@@ -960,3 +960,26 @@ fn counts_the_exit_reason_of_a_freed_process() {
         .insert(ProcessId(0), (process, ExitPhase::Links(None)));
     assert!(with_reason > scheduler.live_bytes());
 }
+
+#[test]
+fn counts_the_persistent_terms_the_ets_objects_and_the_timer_messages() {
+    let mut scheduler = test_scheduler();
+    let before = scheduler.live_bytes();
+    let _ = scheduler
+        .persistent_terms
+        .put(&atom("key"), &Term::tuple(vec![Term::Integer(1)]));
+    assert!(scheduler.live_bytes() > before);
+    let mut table = Table::new(ProcessId(1), Access::Public, 1);
+    table.insert(vec![atom("key"), Term::tuple(vec![Term::Integer(2)])]);
+    scheduler.ets.create(Reference(1), None, table);
+    assert!(scheduler.live_bytes() > before);
+    scheduler.timers.start(
+        1100,
+        Timer::Bif {
+            reference: Reference(2),
+            receiver: Receiver::Process(ProcessId(1)),
+            message: Term::tuple(vec![Term::Integer(3)]),
+        },
+    );
+    assert!(scheduler.live_bytes() > before);
+}
