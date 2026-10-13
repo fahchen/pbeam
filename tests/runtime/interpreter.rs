@@ -4024,6 +4024,7 @@ fn drains_the_release_work_of_an_exited_process_while_the_root_waits() {
             "waits",
             &[Term::Integer(RELEASE_CELLS)],
             Issuer::Unchecked,
+            &mut None,
         )
         .expect("the loop ends with the root that waits");
     assert!(

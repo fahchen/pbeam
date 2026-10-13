@@ -387,3 +387,17 @@ fn takes_no_term_of_a_signal_node_that_the_handling_emptied() {
     assert!(mailbox.is_empty());
     assert!(pending.is_empty());
 }
+
+#[test]
+fn reports_the_bytes_of_the_mailbox_and_walks_its_terms() {
+    let mut mailbox = Mailbox::default();
+    assert_eq!(mailbox.allocated_bytes(), 0);
+    mailbox.push(Term::tuple(vec![Term::Integer(1)]));
+    mailbox.push_signal(link(5));
+    mailbox.reserve_marker();
+    mailbox.fetch();
+    assert!(mailbox.allocated_bytes() > 0);
+    let mut live = crate::term::LiveBytes::new();
+    mailbox.account_terms(&mut live);
+    assert!(live.bytes() > 0);
+}

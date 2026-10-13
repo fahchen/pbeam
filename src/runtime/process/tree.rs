@@ -192,6 +192,37 @@ impl<K, V> Default for MonitorLinkTree<K, V> {
 }
 
 impl<K: TreeKey, V> MonitorLinkTree<K, V> {
+    /// Return the bytes of the node vector of the tree: the capacity of the
+    /// vector times the size of one node. The number excludes the header of
+    /// the `Vec`, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it.
+    /// The keys and the values are slots of the node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tree = MonitorLinkTree::default();
+    /// tree.insert(ProcessId(1), 7);
+    /// assert!(tree.allocated_bytes() > 0);
+    /// ```
+    pub(in crate::runtime) fn allocated_bytes(&self) -> usize {
+        self.nodes.capacity() * std::mem::size_of::<Node<K, V>>()
+    }
+
+    /// Return the values of the tree, in no order, for the live-byte walk.
+    /// A tree with no entry gives no value.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tree = MonitorLinkTree::default();
+    /// tree.insert(ProcessId(1), 7);
+    /// assert_eq!(tree.values().copied().collect::<Vec<_>>(), vec![7]);
+    /// ```
+    pub(in crate::runtime) fn values(&self) -> impl Iterator<Item = &V> {
+        self.nodes.iter().map(|node| &node.value)
+    }
+
     /// Return true when the tree has no entry. The nodes of a live tree are
     /// one for each entry, so a tree that [`Self::take_value`] emptied is
     /// empty.
@@ -220,21 +251,6 @@ impl<K: TreeKey, V> MonitorLinkTree<K, V> {
     /// ```
     pub(in crate::runtime) fn take_value(&mut self) -> Option<V> {
         self.nodes.pop().map(|node| node.value)
-    }
-
-    /// Return the bytes of the node vector of the tree. The keys and the
-    /// values are slots of that vector.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut tree = MonitorLinkTree::default();
-    /// tree.insert(ProcessId(1), 7);
-    /// assert!(tree.allocated_bytes() > 0);
-    /// ```
-    #[cfg(test)]
-    pub(in crate::runtime) fn allocated_bytes(&self) -> usize {
-        self.nodes.capacity() * std::mem::size_of::<Node<K, V>>()
     }
 
     /// Return the value of `key`, as `mon_lnk_rbt_lookup`.

@@ -86,3 +86,12 @@ fn keeps_the_erts_slots_through_collisions_and_a_resize() {
     assert_eq!(slots(&terms)[0], (0, ok.clone()));
     assert_eq!(terms.get(&ok), Some(&Term::Integer(30)));
 }
+
+#[test]
+fn counts_the_keys_and_values_of_the_table() {
+    let mut terms = PersistentTerms::default();
+    terms.put(&atom("key"), &Term::tuple(vec![Term::Integer(1)]));
+    let mut live = crate::term::LiveBytes::new();
+    terms.account_terms(&mut live);
+    assert!(live.bytes() > 0);
+}

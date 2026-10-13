@@ -9,7 +9,7 @@ use super::{
 use crate::{
     beam::{ModuleId, NameId},
     error::{BeamError, error},
-    term::{Atom, PortId, ProcessId, Reference, Term},
+    term::{Atom, LiveBytes, PortId, ProcessId, Reference, Term},
 };
 
 /// The other end of a link: a process or a port, as the `other.item` of an
@@ -381,6 +381,23 @@ pub(super) struct DirtyWrite {
     pub(super) claim: Claim,
 }
 
+impl Frame {
+    /// Return the bytes of the Y-register slots of the frame: the capacity
+    /// of the slot array times the size of one slot. The number excludes
+    /// the header of the `Vec`, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let frame = Frame { module_id: 0, function: 0, next_instruction: 0, stack: Vec::new() };
+    /// assert_eq!(frame.allocated_bytes(), 0);
+    /// ```
+    pub(super) fn allocated_bytes(&self) -> usize {
+        self.stack.capacity() * std::mem::size_of::<StackSlot>()
+    }
+}
+
 impl ProcessState {
     /// Create a runnable process with argument registers. An entry start
     /// gives one frame. An undefined start gives no frame and keeps the
@@ -593,6 +610,147 @@ impl ProcessState {
             self.receive_timer = ReceiveTimer::Expired { resume };
         }
         std::mem::take(&mut self.waiting)
+    }
+
+    /// Return the bytes of the container arrays of the process: the frame
+    /// array and the Y-register slots of each frame, the register array,
+    /// the dictionary, the target monitors, the mailbox, the link and
+    /// monitor trees, and the BIF timers. The number excludes the header of
+    /// each `Vec` and of each tree node, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes them.
+    /// The terms that the containers hold are the work of
+    /// [`Self::account`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let process = ProcessState::new(ProcessId(0), Start::Undefined { module, function }, vec![]);
+    /// assert!(process.allocated_bytes() > 0);
+    /// ```
+    pub(super) fn allocated_bytes(&self) -> usize {
+        let mut bytes = self.frames.capacity() * std::mem::size_of::<Frame>()
+            + self.registers.capacity() * std::mem::size_of::<Option<Term>>()
+            + self.dictionary_bytes()
+            + self.pending_bif_bytes()
+            + self.length_trap_bytes()
+            + self.monitored_by.capacity() * std::mem::size_of::<TargetMonitor>()
+            + self.mailbox.allocated_bytes()
+            + self.links.allocated_bytes()
+            + self.monitors.allocated_bytes()
+            + self.bif_timers.allocated_bytes();
+        for frame in &self.frames {
+            bytes += frame.allocated_bytes();
+        }
+        bytes
+    }
+
+    /// Return the bytes of the process dictionary of `put/2` and `get/1`: the
+    /// capacity of the pair array times the size of one pair. The number
+    /// excludes the header of the `Vec`, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![]);
+    /// process.dictionary.push((Term::Integer(1), Term::Integer(2)));
+    /// assert!(process.dictionary_bytes() > 0);
+    /// ```
+    pub(super) fn dictionary_bytes(&self) -> usize {
+        self.dictionary.capacity() * std::mem::size_of::<(Term, Term)>()
+    }
+
+    /// Return the bytes of the argument vector of the pending BIF call of the
+    /// process: the capacity of the vector times the size of one argument, or
+    /// 0 when the process has no pending call. The vector survives the
+    /// scheduling step at the call. The number excludes the header of the
+    /// `Vec`, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![]);
+    /// process.pending_bif = Some(PendingBif { module: "lists", function: "member", arguments: vec![Term::Integer(1)], tail: false });
+    /// assert!(process.pending_bif_bytes() > 0);
+    /// ```
+    pub(super) fn pending_bif_bytes(&self) -> usize {
+        self.pending_bif.as_ref().map_or(0, |pending| {
+            pending.arguments.capacity() * std::mem::size_of::<Term>()
+        })
+    }
+
+    /// Return the bytes of the state vector of the `length/1` trap of the
+    /// process: the capacity of the vector times the size of one term, or 0
+    /// when the process has no trap. The vector survives the scheduling step
+    /// at the trap. The number excludes the header of the `Vec`, as the
+    /// accounting of task [#559](https://github.com/fahchen/pbeam/issues/559)
+    /// excludes it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![]);
+    /// process.length_trap = Some(vec![Term::Integer(1), Term::nil()]);
+    /// assert!(process.length_trap_bytes() > 0);
+    /// ```
+    pub(super) fn length_trap_bytes(&self) -> usize {
+        self.length_trap
+            .as_ref()
+            .map_or(0, |trap| trap.capacity() * std::mem::size_of::<Term>())
+    }
+
+    /// Count the bytes of the containers of the process and of each guest
+    /// term that they hold. The terms are in the Y-register slots, the X
+    /// registers, the dictionary, the exit reason of an exiting process, the
+    /// mailbox entries, the origins of the monitor tree, the arguments of a
+    /// pending BIF, and the state of the `length/1` trap. The walk reaches
+    /// the exit reason for a live process and for a freed process, because
+    /// the scheduler counts both through this method.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// process.account(&mut live);
+    /// assert!(live.bytes() > 0);
+    /// ```
+    pub(super) fn account(&self, live: &mut LiveBytes) {
+        live.add(self.allocated_bytes());
+        for frame in &self.frames {
+            for slot in &frame.stack {
+                if let StackSlot::Term(term) = slot {
+                    live.term(term);
+                }
+            }
+        }
+        for register in self.registers.iter().flatten() {
+            live.term(register);
+        }
+        for (key, value) in &self.dictionary {
+            live.term(key);
+            live.term(value);
+        }
+        if let Some(reason) = &self.exiting {
+            live.term(reason);
+        }
+        self.mailbox.account_terms(live);
+        for origin in self.monitors.values() {
+            if let Some(monitor) = &origin.monitor {
+                live.term(&monitor.item);
+                live.term(&monitor.tag);
+            }
+        }
+        if let Some(pending) = &self.pending_bif {
+            for argument in &pending.arguments {
+                live.term(argument);
+            }
+        }
+        if let Some(trap) = &self.length_trap {
+            for term in trap {
+                live.term(term);
+            }
+        }
     }
 }
 

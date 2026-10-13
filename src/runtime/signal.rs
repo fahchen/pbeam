@@ -203,12 +203,36 @@ pub(super) enum Signal {
 }
 
 impl Signal {
+    /// Call `visit` for each guest term that the signal holds: the exit
+    /// reason of an exit or a monitor down signal, the item of a
+    /// `process_info/2` signal, and the message of an alias signal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut terms = Vec::new();
+    /// Signal::Exit { from: LinkId::Process(ProcessId(1)), reason: Term::nil(), linked: false, normal_kills: false, alias: None }
+    ///     .visit_terms(&mut |term| terms.push(term.clone()));
+    /// assert_eq!(terms, vec![Term::nil()]);
+    /// ```
+    pub(super) fn visit_terms(&self, visit: &mut impl FnMut(&Term)) {
+        match self {
+            Signal::Exit { reason, .. } => visit(reason),
+            Signal::MonitorDown { reason, .. } => visit(reason),
+            Signal::ProcessInfo { item, .. } => visit(item),
+            Signal::AliasMessage { message, .. } => visit(message),
+            _ => {}
+        }
+    }
+}
+
+impl Signal {
     /// Move each term of this signal to `pending`, and leave the signal with
     /// no term. The `Exit`, `MonitorDown`, `ProcessInfo`, and `AliasMessage`
     /// signals hold a term; the other signals hold identifiers, references,
     /// and capabilities. Only a signal that no guest code can read again
     /// gives up its terms (see
-    /// [`ProcessState::take_terms`](super::ProcessState)).
+    /// [`Scheduler::release_process`](super::Scheduler::release_process)).
     ///
     /// # Examples
     ///

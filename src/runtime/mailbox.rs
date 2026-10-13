@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use super::signal::Signal;
-use crate::term::Term;
+use crate::term::{LiveBytes, Term};
 
 /// Number of receive marker slots in a process, as
 /// `ERTS_RECV_MARKER_BLOCK_SIZE` in ERTS.
@@ -983,9 +983,12 @@ impl Mailbox {
         self.nodes.is_empty() && self.markers.is_empty()
     }
 
-    /// Return the bytes of the allocations of the mailbox: its node arena, its
-    /// free slots, and its marker slots. The terms that the entries hold are
-    /// slots of the arena.
+    /// Return the bytes of the allocations of the mailbox: its node arena,
+    /// its free slots, and its marker slots. The number excludes the header
+    /// of each `Vec` and of the `VecDeque`, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes them.
+    /// The terms that the entries hold are the work of
+    /// [`Self::account_terms`].
     ///
     /// # Examples
     ///
@@ -994,11 +997,37 @@ impl Mailbox {
     /// mailbox.push(Term::Integer(1));
     /// assert!(mailbox.allocated_bytes() > 0);
     /// ```
-    #[cfg(test)]
     pub(super) fn allocated_bytes(&self) -> usize {
         self.nodes.capacity() * std::mem::size_of::<Node>()
             + self.free.capacity() * std::mem::size_of::<NodeId>()
             + self.markers.capacity() * std::mem::size_of::<Marker>()
+    }
+
+    /// Count the guest terms of the mailbox entries and of the receive
+    /// markers, in queue order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut live = LiveBytes::new();
+    /// mailbox.account_terms(&mut live);
+    /// assert!(live.bytes() > 0);
+    /// ```
+    pub(super) fn account_terms(&self, live: &mut LiveBytes) {
+        let mut node = self.first;
+        while let Some(current) = node {
+            match &self.nodes[current].entry {
+                Entry::Message(term) => live.term(term),
+                Entry::Signal(Some(signal)) => signal.visit_terms(&mut |term| live.term(term)),
+                Entry::Marker | Entry::Signal(None) => {}
+            }
+            node = self.nodes[current].next;
+        }
+        for marker in &self.markers {
+            if let Some(id) = &marker.id {
+                live.term(id);
+            }
+        }
     }
 }
 

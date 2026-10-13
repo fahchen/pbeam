@@ -135,3 +135,16 @@ fn drains_the_elements_of_a_tuple_with_the_work_stack() {
     };
     assert_eq!(tuple.take_last(), None);
 }
+
+#[test]
+fn reports_the_bytes_of_the_element_array() {
+    let term = tuple(&[1, 2, 3]);
+    let Term::Tuple(tuple) = &term else {
+        unreachable!()
+    };
+    assert_eq!(
+        tuple.allocated_bytes(),
+        tuple.arc().capacity() * std::mem::size_of::<Term>()
+    );
+    assert_eq!(tuple.allocated_bytes(), 3 * std::mem::size_of::<Term>());
+}
