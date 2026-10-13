@@ -391,7 +391,11 @@ fn prints_the_cost_of_every_derivation() {
         measure(OPERATIONS, || {
             let mut sum = 0u64;
             for _ in 0..OPERATIONS {
-                sum += black_box(position.index) as u64;
+                // The reference goes through `black_box` first, so the load
+                // of the field happens after the opaque call. A bare
+                // `black_box(position.index)` passes the known constant 12
+                // and folds the load away.
+                sum += black_box(&position).index as u64;
             }
             sum
         }),
@@ -533,8 +537,12 @@ fn prints_the_cost_of_every_derivation() {
             },
         ),
     );
+    // The index maintenance alone: one key and its hash. The caller of a
+    // real insert also builds the object that the table stores, and the row
+    // above pays that storage while this row does not. The document must not
+    // compare the two rows as equal work.
     report(
-        "hash_index_insert_1000",
+        "hash_index_insert_key_1000",
         measure_with(
             ETS_OPERATIONS,
             || KeyIndex::of((0..1000).map(Term::Integer).collect(), 1024),
