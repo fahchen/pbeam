@@ -13,18 +13,19 @@
 -export([scene/0]).
 
 %% Build the scene and return the terms that the harness holds: the render
-%% fun, the screen, and the hash map of styles.
+%% fun, the screen, and the hash map of styles. The held tuple keeps the fun
+%% and its hash map live across the yields, so a sample includes them.
 scene() ->
     Styles = styles(),
     Hash = hash_styles(),
     Screen = screen(Styles),
     Render = fun(Line) -> render(Line, Hash) end,
-    Held = hold(Screen, Render),
+    Held = hold(Screen, Render, Hash),
     put(counter, length(Screen)),
     put(styles, Styles),
     self() ! {screen, Screen},
-    %% Yield with the screen, the dictionary entries, and the mailbox message
-    %% live, so a sample of the run includes those containers.
+    %% Yield with the screen, the fun, the hash map, the dictionary entries,
+    %% and the mailbox message live, so a sample includes those containers.
     ok = pump(3),
     Held.
 
@@ -51,13 +52,14 @@ screen(Styles) ->
 render(Line, Hash) ->
     maps:size(Hash) + length(Line).
 
-%% Keep the screen and the fun in Y registers across a call, so the process
-%% holds frame stack slots at the sampling point.
-hold(Screen, Render) ->
+%% Keep the screen, the render fun, and the hash map in the held result
+%% across the yields of `pump/1`, so the process holds their containers at a
+%% sampling point.
+hold(Screen, Render, Hash) ->
     Count = total(Screen, 0, Render),
     Safe = Screen,
     More = seq(1, 3),
-    {Safe, More, Count}.
+    {Safe, More, Count, Render, Hash}.
 
 %% Yield three times, so the harness samples the live bytes at more than one
 %% scheduling step while the caller holds the scene.
