@@ -23,8 +23,11 @@ for [_, filename, body] <- Regex.scan(~r/<class [^>]*filename="([^"]+)"[^>]*>(.*
     end
 
   uncovered =
-    Regex.scan(~r/<line number="(\d+)" hits="0"/, lines)
-    |> Enum.map(fn [_, number] -> number end)
+    Regex.scan(~r/<line ([^>]*)\/>/, lines)
+    |> Enum.filter(fn [_, attributes] -> String.contains?(attributes, ~s(hits="0")) end)
+    |> Enum.map(fn [_, attributes] ->
+      Regex.run(~r/number="(\d+)"/, attributes) |> List.last()
+    end)
 
   if uncovered != [] do
     IO.puts("UNCOVERED #{filename}: #{Enum.join(uncovered, ",")}")
