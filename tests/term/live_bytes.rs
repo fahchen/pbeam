@@ -162,3 +162,12 @@ fn counts_no_bytes_for_an_immediate() {
     assert_eq!(bytes(&Term::nil()), 0);
     assert_eq!(bytes(&Term::static_atom("ok")), 0);
 }
+
+#[test]
+fn walks_a_long_list_without_recursion() {
+    // A recursive walk overflows the Rust stack on a list of this length.
+    let list = Term::list_from((0..200_000_i64).map(Term::Integer));
+    let mut live = LiveBytes::new();
+    live.term(&list);
+    assert_eq!(live.bytes(), 200_000 * size_of::<Cons>());
+}
