@@ -242,7 +242,9 @@ The size cost. A `HostTerm` is a `Term` of 40 bytes and an `Arc<AtomTable>` of 8
 
 ### 3.5 The size that the atom mechanism reaches
 
-The atom arm goes from 24 bytes to 4 bytes. `Term` stays 40 bytes and `Option<Term>` stays 40 bytes, because the 32-byte `Binary` arm holds the size. The mechanism alone does not reach the 16-byte target of row 6. It removes the last arm above 8 bytes other than `Binary`, so the compact term then reaches 16 bytes.
+The atom arm goes from 24 bytes to 4 bytes. Without the compact term of section 4, `Term` stays 40 bytes and `Option<Term>` stays 40 bytes, because the 32-byte `Binary` arm holds the size. The mechanism alone does not reach the 16-byte target of row 6. It removes the last arm above 8 bytes other than `Binary`, so the compact term then reaches 16 bytes.
+
+The order of the two mechanisms changes the number that each one reaches. With the compact term of section 4 in place, `Term` is 32 bytes and the 24-byte atom arm is the largest arm. The atom mechanism then takes `Term` from 32 bytes to 16 bytes. Task [#580](https://github.com/fahchen/pbeam/issues/580) owns that mechanism, and its sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver it. Section 8 records the size that the compact term reaches alone.
 
 ### 3.6 The alternatives that this design rejects
 
@@ -257,7 +259,7 @@ The atom arm goes from 24 bytes to 4 bytes. `Term` stays 40 bytes and `Option<Te
 
 ## 4. The design of the compact term
 
-The mechanism boxes the 32-byte binary descriptor behind one pointer, as the representation section of the proposal asks: "Box the binary descriptor in the layout comparison" (`docs/term-performance-design-codex-v2.md`). `Term::Binary` then holds one `Arc` to the view, and the view keeps the bytes, the bit offset, the size, and the packed bytes that `src/term/binary.rs:44-60` holds today.
+The mechanism boxes the 32-byte binary descriptor behind one pointer, as the representation section of the proposal asks: "Box the binary descriptor in the layout comparison" (`docs/term-performance-design-codex-v2.md`). Task [#571](https://github.com/fahchen/pbeam/issues/571) realizes the pointer as the `Binary` handle of the implementation: `Binary` is one `Arc` to a private `BinaryView`, as `Tuple`, `Fun`, `Map`, and `ConsRef` are one `Arc` to their payload. `Term::Binary` keeps the `Binary` handle, and the view keeps the bytes, the bit offset, the size, and the packed bytes that `src/term/binary.rs:44-60` held before the change. Section 8 records the outcome.
 
 The model of section 1 gives the sizes. After the binary move, `Binary` is 8 bytes, so every compound arm is at most 8 bytes and `Nil` is 0. With the immediate atom of section 3, the largest arm is 8 bytes and the discriminant is 8 bytes, which is 16 bytes. `Option<Term>` is also 16 bytes.
 
@@ -326,3 +328,57 @@ The Terra Counter example, release build, from `bash scripts/terra_latency.sh re
 | control run, `3b3a21d` | `{ 6.94 18.96 18.36 }` | 0.29 s | 0.021 s | 0.030 s | 0.015 s | 0.027 s | 62080 KB |
 
 The resident set size of the release process is 62080 KB, which is 60.6 MiB, for a full scene of the control run. The method is a wrapper that samples `ps -o rss` of the `pbeam` process every 50 ms and keeps the maximum. The number is not the live guest bytes and it is not an upper bound of them. It can be above the live bytes, because the allocator keeps freed memory, and because the loaded BEAM code, the binary, and the allocator arenas are part of the resident set. It can be below a short peak, because a sample every 50 ms does not see a peak between two samples. The sample is supporting evidence only, as section 5 states, and it cannot establish a 20 percent reduction of the live bytes. The control run is a single run, and its four keys carry the variance of a single sample. The record keeps the discarded run only to show why the bound of the measurement plan matters.
+
+## 8. The outcome of the compact term of [#571](https://github.com/fahchen/pbeam/issues/571)
+
+Task [#571](https://github.com/fahchen/pbeam/issues/571) implements the compact term of section 4 on branch `perf/571-compact-term` at `45cae312`. The implementation makes `Binary` the one-pointer handle: the private `BinaryView` keeps the bytes, the bit offset, the size, and the packed bytes, and `Binary` is one `Arc` to it. The public `Term::Binary(Binary)` variant and every call site stay unchanged.
+
+The sizes at the pinned `rustc 1.99.0 (b940084d7 2026-09-28)`, host Darwin 27.0.0 arm64, Apple M1 Max, from `RUSTC_BOOTSTRAP=1 mise exec -- cargo rustc --locked --lib -- -Zprint-type-sizes`:
+
+| Type | At `c7dd12f5`, bytes | At `45cae312`, bytes |
+| --- | --- | --- |
+| `Term` | 40 | 32 |
+| `Option<Term>` | 40 | 32 |
+| `Binary` | 32 | 8 |
+| `BinaryView` | no separate type | 32 |
+| `Atom` | 24 | 24 |
+| `MatchState` | 40 | 16 |
+| `Operand` | 40 | 32 |
+| `Instruction` | 136 | 112 |
+| `StackSlot` | 40 | 32 |
+
+The arm sizes at `45cae312` are `Binary` 8, `Atom` 24, `Integer`, `Cons`, `Tuple`, `Map`, `Pid`, `Port`, `Reference`, `Fun`, and `MatchContext` 8, and `Nil` 0. `Term` is 32 bytes because the 24-byte `Atom` arm is the largest arm and the discriminant is 8 bytes. The task does not reach the 16-byte target of row 6. Only the immediate atom root of [#580](https://github.com/fahchen/pbeam/issues/580) takes the largest arm to 8 bytes and `Term` to 16 bytes, and its sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver it.
+
+The added allocation and the indirection, from `mise run bench-term` at `45cae312`, load `{ 8.55 39.09 47.42 }` for the first run and `{ 5.68 24.15 39.60 }` for the second:
+
+| Operation | Allocations | Note |
+| --- | --- | --- |
+| `Binary::from(bytes)`, with the byte vector owned by the caller | 2 | the array of the bytes and the view descriptor |
+| a copy of a `Binary` handle | 0 | one reference count |
+| `bits` of a byte-aligned range | 1 | one view descriptor |
+| `bits` of a range whose first bit is not on a byte boundary | 3 | the view descriptor, the vector of the packed bits, and its `Arc` |
+| one read of the size through the handle | 0.825 ns, then 0.799 ns | one pointer load before the fields of the view |
+
+The boxed descriptor adds one allocation for each binary handle against the inline descriptor of the previous layout. The live-byte walk counts 32 bytes of the descriptor for each distinct handle and excludes the 16-byte `Arc` header, as it excludes the header of every shared container (section 5).
+
+The peak live bytes of one Terra scene, from `mise run bench-live-bytes`, at load `{ 8.55 39.09 47.42 }` for both runs:
+
+| Revision | Peak live bytes | Peak resident set size |
+| --- | --- | --- |
+| `c7dd12f5` | 24096 | 3952 KB |
+| `45cae312` | 20192 | 3792 KB |
+
+The reduction is 3904 bytes, or 16.20 percent of 24096 bytes. The two runs of the harness agree in both revisions, so the spread is 0 bytes.
+
+The end-to-end Terra path, from `bash scripts/terra_latency.sh release`:
+
+| Revision | Load | First frame | Key `j` | Key `j` | Key `k` | Key `q` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `c7dd12f5` | `{ 8.23 38.01 46.94 }` | 0.50 s | 0.014 s | 0.015 s | 0.015 s | 0.016 s |
+| `45cae312` | `{ 7.50 36.88 46.44 }` | 0.51 s | 0.015 s | 0.015 s | 0.015 s | 0.015 s |
+
+The floor loop at 200000 iterations, from `mise run bench-dispatch`, load `{ 8.42 38.56 47.19 }` at both runs. The `call_only` floor loop of `dispatch_probe` is 122.5 ns at `c7dd12f5` and 122.2 ns at `45cae312`; the `call_ext_only` floor loop is 296.4 ns and 253.4 ns; the loop plus `gc_bif '+'` is 194.0 ns and 192.3 ns; the loop plus the `bif` of `tuple_size/1` is 194.7 ns and 193.4 ns; the loop plus the `bif` of `element/2` is 197.8 ns and 194.3 ns; the loop plus the `bif` of `hd/1` is 197.8 ns and 194.7 ns; and the loop plus the `bif` of `map_get/2` on a 1000-key map is 254.7 ns and 252.4 ns.
+
+The gate of row 6 fails. The end-to-end Terra time does not gain 10 percent: the first frame is 0.50 s and 0.51 s, and each key is at most 0.016 s in both runs. The peak-live-byte reduction is 16.20 percent, below the 20 percent bound. The time does not regress by more than 10 percent: each Terra key is flat, and no floor-loop number regresses. The `call_ext_only` floor loop improves by 14.5 percent, which is supporting evidence of the smaller decoded form and not a limb of the gate. The compact term alone therefore does not pass the gate, and the task closes with this measurement.
+
+The row stays open for the immediate atom of [#580](https://github.com/fahchen/pbeam/issues/580). That mechanism takes term slots from 32 bytes to 16 bytes, so the peak-live-byte limb has the reduction that this task alone does not reach.
