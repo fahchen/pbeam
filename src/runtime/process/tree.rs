@@ -231,6 +231,23 @@ impl<K: TreeKey, V> MonitorLinkTree<K, V> {
         self.find(*key).map(|index| &mut self.nodes[index].value)
     }
 
+    /// Return each value of the tree for a change in place, in no order. A
+    /// reader that takes the terms out of a value uses it before the tree
+    /// drops (see [`ProcessState::take_terms`](super::ProcessState)).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// tree.insert(ProcessId(1), 0);
+    /// for value in tree.values_mut() {
+    ///     *value += 1;
+    /// }
+    /// assert_eq!(tree.get(&ProcessId(1)), Some(&1));
+    /// ```
+    pub(in crate::runtime) fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.nodes.iter_mut().map(|node| &mut node.value)
+    }
+
     /// Insert `value` at `key`, as the ERTS `insert_aux__`
     /// (`erl_rbtree.h:1055-1130`) and `insert_fixup__`
     /// (`erl_rbtree.h:938-1053`) do. A key that the tree has keeps its node

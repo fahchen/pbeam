@@ -384,6 +384,16 @@ impl Term {
     /// its tail and then its head onto the stack. The head comes off the
     /// stack first, so a long list keeps the stack short.
     ///
+    /// The method moves one compound node and its direct children, and it
+    /// does not walk the graph. The children of a tuple, of a fun, and of a
+    /// map can be many, and the whole group moves in this one call: see
+    /// [`Term::take_group`] for the bounded release of a tuple or of a fun.
+    /// A caller that owns a work stack can release the graph one bounded
+    /// step at a time, as `Scheduler::drain_release` does for the exit of a
+    /// process that owns a large graph (row 11 of
+    /// `docs/term-performance-design-codex-v2.md`, task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559)).
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -391,7 +401,7 @@ impl Term {
     /// Term::tuple(vec![Term::Integer(1)]).take_nested(&mut pending);
     /// assert_eq!(pending, vec![Term::Integer(1)]);
     /// ```
-    fn take_nested(&mut self, pending: &mut Vec<Term>) {
+    pub(crate) fn take_nested(&mut self, pending: &mut Vec<Term>) {
         match self {
             Term::Tuple(elements) => pending.extend(elements.take_last().unwrap_or_default()),
             Term::Cons(cell) => {
@@ -402,6 +412,33 @@ impl Term {
             Term::Fun(fun) => pending.extend(fun.take_last().unwrap_or_default()),
             Term::Map(map) => map.drain_into(pending),
             _ => {}
+        }
+    }
+
+    /// Take the element array of a tuple or the free variables of a fun as
+    /// one owned vector, and leave the term empty. Return `None` when the
+    /// term holds no such array: an immediate, a binary, a match context, a
+    /// cons cell of two terms, an empty container, or a map.
+    ///
+    /// The vector can hold many terms, and it is the array that the term
+    /// already owns, so the call copies nothing. A caller that releases a
+    /// graph in bounded steps moves the vector in batches, as
+    /// `Scheduler::drain_release` does (row 11 of
+    /// `docs/term-performance-design-codex-v2.md`, task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559)).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut term = Term::tuple(vec![Term::Integer(1)]);
+    /// assert_eq!(term.take_group(), Some(vec![Term::Integer(1)]));
+    /// assert_eq!(term.take_group(), None);
+    /// ```
+    pub(crate) fn take_group(&mut self) -> Option<Vec<Term>> {
+        match self {
+            Term::Tuple(elements) => elements.take_last().filter(|elements| !elements.is_empty()),
+            Term::Fun(fun) => fun.take_last().filter(|arguments| !arguments.is_empty()),
+            _ => None,
         }
     }
 }

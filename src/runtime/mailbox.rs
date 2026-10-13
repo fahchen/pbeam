@@ -926,6 +926,38 @@ impl Mailbox {
         }
         messages
     }
+
+    /// Move each term of the mailbox to `pending`, and leave the mailbox with
+    /// no term: the message of each node, the term of each signal, and the
+    /// identifier of each receive marker. Only a mailbox of a process that no
+    /// guest code can read again gives up its terms (see
+    /// [`ProcessState::take_terms`](super::ProcessState)).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut mailbox = Mailbox::default();
+    /// mailbox.push(Term::Integer(1));
+    /// let mut pending = Vec::new();
+    /// mailbox.take_terms(&mut pending);
+    /// assert_eq!(pending, vec![Term::Integer(1)]);
+    /// ```
+    pub(super) fn take_terms(&mut self, pending: &mut Vec<Term>) {
+        for node in &mut self.nodes {
+            match &mut node.entry {
+                Entry::Message(term) => pending.push(std::mem::replace(term, Term::Nil)),
+                Entry::Marker => {}
+                Entry::Signal(signal) => {
+                    if let Some(signal) = signal {
+                        signal.take_terms(pending);
+                    }
+                }
+            }
+        }
+        for marker in &mut self.markers {
+            pending.extend(marker.id.take());
+        }
+    }
 }
 
 #[cfg(test)]

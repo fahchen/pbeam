@@ -1,4 +1,6 @@
-use super::{CONTEXT_REDS, LinkId, MonitorOptions, MonitorTarget, Scheduler, Turn};
+use super::{
+    CONTEXT_REDS, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH, Release, Scheduler, Turn,
+};
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
 use crate::runtime::host::output::{IovecWrite, IovecWritten};
@@ -11,7 +13,7 @@ use crate::{
     },
     runtime::signal::Signal,
     runtime::timer::{Receiver, Timer},
-    term::{Atom, ProcessId, Reference, Term},
+    term::{Atom, Fun, Lambda, ProcessId, Reference, Term},
 };
 use std::{
     io::{PipeReader, PipeWriter, Read, Write},
@@ -927,4 +929,189 @@ fn sends_a_message_that_shares_the_term_of_the_sender() {
     assert!(message.shares_storage_with(&received[0]));
     // A term of another kind does not share its storage.
     assert!(!Term::Integer(1).shares_storage_with(&Term::Integer(1)));
+}
+
+/// Return a term of one integer, for a test that tells the terms of the
+/// release work list apart.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(marker(1), Term::tuple(vec![Term::Integer(1)]));
+/// ```
+fn marker(number: i64) -> Term {
+    Term::tuple(vec![Term::Integer(number)])
+}
+
+/// Release each term of the release work list of `scheduler`, and check that
+/// the list ends empty. A test uses it to finish a bounded release.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// release_all(&mut test_scheduler());
+/// ```
+fn release_all(scheduler: &mut Scheduler) {
+    while !scheduler.release.is_empty() {
+        scheduler.drain_release(RELEASE_BATCH);
+    }
+}
+
+#[test]
+fn keeps_the_terms_of_an_exiting_process_for_the_release_batches() {
+    // Row 11 of docs/term-performance-design-codex-v2.md: an exiting process
+    // moves its terms to the release work list of the scheduler, and one
+    // scheduler step releases at most `RELEASE_BATCH` of them.
+    let mut scheduler = test_scheduler();
+    let terms: Vec<Term> = (0..2 * RELEASE_BATCH as i64).map(Term::Integer).collect();
+    scheduler.start(frame(), terms, allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    // Every term of the process is on the list, and the exit reason is the
+    // last one. The list owns them, so a switch to another process loses no
+    // root.
+    assert_eq!(scheduler.release.len(), 2 * RELEASE_BATCH + 1);
+    assert_eq!(
+        scheduler.release.last(),
+        Some(&Release::Term(atom("normal")))
+    );
+    scheduler.drain_release(RELEASE_BATCH);
+    assert_eq!(
+        scheduler.release.len(),
+        2 * RELEASE_BATCH + 1 - RELEASE_BATCH,
+        "one step releases one batch"
+    );
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn releases_the_terms_of_an_exiting_process_at_each_later_step() {
+    // A step releases one batch of the release work, also when no process
+    // runs, so a process that waits to run waits for at most one batch.
+    let mut scheduler = test_scheduler();
+    let terms: Vec<Term> = (0..2 * RELEASE_BATCH as i64).map(Term::Integer).collect();
+    scheduler.start(frame(), terms, allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    let held = scheduler.release.len();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
+    assert_eq!(scheduler.release.len(), held - RELEASE_BATCH);
+}
+
+#[test]
+fn keeps_the_shared_child_of_a_released_graph_alive() {
+    // The release work list owns each child root. A child that another
+    // holder still owns keeps its value across the release of the graph that
+    // the process held.
+    let mut scheduler = test_scheduler();
+    let shared = marker(11);
+    let held = shared.clone();
+    let graph = Term::list_from([shared.clone(), shared.clone()]);
+    drop(shared);
+    scheduler.start(frame(), vec![graph], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    release_all(&mut scheduler);
+    assert_eq!(held, marker(11), "the shared child keeps its value");
+}
+
+#[test]
+fn releases_a_deep_chain_through_the_batches_without_a_stack_overflow() {
+    // The walk of the release work list uses no Rust recursion, so the
+    // release of a deep chain does not overflow the stack.
+    let mut scheduler = test_scheduler();
+    let deep = (0..100_000).fold(Term::Nil, |inner, _| Term::tuple(vec![inner]));
+    scheduler.start(frame(), vec![deep], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn drops_a_live_process_that_holds_a_deep_chain_without_a_stack_overflow() {
+    // The shutdown of a run releases the state of a live process through the
+    // iterative drop walk of `Term::drop`, which does not recurse on a deep
+    // term. No process waits to run at the shutdown.
+    let mut scheduler = test_scheduler();
+    let deep = (0..100_000).fold(Term::Nil, |inner, _| Term::tuple(vec![inner]));
+    scheduler.start(frame(), vec![deep], allow_all()).unwrap();
+    drop(scheduler);
+}
+
+/// Return the number of terms that the release work list of `scheduler`
+/// owns: each term of the list and each term of a group that it holds.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(held(&test_scheduler()), 0);
+/// ```
+fn held(scheduler: &Scheduler) -> usize {
+    scheduler
+        .release
+        .iter()
+        .map(|item| match item {
+            Release::Term(_) => 1,
+            Release::Terms(group) => group.len(),
+        })
+        .sum()
+}
+
+#[test]
+fn moves_the_array_of_a_wide_tuple_in_batches() {
+    // One node holds more direct children than one batch. The exit moves the
+    // term to the release work list, one step takes its array as one group
+    // and moves at most one batch of the group, and the rest waits for a
+    // later step. A step that moved the whole array would leave no group.
+    let mut scheduler = test_scheduler();
+    let width = 4 * RELEASE_BATCH;
+    let wide = Term::tuple((0..width as i64).map(Term::Integer).collect());
+    scheduler.start(frame(), vec![wide], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    // The exit moved one term for the tuple and one for its reason.
+    assert_eq!(scheduler.release.len(), 2);
+    assert_eq!(held(&scheduler), 2);
+    let start = scheduler.release.len();
+    scheduler.drain_release(RELEASE_BATCH);
+    assert_eq!(held(&scheduler), width, "the group keeps every element");
+    // The step released the exit reason and the tuple node, which cost one
+    // term each, and then moved `RELEASE_BATCH - 2` terms of the array. The
+    // rest of the array waits for a later step, so one step moves at most
+    // one batch of the group.
+    let remaining = scheduler.release.iter().find_map(|item| match item {
+        Release::Terms(group) => Some(group.len()),
+        Release::Term(_) => None,
+    });
+    assert_eq!(remaining, Some(width - (RELEASE_BATCH - 2)));
+    assert!(scheduler.release.len() > start);
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
+}
+
+#[test]
+fn moves_the_free_variables_of_a_fun_in_batches() {
+    // The free variables of a fun are one group, as the elements of a tuple
+    // are, so one step moves at most one batch of them.
+    let mut scheduler = test_scheduler();
+    let module = Atom::from_static("lists").unwrap();
+    let width = 4 * RELEASE_BATCH;
+    let free: Vec<Term> = (0..width as i64).map(Term::Integer).collect();
+    let fun = Term::Fun(Fun::new(Lambda::new(module, 0, 7, 53, 1), free));
+    scheduler.start(frame(), vec![fun], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.finish_current(atom("normal"), None);
+    let start = scheduler.release.len();
+    scheduler.drain_release(RELEASE_BATCH);
+    assert_eq!(held(&scheduler), width, "the group keeps every variable");
+    let remaining = scheduler.release.iter().find_map(|item| match item {
+        Release::Terms(group) => Some(group.len()),
+        Release::Term(_) => None,
+    });
+    assert_eq!(remaining, Some(width - (RELEASE_BATCH - 2)));
+    assert!(scheduler.release.len() > start);
+    release_all(&mut scheduler);
+    assert!(scheduler.release.is_empty());
 }

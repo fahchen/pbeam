@@ -1,4 +1,5 @@
-use super::{MARKER_SLOTS, Mailbox, Step};
+use super::{Entry, MARKER_SLOTS, Mailbox, Step};
+use crate::runtime::process::LinkId;
 use crate::runtime::signal::Signal;
 use crate::term::test_atom;
 use crate::term::{ProcessId, Reference, Term};
@@ -340,4 +341,39 @@ fn reuses_marker_slots_and_drops_passed_markers() {
     }
     assert!(mailbox.markers.is_empty());
     assert_eq!(mailbox.messages(), vec![int(0), int(1)]);
+}
+
+#[test]
+fn takes_the_terms_of_the_messages_the_signal_reasons_and_the_markers() {
+    // The scheduler moves each term of the mailbox of an exiting process to
+    // its release work list (`Mailbox::take_terms`, row 11 of
+    // docs/term-performance-design-codex-v2.md).
+    let mut mailbox = Mailbox::default();
+    let message = int(1);
+    let reason = int(2);
+    mailbox.push(message.clone());
+    mailbox.push_signal(Signal::Exit {
+        from: LinkId::Process(ProcessId(1)),
+        reason: reason.clone(),
+        linked: false,
+        normal_kills: false,
+        alias: None,
+    });
+    let marker = mailbox.reserve_marker();
+    assert_eq!(marker, int(-(1i64 << 59)));
+    let mut pending = Vec::new();
+    mailbox.take_terms(&mut pending);
+    assert_eq!(pending, vec![message, reason, marker]);
+}
+
+#[test]
+fn takes_no_term_of_a_signal_node_that_the_handling_emptied() {
+    // The handling of a signal leaves its node with `Entry::Signal(None)`.
+    // That node holds no term, so the reader of an exiting process skips it.
+    let mut mailbox = Mailbox::default();
+    mailbox.push_signal(Signal::Flush);
+    mailbox.nodes[0].entry = Entry::Signal(None);
+    let mut pending = Vec::new();
+    mailbox.take_terms(&mut pending);
+    assert!(pending.is_empty());
 }

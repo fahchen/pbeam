@@ -68,6 +68,28 @@ const SIGNAL_HANDLING_REDUCTIONS: i32 = 100;
 /// (`erl_proc_sig_queue.c:7771-7799`).
 const RECEIVE_FETCH_REDUCTIONS: i32 = 4;
 
+/// The number of terms whose nested values one scheduler step releases, as
+/// the release batch of row 11 of `docs/term-performance-design-codex-v2.md`
+/// ("process it in batches of at most 256 nodes"). A process that owned a
+/// large graph leaves that graph on the release work list of the scheduler
+/// when it exits ([`Scheduler::release_process`]), and the scheduler walks
+/// the list in this bound at each step ([`Scheduler::drain_release`]). The
+/// bound is host cleanup work: it changes no guest reduction and no guest
+/// value.
+pub(super) const RELEASE_BATCH: usize = 256;
+
+/// One item of the release work list of the scheduler.
+#[derive(Debug, PartialEq)]
+enum Release {
+    /// A term whose nested values the scheduler still has to move. One step
+    /// moves the direct children of this term.
+    Term(Term),
+    /// The element array of a tuple or the free variables of a fun, which
+    /// one step moves in batches of at most [`RELEASE_BATCH`] terms. The
+    /// array is the one that the term owned, so the group copies nothing.
+    Terms(Vec<Term>),
+}
+
 /// The target of `erlang:monitor/2`, after the BIF checked the type and the
 /// target term as ERTS `monitor` does (`bif.c:758-981`).
 #[derive(Debug)]
@@ -241,6 +263,14 @@ pub(super) struct Scheduler {
     dirty_io: DirtyIo,
     /// The delegation records of the capability copies of the run.
     delegations: Delegations,
+    /// The terms whose nested values the scheduler still has to release, most
+    /// recent first. A process that left the process table moves each term
+    /// that it owned here before it drops ([`Self::release_process`]), and
+    /// each scheduler step releases at most [`RELEASE_BATCH`] terms of the
+    /// list ([`Self::drain_release`]). The list owns each term, so a switch
+    /// to another process loses no root. The final drain of a run is the
+    /// drop of the scheduler, which releases the terms that are left.
+    release: Vec<Release>,
     /// The policy process of a run with a policy module, or `None` with a
     /// Rust policy.
     policy: Option<PolicyProcess>,
@@ -293,6 +323,7 @@ impl Scheduler {
             virtual_reductions: 0,
             dirty_io: DirtyIo::new(),
             delegations: Delegations::default(),
+            release: Vec::new(),
             policy: None,
             skip_checks: false,
         }
@@ -486,6 +517,92 @@ impl Scheduler {
         }
     }
 
+    /// Release the nested values of at most `budget` terms of the release
+    /// work list, and leave the rest for the next step. One term takes its
+    /// direct children onto the list with [`Term::take_nested`] and then
+    /// drops its own storage; the element array of a tuple or of a fun goes
+    /// to the list as a group that the later steps move in batches. Thus one
+    /// call moves at most `budget` terms, walks no node twice, and uses no
+    /// Rust recursion. The list owns each term, so a term that this method
+    /// does not reach stays alive.
+    ///
+    /// The method calls no guest code, charges no reduction, and changes no
+    /// value. A caller passes [`RELEASE_BATCH`], so that a process that
+    /// waits to run waits for at most that work (row 11 of
+    /// `docs/term-performance-design-codex-v2.md`). The pairs of a map are
+    /// the one group that moves outside this bound: the walk of a map lives
+    /// in `Map::drain_into`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.release.push(Release::Term(Term::tuple(vec![Term::Integer(1)])));
+    /// scheduler.drain_release(RELEASE_BATCH);
+    /// assert!(scheduler.release.is_empty());
+    /// ```
+    fn drain_release(&mut self, budget: usize) {
+        let mut moved = 0;
+        let mut children = Vec::new();
+        while moved < budget {
+            let Some(item) = self.release.pop() else {
+                return;
+            };
+            match item {
+                Release::Term(mut term) => {
+                    moved += 1;
+                    match term.take_group() {
+                        Some(group) => self.release.push(Release::Terms(group)),
+                        None => {
+                            // A cons cell, a map, a binary, or an immediate.
+                            // A cons cell moves two terms; a map walks its
+                            // pairs in this call.
+                            children.clear();
+                            term.take_nested(&mut children);
+                            self.release.extend(children.drain(..).map(Release::Term));
+                        }
+                    }
+                }
+                Release::Terms(mut group) => {
+                    let take = group.len().min(budget - moved);
+                    moved += take;
+                    if take == group.len() {
+                        self.release.extend(group.into_iter().map(Release::Term));
+                    } else {
+                        // The list takes the terms from the end of the group,
+                        // as `Term::take_nested` puts them on a work stack.
+                        // The group goes under the moved terms, so that the
+                        // next step releases them before it moves more.
+                        let rest = group.split_off(group.len() - take);
+                        self.release.push(Release::Terms(group));
+                        self.release.extend(rest.into_iter().map(Release::Term));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Move each term of the process `process` to the release work list, and
+    /// leave the process with no term. The exit of the process calls this
+    /// before the process drops, so that the release of a large graph runs
+    /// in bounded scheduler work ([`Self::drain_release`]) and not in the
+    /// drop of the process. The list owns each term, so the process loses no
+    /// root.
+    ///
+    /// The process must have left the process table: no guest code can read
+    /// its registers, its frames, its dictionary, or its mailbox again.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.release_process(process);
+    /// assert!(!scheduler.release.is_empty());
+    /// ```
+    fn release_process(&mut self, mut process: ProcessState) {
+        let mut terms = Vec::new();
+        process.take_terms(&mut terms);
+        self.release.extend(terms.into_iter().map(Release::Term));
+    }
+
     /// Run one scheduling step, as `erts_schedule` does after it takes a
     /// process from the run queue (`erl_process.c:10318-10460`). The process
     /// becomes the current process with a budget of `CONTEXT_REDS`
@@ -520,6 +637,10 @@ impl Scheduler {
     ///
     /// An error of [`Scheduler::handle_signals`].
     pub(super) fn schedule_next(&mut self) -> Result<Turn, BeamError> {
+        // The release work of an exiting process runs in this bound, so the
+        // process that this step runs waits for the release of at most
+        // [`RELEASE_BATCH`] nodes.
+        self.drain_release(RELEASE_BATCH);
         let Some(id) = self.runnable.pop_front() else {
             return Ok(Turn::Idle);
         };
@@ -2145,6 +2266,10 @@ impl Scheduler {
         }
         self.alias_owners.retain(|_, owner| *owner != id);
         self.send_pending_monitor();
+        // The process left the process table and no guest code can read it
+        // again. Its terms go to the release work list, so that the walk of a
+        // large graph runs in bounded scheduler work and not in this step.
+        self.release_process(process);
     }
 }
 
@@ -2171,3 +2296,12 @@ pub(super) use signals::{Flushed, HandlingPoint, Received};
 #[cfg(test)]
 #[path = "../../tests/runtime/scheduler.rs"]
 mod tests;
+
+/// The measurement of the scheduler release of a large shared graph of row 11
+/// of `docs/term-performance-design-codex-v2.md` and task
+/// [#559](https://github.com/fahchen/pbeam/issues/559). It lives beside the
+/// scheduler, because the pause is the time inside the private exit and drop
+/// paths.
+#[cfg(test)]
+#[path = "../../tests/runtime/scheduler/release_costs.rs"]
+mod release_costs;
