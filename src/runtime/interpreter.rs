@@ -593,17 +593,22 @@ impl BeamProgram {
         }
         // A frame names its module, and the code of a module name does not
         // change in a run (see `CodeTable`). Thus the cursor keeps the code
-        // of the active frame and looks up the code table only when the
-        // active frame is in another module. The identity of a module is an
-        // integer, so the test of the active module costs no name compare.
-        // Each exit that changes the frame refreshes the cursor.
+        // of the active frame, and each exit that can change the active
+        // module refreshes it. The refresh compares the integer identity of
+        // the two modules, so a call, a return, and an exception each pay
+        // that compare and no name compare. The loop reads the active frame
+        // only where an instruction needs it, and not on each iteration. The
+        // test profile asserts that the refresh keeps the two modules equal,
+        // so a path that changes the active module without a refresh fails a
+        // test instead of running another module's code in release.
         let mut cursor = Cursor::new(scheduler)?;
         loop {
             let process = scheduler.current_process_mut();
-            if current_frame(process).module_id != cursor.module.id {
-                cursor.refresh(scheduler)?;
-                continue;
-            }
+            debug_assert_eq!(
+                current_frame(process).module_id,
+                cursor.module.id,
+                "a frame change must refresh the cursor"
+            );
             let module: &BeamModule = &cursor.module;
             let Some(instruction) = module.instructions.get(cursor.position) else {
                 let frame = current_frame(process);
@@ -756,7 +761,7 @@ impl BeamProgram {
                         {
                             return Ok(outcome);
                         }
-                        cursor.position = active_position(scheduler);
+                        cursor.refresh(scheduler)?;
                         continue;
                     };
                     if let Some(outcome) =
@@ -852,7 +857,7 @@ impl BeamProgram {
                             if let Some(outcome) = raise(process, class, reason) {
                                 return Ok(outcome);
                             }
-                            cursor.position = active_position(scheduler);
+                            cursor.refresh(scheduler)?;
                         }
                         // The compiler emits a `bif` instruction only for a
                         // BIF that does not trap or end the caller.
@@ -1019,7 +1024,7 @@ impl BeamProgram {
                             if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
                                 return Ok(outcome);
                             }
-                            cursor.position = active_position(scheduler);
+                            cursor.refresh(scheduler)?;
                         }
                     }
                 }
@@ -1290,7 +1295,7 @@ impl BeamProgram {
                         if let Some(outcome) = raise_binary_failure(scheduler, module, failure)? {
                             return Ok(outcome);
                         }
-                        cursor.position = active_position(scheduler);
+                        cursor.refresh(scheduler)?;
                     }
                 },
                 // ERTS `fconv` converts a small integer, a bignum, or a float
@@ -1307,7 +1312,7 @@ impl BeamProgram {
                     if let Some(outcome) = raise(process, ExceptionClass::Error, badarith) {
                         return Ok(outcome);
                     }
-                    cursor.position = active_position(scheduler);
+                    cursor.refresh(scheduler)?;
                 }
                 Instruction::SelectValue {
                     value,
@@ -1433,7 +1438,7 @@ impl BeamProgram {
                     if let Some(outcome) = self.finish_bif(scheduler, result, false)? {
                         return Ok(outcome);
                     }
-                    cursor.position = active_position(scheduler);
+                    cursor.refresh(scheduler)?;
                 }
                 Instruction::LoopReceive {
                     fail_label,
@@ -1516,7 +1521,7 @@ impl BeamProgram {
                                 {
                                     return Ok(outcome);
                                 }
-                                cursor.position = active_position(scheduler);
+                                cursor.refresh(scheduler)?;
                                 continue;
                             }
                         }
@@ -1560,7 +1565,7 @@ impl BeamProgram {
                     {
                         return Ok(outcome);
                     }
-                    cursor.position = active_position(scheduler);
+                    cursor.refresh(scheduler)?;
                 }
                 Instruction::Hibernate => {
                     // `emit_i_hibernate` writes `ok` to `x0` and switches
@@ -1600,7 +1605,7 @@ impl BeamProgram {
                     if let Some(outcome) = raise_with_stacktrace(process, class, value, stack) {
                         return Ok(outcome);
                     }
-                    cursor.position = active_position(scheduler);
+                    cursor.refresh(scheduler)?;
                 }
                 // ERTS `badmatch`, `case_end`, `try_case_end`, and
                 // `badrecord` raise class `error` with the reason
@@ -1611,7 +1616,7 @@ impl BeamProgram {
                     if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
                         return Ok(outcome);
                     }
-                    cursor.position = active_position(scheduler);
+                    cursor.refresh(scheduler)?;
                 }
                 // ERTS `if_end` raises class `error` with the reason
                 // `if_clause` (emu `instrs.tab:1151-1155`;
@@ -1621,7 +1626,7 @@ impl BeamProgram {
                     if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
                         return Ok(outcome);
                     }
-                    cursor.position = active_position(scheduler);
+                    cursor.refresh(scheduler)?;
                 }
                 // ERTS `raw_raise` raises `x1` with the class in `x0` and the
                 // stack trace of the raw stack trace in `x2`. For a class
@@ -1639,7 +1644,7 @@ impl BeamProgram {
                             {
                                 return Ok(outcome);
                             }
-                            cursor.position = active_position(scheduler);
+                            cursor.refresh(scheduler)?;
                         }
                         None => write(process, &Operand::X(0), Term::static_atom("badarg"))?,
                     }
@@ -1665,7 +1670,7 @@ impl BeamProgram {
                     if let Some(outcome) = exit {
                         return Ok(outcome);
                     }
-                    cursor.position = active_position(scheduler);
+                    cursor.refresh(scheduler)?;
                 }
                 Instruction::End => {
                     let frame = current_frame(process);
