@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{Atom, BeamProgram, Map, Term};
+use pbeam_runtime::{Atom, AtomTable, BeamProgram, Map, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -117,7 +117,7 @@ fn map(program: &BeamProgram, pairs: &[(&str, Term)]) -> Term {
         .iter()
         .map(|(key, value)| (atom(program, key), value.clone()))
         .collect();
-    Term::Map(Map::from_pairs(pairs).unwrap())
+    Term::Map(Map::from_pairs(pairs, program.atoms()).unwrap())
 }
 
 fn integers(keys: &[i64]) -> Term {
@@ -816,7 +816,7 @@ fn keeps_each_copy_of_a_map_when_another_copy_changes_like_erts() {
             .iter()
             .map(|(key, value)| (Term::Integer(*key), atom(value)))
             .collect();
-        Term::Map(Map::from_pairs(pairs).unwrap())
+        Term::Map(Map::from_pairs(pairs, program.atoms()).unwrap())
     };
     assert_eq!(
         program
@@ -897,7 +897,7 @@ fn raises_badkey_and_keeps_the_shared_map_like_erts() {
         Term::list_from(vec![
             badkey(int(2)),
             badkey(int(34)),
-            Term::Map(Map::from_pairs(vec![(int(1), atom("a"))]).unwrap()),
+            Term::Map(Map::from_pairs(vec![(int(1), atom("a"))], program.atoms()).unwrap(),),
             int(33),
             int(1),
         ])
@@ -941,6 +941,7 @@ fn int_map(pairs: &[(i64, Term)]) -> Term {
                 .iter()
                 .map(|(key, value)| (Term::Integer(*key), value.clone()))
                 .collect(),
+            &AtomTable::new(),
         )
         .unwrap(),
     )
@@ -999,7 +1000,7 @@ fn keeps_a_value_that_aliases_the_map_like_erts() {
     let x = static_atom("x");
     let source = int_map(&[(1, Term::Integer(0)), (2, Term::Integer(2))]);
     let two = int_map(&[(2, Term::Integer(2))]);
-    let inner = Term::Map(Map::from_pairs(vec![(x, Term::Integer(1))]).unwrap());
+    let inner = Term::Map(Map::from_pairs(vec![(x, Term::Integer(1))], program.atoms()).unwrap());
     take_probe(
         "aliasing",
         Term::list_from(vec![
@@ -1007,11 +1008,14 @@ fn keeps_a_value_that_aliases_the_map_like_erts() {
             int_map(&[(2, Term::Integer(2)), (7, two)]),
             int_map(&[(1, source), (2, Term::Integer(2))]),
             Term::Map(
-                Map::from_pairs(vec![
-                    (Term::Integer(1), inner.clone()),
-                    (Term::Integer(2), Term::Integer(2)),
-                    (i, inner),
-                ])
+                Map::from_pairs(
+                    vec![
+                        (Term::Integer(1), inner.clone()),
+                        (Term::Integer(2), Term::Integer(2)),
+                        (i, inner),
+                    ],
+                    program.atoms(),
+                )
                 .unwrap(),
             ),
         ]),

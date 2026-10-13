@@ -152,7 +152,7 @@ fn puts_literal_atoms_into_the_table_in_byte_order() {
     assert_eq!(atoms.get("pbeam_lit_a").unwrap().index(), 1151);
     let (lit_a, lit_b) = (atom(&atoms, "pbeam_lit_a"), atom(&atoms, "pbeam_lit_b"));
     let pairs = vec![(lit_a, Term::Integer(1)), (lit_b.clone(), Term::Integer(2))];
-    let map = Term::Map(Map::from_pairs(pairs).unwrap());
+    let map = Term::Map(Map::from_pairs(pairs, &atoms).unwrap());
     assert_eq!(literal, Term::tuple(vec![lit_b, map]));
     assert_eq!(
         format!("{literal:?}"),
@@ -224,7 +224,9 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
     );
     assert_eq!(
         read(&[131, 116, 0, 0, 0, 0]).unwrap(),
-        Some(Term::Map(Map::from_pairs(vec![]).unwrap()))
+        Some(Term::Map(
+            Map::from_pairs(vec![], &AtomTable::new()).unwrap()
+        ))
     );
     // A map key that `Map` does not support yet makes the literal unsupported: #{#{} => []}.
     assert_eq!(

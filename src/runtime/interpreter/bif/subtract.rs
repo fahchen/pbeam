@@ -171,6 +171,7 @@ enum Step {
 /// [`ProcessState::bif_reductions_left`] for a negative budget.
 pub(super) fn subtract(
     process: &mut ProcessState,
+    atoms: &AtomTable,
     left: &Term,
     right: &Term,
 ) -> Result<BifResult, BeamError> {
@@ -188,7 +189,7 @@ pub(super) fn subtract(
         set: Vec::new(),
         result: Vec::new(),
     };
-    state.run(process)
+    state.run(process, atoms)
 }
 
 /// Continue a subtraction from the trap state `arguments` that
@@ -212,9 +213,10 @@ pub(super) fn subtract(
 /// Panic for a trap state that [`subtract`] did not make.
 pub(super) fn continue_trap(
     process: &mut ProcessState,
+    atoms: &AtomTable,
     arguments: &[Term; 10],
 ) -> Result<BifResult, BeamError> {
-    Subtract::from_terms(arguments).run(process)
+    Subtract::from_terms(arguments).run(process, atoms)
 }
 
 impl Subtract {
@@ -230,15 +232,19 @@ impl Subtract {
     /// # Errors
     ///
     /// The errors of [`subtract`].
-    fn run(mut self, process: &mut ProcessState) -> Result<BifResult, BeamError> {
+    fn run(
+        mut self,
+        process: &mut ProcessState,
+        atoms: &AtomTable,
+    ) -> Result<BifResult, BeamError> {
         loop {
             let step = match self.stage {
                 Stage::LengthLeft => self.length(process, true)?,
                 Stage::NaiveLeft => self.naive_left(process)?,
                 Stage::LengthRight => self.length(process, false)?,
                 Stage::NaiveRight => self.naive_right(process)?,
-                Stage::SetBuild => self.set_build(process)?,
-                Stage::SetFinish => self.set_finish(process)?,
+                Stage::SetBuild => self.set_build(process, atoms)?,
+                Stage::SetFinish => self.set_finish(process, atoms)?,
             };
             match step {
                 Step::Next => {}
@@ -433,14 +439,18 @@ impl Subtract {
     ///
     /// The runtime error of [`Term::compare`] and of
     /// [`ProcessState::bif_reductions_left`].
-    fn set_build(&mut self, process: &mut ProcessState) -> Result<Step, BeamError> {
+    fn set_build(
+        &mut self,
+        process: &mut ProcessState,
+        atoms: &AtomTable,
+    ) -> Result<Step, BeamError> {
         const INSERTIONS_PER_RED: usize = 16;
         let budget = INSERTIONS_PER_RED * process.bif_reductions_left()?;
         let mut insertions = 0;
         while insertions < budget
             && let Some((value, next)) = self.iterator.cons_cell()
         {
-            match self.find(value)? {
+            match self.find(value, atoms)? {
                 Ok(found) => self.set[found].1 += 1,
                 Err(position) => self.set.insert(position, (value.clone(), 1)),
             }
@@ -474,14 +484,18 @@ impl Subtract {
     ///
     /// The runtime error of [`Term::compare`] and of
     /// [`ProcessState::bif_reductions_left`].
-    fn set_finish(&mut self, process: &mut ProcessState) -> Result<Step, BeamError> {
+    fn set_finish(
+        &mut self,
+        process: &mut ProcessState,
+        atoms: &AtomTable,
+    ) -> Result<Step, BeamError> {
         const CHECKS_PER_RED: usize = 8;
         let budget = CHECKS_PER_RED * process.bif_reductions_left()?;
         let mut checks = 0;
         while checks < budget
             && let Some((value, next)) = self.iterator.cons_cell()
         {
-            match self.find(value)? {
+            match self.find(value, atoms)? {
                 Err(_) => self.result.push(value.clone()),
                 Ok(found) => {
                     if self.right_remaining == 1 {
@@ -521,11 +535,11 @@ impl Subtract {
     /// # Errors
     ///
     /// The runtime error of [`Term::compare`].
-    fn find(&self, value: &Term) -> Result<Result<usize, usize>, BeamError> {
+    fn find(&self, value: &Term, atoms: &AtomTable) -> Result<Result<usize, usize>, BeamError> {
         let (mut low, mut high) = (0, self.set.len());
         while low < high {
             let middle = (low + high) / 2;
-            match self.set[middle].0.compare(value)? {
+            match self.set[middle].0.compare(value, atoms)? {
                 Ordering::Less => low = middle + 1,
                 Ordering::Greater => high = middle,
                 Ordering::Equal => return Ok(Ok(middle)),

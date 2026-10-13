@@ -93,7 +93,7 @@ fn counts_the_units_of_one_key_as_erts() {
     let units = |count| {
         let keys = vec![Term::Integer(1); count];
         let keys: Vec<&Term> = keys.iter().collect();
-        let units = from_list_units(&keys).unwrap();
+        let units = from_list_units(&keys, &crate::term::test_atoms()).unwrap();
         // The check loop of the BIF adds one unit for each pair.
         count + units.iter().map(|&unit| unit as usize).sum::<usize>()
     };

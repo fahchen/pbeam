@@ -201,6 +201,7 @@ fn map_of(keys: i64) -> Term {
             (0..keys)
                 .map(|key| (Term::Integer(key), Term::Integer(key)))
                 .collect(),
+            &crate::term::test_atoms(),
         )
         .unwrap(),
     )

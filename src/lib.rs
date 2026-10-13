@@ -9,4 +9,4 @@ pub use runtime::{
     AllowAll, BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy,
     install_start_dispositions,
 };
-pub use term::{Atom, HostTerm, Map, PortId, ProcessId, Reference, Term};
+pub use term::{Atom, AtomTable, HostTerm, Map, PortId, ProcessId, Reference, Term};

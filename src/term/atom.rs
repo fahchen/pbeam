@@ -127,8 +127,16 @@ impl ProgramId {
 }
 
 /// The atom table of one program or one run (`erts_atom_table` in ERTS).
+///
+/// A caller receives the table of a program from [`BeamProgram::atoms`] and
+/// passes it to [`Map::from_pairs`], so a map that the caller builds orders
+/// its keys as the program does. A table of the library holds every atom of
+/// one program; the host cannot add an atom to it.
+///
+/// [`BeamProgram::atoms`]: crate::BeamProgram::atoms
+/// [`Map::from_pairs`]: crate::Map::from_pairs
 #[derive(Debug, Clone)]
-pub(crate) struct AtomTable {
+pub struct AtomTable {
     /// The index of each atom, keyed by its name.
     indices: HashMap<Arc<str>, u32>,
     /// The name of each atom, by its index. The next new atom gets index
@@ -149,7 +157,7 @@ impl AtomTable {
     /// let table = AtomTable::new();
     /// assert_eq!(table.get("false"), Atom::from_static("false"));
     /// ```
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let mut indices = HashMap::with_capacity(STATIC_ATOM_NAMES.len());
         let mut names = Vec::with_capacity(STATIC_ATOM_NAMES.len());
         for (index, &name) in STATIC_ATOM_NAMES.iter().enumerate() {
@@ -238,6 +246,26 @@ impl AtomTable {
         self.names
             .get(usize::try_from(index).ok()?)
             .map(Arc::as_ref)
+    }
+
+    /// Return the name of `atom` through [`AtomTable::name`] and the index of
+    /// the atom. The order rule reads each name with this function.
+    ///
+    /// # Panics
+    ///
+    /// Panic when the index of `atom` is outside this table. A term holds
+    /// only atoms of its owning table, so such an index is an invariant
+    /// error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = AtomTable::new();
+    /// assert_eq!(table.atom_name(&Atom::from_static("ok").unwrap()), "ok");
+    /// ```
+    pub(crate) fn atom_name(&self, atom: &Atom) -> &str {
+        self.name(atom.index())
+            .expect("an atom term holds an index of its owning table")
     }
 
     /// Return the term of `source` with every atom of its source table
@@ -422,7 +450,7 @@ impl AtomTable {
                     }
                     // The source map is canonical, so its keys are valid
                     // keys, and a key keeps its shape across the import.
-                    let map = Map::from_pairs(pairs)
+                    let map = Map::from_pairs(pairs, self)
                         .expect("a canonical map of one table imports to a canonical map");
                     let term = Term::Map(map);
                     imported.insert(key, term.clone());
@@ -447,6 +475,19 @@ impl AtomTable {
             .name(atom.index())
             .ok_or_else(|| outside_atom_table(atom.index()))?;
         self.put(name)
+    }
+}
+
+impl Default for AtomTable {
+    /// Return the table of [`AtomTable::new`], which holds the static atoms.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(AtomTable::default().get("ok"), AtomTable::new().get("ok"));
+    /// ```
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -581,8 +622,12 @@ impl HostTerm {
 
 #[cfg(test)]
 thread_local! {
-    /// The atom table of the unit tests in one test thread.
-    static TEST_ATOMS: std::cell::RefCell<AtomTable> = std::cell::RefCell::new(AtomTable::new());
+    /// The atom table of the unit tests in one test thread. The table is
+    /// leaked, so [`test_atoms`] returns a borrow with the `'static`
+    /// lifetime that `thread_local!` cannot give a guard over an owned
+    /// value.
+    static TEST_ATOMS: &'static std::cell::RefCell<AtomTable> =
+        Box::leak(Box::new(std::cell::RefCell::new(AtomTable::new())));
 }
 
 /// Return the atom term of a name for a unit test. A static name gets its
@@ -601,6 +646,25 @@ thread_local! {
 pub(crate) fn test_atom(name: &str) -> Term {
     let atom = TEST_ATOMS.with(|table| table.borrow_mut().put(name));
     Term::Atom(atom.expect("a test makes fewer atoms than ATOM_LIMIT"))
+}
+
+/// Return a borrow of the atom table of the unit tests in this thread. Pass
+/// it as the owning table of a term that [`test_atom`] built, so the order
+/// rule reads each name through [`AtomTable::name`].
+///
+/// Make every atom of the call before the call. The borrow ends at the end
+/// of the statement that uses it, and a call of [`test_atom`] during the
+/// borrow panics.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Map::from_pairs(vec![(test_atom("ok"), Term::nil())], &test_atoms());
+/// assert_eq!(map.unwrap().len(), 1);
+/// ```
+#[cfg(test)]
+pub(crate) fn test_atoms() -> std::cell::Ref<'static, AtomTable> {
+    TEST_ATOMS.with(|table| table.borrow())
 }
 
 #[cfg(test)]

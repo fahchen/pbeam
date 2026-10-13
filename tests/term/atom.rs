@@ -20,6 +20,8 @@ fn starts_with_the_erts_static_atoms() {
     assert_eq!(table.get("pbeam_zeta"), None);
     assert_eq!(Atom::from_static("pbeam_zeta"), None);
     assert_eq!(STATIC_ATOM_NAMES[1149], "get_definition");
+    // The default table holds the same static atoms as a new table.
+    assert_eq!(AtomTable::default().get("ok"), table.get("ok"));
 }
 
 #[test]
@@ -136,10 +138,13 @@ fn imports_a_fun_between_two_atom_tables() {
         Term::Atom(module_source.clone()),
         Term::list_from([Term::Atom(function_source.clone())]),
         Term::Map(
-            Map::from_pairs(vec![(
-                Term::Atom(module_source.clone()),
-                Term::Atom(function_source.clone()),
-            )])
+            Map::from_pairs(
+                vec![(
+                    Term::Atom(module_source.clone()),
+                    Term::Atom(function_source.clone()),
+                )],
+                &source,
+            )
             .unwrap(),
         ),
         Term::Integer(1),
@@ -150,10 +155,13 @@ fn imports_a_fun_between_two_atom_tables() {
             Term::Atom(module_destination.clone()),
             Term::list_from([Term::Atom(function_destination.clone())]),
             Term::Map(
-                Map::from_pairs(vec![(
-                    Term::Atom(module_destination.clone()),
-                    Term::Atom(function_destination.clone()),
-                )])
+                Map::from_pairs(
+                    vec![(
+                        Term::Atom(module_destination.clone()),
+                        Term::Atom(function_destination.clone()),
+                    )],
+                    &destination,
+                )
                 .unwrap(),
             ),
             Term::Integer(1),
@@ -221,8 +229,9 @@ fn keeps_the_sharing_of_a_compound_that_the_source_holds_twice() {
     let atom = source.get("ok").unwrap();
     let tuple = Term::tuple(vec![Term::Atom(atom.clone()), Term::Integer(1)]);
     let cell = Term::list_from([Term::Integer(2)]);
-    let map =
-        Term::Map(Map::from_pairs(vec![(Term::Atom(atom.clone()), Term::Integer(3))]).unwrap());
+    let map = Term::Map(
+        Map::from_pairs(vec![(Term::Atom(atom.clone()), Term::Integer(3))], &source).unwrap(),
+    );
     let fun = Term::Fun(Fun::external(atom.clone(), atom.clone(), 1));
     let term = Term::tuple(vec![
         tuple.clone(),
@@ -295,15 +304,21 @@ fn compares_host_terms_of_two_tables_by_their_names() {
     let second_a = second.put("pbeam_host_a").unwrap();
     assert_ne!(first_a.index(), second_a.index());
     assert_ne!(first_b.index(), second_b.index());
-    let first_map = Map::from_pairs(vec![
-        (Term::Atom(first_a), Term::Integer(1)),
-        (Term::Atom(first_b), Term::Integer(2)),
-    ])
+    let first_map = Map::from_pairs(
+        vec![
+            (Term::Atom(first_a), Term::Integer(1)),
+            (Term::Atom(first_b), Term::Integer(2)),
+        ],
+        &first,
+    )
     .unwrap();
-    let second_map = Map::from_pairs(vec![
-        (Term::Atom(second_b), Term::Integer(2)),
-        (Term::Atom(second_a), Term::Integer(1)),
-    ])
+    let second_map = Map::from_pairs(
+        vec![
+            (Term::Atom(second_b), Term::Integer(2)),
+            (Term::Atom(second_a), Term::Integer(1)),
+        ],
+        &second,
+    )
     .unwrap();
     let first_host = HostTerm {
         term: Term::Map(first_map),
@@ -353,12 +368,26 @@ fn compares_terms_with_a_memory_of_the_shared_compounds() {
     assert!(!cell.eq_shared(&Term::list_from([Term::Integer(1), Term::Integer(2)])));
 
     // A map pair: one shared form, one equal copy, and one shorter map.
-    let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap());
+    let map = Term::Map(
+        Map::from_pairs(
+            vec![(Term::Integer(1), Term::Integer(2))],
+            &AtomTable::new(),
+        )
+        .unwrap(),
+    );
     assert!(map.eq_shared(&map.clone()));
-    assert!(map.eq_shared(&Term::Map(
-        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap()
+    assert!(
+        map.eq_shared(&Term::Map(
+            Map::from_pairs(
+                vec![(Term::Integer(1), Term::Integer(2))],
+                &AtomTable::new()
+            )
+            .unwrap()
+        ))
+    );
+    assert!(!map.eq_shared(&Term::Map(
+        Map::from_pairs(vec![], &AtomTable::new()).unwrap()
     )));
-    assert!(!map.eq_shared(&Term::Map(Map::from_pairs(vec![]).unwrap())));
 
     // A fun pair: one shared thing, one equal copy, another free-variable
     // count, and another entry.
@@ -389,8 +418,20 @@ fn compares_terms_with_a_memory_of_the_shared_compounds() {
         Term::tuple(vec![cell.clone(), cell])
             .eq_shared(&Term::tuple(vec![cell_copy.clone(), cell_copy]))
     );
-    let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap());
-    let map_copy = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap());
+    let map = Term::Map(
+        Map::from_pairs(
+            vec![(Term::Integer(1), Term::Integer(2))],
+            &AtomTable::new(),
+        )
+        .unwrap(),
+    );
+    let map_copy = Term::Map(
+        Map::from_pairs(
+            vec![(Term::Integer(1), Term::Integer(2))],
+            &AtomTable::new(),
+        )
+        .unwrap(),
+    );
     assert!(
         Term::tuple(vec![map.clone(), map])
             .eq_shared(&Term::tuple(vec![map_copy.clone(), map_copy]))

@@ -37,7 +37,7 @@
 
 use std::cmp::Ordering;
 
-use super::{Term, match_context::MATCH_CONTEXT_ESCAPE};
+use super::{AtomTable, Term, match_context::MATCH_CONTEXT_ESCAPE};
 use crate::error::{BeamError, error};
 
 /// The rank of `[]` in the ERTS term order (`NIL_DEF`).
@@ -58,21 +58,21 @@ impl Term {
     /// ```rust,ignore
     /// use std::cmp::Ordering;
     ///
-    /// assert_eq!(Term::Integer(1).compare(&Term::static_atom("a"))?, Ordering::Less);
+    /// assert_eq!(Term::Integer(1).compare(&Term::static_atom("a"), &atoms)?, Ordering::Less);
     /// let short = Term::list_from([Term::static_atom("b")]);
     /// let long = Term::list_from([Term::static_atom("a"), Term::static_atom("z")]);
-    /// assert_eq!(short.compare(&long)?, Ordering::Greater);
-    /// assert!(Term::Reference(Reference(1)).compare(&Term::Reference(Reference(2))).is_err());
+    /// assert_eq!(short.compare(&long, &atoms)?, Ordering::Greater);
+    /// assert!(Term::Reference(Reference(1)).compare(&Term::Reference(Reference(2)), &atoms).is_err());
     /// ```
     ///
     /// # Errors
     ///
     /// Return a runtime error when the result depends on the order of two
     /// different references.
-    pub(crate) fn compare(&self, other: &Term) -> Result<Ordering, BeamError> {
+    pub(crate) fn compare(&self, other: &Term, atoms: &AtomTable) -> Result<Ordering, BeamError> {
         let mut steps = vec![Step(self, other)];
         while let Some(Step(left, right)) = steps.pop() {
-            let order = compare_pair(left, right, &mut steps)?;
+            let order = compare_pair(left, right, &mut steps, atoms)?;
             if order.is_ne() {
                 return Ok(order);
             }
@@ -94,13 +94,15 @@ impl Term {
 /// let mut steps = Vec::new();
 /// let left = Term::tuple(vec![Term::Integer(1)]);
 /// let right = Term::tuple(vec![Term::Integer(2)]);
-/// assert_eq!(compare_pair(&left, &right, &mut steps)?, Ordering::Equal);
+/// let atoms = AtomTable::new();
+/// assert_eq!(compare_pair(&left, &right, &mut steps, &atoms)?, Ordering::Equal);
 /// assert_eq!(steps.len(), 1);
 /// ```
 fn compare_pair<'a>(
     left: &'a Term,
     right: &'a Term,
     steps: &mut Vec<Step<'a>>,
+    atoms: &AtomTable,
 ) -> Result<Ordering, BeamError> {
     let order = match (left, right) {
         (Term::Cons(left), Term::Cons(right)) => {
@@ -109,7 +111,7 @@ fn compare_pair<'a>(
             Ordering::Equal
         }
         (Term::Integer(left), Term::Integer(right)) => left.cmp(right),
-        (Term::Atom(left), Term::Atom(right)) => left.name().cmp(right.name()),
+        (Term::Atom(left), Term::Atom(right)) => atoms.atom_name(left).cmp(atoms.atom_name(right)),
         (Term::Binary(left), Term::Binary(right)) => left.cmp(right),
         (Term::Pid(left), Term::Pid(right)) => left.0.cmp(&right.0),
         (Term::Port(left), Term::Port(right)) => left.0.cmp(&right.0),
@@ -126,7 +128,7 @@ fn compare_pair<'a>(
         (Term::Tuple(left), Term::Tuple(right)) => left.len().cmp(&right.len()),
         (Term::Map(left), Term::Map(right)) if left.len() == right.len() => {
             // ERTS compares all keys first, then the values (`erts_cmp_compound`).
-            let (left, right) = (sorted_pairs(left), sorted_pairs(right));
+            let (left, right) = (sorted_pairs(left, atoms), sorted_pairs(right, atoms));
             let pairs = || left.iter().zip(&right).rev();
             steps.extend(pairs().map(|((_, l), (_, r))| Step(l, r)));
             steps.extend(pairs().map(|((l, _), (r, _))| Step(l, r)));
@@ -136,7 +138,7 @@ fn compare_pair<'a>(
         (Term::Fun(left), Term::Fun(right)) => {
             let order = left
                 .target()
-                .compare(right.target())
+                .compare(right.target(), atoms)
                 .then(left.free().len().cmp(&right.free().len()));
             if order.is_eq() {
                 let pairs = left.free().iter().zip(right.free()).rev();
@@ -154,14 +156,14 @@ fn compare_pair<'a>(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let map = Map::from_pairs(vec![(Term::static_atom("b"), Term::Integer(1)), (Term::Integer(2), Term::Integer(3))])?;
-/// let keys: Vec<_> = sorted_pairs(&map).into_iter().map(|(key, _)| key.clone()).collect();
+/// let map = Map::from_pairs(vec![(Term::static_atom("b"), Term::Integer(1)), (Term::Integer(2), Term::Integer(3))], &atoms)?;
+/// let keys: Vec<_> = sorted_pairs(&map, &atoms).into_iter().map(|(key, _)| key.clone()).collect();
 /// assert_eq!(keys, [Term::Integer(2), Term::static_atom("b")]);
 /// ```
-fn sorted_pairs(map: &super::Map) -> Vec<(&Term, &Term)> {
+fn sorted_pairs<'a>(map: &'a super::Map, atoms: &AtomTable) -> Vec<(&'a Term, &'a Term)> {
     let mut pairs: Vec<_> = map.iter().collect();
     pairs.sort_unstable_by(|(left, _), (right, _)| {
-        left.compare(right)
+        left.compare(right, atoms)
             .expect("a map key is a binary, an integer, an atom, or a list")
     });
     pairs

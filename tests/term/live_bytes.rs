@@ -48,19 +48,25 @@ fn counts_each_cell_of_a_list_and_shares_a_tail() {
 
 #[test]
 fn counts_a_flat_map_and_walks_its_pairs() {
-    let map = Map::from_pairs(vec![
-        (Term::Integer(1), Term::tuple(vec![Term::Integer(2)])),
-        (Term::Integer(3), Term::Integer(4)),
-    ])
+    let map = Map::from_pairs(
+        vec![
+            (Term::Integer(1), Term::tuple(vec![Term::Integer(2)])),
+            (Term::Integer(3), Term::Integer(4)),
+        ],
+        &crate::term::test_atoms(),
+    )
     .unwrap();
     let term = Term::Map(map);
     assert!(bytes(&term) > size_of::<Term>());
     // The value tuple of the first pair is part of the number.
     let without = Term::Map(
-        Map::from_pairs(vec![
-            (Term::Integer(1), Term::Integer(2)),
-            (Term::Integer(3), Term::Integer(4)),
-        ])
+        Map::from_pairs(
+            vec![
+                (Term::Integer(1), Term::Integer(2)),
+                (Term::Integer(3), Term::Integer(4)),
+            ],
+            &crate::term::test_atoms(),
+        )
         .unwrap(),
     );
     assert!(bytes(&term) > bytes(&without));
@@ -71,7 +77,7 @@ fn counts_a_hash_map_and_walks_its_nodes() {
     let pairs: Vec<_> = (0..40)
         .map(|key| (Term::Integer(key), Term::tuple(vec![Term::Integer(key)])))
         .collect();
-    let map = Map::from_pairs(pairs).unwrap();
+    let map = Map::from_pairs(pairs, &crate::term::test_atoms()).unwrap();
     assert!(bytes(&Term::Map(map)) > 40 * size_of::<Term>());
 }
 
@@ -158,12 +164,16 @@ fn counts_a_node_that_two_hash_maps_share_once() {
     let pairs: Vec<_> = (0..40)
         .map(|key| (Term::Integer(key), Term::Integer(key)))
         .collect();
-    let first = Map::from_pairs(pairs).unwrap();
+    let first = Map::from_pairs(pairs, &crate::term::test_atoms()).unwrap();
     let mut second = first.clone();
     // A change through one copy copies only the nodes on the path of the
     // key, so the two maps share the other nodes.
     second
-        .insert(Term::Integer(1000), Term::Integer(1000))
+        .insert(
+            Term::Integer(1000),
+            Term::Integer(1000),
+            &crate::term::test_atoms(),
+        )
         .unwrap();
     let term = Term::tuple(vec![Term::Map(first), Term::Map(second)]);
     let mut live = LiveBytes::new();

@@ -1424,6 +1424,36 @@ impl Scheduler {
             .expect("the scheduler has a current process")
     }
 
+    /// Return the current process and the atom table of the run together.
+    /// The order rule reads a term from the process and the name of an atom
+    /// from the table, so the caller needs both at once. The two borrows are
+    /// of different fields, so they do not conflict.
+    ///
+    /// # Panics
+    ///
+    /// Panic when the scheduler has no current process, as
+    /// [`Self::current_process_mut`] does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.schedule_next();
+    /// let (process, atoms) = scheduler.current_process_and_atoms();
+    /// assert_eq!(process.id, ProcessId(0));
+    /// assert_eq!(atoms.name(506), Some("ok"));
+    /// ```
+    pub(super) fn current_process_and_atoms(&mut self) -> (&mut ProcessState, &AtomTable) {
+        // ponytail: only the run loop calls this, after `schedule_next` returned a process.
+        let id = self
+            .current_process
+            .expect("the scheduler has a current process");
+        let process = self
+            .processes
+            .get_mut(&id)
+            .expect("the scheduler has a current process");
+        (process, &self.atoms)
+    }
+
     /// Return the module of the active frame of the current process from
     /// the code table of the run.
     ///

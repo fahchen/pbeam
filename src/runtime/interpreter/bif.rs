@@ -816,7 +816,7 @@ impl BeamProgram {
                 bytes,
             ));
         }
-        let process = scheduler.current_process_mut();
+        let (process, atoms) = scheduler.current_process_and_atoms();
         match (module, function, arguments.as_slice()) {
             ("erlang", "length", [list, Term::Integer(count)]) => {
                 erlang::length(process, list, *count)
@@ -825,16 +825,16 @@ impl BeamProgram {
                 erlang::append_chunk(process, left, right, rest)
             }
             ("erlang", "--", state) if let Ok(state) = <&[Term; 10]>::try_from(state) => {
-                subtract::continue_trap(process, state)
+                subtract::continue_trap(process, atoms, state)
             }
             ("maps", "merge_trap", [merged, Term::Integer(steps)]) => {
                 maps::merge_trap(process, merged.clone(), *steps as usize)
             }
             ("maps", "from_list_trap", [list, Term::Integer(done)]) => {
-                maps::from_list(process, list, *done as usize)
+                maps::from_list(process, list, *done as usize, atoms)
             }
             ("maps", "from_keys_trap", [keys, value, Term::Integer(done)]) => {
-                maps::from_keys(process, keys, value, *done as usize)
+                maps::from_keys(process, keys, value, *done as usize, atoms)
             }
             ("maps", "keys_trap", [map, Term::Integer(done)]) => {
                 maps::keys(process, map, *done as usize)

@@ -3,7 +3,7 @@
 use super::BifResult::Value;
 use super::ycf::{YcfTurn, run_units};
 use super::*;
-use crate::term::{Direction, from_list_units};
+use crate::term::{AtomTable, Direction, from_list_units};
 
 /// Run `maps:keys/1`: return the keys of a map in map order, as ERTS
 /// `maps_keys_1` does (`erl_map.c:1207-1253`). A term that is not a map
@@ -151,13 +151,18 @@ pub(super) fn find(key: &Term, map: &Term) -> BifResult {
 ///
 /// Return a runtime error when the key is of a type that the map form does
 /// not support yet, for example a map key.
-pub(super) fn put(key: &Term, value: &Term, map: &Term) -> Result<BifResult, BeamError> {
+pub(super) fn put(
+    key: &Term,
+    value: &Term,
+    map: &Term,
+    atoms: &AtomTable,
+) -> Result<BifResult, BeamError> {
     let mut map = map.clone();
     let Term::Map(entries) = &mut map else {
         return Ok(error_with("badmap", &map));
     };
     entries
-        .insert(key.clone(), value.clone())
+        .insert(key.clone(), value.clone(), atoms)
         .map_err(|key| error(format!("unsupported map key {key:?}")))?;
     Ok(Value(map))
 }
@@ -201,6 +206,7 @@ pub(super) fn from_list(
     process: &mut ProcessState,
     list: &Term,
     done: usize,
+    atoms: &AtomTable,
 ) -> Result<BifResult, BeamError> {
     /// `iterations_per_red` of `maps_from_list_1` (`erl_map.c:606`).
     const PER_REDUCTION: usize = 40;
@@ -231,7 +237,7 @@ pub(super) fn from_list(
         && pairs.len() > SMALL_MAP_LIMIT
     {
         let keys: Vec<&Term> = pairs.iter().map(|(key, _)| *key).collect();
-        units.extend(from_list_units(&keys)?);
+        units.extend(from_list_units(&keys, atoms)?);
     }
     match run_units(process, PER_REDUCTION, &units, done)? {
         YcfTurn::Yield(done) => Ok(BifResult::TrapBif {
@@ -251,7 +257,7 @@ pub(super) fn from_list(
             let pairs = pairs
                 .into_iter()
                 .map(|(key, value)| (key.clone(), value.clone()));
-            let map = Map::from_pairs(pairs.collect())
+            let map = Map::from_pairs(pairs.collect(), atoms)
                 .map_err(|key| error(format!("unsupported map key {key:?}")))?;
             Ok(Value(Term::Map(map)))
         }
@@ -295,6 +301,7 @@ pub(super) fn from_keys(
     keys: &Term,
     value: &Term,
     done: usize,
+    atoms: &AtomTable,
 ) -> Result<BifResult, BeamError> {
     /// `iterations_per_red` of `maps_from_keys_2` (`erl_map.c:630`).
     const PER_REDUCTION: usize = 40;
@@ -307,7 +314,7 @@ pub(super) fn from_keys(
     let proper = tail.is_none();
     let mut units = vec![1; elements.len()];
     if proper && elements.len() > SMALL_MAP_LIMIT {
-        units.extend(from_list_units(&elements)?);
+        units.extend(from_list_units(&elements, atoms)?);
     }
     match run_units(process, PER_REDUCTION, &units, done)? {
         YcfTurn::Yield(done) => Ok(BifResult::TrapBif {
@@ -323,7 +330,7 @@ pub(super) fn from_keys(
         YcfTurn::Done(reductions) => {
             process.bump_reductions(reductions);
             let pairs = elements.into_iter().map(|key| (key.clone(), value.clone()));
-            let map = Map::from_pairs(pairs.collect())
+            let map = Map::from_pairs(pairs.collect(), atoms)
                 .map_err(|key| error(format!("unsupported map key {key:?}")))?;
             Ok(Value(Term::Map(map)))
         }
@@ -546,6 +553,7 @@ pub(super) fn merge(
     process: &mut ProcessState,
     first: &Term,
     second: &Term,
+    atoms: &AtomTable,
 ) -> Result<BifResult, BeamError> {
     match (first, second) {
         (Term::Map(first_map), Term::Map(second_map)) if first_map.same_form(second_map) => {
@@ -554,7 +562,7 @@ pub(super) fn merge(
         (Term::Map(first), Term::Map(second)) => {
             let pairs = first.iter().chain(second.iter());
             let pairs = pairs.map(|(key, value)| (key.clone(), value.clone()));
-            let merged = Map::from_pairs(pairs.collect())
+            let merged = Map::from_pairs(pairs.collect(), atoms)
                 .map_err(|key| error(format!("unsupported map key {key:?}")))?;
             let merged = Term::Map(merged);
             match first.merge_steps(second) {
@@ -632,14 +640,14 @@ pub(super) fn merge_trap(
 /// assert!(matches!(remove(&test_atom("b"), &map), BifResult::Value(same) if same == map));
 /// assert!(matches!(remove(&test_atom("a"), &test_atom("foo")), BifResult::Raise { .. }));
 /// ```
-pub(super) fn remove(key: &Term, map: &Term) -> BifResult {
+pub(super) fn remove(key: &Term, map: &Term, atoms: &AtomTable) -> BifResult {
     let Term::Map(entries) = map else {
         return error_with("badmap", map);
     };
     if entries.get(key).is_none() {
         return Value(map.clone());
     }
-    Value(without(entries, key))
+    Value(without(entries, key, atoms))
 }
 
 /// Return the map `entries` without the key `key`, which it holds, as
@@ -651,11 +659,12 @@ pub(super) fn remove(key: &Term, map: &Term) -> BifResult {
 /// let map = Map::from_pairs(vec![(test_atom("a"), Term::Integer(1))])?;
 /// assert!(matches!(without(&map, &test_atom("a")), Term::Map(empty) if empty.len() == 0));
 /// ```
-fn without(entries: &Map, key: &Term) -> Term {
+fn without(entries: &Map, key: &Term, atoms: &AtomTable) -> Term {
     let pairs = entries.iter().filter(|(existing, _)| *existing != key);
     let pairs = pairs.map(|(key, value)| (key.clone(), value.clone()));
     // Each key of the rest is a key of the map, so the map form supports it.
-    let rest = Map::from_pairs(pairs.collect()).expect("the keys of a map are valid map keys");
+    let rest =
+        Map::from_pairs(pairs.collect(), atoms).expect("the keys of a map are valid map keys");
     Term::Map(rest)
 }
 
@@ -673,14 +682,17 @@ fn without(entries: &Map, key: &Term) -> Term {
 /// assert!(matches!(take(&test_atom("b"), &map), BifResult::Value(Term::Atom(_))));
 /// assert!(matches!(take(&test_atom("a"), &test_atom("foo")), BifResult::Raise { .. }));
 /// ```
-pub(super) fn take(key: &Term, map: &Term) -> BifResult {
+pub(super) fn take(key: &Term, map: &Term, atoms: &AtomTable) -> BifResult {
     let Term::Map(entries) = map else {
         return error_with("badmap", map);
     };
     let Some(value) = entries.get(key) else {
         return Value(Term::static_atom("error"));
     };
-    Value(Term::tuple(vec![value.clone(), without(entries, key)]))
+    Value(Term::tuple(vec![
+        value.clone(),
+        without(entries, key, atoms),
+    ]))
 }
 
 /// Return the `error:{Tag, Term}` exception, as ERTS `BIF_ERROR` with

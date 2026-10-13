@@ -520,7 +520,7 @@ impl Scheduler {
             (Term::static_atom("initial_call"), initial_call),
         ];
         Ok(Term::Map(
-            Map::from_pairs(pairs).expect("a map takes atom keys"),
+            Map::from_pairs(pairs, &self.atoms).expect("a map takes atom keys"),
         ))
     }
 }

@@ -96,10 +96,13 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
     let binary = Term::binary(b"0123456789abcdefg".to_vec());
     let string = Term::list_from(b"abc".iter().map(|&c| Term::Integer(c.into())));
     let small_map = Term::Map(
-        Map::from_pairs(vec![
-            (atom("ok"), Term::nil()),
-            (Term::Integer(1), Term::binary(vec![])),
-        ])
+        Map::from_pairs(
+            vec![
+                (atom("ok"), Term::nil()),
+                (Term::Integer(1), Term::binary(vec![])),
+            ],
+            program.atoms(),
+        )
         .unwrap(),
     );
     let large_map = Term::Map(
@@ -107,6 +110,7 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
             (1..=33)
                 .map(|key| (Term::Integer(key), Term::Integer(key)))
                 .collect(),
+            program.atoms(),
         )
         .unwrap(),
     );

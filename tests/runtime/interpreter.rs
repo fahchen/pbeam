@@ -14,7 +14,7 @@ use crate::{
         ets::{Access, Table},
         process::{ProcessState, Start, tests::frame},
     },
-    term::{Atom, AtomTable, Lambda, ProcessId, Reference, test_atom},
+    term::{Atom, AtomTable, Lambda, ProcessId, Reference, test_atom, test_atoms},
 };
 
 /// Return the initial capabilities of the default policy.
@@ -876,7 +876,7 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             .into_iter()
             .map(|(key, value)| (test_atom(key), Term::Integer(value)))
             .collect();
-        Operand::Value(Term::Map(Map::from_pairs(pairs).unwrap()))
+        Operand::Value(Term::Map(Map::from_pairs(pairs, &test_atoms()).unwrap()))
     };
     let run = |body: Vec<Instruction>| make_program(body, 0).execute("fixture", "main", &[]);
     // Replace an existing key, then read it back.
@@ -955,10 +955,13 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
 #[test]
 fn tests_map_keys_with_has_map_fields_and_writes_no_register() {
     let map = Operand::Value(Term::Map(
-        Map::from_pairs(vec![
-            (test_atom("input"), test_atom("cooked")),
-            (Term::Integer(1), test_atom("one")),
-        ])
+        Map::from_pairs(
+            vec![
+                (test_atom("input"), test_atom("cooked")),
+                (Term::Integer(1), test_atom("one")),
+            ],
+            &test_atoms(),
+        )
         .unwrap(),
     ));
     let run = |keys: Vec<Operand>, map: Operand| {
@@ -1114,7 +1117,7 @@ fn keeps_a_destination_register_when_a_map_change_fails() {
     );
     // A map source in another register with a missing key.
     let map = Operand::Value(Term::Map(
-        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(1))]).unwrap(),
+        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(1))], &test_atoms()).unwrap(),
     ));
     assert_eq!(
         run(
@@ -1131,7 +1134,9 @@ fn keeps_a_built_map_when_a_same_register_change_fails() {
     // `put_map_assoc` on a literal map builds a map that no literal holds,
     // and the failing `put_map_exact` then takes that map, puts it back, and
     // jumps to its fail label.
-    let source = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(1))]).unwrap());
+    let source = Term::Map(
+        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(1))], &test_atoms()).unwrap(),
+    );
     let build = |source: Term| {
         vec![
             Instruction::Move(Operand::Value(source), Operand::X(0)),
@@ -1164,10 +1169,13 @@ fn keeps_a_built_map_when_a_same_register_change_fails() {
             .unwrap()
             .term,
         Term::Map(
-            Map::from_pairs(vec![
-                (Term::Integer(1), Term::Integer(1)),
-                (Term::Integer(3), Term::Integer(3)),
-            ])
+            Map::from_pairs(
+                vec![
+                    (Term::Integer(1), Term::Integer(1)),
+                    (Term::Integer(3), Term::Integer(3)),
+                ],
+                &test_atoms(),
+            )
             .unwrap()
         )
     );
@@ -1214,7 +1222,8 @@ fn keeps_a_key_or_value_in_the_destination_slot() {
             vec![
                 Instruction::Move(
                     Operand::Value(Term::Map(
-                        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(0))]).unwrap(),
+                        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(0))], &test_atoms())
+                            .unwrap(),
                     )),
                     Operand::X(0),
                 ),
@@ -1234,8 +1243,11 @@ fn keeps_a_key_or_value_in_the_destination_slot() {
         .unwrap()
         .term
     };
-    let expected =
-        || Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(9))]).unwrap());
+    let expected = || {
+        Term::Map(
+            Map::from_pairs(vec![(Term::Integer(1), Term::Integer(9))], &test_atoms()).unwrap(),
+        )
+    };
     // The key is the term that the destination register held.
     assert_eq!(
         run(
@@ -1259,7 +1271,7 @@ fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
     // A flatmap accepts the integer 2^59, and a hashmap does not yet.
     let pairs = |keys: std::ops::RangeInclusive<i64>| {
         let pairs = keys.map(|key| (Term::Integer(key), Term::Integer(0)));
-        Term::Map(Map::from_pairs(pairs.collect()).unwrap())
+        Term::Map(Map::from_pairs(pairs.collect(), &test_atoms()).unwrap())
     };
     let merge = make_program(
         vec![
@@ -1359,7 +1371,7 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
             .into_iter()
             .map(|key| (key, Term::Integer(0)))
             .collect();
-        Term::Map(Map::from_pairs(pairs).unwrap())
+        Term::Map(Map::from_pairs(pairs, &test_atoms()).unwrap())
     };
     let atom = Term::static_atom;
     // ERTS 29.1.1: maps:keys(#{a => V, 2 => V, 1 => V}) is [1,2,a].
@@ -1388,7 +1400,9 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
     let mut program = make_program(
         vec![
             Instruction::Move(
-                Operand::Value(Term::Map(Map::from_pairs(Vec::new()).unwrap())),
+                Operand::Value(Term::Map(
+                    Map::from_pairs(Vec::new(), &test_atoms()).unwrap(),
+                )),
                 Operand::X(0),
             ),
             Instruction::CallExternal {
@@ -3989,7 +4003,9 @@ fn shares_the_stored_term_of_a_persistent_term() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let key = Term::tuple(vec![Term::Integer(7)]);
-    let value = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap());
+    let value = Term::Map(
+        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &test_atoms()).unwrap(),
+    );
     program
         .bif(
             &mut scheduler,

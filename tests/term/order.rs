@@ -5,7 +5,7 @@ use std::{
 
 use super::super::{
     Atom, AtomTable, Binary, Fun, Lambda, Map, MatchState, PortId, ProcessId, Reference, Term,
-    test_atom as atom,
+    test_atom as atom, test_atoms,
 };
 
 #[test]
@@ -14,11 +14,11 @@ fn panics_for_a_match_context() {
     // The interpreter gives a runtime error before a match context can
     // reach a term operation.
     let _ = Term::MatchContext(Arc::new(MatchState::new(Binary::from(b"a"))))
-        .compare(&Term::Integer(1));
+        .compare(&Term::Integer(1), &test_atoms());
 }
 
 fn map(pairs: Vec<(Term, Term)>) -> Term {
-    Term::Map(Map::from_pairs(pairs).unwrap())
+    Term::Map(Map::from_pairs(pairs, &test_atoms()).unwrap())
 }
 
 /// Return a fun of a lambda of `module` with an index, an old unique
@@ -51,29 +51,89 @@ fn orders_terms_of_different_types_by_type() {
     ];
     for (index, left) in sorted.iter().enumerate() {
         for (other, right) in sorted.iter().enumerate() {
-            assert_eq!(left.compare(right).unwrap(), index.cmp(&other));
+            assert_eq!(
+                left.compare(right, &test_atoms()).unwrap(),
+                index.cmp(&other)
+            );
         }
     }
 }
 
 #[test]
 fn orders_atoms_by_name_and_not_by_index() {
-    // A fresh table gives z the lower index. ERTS 29.1.1: z >= a is true,
-    // ab >= abc is false, and 'é' >= z is true.
+    // One fresh table gives z the lower index, so an order that reads the
+    // atom index and an order that reads the table name disagree. ERTS
+    // 29.1.1: pbeam_order_z >= pbeam_order_a is true and ab >= abc is
+    // false, because the term order compares the name bytes.
     let mut table = AtomTable::new();
     let z = Term::Atom(table.put("pbeam_order_z").unwrap());
     let a = Term::Atom(table.put("pbeam_order_a").unwrap());
-    assert_eq!(z.compare(&a).unwrap(), Greater);
-    assert_eq!(atom("ab").compare(&atom("abc")).unwrap(), Less);
+    let ab = Term::Atom(table.put("ab").unwrap());
+    let abc = Term::Atom(table.put("abc").unwrap());
     let accent = Term::Atom(table.put("é").unwrap());
-    assert_eq!(accent.compare(&atom("z")).unwrap(), Greater);
+    let plain_z = Term::Atom(table.put("z").unwrap());
+    assert_eq!(z.compare(&a, &table).unwrap(), Greater);
+    assert_eq!(ab.compare(&abc, &table).unwrap(), Less);
+    assert_eq!(accent.compare(&plain_z, &table).unwrap(), Greater);
     // Map values compare in the term order of the keys: a, then z.
-    let first = map(vec![
-        (z.clone(), Term::Integer(1)),
-        (a.clone(), Term::Integer(2)),
-    ]);
-    let second = map(vec![(z, Term::Integer(2)), (a, Term::Integer(1))]);
-    assert_eq!(first.compare(&second).unwrap(), Greater);
+    let first = Term::Map(
+        Map::from_pairs(
+            vec![(z.clone(), Term::Integer(1)), (a.clone(), Term::Integer(2))],
+            &table,
+        )
+        .unwrap(),
+    );
+    let second = Term::Map(
+        Map::from_pairs(
+            vec![(z.clone(), Term::Integer(2)), (a.clone(), Term::Integer(1))],
+            &table,
+        )
+        .unwrap(),
+    );
+    assert_eq!(first.compare(&second, &table).unwrap(), Greater);
+}
+
+#[test]
+fn orders_each_nested_atom_by_the_owning_table_name() {
+    // ERTS 29.1.1: lists:sort([Z, A, {Z}, {A}, [Z], [A]]) is
+    // [A, Z, {A}, {Z}, [A], [Z]], where Z and A are
+    // list_to_atom("pbeam_order_z") and list_to_atom("pbeam_order_a"). The
+    // fresh table gives Z the lower index, so each nested order below
+    // disagrees with the index order. The flatmap key order still compares
+    // two atom keys by index: maps:keys(#{A => 1, Z => 2}) is [Z, A].
+    let mut table = AtomTable::new();
+    let z = Term::Atom(table.put("pbeam_order_z").unwrap());
+    let a = Term::Atom(table.put("pbeam_order_a").unwrap());
+    assert_eq!(z.compare(&a, &table).unwrap(), Greater);
+    let list = |atom: &Term| Term::list_from([atom.clone()]);
+    let tuple = |atom: &Term| Term::tuple(vec![atom.clone()]);
+    assert_eq!(list(&z).compare(&list(&a), &table).unwrap(), Greater);
+    assert_eq!(tuple(&z).compare(&tuple(&a), &table).unwrap(), Greater);
+    let map = |atom: &Term| {
+        Term::Map(Map::from_pairs(vec![(atom.clone(), Term::Integer(1))], &table).unwrap())
+    };
+    assert_eq!(map(&z).compare(&map(&a), &table).unwrap(), Greater);
+    // A local fun compares its free variables after the module and the
+    // entry, so two funs of one lambda compare their free atoms by name.
+    let fun = |free: Term| {
+        Term::Fun(Fun::new(
+            Lambda::new(Atom::from_static("lists").unwrap(), 0, 0, 53, 1),
+            vec![free],
+        ))
+    };
+    assert_eq!(
+        fun(z.clone()).compare(&fun(a.clone()), &table).unwrap(),
+        Greater
+    );
+    // The flatmap key order compares two atom keys by index, and this table
+    // gives z the lower index, so z comes before a.
+    let flat = Map::from_pairs(
+        vec![(a.clone(), Term::Integer(1)), (z.clone(), Term::Integer(2))],
+        &table,
+    )
+    .unwrap();
+    let keys: Vec<_> = flat.iter().map(|(key, _)| key.clone()).collect();
+    assert_eq!(keys, [z, a]);
 }
 
 #[test]
@@ -121,13 +181,18 @@ fn orders_nested_terms_as_pinned_erts() {
     ];
     for (left, right, order) in pairs {
         assert_eq!(
-            left.compare(&right).unwrap(),
+            left.compare(&right, &test_atoms()).unwrap(),
             order,
             "{left:?} and {right:?}"
         );
     }
     let deep = |levels| (0..levels).fold(Term::nil(), |inner, _| Term::list_from(vec![inner]));
-    assert_eq!(deep(1_000_000).compare(&deep(999_999)).unwrap(), Greater);
+    assert_eq!(
+        deep(1_000_000)
+            .compare(&deep(999_999), &test_atoms())
+            .unwrap(),
+        Greater
+    );
 }
 
 #[test]
@@ -177,7 +242,7 @@ fn orders_improper_lists_by_elements_then_tails_as_pinned_erts() {
     ];
     for (left, right, order) in pairs {
         assert_eq!(
-            left.compare(&right).unwrap(),
+            left.compare(&right, &test_atoms()).unwrap(),
             order,
             "{left:?} and {right:?}"
         );
@@ -220,7 +285,7 @@ fn orders_local_funs_by_fun_entry_then_free_variables() {
     ];
     for (left, right, order) in pairs {
         assert_eq!(
-            left.compare(&right).unwrap(),
+            left.compare(&right, &test_atoms()).unwrap(),
             order,
             "{left:?} and {right:?}"
         );
@@ -272,7 +337,7 @@ fn orders_external_funs_by_mfa_and_after_local_funs() {
     ];
     for (left, right, order) in pairs {
         assert_eq!(
-            left.compare(&right).unwrap(),
+            left.compare(&right, &test_atoms()).unwrap(),
             order,
             "{left:?} and {right:?}"
         );
@@ -286,14 +351,14 @@ fn rejects_the_order_of_two_different_references() {
     let pair = Term::tuple(vec![atom("a"), Term::Reference(Reference(1))]);
     let other = Term::tuple(vec![atom("a"), Term::Reference(Reference(2))]);
     assert_eq!(
-        pair.compare(&other).unwrap_err().to_string(),
+        pair.compare(&other, &test_atoms()).unwrap_err().to_string(),
         "unsupported term order of two references Reference(Reference(1)) and \
          Reference(Reference(2))"
     );
     let earlier = Term::tuple(vec![atom("a"), Term::Reference(Reference(2))]);
     assert_eq!(
         Term::tuple(vec![atom("b"), Term::Reference(Reference(1))])
-            .compare(&earlier)
+            .compare(&earlier, &test_atoms())
             .unwrap(),
         Greater
     );
@@ -310,9 +375,17 @@ fn orders_ports_by_number_between_funs_and_pids() {
         static_atom("reverse"),
         1,
     ));
-    assert_eq!(three.compare(&ten).unwrap(), Less);
-    assert_eq!(three.compare(&three).unwrap(), Equal);
-    assert_eq!(reverse.compare(&three).unwrap(), Less);
-    assert_eq!(three.compare(&Term::Pid(ProcessId(1))).unwrap(), Less);
-    assert_eq!(three.compare(&Term::tuple(vec![])).unwrap(), Less);
+    assert_eq!(three.compare(&ten, &test_atoms()).unwrap(), Less);
+    assert_eq!(three.compare(&three, &test_atoms()).unwrap(), Equal);
+    assert_eq!(reverse.compare(&three, &test_atoms()).unwrap(), Less);
+    assert_eq!(
+        three
+            .compare(&Term::Pid(ProcessId(1)), &test_atoms())
+            .unwrap(),
+        Less
+    );
+    assert_eq!(
+        three.compare(&Term::tuple(vec![]), &test_atoms()).unwrap(),
+        Less
+    );
 }
