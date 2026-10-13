@@ -238,3 +238,16 @@ fn counts_the_objects_of_the_tables() {
     tables.account_terms(&mut live);
     assert!(live.bytes() > 0);
 }
+
+#[test]
+fn counts_the_object_array_of_immediate_elements() {
+    let mut tables = EtsTables::default();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    table.insert(vec![Term::Integer(1), Term::Integer(2)]);
+    let object = table.allocated_bytes();
+    assert!(object > 0);
+    tables.create(Reference(1), None, table);
+    let mut live = crate::term::LiveBytes::new();
+    tables.account_terms(&mut live);
+    assert_eq!(live.bytes(), object);
+}

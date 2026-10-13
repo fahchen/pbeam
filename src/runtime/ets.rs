@@ -137,8 +137,10 @@ impl EtsTables {
         }
     }
 
-    /// Count the guest terms that the tables hold: each element of each
-    /// stored object, including the key.
+    /// Count the heap storage of the tables and the guest terms that they
+    /// hold: the slot array of the objects, the free-slot array, and the
+    /// element array of each stored object, plus each element of each stored
+    /// object, including the key.
     ///
     /// # Examples
     ///
@@ -153,6 +155,7 @@ impl EtsTables {
     /// ```
     pub(super) fn account_terms(&self, live: &mut LiveBytes) {
         for table in self.tables.values() {
+            live.add(table.allocated_bytes());
             for object in table.objects.iter().flatten() {
                 for term in object {
                     live.term(term);
@@ -372,6 +375,32 @@ impl Table {
     pub(super) fn object(&self, key: &Term) -> Option<&[Term]> {
         let slot = self.position(stored_hash(key), key)?;
         Some(self.object_of(slot).as_slice())
+    }
+
+    /// Return the bytes of the container arrays of the table: the slot array
+    /// of the objects, the free-slot array, and the element array of each
+    /// stored object. The number excludes the header of the `Vec` of each
+    /// array, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it. An
+    /// object of immediate elements owns its element array, so the number is
+    /// above 0 for it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// table.insert(vec![Term::Integer(1), Term::Integer(2)]);
+    /// assert!(table.allocated_bytes() > 0);
+    /// ```
+    pub(super) fn allocated_bytes(&self) -> usize {
+        self.objects.capacity() * std::mem::size_of::<Option<Vec<Term>>>()
+            + self.free.capacity() * std::mem::size_of::<usize>()
+            + self
+                .objects
+                .iter()
+                .flatten()
+                .map(|object| object.capacity() * std::mem::size_of::<Term>())
+                .sum::<usize>()
     }
 
     /// Return the slot of the object whose stored key hash is `hash` and whose
