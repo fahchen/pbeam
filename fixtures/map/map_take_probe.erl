@@ -1,6 +1,7 @@
 -module(map_take_probe).
--export([main/0, aliases/0, retained/0, keys/0, guarded/0, caught/0,
-         badmap/1, exact/2, assoc/3, id/1]).
+-export([main/0, aliases/0, aliasing/0, retained/0, keys/0, guarded/0,
+         caught/0, badmap/1, exact/2, assoc/3, exact_self/1, assoc_self/2,
+         exact_self_key/2, shared_value/1, id/1]).
 
 %% A same-register `put_map_exact`: the source and the destination of the
 %% instruction are one register, and the value of the pair is an operand.
@@ -9,6 +10,24 @@ exact(Map, Value) when is_map(Map) -> Map#{1 := Value}.
 %% A same-register `put_map_assoc` with a key and a value that the caller
 %% gives. A key that the map does not hold.
 assoc(Map, Key, Value) when is_map(Map) -> Map#{Key => Value}.
+
+%% A `put_map_exact` whose value is the source map. The value operand names
+%% the register that the change also writes, so ERTS must read it before the
+%% change and the new map holds the old map.
+exact_self(Map) when is_map(Map) -> Map#{1 := Map}.
+
+%% A `put_map_assoc` whose value is the source map, with a key from a caller
+%% register.
+assoc_self(Map, Key) when is_map(Map) -> Map#{Key => Map}.
+
+%% A `put_map_exact` whose key and value are caller registers, and whose
+%% value is the source map.
+exact_self_key(Map, Key) when is_map(Map) -> Map#{Key := Map}.
+
+%% A `put_map_exact` whose value is a map that the source holds.
+shared_value(Map) when is_map(Map) ->
+    Inner = maps:get(i, Map),
+    Map#{1 := Inner}.
 
 %% Each helper changes one same-register copy and returns the result and
 %% each old root. The key and the value of the pair are terms of the
@@ -23,6 +42,18 @@ aliases() ->
     AliasResult = ?MODULE:assoc(Alias, Key, Value),
     Other = Map#{1 => 3},
     [Exact, Map, Key, Value, Alias, AliasResult, Other].
+
+%% The alias cases: the value of the pair is the source map, the key and the
+%% value are caller registers, and the value is a map that the source holds.
+%% Each result keeps the pinned ERTS value.
+aliasing() ->
+    ExactSelf = ?MODULE:exact_self(?MODULE:id(#{1 => 0, 2 => 2})),
+    Key = ?MODULE:id(7),
+    AssocSelf = ?MODULE:assoc_self(?MODULE:id(#{2 => 2}), Key),
+    ExactSelfKey = ?MODULE:exact_self_key(?MODULE:id(#{1 => 0, 2 => 2}), ?MODULE:id(1)),
+    Inner = ?MODULE:id(#{x => 1}),
+    SharedValue = ?MODULE:shared_value(?MODULE:id(#{1 => 0, i => Inner, 2 => 2})),
+    [ExactSelf, AssocSelf, ExactSelfKey, SharedValue].
 
 %% An update that shares the form and the descendants with an old root. The
 %% old root keeps its pairs, and the shared inner term is not written.
@@ -87,6 +118,6 @@ caught() ->
     [Result, Map, Alias].
 
 main() ->
-    [aliases(), retained(), keys(), guarded(), caught()].
+    [aliases(), aliasing(), retained(), keys(), guarded(), caught()].
 
 id(Term) -> Term.

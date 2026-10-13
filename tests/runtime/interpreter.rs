@@ -1205,6 +1205,56 @@ fn keeps_a_built_map_when_a_same_register_change_fails() {
 }
 
 #[test]
+fn keeps_a_key_or_value_in_the_destination_slot() {
+    // The key and the value operands name the destination register, whose
+    // value the instruction overwrites. ERTS reads both before the write, so
+    // the result uses the terms that the register held before.
+    let run = |held: Term, pairs: Vec<(Operand, Operand)>| {
+        make_program(
+            vec![
+                Instruction::Move(
+                    Operand::Value(Term::Map(
+                        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(0))]).unwrap(),
+                    )),
+                    Operand::X(0),
+                ),
+                Instruction::Move(Operand::Value(held), Operand::X(2)),
+                Instruction::PutMapExact {
+                    fail_label: 0,
+                    map: Operand::X(0),
+                    destination: Operand::X(2),
+                    pairs,
+                },
+                Instruction::Move(Operand::X(2), Operand::X(0)),
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .unwrap()
+        .term
+    };
+    let expected =
+        || Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(9))]).unwrap());
+    // The key is the term that the destination register held.
+    assert_eq!(
+        run(
+            Term::Integer(1),
+            vec![(Operand::X(2), Operand::Value(Term::Integer(9)))],
+        ),
+        expected()
+    );
+    // The value is the term that the destination register held.
+    assert_eq!(
+        run(
+            Term::Integer(9),
+            vec![(Operand::Value(Term::Integer(1)), Operand::X(2))],
+        ),
+        expected()
+    );
+}
+
+#[test]
 fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
     // A flatmap accepts the integer 2^59, and a hashmap does not yet.
     let pairs = |keys: std::ops::RangeInclusive<i64>| {

@@ -986,6 +986,41 @@ fn keeps_a_same_register_update_with_its_aliases_like_erts() {
 }
 
 #[test]
+fn keeps_a_value_that_aliases_the_map_like_erts() {
+    // `exact_self/1`, `assoc_self/2`, and `exact_self_key/2` name the source
+    // map in the value operand, so the value operand is the register that the
+    // change also writes (`{put_map_exact,{f,0},{x,0},{x,0},1,
+    // {list,[{integer,1},{x,0}]}}` and the two other forms). ERTS reads the
+    // value before the change, so the new map holds the old map.
+    // `shared_value/1` puts a map that the source holds in the value
+    // (`{list,[{integer,1},{x,1}]}`).
+    let program = BeamProgram::load(&[MAP_TAKE_PROBE]).unwrap();
+    let i = Term::Atom(program.atom("i").unwrap());
+    let x = static_atom("x");
+    let source = int_map(&[(1, Term::Integer(0)), (2, Term::Integer(2))]);
+    let two = int_map(&[(2, Term::Integer(2))]);
+    let inner = Term::Map(Map::from_pairs(vec![(x, Term::Integer(1))]).unwrap());
+    take_probe(
+        "aliasing",
+        Term::list_from(vec![
+            int_map(&[(1, source.clone()), (2, Term::Integer(2))]),
+            int_map(&[(2, Term::Integer(2)), (7, two)]),
+            int_map(&[(1, source), (2, Term::Integer(2))]),
+            Term::Map(
+                Map::from_pairs(vec![
+                    (Term::Integer(1), inner.clone()),
+                    (Term::Integer(2), Term::Integer(2)),
+                    (i, inner),
+                ])
+                .unwrap(),
+            ),
+        ]),
+        b"[#{1 => #{1 => 0,2 => 2},2 => 2},#{2 => 2,7 => #{2 => 2}},\
+          #{1 => #{1 => 0,2 => 2},2 => 2},#{1 => #{x => 1},2 => 2,i => #{x => 1}}]\n",
+    );
+}
+
+#[test]
 fn keeps_a_shared_map_and_its_descendants_like_erts() {
     // An update of a map that another owner holds copies the form and the
     // nodes on the path of the key, and each old root keeps its pairs. The
