@@ -2103,13 +2103,27 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
             arity,
         } => size_of_val(module) + size_of_val(name) + size_of_val(arity),
         Instruction::Move(field_0, field_1) => size_of_val(field_0) + size_of_val(field_1),
-        Instruction::Call { arity, label } => size_of_val(arity) + size_of_val(label),
+        Instruction::Call {
+            arity,
+            function,
+            target,
+        } => size_of_val(arity) + size_of_val(function) + size_of_val(target),
         Instruction::CallLast {
             arity,
-            label,
+            function,
+            target,
             deallocate,
-        } => size_of_val(arity) + size_of_val(label) + size_of_val(deallocate),
-        Instruction::CallOnly { arity, label } => size_of_val(arity) + size_of_val(label),
+        } => {
+            size_of_val(arity)
+                + size_of_val(function)
+                + size_of_val(target)
+                + size_of_val(deallocate)
+        }
+        Instruction::CallOnly {
+            arity,
+            function,
+            target,
+        } => size_of_val(arity) + size_of_val(function) + size_of_val(target),
         Instruction::CallExternal {
             arity,
             module,

@@ -170,22 +170,9 @@ pub(crate) struct ModuleTables {
     pub(crate) function_starts: LabelMap<Option<FunctionStart>>,
     /// The function names of the module and their identities.
     names: NameTable,
-    /// The name, the arity, and the code position of each function of the
-    /// module, in stream order. A `FunctionStart` names its entry in this
-    /// vector.
-    pub(crate) functions: Vec<FunctionEntry>,
-}
-
-/// The identity, the arity, and the code position of one function of a
-/// module.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FunctionEntry {
-    /// The identity of the function name in [`ModuleTables::names`].
-    pub(crate) name: NameId,
-    pub(crate) arity: u32,
-    /// The index of the first instruction of the function, after its entry
-    /// label.
-    pub(crate) start: usize,
+    /// The name and the arity of each function of the module, in stream
+    /// order. A `FunctionStart` names its entry in this vector.
+    pub(crate) functions: Vec<(NameId, u32)>,
 }
 
 /// The function that a label starts.
@@ -243,7 +230,7 @@ impl ModuleTables {
     /// ];
     /// let tables = ModuleTables::build("fixture", &mut instructions, NameTable::default()).unwrap();
     /// assert_eq!(tables.jump_targets.get(&2), Some(&3));
-    /// assert_eq!(tables.name(tables.functions[0].name), "main");
+    /// assert_eq!(tables.name(tables.functions[0].0), "main");
     /// ```
     fn build(
         name: &str,
@@ -252,7 +239,7 @@ impl ModuleTables {
     ) -> Result<Self, BeamError> {
         let mut jump_targets = LabelMap::default();
         let mut function_starts = LabelMap::default();
-        let mut functions: Vec<FunctionEntry> = Vec::new();
+        let mut functions: Vec<(NameId, u32)> = Vec::new();
         let mut function: Option<usize> = None;
         for (index, instruction) in instructions.iter().enumerate() {
             match instruction {
@@ -261,11 +248,7 @@ impl ModuleTables {
                     name: function_name,
                     arity,
                 } if module == name => {
-                    functions.push(FunctionEntry {
-                        name: names.intern(function_name),
-                        arity: *arity,
-                        start: 0,
-                    });
+                    functions.push((names.intern(function_name), *arity));
                     function = Some(functions.len() - 1);
                 }
                 Instruction::FunctionInfo { .. } => function = None,
@@ -277,11 +260,6 @@ impl ModuleTables {
                             function,
                             start: index + 1,
                         }));
-                    if let Some(function) = function
-                        && functions[function].start == 0
-                    {
-                        functions[function].start = index + 1;
-                    }
                 }
                 _ => {}
             }
@@ -302,8 +280,10 @@ impl ModuleTables {
 /// Replace the label of one instruction with the code position that the
 /// loader tables give. A branch label becomes the index of the instruction
 /// after the label. A call label becomes the index of the function in
-/// [`ModuleTables::functions`]. A label that no table holds keeps the error
-/// text of the removed lookup, and the module does not load.
+/// [`ModuleTables::functions`] and the index of the instruction at the
+/// label, so that a call starts where its label is and not at the entry of
+/// the function. A label that no table holds keeps the error text of the
+/// removed lookup, and the module does not load.
 ///
 /// # Examples
 ///
@@ -320,19 +300,28 @@ fn resolve(
     let jump_targets = &tables.jump_targets;
     let function_starts = &tables.function_starts;
     match instruction {
-        Instruction::Call { label, .. }
-        | Instruction::CallLast { label, .. }
-        | Instruction::CallOnly { label, .. } => {
-            let target = *label;
-            *label = match function_starts.get(&target) {
-                Some(Some(entry)) => entry.function as u32,
+        Instruction::Call {
+            function, target, ..
+        }
+        | Instruction::CallLast {
+            function, target, ..
+        }
+        | Instruction::CallOnly {
+            function, target, ..
+        } => {
+            let label = *target;
+            match function_starts.get(&label) {
+                Some(Some(entry)) => {
+                    *function = entry.function as u32;
+                    *target = entry.start as u32;
+                }
                 Some(None) => {
-                    return Err(error(format!("entry label {target} has no function info")));
+                    return Err(error(format!("entry label {label} has no function info")));
                 }
                 None => {
-                    return Err(error(format!("entry label {target} not found in {name}")));
+                    return Err(error(format!("entry label {label} not found in {name}")));
                 }
-            };
+            }
         }
         Instruction::Jump(target)
         | Instruction::LoopReceiveEnd(target)

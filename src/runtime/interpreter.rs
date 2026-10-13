@@ -653,29 +653,38 @@ impl BeamProgram {
                     }
                     stack.drain(..*count as usize);
                 }
-                Instruction::Call { arity, label } => {
+                Instruction::Call {
+                    arity,
+                    function,
+                    target,
+                } => {
                     check_local_call_arguments(&process.registers, *arity)?;
                     cursor.commit(process);
-                    let frame = code_table::frame_at(module, *label, *arity)?;
+                    let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
                     process.frames.push(frame);
                 }
-                Instruction::CallOnly { arity, label } => {
+                Instruction::CallOnly {
+                    arity,
+                    function,
+                    target,
+                } => {
                     check_local_call_arguments(&process.registers, *arity)?;
-                    let frame = code_table::frame_at(module, *label, *arity)?;
+                    let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
                     *current_frame(process) = frame;
                 }
                 Instruction::CallLast {
                     arity,
-                    label,
+                    function,
+                    target,
                     deallocate,
                 } => {
                     if *deallocate as usize != current_frame(process).stack.len() {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     check_local_call_arguments(&process.registers, *arity)?;
-                    let frame = code_table::frame_at(module, *label, *arity)?;
+                    let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
                     *current_frame(process) = frame;
                 }
@@ -3215,10 +3224,10 @@ struct Function {
 fn function_at_label(module: &BeamModule, target: u32) -> Result<Function, BeamError> {
     match module.tables.function_starts.get(&target) {
         Some(Some(entry)) => {
-            let function = &module.tables.functions[entry.function];
+            let (name, arity) = &module.tables.functions[entry.function];
             Ok(Function {
-                name: function.name,
-                arity: function.arity,
+                name: *name,
+                arity: *arity,
                 start: entry.start,
             })
         }

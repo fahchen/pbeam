@@ -149,7 +149,11 @@ fn floor_module() -> Rc<BeamModule> {
                     arguments: vec![Operand::X(0), Operand::Value(Term::Integer(1))],
                     destination: Operand::X(0),
                 },
-                Instruction::CallOnly { arity: 1, label: 1 },
+                Instruction::CallOnly {
+                    arity: 1,
+                    function: 1,
+                    target: 1,
+                },
             ],
         )
         .expect("the fixture module loads"),

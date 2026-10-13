@@ -690,7 +690,8 @@ fn rejects_missing_modules_exports_and_function_arities() {
 fn rejects_a_local_call_with_the_wrong_arity() {
     let body = vec![Instruction::Call {
         arity: 0,
-        label: 11,
+        function: 11,
+        target: 11,
     }];
     let extra = vec![
         Instruction::FunctionInfo {
@@ -708,6 +709,45 @@ fn rejects_a_local_call_with_the_wrong_arity() {
             .unwrap_err()
             .to_string(),
         "call arity does not match fixture:one"
+    );
+}
+
+/// A local call starts at the exact position of the label that it names, and
+/// not at the entry of the function. The pinned ERTS `i_call` saves the
+/// continuation pointer and dispatches to the code position of the operand
+/// label, and `i_call_only` dispatches to it with no other work
+/// (`erts/emulator/beam/emu/instrs.tab:148-180`), so a call to a label inside
+/// a function does not run the instructions before that label. `two/0` writes
+/// 1 to `x0` between its entry and label 12; the call to label 12 must keep
+/// the 2 that `main/0` wrote, and a frame at the entry would return 1.
+#[test]
+fn starts_a_local_call_at_the_exact_position_of_its_label() {
+    let body = vec![
+        Instruction::Move(Operand::Value(Term::Integer(2)), Operand::X(0)),
+        Instruction::Call {
+            arity: 0,
+            function: 12,
+            target: 12,
+        },
+        Instruction::Return,
+    ];
+    let extra = vec![
+        Instruction::FunctionInfo {
+            module: "fixture".into(),
+            name: "two".into(),
+            arity: 0,
+        },
+        Instruction::Label(11),
+        Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
+        Instruction::Label(12),
+        Instruction::Return,
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("two".into(), 0), 11)]);
+    assert_eq!(
+        program_of(fixture_instructions(0, body, extra), exports)
+            .execute("fixture", "main", &[])
+            .unwrap(),
+        Term::Integer(2)
     );
 }
 
@@ -1813,11 +1853,18 @@ fn rejects_call_stack_and_return_errors() {
             .is_err()
     );
     assert!(
-        make_program(vec![Instruction::Call { arity: 1, label: 2 }], 0)
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string()
-            .contains("argument x0 is unset")
+        make_program(
+            vec![Instruction::Call {
+                arity: 1,
+                function: 2,
+                target: 2
+            }],
+            0
+        )
+        .execute("fixture", "main", &[])
+        .unwrap_err()
+        .to_string()
+        .contains("argument x0 is unset")
     );
 }
 
@@ -1836,7 +1883,11 @@ fn keeps_the_error_text_of_a_bad_label_entry_and_register() {
     };
     assert_eq!(load(vec![Instruction::Jump(9)]), "missing BEAM label 9");
     assert_eq!(
-        load(vec![Instruction::Call { arity: 0, label: 9 }]),
+        load(vec![Instruction::Call {
+            arity: 0,
+            function: 9,
+            target: 9
+        }]),
         "entry label 9 not found in fixture"
     );
     // A target of 0 is the "no fail label" operand of a BIF only. Any other
@@ -1874,7 +1925,11 @@ fn keeps_the_error_text_of_a_call_with_no_function_info() {
             arity: 0,
         },
         Instruction::Label(7),
-        Instruction::Call { arity: 0, label: 7 },
+        Instruction::Call {
+            arity: 0,
+            function: 7,
+            target: 7,
+        },
     ];
     assert_eq!(
         BeamModule::new("fixture".into(), HashMap::new(), instructions)
@@ -2425,7 +2480,8 @@ fn selects_tuple_arity_and_rejects_call_last_stack_size() {
             Instruction::Allocate { stack_size: 1 },
             Instruction::CallLast {
                 arity: 0,
-                label: 2,
+                function: 2,
+                target: 2,
                 deallocate: 0,
             },
         ])
@@ -2860,7 +2916,8 @@ fn applies_module_functions_and_bifs_as_pinned_erts() {
             Instruction::Move(atom("exit"), Operand::X(1)),
             Instruction::Call {
                 arity: 2,
-                label: 13
+                function: 13,
+                target: 13
             },
             Instruction::Label(3),
             Instruction::CatchEnd { register: 0 },
@@ -3575,7 +3632,8 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
         extra.extend([
             Instruction::Call {
                 arity: 0,
-                label: 23,
+                function: 23,
+                target: 23,
             },
             Instruction::Return,
         ]);
