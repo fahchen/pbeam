@@ -637,7 +637,11 @@ fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
         });
     }
     let mut child = command.spawn().unwrap_or_else(|error| {
-        panic!("the host did not give the child the pseudo-terminal as its controlling terminal: {error}")
+        panic!(
+            "the host did not start the child of the pseudo-terminal run: {error}. The likely \
+             causes are a failed `setsid` or `TIOCSCTTY` in the child, and a failed fork of the \
+             host. The report does not decide which one occurred."
+        )
     });
     // `spawn` gives each `Stdio` to the child and closes the copies of the
     // test, so the test drops the command and its slave. It keeps the master
