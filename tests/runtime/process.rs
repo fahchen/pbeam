@@ -165,3 +165,49 @@ fn walks_the_terms_of_the_monitors_the_pending_bif_and_the_length_trap() {
     process.account(&mut live);
     assert!(live.bytes() > 0);
 }
+
+#[test]
+fn reports_the_bytes_of_the_pending_bif_arguments_and_the_length_trap() {
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    assert_eq!(process.pending_bif_bytes(), 0);
+    assert_eq!(process.length_trap_bytes(), 0);
+    let before = process.allocated_bytes();
+    process.pending_bif = Some(PendingBif {
+        module: "lists",
+        function: "member",
+        arguments: vec![Term::Integer(1), Term::Integer(2)],
+        tail: false,
+    });
+    let arguments = process.pending_bif.as_ref().unwrap().arguments.capacity();
+    assert_eq!(
+        process.pending_bif_bytes(),
+        arguments * std::mem::size_of::<Term>()
+    );
+    assert_eq!(
+        process.allocated_bytes(),
+        before + arguments * std::mem::size_of::<Term>()
+    );
+    process.length_trap = Some(vec![Term::Integer(1), Term::nil()]);
+    let trap = process.length_trap.as_ref().unwrap().capacity();
+    assert_eq!(
+        process.length_trap_bytes(),
+        trap * std::mem::size_of::<Term>()
+    );
+}
+
+#[test]
+fn walks_the_exit_reason_of_an_exiting_process() {
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    let before = {
+        let mut live = crate::term::LiveBytes::new();
+        process.account(&mut live);
+        live.bytes()
+    };
+    process.exiting = Some(Term::tuple(vec![Term::Integer(1)]));
+    let after = {
+        let mut live = crate::term::LiveBytes::new();
+        process.account(&mut live);
+        live.bytes()
+    };
+    assert!(after > before);
+}

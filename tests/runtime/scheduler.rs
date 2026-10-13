@@ -1,4 +1,4 @@
-use super::{CONTEXT_REDS, LinkId, MonitorOptions, MonitorTarget, Scheduler, Turn};
+use super::{CONTEXT_REDS, ExitPhase, LinkId, MonitorOptions, MonitorTarget, Scheduler, Turn};
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
 use crate::runtime::host::output::{IovecWrite, IovecWritten};
@@ -941,4 +941,22 @@ fn reports_the_live_bytes_of_the_scheduler_state() {
         )
         .unwrap();
     assert!(scheduler.live_bytes() > 0);
+}
+
+#[test]
+fn counts_the_exit_reason_of_a_freed_process() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], Vec::new()).unwrap();
+    let mut process = scheduler.processes.remove(&ProcessId(0)).unwrap();
+    process.exiting = Some(Term::tuple(vec![Term::Integer(1)]));
+    scheduler
+        .freed
+        .insert(ProcessId(0), (process, ExitPhase::Links(None)));
+    let with_reason = scheduler.live_bytes();
+    let (mut process, _) = scheduler.freed.remove(&ProcessId(0)).unwrap();
+    process.exiting = None;
+    scheduler
+        .freed
+        .insert(ProcessId(0), (process, ExitPhase::Links(None)));
+    assert!(with_reason > scheduler.live_bytes());
 }

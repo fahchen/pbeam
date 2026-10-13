@@ -631,6 +631,8 @@ impl ProcessState {
         let mut bytes = self.frames.capacity() * std::mem::size_of::<Frame>()
             + self.registers.capacity() * std::mem::size_of::<Option<Term>>()
             + self.dictionary_bytes()
+            + self.pending_bif_bytes()
+            + self.length_trap_bytes()
             + self.monitored_by.capacity() * std::mem::size_of::<TargetMonitor>()
             + self.mailbox.allocated_bytes()
             + self.links.allocated_bytes()
@@ -658,11 +660,53 @@ impl ProcessState {
         self.dictionary.capacity() * std::mem::size_of::<(Term, Term)>()
     }
 
+    /// Return the bytes of the argument vector of the pending BIF call of the
+    /// process: the capacity of the vector times the size of one argument, or
+    /// 0 when the process has no pending call. The vector survives the
+    /// scheduling step at the call. The number excludes the header of the
+    /// `Vec`, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![]);
+    /// process.pending_bif = Some(PendingBif { module: "lists", function: "member", arguments: vec![Term::Integer(1)], tail: false });
+    /// assert!(process.pending_bif_bytes() > 0);
+    /// ```
+    pub(super) fn pending_bif_bytes(&self) -> usize {
+        self.pending_bif.as_ref().map_or(0, |pending| {
+            pending.arguments.capacity() * std::mem::size_of::<Term>()
+        })
+    }
+
+    /// Return the bytes of the state vector of the `length/1` trap of the
+    /// process: the capacity of the vector times the size of one term, or 0
+    /// when the process has no trap. The vector survives the scheduling step
+    /// at the trap. The number excludes the header of the `Vec`, as the
+    /// accounting of task [#559](https://github.com/fahchen/pbeam/issues/559)
+    /// excludes it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![]);
+    /// process.length_trap = Some(vec![Term::Integer(1), Term::nil()]);
+    /// assert!(process.length_trap_bytes() > 0);
+    /// ```
+    pub(super) fn length_trap_bytes(&self) -> usize {
+        self.length_trap
+            .as_ref()
+            .map_or(0, |trap| trap.capacity() * std::mem::size_of::<Term>())
+    }
+
     /// Count the bytes of the containers of the process and of each guest
     /// term that they hold. The terms are in the Y-register slots, the X
-    /// registers, the dictionary, the mailbox entries, the origins of the
-    /// monitor tree, the arguments of a pending BIF, and the state of the
-    /// `length/1` trap.
+    /// registers, the dictionary, the exit reason of an exiting process, the
+    /// mailbox entries, the origins of the monitor tree, the arguments of a
+    /// pending BIF, and the state of the `length/1` trap. The walk reaches
+    /// the exit reason for a live process and for a freed process, because
+    /// the scheduler counts both through this method.
     ///
     /// # Examples
     ///
@@ -686,6 +730,9 @@ impl ProcessState {
         for (key, value) in &self.dictionary {
             live.term(key);
             live.term(value);
+        }
+        if let Some(reason) = &self.exiting {
+            live.term(reason);
         }
         self.mailbox.account_terms(live);
         for origin in self.monitors.values() {
