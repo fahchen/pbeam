@@ -2,8 +2,9 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
-    BeamProgram, CodeTable, Outcome, Scheduler, StackSlot, call_arguments, function_at_label,
-    read_bif_arguments, read_operand, read_ref, take_owned, write, write_operand,
+    BeamProgram, CodeTable, Outcome, Register, Scheduler, StackSlot, call_arguments,
+    function_at_label, read_bif_arguments, read_operand, read_ref, take_owned, write,
+    write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -4035,14 +4036,14 @@ fn gives_up_the_map_of_a_y_register_with_one_owner() {
     process.frames.last_mut().unwrap().stack = vec![StackSlot::Term(Term::nil())];
     write(&mut process, &Operand::Y(0), Term::Map(Map::new())).unwrap();
     assert!(matches!(
-        take_owned(&mut process, &Operand::Y(0)),
+        take_owned(&mut process, Register::Y(0)),
         Some(Term::Map(_))
     ));
-    assert!(take_owned(&mut process, &Operand::Y(0)).is_none());
+    assert!(take_owned(&mut process, Register::Y(0)).is_none());
     // A shared map keeps its slot.
     write(&mut process, &Operand::Y(0), Term::Map(Map::new())).unwrap();
     let held = read_ref(&process, &Operand::Y(0)).unwrap().clone();
-    assert!(take_owned(&mut process, &Operand::Y(0)).is_none());
+    assert!(take_owned(&mut process, Register::Y(0)).is_none());
     assert!(matches!(
         read_ref(&process, &Operand::Y(0)),
         Ok(Term::Map(_))

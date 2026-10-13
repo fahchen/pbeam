@@ -2748,10 +2748,10 @@ fn update_owned(
     destination: &Operand,
     update: impl FnOnce(&mut Map) -> Result<Option<Term>, BeamError>,
 ) -> Result<Update, BeamError> {
-    let source = register_slot(map);
-    let target = register_slot(destination);
-    let owned = match (source, target) {
-        (Some(source), Some(target)) if source == target => take_owned(process, destination),
+    let owned = match (register_of(map), register_of(destination)) {
+        (Some(source), Some(target)) if register_index(&source) == register_index(&target) => {
+            take_owned(process, target)
+        }
         _ => None,
     };
     // The destination of a `put_map_assoc` and a `put_map_exact` is a
@@ -2785,24 +2785,6 @@ enum Update {
     /// The change of a map failed; the destination register keeps the map
     /// that it held.
     Reason(Term),
-}
-
-/// Return the name of the register slot of an operand, as the pair
-/// `(is_x, index)`. Return `None` for a term that is not a register, which
-/// cannot hold a map that the instruction can change.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(register_slot(&Operand::X(1)), Some((true, 1)));
-/// assert_eq!(register_slot(&Operand::Value(Term::Integer(1))), None);
-/// ```
-fn register_slot(operand: &Operand) -> Option<(bool, u32)> {
-    match operand {
-        Operand::X(index) => Some((true, *index)),
-        Operand::Y(index) => Some((false, *index)),
-        Operand::Value(_) | Operand::UnsupportedLiteral(_) | Operand::UnsupportedInteger => None,
-    }
 }
 
 /// Replace the value of each existing key of `entries`, as ERTS
@@ -2868,25 +2850,68 @@ fn update_map_exact(
 /// assert!(matches!(take_owned(&mut process, &Operand::X(0)), Some(Term::Map(_))));
 /// assert!(take_owned(&mut process, &Operand::X(0)).is_none());
 /// ```
-fn take_owned(process: &mut ProcessState, destination: &Operand) -> Option<Term> {
+fn take_owned(process: &mut ProcessState, destination: Register) -> Option<Term> {
     match destination {
-        Operand::X(index) => process
+        Register::X(index) => process
             .registers
-            .get_mut(*index as usize)
+            .get_mut(index as usize)
             .and_then(Option::as_mut)
             .filter(|term| term.unique())
             .map(|slot| std::mem::replace(slot, Term::nil())),
-        Operand::Y(index) => process
+        Register::Y(index) => process
             .frames
             .last_mut()
-            .and_then(|frame| frame.stack.get_mut(*index as usize))
+            .and_then(|frame| frame.stack.get_mut(index as usize))
             .and_then(|slot| match slot {
                 StackSlot::Term(term) if term.unique() => {
                     Some(std::mem::replace(term, Term::nil()))
                 }
                 StackSlot::Term(_) | StackSlot::Empty | StackSlot::Catch(_) => None,
             }),
-        _ => None,
+    }
+}
+
+/// Return a name of a register that two [`Register`] values share only when
+/// they are the same slot.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(register_index(&Register::X(1)), register_index(&Register::X(1)));
+/// assert_ne!(register_index(&Register::X(1)), register_index(&Register::Y(1)));
+/// ```
+fn register_index(register: &Register) -> (bool, u32) {
+    match register {
+        Register::X(index) => (true, *index),
+        Register::Y(index) => (false, *index),
+    }
+}
+
+/// The register slot of a `put_map_assoc` or `put_map_exact` operand. Both
+/// the source and the destination of these instructions are a register, so
+/// the value cannot be a literal.
+enum Register {
+    /// An X register at the index.
+    X(u32),
+    /// A Y register at the index.
+    Y(u32),
+}
+
+/// Return the [`Register`] of an operand, or `None` for a literal. The
+/// loader gives a `put_map_assoc` and a `put_map_exact` a register, so a
+/// literal is not an operand of these instructions.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(register_of(&Operand::X(1)), Some(Register::X(1))));
+/// assert!(register_of(&Operand::Value(Term::Integer(1))).is_none());
+/// ```
+fn register_of(operand: &Operand) -> Option<Register> {
+    match operand {
+        Operand::X(index) => Some(Register::X(*index)),
+        Operand::Y(index) => Some(Register::Y(*index)),
+        Operand::Value(_) | Operand::UnsupportedLiteral(_) | Operand::UnsupportedInteger => None,
     }
 }
 
