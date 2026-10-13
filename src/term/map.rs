@@ -257,7 +257,8 @@ impl Drain {
             if let Some((key, value)) = self.collision.pop() {
                 pending.push(key);
                 pending.push(value);
-                moved += 2;
+                // One pair is one unit, as one leaf is.
+                moved += 1;
                 continue;
             }
             let Some(children) = self.nodes.last_mut() else {
@@ -300,6 +301,52 @@ impl Drain {
     pub(crate) fn is_empty(&self) -> bool {
         self.collision.is_empty() && self.nodes.iter().all(|children| children.is_empty())
     }
+
+    /// Return the bytes of the allocations that the drain holds: the stack of
+    /// the node children, the collision pairs that are not moved, and the
+    /// children of each node that the walk has not taken. The keys, the
+    /// values, and the terms of the pairs are slots of these vectors.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let drain = Drain::take(&mut map).unwrap();
+    /// assert!(drain.allocated_bytes() > 0);
+    /// ```
+    #[cfg(test)]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.nodes.capacity() * std::mem::size_of::<Vec<Child>>()
+            + self.collision.capacity() * std::mem::size_of::<(Term, Term)>()
+            + self
+                .nodes
+                .iter()
+                .map(|children| children_bytes(children, children.capacity()))
+                .sum::<usize>()
+    }
+}
+
+/// Return the bytes of the child vector of one node and of the nodes below it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(children_bytes(&[]), 0);
+/// ```
+#[cfg(test)]
+fn children_bytes(children: &[Child], capacity: usize) -> usize {
+    capacity * std::mem::size_of::<Child>()
+        + children
+            .iter()
+            .map(|child| match child {
+                Child::Leaf(..) => 0,
+                Child::Node(node) => {
+                    std::mem::size_of::<Node>()
+                        + children_bytes(&node.children, node.children.capacity())
+                }
+                Child::Collision(pairs) => pairs.capacity() * std::mem::size_of::<(Term, Term)>(),
+            })
+            .sum::<usize>()
 }
 
 impl Map {

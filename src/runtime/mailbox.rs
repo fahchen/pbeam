@@ -982,6 +982,24 @@ impl Mailbox {
     pub(super) fn is_empty(&self) -> bool {
         self.nodes.is_empty() && self.markers.is_empty()
     }
+
+    /// Return the bytes of the allocations of the mailbox: its node arena, its
+    /// free slots, and its marker slots. The terms that the entries hold are
+    /// slots of the arena.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut mailbox = Mailbox::default();
+    /// mailbox.push(Term::Integer(1));
+    /// assert!(mailbox.allocated_bytes() > 0);
+    /// ```
+    #[cfg(test)]
+    pub(super) fn allocated_bytes(&self) -> usize {
+        self.nodes.capacity() * std::mem::size_of::<Node>()
+            + self.free.capacity() * std::mem::size_of::<NodeId>()
+            + self.markers.capacity() * std::mem::size_of::<Marker>()
+    }
 }
 
 #[cfg(test)]

@@ -1163,12 +1163,19 @@ fn drains_the_pairs_of_a_collision_child_in_batches() {
         repr: Some(Repr::Hash(hamt).into()),
     };
     let mut drain = Drain::take(&mut map).expect("the only holder takes the form");
+    assert!(
+        drain.allocated_bytes() > 0,
+        "the drain holds the nodes of the collision"
+    );
     let mut pending = Vec::new();
+    let mut units = 0;
     for _ in 0..1000 {
         if drain.is_empty() {
             break;
         }
-        drain.step(&mut pending, 1);
+        let moved = drain.step(&mut pending, 1);
+        assert!(moved <= 1, "one step of one unit moved {moved} units");
+        units += moved;
     }
     assert!(drain.is_empty());
     assert_eq!(
@@ -1176,6 +1183,9 @@ fn drains_the_pairs_of_a_collision_child_in_batches() {
         8,
         "the drain moves the pairs of the collision"
     );
+    // The four pairs of the collision cost one unit each, and the walk steps
+    // down a node for each level of the trie.
+    assert!(units > 4, "the walk descends nodes: {units} units");
 }
 
 #[test]

@@ -222,6 +222,21 @@ impl<K: TreeKey, V> MonitorLinkTree<K, V> {
         self.nodes.pop().map(|node| node.value)
     }
 
+    /// Return the bytes of the node vector of the tree. The keys and the
+    /// values are slots of that vector.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tree = MonitorLinkTree::default();
+    /// tree.insert(ProcessId(1), 7);
+    /// assert!(tree.allocated_bytes() > 0);
+    /// ```
+    #[cfg(test)]
+    pub(in crate::runtime) fn allocated_bytes(&self) -> usize {
+        self.nodes.capacity() * std::mem::size_of::<Node<K, V>>()
+    }
+
     /// Return the value of `key`, as `mon_lnk_rbt_lookup`.
     ///
     /// # Examples
