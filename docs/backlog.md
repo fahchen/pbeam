@@ -73,6 +73,17 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Source:** owner decision on #503; epic checkpoint measurement at `a6b838c`.
 - **Scheduled:** this entry is the older statement of the same target as row 6 of `docs/term-performance-design-codex-v2.md` ("Immediate atoms and compact term"), which is the active task #553. The proposal asks for at most 16 bytes for `size_of::<Term>()` on the verified host, while this entry records the 24-byte design target of `docs/copy-on-write-terms.md`. The pull request that closes #553 removes this entry.
 
+### Land the compact term behind the owner decision on row 6
+
+- **Now:** the compact term exists as `Binary(Arc<BinaryView>)` on branch `perf/571-compact-term` at `45cae312`, in [PR #598](https://github.com/fahchen/pbeam/pull/598) for task [#571](https://github.com/fahchen/pbeam/issues/571). `Binary` is one `Arc` to a private `BinaryView` that keeps the byte array, the bit offset, the size, and the packed bytes, so the public `Term::Binary(Binary)` variant and every call site are unchanged.
+- **Sizes:** at the pinned `rustc 1.99.0 (b940084d7 2026-09-28)`, `size_of::<Term>()` and `size_of::<Option<Term>>()` are 32 bytes against 40 bytes at `c7dd12f5`, `size_of::<Binary>()` is 8 against 32, and `size_of::<Atom>()` stays 24. `BinaryView` is 32 bytes, so each binary handle pays one more allocation.
+- **Peak live bytes:** one Terra scene falls from 24096 bytes at `c7dd12f5` to 20192 bytes at `45cae312`, which is 16.20 percent, from `mise run bench-live-bytes`. The load is `{ 8.55 39.09 47.42 }` for both runs, and the two runs of the harness agree, so the spread is 0 bytes.
+- **End-to-end Terra:** flat, from `bash scripts/terra_latency.sh release`. The first frame is 0.50 s at `c7dd12f5` under load `{ 8.23 38.01 46.94 }` and 0.51 s at `45cae312` under load `{ 7.50 36.88 46.44 }`, and each key is at most 0.016 s in both runs.
+- **Gate:** the row-6 gate fails. The measured limb that decides it is the peak live bytes, and its 16.20 percent reduction is below the 20 percent bound. The time limb does not reach the 10 percent gain, and no time regresses by more than 10 percent.
+- **Reason:** the owner decides the class of question that row 6 asks, and the compact term and the atom mechanism belong to one decision. This change reaches 32 bytes and 16.20 percent of the peak live bytes, and the atom work of [#580](https://github.com/fahchen/pbeam/issues/580) reaches the 16-byte target and changes every site that reads an atom name (`docs/term-layout-design.md` section 2 counts 172 in `src/` and 45 in `tests/`).
+- **Trigger:** the atom mechanism of [#580](https://github.com/fahchen/pbeam/issues/580), which its sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver, changes the layout again. Re-measure the compact term against the row gate after it lands, with the same harnesses and a quiet host.
+- **Source:** task [#571](https://github.com/fahchen/pbeam/issues/571) and [PR #598](https://github.com/fahchen/pbeam/pull/598).
+
 ### Drop a shared map without a fresh empty handle
 
 - `Map::drain_into` replaces `self.repr` with a fresh `Arc<Repr::Flat(Vec::new())>` before `Arc::into_inner` (`src/term/map.rs:503`). The replacement allocates a handle also when another map holds the value, so the drop of one of several copies of a map term pays one allocation that the drop of a shared tuple does not.
