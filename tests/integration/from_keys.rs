@@ -47,9 +47,13 @@ fn makes_maps_from_keys_as_pinned_erts() {
     // the files of a code path directory with it (code_server.erl:1146-1159).
     let program = BeamProgram::load(&[FROM_KEYS_PROBE]).unwrap();
     let results = program
-        .execute("from_keys_probe", "results", &[Term::nil()])
+        .execute(
+            "from_keys_probe",
+            "results",
+            &[program.host_term(Term::nil())],
+        )
         .unwrap();
-    assert_eq!(text(&results), ERTS_RESULTS);
+    assert_eq!(text(&results.term), ERTS_RESULTS);
 
     let reference = Command::new("erl")
         .args([

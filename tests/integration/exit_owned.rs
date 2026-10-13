@@ -180,10 +180,13 @@ fn deletes_the_owned_tables_as_pinned_erts_with_one_scheduler() {
         .execute(
             "exit_owned_probe",
             "tables",
-            &[parse(&program, TABLE_CASES), Term::nil()],
+            &[
+                program.host_term(parse(&program, TABLE_CASES)),
+                program.host_term(Term::nil()),
+            ],
         )
         .unwrap();
-    assert_eq!(text(&tables), TABLES);
+    assert_eq!(text(&tables.term), TABLES);
 
     let reference = Command::new("erl")
         .args([
@@ -219,10 +222,13 @@ fn runs_the_tty_monitors_in_the_order_of_pinned_erts() {
         .execute(
             "exit_owned_probe",
             "ttys",
-            &[parse(&program, TTY_CASES), Term::nil()],
+            &[
+                program.host_term(parse(&program, TTY_CASES)),
+                program.host_term(Term::nil()),
+            ],
         )
         .unwrap();
-    assert_eq!(text(&ttys), TTYS);
+    assert_eq!(text(&ttys.term), TTYS);
 
     // The stand-in replaces the `prim_tty` of the boot, so the reference
     // prints with `erlang:display/1`, which needs no IO server and ends the

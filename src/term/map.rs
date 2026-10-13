@@ -249,6 +249,23 @@ impl Map {
             .expect("only the drop of a term takes the form of a map")
     }
 
+    /// Return a value that identifies the shared form. Two maps have one
+    /// value only when they share one form, so the import of a host term
+    /// reuses the imported term of a map that the source holds more than
+    /// once. The value is the address of the form, and no reader
+    /// dereferences it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::new();
+    /// assert_eq!(map.identity(), map.clone().identity());
+    /// assert_ne!(map.identity(), Map::new().identity());
+    /// ```
+    pub(super) fn identity(&self) -> usize {
+        Arc::as_ptr(self.arc()) as usize
+    }
+
     /// Return the handle of the form for a change. This is the receiver of
     /// `Arc::make_mut`: the caller copies the form first when another copy
     /// also holds it.

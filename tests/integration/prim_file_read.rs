@@ -166,9 +166,13 @@ fn isolated_prim_file_read() {
     let prim_file = pinned_beam("prim_file");
     let program = BeamProgram::load(&[&prim_file, PRIM_FILE_READ_PROBE]).unwrap();
     let result = program
-        .execute("prim_file_read_probe", "main", &[characters(&directory)])
+        .execute(
+            "prim_file_read_probe",
+            "main",
+            &[program.host_term(characters(&directory))],
+        )
         .unwrap();
-    fs::write(env::var_os(RESULT).unwrap(), text(&result) + "\n").unwrap();
+    fs::write(env::var_os(RESULT).unwrap(), text(&result.term) + "\n").unwrap();
 }
 
 /// Return the path as a list of its bytes, which is the character list of

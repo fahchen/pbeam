@@ -48,7 +48,7 @@ fn reads_the_monotonic_and_the_system_clock_as_pinned_erts() {
     let truths = Term::list_from(vec![Term::Atom(program.atom("true").unwrap()); 16]);
     for function in ["monotonic", "system"] {
         assert_eq!(
-            program.execute("time_probe", function, &[]).unwrap(),
+            program.execute("time_probe", function, &[]).unwrap().term,
             truths
         );
         assert_eq!(
@@ -66,7 +66,7 @@ fn raises_badarg_for_a_unit_that_is_not_valid_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let badargs = Term::list_from(vec![Term::tuple(vec![atom("error"), atom("badarg")]); 10]);
     assert_eq!(
-        program.execute("time_probe", "units", &[]).unwrap(),
+        program.execute("time_probe", "units", &[]).unwrap().term,
         Term::list_from(vec![badargs.clone(), badargs])
     );
     let badargs = ["{error,badarg}"; 10].join(",");
@@ -86,7 +86,7 @@ fn converts_the_time_unit_in_the_pinned_erlang_beam() {
     // (`erlang.erl:5299-5340`). It rounds a negative time down.
     let program = program();
     assert_eq!(
-        program.execute("time_probe", "convert", &[]).unwrap(),
+        program.execute("time_probe", "convert", &[]).unwrap().term,
         Term::list_from(
             [
                 1_000_000_000,
@@ -175,7 +175,7 @@ fn gives_the_date_of_a_posix_time_as_pinned_erts() {
     .collect();
     expected.extend([badarg.clone(), badarg.clone(), badarg]);
     assert_eq!(
-        program.execute("time_probe", "posix", &[]).unwrap(),
+        program.execute("time_probe", "posix", &[]).unwrap().term,
         Term::list_from(expected)
     );
     assert_eq!(
@@ -198,7 +198,10 @@ fn raises_badarg_for_a_date_that_is_not_valid_as_pinned_erts() {
     let program = program();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("time_probe", "local_badarg", &[]).unwrap(),
+        program
+            .execute("time_probe", "local_badarg", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![Term::tuple(vec![atom("error"), atom("badarg")]); 23])
     );
     assert_eq!(

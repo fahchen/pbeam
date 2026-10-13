@@ -64,7 +64,7 @@ fn timed(program: &BeamProgram, function: &str) -> Term {
         best = best.min(start.elapsed());
     }
     println!("COST ets_{function}_program {} ns", best.as_nanos());
-    result.unwrap()
+    result.unwrap().term
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn makes_tables_and_raises_badarg_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
-        program.execute("ets_probe", "new", &[]).unwrap(),
+        program.execute("ets_probe", "new", &[]).unwrap().term,
         Term::list_from(vec![
             atom("reference"),
             atom("ets_probe_named"),
@@ -111,7 +111,10 @@ fn deletes_the_tables_of_an_owner_before_its_down_message_as_pinned_erts() {
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("ets_probe", "owner_exit", &[]).unwrap(),
+        program
+            .execute("ets_probe", "owner_exit", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             Term::tuple(vec![atom("error"), atom("badarg")]),
             atom("stopped"),
@@ -139,7 +142,7 @@ fn inserts_objects_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
-        program.execute("ets_probe", "insert", &[]).unwrap(),
+        program.execute("ets_probe", "insert", &[]).unwrap().term,
         Term::list_from(vec![
             atom("true"),
             atom("true"),
@@ -171,7 +174,7 @@ fn looks_up_elements_as_pinned_erts() {
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
     assert_eq!(
-        program.execute("ets_probe", "lookup", &[]).unwrap(),
+        program.execute("ets_probe", "lookup", &[]).unwrap().term,
         Term::list_from(vec![
             atom("v"),
             atom("x"),
@@ -204,7 +207,7 @@ fn checks_table_access_as_pinned_erts() {
     let all = || Term::tuple(vec![atom("owner"), atom("true"), atom("true")]);
     let none = || Term::tuple(vec![badarg(), badarg(), badarg()]);
     assert_eq!(
-        program.execute("ets_probe", "access", &[]).unwrap(),
+        program.execute("ets_probe", "access", &[]).unwrap().term,
         Term::list_from(vec![
             Term::list_from(vec![
                 all(),
@@ -246,7 +249,7 @@ fn reads_the_application_environment_from_ac_tab_as_pinned_erts() {
     let program = BeamProgram::load(&[&application, &application_controller, ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("ets_probe", "main", &[]).unwrap(),
+        program.execute("ets_probe", "main", &[]).unwrap().term,
         Term::list_from(vec![atom("default"), atom("true"), atom("value")])
     );
     let output = Command::new("erl")
@@ -291,7 +294,7 @@ fn rejects_tables_that_pbeam_cannot_model() {
         let message = format!("unsupported ets:{detail}");
         let case = Term::Atom(program.atom(case).unwrap());
         let error = program
-            .execute("ets_probe", "unsupported", &[case])
+            .execute("ets_probe", "unsupported", &[program.host_term(case)])
             .unwrap_err();
         assert!(
             error.to_string().contains(&message),

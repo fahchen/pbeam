@@ -57,7 +57,10 @@ fn runs_the_bifs_of_io_inspect_of_a_tuple_as_pinned_erts() {
         Term::list_from(vec![badarg; 9]),
     ]);
     assert_eq!(
-        program.execute("inspect_bif_probe", "main", &[]).unwrap(),
+        program
+            .execute("inspect_bif_probe", "main", &[])
+            .unwrap()
+            .term,
         expected
     );
 

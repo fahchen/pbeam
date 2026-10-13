@@ -22,12 +22,13 @@ fn runs_the_pinned_unicode_characters_to_binary_as_pinned_erts() {
             .execute(
                 "unicode",
                 "characters_to_binary",
-                &[Term::list_from(vec![
+                &[program.host_term(Term::list_from(vec![
                     Term::binary(b"Hello".to_vec()),
                     Term::Integer(10),
-                ])],
+                ]))],
             )
-            .unwrap(),
+            .unwrap()
+            .term,
         Term::binary(b"Hello\n".to_vec())
     );
 
@@ -50,7 +51,10 @@ fn runs_iolist_to_iovec_of_terms_that_are_not_lists_as_pinned_erts() {
     // `badarg` for `foo`, as `iolist_to_iovec_1` (`erl_iolist.c`) does.
     let program = BeamProgram::load(&[USER_DRV_PROBE]).unwrap();
     assert_eq!(
-        program.execute("user_drv_probe", "iovec", &[]).unwrap(),
+        program
+            .execute("user_drv_probe", "iovec", &[])
+            .unwrap()
+            .term,
         Term::list_from(vec![
             Term::nil(),
             Term::nil(),
@@ -133,16 +137,17 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
                 "user_drv_probe",
                 "iolists",
                 &[
-                    ones(64),
-                    ones(512),
-                    ones(513),
-                    huge,
-                    deep,
-                    Term::Integer(256),
-                    Term::Integer(-1),
+                    program.host_term(ones(64)),
+                    program.host_term(ones(512)),
+                    program.host_term(ones(513)),
+                    program.host_term(huge),
+                    program.host_term(deep),
+                    program.host_term(Term::Integer(256)),
+                    program.host_term(Term::Integer(-1)),
                 ],
             )
-            .unwrap(),
+            .unwrap()
+            .term,
         expected
     );
 
@@ -195,7 +200,7 @@ fn runs_is_ne_exact_in_an_orelse_guard_as_pinned_erts() {
     let program = BeamProgram::load(&[USER_DRV_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("user_drv_probe", "ne", &[]).unwrap(),
+        program.execute("user_drv_probe", "ne", &[]).unwrap().term,
         Term::list_from(vec![atom("match"), atom("match"), atom("no_match")])
     );
 
@@ -241,7 +246,7 @@ fn executes_the_pinned_user_drv_server_for_one_put_chars_sync_request() {
     beams.extend(modules.iter().map(Vec::as_slice));
     let program = BeamProgram::load(&beams).unwrap();
     assert_eq!(
-        program.execute("user_drv_probe", "main", &[]).unwrap(),
+        program.execute("user_drv_probe", "main", &[]).unwrap().term,
         Term::tuple(vec![
             Term::list_from(vec![Term::binary(b"Hello, world!\n".to_vec())]),
             Term::Atom(program.atom("ok").unwrap()),

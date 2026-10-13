@@ -63,7 +63,7 @@ fn runs_the_nif_error_fallback_of_a_nif_without_a_binding() {
     let program = BeamProgram::load(&[NIF_ERROR_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     assert_eq!(
-        program.execute("nif_error_probe", "nif", &[]).unwrap(),
+        program.execute("nif_error_probe", "nif", &[]).unwrap().term,
         Term::tuple(vec![atom("error"), atom("undef")])
     );
 }

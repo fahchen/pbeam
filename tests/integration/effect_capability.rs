@@ -358,6 +358,7 @@ fn run(program: &BeamProgram, function: &str, policy: &dyn Policy) -> Term {
     program
         .execute_with_policy("effect_probe", function, &[], policy)
         .unwrap()
+        .term
 }
 
 /// Return the atom `name` of the program.
@@ -692,12 +693,12 @@ fn skips_each_effect_check_in_a_run_with_no_policy() {
     let unchecked = |function| program.execute("effect_probe", function, &[]).unwrap();
     let ok = atom(&program, "ok");
     assert_eq!(
-        unchecked("system_flag_kept"),
+        unchecked("system_flag_kept").term,
         tuple(&[ok.clone(), atom(&program, "undefined")])
     );
     let stored = |value| tuple(&[ok.clone(), Term::Integer(value)]);
     assert_eq!(
-        unchecked("persistent_term_kept"),
+        unchecked("persistent_term_kept").term,
         Term::list_from(vec![stored(1), stored(2)])
     );
 }

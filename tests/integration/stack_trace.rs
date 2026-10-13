@@ -101,7 +101,10 @@ fn keeps_the_stack_trace_frames_of_error_1_and_raise_3_as_pinned_erts() {
     };
     let down = |reason: Term| tuple(vec![reason, list(vec![f(1), mfa("g", nil(), nil())])]);
     assert_eq!(
-        program.execute("stack_trace_probe", "main", &[]).unwrap(),
+        program
+            .execute("stack_trace_probe", "main", &[])
+            .unwrap()
+            .term,
         tuple(vec![
             list(vec![int(8), int(64), badarg(), badarg(), int(64)]),
             list(vec![

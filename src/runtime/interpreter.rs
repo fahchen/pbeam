@@ -14,8 +14,8 @@ use crate::{
     },
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Fun, Insert, Map, MatchState, Target, Term, print_term, segment_equals,
-        segment_integer,
+        Atom, AtomTable, Fun, HostTerm, Insert, Map, MatchState, Target, Term, print_term,
+        segment_equals, segment_integer,
     },
 };
 use std::{borrow::Cow, collections::HashMap, rc::Rc, sync::Arc};
@@ -60,7 +60,8 @@ pub struct BeamProgram {
     modules: HashMap<String, Rc<BeamModule>>,
     /// The atom table of the loaded modules. ERTS has one atom table for
     /// each emulator, so each run starts its own table from a copy of it.
-    atoms: AtomTable,
+    /// The `Arc` lets a [`HostTerm`] of this program share the table.
+    atoms: Arc<AtomTable>,
 }
 
 /// The issuer of the initial capabilities of a run.
@@ -175,7 +176,7 @@ impl BeamProgram {
         }
         Ok(Self {
             modules: loaded,
-            atoms,
+            atoms: Arc::new(atoms),
         })
     }
 
@@ -193,6 +194,40 @@ impl BeamProgram {
     /// ```
     pub fn atom(&self, name: &str) -> Option<Atom> {
         self.atoms.get(name)
+    }
+
+    /// Pair `term` with the atom table of this program. Pass the result as
+    /// an argument of [`BeamProgram::execute`],
+    /// [`BeamProgram::execute_with_policy`], or
+    /// [`BeamProgram::execute_with_policy_module`]. A copy of the result is
+    /// cheap: the term copy is O(1), and the table is shared. The result of
+    /// a run is already a `HostTerm` that carries the table of the run, so
+    /// use this function for a term that the caller builds with
+    /// [`BeamProgram::atom`].
+    ///
+    /// # Precondition
+    ///
+    /// Every atom of `term` must come from this program, through
+    /// [`BeamProgram::atom`], or be a static atom, whose index is the same
+    /// in every table. A term of another table enters through
+    /// `HostTerm::import_into` first. This function reads no atom of the
+    /// term, because a bare atom term holds an index and no table identity,
+    /// so it cannot prove that the term belongs to the program. A foreign
+    /// index is a caller error, and no run-time check detects it. When the
+    /// program table gives that index to a different name, the host term
+    /// reads that other name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let argument = program.host_term(Term::Atom(program.atom("ok").unwrap()));
+    /// let applied = program.execute("process_probe", "apply", &[argument])?;
+    /// ```
+    pub fn host_term(&self, term: Term) -> HostTerm {
+        HostTerm {
+            term,
+            atoms: Arc::clone(&self.atoms),
+        }
     }
 
     /// Run an exported function as the root process. Processes that it
@@ -254,8 +289,8 @@ impl BeamProgram {
         &self,
         module: &str,
         function: &str,
-        arguments: &[Term],
-    ) -> Result<Term, BeamError> {
+        arguments: &[HostTerm],
+    ) -> Result<HostTerm, BeamError> {
         self.execute_issued(module, function, arguments, Issuer::Unchecked)
     }
 
@@ -281,9 +316,9 @@ impl BeamProgram {
         &self,
         module: &str,
         function: &str,
-        arguments: &[Term],
+        arguments: &[HostTerm],
         policy: &dyn Policy,
-    ) -> Result<Term, BeamError> {
+    ) -> Result<HostTerm, BeamError> {
         self.execute_issued(module, function, arguments, Issuer::Host(policy))
     }
 
@@ -349,10 +384,10 @@ impl BeamProgram {
         &self,
         module: &str,
         function: &str,
-        arguments: &[Term],
+        arguments: &[HostTerm],
         policy: &str,
         boot: bool,
-    ) -> Result<Term, BeamError> {
+    ) -> Result<HostTerm, BeamError> {
         let issuer = Issuer::Module { policy, boot };
         self.execute_issued(module, function, arguments, issuer)
     }
@@ -370,20 +405,35 @@ impl BeamProgram {
         &self,
         module: &str,
         function: &str,
-        arguments: &[Term],
+        arguments: &[HostTerm],
         issuer: Issuer,
-    ) -> Result<Term, BeamError> {
+    ) -> Result<HostTerm, BeamError> {
         let initial_mode = InitialMode::read();
         let mut scheduler = match issuer {
-            Issuer::Unchecked => Scheduler::without_checks(self.atoms.clone()),
-            Issuer::Host(_) | Issuer::Module { .. } => Scheduler::new(self.atoms.clone()),
+            Issuer::Unchecked => Scheduler::without_checks((*self.atoms).clone()),
+            Issuer::Host(_) | Issuer::Module { .. } => Scheduler::new((*self.atoms).clone()),
         };
         scheduler.code = CodeTable::new(self.modules.clone());
-        let run = self.run_root(&mut scheduler, module, function, arguments, issuer);
+        // Each argument of another table is imported into the table of the
+        // run. `run_root` then runs with terms of one table.
+        let imported = arguments
+            .iter()
+            .map(|argument| argument.import_into(&mut scheduler.atoms))
+            .collect::<Result<Vec<Term>, BeamError>>();
+        let run = match imported {
+            Ok(arguments) => self.run_root(&mut scheduler, module, function, &arguments, issuer),
+            Err(import_error) => Err(import_error),
+        };
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
-        match scheduler.into_root_result() {
-            Some(Ok(result)) => Ok(result),
+        // The table of the run holds each name that the run created, so the
+        // host result can name every atom of the root result.
+        let (root, atoms) = scheduler.into_run_result();
+        match root {
+            Some(Ok(result)) => Ok(HostTerm {
+                term: result,
+                atoms: Arc::new(atoms),
+            }),
             Some(Err(reason)) => {
                 // `erlang:halt/1` writes each byte of the `%T` text as one code
                 // point (`bif.c:4372-4387`), so the text is valid UTF-8.
@@ -412,7 +462,7 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut scheduler = Scheduler::new(program.atoms.clone());
+    /// let mut scheduler = Scheduler::new((*program.atoms).clone());
     /// scheduler.code = CodeTable::new(program.modules.clone());
     /// program.run_root(&mut scheduler, "process_probe", "main", &[], Issuer::Host(&AllowAll))?;
     /// assert!(scheduler.into_root_result().is_some());

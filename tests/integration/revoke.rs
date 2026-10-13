@@ -82,7 +82,7 @@ fn pbeam(function: &str, policy: &dyn Policy) -> String {
     let result = program()
         .execute_with_policy("revoke_probe", function, &[], policy)
         .unwrap();
-    text(&result)
+    text(&result.term)
 }
 
 /// Run `revoke_probe:Function()` on PBeam with no policy, which skips each
@@ -94,7 +94,12 @@ fn pbeam(function: &str, policy: &dyn Policy) -> String {
 /// assert_eq!(unchecked("released"), "ok");
 /// ```
 fn unchecked(function: &str) -> String {
-    text(&program().execute("revoke_probe", function, &[]).unwrap())
+    text(
+        &program()
+            .execute("revoke_probe", function, &[])
+            .unwrap()
+            .term,
+    )
 }
 
 /// Load the probe and the pinned `erlang` and `erts_internal`.

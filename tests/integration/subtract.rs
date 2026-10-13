@@ -58,9 +58,13 @@ fn subtracts_lists_in_each_stage_as_pinned_erts() {
     // of the pinned ERTS JIT.
     let program = BeamProgram::load(&[SUBTRACT_PROBE]).unwrap();
     let results = program
-        .execute("subtract_probe", "results", &[Term::nil()])
+        .execute(
+            "subtract_probe",
+            "results",
+            &[program.host_term(Term::nil())],
+        )
         .unwrap();
-    assert_eq!(text(&results), ERTS_RESULTS);
+    assert_eq!(text(&results.term), ERTS_RESULTS);
 
     let reference = Command::new("erl")
         .args([
