@@ -9,7 +9,8 @@ use crate::{
 const WORD_SIZE: usize = 4;
 mod instruction;
 pub(crate) use instruction::{
-    BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind, TestOperand,
+    BinaryMatchCommand, BinarySegment, Instruction, Operand, SelectValueChoices, TestKind,
+    TestOperand,
 };
 
 const CHUNK_ALIGNMENT: usize = WORD_SIZE;

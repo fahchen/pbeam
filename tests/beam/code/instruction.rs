@@ -6,16 +6,19 @@ use super::{
     OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
     OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP,
     OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
-    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, parse_code,
-    read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
-    read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
-    skip_integer_payload, skip_operand, skip_unsupported_instruction, test_kind,
-    unsupported_opcode_operand_count,
+    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT,
+    parse_code, prepare_select_value_choices, read_binary_match_commands, read_binary_segments,
+    read_move_operand, read_operand_pairs, read_pair_count, read_record_updates, skip_allocation,
+    skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
+    test_kind, unsupported_opcode_operand_count,
 };
 use crate::{
-    beam::code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind, TestOperand},
+    beam::code::{
+        BinaryMatchCommand, BinarySegment, Instruction, Operand, SelectValueChoices, TestKind,
+        TestOperand,
+    },
     runtime::BifId,
-    term::{Atom, AtomTable, Lambda, Term},
+    term::{Atom, AtomTable, Lambda, Reference, Term},
 };
 
 #[test]
@@ -176,6 +179,67 @@ fn rejects_unsupported_select_val_forms() {
             .contains("exceeds code chunk")
         );
     }
+}
+
+/// Check the prepared form of a `select_val` choice list: a small list keeps
+/// the encoded order, a large distinct list takes the term order, and a
+/// duplicate or an incomparable choice keeps the linear form with the
+/// encoded order.
+#[test]
+fn prepares_the_select_value_choices_by_shape() {
+    let atoms = AtomTable::new();
+    let choices = |values: &[i64]| -> Vec<(Term, u32)> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (Term::Integer(*value), index as u32))
+            .collect()
+    };
+
+    // The boundary: a list of exactly the limit keeps the linear walk.
+    let limit: Vec<i64> = (0..SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    assert!(matches!(
+        prepare_select_value_choices(choices(&limit), &atoms),
+        SelectValueChoices::Linear(_)
+    ));
+
+    // One choice more takes the term order.
+    let mut values: Vec<i64> = (0..=SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    values.reverse();
+    let large = choices(&values);
+    let SelectValueChoices::Ordered(ordered) = prepare_select_value_choices(large.clone(), &atoms)
+    else {
+        panic!(
+            "{} distinct choices must take the ordered form",
+            values.len()
+        );
+    };
+    let mut expected = large;
+    expected.sort_by_key(|(term, _)| match term {
+        Term::Integer(value) => *value,
+        _ => unreachable!("the probe holds integers only"),
+    });
+    assert_eq!(ordered, expected);
+
+    // A duplicate choice keeps the linear form and its encoded order, so the
+    // interpreter still gives the first match.
+    let mut duplicate_values: Vec<i64> = (0..SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    duplicate_values.push(0);
+    let duplicate = choices(&duplicate_values);
+    let SelectValueChoices::Linear(kept) = prepare_select_value_choices(duplicate.clone(), &atoms)
+    else {
+        panic!("a duplicate choice must keep the linear form");
+    };
+    assert_eq!(kept, duplicate);
+
+    // A choice list with no term order keeps the linear form.
+    let incomparable: Vec<(Term, u32)> = (0..=SELECT_VALUE_LINEAR_LIMIT as u64)
+        .map(|index| (Term::Reference(Reference(index)), index as u32))
+        .collect();
+    assert!(matches!(
+        prepare_select_value_choices(incomparable, &atoms),
+        SelectValueChoices::Linear(_)
+    ));
 }
 
 #[test]
@@ -2527,7 +2591,7 @@ fn records_the_decoded_form_layout() {
             Instruction::SelectValue {
                 value: Operand::X(0),
                 fail_label: 0,
-                choices: vec![(Term::Integer(1), 1)],
+                choices: SelectValueChoices::Linear(vec![(Term::Integer(1), 1)]),
             },
         ),
         (

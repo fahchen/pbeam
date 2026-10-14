@@ -93,6 +93,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a combined form that measures a gain of at least 10 percent on the local floor loop against the two separate instructions, with the session control of its own revision.
 - **Source:** task #517 and the step 9 measurement of `docs/interpreter-dispatch-measurements.md`.
 
+### Pin the select_val linear bound between 17 and 32 choices
+
+- **Reason:** `SELECT_VALUE_LINEAR_LIMIT` is 32, and it is a measured estimate. The end-to-end session of task #545 measures a loss of the ordered form at 16 choices and a win of 458.005 ns at 256 choices, and no end-to-end probe covers 17 to 32 choices, so the crossover of the average case is unknown between those points.
+- **Evidence:** the session of task #545 in `tests/integration/select_val.rs`: the linear form costs 500.169 ns for each iteration at 16 choices and the ordered form costs 514.915 ns at the same shape, while the ordered form costs 526.238 ns at 256 choices against 984.243 ns of the linear form. The micro-measurement of `prints_the_cost_of_every_derivation` is the only point between them, at 32 choices, where the linear worst case costs 152.053 ns and the ordered search costs 34.172 ns.
+- **Option:** run the end-to-end probe at 32 and 64 choices in one interleaved session, and set the bound at the highest shape where the linear walk still wins.
+- **Trigger:** a session that can run end-to-end probes at 32 and 64 choices, or a measured `select_val` with 17 to 32 choices in a hot path.
+- **Source:** task #545 and the section "The `select_val` dispatch decision of task [#545](https://github.com/fahchen/pbeam/issues/545)" of `docs/interpreter-dispatch-measurements.md`.
+
 ## Runtime
 
 ### Model the process heap for GC reductions and the message copy cost

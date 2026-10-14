@@ -607,3 +607,80 @@ Step 7 ([#515](https://github.com/fahchen/pbeam/issues/515)) merged as `c6cfb3a`
 Step 9 ([#517](https://github.com/fahchen/pbeam/issues/517)) adds combined instructions for the two measured pair shapes, `test` with `gc_bif` and `gc_bif` with `call_only`. Its gate is a floor loop at or below 150 ns for each iteration, and the target for the Terra key latency at that point is at most 10 ms, against the measured 0.018 s to 0.039 s of section 3.
 
 Step 8 ([#516](https://github.com/fahchen/pbeam/issues/516)) is skipped. The gate of that step needs at least a 10 percent gain on the floor loop and at most 32 bytes for each instruction. The step 6 estimate is 5.0 percent under the memory-system proxy, which is below the gate, and the 816-byte slot range of the floor loop is below 1.3 percent of the smaller L1 data cache of the host. The step number does not change, and step 9 follows step 7 without it. Step 9 keeps a blocked-by link to step 8, and that link is stale while step 8 is skipped.
+
+## The `select_val` dispatch decision of task [#545](https://github.com/fahchen/pbeam/issues/545)
+
+This section answers the question of issue [#545](https://github.com/fahchen/pbeam/issues/545): how does the interpreter select the clause of a `select_val` instruction, given the shape of the choice list that real code produces? The measured revision is `915590af`, the head of `origin/main` that the branch of the task starts from, and the environment is the one of "The environment of the numbers" above. The branch holds three later revisions: `b4b1d275` adds the ordered form, `d8ffdb36` adds the compare fast path, and `ea45a0e7` adds the 16-choice probe to the fixture and the harness.
+
+The instruction has two prepared forms, and the decoder of the loader builds one of them one time at load time. A list of at most `SELECT_VALUE_LINEAR_LIMIT` choices keeps the encoded order, and the interpreter walks it with the exact equality of `Term`. The linear walk is the behaviour of every earlier revision. A larger list is sorted by the ERTS term order `Term::compare`, and the interpreter binary-searches it.
+
+The bound is 32, and it is a measured estimate. It is not the bound of the pinned ERTS. ERTS uses 10 in the generator that serves a choice list that a jump table does not fit: that generator special-cases two values with `i_select_val2`, reserves a place for a sentinel and takes `align = 1` for 3 to 10 values, which selects `i_select_val_lins`, and it selects `i_select_val_bins` above that (`erts/emulator/beam/emu/ops.tab:159-169` and `emu/generators.tab:214-254`, OTP 29.1.1). The ordered search of ERTS compares one encoded value at a time, which costs less than the `Term::compare` call of PBeam, so the crossover of ERTS sits below the crossover of PBeam. ERTS sorts the encoded values one time at load time with `beam_load_sort_select_vals` (`erts/emulator/beam/beam_transform_helpers.c:135-146`), so its order of atom choices follows the atom value and not the atom name. PBeam sorts by `Term::compare` and searches with the same order, so the selected clause agrees.
+
+The two end-to-end points of the task bracket the bound: the ordered form loses 13.276 ns for each iteration at 16 choices, net of the 2-choice control, and wins 458.005 ns at 256 choices. The only micro-measurement point between them is 32 choices, where the linear walk costs 152.053 ns in the worst case and the ordered search costs 34.172 ns. No end-to-end probe covers 17 to 32 choices, so 32 is an estimate, and a later session can pin the bound with end-to-end probes at 32 and 64 choices.
+
+### The shape distribution
+
+The command is `escript /tmp/select_val_histogram.escript fixtures <OTP lib dir> <Elixir lib dir>`, run from the repository root on the pinned ERTS. The run reads each BEAM file with `beam_disasm:file/1` and counts the pairs of every `select_val` instruction. The first run is the tree without the fixture of this task: 1777 files and 24568 instructions.
+
+| Choices | Instructions | Share |
+| --- | --- | --- |
+| 1 to 4 | 20346 | 82.82 percent |
+| 5 to 8 | 2055 | 8.36 percent |
+| 9 to 16 | 1267 | 5.16 percent |
+| 17 to 32 | 527 | 2.15 percent |
+| 33 to 64 | 189 | 0.77 percent |
+| 65 and more | 184 | 0.75 percent |
+
+The distribution is dominated by small lists: 82.82 percent of the instructions hold at most 4 choices, and 91.18 percent hold at most 8. Only 373 instructions, or 1.52 percent, hold more than 32 choices, so the ordered form serves about one instruction in 66. The largest single list holds 6878 choices.
+
+The fixture of this task, `fixtures/dispatch/select_val_probe.erl`, adds one `select_val` with 256 choices in `bucket/1`, one with 16 choices in `nibble/1`, and one with 2 choices in `digit/1`. The 16-choice probe joined the fixture after the first session of the task, which read 1778 files and 24570 instructions with the two-instruction form of the fixture, of which 20347 are in the 1-to-4 bucket and 185 in the 65-and-more bucket. The fixture covers the 65-and-more bucket, which holds the lists whose linear walk costs the most, and the 9-to-16 bucket, which the bound of 32 keeps on the linear form.
+
+A later run of the same command at `2c667081` on 2026-10-15 on this host reads 1973 BEAM files and 26917 `select_val` instructions: 170 files under `fixtures`, 1356 under the OTP lib directory, and 447 under the Elixir lib directory. Its bucket shares are 83.42, 7.74, 5.49, 1.97, 0.70, and 0.69 percent, which differ from the first table by at most 0.62 percentage points, and 374 instructions, or 1.39 percent, hold more than 32 choices. The record does not identify the cause of the difference in the file count. The record keeps the first table, because the decision of the task used it, and the later run does not change that decision.
+
+### The micro-measurement
+
+The measurement is `select_val_scan_*` and `select_val_binary_search_*` of `tests/runtime/interpreter/data_structure_costs.rs`, inside the test `prints_the_cost_of_every_derivation`. It measures the model of each search arm on an integer list that is already in the term order, with the last choice as the value. The value is the worst case of the linear walk and the `Greater` case of the binary search. Each invocation of the test is the minimum of nine timed runs of 100000 operations. The linear column and the after column come from one release invocation of the test at `d8ffdb36`, after the fast path, and the record of that invocation holds no load. The before column is the minimum of three release invocations in the first session of the task, which measured the code of `b4b1d275` at a one-minute load of 4.39 to 6.04.
+
+| Choices | Linear walk, ns for one operation | Ordered binary search before, ns for one operation | Ordered binary search after, ns for one operation |
+| --- | --- | --- | --- |
+| 4 | 19.828 | 48.4 | 16.381 |
+| 16 | 78.440 | 116.1 | 27.791 |
+| 32 | 152.053 | 139.6 | 34.172 |
+| 64 | 292.362 | 161.8 | 38.867 |
+| 128 | 576.458 | 186.0 | 44.432 |
+| 256 | 1145.774 | 207.2 | 50.515 |
+
+The ordered search is now faster than the worst case of the linear walk at every measured shape, and the fast path is the cause. The cause of the before column is `Term::compare`: it built the work vector `vec![Step(self, other)]` for every call (`src/term/order.rs:73`), so one comparison of two integers cost about 25 ns against about 4.5 ns for the exact equality of `Term`. The fast path of `d8ffdb36` compares the pair of the two terms first with no work stack, so a pair that the comparison decides allocates nothing, and only a pair that the comparison does not decide fills the stack: two cons cells, two tuples of equal size, two maps of equal size, and two funs that the own entries do not order.
+
+A branch session re-measures the same test at a one-minute load of 2.10 to 2.88. Its linear rows are 18.111, 70.846, 141.573, 283.228, 564.987, and 1130.336 ns, which agree with the linear column above. Its ordered rows are 9.371, 16.341, 19.827, 23.353, 26.825, and 30.284 ns, which are below the after column above. The direction of the change is firm, and the after column above is conservative.
+
+The linear column is a model of the walk, and the model costs more than the interpreter's own walk: the interpreter reads its encoded choice list in order with the exact equality of `Term`, and the end-to-end session below measures that walk for each iteration.
+
+The issue quotes the linear scan at `912b322` as 85.073 ns, 343.375 ns, and 1417.017 ns for 4, 16, and 64 choices. Those numbers are historical: [#548](https://github.com/fahchen/pbeam/pull/548) removed the pair-stack allocation of `Term::eq` between that revision and this one, so the same model now costs 19.828 ns, 78.440 ns, and 292.362 ns in the table above.
+
+### The end-to-end measurement
+
+The probe is `fixtures/dispatch/select_val_probe.erl`, and the harness is `tests/integration/select_val.rs`. `ordered_loop/2` runs the 256-choice `select_val` of `bucket/1` one time for each iteration, `nibble_loop/2` runs the 16-choice `select_val` of `nibble/1`, and `linear_loop/2` is the control: the same loop shape with a 2-choice `select_val` and with `rem 3` in the place of `band 255`. Each number is the minimum of nine runs of the probe inside one invocation of `cargo test --release --test select_val`, and the number divides the run by the 200000 iterations. The pinned ERTS answers the same loops in 7.72 ns to 8.35 ns for each iteration.
+
+The session interleaves three builds in one worktree. **Before** is the `src/` of `915590af`, the head of `origin/main` that the branch starts from, which keeps the linear walk for every shape. **Middle** is `b4b1d275`, which adds the ordered form with no compare fast path. **After** is `d8ffdb36`, which adds the compare fast path. Every build holds the fixture and the harness of `ea45a0e7`. The `src/` of each build is checked out into the one worktree, so the three builds share the fixture, the harness, the host, and the hour, and a rebuild separates each pair of builds. The task could not run the three revisions as detached checkouts.
+
+| Round | Before `915590af`, 256 | Middle `b4b1d275`, 256 | After `d8ffdb36`, 256 | Before, 16 | Middle, 16 | After, 16 | Before, 2 | Middle, 2 | After, 2 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 992.740 | 672.733 | 526.883 | 506.625 | 584.573 | 517.379 | 488.130 | 489.851 | 487.776 |
+| 2 | 990.376 | 672.988 | 528.557 | 507.679 | 582.008 | 518.964 | 489.019 | 491.837 | 491.222 |
+| 3 | 984.243 | 684.754 | 526.238 | 500.169 | 583.174 | 514.915 | 486.306 | 488.149 | 489.312 |
+| Minimum | 984.243 | 672.733 | 526.238 | 500.169 | 582.008 | 514.915 | 486.306 | 488.149 | 487.776 |
+
+The one-minute load is `{ 4.40 5.95 7.00 }`, `{ 3.71 5.72 6.90 }`, and `{ 3.45 5.60 6.84 }` for the three builds of round 1; `{ 3.28 5.46 6.77 }`, `{ 7.20 6.22 7.02 }`, and `{ 6.16 6.03 6.94 }` for round 2; and `{ 5.53 5.90 6.88 }`, `{ 5.93 5.96 6.88 }`, and `{ 5.17 5.80 6.81 }` for round 3. Every value is below the bound of 12 that this document uses.
+
+The session measures the two forms with the bound of 10, because that was the bound of the task at the time of the run, and the landed bound is 32. The 256-choice rows are direct for the landed change: the shape is above both bounds, so it keeps the ordered form, and it falls from 984.243 ns to 526.238 ns for each iteration, a fall of 458.005 ns or 46.5 percent. The 16-choice rows are historical for the landed change: the bound of 32 keeps the shape on the linear form, so its landed value is the linear arm of the before build, 500.169 ns for each iteration. That arm is the code of this branch, and the run of the final build does not measure 16 choices, so the value is an inference from the same session and not a measurement of the final revision. The ordered rows of the middle and the after build measure the form that the landed change does not use at 16 choices, and they show why the bound moved: the ordered search costs 582.008 ns before the compare fast path of `d8ffdb36` and 514.915 ns after it, against the 500.169 ns of the linear walk. The control of the session moves by at most 1.843 ns, or 0.4 percent, across the three builds.
+
+### The decision
+
+The compare fast path lands. It removes the work-vector allocation of `Term::compare` for a pair that the comparison decides, and the micro-measurement falls the ordered search from 116.1 ns to 27.791 ns at 16 choices and from 207.2 ns to 50.515 ns at 256 choices. The resolved 256-choice shape, which keeps the ordered form under either bound, measures 526.238 ns against the 984.243 ns of the linear form of `915590af`, a fall of 458.005 ns or 46.5 percent.
+
+`SELECT_VALUE_LINEAR_LIMIT` is 32. The bound is a measured estimate between the two end-to-end points of the session: the linear form wins at 16 choices, and the ordered form wins by 458.005 ns at 256 choices. The only micro-measurement point between them is 32 choices, where the linear walk costs 152.053 ns in the worst case and the ordered search costs 34.172 ns; at 16 choices the same worst-case numbers are 78.440 ns and 27.791 ns. Thus the resolved change keeps the linear form at 16 choices, whose value is the 500.169 ns of the same session, and it uses the ordered form above 32 choices.
+
+The pinned ERTS uses 10 (`erts/emulator/beam/emu/generators.tab:240-254`, OTP 29.1.1). Its ordered search compares one encoded value at a time, which costs less than the `Term::compare` call of PBeam, so the crossover of ERTS sits below the crossover of PBeam.
+
+No end-to-end probe covers 17 to 32 choices, so the bound of 32 is an estimate. A later session can pin the bound with end-to-end probes at 32 and 64 choices, and `docs/backlog.md` records that gap with its trigger. The fixture also measures only the 256-choice shape, the 16-choice shape, and the 2-choice control, so no number here covers a `select_val` with 6878 choices.
