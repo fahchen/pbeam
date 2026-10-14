@@ -96,7 +96,7 @@ fn checks_the_follow_flag_and_then_the_path_as_erts() {
     let result = read_info_nif(&mut scheduler, &path, &Term::Integer(0)).unwrap();
     assert!(
         matches!(&result, BifResult::Value(Term::Tuple(fields)) if fields.len() == 14
-            && matches!(&fields[2], Term::Atom(atom) if atom.name() == "directory")),
+            && matches!(&fields[2], Term::Atom(atom) if scheduler.atoms.name_of(atom) == "directory")),
         "{result:?}"
     );
 }

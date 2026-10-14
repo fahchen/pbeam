@@ -82,7 +82,7 @@ fn parse_options(atoms: &AtomTable, options: &Term) -> Option<CompileOptions> {
                 } else if atom.is_static("export") {
                     parsed.export = true;
                 } else {
-                    parsed.compile |= lookup(&COMPILE_OPTIONS, atom.name())?;
+                    parsed.compile |= lookup(&COMPILE_OPTIONS, atoms.name_of(atom))?;
                 }
             }
             Term::Tuple(elements) => match elements.as_ref() {

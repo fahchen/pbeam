@@ -13,7 +13,11 @@ fn names_the_native_name_encoding_of_each_host_encoding() {
         let BifResult::Value(Term::Atom(ref atom)) = native_name_encoding(encoding) else {
             panic!("native_name_encoding({encoding:?}) gives no atom");
         };
-        assert_eq!(atom.name(), name, "{encoding:?}");
+        assert_eq!(
+            *atom,
+            Atom::from_static(name).expect("the name is a static atom"),
+            "{encoding:?}"
+        );
     }
 }
 

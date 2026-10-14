@@ -1742,7 +1742,7 @@ pub(super) fn parse_code(
                     } else {
                         return Err(error(format!(
                             "unsupported BEAM bs_start_match4 fail operand {}",
-                            atom.name()
+                            atom_table.name_of(atom)
                         )));
                     }
                 } else {
@@ -1819,11 +1819,17 @@ pub(super) fn parse_code(
                     destination: read_register(data, &mut cursor)?,
                 }
             }
-            OPCODE_BS_MATCH => Instruction::BinaryMatch {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
-                context: read_move_operand(data, &mut cursor, atoms, literals)?,
-                commands: read_binary_match_commands(data, &mut cursor, atoms, literals)?,
-            },
+            OPCODE_BS_MATCH => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let commands =
+                    read_binary_match_commands(data, &mut cursor, atom_table, atoms, literals)?;
+                Instruction::BinaryMatch {
+                    fail_label,
+                    context,
+                    commands,
+                }
+            }
             OPCODE_BS_CREATE_BIN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 skip_allocation(data, &mut cursor)?;
@@ -2372,10 +2378,10 @@ fn read_operand_pairs(
 ///
 /// ```rust,ignore
 /// // {list,[ensure_at_least,0,8]} with atom 8 `ensure_at_least`
-/// let commands = read_binary_match_commands(&[0x17, 0x30, 0x82, 0x00, 0x80], &mut 0, &atoms, &[])?;
+/// let commands = read_binary_match_commands(&[0x17, 0x30, 0x82, 0x00, 0x80], &mut 0, &atom_table, &atoms, &[])?;
 /// assert!(matches!(commands.as_slice(), [BinaryMatchCommand::EnsureAtLeast { size: 0, .. }]));
 /// // {list,[skip,8]} with atom 17 `skip`
-/// let commands = read_binary_match_commands(&[0x17, 0x20, 0x0A, 0x11, 0x80], &mut 0, &atoms, &[])?;
+/// let commands = read_binary_match_commands(&[0x17, 0x20, 0x0A, 0x11, 0x80], &mut 0, &atom_table, &atoms, &[])?;
 /// assert!(matches!(commands.as_slice(), [BinaryMatchCommand::Skip { size: 8 }]));
 /// ```
 ///
@@ -2387,6 +2393,7 @@ fn read_operand_pairs(
 fn read_binary_match_commands(
     data: &[u8],
     cursor: &mut usize,
+    atom_table: &AtomTable,
     atoms: &[Atom],
     literals: &[Option<Term>],
 ) -> Result<Vec<BinaryMatchCommand>, BeamError> {
@@ -2404,7 +2411,7 @@ fn read_binary_match_commands(
             let size = read_operand(data, cursor, TAG_UNSIGNED)?;
             (BinaryMatchCommand::EnsureExactly { size }, 1)
         } else if name.is_one_of(&["integer", "binary"]) {
-            let kind = name.name();
+            let kind = atom_table.name_of(name);
             let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
             let flags = read_move_operand(data, cursor, atoms, literals)?;
             let size = read_operand(data, cursor, TAG_UNSIGNED)?
@@ -2451,7 +2458,7 @@ fn read_binary_match_commands(
         } else {
             return Err(error(format!(
                 "unsupported BEAM bs_match command {}",
-                name.name()
+                atom_table.name_of(name)
             )));
         };
         commands.push(command);

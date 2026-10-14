@@ -14,7 +14,7 @@ fn starts_with_the_erts_static_atoms() {
     }
     assert_eq!(table.get("get_definition").unwrap().index, 1149);
     assert_eq!(
-        table.get("get_definition").unwrap().name(),
+        table.name_of(&table.get("get_definition").unwrap()),
         "get_definition"
     );
     assert_eq!(table.get("pbeam_zeta"), None);
@@ -53,20 +53,18 @@ fn stops_at_the_erts_atom_limit() {
 }
 
 #[test]
-fn shares_the_name_of_a_copied_atom_and_keeps_the_name_out_of_line() {
+fn stores_only_the_index_in_a_copied_atom() {
     // ERTS makes an atom term one tagged word that holds the atom-table
     // index (`make_atom` and `_unchecked_atom_val` in `erl_term.h:300`,
     // `:303`), and the table holds the name (`atom.c:38`). Thus a copy of
-    // an atom allocates nothing. PBeam keeps the name with the atom, so a
-    // copy must share it. `size_of::<Atom>()` is 24 bytes: a fat
-    // `Arc<str>` of 16 bytes and a 4-byte index, where an inline `String`
-    // needs 32 bytes.
+    // an atom allocates nothing. PBeam follows that rule: the atom holds
+    // the 4-byte index and no name, and the table keeps each name one time.
     let table = AtomTable::new();
     let atom = table.get("ok").unwrap();
     let copy = atom.clone();
     assert_eq!(atom, copy);
-    assert!(Arc::ptr_eq(&atom.name, &copy.name));
-    assert!(size_of::<Atom>() <= 24);
+    assert_eq!(atom, Atom { index: 506 });
+    assert_eq!(size_of::<Atom>(), 4);
 }
 
 #[test]
@@ -171,10 +169,7 @@ fn imports_a_fun_between_two_atom_tables() {
     // An index at or above the source table is not a value of the table, for
     // a term atom and for the module of a local fun.
     let outside_index = u32::try_from(source.names.len()).unwrap();
-    let outside = |index| Atom {
-        index,
-        name: Arc::from("pbeam_host_outside"),
-    };
+    let outside = |index| Atom { index };
     let outside_error =
         format!("atom index {outside_index} is outside the atom table of the host term");
     assert_eq!(
@@ -334,10 +329,7 @@ fn compares_host_terms_of_two_tables_by_their_names() {
 
     // A term that the other table cannot import is not equal.
     let foreign = HostTerm {
-        term: Term::Atom(Atom {
-            index: 1 << 30,
-            name: Arc::from("pbeam_host_foreign"),
-        }),
+        term: Term::Atom(Atom { index: 1 << 30 }),
         atoms: Arc::new(AtomTable::new()),
     };
     assert_ne!(first_host, foreign);
@@ -512,9 +504,6 @@ fn rejects_the_read_of_an_atom_index_outside_the_table() {
     // An atom term holds an index of the table that owns it. An index that
     // the table does not hold is a broken invariant, so the read fails.
     let table = AtomTable::new();
-    let atom = Atom {
-        index: 1150,
-        name: Arc::from("outside"),
-    };
+    let atom = Atom { index: 1150 };
     table.name_of(&atom);
 }

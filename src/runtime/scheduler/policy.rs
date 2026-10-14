@@ -562,7 +562,7 @@ fn granted(atoms: &AtomTable, value: &Term) -> Option<Capability> {
         return None;
     };
     match elements.as_ref() {
-        [Term::Atom(grant), capability] if grant.name() == "grant" => {
+        [Term::Atom(grant), capability] if atoms.name_of(grant) == "grant" => {
             capability::capability(atoms, capability)
         }
         _ => None,

@@ -4,7 +4,7 @@ mod common;
 use std::process::Command;
 
 use common::pinned_beam;
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 const PREEMPT_PROBE: &[u8] = include_bytes!("../../fixtures/preempt/preempt_probe.beam");
 
@@ -253,15 +253,23 @@ fn charges_the_receive_reductions_as_pinned_erts_with_one_scheduler() {
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// lists, and tuples of the probe results.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)]), &atoms), "[1]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => match atom.name() {
+        Term::Atom(atom) => match atoms.name_of(atom) {
             "fun" => "'fun'".to_owned(),
             name => name.to_owned(),
         },
@@ -306,12 +314,8 @@ fn runs_erlang_yield_as_the_pinned_erts_instruction() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, PREEMPT_PROBE]).unwrap();
     let run = |function| {
-        text(
-            &program
-                .execute("preempt_probe", function, &[])
-                .unwrap()
-                .term,
-        )
+        let result = program.execute("preempt_probe", function, &[]).unwrap();
+        text(&result.term, result.atoms())
     };
     assert_eq!(run("yields"), yields);
 
@@ -369,12 +373,8 @@ fn runs_bump_reductions_and_reads_the_reduction_total_as_pinned_erts() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, PREEMPT_PROBE]).unwrap();
     let run = |function| {
-        text(
-            &program
-                .execute("preempt_probe", function, &[])
-                .unwrap()
-                .term,
-        )
+        let result = program.execute("preempt_probe", function, &[]).unwrap();
+        text(&result.term, result.atoms())
     };
     assert_eq!(run("bumps"), bumps);
     assert_eq!(run("reductions"), reductions);

@@ -1163,7 +1163,8 @@ pub(super) fn capability(atoms: &AtomTable, term: &Term) -> Option<Capability> {
     let Term::Map(fields) = term else {
         return None;
     };
-    let is_kind = |field: &Term| matches!(field, Term::Atom(field) if field.name() == "kind");
+    let is_kind =
+        |field: &Term| matches!(field, Term::Atom(field) if atoms.name_of(field) == "kind");
     let (_, Term::Atom(kind)) = fields.iter().find(|(field, _)| is_kind(field))? else {
         return None;
     };

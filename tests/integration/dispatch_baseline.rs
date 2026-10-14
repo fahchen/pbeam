@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pbeam_runtime::{BeamProgram, HostTerm, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};
 
 const DISPATCH_PROBE: &[u8] = include_bytes!("../../fixtures/dispatch/dispatch_probe.beam");
 const POSITION_PROBE: &[u8] =
@@ -240,14 +240,16 @@ fn expected(program: &BeamProgram, function: &str, length: usize) -> Term {
 /// Return a term as `io:format("~w")` prints it, for the integers and atoms
 /// of the probe results.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::Integer(3)), "3");
+/// assert_eq!(text(&Term::Integer(3), &atoms), "3");
 /// ```
-fn text(term: &Term) -> String {
+fn text(term: &Term, atoms: &AtomTable) -> String {
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         other => panic!("unexpected term {other:?}"),
     }
@@ -578,7 +580,7 @@ fn records_the_interpreter_dispatch_baseline() {
     let list = program.execute("dispatch_probe", "list3", &[]).unwrap();
     let map = program.execute("dispatch_probe", "map_1000", &[]).unwrap();
     let key = program.execute("dispatch_probe", "key", &[]).unwrap();
-    assert_eq!(text(&key.term), "500");
+    assert_eq!(text(&key.term, key.atoms()), "500");
 
     let lines = run_erts();
     let erts_result = |key: &str| {
@@ -612,15 +614,18 @@ fn records_the_interpreter_dispatch_baseline() {
             .execute(probe.module, probe.function, &args)
             .unwrap();
         assert_eq!(
-            text(&result.term),
-            text(&expected(&program, probe.function, probe.length)),
+            text(&result.term, result.atoms()),
+            text(
+                &expected(&program, probe.function, probe.length),
+                program.atoms()
+            ),
             "{}:{} at {} iterations",
             probe.module,
             probe.function,
             probe.length
         );
         assert_eq!(
-            text(&result.term),
+            text(&result.term, result.atoms()),
             erts_result(&probe.key()),
             "PBeam and ERTS differ for {}:{} at {} iterations",
             probe.module,

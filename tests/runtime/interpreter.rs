@@ -2799,10 +2799,12 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
         1150
     );
     for _ in 0..2 {
-        assert!(matches!(
-            program.execute("fixture", "main", &[]).unwrap().term,
-            Term::Atom(ref alpha) if alpha.name() == "pbeam_alpha" && alpha.index() == 1151
-        ));
+        let result = program.execute("fixture", "main", &[]).unwrap();
+        let Term::Atom(alpha) = &result.term else {
+            panic!("the run returns the atom pbeam_alpha");
+        };
+        assert_eq!(result.atoms().name_of(alpha), "pbeam_alpha");
+        assert_eq!(alpha.index(), 1151);
     }
     assert_eq!(program.atom("pbeam_alpha"), None);
 }

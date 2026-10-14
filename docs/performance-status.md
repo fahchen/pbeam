@@ -41,20 +41,54 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
-### 2026-10-14 23:50 JST - Shared append tree, task [#558](https://github.com/fahchen/pbeam/issues/558), pull request (not yet open) - **Not landed**
+### 2026-10-14 23:50 JST - Shared append tree, task [#558](https://github.com/fahchen/pbeam/issues/558), pull request [#620](https://github.com/fahchen/pbeam/pull/620) - **Not landed**
 
-One interleaved session of `tests/integration/binary_append_bench.rs` on the release profile, three rounds, and each number is the minimum of nine timed runs inside one invocation. The before revision is `6fd1b3db` with the benchmark files of the branch, and the after revision is `0c56e7a0`. The one-minute load of every round is 2.47 to 5.65.
+One interleaved session of `tests/integration/binary_append_bench.rs` on the release profile, three rounds, and each number is the minimum of nine timed runs inside one invocation. The before revision is `915590af` with the benchmark files of the branch, and the after revision is the branch `perf/558-append-tree` at `eb1dd92a`. The one-minute load of the rounds is 7.96 to 9.36.
 
-| Shape | Before `6fd1b3db` | After | Change |
+| Shape | Before `915590af` | After `eb1dd92a` | Change |
 | --- | --- | --- | --- |
-| Append to a 100000-byte prefix, one byte each, ns for each append | 2490.840 | 857.080 | -65.6 percent |
-| Append to a 1000000-byte prefix, one byte each, ns for each append | 19462.500 | 1554.150 | -92.0 percent |
-| Doubling build of 1000000 bytes, total ns | 101125 | 58416 | -42.2 percent |
-| Doubling build of 1000 bytes, total ns | 24750 | 26750 | +8.1 percent |
-| Warm match of a 1000000-byte subject, 100 rounds, total ns | 31459208 | 31352833 | -0.3 percent |
-| First match of a fresh 1000000-byte subject, total ns | 334708 | 359458 | +7.4 percent |
+| Append to a 100000-byte prefix, one byte each, ns for each append | 2567.920 | 948.750 | -63.1 percent |
+| Append to a 1000000-byte prefix, one byte each, ns for each append | 19854.150 | 1672.950 | -91.6 percent |
+| Doubling build of 1000 bytes, total ns | 26125 | 25250 | -3.3 percent |
+| Doubling build of 100000 bytes, total ns | 40292 | 34625 | -14.1 percent |
+| Doubling build of 1000000 bytes, total ns | 99292 | 60417 | -39.2 percent |
+| Warm match of a 1000000-byte subject, 1 round, total ns | 336959 | 331959 | -1.5 percent |
+| Warm match of a 1000000-byte subject, 100 rounds, total ns | 32223292 | 32061166 | -0.5 percent |
+| First match of a fresh 100000-byte subject, total ns | 50125 | 51875 | +3.5 percent |
+| First match of a fresh 1000000-byte subject, total ns | 337958 | 354542 | +4.9 percent |
 
-The view descriptor grows from 32 bytes to 56 bytes, because the view now holds the chunk list and the joined array; a view that no append built keeps both fields empty or unset, and the test `prints_the_cost_of_a_binary_view` records the larger descriptor. The gate of the task is that a shared append copies no old payload byte except one partial 4096-byte leaf, and that the match scan throughput regresses by at most 10 percent. The match numbers fall inside that bound in this session. The three build and copy shapes fall, and the small 1000-byte build rises 8.1 percent, which is inside the run-to-run noise of that shape.
+The view descriptor grows from 32 bytes to 56 bytes, because the view now holds the chunk list and the joined array; a view that no append built keeps both fields empty or unset, and the test `prints_the_cost_of_a_binary_view` records the larger descriptor. The gate of the task is that a shared append copies no old payload byte except one partial 4096-byte leaf, and that the match scan throughput regresses by at most 10 percent. The copy and the three build shapes fall, and each match shape is inside the 10 percent bound.
+
+### 2026-10-14 23:40 JST - Store only the atom index in the atom term, task [#596](https://github.com/fahchen/pbeam/issues/596), pull request [#619](https://github.com/fahchen/pbeam/pull/619) - Landed as `e0d9cbe5`
+
+This change reaches the 16-byte term that the owner set as the acceptance of row 6 of the term plan. The pinned toolchain is rustc 1.99.0, the host is Darwin 27.0.1 arm64, Apple M1 Max, and the before revision is `6fd1b3db`.
+
+The type sizes come from `RUSTC_BOOTSTRAP=1 mise exec -- cargo rustc --locked --lib -- -Zprint-type-sizes`.
+
+| Type | Before `6fd1b3db` | After `f2cadf82` |
+| --- | --- | --- |
+| `term::Term` | 32 bytes | 16 bytes |
+| `Option<term::Term>` | 32 bytes | 16 bytes |
+| `term::atom::Atom` | 24 bytes | 4 bytes |
+
+The peak live bytes of one Terra scene come from `mise run bench-live-bytes` on each revision, at load `{ 2.58 4.44 5.55 }`, with a spread of 0 over the two runs of each revision.
+
+| Revision | Peak live bytes | Peak resident set size |
+| --- | --- | --- |
+| `6fd1b3db` | 20192 | 3952 KB |
+| `f2cadf82` | 11904 | 3792 KB |
+
+The dispatch numbers come from one interleaved session of the `dispatch_baseline` probes, three rounds, and each number is the minimum of nine probe runs inside one invocation. The one-minute load of every round is 3.35 to 4.08.
+
+| Shape, 200000 iterations | Before `6fd1b3db` | After `f2cadf82` |
+| --- | --- | --- |
+| Local `call_only` floor loop | 100.4 ns, 99.6 ns, 100.3 ns | 112.3 ns, 112.4 ns, 112.4 ns |
+| Position `call_only` floor loop after 20 guest functions | 100.4 ns, 100.1 ns, 101.5 ns | 112.4 ns, 112.6 ns, 112.3 ns |
+| Added `call_only` floor loop plus `gc_bif '+'` | 51.6 ns, 53.1 ns, 53.1 ns | 66.7 ns, 66.6 ns, 66.8 ns |
+
+The local shape rises 12.0 percent and the position shape rises 12.1 percent. The local shape stays below the 120 ns gate of the term plan and it is below the 117.9 ns value that the headline table holds for `ddb32f6e`. Those two numbers come from two sessions, so their difference is not a measured change of this step.
+
+The Terra Counter latency comes from one interleaved session of `bash scripts/terra_latency.sh release`, 15 rounds per revision, at a one-minute load of at most 3.4. The first frame is 0.34 s at the median in both revisions, and a key answers in 27.0 ms before and 26.0 ms after. The spread of the two groups overlaps, so this session measures no change of the Terra path. The issue asks for at least 30 rounds of each revision, and this session holds 15; the entry states the smaller count.
 
 ### 2026-10-14 22:32 JST - Borrowed-argument leaf lane, task [#568](https://github.com/fahchen/pbeam/issues/568), pull request [#616](https://github.com/fahchen/pbeam/pull/616) - Landed as `ef0c8b94`
 

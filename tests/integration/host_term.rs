@@ -27,7 +27,7 @@ fn rejects_a_local_fun_of_another_program() {
     let name = |program: &BeamProgram, function: &str| {
         let result = program.execute("host_term_probe", function, &[]).unwrap();
         match &result.term {
-            Term::Atom(atom) => atom.name().to_owned(),
+            Term::Atom(atom) => result.atoms().name_of(atom).to_owned(),
             other => panic!("expected an atom, got {other:?}"),
         }
     };
@@ -77,14 +77,14 @@ fn imports_an_atom_that_the_run_created() {
     // The program table of `first` still does not hold the name, and the
     // host result carries the table of the run, which does.
     assert!(first.atom(name).is_none());
-    assert_eq!(created.atom(name).unwrap().name(), name);
+    assert_eq!(created.atoms().name_of(&created.atom(name).unwrap()), name);
     let applied = second
         .execute("host_term_probe", "accept", &[created])
         .unwrap();
     let Term::Atom(atom) = &applied.term else {
         panic!("the second program returns the atom");
     };
-    assert_eq!(atom.name(), name);
+    assert_eq!(applied.atoms().name_of(atom), name);
 }
 
 #[test]

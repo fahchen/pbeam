@@ -64,15 +64,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the start time of Terra Counter, or of another example, is slower than on `main` after the start set of #448. #448 gives the PBeam run the start set of the build and loads each other module on demand, so it decodes fewer modules at the start and each on-demand module at its first call.
 - **Source:** #448, `docs/code-loading.md` section 8 (Q9).
 
-### Reduce the term width to 24 bytes
-
-- The design target of `docs/copy-on-write-terms.md` is at most 24 bytes for `size_of::<Term>()`. The measurement at `a6b838c` is 40 bytes, and the largest payload is `Binary` at 32 bytes: the shared array `Arc<Vec<u8>>`, the bit offset, the bit size, and the packed view `Option<Arc<Vec<u8>>>` (`src/term/binary.rs:46-59`). The tag of the enum needs the other 8 bytes.
-- **Reason:** the owner accepted 40 bytes at `a6b838c` as the term width for now and deferred the target. The acceptance item "A test asserts `size_of::<Term>()` is at most 24 bytes" of #460 is not met; the test `holds_no_inline_atom_name_in_a_term` of `tests/term.rs` holds the size at 80 bytes.
-- **Option:** a `Binary` payload of 8 bytes that keeps the offset and the size with the bytes behind one pointer. `docs/copy-on-write-terms.md` permits no smaller offset or size type, because it adds a binary size limit that ERTS does not have.
-- **Trigger:** a measured memory or cache cost of the term width, or an owner decision to reach the design target.
-- **Source:** owner decision on #503; epic checkpoint measurement at `a6b838c`.
-- **Scheduled:** this entry is the older statement of the same target as row 6 of `docs/term-performance-design-codex-v2.md` ("Immediate atoms and compact term"), which is the active task #553. The proposal asks for at most 16 bytes for `size_of::<Term>()` on the verified host, while this entry records the 24-byte design target of `docs/copy-on-write-terms.md`. The pull request that closes #553 removes this entry.
-
 ### Drop a shared map without a fresh empty handle
 
 - `Map::drain_into` replaces `self.repr` with a fresh `Arc<Repr::Flat(Vec::new())>` before `Arc::into_inner` (`src/term/map.rs:503`). The replacement allocates a handle also when another map holds the value, so the drop of one of several copies of a map term pays one allocation that the drop of a shared tuple does not.

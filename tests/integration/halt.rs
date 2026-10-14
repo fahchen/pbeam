@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamError, BeamProgram, Term};
+use pbeam_runtime::{BeamError, BeamProgram, HostTerm, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -47,18 +47,17 @@ fn erts(function: &str) -> (Option<i32>, String) {
 /// ```rust,ignore
 /// assert_eq!(pbeam("status"), Err(BeamError::Halt(259)));
 /// ```
-fn pbeam(function: &str) -> Result<Term, BeamError> {
+fn pbeam(function: &str) -> Result<HostTerm, BeamError> {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, HALT_PROBE]).unwrap();
-    program
-        .execute("halt_probe", function, &[])
-        .map(|host| host.term)
+    program.execute("halt_probe", function, &[])
 }
 
 #[test]
 fn raises_badarg_for_each_status_and_option_that_halt_rejects() {
     let pbeam = pbeam("badargs").unwrap();
     let Some(results) = pbeam
+        .term
         .proper_list()
         .map(|results| results.collect::<Vec<_>>())
     else {
@@ -69,7 +68,8 @@ fn raises_badarg_for_each_status_and_option_that_halt_rejects() {
         assert!(
             matches!(result, Term::Tuple(pair) if matches!(pair.as_ref(),
                 [Term::Atom(class), Term::Atom(reason)]
-                    if class.name() == "error" && reason.name() == "badarg")),
+                    if pbeam.atoms().name_of(class) == "error"
+                        && pbeam.atoms().name_of(reason) == "badarg")),
             "{pbeam:?}"
         );
     }

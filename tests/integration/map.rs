@@ -327,7 +327,7 @@ fn orders_a_hashmap_of_all_static_atoms_like_erts() {
     let names: Vec<&str> = keys
         .iter()
         .map(|key| match key {
-            Term::Atom(atom) => atom.name(),
+            Term::Atom(atom) => result.atoms().name_of(atom),
             other => panic!("static key {other:?} is not an atom"),
         })
         .collect();

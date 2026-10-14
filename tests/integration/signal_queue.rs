@@ -8,7 +8,7 @@ mod common;
 use std::process::Command;
 
 use common::pinned_beam;
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 const SIGNAL_QUEUE_PROBE: &[u8] =
     include_bytes!("../../fixtures/signal_queue/signal_queue_probe.beam");
@@ -105,16 +105,24 @@ const CASES: &[(&str, &str)] = &[
 /// Return the `~w` text of a term of atoms, integers, lists, and tuples. A
 /// pid is `<pid>`, and a reference is `#Ref`.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::nil()), "[]");
+/// assert_eq!(text(&Term::nil(), &atoms), "[]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
         Term::Atom(atom) => {
-            let name = atom.name();
+            let name = atoms.name_of(atom);
             let bare = name.starts_with(|c: char| c.is_ascii_lowercase())
                 && name
                     .chars()
@@ -193,7 +201,8 @@ fn pbeam_all(module: &str, probe: &[u8]) -> String {
     let erlang = pinned_beam("erlang");
     let erts_internal = pinned_beam("erts_internal");
     let program = BeamProgram::load(&[&erlang, &erts_internal, probe]).unwrap();
-    text(&program.execute(module, "all", &[]).unwrap().term)
+    let result = program.execute(module, "all", &[]).unwrap();
+    text(&result.term, result.atoms())
 }
 
 #[test]

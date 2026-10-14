@@ -14,7 +14,7 @@ use std::{
 };
 
 use common::pinned_beam;
-use pbeam_runtime::{AllowAll, BeamProgram, Capability, CapabilityKind, Policy, Term};
+use pbeam_runtime::{AllowAll, AtomTable, BeamProgram, Capability, CapabilityKind, Policy, Term};
 
 const REVOKE_PROBE: &[u8] = include_bytes!("../../fixtures/capability/revoke_probe.beam");
 
@@ -53,15 +53,23 @@ impl Policy for Launcher {
 
 /// Return the `~w` text of a term of atoms, lists, and tuples.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::nil()), "[]");
+/// assert_eq!(text(&Term::nil(), &atoms), "[]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         _ if let Some(elements) = term.proper_list() => {
             format!("[{}]", join(&elements.cloned().collect::<Vec<_>>()))
         }
@@ -82,7 +90,7 @@ fn pbeam(function: &str, policy: &dyn Policy) -> String {
     let result = program()
         .execute_with_policy("revoke_probe", function, &[], policy)
         .unwrap();
-    text(&result.term)
+    text(&result.term, result.atoms())
 }
 
 /// Run `revoke_probe:Function()` on PBeam with no policy, which skips each
@@ -94,12 +102,8 @@ fn pbeam(function: &str, policy: &dyn Policy) -> String {
 /// assert_eq!(unchecked("released"), "ok");
 /// ```
 fn unchecked(function: &str) -> String {
-    text(
-        &program()
-            .execute("revoke_probe", function, &[])
-            .unwrap()
-            .term,
-    )
+    let result = program().execute("revoke_probe", function, &[]).unwrap();
+    text(&result.term, result.atoms())
 }
 
 /// Load the probe and the pinned `erlang` and `erts_internal`.
