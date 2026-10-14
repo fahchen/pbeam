@@ -13,7 +13,9 @@ use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
-use crate::term::{Atom, Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference};
+use crate::term::{
+    Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference, debug_term,
+};
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
 /// gives a runtime error.
@@ -21,15 +23,17 @@ use crate::term::{Atom, Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Ref
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = node(&Term::Pid(pid))?;
+/// let atoms = AtomTable::new();
+/// let result = node(&Term::Pid(pid), &atoms)?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "nonode@nohost"));
-/// assert!(node(&Term::Integer(1)).is_err());
+/// assert!(node(&Term::Integer(1), &atoms).is_err());
 /// ```
-pub(super) fn node(term: &Term) -> Result<BifResult, BeamError> {
+pub(super) fn node(term: &Term, atoms: &AtomTable) -> Result<BifResult, BeamError> {
     match term {
         Term::Pid(_) => Ok(Value(local_node())),
         _ => Err(error(format!(
-            "unsupported erlang:node/1 argument {term:?}: not a pid"
+            "unsupported erlang:node/1 argument {}: not a pid",
+            debug_term(term, atoms)
         ))),
     }
 }
@@ -1068,7 +1072,12 @@ pub(super) fn spawn_opt(
                 spawn_options.capabilities = Some(restrictions);
             }
             // ponytail: ERTS accepts more options; see "Spawn options" in docs/erts-differences.md.
-            _ => return Err(error(format!("unsupported spawn option {option:?}"))),
+            _ => {
+                return Err(error(format!(
+                    "unsupported spawn option {}",
+                    debug_term(option, &context.scheduler.atoms)
+                )));
+            }
         }
     }
     create_process(
@@ -1759,7 +1768,8 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
             ])))
         }
         _ => Err(error(format!(
-            "unsupported erlang:system_info/1 argument {item:?}"
+            "unsupported erlang:system_info/1 argument {}",
+            debug_term(item, atoms)
         ))),
     }
 }
@@ -2607,9 +2617,11 @@ pub(super) fn process_info(
     }
     let caller = scheduler.current_process_mut();
     // ponytail: lists of items, other items, and the frames of another process need more state; see "BIF arguments" in docs/erts-differences.md.
-    let unsupported = || {
+    let unsupported = |atoms: &AtomTable| {
         error(format!(
-            "unsupported erlang:process_info/2 arguments {process:?}, {item:?}"
+            "unsupported erlang:process_info/2 arguments {}, {}",
+            debug_term(process, atoms),
+            debug_term(item, atoms)
         ))
     };
     if *id == caller.id {
@@ -2636,7 +2648,7 @@ pub(super) fn process_info(
             let messages = caller.mailbox.message_count();
             let info = caller
                 .info(atoms, item, current, messages, true)?
-                .ok_or_else(unsupported)?;
+                .ok_or_else(|| unsupported(atoms))?;
             caller.bump_reductions(1);
             info
         };
@@ -2648,7 +2660,7 @@ pub(super) fn process_info(
     let messages = target.mailbox.message_count();
     let info = target
         .info(&scheduler.atoms, item, 0, messages, false)?
-        .ok_or_else(unsupported)?;
+        .ok_or_else(|| unsupported(&scheduler.atoms))?;
     if target.exiting.is_some() || target.mailbox.has_incoming() {
         let caller = scheduler.current_process_mut().id;
         let reference = scheduler.make_ref()?;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::{
     AtomTable, Binary, Fun, Lambda, Map, MatchState, PortId, ProcessId, Reference, Term,
-    test_atom as atom, test_atom_table,
+    debug_term, test_atom as atom, test_atom_table,
 };
 
 fn map(pairs: Vec<(Term, Term)>) -> Term {
@@ -88,7 +88,7 @@ fn clones_compares_formats_and_drops_deep_terms_without_recursion() {
     let copy = term.clone();
     assert_eq!(term, copy);
     assert_ne!(term, deep(999_999));
-    assert!(format!("{copy:?}").starts_with(
+    assert!(debug_term(&copy, &test_atom_table()).starts_with(
         "Fun(Local(Lambda { module: Atom { index: 971, name: \"lists\" }, index: 0, \
          old_unique: 7, label: 53, arity: 1 }), [Map([(Atom(\"k\"), List([Integer(1), Tuple([Fun("
     ));
@@ -139,9 +139,9 @@ fn compares_and_formats_improper_lists_by_elements_and_tail() {
     assert_ne!(improper(&[1], atom("x")), improper(&[1, 2], atom("x")));
     assert_ne!(improper(&[1], atom("x")), improper(&[2], atom("x")));
     assert_eq!(
-        format!(
-            "{:?}",
-            Term::tuple(vec![improper(&[1, 2], Term::tuple(vec![atom("t")]))])
+        debug_term(
+            &Term::tuple(vec![improper(&[1, 2], Term::tuple(vec![atom("t")]))]),
+            &test_atom_table()
         ),
         "Tuple([ImproperList([Integer(1), Integer(2)], Tuple([Atom(\"t\")]))])"
     );
@@ -245,7 +245,7 @@ fn matches_the_derived_debug_text_and_compares_every_variant() {
     ];
     let term = Term::tuple(vec![Term::list_from(leaves.to_vec()), Term::nil()]);
     assert_eq!(
-        format!("{term:?}"),
+        debug_term(&term, &test_atom_table()),
         "Tuple([List([Atom(\"ok\"), Binary([1, 2]), Integer(-3), Pid(ProcessId(4)), \
          Reference(Reference(5)), MatchContext(MatchState { bytes: [6], position: 0, position_known: true })]), \
          List([])])"
@@ -257,6 +257,16 @@ fn matches_the_derived_debug_text_and_compares_every_variant() {
     assert_ne!(Term::nil(), Term::tuple(vec![]));
     assert_ne!(Term::nil(), Term::list_from(vec![Term::Integer(1)]));
     assert_ne!(Term::tuple(vec![atom("a")]), Term::tuple(vec![atom("b")]));
+}
+
+#[test]
+fn prints_an_atom_index_without_a_table_and_a_name_with_one() {
+    // `Debug` prints the atom index, because a bare term carries no table and
+    // the caller of `Debug::fmt` cannot pass one. `debug_term` reads the name
+    // through a table. ERTS gives the static atom `undef` index 725.
+    let term = Term::static_atom("undef");
+    assert_eq!(format!("{term:?}"), "Atom(725)");
+    assert_eq!(debug_term(&term, &AtomTable::new()), "Atom(\"undef\")");
 }
 
 #[test]
@@ -274,7 +284,7 @@ fn formats_and_compares_maps_by_their_pairs() {
     let pairs = || vec![(atom("a"), Term::Integer(1)), (atom("b"), Term::nil())];
     let sorted = map(pairs());
     assert_eq!(
-        format!("{sorted:?}"),
+        debug_term(&sorted, &table),
         "Map([(Atom(\"a\"), Integer(1)), (Atom(\"b\"), List([]))])"
     );
     assert_eq!(format!("{:?}", map(vec![])), "Map([])");
@@ -300,7 +310,10 @@ fn formats_and_compares_maps_by_their_pairs() {
     let forty = hash(&mut (1..=40));
     assert_eq!(forty.clone(), hash(&mut (1..=40).rev()));
     assert_eq!(format!("{:?}", forty.clone()), format!("{forty:?}"));
-    assert!(format!("{forty:?}").starts_with("Map([(Integer(18), Atom(\"v\")), (Integer(4), "));
+    assert!(
+        debug_term(&forty, &test_atom_table())
+            .starts_with("Map([(Integer(18), Atom(\"v\")), (Integer(4), ")
+    );
     assert_ne!(forty, hash(&mut (2..=41)));
 }
 

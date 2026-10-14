@@ -184,6 +184,8 @@ These sites read the name to key a registry (`src/runtime/ets.rs:200`, `src/runt
 
 This matters because production messages print a term with `{:?}`, and a changed `Debug` would change their text. The sites include `unsupported map key {key:?}` (`src/runtime/interpreter.rs:1000`, `src/runtime/interpreter/bif/maps.rs:161`, `:255`, `:327`, `:558`), `unsupported ets:new/2 heir {heir:?}` (`src/runtime/interpreter/bif/ets.rs:134`), `unsupported erlang:node/1 argument {term:?}: not a pid` (`src/runtime/interpreter/bif/erlang.rs:32`), `unsupported term order of two references {left:?} and {right:?}` (`src/term/order.rs:119`), and the list-source and match-context invariant errors of `src/runtime/interpreter.rs`.
 
+Task [#595](https://github.com/fahchen/pbeam/issues/595) resolved this problem: `Debug for Term` writes `Atom(<index>)`, and the table-aware `debug_term(term, atoms)` keeps the atom name in each production message that the list above names with a term. Four sites of that list need no table-aware formatter. The `ets:new/2` heir is a process id, and the two references of the term order are references, so neither message prints an atom. The `unsupported read of the match context in {operand:?} after a failed bs_match =:= command` message (`check_known_position`) and the `invariant error: the match context in {operand:?} reached an instruction that is not a binary match` message (`match_context_escape`) print a register operand, so neither message prints a term.
+
 ## 3. The design of the immediate atom root
 
 The atom term holds the ERTS atom-table index and nothing else, as the proposal's representation section records (`docs/term-performance-design-codex-v2.md`, the `Atom(u32)` row). The `AtomTable` owns each immutable name one time. A copy of an atom then copies 4 bytes and touches no reference count.
@@ -208,7 +210,7 @@ The term order of two atoms stays the order of the name bytes. `Term::compare` a
 
 ### 3.3 How `Debug for Term` prints a name
 
-`Debug for Term` prints `Atom(<index>)`. The sites of section 2.8 that must keep the atom name in their text take a table-aware formatter, for example `debug_term(&key, &atoms)`, or they use `print_term(term, &atoms)` where the ERTS text is the right text. The record names the exact sites so that the atom task can keep each message.
+`Debug for Term` prints `Atom(<index>)`, for example `Atom(725)` for the static atom `undef`, and the text of each other shape does not change. The sites of section 2.8 that must keep the atom name in their text take a table-aware formatter, for example `debug_term(&key, &atoms)`, or they use `print_term(term, &atoms)` where the ERTS text is the right text. The record names the exact sites so that the atom task can keep each message.
 
 ### 3.4 A host result and an import between runs
 

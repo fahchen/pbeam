@@ -257,7 +257,7 @@ bifs! {
     erlang:nif_error/1 as ErlangNifError1 => |_, [reason]| Ok(Raise { class: ExceptionClass::Error, reason: reason.clone() }),
     erlang:nif_error/2 => unsupported,
     erlang:node/0 as ErlangNode0 => |_, []| Ok(Value(crate::runtime::local_node())),
-    erlang:node/1 as ErlangNode1 => |_, [term]| erlang::node(term),
+    erlang:node/1 as ErlangNode1 => |cx, [term]| erlang::node(term, &cx.scheduler.atoms),
     erlang:nodes/0 => unsupported,
     erlang:nodes/1 => unsupported,
     erlang:nodes/2 => unsupported,
@@ -570,7 +570,7 @@ bifs! {
     records:update/4 => unsupported,
     string:list_to_float/1 => unsupported,
     unicode:bin_is_7bit/1 as UnicodeBinIs7bit1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Binary(bytes) if bytes.is_ascii()) { "true" } else { "false" }))),
-    unicode:characters_to_binary/2 as UnicodeCharactersToBinary2 => |cx, [chardata, encoding]| unicode::characters_to_binary(cx.scheduler.current_process_mut(), chardata, encoding),
+    unicode:characters_to_binary/2 as UnicodeCharactersToBinary2 => |cx, [chardata, encoding]| { let (process, atoms) = cx.scheduler.current_process_and_atoms(); unicode::characters_to_binary(process, chardata, encoding, atoms) },
     unicode:characters_to_list/2 as UnicodeCharactersToList2 => |cx, [chardata, encoding]| unicode::characters_to_list(cx.scheduler.current_process_mut(), chardata, encoding),
 }
 

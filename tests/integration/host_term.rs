@@ -12,7 +12,7 @@
 mod common;
 
 use common::pinned_beam;
-use pbeam_runtime::{BeamProgram, Map, Term};
+use pbeam_runtime::{BeamProgram, Map, Term, debug_term};
 
 const FIRST: &[u8] = include_bytes!("../../fixtures/host_term_first/host_term_probe.beam");
 const LOADER: &[u8] = include_bytes!("../../fixtures/host_term_loader/host_term_loader.beam");
@@ -123,7 +123,7 @@ fn builds_a_map_from_an_atom_that_the_run_created() {
     // so the created key is the first key of the map.
     let term = Term::Map(map);
     assert_eq!(
-        format!("{term:?}"),
+        debug_term(&term, created.atoms()),
         format!(
             "Map([(List([Atom(\"{name}\")]), Atom(\"ok\")), \
              (List([Atom(\"true\")]), Atom(\"ok\"))])"
