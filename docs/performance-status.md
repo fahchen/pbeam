@@ -41,6 +41,18 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
+### 2026-10-14 22:32 JST - Borrowed-argument leaf lane, task [#568](https://github.com/fahchen/pbeam/issues/568), pull request (not yet open) - **Not landed**
+
+One interleaved session of the `dispatch_baseline` probes. Each round runs the before binary and then the after binary. Every number is the minimum of nine probe runs inside one invocation. The before revision is `6935019a`, and the after revision is `6ef206e8` on the branch `perf/568-leaf-lane`. The one-minute load of the rounds is 5.29 to 8.21.
+
+| Shape, 200000 iterations | Before `6935019a` | After `6ef206e8` | Change |
+| --- | --- | --- | --- |
+| Local `call_only` floor loop | 123.2 ns, 124.0 ns, 122.1 ns | 105.1 ns, 104.2 ns, 106.1 ns | -14.6 percent at the minimum, -15.0 percent at the median |
+| Position `call_only` floor loop after 20 guest functions | 123.3 ns, 121.7 ns, 122.6 ns | 104.5 ns, 104.5 ns, 109.1 ns | -14.2 percent at the minimum, -14.7 percent at the median |
+| Added `call_only` floor loop plus `gc_bif '+'` | 71.6 ns, 68.1 ns, 72.1 ns | 55.9 ns, 55.6 ns, 57.0 ns | -18.4 percent at the minimum |
+
+The gate of the task is that the local `call_only` floor loop falls against the base group of the same session, and that the added delta of `gc_bif '+'` stays below 80 ns. Both hold in each of the three rounds.
+
 ### 2026-10-14 - Row 6 compact term, task [#571](https://github.com/fahchen/pbeam/issues/571), pull request [#598](https://github.com/fahchen/pbeam/pull/598) - Landed as `855da1fc`
 
 The change boxes the 32-byte binary descriptor behind one `Arc` to a private `BinaryView`, so the `Term::Binary` arm falls from 32 bytes to 8 bytes. The owner decided to land the compact term as the first half of the 16-byte target of row 6, and the row gate fails on its numbers. Pull request [#598](https://github.com/fahchen/pbeam/pull/598) merged on 2026-10-14 as the squash commit `855da1fc` of a branch whose measured revisions are `35c410e6` (before) and `dabac942` (after). The 16-byte target waits for the immediate atom root of [#580](https://github.com/fahchen/pbeam/issues/580).
