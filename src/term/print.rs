@@ -21,7 +21,7 @@
 //! | pid | `<0.Number.Serial>` |
 //! | reference | `#Ref<0.N2.N1.N0>` |
 
-use super::{Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
+use super::{AtomTable, Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
 
 /// The number of low bits of the pid data that ERTS prints as the pid
 /// number (`_PID_NUM_SIZE`, `erl_term.h:646-656`). The higher bits are the
@@ -41,18 +41,20 @@ enum Item<'a> {
 /// (`erl_printf_term.c:352-811`) prints it with no length limit. A deep term
 /// does not recurse on the Rust stack: the function keeps a work stack, as
 /// `print_term` does. A pid prints its PBeam process number as the ERTS pid
-/// data, and a reference prints its `Reference::numbers`.
+/// data, and a reference prints its `Reference::numbers`. `atoms` is the
+/// table of the run that owns `term`, so each atom name comes from the table.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
+/// let atoms = AtomTable::new();
 /// let term = Term::tuple(vec![Term::static_atom("undef"), Term::nil()]);
-/// assert_eq!(print_term(&term), b"{undef,[]}");
+/// assert_eq!(print_term(&term, &atoms), b"{undef,[]}");
 /// let string = Term::list_from(b"ab\n".iter().map(|&byte| Term::Integer(byte.into())));
-/// assert_eq!(print_term(&string), b"\"ab\\n\"");
-/// assert_eq!(print_term(&Term::binary(vec![1, 2])), b"<<1,2>>");
+/// assert_eq!(print_term(&string, &atoms), b"\"ab\\n\"");
+/// assert_eq!(print_term(&Term::binary(vec![1, 2]), &atoms), b"<<1,2>>");
 /// ```
-pub(crate) fn print_term(term: &Term) -> Vec<u8> {
+pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
     let mut text = Vec::new();
     let mut items = vec![Item::Term(term)];
     while let Some(item) = items.pop() {
@@ -64,7 +66,7 @@ pub(crate) fn print_term(term: &Term) -> Vec<u8> {
             Item::Term(term) => term,
         };
         match term {
-            Term::Atom(atom) => print_atom(atom.name(), &mut text),
+            Term::Atom(atom) => print_atom(atoms.name_of(atom), &mut text),
             Term::Integer(value) => text.extend_from_slice(value.to_string().as_bytes()),
             Term::Nil => text.extend_from_slice(b"[]"),
             Term::Cons(_)
@@ -129,7 +131,7 @@ pub(crate) fn print_term(term: &Term) -> Vec<u8> {
                 Target::Local(lambda) => text.extend_from_slice(
                     format!(
                         "#Fun<{}.{}.{}>",
-                        lambda.module().name(),
+                        atoms.name_of(lambda.module()),
                         lambda.index,
                         lambda.old_unique
                     )
@@ -141,9 +143,9 @@ pub(crate) fn print_term(term: &Term) -> Vec<u8> {
                     arity,
                 } => {
                     text.extend_from_slice(b"fun ");
-                    print_atom(module.name(), &mut text);
+                    print_atom(atoms.name_of(module), &mut text);
                     text.push(b':');
-                    print_atom(function.name(), &mut text);
+                    print_atom(atoms.name_of(function), &mut text);
                     text.extend_from_slice(format!("/{arity}").as_bytes());
                 }
             },

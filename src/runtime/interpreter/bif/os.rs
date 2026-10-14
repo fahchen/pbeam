@@ -108,9 +108,11 @@ pub(super) fn set_signal(
     let Some(number) = signal::signal_number(scheduler.atoms.name_of(signal)) else {
         return Ok(BifResult::badarg());
     };
+    // The capability check borrows the scheduler mutably, so the name comes
+    // out of the table first.
+    let name = scheduler.atoms.name_of(signal).as_bytes().to_vec();
     for &operation in operations {
-        let name = Some(signal.name().as_bytes());
-        if let Some(denied) = denial(scheduler, CapabilityKind::Signal, operation, name)? {
+        if let Some(denied) = denial(scheduler, CapabilityKind::Signal, operation, Some(&name))? {
             return Ok(denied);
         }
     }

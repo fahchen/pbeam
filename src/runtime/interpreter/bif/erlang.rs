@@ -1614,22 +1614,24 @@ fn big_integer_estimate(value: i64, base: u32) -> usize {
 
 /// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
 /// name, as ERTS `atom_to_list_1` (`bif.c:3186-3210`) does. The atom `''`
-/// gives `[]`. A term that is not an atom raises `badarg`.
+/// gives `[]`. A term that is not an atom raises `badarg`. `atoms` is the
+/// table of the run that owns `term`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let list = atom_to_list(&Term::static_atom("ok"));
+/// let atoms = AtomTable::new();
+/// let list = atom_to_list(&atoms, &Term::static_atom("ok"));
 /// assert!(matches!(list, BifResult::Value(codes) if codes == Term::list_from([Term::Integer(111), Term::Integer(107)])));
-/// assert!(matches!(atom_to_list(&Term::static_atom("")), BifResult::Value(codes) if codes.is_nil()));
-/// assert!(matches!(atom_to_list(&Term::nil()), BifResult::Raise { .. }));
+/// assert!(matches!(atom_to_list(&atoms, &Term::static_atom("")), BifResult::Value(codes) if codes.is_nil()));
+/// assert!(matches!(atom_to_list(&atoms, &Term::nil()), BifResult::Raise { .. }));
 /// ```
-pub(super) fn atom_to_list(term: &Term) -> BifResult {
+pub(super) fn atom_to_list(atoms: &AtomTable, term: &Term) -> BifResult {
     match term {
         Term::Atom(atom) => {
-            Value(Term::list_from(atom.name().chars().map(|character| {
-                Term::Integer(i64::from(u32::from(character)))
-            })))
+            Value(Term::list_from(atoms.name_of(atom).chars().map(
+                |character| Term::Integer(i64::from(u32::from(character))),
+            )))
         }
         _ => BifResult::badarg(),
     }
@@ -2898,11 +2900,14 @@ pub(super) fn module_loaded(
     let Term::Atom(module) = module else {
         return Ok(BifResult::badarg());
     };
+    // The capability check borrows the scheduler mutably, so the name comes
+    // out of the table first.
+    let name = context.scheduler.atoms.name_of(module).as_bytes().to_vec();
     let check = denial(
         context.scheduler,
         CapabilityKind::Code,
         Operation::Inspect,
-        Some(module.name().as_bytes()),
+        Some(&name),
     );
     if let Some(denied) = check? {
         return Ok(denied);
@@ -3010,11 +3015,14 @@ pub(super) fn get_module_info(
     let Term::Atom(key) = what else {
         return Ok(BifResult::badarg());
     };
+    // The capability check borrows the scheduler mutably, so the name comes
+    // out of the table first.
+    let name_bytes = context.scheduler.atoms.name_of(name).as_bytes().to_vec();
     let check = denial(
         context.scheduler,
         CapabilityKind::Code,
         Operation::Inspect,
-        Some(name.name().as_bytes()),
+        Some(&name_bytes),
     );
     if let Some(denied) = check? {
         return Ok(denied);
