@@ -40,7 +40,11 @@
 //! `Term::Binary` is 8 bytes, so every compound arm of `Term` is at most 8
 //! bytes (`docs/term-layout-design.md` section 4).
 
-use std::{fmt, ops::Deref, sync::Arc};
+use std::{
+    fmt,
+    ops::Deref,
+    sync::{Arc, OnceLock},
+};
 
 use super::Term;
 
@@ -49,10 +53,19 @@ use super::Term;
 /// copies of the binary own one reference to the array. The array holds the
 /// bytes of the source binary of the view, so a sub-binary keeps the offset
 /// of its bits. The last copy that drops releases the array.
-#[derive(Clone)]
 struct BinaryView {
     /// The array of the bytes of the source binary, from its first byte.
+    /// The array is empty when the view keeps its bytes in `chunks`.
     bytes: Arc<Vec<u8>>,
+    /// The chunks of a view that an append built, or `None` for each other
+    /// view. Each chunk is an immutable array, and an append shares the
+    /// chunks of its prefix, so an append copies no old payload byte. The
+    /// view keeps the chunks in order, and their bytes are the bytes of the
+    /// view.
+    chunks: Option<Arc<Vec<Arc<Vec<u8>>>>>,
+    /// The bytes of `chunks` joined in one array, built at the first read
+    /// that needs the contiguous bytes. `None` until such a read.
+    flat: OnceLock<Arc<Vec<u8>>>,
     /// The offset in bits of the first bit of this binary in the array.
     offset: usize,
     /// The number of bits of this binary.
@@ -73,6 +86,13 @@ struct BinaryView {
 #[derive(Clone)]
 pub struct Binary(Arc<BinaryView>);
 
+/// The size of one leaf of an append-built binary. An append merges a small
+/// later segment in the last leaf of its prefix, so the merge copies at most
+/// this many bytes. The size is an internal storage choice of the append
+/// tree, not an ERTS binary-size limit
+/// (`docs/term-performance-design-codex-v2.md`, the append-tree paragraph).
+const APPEND_LEAF: usize = 4096;
+
 impl Binary {
     /// Return the shared array of the bytes. Two binaries that return one
     /// array keep their bytes in one place.
@@ -89,7 +109,9 @@ impl Binary {
     }
 
     /// Return the shared array of the bytes for the live-byte walk. Two
-    /// binaries that return one array keep their bytes in one place.
+    /// binaries that return one array keep their bytes in one place. A view
+    /// that an append built returns its empty source array and keeps its
+    /// bytes in the chunks of [`Binary::chunk_backing`].
     ///
     /// # Examples
     ///
@@ -99,6 +121,34 @@ impl Binary {
     /// ```
     pub(super) fn backing(&self) -> &Arc<Vec<u8>> {
         &self.0.bytes
+    }
+
+    /// Return the chunks of a view that an append built, or `None` for each
+    /// other view, for the live-byte walk. Each chunk is one allocation that
+    /// the view keeps.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Binary::from(b"ab".to_vec()).chunk_backing().is_none());
+    /// ```
+    #[cfg(test)]
+    pub(super) fn chunk_backing(&self) -> Option<&Arc<Vec<Arc<Vec<u8>>>>> {
+        self.0.chunks.as_ref()
+    }
+
+    /// Return the array that joins the chunks of a view that an append
+    /// built, or an empty array for each other view, for the accounting and
+    /// the tests.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Binary::from(b"ab".to_vec()).flat_backing().is_empty());
+    /// ```
+    #[cfg(test)]
+    pub(super) fn flat_backing(&self) -> &Arc<Vec<u8>> {
+        self.0.flat_backing()
     }
 
     /// Return whether the two handles own one view. Two handles that share
@@ -147,7 +197,13 @@ impl Binary {
     /// assert!(bytes.bits(4, 12).allocated_bytes() > bytes.allocated_bytes());
     /// ```
     pub(crate) fn allocated_bytes(&self) -> usize {
-        self.0.bytes.capacity() + self.0.packed.as_ref().map_or(0, |packed| packed.capacity())
+        let chunks = self.0.chunks.as_ref().map_or(0, |chunks| {
+            chunks.iter().map(|chunk| chunk.capacity()).sum()
+        });
+        self.0.bytes.capacity()
+            + chunks
+            + self.0.flat.get().map_or(0, |flat| flat.capacity())
+            + self.0.packed.as_ref().map_or(0, |packed| packed.capacity())
     }
 
     /// Return the packed bits of a view whose size is not a whole number of
@@ -207,20 +263,19 @@ impl Binary {
         );
         let offset = view.offset + start;
         let size = end - start;
+        let flat = view.flat_backing();
         let packed = (!offset.is_multiple_of(BITS_PER_BYTE)).then(|| {
             let first = byte(offset);
             // The segment can end in the byte after its last whole byte, so
             // the bits include that byte. `pack_bits` reads one byte past the
             // slice, and the last byte of the array has no byte after it.
-            let end = (first + size.div_ceil(BITS_PER_BYTE) + 1).min(view.bytes.len());
-            Arc::new(pack_bits(
-                &view.bytes[first..end],
-                offset % BITS_PER_BYTE,
-                size,
-            ))
+            let end = (first + size.div_ceil(BITS_PER_BYTE) + 1).min(flat.len());
+            Arc::new(pack_bits(&flat[first..end], offset % BITS_PER_BYTE, size))
         });
         Binary(Arc::new(BinaryView {
-            bytes: Arc::clone(&view.bytes),
+            bytes: Arc::clone(flat),
+            chunks: None,
+            flat: OnceLock::new(),
             offset,
             size,
             packed,
@@ -239,7 +294,11 @@ impl Binary {
     /// assert!(!bytes.same_bytes(&Binary::from(b"ab".to_vec())));
     /// ```
     pub fn same_bytes(&self, other: &Binary) -> bool {
-        Arc::ptr_eq(&self.0.bytes, &other.0.bytes)
+        match (&self.0.chunks, &other.0.chunks) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => Arc::ptr_eq(&self.0.bytes, &other.0.bytes),
+            (Some(_), None) | (None, Some(_)) => false,
+        }
     }
 
     /// Take the bytes of this binary as an owned vector. The function moves
@@ -284,13 +343,140 @@ impl Binary {
         // binary.
         self[..].to_vec()
     }
+
+    /// Build the binary of `prefix` followed by `suffix`, the result of an
+    /// `append` segment that adds bits. The result shares each array of
+    /// `prefix` and copies no byte of the old payload, as an ERTS append to
+    /// a binary that is not writable shares the old binary
+    /// (`erts_bs_append_checked`, `erl_bits.c:1851-1921`). A prefix view
+    /// that is not the whole of its array, or that keeps packed bits, is
+    /// materialized in one array at this call, because its bytes are not one
+    /// array.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let prefix = Binary::from(b"ab".to_vec());
+    /// assert_eq!(Binary::concat(&prefix, b"cd"), Binary::from(b"abcd".to_vec()));
+    /// ```
+    pub(crate) fn concat(prefix: &Binary, suffix: &[u8]) -> Binary {
+        if suffix.is_empty() {
+            return prefix.clone();
+        }
+        Binary::concat_arrays(prefix, vec![Arc::new(suffix.to_vec())])
+    }
+
+    /// Build the binary of `prefix` followed by the arrays of `suffix`, in
+    /// order, the result of an `append` segment whose later segments are
+    /// whole byte ranges. The result shares each array of `prefix` and of
+    /// `suffix`, so the append copies no byte of the old payload.
+    ///
+    /// When the arrays of `suffix` fit in one leaf with the last array of
+    /// `prefix`, the result merges them in one leaf of at most
+    /// [`APPEND_LEAF`] bytes. A repeated small append then fills a leaf
+    /// instead of adding one small array for each step, and the merge copies
+    /// at most that one leaf.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let prefix = Binary::from(b"ab".to_vec());
+    /// let suffix = vec![Arc::new(b"cd".to_vec())];
+    /// assert_eq!(Binary::concat_arrays(&prefix, suffix), Binary::from(b"abcd".to_vec()));
+    /// ```
+    pub(crate) fn concat_arrays(prefix: &Binary, suffix: Vec<Arc<Vec<u8>>>) -> Binary {
+        let mut chunks = prefix.chunks();
+        let appended: usize = suffix.iter().map(|chunk| chunk.len()).sum();
+        let merge = chunks
+            .last()
+            .is_some_and(|chunk| chunk.len() + appended <= APPEND_LEAF);
+        if merge {
+            let mut leaf = chunks
+                .pop()
+                .expect("the merge keeps the last array of the prefix")
+                .to_vec();
+            for chunk in &suffix {
+                leaf.extend_from_slice(chunk);
+            }
+            if !leaf.is_empty() {
+                chunks.push(Arc::new(leaf));
+            }
+        } else {
+            chunks.retain(|chunk| !chunk.is_empty());
+            chunks.extend(suffix.into_iter().filter(|chunk| !chunk.is_empty()));
+        }
+        Binary::from_chunks(chunks)
+    }
+
+    /// Return the arrays that hold the bytes of this binary, in order. The
+    /// function shares the arrays of a view that an append built, and the
+    /// whole array of a view that is all of it. It copies the bytes of a
+    /// sub-binary or of a packed view into one array, because those bytes
+    /// are not one whole array.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let binary = Binary::from(b"ab".to_vec());
+    /// assert_eq!(binary.chunks().len(), 1);
+    /// ```
+    pub(crate) fn chunks(&self) -> Vec<Arc<Vec<u8>>> {
+        let view = &self.0;
+        match &view.chunks {
+            Some(chunks) => chunks.iter().cloned().collect(),
+            None if view.offset == 0
+                && view.packed.is_none()
+                && view.size == view.bytes.len() * BITS_PER_BYTE =>
+            {
+                vec![Arc::clone(&view.bytes)]
+            }
+            None => vec![Arc::new(view.bytes_of_view().to_vec())],
+        }
+    }
+
+    /// Build the binary of `chunks` in order. The view keeps the arrays and
+    /// copies no byte of them, so a later append can share each one. One
+    /// chunk gives a view of that array with no chunk list.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let chunk = Arc::new(b"ab".to_vec());
+    /// assert_eq!(Binary::from_chunks(vec![chunk]), Binary::from(b"ab".to_vec()));
+    /// ```
+    pub(crate) fn from_chunks(chunks: Vec<Arc<Vec<u8>>>) -> Binary {
+        if let [chunk] = chunks.as_slice() {
+            let size = chunk.len() * BITS_PER_BYTE;
+            return Binary(Arc::new(BinaryView {
+                bytes: Arc::clone(chunk),
+                chunks: None,
+                flat: OnceLock::new(),
+                offset: 0,
+                size,
+                packed: None,
+            }));
+        }
+        let size = chunks.iter().map(|chunk| chunk.len()).sum::<usize>() * BITS_PER_BYTE;
+        Binary(Arc::new(BinaryView {
+            bytes: Arc::new(Vec::new()),
+            chunks: Some(Arc::new(chunks)),
+            flat: OnceLock::new(),
+            offset: 0,
+            size,
+            packed: None,
+        }))
+    }
 }
 
 impl BinaryView {
     /// Take the bytes of this view as an owned vector. The array moves out
     /// only when this view is all of it, and only when this view is its last
-    /// holder.
+    /// holder. A view that an append built copies its bytes, because its
+    /// bytes are in several arrays.
     fn take_bytes(mut self) -> Vec<u8> {
+        if self.chunks.is_some() {
+            return self.bytes_of_view().to_vec();
+        }
         // A sub-binary gives only its own bytes, also when it owns the array
         // of its source.
         let whole = self.offset == 0 && self.size == self.bytes.len() * BITS_PER_BYTE;
@@ -304,6 +490,22 @@ impl BinaryView {
         self.bytes_of_view().to_vec()
     }
 
+    /// Return the one array that holds the bytes of this view. A view that
+    /// an append built joins its chunks in one array at the first call, so
+    /// the reader of the contiguous bytes pays one copy of the chunks.
+    fn flat_backing(&self) -> &Arc<Vec<u8>> {
+        match &self.chunks {
+            None => &self.bytes,
+            Some(chunks) => self.flat.get_or_init(|| {
+                let mut bytes = Vec::with_capacity(self.size.div_ceil(BITS_PER_BYTE));
+                for chunk in chunks.iter() {
+                    bytes.extend_from_slice(chunk);
+                }
+                Arc::new(bytes)
+            }),
+        }
+    }
+
     /// Return the bytes of this view, as [`Binary`] derefs to them.
     fn bytes_of_view(&self) -> &[u8] {
         match &self.packed {
@@ -313,9 +515,10 @@ impl BinaryView {
             // 0 gives no byte, also at the end of the array.
             None if self.size == 0 => &[],
             None => {
+                let flat = self.flat_backing();
                 let first = byte(self.offset);
-                let end = self.bytes.len().min(byte(self.offset + self.size - 1) + 1);
-                &self.bytes[first..end]
+                let end = flat.len().min(byte(self.offset + self.size - 1) + 1);
+                &flat[first..end]
             }
         }
     }
@@ -456,6 +659,8 @@ impl From<Vec<u8>> for Binary {
         let size = bytes.len() * BITS_PER_BYTE;
         Binary(Arc::new(BinaryView {
             bytes: Arc::new(bytes),
+            chunks: None,
+            flat: OnceLock::new(),
             offset: 0,
             size,
             packed: None,

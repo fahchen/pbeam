@@ -130,6 +130,10 @@ name = "binary_find"
 path = "tests/integration/binary_find.rs"
 
 [[test]]
+name = "binary_append_bench"
+path = "tests/integration/binary_append_bench.rs"
+
+[[test]]
 name = "bitstr"
 path = "tests/integration/bitstr.rs"
 
