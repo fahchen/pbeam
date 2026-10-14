@@ -25,7 +25,7 @@ fn converts_native_name_bytes_or_gives_the_warning_tuple_in_each_encoding() {
     // and [97,255] in Latin-1, and the atom ok raises badarg. The Latin-1
     // encoding exists only on a host other than macOS.
     let convert = |name: &Term, encoding| format!("{:?}", internal_native2name(name, encoding));
-    let warning = "Ok(Value(Tuple([Atom(\"error\"), Atom(\"warning\")])))";
+    let warning = "Ok(Value(Tuple([Atom(12), Atom(752)])))";
     for (name, latin1, utf8) in [
         (
             Term::binary(vec![]),
@@ -44,8 +44,8 @@ fn converts_native_name_bytes_or_gives_the_warning_tuple_in_each_encoding() {
         ),
         (
             Term::static_atom("ok"),
-            "Ok(Raise { class: Error, reason: Atom(\"badarg\") })",
-            "Ok(Raise { class: Error, reason: Atom(\"badarg\") })",
+            "Ok(Raise { class: Error, reason: Atom(78) })",
+            "Ok(Raise { class: Error, reason: Atom(78) })",
         ),
     ] {
         assert_eq!(convert(&name, FilenameEncoding::Latin1), latin1, "{name:?}");

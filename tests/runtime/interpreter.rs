@@ -3,8 +3,8 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
     BeamProgram, CodeTable, Issuer, Outcome, Register, Scheduler, StackSlot, call_arguments,
-    function_at_label, read_bif_arguments, read_operand, read_ref, take_owned, write,
-    write_operand,
+    function_at_label, read_bif_arguments, read_operand, read_owned_bif_arguments, read_ref,
+    take_owned, write, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -14,7 +14,7 @@ use crate::{
         ets::{Access, Table},
         process::{ProcessState, Start, tests::frame},
     },
-    term::{Atom, AtomTable, Lambda, ProcessId, Reference, test_atom, test_atom_table},
+    term::{Atom, AtomTable, Lambda, ProcessId, Reference, debug_term, test_atom, test_atom_table},
 };
 
 /// Return the initial capabilities of the default policy.
@@ -1963,7 +1963,10 @@ fn raises_class_error_for_the_raw_stack_trace_nil() {
     ] {
         assert_eq!(
             raise(trace.clone()),
-            format!("invariant error: {trace:?} is not a raw stack trace")
+            format!(
+                "invariant error: {} is not a raw stack trace",
+                debug_term(&trace, &test_atom_table())
+            )
         );
     }
 }
@@ -2325,6 +2328,21 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
     );
 }
 
+#[test]
+fn writes_the_operand_of_a_match_context_error_with_each_atom_name() {
+    // `Debug for Term` writes the atom index, because a bare term carries no
+    // table. The invariant error of a match context holds the table, so it
+    // writes the name of a `Value` operand and its index for a register.
+    assert_eq!(
+        super::debug_operand(&Operand::Value(test_atom("a")), &test_atom_table()),
+        "Value(Atom(\"a\"))"
+    );
+    assert_eq!(
+        super::debug_operand(&Operand::X(0), &AtomTable::new()),
+        "X(0)"
+    );
+}
+
 /// A copy of a match context to another register shares the match
 /// context, as ERTS copies the term that refers to it (`emit_i_move`,
 /// jit/arm/instr_common.cpp:516-519; `emit_i_bs_start_match3`,
@@ -2648,16 +2666,30 @@ fn handles_register_values_and_reports_invalid_registers() {
 fn reads_bif_arguments_into_a_fixed_buffer_and_reports_invalid_operands() {
     let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
     process.registers = vec![Some(Term::Integer(7))];
+    let operands = [Operand::X(0), Operand::Value(Term::Integer(9))];
     let arguments =
-        read_bif_arguments(&process, &[Operand::X(0), Operand::Value(Term::Integer(9))])
-            .expect("two set operands are valid arguments");
+        read_bif_arguments(&process, &operands).expect("two set operands are valid arguments");
     assert_eq!(
         arguments.with(|terms| terms.to_vec()),
-        vec![Term::Integer(7), Term::Integer(9)]
+        vec![&Term::Integer(7), &Term::Integer(9)]
     );
     assert!(read_bif_arguments(&process, &[Operand::X(1)]).is_err());
     assert!(
         read_bif_arguments(
+            &process,
+            &[Operand::X(0), Operand::X(0), Operand::X(0), Operand::X(0)]
+        )
+        .is_err()
+    );
+    let owned = read_owned_bif_arguments(&process, &operands)
+        .expect("two set operands are valid arguments");
+    assert_eq!(
+        owned.with(|terms| terms.to_vec()),
+        vec![Term::Integer(7), Term::Integer(9)]
+    );
+    assert!(read_owned_bif_arguments(&process, &[Operand::X(1)]).is_err());
+    assert!(
+        read_owned_bif_arguments(
             &process,
             &[Operand::X(0), Operand::X(0), Operand::X(0), Operand::X(0)]
         )
@@ -3726,7 +3758,10 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
             process_info(process.clone(), item.clone())
                 .unwrap_err()
                 .to_string(),
-            format!("unsupported erlang:process_info/2 arguments {process:?}, {item:?}")
+            format!(
+                "unsupported erlang:process_info/2 arguments {process:?}, {}",
+                debug_term(&item, &test_atom_table())
+            )
         );
     }
     // ERTS 29.1.1: process_info(self(), registered_name) is [] for a

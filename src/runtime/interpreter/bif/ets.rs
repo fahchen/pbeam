@@ -3,7 +3,7 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::ets::{Access, Operation, Table};
-use crate::term::{Atom, Reference};
+use crate::term::Reference;
 
 /// The fewest and the most locks that the hidden option
 /// `{write_concurrency, {debug_hash_fixed_number_of_locks, N}}` accepts
@@ -79,16 +79,20 @@ pub(super) fn new(
     let mut heir = None;
     for option in options {
         match option {
-            Term::Atom(atom) => match atom.index() {
-                _ if atom.is_one_of(&["bag", "duplicate_bag", "ordered_set"]) => {
+            Term::Atom(atom) => {
+                if atom.is_one_of(&["bag", "duplicate_bag", "ordered_set"]) {
                     table_type = context.scheduler.atoms.name_of(atom).to_owned();
+                } else if atom.is_static("named_table") {
+                    named = true;
+                } else if atom.is_static("public") {
+                    access = Access::Public;
+                } else if atom.is_static("private") {
+                    access = Access::Private;
+                } else if atom.is_one_of(&["set", "protected", "compressed"]) {
+                } else {
+                    return Ok(BifResult::badarg());
                 }
-                index if index == Atom::static_index("named_table") => named = true,
-                index if index == Atom::static_index("public") => access = Access::Public,
-                index if index == Atom::static_index("private") => access = Access::Private,
-                _ if atom.is_one_of(&["set", "protected", "compressed"]) => {}
-                _ => return Ok(BifResult::badarg()),
-            },
+            }
             Term::Tuple(elements) => match elements.as_ref() {
                 [Term::Atom(key), value] => match (context.scheduler.atoms.name_of(key), value) {
                     ("keypos", value) => match value.small_integer() {
@@ -106,15 +110,13 @@ pub(super) fn new(
                     }
                     ("read_concurrency" | "decentralized_counters", Term::Atom(value))
                         if value.is_one_of(&["true", "false"]) => {}
-                    ("heir", Term::Atom(value)) if value.index() == Atom::static_index("none") => {
+                    ("heir", Term::Atom(value)) if value.is_static("none") => {
                         heir = None;
                     }
                     ("heir", Term::Pid(pid)) => heir = Some(*pid),
                     _ => return Ok(BifResult::badarg()),
                 },
-                [Term::Atom(key), Term::Pid(pid), _]
-                    if key.index() == Atom::static_index("heir") =>
-                {
+                [Term::Atom(key), Term::Pid(pid), _] if key.is_static("heir") => {
                     heir = Some(*pid);
                 }
                 _ => return Ok(BifResult::badarg()),
@@ -632,5 +634,5 @@ pub(super) fn delete(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
 /// ```
 fn is_lock_count(locks: &[Term]) -> bool {
     matches!(locks, [Term::Atom(tag), Term::Integer(count)]
-        if tag.index() == Atom::static_index("debug_hash_fixed_number_of_locks") && LOCKS.contains(count))
+        if tag.is_static("debug_hash_fixed_number_of_locks") && LOCKS.contains(count))
 }

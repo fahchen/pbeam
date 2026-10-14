@@ -16,7 +16,6 @@ use super::BifResult::{Raise, Value};
 use super::*;
 use crate::runtime::host::filename_encoding;
 use crate::runtime::time;
-use crate::term::Atom;
 
 bifs! {
     atomics:add/3 => unsupported,
@@ -97,7 +96,7 @@ bifs! {
     erlang:adler32/2 => unsupported,
     erlang:adler32_combine/3 => unsupported,
     erlang:alias/1 => unsupported,
-    erlang:and/2 as ErlangAnd2 => |_, [left, right]| Ok(match (left, right) { (Term::Atom(left), Term::Atom(right)) if left.is_one_of(&["true", "false"]) && right.is_one_of(&["true", "false"]) => Value(Term::static_atom(if left.index() == Atom::static_index("true") && right.index() == Atom::static_index("true") { "true" } else { "false" })), _ => BifResult::badarg() }),
+    erlang:and/2 as ErlangAnd2 => |_, [left, right]| Ok(match (left, right) { (Term::Atom(left), Term::Atom(right)) if left.is_one_of(&["true", "false"]) && right.is_one_of(&["true", "false"]) => Value(Term::static_atom(if left.is_static("true") && right.is_static("true") { "true" } else { "false" })), _ => BifResult::badarg() }),
     erlang:append/2 => unsupported,
     erlang:append_element/2 => unsupported,
     erlang:atom_to_binary/2 as ErlangAtomToBinary2 => |cx, [term, encoding]| Ok(erlang::atom_to_binary(&cx.scheduler.atoms, term, encoding)),
@@ -150,7 +149,7 @@ bifs! {
     erlang:dt_get_tag_data/0 => unsupported,
     erlang:dt_prepend_vm_tag_data/1 => unsupported,
     erlang:dt_put_tag/1 => unsupported,
-    erlang:dt_restore_tag/1 as ErlangDtRestoreTag1 => |_, [tag]| Ok(match tag { Term::Atom(atom) if atom.index() == Atom::static_index("true") => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
+    erlang:dt_restore_tag/1 as ErlangDtRestoreTag1 => |_, [tag]| Ok(match tag { Term::Atom(atom) if atom.is_static("true") => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     erlang:dt_spread_tag/1 as ErlangDtSpreadTag1 => |_, [flag]| Ok(match flag { Term::Atom(atom) if atom.is_one_of(&["true", "false"]) => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     erlang:element/2 as ErlangElement2 => |_, [index, tuple]| Ok(erlang::element(index, tuple)),
     erlang:erase/0 => unsupported,
@@ -257,11 +256,11 @@ bifs! {
     erlang:nif_error/1 as ErlangNifError1 => |_, [reason]| Ok(Raise { class: ExceptionClass::Error, reason: reason.clone() }),
     erlang:nif_error/2 => unsupported,
     erlang:node/0 as ErlangNode0 => |_, []| Ok(Value(crate::runtime::local_node())),
-    erlang:node/1 as ErlangNode1 => |_, [term]| erlang::node(term),
+    erlang:node/1 as ErlangNode1 => |cx, [term]| erlang::node(term, &cx.scheduler.atoms),
     erlang:nodes/0 => unsupported,
     erlang:nodes/1 => unsupported,
     erlang:nodes/2 => unsupported,
-    erlang:not/1 as ErlangNot1 => |_, [term]| Ok(match term { Term::Atom(atom) if atom.index() == Atom::static_index("true") => Value(Term::static_atom("false")), Term::Atom(atom) if atom.index() == Atom::static_index("false") => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
+    erlang:not/1 as ErlangNot1 => |_, [term]| Ok(match term { Term::Atom(atom) if atom.is_static("true") => Value(Term::static_atom("false")), Term::Atom(atom) if atom.is_static("false") => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     erlang:now/0 => unsupported,
     erlang:or/2 => unsupported,
     erlang:phash/2 => unsupported,
@@ -570,6 +569,74 @@ bifs! {
     records:update/4 => unsupported,
     string:list_to_float/1 => unsupported,
     unicode:bin_is_7bit/1 as UnicodeBinIs7bit1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Binary(bytes) if bytes.is_ascii()) { "true" } else { "false" }))),
-    unicode:characters_to_binary/2 as UnicodeCharactersToBinary2 => |cx, [chardata, encoding]| unicode::characters_to_binary(cx.scheduler.current_process_mut(), chardata, encoding),
+    unicode:characters_to_binary/2 as UnicodeCharactersToBinary2 => |cx, [chardata, encoding]| { let (process, atoms) = cx.scheduler.current_process_and_atoms(); unicode::characters_to_binary(process, chardata, encoding, atoms) },
     unicode:characters_to_list/2 as UnicodeCharactersToList2 => |cx, [chardata, encoding]| unicode::characters_to_list(cx.scheduler.current_process_mut(), chardata, encoding),
+}
+
+/// Return whether a BIF identity is in the measured leaf set that the
+/// borrowed argument lane runs (see `docs/bif-argument-borrow-design.md`).
+///
+/// A leaf body reads its arguments as references and takes no scheduler,
+/// so it cannot change the process that holds them. Every other body stays
+/// on the owned lane. The identities of this function and of the arms of
+/// [`dispatch_leaf`] are the same.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_leaf(BifId::ErlangPlus2));
+/// assert!(!is_leaf(BifId::ErlangByteSize1));
+/// ```
+pub(in crate::runtime::interpreter) fn is_leaf(id: BifId) -> bool {
+    matches!(
+        id,
+        BifId::ErlangPlus2
+            | BifId::ErlangMinus2
+            | BifId::ErlangTupleSize1
+            | BifId::ErlangElement2
+            | BifId::ErlangHd1
+            | BifId::ErlangMapGet2
+    )
+}
+
+/// Run a leaf BIF with borrowed arguments. This function takes no
+/// scheduler, so its bodies cannot change the process that holds the
+/// arguments.
+///
+/// The identities of the arms are the identities of [`is_leaf`]. Each arm
+/// body is the body of the same entry of the `bifs!` table, and its
+/// context pattern is `_`, so the body reads no scheduler. An identity
+/// that the leaf lane does not hold reports the unresolved MFA error of
+/// its entry, as the fallback arm of `dispatch` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let left = Term::Integer(1);
+/// let right = Term::Integer(2);
+/// let sum = dispatch_leaf(BifId::ErlangPlus2, &[&left, &right])?;
+/// assert!(matches!(sum, BifResult::Value(Term::Integer(3))));
+/// ```
+pub(in crate::runtime::interpreter) fn dispatch_leaf(
+    id: BifId,
+    arguments: &[&Term],
+) -> Result<BifResult, BeamError> {
+    match (id, arguments) {
+        (BifId::ErlangPlus2, &[left, right]) => erlang::arith("+", left, right, i64::checked_add),
+        (BifId::ErlangMinus2, &[left, right]) => erlang::arith("-", left, right, i64::checked_sub),
+        (BifId::ErlangTupleSize1, &[term]) => Ok(match term {
+            Term::Tuple(elements) => Value(Term::Integer(elements.len() as i64)),
+            _ => BifResult::badarg(),
+        }),
+        (BifId::ErlangElement2, &[index, tuple]) => Ok(erlang::element(index, tuple)),
+        (BifId::ErlangHd1, &[list]) => Ok(match list.list_head() {
+            Some(head) => Value(head.clone()),
+            None => BifResult::badarg(),
+        }),
+        (BifId::ErlangMapGet2, &[key, map]) => Ok(maps::get(key, map)),
+        (id, _) => {
+            let (module, name, _) = mfa(id);
+            Err(unresolved_mfa(module, name, arguments.len()))
+        }
+    }
 }

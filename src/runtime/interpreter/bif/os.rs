@@ -6,7 +6,6 @@ use crate::runtime::capability::{CapabilityKind, Operation};
 use crate::runtime::host::signal::{self, Disposition};
 use crate::runtime::host::{clock, environment, filename_encoding};
 use crate::runtime::unicode::{filename_from_native, native_filename};
-use crate::term::Atom;
 
 /// Run `os:getenv(Name)`: return the value of the environment variable
 /// `Name` as a list of characters, or `false` when the environment has no
@@ -90,16 +89,12 @@ pub(super) fn set_signal(
     mode: &Term,
 ) -> Result<BifResult, BeamError> {
     let (disposition, operations): (_, &[Operation]) = match mode {
-        Term::Atom(mode) if mode.index() == Atom::static_index("ignore") => {
-            (Disposition::Ignore, &[Operation::Ignore])
-        }
-        Term::Atom(mode) if mode.index() == Atom::static_index("default") => (
+        Term::Atom(mode) if mode.is_static("ignore") => (Disposition::Ignore, &[Operation::Ignore]),
+        Term::Atom(mode) if mode.is_static("default") => (
             Disposition::Default,
             &[Operation::Handle, Operation::Ignore],
         ),
-        Term::Atom(mode) if mode.index() == Atom::static_index("handle") => {
-            (Disposition::Handle, &[Operation::Handle])
-        }
+        Term::Atom(mode) if mode.is_static("handle") => (Disposition::Handle, &[Operation::Handle]),
         _ => return Ok(BifResult::badarg()),
     };
     let Term::Atom(signal) = signal else {

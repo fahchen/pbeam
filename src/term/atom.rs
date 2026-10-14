@@ -120,15 +120,28 @@ impl Atom {
     /// ```rust,ignore
     /// assert_eq!(Atom::static_index("ok"), Atom::from_static("ok").unwrap().index());
     /// ```
-    pub(crate) fn static_index(name: &str) -> u32 {
+    fn static_index(name: &str) -> u32 {
         *STATIC_INDICES.get(name).expect("the name is a static atom")
     }
 
-    /// Return true when the index of this atom is the index of one of the
-    /// static atom names `names`.
+    /// Return true when this atom is the static atom `name`.
     ///
-    /// Each name must be a static atom name, as [`Atom::static_index`]
-    /// requires.
+    /// `name` must be a static atom name, as [`Atom::static_index`] requires.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let ok = Atom::from_static("ok").unwrap();
+    /// assert!(ok.is_static("ok"));
+    /// assert!(!ok.is_static("error"));
+    /// ```
+    pub(crate) fn is_static(&self, name: &str) -> bool {
+        self.index == Atom::static_index(name)
+    }
+
+    /// Return true when this atom is one of the static atom names `names`.
+    ///
+    /// Each name must be a static atom name, as [`Atom::is_static`] requires.
     ///
     /// # Examples
     ///
@@ -138,9 +151,7 @@ impl Atom {
     /// assert!(!ok.is_one_of(&["error"]));
     /// ```
     pub(crate) fn is_one_of(&self, names: &[&str]) -> bool {
-        names
-            .iter()
-            .any(|name| self.index == Atom::static_index(name))
+        names.iter().any(|name| self.is_static(name))
     }
 }
 
