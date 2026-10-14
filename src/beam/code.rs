@@ -277,7 +277,7 @@ pub(crate) fn prepare(
     let atoms = required_chunk(&chunks, b"AtU8")
         .and_then(|data| parse_atoms(data, atom_table))
         .map_err(PrepareError::Unsupported)?;
-    if atoms.first().map(Atom::name) != Some(module) {
+    if atoms.first().map(|atom| atom_table.name_of(atom)) != Some(module) {
         return Err(PrepareError::BadFile);
     }
     decode(&chunks, atoms, atom_table).map_err(PrepareError::Unsupported)
@@ -407,7 +407,7 @@ fn decode(
 /// ```rust,ignore
 /// let mut table = AtomTable::new();
 /// let atoms = parse_atoms(&[0xff, 0xff, 0xff, 0xff, 0x10, b'a'], &mut table)?;
-/// assert_eq!(atoms[0].name(), "a");
+/// assert_eq!(table.name_of(&atoms[0]), "a");
 /// assert_eq!(table.get("a"), Some(atoms[0].clone()));
 /// ```
 fn parse_atoms(data: &[u8], atom_table: &mut AtomTable) -> Result<Vec<Atom>, BeamError> {
@@ -986,8 +986,9 @@ fn sign_extend(first_byte: u8, payload: u64) -> i64 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let atoms = vec![AtomTable::new().put("hello")?];
-/// assert_eq!(atom_at(&atoms, 1)?.name(), "hello");
+/// let mut table = AtomTable::new();
+/// let atoms = vec![table.put("hello")?];
+/// assert_eq!(table.name_of(atom_at(&atoms, 1)?), "hello");
 /// ```
 fn atom_at(atoms: &[Atom], index: usize) -> Result<&Atom, BeamError> {
     if index < FIRST_ATOM_INDEX {

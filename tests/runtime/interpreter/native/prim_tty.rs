@@ -28,7 +28,7 @@ fn gives_ebadf_for_an_fd_that_is_not_open() {
     let mut atoms = AtomTable::new();
     let result = isatty_fd(&mut atoms, -1).unwrap();
     assert!(
-        matches!(&result, BifResult::Value(Term::Atom(atom)) if atom.name() == "ebadf"),
+        matches!(&result, BifResult::Value(Term::Atom(atom)) if atoms.name_of(atom) == "ebadf"),
         "{result:?}"
     );
 }

@@ -407,8 +407,8 @@ fn returns_the_host_os_type_as_pinned_erts() {
     let [Term::Atom(family), Term::Atom(flavor)] = elements.as_ref() else {
         panic!("os:type/0 must return a tuple of two atoms");
     };
-    assert_eq!(family.name(), "unix");
-    let flavor = flavor.name();
+    assert_eq!(result.atoms().name_of(family), "unix");
+    let flavor = result.atoms().name_of(flavor);
     assert_eq!(
         reference("system"),
         format!("[{{unix,{flavor}}},{{unix,{flavor}}}]\n").into_bytes()

@@ -37,7 +37,9 @@ pub(super) fn send_denial(
     message: &Term,
 ) -> Result<Option<BifResult>, BeamError> {
     let sender = scheduler.current_process();
-    if scheduler.serves_io(target) && io_request_permitted(sender.id, &sender.security, message) {
+    if scheduler.serves_io(target)
+        && io_request_permitted(sender.id, &sender.security, &scheduler.atoms, message)
+    {
         return Ok(None);
     }
     boot_denial(scheduler, target)
@@ -64,21 +66,29 @@ pub(super) fn send_denial(
 /// Each other message and request is denied. The walk uses a work list,
 /// not recursion, so deeply nested requests do not overflow the stack.
 ///
+/// An IO request holds only the atom index, so the walk reads each name
+/// through `atoms`, the table that owns the request.
+///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let put_chars = Term::tuple(vec![Term::static_atom("put_chars"), unicode, Term::binary(b"hi\n".to_vec())]);
 /// let request = Term::tuple(vec![io_request, Term::Pid(sender), reply_as, put_chars]);
-/// assert!(io_request_permitted(sender, &security, &request));
+/// assert!(io_request_permitted(sender, &security, &atoms, &request));
 /// ```
-fn io_request_permitted(sender: ProcessId, security: &SecurityContext, message: &Term) -> bool {
+fn io_request_permitted(
+    sender: ProcessId,
+    security: &SecurityContext,
+    atoms: &AtomTable,
+    message: &Term,
+) -> bool {
     let Term::Tuple(elements) = message else {
         return false;
     };
     let [Term::Atom(tag), Term::Pid(from), _reply_as, request] = elements.as_ref() else {
         return false;
     };
-    if tag.name() != "io_request" || *from != sender {
+    if atoms.name_of(tag) != "io_request" || *from != sender {
         return false;
     }
     let writes = || {
@@ -92,7 +102,7 @@ fn io_request_permitted(sender: ProcessId, security: &SecurityContext, message: 
             return false;
         };
         let permitted = match elements.as_ref() {
-            [Term::Atom(tag), _encoding, _chars] => tag.name() == "put_chars" && writes(),
+            [Term::Atom(tag), _encoding, _chars] => atoms.name_of(tag) == "put_chars" && writes(),
             [
                 Term::Atom(tag),
                 _encoding,
@@ -100,13 +110,13 @@ fn io_request_permitted(sender: ProcessId, security: &SecurityContext, message: 
                 Term::Atom(function),
                 arguments,
             ] => {
-                tag.name() == "put_chars"
-                    && module.name() == "io_lib"
-                    && matches!(function.name(), "format" | "fwrite" | "write")
+                atoms.name_of(tag) == "put_chars"
+                    && atoms.name_of(module) == "io_lib"
+                    && matches!(atoms.name_of(function), "format" | "fwrite" | "write")
                     && !arguments.contains_fun()
                     && writes()
             }
-            [Term::Atom(tag), requests] if tag.name() == "requests" => {
+            [Term::Atom(tag), requests] if atoms.name_of(tag) == "requests" => {
                 let Some(requests) = requests.proper_list() else {
                     return false;
                 };

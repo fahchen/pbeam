@@ -12,8 +12,8 @@ use std::{
 };
 
 use pbeam_runtime::{
-    AllowAll, BeamError, BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy,
-    Term,
+    AllowAll, AtomTable, BeamError, BeamProgram, Capability, CapabilityKind, Constraint, Operation,
+    Policy, Term,
 };
 
 #[path = "../common/mod.rs"]
@@ -361,6 +361,15 @@ fn run(program: &BeamProgram, function: &str, policy: &dyn Policy) -> Term {
         .term
 }
 
+/// Run `effect_probe:Function()` with `policy` and return the `~w` text of
+/// the result, with each atom name from the table of the run.
+fn run_text(program: &BeamProgram, function: &str, policy: &dyn Policy) -> String {
+    let result = program
+        .execute_with_policy("effect_probe", function, &[], policy)
+        .unwrap();
+    text(&result.term, result.atoms())
+}
+
 /// Return the atom `name` of the program.
 fn atom(program: &BeamProgram, name: &str) -> Term {
     Term::Atom(program.atom(name).unwrap())
@@ -406,7 +415,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
                     nonode@nohost,nonode@nohost,true,{error,badfile},false,\
                     effect_probe_ambient_atom,ok,effect_probe_ambient,true,[{key,value}],value,\
                     true,true,reference,atom,2,ok,1,error,ok,error,ok]";
-    assert_eq!(text(&run(&program, "ambient", &Grants(vec![]))), expected);
+    assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }
 
@@ -546,10 +555,7 @@ fn checks_the_key_of_get_module_info_before_the_code_capability() {
     // raises `badarg` for it too (`erl_bif_info.c:5986-6008`).
     let program = program();
     let expected = "{error,badarg}";
-    assert_eq!(
-        text(&run(&program, "code_badarg", &Grants(vec![]))),
-        expected
-    );
+    assert_eq!(run_text(&program, "code_badarg", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("code_badarg"), format!("{expected}\n"));
 }
 
@@ -809,7 +815,7 @@ fn gives_the_erts_results_of_the_permitted_process_inspection() {
     let expected = "[[[],{message_queue_len,0},true,ok,true,true,ok,true],true,\
                     [undefined,false,ok,false,badarg,ok,badarg]]";
     assert_eq!(
-        text(&run(&program, "process_inspect_permitted", &policy)),
+        run_text(&program, "process_inspect_permitted", &policy),
         expected
     );
     assert_eq!(
@@ -836,7 +842,7 @@ fn inspects_the_caller_without_inspect_and_group_leader() {
     let policy = process_grants(&[]);
     let expected = "[[],true,ok,true,true,ok,true]";
     assert_eq!(
-        text(&run(&program, "process_inspect_self", &policy)),
+        run_text(&program, "process_inspect_self", &policy),
         expected
     );
     assert_eq!(
@@ -850,11 +856,11 @@ fn keeps_the_process_state_after_a_denied_inspection() {
     // A child of the probe holds no `inspect` and no `group_leader`.
     let program = program();
     assert_eq!(
-        text(&run(&program, "inspect_kept", &AllowAll)),
+        run_text(&program, "inspect_kept", &AllowAll),
         "[denied,denied,{denied,none}]"
     );
     assert_eq!(
-        text(&run(&program, "group_leader_kept", &AllowAll)),
+        run_text(&program, "group_leader_kept", &AllowAll),
         "{[denied,denied],same}"
     );
 }
@@ -907,15 +913,23 @@ fn keeps_the_persistent_terms_after_a_denied_put() {
 /// Return a term as `io:format("~w")` prints it, for the atoms, the
 /// integers, and the tuples of the terminal probe results.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::static_atom("ok")])), "[ok]");
+/// assert_eq!(text(&Term::list_from(vec![Term::static_atom("ok")]), &atoms), "[ok]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(integer) => integer.to_string(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
@@ -936,7 +950,7 @@ fn gives_the_erts_results_of_the_permitted_terminal_setup_and_queries() {
         &[Operation::Setup, Operation::Query],
         Constraint::Any,
     );
-    let pbeam = text(&run(&program, "terminal_permitted", &policy));
+    let pbeam = run_text(&program, "terminal_permitted", &policy);
     assert_eq!(
         format!("{pbeam}\n"),
         erts_with_standard_streams("terminal_permitted")

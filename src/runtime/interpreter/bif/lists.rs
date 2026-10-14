@@ -24,7 +24,7 @@ use crate::runtime::scheduler::CONTEXT_REDS;
 /// let found = keyfind(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::list_from(vec![entry.clone()]));
 /// assert!(matches!(found, BifResult::Value(term) if term == entry));
 /// let missing = keyfind(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::nil());
-/// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.is_static("false"));
 /// assert!(matches!(keyfind(&mut process, &Term::Integer(1), &Term::Integer(0), &Term::nil()), BifResult::Raise { .. }));
 /// let improper = Term::list_with_tail(vec![Term::Integer(1)], Term::static_atom("x"));
 /// assert!(matches!(keyfind(&mut process, &Term::Integer(1), &Term::Integer(1), &improper), BifResult::Raise { .. }));
@@ -49,9 +49,9 @@ pub(super) fn keyfind(
 /// ```rust,ignore
 /// let entry = Term::tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
 /// let found = keymember(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::list_from(vec![entry]));
-/// assert!(matches!(found, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(found, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// let missing = keymember(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::nil());
-/// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.is_static("false"));
 /// assert!(matches!(keymember(&mut process, &Term::Integer(1), &Term::Integer(0), &Term::nil()), BifResult::Raise { .. }));
 /// ```
 pub(super) fn keymember(
@@ -74,7 +74,7 @@ pub(super) fn keymember(
 ///
 /// ```rust,ignore
 /// let missing = key_search(&mut process, "keyfind", &Term::Integer(1), &Term::Integer(1), &Term::nil());
-/// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.is_static("false"));
 /// ```
 fn key_search(
     process: &mut ProcessState,
@@ -126,8 +126,8 @@ fn key_search(
 /// ```rust,ignore
 /// let x = Term::static_atom("x");
 /// let improper = Term::list_with_tail(vec![Term::Integer(1)], x.clone());
-/// assert!(matches!(member(&mut process, &Term::Integer(1), &improper)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
-/// assert!(matches!(member(&mut process, &Term::Integer(2), &Term::nil())?, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(member(&mut process, &Term::Integer(1), &improper)?, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
+/// assert!(matches!(member(&mut process, &Term::Integer(2), &Term::nil())?, BifResult::Value(Term::Atom(atom)) if atom.is_static("false"));
 /// assert!(matches!(member(&mut process, &Term::Integer(2), &improper)?, BifResult::Raise { .. }));
 /// assert!(matches!(member(&mut process, &Term::Integer(2), &x)?, BifResult::Raise { .. }));
 /// ```

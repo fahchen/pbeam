@@ -70,7 +70,7 @@ impl Lambda {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(lambda.module().name(), "fun_probe");
+    /// assert_eq!(atoms.name_of(lambda.module()), "fun_probe");
     /// ```
     pub(crate) fn module(&self) -> &Atom {
         &self.module

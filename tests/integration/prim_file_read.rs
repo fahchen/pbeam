@@ -7,7 +7,7 @@ use std::{
     process::{self, Command, Stdio},
 };
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -57,19 +57,25 @@ const NAMES_LATIN1: &str = "[[],[97,98,99],[99,97,102,195,169],[97,255],[97,0,98
 /// with each binary as its bytes, for the atoms, integers, binaries, lists,
 /// and tuples of the probe results.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::binary(vec![97])])), "[<<97>>]");
+/// assert_eq!(text(&Term::list_from(vec![Term::binary(vec![97])]), &atoms), "[<<97>>]");
 /// ```
-fn text(term: &Term) -> String {
-    let join =
-        |terms: &mut dyn Iterator<Item = &Term>| terms.map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &mut dyn Iterator<Item = &Term>| {
+        terms
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     if let Some(mut terms) = term.proper_list() {
         return format!("[{}]", join(&mut terms));
     }
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         Term::Tuple(terms) => format!("{{{}}}", join(&mut terms.iter())),
         Term::Binary(bytes) => {
@@ -172,7 +178,11 @@ fn isolated_prim_file_read() {
             &[program.host_term(characters(&directory))],
         )
         .unwrap();
-    fs::write(env::var_os(RESULT).unwrap(), text(&result.term) + "\n").unwrap();
+    fs::write(
+        env::var_os(RESULT).unwrap(),
+        text(&result.term, result.atoms()) + "\n",
+    )
+    .unwrap();
 }
 
 /// Return the path as a list of its bytes, which is the character list of

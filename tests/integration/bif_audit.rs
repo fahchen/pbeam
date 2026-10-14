@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 const BIF_AUDIT_PROBE: &[u8] = include_bytes!("../../fixtures/preempt/bif_audit_probe.beam");
 
@@ -50,16 +50,24 @@ const SEND_COPY: (&str, &str) = ("{send2,[1,313]}", "{send2,[1,1]}");
 /// lists, and tuples of the probe results. An atom that is an Erlang
 /// keyword is quoted.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)]), &atoms), "[1]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) if atom.name() == "not" => "'not'".to_owned(),
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) if atoms.name_of(atom) == "not" => "'not'".to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
@@ -80,7 +88,7 @@ fn charges_each_bif_with_a_body_as_pinned_erts_except_the_message_copy() {
         )
         .unwrap();
     assert_eq!(
-        text(&costs.term),
+        text(&costs.term, costs.atoms()),
         ERTS_COSTS.replace(SEND_COPY.0, SEND_COPY.1)
     );
 

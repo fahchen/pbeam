@@ -15,8 +15,8 @@ use crate::runtime::unicode::{name_from_native, native_filename};
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(native_name_encoding(FilenameEncoding::Utf8Mac), BifResult::Value(Term::Atom(atom)) if atom.name() == "utf8"));
-/// assert!(matches!(native_name_encoding(FilenameEncoding::Latin1), BifResult::Value(Term::Atom(atom)) if atom.name() == "latin1"));
+/// assert!(matches!(native_name_encoding(FilenameEncoding::Utf8Mac), BifResult::Value(Term::Atom(atom)) if atom.is_static("utf8"));
+/// assert!(matches!(native_name_encoding(FilenameEncoding::Latin1), BifResult::Value(Term::Atom(atom)) if atom.is_static("latin1"));
 /// ```
 pub(super) fn native_name_encoding(encoding: FilenameEncoding) -> BifResult {
     Value(Term::static_atom(match encoding {

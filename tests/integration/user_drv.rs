@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -165,7 +165,7 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
-        format!("{}\n", erl_w(&expected))
+        format!("{}\n", erl_w(&expected, program.atoms()))
     );
 }
 
@@ -176,16 +176,16 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
 ///
 /// ```rust,ignore
 /// let term = Term::list_from(vec![Term::binary(vec![1, 2])]);
-/// assert_eq!(erl_w(&term), "[<<1,2>>]");
+/// assert_eq!(erl_w(&term, &atoms), "[<<1,2>>]");
 /// ```
-fn erl_w(term: &Term) -> String {
+fn erl_w(term: &Term, atoms: &AtomTable) -> String {
     let join = |items: Vec<String>| items.join(",");
     match term {
         Term::Binary(bytes) => format!("<<{}>>", join(bytes.iter().map(u8::to_string).collect())),
         _ if let Some(items) = term.proper_list() => {
-            format!("[{}]", join(items.map(erl_w).collect()))
+            format!("[{}]", join(items.map(|term| erl_w(term, atoms)).collect()))
         }
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         other => panic!("no ~w format for {other:?}"),
     }
 }

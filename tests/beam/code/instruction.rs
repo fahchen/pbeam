@@ -25,7 +25,7 @@ fn reads_operand_pairs_and_rejects_other_lists() {
     let pairs = read_operand_pairs(&[0x17, 0x20, 0x12, 0x13], &mut 0, &atoms, &[]).unwrap();
     assert!(matches!(
         pairs.as_slice(),
-        [(Operand::Value(Term::Atom(key)), Operand::X(1))] if key.name() == "output"
+        [(Operand::Value(Term::Atom(key)), Operand::X(1))] if key.is_static("output")
     ));
     assert!(read_operand_pairs(&[0x27, 0x20], &mut 0, &atoms, &[]).is_err());
     assert!(read_operand_pairs(&[0x17, 0x10, 0x12], &mut 0, &atoms, &[]).is_err());
@@ -1040,7 +1040,8 @@ fn reads_each_bs_match_command_and_rejects_bad_command_lists() {
         0x23, 0x52, 0x10, 0x80, 0x33, 0x62, 0x02, 0x80, 0x08, 0x61, 0x72, 0x80,
     ];
     let mut cursor = 0;
-    let commands = read_binary_match_commands(&list, &mut cursor, &atoms, &literals).unwrap();
+    let commands =
+        read_binary_match_commands(&list, &mut cursor, &table, &atoms, &literals).unwrap();
     assert_eq!(cursor, list.len());
     assert!(
         matches!(
@@ -1070,6 +1071,7 @@ fn reads_each_bs_match_command_and_rejects_bad_command_lists() {
     let commands = read_binary_match_commands(
         &[0x17, 0x60, 0x42, 0x10, 0x02, 0x80, 0x10, 0x13],
         &mut 0,
+        &table,
         &atoms,
         &literals,
     )
@@ -1087,7 +1089,7 @@ fn reads_each_bs_match_command_and_rejects_bad_command_lists() {
         "{commands:?}"
     );
     let failure = |list: &[u8]| {
-        read_binary_match_commands(list, &mut 0, &atoms, &literals)
+        read_binary_match_commands(list, &mut 0, &table, &atoms, &literals)
             .unwrap_err()
             .to_string()
     };
@@ -1249,7 +1251,7 @@ fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
         ] if matches!(
             pairs.as_slice(),
             [(Operand::Value(Term::Atom(key)), Operand::Value(Term::Atom(value)))]
-                if key.name() == "output" && value.name() == "cooked"
+                if table.name_of(key) == "output" && table.name_of(value) == "cooked"
         )
     ));
 }
@@ -1303,7 +1305,7 @@ fn decodes_the_has_map_fields_tests_of_the_map_probe_fixture() {
         ] if matches!(
             keys.as_slice(),
             [Operand::Value(Term::Atom(first)), Operand::Value(Term::Atom(second))]
-                if first.name() == "input" && second.name() == "output"
+                if first.is_static("input") && second.is_static("output")
         ) && matches!(register_keys.as_slice(), [Operand::X(0)])
     ));
 }
@@ -2094,7 +2096,7 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
         let segments = read(bytes, b"").unwrap();
         assert!(matches!(
             segments.last(),
-            Some(BinarySegment::Unsupported(kind)) if kind.name() == "append"
+            Some(BinarySegment::Unsupported(kind)) if kind.is_static("append")
         ));
     }
     // {atom,integer},1,1,nil,{x,0},{integer,8},
@@ -2154,7 +2156,7 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
                 source: Operand::X(3),
             },
             BinarySegment::Unsupported(kind),
-        ] if kind.name() == "utf16"
+        ] if kind.is_static("utf16")
     ));
     // A list of one item, and a string of 7 bytes in a StrT chunk of 5.
     assert!(read(&[0x17, 0x10, 0x12], b"").is_err());
@@ -2553,9 +2555,9 @@ fn records_the_decoded_form_layout() {
         println!("| {name} | {} |", arm_field_bytes(instruction));
     }
 
-    assert_eq!(size_of::<Instruction>(), 112, "the size of `Instruction`");
-    assert_eq!(size_of::<Operand>(), 32, "the size of `Operand`");
-    assert_eq!(size_of::<Term>(), 32, "the size of `Term`");
+    assert_eq!(size_of::<Instruction>(), 64, "the size of `Instruction`");
+    assert_eq!(size_of::<Operand>(), 16, "the size of `Operand`");
+    assert_eq!(size_of::<Term>(), 16, "the size of `Term`");
     assert_eq!(size_of::<String>(), 24, "the size of `String`");
     assert_eq!(size_of::<Vec<Operand>>(), 24, "the size of `Vec<Operand>`");
     // The arm that sets the size of `Instruction`, and the arm of the floor
@@ -2564,14 +2566,18 @@ fn records_the_decoded_form_layout() {
     // from `Bif`. The boxed binary view of task [#571] takes `Term` from 40
     // bytes to 32, and the two `Operand` fields and the `Term` field of
     // `BinaryGetBinary` then lose 24 bytes. `Bif` holds the arguments of the
-    // call in one `Term` slot, so it loses the 8 bytes of one `Term`.
+    // call in one `Term` slot, so it loses the 8 bytes of one `Term`. The
+    // atom index of task [#596] takes `Term` from 32 bytes to 16 and
+    // `Operand` from 32 bytes to 16, so `Instruction` is 64 bytes and each
+    // `Operand` or `Term` field of an arm loses 16 bytes.
     //
     // [#571]: https://github.com/fahchen/pbeam/issues/571
+    // [#596]: https://github.com/fahchen/pbeam/issues/596
     assert_eq!(
         arm_field_bytes(&arms[0].1),
-        108,
+        60,
         "the fields of `BinaryGetBinary`"
     );
-    assert_eq!(arm_field_bytes(&arms[3].1), 64, "the fields of `Bif`");
-    assert_eq!(arm_field_bytes(&arms[6].1), 64, "the fields of `Move`");
+    assert_eq!(arm_field_bytes(&arms[3].1), 48, "the fields of `Bif`");
+    assert_eq!(arm_field_bytes(&arms[6].1), 32, "the fields of `Move`");
 }

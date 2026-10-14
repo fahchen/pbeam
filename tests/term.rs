@@ -26,15 +26,12 @@ fn deep(levels: usize) -> Term {
 
 #[test]
 fn holds_no_inline_atom_name_in_a_term() {
-    // #460: an atom holds no inline `String`, so its payload is at most 24
-    // bytes. `size_of::<Term>()` is 80 bytes on this branch, because the
-    // `Fun` variant (`src/term/fun.rs`) is the largest one. The design
-    // target of `docs/copy-on-write-terms.md` is at most 24 bytes; it needs
-    // the shared free variables of a fun (#455) and the shared binary bytes
-    // (#456). This test holds the size that #460 reaches and stops a later
-    // change from making a term larger.
-    assert!(size_of::<super::Atom>() <= 24);
-    assert!(size_of::<Term>() <= 80);
+    // #460 removed the inline `String` of an atom, and #596 removed the
+    // `Arc<str>` name, so the atom holds only its 4-byte index. `Term` is 16
+    // bytes, which is the target of `docs/term-layout-design.md`. This test
+    // holds that size and stops a later change from making a term larger.
+    assert_eq!(size_of::<super::Atom>(), 4);
+    assert_eq!(size_of::<Term>(), 16);
 }
 
 #[test]
@@ -89,7 +86,7 @@ fn clones_compares_formats_and_drops_deep_terms_without_recursion() {
     assert_eq!(term, copy);
     assert_ne!(term, deep(999_999));
     assert!(debug_term(&copy, &test_atom_table()).starts_with(
-        "Fun(Local(Lambda { module: Atom { index: 971, name: \"lists\" }, index: 0, \
+        "Fun(Local(Lambda { module: Atom { index: 971 }, index: 0, \
          old_unique: 7, label: 53, arity: 1 }), [Map([(Atom(\"k\"), List([Integer(1), Tuple([Fun("
     ));
     drop(term);
@@ -214,8 +211,8 @@ fn compares_external_funs_by_their_mfa() {
     assert_ne!(external("get", 1), fun(0, vec![]));
     assert_eq!(
         format!("{:?}", external("get", 1)),
-        "Fun(External { module: Atom { index: 971, name: \"lists\" }, function: Atom { \
-         index: 781, name: \"get\" }, arity: 1 }, [])"
+        "Fun(External { module: Atom { index: 971 }, function: Atom { index: 781 }, \
+         arity: 1 }, [])"
     );
 }
 
@@ -228,7 +225,7 @@ fn prints_each_free_variable_of_a_fun() {
     let term = fun(0, vec![Term::Integer(1), Term::Integer(2)]);
     assert_eq!(
         format!("{term:?}"),
-        "Fun(Local(Lambda { module: Atom { index: 971, name: \"lists\" }, index: 0, \
+        "Fun(Local(Lambda { module: Atom { index: 971 }, index: 0, \
          old_unique: 7, label: 53, arity: 1 }), [Integer(1), Integer(2)])"
     );
 }

@@ -44,7 +44,8 @@ pub(crate) const MAX_TUPLE_SIZE: usize = (1 << 24) - 1;
 /// takes O(1) time. `Drop`, `PartialEq`, and `Debug` use explicit work
 /// stacks and do not recurse on the Rust stack.
 pub enum Term {
-    /// An atom: its index in the atom table of the program, and its name.
+    /// An atom: its index in the atom table of the program. Read the name
+    /// through the table that owns the index.
     Atom(Atom),
     /// A binary: its bytes in a shared array, and the offset and the length
     /// of its view. A copy of a binary increments the reference count of the

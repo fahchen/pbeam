@@ -130,12 +130,12 @@ pub(super) const BINDINGS: &[Binding] = &[
 ///
 /// ```rust,ignore
 /// let stderr = Term::Atom(atoms.put("stderr")?);
-/// assert_eq!(tty_get_fd(&stderr), Some(2));
-/// assert_eq!(tty_get_fd(&Term::static_atom("ok")), None);
+/// assert_eq!(tty_get_fd(&stderr, &atoms), Some(2));
+/// assert_eq!(tty_get_fd(&Term::static_atom("ok"), &atoms), None);
 /// ```
-fn tty_get_fd(term: &Term) -> Option<libc::c_int> {
+fn tty_get_fd(term: &Term, atoms: &AtomTable) -> Option<libc::c_int> {
     match term {
-        Term::Atom(atom) => match atom.name() {
+        Term::Atom(atom) => match atoms.name_of(atom) {
             "stdin" => Some(libc::STDIN_FILENO),
             "stdout" => Some(libc::STDOUT_FILENO),
             "stderr" => Some(libc::STDERR_FILENO),
@@ -166,7 +166,7 @@ fn tty_get_fd(term: &Term) -> Option<libc::c_int> {
 /// The atom `ebadf` or `capability_denied` in a full atom table gives the
 /// error of `AtomTable::put`.
 fn isatty(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
-    let Some(fd) = tty_get_fd(fd) else {
+    let Some(fd) = tty_get_fd(fd, &scheduler.atoms) else {
         return Ok(BifResult::badarg());
     };
     let check = denial(scheduler, CapabilityKind::Terminal, Operation::Query, None);
@@ -226,7 +226,8 @@ fn isatty_fd(atoms: &mut AtomTable, fd: libc::c_int) -> Result<BifResult, BeamEr
 /// atom `capability_denied` in a full atom table gives the error of
 /// `AtomTable::put`.
 fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
-    let Some(ofd) = tty_get_fd(fd).filter(|&ofd| ofd != libc::STDIN_FILENO) else {
+    let Some(ofd) = tty_get_fd(fd, &scheduler.atoms).filter(|&ofd| ofd != libc::STDIN_FILENO)
+    else {
         return Ok(BifResult::badarg());
     };
     let check = denial(scheduler, CapabilityKind::Terminal, Operation::Query, None);
@@ -428,7 +429,7 @@ fn monitor_caller(scheduler: &mut Scheduler, tty: Reference) {
 ///
 /// ```rust,ignore
 /// let reference = Term::Reference(scheduler.make_ref()?);
-/// assert!(matches!(tty_select(&mut scheduler, &tty, &reference)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(tty_select(&mut scheduler, &tty, &reference)?, BifResult::Value(Term::Atom(atom)) if atom.is_static("ok"));
 /// assert!(matches!(tty_select(&mut scheduler, &Term::static_atom("ok"), &reference)?, BifResult::Raise { .. }));
 /// ```
 ///
@@ -578,7 +579,7 @@ fn read_nif(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(tty_encoding(), BifResult::Value(Term::Atom(atom)) if atom.name() == "utf8"));
+/// assert!(matches!(tty_encoding(), BifResult::Value(Term::Atom(atom)) if atom.is_static("utf8"));
 /// ```
 fn tty_encoding() -> BifResult {
     BifResult::Value(Term::static_atom("utf8"))
@@ -595,7 +596,7 @@ fn tty_encoding() -> BifResult {
 ///
 /// ```rust,ignore
 /// // LC_ALL=C.UTF-8
-/// assert!(matches!(setlocale(&mut scheduler)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(setlocale(&mut scheduler)?, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// ```
 ///
 /// # Errors
@@ -627,7 +628,7 @@ fn setlocale(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
 ///
 /// ```rust,ignore
 /// // TERM=dumb
-/// assert!(matches!(setupterm_nif(&mut scheduler)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(setupterm_nif(&mut scheduler)?, BifResult::Value(Term::Atom(atom)) if atom.is_static("ok"));
 /// // TERM=pbeam-unknown-term on macOS: {error, {setupterm, enoent}}
 /// assert!(matches!(setupterm_nif(&mut scheduler)?, BifResult::Value(Term::Tuple(_))));
 /// ```
@@ -696,7 +697,7 @@ fn tigetnum_nif(scheduler: &mut Scheduler, code: &Term) -> Result<BifResult, Bea
 /// ```rust,ignore
 /// // TERM=vt100, after setupterm_nif()
 /// let code = Term::binary(b"xn\0".to_vec());
-/// assert!(matches!(tigetflag_nif(&mut scheduler, &code)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(tigetflag_nif(&mut scheduler, &code)?, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// assert!(matches!(tigetflag_nif(&mut scheduler, &Term::static_atom("xn"))?, BifResult::Raise { .. }));
 /// ```
 ///

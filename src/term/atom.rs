@@ -11,8 +11,8 @@
 //! (`make_atom` and `_unchecked_atom_val` in `erl_term.h:300`, `:303`), and
 //! the name stays in the atom table (`erts_atom_table` in `atom.c:38`). A
 //! copy of an atom therefore copies one word and allocates nothing. PBeam
-//! keeps the name with the atom, in an `Arc<str>`, so a copy of an atom
-//! shares the name and also allocates nothing.
+//! follows that rule: an [`Atom`] holds only the index, and the
+//! [`AtomTable`] that owns the index holds the name.
 
 mod static_names;
 
@@ -48,31 +48,17 @@ static STATIC_INDICES: LazyLock<HashMap<&'static str, u32>> = LazyLock::new(|| {
         .collect()
 });
 
-/// An atom term: its index in the atom table of one program, and its name.
+/// An atom term: its index in the atom table of one program.
+///
+/// The atom holds no name. Read a name through the [`AtomTable`] that owns
+/// the index, with [`AtomTable::name_of`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Atom {
     /// The ERTS atom-table index. The atom word is `(index << 6) | 0xB`.
     index: u32,
-    /// The atom name, in an `Arc<str>`. Name-based code, such as BIF
-    /// dispatch and `Debug`, reads it without the table. A copy of an atom
-    /// shares this name, so it takes O(1) time and allocates nothing.
-    name: Arc<str>,
 }
 
 impl Atom {
-    /// Return the name of the atom.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use pbeam_runtime::Atom;
-    ///
-    /// assert_eq!(Atom::from_static("ok").unwrap().name(), "ok");
-    /// ```
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     /// Return the atom-table index of the atom.
     ///
     /// # Examples
@@ -97,10 +83,7 @@ impl Atom {
     /// assert!(Atom::from_static("pbeam_zeta").is_none());
     /// ```
     pub fn from_static(name: &str) -> Option<Atom> {
-        STATIC_INDICES.get(name).map(|&index| Atom {
-            index,
-            name: Arc::from(name),
-        })
+        STATIC_INDICES.get(name).map(|&index| Atom { index })
     }
 
     /// Return the index of a static atom name, with no atom table.
@@ -257,11 +240,8 @@ impl AtomTable {
         let index = u32::try_from(count).expect("ATOM_LIMIT fits in u32");
         let shared: Arc<str> = Arc::from(name);
         self.indices.insert(Arc::clone(&shared), index);
-        self.names.push(Arc::clone(&shared));
-        Ok(Atom {
-            index,
-            name: shared,
-        })
+        self.names.push(shared);
+        Ok(Atom { index })
     }
 
     /// Return the atom of a name only when it exists.
@@ -274,10 +254,7 @@ impl AtomTable {
     /// assert_eq!(table.get("pbeam_zeta"), None);
     /// ```
     pub(crate) fn get(&self, name: &str) -> Option<Atom> {
-        self.indices.get_key_value(name).map(|(name, &index)| Atom {
-            index,
-            name: Arc::clone(name),
-        })
+        self.indices.get(name).map(|&index| Atom { index })
     }
 
     /// Return the name of the atom at `index`, or `None` when the table
@@ -300,10 +277,11 @@ impl AtomTable {
     }
 
     /// Return the name of `atom` from this table. Read it with
-    /// [`AtomTable::name`] at the index of the atom.
+    /// `AtomTable::name` at the index of the atom.
     ///
     /// An atom term holds an index of the table that owns it, so an index
     /// that this table does not hold is a broken invariant and not a value.
+    /// A caller that holds a term of another table imports it first.
     ///
     /// # Panics
     ///
@@ -317,7 +295,7 @@ impl AtomTable {
     /// let ok = table.get("ok").unwrap();
     /// assert_eq!(table.name_of(&ok), "ok");
     /// ```
-    pub(crate) fn name_of(&self, atom: &Atom) -> &str {
+    pub fn name_of(&self, atom: &Atom) -> &str {
         let index = atom.index();
         self.name(index)
             .unwrap_or_else(|| panic!("atom index {index} is outside the atom table"))

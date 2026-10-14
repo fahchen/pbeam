@@ -1,6 +1,6 @@
 use std::process::{Command, Stdio};
 
-use pbeam_runtime::{BeamProgram, HostTerm, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};
 
 const BINARY_FIND_PROBE: &[u8] =
     include_bytes!("../../fixtures/binary_find/binary_find_probe.beam");
@@ -56,15 +56,23 @@ const COSTS: &str = "[{10,0,1,nomatch,1},{10,1,1,{10,1},1},{100000,0,1,nomatch,1
 /// with each binary as its bytes, for the atoms, integers, binaries, lists,
 /// and tuples of the probe results.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::binary(vec![97])])), "[<<97>>]");
+/// assert_eq!(text(&Term::list_from(vec![Term::binary(vec![97])]), &atoms), "[<<97>>]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
@@ -82,12 +90,10 @@ fn text(term: &Term) -> String {
 fn matches_binaries_as_pinned_erts_with_one_scheduler() {
     let program = BeamProgram::load(&[BINARY_FIND_PROBE]).unwrap();
     let run = |function, arguments: &[HostTerm]| {
-        text(
-            &program
-                .execute("binary_find_probe", function, arguments)
-                .unwrap()
-                .term,
-        )
+        let result = program
+            .execute("binary_find_probe", function, arguments)
+            .unwrap();
+        text(&result.term, result.atoms())
     };
     assert_eq!(run("results", &[]), RESULTS);
     assert_eq!(run("costs", &[program.host_term(Term::nil())]), COSTS);

@@ -58,7 +58,7 @@ fn puts_atu8_atoms_into_the_table_in_chunk_order() {
     let atoms = parse_atoms(&chunk, &mut table).unwrap();
     let indices: Vec<_> = atoms.iter().map(|atom| atom.index()).collect();
     assert_eq!(indices, [1150, 506, 1151]);
-    assert_eq!(atoms[2].name(), "alpha");
+    assert_eq!(table.name_of(&atoms[2]), "alpha");
     assert_eq!(table.get("zeta"), Some(atoms[0].clone()));
     // A second module gets the same index for an existing atom.
     assert_eq!(parse_atoms(&chunk, &mut table).unwrap(), atoms);
@@ -95,7 +95,7 @@ fn truncates_a_long_atu8_name_to_255_characters_like_erts() {
         chunk.push(last);
     }
     let atoms = parse_atoms(&chunk, &mut table).unwrap();
-    assert_eq!(atoms[0].name(), a255);
+    assert_eq!(table.name_of(&atoms[0]), a255);
     assert_eq!(atoms[0].index(), 1150);
     assert_eq!(atoms[1], atoms[0]);
     assert_eq!(table.get(&a255), Some(atoms[0].clone()));

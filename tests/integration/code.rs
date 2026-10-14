@@ -1,6 +1,8 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy, Term};
+use pbeam_runtime::{
+    AtomTable, BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy, Term,
+};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -149,7 +151,7 @@ fn load_run(function: &str, code: &[u8]) -> String {
             &[program.host_term(Term::binary(code.to_vec()))],
         )
         .unwrap();
-    format!("{}\n", text(&result.term))
+    format!("{}\n", text(&result.term, result.atoms()))
 }
 
 /// Run `load_probe:Function(Code)` on the pinned ERTS with one scheduler,
@@ -183,11 +185,18 @@ fn load_reference(function: &str, file: &str) -> String {
     String::from_utf8(reference.stdout).unwrap()
 }
 
-/// Return the `~w` text of a term of atoms, tuples, and lists.
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+/// Return the `~w` text of a term of atoms, tuples, and lists. The atom
+/// names come from `atoms`, the table that owns the term.
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
         }
