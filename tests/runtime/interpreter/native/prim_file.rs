@@ -1,6 +1,23 @@
 use super::*;
 use crate::runtime::capability::{AllowAll, Policy};
 use crate::runtime::process::tests::frame;
+use crate::term::debug_term;
+
+/// Return the `Debug` text of a BIF result, with each atom name from `atoms`.
+///
+/// `Debug for Term` writes the atom index, because a bare term carries no
+/// table. The atom names of a BIF result come from the run, so this test
+/// reads them through the table of that run.
+fn debug_bif(result: &BifResult, atoms: &AtomTable) -> String {
+    match result {
+        BifResult::Value(term) => format!("Value({})", debug_term(term, atoms)),
+        BifResult::Raise { class, reason } => format!(
+            "Raise {{ class: {class:?}, reason: {} }}",
+            debug_term(reason, atoms)
+        ),
+        other => format!("{other:?}"),
+    }
+}
 
 /// Return a scheduler whose current process is a new root process.
 fn scheduler() -> Scheduler {
@@ -70,7 +87,11 @@ fn checks_the_follow_flag_and_then_the_path_as_erts() {
         ),
     ] {
         let result = read_info_nif(&mut scheduler, &path, &follow).unwrap();
-        assert_eq!(format!("{result:?}"), expected, "{path:?} {follow:?}");
+        assert_eq!(
+            debug_bif(&result, &scheduler.atoms),
+            expected,
+            "{path:?} {follow:?}"
+        );
     }
     let result = read_info_nif(&mut scheduler, &path, &Term::Integer(0)).unwrap();
     assert!(
@@ -100,7 +121,11 @@ fn gives_einval_for_a_path_that_is_not_marshaled_as_erts() {
             Term::list_from(vec![Term::Integer(47), Term::Integer(0)]),
         ] {
             let result = (binding.run)(&mut scheduler, std::slice::from_ref(&path)).unwrap();
-            assert_eq!(format!("{result:?}"), einval, "{name} {path:?}");
+            assert_eq!(
+                debug_bif(&result, &scheduler.atoms),
+                einval,
+                "{name} {path:?}"
+            );
         }
     }
 }

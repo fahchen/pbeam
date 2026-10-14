@@ -67,8 +67,8 @@ impl Value {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Value::False => "Atom(\"false\")".to_owned(),
-            Value::Badarg => "Tuple([Atom(\"error\"), Atom(\"badarg\")])".to_owned(),
+            Value::False => "Atom(0)".to_owned(),
+            Value::Badarg => "Tuple([Atom(12), Atom(78)])".to_owned(),
         }
     }
 }

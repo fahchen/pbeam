@@ -2,7 +2,7 @@ use super::{
     atom_at, atom_chunk_name, parse_atoms, parse_exports, parse_lambdas, parse_literals,
     read_literal, read_u32,
 };
-use crate::term::{AtomTable, Fun, Lambda, Map, Term};
+use crate::term::{AtomTable, Fun, Lambda, Map, Term, debug_term};
 
 /// Return a `FunT` payload with a count and entries. Each entry gives
 /// its function atom index, total arity, label, index, number of free
@@ -156,7 +156,7 @@ fn puts_literal_atoms_into_the_table_in_byte_order() {
     let map = Term::Map(Map::from_pairs(pairs, &atoms).unwrap());
     assert_eq!(literal, Term::tuple(vec![lit_b, map]));
     assert_eq!(
-        format!("{literal:?}"),
+        debug_term(&literal, &atoms),
         "Tuple([Atom(\"pbeam_lit_b\"), Map([(Atom(\"pbeam_lit_b\"), Integer(2)), \
          (Atom(\"pbeam_lit_a\"), Integer(1))])])"
     );
@@ -175,76 +175,107 @@ fn puts_literal_atoms_into_the_table_in_byte_order() {
 #[test]
 fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
     let mut atoms = AtomTable::new();
-    let mut read = |bytes: &[u8]| read_literal(bytes, &mut atoms);
+    let read = |atoms: &mut AtomTable, bytes: &[u8]| read_literal(bytes, atoms);
     // [a|[b]] gives the same list as [a,b].
-    let nested = read(&[
-        131, 108, 0, 0, 0, 1, 119, 1, b'a', 108, 0, 0, 0, 1, 119, 1, b'b', 106,
-    ])
+    let nested = read(
+        &mut atoms,
+        &[
+            131, 108, 0, 0, 0, 1, 119, 1, b'a', 108, 0, 0, 0, 1, 119, 1, b'b', 106,
+        ],
+    )
     .unwrap();
     assert_eq!(
-        read(&[131, 104, 2, 119, 2, b'o', b'k', 106]).unwrap(),
+        read(&mut atoms, &[131, 104, 2, 119, 2, b'o', b'k', 106]).unwrap(),
         Some(Term::tuple(vec![Term::static_atom("ok"), Term::nil()]))
     );
     // NEW_FLOAT_EXT (70) 1.0 inside a tuple, inside a list, and as a list tail.
     let float = [70, 63, 240, 0, 0, 0, 0, 0, 0];
-    assert_eq!(read(&[&[131, 104, 1][..], &float].concat()).unwrap(), None);
     assert_eq!(
-        read(&[&[131, 108, 0, 0, 0, 1][..], &float, &[106]].concat()).unwrap(),
+        read(&mut atoms, &[&[131, 104, 1][..], &float].concat()).unwrap(),
         None
     );
     assert_eq!(
-        read(&[&[131, 108, 0, 0, 0, 1, 106][..], &float].concat()).unwrap(),
+        read(
+            &mut atoms,
+            &[&[131, 108, 0, 0, 0, 1][..], &float, &[106]].concat()
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        read(
+            &mut atoms,
+            &[&[131, 108, 0, 0, 0, 1, 106][..], &float].concat()
+        )
+        .unwrap(),
         None
     );
     // [[]|t] has an atom tail, and [a|[b|t]] keeps the tail of its list tail.
-    let nil_head = read(&[131, 108, 0, 0, 0, 1, 106, 119, 1, b't']).unwrap();
+    let nil_head = read(&mut atoms, &[131, 108, 0, 0, 0, 1, 106, 119, 1, b't']).unwrap();
     let tail = [108, 0, 0, 0, 1, 119, 1, b'b', 119, 1, b't'];
-    let list_tail = read(&[&[131, 108, 0, 0, 0, 1, 119, 1, b'a'][..], &tail].concat()).unwrap();
+    let list_tail = read(
+        &mut atoms,
+        &[&[131, 108, 0, 0, 0, 1, 119, 1, b'a'][..], &tail].concat(),
+    )
+    .unwrap();
     // A LIST_EXT of length 0 gives its tail (external.c:4581-4588).
-    let empty = read(&[131, 108, 0, 0, 0, 0, 119, 1, b't']).unwrap();
-    assert!(read(&[131, 119, 1, 0xff]).is_err());
-    assert!(read(&[131, 106, 106]).is_err());
-    assert!(read(&[131, 104]).is_err());
+    let empty = read(&mut atoms, &[131, 108, 0, 0, 0, 0, 119, 1, b't']).unwrap();
+    assert!(read(&mut atoms, &[131, 119, 1, 0xff]).is_err());
+    assert!(read(&mut atoms, &[131, 106, 106]).is_err());
+    assert!(read(&mut atoms, &[131, 104]).is_err());
     // [a, b] with length 2, and a zero-length LIST_EXT whose tail is [].
-    let proper = read(&[131, 108, 0, 0, 0, 2, 119, 1, b'a', 119, 1, b'b', 106]).unwrap();
+    let proper = read(
+        &mut atoms,
+        &[131, 108, 0, 0, 0, 2, 119, 1, b'a', 119, 1, b'b', 106],
+    )
+    .unwrap();
     assert_eq!(
-        read(&[131, 108, 0, 0, 0, 0, 106]).unwrap(),
+        read(&mut atoms, &[131, 108, 0, 0, 0, 0, 106]).unwrap(),
         Some(Term::nil())
     );
 
     // #{b => [], a => {}} keeps its pairs in flatmap key order. The first literal made a
     // before b, so a has the lower atom index.
-    let map = read(&[
-        131, 116, 0, 0, 0, 2, 119, 1, b'b', 106, 119, 1, b'a', 104, 0,
-    ])
+    let map = read(
+        &mut atoms,
+        &[
+            131, 116, 0, 0, 0, 2, 119, 1, b'b', 106, 119, 1, b'a', 104, 0,
+        ],
+    )
     .unwrap()
     .unwrap();
     assert_eq!(
-        format!("{map:?}"),
+        debug_term(&map, &atoms),
         "Map([(Atom(\"a\"), Tuple([])), (Atom(\"b\"), List([]))])"
     );
     assert_eq!(
-        read(&[131, 116, 0, 0, 0, 0]).unwrap(),
+        read(&mut atoms, &[131, 116, 0, 0, 0, 0]).unwrap(),
         Some(Term::Map(
             Map::from_pairs(vec![], &AtomTable::new()).unwrap()
         ))
     );
     // A map key that `Map` does not support yet makes the literal unsupported: #{#{} => []}.
     assert_eq!(
-        read(&[131, 116, 0, 0, 0, 1, 116, 0, 0, 0, 0, 106]).unwrap(),
+        read(&mut atoms, &[131, 116, 0, 0, 0, 1, 116, 0, 0, 0, 0, 106]).unwrap(),
         None
     );
     // ERTS rejects a MAP_EXT with a duplicate key: #{1 => [], 1 => []}.
     assert_eq!(
-        read(&[131, 116, 0, 0, 0, 2, 97, 1, 106, 97, 1, 106])
+        read(&mut atoms, &[131, 116, 0, 0, 0, 2, 97, 1, 106, 97, 1, 106])
             .unwrap_err()
             .to_string(),
         "duplicate key in BEAM map literal"
     );
 
     // SMALL_INTEGER_EXT: 1 and 255.
-    assert_eq!(read(&[131, 97, 1]).unwrap(), Some(Term::Integer(1)));
-    assert_eq!(read(&[131, 97, 255]).unwrap(), Some(Term::Integer(255)));
+    assert_eq!(
+        read(&mut atoms, &[131, 97, 1]).unwrap(),
+        Some(Term::Integer(1))
+    );
+    assert_eq!(
+        read(&mut atoms, &[131, 97, 255]).unwrap(),
+        Some(Term::Integer(255))
+    );
     // INTEGER_EXT: 256, -1, and the i32 limits, as term_to_binary/1 writes them.
     for (bytes, value) in [
         ([0, 0, 1, 0], 256),
@@ -253,9 +284,12 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
         ([128, 0, 0, 0], i64::from(i32::MIN)),
     ] {
         let literal = [&[131, 98][..], &bytes].concat();
-        assert_eq!(read(&literal).unwrap(), Some(Term::Integer(value)));
+        assert_eq!(
+            read(&mut atoms, &literal).unwrap(),
+            Some(Term::Integer(value))
+        );
     }
-    assert!(read(&[131, 98, 0, 0, 1]).is_err());
+    assert!(read(&mut atoms, &[131, 98, 0, 0, 1]).is_err());
 
     // erlc writes #{1 => v, ..., 33 => v} as 131,116,0,0,0,33,97,1,119,1,118,...;
     // 33 keys give a hashmap in the ERTS order, from either input order.
@@ -264,12 +298,12 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
         for key in keys {
             bytes.extend([97, key, 119, 1, b'v']);
         }
-        read(&bytes).unwrap().unwrap()
+        read(&mut atoms, &bytes).unwrap().unwrap()
     };
     let forward = literal(&mut (1..=33));
     assert_eq!(forward, literal(&mut (1..=33).rev()));
     assert!(
-        format!("{forward:?}").starts_with(
+        debug_term(&forward, &atoms).starts_with(
             "Map([(Integer(18), Atom(\"v\")), (Integer(4), Atom(\"v\")), (Integer(12), "
         )
     );
@@ -280,7 +314,7 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
         deep.extend([104, 1]);
     }
     deep.push(106);
-    let term = read(&deep).unwrap().unwrap();
+    let term = read(&mut atoms, &deep).unwrap().unwrap();
     assert!(format!("{term:?}").starts_with("Tuple([Tuple(["));
 
     let list = Some(Term::list_from(vec![atom(&atoms, "a"), atom(&atoms, "b")]));
@@ -304,7 +338,7 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
 #[test]
 fn reads_external_fun_literals_as_export_ext() {
     let mut atoms = AtomTable::new();
-    let mut read = |bytes: &[u8]| read_literal(bytes, &mut atoms);
+    let read = |atoms: &mut AtomTable, bytes: &[u8]| read_literal(bytes, atoms);
     // erlc writes `fun lists:reverse/1` as EXPORT_EXT (113), two atoms,
     // and SMALL_INTEGER_EXT.
     let mut reverse = vec![131, 113, 119, 5];
@@ -312,10 +346,13 @@ fn reads_external_fun_literals_as_export_ext() {
     reverse.extend([119, 7]);
     reverse.extend(b"reverse");
     reverse.extend([97, 1]);
-    let reverse = read(&reverse).unwrap();
+    let reverse = read(&mut atoms, &reverse).unwrap();
     // An atom tag that PBeam does not decode, such as ATOM_EXT (100),
     // makes the literal unsupported.
-    assert_eq!(read(&[131, 113, 100, 0, 1, b'm']).unwrap(), None);
+    assert_eq!(
+        read(&mut atoms, &[131, 113, 100, 0, 1, b'm']).unwrap(),
+        None
+    );
     // ERTS `dec_term` (`external.c:5006-5041`) fails for a module or
     // function that is not an atom, or an arity that is not an integer.
     for bytes in [
@@ -324,7 +361,7 @@ fn reads_external_fun_literals_as_export_ext() {
         &[131, 113, 119, 1, b'm', 119, 1, b'f', 106],
     ] {
         assert_eq!(
-            read(bytes).unwrap_err().to_string(),
+            read(&mut atoms, bytes).unwrap_err().to_string(),
             "invalid BEAM external fun literal"
         );
     }
@@ -332,11 +369,11 @@ fn reads_external_fun_literals_as_export_ext() {
     // `[98, 0, 0, 0, 1]` and `[98, 0, 0, 0, 255]`. It rejects -1 as a
     // corrupt literal table, and it has no defined result above 255.
     let export = |arity: &[u8]| [&[131, 113, 119, 1, b'm', 119, 1, b'f'][..], arity].concat();
-    let integer_one = read(&export(&[98, 0, 0, 0, 1])).unwrap();
-    let integer_max = read(&export(&[98, 0, 0, 0, 255])).unwrap();
+    let integer_one = read(&mut atoms, &export(&[98, 0, 0, 0, 1])).unwrap();
+    let integer_max = read(&mut atoms, &export(&[98, 0, 0, 0, 255])).unwrap();
     for arity in [&[98, 255, 255, 255, 255][..], &[98, 0, 0, 1, 0]] {
         assert_eq!(
-            read(&export(arity)).unwrap_err().to_string(),
+            read(&mut atoms, &export(arity)).unwrap_err().to_string(),
             "invalid BEAM external fun literal"
         );
     }

@@ -6,7 +6,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use pbeam_runtime::{BeamProgram, install_start_dispositions};
+use pbeam_runtime::{BeamProgram, debug_term, install_start_dispositions};
 
 const SIGNAL_PROBE: &str = "fixtures/signal/signal_probe.beam";
 
@@ -129,9 +129,13 @@ fn isolated_set_signal() {
         .iter()
         .map(|(name, signal, _)| format!("{name}={}", disposition(*signal)))
         .collect();
+    let text = match &result {
+        Ok(term) => format!("Ok({})", debug_term(&term.term, term.atoms())),
+        Err(error) => format!("Err({error:?})"),
+    };
     fs::write(
         env::var_os(RESULT).unwrap(),
-        format!("{result:?}\n{}", dispositions.join(" ")),
+        format!("{text}\n{}", dispositions.join(" ")),
     )
     .unwrap();
 }
