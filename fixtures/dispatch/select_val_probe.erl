@@ -5,25 +5,33 @@
 %%
 %% `ordered_loop/2` runs the 256-choice `select_val` of `bucket/1` one time
 %% for each iteration, so it measures the ordered form on the large shape.
-%% `linear_loop/2` runs the 2-choice `select_val` of `digit/1`, so it
-%% measures the linear form. The two loops are the same shape around the
-%% call.
+%% `nibble_loop/2` runs the 16-choice `select_val` of `nibble/1`, so it
+%% measures the ordered form on the 11-to-16 band that the first measurement
+%% of the task flagged. `linear_loop/2` runs the 2-choice `select_val` of
+%% `digit/1`, so it measures the linear form. The three loops are the same
+%% shape around the call.
 %%
 %% The 256 choices cover the more-than-64 bucket of the measured
 %% distribution of issue #545, which holds the select_val instructions whose
-%% linear walk costs the most.
+%% linear walk costs the most. The 16 choices cover the 9-to-16 bucket, which
+%% is the largest group above the 10-choice bound.
 %%
 %% `tests/integration/select_val.rs` disassembles the fixture and fails when
 %% the compiled shape changes, so the measured work is the work that the
 %% benchmark claims to measure.
 -module(select_val_probe).
 
--export([ordered_loop/2, linear_loop/2, bucket/1, digit/1]).
+-export([ordered_loop/2, nibble_loop/2, linear_loop/2, bucket/1, nibble/1, digit/1]).
 
 %% The ordered shape: the 256 choices of `bucket/1` are above the 10-choice
 %% bound of the linear form.
 ordered_loop(0, Acc) -> Acc;
 ordered_loop(N, Acc) -> ordered_loop(N - 1, Acc + bucket(N band 255)).
+
+%% The small ordered shape: the 16 choices of `nibble/1` are above the
+%% 10-choice bound of the linear form.
+nibble_loop(0, Acc) -> Acc;
+nibble_loop(N, Acc) -> nibble_loop(N - 1, Acc + nibble(N band 15)).
 
 %% The linear shape: the 2 choices of `digit/1` are below the bound of the
 %% ordered form.
@@ -291,6 +299,30 @@ bucket(V) ->
         254 -> 254;
         255 -> 255;
         _ -> 256
+    end.
+
+%% A `select_val` with 16 distinct integer choices, the 11-to-16 band above
+%% the 10-choice bound of the linear form. A value of 16 or above takes the
+%% fail label of the instruction, which is the `_` clause.
+nibble(V) ->
+    case V of
+        0 -> 0;
+        1 -> 1;
+        2 -> 2;
+        3 -> 3;
+        4 -> 4;
+        5 -> 5;
+        6 -> 6;
+        7 -> 7;
+        8 -> 8;
+        9 -> 9;
+        10 -> 10;
+        11 -> 11;
+        12 -> 12;
+        13 -> 13;
+        14 -> 14;
+        15 -> 15;
+        _ -> 16
     end.
 
 %% A `select_val` with 2 distinct integer choices, for the linear form.

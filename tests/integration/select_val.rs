@@ -5,9 +5,10 @@
 //!
 //! The probe is `fixtures/dispatch/select_val_probe.erl`. `ordered_loop/2`
 //! runs the 256-choice `select_val` of `bucket/1` one time for each
-//! iteration, and `linear_loop/2` runs the 2-choice `select_val` of
-//! `digit/1`. Each probe runs on PBeam and on the pinned ERTS, and the test
-//! asserts that the two results are equal.
+//! iteration, `nibble_loop/2` runs the 16-choice `select_val` of `nibble/1`,
+//! and `linear_loop/2` runs the 2-choice `select_val` of `digit/1`. Each
+//! probe runs on PBeam and on the pinned ERTS, and the test asserts that the
+//! two results are equal.
 //!
 //! Run the release measurement with
 //! `cargo test --locked --release --test select_val records_the_select_val_cost -- --nocapture --test-threads=1`.
@@ -38,6 +39,12 @@ const LENGTH: usize = 200_000;
 /// `SELECT_VALUE_LINEAR_LIMIT`, which selects the ordered form. The count is
 /// in the more-than-64 bucket of the measured distribution of issue #545.
 const ORDERED_CHOICES: usize = 256;
+
+/// The number of choices of the `select_val` of `nibble/1`, above
+/// `SELECT_VALUE_LINEAR_LIMIT`, which selects the ordered form. The count is
+/// in the 9-to-16 bucket of the measured distribution of issue #545, the
+/// band that the first measurement of the task flagged as a regression.
+const NIBBLE_CHOICES: usize = 16;
 
 /// The number of choices of the `select_val` of `digit/1`, below the bound
 /// of the ordered form, which keeps the linear form.
@@ -134,6 +141,7 @@ fn erts_expression() -> String {
     );
     expression.push_str(&format!(
         "io:format(\"result ordered_loop ~w~n\", [M:ordered_loop({LENGTH}, 0)]), \
+         io:format(\"result nibble_loop ~w~n\", [M:nibble_loop({LENGTH}, 0)]), \
          io:format(\"result linear_loop ~w~n\", [M:linear_loop({LENGTH}, 0)]), "
     ));
     for value in -1..=257 {
@@ -141,8 +149,14 @@ fn erts_expression() -> String {
             "io:format(\"result bucket_{value} ~w~n\", [M:bucket({value})]), "
         ));
     }
+    for value in -1..=17 {
+        expression.push_str(&format!(
+            "io:format(\"result nibble_{value} ~w~n\", [M:nibble({value})]), "
+        ));
+    }
     expression.push_str(&format!(
         "io:format(\"time ordered_loop ~b~n\", [Run(fun() -> M:ordered_loop({LENGTH}, 0) end)]), \
+         io:format(\"time nibble_loop ~b~n\", [Run(fun() -> M:nibble_loop({LENGTH}, 0) end)]), \
          io:format(\"time linear_loop ~b~n\", [Run(fun() -> M:linear_loop({LENGTH}, 0) end)]), \
          halt()."
     ));
@@ -219,10 +233,10 @@ fn erts_nanos(lines: &[String], key: &str) -> u128 {
 }
 
 /// Check that each `select_val` of the fixture keeps the choice count that
-/// the measurement claims: 256 for `bucket/1`, which selects the ordered
-/// form, and 2 for `digit/1`, which keeps the linear form. A change of the
-/// compiler or of the fixture fails here, because the numbers would then
-/// measure other work.
+/// the measurement claims: 256 for `bucket/1` and 16 for `nibble/1`, which
+/// select the ordered form, and 2 for `digit/1`, which keeps the linear
+/// form. A change of the compiler or of the fixture fails here, because the
+/// numbers would then measure other work.
 #[test]
 fn keeps_the_measured_select_val_shapes() {
     let counts = select_val_choice_counts();
@@ -232,20 +246,25 @@ fn keeps_the_measured_select_val_shapes() {
         "the ordered probe must hold {ORDERED_CHOICES} choices"
     );
     assert_eq!(
+        counts.get("nibble"),
+        Some(&NIBBLE_CHOICES),
+        "the 16-choice probe must hold {NIBBLE_CHOICES} choices"
+    );
+    assert_eq!(
         counts.get("digit"),
         Some(&LINEAR_CHOICES),
         "the linear probe must hold {LINEAR_CHOICES} choices"
     );
     assert_eq!(
         counts.len(),
-        2,
-        "the fixture holds one select_val in each of bucket/1 and digit/1"
+        3,
+        "the fixture holds one select_val in each of bucket/1, nibble/1, and digit/1"
     );
 }
 
 /// Check that each probe returns the same value on PBeam and on the pinned
-/// ERTS, for every value that `bucket/1` meets, including a value that takes
-/// its fail label.
+/// ERTS. The check covers every value that `bucket/1` and `nibble/1` meet,
+/// including a value that takes the fail label of each instruction.
 #[test]
 fn checks_the_select_val_results_against_erts() {
     let program = BeamProgram::load(&[SELECT_VAL_PROBE]).unwrap();
@@ -253,7 +272,7 @@ fn checks_the_select_val_results_against_erts() {
 
     let counter = program.host_term(Term::Integer(LENGTH as i64));
     let zero = program.host_term(Term::Integer(0));
-    for function in ["ordered_loop", "linear_loop"] {
+    for function in ["ordered_loop", "nibble_loop", "linear_loop"] {
         let args = [counter.clone(), zero.clone()];
         let result = program
             .execute("select_val_probe", function, &args)
@@ -276,10 +295,23 @@ fn checks_the_select_val_results_against_erts() {
             "PBeam and ERTS differ for bucket({value})"
         );
     }
+
+    for value in -1i64..=17 {
+        let args = [program.host_term(Term::Integer(value))];
+        let result = program
+            .execute("select_val_probe", "nibble", &args)
+            .unwrap();
+        assert_eq!(
+            result.term,
+            Term::Integer(erts_result(&lines, &format!("nibble_{value}"))),
+            "PBeam and ERTS differ for nibble({value})"
+        );
+    }
 }
 
-/// Record the cost of the ordered form and of the linear form: run each loop
-/// on PBeam and on the pinned ERTS, and print the numbers as Markdown. The
+/// Record the cost of the ordered form on the large shape and on the
+/// 11-to-16 band, and of the linear form on the control: run each loop on
+/// PBeam and on the pinned ERTS, and print the numbers as Markdown. The
 /// minimum of [`RUNS`] runs is the reported number.
 #[test]
 fn records_the_select_val_cost() {
@@ -293,7 +325,11 @@ fn records_the_select_val_cost() {
     println!();
     println!("| shape | choices | PBeam ns for each iteration | ERTS ns for each iteration |");
     println!("| --- | --- | --- | --- |");
-    for function in ["ordered_loop", "linear_loop"] {
+    for (function, choices) in [
+        ("ordered_loop", ORDERED_CHOICES),
+        ("nibble_loop", NIBBLE_CHOICES),
+        ("linear_loop", LINEAR_CHOICES),
+    ] {
         let result = program
             .execute("select_val_probe", function, &args)
             .unwrap();
@@ -305,12 +341,7 @@ fn records_the_select_val_cost() {
         let pbeam = measure_pbeam(&program, function, &args);
         let erts = erts_nanos(&lines, function);
         println!(
-            "| `select_val_probe:{function}/2` | {} | {:.3} | {:.2} |",
-            if function == "ordered_loop" {
-                ORDERED_CHOICES
-            } else {
-                LINEAR_CHOICES
-            },
+            "| `select_val_probe:{function}/2` | {choices} | {:.3} | {:.2} |",
             pbeam.as_nanos() as f64 / LENGTH as f64,
             erts as f64 / LENGTH as f64,
         );
