@@ -41,6 +41,21 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
+### 2026-10-14 23:50 JST - Shared append tree, task [#558](https://github.com/fahchen/pbeam/issues/558), pull request (not yet open) - **Not landed**
+
+One interleaved session of `tests/integration/binary_append_bench.rs` on the release profile, three rounds, and each number is the minimum of nine timed runs inside one invocation. The before revision is `6fd1b3db` with the benchmark files of the branch, and the after revision is `0c56e7a0`. The one-minute load of every round is 2.47 to 5.65.
+
+| Shape | Before `6fd1b3db` | After | Change |
+| --- | --- | --- | --- |
+| Append to a 100000-byte prefix, one byte each, ns for each append | 2490.840 | 857.080 | -65.6 percent |
+| Append to a 1000000-byte prefix, one byte each, ns for each append | 19462.500 | 1554.150 | -92.0 percent |
+| Doubling build of 1000000 bytes, total ns | 101125 | 58416 | -42.2 percent |
+| Doubling build of 1000 bytes, total ns | 24750 | 26750 | +8.1 percent |
+| Warm match of a 1000000-byte subject, 100 rounds, total ns | 31459208 | 31352833 | -0.3 percent |
+| First match of a fresh 1000000-byte subject, total ns | 334708 | 359458 | +7.4 percent |
+
+The gate of the task is that a shared append copies no old payload byte except one partial 4096-byte leaf, and that the match scan throughput regresses by at most 10 percent. The match numbers fall inside that bound in this session. The three build and copy shapes fall, and the small 1000-byte build rises 8.1 percent, which is inside the run-to-run noise of that shape.
+
 ### 2026-10-14 - Row 6 compact term, task [#571](https://github.com/fahchen/pbeam/issues/571), pull request [#598](https://github.com/fahchen/pbeam/pull/598) - Landed as `855da1fc`
 
 The change boxes the 32-byte binary descriptor behind one `Arc` to a private `BinaryView`, so the `Term::Binary` arm falls from 32 bytes to 8 bytes. The owner decided to land the compact term as the first half of the 16-byte target of row 6, and the row gate fails on its numbers. Pull request [#598](https://github.com/fahchen/pbeam/pull/598) merged on 2026-10-14 as the squash commit `855da1fc` of a branch whose measured revisions are `35c410e6` (before) and `dabac942` (after). The 16-byte target waits for the immediate atom root of [#580](https://github.com/fahchen/pbeam/issues/580).

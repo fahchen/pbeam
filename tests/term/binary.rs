@@ -236,3 +236,156 @@ fn reports_the_bytes_of_the_backing_and_the_packed_array() {
         bytes.allocated_bytes() + packed.packed().unwrap().capacity()
     );
 }
+
+#[test]
+fn shares_the_prefix_array_of_a_large_append() {
+    // `Binary::concat` is the result of an `append` segment that adds bits.
+    // A later segment that does not fit in the last leaf with the prefix
+    // keeps the array of the prefix, so the append copies no byte of the old
+    // payload.
+    let prefix = Binary::from(vec![7_u8; 100_000]);
+    let result = Binary::concat(&prefix, &[9]);
+    let arrays = result
+        .chunk_backing()
+        .expect("a large append keeps its bytes in arrays");
+    assert_eq!(arrays.len(), 2);
+    assert!(Arc::ptr_eq(&arrays[0], prefix.backing()));
+    assert_eq!(arrays[0].len(), 100_000);
+    assert_eq!(arrays[1][..], [9]);
+    assert_eq!(result.len(), 100_001);
+    assert_eq!(result[0], 7);
+    assert_eq!(result[100_000], 9);
+    // A chunked view and a flat view never share their bytes.
+    assert!(!result.same_bytes(&prefix));
+    assert!(!prefix.same_bytes(&result));
+    // An empty suffix shares the whole prefix handle.
+    let whole = Binary::concat(&prefix, &[]);
+    assert!(whole.same_bytes(&prefix));
+}
+
+#[test]
+fn shares_every_array_when_a_binary_is_appended_to_itself() {
+    // The doubling build appends a binary to itself. The later binary is
+    // larger than one leaf, so the append shares each array of the prefix
+    // and of the later binary, and copies no byte of the old payload.
+    let full = Arc::new(vec![1_u8; APPEND_LEAF]);
+    let partial = Arc::new(vec![2_u8; 7]);
+    let half = Binary::from_chunks(vec![Arc::clone(&full), Arc::clone(&partial)]);
+    let whole = Binary::concat_arrays(&half, half.chunks());
+    let arrays = whole
+        .chunk_backing()
+        .expect("the doubling keeps its bytes in arrays");
+    assert_eq!(arrays.len(), 4);
+    assert!(Arc::ptr_eq(&arrays[0], &full));
+    assert!(Arc::ptr_eq(&arrays[1], &partial));
+    assert!(Arc::ptr_eq(&arrays[2], &full));
+    assert!(Arc::ptr_eq(&arrays[3], &partial));
+    assert_eq!(whole.len(), 2 * APPEND_LEAF + 14);
+}
+
+#[test]
+fn merges_a_small_append_in_the_last_leaf() {
+    // A later segment that fits in one leaf with the last array of the
+    // prefix merges in one leaf, so a repeated small append fills a leaf
+    // instead of adding one small array for each step. The merge copies at
+    // most that one leaf.
+    let prefix = Binary::from(vec![7_u8; 100]);
+    let result = Binary::concat(&prefix, &[9]);
+    assert!(result.chunk_backing().is_none());
+    assert!(!Arc::ptr_eq(result.backing(), prefix.backing()));
+    assert_eq!(result.len(), 101);
+    assert_eq!(result[0], 7);
+    assert_eq!(result[99], 7);
+    assert_eq!(result[100], 9);
+    // The merge stops at one leaf: a full leaf keeps its array and the byte
+    // starts a new array.
+    let full = Arc::new(vec![1_u8; APPEND_LEAF]);
+    let merged = Binary::concat_arrays(
+        &Binary::from_chunks(vec![Arc::clone(&full)]),
+        vec![Arc::new(vec![9_u8])],
+    );
+    let arrays = merged
+        .chunk_backing()
+        .expect("a full leaf stays an array of the result");
+    assert_eq!(arrays.len(), 2);
+    assert!(Arc::ptr_eq(&arrays[0], &full));
+    assert_eq!(arrays[1][..], [9]);
+}
+
+#[test]
+fn drops_an_empty_array_of_an_append() {
+    // An empty array holds no byte, so the result keeps no array for it.
+    let empty = Binary::from(Vec::new());
+    assert!(empty.chunk_backing().is_none());
+    let result = Binary::concat_arrays(
+        &empty,
+        vec![Arc::new(vec![1_u8; APPEND_LEAF]), Arc::new(vec![2_u8])],
+    );
+    let arrays = result
+        .chunk_backing()
+        .expect("a large suffix keeps its bytes in arrays");
+    assert_eq!(arrays.len(), 2);
+    assert_eq!(arrays[0].len(), APPEND_LEAF);
+    assert_eq!(arrays[1][..], [2]);
+    let result = Binary::concat_arrays(
+        &Binary::from(vec![1_u8; APPEND_LEAF + 1]),
+        vec![Arc::new(Vec::new()), Arc::new(vec![2_u8])],
+    );
+    let arrays = result
+        .chunk_backing()
+        .expect("a large prefix keeps its bytes in arrays");
+    assert_eq!(arrays.len(), 2);
+    assert_eq!(arrays[0].len(), APPEND_LEAF + 1);
+    assert_eq!(arrays[1][..], [2]);
+}
+
+#[test]
+fn joins_the_arrays_of_a_chunked_prefix_in_one_array() {
+    // A read of the contiguous bytes joins the arrays of an append at the
+    // first read and keeps the joined array for each later read.
+    let first = Binary::from_chunks(vec![Arc::new(vec![1_u8; 5]), Arc::new(vec![2_u8; 4095])]);
+    let second = Binary::concat_arrays(&first, vec![Arc::new(vec![3_u8; 8])]);
+    let arrays = second
+        .chunk_backing()
+        .expect("a large append keeps its bytes in arrays");
+    assert_eq!(arrays.len(), 3);
+    assert_eq!(second.len(), 4108);
+    assert_eq!(second[0], 1);
+    assert_eq!(second[5], 2);
+    assert_eq!(second[4100], 3);
+    // The joined array is built once and shared by each later read.
+    let joined = second.backing().clone();
+    assert!(joined.is_empty());
+    assert_eq!(second.backing().len(), 0);
+    assert_eq!(second.to_bytes(), second.to_bytes());
+    assert_eq!(second.to_bytes().len(), 4108);
+    // A copy of the handle shares the joined array.
+    let copy = second.clone();
+    assert_eq!(&copy[..], &second[..]);
+    assert!(second.same_bytes(&copy));
+    // A sub-binary of an append keeps the joined array, so the two handles
+    // keep their bytes in different arrays.
+    let part = second.bits(32, 48);
+    assert_eq!(&part[..], &[1, 2]);
+    assert!(!second.same_bytes(&part));
+    assert_eq!(second.take_bytes().len(), 4108);
+}
+
+#[test]
+fn merges_a_sub_binary_prefix_of_an_append_in_one_leaf() {
+    // A prefix that is not the whole of its array has no single array of
+    // bytes, so the append materializes its view and merges the later
+    // segment in that array.
+    let source = Binary::from(b"abcdef".to_vec());
+    let prefix = source.bits(8, 24);
+    let result = Binary::concat(&prefix, b"z");
+    assert!(result.chunk_backing().is_none());
+    assert_eq!(&result[..], b"bcz");
+    // A packed prefix packs its bits in one array.
+    let packed = Binary::from(&[0xC3]).bits(4, 8);
+    let result = Binary::concat(&packed, &[0xFF]);
+    assert!(result.chunk_backing().is_none());
+    assert_eq!(&result[..], &[0b0011_0000, 0xFF]);
+    // The take of an append copies its bytes.
+    assert_eq!(result.take_bytes(), vec![0b0011_0000, 0xFF]);
+}

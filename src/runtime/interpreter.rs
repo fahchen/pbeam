@@ -14,7 +14,7 @@ use crate::{
     },
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Fun, HostTerm, Insert, Map, MatchState, Target, Term, print_term,
+        Atom, AtomTable, Binary, Fun, HostTerm, Insert, Map, MatchState, Target, Term, print_term,
         segment_equals, segment_integer,
     },
 };
@@ -1467,9 +1467,9 @@ impl BeamProgram {
                         create_binary(atoms, process, segments)?
                     };
                     match result {
-                        Ok(bytes) => {
+                        Ok(term) => {
                             let process = scheduler.current_process_mut();
-                            write(process, destination, Term::binary(bytes))?;
+                            write(process, destination, term)?;
                         }
                         Err(_) if *fail_label != 0 => {
                             cursor.position = label_position(*fail_label)?;
@@ -3932,11 +3932,14 @@ impl BinarySegmentFailure {
 }
 
 /// A segment of `bs_create_bin` after the size pass: the bytes of a
-/// `string` or `binary` segment and the reductions of their copy, an
-/// `integer` segment with its term and its size in bits, or the code point
-/// of a `utf8` segment.
+/// `string` segment, a `binary` segment with its handle and the reductions
+/// of its copy, an `integer` segment with its term and its size in bits, or
+/// the code point of a `utf8` segment.
 enum BinaryPart<'a> {
     Bytes(Cow<'a, [u8]>, usize),
+    /// A `binary` segment. The handle keeps the arrays of the binary, so an
+    /// append can share them and copy no byte of the segment.
+    Shared(Binary, usize),
     Integer {
         segment: u64,
         value: Term,
@@ -3970,6 +3973,7 @@ impl BinaryPart<'_> {
     fn has_bits(&self) -> bool {
         match self {
             BinaryPart::Bytes(bytes, _) => !bytes.is_empty(),
+            BinaryPart::Shared(binary, _) => !binary.is_empty(),
             BinaryPart::Integer { bits, .. } => *bits > 0,
             BinaryPart::Utf8(_) => true,
         }
@@ -4087,16 +4091,16 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 /// unit larger than 1 fails with the reason `unit`. When the other
 /// segments add no bits, the result is the binary of the `append` segment
 /// and the append uses no reduction, but the construct pass still checks
-/// the term of each `integer` segment of size 0. Else the result starts with a copy of
-/// that binary, which uses one reduction for each 8192 bits, as the ERTS
-/// path for a binary that is not writable does (erl_bits.c:1855-1924).
-/// PBeam has no writable binary (row "Binary construction" of
-/// `docs/erts-differences.md`).
+/// the term of each `integer` segment of size 0. Else the result keeps the
+/// arrays of that binary, which uses one reduction for each 8192 bits, as
+/// the ERTS path for a binary that is not writable does
+/// (erl_bits.c:1855-1924). PBeam has no writable binary (row "Binary
+/// construction" of `docs/erts-differences.md`).
 ///
 /// The construct pass writes the segments (jit/arm/instr_bs.cpp:
-/// 1994-2486). A `string` segment copies its bytes (`erts_bs_put_string`,
-/// erl_bits.c:1641-1654). A `binary` segment copies its binary and uses
-/// one reduction for each 8192 bits (`beam_jit_bs_put_binary_all`,
+/// 1994-2486). A `string` segment keeps its bytes (`erts_bs_put_string`,
+/// erl_bits.c:1641-1654). A `binary` segment keeps its binary and uses one
+/// reduction for each 8192 bits (`beam_jit_bs_put_binary_all`,
 /// jit/beam_jit_common.cpp:1043-1057). An `integer` segment with a term
 /// that is not an integer fails with `type`, in the order of
 /// `integer_type_failure`; else it writes the integer with no reduction
@@ -4104,6 +4108,15 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 /// 926-1167). A `utf8` segment writes the UTF-8 bytes of its code point
 /// (`emit_construct_utf8`). PBeam has no bitstring that is not a binary,
 /// so the unit 8 test of `erts_bs_put_binary_all` always passes.
+///
+/// The result of an `append` segment that adds bits keeps the arrays of the
+/// append binary and of each later `binary` or `string` segment, so the
+/// physical copy of the old payload is absent (`Binary::concat_arrays`).
+/// The append still copies at most one leaf of 4096 bytes when the later
+/// segments fit in one leaf with the last array of the append binary. PBeam
+/// still charges the copy reductions of each segment, because ERTS charges
+/// them (`erl_bits.c:1855-1924`). Thus the logical reduction count is the
+/// same as the ERTS count.
 ///
 /// # Examples
 ///
@@ -4113,10 +4126,13 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 ///     BinarySegment::String(b"count: ".to_vec()),
 ///     BinarySegment::BinaryAll { segment: 2, source: Operand::X(0) },
 /// ];
-/// assert_eq!(create_binary(&mut process, &segments)?, Ok(b"count: 3".to_vec()));
+/// assert_eq!(
+///     create_binary(atoms, &mut process, &segments)?,
+///     Ok(Term::binary(b"count: 3".to_vec()))
+/// );
 /// write(&mut process, &Operand::X(0), Term::static_atom("a"))?;
 /// assert_eq!(
-///     create_binary(&mut process, &segments)?,
+///     create_binary(atoms, &mut process, &segments)?,
 ///     Err(BinarySegmentFailure::badarg(2, "binary", "type", Term::static_atom("a")))
 /// );
 ///
@@ -4129,7 +4145,10 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 ///     source: Operand::X(0),
 ///     size: Operand::Value(Term::Integer(16)),
 /// }];
-/// assert_eq!(create_binary(&mut process, &segments)?, Ok(vec![0x34, 0x12]));
+/// assert_eq!(
+///     create_binary(atoms, &mut process, &segments)?,
+///     Ok(Term::binary(vec![0x34, 0x12]))
+/// );
 /// ```
 ///
 /// # Errors
@@ -4142,7 +4161,7 @@ fn create_binary(
     atoms: &AtomTable,
     process: &mut ProcessState,
     segments: &[BinarySegment],
-) -> Result<Result<Vec<u8>, BinarySegmentFailure>, BeamError> {
+) -> Result<Result<Term, BinarySegmentFailure>, BeamError> {
     let mut parts = Vec::with_capacity(segments.len());
     let mut append = None;
     for segment in segments {
@@ -4158,10 +4177,7 @@ fn create_binary(
                     )));
                 };
                 let reductions = bytes.len() * 8 / BITS_PER_REDUCTION;
-                parts.push(BinaryPart::Bytes(
-                    Cow::Owned(bytes.clone().to_bytes()),
-                    reductions,
-                ));
+                parts.push(BinaryPart::Shared(bytes.clone(), reductions));
             }
             BinarySegment::Append {
                 segment,
@@ -4218,6 +4234,7 @@ fn create_binary(
         }
     }
     let mut writer = BitWriter::default();
+    let mut prefix = None;
     if let Some((segment, unit, mut value)) = append {
         let Term::Binary(start) = &mut value else {
             return Ok(Err(BinarySegmentFailure::badarg(
@@ -4235,16 +4252,51 @@ fn create_binary(
             if let Some(index) = parts.iter().position(|part| part.type_failure().is_some()) {
                 return Ok(Err(integer_type_failure(&parts, index)));
             }
-            return Ok(Ok(start.clone().to_bytes()));
+            return Ok(Ok(Term::Binary(start.clone())));
         }
         let reductions = start.len() * 8 / BITS_PER_REDUCTION;
         process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
-        writer.push_bytes(start);
+        // The result shares the chunks of the append binary. The writer holds
+        // only the later segments, so the old payload stays in its arrays.
+        prefix = Some(start.clone());
+    }
+    // An append whose later segments are each a whole byte range keeps the
+    // arrays of the append binary and of each `binary` segment. The result
+    // shares them and copies no byte of the old payload. When the later
+    // segments fit in one leaf with the last array of the append binary,
+    // `Binary::concat_arrays` merges them in one leaf and copies at most
+    // that leaf. Each other form writes the segments in the writer and joins
+    // them after the append binary.
+    let chunked = prefix.is_some()
+        && parts
+            .iter()
+            .all(|part| matches!(part, BinaryPart::Bytes(..) | BinaryPart::Shared(..)));
+    if chunked {
+        let start = prefix.expect("the chunked path holds an append binary");
+        let mut arrays = Vec::new();
+        for part in parts {
+            match part {
+                BinaryPart::Bytes(bytes, reductions) => {
+                    arrays.push(Arc::new(bytes.into_owned()));
+                    process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+                }
+                BinaryPart::Shared(binary, reductions) => {
+                    arrays.extend(binary.chunks());
+                    process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+                }
+                _ => {}
+            }
+        }
+        return Ok(Ok(Term::Binary(Binary::concat_arrays(&start, arrays))));
     }
     for (index, part) in parts.iter().enumerate() {
         match part {
             BinaryPart::Bytes(bytes, reductions) => {
                 writer.push_bytes(bytes);
+                process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
+            }
+            BinaryPart::Shared(binary, reductions) => {
+                writer.push_bytes(&binary.to_bytes());
                 process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
             }
             BinaryPart::Integer {
@@ -4259,11 +4311,15 @@ fn create_binary(
             }
         }
     }
-    writer.into_bytes().map(Ok).map_err(|bits| {
-        error(format!(
+    match writer.into_bytes() {
+        Ok(bytes) => Ok(Ok(match &prefix {
+            Some(start) => Term::Binary(Binary::concat(start, &bytes)),
+            None => Term::binary(bytes),
+        })),
+        Err(bits) => Err(error(format!(
             "unsupported bs_create_bin result: a bitstring of {bits} bits, which is not a binary"
-        ))
-    })
+        ))),
+    }
 }
 
 /// Raise the exception of a failed `bs_create_bin` segment in the current
