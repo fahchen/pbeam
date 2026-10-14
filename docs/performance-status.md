@@ -41,7 +41,7 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
-### 2026-10-14 23:40 JST - Store only the atom index in the atom term, task [#596](https://github.com/fahchen/pbeam/issues/596), pull request [#619](https://github.com/fahchen/pbeam/pull/619) - **Not landed**
+### 2026-10-14 23:40 JST - Store only the atom index in the atom term, task [#596](https://github.com/fahchen/pbeam/issues/596), pull request [#619](https://github.com/fahchen/pbeam/pull/619) - Landed as `e0d9cbe5`
 
 This change reaches the 16-byte term that the owner set as the acceptance of row 6 of the term plan. The pinned toolchain is rustc 1.99.0, the host is Darwin 27.0.1 arm64, Apple M1 Max, and the before revision is `6fd1b3db`.
 
