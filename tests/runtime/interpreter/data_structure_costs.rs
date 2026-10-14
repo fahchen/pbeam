@@ -689,7 +689,7 @@ fn prints_the_cost_of_every_derivation() {
     // `Term::compare`. The list is already in the term order, and the value
     // is the last choice: that is the worst case of the linear walk and the
     // `Greater` case of the binary search. The shapes cover the linear walk
-    // and the large shapes above the 10-choice bound.
+    // and the large shapes above the `SELECT_VALUE_LINEAR_LIMIT` bound.
     let atoms = AtomTable::new();
     for choices in SELECT_VAL_SHAPES {
         let list: Vec<(Term, u32)> = (0..choices)
