@@ -172,26 +172,26 @@ const OPCODE_RECV_MARKER_USE: u8 = 176;
 /// The largest choice list that keeps the linear walk of
 /// [`Instruction::SelectValue`].
 ///
-/// ERTS uses the same bound in the `select_val` generator that serves a
-/// choice list that a jump table does not fit (`erts/emulator/beam/emu/ops.tab:159-169`
-/// and `emu/generators.tab:214-254`, OTP 29.1.1). That generator special-cases
-/// two values with `i_select_val2`, reserves a place for a sentinel and takes
-/// `align = 1` for 3 to 10 values, which selects `i_select_val_lins`
-/// (`generators.tab:221-253`), and selects `i_select_val_bins` above 10.
+/// The value is 32. It is a measured estimate between the two end-to-end
+/// points of the task: the ordered form loses 13.276 ns for each iteration at
+/// 16 choices and wins 458.005 ns at 256 choices
+/// (`tests/integration/select_val.rs`). The micro-measurement puts the
+/// crossover of the worst case at 32 choices: the linear walk costs 152.053 ns
+/// and the ordered search costs 34.172 ns at 32 choices, against 78.440 ns and
+/// 27.791 ns at 16. No end-to-end probe covers 17 to 32 choices, so the bound
+/// is an estimate, and a later session can pin it with end-to-end probes at 32
+/// and 64 choices.
+///
+/// The pinned ERTS uses 10 (`erts/emulator/beam/emu/generators.tab:240-254`,
+/// OTP 29.1.1). Its ordered search compares one encoded value at a time, which
+/// costs less than the `Term::compare` call of PBeam, so the crossover of ERTS
+/// sits below the crossover of PBeam. ERTS reaches that generator only when a
+/// jump table does not fit, and it special-cases two values with
+/// `i_select_val2` (`erts/emulator/beam/emu/ops.tab:159-169`, OTP 29.1.1).
 /// PBeam has no jump table, and it keeps the linear form for two values.
 ///
-/// The bound stays at 10 after the compare fast path of `Term::compare`. The
-/// linear form wins on the average walk below about 16 choices, because the
-/// worst case is `n` comparisons and the average is about `n / 2`. The
-/// micro-measurement costs the linear walk at 19.828 ns for 4 choices and
-/// 78.440 ns for 16 choices, and the ordered search at 16.381 ns for 4
-/// choices and 27.791 ns for 16 choices, so the two forms are within a few
-/// nanoseconds at 10 choices. The end-to-end 16-choice probe of
-/// `tests/integration/select_val.rs` still measures the linear walk 13.276 ns
-/// ahead for each iteration, which agrees with the average-walk rule. The
-/// value of the pinned ERTS decides the bound, and
 /// `docs/interpreter-dispatch-measurements.md` records the numbers.
-pub(crate) const SELECT_VALUE_LINEAR_LIMIT: usize = 10;
+pub(crate) const SELECT_VALUE_LINEAR_LIMIT: usize = 32;
 
 /// The prepared choice list of [`Instruction::SelectValue`].
 ///
@@ -258,11 +258,11 @@ pub(crate) enum SelectValueChoices {
 ///
 /// ```rust,ignore
 /// let atoms = AtomTable::new();
-/// let choices: Vec<(Term, u32)> = (0..11)
+/// let choices: Vec<(Term, u32)> = (0..33)
 ///     .map(|value| (Term::Integer(value as i64), value as u32))
 ///     .collect();
 /// let SelectValueChoices::Ordered(ordered) = prepare_select_value_choices(choices, &atoms) else {
-///     panic!("11 distinct choices take the ordered form");
+///     panic!("33 distinct choices take the ordered form");
 /// };
 /// assert!(ordered[0].0.compare(&ordered[1].0, &atoms)?.is_lt());
 /// ```

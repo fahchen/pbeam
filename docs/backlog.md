@@ -93,12 +93,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a combined form that measures a gain of at least 10 percent on the local floor loop against the two separate instructions, with the session control of its own revision.
 - **Source:** task #517 and the step 9 measurement of `docs/interpreter-dispatch-measurements.md`.
 
-### Lower the ordered `select_val` form at 16 choices
+### Pin the select_val linear bound between 17 and 32 choices
 
-- **Reason:** the ordered binary search of `select_val` costs 27.139 ns for each iteration at 16 choices against 13.863 ns of the linear walk, so that shape still pays about 13 ns for each run, and the 9-to-16 bucket is the largest group above the bound with 1267 of the 24568 measured instructions. The fixture measures 2, 16, and 256 choices only, so no number covers 11 to 15 choices.
-- **Evidence:** the end-to-end session of task #545 in `tests/integration/select_val.rs`. On the fixture `fixtures/dispatch/select_val_probe.erl`, `nibble_loop/2` (16 choices) costs 514.915 ns for each iteration on the branch and its 2-choice control costs 487.776 ns, while the linear form of `915590af` costs 500.169 ns against a control of 486.306 ns. The compare fast path removed most of the penalty: without it, the 16-choice probe costs 582.008 ns, or 93.859 ns above its control. The control moves by at most 1.843 ns across the three builds.
-- **Option:** raise `SELECT_VALUE_LINEAR_LIMIT` above 16, so the 11-to-16 band keeps the linear walk, or reduce the number of comparisons of the ordered form. The bound of 10 follows the pinned ERTS (`erts/emulator/beam/emu/generators.tab:240-249`), so a change of the bound departs from the reference.
-- **Trigger:** a measured `select_val` with 11 to 16 choices in a hot path, or an owner decision to set the bound from the PBeam measurement instead of the pinned ERTS.
+- **Reason:** `SELECT_VALUE_LINEAR_LIMIT` is 32, and it is a measured estimate. The end-to-end session of task #545 measures a loss of the ordered form at 16 choices and a win of 458.005 ns at 256 choices, and no end-to-end probe covers 17 to 32 choices, so the crossover of the average case is unknown between those points.
+- **Evidence:** the session of task #545 in `tests/integration/select_val.rs`: the linear form costs 500.169 ns for each iteration at 16 choices and the ordered form costs 514.915 ns at the same shape, while the ordered form costs 526.238 ns at 256 choices against 984.243 ns of the linear form. The micro-measurement of `prints_the_cost_of_every_derivation` is the only point between them, at 32 choices, where the linear worst case costs 152.053 ns and the ordered search costs 34.172 ns.
+- **Option:** run the end-to-end probe at 32 and 64 choices in one interleaved session, and set the bound at the highest shape where the linear walk still wins.
+- **Trigger:** a session that can run end-to-end probes at 32 and 64 choices, or a measured `select_val` with 17 to 32 choices in a hot path.
 - **Source:** task #545 and the section "The `select_val` dispatch decision of task [#545](https://github.com/fahchen/pbeam/issues/545)" of `docs/interpreter-dispatch-measurements.md`.
 
 ## Runtime

@@ -1,7 +1,7 @@
 //! The `select_val` dispatch measurement of issue #545. The interpreter has
 //! two search arms: a linear walk over the encoded order for a list of at
-//! most 10 choices, and a binary search over a list that the loader sorted
-//! by the ERTS term order above that bound.
+//! most `SELECT_VALUE_LINEAR_LIMIT` choices, and a binary search over a list
+//! that the loader sorted by the ERTS term order above that bound.
 //!
 //! The probe is `fixtures/dispatch/select_val_probe.erl`. `ordered_loop/2`
 //! runs the 256-choice `select_val` of `bucket/1` one time for each
@@ -40,10 +40,11 @@ const LENGTH: usize = 200_000;
 /// in the more-than-64 bucket of the measured distribution of issue #545.
 const ORDERED_CHOICES: usize = 256;
 
-/// The number of choices of the `select_val` of `nibble/1`, above
-/// `SELECT_VALUE_LINEAR_LIMIT`, which selects the ordered form. The count is
-/// in the 9-to-16 bucket of the measured distribution of issue #545, the
-/// band that the first measurement of the task flagged as a regression.
+/// The number of choices of the `select_val` of `nibble/1`, below
+/// `SELECT_VALUE_LINEAR_LIMIT`, which keeps the linear form. The count is in
+/// the 9-to-16 bucket of the measured distribution of issue #545, the band
+/// that the first measurement of the task flagged as a regression of the
+/// ordered form.
 const NIBBLE_CHOICES: usize = 16;
 
 /// The number of choices of the `select_val` of `digit/1`, below the bound
@@ -233,8 +234,8 @@ fn erts_nanos(lines: &[String], key: &str) -> u128 {
 }
 
 /// Check that each `select_val` of the fixture keeps the choice count that
-/// the measurement claims: 256 for `bucket/1` and 16 for `nibble/1`, which
-/// select the ordered form, and 2 for `digit/1`, which keeps the linear
+/// the measurement claims: 256 for `bucket/1`, which selects the ordered
+/// form, and 16 for `nibble/1` and 2 for `digit/1`, which keep the linear
 /// form. A change of the compiler or of the fixture fails here, because the
 /// numbers would then measure other work.
 #[test]
@@ -309,10 +310,10 @@ fn checks_the_select_val_results_against_erts() {
     }
 }
 
-/// Record the cost of the ordered form on the large shape and on the
-/// 11-to-16 band, and of the linear form on the control: run each loop on
-/// PBeam and on the pinned ERTS, and print the numbers as Markdown. The
-/// minimum of [`RUNS`] runs is the reported number.
+/// Record the cost of the ordered form on the large shape and of the linear
+/// form on the 16-choice shape and the control: run each loop on PBeam and on
+/// the pinned ERTS, and print the numbers as Markdown. The minimum of
+/// [`RUNS`] runs is the reported number.
 #[test]
 fn records_the_select_val_cost() {
     let program = BeamProgram::load(&[SELECT_VAL_PROBE]).unwrap();

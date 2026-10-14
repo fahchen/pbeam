@@ -204,23 +204,28 @@ fn prepares_the_select_value_choices_by_shape() {
     ));
 
     // One choice more takes the term order.
-    let large = choices(&[9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 10]);
-    let SelectValueChoices::Ordered(ordered) = prepare_select_value_choices(large, &atoms) else {
-        panic!("11 distinct choices must take the ordered form");
+    let mut values: Vec<i64> = (0..=SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    values.reverse();
+    let large = choices(&values);
+    let SelectValueChoices::Ordered(ordered) = prepare_select_value_choices(large.clone(), &atoms)
+    else {
+        panic!(
+            "{} distinct choices must take the ordered form",
+            values.len()
+        );
     };
-    assert_eq!(
-        ordered,
-        (0..=10)
-            .map(|value| (
-                Term::Integer(value),
-                if value == 10 { 10 } else { 9 - value as u32 }
-            ))
-            .collect::<Vec<_>>()
-    );
+    let mut expected = large;
+    expected.sort_by_key(|(term, _)| match term {
+        Term::Integer(value) => *value,
+        _ => unreachable!("the probe holds integers only"),
+    });
+    assert_eq!(ordered, expected);
 
     // A duplicate choice keeps the linear form and its encoded order, so the
     // interpreter still gives the first match.
-    let duplicate = choices(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]);
+    let mut duplicate_values: Vec<i64> = (0..SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    duplicate_values.push(0);
+    let duplicate = choices(&duplicate_values);
     let SelectValueChoices::Linear(kept) = prepare_select_value_choices(duplicate.clone(), &atoms)
     else {
         panic!("a duplicate choice must keep the linear form");
@@ -228,7 +233,7 @@ fn prepares_the_select_value_choices_by_shape() {
     assert_eq!(kept, duplicate);
 
     // A choice list with no term order keeps the linear form.
-    let incomparable: Vec<(Term, u32)> = (0..11)
+    let incomparable: Vec<(Term, u32)> = (0..=SELECT_VALUE_LINEAR_LIMIT as u64)
         .map(|index| (Term::Reference(Reference(index)), index as u32))
         .collect();
     assert!(matches!(

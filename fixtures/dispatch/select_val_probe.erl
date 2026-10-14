@@ -1,20 +1,20 @@
 %% The `select_val` shape probe of issue #545. The interpreter has two
-%% search arms: a linear walk for a list of at most 10 choices, and a binary
+%% search arms: a linear walk for a list of at most 32 choices, and a binary
 %% search over a list that the loader sorted by the ERTS term order above
 %% that bound.
 %%
 %% `ordered_loop/2` runs the 256-choice `select_val` of `bucket/1` one time
 %% for each iteration, so it measures the ordered form on the large shape.
 %% `nibble_loop/2` runs the 16-choice `select_val` of `nibble/1`, so it
-%% measures the ordered form on the 11-to-16 band that the first measurement
+%% measures the linear form on the 9-to-16 bucket that the first measurement
 %% of the task flagged. `linear_loop/2` runs the 2-choice `select_val` of
-%% `digit/1`, so it measures the linear form. The three loops are the same
-%% shape around the call.
+%% `digit/1`, so it measures the linear form on the smallest shape. The three
+%% loops are the same shape around the call.
 %%
 %% The 256 choices cover the more-than-64 bucket of the measured
 %% distribution of issue #545, which holds the select_val instructions whose
 %% linear walk costs the most. The 16 choices cover the 9-to-16 bucket, which
-%% is the largest group above the 10-choice bound.
+%% the bound of 32 keeps on the linear form.
 %%
 %% `tests/integration/select_val.rs` disassembles the fixture and fails when
 %% the compiled shape changes, so the measured work is the work that the
@@ -23,18 +23,18 @@
 
 -export([ordered_loop/2, nibble_loop/2, linear_loop/2, bucket/1, nibble/1, digit/1]).
 
-%% The ordered shape: the 256 choices of `bucket/1` are above the 10-choice
+%% The ordered shape: the 256 choices of `bucket/1` are above the 32-choice
 %% bound of the linear form.
 ordered_loop(0, Acc) -> Acc;
 ordered_loop(N, Acc) -> ordered_loop(N - 1, Acc + bucket(N band 255)).
 
-%% The small ordered shape: the 16 choices of `nibble/1` are above the
-%% 10-choice bound of the linear form.
+%% The linear shape at 16 choices: the 16 choices of `nibble/1` are below the
+%% 32-choice bound of the linear form.
 nibble_loop(0, Acc) -> Acc;
 nibble_loop(N, Acc) -> nibble_loop(N - 1, Acc + nibble(N band 15)).
 
-%% The linear shape: the 2 choices of `digit/1` are below the bound of the
-%% ordered form.
+%% The linear shape at 2 choices: the 2 choices of `digit/1` keep the linear
+%% form.
 linear_loop(0, Acc) -> Acc;
 linear_loop(N, Acc) -> linear_loop(N - 1, Acc + digit(N rem 3)).
 
@@ -301,9 +301,9 @@ bucket(V) ->
         _ -> 256
     end.
 
-%% A `select_val` with 16 distinct integer choices, the 11-to-16 band above
-%% the 10-choice bound of the linear form. A value of 16 or above takes the
-%% fail label of the instruction, which is the `_` clause.
+%% A `select_val` with 16 distinct integer choices, in the 9-to-16 bucket and
+%% below the 32-choice bound of the linear form. A value of 16 or above takes
+%% the fail label of the instruction, which is the `_` clause.
 nibble(V) ->
     case V of
         0 -> 0;
