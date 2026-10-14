@@ -176,6 +176,18 @@ const OPCODE_RECV_MARKER_USE: u8 = 176;
 /// takes `align = 1` when the list holds at most 10 values, which selects
 /// `i_select_val_lins`, and it selects `i_select_val_bins` above that
 /// (`erts/emulator/beam/emu/generators.tab:240-249`, OTP 29.1.1).
+///
+/// The bound stays at 10 after the compare fast path of `Term::compare`. The
+/// linear form wins on the average walk below about 16 choices, because the
+/// worst case is `n` comparisons and the average is about `n / 2`. The
+/// micro-measurement costs the linear walk at 19.828 ns for 4 choices and
+/// 78.440 ns for 16 choices, and the ordered search at 16.381 ns for 4
+/// choices and 27.791 ns for 16 choices, so the two forms are within a few
+/// nanoseconds at 10 choices. The end-to-end 16-choice probe of
+/// `tests/integration/select_val.rs` still measures the linear walk 13.276 ns
+/// ahead for each iteration, which agrees with the average-walk rule. The
+/// value of the pinned ERTS decides the bound, and
+/// `docs/interpreter-dispatch-measurements.md` records the numbers.
 pub(crate) const SELECT_VALUE_LINEAR_LIMIT: usize = 10;
 
 /// The prepared choice list of [`Instruction::SelectValue`].
