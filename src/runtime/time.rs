@@ -2,7 +2,7 @@
 //! conversion of `erlang:monotonic_time/1` and `os:system_time/1`, the
 //! date of a POSIX time, and the POSIX time of a UTC date.
 
-use crate::term::{SMALL_INTEGER_MIN, Term};
+use crate::term::{Atom, SMALL_INTEGER_MIN, Term};
 
 /// The native time unit, `ERTS_MONOTONIC_TIME_UNIT`: 1000000000 parts of a
 /// second (`erl_time.h:282-283`, `sys/unix/erl_unix_sys.h:192-204`).
@@ -81,13 +81,13 @@ pub(super) fn time_unit_conversion(value: i64, offset_multiplier: i64, unit: &Te
         return TimeValue::Trap(native);
     }
     let per_second = match unit {
-        Term::Atom(unit) => match unit.name() {
-            "native" => return TimeValue::Value(native),
-            "second" | "seconds" => 1,
-            "millisecond" | "milli_seconds" => 1_000,
-            "microsecond" | "micro_seconds" => 1_000_000,
-            "nanosecond" | "nano_seconds" => 1_000_000_000,
-            "perf_counter" => return TimeValue::Trap(native),
+        Term::Atom(unit) => match unit.index() {
+            index if index == Atom::static_index("native") => return TimeValue::Value(native),
+            _ if unit.is_one_of(&["second", "seconds"]) => 1,
+            _ if unit.is_one_of(&["millisecond", "milli_seconds"]) => 1_000,
+            _ if unit.is_one_of(&["microsecond", "micro_seconds"]) => 1_000_000,
+            _ if unit.is_one_of(&["nanosecond", "nano_seconds"]) => 1_000_000_000,
+            index if index == Atom::static_index("perf_counter") => return TimeValue::Trap(native),
             _ => return TimeValue::Badarg,
         },
         Term::Integer(unit @ (1 | 1_000 | 1_000_000 | 1_000_000_000)) => *unit,

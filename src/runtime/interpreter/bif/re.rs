@@ -3,6 +3,7 @@
 use super::BifResult::{Trap, Value};
 use super::*;
 use crate::runtime::{pcre2, regex_code::RegexCodes};
+use crate::term::Atom;
 
 /// The atom options of `re:compile/2` that set one `PCRE2_*` compile bit
 /// (`parse_options`, `erl_bif_re.c:442-537`).
@@ -74,14 +75,20 @@ fn parse_options(atoms: &AtomTable, options: &Term) -> Option<CompileOptions> {
     let mut parsed = CompileOptions::default();
     for option in options {
         match option {
-            Term::Atom(atom) => match atom.name() {
-                "bsr_anycrlf" => parsed.bsr = Some(pcre2::BSR_ANYCRLF),
-                "bsr_unicode" => parsed.bsr = Some(pcre2::BSR_UNICODE),
-                "export" => parsed.export = true,
-                name => parsed.compile |= lookup(&COMPILE_OPTIONS, name)?,
+            Term::Atom(atom) => match atom.index() {
+                index if index == Atom::static_index("bsr_anycrlf") => {
+                    parsed.bsr = Some(pcre2::BSR_ANYCRLF);
+                }
+                index if index == Atom::static_index("bsr_unicode") => {
+                    parsed.bsr = Some(pcre2::BSR_UNICODE);
+                }
+                index if index == Atom::static_index("export") => parsed.export = true,
+                _ => parsed.compile |= lookup(&COMPILE_OPTIONS, atom.name())?,
             },
             Term::Tuple(elements) => match elements.as_ref() {
-                [Term::Atom(key), Term::Atom(value)] if key.name() == "newline" => {
+                [Term::Atom(key), Term::Atom(value)]
+                    if key.index() == Atom::static_index("newline") =>
+                {
                     parsed.newline = Some(lookup(&NEWLINES, atoms.name_of(value))?);
                 }
                 _ => return None,

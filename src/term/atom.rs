@@ -102,6 +102,46 @@ impl Atom {
             name: Arc::from(name),
         })
     }
+
+    /// Return the index of a static atom name, with no atom table.
+    ///
+    /// [`Atom::from_static`] gives an atom with this index. This function
+    /// returns the index alone, so a comparison allocates nothing. A static
+    /// atom has the same index in every atom table, so the index is enough
+    /// to compare a name without the table.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `name` is not a static atom name. Each caller compares a
+    /// name that the pinned ERTS holds as a static atom.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Atom::static_index("ok"), Atom::from_static("ok").unwrap().index());
+    /// ```
+    pub(crate) fn static_index(name: &str) -> u32 {
+        *STATIC_INDICES.get(name).expect("the name is a static atom")
+    }
+
+    /// Return true when the index of this atom is the index of one of the
+    /// static atom names `names`.
+    ///
+    /// Each name must be a static atom name, as [`Atom::static_index`]
+    /// requires.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let ok = Atom::from_static("ok").unwrap();
+    /// assert!(ok.is_one_of(&["ok", "error"]));
+    /// assert!(!ok.is_one_of(&["error"]));
+    /// ```
+    pub(crate) fn is_one_of(&self, names: &[&str]) -> bool {
+        names
+            .iter()
+            .any(|name| self.index == Atom::static_index(name))
+    }
 }
 
 /// The identity of the program that owns an [`AtomTable`]. Two tables have
