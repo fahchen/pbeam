@@ -487,7 +487,10 @@ impl BeamProgram {
             Some(Err(reason)) => {
                 // `erlang:halt/1` writes each byte of the `%T` text as one code
                 // point (`bif.c:4372-4387`), so the text is valid UTF-8.
-                let text: String = print_term(&reason).into_iter().map(char::from).collect();
+                let text: String = print_term(&reason, &atoms)
+                    .into_iter()
+                    .map(char::from)
+                    .collect();
                 Err(error(format!("root process exited with {text}")))
             }
             None => Err(error("root process waits for a message that cannot arrive")),

@@ -354,7 +354,7 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                 };
                 match option.index() {
                     index if index == Atom::static_index("args") => {
-                        let Some(args) = port_args(&pair[1]) else {
+                        let Some(args) = port_args(atoms, &pair[1]) else {
                             return Ok(None);
                         };
                         result.args = args;
@@ -418,12 +418,13 @@ fn unsupported_option(name: &str) -> BeamError {
 /// # Examples
 ///
 /// ```rust,ignore
+/// let atoms = AtomTable::new();
 /// let args = Term::list_from(vec![Term::binary(b"-c".to_vec()), Term::nil()]);
-/// assert_eq!(port_args(&args), Some(vec![b"-c".to_vec(), Vec::new()]));
+/// assert_eq!(port_args(&atoms, &args), Some(vec![b"-c".to_vec(), Vec::new()]));
 /// ```
-fn port_args(args: &Term) -> Option<Vec<Vec<u8>>> {
+fn port_args(atoms: &AtomTable, args: &Term) -> Option<Vec<Vec<u8>>> {
     let elements = args.proper_list()?;
-    elements.map(|arg| native_name(arg, true)).collect()
+    elements.map(|arg| native_name(atoms, arg, true)).collect()
 }
 
 /// Return the native bytes of the program of `{spawn_executable, Name}`,
@@ -447,7 +448,7 @@ fn spawn_executable(atoms: &AtomTable, name: &Term) -> Result<Option<Vec<u8>>, B
     };
     match elements.as_ref() {
         [Term::Atom(kind), name] if kind.index() == Atom::static_index("spawn_executable") => {
-            Ok(native_name(name, false))
+            Ok(native_name(atoms, name, false))
         }
         [Term::Atom(kind), ..] if kind.is_one_of(&["spawn", "spawn_driver", "fd"]) => {
             Err(error(format!(
@@ -466,17 +467,19 @@ fn spawn_executable(atoms: &AtomTable, name: &Term) -> Result<Option<Vec<u8>>, B
 /// is that C string (`erl_unicode.c:2107-2108`, `io.c:323`, `366-367`). An
 /// atom gives the bytes of its characters, and a list gives the bytes of
 /// [`native_filename`]. `[]` is a name only with `allow_empty`. Return
-/// `None` for each other term.
+/// `None` for each other term. `atoms` is the table of the run that owns
+/// `name`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(native_name(&Term::binary(b"/bin/sh\0x".to_vec()), false), Some(b"/bin/sh".to_vec()));
-/// assert_eq!(native_name(&Term::static_atom("ok"), false), Some(b"ok".to_vec()));
-/// assert_eq!(native_name(&Term::nil(), false), None);
-/// assert_eq!(native_name(&Term::nil(), true), Some(Vec::new()));
+/// let atoms = AtomTable::new();
+/// assert_eq!(native_name(&atoms, &Term::binary(b"/bin/sh\0x".to_vec()), false), Some(b"/bin/sh".to_vec()));
+/// assert_eq!(native_name(&atoms, &Term::static_atom("ok"), false), Some(b"ok".to_vec()));
+/// assert_eq!(native_name(&atoms, &Term::nil(), false), None);
+/// assert_eq!(native_name(&atoms, &Term::nil(), true), Some(Vec::new()));
 /// ```
-fn native_name(name: &Term, allow_empty: bool) -> Option<Vec<u8>> {
+fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<u8>> {
     let characters;
     let name = match name {
         Term::Binary(bytes) => {
@@ -484,7 +487,7 @@ fn native_name(name: &Term, allow_empty: bool) -> Option<Vec<u8>> {
             return Some(bytes[..end.unwrap_or(bytes.len())].to_vec());
         }
         Term::Atom(atom) => {
-            let text = atom.name().chars();
+            let text = atoms.name_of(atom).chars();
             characters = Term::list_from(text.map(|c| Term::Integer(u32::from(c).into())));
             &characters
         }
