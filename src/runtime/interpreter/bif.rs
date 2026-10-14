@@ -286,40 +286,52 @@ struct BifContext<'a> {
     scheduler: &'a mut Scheduler,
 }
 
-/// The largest number of arguments that the borrowed BIF path holds.
-///
-/// The path holds the arguments in this struct, so it needs no `Vec<Term>`
-/// for one call. The instruction set gives a `bif` instruction at most the
-/// three arguments of `gc_bif3`, so the path covers every `bif`
+/// The largest number of arguments of the argument lanes of a `bif`
 /// instruction.
+///
+/// The instruction set gives a `bif` instruction at most the three
+/// arguments of `gc_bif3`, so a lane that holds this many arguments covers
+/// every `bif` instruction. The borrowed lane holds this many references
+/// and the owned lane holds this many terms.
 pub(super) const MAX_BORROWED_ARGUMENTS: usize = 3;
 
-/// The argument terms of one BIF call of at most
-/// [`MAX_BORROWED_ARGUMENTS`] terms.
+/// The placeholder of a slot that no argument filled.
 ///
-/// The caller reads the arguments into this struct one time, and [`Self::with`]
-/// passes them to a body as a borrowed slice. The body may borrow the
-/// scheduler at the same time, because the slice borrows this struct and not
-/// the scheduler. A body that stores the arguments for a later turn copies
-/// them (see [`BifResult::TrapBif`]).
+/// The array of [`BifArguments`] is fully initialized, because `&Term` is
+/// `Copy` and `[&UNUSED_ARGUMENT; 3]` writes three references. A slot at or
+/// above the length holds this term and stays outside the slice of
+/// [`BifArguments::with`]. `Term::Nil` is a unit variant, so the static is
+/// a constant expression, and `Term` is `Sync` (`src/term.rs`).
+static UNUSED_ARGUMENT: Term = Term::Nil;
+
+/// The argument terms of one BIF call of at most
+/// [`MAX_BORROWED_ARGUMENTS`] terms, as references.
+///
+/// The leaf lane reads the arguments into this struct one time, and
+/// [`Self::with`] passes them to a body as a borrowed slice. The body takes
+/// no scheduler, so the borrow of the process stays valid in safe Rust (see
+/// `docs/bif-argument-borrow-design.md`). The struct holds no `Term` value,
+/// so it needs no `Term::nil()` and no `Arc` operation.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
+/// let one = Term::Integer(1);
+/// let two = Term::Integer(2);
 /// let mut arguments = BifArguments::new();
-/// arguments.push(Term::Integer(1));
-/// arguments.push(Term::Integer(2));
-/// assert_eq!(arguments.with(|terms| terms.to_vec()), vec![Term::Integer(1), Term::Integer(2)]);
+/// arguments.push(&one);
+/// arguments.push(&two);
+/// assert_eq!(arguments.with(|terms| terms.to_vec()), vec![&one, &two]);
 /// ```
-pub(super) struct BifArguments {
-    /// The terms of the arguments. A slot at or above the length holds `nil`
-    /// and stays outside the slice of [`Self::with`].
-    terms: [Term; MAX_BORROWED_ARGUMENTS],
-    /// The number of terms that [`Self::push`] wrote.
+pub(super) struct BifArguments<'a> {
+    /// The references to the arguments. A slot at or above the length holds
+    /// [`UNUSED_ARGUMENT`] and stays outside the slice of [`Self::with`].
+    terms: [&'a Term; MAX_BORROWED_ARGUMENTS],
+    /// The number of references that [`Self::push`] wrote.
     len: usize,
 }
 
-impl BifArguments {
+impl<'a> BifArguments<'a> {
     /// Return an empty argument list.
     ///
     /// # Examples
@@ -329,12 +341,12 @@ impl BifArguments {
     /// ```
     pub(super) fn new() -> Self {
         Self {
-            terms: std::array::from_fn(|_| Term::nil()),
+            terms: [&UNUSED_ARGUMENT; MAX_BORROWED_ARGUMENTS],
             len: 0,
         }
     }
 
-    /// Add one argument term to the end of the list.
+    /// Add one reference to the end of the list.
     ///
     /// # Panics
     ///
@@ -344,7 +356,84 @@ impl BifArguments {
     /// # Examples
     ///
     /// ```rust,ignore
+    /// let one = Term::Integer(1);
     /// let mut arguments = BifArguments::new();
+    /// arguments.push(&one);
+    /// assert_eq!(arguments.with(|terms| terms.to_vec()), vec![&one]);
+    /// ```
+    pub(super) fn push(&mut self, term: &'a Term) {
+        self.terms[self.len] = term;
+        self.len += 1;
+    }
+
+    /// Call `body` with the arguments as a borrowed slice of references.
+    /// The slice is valid only for the call of `body`, which takes no
+    /// scheduler.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let one = Term::Integer(1);
+    /// let mut arguments = BifArguments::new();
+    /// arguments.push(&one);
+    /// assert_eq!(arguments.with(|terms| terms.len()), 1);
+    /// ```
+    pub(super) fn with<R>(&self, body: impl FnOnce(&[&'a Term]) -> R) -> R {
+        body(&self.terms[..self.len])
+    }
+}
+
+/// The argument terms of one BIF call of at most
+/// [`MAX_BORROWED_ARGUMENTS`] terms, as owned copies.
+///
+/// The owned lane copies each argument into this struct one time, and
+/// [`Self::with`] passes them to a body as a borrowed slice. The body may
+/// borrow the scheduler at the same time, because the slice borrows this
+/// struct and not the scheduler. A body that stores the arguments for a
+/// later turn copies them again (see [`BifResult::TrapBif`]).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut arguments = OwnedBifArguments::new();
+/// arguments.push(Term::Integer(1));
+/// arguments.push(Term::Integer(2));
+/// assert_eq!(arguments.with(|terms| terms.to_vec()), vec![Term::Integer(1), Term::Integer(2)]);
+/// ```
+pub(super) struct OwnedBifArguments {
+    /// The owned terms of the arguments. A slot at or above the length holds
+    /// `nil` and stays outside the slice of [`Self::with`].
+    terms: [Term; MAX_BORROWED_ARGUMENTS],
+    /// The number of terms that [`Self::push`] wrote.
+    len: usize,
+}
+
+impl OwnedBifArguments {
+    /// Return an empty argument list.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(OwnedBifArguments::new().with(|terms| terms.len()), 0);
+    /// ```
+    pub(super) fn new() -> Self {
+        Self {
+            terms: std::array::from_fn(|_| Term::nil()),
+            len: 0,
+        }
+    }
+
+    /// Add one owned argument term to the end of the list.
+    ///
+    /// # Panics
+    ///
+    /// The reader checks the count against [`MAX_BORROWED_ARGUMENTS`] before
+    /// it pushes, so a full list is a caller error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut arguments = OwnedBifArguments::new();
     /// arguments.push(Term::Integer(1));
     /// assert_eq!(arguments.with(|terms| terms.to_vec()), vec![Term::Integer(1)]);
     /// ```
@@ -360,7 +449,7 @@ impl BifArguments {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut arguments = BifArguments::new();
+    /// let mut arguments = OwnedBifArguments::new();
     /// arguments.push(Term::Integer(1));
     /// assert_eq!(arguments.with(|terms| terms.len()), 1);
     /// ```
@@ -566,6 +655,7 @@ mod table;
 #[cfg(test)]
 pub(in crate::runtime::interpreter) use table::BIFS;
 pub(crate) use table::{BifId, mfa, resolve};
+pub(super) use table::{dispatch_leaf, is_leaf};
 
 #[cfg(test)]
 thread_local! {
@@ -626,7 +716,7 @@ impl BeamProgram {
     /// loader stores it in a `call_ext` instruction, and the identity lookup
     /// of the call gives it for a `bif` instruction. `None` selects the name
     /// path of a PBeam BIF. The arguments are borrowed, so a caller that
-    /// holds them in a [`BifArguments`] passes them with no copy.
+    /// holds them in an [`OwnedBifArguments`] passes them with no copy.
     ///
     /// # Examples
     ///

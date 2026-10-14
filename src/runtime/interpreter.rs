@@ -18,7 +18,12 @@ use crate::{
         segment_equals, segment_integer,
     },
 };
-use std::{borrow::Cow, collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    borrow::{Borrow, Cow},
+    collections::HashMap,
+    rc::Rc,
+    sync::Arc,
+};
 
 pub(crate) mod bif;
 mod bits;
@@ -28,8 +33,8 @@ mod native;
 pub(super) use code_table::CodeTable;
 
 use bif::{
-    BifArguments, BifId, BifResult, MAX_BORROWED_ARGUMENTS, is_function, is_heavy_bif,
-    is_pbeam_bif, mfa, resolve, send,
+    BifArguments, BifId, BifResult, MAX_BORROWED_ARGUMENTS, OwnedBifArguments, dispatch_leaf,
+    is_function, is_heavy_bif, is_leaf, is_pbeam_bif, mfa, resolve, send,
 };
 use bits::BitWriter;
 
@@ -944,15 +949,38 @@ impl BeamProgram {
                     // process runs again (`jit/arm/instr_bif.cpp:253-272`).
                     // The argument `Vec<Term>` of a `bif` instruction is
                     // one of the two allocations that remain on the call
-                    // path (step 3 of the plan), so the pure leaf path reads
-                    // its terms into a `BifArguments` and passes the
-                    // borrowed slice. The loader gives a `bif` instruction
-                    // at most `MAX_BORROWED_ARGUMENTS` arguments, so the
-                    // path covers every `bif` instruction.
+                    // path (step 3 of the plan). The `bif` path therefore
+                    // has two argument lanes. A leaf identity of [`is_leaf`]
+                    // reads its arguments into a borrowed [`BifArguments`]
+                    // and runs [`dispatch_leaf`], which takes no scheduler,
+                    // so the borrow of the process stays valid. Every other
+                    // identity copies its arguments into an
+                    // [`OwnedBifArguments`] and runs the owned dispatch, as
+                    // before. The loader gives a `bif` instruction at most
+                    // `MAX_BORROWED_ARGUMENTS` arguments, so each lane
+                    // covers every `bif` instruction.
                     let result = if let Some(state) = process.length_trap.take() {
                         self.bif_trap(scheduler, "erlang", "length", state)?
-                    } else {
+                    } else if is_leaf(*bif) {
+                        // The leaf read borrows the process, so the commit
+                        // of the advanced position runs first. The commit
+                        // writes the same position in either order, and
+                        // the read errors leave the run.
+                        cursor.commit(process);
                         let values = read_bif_arguments(process, arguments)?;
+                        // No leaf identity is `byte_size/1`, so the
+                        // byte-size case of `match_context_byte_size`
+                        // cannot apply. The call still reports a match
+                        // context in a leaf argument, as the owned lane
+                        // does. The assertion holds the two facts together,
+                        // so an identity that joins the leaf set without
+                        // this case fails a test.
+                        let size =
+                            values.with(|terms| match_context_byte_size(*bif, arguments, terms))?;
+                        debug_assert_eq!(size, None);
+                        values.with(|terms| dispatch_leaf(*bif, terms))?
+                    } else {
+                        let values = read_owned_bif_arguments(process, arguments)?;
                         cursor.commit(process);
                         let size =
                             values.with(|terms| match_context_byte_size(*bif, arguments, terms))?;
@@ -3490,19 +3518,22 @@ fn check_known_position(context: &MatchState, operand: &Operand) -> Result<(), B
 /// assert_eq!(size, Some(Term::Integer(3)));
 /// assert!(match_context_byte_size(BifId::ErlangHd1, &[Operand::X(0)], &values).is_err());
 /// ```
-fn match_context_byte_size(
+fn match_context_byte_size<T: Borrow<Term>>(
     bif: BifId,
     arguments: &[Operand],
-    values: &[Term],
+    values: &[T],
 ) -> Result<Option<Term>, BeamError> {
-    if let (BifId::ErlangByteSize1, [Term::MatchContext(context)]) = (bif, values) {
+    if bif == BifId::ErlangByteSize1
+        && let [value] = values
+        && let Term::MatchContext(context) = Borrow::<Term>::borrow(value)
+    {
         check_known_position(context, &arguments[0])?;
         let bits = context.remaining_bits();
         return Ok(Some(Term::Integer(bits.div_ceil(8) as i64)));
     }
     match values
         .iter()
-        .position(|value| matches!(value, Term::MatchContext(_)))
+        .position(|value| matches!(Borrow::<Term>::borrow(value), Term::MatchContext(_)))
     {
         Some(index) => Err(match_context_escape(&arguments[index])),
         None => Ok(None),
@@ -3628,17 +3659,20 @@ fn function_at_label(module: &BeamModule, target: u32) -> Result<Function, BeamE
     }
 }
 
-/// Read the argument operands of a `bif` instruction into a
-/// [`BifArguments`], which holds at most [`MAX_BORROWED_ARGUMENTS`] terms.
-/// Each operand must be set, and a match context is a runtime invariant
-/// error, as it is for a call argument. The loader gives a `bif`
+/// Read the argument operands of a leaf `bif` instruction into a borrowed
+/// [`BifArguments`], which holds at most [`MAX_BORROWED_ARGUMENTS`]
+/// references. Each operand must be set, and a match context is a runtime
+/// invariant error, as it is for a call argument. The loader gives a `bif`
 /// instruction at most [`MAX_BORROWED_ARGUMENTS`] arguments, so this
 /// function holds every argument of an instruction that the loader loads.
+/// The read copies no term and writes no term: each reference points to
+/// the literal of the instruction or to the register of the process.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let arguments = read_bif_arguments(&process, &[Operand::X(0)])?;
+/// let operands = [Operand::X(0)];
+/// let arguments = read_bif_arguments(&process, &operands)?;
 /// assert_eq!(arguments.with(|terms| terms.len()), 1);
 /// assert!(read_bif_arguments(&process, &[Operand::X(7)]).is_err());
 /// ```
@@ -3647,16 +3681,52 @@ fn function_at_label(module: &BeamModule, target: u32) -> Result<Function, BeamE
 ///
 /// An unset operand, a match context, or a call with more than
 /// [`MAX_BORROWED_ARGUMENTS`] arguments.
-fn read_bif_arguments(
-    process: &ProcessState,
-    operands: &[Operand],
-) -> Result<BifArguments, BeamError> {
+fn read_bif_arguments<'a>(
+    process: &'a ProcessState,
+    operands: &'a [Operand],
+) -> Result<BifArguments<'a>, BeamError> {
     if operands.len() > MAX_BORROWED_ARGUMENTS {
         return Err(error(format!(
             "a BIF call holds more than {MAX_BORROWED_ARGUMENTS} borrowed arguments"
         )));
     }
     let mut arguments = BifArguments::new();
+    for operand in operands {
+        arguments.push(read_any_ref(process, operand)?);
+    }
+    Ok(arguments)
+}
+
+/// Read the argument operands of a `bif` instruction into an owned
+/// [`OwnedBifArguments`], which holds at most [`MAX_BORROWED_ARGUMENTS`]
+/// terms. Each operand must be set, and a match context is a runtime
+/// invariant error, as it is for a call argument. The owned lane copies
+/// each term, so a body of that lane may borrow the scheduler at the same
+/// time.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let operands = [Operand::X(0)];
+/// let arguments = read_owned_bif_arguments(&process, &operands)?;
+/// assert_eq!(arguments.with(|terms| terms.len()), 1);
+/// assert!(read_owned_bif_arguments(&process, &[Operand::X(7)]).is_err());
+/// ```
+///
+/// # Errors
+///
+/// An unset operand, a match context, or a call with more than
+/// [`MAX_BORROWED_ARGUMENTS`] arguments.
+fn read_owned_bif_arguments(
+    process: &ProcessState,
+    operands: &[Operand],
+) -> Result<OwnedBifArguments, BeamError> {
+    if operands.len() > MAX_BORROWED_ARGUMENTS {
+        return Err(error(format!(
+            "a BIF call holds more than {MAX_BORROWED_ARGUMENTS} borrowed arguments"
+        )));
+    }
+    let mut arguments = OwnedBifArguments::new();
     for operand in operands {
         arguments.push(read_any(process, operand)?);
     }

@@ -328,7 +328,8 @@ fn prints_the_size_of_every_structure() {
     report_size::<StrideModel<136>>("instruction_stride_model_136_arm");
     report_size::<BeamModule>("beam_module");
     report_size::<super::bif::BifId>("bif_id");
-    report_size::<super::bif::BifArguments>("bif_arguments");
+    report_size::<super::bif::BifArguments<'static>>("bif_arguments");
+    report_size::<super::bif::OwnedBifArguments>("owned_bif_arguments");
     let module = module_of(1000);
     report_size_of("module_tables", &module.tables);
     report_size_of("jump_targets_header", &module.tables.jump_targets);

@@ -3,8 +3,8 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
     BeamProgram, CodeTable, Issuer, Outcome, Register, Scheduler, StackSlot, call_arguments,
-    function_at_label, read_bif_arguments, read_operand, read_ref, take_owned, write,
-    write_operand,
+    function_at_label, read_bif_arguments, read_operand, read_owned_bif_arguments, read_ref,
+    take_owned, write, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -2648,16 +2648,30 @@ fn handles_register_values_and_reports_invalid_registers() {
 fn reads_bif_arguments_into_a_fixed_buffer_and_reports_invalid_operands() {
     let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
     process.registers = vec![Some(Term::Integer(7))];
+    let operands = [Operand::X(0), Operand::Value(Term::Integer(9))];
     let arguments =
-        read_bif_arguments(&process, &[Operand::X(0), Operand::Value(Term::Integer(9))])
-            .expect("two set operands are valid arguments");
+        read_bif_arguments(&process, &operands).expect("two set operands are valid arguments");
     assert_eq!(
         arguments.with(|terms| terms.to_vec()),
-        vec![Term::Integer(7), Term::Integer(9)]
+        vec![&Term::Integer(7), &Term::Integer(9)]
     );
     assert!(read_bif_arguments(&process, &[Operand::X(1)]).is_err());
     assert!(
         read_bif_arguments(
+            &process,
+            &[Operand::X(0), Operand::X(0), Operand::X(0), Operand::X(0)]
+        )
+        .is_err()
+    );
+    let owned = read_owned_bif_arguments(&process, &operands)
+        .expect("two set operands are valid arguments");
+    assert_eq!(
+        owned.with(|terms| terms.to_vec()),
+        vec![Term::Integer(7), Term::Integer(9)]
+    );
+    assert!(read_owned_bif_arguments(&process, &[Operand::X(1)]).is_err());
+    assert!(
+        read_owned_bif_arguments(
             &process,
             &[Operand::X(0), Operand::X(0), Operand::X(0), Operand::X(0)]
         )
