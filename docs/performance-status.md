@@ -19,9 +19,9 @@ The table holds the headline numbers of the whole programme. Each row names its 
 
 | Headline number | Value | Revision | Session or run group | Load or run rule | Source |
 | --- | --- | --- | --- | --- | --- |
-| The `select_val` probe with 256 choices, 200000 iterations | 526.2 ns, from 984.2 ns | `915590af` before, after on the branch `perf/545-select-val` | One interleaved session of three rounds and three builds, each number the minimum of nine probe runs inside one invocation | One-minute load 3.28 to 7.20 | Issue [#545](https://github.com/fahchen/pbeam/issues/545) and the record |
-| The `select_val` probe with 16 choices, 200000 iterations | 500.2 ns; the bound of 32 keeps the linear form, so the value is the linear row of the session | `915590af` before, after on the branch `perf/545-select-val` | The same interleaved session and the same rule; the ordered rows of the session measure the bound of 10 and do not apply to the landed change | The same loads | Issue [#545](https://github.com/fahchen/pbeam/issues/545) and the record |
-| The `select_val` linear bound, `SELECT_VALUE_LINEAR_LIMIT` | 32 | The branch `perf/545-select-val` | One estimate between the two end-to-end points of the interleaved session and the micro-measurement point at 32 choices | One-minute load 3.28 to 7.20 | Issue [#545](https://github.com/fahchen/pbeam/issues/545) and the record |
+| The `select_val` probe with 256 choices, 200000 iterations | 526.2 ns, from 984.2 ns | `915590af` before, after on the branch `perf/545-select-val`, landed as `8659710f` | One interleaved session of three rounds and three builds, each number the minimum of nine probe runs inside one invocation | One-minute load 3.28 to 7.20 | Issue [#545](https://github.com/fahchen/pbeam/issues/545) and the record |
+| The `select_val` probe with 16 choices, 200000 iterations | 500.2 ns; the bound of 32 keeps the linear form, so the value is the linear row of the session | `915590af` before, after on the branch `perf/545-select-val`, landed as `8659710f` | The same interleaved session and the same rule; the ordered rows of the session measure the bound of 10 and do not apply to the landed change | The same loads | Issue [#545](https://github.com/fahchen/pbeam/issues/545) and the record |
+| The `select_val` linear bound, `SELECT_VALUE_LINEAR_LIMIT` | 32 | The branch `perf/545-select-val`, landed as `8659710f` | One estimate between the two end-to-end points of the interleaved session and the micro-measurement point at 32 choices | One-minute load 3.28 to 7.20 | Issue [#545](https://github.com/fahchen/pbeam/issues/545) and the record |
 | Local `call_only` floor loop, 200000 iterations | 117.9 ns | `ddb32f6e` | The interleaved check session, the minimum of three rounds, and each round is the minimum of nine probe runs inside one invocation | One-minute load 26.15, 29.92, and 25.70 on the three rounds | [#600](https://github.com/fahchen/pbeam/pull/600) and `docs/interpreter-dispatch-measurements.md` |
 | Position `call_only` floor loop, 200000 iterations | 117.8 ns | `ddb32f6e` | The same interleaved check session | The same three rounds | [#600](https://github.com/fahchen/pbeam/pull/600) and the record |
 | Local `call_only` floor loop of the after-revision of #585, 200000 iterations | 118.4 ns | `d54e6a4` | The same interleaved check session | The same three rounds | [#600](https://github.com/fahchen/pbeam/pull/600) and the record |
@@ -44,7 +44,7 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
-### 2026-10-15 01:10 JST - The `select_val` dispatch decision, task [#545](https://github.com/fahchen/pbeam/issues/545), branch `perf/545-select-val`
+### 2026-10-15 01:10 JST - The `select_val` dispatch decision, task [#545](https://github.com/fahchen/pbeam/issues/545), pull request [#622](https://github.com/fahchen/pbeam/pull/622) - Landed as `8659710f`
 
 The change adds a prepared form of the `select_val` choice list and removes the work-vector allocation of the term comparison that the ordered form uses. The decoder builds the prepared form one time at load time. A list of at most `SELECT_VALUE_LINEAR_LIMIT` choices keeps the encoded order and the linear walk of every earlier revision. A larger list is sorted by the ERTS term order and the interpreter binary-searches it. A duplicate choice keeps the linear form, so the first-match result of ERTS is preserved. The measured before revision is `915590af`, the head of `origin/main` that the branch starts from.
 
@@ -80,7 +80,7 @@ The 256-choice shape is direct for the landed change: it is above both bounds, s
 
 Source: the section "The `select_val` dispatch decision of task [#545](https://github.com/fahchen/pbeam/issues/545)" of `docs/interpreter-dispatch-measurements.md` and the task branch. Known limits: the bound of 32 is an estimate, because no end-to-end probe covers 17 to 32 choices; `docs/backlog.md` records that gap with its trigger. The fixture measures the 256-choice shape, the 16-choice shape, and the 2-choice control, so no number here covers a `select_val` with 6878 choices.
 
-### 2026-10-14 23:50 JST - Shared append tree, task [#558](https://github.com/fahchen/pbeam/issues/558), pull request [#620](https://github.com/fahchen/pbeam/pull/620) - **Not landed**
+### 2026-10-14 23:50 JST - Shared append tree, task [#558](https://github.com/fahchen/pbeam/issues/558), pull request [#620](https://github.com/fahchen/pbeam/pull/620) - Landed as `a4072f1f`
 
 One interleaved session of `tests/integration/binary_append_bench.rs` on the release profile, three rounds, and each number is the minimum of nine timed runs inside one invocation. The before revision is `915590af` with the benchmark files of the branch, and the after revision is the branch `perf/558-append-tree` at `eb1dd92a`. The one-minute load of the rounds is 7.96 to 9.36.
 
