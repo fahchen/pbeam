@@ -137,6 +137,20 @@ impl Binary {
         self.0.chunks.as_ref()
     }
 
+    /// Return the array that joins the chunks of a view that an append
+    /// built, or an empty array for each other view, for the accounting and
+    /// the tests.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Binary::from(b"ab".to_vec()).flat_backing().is_empty());
+    /// ```
+    #[cfg(test)]
+    pub(super) fn flat_backing(&self) -> &Arc<Vec<u8>> {
+        self.0.flat_backing()
+    }
+
     /// Return whether the two handles own one view. Two handles that share
     /// one view share one descriptor allocation, so the live-byte walk
     /// counts that allocation once.

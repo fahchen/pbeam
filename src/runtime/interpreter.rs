@@ -4424,7 +4424,9 @@ fn create_binary(
                     arrays.extend(binary.chunks());
                     process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
                 }
-                _ => {}
+                // The predicate above holds only bytes and shared binary
+                // segments, so this arm is not reachable.
+                BinaryPart::Integer { .. } | BinaryPart::Utf8(_) => {}
             }
         }
         return Ok(Ok(Term::Binary(Binary::concat_arrays(&start, arrays))));

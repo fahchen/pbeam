@@ -227,6 +227,33 @@ fn takes_the_bytes_of_the_last_holder_with_no_copy() {
 }
 
 #[test]
+fn reports_the_bytes_of_each_chunk_of_an_append() {
+    // A view that an append built keeps its bytes in several arrays, so the
+    // accounting counts the capacity of each one and of the joined array.
+    let mut first = Vec::with_capacity(64);
+    first.extend_from_slice(&[1_u8; 5]);
+    let mut second = Vec::with_capacity(4096);
+    second.extend_from_slice(&[2_u8; 4095]);
+    let array = Binary::from_chunks(vec![Arc::new(first), Arc::new(second)]);
+    let chunks: usize = array
+        .chunk_backing()
+        .expect("a large append keeps its arrays")
+        .iter()
+        .map(|chunk| chunk.capacity())
+        .sum();
+    assert_eq!(array.allocated_bytes(), array.backing().capacity() + chunks);
+    // The first read joins the arrays, and the account counts the joined
+    // array as well.
+    let joined = array.to_bytes();
+    assert_eq!(joined.len(), 4100);
+    assert_eq!(
+        array.allocated_bytes(),
+        array.backing().capacity() + chunks + array.flat_backing().capacity()
+    );
+    assert_eq!(array.take_bytes(), joined);
+}
+
+#[test]
 fn reports_the_bytes_of_the_backing_and_the_packed_array() {
     let bytes = Binary::from(b"abcd".to_vec());
     assert!(bytes.allocated_bytes() >= 4);
