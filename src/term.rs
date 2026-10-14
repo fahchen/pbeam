@@ -788,103 +788,136 @@ impl Term {
 
 impl fmt::Debug for Term {
     /// Write the text of a derived `Debug`, for example
-    /// `Tuple([Atom("undef"), Integer(1)])` or `Map([(Atom("a"), Integer(1))])`,
-    /// with a work stack. A list writes its elements: a proper list as
-    /// `List([Integer(1)])` and `[]` as `List([])`, and an improper list
-    /// with its tail as `ImproperList([Integer(1)], Atom("x"))`. A fun
-    /// writes its entry and its free variables, for example
-    /// `Fun(Local(Lambda { .. }), [Atom("tag")])`.
+    /// `Tuple([Atom(725), Integer(1)])` or `Map([(Atom(1150), Integer(1))])`,
+    /// with a work stack. An atom writes its table index, because a bare term
+    /// carries no table and the caller of `Debug::fmt` cannot pass one;
+    /// [`debug_term`] writes the name through a table. A list writes its
+    /// elements: a proper list as `List([Integer(1)])` and `[]` as
+    /// `List([])`, and an improper list with its tail as
+    /// `ImproperList([Integer(1)], Atom(725))`. A fun writes its entry and
+    /// its free variables, for example
+    /// `Fun(Local(Lambda { .. }), [Atom(725)])`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let term = Term::tuple(vec![Term::static_atom("undef"), Term::nil()]);
-    /// assert_eq!(format!("{term:?}"), "Tuple([Atom(\"undef\"), List([])])");
+    /// assert_eq!(format!("{term:?}"), "Tuple([Atom(725), List([])])");
     /// ```
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        enum Item<'a> {
-            Term(&'a Term),
-            Text(&'static str),
-        }
-        let mut items = vec![Item::Term(self)];
-        while let Some(item) = items.pop() {
-            let term = match item {
-                Item::Text(text) => {
-                    formatter.write_str(text)?;
-                    continue;
-                }
-                Item::Term(term) => term,
-            };
-            match term {
-                Term::Atom(atom) => write!(formatter, "Atom({:?})", atom.name())?,
-                Term::Binary(bytes) => write!(formatter, "Binary({bytes:?})")?,
-                Term::Integer(value) => write!(formatter, "Integer({value:?})")?,
-                Term::Pid(pid) => write!(formatter, "Pid({pid:?})")?,
-                Term::Port(port) => write!(formatter, "Port({port:?})")?,
-                Term::Reference(reference) => write!(formatter, "Reference({reference:?})")?,
-                Term::MatchContext(context) => write!(formatter, "MatchContext({context:?})")?,
-                Term::Nil | Term::Cons(_) => {
-                    let (elements, tail) = term.list_cells().expect("the term is a list");
-                    let elements: Vec<_> = elements.collect();
-                    match tail {
-                        None => {
-                            formatter.write_str("List([")?;
-                            items.push(Item::Text("])"));
-                        }
-                        Some(tail) => {
-                            formatter.write_str("ImproperList([")?;
-                            items.push(Item::Text(")"));
-                            items.push(Item::Term(tail));
-                            items.push(Item::Text("], "));
-                        }
+        write_debug(self, None, formatter)
+    }
+}
+
+/// Return the text of `term` for a message, with each atom name read from
+/// `atoms`.
+///
+/// [`Debug for Term`] writes the atom index, because a bare term carries no
+/// table and the caller of `Debug::fmt` cannot pass one. A production message
+/// that holds the table calls this function, so its text keeps the atom name.
+/// Every other part of the text is the same as the `Debug` text.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let table = AtomTable::new();
+/// let term = Term::tuple(vec![Term::static_atom("undef"), Term::nil()]);
+/// assert_eq!(debug_term(&term, &table), "Tuple([Atom(\"undef\"), List([])])");
+/// ```
+pub fn debug_term(term: &Term, atoms: &AtomTable) -> String {
+    let mut text = String::new();
+    write_debug(term, Some(atoms), &mut text).expect("writing to a String succeeds");
+    text
+}
+
+/// Write the `Debug` text of `term` to `out`, with the atom name from `atoms`
+/// when it is `Some` and the atom index when it is `None`.
+fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write) -> fmt::Result {
+    enum Item<'a> {
+        Term(&'a Term),
+        Text(&'static str),
+    }
+    let mut items = vec![Item::Term(term)];
+    while let Some(item) = items.pop() {
+        let term = match item {
+            Item::Text(text) => {
+                out.write_str(text)?;
+                continue;
+            }
+            Item::Term(term) => term,
+        };
+        match term {
+            Term::Atom(atom) => match atoms {
+                Some(atoms) => write!(out, "Atom({:?})", atoms.name_of(atom))?,
+                None => write!(out, "Atom({})", atom.index())?,
+            },
+            Term::Binary(bytes) => write!(out, "Binary({bytes:?})")?,
+            Term::Integer(value) => write!(out, "Integer({value:?})")?,
+            Term::Pid(pid) => write!(out, "Pid({pid:?})")?,
+            Term::Port(port) => write!(out, "Port({port:?})")?,
+            Term::Reference(reference) => write!(out, "Reference({reference:?})")?,
+            Term::MatchContext(context) => write!(out, "MatchContext({context:?})")?,
+            Term::Nil | Term::Cons(_) => {
+                let (elements, tail) = term.list_cells().expect("the term is a list");
+                let elements: Vec<_> = elements.collect();
+                match tail {
+                    None => {
+                        out.write_str("List([")?;
+                        items.push(Item::Text("])"));
                     }
-                    for (index, element) in elements.iter().enumerate().rev() {
-                        items.push(Item::Term(element));
-                        if index > 0 {
-                            items.push(Item::Text(", "));
-                        }
-                    }
-                }
-                Term::Tuple(elements) => {
-                    formatter.write_str("Tuple([")?;
-                    items.push(Item::Text("])"));
-                    for (index, element) in elements.iter().enumerate().rev() {
-                        items.push(Item::Term(element));
-                        if index > 0 {
-                            items.push(Item::Text(", "));
-                        }
-                    }
-                }
-                Term::Fun(fun) => {
-                    let (target, free) = (fun.target(), fun.free());
-                    write!(formatter, "Fun({target:?}, [")?;
-                    items.push(Item::Text("])"));
-                    for (index, element) in free.iter().enumerate().rev() {
-                        items.push(Item::Term(element));
-                        if index > 0 {
-                            items.push(Item::Text(", "));
-                        }
-                    }
-                }
-                Term::Map(map) => {
-                    formatter.write_str("Map([")?;
-                    items.push(Item::Text("])"));
-                    let pairs: Vec<_> = map.iter().collect();
-                    for (index, (key, value)) in pairs.into_iter().enumerate().rev() {
+                    Some(tail) => {
+                        out.write_str("ImproperList([")?;
                         items.push(Item::Text(")"));
-                        items.push(Item::Term(value));
+                        items.push(Item::Term(tail));
+                        items.push(Item::Text("], "));
+                    }
+                }
+                for (index, element) in elements.iter().enumerate().rev() {
+                    items.push(Item::Term(element));
+                    if index > 0 {
                         items.push(Item::Text(", "));
-                        items.push(Item::Term(key));
-                        items.push(Item::Text("("));
-                        if index > 0 {
-                            items.push(Item::Text(", "));
-                        }
+                    }
+                }
+            }
+            Term::Tuple(elements) => {
+                out.write_str("Tuple([")?;
+                items.push(Item::Text("])"));
+                for (index, element) in elements.iter().enumerate().rev() {
+                    items.push(Item::Term(element));
+                    if index > 0 {
+                        items.push(Item::Text(", "));
+                    }
+                }
+            }
+            Term::Fun(fun) => {
+                let (target, free) = (fun.target(), fun.free());
+                write!(out, "Fun({target:?}, [")?;
+                items.push(Item::Text("])"));
+                for (index, element) in free.iter().enumerate().rev() {
+                    items.push(Item::Term(element));
+                    if index > 0 {
+                        items.push(Item::Text(", "));
+                    }
+                }
+            }
+            Term::Map(map) => {
+                out.write_str("Map([")?;
+                items.push(Item::Text("])"));
+                let pairs: Vec<_> = map.iter().collect();
+                for (index, (key, value)) in pairs.into_iter().enumerate().rev() {
+                    items.push(Item::Text(")"));
+                    items.push(Item::Term(value));
+                    items.push(Item::Text(", "));
+                    items.push(Item::Term(key));
+                    items.push(Item::Text("("));
+                    if index > 0 {
+                        items.push(Item::Text(", "));
                     }
                 }
             }
         }
-        Ok(())
     }
+    Ok(())
 }
 
 /// An identifier for a process in this runtime. The order of identifiers

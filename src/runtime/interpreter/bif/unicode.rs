@@ -14,7 +14,7 @@ use crate::runtime::scheduler::CONTEXT_REDS;
 use crate::runtime::unicode::{
     Utf8Output, Utf8State, analyze_utf8, build_utf8, code_points, is_incomplete, utf8_need,
 };
-use crate::term::Atom;
+use crate::term::{Atom, AtomTable, debug_term};
 
 /// The loop steps for each reduction (`LOOP_FACTOR`, `erl_unicode.c:48`).
 const LOOP_FACTOR: i64 = 10;
@@ -83,15 +83,16 @@ fn cost_to_proc(process: &mut ProcessState, steps: i64) {
 /// # Examples
 ///
 /// ```rust,ignore
+/// let atoms = AtomTable::new();
 /// let chardata = Term::list_from(vec![Term::Integer(104), Term::Integer(105)]);
-/// let result = characters_to_binary(&mut process, &chardata, &Term::static_atom("unicode"))?;
+/// let result = characters_to_binary(&mut process, &chardata, &Term::static_atom("unicode"), &atoms)?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes == b"hi"));
 /// let latin1 = Term::binary(vec![200]);
-/// let result = characters_to_binary(&mut process, &latin1, &Term::static_atom("latin1"))?;
+/// let result = characters_to_binary(&mut process, &latin1, &Term::static_atom("latin1"), &atoms)?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes == [195, 136]));
 /// let foo = Term::list_from(vec![Term::static_atom("foo")]);
-/// assert!(matches!(characters_to_binary(&mut process, &foo, &Term::static_atom("unicode"))?, BifResult::Raise { .. }));
-/// assert!(characters_to_binary(&mut process, &chardata, &Term::static_atom("utf16")).is_err());
+/// assert!(matches!(characters_to_binary(&mut process, &foo, &Term::static_atom("unicode"), &atoms)?, BifResult::Raise { .. }));
+/// assert!(characters_to_binary(&mut process, &chardata, &Term::static_atom("utf16"), &atoms).is_err());
 /// ```
 ///
 /// # Errors
@@ -104,6 +105,7 @@ pub(super) fn characters_to_binary(
     process: &mut ProcessState,
     chardata: &Term,
     encoding: &Term,
+    atoms: &AtomTable,
 ) -> Result<BifResult, BeamError> {
     let latin1 = match encoding {
         Term::Atom(encoding) if encoding.index() == Atom::static_index("latin1") => true,
@@ -111,7 +113,8 @@ pub(super) fn characters_to_binary(
         // ponytail: ERTS traps each other encoding to `unicode:characters_to_binary_int/2`; see "Chardata conversion" in docs/erts-differences.md.
         _ => {
             return Err(error(format!(
-                "unsupported unicode:characters_to_binary/2 encoding {encoding:?}"
+                "unsupported unicode:characters_to_binary/2 encoding {}",
+                debug_term(encoding, atoms)
             )));
         }
     };

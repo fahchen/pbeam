@@ -14,7 +14,7 @@ use crate::{
         ets::{Access, Table},
         process::{ProcessState, Start, tests::frame},
     },
-    term::{Atom, AtomTable, Lambda, ProcessId, Reference, test_atom, test_atom_table},
+    term::{Atom, AtomTable, Lambda, ProcessId, Reference, debug_term, test_atom, test_atom_table},
 };
 
 /// Return the initial capabilities of the default policy.
@@ -1963,7 +1963,10 @@ fn raises_class_error_for_the_raw_stack_trace_nil() {
     ] {
         assert_eq!(
             raise(trace.clone()),
-            format!("invariant error: {trace:?} is not a raw stack trace")
+            format!(
+                "invariant error: {} is not a raw stack trace",
+                debug_term(&trace, &test_atom_table())
+            )
         );
     }
 }
@@ -2322,6 +2325,21 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
             destination: Operand::X(1),
         }]),
         "invariant error: Value(Atom(\"a\")) holds Atom(\"a\"), not a match context"
+    );
+}
+
+#[test]
+fn writes_the_operand_of_a_match_context_error_with_each_atom_name() {
+    // `Debug for Term` writes the atom index, because a bare term carries no
+    // table. The invariant error of a match context holds the table, so it
+    // writes the name of a `Value` operand and its index for a register.
+    assert_eq!(
+        super::debug_operand(&Operand::Value(test_atom("a")), &test_atom_table()),
+        "Value(Atom(\"a\"))"
+    );
+    assert_eq!(
+        super::debug_operand(&Operand::X(0), &AtomTable::new()),
+        "X(0)"
     );
 }
 
@@ -3726,7 +3744,10 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
             process_info(process.clone(), item.clone())
                 .unwrap_err()
                 .to_string(),
-            format!("unsupported erlang:process_info/2 arguments {process:?}, {item:?}")
+            format!(
+                "unsupported erlang:process_info/2 arguments {process:?}, {}",
+                debug_term(&item, &test_atom_table())
+            )
         );
     }
     // ERTS 29.1.1: process_info(self(), registered_name) is [] for a

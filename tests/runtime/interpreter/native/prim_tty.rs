@@ -1,7 +1,23 @@
 use super::*;
 use crate::runtime::capability::{AllowAll, Policy};
 use crate::runtime::process::tests::frame;
-use crate::term::Map;
+use crate::term::{Map, debug_term};
+
+/// Return the `Debug` text of a BIF result, with each atom name from `atoms`.
+///
+/// `Debug for Term` writes the atom index, because a bare term carries no
+/// table. The atom names of a BIF result come from the run, so this test
+/// reads them through the table of that run.
+fn debug_bif(result: &BifResult, atoms: &AtomTable) -> String {
+    match result {
+        BifResult::Value(term) => format!("Value({})", debug_term(term, atoms)),
+        BifResult::Raise { class, reason } => format!(
+            "Raise {{ class: {class:?}, reason: {} }}",
+            debug_term(reason, atoms)
+        ),
+        other => format!("{other:?}"),
+    }
+}
 
 #[test]
 fn gives_ebadf_for_an_fd_that_is_not_open() {
@@ -50,7 +66,7 @@ fn gives_the_tcsetattr_errno_and_keeps_no_owner() {
     );
     let result = tty_init(&mut scheduler, &Term::Reference(reference), &options).unwrap();
     assert_eq!(
-        format!("{result:?}"),
+        debug_bif(&result, &scheduler.atoms),
         r#"Value(Tuple([Atom("error"), Tuple([Atom("tcsetattr"), Atom("ebadf")])]))"#
     );
     let tty = scheduler

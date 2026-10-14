@@ -12,7 +12,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{BeamProgram, Term, debug_term};
 
 #[path = "../common/boot.rs"]
 mod boot;
@@ -1548,7 +1548,11 @@ fn isolated_run() {
     let entry = env::var(ENTRY).unwrap();
     let (module, function) = entry.split_once(':').unwrap();
     let result = program.execute(module, function, &[]);
-    fs::write(env::var_os(RESULT).unwrap(), format!("{result:?}")).unwrap();
+    let text = match &result {
+        Ok(term) => format!("Ok({})", debug_term(&term.term, term.atoms())),
+        Err(error) => format!("Err({error:?})"),
+    };
+    fs::write(env::var_os(RESULT).unwrap(), text).unwrap();
 }
 
 /// Run `command` with `TERM=dumb`, `LC_ALL=C.UTF-8`, the variables of

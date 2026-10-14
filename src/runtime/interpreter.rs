@@ -14,8 +14,8 @@ use crate::{
     },
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Fun, HostTerm, Insert, Map, MatchState, Target, Term, print_term,
-        segment_equals, segment_integer,
+        Atom, AtomTable, Fun, HostTerm, Insert, Map, MatchState, Target, Term, debug_term,
+        print_term, segment_equals, segment_integer,
     },
 };
 use std::{borrow::Cow, collections::HashMap, rc::Rc, sync::Arc};
@@ -1013,6 +1013,7 @@ impl BeamProgram {
                     write(process, &Operand::X(0), class)?;
                 }
                 Instruction::CatchEnd { register } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
                     try_end(process, *register)?;
                     // An unset x0 is the ERTS non-value: an exception reached
                     // the handler. A normal return always sets x0. A throw
@@ -1027,7 +1028,7 @@ impl BeamProgram {
                         if !throw {
                             if error_class {
                                 let (_, stack) =
-                                    raw_stacktrace(read_ref(process, &Operand::X(2))?)?;
+                                    raw_stacktrace(read_ref(process, &Operand::X(2))?, atoms)?;
                                 reason = Term::tuple(vec![reason, stack]);
                             }
                             reason = Term::tuple(vec![Term::static_atom("EXIT"), reason]);
@@ -1130,7 +1131,9 @@ impl BeamProgram {
                                     .collect(),
                                 atoms,
                             )
-                            .map_err(|key| error(format!("unsupported map key {key:?}")))?;
+                            .map_err(|key| {
+                                error(format!("unsupported map key {}", debug_term(&key, atoms)))
+                            })?;
                         Ok(None)
                     })? {
                         Update::Written => {}
@@ -1312,19 +1315,25 @@ impl BeamProgram {
                     fail_label,
                     source,
                     destination,
-                } => match read_any(process, source)? {
-                    Term::Binary(ref bytes) => {
-                        let state = MatchState::new(bytes.clone());
-                        write(process, destination, Term::MatchContext(Arc::new(state)))?;
+                } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    match read_any(process, source)? {
+                        Term::Binary(ref bytes) => {
+                            let state = MatchState::new(bytes.clone());
+                            write(process, destination, Term::MatchContext(Arc::new(state)))?;
+                        }
+                        context @ Term::MatchContext(_) => {
+                            write(process, destination, context)?;
+                        }
+                        other if *fail_label == 0 => {
+                            return Err(error(format!(
+                                "invariant error: bs_start_match3 with no fail label got {}, not a binary or a match context",
+                                debug_term(&other, atoms)
+                            )));
+                        }
+                        _ => cursor.position = label_position(*fail_label)?,
                     }
-                    context @ Term::MatchContext(_) => write(process, destination, context)?,
-                    other if *fail_label == 0 => {
-                        return Err(error(format!(
-                            "invariant error: bs_start_match3 with no fail label got {other:?}, not a binary or a match context"
-                        )));
-                    }
-                    _ => cursor.position = label_position(*fail_label)?,
-                },
+                }
                 // On a 64-bit system, ERTS loads `bs_start_match4` with
                 // `resume` as nothing when the source is the destination,
                 // and else as `move` (JIT jit/arm/ops.tab:1041-1045). The
@@ -1335,7 +1344,8 @@ impl BeamProgram {
                     source,
                     destination,
                 } => {
-                    let context = any_match_context(process, source)?;
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let context = any_match_context(process, source, atoms)?;
                     write(process, destination, Term::MatchContext(context))?;
                 }
                 // ERTS `bs_get_tail` writes the bits after the position as
@@ -1347,7 +1357,8 @@ impl BeamProgram {
                     context,
                     destination,
                 } => {
-                    let state = match_context(process, context)?;
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let state = match_context(process, context, atoms)?;
                     let bits = state.remaining_bits();
                     let Some(tail) = state.tail() else {
                         return Err(error(format!(
@@ -1371,7 +1382,8 @@ impl BeamProgram {
                     unit,
                     destination,
                 } => {
-                    let state = match_context(process, context)?;
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let state = match_context(process, context, atoms)?;
                     // ERTS writes a sub-bitstring that refers to the
                     // original binary and moves the position past the
                     // segment (`erts_bs_get_binary_2`, `erl_bits.c:400-424`),
@@ -1401,21 +1413,24 @@ impl BeamProgram {
                     context,
                     destination,
                 } => {
-                    let position = match_context(process, context)?.position();
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let position = match_context(process, context, atoms)?.position();
                     write(process, destination, Term::Integer(position as i64))?;
                 }
                 // ERTS `bs_set_position` sets `sb->start` to the unsigned
                 // value of the position (emu bs_instrs.tab:1120-1123). The
                 // compiler gives it a position that `bs_get_position` made.
                 Instruction::BinarySetPosition { context, position } => {
-                    let state = any_match_context(process, context)?;
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let state = any_match_context(process, context, atoms)?;
                     match read_ref(process, position)? {
                         Term::Integer(value) if let Ok(value) = usize::try_from(*value) => {
                             state.set_position(value);
                         }
                         other => {
                             return Err(error(format!(
-                                "invariant error: bs_set_position position {other:?} is not a position"
+                                "invariant error: bs_set_position position {} is not a position",
+                                debug_term(other, atoms)
                             )));
                         }
                     }
@@ -1429,7 +1444,8 @@ impl BeamProgram {
                     context,
                     destination,
                 } => {
-                    let code_point = match_context(process, context)?.get_utf8();
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let code_point = match_context(process, context, atoms)?.get_utf8();
                     match code_point {
                         Some(code_point) => {
                             write(process, destination, Term::Integer(code_point.into()))?;
@@ -1442,7 +1458,8 @@ impl BeamProgram {
                     context,
                     commands,
                 } => {
-                    if !binary_match(process, context, commands)? {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    if !binary_match(process, context, commands, atoms)? {
                         cursor.position = label_position(*fail_label)?;
                     }
                 }
@@ -1583,7 +1600,8 @@ impl BeamProgram {
                     write(process, destination, record)?;
                 }
                 Instruction::GetList { source, head, tail } => {
-                    let (first, rest) = nonempty_list(read_ref(process, source)?)?;
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let (first, rest) = nonempty_list(read_ref(process, source)?, atoms)?;
                     let (first, rest) = (first.clone(), rest.clone());
                     write(process, head, first)?;
                     write(process, tail, rest)?;
@@ -1593,10 +1611,12 @@ impl BeamProgram {
                     destination,
                 } => {
                     // `get_hd` reads only the head, so only the head is copied.
+                    let (process, atoms) = scheduler.current_process_and_atoms();
                     let list = read_ref(process, source)?;
                     let Some(head) = list.list_head() else {
                         return Err(error(format!(
-                            "BEAM list source {list:?} is not a nonempty list"
+                            "BEAM list source {} is not a nonempty list",
+                            debug_term(list, atoms)
                         )));
                     };
                     let head = head.clone();
@@ -1607,7 +1627,8 @@ impl BeamProgram {
                     destination,
                 } => {
                     // `get_tl` reads only the tail, so only the tail is copied.
-                    let (_, rest) = nonempty_list(read_ref(process, source)?)?;
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let (_, rest) = nonempty_list(read_ref(process, source)?, atoms)?;
                     let rest = rest.clone();
                     write(process, destination, rest)?;
                 }
@@ -1777,7 +1798,8 @@ impl BeamProgram {
                 // `jit/arm/instr_common.cpp:3046-3056`). The compiler moves
                 // it from `x2` first.
                 Instruction::BuildStacktrace => {
-                    let (_, stack) = raw_stacktrace(read_ref(process, &Operand::X(0))?)?;
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let (_, stack) = raw_stacktrace(read_ref(process, &Operand::X(0))?, atoms)?;
                     write(process, &Operand::X(0), stack)?;
                 }
                 // ERTS `i_raise` raises the reason again with the class and
@@ -1787,7 +1809,8 @@ impl BeamProgram {
                 // `jit/x86/instr_common.cpp:3138-3164`;
                 // `erts_sanitize_freason` in `beam_common.c:1089-1097`).
                 Instruction::Raise { trace, value } => {
-                    let (class, stack) = raw_stacktrace(read_ref(process, trace)?)?;
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let (class, stack) = raw_stacktrace(read_ref(process, trace)?, atoms)?;
                     let value = read(process, value)?;
                     if let Some(outcome) = raise_with_stacktrace(process, class, value, stack) {
                         return Ok(outcome);
@@ -1821,7 +1844,8 @@ impl BeamProgram {
                 // `badarg` to `x0` and continues (emu `instrs.tab:1253-1263`;
                 // `raw_raise` in `beam_common.c:1148-1179`).
                 Instruction::RawRaise => {
-                    let (_, stack) = raw_stacktrace(read_ref(process, &Operand::X(2))?)?;
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let (_, stack) = raw_stacktrace(read_ref(process, &Operand::X(2))?, atoms)?;
                     let class = ExceptionClass::from_term(read_ref(process, &Operand::X(0))?);
                     let value = read(process, &Operand::X(1))?;
                     match class {
@@ -3205,16 +3229,17 @@ fn raise_with_stacktrace(
 /// # Examples
 ///
 /// ```rust,ignore
+/// let atoms = AtomTable::new();
 /// let raw = Term::tuple(vec![Term::static_atom("exit"), Term::nil()]);
-/// assert!(matches!(raw_stacktrace(&raw)?, (ExceptionClass::Exit, stack) if stack.is_nil()));
-/// assert!(matches!(raw_stacktrace(&Term::nil())?, (ExceptionClass::Error, _)));
+/// assert!(matches!(raw_stacktrace(&raw, &atoms)?, (ExceptionClass::Exit, stack) if stack.is_nil()));
+/// assert!(matches!(raw_stacktrace(&Term::nil(), &atoms)?, (ExceptionClass::Error, _)));
 /// ```
 ///
 /// # Errors
 ///
 /// Each other term gives a runtime invariant error. ERTS reads it as a
 /// raw stack trace with no check, so its result is not defined.
-fn raw_stacktrace(raw: &Term) -> Result<(ExceptionClass, Term), BeamError> {
+fn raw_stacktrace(raw: &Term, atoms: &AtomTable) -> Result<(ExceptionClass, Term), BeamError> {
     if let Term::Tuple(parts) = raw
         && let [class, stack] = &parts[..]
         && let Some(class) = ExceptionClass::from_term(class)
@@ -3225,7 +3250,8 @@ fn raw_stacktrace(raw: &Term) -> Result<(ExceptionClass, Term), BeamError> {
         return Ok((ExceptionClass::Error, raw.clone()));
     }
     Err(error(format!(
-        "invariant error: {raw:?} is not a raw stack trace"
+        "invariant error: {} is not a raw stack trace",
+        debug_term(raw, atoms)
     )))
 }
 
@@ -3251,16 +3277,21 @@ fn try_end(process: &mut ProcessState, register: u32) -> Result<(), BeamError> {
 /// # Examples
 ///
 /// ```rust,ignore
+/// let atoms = AtomTable::new();
 /// let x = || Term::static_atom("x");
 /// let list = Term::list_from(vec![Term::Integer(1), Term::Integer(2)]);
-/// assert_eq!(nonempty_list(&list)?, (&Term::Integer(1), &Term::list_from(vec![Term::Integer(2)])));
+/// assert_eq!(nonempty_list(&list, &atoms)?, (&Term::Integer(1), &Term::list_from(vec![Term::Integer(2)])));
 /// let improper = Term::list_with_tail(vec![Term::Integer(1)], x());
-/// assert_eq!(nonempty_list(&improper)?, (&Term::Integer(1), &x()));
-/// assert!(nonempty_list(&Term::nil()).is_err());
+/// assert_eq!(nonempty_list(&improper, &atoms)?, (&Term::Integer(1), &x()));
+/// assert!(nonempty_list(&Term::nil(), &atoms).is_err());
 /// ```
-fn nonempty_list(list: &Term) -> Result<(&Term, &Term), BeamError> {
-    list.cons_cell()
-        .ok_or_else(|| error(format!("BEAM list source {list:?} is not a nonempty list")))
+fn nonempty_list<'a>(list: &'a Term, atoms: &AtomTable) -> Result<(&'a Term, &'a Term), BeamError> {
+    list.cons_cell().ok_or_else(|| {
+        error(format!(
+            "BEAM list source {} is not a nonempty list",
+            debug_term(list, atoms)
+        ))
+    })
 }
 
 /// Return the code position that a branch target names. The loader
@@ -3433,12 +3464,17 @@ fn read_any_ref<'a>(
 /// # Examples
 ///
 /// ```rust,ignore
+/// let atoms = AtomTable::new();
 /// let context = Arc::new(MatchState::new(b"a"));
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
-/// assert_eq!(match_context(&process, &Operand::X(0))?.position(), 0);
+/// assert_eq!(match_context(&process, &Operand::X(0), &atoms)?.position(), 0);
 /// ```
-fn match_context(process: &ProcessState, operand: &Operand) -> Result<Arc<MatchState>, BeamError> {
-    let context = any_match_context(process, operand)?;
+fn match_context(
+    process: &ProcessState,
+    operand: &Operand,
+    atoms: &AtomTable,
+) -> Result<Arc<MatchState>, BeamError> {
+    let context = any_match_context(process, operand, atoms)?;
     check_known_position(&context, operand)?;
     Ok(context)
 }
@@ -3517,20 +3553,47 @@ fn match_context_byte_size(
 /// # Examples
 ///
 /// ```rust,ignore
+/// let atoms = AtomTable::new();
 /// let context = Arc::new(MatchState::new(b"a"));
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
-/// assert_eq!(any_match_context(&process, &Operand::X(0))?.position(), 0);
-/// assert!(any_match_context(&process, &Operand::Value(Term::Integer(1))).is_err());
+/// assert_eq!(any_match_context(&process, &Operand::X(0), &atoms)?.position(), 0);
+/// assert!(any_match_context(&process, &Operand::Value(Term::Integer(1)), &atoms).is_err());
 /// ```
 fn any_match_context(
     process: &ProcessState,
     operand: &Operand,
+    atoms: &AtomTable,
 ) -> Result<Arc<MatchState>, BeamError> {
     match &read_any(process, operand)? {
         Term::MatchContext(context) => Ok(Arc::clone(context)),
         other => Err(error(format!(
-            "invariant error: {operand:?} holds {other:?}, not a match context"
+            "invariant error: {} holds {}, not a match context",
+            debug_operand(operand, atoms),
+            debug_term(other, atoms)
         ))),
+    }
+}
+
+/// Return the text of `operand` for a message, with the atom name of a
+/// `Value` operand read from `atoms`.
+///
+/// [`Operand`] derives `Debug`, and a `Value` operand writes the term with
+/// the `Debug` text of the term, which holds the atom index. This function
+/// writes that term with [`debug_term`], so a message keeps the atom name.
+/// The other forms write the same text as the derived `Debug`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let operand = Operand::Value(Term::static_atom("a"));
+/// assert_eq!(debug_operand(&operand, &atoms), "Value(Atom(\"a\"))");
+/// assert_eq!(debug_operand(&Operand::X(0), &atoms), "X(0)");
+/// ```
+fn debug_operand(operand: &Operand, atoms: &AtomTable) -> String {
+    match operand {
+        Operand::Value(value) => format!("Value({})", debug_term(value, atoms)),
+        other => format!("{other:?}"),
     }
 }
 
@@ -3802,20 +3865,22 @@ fn match_context_escape(operand: &Operand) -> BeamError {
 /// # Examples
 ///
 /// ```rust,ignore
+/// let atoms = AtomTable::new();
 /// let context = Arc::new(MatchState::new(&[7, 8]));
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
 /// let unit = NonZeroU64::new(8).unwrap();
 /// let byte = BinaryMatchCommand::Integer { size: 8, little: false, signed: false, destination: Operand::X(1) };
-/// assert!(binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureAtLeast { size: 8, unit }, byte])?);
+/// assert!(binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureAtLeast { size: 8, unit }, byte], &atoms)?);
 /// assert_eq!(read(&process, &Operand::X(1))?, Term::Integer(7));
-/// assert!(!binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureExactly { size: 0 }])?);
+/// assert!(!binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureExactly { size: 0 }], &atoms)?);
 /// ```
 fn binary_match(
     process: &mut ProcessState,
     context: &Operand,
     commands: &[BinaryMatchCommand],
+    atoms: &AtomTable,
 ) -> Result<bool, BeamError> {
-    let context = match_context(process, context)?;
+    let context = match_context(process, context, atoms)?;
     let state = &*context;
     // A binary of `size` bits, or a runtime error for a bitstring.
     let binary_size = |command: &str, size: u64| {

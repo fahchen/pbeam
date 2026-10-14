@@ -3,7 +3,7 @@
 use super::BifResult::Value;
 use super::ycf::{YcfTurn, run_units};
 use super::*;
-use crate::term::{AtomTable, Direction, from_list_units};
+use crate::term::{AtomTable, Direction, debug_term, from_list_units};
 
 /// Run `maps:keys/1`: return the keys of a map in map order, as ERTS
 /// `maps_keys_1` does (`erl_map.c:1207-1253`). A term that is not a map
@@ -163,7 +163,7 @@ pub(super) fn put(
     };
     entries
         .insert(key.clone(), value.clone(), atoms)
-        .map_err(|key| error(format!("unsupported map key {key:?}")))?;
+        .map_err(|key| error(format!("unsupported map key {}", debug_term(&key, atoms))))?;
     Ok(Value(map))
 }
 
@@ -258,7 +258,7 @@ pub(super) fn from_list(
                 .into_iter()
                 .map(|(key, value)| (key.clone(), value.clone()));
             let map = Map::from_pairs(pairs.collect(), atoms)
-                .map_err(|key| error(format!("unsupported map key {key:?}")))?;
+                .map_err(|key| error(format!("unsupported map key {}", debug_term(&key, atoms))))?;
             Ok(Value(Term::Map(map)))
         }
     }
@@ -331,7 +331,7 @@ pub(super) fn from_keys(
             process.bump_reductions(reductions);
             let pairs = elements.into_iter().map(|key| (key.clone(), value.clone()));
             let map = Map::from_pairs(pairs.collect(), atoms)
-                .map_err(|key| error(format!("unsupported map key {key:?}")))?;
+                .map_err(|key| error(format!("unsupported map key {}", debug_term(&key, atoms))))?;
             Ok(Value(Term::Map(map)))
         }
     }
@@ -563,7 +563,7 @@ pub(super) fn merge(
             let pairs = first.iter().chain(second.iter());
             let pairs = pairs.map(|(key, value)| (key.clone(), value.clone()));
             let merged = Map::from_pairs(pairs.collect(), atoms)
-                .map_err(|key| error(format!("unsupported map key {key:?}")))?;
+                .map_err(|key| error(format!("unsupported map key {}", debug_term(&key, atoms))))?;
             let merged = Term::Map(merged);
             match first.merge_steps(second) {
                 Some(steps) => merge_trap(process, merged, steps),
