@@ -12,7 +12,13 @@
 //! the `SCAN` lines. The test asserts no time, because the load of the host
 //! changes it.
 
-use super::{is_heavy_bif, is_pbeam_bif};
+use super::{
+    BifContext, BifId, BifResult, dispatch_leaf, is_heavy_bif, is_leaf, is_pbeam_bif, mfa, resolve,
+};
+use crate::{
+    runtime::scheduler::Scheduler,
+    term::{AtomTable, Map, Term},
+};
 use std::{hint::black_box, time::Instant};
 
 /// The number of calls of each measurement.
@@ -90,4 +96,120 @@ fn prints_the_cost_of_the_two_classification_scans() {
         "SCAN is_pbeam_bif(pbeam_cap:serve/2) {:.2} ns",
         measure_pbeam("pbeam_cap", "serve", 2)
     );
+}
+
+/// Assert that the leaf lane and the owned dispatch agree on each leaf
+/// identity, and that the leaf predicate holds exactly for those
+/// identities.
+///
+/// The leaf arms of [`dispatch_leaf`] and the entries of the `bifs!` table
+/// hold the same identities in two places (`docs/bif-argument-borrow-design.md`).
+/// This test holds them equal. It reaches each leaf arm, so a missing arm
+/// fails a test.
+#[test]
+fn the_leaf_lane_matches_the_owned_dispatch_for_each_leaf_identity() {
+    let cases = [
+        (
+            BifId::ErlangPlus2,
+            "erlang",
+            "+",
+            2,
+            vec![Term::Integer(1), Term::Integer(2)],
+        ),
+        (
+            BifId::ErlangMinus2,
+            "erlang",
+            "-",
+            2,
+            vec![Term::Integer(3), Term::Integer(2)],
+        ),
+        (
+            BifId::ErlangTupleSize1,
+            "erlang",
+            "tuple_size",
+            1,
+            vec![Term::tuple(vec![Term::Integer(1), Term::Integer(2)])],
+        ),
+        (
+            BifId::ErlangElement2,
+            "erlang",
+            "element",
+            2,
+            vec![
+                Term::Integer(2),
+                Term::tuple(vec![Term::Integer(3), Term::Integer(4)]),
+            ],
+        ),
+        (
+            BifId::ErlangHd1,
+            "erlang",
+            "hd",
+            1,
+            vec![Term::list_from([Term::Integer(5)])],
+        ),
+        (
+            BifId::ErlangMapGet2,
+            "erlang",
+            "map_get",
+            2,
+            vec![Term::Integer(1), Term::Map(Map::new())],
+        ),
+    ];
+    for (id, module, name, arity, terms) in cases {
+        assert_eq!(
+            resolve(module, name, arity),
+            Some(id),
+            "{module}:{name}/{arity} must resolve to the leaf identity"
+        );
+        assert!(is_leaf(id), "{module}:{name}/{arity} must be a leaf");
+        assert_eq!(mfa(id), (module, name, arity));
+        let borrowed: Vec<&Term> = terms.iter().collect();
+        let leaf_result = dispatch_leaf(id, &borrowed).expect("the leaf lane runs");
+        let mut scheduler = Scheduler::new(AtomTable::new());
+        let mut context = BifContext {
+            scheduler: &mut scheduler,
+        };
+        let owned_result =
+            super::table::dispatch(&mut context, id, &terms).expect("the owned dispatch runs");
+        assert_eq!(
+            format!("{leaf_result:?}"),
+            format!("{owned_result:?}"),
+            "{module}:{name}/{arity}"
+        );
+    }
+}
+
+/// Assert that the fallback arm of the leaf lane reports the same
+/// unresolved MFA error as the fallback arm of the owned dispatch, and
+/// that the leaf predicate rejects a non-leaf identity.
+#[test]
+fn dispatch_leaf_reports_an_identity_that_the_leaf_lane_does_not_hold() {
+    assert!(!is_leaf(BifId::ErlangByteSize1));
+    let error = dispatch_leaf(BifId::ErlangByteSize1, &[&Term::Integer(1)])
+        .expect_err("a non-leaf identity has no leaf arm");
+    assert_eq!(
+        error.to_string(),
+        "unresolved external MFA erlang:byte_size/1"
+    );
+}
+
+/// Assert that the guard-failure path of the leaf arms that have one
+/// raises the same exception as the owned dispatch.
+#[test]
+fn the_leaf_lane_keeps_the_guard_failure_of_each_leaf() {
+    let cases: [(BifId, Term); 2] = [
+        (BifId::ErlangTupleSize1, Term::Integer(1)),
+        (BifId::ErlangHd1, Term::Nil),
+    ];
+    for (id, argument) in cases {
+        let leaf = dispatch_leaf(id, &[&argument]).expect("the leaf lane runs");
+        assert!(matches!(&leaf, BifResult::Raise { .. }));
+        let mut scheduler = Scheduler::new(AtomTable::new());
+        let mut context = BifContext {
+            scheduler: &mut scheduler,
+        };
+        let owned = super::table::dispatch(&mut context, id, std::slice::from_ref(&argument))
+            .expect("the owned dispatch runs");
+        assert_eq!(format!("{leaf:?}"), format!("{owned:?}"));
+    }
 }
