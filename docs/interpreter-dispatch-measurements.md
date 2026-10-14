@@ -526,9 +526,9 @@ The measurement is `select_val_scan_*` and `select_val_binary_search_*` of `test
 | 128 | 576.458 | 186.0 | 44.432 |
 | 256 | 1145.774 | 207.2 | 50.515 |
 
-The ordered search is now faster than the linear walk at every measured shape. The cause of the before column is `Term::compare`: it built the work vector `vec![Step(self, other)]` for every call (`src/term/order.rs:73`), so one comparison of two integers cost about 25 ns against about 4.5 ns for the exact equality of `Term`. The fast path of `d8ffdb36` compares the pair of the two terms first with no work stack, so a pair that the comparison decides allocates nothing and only a pair of equal compound terms fills the stack.
+The ordered search is now faster than the worst case of the linear walk at every measured shape, and the fast path is the cause. The cause of the before column is `Term::compare`: it built the work vector `vec![Step(self, other)]` for every call (`src/term/order.rs:73`), so one comparison of two integers cost about 25 ns against about 4.5 ns for the exact equality of `Term`. The fast path of `d8ffdb36` compares the pair of the two terms first with no work stack, so a pair that the comparison decides allocates nothing and only a pair of equal compound terms fills the stack.
 
-A branch session re-measures the same test at a one-minute load of 2.10 to 2.88. Its linear rows are 18.111, 70.745, 141.062, 281.904, 563.459, and 1124.964 ns, which agree with the linear column above. Its ordered rows are 9.371, 16.341, 19.827, 23.353, 26.825, and 30.284 ns, which are below the after column above. The direction of the change is firm, and the after column above is conservative.
+A branch session re-measures the same test at a one-minute load of 2.10 to 2.88. Its linear rows are 18.111, 70.846, 141.573, 283.228, 564.987, and 1130.336 ns, which agree with the linear column above. Its ordered rows are 9.371, 16.341, 19.827, 23.353, 26.825, and 30.284 ns, which are below the after column above. The direction of the change is firm, and the after column above is conservative.
 
 The linear column is a model of the walk, and the model costs more than the interpreter's own walk: the interpreter reads its encoded choice list in order with the exact equality of `Term`, and the end-to-end session below measures that walk for each iteration.
 
