@@ -11,7 +11,7 @@ mod common;
 use std::process::Command;
 
 use common::pinned_beam;
-use pbeam_runtime::{AllowAll, BeamProgram, Term};
+use pbeam_runtime::{AllowAll, AtomTable, BeamProgram, Term};
 
 const POLICY_PROBE: &[u8] = include_bytes!("../../fixtures/policy/policy_probe.beam");
 const ERL_POLICY: &[u8] = include_bytes!("../../fixtures/policy/erl_policy.beam");
@@ -19,15 +19,23 @@ const ELIXIR_POLICY: &[u8] = include_bytes!("../../fixtures/policy/Elixir.Elixir
 
 /// Return the `~w` text of a term of atoms, lists, and tuples.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::nil()), "[]");
+/// assert_eq!(text(&Term::nil(), &atoms), "[]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         _ if let Some(elements) = term.proper_list() => {
             format!("[{}]", join(&elements.cloned().collect::<Vec<_>>()))
         }
@@ -69,7 +77,7 @@ fn program() -> BeamProgram {
 fn pbeam(function: &str, policy: &str) -> Result<String, String> {
     program()
         .execute_with_policy_module("policy_probe", function, &[], policy, false)
-        .map(|result| text(&result.term))
+        .map(|result| text(&result.term, result.atoms()))
         .map_err(|error| error.to_string())
 }
 
@@ -137,11 +145,17 @@ fn grants_a_requested_capability_with_an_erlang_and_an_elixir_policy() {
     let host = program
         .execute_with_policy("policy_probe", "granted", &[], &AllowAll)
         .unwrap();
-    assert_eq!(text(&host.term), "{string,denied,[string,string]}");
+    assert_eq!(
+        text(&host.term, host.atoms()),
+        "{string,denied,[string,string]}"
+    );
     // A run with no policy skips each check, so a request returns ok and
     // calls no policy code.
     let unchecked = program.execute("policy_probe", "granted", &[]).unwrap();
-    assert_eq!(text(&unchecked.term), "{string,ok,[string,string]}");
+    assert_eq!(
+        text(&unchecked.term, unchecked.atoms()),
+        "{string,ok,[string,string]}"
+    );
 }
 
 #[test]
@@ -293,7 +307,7 @@ fn lets_only_the_policy_process_call_policy_revoke() {
         .execute("policy_probe", "revoke_denied", &[])
         .unwrap();
     assert_eq!(
-        text(&unchecked.term),
+        text(&unchecked.term, unchecked.atoms()),
         "[ok,ok,ok,{error,badarg},ok,ok,ok,ok,ok,string,pid]"
     );
 }

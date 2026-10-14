@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 const INSPECT_BIF_PROBE: &[u8] =
     include_bytes!("../../fixtures/inspect_bif/inspect_bif_probe.beam");
@@ -80,17 +80,24 @@ fn runs_the_bifs_of_io_inspect_of_a_tuple_as_pinned_erts() {
     );
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
-        format!("{}\n", text(&expected))
+        format!("{}\n", text(&expected, program.atoms()))
     );
 }
 
 /// Return the `~w` text of a term of the probe result: an atom, an
 /// integer, a binary, a list, or a tuple. `~w` prints each byte of a
-/// binary as an integer.
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+/// binary as an integer. The atom names come from `atoms`, the table that
+/// owns the term.
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         Term::Binary(bytes) => {
             let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();

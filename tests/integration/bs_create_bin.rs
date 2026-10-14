@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Map, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Map, Term};
 
 const BS_CREATE_BIN_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_probe.beam");
@@ -596,11 +596,12 @@ fn copies_a_binary_that_an_append_built_where_erts_appends_in_place() {
     );
 }
 
-/// Render an integer, an atom, or a binary as `io:format("~w")` does.
-fn render(term: &Term) -> String {
+/// Render an integer, an atom, or a binary as `io:format("~w")` does. Each
+/// atom name comes from `atoms`, the table that owns the term.
+fn render(term: &Term, atoms: &AtomTable) -> String {
     match term {
         Term::Integer(value) => value.to_string(),
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Binary(bytes) => {
             let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
             format!("<<{}>>", bytes.join(","))
@@ -624,10 +625,16 @@ fn run_integer(program: &BeamProgram, function: &str, arguments: &[Term]) -> Ter
 
 /// Return the ERTS expression that calls `bs_create_bin_integer_probe:Function`
 /// for each case, in a list.
-fn integer_calls<'a>(calls: impl Iterator<Item = (&'a str, &'a [Term])>) -> String {
+fn integer_calls<'a>(
+    atoms: &AtomTable,
+    calls: impl Iterator<Item = (&'a str, &'a [Term])>,
+) -> String {
     let calls: Vec<String> = calls
         .map(|(function, arguments)| {
-            let arguments: Vec<String> = arguments.iter().map(render).collect();
+            let arguments: Vec<String> = arguments
+                .iter()
+                .map(|argument| render(argument, atoms))
+                .collect();
             format!(
                 "bs_create_bin_integer_probe:{function}({})",
                 arguments.join(", ")
@@ -741,12 +748,15 @@ fn builds_integer_and_utf8_segments_as_pinned_erts() {
     }
     let expected: Vec<String> = cases
         .iter()
-        .map(|(_, _, bytes)| render(&Term::binary(bytes.clone())))
+        .map(|(_, _, bytes)| render(&Term::binary(bytes.clone()), program.atoms()))
         .collect();
     assert_eq!(
-        reference(&integer_calls(cases.iter().map(
-            |(function, arguments, _)| (*function, arguments.as_slice())
-        ))),
+        reference(&integer_calls(
+            program.atoms(),
+            cases
+                .iter()
+                .map(|(function, arguments, _)| (*function, arguments.as_slice()))
+        )),
         format!("[{}]\n", expected.join(","))
     );
 }
@@ -781,10 +791,12 @@ fn jumps_to_the_fail_label_for_integer_and_utf8_segments_that_fail() {
         ]
     );
     assert_eq!(
-        reference(&integer_calls(cases.iter().map(|(function, argument)| (
-            *function,
-            std::slice::from_ref(argument)
-        )))),
+        reference(&integer_calls(
+            program.atoms(),
+            cases
+                .iter()
+                .map(|(function, argument)| (*function, std::slice::from_ref(argument)))
+        )),
         "[one,other,other,e,other,other]\n"
     );
 }
@@ -1139,7 +1151,10 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
     let calls: Vec<String> = reference_cases
         .iter()
         .map(|(function, arguments, ..)| {
-            let arguments: Vec<String> = arguments.iter().map(render).collect();
+            let arguments: Vec<String> = arguments
+                .iter()
+                .map(|argument| render(argument, program.atoms()))
+                .collect();
             format!(
                 "bs_create_bin_integer_probe:catch_call({function}, [{}])",
                 arguments.join(",")
@@ -1155,7 +1170,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
                  #{{cause => {{{segment},{operation},{info},{}}},function => format_bs_fail,\
                  module => erl_erts_errors}}}}]}}}}",
                     arguments.len(),
-                    render(value)
+                    render(value, program.atoms())
                 )
             },
         )

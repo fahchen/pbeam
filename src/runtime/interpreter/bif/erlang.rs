@@ -25,7 +25,7 @@ use crate::term::{
 /// ```rust,ignore
 /// let atoms = AtomTable::new();
 /// let result = node(&Term::Pid(pid), &atoms)?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "nonode@nohost"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("nonode@nohost"));
 /// assert!(node(&Term::Integer(1), &atoms).is_err());
 /// ```
 pub(super) fn node(term: &Term, atoms: &AtomTable) -> Result<BifResult, BeamError> {
@@ -86,11 +86,11 @@ const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
 ///
 /// ```rust,ignore
 /// let old = process_flag(&mut context, &Term::static_atom("trap_exit"), &Term::static_atom("true"))?;
-/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.is_static("false"));
 /// let old = process_flag(&mut context, &Term::static_atom("message_queue_data"), &Term::static_atom("off_heap"))?;
-/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "on_heap"));
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.is_static("on_heap"));
 /// let old = process_flag(&mut context, &Term::static_atom("error_handler"), &Term::static_atom("lists"))?;
-/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "error_handler"));
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.is_static("error_handler"));
 /// assert!(matches!(process_flag(&mut context, &foo, &Term::static_atom("true"))?, BifResult::Raise { .. }));
 /// assert!(process_flag(&mut context, &Term::static_atom("priority"), &Term::static_atom("high")).is_err());
 /// ```
@@ -260,7 +260,7 @@ const MAX_BACKTRACE_SIZE: i64 = 64;
 ///
 /// ```rust,ignore
 /// let old = system_flag(&mut context, &Term::static_atom("system_logger"), &Term::Pid(pid))?;
-/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.name() == "logger"));
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.is_static("logger"));
 /// assert!(matches!(system_flag(&mut context, &foo, &Term::Integer(1))?, BifResult::Raise { .. }));
 /// let depth = system_flag(&mut context, &Term::static_atom("backtrace_depth"), &Term::Integer(100))?;
 /// assert!(matches!(depth, BifResult::Value(Term::Integer(8))));
@@ -293,7 +293,7 @@ pub(super) fn system_flag(
         ("system_logger", _) => logger,
         ("debug_flags", _) => true,
         ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
-        ("time_offset", Term::Atom(finalize)) => finalize.name() == "finalize",
+        ("time_offset", Term::Atom(finalize)) => atoms.name_of(finalize) == "finalize",
         (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
             unsupported_system_flag_value(name, atoms, value)
         }
@@ -563,7 +563,7 @@ pub(super) fn error_2(
 /// // The stack trace is [{m, f, 1, []}].
 /// assert!(matches!(result, BifResult::RaiseWithStacktrace { class: ExceptionClass::Throw, .. }));
 /// let result = raise(8, &Term::static_atom("foo"), &reason, &Term::nil());
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "badarg"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("badarg"));
 /// ```
 pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term) -> BifResult {
     let Some(class) = ExceptionClass::from_term(class) else {
@@ -620,7 +620,7 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(link(scheduler, child)?, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(link(scheduler, child)?, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// assert!(matches!(link(scheduler, dead)?, BifResult::Raise { .. }));
 /// ```
 ///
@@ -678,7 +678,7 @@ pub(super) fn link(scheduler: &mut Scheduler, target: ProcessId) -> Result<BifRe
 ///
 /// ```rust,ignore
 /// let result = exit(&mut context, &Term::Reference(reference), &boom)?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// let result = exit(&mut context, &Term::Pid(caller), &kill)?;
 /// assert!(matches!(result, BifResult::TrapBif { function: "await_exit", .. }));
 /// assert!(matches!(exit(&mut context, &foo, &boom)?, BifResult::Raise { .. }));
@@ -768,10 +768,10 @@ pub(super) fn exit(
 ///
 /// ```rust,ignore
 /// let result = demonitor(&mut context, &Term::Reference(reference), &Term::nil());
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// let info = Term::list_from(vec![Term::static_atom("info")]);
 /// let result = demonitor(&mut context, &Term::Reference(reference), &info);
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("false"));
 /// let flush = Term::list_from(vec![Term::static_atom("flush")]);
 /// let result = demonitor(&mut context, &Term::Reference(gone), &flush);
 /// assert!(matches!(result, BifResult::Trap { function: "flush_monitor_messages", .. }));
@@ -1047,7 +1047,7 @@ pub(super) fn spawn_opt(
                     _ => return Ok(BifResult::badarg()),
                 };
             }
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.name() == "capabilities") =>
+            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if context.scheduler.atoms.name_of(name) == "capabilities") =>
             {
                 let Some(restrictions) =
                     capability::restrictions(&context.scheduler.atoms, &option[1])
@@ -1083,7 +1083,7 @@ pub(super) fn spawn_opt(
 ///
 /// ```rust,ignore
 /// let key = Term::static_atom("ok");
-/// assert!(matches!(put(&mut context, &key, &Term::Integer(1)), BifResult::Value(Term::Atom(atom)) if atom.name() == "undefined"));
+/// assert!(matches!(put(&mut context, &key, &Term::Integer(1)), BifResult::Value(Term::Atom(atom)) if atom.is_static("undefined"));
 /// assert!(matches!(put(&mut context, &key, &Term::Integer(2)), BifResult::Value(Term::Integer(1))));
 /// ```
 pub(super) fn put(context: &mut BifContext<'_>, key: &Term, value: &Term) -> BifResult {
@@ -1106,7 +1106,7 @@ pub(super) fn put(context: &mut BifContext<'_>, key: &Term, value: &Term) -> Bif
 ///
 /// ```rust,ignore
 /// let key = Term::static_atom("ok");
-/// assert!(matches!(get(&mut context, &key), BifResult::Value(Term::Atom(atom)) if atom.name() == "undefined"));
+/// assert!(matches!(get(&mut context, &key), BifResult::Value(Term::Atom(atom)) if atom.is_static("undefined"));
 /// put(&mut context, &key, &Term::Integer(1));
 /// assert!(matches!(get(&mut context, &key), BifResult::Value(Term::Integer(1))));
 /// ```
@@ -2171,9 +2171,9 @@ pub(in crate::runtime::interpreter) fn send(
 ///
 /// ```rust,ignore
 /// let noconnect = Term::list_from(vec![Term::static_atom("noconnect")]);
-/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.is_static("ok"));
 /// let remote = Term::tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
-/// assert!(matches!(send3(scheduler, &remote, ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.name() == "noconnect"));
+/// assert!(matches!(send3(scheduler, &remote, ok.clone(), &noconnect), BifResult::Value(Term::Atom(atom)) if atom.is_static("noconnect"));
 /// assert!(matches!(send3(scheduler, &Term::Pid(pid), ok, &Term::static_atom("x"))?, BifResult::Raise { .. }));
 /// ```
 ///
@@ -2419,7 +2419,7 @@ fn deliver_to(
 ///
 /// ```rust,ignore
 /// let result = unregister(scheduler, &Term::static_atom("worker"))?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// ```
 ///
 /// # Errors
@@ -2569,7 +2569,7 @@ fn is_process_info_item(atoms: &AtomTable, item: &Term) -> bool {
 /// let name = process_info(&mut context, &process, &Term::static_atom("registered_name"))?;
 /// assert!(matches!(name, BifResult::Value(name) if name.is_nil()));
 /// let dead = process_info(&mut context, &Term::Pid(ProcessId(99)), &name_item)?;
-/// assert!(matches!(dead, BifResult::Value(Term::Atom(atom)) if atom.name() == "undefined"));
+/// assert!(matches!(dead, BifResult::Value(Term::Atom(atom)) if atom.is_static("undefined"));
 /// let bogus = process_info(&mut context, &process, &Term::static_atom("bogus_item"))?;
 /// assert!(matches!(bogus, BifResult::Raise { .. }));
 /// assert!(process_info(&mut context, &process, &Term::static_atom("status")).is_err());
@@ -2680,7 +2680,7 @@ pub(super) fn process_info(
 ///
 /// ```rust,ignore
 /// let alive = is_process_alive(&mut context, &Term::Pid(child))?;
-/// assert!(matches!(alive, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(alive, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// assert!(matches!(is_process_alive(&mut context, &Term::Integer(1))?, BifResult::Raise { .. }));
 /// ```
 ///
@@ -2752,7 +2752,7 @@ pub(super) fn signals_return(scheduler: &mut Scheduler, from: &Term, value: Term
 /// ```rust,ignore
 /// let erlang = Term::static_atom("erlang");
 /// let exported = function_exported(&AtomTable::new(), &scheduler.code, &erlang, &Term::static_atom("self"), &Term::Integer(0));
-/// assert!(matches!(exported, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(exported, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// let exported = function_exported(&AtomTable::new(), &scheduler.code, &erlang, &Term::static_atom("self"), &Term::Integer(1 << 59));
 /// assert!(matches!(exported, BifResult::Raise { .. }));
 /// ```
@@ -2878,7 +2878,7 @@ pub(super) fn finish_loading(
 ///
 /// ```rust,ignore
 /// let loaded = module_loaded(&mut context, &Term::static_atom("erlang"))?;
-/// assert!(matches!(loaded, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(loaded, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// assert!(matches!(module_loaded(&mut context, &Term::Integer(1))?, BifResult::Raise { .. }));
 /// ```
 ///
@@ -2988,7 +2988,7 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 /// ```rust,ignore
 /// let lists = Term::static_atom("lists");
 /// let info = get_module_info(&mut context, &lists, &Term::static_atom("module"))?;
-/// assert!(matches!(info, BifResult::Value(Term::Atom(atom)) if atom.name() == "lists"));
+/// assert!(matches!(info, BifResult::Value(Term::Atom(atom)) if atom.is_static("lists"));
 /// ```
 ///
 /// # Errors
@@ -3042,7 +3042,7 @@ pub(super) fn get_module_info(
     ]) {
         Err(error(format!(
             "erlang:get_module_info/2 key {} is not implemented",
-            key.name()
+            context.scheduler.atoms.name_of(key)
         )))
     } else {
         Ok(BifResult::badarg())
@@ -3169,7 +3169,7 @@ pub(super) fn start_timer(
 /// let result = cancel_timer(&mut context, &Term::Reference(reference), &Term::nil())?;
 /// assert!(matches!(result, BifResult::Value(Term::Integer(100))));
 /// let result = cancel_timer(&mut context, &Term::Reference(reference), &Term::nil())?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "false"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("false"));
 /// ```
 pub(super) fn cancel_timer(
     context: &mut BifContext<'_>,

@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 const IOLIST_SPLIT_PROBE: &[u8] =
     include_bytes!("../../fixtures/iolist_split/iolist_split_probe.beam");
@@ -31,15 +31,23 @@ const EXPECTED: &str = "[{iolist_to_binary,[<<1,2,3>>,<<>>,<<>>,<<>>,<<97,98,99>
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// binaries, lists, and tuples of the probe result.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::binary(vec![1, 2])), "<<1,2>>");
+/// assert_eq!(text(&Term::binary(vec![1, 2]), &atoms), "<<1,2>>");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         Term::Binary(bytes) => {
             let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
@@ -60,7 +68,7 @@ fn converts_iodata_and_splits_binaries_as_pinned_erts() {
     // trace `[]` (`erl_iolist.c:857-928`, `erl_bif_binary.c:1346-1645`).
     let program = BeamProgram::load(&[IOLIST_SPLIT_PROBE]).unwrap();
     let result = program.execute("iolist_split_probe", "main", &[]).unwrap();
-    assert_eq!(text(&result.term), EXPECTED);
+    assert_eq!(text(&result.term, result.atoms()), EXPECTED);
 
     let reference = Command::new("erl")
         .args([

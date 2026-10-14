@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -21,15 +21,23 @@ const ERTS_RESULT: &str = "{[no_integer,not_a_list,not_a_list,{12,[]},{-12,[97]}
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// lists, and tuples of the probe result.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)]), &atoms), "[1]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
@@ -52,7 +60,7 @@ fn reads_integers_from_lists_as_pinned_erts() {
     let result = program
         .execute("list_to_integer_probe", "main", &[])
         .unwrap();
-    assert_eq!(text(&result.term), ERTS_RESULT);
+    assert_eq!(text(&result.term, result.atoms()), ERTS_RESULT);
 
     let reference = Command::new("erl")
         .args([

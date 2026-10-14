@@ -75,7 +75,7 @@ pub(super) fn getenv(scheduler: &mut Scheduler, name: &Term) -> Result<BifResult
 ///
 /// ```rust,ignore
 /// let result = set_signal(&mut scheduler, &Term::static_atom("sighup"), &Term::static_atom("ignore"))?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("ok"));
 /// let result = set_signal(&mut scheduler, &Term::static_atom("sigint"), &Term::static_atom("ignore"))?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```

@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, HostTerm, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};
 
 const BIF_COST_PROBE: &[u8] = include_bytes!("../../fixtures/preempt/bif_cost_probe.beam");
 
@@ -152,15 +152,23 @@ const EXITS: &str = "[{3845,[{down,0,normal},{seen,false},{done,1000}]},\
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// lists, and tuples of the probe results.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)]), &atoms), "[1]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
@@ -178,12 +186,10 @@ fn text(term: &Term) -> String {
 fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_scheduler() {
     let program = BeamProgram::load(&[BIF_COST_PROBE]).unwrap();
     let run = |function, arguments: &[HostTerm]| {
-        text(
-            &program
-                .execute("bif_cost_probe", function, arguments)
-                .unwrap()
-                .term,
-        )
+        let result = program
+            .execute("bif_cost_probe", function, arguments)
+            .unwrap();
+        text(&result.term, result.atoms())
     };
     let options = [program.host_term(Term::nil())];
     assert_eq!(run("puts", &options), PUTS);
@@ -271,7 +277,7 @@ fn switches_out_at_each_persistent_term_put() {
     // [{b,1334},{a,1},{b,1334},{a,1},{b,667},{a,1},{b,1665}] (row "Persistent terms" in
     // docs/erts-differences.md).
     assert_eq!(
-        text(&runs.term),
+        text(&runs.term, runs.atoms()),
         "[{b,667},{a,1},{b,667},{a,1},{b,667},{a,1},{b,2999}]"
     );
 }

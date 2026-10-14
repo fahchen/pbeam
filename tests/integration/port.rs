@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -11,20 +11,31 @@ const PORT_PROBE: &[u8] = include_bytes!("../../fixtures/port/port_probe.beam");
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// binaries, lists, and tuples of the probe results. An atom that does not
-/// start with a lowercase letter is quoted.
+/// start with a lowercase letter is quoted. Each atom name comes from
+/// `atoms`, the table of the run that owns the term.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::binary(b"hi".to_vec())), "<<104,105>>");
+/// assert_eq!(text(&Term::binary(b"hi".to_vec()), &atoms), "<<104,105>>");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) if atom.name().starts_with(|c: char| c.is_ascii_lowercase()) => {
-            atom.name().to_owned()
+        Term::Atom(atom)
+            if atoms
+                .name_of(atom)
+                .starts_with(|c: char| c.is_ascii_lowercase()) =>
+        {
+            atoms.name_of(atom).to_owned()
         }
-        Term::Atom(atom) => format!("'{}'", atom.name()),
+        Term::Atom(atom) => format!("'{}'", atoms.name_of(atom)),
         Term::Integer(value) => value.to_string(),
         Term::Binary(bytes) => format!(
             "<<{}>>",
@@ -78,7 +89,7 @@ fn assert_runs(call: &str, expected: &str) {
     );
     let function = call.strip_suffix("()").unwrap();
     let result = load().execute("port_probe", function, &[]).unwrap();
-    assert_eq!(text(&result.term), expected, "PBeam {call}");
+    assert_eq!(text(&result.term, result.atoms()), expected, "PBeam {call}");
 }
 
 /// Load the probe with the pinned `erlang` module, whose `open_port/2`,
@@ -225,5 +236,5 @@ fn charges_the_port_bifs_as_pinned_erts() {
     let result = program
         .execute("port_probe", "costs", &[program.host_term(Term::nil())])
         .unwrap();
-    assert_eq!(text(&result.term), expected);
+    assert_eq!(text(&result.term, result.atoms()), expected);
 }

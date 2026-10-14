@@ -126,7 +126,8 @@ pub(super) fn request(
     kind: &Term,
     request: &Term,
 ) -> Result<BifResult, BeamError> {
-    if !matches!(kind, Term::Atom(kind) if CapabilityKind::named(kind.name()).is_some()) {
+    if !matches!(kind, Term::Atom(kind) if CapabilityKind::named(scheduler.atoms.name_of(kind)).is_some())
+    {
         return Ok(BifResult::badarg());
     }
     if scheduler.skips_checks() || scheduler.current_process().security.is_boot() {

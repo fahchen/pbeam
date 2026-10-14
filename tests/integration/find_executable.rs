@@ -7,7 +7,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 #[path = "../common/boot.rs"]
 mod boot;
@@ -68,15 +68,23 @@ const NAMES_LATIN1: &str = "[<<97,98,99,0>>,<<97,98,99,0>>,<<0>>,<<97,98,99,0>>,
 /// with each binary as its bytes, for the atoms, integers, binaries, lists,
 /// and tuples of the probe results.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::binary(vec![97])])), "[<<97>>]");
+/// assert_eq!(text(&Term::list_from(vec![Term::binary(vec![97])]), &atoms), "[<<97>>]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
@@ -94,6 +102,9 @@ fn text(term: &Term) -> String {
 fn finds_executables_and_reads_file_info_as_pinned_erts() {
     let directory = env::temp_dir().join(format!("pbeam-find-executable-{}", std::process::id()));
     make_files(&directory);
+    // The character lists of the ERTS comparison hold no atom, so any table
+    // reads them.
+    let atoms = AtomTable::new();
     for locale in ["C.UTF-8", "C"] {
         let utf8 = cfg!(target_os = "macos") || locale == "C.UTF-8";
         let erts = Command::new("erl")
@@ -122,13 +133,13 @@ fn finds_executables_and_reads_file_info_as_pinned_erts() {
         assert_eq!(erts.lines().nth(2), Some(names), "{locale}");
         // The executable of the second path directory, through the link
         // too, and not the file without an execute bit or the directory.
-        let tool = text(&characters(&directory.join("bin2/tool")));
-        let sub = text(&characters(&directory.join("bin2/sub")));
-        let link = text(&characters(&directory.join("bin2/link")));
+        let tool = text(&characters(&directory.join("bin2/tool")), &atoms);
+        let sub = text(&characters(&directory.join("bin2/sub")), &atoms);
+        let link = text(&characters(&directory.join("bin2/link")), &atoms);
         assert!(
             erts.starts_with(&format!(
                 "{{{sh},[{tool},{sub},{link},false,{tool},false,false],false,",
-                sh = text(&characters(Path::new(&sh_path())))
+                sh = text(&characters(Path::new(&sh_path())), &atoms)
             )),
             "{locale}: {erts}"
         );
@@ -205,7 +216,7 @@ fn isolated_find_executable() {
             &[program.host_term(Term::Integer(1 << 60))],
         )
         .unwrap();
-    let results = [main, bifs, names].map(|term| text(&term.term) + "\n");
+    let results = [main, bifs, names].map(|term| text(&term.term, term.atoms()) + "\n");
     fs::write(env::var_os(RESULT).unwrap(), results.concat()).unwrap();
 }
 

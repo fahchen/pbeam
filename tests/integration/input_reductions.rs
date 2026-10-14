@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 const INPUT_PROBE: &[u8] = include_bytes!("../../fixtures/preempt/input_probe.beam");
 
@@ -482,15 +482,23 @@ fn longs_text() -> String {
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// lists, and tuples of the probe results.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)]), &atoms), "[1]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
@@ -504,12 +512,10 @@ fn text(term: &Term) -> String {
 fn charges_and_traps_the_input_dependent_bifs_as_pinned_erts_with_one_scheduler() {
     let program = BeamProgram::load(&[INPUT_PROBE]).unwrap();
     let run = |function| {
-        text(
-            &program
-                .execute("input_probe", function, &[program.host_term(Term::nil())])
-                .unwrap()
-                .term,
-        )
+        let result = program
+            .execute("input_probe", function, &[program.host_term(Term::nil())])
+            .unwrap();
+        text(&result.term, result.atoms())
     };
     assert_eq!(run("costs"), costs_text());
     assert_eq!(run("longs"), longs_text());

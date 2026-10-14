@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 const MODULE_INFO_PROBE: &[u8] =
     include_bytes!("../../fixtures/module_info/module_info_probe.beam");
@@ -17,15 +17,23 @@ const ERTS_RESULT: &str = "[[persistent_term,counters,atomics,\
 /// Return a term as `io:format("~w")` prints it, for the atoms, lists, and
 /// tuples of the probe result.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::nil()])), "[[]]");
+/// assert_eq!(text(&Term::list_from(vec![Term::nil()]), &atoms), "[[]]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
         }
@@ -46,7 +54,7 @@ fn gives_preloaded_modules_and_module_info_as_pinned_erts() {
     // module that `code_server` needs (code.erl:1699-1712).
     let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
     let result = program.execute("module_info_probe", "main", &[]).unwrap();
-    assert_eq!(text(&result.term), ERTS_RESULT);
+    assert_eq!(text(&result.term, result.atoms()), ERTS_RESULT);
 
     let reference = Command::new("erl")
         .args([

@@ -36,9 +36,9 @@ use crate::term::PortId;
 ///
 /// ```rust,ignore
 /// let result = group_leader(&mut context, &Term::Pid(leader), &Term::Pid(target))?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "true"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
 /// let result = group_leader(&mut context, &Term::Integer(1), &Term::Pid(target))?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "badarg"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("badarg"));
 /// ```
 ///
 /// # Errors
@@ -85,7 +85,7 @@ pub(super) fn group_leader(
 ///
 /// ```rust,ignore
 /// let result = group_leader_request(&mut context, &Term::Pid(leader), &Term::Pid(target), &Term::Reference(reference))?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("ok"));
 /// ```
 ///
 /// # Errors
@@ -144,7 +144,7 @@ pub(super) fn group_leader_request(
 ///
 /// ```rust,ignore
 /// let result = is_process_alive(&mut context, &Term::Pid(child), &Term::Reference(reference))?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.name() == "ok"));
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("ok"));
 /// ```
 ///
 /// # Errors
@@ -376,7 +376,7 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                 } else if option.is_static("exit_status") {
                     result.exit_status = true
                 } else if option.is_one_of(&UNSUPPORTED_ATOM_OPTIONS) {
-                    return Err(unsupported_option(option.name()));
+                    return Err(unsupported_option(atoms.name_of(option)));
                 } else {
                     return Ok(None);
                 }

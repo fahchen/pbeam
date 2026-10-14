@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 const EXIT_PROBE: &[u8] = include_bytes!("../../fixtures/preempt/exit_probe.beam");
 
@@ -71,15 +71,23 @@ const EXITS: &str = "[{{timers,1,3766},[{{down,normal},1},{{seen,false},1},{b,20
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// lists, and tuples of the probe results.
 ///
+/// The atom names come from `atoms`, the table that owns the term.
+///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)])), "[1]");
+/// assert_eq!(text(&Term::list_from(vec![Term::Integer(1)]), &atoms), "[1]");
 /// ```
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
@@ -119,7 +127,7 @@ fn cases(program: &BeamProgram) -> Term {
         })
         .collect();
     let cases = Term::list_from(cases);
-    assert_eq!(text(&cases), CASES);
+    assert_eq!(text(&cases, program.atoms()), CASES);
     cases
 }
 
@@ -136,7 +144,7 @@ fn charges_the_exit_items_as_pinned_erts_with_one_scheduler() {
             ],
         )
         .unwrap();
-    assert_eq!(text(&exits.term), EXITS);
+    assert_eq!(text(&exits.term, exits.atoms()), EXITS);
 
     // The reference run checks that the pinned `erl` is the JIT flavor, and
     // that `a` and `b` collect no garbage: a collection costs reductions on
@@ -174,7 +182,7 @@ fn gives_no_bif_timer_to_a_process_whose_exit_switched_out() {
     // so `erlang:start_timer/3` destroys the timer (`erl_hl_timer.c:1833-1861`).
     let program = BeamProgram::load(&[EXIT_PROBE]).unwrap();
     let result = program.execute("exit_probe", "late_timer", &[]).unwrap();
-    assert_eq!(text(&result.term), "false");
+    assert_eq!(text(&result.term, result.atoms()), "false");
 
     let reference = Command::new("erl")
         .args([

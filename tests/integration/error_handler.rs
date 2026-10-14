@@ -9,7 +9,7 @@ mod common;
 use std::process::Command;
 
 use common::pinned_beam;
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 const PROBE: &[u8] = include_bytes!("../../fixtures/error_handler/error_handler_probe.beam");
 const TARGET: &[u8] = include_bytes!("../../fixtures/error_handler/error_handler_target.beam");
@@ -106,13 +106,14 @@ fn raises_undef_through_error_handler_beam_as_pinned_erts() {
     // The first frame of the whole stack trace is the frame of the failed
     // call, and `error_handler:crash/1` keeps the frames of the callers after
     // it (`error_handler.erl:172-178`).
-    let frames = program
+    let result = program
         .execute("error_handler_probe", "frames", &[])
-        .unwrap()
+        .unwrap();
+    let frames = result
         .term
         .proper_list()
         .unwrap()
-        .map(text)
+        .map(|term| text(term, result.atoms()))
         .collect::<Vec<_>>();
     assert_eq!(frames[0], "{error_handler_target,missing,[a],[]}");
     assert!(frames.len() >= 2, "{frames:?}");
@@ -264,10 +265,17 @@ fn charges_the_reductions_of_error_handler_beam_as_pinned_erts() {
 }
 
 /// Return the `~w` text of a term of atoms, integers, tuples, and lists.
-fn text(term: &Term) -> String {
-    let join = |terms: &[Term]| terms.iter().map(text).collect::<Vec<_>>().join(",");
+/// The atom names come from `atoms`, the table that owns the term.
+fn text(term: &Term, atoms: &AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     match term {
-        Term::Atom(atom) => atom.name().to_owned(),
+        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         _ if let Some(elements) = term.proper_list() => {
             format!("[{}]", join(&elements.cloned().collect::<Vec<_>>()))

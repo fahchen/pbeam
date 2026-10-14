@@ -18,7 +18,7 @@ pub(crate) use atom::MAX_ATOM_CHARACTERS;
 pub(crate) use atom::{test_atom, test_atom_table};
 pub use binary::Binary;
 pub use fun::Fun;
-pub(crate) use fun::{Lambda, Target};
+pub(crate) use fun::{Lambda, Target, debug_target};
 pub(crate) use hash::internal_hash;
 use list::{Cons, ConsRef};
 pub(crate) use live_bytes::LiveBytes;
@@ -44,7 +44,8 @@ pub(crate) const MAX_TUPLE_SIZE: usize = (1 << 24) - 1;
 /// takes O(1) time. `Drop`, `PartialEq`, and `Debug` use explicit work
 /// stacks and do not recurse on the Rust stack.
 pub enum Term {
-    /// An atom: its index in the atom table of the program, and its name.
+    /// An atom: its index in the atom table of the program. Read the name
+    /// through the table that owns the index.
     Atom(Atom),
     /// A binary: its bytes in a shared array, and the offset and the length
     /// of its view. A copy of a binary increments the reference count of the
@@ -891,7 +892,14 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
             }
             Term::Fun(fun) => {
                 let (target, free) = (fun.target(), fun.free());
-                write!(out, "Fun({target:?}, [")?;
+                match atoms {
+                    Some(atoms) => {
+                        out.write_str("Fun(")?;
+                        debug_target(target, atoms, out)?;
+                        out.write_str(", [")?;
+                    }
+                    None => write!(out, "Fun({target:?}, [")?,
+                }
                 items.push(Item::Text("])"));
                 for (index, element) in free.iter().enumerate().rev() {
                     items.push(Item::Term(element));
