@@ -54,7 +54,7 @@ One interleaved session of `tests/integration/binary_append_bench.rs` on the rel
 | Warm match of a 1000000-byte subject, 100 rounds, total ns | 31459208 | 31352833 | -0.3 percent |
 | First match of a fresh 1000000-byte subject, total ns | 334708 | 359458 | +7.4 percent |
 
-The gate of the task is that a shared append copies no old payload byte except one partial 4096-byte leaf, and that the match scan throughput regresses by at most 10 percent. The match numbers fall inside that bound in this session. The three build and copy shapes fall, and the small 1000-byte build rises 8.1 percent, which is inside the run-to-run noise of that shape.
+The view descriptor grows from 32 bytes to 56 bytes, because the view now holds the chunk list and the joined array; a view that no append built keeps both fields empty or unset, and the test `prints_the_cost_of_a_binary_view` records the larger descriptor. The gate of the task is that a shared append copies no old payload byte except one partial 4096-byte leaf, and that the match scan throughput regresses by at most 10 percent. The match numbers fall inside that bound in this session. The three build and copy shapes fall, and the small 1000-byte build rises 8.1 percent, which is inside the run-to-run noise of that shape.
 
 ### 2026-10-14 22:32 JST - Borrowed-argument leaf lane, task [#568](https://github.com/fahchen/pbeam/issues/568), pull request [#616](https://github.com/fahchen/pbeam/pull/616) - Landed as `ef0c8b94`
 
