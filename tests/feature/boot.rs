@@ -128,11 +128,14 @@ fn isolated_logger_boot() {
         Term::list_from(vec![atom("default")]),
         atom("notice"),
         Term::Map(
-            Map::from_pairs(vec![
-                (atom("id"), atom("default")),
-                (atom("module"), atom("logger_std_h")),
-                (atom("level"), atom("all")),
-            ])
+            Map::from_pairs(
+                vec![
+                    (atom("id"), atom("default")),
+                    (atom("module"), atom("logger_std_h")),
+                    (atom("level"), atom("all")),
+                ],
+                program.atoms(),
+            )
             .unwrap(),
         ),
         Term::list_from(vec![

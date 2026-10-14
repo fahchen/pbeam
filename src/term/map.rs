@@ -27,7 +27,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use super::{LiveBytes, Term, hash::internal_hash};
+use super::{AtomTable, LiveBytes, Term, hash::internal_hash};
 use crate::error::{BeamError, error};
 
 mod build;
@@ -72,12 +72,14 @@ pub(crate) enum Insert {
 ///
 /// ```rust,ignore
 /// let pairs = [(Term::Integer(1), Term::nil())];
-/// assert!(flatmap_holds(&pairs, &Term::Integer(1)));
-/// assert!(!flatmap_holds(&pairs, &Term::Integer(2)));
+/// assert!(flatmap_holds(&pairs, &Term::Integer(1), &atoms));
+/// assert!(!flatmap_holds(&pairs, &Term::Integer(2), &atoms));
 /// ```
-fn flatmap_holds(pairs: &[(Term, Term)], key: &Term) -> bool {
+fn flatmap_holds(pairs: &[(Term, Term)], key: &Term, atoms: &AtomTable) -> bool {
     pairs
-        .binary_search_by(|(existing, _)| flatmap_order(existing, key).unwrap_or(Ordering::Equal))
+        .binary_search_by(|(existing, _)| {
+            flatmap_order(existing, key, atoms).unwrap_or(Ordering::Equal)
+        })
         .is_ok()
 }
 
@@ -256,7 +258,7 @@ impl Drain {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// let mut copy = map.clone();
     /// assert!(Drain::take(&mut map).is_none());
     /// assert!(Drain::take(&mut copy).is_some());
@@ -287,7 +289,7 @@ impl Drain {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// let mut drain = Drain::take(&mut map).unwrap();
     /// let mut pending = Vec::new();
     /// assert_eq!(drain.step(&mut pending, 256), 1);
@@ -337,7 +339,7 @@ impl Drain {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// let drain = Drain::take(&mut map).unwrap();
     /// assert!(!drain.is_empty());
     /// ```
@@ -381,7 +383,7 @@ impl Drain {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// let drain = Drain::take(&mut map).unwrap();
     /// assert!(drain.allocated_bytes() > 0);
     /// ```
@@ -464,7 +466,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let flat = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let flat = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert!(flat.allocated_bytes() > 0);
     /// ```
     pub(crate) fn allocated_bytes(&self) -> usize {
@@ -524,7 +526,7 @@ impl Map {
     /// let map = Map::from_pairs(vec![
     ///     (Term::static_atom("ok"), Term::Integer(1)),
     ///     (Term::Integer(2), Term::Integer(2)),
-    /// ])?;
+    /// ], &atoms)?;
     /// let keys: Vec<_> = map.iter().map(|(key, _)| key.clone()).collect();
     /// assert_eq!(keys, [Term::Integer(2), Term::static_atom("ok")]);
     /// ```
@@ -534,10 +536,10 @@ impl Map {
     /// Return the first key that the map form does not support yet, for
     /// example a map key, or an integer outside the small-integer range in
     /// a map of more than 32 keys.
-    pub fn from_pairs(pairs: Vec<(Term, Term)>) -> Result<Self, Term> {
+    pub fn from_pairs(pairs: Vec<(Term, Term)>, atoms: &AtomTable) -> Result<Self, Term> {
         let mut map = Map::new();
         for (key, value) in pairs {
-            map.insert(key, value)?;
+            map.insert(key, value, atoms)?;
         }
         Ok(map)
     }
@@ -550,7 +552,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert!(map.unique());
     /// let copy = map.clone();
     /// assert!(!map.unique() || !copy.unique());
@@ -564,7 +566,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert_eq!(map.len(), 1);
     /// ```
     pub(crate) fn len(&self) -> usize {
@@ -591,7 +593,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert!(matches!(map.form(), Form::Flat([(Term::Integer(1), Term::Integer(2))])));
     /// ```
     pub(super) fn form(&self) -> Form<'_> {
@@ -612,7 +614,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(2)));
     /// assert_eq!(map.get(&Term::tuple(vec![])), None);
     /// ```
@@ -662,7 +664,7 @@ impl Map {
     ///     (Term::static_atom("abs"), Term::Integer(1)),
     ///     (Term::static_atom("value"), Term::Integer(2)),
     /// ];
-    /// Map::sort_pairs(&mut pairs)?;
+    /// Map::sort_pairs(&mut pairs, &atoms)?;
     /// // value has atom index 745, abs has atom index 762, and an atom
     /// // comes before a tuple.
     /// assert_eq!(pairs[0].0, Term::static_atom("value"));
@@ -675,10 +677,13 @@ impl Map {
     /// references, which have no PBeam term order. Compiled code cannot get
     /// this error: the ERTS loader sorts only literal keys, and a literal
     /// cannot hold a reference.
-    pub(crate) fn sort_pairs(pairs: &mut [(Term, Term)]) -> Result<(), BeamError> {
+    pub(crate) fn sort_pairs(
+        pairs: &mut [(Term, Term)],
+        atoms: &AtomTable,
+    ) -> Result<(), BeamError> {
         let mut failure = None;
         pairs.sort_by(|(left, _), (right, _)| {
-            flatmap_order(left, right).unwrap_or_else(|error| {
+            flatmap_order(left, right, atoms).unwrap_or_else(|error| {
                 failure.get_or_insert(error);
                 Ordering::Equal
             })
@@ -698,20 +703,20 @@ impl Map {
     ///
     /// ```rust,ignore
     /// let mut map = Map::new();
-    /// map.insert(Term::Integer(1), Term::Integer(2))?;
-    /// map.insert(Term::Integer(1), Term::Integer(3))?;
+    /// map.insert(Term::Integer(1), Term::Integer(2), &atoms)?;
+    /// map.insert(Term::Integer(1), Term::Integer(3), &atoms)?;
     /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(3)));
-    /// map.insert(Term::tuple(vec![Term::Integer(1)]), Term::Integer(4))?;
+    /// map.insert(Term::tuple(vec![Term::Integer(1)]), Term::Integer(4), &atoms)?;
     /// assert_eq!(map.get(&Term::tuple(vec![Term::Integer(1)])), Some(&Term::Integer(4)));
-    /// assert!(map.insert(Term::Map(Map::new()), Term::Integer(1)).is_err());
+    /// assert!(map.insert(Term::Map(Map::new()), Term::Integer(1), &atoms).is_err());
     /// ```
     ///
     /// # Errors
     ///
     /// Return the first key that the map form does not support yet. The map
     /// does not change.
-    pub(crate) fn insert(&mut self, key: Term, value: Term) -> Result<(), Term> {
-        self.update(vec![(Insert::Add, key, value)])
+    pub(crate) fn insert(&mut self, key: Term, value: Term, atoms: &AtomTable) -> Result<(), Term> {
+        self.update(vec![(Insert::Add, key, value)], atoms)
     }
 
     /// Apply a list of key operations. An [`Insert::Add`] that gives a
@@ -729,11 +734,11 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &atoms)?;
     /// map.update(vec![
     ///     (Insert::Set, Term::Integer(1), Term::Integer(3)),
     ///     (Insert::Add, Term::Integer(5), Term::Integer(4)),
-    /// ])?;
+    /// ], &atoms)?;
     /// assert_eq!(map.get(&Term::Integer(1)), Some(&Term::Integer(3)));
     /// assert_eq!(map.get(&Term::Integer(5)), Some(&Term::Integer(4)));
     /// ```
@@ -742,7 +747,11 @@ impl Map {
     ///
     /// Return the first key that the map form does not support, or the first
     /// key that an [`Insert::Set`] does not find. The map does not change.
-    pub(crate) fn update(&mut self, operations: Vec<(Insert, Term, Term)>) -> Result<(), Term> {
+    pub(crate) fn update(
+        &mut self,
+        operations: Vec<(Insert, Term, Term)>,
+        atoms: &AtomTable,
+    ) -> Result<(), Term> {
         // The read of the form and the change are one match, so the change
         // takes the value of the form that it read. `make_mut` copies a
         // shared form, so the change does not show in another copy.
@@ -753,10 +762,10 @@ impl Map {
         match Arc::make_mut(self.arc_mut()) {
             Repr::Hash(hamt) => {
                 validate_hash(hamt, &operations, &hashes)?;
-                apply_hash(hamt, operations, hashes);
+                apply_hash(hamt, operations, hashes, atoms);
             }
             Repr::Flat(pairs) => {
-                if let Convert::Yes(hamt) = update_flat(pairs, operations, hashes)? {
+                if let Convert::Yes(hamt) = update_flat(pairs, operations, hashes, atoms)? {
                     self.repr = Some(Arc::new(Repr::Hash(hamt)));
                 }
             }
@@ -773,7 +782,7 @@ impl Map {
     ///
     /// ```rust,ignore
     /// let nil = || Term::nil();
-    /// let map = Map::from_pairs(vec![(Term::Integer(2), nil()), (Term::Integer(1), nil())])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(2), nil()), (Term::Integer(1), nil())], &AtomTable::new())?;
     /// let keys: Vec<_> = map.iter().map(|(key, _)| key.clone()).collect();
     /// assert_eq!(keys, [Term::Integer(1), Term::Integer(2)]);
     /// ```
@@ -820,7 +829,7 @@ impl Map {
     ///
     /// ```rust,ignore
     /// let mut pending = Vec::new();
-    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let mut map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// let mut copy = map.clone();
     /// map.drain_into(&mut pending);
     /// assert!(pending.is_empty());
@@ -880,7 +889,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs((1..=40).map(|key| (Term::Integer(key), Term::Integer(key))).collect())?;
+    /// let map = Map::from_pairs((1..=40).map(|key| (Term::Integer(key), Term::Integer(key))).collect(), &AtomTable::new())?;
     /// let chunk = map.chunk(&Term::Integer(0), 1000, Direction::Backward)?.unwrap();
     /// // ERTS 29.1.1: the last 32 pairs and the path 43.
     /// assert_eq!((chunk.pairs.len(), chunk.next), (32, Some(43)));
@@ -937,9 +946,9 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?;
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
     /// assert!(map.same_form(&map.clone()));
-    /// assert!(!map.same_form(&Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?));
+    /// assert!(!map.same_form(&Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?));
     /// ```
     pub(crate) fn same_form(&self, other: &Map) -> bool {
         Arc::ptr_eq(self.arc(), other.arc())
@@ -960,7 +969,7 @@ impl Map {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = |keys: std::ops::Range<i64>| Map::from_pairs(keys.map(|key| (Term::Integer(key), Term::Integer(key))).collect());
+    /// let map = |keys: std::ops::Range<i64>| Map::from_pairs(keys.map(|key| (Term::Integer(key), Term::Integer(key))).collect(), &AtomTable::new());
     /// assert_eq!(map(0..10)?.merge_steps(&map(5..20)?), None);
     /// assert_eq!(map(0..0)?.merge_steps(&map(0..40)?), None);
     /// // ERTS 29.1.1: maps:merge/2 of two maps of the keys 1..40 costs 8.
@@ -1087,10 +1096,15 @@ fn validate_hash(
 
 /// Apply the operations of [`Map::update`] to a hashmap. `validate_hash`
 /// checked every key.
-fn apply_hash(hamt: &mut Hamt, operations: Vec<(Insert, Term, Term)>, hashes: Vec<Option<u64>>) {
+fn apply_hash(
+    hamt: &mut Hamt,
+    operations: Vec<(Insert, Term, Term)>,
+    hashes: Vec<Option<u64>>,
+    atoms: &AtomTable,
+) {
     for ((_, key, value), hash) in operations.into_iter().zip(hashes) {
         if let Some(hash) = hash {
-            hamt.insert(hash, key, value);
+            hamt.insert(hash, key, value, atoms);
         }
     }
 }
@@ -1112,6 +1126,7 @@ fn update_flat(
     pairs: &mut Vec<(Term, Term)>,
     operations: Vec<(Insert, Term, Term)>,
     hashes: Vec<Option<u64>>,
+    atoms: &AtomTable,
 ) -> Result<Convert, Term> {
     let mut added: Vec<&Term> = Vec::new();
     for ((kind, key, _), hash) in operations.iter().zip(&hashes) {
@@ -1119,8 +1134,8 @@ fn update_flat(
             return Err(key.clone());
         }
         match kind {
-            Insert::Set if !flatmap_holds(pairs, key) => return Err(key.clone()),
-            Insert::Add if !flatmap_holds(pairs, key) && !added.contains(&key) => {
+            Insert::Set if !flatmap_holds(pairs, key, atoms) => return Err(key.clone()),
+            Insert::Add if !flatmap_holds(pairs, key, atoms) && !added.contains(&key) => {
                 added.push(key);
             }
             _ => {}
@@ -1129,7 +1144,7 @@ fn update_flat(
     if pairs.len() + added.len() <= SMALL_MAP_LIMIT {
         for (_, key, value) in operations {
             match pairs.binary_search_by(|(existing, _)| {
-                flatmap_order(existing, &key).expect("supported map keys have a term order")
+                flatmap_order(existing, &key, atoms).expect("supported map keys have a term order")
             }) {
                 Ok(index) => pairs[index].1 = value,
                 Err(index) => pairs.insert(index, (key, value)),
@@ -1137,7 +1152,7 @@ fn update_flat(
         }
         return Ok(Convert::No);
     }
-    Ok(Convert::Yes(convert_to_hash(pairs, operations)?))
+    Ok(Convert::Yes(convert_to_hash(pairs, operations, atoms)?))
 }
 
 /// The result of [`update_flat`]: the map kept its flatmap form, or it
@@ -1158,6 +1173,7 @@ enum Convert {
 fn convert_to_hash(
     pairs: &mut Vec<(Term, Term)>,
     operations: Vec<(Insert, Term, Term)>,
+    atoms: &AtomTable,
 ) -> Result<Hamt, Term> {
     let mut keys = pairs
         .iter()
@@ -1174,7 +1190,7 @@ fn convert_to_hash(
         .chain(operations.into_iter().map(|(_, key, value)| (key, value)));
     for (key, value) in existing {
         let hash = map_hash(&key).ok_or_else(|| key.clone())?;
-        hamt.insert(hash, key, value);
+        hamt.insert(hash, key, value, atoms);
     }
     Ok(hamt)
 }
@@ -1308,7 +1324,7 @@ impl Hamt {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs((0..40).map(|key| (Term::Integer(key), Term::Integer(key))).collect())?;
+    /// let mut map = Map::from_pairs((0..40).map(|key| (Term::Integer(key), Term::Integer(key))).collect(), &AtomTable::new())?;
     /// let Repr::Hash(hamt) = &**map.arc() else { unreachable!() };
     /// assert_eq!(hamt.get(&Term::Integer(1)), Some(&Term::Integer(1)));
     /// assert_eq!(hamt.get(&Term::Integer(40)), None);
@@ -1319,7 +1335,7 @@ impl Hamt {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut map = Map::from_pairs((0..40).map(|key| (Term::Integer(key), Term::Integer(key))).collect())?;
+    /// let mut map = Map::from_pairs((0..40).map(|key| (Term::Integer(key), Term::Integer(key))).collect(), &AtomTable::new())?;
     /// let Repr::Hash(hamt) = &**map.arc() else { unreachable!() };
     /// assert_eq!(hamt.get(&Term::Integer(1)), Some(&Term::Integer(1)));
     /// assert_eq!(hamt.get(&Term::Integer(40)), None);
@@ -1354,10 +1370,10 @@ impl Hamt {
     ///
     /// ```rust,ignore
     /// let mut hamt = Hamt { root: Node::empty(), size: 0 };
-    /// hamt.insert(map_hash(&Term::Integer(1)).unwrap(), Term::Integer(1), Term::Integer(2));
+    /// hamt.insert(map_hash(&Term::Integer(1)).unwrap(), Term::Integer(1), Term::Integer(2), &atoms);
     /// assert_eq!(hamt.size, 1);
     /// ```
-    fn insert(&mut self, hash: u64, key: Term, value: Term) {
+    fn insert(&mut self, hash: u64, key: Term, value: Term, atoms: &AtomTable) {
         let mut node = &mut self.root;
         let mut level = 0;
         loop {
@@ -1384,7 +1400,7 @@ impl Hamt {
                         std::mem::replace(existing, Term::nil()),
                         std::mem::replace(existing_value, Term::nil()),
                     );
-                    *child = Node::split(level + 1, existing, (hash, key, value));
+                    *child = Node::split(level + 1, existing, (hash, key, value), atoms);
                     self.size += 1;
                     return;
                 }
@@ -1392,7 +1408,7 @@ impl Hamt {
                 Child::Collision(pairs) => {
                     match pairs.binary_search_by(|(existing, _)| {
                         existing
-                            .compare(&key)
+                            .compare(&key, atoms)
                             .expect("supported map keys have a term order")
                     }) {
                         Ok(index) => pairs[index].1 = value,
@@ -1489,13 +1505,18 @@ impl Node {
     ///
     /// ```rust,ignore
     /// // The hashes 0x01 and 0x11 differ first at level 1.
-    /// let child = Node::split(0, (0x01, one, one_value), (0x11, two, two_value));
+    /// let child = Node::split(0, (0x01, one, one_value), (0x11, two, two_value), &atoms);
     /// assert!(matches!(child, Child::Node(Node { bitmap: 0b10, .. })));
     /// // Equal hashes at level 16 give a collision child.
-    /// let child = Node::split(16, (0x01, one, one_value), (0x01, two, two_value));
+    /// let child = Node::split(16, (0x01, one, one_value), (0x01, two, two_value), &atoms);
     /// assert!(matches!(child, Child::Collision(_)));
     /// ```
-    fn split(level: u32, first: (u64, Term, Term), second: (u64, Term, Term)) -> Child {
+    fn split(
+        level: u32,
+        first: (u64, Term, Term),
+        second: (u64, Term, Term),
+        atoms: &AtomTable,
+    ) -> Child {
         let mut depth = level;
         while depth < HAMT_MAX_LEVEL && slot(first.0, depth) == slot(second.0, depth) {
             depth += 1;
@@ -1504,7 +1525,7 @@ impl Node {
         let mut child = if depth == HAMT_MAX_LEVEL {
             let order = first
                 .1
-                .compare(&second.1)
+                .compare(&second.1, atoms)
                 .expect("supported map keys have a term order");
             let (low, high) = if order == Ordering::Less {
                 (first, second)
@@ -1546,20 +1567,20 @@ impl Node {
 ///
 /// // true has index 1 and abs_path has index 26.
 /// let (abs_path, true_) = (Term::static_atom("abs_path"), Term::static_atom("true"));
-/// assert_eq!(flatmap_order(&true_, &abs_path)?, Ordering::Less);
+/// assert_eq!(flatmap_order(&true_, &abs_path, &atoms)?, Ordering::Less);
 /// let list = |atom: &Term| Term::list_from([atom.clone()]);
-/// assert_eq!(flatmap_order(&list(&true_), &list(&abs_path))?, Ordering::Greater);
-/// assert_eq!(flatmap_order(&Term::Integer(1), &true_)?, Ordering::Less);
+/// assert_eq!(flatmap_order(&list(&true_), &list(&abs_path), &atoms)?, Ordering::Greater);
+/// assert_eq!(flatmap_order(&Term::Integer(1), &true_, &atoms)?, Ordering::Less);
 /// ```
 ///
 /// # Errors
 ///
 /// Return a runtime error when the order depends on two different
 /// references, which have no PBeam term order.
-fn flatmap_order(left: &Term, right: &Term) -> Result<Ordering, BeamError> {
+fn flatmap_order(left: &Term, right: &Term, atoms: &AtomTable) -> Result<Ordering, BeamError> {
     match (left, right) {
         (Term::Atom(left), Term::Atom(right)) => Ok(left.index().cmp(&right.index())),
-        _ => left.compare(right),
+        _ => left.compare(right, atoms),
     }
 }
 

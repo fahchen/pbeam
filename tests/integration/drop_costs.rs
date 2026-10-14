@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pbeam_runtime::{Map, Term};
+use pbeam_runtime::{AtomTable, Map, Term};
 
 /// The number of terms of one timed run of a shape whose term is small.
 const BATCH: usize = 100_000;
@@ -62,7 +62,13 @@ struct Shape {
 /// assert!(matches!(one_key_map(), Term::Map(_)));
 /// ```
 fn one_key_map() -> Term {
-    Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap())
+    Term::Map(
+        Map::from_pairs(
+            vec![(Term::Integer(1), Term::Integer(2))],
+            &AtomTable::new(),
+        )
+        .unwrap(),
+    )
 }
 
 /// Return a tuple term of three immediate elements.

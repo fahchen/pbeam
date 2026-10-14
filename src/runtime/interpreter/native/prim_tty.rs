@@ -324,7 +324,7 @@ fn tty_window_size(scheduler: &mut Scheduler, tty: &Term) -> Result<BifResult, B
 /// # Examples
 ///
 /// ```rust,ignore
-/// let options = Term::Map(Map::from_pairs(vec![(Term::static_atom("input"), Term::static_atom("raw"))])?);
+/// let options = Term::Map(Map::from_pairs(vec![(Term::static_atom("input"), Term::static_atom("raw"))], &AtomTable::new())?);
 /// // stdout is a terminal: ok
 /// assert!(matches!(tty_init(&mut scheduler, &tty, &options)?, BifResult::Value(Term::Atom(_))));
 /// assert!(matches!(tty_init(&mut scheduler, &tty, &Term::Integer(1))?, BifResult::Raise { .. }));

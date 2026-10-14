@@ -126,17 +126,31 @@ fn orders_binaries_by_their_bytes() {
     use std::cmp::Ordering::{Equal, Greater, Less};
     let less = Term::binary(b"ab".to_vec());
     let more = Term::binary(b"b".to_vec());
-    assert_eq!(less.compare(&more).unwrap(), Less);
-    assert_eq!(more.compare(&less).unwrap(), Greater);
+    assert_eq!(
+        less.compare(&more, &crate::term::test_atom_table())
+            .unwrap(),
+        Less
+    );
+    assert_eq!(
+        more.compare(&less, &crate::term::test_atom_table())
+            .unwrap(),
+        Greater
+    );
     assert_eq!(
         Term::binary(b"a".to_vec())
-            .compare(&Term::binary(b"a".to_vec()))
+            .compare(
+                &Term::binary(b"a".to_vec()),
+                &crate::term::test_atom_table()
+            )
             .unwrap(),
         Equal
     );
     assert_eq!(
         Term::binary(b"a".to_vec())
-            .compare(&Term::binary(b"ab".to_vec()))
+            .compare(
+                &Term::binary(b"ab".to_vec()),
+                &crate::term::test_atom_table()
+            )
             .unwrap(),
         Less
     );

@@ -167,8 +167,16 @@ impl ProgramId {
 }
 
 /// The atom table of one program or one run (`erts_atom_table` in ERTS).
+///
+/// A caller receives the table of a program from [`BeamProgram::atoms`] and
+/// passes it to [`Map::from_pairs`], so a map that the caller builds orders
+/// its keys as the program does. A table of the library holds every atom of
+/// one program; the host cannot add an atom to it.
+///
+/// [`BeamProgram::atoms`]: crate::BeamProgram::atoms
+/// [`Map::from_pairs`]: crate::Map::from_pairs
 #[derive(Debug, Clone)]
-pub(crate) struct AtomTable {
+pub struct AtomTable {
     /// The index of each atom, keyed by its name.
     indices: HashMap<Arc<str>, u32>,
     /// The name of each atom, by its index. The next new atom gets index
@@ -189,7 +197,7 @@ impl AtomTable {
     /// let table = AtomTable::new();
     /// assert_eq!(table.get("false"), Atom::from_static("false"));
     /// ```
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let mut indices = HashMap::with_capacity(STATIC_ATOM_NAMES.len());
         let mut names = Vec::with_capacity(STATIC_ATOM_NAMES.len());
         for (index, &name) in STATIC_ATOM_NAMES.iter().enumerate() {
@@ -486,7 +494,7 @@ impl AtomTable {
                     }
                     // The source map is canonical, so its keys are valid
                     // keys, and a key keeps its shape across the import.
-                    let map = Map::from_pairs(pairs)
+                    let map = Map::from_pairs(pairs, self)
                         .expect("a canonical map of one table imports to a canonical map");
                     let term = Term::Map(map);
                     imported.insert(key, term.clone());
@@ -511,6 +519,19 @@ impl AtomTable {
             .name(atom.index())
             .ok_or_else(|| outside_atom_table(atom.index()))?;
         self.put(name)
+    }
+}
+
+impl Default for AtomTable {
+    /// Return the table of [`AtomTable::new`], which holds the static atoms.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(AtomTable::default().get("ok"), AtomTable::new().get("ok"));
+    /// ```
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -619,6 +640,22 @@ impl HostTerm {
     /// ```
     pub fn atom(&self, name: &str) -> Option<Atom> {
         self.atoms.get(name)
+    }
+
+    /// Return the atom table that owns the atoms of this host term, which is
+    /// the table of the run that made the term. A run adds each name that it
+    /// creates to that table, for example with `erlang:list_to_atom/1`, and
+    /// the program table holds none of those names. A host that builds a map
+    /// from an atom of a run passes this table to [`Map::from_pairs`],
+    /// because the order rule reads each name through the owning table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::from_pairs(vec![(key, value)], host_term.atoms())?;
+    /// ```
+    pub fn atoms(&self) -> &AtomTable {
+        &self.atoms
     }
 
     /// Return this term with every atom of its table replaced by the atom

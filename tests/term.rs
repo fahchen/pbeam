@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use super::{
     AtomTable, Binary, Fun, Lambda, Map, MatchState, PortId, ProcessId, Reference, Term,
-    test_atom as atom,
+    test_atom as atom, test_atom_table,
 };
 
 fn map(pairs: Vec<(Term, Term)>) -> Term {
-    Term::Map(Map::from_pairs(pairs).unwrap())
+    Term::Map(Map::from_pairs(pairs, &test_atom_table()).unwrap())
 }
 
 /// Return a fun of a lambda of `lists` with an index and free variables.

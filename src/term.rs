@@ -11,8 +11,9 @@ mod print;
 mod tuple;
 
 pub use atom::Atom;
+pub use atom::AtomTable;
 pub use atom::HostTerm;
-pub(crate) use atom::{AtomTable, MAX_ATOM_CHARACTERS};
+pub(crate) use atom::MAX_ATOM_CHARACTERS;
 #[cfg(test)]
 pub(crate) use atom::{test_atom, test_atom_table};
 pub use binary::Binary;
@@ -402,7 +403,7 @@ impl Term {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))])?);
+    /// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?);
     /// assert!(map.unique());
     /// let copy = map.clone();
     /// assert!(!map.unique() || !copy.unique());

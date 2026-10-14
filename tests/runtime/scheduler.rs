@@ -1141,6 +1141,7 @@ fn moves_the_pairs_of_a_map_in_batches() {
             (1..=200)
                 .map(|key| (Term::Integer(key), Term::Integer(key)))
                 .collect(),
+            &crate::term::test_atom_table(),
         )
         .unwrap(),
     );
@@ -1470,6 +1471,7 @@ fn counts_the_bytes_of_the_release_work_list() {
         (0..4 * RELEASE_BATCH as i64)
             .map(|key| (Term::Integer(key), atom("v")))
             .collect(),
+        &crate::term::test_atom_table(),
     )
     .unwrap();
     scheduler
@@ -1656,10 +1658,13 @@ fn counts_the_terms_of_a_map_drain_that_is_the_only_item() {
     direct.term(&Term::list_from((0..width as i64).map(Term::Integer)));
     let expected = direct.bytes();
     assert!(expected > 0, "a list of cells holds live bytes");
-    let mut map = Map::from_pairs(vec![(
-        Term::Integer(0),
-        Term::list_from((0..width as i64).map(Term::Integer)),
-    )])
+    let mut map = Map::from_pairs(
+        vec![(
+            Term::Integer(0),
+            Term::list_from((0..width as i64).map(Term::Integer)),
+        )],
+        &crate::term::test_atom_table(),
+    )
     .unwrap();
     let drain = crate::term::MapDrain::take(&mut map).expect("the only holder takes the form");
     let mut scheduler = test_scheduler();

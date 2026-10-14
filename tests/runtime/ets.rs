@@ -188,7 +188,13 @@ fn finds_and_keeps_a_key_of_each_shape() {
         Term::tuple(vec![Term::Integer(1), Term::static_atom("true")]),
         Term::list_from([Term::Integer(1), Term::Integer(2)]),
         Term::binary(vec![1, 2, 3]),
-        Term::Map(Map::from_pairs(vec![(Term::static_atom("ok"), Term::Integer(1))]).unwrap()),
+        Term::Map(
+            Map::from_pairs(
+                vec![(Term::static_atom("ok"), Term::Integer(1))],
+                &crate::term::test_atom_table(),
+            )
+            .unwrap(),
+        ),
     ];
     for key in &keys {
         table.insert(&atoms, vec![key.clone()]);

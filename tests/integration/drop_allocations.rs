@@ -13,7 +13,7 @@
 
 use std::{alloc::System, cell::Cell, hint::black_box};
 
-use pbeam_runtime::{Map, Term};
+use pbeam_runtime::{AtomTable, Map, Term};
 
 /// The allocations of the drop of a map that owns its form: the work vector
 /// that holds one key and one value of a pair at a time.
@@ -112,7 +112,13 @@ fn dropped(term: Term, held: &[Term]) -> usize {
 /// assert!(matches!(one_key_map(), Term::Map(_)));
 /// ```
 fn one_key_map() -> Term {
-    Term::Map(Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))]).unwrap())
+    Term::Map(
+        Map::from_pairs(
+            vec![(Term::Integer(1), Term::Integer(2))],
+            &AtomTable::new(),
+        )
+        .unwrap(),
+    )
 }
 
 /// Return a hashmap term of `keys` keys.
@@ -128,6 +134,7 @@ fn hashmap(keys: i64) -> Term {
             (1..=keys)
                 .map(|key| (Term::Integer(key), Term::Integer(key)))
                 .collect(),
+            &AtomTable::new(),
         )
         .unwrap(),
     )

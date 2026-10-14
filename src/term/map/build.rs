@@ -21,7 +21,7 @@ use std::cmp::Ordering;
 
 use super::{HAMT_MAX_LEVEL, SLOT_BITS, SLOT_MASK};
 use crate::error::BeamError;
-use crate::term::{Term, hash::internal_hash};
+use crate::term::{AtomTable, Term, hash::internal_hash};
 
 /// The size of an ERTS `hxnode_t` in bytes: the hash, `skip`, `i`, and
 /// `val` words (`erl_map.c:81-86`). The pivot hash reads the address of a
@@ -72,7 +72,7 @@ struct HxNode {
 ///
 /// ```rust,ignore
 /// let keys: Vec<Term> = (1..=40).map(Term::Integer).collect();
-/// let units = from_list_units(&keys.iter().collect::<Vec<_>>())?;
+/// let units = from_list_units(&keys.iter().collect::<Vec<_>>(), &atoms)?;
 /// // 40 hash units come first.
 /// assert!(units[..40].iter().all(|&unit| unit == 1));
 /// ```
@@ -81,7 +81,7 @@ struct HxNode {
 ///
 /// Return a runtime error when two keys with equal hashes have no PBeam
 /// term order.
-pub(crate) fn from_list_units(keys: &[&Term]) -> Result<Vec<u32>, BeamError> {
+pub(crate) fn from_list_units(keys: &[&Term], atoms: &AtomTable) -> Result<Vec<u32>, BeamError> {
     let mut nodes: Vec<HxNode> = keys
         .iter()
         .enumerate()
@@ -94,7 +94,7 @@ pub(crate) fn from_list_units(keys: &[&Term]) -> Result<Vec<u32>, BeamError> {
     let mut units = vec![1; keys.len()];
     // hxnodecmp: a higher hash comes first (`erl_map.c:1171-1182`).
     qsort_units(&mut nodes, 0, &mut units, &mut |a, b| Ok(b.hx.cmp(&a.hx)))?;
-    let unique = unique_units(&mut nodes, keys, &mut units)?;
+    let unique = unique_units(&mut nodes, keys, &mut units, atoms)?;
     if unique > 1 {
         nodes.truncate(unique);
         sorted_unique_units(&mut nodes, &mut units);
@@ -367,6 +367,7 @@ fn unique_units(
     nodes: &mut [HxNode],
     keys: &[&Term],
     units: &mut Vec<u32>,
+    atoms: &AtomTable,
 ) -> Result<usize, BeamError> {
     let count = nodes.len();
     let (mut index, mut kept) = (0, 0);
@@ -379,7 +380,8 @@ fn unique_units(
                 end += 1;
             }
             // hxnodecmpkey: the term order of the keys (`erl_map.c:1160-1169`).
-            let mut by_key = |a: &HxNode, b: &HxNode| keys[a.position].compare(keys[b.position]);
+            let mut by_key =
+                |a: &HxNode, b: &HxNode| keys[a.position].compare(keys[b.position], atoms);
             qsort_units(&mut nodes[index..end], index, units, &mut by_key)?;
             while index < end {
                 loop_steps(units, 1, 1);

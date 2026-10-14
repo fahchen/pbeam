@@ -86,7 +86,8 @@ fn removes_map_keys_as_pinned_erts() {
     // is not a map raises `{badmap, Map}`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs).unwrap());
+    let map =
+        |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs, program.atoms()).unwrap());
     let integers = |keys: &[i64]| Term::list_from(keys.iter().copied().map(Term::Integer));
     let both = map(vec![
         (Term::Integer(1), atom("one")),
@@ -143,7 +144,8 @@ fn takes_map_keys_as_pinned_erts() {
     // not a map raises `{badmap, Map}`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs).unwrap());
+    let map =
+        |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs, program.atoms()).unwrap());
     let expected = vec![
         Term::tuple(vec![
             atom("one"),
@@ -179,7 +181,8 @@ fn removes_map_keys_through_maps_without() {
     // removes the `olp` key that it holds.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs).unwrap());
+    let map =
+        |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs, program.atoms()).unwrap());
     let expected = vec![
         map(vec![(atom("type"), atom("standard_io"))]),
         map(vec![
@@ -338,7 +341,8 @@ fn builds_maps_from_lists_as_pinned_erts() {
     // is not a tuple, and a tuple with an arity other than 2 raise `badarg`.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs).unwrap());
+    let map =
+        |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs, program.atoms()).unwrap());
     let integer_map = |pairs: &[(i64, i64)]| {
         map(pairs
             .iter()

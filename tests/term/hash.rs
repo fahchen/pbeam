@@ -22,7 +22,9 @@ fn integers(values: &[i64]) -> Term {
 }
 
 fn map(pairs: impl IntoIterator<Item = (Term, Term)>) -> Term {
-    Term::Map(Map::from_pairs(pairs.into_iter().collect()).unwrap())
+    Term::Map(
+        Map::from_pairs(pairs.into_iter().collect(), &crate::term::test_atom_table()).unwrap(),
+    )
 }
 
 fn improper(cells: Vec<Term>, tail: Term) -> Term {

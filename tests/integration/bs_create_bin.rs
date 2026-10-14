@@ -110,11 +110,14 @@ fn raises_badarg_with_the_erts_error_info_for_a_term_that_is_not_a_binary() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let caught = |value: Term| {
         let cause = Term::tuple(vec![Term::Integer(2), atom("binary"), atom("type"), value]);
-        let error_info = Map::from_pairs(vec![
-            (atom("cause"), cause),
-            (atom("function"), atom("format_bs_fail")),
-            (atom("module"), atom("erl_erts_errors")),
-        ])
+        let error_info = Map::from_pairs(
+            vec![
+                (atom("cause"), cause),
+                (atom("function"), atom("format_bs_fail")),
+                (atom("module"), atom("erl_erts_errors")),
+            ],
+            program.atoms(),
+        )
         .unwrap();
         let frame = Term::tuple(vec![
             atom("bs_create_bin_probe"),
@@ -392,11 +395,14 @@ fn raises_badarg_with_the_erts_error_info_for_an_append_segment() {
             atom(reason),
             value,
         ]);
-        let error_info = Map::from_pairs(vec![
-            (atom("cause"), cause),
-            (atom("function"), atom("format_bs_fail")),
-            (atom("module"), atom("erl_erts_errors")),
-        ])
+        let error_info = Map::from_pairs(
+            vec![
+                (atom("cause"), cause),
+                (atom("function"), atom("format_bs_fail")),
+                (atom("module"), atom("erl_erts_errors")),
+            ],
+            program.atoms(),
+        )
         .unwrap();
         let frame = Term::tuple(vec![
             atom("bs_create_bin_append_probe"),
@@ -1084,11 +1090,14 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
         ),
     ];
     let caught = |function: &str, arity: usize, reason: &str, cause: Term| {
-        let error_info = Map::from_pairs(vec![
-            (atom("cause"), cause),
-            (atom("function"), atom("format_bs_fail")),
-            (atom("module"), atom("erl_erts_errors")),
-        ])
+        let error_info = Map::from_pairs(
+            vec![
+                (atom("cause"), cause),
+                (atom("function"), atom("format_bs_fail")),
+                (atom("module"), atom("erl_erts_errors")),
+            ],
+            program.atoms(),
+        )
         .unwrap();
         let frame = Term::tuple(vec![
             atom("bs_create_bin_integer_probe"),

@@ -196,6 +196,20 @@ impl BeamProgram {
         self.atoms.get(name)
     }
 
+    /// Return the atom table of this program. A caller passes it as the
+    /// owning table of a term that it builds from [`BeamProgram::atom`], for
+    /// example to [`Map::from_pairs`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let program = BeamProgram::load(&[ATOM_MAP_PROBE])?;
+    /// assert_eq!(program.atoms().name(506), Some("ok"));
+    /// ```
+    pub fn atoms(&self) -> &AtomTable {
+        &self.atoms
+    }
+
     /// Pair `term` with the atom table of this program. Pass the result as
     /// an argument of [`BeamProgram::execute`],
     /// [`BeamProgram::execute_with_policy`], or
@@ -1093,6 +1107,7 @@ impl BeamProgram {
                     destination,
                     pairs,
                 } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
                     let pairs = pairs
                         .iter()
                         .map(|(key, value)| Ok((read(process, key)?, read(process, value)?)))
@@ -1110,6 +1125,7 @@ impl BeamProgram {
                                     .into_iter()
                                     .map(|(key, value)| (Insert::Add, key, value))
                                     .collect(),
+                                atoms,
                             )
                             .map_err(|key| error(format!("unsupported map key {key:?}")))?;
                         Ok(None)
@@ -1129,6 +1145,7 @@ impl BeamProgram {
                     destination,
                     pairs,
                 } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
                     let pairs = pairs
                         .iter()
                         .map(|(key, value)| Ok((read(process, key)?, read(process, value)?)))
@@ -1140,7 +1157,7 @@ impl BeamProgram {
                     // register keeps its value on a failure
                     // (`beam_common.c:2231-2253`, `erts_gc_update_map_exact`).
                     match update_owned(process, map, destination, |entries| {
-                        update_map_exact(entries, pairs)
+                        update_map_exact(entries, pairs, atoms)
                     })? {
                         Update::Written => {}
                         Update::Missing(value) => {
@@ -1234,8 +1251,9 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
                     if !read_ref(process, left)?
-                        .compare(read_ref(process, right)?)?
+                        .compare(read_ref(process, right)?, atoms)?
                         .is_lt()
                     {
                         cursor.position = label_position(*fail_label)?;
@@ -1246,8 +1264,9 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
                     if read_ref(process, left)?
-                        .compare(read_ref(process, right)?)?
+                        .compare(read_ref(process, right)?, atoms)?
                         .is_lt()
                     {
                         cursor.position = label_position(*fail_label)?;
@@ -2933,12 +2952,13 @@ enum Update {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let mut entries = Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))])?;
+/// let atoms = AtomTable::new();
+/// let mut entries = Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))], &atoms)?;
 /// let cooked = vec![(Term::static_atom("output"), Term::static_atom("cooked"))];
-/// assert_eq!(update_map_exact(&mut entries, cooked)?, None);
+/// assert_eq!(update_map_exact(&mut entries, cooked, &atoms)?, None);
 /// let missing = vec![(Term::static_atom("input"), Term::static_atom("cooked"))];
 /// assert_eq!(
-///     update_map_exact(&mut entries, missing)?,
+///     update_map_exact(&mut entries, missing, &atoms)?,
 ///     Some(Term::tuple(vec![Term::static_atom("badkey"), Term::static_atom("input")]))
 /// );
 /// ```
@@ -2950,14 +2970,16 @@ enum Update {
 fn update_map_exact(
     entries: &mut Map,
     mut pairs: Vec<(Term, Term)>,
+    atoms: &AtomTable,
 ) -> Result<Option<Term>, BeamError> {
-    Map::sort_pairs(&mut pairs)?;
+    Map::sort_pairs(&mut pairs, atoms)?;
     Ok(entries
         .update(
             pairs
                 .into_iter()
                 .map(|(key, value)| (Insert::Set, key, value))
                 .collect(),
+            atoms,
         )
         .err()
         .map(|key| Term::tuple(vec![Term::static_atom("badkey"), key])))
@@ -4283,17 +4305,20 @@ fn raise_binary_failure(
         failure.value,
     ]);
     // ponytail: each map form holds atom keys, so `from_pairs` cannot fail.
-    let error_info = Map::from_pairs(vec![
-        (Term::static_atom("cause"), cause),
-        (
-            Term::static_atom("function"),
-            Term::static_atom("format_bs_fail"),
-        ),
-        (
-            Term::static_atom("module"),
-            Term::static_atom("erl_erts_errors"),
-        ),
-    ])
+    let error_info = Map::from_pairs(
+        vec![
+            (Term::static_atom("cause"), cause),
+            (
+                Term::static_atom("function"),
+                Term::static_atom("format_bs_fail"),
+            ),
+            (
+                Term::static_atom("module"),
+                Term::static_atom("erl_erts_errors"),
+            ),
+        ],
+        &scheduler.atoms,
+    )
     .expect("atom keys fit each map form");
     let location = Term::tuple(vec![Term::static_atom("error_info"), Term::Map(error_info)]);
     let frame = Term::tuple(vec![

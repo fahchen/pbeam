@@ -174,7 +174,10 @@ fn pairs_1000() -> Vec<(Term, Term)> {
 
 /// Return a 1000-key map term.
 fn map_1000() -> Term {
-    Term::Map(Map::from_pairs(pairs_1000()).expect("1000 integer keys are valid"))
+    Term::Map(
+        Map::from_pairs(pairs_1000(), &crate::term::test_atom_table())
+            .expect("1000 integer keys are valid"),
+    )
 }
 
 /// Return a tuple term that holds a 1000-key map term.

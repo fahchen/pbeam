@@ -625,23 +625,26 @@ fn prints_the_cost_of_every_derivation() {
     let pairs_1000: Vec<(Term, Term)> = (0..1000)
         .map(|key| (Term::Integer(key), Term::Integer(key)))
         .collect();
-    let map_1000 = Map::from_pairs(pairs_1000).unwrap();
+    let map_1000 = Map::from_pairs(pairs_1000, &crate::term::test_atom_table()).unwrap();
     let flat_32 = Map::from_pairs(
         (0..32)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
+        &crate::term::test_atom_table(),
     )
     .unwrap();
     let flat_4 = Map::from_pairs(
         (0..4)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
+        &crate::term::test_atom_table(),
     )
     .unwrap();
     let flat_2 = Map::from_pairs(
         (0..2)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
+        &crate::term::test_atom_table(),
     )
     .unwrap();
     for (name, map, key) in [

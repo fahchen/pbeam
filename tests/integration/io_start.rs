@@ -183,10 +183,13 @@ fn reads_and_updates_maps_as_pinned_erts() {
         atom("other"),
         atom("other"),
         Term::Map(
-            Map::from_pairs(vec![
-                (atom("input"), atom("cooked")),
-                (atom("output"), atom("cooked")),
-            ])
+            Map::from_pairs(
+                vec![
+                    (atom("input"), atom("cooked")),
+                    (atom("output"), atom("cooked")),
+                ],
+                program.atoms(),
+            )
             .unwrap(),
         ),
         tagged("badkey", "output"),
@@ -257,7 +260,8 @@ fn merges_maps_as_pinned_erts() {
     // `{badmap, Second}`.
     let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
-    let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs).unwrap());
+    let map =
+        |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs, program.atoms()).unwrap());
     let options = map(vec![
         (atom("input"), atom("cooked")),
         (atom("output"), atom("raw")),

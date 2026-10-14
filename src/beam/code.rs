@@ -882,7 +882,7 @@ fn read_external_term(
                     pairs.push((key, term));
                     if remaining == 1 {
                         let count = pairs.len();
-                        let Ok(map) = Map::from_pairs(pairs) else {
+                        let Ok(map) = Map::from_pairs(pairs, atom_table) else {
                             return Ok(None);
                         };
                         if map.len() < count {

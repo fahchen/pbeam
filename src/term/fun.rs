@@ -18,7 +18,7 @@
 
 use std::{cmp::Ordering, sync::Arc};
 
-use super::{Atom, Term};
+use super::{Atom, AtomTable, Term};
 
 /// The fun entry of a lambda in a loaded module: the `FunT` entry that the
 /// loader resolves, as ERTS `ErlFunEntry` is.
@@ -109,12 +109,12 @@ impl Lambda {
     ///
     /// let first = Lambda::new(atom.clone(), 0, 1, 53, 1);
     /// let second = Lambda::new(atom, 1, 1, 51, 0);
-    /// assert_eq!(first.compare(&second), Ordering::Less);
+    /// assert_eq!(first.compare(&second, &atoms), Ordering::Less);
     /// ```
-    fn compare(&self, other: &Lambda) -> Ordering {
-        self.module
-            .name()
-            .cmp(other.module.name())
+    fn compare(&self, other: &Lambda, atoms: &AtomTable) -> Ordering {
+        atoms
+            .name_of(&self.module)
+            .cmp(atoms.name_of(&other.module))
             .then(self.index.cmp(&other.index))
             .then(self.old_unique.cmp(&other.old_unique))
     }
@@ -195,11 +195,11 @@ impl Target {
     ///
     /// let local = Target::Local(Lambda::new(atom.clone(), 0, 1, 53, 1));
     /// let external = Target::External { module: atom.clone(), function: atom, arity: 0 };
-    /// assert_eq!(local.compare(&external), Ordering::Less);
+    /// assert_eq!(local.compare(&external, &atoms), Ordering::Less);
     /// ```
-    pub(super) fn compare(&self, other: &Target) -> Ordering {
+    pub(super) fn compare(&self, other: &Target, atoms: &AtomTable) -> Ordering {
         match (self, other) {
-            (Target::Local(left), Target::Local(right)) => left.compare(right),
+            (Target::Local(left), Target::Local(right)) => left.compare(right, atoms),
             (
                 Target::External {
                     module,
@@ -211,10 +211,10 @@ impl Target {
                     function: other_function,
                     arity: other_arity,
                 },
-            ) => module
-                .name()
-                .cmp(other_module.name())
-                .then(function.name().cmp(other_function.name()))
+            ) => atoms
+                .name_of(module)
+                .cmp(atoms.name_of(other_module))
+                .then(atoms.name_of(function).cmp(atoms.name_of(other_function)))
                 .then(arity.cmp(other_arity)),
             (Target::Local(_), Target::External { .. }) => Ordering::Less,
             (Target::External { .. }, Target::Local(_)) => Ordering::Greater,
