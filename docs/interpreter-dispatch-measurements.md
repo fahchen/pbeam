@@ -142,9 +142,9 @@ The decision of the step follows the step 8 gate of the plan: a compact form mus
 
 ## Step 10: the reference-count share
 
-Task [#544](https://github.com/fahchen/pbeam/issues/544) measures the count of the reference-count changes on the hot path, and the share of the time that they take. Step 10 ([#518](https://github.com/fahchen/pbeam/issues/518)) has one falsifier in the plan (`docs/interpreter-dispatch-plan.md:152`): if the counts take less than 20 percent of the loop time, stop and report the ceiling. Step 9 closed without an implementation, so the baseline is the current `main`.
+Task [#544](https://github.com/fahchen/pbeam/issues/544) measures the count of the reference-count changes on the hot path, and the share of the time that they take. Step 10 ([#518](https://github.com/fahchen/pbeam/issues/518)) has a 20 percent gate in the plan (`docs/interpreter-dispatch-plan.md:152`): "If counts remain below the gate, keep `Arc` and report the remaining dispatch cost." Task [#544](https://github.com/fahchen/pbeam/issues/544) states the same falsifier: if the counts stay below 20 percent of loop time, stop and report the ceiling. Step 9 closed without an implementation, so the baseline is the current `main`.
 
-The measured revision is `a4072f1`, the head of `origin/main` at the time of the runs. All numbers of this section come from one session on 2026-10-15 from 08:29 to 08:33 JST, on the host of the environment table, at a one-minute load of 1.46 to 4.63. No other `cargo`, `rustc`, or `nextest` process ran at the start of each run.
+The measured revision is `a4072f1`, the head of `origin/main` at the time of the runs. All numbers of this section come from one session on 2026-10-15 from 08:29 to 08:33 JST, on the host of the environment table, at a one-minute load of 1.46 to 4.21. The floor-shape counts are the exception: a rerun at 08:48 JST recorded them with a revision and load header (`target/arc-probe-floor-rerun.txt`), and its rows are the same as the rows of the first run (`target/arc-probe-floor.txt`, which has no header). No other `cargo`, `rustc`, or `nextest` process ran at the start of each run.
 
 ### The method
 
@@ -163,7 +163,7 @@ The time and the cost numbers come from the clean tree of `a4072f1` in the same 
 
 ### The count for each instruction of the floor shapes
 
-The rows are the release build at 200000 iterations, at a load of `{ 2.37 2.82 4.42 }`. Each shape retires the same 4 instructions for each iteration: `TestYield`, `TestExactEqualOperands`, `Bif` (`gc_bif '-'`), and the call.
+The rows are the release build of `a4072f1` with the counting patch, at 200000 iterations. The record is `target/arc-probe-floor-rerun.txt`, from 2026-10-15 08:48:52 JST, at a load of `{ 4.61 7.20 7.23 }` before and after the run. Each shape retires the same 4 instructions for each iteration: `TestYield`, `TestExactEqualOperands`, `Bif` (`gc_bif '-'`), and the call.
 
 | Shape | Instruction kind | Runs at 200000 | `Arc` clones | `Arc` drops | `Rc` clones | `Rc` drops |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -187,7 +187,7 @@ At 20000 iterations each shape gives the same rows with 0 `Arc` changes and 6 `R
 
 ### The count for each Terra key press
 
-The release and the debug builds of the patch give the same rows in every block, as they must, because a clone or a drop does not change with the profile. The raw files are `target/arc-probe-terra.txt` (release, load `{ 2.10 2.72 4.33 }`) and `target/arc-probe-terra-debug.txt` (debug, load `{ 1.93 2.67 4.29 }`).
+The release and the debug builds of the patch give the same rows in every block. The raw files are `target/arc-probe-terra.txt` (release, load `{ 2.10 2.72 4.33 }`) and `target/arc-probe-terra-debug.txt` (debug, load `{ 1.93 2.67 4.29 }`).
 
 | Block | Instructions | `Arc` clones | `Arc` drops | `Rc` clones | `Rc` drops |
 | --- | --- | --- | --- | --- | --- |
@@ -218,9 +218,9 @@ Measured on the clean tree of `a4072f1` in the same session. The release costs a
 
 | Cost of one clone and drop | Release | Opt-level 0 |
 | --- | --- | --- |
-| `Arc` of one term, the largest of the six payload kinds (a 1000-key map) | 11.111 ns | 33.734 ns |
+| `Arc` of one term, the largest of the six payload kinds of `prints_the_cost_of_a_term_operation` (a 1000-key map in each column) | 11.111 ns | 33.734 ns |
 | `Arc` of a tuple | 9.600 ns | 25.129 ns |
-| `Rc` of one term, the largest of the measured payload kinds | 3.962 ns | 14.269 ns |
+| `Rc` of one term, the largest of the measured payload kinds | 3.962 ns, the fun payload of `prints_the_cost_of_a_fun_payload`, the largest of five kinds (tuple, binary, list cell, fun payload, map payload) | 14.269 ns, the tuple, the largest of three kinds (tuple, binary, list cell), because only `prints_the_cost_of_a_term_operation` ran at opt-level 0 |
 | Bare `Arc` | 9.475 ns | 12.145 ns |
 | Bare `Rc` | 3.821 ns | 13.016 ns |
 
@@ -595,7 +595,7 @@ The task decided to keep `Arc`. The floor loop makes 0 `Arc` changes for each it
 - The repository has no Terra benchmark. The 5.0 percent estimate of step 6 is the memory-system difference of the two record strides at the estimated size of one redraw stream, and it is not a measurement of the redraw.
 - The run-to-run noise is about 10 percent at 200000 iterations. A single column of a summary table therefore carries that noise, and a change inside it is not a measured effect.
 - The end-to-end measurement of section 3 is one run of each mode, and not a minimum of several runs.
-- The count of step 10 does not include these `Arc` and `Rc` changes: the `Arc` of the binary sub-views (`src/term/binary.rs:276`, `src/term/binary.rs:431`, `src/term/binary.rs:451`), the child nodes of a map that `Arc::make_mut` copies, the `Arc<str>` of an atom name, the `Arc<AtomTable>`, a clone of a `ConsRef` or a `Tuple` that does not go through `Term::clone`, and the three `Rc<BeamModule>` clones outside the run loop (`src/runtime/interpreter.rs:4655`, `src/runtime/interpreter/native.rs:227`, `src/runtime/interpreter/bif/erlang.rs:516`). The trigger to count them is a key-press share of 10 percent or more, half of the gate.
+- The count of step 10 does not include these `Arc` and `Rc` changes: the `Arc` of the binary sub-views (`src/term/binary.rs:276`, `src/term/binary.rs:431`, `src/term/binary.rs:451`), the child nodes of a map that `Arc::make_mut` copies, the `Arc<str>` of an atom name, the `Arc<AtomTable>`, a direct clone of a `ConsRef`, a `Tuple`, a `Binary`, a `Map`, or a fun that does not go through `Term::clone`, the `Arc::clone` of the match context in `any_match_context` (`src/runtime/interpreter.rs:3604`) and the drop of the returned `Arc<MatchState>`, the `Binary` clone of `MatchState::new(bytes.clone())` (`src/runtime/interpreter.rs:1355`), the release of the child nodes of a map through `Arc::into_inner` in `Map::drain_into` (`src/term/map.rs:320`, `src/term/map.rs:860`), the `Arc::downgrade` of the dirty IO `Claim` (`src/runtime/dirty_io.rs:207`) and the drop of that `Weak` after the call, and the three `Rc<BeamModule>` clones in `mfa_stacktrace` (`src/runtime/interpreter.rs:4655`, one for each stack frame), in `load_nif` (`src/runtime/interpreter/native.rs:227`), and in `error/2` (`src/runtime/interpreter/bif/erlang.rs:516`). The line numbers are at `a4072f1`. Instruction handlers reach the three `Rc` clones: the `error/2` BIF calls `mfa_stacktrace` (`src/runtime/interpreter/bif/erlang.rs:533`), and `CallExternal` reaches `load_nif`. The match-context clone runs at each binary-match instruction: the first key block runs about 940 of them (`BinaryMatch` 212, `BinaryGetPosition` 210, `BinaryGetUtf8` 199, `BinaryMatchStart` 115, `BinarySetPosition` 104, `BinaryGetTail` 97), against 84892 counted `Arc` drops. These sites add an estimated 1 to 2 percent more counts to a key press, which does not change the decision. The trigger to count them is a key-press share of 10 percent or more, half of the gate.
 - The cost of one change in step 10 is a micro-measurement with a cache-resident count line. The shares of the Terra key press do not include the cost of a cold count line.
 
 ## 6. What comes next
