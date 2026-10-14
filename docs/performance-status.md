@@ -77,6 +77,24 @@ The 256-choice shape falls 458.005 ns, or 46.5 percent, against the before build
 
 Source: the section "The `select_val` dispatch decision of task [#545](https://github.com/fahchen/pbeam/issues/545)" of `docs/interpreter-dispatch-measurements.md` and the task branch. Known limits: the ordered form is 13.276 ns slower than the linear walk for each iteration in the average case of the 11-to-16 band, and the 9-to-16 bucket holds 1267 of the 24568 measured instructions; `docs/backlog.md` records the residual with its trigger. The fixture measures the 256-choice shape, the 16-choice shape, and the 2-choice control, so no number here covers a `select_val` with 6878 choices.
 
+### 2026-10-14 23:50 JST - Shared append tree, task [#558](https://github.com/fahchen/pbeam/issues/558), pull request [#620](https://github.com/fahchen/pbeam/pull/620) - **Not landed**
+
+One interleaved session of `tests/integration/binary_append_bench.rs` on the release profile, three rounds, and each number is the minimum of nine timed runs inside one invocation. The before revision is `915590af` with the benchmark files of the branch, and the after revision is the branch `perf/558-append-tree` at `eb1dd92a`. The one-minute load of the rounds is 7.96 to 9.36.
+
+| Shape | Before `915590af` | After `eb1dd92a` | Change |
+| --- | --- | --- | --- |
+| Append to a 100000-byte prefix, one byte each, ns for each append | 2567.920 | 948.750 | -63.1 percent |
+| Append to a 1000000-byte prefix, one byte each, ns for each append | 19854.150 | 1672.950 | -91.6 percent |
+| Doubling build of 1000 bytes, total ns | 26125 | 25250 | -3.3 percent |
+| Doubling build of 100000 bytes, total ns | 40292 | 34625 | -14.1 percent |
+| Doubling build of 1000000 bytes, total ns | 99292 | 60417 | -39.2 percent |
+| Warm match of a 1000000-byte subject, 1 round, total ns | 336959 | 331959 | -1.5 percent |
+| Warm match of a 1000000-byte subject, 100 rounds, total ns | 32223292 | 32061166 | -0.5 percent |
+| First match of a fresh 100000-byte subject, total ns | 50125 | 51875 | +3.5 percent |
+| First match of a fresh 1000000-byte subject, total ns | 337958 | 354542 | +4.9 percent |
+
+The view descriptor grows from 32 bytes to 56 bytes, because the view now holds the chunk list and the joined array; a view that no append built keeps both fields empty or unset, and the test `prints_the_cost_of_a_binary_view` records the larger descriptor. The gate of the task is that a shared append copies no old payload byte except one partial 4096-byte leaf, and that the match scan throughput regresses by at most 10 percent. The copy and the three build shapes fall, and each match shape is inside the 10 percent bound.
+
 ### 2026-10-14 23:40 JST - Store only the atom index in the atom term, task [#596](https://github.com/fahchen/pbeam/issues/596), pull request [#619](https://github.com/fahchen/pbeam/pull/619) - Landed as `e0d9cbe5`
 
 This change reaches the 16-byte term that the owner set as the acceptance of row 6 of the term plan. The pinned toolchain is rustc 1.99.0, the host is Darwin 27.0.1 arm64, Apple M1 Max, and the before revision is `6fd1b3db`.

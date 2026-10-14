@@ -266,10 +266,15 @@ fn prints_the_cost_of_a_binary_view() {
         built, 2,
         "`Binary::from` allocates the byte array and the view descriptor"
     );
+    // The append tree of [#558] adds the chunk list and the joined array
+    // to the view, so the descriptor grows from four words to seven. A view
+    // that no append built keeps both fields empty or unset.
+    //
+    // [#558]: https://github.com/fahchen/pbeam/issues/558
     assert_eq!(
         binary.view_bytes(),
-        4 * std::mem::size_of::<usize>(),
-        "the view descriptor is four words"
+        7 * std::mem::size_of::<usize>(),
+        "the view descriptor is seven words"
     );
 
     let before = allocations();
