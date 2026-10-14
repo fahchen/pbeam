@@ -101,7 +101,7 @@ bifs! {
     erlang:append/2 => unsupported,
     erlang:append_element/2 => unsupported,
     erlang:atom_to_binary/2 as ErlangAtomToBinary2 => |cx, [term, encoding]| Ok(erlang::atom_to_binary(&cx.scheduler.atoms, term, encoding)),
-    erlang:atom_to_list/1 as ErlangAtomToList1 => |_, [term]| Ok(erlang::atom_to_list(term)),
+    erlang:atom_to_list/1 as ErlangAtomToList1 => |cx, [term]| Ok(erlang::atom_to_list(&cx.scheduler.atoms, term)),
     erlang:band/2 as ErlangBand2 => |cx, [left, right]| Ok(erlang::band(cx.scheduler.current_process_mut(), left, right)),
     erlang:binary_part/2 => unsupported,
     erlang:binary_part/3 as ErlangBinaryPart3 => |_, [binary, start, length]| Ok(erlang::binary_part(binary, start, length)),

@@ -424,10 +424,11 @@ impl Scheduler {
             PolicyCall::Initial => {
                 policy.initial = Some(match end {
                     PolicyEnd::Returned(value) => initial_capabilities(&self.atoms, &value)
-                        .ok_or_else(|| format!("initial/1 returned {}", text(&value))),
-                    PolicyEnd::Raised(reason) => {
-                        Err(format!("initial/1 exited with {}", text(&reason)))
-                    }
+                        .ok_or_else(|| format!("initial/1 returned {}", text(&self.atoms, &value))),
+                    PolicyEnd::Raised(reason) => Err(format!(
+                        "initial/1 exited with {}",
+                        text(&self.atoms, &reason)
+                    )),
                     PolicyEnd::Overrun => Err(format!(
                         "initial/1 used more than {POLICY_REDUCTIONS} reductions"
                     )),
@@ -468,7 +469,10 @@ impl Scheduler {
             .collect();
         match policy.call.take() {
             Some(PolicyCall::Initial) => {
-                let cause = format!("the policy process exited with {}", text(reason));
+                let cause = format!(
+                    "the policy process exited with {}",
+                    text(&self.atoms, reason)
+                );
                 policy.initial = Some(Err(cause));
             }
             Some(PolicyCall::Grant(requester)) => denied.insert(0, requester),
@@ -566,13 +570,16 @@ fn granted(atoms: &AtomTable, value: &Term) -> Option<Capability> {
 }
 
 /// Return the ERTS text of `term`, as `erlang:halt/1` prints it, for the
-/// cause of a denial.
+/// cause of a denial. `atoms` is the table of the run that owns `term`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(text(&Term::static_atom("deny")), "deny");
+/// assert_eq!(text(&AtomTable::new(), &Term::static_atom("deny")), "deny");
 /// ```
-fn text(term: &Term) -> String {
-    print_term(term).into_iter().map(char::from).collect()
+fn text(atoms: &AtomTable, term: &Term) -> String {
+    print_term(term, atoms)
+        .into_iter()
+        .map(char::from)
+        .collect()
 }
