@@ -41,7 +41,7 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
-### 2026-10-14 22:32 JST - Borrowed-argument leaf lane, task [#568](https://github.com/fahchen/pbeam/issues/568), pull request (not yet open) - **Not landed**
+### 2026-10-14 22:32 JST - Borrowed-argument leaf lane, task [#568](https://github.com/fahchen/pbeam/issues/568), pull request [#616](https://github.com/fahchen/pbeam/pull/616) - Landed as `ef0c8b94`
 
 One interleaved session of the `dispatch_baseline` probes. Each round runs the before binary and then the after binary. Every number is the minimum of nine probe runs inside one invocation. The before revision is `6935019a`, and the after revision is `6ef206e8` on the branch `perf/568-leaf-lane`. The one-minute load of the rounds is 5.29 to 8.21.
 
