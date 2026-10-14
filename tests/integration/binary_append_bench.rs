@@ -158,6 +158,35 @@ fn appends_and_matches() {
     }
 }
 
+/// The append of a literal string and of an integer segment to a large
+/// binary. The string segment shares its array and covers the `Bytes` arm of
+/// the chunked path; the integer segment writes bits, so the append takes the
+/// writer path and covers the `None` result of the classification.
+#[test]
+fn appends_a_string_and_an_integer_segment_to_a_large_binary() {
+    let program = BeamProgram::load(&[BINARY_APPEND_PROBE]).unwrap();
+    let prefix = Term::binary(vec![b'a'; 5000]);
+
+    let with_string = execute(&program, "append_string", std::slice::from_ref(&prefix));
+    let Term::Binary(bytes) = &with_string else {
+        panic!("not a binary: {with_string:?}");
+    };
+    assert_eq!(bytes.len(), 5004);
+    assert_eq!(&bytes[..], &[&[b'a'; 5000][..], b"tail"].concat()[..]);
+
+    let with_integer = execute(
+        &program,
+        "append_integer",
+        &[prefix.clone(), Term::Integer(7)],
+    );
+    let Term::Binary(bytes) = &with_integer else {
+        panic!("not a binary: {with_integer:?}");
+    };
+    assert_eq!(bytes.len(), 5001);
+    assert_eq!(bytes[5000], 7);
+    assert_eq!(&bytes[..5000], &[b'a'; 5000][..]);
+}
+
 trait BinaryLen {
     fn binary_len(self) -> usize;
 }

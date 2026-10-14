@@ -4168,6 +4168,40 @@ fn integer_segment_bits(fixed: bool, size: &Term, unit: u64) -> Result<u64, &'st
 /// // <<A:8/little, B:8/little>> with A = a and B = b fails at B.
 /// assert_eq!(integer_type_failure(&parts, 0).segment, 2);
 /// ```
+/// Return one array for each segment of an append whose later segments each
+/// write a whole byte range, with the reductions that ERTS charges for the
+/// segment, or `None` when a segment writes bits. The caller charges the
+/// reductions only for a `Some` result, so an append that writes bits charges
+/// them once, in the writer path.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let string = BinaryPart::Bytes(Cow::Borrowed(b"ab"), 1);
+/// assert_eq!(
+///     shared_append_arrays(&[string]).map(|arrays| arrays.len()),
+///     Some(1)
+/// );
+/// assert!(shared_append_arrays(&[BinaryPart::Utf8(65)]).is_none());
+/// ```
+fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, usize)>> {
+    let mut arrays = Vec::new();
+    for part in parts {
+        match part {
+            BinaryPart::Bytes(bytes, reductions) => {
+                arrays.push((Arc::new(bytes.clone().into_owned()), *reductions));
+            }
+            BinaryPart::Shared(binary, reductions) => {
+                for chunk in binary.chunks() {
+                    arrays.push((chunk, *reductions));
+                }
+            }
+            BinaryPart::Integer { .. } | BinaryPart::Utf8(_) => return None,
+        }
+    }
+    Some(arrays)
+}
+
 fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFailure {
     let mut group = 0..0;
     let mut group_little = false;
@@ -4400,36 +4434,21 @@ fn create_binary(
         // only the later segments, so the old payload stays in its arrays.
         prefix = Some(start.clone());
     }
-    // An append whose later segments are each a whole byte range keeps the
+    // An append whose later segments each write a whole byte range keeps the
     // arrays of the append binary and of each `binary` segment. The result
     // shares them and copies no byte of the old payload. When the later
     // segments fit in one leaf with the last array of the append binary,
-    // `Binary::concat_arrays` merges them in one leaf and copies at most
-    // that leaf. Each other form writes the segments in the writer and joins
-    // them after the append binary.
-    let chunked = prefix.is_some()
-        && parts
-            .iter()
-            .all(|part| matches!(part, BinaryPart::Bytes(..) | BinaryPart::Shared(..)));
-    if chunked {
-        let start = prefix.expect("the chunked path holds an append binary");
-        let mut arrays = Vec::new();
-        for part in parts {
-            match part {
-                BinaryPart::Bytes(bytes, reductions) => {
-                    arrays.push(Arc::new(bytes.into_owned()));
-                    process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
-                }
-                BinaryPart::Shared(binary, reductions) => {
-                    arrays.extend(binary.chunks());
-                    process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
-                }
-                // The predicate above holds only bytes and shared binary
-                // segments, so this arm is not reachable.
-                BinaryPart::Integer { .. } | BinaryPart::Utf8(_) => {}
-            }
+    // `Binary::concat_arrays` merges them in one leaf and copies at most that
+    // leaf. A segment that writes bits cannot share an array, and that append
+    // writes its segments in the writer below.
+    let shared = prefix.as_ref().and_then(|_| shared_append_arrays(&parts));
+    if let (Some(start), Some(arrays)) = (prefix.as_ref(), shared) {
+        let mut chunks = Vec::with_capacity(arrays.len());
+        for (array, reductions) in arrays {
+            chunks.push(array);
+            process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
         }
-        return Ok(Ok(Term::Binary(Binary::concat_arrays(&start, arrays))));
+        return Ok(Ok(Term::Binary(Binary::concat_arrays(start, chunks))));
     }
     for (index, part) in parts.iter().enumerate() {
         match part {

@@ -1,5 +1,6 @@
 -module(binary_append_probe).
--export([repeat/2, append/2, append_many/3, match_many/3, match_built/3, repeated/2]).
+-export([repeat/2, append/2, append_many/3, match_many/3, match_built/3, repeated/2,
+         append_string/1, append_integer/2]).
 
 %% A binary of Count copies of Unit, built by doubling with the retained
 %% prefix: each step appends the same half to itself.
@@ -38,3 +39,12 @@ match_built(Count, Needle, Rounds) ->
 repeated(Count, Unit) ->
     lists:foldl(fun(_, Acc) -> <<Acc/binary, Unit/binary>> end, <<>>,
                 lists:seq(1, Count)).
+
+%% One append of a literal string to a binary. The string segment writes a
+%% whole byte range, so the result shares the arrays of the append binary and
+%% of the string.
+append_string(A) -> <<A/binary, "tail">>.
+
+%% One append of an integer segment to a binary. The integer segment writes
+%% bits, so the result cannot share an array and the writer path runs.
+append_integer(A, N) -> <<A/binary, N:8>>.
