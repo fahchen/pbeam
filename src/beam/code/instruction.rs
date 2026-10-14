@@ -175,9 +175,9 @@ const OPCODE_RECV_MARKER_USE: u8 = 176;
 /// The value is 32. It is a measured estimate between the two end-to-end
 /// points of the task: the ordered form loses 13.276 ns for each iteration at
 /// 16 choices, net of the 2-choice control, and wins 458.005 ns at 256 choices
-/// (`tests/integration/select_val.rs`). The micro-measurement puts the
-/// crossover of the worst case at 32 choices: the linear walk costs 152.053 ns
-/// and the ordered search costs 34.172 ns at 32 choices, against 78.440 ns and
+/// (`tests/integration/select_val.rs`). The only micro-measurement point
+/// between them is 32 choices, where the linear walk costs 152.053 ns in the
+/// worst case and the ordered search costs 34.172 ns, against 78.440 ns and
 /// 27.791 ns at 16. No end-to-end probe covers 17 to 32 choices, so the bound
 /// is an estimate, and a later session can pin it with end-to-end probes at 32
 /// and 64 choices.
